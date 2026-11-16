@@ -1,3 +1,4 @@
+import { chatScrollInsets } from "@/lib/chat-scroll-insets"
 import type { Message } from "@/types"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
@@ -1020,8 +1021,9 @@ export function ChatScrollNavigator({
 
     const { scrollTop, scrollHeight, clientHeight } = viewport
     const nearBottom = scrollHeight - scrollTop - clientHeight < 80
-    const viewportAnchor = scrollTop + 24
-    const viewportBottomAnchor = scrollTop + clientHeight - 80
+    const insets = chatScrollInsets(viewport)
+    const viewportAnchor = scrollTop + insets.top + 24
+    const viewportBottomAnchor = scrollTop + clientHeight - insets.bottom - 80
     // User rows are in transcript order, so their top positions are monotonic.
     // Binary search avoids forcing layout for every historical question on each
     // scroll frame. With the 240-row transcript window this needs at most about
@@ -1091,7 +1093,8 @@ export function ChatScrollNavigator({
         const targetElement = userMessageRefs.current.get(messageId)
         if (nextViewport && targetElement) {
           pendingRevealFrameRef.current = null
-          const targetTop = Math.max(0, getElementTopInViewport(targetElement, nextViewport) - 8)
+          const topInset = chatScrollInsets(nextViewport).top
+          const targetTop = Math.max(0, getElementTopInViewport(targetElement, nextViewport) - topInset - 8)
           nextViewport.scrollTo({ top: targetTop, behavior: "smooth" })
           onScrollToQuestionRef.current?.()
           return

@@ -37,6 +37,7 @@ function fixture() {
     "importFiles",
     "attachFiles",
     "attachFileBytes",
+    "attachWorkspaceFile",
     "exportFile",
     "shareFile",
     "browserPreview",
@@ -197,8 +198,15 @@ describe("original beta client bound to a work", () => {
     expect(client.listFiles).toHaveBeenCalledWith(work.botId, "cursor", undefined, work.id)
     await scoped.attachFiles(work.botId, 2, 24000)
     expect(client.attachFiles).toHaveBeenCalledWith(work.botId, 2, 24000, undefined, work.id)
+    await scoped.attachWorkspaceFile!(work.botId, work.threadId, "data/report.md", 24000)
+    expect(client.attachWorkspaceFile).toHaveBeenCalledExactlyOnceWith(
+      work.botId, work.threadId, "data/report.md", 24000, work.id
+    )
+    expect(() => scoped.attachWorkspaceFile!(work.botId, "other-thread", "report.md", 24000)).toThrow("工作会话目标不一致")
     await scoped.exportFile(work.botId, "report.md")
-    expect(client.exportFile).toHaveBeenCalledWith(work.botId, "report.md", undefined, work.id)
+    expect(client.exportFile).toHaveBeenCalledWith(work.botId, "report.md", undefined, work.id, undefined)
+    await scoped.exportFile(work.botId, ".bot-deliveries/hash/report.md", undefined, undefined, "Report.md")
+    expect(client.exportFile).toHaveBeenLastCalledWith(work.botId, ".bot-deliveries/hash/report.md", undefined, work.id, "Report.md")
     await scoped.browserPreview(work.botId)
     expect(client.browserPreview).toHaveBeenCalledWith("work-work-a--bot-a", undefined)
     await scoped.giveBackBrowser(work.botId, 7, "skipped")

@@ -3,7 +3,7 @@ import { pendingNotificationScheduler } from "../agent/pending-notification-sche
 import { createBotNotificationDispatcher } from "./notification-dispatch"
 import { BotError } from "../../shared/bots/contracts"
 import { join } from "node:path"
-import { existsSync } from "node:fs"
+import { existsSync, realpathSync } from "node:fs"
 import { DatabaseSync } from "node:sqlite"
 import { getCmbCoworkAgentDataRoot } from "../app-data-root"
 import { openNativeSqliteDatabase, NativeSqliteAdapter } from "../db/native-sqlite-adapter"
@@ -12,7 +12,8 @@ import { BotTelemetryReporter } from "./telemetry-reporter"
 import { buildEvent, getEventReporter } from "../services/event-reporter"
 import { LocalBotHost } from "./host"
 import { verifyWorkConversationThread } from "./conversation-link-authority"
-import { createLocalBotRunPort } from "./runtime-adapter"
+import { createLocalBotRunPort, prepareBotThread } from "./runtime-adapter"
+import { announceBotResultMessage, persistScheduledBotResultMessage } from "./work-result-publication"
 import { BotMemoryService } from "./memory"
 import { computeNextRunAt } from "../storage"
 import { BotBrowserService } from "./browser"
@@ -23,7 +24,13 @@ import { isBotMemoryEnabled } from "./memory-policy"
 import type { BotMemoryMaintainer } from "./memory-maintainer"
 import { splitBotInlineReasoning } from "../../shared/bots/inline-reasoning"
 import { setWorkConversationLookup } from "./conversation-link-authority"
-import { parseBotFileDelivery } from "../../shared/bots/file-delivery"
+import { botHistoryDeliveryScope, botHistoryInputProjection, deleteBotThreadHistory, deliveryScopeAtOrdinal,
+  setBotHistoryInputSource } from "./history-input-projection"
+import { parseBotFileDelivery, parseBotHistoryFileDelivery } from "../../shared/bots/file-delivery"
+import { getLocalThreadRunLease } from "../agent/thread-run-lease"
+import { getPendingUserInputForThread, submitUserInputResponse } from "../services/user-input"
+import { botWorkApprovals } from "./work-approvals"
+import { readForkInputProjections } from "./fork-input-projection"
 
 let host: LocalBotHost | undefined
 let telemetry: BotTelemetryReporter | undefined
@@ -132,7 +139,7 @@ export function getLocalBotHost(): LocalBotHost {
               messages.set(message.id, message.content)
           return messages
         },
-        (threadId, messageId) => {
+        (threadId, messageId, desktopWork) => {
           const message = getThreadMessagesByIds(threadId, [messageId])[0]
           if (
             !message ||
@@ -148,20 +155,41 @@ export function getLocalBotHost(): LocalBotHost {
                   .map((block) => block.text ?? "")
                   .join("\n")
           let body = message.role === "assistant" ? splitBotInlineReasoning(text).body : text
+          if (message.role === "user") {
+            const row = getThreadCore(threadId)
+            const admitted = row ? botHistoryInputProjection(threadId, row)?.([messageId], "reply").get(messageId) : undefined
+            if (admitted === null) return null
+            if (admitted !== undefined) body = admitted
+          }
           let preview: string | undefined
           // Quote published bytes, not the mutable working path or model-supplied arguments.
           // Receipts belong to this exact assistant batch; never follow reused ids into a later turn.
           if (message.role === "assistant" && message.tool_calls?.some(call => call.name === "bot_deliver_files")) {
+            const authority = desktopWork ? botHistoryDeliveryScope(threadId, () => getThreadCore(threadId)) : undefined
+            let workspace = authority?.legacyWorkspace
+            if (workspace) {
+              try { workspace = realpathSync(workspace) } catch { /* Missing old workspace cannot resolve an alias. */ }
+            }
+            const scope = authority ? deliveryScopeAtOrdinal(authority, message.ordinal, workspace) : undefined
             const calls = new Set(message.tool_calls.filter(call => call.name === "bot_deliver_files").map(call => call.id))
             const references: string[] = []
             const names: string[] = []
             let remaining = 7_000
             let omitted = 0
-            for (const result of getThreadMessagesAfterAnyId(threadId, [messageId], message.tool_calls.length)) {
+            const results = getThreadMessagesAfterAnyId(threadId, [messageId], message.tool_calls.length)
+            for (const result of results) {
               if (result.role !== "tool") break
-              if (result.is_error || result.name !== "bot_deliver_files" || !calls.delete(result.tool_call_id ?? "")) continue
-              for (const file of parseBotFileDelivery(result.content) ?? []) {
-                const reference = JSON.stringify({ name: file.name.slice(0, 200), path: file.attachmentPath ?? file.filePath, size: file.size })
+              const callId = result.tool_call_id
+              if (result.is_error || result.name !== "bot_deliver_files" || !callId || !calls.delete(callId)) continue
+              if (desktopWork && results.filter(entry => entry.role === "tool" && entry.tool_call_id === callId).length !== 1)
+                continue
+              const files = desktopWork ? parseBotHistoryFileDelivery(result.content, scope) : parseBotFileDelivery(result.content)
+              for (const [fileIndex, file] of (files ?? []).entries()) {
+                const exactSource = desktopWork === true && file.attachmentPath
+                  ? { source: { threadId, assistantMessageId: message.id, callId, fileIndex } } : {}
+                const reference = JSON.stringify({ name: file.name.slice(0, 200), path: file.attachmentPath ?? file.filePath,
+                  size: file.size, ...(desktopWork === true ? { filePath: file.filePath,
+                    ...(file.attachmentPath ? { attachmentPath: file.attachmentPath } : {}), ...exactSource } : {}) })
                 if (reference.length + 1 > remaining) { omitted++; continue }
                 references.push(reference)
                 names.push(file.name.slice(0, 200))
@@ -263,12 +291,51 @@ export function getLocalBotHost(): LocalBotHost {
           return context
         }
       ),
-      createLocalBotRunPort(
-        getBotMemoryService(),
-        getLocalBotHost,
-        getBotBrowserService(),
-        summaries
-      ),
+      {
+        ...createLocalBotRunPort(
+          getBotMemoryService(),
+          getLocalBotHost,
+          getBotBrowserService(),
+          summaries
+        ),
+        ...botWorkApprovals,
+        validateSkillSelection: async (selection) => {
+          const { validateExplicitSkillReference } = await import("../agent/standard-thread-turn")
+          const error = await validateExplicitSkillReference(selection, undefined, true)
+          if (error) throw new BotError("CONFLICT", error)
+        },
+        pendingUserInput: (task) => {
+          const lease = getLocalThreadRunLease(task.threadId)
+          return lease?.owner === "bot" && lease.runId === task.id
+            ? getPendingUserInputForThread(task.threadId)
+            : null
+        },
+        answerUserInput: (response) => submitUserInputResponse(response, {
+          notifyRenderer: true,
+          reason: "已在原交办对话处理此问题。"
+        }),
+        scheduleObservationPublication: {
+          persist: (bot, publication) => {
+            if (bot.threadId !== publication.threadId)
+              throw new BotError("CONFLICT", "工作观察的原对话身份已变化")
+            const thread = getThreadCore(bot.threadId)
+            if (!thread) prepareBotThread(bot)
+            else {
+              const metadata = JSON.parse(thread.metadata || "{}")
+              if (metadata?.botId !== bot.id || metadata.botHostId !== "local" ||
+                  metadata.botWorkId != null || metadata.botGroupId != null || metadata.botMockBindingId != null)
+                throw new BotError("CONFLICT", "工作观察的原对话身份已变化")
+            }
+            return persistScheduledBotResultMessage(publication)
+          },
+          announce: (publication) => announceBotResultMessage({
+            threadId: publication.threadId, id: publication.id, content: publication.text,
+            attention: publication.failed ? "task-error" : "task-complete",
+            notificationTitle: publication.reminder ? "提醒" : "例行观察", notificationBody: publication.text.slice(0, 240),
+            mirrorTranscript: false
+          })
+        }
+      },
       Number.POSITIVE_INFINITY,
       console.error,
       (input, from) =>
@@ -284,6 +351,13 @@ export function getLocalBotHost(): LocalBotHost {
     telemetry = new BotTelemetryReporter(host.telemetry, getEventReporter)
     telemetry.start()
     setWorkConversationLookup((threadId) => host?.conversationLinks.forThread(threadId) ?? null)
+    setBotHistoryInputSource({
+      forkInputs: readForkInputProjections,
+      legacyRequests: (...args) => host?.legacyHistoryRequests(...args) ?? [],
+      origins: (threadId, incarnation, ids, row) => host?.historicalMessageOrigins(threadId, incarnation, ids, true, row) ?? [],
+      works: threadId => host?.desktopDeliveryWorks(threadId) ?? [],
+      inputs: (botId, threadId, ids, workIds, purpose) => host?.inputProjections(botId, threadId, ids, workIds, purpose) ?? new Map()
+    })
     return host
   } catch (error) {
     database.close()
@@ -319,8 +393,12 @@ export function removeLocalBotMessageReactionsForThreads(threadIds: readonly str
       return
     cleanup.run("BEGIN IMMEDIATE")
     try {
+      const archivedHistory = Boolean(cleanup.exec(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='bot_thread_history_owners'"
+      )[0]?.values.length)
       for (let offset = 0; offset < ids.length; offset += 100) {
         const batch = ids.slice(offset, offset + 100)
+        if (archivedHistory) deleteBotThreadHistory(cleanup, batch)
         cleanup.run(
           `DELETE FROM bot_message_reactions WHERE scope_kind='thread' AND scope_id IN (${batch.map(() => "?").join(",")})`,
           batch
@@ -355,6 +433,7 @@ export function stopLocalBotHost(): Promise<void> {
     } finally {
       database = undefined
       setWorkConversationLookup(undefined)
+      setBotHistoryInputSource(undefined)
     }
     const errors = results.flatMap((result) =>
       result.status === "rejected" ? [result.reason] : []

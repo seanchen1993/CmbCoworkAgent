@@ -218,6 +218,9 @@ export type StreamEvent =
 
 export interface Message {
   id: string
+  /** Added only to desktop history responses; storage and model inputs ignore it. */
+  botHistoryInputOrigin?: import("../shared/bots/message-reply").BotHistoryInputOrigin
+  botHistoryDeliveryScope?: import("../shared/bots/file-delivery").BotHistoryDeliveryScope
   /** Durable transcript order. Present on messages read from thread_messages pages. */
   ordinal?: number
   provider_source_id?: string
@@ -351,6 +354,11 @@ export interface ThreadDeleteOptions {
    * confirmed. Main rechecks this inside the same-thread mutation lock.
    */
   groupGuard?: ThreadGroupDeleteGuard
+}
+
+/** The ordinary delete path returns no value. Work draft cleanup requires its exact committed owner. */
+export type ThreadDeleteResult = void | {
+  deletedWork: NonNullable<import("../shared/bots/conversation").BotConversationDeletionOutcome["deletedWork"]>
 }
 
 export interface ThreadMessagesPage {

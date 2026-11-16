@@ -36,7 +36,94 @@ function fixture(path = ":memory:") {
   return { db, store, bot, target, messages, read, quote }
 }
 
+function takeWork(store: BotStore, work: { botId: string; id: string }) {
+  store.changeWorkControl({
+    botId: work.botId, workId: work.id, action: "take", operationId: `take-${work.id}`,
+    expectedVersion: store.getWork(work.botId, work.id).version
+  })
+  expect(store.finishWorkControlHandoffs(new Set())).toBe(true)
+}
+
 describe("persisted local user message reactions", () => {
+  it("keeps task feedback read-only until takeover settles, then saves it without waking the Host", async () => {
+    const f = fixture(), id = "native:message.1"
+    const { work, task } = f.store.createWork({
+      botId: f.bot.id, operationId: "controlled-reaction", title: "Report", goal: "Draft a report"
+    })
+    const target = { kind: "bot" as const, botId: f.bot.id, workId: work.id }
+    f.messages.set(work.threadId, [{ id, role: "assistant", ordinal: 0 }])
+    f.store.transition(task.id, "running")
+    expect(f.store.messageReactions(target, [id]).items[0].canReact).toBe(false)
+    expect(() => f.store.setMessageReaction(target, id, "👍", true)).toThrow("控制权")
+    const control = (action: "take" | "return") => f.store.changeWorkControl({
+      ...target, action, operationId: action, expectedVersion: f.store.getWork(f.bot.id, work.id).version
+    })
+    expect(control("take").userControl?.settling).toBe(true)
+    expect(() => f.store.setMessageReaction(target, id, "👍", true)).toThrow("控制权")
+    f.store.settle(task.id, "completed", null, "Report ready")
+    expect(f.store.finishWorkControlHandoffs(new Set())).toBe(true)
+
+    const acquire = vi.fn(() => null)
+    const host = new LocalBotHost(f.store, { acquire, onAvailable: () => () => {} })
+    hosts.push(host)
+    await new Promise<void>(resolve => setImmediate(resolve))
+    acquire.mockClear()
+    // An unrelated queued turn would be offered to the runtime by an accidental wake.
+    f.store.enqueue({ botId: f.bot.id, requestId: "unrelated-inbox", message: "Other request" })
+    expect(host.setMessageReaction(target, id, "👍", true).item).toMatchObject({
+      canReact: true, reactions: [{ emoji: "👍", mine: true }]
+    })
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(acquire).not.toHaveBeenCalled()
+    expect(f.store.pendingWorkFamily(f.bot.id, work.id)).toEqual([])
+
+    f.store.stopWorkDispatch(f.bot.id, work.id)
+    expect(host.setMessageReaction(target, id, "🎉", true).item.reactions[0].emoji).toBe("🎉")
+    expect(f.store.pendingWorkFamily(f.bot.id, work.id)).toEqual([])
+    control("return")
+    expect(f.store.messageReactions(target, [id]).items[0]).toMatchObject({
+      canReact: false, reactions: [{ emoji: "🎉", mine: true }]
+    })
+    expect(() => host.setMessageReaction(target, id, "🎉", false)).toThrow("控制权")
+    expect(f.store.getWork(f.bot.id, work.id).dispatchStopped).toBe(true)
+  })
+
+  it.each(["take", "recover"] as const)(
+    "retires queued legacy task feedback on %s and keeps an original command receipt runnable",
+    action => {
+      const f = fixture()
+      const { work, task } = f.store.createWork({
+        botId: f.bot.id, operationId: "legacy-feedback-work", title: "Report", goal: "Build a report"
+      })
+      f.store.transition(task.id, "running")
+      f.store.acceptCommand(task.id, {
+        id: "original-command", threadId: work.threadId, command: "build report", cwd: "/synthetic", startedAt: 1
+      })
+      f.store.settle(task.id, "completed", null, "Build started")
+      const feedback = f.store.enqueue({
+        botId: f.bot.id, workId: work.id, requestId: "legacy-reaction", message: "Prior reaction"
+      }, { kind: "notification", notificationKind: "reaction", key: "native:message.1" })
+      f.store.settleCommand({
+        id: "original-command", threadId: work.threadId, output: "Done", exitCode: 0,
+        cancelled: false, truncated: false
+      })
+      f.store.flushReplies()
+      if (action === "take") {
+        f.store.changeWorkControl({
+          botId: f.bot.id, workId: work.id, action, operationId: action,
+          expectedVersion: f.store.getWork(f.bot.id, work.id).version
+        })
+        expect(f.store.finishWorkControlHandoffs(new Set())).toBe(false)
+      } else {
+        f.store.recover()
+      }
+      expect(f.store.getTask(feedback.id).state).toBe("cancelled")
+      expect(f.store.nextQueued([f.bot.threadId])).toMatchObject({
+        workId: work.id, origin: { kind: "notification", notificationKind: "command", key: "original-command" }
+      })
+    }
+  )
+
   it("replaces the selected emoji, canonicalizes aliases and advances revision only for changes", () => {
     const f = fixture(),
       id = "native:message.1",
@@ -89,6 +176,7 @@ describe("persisted local user message reactions", () => {
       ...(f.target as { kind: "bot"; botId: string }),
       workId: work.id
     }
+    takeWork(f.store, work)
     f.store.setMessageReaction(f.target, id, "👍", true)
     f.store.setMessageReaction(workTarget, id, "🎉", true)
     expect(
@@ -186,6 +274,8 @@ describe("persisted local user message reactions", () => {
     }).work
     f.messages.set(admitted.threadId, [{ id, role: "assistant", ordinal: 0 }])
     f.messages.set(disposable.threadId, [{ id, role: "assistant", ordinal: 0 }])
+    takeWork(f.store, admitted)
+    takeWork(f.store, disposable)
     f.store.setMessageReaction(
       { kind: "bot", botId: f.bot.id, workId: admitted.id },
       id,
@@ -312,7 +402,7 @@ describe("persisted local user message reactions", () => {
     expect(f.store.messageReactions(target, ["answer"]).items[0].reactions[0].emoji).toBe("❤️")
   })
 
-  it("routes work feedback only to that conversation and never reopens a completed work or archived Bot", () => {
+  it("keeps completed work reactions display-only and never wakes an archived main Bot", () => {
     const f = fixture(),
       id = "native:message.1"
     const created = f.store.createWork({
@@ -323,24 +413,20 @@ describe("persisted local user message reactions", () => {
     })
     const work = created.work
     f.store.transition(created.task.id, "cancelled")
+    takeWork(f.store, work)
     f.messages.set(work.threadId, [{ id, role: "assistant", ordinal: 0 }])
     const target: BotReactionTarget = { kind: "bot", botId: f.bot.id, workId: work.id }
     const activities = f.store.activities()
     f.store.setMessageReaction(target, id, "👍", true)
-    const feedback = f.store.recentTasks().find((entry) => entry.origin.kind === "notification")!
-    expect(feedback).toMatchObject({ workId: work.id, threadId: work.threadId, botId: f.bot.id })
     expect(f.store.activities()).toEqual(activities)
-    f.store.transition(feedback.id, "running")
-    f.store.settle(feedback.id, "completed", null, "BOT_ROUTINE_SILENT")
-    expect(f.store.activities()).toEqual(activities)
-    expect(f.store.recentTasks()).toHaveLength(2) // Original work task and feedback only.
+    expect(f.store.recentTasks()).toHaveLength(1)
     const current = f.store.getWork(f.bot.id, work.id)
     f.store.changeWork(f.bot.id, work.id, current.version, "complete", "complete")
     f.store.setMessageReaction(target, id, "❤️", true)
     const bot = f.store.getBot(f.bot.id)
     f.store.update({ ...bot, expectedVersion: bot.version, archived: true })
     f.store.setMessageReaction(f.target, id, "👍", true)
-    expect(f.store.recentTasks()).toHaveLength(2)
+    expect(f.store.recentTasks()).toHaveLength(1)
   })
   it("keeps file-only feedback and quoted markup bounded, without treating the quote as user authority", () => {
     const f = fixture(),

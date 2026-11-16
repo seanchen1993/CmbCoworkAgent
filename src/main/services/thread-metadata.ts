@@ -1,6 +1,7 @@
 import { getThreadCore, updateThread, type ThreadRow } from "../db"
 import type { ThreadMetadataPatch } from "../types"
 import { isAgentOutputStyle } from "../../shared/agent-output-style"
+import { isBotCreatedWorkMetadata } from "../../shared/bots/model-policy"
 import {
   resolveThreadExecutionModeFromMetadata,
   type ThreadExecutionMode
@@ -19,7 +20,8 @@ export const RENDERER_WRITABLE_THREAD_METADATA_KEYS = new Set([
   "memoryEnabled",
   "outputStyle",
   "conciseModeEnabled",
-  "model"
+  "model",
+  "botWorkModelRoutingMode"
 ])
 
 function assertSafeMetadataKey(key: string): void {
@@ -170,6 +172,10 @@ export function validateRendererThreadMetadataPatch(patch: ThreadMetadataPatch):
       case "outputStyle":
         if (!isAgentOutputStyle(value)) throw new Error("Invalid outputStyle")
         break
+      case "botWorkModelRoutingMode":
+        if (value !== "default" && value !== "pinned")
+          throw new Error("Invalid botWorkModelRoutingMode")
+        break
       case "model":
         if (
           typeof value !== "string" ||
@@ -198,6 +204,17 @@ export function validateRendererThreadMetadataPatch(patch: ThreadMetadataPatch):
   if (Buffer.byteLength(serialized, "utf8") > RENDERER_METADATA_PATCH_MAX_BYTES) {
     throw new Error("Thread metadata patch is too large")
   }
+}
+
+/** The new local choice is unavailable to ordinary threads or imported conversations. */
+export function assertBotWorkModelRoutingPatch(
+  metadata: Record<string, unknown>, patch: ThreadMetadataPatch
+): void {
+  if (patch.remove?.includes("botWorkModelRoutingMode"))
+    throw new Error("Bot 任务模型策略请使用明确设置，不能删除。")
+  if (Object.prototype.hasOwnProperty.call(patch.set ?? {}, "botWorkModelRoutingMode") &&
+      !isBotCreatedWorkMetadata(metadata))
+    throw new Error("仅 Bot 内新建的桌面任务支持独立模型策略。")
 }
 
 export function applyThreadMetadataPatch(

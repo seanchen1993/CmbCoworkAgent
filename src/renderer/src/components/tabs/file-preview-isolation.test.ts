@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs"
-import { describe, expect, it } from "vitest"
+import { runInNewContext } from "node:vm"
+import { describe, expect, it, vi } from "vitest"
 
 const fileViewer = readFileSync(new URL("./FileViewer.tsx", import.meta.url), "utf8")
 const tabbedPanel = readFileSync(new URL("./TabbedPanel.tsx", import.meta.url), "utf8")
@@ -93,6 +94,52 @@ describe("persisted active file preview isolation", () => {
     expect(fileViewer).toContain("MAX_MARKDOWN_IMAGE_SOURCE_BYTES")
   })
 
+  it("keeps workbench Markdown previews on the exact Bot delivery receipt", () => {
+    const viewer = rightPanel.match(/<FileViewer\b[\s\S]*?\/>/)?.[0]
+    expect(rightPanel).toContain("botDeliverySource?.threadId === threadId")
+    expect(rightPanel).toContain("{ botDeliverySource: deliverySource, markdownBasePath }")
+    expect(rightPanel).toContain("botDeliveryMarkdown={previewExternalAuthorizationForCurrentThread?.botDeliverySource}")
+    expect(rightPanel).toContain("markdownBasePath={previewExternalAuthorizationForCurrentThread?.markdownBasePath}")
+    expect(rightPanel).toContain("(!resolved.inWorkspace || Boolean(botDeliveryMarkdown))")
+    expect(viewer).toContain("markdownBasePath={markdownBasePath}")
+    expect(viewer).toContain("botDeliveryMarkdown={botDeliveryMarkdown}")
+    expect(fileViewer).toContain("{ botDeliveryImage }")
+  })
+
+  it("saves formal snapshots by their exact receipt without exposing their storage folder", async () => {
+    const revealCondition = rightPanel.match(/const canRevealInFolder = ([^\n]+)/)?.[1]
+    expect(revealCondition).toBeDefined()
+    const receipt = { threadId: "original", assistantMessageId: "message", callId: "delivery", fileIndex: 0 }
+    for (const inWorkspace of [true, false]) {
+      for (const authorized of [true, false]) {
+        const scope = { resolved: { inWorkspace }, hasExternalPreviewAuthorization: authorized }
+        expect(runInNewContext(revealCondition!, { ...scope, botDeliveryMarkdown: receipt })).toBe(false)
+        expect(runInNewContext(revealCondition!, { ...scope, botDeliveryMarkdown: undefined })).toBe(inWorkspace || authorized)
+      }
+    }
+    const saveBody = rightPanel.match(/const saveDelivery = async \(\) => \{([\s\S]*?)\n  \}\n/)?.[1]
+    expect(saveBody).toBeDefined()
+    let finish!: () => void
+    const save = vi.fn(() => new Promise<void>(resolve => { finish = resolve }))
+    const pending = { current: false }
+    const setSaving = vi.fn()
+    const handler = runInNewContext(`(async () => {${saveBody}})`, {
+      window: { api: { bots: { exportDeliveredFile: save } } },
+      botDeliveryMarkdown: receipt, deliverySavePending: pending, setSavingDelivery: setSaving,
+      toast: { error: vi.fn() }
+    }) as () => Promise<void>
+    const first = handler()
+    await handler()
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(save).toHaveBeenCalledWith(receipt)
+    finish()
+    await first
+    expect(pending.current).toBe(false)
+    expect(setSaving.mock.calls).toEqual([[true], [false]])
+    expect(rightPanel).toContain('{botDeliveryMarkdown ? <button')
+    expect(rightPanel).toContain('data-testid="resource-preview-save-delivery"')
+  })
+
   it("keeps Shiki parsing and highlighting off the renderer UI thread", () => {
     expect(codeViewer).not.toContain('from "shiki/')
     expect(codeViewer).toContain("requestCodeHighlight")
@@ -176,7 +223,7 @@ describe("persisted active file preview isolation", () => {
     expect(resourcePreviewRequestHook).toContain("isCurrentOpenResourcePreviewIntent(")
     expect(resourcePreviewRequestHook).toContain("beginOpenResourcePreviewIntent(previousThreadId)")
     expect(resourcePanelOverlay).toContain('setMode("preview")')
-    expect(rightPanel).toContain("const canRevealInFolder = resolved.inWorkspace")
+    expect(rightPanel).toContain("const canRevealInFolder = !botDeliveryMarkdown")
     expect(rightPanel).toContain("if (!resolved.inWorkspace)")
     expect(rightPanel).toContain("if (!canRevealInFolder)")
     expect(rightPanel).toContain("disabled={!canRevealInFolder}")

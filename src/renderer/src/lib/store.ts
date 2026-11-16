@@ -17,6 +17,9 @@ import {
   mergeThreadDirectoryFirstPage
 } from "./thread-directory-pagination"
 import { queueStorageKey } from "./queued-message-content"
+import { botConversationDraftKey, botThreadDraftKey } from "./bot-draft-storage"
+import { LOCAL_BOT_HOST_ID } from "../../../shared/bots/contracts"
+import type { BotConversationDeletionOutcome } from "../../../shared/bots/conversation"
 import {
   buildAvailableProviderOccurrenceId,
   getMessageProviderOccurrence,
@@ -31,6 +34,8 @@ import type { ThreadDeleteOptions, ThreadMetadataPatch } from "../../../main/typ
 import { chatScrollSessionStore } from "@/components/chat/chat-scroll-session-store"
 import { clearChatThreadProjectionRuntime } from "./chat-thread-projection-cache"
 import { runBestEffortCommittedDeletionCleanups } from "./thread-group-deletion"
+import { DEFAULT_STARTUP_VIEW, type StartupView } from "../../../shared/startup-view"
+import { useChatSourceNavigation } from "./chat-source-navigation"
 
 const MAX_WORKER_FOCUS_MESSAGES = 2_000
 const MAX_WORKER_SIGNATURE_CHARS = 512
@@ -46,11 +51,56 @@ export function isThreadDeletionPending(threadId: string): boolean {
 export function isThreadRetired(threadId: string): boolean {
   return rendererRetiredThreadIds.has(threadId)
 }
+
+/** The native thread and the Bot work acknowledge deletion separately. */
+export function applyCommittedBotWorkDeletion(work: NonNullable<BotConversationDeletionOutcome["deletedWork"]>): void {
+  runBestEffortCommittedDeletionCleanups([
+    {
+      label: "Failed to remove deleted Bot work draft",
+      run: () => globalThis.localStorage.removeItem(botConversationDraftKey(LOCAL_BOT_HOST_ID, work.botId, work.workId))
+    }
+  ])
+}
+
+/** Apply the renderer side of an acknowledged native thread deletion. */
+export function applyCommittedThreadDeletion(threadId: string, deferDirectoryUpdate = false): void {
+  rendererDeletingThreadIds.delete(threadId)
+  rendererRetiredThreadIds.add(threadId)
+  // Advance the epoch again at commit so a stale page cannot resurrect the row.
+  markThreadDirectoryMutation(threadId)
+  // The durable queue, projection and scroll caches outlive the database row.
+  runBestEffortCommittedDeletionCleanups([
+    {
+      label: "Failed to remove deleted thread queue",
+      run: () => window.localStorage.removeItem(queueStorageKey(threadId))
+    },
+    {
+      label: "Failed to remove deleted thread draft",
+      run: () => window.localStorage.removeItem(botThreadDraftKey(threadId))
+    },
+    {
+      label: "Failed to clear deleted thread projection",
+      run: () => clearChatThreadProjectionRuntime(threadId)
+    },
+    {
+      label: "Failed to clear deleted thread scroll state",
+      run: () => chatScrollSessionStore.delete(threadId)
+    },
+    ...(deferDirectoryUpdate
+      ? []
+      : [
+          {
+            label: "Failed to finalize deleted thread directory state",
+            run: () => useAppStore.getState().finalizeThreadDeletions([threadId])
+          }
+        ])
+  ])
+}
 const THREAD_DIRECTORY_PAGE_LIMIT = 128
 const THREAD_DIRECTORY_PAGE_BYTE_BUDGET = 512 * 1024
 const THREAD_DIRECTORY_LOAD_MORE_PAGE_BATCH = 4
 let threadDirectoryLoadGeneration = 0
-let threadDirectoryBootstrapSelectionPending = false
+let threadDirectoryBootstrapSelection: { isCurrent?: () => boolean } | null = null
 let threadDirectoryLatestLoadPromise: Promise<boolean> | null = null
 let threadDirectoryCursor: { beforeUpdatedAt: number; beforeThreadId: string } | null = null
 let threadDirectoryLoadMorePromise: Promise<void> | null = null
@@ -866,8 +916,13 @@ interface ThreadNavigationOptions {
   preserveView?: boolean
 }
 
+interface ThreadCreationOptions extends ThreadNavigationOptions {
+  selectIf?: () => boolean
+}
+
 interface ThreadDirectoryLoadOptions {
   selectInitialThread?: boolean
+  canSelectInitialThread?: () => boolean
 }
 
 function resolveChatThreadId(threads: Thread[], preferredThreadId?: string | null): string | null {
@@ -1022,7 +1077,7 @@ interface AppState {
   touchThreadSummaries: (threadIds: Iterable<string>, updatedAt: Date) => void
   createThread: (
     metadata?: Record<string, unknown>,
-    options?: ThreadNavigationOptions
+    options?: ThreadCreationOptions
   ) => Promise<Thread>
   forkThread: (params: ThreadForkParams, options?: ThreadNavigationOptions) => Promise<Thread>
   listForkableCheckpoints: (threadId: string) => Promise<ForkableCheckpoint[]>
@@ -1202,7 +1257,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // Thread actions
   loadThreads: (options) => {
-    if (options?.selectInitialThread) threadDirectoryBootstrapSelectionPending = true
+    const bootstrap = options?.selectInitialThread
+      ? { isCurrent: options.canSelectInitialThread }
+      : null
+    if (bootstrap) threadDirectoryBootstrapSelection = bootstrap
     const generation = ++threadDirectoryLoadGeneration
     threadDirectoryLoadMorePromise = null
     const requestMutationEpoch = threadDirectoryMutationEpoch
@@ -1236,10 +1294,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       // Directory refreshes are data-only. Only the explicit startup bootstrap may
       // choose a task, and a route change while the request was pending wins.
-      const shouldSelectInitialThread = threadDirectoryBootstrapSelectionPending
-      threadDirectoryBootstrapSelectionPending = false
+      const pending = threadDirectoryBootstrapSelection
+      threadDirectoryBootstrapSelection = null
       const state = get()
-      if (shouldSelectInitialThread && state.mainView === "thread" && !state.currentThreadId) {
+      if (pending && pending.isCurrent?.() !== false && state.mainView === "thread" &&
+          !state.currentThreadId && !state.showCustomizeView) {
         const firstChatThread = findFirstChatThread(state.threads)
         if (firstChatThread) await get().selectThread(firstChatThread.thread_id)
       }
@@ -1248,8 +1307,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     })()
     threadDirectoryLatestLoadPromise = loadPromise
 
-    return options?.selectInitialThread
-      ? waitForAppliedThreadDirectoryLoad(loadPromise)
+    return bootstrap
+      ? waitForAppliedThreadDirectoryLoad(loadPromise).finally(() => {
+          if (threadDirectoryBootstrapSelection === bootstrap) threadDirectoryBootstrapSelection = null
+        })
       : loadPromise.then(() => undefined)
   },
 
@@ -1341,8 +1402,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     }))
   },
 
-  createThread: async (metadata?: Record<string, unknown>, options?: ThreadNavigationOptions) => {
+  createThread: async (metadata?: Record<string, unknown>, options?: ThreadCreationOptions) => {
     const thread = await window.api.threads.create(metadata)
+    if (options?.selectIf?.() === false) {
+      get().addThreadSummary(thread)
+      return thread
+    }
     markThreadDirectoryMutation(thread.thread_id)
     set((state) => ({
       threads: adoptThreadDirectorySnapshot([
@@ -1438,47 +1503,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     rendererDeletingThreadIds.add(threadId)
     markThreadDirectoryMutation(threadId)
     try {
-      await window.api.threads.delete(
+      const result = await window.api.threads.delete(
         threadId,
         options?.requireIdle === undefined && options?.groupGuard === undefined
           ? undefined
           : { requireIdle: options?.requireIdle, groupGuard: options?.groupGuard }
       )
-      rendererDeletingThreadIds.delete(threadId)
-      rendererRetiredThreadIds.add(threadId)
-      // A directory refresh may start after the optimistic fence but still read
-      // before the database commit becomes visible. Advance the epoch again at
-      // the commit acknowledgement so that stale page cannot resurrect the row.
-      markThreadDirectoryMutation(threadId)
       console.log("[Store] Thread deleted from backend")
-      // The draft-message queue is persisted to localStorage independent of the
-      // DB thread record (thread-context.tsx's persistQueuedMessages) so it
-      // survives reloads; nothing else clears that key, so it would otherwise
-      // sit there forever once the thread it belonged to is gone.
-      // Permanent deletion must evict message-bearing projection/scroll caches immediately.
-      // Advancing the scroll lease also ignores a late React unmount save from the old row.
-      runBestEffortCommittedDeletionCleanups([
-        {
-          label: "Failed to remove deleted thread queue",
-          run: () => window.localStorage.removeItem(queueStorageKey(threadId))
-        },
-        {
-          label: "Failed to clear deleted thread projection",
-          run: () => clearChatThreadProjectionRuntime(threadId)
-        },
-        {
-          label: "Failed to clear deleted thread scroll state",
-          run: () => chatScrollSessionStore.delete(threadId)
-        },
-        ...(options?.deferDirectoryUpdate
-          ? []
-          : [
-              {
-                label: "Failed to finalize deleted thread directory state",
-                run: () => get().finalizeThreadDeletions([threadId])
-              }
-            ])
-      ])
+      applyCommittedThreadDeletion(threadId, options?.deferDirectoryUpdate)
+      if (result?.deletedWork) applyCommittedBotWorkDeletion(result.deletedWork)
     } catch (error) {
       rendererDeletingThreadIds.delete(threadId)
       console.error("[Store] Failed to delete thread:", error)
@@ -2481,6 +2514,42 @@ export const useAppStore = create<AppState>((set, get) => ({
   setEvolutionStreamError: (err) => set({ evolutionStreamError: err }),
   setEvolutionLastRunOpts: (opts) => set({ evolutionLastRunOpts: opts })
 }))
+
+function isUnselectedWorkbench(state: AppState): boolean {
+  return state.mainView === "thread" && !state.currentThreadId && !state.showCustomizeView
+}
+
+/** A launch preference is only a fallback for an untouched route. */
+export async function initializeStartupWorkspace(isCurrent: () => boolean): Promise<void> {
+  if (!isCurrent()) return
+  let untouched = isUnselectedWorkbench(useAppStore.getState())
+  const unsubscribe = useAppStore.subscribe((state) => {
+    if (!isUnselectedWorkbench(state)) untouched = false
+  })
+  const canSelect = () => isCurrent() && untouched && !useChatSourceNavigation.getState().target
+  try {
+    let view: StartupView = DEFAULT_STARTUP_VIEW
+    const navigation = window.performance?.getEntriesByType("navigation")[0] as
+      | PerformanceNavigationTiming
+      | undefined
+    if (canSelect() && (!navigation || navigation.type === "navigate")) {
+      try {
+        view = await window.electron.getStartupView()
+      } catch (error) {
+        console.warn("Failed to read the startup view:", error)
+      }
+    }
+    if (!isCurrent()) return
+    const state = useAppStore.getState()
+    if (view === "bots" && canSelect()) state.setMainView("bots")
+    await state.loadThreads({ selectInitialThread: true, canSelectInitialThread: canSelect })
+    if (canSelect() && useAppStore.getState().threads.length === 0) {
+      await state.createThread(undefined, { selectIf: canSelect })
+    }
+  } finally {
+    unsubscribe()
+  }
+}
 
 // ─────────────────────────────────────────────────────────
 // Selector helpers

@@ -10,6 +10,7 @@ import {
   type BotImFileResult
 } from "../../../shared/bots/im-file"
 import { ImGatewayCommandError } from "./gateway-ws-client"
+import { botSnapshotSourceRoot } from "../../bots/attachment-storage"
 
 export async function deliverBotImFile(
   command: (request: BotImFileCommand) => Promise<BotImFileResult>,
@@ -70,7 +71,10 @@ export async function deliverBotImFile(
     try {
       let stable
       try {
-        stable = await openStableFileHandle(dirname(dirname(dirname(path!))), path!)
+        stable = await openStableFileHandle(
+          botSnapshotSourceRoot(file, dirname(dirname(dirname(path!)))),
+          path!
+        )
       } catch {
         return fail(`附件「${file.name}」无法读取，请重新交付`)
       }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import type { BotFilePreviewTransport } from "../../../../shared/bots/contracts"
+import type { BotDeliveredFileSource } from "../../../../shared/bots/file-delivery"
 import { AlertCircle, ChevronLeft, ChevronRight, FileCode, Loader2 } from "lucide-react"
 import {
   type WorkspaceFilePreviewMediaResult,
@@ -56,6 +57,9 @@ interface FileViewerProps {
   filePath: string
   /** Workspace-only base for relative Markdown images; content still reads filePath. */
   markdownBasePath?: string
+  /** Formal Bot snapshots may resolve images against their exact bound work. */
+  botDeliveryMarkdown?: BotDeliveredFileSource
+  botDelivery?: boolean
   threadId?: string
   externalFullPath?: string
   /** How main should interpret an ungranted workspace path. Absolute remains workspace-bounded. */
@@ -100,6 +104,8 @@ function formatBytes(bytes: number): string {
 export function FileViewer({
   filePath,
   markdownBasePath,
+  botDeliveryMarkdown,
+  botDelivery,
   threadId,
   externalFullPath,
   workspacePathKind,
@@ -117,6 +123,8 @@ export function FileViewer({
   const generatedLane = useId().replace(/[^a-zA-Z\d_-]/g, "")
   const lane = requestLane ?? `file-viewer-${generatedLane}`
   const displayPath = externalFullPath || filePath
+  const botDeliveryImage = externalFullPath && markdownBasePath && botDeliveryMarkdown?.threadId === threadId
+    ? botDeliveryMarkdown : undefined
   const sourceCachePrefix =
     cacheNamespace +
     (externalFullPath
@@ -460,10 +468,13 @@ export function FileViewer({
       const budget = dependencyBudgetRef.current
       if (budget.imageRequests >= MAX_MARKDOWN_IMAGE_REQUESTS) return null
       budget.imageRequests += 1
-      const previewSource = await previewSourceForPath(resolvedPath)
+      const previewSource: WorkspaceFilePreviewSource = botDeliveryImage
+        ? { threadId: botDeliveryImage.threadId, filePath: resolvedPath, workspacePathKind: "absolute" }
+        : await previewSourceForPath(resolvedPath)
       if (generation !== generationRef.current) return null
       const result = await transport.openMediaPreview({
         source: previewSource,
+        ...(botDeliveryImage ? { botDeliveryImage } : {}),
         lane: `${lane}:image:${shortPathHash(resolvedPath)}`,
         requestToken: requestTokenRef.current
       })
@@ -487,7 +498,7 @@ export function FileViewer({
       budget.imageBytes += result.size
       return result.previewUrl
     },
-    [lane, previewSourceForPath, transport]
+    [botDeliveryImage, lane, previewSourceForPath, transport]
   )
 
   if (isLoading) {
@@ -587,10 +598,11 @@ export function FileViewer({
       <div className="h-full min-h-0 overflow-y-auto right-panel-scroll">
         <MarkdownPreview
           content={content}
-          path={externalFullPath ? displayPath : (markdownBasePath ?? displayPath)}
+          path={externalFullPath && !botDeliveryImage ? displayPath : (markdownBasePath ?? displayPath)}
           showHeader={false}
           showModeToggle={false}
           viewMode={previewMode}
+          botDelivery={botDelivery || Boolean(externalFullPath && botDeliveryMarkdown && botDeliveryMarkdown.threadId === threadId)}
           whiteBackground
           className="markdown-preview"
           readBinaryFile={readBinaryDependencyFile}

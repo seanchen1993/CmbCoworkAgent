@@ -7,7 +7,7 @@ import type {
 import type { BotWorkClient } from "./work"
 import type { BotMockSource } from "./mock-channel"
 import type { WorkspaceFileScanEntry } from "../workspace-file-scan"
-import type { BotDeliveredFile } from "./file-delivery"
+import type { BotDeliveredFile, BotDeliveredFileSource } from "./file-delivery"
 import type { UserInputRequest } from "../../main/types"
 import type {
   WorkspaceFilePreviewReadRequest,
@@ -174,15 +174,27 @@ export type BotTaskOrigin =
   | { kind: "mock"; bindingId: string; eventId: string }
   | {
       kind: "user"
-      replyTo?: Pick<BotMessageReply, "id" | "ordinal" | "role">
+      replyTo?: Pick<BotMessageReply, "id" | "ordinal" | "role"> & {
+        /** Host-validated quote transferred from another thread; never a local jump target. */
+        sourceThreadId?: string
+      }
       mentions?: BotMessageMention[]
+      /** Exact picker/drop receipts accepted with this request; text alone grants nothing. */
+      inputFileIds?: string[]
+      /** Host receipt from this submission's actual prompt preparation. */
+      allowedInputFileIds?: string[]
+      explicitSkill?: import("./skill-selection").BotSkillSelection
     }
   | { kind: "introduction" }
   | {
       kind: "work"
       sourceTaskId: string
       /** Present on new dispatches; their message is the actual Bot-authored instruction. */
-      dispatch?: "create" | "follow_up"
+      dispatch?: "create" | "follow_up" | "repair"
+      /** Host-owned original execution request for a bounded automatic repair. */
+      reviewRequestTaskId?: string
+      inputFileIds?: string[]
+      allowedInputFileIds?: string[]
       /** Host-captured source references, never copied into the task's model input. */
       sourceMessageIds?: string[]
       /** Legacy forwarded turns kept the Bot's brief separate from the user message. */
@@ -196,6 +208,8 @@ export type BotTaskOrigin =
       workThreadId: string
       executionTaskId: string
       executionState: BotTaskState
+      /** Private verification or committed publication of the same result. */
+      review?: { requestTaskId: string; phase: "review" | "publish"; attempt?: number }
     }
   | {
       kind: "bot"
@@ -211,6 +225,8 @@ export type BotTaskOrigin =
       rootWorkId?: string
       /** Host-owned source turn for this private handoff; never a peer-selected return route. */
       upstreamTaskId?: string
+      /** Accepted work input at dispatch, retained when returning this handoff. */
+      workReviewScopeId?: string
       depth: number
       expectsReply: boolean
       /** Host-owned feedback delivery, not a model-selected task or user grant. */
@@ -221,14 +237,18 @@ export type BotTaskOrigin =
       outputFiles?: string[]
       /** Host-verified outputs of this exact internal handoff, not model-supplied grants. */
       replyFiles?: BotDeliveredFile[]
+      /** Verified declared names for this exact handoff's retained versions. */
+      replyOutputBindings?: Record<string, string>
     }
   | {
       kind: "notification"
       notificationKind: "workflow" | "coordinator" | "command" | "reaction"
       /** Workflow continuation inherits the verified launcher's collaboration family. */
       rootTaskId?: string
-      /** Host-owned originating turn, used to retain an authenticated IM route. */
+      /** Host-owned originating turn, used to retain an authenticated IM route or a work receipt. */
       sourceTaskId?: string
+      /** Local work command provenance, fixed at admission before command and task receipts can be pruned. */
+      commandReviewSource?: { requestTaskId: string; executionTaskId: string; scopeId?: string }
       /** Inherits the host-owned collaboration quota; never an owner permission. */
       rootWorkId?: string
       key: string
@@ -238,7 +258,13 @@ export type BotTaskOrigin =
       runStartedAt?: string
       groupId?: string
     }
-  | { kind: "schedule"; scheduleId: string; sourceTaskId?: string }
+  | {
+      kind: "schedule"
+      scheduleId: string
+      sourceTaskId?: string
+      observation?: import("./schedule-observation").BotScheduledWorkObservation
+      fixedReminder?: import("./schedule-observation").BotScheduledFixedReminder
+    }
   | { kind: "discussion"; groupId: string; messageId: string; round: number }
   | { kind: "group"; groupId: string; messageId: string }
 
@@ -332,11 +358,31 @@ export interface BotScheduleInput {
   intervalMinutes?: number
   enabled: boolean
 }
+export interface BotDesktopWorkScheduleBinding {
+  workId: string
+  operationId: string
+}
+export interface BotScheduleEditInput {
+  id: string
+  version: number
+  /** Explicitly change the saved deadline of a fixed reminder or observation. */
+  expiresAt?: string
+  /** Explicitly edit the target and condition of an existing desktop observation. */
+  workMonitor?: Pick<import("./schedule-observation").BotWorkScheduleMonitorInput, "workId" | "mode">
+  /** Withdraw the exact occurrence displayed by the desktop card. */
+  withdrawTaskId?: string
+}
 export interface BotSchedule extends BotScheduleInput {
   /** Host-captured source; cannot be chosen by model or renderer input. */
   sourceTaskId?: string
   audienceKey?: string
   workId?: string
+  /** Execution stays on this exact local work; no channel source is inherited. */
+  desktopWork?: true
+  workUnavailable?: true
+  /** Read-only source work, never an execution destination. */
+  workMonitor?: import("./schedule-observation").BotWorkScheduleMonitor
+  fixedReminder?: import("./schedule-observation").BotFixedReminder
   id: string
   botId: string
   version: number
@@ -344,6 +390,8 @@ export interface BotSchedule extends BotScheduleInput {
   timezone: string
   /** Persisted when a trigger actually enters the queue; not a completion receipt. */
   lastTriggeredAt?: string
+  /** Host snapshot only, for an accepted one-shot desktop work occurrence that has not begun. */
+  pendingOccurrenceId?: string
 }
 
 export interface SendBotMessageInput {
@@ -355,6 +403,12 @@ export interface SendBotMessageInput {
   replyToId?: string
   /** UTF-16 ranges in message, including any existing transport decorations. */
   mentions?: BotMessageMention[]
+  inputFileIds?: string[]
+  explicitSkill?: import("./skill-selection").BotSkillSelection
+  /** This desktop draft was deliberately sent from the Bot's main chat to the selected work. */
+  skillDraftFromMain?: true
+  /** Exact main conversation whose explicit skill draft selected this work. */
+  skillDraftSourceThreadId?: string
 }
 
 /** A bounded reference resolved from this Bot's existing durable private transcript. */
@@ -410,6 +464,8 @@ export interface BotChangeEvent {
   reactionTarget?: BotReactionTarget
   /** Invalidate this Bot's memory view; never carries private memory content. */
   memoryBotId?: string
+  /** The already-persisted assistant reminder has no Agent lifecycle. */
+  reminder?: { threadId: string; id: string; content: string; createdAt: number }
 }
 
 export interface BotMemory {
@@ -503,10 +559,21 @@ export interface BotClient {
     groupId?: string,
     workId?: string
   ): Promise<import("../file-attachment").FileAttachment[]>
+  /** Retain a selected file from the exact local Bot conversation's workspace. */
+  attachWorkspaceFile?(
+    botId: string, threadId: string, fileId: string, maxChars: number, workId?: string
+  ): Promise<import("../file-attachment").FileAttachment>
   /** Accepts a relative file ID or a preview's host path, always confined to this workspace. */
-  exportFile(botId: string, fileId: string, groupId?: string, workId?: string): Promise<boolean>
+  exportFile(botId: string, fileId: string, groupId?: string, workId?: string, suggestedName?: string): Promise<boolean>
+  authorizeDeliveredFile?(source: BotDeliveredFileSource): Promise<{
+    filePath: string
+    grant: string
+    expiresAt?: number
+    markdownBasePath?: string
+  }>
+  exportDeliveredFile?(source: BotDeliveredFileSource): Promise<boolean>
   /** User access to retained group files, including groups with no remaining members. */
-  exportGroupFile(groupId: string, fileId: string): Promise<boolean>
+  exportGroupFile(groupId: string, fileId: string, suggestedName?: string): Promise<boolean>
   /** Host-owned path used only to resolve retained public Markdown file links. */
   groupFileWorkspace(groupId: string): Promise<string>
   shareFile(
@@ -527,6 +594,8 @@ export interface BotClient {
     expectedGeneration: number
   ): Promise<string | null>
   snapshot(): Promise<BotSnapshot>
+  /** Whether any conversation or work has unread activity on this host. */
+  hasUnread?(): Promise<boolean>
   exchange(botId: string, taskId: string, groupId?: string, workId?: string, imConversationId?: string): Promise<BotExchange>
   messageOrigins(
     botId: string,
@@ -570,7 +639,8 @@ export interface BotClient {
   saveSchedule(
     botId: string,
     input: BotScheduleInput,
-    existing?: { id: string; version: number }
+    existing?: BotScheduleEditInput,
+    desktopWork?: BotDesktopWorkScheduleBinding
   ): Promise<BotSchedule>
   removeSchedule(id: string, version: number): Promise<void>
   saveGroup(input: BotGroupInput, existing?: { id: string; version: number }): Promise<BotGroup>
@@ -582,7 +652,7 @@ export interface BotClient {
   remove(botId: string, expectedVersion: number): Promise<void>
   send(input: SendBotMessageInput): Promise<BotTask>
   /** Stops private conversation work from the inbox authority, including unseen accepted requests. */
-  stopConversation(botId: string, groupId?: string, workId?: string): Promise<void>
+  stopConversation(botId: string, groupId?: string, workId?: string, scope?: "background"): Promise<void>
   /** Stops this group's work and its peer owners, preserving members' other conversations. */
   stopGroup(groupId: string): Promise<void>
   cancel(taskId: string): Promise<void>

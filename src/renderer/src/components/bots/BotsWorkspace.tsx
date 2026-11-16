@@ -7,6 +7,7 @@ import { BotGroupAvatar } from "./BotGroupAvatar"
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type DragEvent } from "react"
 import {
   Archive,
+  Brain,
   CircleAlert,
   ChevronRight,
   Loader2,
@@ -43,6 +44,7 @@ import {
 } from "@/components/ui/select"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { useAppStore } from "@/lib/store"
+import { useChatSourceNavigation } from "@/lib/chat-source-navigation"
 import { useThreadContext, useThreadStateSummaries } from "@/lib/thread-context"
 import {
   privateBotTasksByBot,
@@ -80,6 +82,7 @@ import type {
   BotGroup,
   CreateBotInput
 } from "../../../../shared/bots/contracts"
+import type { BotWorkApproval } from "../../../../shared/bots/work"
 import { BotAvatar } from "./BotAvatar"
 import { BotRuntimeAvatar } from "./BotRuntimeAvatar"
 import { botActiveTaskCreatedAt } from "@/lib/bot-avatar-mood"
@@ -110,8 +113,14 @@ import { useBots } from "./use-bots"
 import { useBotReadState } from "./use-bot-read-state"
 import { localBotClient } from "./client"
 import { botWorkClient } from "@/lib/bot-work-client"
+import { openBotWorkThreadChat, resolveBotWorkThreadForNavigation } from "@/lib/bot/work-thread-summary"
 import { useBotWorks } from "./use-bot-works"
 import { BotWorkPanel } from "./BotWorkPanel"
+import {
+  BOT_WORK_DELETION_PENDING_MESSAGE,
+  BotWorkPreview,
+  isWorkDeletionPending
+} from "./BotWorkPreview"
 import { BotImChannelDialog } from "./BotImChannelDialog"
 import {
   BotImConversation,
@@ -142,6 +151,27 @@ const STATE_LABELS: Record<BotTask["state"], string> = {
   interrupted: "已中断",
   superseded: "已由新消息接续",
   outcome_unknown: "需要核对结果"
+}
+
+type BotWorkPreviewReturn = {
+  trigger: HTMLButtonElement | null
+  scroll?: { container: HTMLElement; top: number }
+}
+
+export function restoreBotWorkPreviewPosition(
+  previous: BotWorkPreviewReturn | null,
+  fallback: HTMLButtonElement | null
+): void {
+  const scroll = previous?.scroll
+  if (scroll?.container.isConnected) scroll.container.scrollTop = scroll.top
+  const trigger = previous?.trigger
+  const target = trigger?.isConnected ? trigger : fallback
+  target?.focus({ preventScroll: true })
+  if (!target || !scroll?.container.isConnected || !scroll.container.contains(target)) return
+  const row = target.getBoundingClientRect()
+  const viewport = scroll.container.getBoundingClientRect()
+  if (row.top < viewport.top || row.bottom > viewport.bottom)
+    target.scrollIntoView({ block: "nearest" })
 }
 
 function BotEditor({
@@ -499,6 +529,7 @@ export function BotsWorkspace({ client = localBotClient() }: { client?: BotClien
 function BotWorkspaceForHost({ client }: { client: BotClient }) {
   const { snapshot, error, retry } = useBots(client)
   const [profileName, setProfileName] = useState("")
+  const [approvalReturn, setApprovalReturn] = useState<{ sourceBotId: string; targetThreadId: string } | null>(null)
   useEffect(() => {
     let disposed = false
     let generation = 0
@@ -548,8 +579,8 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
     }
   }, [client.hostId, snapshot?.groups, snapshot?.bots])
   const view = useBotViewStore((state) => state.hosts[client.hostId] ?? DEFAULT_BOT_VIEW)
-  const updateView = (patch: Partial<typeof view>) =>
-    useBotViewStore.getState().update(client.hostId, patch)
+  const updateView = useCallback((patch: Partial<typeof view>) =>
+    useBotViewStore.getState().update(client.hostId, patch), [client.hostId])
   const { groupId, showArchived, detailOpen, detailTab } = view
   // Old service routes are view preferences, never local Bot identities.
   const legacySelection =
@@ -561,12 +592,16 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
   const setShowArchived = (showArchived: boolean) => updateView({ showArchived })
   const detailTriggerRef = useRef<HTMLButtonElement>(null)
   const setDetailOpen = (detailOpen: boolean) => {
+    if (detailOpen !== view.detailOpen) workPreviewNavigation.current = { preview: null }
     if (!detailOpen && document.activeElement?.closest(".bot-details")) {
       detailTriggerRef.current?.focus({ preventScroll: true })
     }
     updateView({ detailOpen })
   }
-  const setDetailTab = (detailTab: typeof view.detailTab) => updateView({ detailTab })
+  const setDetailTab = (detailTab: typeof view.detailTab) => {
+    if (detailTab !== view.detailTab) workPreviewNavigation.current = { preview: null }
+    updateView({ detailTab })
+  }
   const [query, setQuery] = useState("")
   const [showHidden, setShowHidden] = useState(false)
   const [suppressedRead, setSuppressedRead] = useState<string | null>(null)
@@ -879,6 +914,48 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
     : selected
       ? (view.activeWorkIdByBot?.[selected.id] ?? null)
       : null
+  const [workPreview, setWorkPreview] = useState<{
+    hostId: string
+    botId: string
+    workId: string
+    title: string
+  } | null>(null)
+  const workPreviewReturn = useRef<BotWorkPreviewReturn | null>(null)
+  // Keep an identity even with no open preview so dismissing a newer preview invalidates older navigation.
+  const workPreviewNavigation = useRef<{ preview: typeof workPreview }>({ preview: null })
+  const captureWorkNavigation = useCallback(() => {
+    const intent = workPreviewNavigation.current
+    return () => {
+      const { mainView, showCustomizeView } = useAppStore.getState()
+      return workPreviewNavigation.current === intent && mainView === "bots" && !showCustomizeView
+    }
+  }, [])
+  const approvalNavigation = useRef<object | null>(null)
+  const dismissWorkPreview = useCallback(() => {
+    approvalNavigation.current = null
+    workPreviewReturn.current = null
+    workPreviewNavigation.current = { preview: null }
+    setWorkPreview(null)
+  }, [])
+  useEffect(() => {
+    // Settings overlay Bots rather than changing mainView. A later navigation
+    // choice must invalidate pending opens even if the overlay is closed again.
+    const unsubscribe = useAppStore.subscribe(state => {
+      if (state.mainView !== "bots" || state.showCustomizeView) {
+        approvalNavigation.current = null
+        workPreviewNavigation.current = { preview: null }
+      }
+    })
+    return () => { unsubscribe(); workPreviewNavigation.current = { preview: null } }
+  }, [])
+  const canPreviewWork = client.hostId === "local" && !selectedIm && !selectedGroup &&
+    !newChat && !activeWorkId
+  const preview = canPreviewWork && workPreview?.hostId === client.hostId &&
+    workPreview.botId === selected?.id ? workPreview : null
+  const personalDetailOpen = detailOpen
+  useEffect(() => {
+    if (workPreview && !preview) dismissWorkPreview()
+  }, [workPreview, preview, dismissWorkPreview])
   const workListClient = useMemo(
     () =>
       selectedIm && client.works && client.im?.conversationWorks
@@ -896,50 +973,69 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
   const works = useBotWorks(
     workListClient,
     selected?.id,
-    activeWorkId,
+    activeWorkId ?? preview?.workId ?? null,
     snapshot?.revision ?? 0,
     selectedIm?.id ?? "desktop"
   )
   const loadedWork = activeWorkId && works.selected?.id === activeWorkId ? works.selected : null
+  const workDeletionPending = isWorkDeletionPending(loadedWork)
+  const previewWork = preview && works.selected?.id === preview.workId ? works.selected : null
   const selectedWork =
     loadedWork &&
+    !loadedWork.deletionCommitted &&
+    !loadedWork.deletionPending &&
     loadedWork.conversation?.state !== "detached" &&
     (selectedIm
       ? loadedWork.source?.transport === "im" && loadedWork.source.bindingId === selectedIm.id
       : loadedWork.source?.transport !== "im")
       ? loadedWork
       : null
+  const activeWorkTitle = (workDeletionPending ? loadedWork : selectedWork)?.title
+  const desktopScheduleWork =
+    client.hostId === "local" &&
+    !selectedIm &&
+    selectedWork?.audienceKey === "desktop" &&
+    !selectedWork.source
+      ? selectedWork
+      : undefined
   useEffect(() => {
-    if (
-      !loadedWork ||
-      loadedWork.conversation?.state !== "detached" ||
-      loadedWork.source ||
-      !client.conversations ||
-      loadedWork.botId !== selected?.id
-    )
+    if (!loadedWork || loadedWork.source || loadedWork.botId !== selected?.id) return
+    if (loadedWork.deletionCommitted) {
+      const activeWorkIdByBot = useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot
+      if (activeWorkIdByBot?.[loadedWork.botId] === loadedWork.id)
+        updateView({ activeWorkIdByBot: { ...activeWorkIdByBot, [loadedWork.botId]: null } })
       return
+    }
+    if (client.hostId !== "local" || loadedWork.audienceKey !== "desktop" || loadedWork.deletionPending ||
+      loadedWork.conversation?.state !== "detached" || !client.conversations) return
     let disposed = false
     const work = loadedWork
+    const isNavigationCurrent = captureWorkNavigation()
+    const isCurrent = () => !disposed && isNavigationCurrent()
     void (async () => {
-      // The host verifies the retained thread incarnation without rebinding it.
-      const original = await client.conversations!.expose(work.botId, work.id)
-      if (disposed) return
-      await useAppStore.getState().loadThreads()
-      if (disposed) return
-      updateView({
-        activeWorkIdByBot: {
-          ...useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot,
-          [work.botId]: null
-        }
+      const threadId = await resolveBotWorkThreadForNavigation(client, work, isCurrent).catch(cause => {
+        if (isCurrent()) throw cause
+        return null
       })
-      await useAppStore.getState().selectThread(original.threadId)
+      if (disposed) return
+      const activeWorkIdByBot = useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot
+      if (activeWorkIdByBot?.[work.botId] !== work.id) return
+      const openThreadId = isCurrent() ? threadId : null
+      // A detached work no longer has a Bots conversation, even if a newer action prevented opening it.
+      updateView({
+        activeWorkIdByBot: { ...activeWorkIdByBot, [work.botId]: null }
+      })
+      if (openThreadId) await useAppStore.getState().selectThread(openThreadId)
     })().catch((cause) => {
-      if (!disposed) toast.error(botErrorMessage(cause))
+      if (isCurrent()) toast.error(botErrorMessage(cause))
     })
     return () => {
       disposed = true
     }
-  }, [client, loadedWork?.id, loadedWork?.conversation?.state, selected?.id])
+  }, [
+    client, loadedWork?.id, loadedWork?.conversation?.state, loadedWork?.deletionCommitted,
+    loadedWork?.deletionPending, selected?.id, captureWorkNavigation
+  ])
   // Old saved navigation and workbench deep links still arrive by Bot ID. Resolve the
   // host-owned source before rendering, then keep the source group selected.
   useEffect(() => {
@@ -963,23 +1059,147 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
   const selectedThreadId = activeWorkId
     ? (selectedWork?.threadId ?? "")
     : (selected?.threadId ?? "")
+  useEffect(() => {
+    setApprovalReturn(previous => previous?.targetThreadId === selectedThreadId && !selectedIm ? previous : null)
+  }, [selectedThreadId, selectedIm])
   const conversationClient = useMemo(
     () => (selectedWork ? botWorkClient(client, selectedWork) : client),
     [client, selectedWork?.id, selectedWork?.threadId]
   )
-  const selectWork = (id: string | null) => {
-    if (!selected) return
+  const currentBotId = selected?.id
+  const currentImId = selectedIm?.id
+  const selectWork = useCallback((id: string | null) => {
+    if (!currentBotId) return
+    workPreviewNavigation.current = { preview: null }
     const prefs = useBotViewStore.getState().hosts[client.hostId]
-    if (selectedIm)
+    if (currentImId)
       updateView({
         activeImWorkIdByConversation: {
           ...prefs?.activeImWorkIdByConversation,
-          [selectedIm.id]: id
+          [currentImId]: id
         }
       })
-    else updateView({ activeWorkIdByBot: { ...prefs?.activeWorkIdByBot, [selected.id]: id } })
+    else updateView({ activeWorkIdByBot: { ...prefs?.activeWorkIdByBot, [currentBotId]: id } })
+  }, [client.hostId, currentBotId, currentImId, updateView])
+  const openWorkPreview = useCallback((workId: string, trigger: HTMLButtonElement | null, title: string) => {
+    // Creation may finish while Settings covers the still-mounted Bots workspace.
+    const { mainView, showCustomizeView } = useAppStore.getState()
+    if (!canPreviewWork || !currentBotId || mainView !== "bots" || showCustomizeView) return
+    approvalNavigation.current = null
+    workPreviewNavigation.current = { preview: null }
+    const previous = workPreviewReturn.current
+    // Switching between previews keeps the position of the original details.
+    const container = !previous && detailOpen
+      ? profileMenuTrigger.current?.closest<HTMLElement>(".bot-details-content")
+      : null
+    workPreviewReturn.current = {
+      trigger,
+      scroll: previous?.scroll ?? (container ? { container, top: container.scrollTop } : undefined)
+    }
+    setWorkPreview({ hostId: client.hostId, botId: currentBotId, workId, title })
+  }, [canPreviewWork, client.hostId, currentBotId, detailOpen])
+  const openWork = useCallback((workId: string | null) => {
+    if (!workId || !canPreviewWork) { selectWork(workId); return }
+    const work = [...works.priority, ...works.items].find(item => item.id === workId)
+    if (work?.source) { selectWork(workId); return }
+    openWorkPreview(workId, detailTriggerRef.current, work?.title ?? "任务")
+  }, [canPreviewWork, selectWork, openWorkPreview, works.items, works.priority])
+  const closeWorkPreview = () => {
+    const previous = workPreviewReturn.current
+    dismissWorkPreview()
+    requestAnimationFrame(() => {
+      if (!workPreviewReturn.current) restoreBotWorkPreviewPosition(previous, detailTriggerRef.current)
+    })
+  }
+  const openPreviewConversation = async () => {
+    if (!preview || !previewWork || workPreviewNavigation.current.preview === preview) return
+    const intent = { preview }
+    workPreviewNavigation.current = intent
+    const isCurrent = () => workPreviewNavigation.current === intent &&
+      works.current.current.botId === preview.botId && works.current.current.selectedId === preview.workId &&
+      useAppStore.getState().mainView === "bots" && !useAppStore.getState().showCustomizeView
+    try {
+      const threadId = await resolveBotWorkThreadForNavigation(client, previewWork, isCurrent)
+      if (!threadId || !isCurrent()) return
+      dismissWorkPreview()
+      await openBotWorkThreadChat(threadContext, threadId)
+    } catch (cause) {
+      if (isCurrent()) toast.error(botErrorMessage(cause, "暂时无法打开聊天。"))
+    } finally {
+      if (workPreviewNavigation.current === intent) workPreviewNavigation.current = { preview: null }
+    }
+  }
+  const openRoutineDetails = useCallback(() => {
+    if (!currentBotId) return
+    dismissWorkPreview()
+    updateView({ selectedId: currentBotId, groupId: null, detailOpen: true, detailTab: "details" })
+  }, [currentBotId, dismissWorkPreview, updateView])
+  // Channel cards retain their existing entry point when the Host resolves their source.
+  useEffect(() => {
+    if (previewWork && (previewWork.source || previewWork.audienceKey !== "desktop")) {
+      selectWork(previewWork.id)
+    }
+  }, [previewWork, selectWork])
+  const togglePersonalDetail = () => {
+    dismissWorkPreview()
+    setDetailOpen(!personalDetailOpen)
+  }
+  const openBotMain = (id: string) =>
+    updateView({
+      selectedId: id,
+      groupId: null,
+      detailTab: "details",
+      activeWorkIdByBot: {
+        ...useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot,
+        [id]: null
+      }
+    })
+  useEffect(() => () => { approvalNavigation.current = null }, [client, currentBotId, currentImId, activeWorkId, newChat])
+  const openWorkApproval = async (approval: BotWorkApproval, interactionIsCurrent: () => boolean) => {
+    if (!selected || activeWorkId || selectedIm) return
+    // Invalidate pending automatic previews before looking up the original approval.
+    workPreviewNavigation.current = { preview: null }
+    const isNavigationCurrent = captureWorkNavigation()
+    const attempt = {}
+    approvalNavigation.current = attempt
+    const isCurrent = () => approvalNavigation.current === attempt && interactionIsCurrent() &&
+      isNavigationCurrent()
+    try {
+      if (!client.works?.pendingQuestions) throw new Error("原审批会话已不可用。")
+      const pending = await client.works.pendingQuestions(selected.id)
+      if (!isCurrent()) return
+      const latest = pending.find((item): item is BotWorkApproval =>
+        item.kind === "approval" && item.taskId === approval.taskId && item.requestId === approval.requestId)
+      if (!latest) {
+        toast.info("审批已处理或已失效。")
+        return
+      }
+      const { workId, target } = latest
+      if (target.botId === selected.id && target.workId === workId) {
+        if (client.hostId !== "local" || !client.works) throw new Error("原审批会话已不可用。")
+        const work = await client.works.get(target.botId, workId)
+        if (!isCurrent()) return
+        if (work.botId !== target.botId || work.id !== workId || work.threadId !== target.threadId ||
+          (work.conversation && work.conversation.state !== "bound"))
+          throw new Error("原审批会话已不可用。")
+        const threadId = await resolveBotWorkThreadForNavigation(client, work, isCurrent)
+        if (threadId && isCurrent()) await openBotWorkThreadChat(threadContext, threadId)
+        return
+      }
+      const peer = snapshot?.bots.find(bot => bot.id === target.botId && bot.threadId === target.threadId)
+      if (target.workId || !peer || peer.archived || peer.deleting)
+        throw new Error("原审批会话已不可用。")
+      if (peer.id === selected.id) return
+      setApprovalReturn({ sourceBotId: selected.id, targetThreadId: peer.threadId })
+      openBotMain(peer.id)
+    } catch (cause) {
+      if (isCurrent()) throw cause
+    } finally {
+      if (approvalNavigation.current === attempt) approvalNavigation.current = null
+    }
   }
   const tasks = selected ? (tasksByThread.get(selectedThreadId) ?? []) : []
+  const recentTasks = tasks.slice(-6).reverse()
   const selectedState = botConversationState(
     tasks,
     selected ? threadSummaries[selectedThreadId] : undefined,
@@ -1770,7 +1990,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
     <TooltipProvider delayDuration={250} skipDelayDuration={150}>
       <div
         className="bots-workspace"
-        data-details-open={!newChat && detailOpen}
+        data-details-open={!newChat && personalDetailOpen}
         style={
           {
             "--bot-sidebar-width": `${clampBotPanelWidth("sidebar", view.sidebarWidth)}px`,
@@ -2174,7 +2394,9 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
           width={clampBotPanelWidth("sidebar", view.sidebarWidth)}
           onChange={(sidebarWidth) => updateView({ sidebarWidth })}
         />
-        <main className="bots-conversation">
+        <main className="bots-conversation" data-bot-floating-chat={
+          client.hostId === "local" && Boolean(selected) && !selectedGroup && !selectedIm && !activeWorkId || undefined
+        }>
           {error && (
             <div className="bot-notice" role="alert">
               <CircleAlert size={16} />
@@ -2288,14 +2510,30 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
             />
           ) : selected ? (
             <>
-              <header className="bot-chat-header">
-                <BotExecutionDetailsToggle hostId={client.hostId} compact />
+              <header className="bot-chat-header bot-personal-header" data-task={Boolean(activeWorkId) || undefined}>
+                {activeWorkId ? (
+                  <>
+                    <button type="button" className="bot-task-parent" title={`返回 ${selected.name} 主对话`}
+                      aria-label={`返回 ${selected.name} 主对话`}
+                      onClick={() => {
+                        const group = snapshot?.imConversations?.find(item => item.id === selectedWork?.source?.bindingId)
+                        if (selectedIm) selectWork(null)
+                        else if (group) openImConversation(group.id)
+                        else selectWork(null)
+                      }}>
+                      <ChevronRight size={15} className="rotate-180" aria-hidden="true" />
+                      <BotAvatar color={selected.color} shape={selected.shape} size={24} animated={false} />
+                      <span>{selected.name}</span>
+                    </button>
+                    <span className="bot-task-header-divider" aria-hidden="true" />
+                    <h2 className="bot-task-header-title" title={activeWorkTitle}>{activeWorkTitle ?? "任务"}</h2>
+                  </>
+                ) : (
                 <button
                   className="bot-title-pill"
-                  ref={detailTriggerRef}
-                  aria-label={selectedIm ? "查看招乎群详情" : "查看 Bot 详情"}
-                  aria-expanded={detailOpen}
-                  onClick={() => setDetailOpen(!detailOpen)}
+                  aria-label={personalDetailOpen ? "关闭 Bot 详情" : "查看 Bot 详情"}
+                  aria-expanded={personalDetailOpen}
+                  onClick={togglePersonalDetail}
                 >
                   <BotRuntimeAvatar
                     threadId={selectedThreadId}
@@ -2307,16 +2545,27 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                     busy={selectedState === "running"}
                     waiting={selectedState === "waiting_user"}
                   />
-                  <span>{selectedWork?.title ?? selected.name}</span>
+                  <span>{selected.name}</span>
                 </button>
+                )}
+                <div className="bot-personal-header-actions">
+                <BotExecutionDetailsToggle hostId={client.hostId} compact />
+                {approvalReturn?.targetThreadId === selectedThreadId && !selectedIm && (
+                  <button className="bot-icon-button" aria-label="返回原交办对话" title="返回原交办对话"
+                    onClick={() => openBotMain(approvalReturn.sourceBotId)}>
+                    <ChevronRight size={16} className="rotate-180" aria-hidden="true" />
+                  </button>
+                )}
                 <button
                   className="bot-icon-button"
-                  aria-label={detailOpen ? "关闭详情" : "打开详情"}
-                  aria-expanded={detailOpen}
-                  onClick={() => setDetailOpen(!detailOpen)}
+                  ref={detailTriggerRef}
+                  aria-label={personalDetailOpen ? "关闭详情" : "打开详情"}
+                  aria-expanded={personalDetailOpen}
+                  onClick={togglePersonalDetail}
                 >
                   <PanelRight size={19} />
                 </button>
+                </div>
               </header>
               {!activeWorkId &&
                 snapshot?.personalIm?.some((entry) => entry.botId === selected.id) && (
@@ -2326,26 +2575,6 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                       " · 当前离线，待重新连接后同步"}
                   </div>
                 )}
-              {activeWorkId && (
-                <div className="bot-work-breadcrumb">
-                  <button
-                    onClick={() => {
-                      const group = snapshot?.imConversations?.find(
-                        (item) => item.id === selectedWork?.source?.bindingId
-                      )
-                      if (selectedIm) selectWork(null)
-                      else if (group) openImConversation(group.id)
-                      else selectWork(null)
-                    }}
-                  >
-                    ←{" "}
-                    {snapshot?.imConversations?.find(
-                      (item) => item.id === selectedWork?.source?.bindingId
-                    )?.title ?? `${selected.name} 主对话`}
-                  </button>
-                  <span>{selectedWork?.state === "completed" ? "已完成" : "独立任务"}</span>
-                </div>
-              )}
               {selectedWork?.source && (
                 <div className="bot-work-source" role="note">
                   {selectedWork.source.transport === "im" ? "IM 任务" : "模拟渠道任务"} ·
@@ -2354,27 +2583,33 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
               )}
               {activeWorkId && !selectedWork ? (
                 <div className="bot-empty" role="status">
-                  {works.error ?? "正在读取任务会话…"}
-                  <button onClick={() => void works.refresh()}>重试</button>
+                  {workDeletionPending ? (
+                    <>
+                      <p>{BOT_WORK_DELETION_PENDING_MESSAGE}</p>
+                      <button type="button" onClick={() => selectWork(null)}>返回主对话</button>
+                    </>
+                  ) : (
+                    <>
+                      {works.error ?? "正在读取任务会话…"}
+                      <button onClick={() => void works.refresh()}>重试</button>
+                    </>
+                  )}
                 </div>
               ) : (
                 <BotConversation
                   key={`${selected.hostId}:${selected.id}:${selectedThreadId}`}
                   bot={selected}
                   work={selectedWork}
+                  workDirectory={works}
+                  workQuestionTasks={client.hostId === "local" && !activeWorkId && !selectedIm ? snapshot?.tasks : undefined}
+                  onOpenWorkApproval={openWorkApproval}
+                  workRevision={snapshot?.revision ?? 0}
                   onConfigureModel={() => openBotEditor(selected)}
-                  onOpenWork={(id) => selectWork(id)}
-                  onOpenBot={(id) =>
-                    updateView({
-                      selectedId: id,
-                      groupId: null,
-                      detailTab: "details",
-                      activeWorkIdByBot: {
-                        ...useBotViewStore.getState().hosts[client.hostId]?.activeWorkIdByBot,
-                        [id]: null
-                      }
-                    })
-                  }
+                  onOpenWork={openWork}
+                  captureWorkNavigation={captureWorkNavigation}
+                  onPreviewWork={canPreviewWork ? openWorkPreview : undefined}
+                  onOpenRoutineDetails={openRoutineDetails}
+                  onOpenBot={openBotMain}
                   groups={snapshot?.groups ?? []}
                   onOpenGroup={(id) =>
                     updateView({ groupId: id, selectedId: null, groupDetailTab: "details" })
@@ -2576,14 +2811,36 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
         )}
         {!newChat && selected && !selectedIm && (
           <>
-            {detailOpen && (
+            {personalDetailOpen && (
               <BotPanelDivider
                 kind="detail"
                 width={clampBotPanelWidth("detail", view.detailWidth)}
                 onChange={(detailWidth) => updateView({ detailWidth })}
               />
             )}
-            <BotDetailsPane open={detailOpen} label="Bot 详情">
+            {preview && (
+                <BotWorkPreview
+                  key={JSON.stringify([preview.hostId, preview.botId, preview.workId])}
+                  title={preview.title}
+                  work={previewWork?.deletionCommitted ? null : previewWork}
+                  activeTask={previewWork ? tasksByThread.get(previewWork.threadId)?.findLast((task) =>
+                    !task.injectedInto && (task.state === "running" || task.state === "waiting_user")) : undefined}
+                  directoryError={previewWork?.deletionCommitted ? "任务已删除。" : works.error}
+                  backLabel={detailOpen && detailTab === "details" ? "返回任务列表" : "关闭任务预览"}
+                  onBack={closeWorkPreview}
+                  onOpen={() => void openPreviewConversation()}
+                  onOpenMain={previewWork?.parentThreadId === selected.threadId ? () => {
+                    dismissWorkPreview()
+                    if (previewWork.resultPublicationId) useChatSourceNavigation.getState().request({
+                      threadId: selected.threadId, messageId: previewWork.resultPublicationId, ordinal: 0
+                    })
+                    openBotMain(selected.id)
+                  } : undefined}
+                  onRetry={() => { void works.refresh() }}
+                />
+            )}
+            <BotDetailsPane open={personalDetailOpen} label="Bot 详情">
+              <div>
               <div className="bot-detail-actions">
                 <Popover>
                   <PopoverTrigger asChild>
@@ -2659,7 +2916,12 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                   <X size={19} />
                 </button>
               </div>
-              <div className="bot-profile" key={`profile:${selected.id}`}>
+              {activeWorkId ? (
+                <div className="bot-task-detail-owner">
+                  <BotAvatar color={selected.color} shape={selected.shape} size={24} animated={false} />
+                  <span>{selected.name}</span>
+                </div>
+              ) : <div className="bot-profile" key={`profile:${selected.id}`}>
                 <BotAvatarEditor
                   bot={selected}
                   client={client}
@@ -2693,7 +2955,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                         : ""}
                   </span>
                 )}
-              </div>
+              </div>}
               <Tabs
                 value={detailTab === "memory" ? "details" : detailTab}
                 onValueChange={(tab) => {
@@ -2731,8 +2993,10 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                   !selectedWork &&
                   (detailTab === "files" || detailTab === "computer") ? (
                     <div className="bot-detail-section" role="status">
-                      <p>{works.error ?? "正在读取任务会话，资源面板暂不可用…"}</p>
-                      <button onClick={() => void works.refresh()}>重试</button>
+                      <p>{workDeletionPending
+                        ? "删除待完成"
+                        : works.error ?? "正在读取任务会话，资源面板暂不可用…"}</p>
+                      {!workDeletionPending && <button onClick={() => void works.refresh()}>重试</button>}
                       <button onClick={() => selectWork(null)}>返回主对话</button>
                     </div>
                   ) : selectedWork?.source &&
@@ -2763,57 +3027,71 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                       peers={snapshot?.bots ?? []}
                     />
                   ) : (
-                    <>
-                      <section className="bot-detail-section">
-                        <h3>职责</h3>
-                        <p>
-                          {selected.instructions ||
-                            "你可以在对话中交办工作，也可以为它设定长期职责。"}
-                        </p>
-                        <button onClick={(event) => openBotEditor(selected, event.currentTarget)}>
-                          编辑职责
-                        </button>
-                        <button className="ml-4" onClick={() => setDetailTab("memory")}>
-                          管理记忆
-                        </button>
-                      </section>
+                    <div className="bot-personal-details">
                       <BotWorkPanel
                         key={`${client.hostId}:${selected.id}`}
                         client={client}
                         botId={selected.id}
                         controller={works}
                         selected={selectedWork}
-                        onSelect={selectWork}
+                        onSelect={openWork}
+                        onPreview={canPreviewWork ? (work, trigger) => {
+                          if (work.source) selectWork(work.id)
+                          else openWorkPreview(work.id, trigger, work.title)
+                        } : undefined}
+                        captureWorkNavigation={captureWorkNavigation}
                         disabled={Boolean(selected.archived || selected.deleting)}
                       />
                       <BotSchedulePanel
-                        key={selected.id}
+                        key={desktopScheduleWork?.id ?? selected.id}
                         botId={selected.id}
                         client={client}
+                        work={desktopScheduleWork}
+                        allowCreate={
+                          !activeWorkId ||
+                          client.hostId !== "local" ||
+                          Boolean(selectedIm) ||
+                          Boolean(
+                            desktopScheduleWork &&
+                              desktopScheduleWork.state === "active" &&
+                              !desktopScheduleWork.dispatchStopped &&
+                              (!desktopScheduleWork.conversation ||
+                                desktopScheduleWork.conversation.state === "bound")
+                          )
+                        }
                         schedules={(snapshot?.schedules ?? []).filter(
                           (item) =>
                             item.botId === selected.id &&
                             (item.audienceKey ?? "desktop") ===
-                              (selectedWork?.audienceKey ?? "desktop")
+                              (selectedWork?.audienceKey ?? "desktop") &&
+                            (!desktopScheduleWork ||
+                              (item.desktopWork && item.workId === desktopScheduleWork.id) ||
+                              item.workMonitor?.workId === desktopScheduleWork.id)
                         )}
                       />
-                      <section className="bot-detail-section">
-                        <h3>最近活动</h3>
-                        {tasks
-                          .slice(-6)
-                          .reverse()
-                          .map((task) => (
-                            <div className="bot-task-item" key={task.id}>
-                              <span>{STATE_LABELS[task.state]}</span>
+                      {!activeWorkId && <section className="bot-detail-card bot-detail-settings" aria-label="Bot 设置">
+                        <button type="button" onClick={(event) => openBotEditor(selected, event.currentTarget)}>
+                          <Settings2 size={16} aria-hidden="true" /><span>职责与设置</span><ChevronRight size={14} aria-hidden="true" />
+                        </button>
+                        <button type="button" onClick={() => setDetailTab("memory")}>
+                          <Brain size={16} aria-hidden="true" /><span>记忆</span><ChevronRight size={14} aria-hidden="true" />
+                        </button>
+                      </section>}
+                      {tasks.length > 0 && <details className="bot-detail-activity">
+                        <summary><span>最近活动{recentTasks.some(task => task.error) && <small className="bot-detail-activity-error"> · 有异常</small>}</span><ChevronRight size={13} aria-hidden="true" /></summary>
+                        {recentTasks.map((task) => (
+                            <details className="bot-detail-activity-item" key={task.id}>
+                              <summary><span>{STATE_LABELS[task.state]}</span><span>{botTaskPreview(task).replace(/\s+/g, " ").slice(0, 100)}</span></summary>
                               <p>{botTaskPreview(task)}</p>
-                              {task.error && <small>{task.error}</small>}
-                            </div>
+                              {task.error && <small role="alert">{task.error}</small>}
+                            </details>
                           ))}
-                      </section>
-                    </>
+                      </details>}
+                    </div>
                   )}
                 </TabsContent>
               </Tabs>
+              </div>
             </BotDetailsPane>
           </>
         )}

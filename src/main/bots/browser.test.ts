@@ -23,6 +23,7 @@ import { BotStore } from "./store"
 import { LocalBotHost, type BotRunPort } from "./host"
 import { botImBrowserScope } from "../../shared/bots/im-channel"
 import { botGroupBrowserScope } from "../../shared/bots/contracts"
+import { botWorkBrowserScope } from "../../shared/bots/work"
 
 const launch = vi.fn()
 class TestPage extends EventEmitter {
@@ -143,6 +144,77 @@ afterEach(async () => {
 })
 
 describe("Bot browser ownership and control", () => {
+  it("checks open pages for the exact work without creating or selecting a page", async () => {
+    const scope = "work-project--bot"
+    expect(service.hasOpenPages(scope)).toBe(false)
+    expect(launch).not.toHaveBeenCalled()
+    await service.act("bot", { action: "observe" }, signal())
+    await service.act("work-other--bot", { action: "observe" }, signal())
+    expect(service.hasOpenPages(scope)).toBe(false)
+    await service.act(scope, { action: "observe" }, signal())
+    expect(service.hasOpenPages(scope)).toBe(true)
+    await context.entries.at(-1)!.close()
+    expect(service.hasOpenPages(scope)).toBe(false)
+    expect(service.hasOpenPages("work-other--bot")).toBe(true)
+  })
+
+  it.each([false, true])("closes only the permanently deleted work's browser (retry: %s)", async (retry) => {
+    const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    const store = new BotStore(db)
+    const host = new LocalBotHost(store, {
+      acquire: () => null,
+      onAvailable: () => () => {},
+      removeWorkBrowser: (scope) => service.removeBot(scope)
+    }, 2, () => {})
+    try {
+      const bot = store.create({ name: "Owner", instructions: "", color: "#123456", modelRef: null })
+      const createWork = (operationId: string, title: string) =>
+        store.createWork({ botId: bot.id, operationId, title, goal: title })
+      const { work, task } = createWork("delete", "Delete this work")
+      const { work: other } = createWork("keep", "Keep this work")
+      store.transition(task.id, "running")
+      store.settle(task.id, "completed", null)
+      const scope = botWorkBrowserScope(work.id, bot.id)
+      const otherScope = botWorkBrowserScope(other.id, bot.id)
+      const { pageId } = JSON.parse(await service.act(host.browserScope(scope), { action: "observe" }, signal()))
+      await service.act(host.browserScope(otherScope), { action: "observe" }, signal())
+      await service.act(bot.id, { action: "observe" }, signal())
+      await service.takeOver(scope, pageId)
+
+      const close = vi.spyOn(context.entries[0], "close")
+      if (retry) close.mockRejectedValueOnce(new Error("Native page did not close"))
+      const cleanup = vi.fn(async (_read: () => unknown, ready: () => void) => {
+        expect(service.hasOpenPages(scope)).toBe(false)
+        ready()
+        return undefined
+      })
+      const removeWork = () => host.removeWork({
+        botId: bot.id, workId: work.id, threadId: work.threadId, version: work.version, incarnation: null
+      }, cleanup, () => {})
+
+      if (retry) {
+        await expect(removeWork()).rejects.toThrow("请重试删除")
+        expect(host.workDeletionRecord(bot.id, work.id)?.phase).toBe("stopping")
+        expect(cleanup).not.toHaveBeenCalled()
+        expect(service.hasOpenPages(scope)).toBe(true)
+        expect(() => host.browserScope(scope)).toThrow("删除")
+      }
+      await expect(removeWork()).resolves.toMatchObject({ state: "deleted" })
+      await expect(removeWork()).resolves.toMatchObject({ state: "deleted" })
+      expect(cleanup).toHaveBeenCalledTimes(1)
+      expect(close).toHaveBeenCalledTimes(retry ? 2 : 1)
+      expect(() => host.browserScope(scope)).toThrow("删除")
+      await expect(service.preview(scope)).rejects.toThrow("删除")
+      expect(service.hasOpenPages(otherScope)).toBe(true)
+      expect(service.hasOpenPages(bot.id)).toBe(true)
+      await expect(service.takeOver(bot.id)).resolves.toBeUndefined()
+      await service.giveBack(bot.id)
+    } finally {
+      await host.stop()
+      db.close()
+    }
+  })
+
   it("bounds a stuck evaluate, closes only its page and allows a fresh page", async () => {
     const a = JSON.parse(await service.act("a", { action: "observe" }, signal()))
     const sameBot = JSON.parse(await service.act("a", { action: "navigate", newTab: true, url: "https://example.test/other" }, signal()))

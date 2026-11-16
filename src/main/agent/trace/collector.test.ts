@@ -32,7 +32,7 @@ vi.mock("../skill-eval/documents", () => ({
   buildSkillEvalTraceExtension: () => undefined
 }))
 vi.mock("../skill-eval/window", () => ({
-  appendSkillEvalWindowTurn: () => ({ evalSkillNames: [] }),
+  appendSkillEvalWindowTurn: vi.fn(() => ({ evalSkillNames: [] })),
   getSkillEvalWindowAssistantText: () => "",
   getSkillEvalWindowContextByRawName: () => ({})
 }))
@@ -41,9 +41,11 @@ import {
   flushPendingTraceReports,
   flushTraceWriteQueue,
   hasPendingTraceReports,
+  readTraceById,
   setTraceReporter,
   TraceCollector
 } from "./collector"
+import { appendSkillEvalWindowTurn } from "../skill-eval/window"
 
 let tracesDir = ""
 let previousStorageMode: string | undefined
@@ -75,6 +77,29 @@ afterEach(async () => {
 })
 
 describe("TraceCollector completion", () => {
+  it.each([
+    { path: "blocked Bot input", deferred: true, approved: undefined, expected: "" },
+    { path: "rewritten Bot input", deferred: true, approved: "Approved local request", expected: "Approved local request" },
+    { path: "ordinary desktop input", deferred: false, approved: undefined, expected: "Original submitted text" }
+  ])("preserves the request boundary for $path", async ({ deferred, approved, expected }) => {
+    const original = "Original submitted text"
+    const report = vi.fn(async () => {})
+    setTraceReporter({ report })
+    const tracer = new TraceCollector("trace-input-policy", deferred ? "" : original, "model-test")
+    if (approved !== undefined) tracer.setPreparedUserMessage(approved)
+    const trace = await tracer.finish(deferred && approved === undefined ? "cancelled" : "success")
+    await Promise.all([flushPendingTraceReports(1_000), flushTraceWriteQueue()])
+    const expectedInput = { userMessage: expected }
+    expect(trace.userMessage).toBe(expected)
+    expect(trace.nodes?.find(node => node.type === "trace")?.input).toEqual(expectedInput)
+    expect(await readTraceById(trace.traceId)).toMatchObject(expectedInput)
+    expect(appendSkillEvalWindowTurn).toHaveBeenLastCalledWith(expect.objectContaining(expectedInput))
+    expect(report).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      ...expectedInput,
+      nodes: expect.arrayContaining([expect.objectContaining({ type: "trace", input: expectedInput })])
+    }))
+  })
+
   it.each(["raw", "serialized"])(
     "captures call-start stages through the real graph (%s), including generated message IDs",
     async (transport) => {

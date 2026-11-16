@@ -687,8 +687,8 @@ export class TraceCollector {
   private readonly traceId: string
   private readonly threadId: string
   private readonly startedAt: string
-  private readonly userMessage: string
-  private readonly suspectedTechnicalDetailSupplement: boolean
+  private userMessage: string
+  private suspectedTechnicalDetailSupplement: boolean
   private modelId: string
   private modelName: string | undefined
   private routingTrace: RoutingTrace | undefined
@@ -903,6 +903,18 @@ export class TraceCollector {
 
   setExecutionMode(mode: TraceExecutionMode): void {
     this.setObservabilityContext({ executionMode: mode })
+  }
+
+  /** Fill the request after a caller's submit checks have accepted it. */
+  setPreparedUserMessage(message: string): void {
+    this.userMessage = clampText(message, 64 * 1024)
+    this.suspectedTechnicalDetailSupplement = hasSuspectedTechnicalDetailSupplement(message)
+    const root = this.getNode(this.rootNodeId)
+    if (root) {
+      const input = this.collectionBudget.takeValue({ userMessage: this.userMessage }, 32 * 1024)
+      root.inputRef = this.internNodeValue(input)
+      root.input = root.inputRef ? undefined : input
+    }
   }
 
   /** Update the modelId (can be resolved after construction). */

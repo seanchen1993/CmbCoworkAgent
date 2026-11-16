@@ -77,6 +77,7 @@ import {
 } from "./app-tray"
 import { setAppAttentionHandler } from "./app-attention-events"
 import { APP_ATTENTION_CHANNEL, isRendererAppAttentionPayload } from "../shared/app-attention"
+import { STARTUP_VIEW_GET_CHANNEL, STARTUP_VIEW_SET_CHANNEL } from "../shared/startup-view"
 import {
   closePromptActionToBehavior,
   isCloseToTrayPromptResponse,
@@ -460,6 +461,7 @@ import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollb
 import {
   getGitChangeNoticeEnabled,
   getOpenworkDir,
+  getStartupView,
   getStoredAgentGraphRecursionLimit,
   getStoredAgentToolStrategy,
   getStoredWorkflowWorktreeRemoveTimeoutMinutes,
@@ -467,6 +469,7 @@ import {
   getWindowCloseBehavior,
   isKeepAwakeEnabled,
   setGitChangeNoticeEnabled,
+  setStartupView,
   setStoredAgentGraphRecursionLimit,
   setStoredAgentToolStrategy,
   setStoredWorkflowWorktreeRemoveTimeoutMinutes,
@@ -1236,6 +1239,20 @@ if (browserNativeMessagingHostLaunch) {
         throw new Error("Invalid window close behavior")
       }
       return saveWindowCloseBehavior(behavior)
+    })
+
+    ipcMain.handle(STARTUP_VIEW_GET_CHANNEL, (event) => {
+      if (!mainWindow || mainWindow.isDestroyed() || event.sender.id !== mainWindow.webContents.id) {
+        throw new Error("Startup settings are only available to the main window")
+      }
+      return getStartupView()
+    })
+
+    ipcMain.handle(STARTUP_VIEW_SET_CHANNEL, (event, view: unknown) => {
+      if (!mainWindow || mainWindow.isDestroyed() || event.sender.id !== mainWindow.webContents.id) {
+        throw new Error("Startup settings are only available to the main window")
+      }
+      return setStartupView(view)
     })
 
     ipcMain.handle(GIT_CHANGE_NOTICE_GET_CHANNEL, (event) => {

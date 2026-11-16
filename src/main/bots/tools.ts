@@ -4,29 +4,66 @@ import { z } from "zod"
 import { isBotMemoryEnabled } from "./memory-policy"
 import type { DynamicStructuredTool } from "@langchain/core/tools"
 import { ToolMessage } from "@langchain/core/messages"
-import { basename, isAbsolute } from "node:path"
-import { resolveBotWorkspaceFile } from "./workspace-file"
+import { createHash } from "node:crypto"
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
+import { lstat, realpath } from "node:fs/promises"
+import { isUnredirectedBotFileReference, resolveBotWorkspaceFile } from "./workspace-file"
 import { openStableFileHandle } from "../services/stable-file-handle"
 import type { BotDeliveredFile } from "../../shared/bots/file-delivery"
+import { BOT_INPUT_FILE_ID_PATTERN, type BotInputFile } from "../../shared/bots/input-files"
 import type { BotDefinition, BotTask } from "../../shared/bots/contracts"
-import { parseSchedule } from "../../shared/bots/validation"
+import { botIdentifier, parseBotFixedReminder, parseBotWorkScheduleMonitor, parseSchedule } from "../../shared/bots/validation"
+import { BOT_WORK_MONITOR_MODES } from "../../shared/bots/schedule-observation"
 import type { BotMemoryService } from "./memory"
 import type { LocalBotHost } from "./host"
 import {
   BotBrowserActionError,
   type BotBrowserAction,
   type BotBrowserService,
-  type BotBrowserUploadLock
+  type BotBrowserUploadLock,
+  type BotRetainedUploadResolver
 } from "./browser"
 import { botImportDestination, exportBotFile, snapshotBotDeliveryFile } from "./file-copy"
+import { botSnapshotSourceRoot } from "./attachment-storage"
+import {
+  BotHistoricalDeliveryAmbiguity, isBotDeliveryMarkdown, isBotDeliverySnapshotPath,
+  type BotDeliveryMarkdownSource, type BotHistoricalDeliveryReference
+} from "./delivery-receipt"
+import { pinBotInputFile } from "./input-files"
 import { MAIN_TURN_ONLY_TOOL_METADATA_KEY } from "../agent/runtime-tool-catalog"
 import { getHookAgentIdFromRequest } from "../hooks/execution-context"
 import { parseBotReactionEmoji } from "../../shared/bots/message-reactions"
+import { botScheduleOperationQuery } from "./desktop-operation"
 
 export interface BotPeerDeliveryFiles {
   workspacePath: string
   files: readonly BotDeliveredFile[]
 }
+/** Exact receipt selected by the tool and its verified local destination. Never model-supplied. */
+export interface BotSelectedPeerFile {
+  reference: BotDeliveredFile
+  filePath: string
+}
+/** Original local selection paired with the file actually verified by the tool. */
+export interface BotSelectedLocalFile {
+  requestedPath: string
+  filePath: string
+}
+/** Host-observed publication scope, separate from the retained file identity. */
+export interface BotFileCaptureReceipt {
+  deliveryScope: { kind: "task"; threadId: string; onwardPublication: "pending_review" }
+  deliveryNote: string
+}
+type BotFileCapture = (
+  files: BotDeliveredFile[], callId: string, content?: string,
+  selectedPaths?: readonly BotSelectedLocalFile[], selectedPeers?: readonly BotSelectedPeerFile[]
+) => BotFileCaptureReceipt | void
+type BotHistoricalDelivery = (reference: BotHistoricalDeliveryReference) => Promise<{
+  path: string
+  root: string
+  file: BotDeliveredFile
+  markdownSource?: BotDeliveryMarkdownSource
+} | undefined>
 
 function assertParentBot(config: unknown): void {
   if (getHookAgentIdFromRequest(config))
@@ -82,7 +119,8 @@ export function createBotReactionTools(
 export async function verifyBotDeliveryFiles(
   workspacePath: string,
   files: readonly string[],
-  signal: AbortSignal
+  signal: AbortSignal,
+  resolvedPaths?: Map<string, string>
 ): Promise<BotDeliveredFile[]> {
   if (!files.length || files.length > 8) throw new Error("请选择1至8个成果文件")
   signal.throwIfAborted()
@@ -94,6 +132,7 @@ export async function verifyBotDeliveryFiles(
     try {
       await file.assertPathIdentity()
       signal.throwIfAborted()
+      resolvedPaths?.set(fileId, file.filePath)
       delivered.set(file.filePath, {
         filePath: file.filePath,
         name: basename(file.filePath),
@@ -107,39 +146,107 @@ export async function verifyBotDeliveryFiles(
   return [...delivered.values()]
 }
 
+/** Fix a result's byte version before it enters either a public or private handoff. */
+export async function retainBotDeliveryFiles(
+  workspacePath: string,
+  files: readonly string[],
+  signal: AbortSignal,
+  resolvedPaths?: Map<string, string>,
+  storageRoot?: string
+): Promise<BotDeliveredFile[]> {
+  const verified = await verifyBotDeliveryFiles(workspacePath, files, signal, resolvedPaths)
+  for (const file of verified)
+    Object.assign(file, await retainDeliveryVersion(workspacePath, file.filePath, signal, storageRoot))
+  signal.throwIfAborted()
+  return verified
+}
+
+async function retainDeliveryVersion(
+  workspacePath: string, filePath: string, signal: AbortSignal, storageRoot?: string
+) {
+  return storageRoot
+    ? { ...(await snapshotBotDeliveryFile(storageRoot, filePath, signal, workspacePath)), attachmentRoot: storageRoot }
+    : snapshotBotDeliveryFile(workspacePath, filePath, signal)
+}
+
+/** Keep the verified local spelling alongside its canonical delivered file. */
+async function deliveryFileAliases(
+  workspace: string,
+  selected: readonly BotSelectedLocalFile[],
+  delivered: readonly BotDeliveredFile[]
+): Promise<Array<[string, number]>> {
+  const aliases = selected.filter(({ requestedPath, filePath }) => resolve(workspace, requestedPath) !== filePath)
+  if (!aliases.length) return []
+  const canonical = await realpath(workspace)
+  const roots = [resolve(workspace), canonical]
+  return aliases.flatMap(({ requestedPath, filePath }) => {
+    const requested = resolve(workspace, requestedPath)
+    const logical = roots.map(root => relative(root, requested)).find(path =>
+      path && path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path))
+    if (!logical || resolve(canonical, logical) === filePath) return []
+    const index = delivered.findIndex(file => file.filePath === filePath)
+    return index < 0 ? [] : [[logical, index]]
+  })
+}
+
 export function createBotDeliveryTools(
   workspacePath: string,
   signal: AbortSignal,
-  publish?: (files: BotDeliveredFile[], callId: string, content?: string) => void,
+  publish?: BotFileCapture,
   peer?: BotPeerDeliveryFiles,
-  publicGroup = false
+  publicGroup = false,
+  storageRoot?: string,
+  receiptWorkId?: string,
+  resolveInput?: (reference: string) => BotInputFile | undefined,
+  receiptThreadKey?: string,
+  resolveHistoricalDelivery?: BotHistoricalDelivery
 ): DynamicStructuredTool[] {
-  return createBotFileTools(workspacePath, signal, publish, peer, publicGroup ? "group" : "private")
+  return createBotFileTools(workspacePath, signal, publish, peer, publicGroup ? "group" : "private",
+    storageRoot, receiptWorkId, resolveInput, receiptThreadKey, resolveHistoricalDelivery)
 }
 
 /** Private collaboration output is not a successful public delivery. */
 export function createBotReturnFileTools(
   workspacePath: string,
   signal: AbortSignal,
-  capture: (files: BotDeliveredFile[]) => void
+  capture: (files: BotDeliveredFile[], selectedPaths?: readonly BotSelectedLocalFile[], selectedPeers?: readonly BotSelectedPeerFile[]) => void,
+  peer?: BotPeerDeliveryFiles,
+  storageRoot?: string
 ): DynamicStructuredTool[] {
-  return createBotFileTools(workspacePath, signal, capture, undefined, "return")
+  return createBotFileTools(workspacePath, signal,
+    (files, _callId, _content, selectedPaths, selectedPeers) => capture(files, selectedPaths, selectedPeers), peer, "return", storageRoot)
 }
 
 function createBotFileTools(
   workspacePath: string,
   signal: AbortSignal,
-  publish: ((files: BotDeliveredFile[], callId: string, content?: string) => void) | undefined,
+  publish: BotFileCapture | undefined,
   peer: BotPeerDeliveryFiles | undefined,
-  mode: "private" | "group" | "return"
+  mode: "private" | "group" | "return",
+  storageRoot?: string,
+  receiptWorkId?: string,
+  resolveInput?: (reference: string) => BotInputFile | undefined,
+  receiptThreadKey?: string,
+  resolveHistoricalDelivery?: BotHistoricalDelivery
 ): DynamicStructuredTool[] {
   const publicGroup = mode === "group"
   const name = mode === "return" ? "bot_return_files" : "bot_deliver_files"
+  const receiptThread = storageRoot ? basename(storageRoot) : receiptThreadKey
+  const desktopWorkDelivery = mode === "private" && Boolean(receiptThread && receiptWorkId)
   // Per-run, bounded by the host's verified handoff (at most eight files).
-  const imported = new Map<string, string>()
+  const imported = new Map<string, { path: string; retained?: BotDeliveredFile }>()
+  const filePath = z.string().trim().min(1).max(4096)
+  const sourceId = z.string().min(1).max(1024)
   const filesSchema = z
     .object({
-      files: z.array(z.string().trim().min(1).max(4096)).min(1).max(8)
+      files: z.array(resolveHistoricalDelivery
+        ? z.union([filePath, z.object({
+            attachmentPath: filePath,
+            filePath,
+            source: z.object({ threadId: sourceId, assistantMessageId: sourceId,
+              callId: sourceId, fileIndex: z.number().int().min(0).max(7) }).strict().optional()
+          }).strict()])
+        : filePath).min(1).max(8)
     })
     .strict()
   return [
@@ -154,78 +261,226 @@ function createBotFileTools(
               : undefined
           // Validate the entire selection before copying. A written path or a peer name
           // alone never authorizes an import; it must match this host-owned receipt.
-          const selected: Array<{ path: string; peer: boolean }> = []
+          const selected: Array<{ path: string; root: string; peer: boolean; retained?: BotDeliveredFile;
+            reference?: BotDeliveredFile; localPath?: string; input?: BotInputFile; markdownSource?: BotDeliveryMarkdownSource }> = []
           for (const fileId of files) {
             signal.throwIfAborted()
-            try {
-              selected.push({
-                path: await resolveBotWorkspaceFile(workspacePath, fileId, { allowAbsolute: true }),
-                peer: false
-              })
-            } catch (error) {
-              if (!peer || !isAbsolute(fileId)) throw error
-              // A public receipt authorizes its retained bytes even after the
-              // editable original changes. Internal returns have no snapshot.
-              let reference = peer.files.find(
-                (file) => file.filePath === fileId || file.attachmentPath === fileId
-              )
-              if (!reference) {
-                const original = await resolveBotWorkspaceFile(peer.workspacePath, fileId, {
-                  allowAbsolute: true
-                })
-                reference = peer.files.find((file) => file.filePath === original)
-              }
-              if (!reference) throw error
-              const source = await resolveBotWorkspaceFile(
-                peer.workspacePath,
-                reference.attachmentPath ?? reference.filePath,
-                { allowAbsolute: true }
-              )
-              selected.push({ path: source, peer: true })
-            }
-          }
-          const local: string[] = []
-          for (const file of selected) {
-            if (!file.peer) {
-              local.push(file.path)
+            const historical = await resolveHistoricalDelivery?.(fileId)
+            if (historical) {
+              selected.push({ path: historical.path, root: historical.root, peer: false,
+                retained: historical.file, markdownSource: historical.markdownSource })
               continue
             }
-            signal.throwIfAborted()
-            let destination = imported.get(file.path)
-            if (!destination) {
-              const target = await botImportDestination(workspacePath, basename(file.path))
-              // Exact host-verified results retain the same size support as direct delivery.
-              await exportBotFile(peer!.workspacePath, file.path, target.path, signal)
-              imported.set(file.path, target.path)
-              destination = target.path
+            // An exact peer reference means the returned version, even when two
+            // conversations happen to share a workspace. Relative paths still
+            // select the caller's current workspace file explicitly.
+            // A supplied source identifies a historical delivery only.
+            let reference = typeof fileId !== "string" && !fileId.source
+              ? peer?.files.find(file => file.filePath === fileId.filePath &&
+                  file.attachmentPath === fileId.attachmentPath)
+              : undefined
+            if (peer && typeof fileId === "string" && isAbsolute(fileId)) {
+              const matches = (path: string) => {
+                const logical = peer.files.find(file => file.filePath === path)
+                if (logical) return logical
+                const snapshots = peer.files.filter(file => file.attachmentPath === path)
+                if (snapshots.length > 1)
+                  throw new Error("此附件副本对应多个成果，请使用各自回执中的绝对 filePath")
+                return snapshots[0]
+              }
+              reference = matches(fileId)
+              if (!reference) {
+                // Native path aliases (for example /var and /private/var) must
+                // select the same receipt even after the original was removed.
+                const parent = await realpath(dirname(fileId)).catch(() => undefined)
+                if (parent && isUnredirectedBotFileReference(peer.workspacePath, dirname(fileId), parent))
+                  reference = matches(join(parent, basename(fileId)))
+                if (!reference) {
+                  const actual = await resolveBotWorkspaceFile(peer.workspacePath, fileId, {
+                    allowAbsolute: true
+                  }).catch(() => undefined)
+                  if (actual && isUnredirectedBotFileReference(peer.workspacePath, fileId, actual))
+                    reference = matches(actual)
+                }
+              }
             }
-            local.push(destination)
-          }
-          const deliveredFiles = await verifyBotDeliveryFiles(workspacePath, local, signal)
-          if (mode !== "return") {
-            for (const file of deliveredFiles)
-              Object.assign(
-                file,
-                await snapshotBotDeliveryFile(workspacePath, file.filePath, signal)
+            if (reference) {
+              const sharedWorkspace = await realpath(workspacePath) === await realpath(peer!.workspacePath)
+              const source = reference.attachmentPath ?? reference.filePath
+              const root = reference.attachmentPath ? botSnapshotSourceRoot(reference, peer!.workspacePath) : peer!.workspacePath
+              const path = await resolveBotWorkspaceFile(
+                root, source, { allowAbsolute: true }
               )
+              if (!isUnredirectedBotFileReference(root, source, path))
+                throw new Error("已保存的成果已指向其他文件，请检查原回执")
+              selected.push({ path, root, peer: !sharedWorkspace, reference,
+                ...(reference.attachmentPath ? { retained: reference } : {}) })
+              continue
+            }
+            if (typeof fileId !== "string")
+              throw new Error("原成果的副本路径和文件路径没有匹配的正式回执，请核对原任务。")
+            const inputFile = mode === "private" && resolveInput &&
+              (BOT_INPUT_FILE_ID_PATTERN.test(fileId) ||
+                (isAbsolute(fileId) && basename(dirname(dirname(fileId))) === ".bot-deliveries"))
+              ? resolveInput(fileId) : undefined
+            if (inputFile) {
+              selected.push({ path: inputFile.file.filePath, root: storageRoot ?? workspacePath, peer: false, input: inputFile })
+              continue
+            }
+            // Peer references were resolved above. An unmatched selection must
+            // pass the ordinary local-workspace check. A delivery snapshot needs its receipt.
+            const path = await resolveBotWorkspaceFile(workspacePath, fileId, { allowAbsolute: true })
+            if (resolveHistoricalDelivery && isBotDeliverySnapshotPath(path, await realpath(workspacePath)))
+              throw new Error("没有匹配的原成果回执，请使用原交付的附件引用或当前工作文件。")
+            selected.push({
+              path, root: workspacePath, peer: false, localPath: fileId
+            })
           }
+          const delivered = new Map<string, BotDeliveredFile>()
+          const selectedPeers: BotSelectedPeerFile[] = []
+          const localFiles = new Map<string, string>()
+          const markdownOrigins = new Map<string, BotDeliveryMarkdownSource>()
+          const unique = new Map(selected.map(selection => [JSON.stringify([
+            selection.path, selection.peer, selection.reference?.filePath, selection.retained?.filePath,
+            selection.markdownSource?.resultId, selection.markdownSource?.fileIndex
+          ]), selection]))
+          for (const selection of unique.values()) {
+            let path = selection.path, root = selection.root, retained = selection.retained
+            if (selection.input) {
+              const snapshot = await pinBotInputFile(selection.input, root, signal)
+              retained = { filePath: path, name: selection.input.file.filename, ...snapshot,
+                ...(storageRoot ? { attachmentRoot: storageRoot } : {}) }
+              path = snapshot.attachmentPath
+            }
+            // Legacy references mean the current source, so obtain its version
+            // before reusing any import. Retained references already name one.
+            const currentSource = selection.peer && !storageRoot && !retained
+              ? await snapshotBotDeliveryFile(workspacePath, path, signal, root)
+              : undefined
+            const importsPeer = selection.peer || (!storageRoot && Boolean(retained?.attachmentRoot))
+            const importKey = importsPeer
+              ? JSON.stringify([selection.reference?.filePath ?? path, currentSource?.attachmentPath ?? path])
+              : undefined
+            if (selection.reference && (storageRoot || (desktopWorkDelivery && importsPeer && retained?.attachmentPath))) {
+              if (!retained?.attachmentPath)
+                throw new Error("旧协作回执没有可核验的文件版本，请让原任务重新提交成果。")
+              // Reuse a locally retained version. A first formal handoff into a
+              // different thread pins its own version so producer deletion cannot
+              // remove the recipient's receipt. Keep the peer's logical paths
+              // together so the formal report can resolve its original images.
+              if (!storageRoot || retained.attachmentRoot !== storageRoot) {
+                const reference = selection.reference
+                retained = {
+                  filePath: reference.filePath, name: reference.name,
+                  ...(storageRoot
+                    ? await retainDeliveryVersion(root, path, signal, storageRoot)
+                    : await snapshotBotDeliveryFile(workspacePath, path, signal, root))
+                }
+                if (selection.retained && (retained.size !== selection.retained.size ||
+                    basename(dirname(retained.attachmentPath!)) !== basename(dirname(selection.retained.attachmentPath!))))
+                  throw new Error("已保存的成果内容已变化，请检查原回执")
+              }
+              root = botSnapshotSourceRoot(retained, workspacePath)
+              path = retained.attachmentPath!
+            } else if (importsPeer) {
+              signal.throwIfAborted()
+              // Distinct logical files may share content-addressed bytes. Cache
+              // their identities separately and never reread an edited import
+              // when the caller selects the exact retained peer version again.
+              const key = importKey!
+              let importedFile = imported.get(key)
+              if (!importedFile) {
+                // Storage may reuse bytes under an older filename spelling.
+                // The verified receipt owns the logical filename, not the cache.
+                const target = await botImportDestination(workspacePath, basename(selection.reference?.filePath ?? path), key)
+                const snapshot = { filePath: target.path, name: basename(target.path),
+                  ...(currentSource ?? await snapshotBotDeliveryFile(workspacePath, path, signal, root)) }
+                // Both snapshots use the existing content-addressed store. Compare
+                // the digest already computed during import, without another scan.
+                if (retained && (snapshot.size !== retained.size ||
+                    basename(dirname(snapshot.attachmentPath!)) !== basename(dirname(retained.attachmentPath!))))
+                  throw new Error("已保存的成果内容已变化，请检查原回执")
+                const exists = await lstat(target.path).then(() => true, error => {
+                  if ((error as NodeJS.ErrnoException).code === "ENOENT") return false
+                  throw error
+                })
+                // A recipient may have edited its local copy. Re-selecting the
+                // receipt keeps the original snapshot without overwriting that edit.
+                if (!exists)
+                  await exportBotFile(workspacePath, snapshot.attachmentPath, target.path, signal)
+                importedFile = { path: target.path, retained: snapshot }
+                imported.set(key, importedFile)
+              }
+              retained = importedFile.retained
+              path = retained?.attachmentPath ?? importedFile.path
+              root = workspacePath
+            }
+            const [file] = await verifyBotDeliveryFiles(root, [path], signal).catch(error => {
+              if (importKey) imported.delete(importKey)
+              throw error
+            })
+            if (retained) {
+              if (retained.size !== file.size) {
+                if (importKey) imported.delete(importKey)
+                throw new Error("已保存的成果大小已变化，请检查原回执")
+              }
+              Object.assign(file, retained)
+            } else Object.assign(file, await retainDeliveryVersion(root, file.filePath, signal, storageRoot))
+            // Receipt identity is the logical file, not its shared storage path.
+            const prior = delivered.get(file.filePath)
+            const priorSource = markdownOrigins.get(file.filePath)
+            if (prior && (prior.attachmentPath !== file.attachmentPath ||
+                priorSource?.resultId !== selection.markdownSource?.resultId ||
+                priorSource?.fileIndex !== selection.markdownSource?.fileIndex))
+              throw new Error("同一文件选择了不同版本，请分别交付所需版本")
+            delivered.set(file.filePath, file)
+            if (selection.markdownSource) markdownOrigins.set(file.filePath, selection.markdownSource)
+            if (selection.reference)
+              selectedPeers.push({ reference: selection.reference, filePath: file.filePath })
+            else localFiles.set(selection.path, file.filePath)
+          }
+          const deliveredFiles = [...delivered.values()]
+          const selectedPaths = selected.flatMap(selection =>
+            selection.localPath === undefined ? [] : [{ requestedPath: selection.localPath, filePath: localFiles.get(selection.path)! }])
+          const retainMarkdownContext = desktopWorkDelivery &&
+            deliveredFiles.some(file => isBotDeliveryMarkdown(file.filePath))
+          const fileAliases = retainMarkdownContext ? await deliveryFileAliases(workspacePath, selectedPaths, deliveredFiles) : []
+          const markdownSources = retainMarkdownContext && markdownOrigins.size
+            ? Object.fromEntries(deliveredFiles.flatMap((file, index) => {
+                const source = markdownOrigins.get(file.filePath)
+                return source ? [[index, source]] : []
+              }))
+            : undefined
           signal.throwIfAborted()
           const callId =
             config.toolCall?.id ?? JSON.stringify(deliveredFiles.map((file) => file.filePath))
-          if (content === undefined) publish?.(deliveredFiles, callId)
-          else publish?.(deliveredFiles, callId, content)
+          // The adapter must distinguish an explicit local declaration from an
+          // absolute peer receipt that happens to use the same shared path.
+          const publication = publish?.(deliveredFiles, callId, content, selectedPaths,
+            selectedPeers.length ? selectedPeers : undefined)
           return JSON.stringify({
             kind: mode === "return" ? "bot-file-return" : "bot-file-delivery",
-            files: deliveredFiles
+            files: deliveredFiles,
+            ...(publication ? {
+              deliveryScope: publication.deliveryScope,
+              deliveryNote: publication.deliveryNote
+            } : {}),
+            ...(receiptThread ? { receiptThread, receiptWorkId } : {}),
+            ...(fileAliases.length ? { fileAliases } : {}),
+            ...(markdownSources ? { markdownSources } : {})
           })
         } catch (cause) {
-          imported.clear()
           signal.throwIfAborted()
           const content = JSON.stringify({
             ok: false,
             error: cause instanceof Error ? cause.message : String(cause),
-            recovery:
-              "Correct the file path inside this conversation's workspace. Only existing files can be delivered; do not claim delivery succeeded."
+            ...(cause instanceof BotHistoricalDeliveryAmbiguity ? {
+              deliveryChoices: cause.choices,
+              moreDeliveryChoices: cause.more,
+              recovery: "These verified delivery choices are ordered oldest to newest among the returned choices. Match the delivery requested by the user and retry with its selection as an item in files. When moreDeliveryChoices is true, only a bounded subset is shown. Do not guess or use an editable file in its place."
+            } : { recovery: resolveInput
+                ? "Use a current workspace file or the exact input_id or snapshot path of an approved attachment. Do not claim delivery succeeded."
+                : "Correct the file path inside this conversation's workspace. Only existing files can be delivered; do not claim delivery succeeded." })
           })
           return config.toolCall?.id
             ? new ToolMessage({
@@ -242,13 +497,16 @@ function createBotFileTools(
         metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
         description:
           mode === "return"
-            ? "Verify existing workspace files and return their references privately to the delegating Bot in the automatic collaboration reply. This does not publish attachments or deliver files to the user. Use this for internal drafts and results; the caller owns public delivery. Use bot_deliver_files only for an explicitly authorized public group attachment. Use workspace-relative paths, retaining subdirectories. Existence, ownership and metadata are verified; references are not immutable copies or proof of content correctness. Never return a directory, another Bot's private file or an unverified path."
-            : "Deliver actual completed or useful partial files as attachments that can be opened and saved. Screenshots and images can be sent by path without a vision model. Use workspace-relative paths, retaining subdirectories; this verifies existence, ownership and metadata. Each public attachment retains its sent bytes separately from the editable workspace original. The host includes verified references in automatic private collaboration replies and verifies declared outputFiles before completion. Never deliver a directory or an unverified path. The receipt confirms local handoff, not delivery confirmation from an external IM platform. " +
+            ? "Verify existing workspace files and retain their current bytes for the automatic private reply to the delegating Bot. This does not publish attachments or deliver files to the user. Use this for internal drafts and results; the caller owns public delivery. Use bot_deliver_files only for an explicitly authorized public group attachment. Use workspace-relative paths for current files, retaining subdirectories. For a host-verified peer receipt, pass its exact absolute filePath or attachmentPath to privately forward the retained version and its logical identity. The receipt preserves this version but is not proof of content correctness. Never return a directory, another Bot's private file or an unverified path."
+            : "Deliver actual completed or useful partial files as attachments that can be opened and saved. Screenshots and images can be sent by path without a vision model. Use workspace-relative paths, retaining subdirectories; this verifies existence, ownership and metadata. Each public attachment retains its sent bytes separately from the editable workspace original. The host includes verified references in automatic private collaboration replies and verifies declared outputFiles before completion. Never deliver a directory or an unverified path. The receipt confirms local handoff, not delivery confirmation from an external IM platform. If deliveryScope is returned, it identifies where files were retained and whether onward publication is still pending. " +
               (publicGroup
-                ? "This publishes to the current shared group. When the user requested a summary with these files, include it in content so the text and attachments are delivered together. Ordinary assistant text is private and is not published. Set content to an empty string for a file-only delivery. Only current workspace files are eligible; other Bots' private files are rejected."
+                ? "This publishes to the current shared group. When the user requested a summary with these files, include it in content so the text and attachments are delivered together. Ordinary assistant text is private and is not published. Set content to an empty string for a file-only delivery. Only current workspace files are eligible; other Bots' private files are rejected. For a host-verified peer receipt, pass its exact absolute filePath or attachmentPath to deliver that retained version without another copy; relative paths select current workspace content."
                 : peer
-                  ? "For this private collaboration result, the exact host-verified peer file paths can also be passed directly: this tool imports those originals into your workspace and delivers the copies. No shell copy is needed. Other private peer files are rejected; the receipt grants no access to a directory or other data. Nothing is sent to an external service."
-                  : "Only current workspace files are eligible; other Bots' private files are rejected. Delivery belongs to the current conversation; the host also forwards files and images to its linked IM route when enabled."),
+                  ? "For this private collaboration result, the exact host-verified peer file paths can also be passed directly: this tool uses the retained version when present, reusing it within the same workspace or importing it across workspaces; legacy references without a retained version use current content. No shell copy is needed. Other private peer files are rejected; the receipt grants no access to a directory or other data. Delivery belongs to the current conversation and its linked IM route when enabled."
+                  : (resolveInput ? "Other Bots' private files are rejected." : "Only current workspace files are eligible; other Bots' private files are rejected.") +
+                    " Delivery belongs to the current conversation; the host also forwards files and images to its linked IM route when enabled.") +
+              (resolveInput ? " To deliver an approved attachment unchanged, pass its exact input_id or retained snapshot path. On a later user request in the same desktop task, you can reuse that task's approved project attachments and retained transfers by exact reference." : "") +
+              (resolveHistoricalDelivery ? " For a previous formal delivery in this task, pass {attachmentPath, filePath} from its receipt as an item in files. Use attachmentPath alone only when it identifies one logical file. If identical Markdown bytes came from different delivery batches, use the exact selection with source returned in deliveryChoices for the batch the user requested." : ""),
         schema: publicGroup
           ? filesSchema.extend({
               content: z
@@ -410,11 +668,14 @@ export function createBotBrowserTools(
   signal: AbortSignal,
   waiting: (active: boolean) => void,
   scopeId = bot.id,
-  withUploadFileLock?: BotBrowserUploadLock
+  withUploadFileLock?: BotBrowserUploadLock,
+  resolveRetainedUpload?: BotRetainedUploadResolver
 ): DynamicStructuredTool[] {
   const run = async (input: BotBrowserAction, callId?: string, name = "bot_browser") => {
     try {
-      const content = await browser.act(scopeId, input, signal, waiting, withUploadFileLock)
+      const content = await (resolveRetainedUpload
+        ? browser.act(scopeId, input, signal, waiting, withUploadFileLock, resolveRetainedUpload)
+        : browser.act(scopeId, input, signal, waiting, withUploadFileLock))
       if (callId && content.startsWith("{") && JSON.parse(content).ok === false)
         return new ToolMessage({ content, status: "error", tool_call_id: callId, name })
       return content
@@ -541,7 +802,8 @@ export function createBotBrowserTools(
           .string()
           .max(4096)
           .describe(
-            "Upload: path within the current workspace, including subdirectories. Relative paths and local absolute paths inside that workspace are accepted. Target the file input by ref or exact label name. Downloads appear in downloads/ after saving."
+            "Upload: path within the current workspace, including subdirectories. Relative paths and local absolute paths inside that workspace are accepted. Target the file input by ref or exact label name. Downloads appear in downloads/ after saving." +
+              (resolveRetainedUpload ? " Use the exact input_id or retained snapshot path for approved attachments. On a later user request in the same desktop task, this also works for that task's approved project attachments, retained transfers and exact formal attachmentPath." : "")
           )
           .optional(),
         accept: z
@@ -590,18 +852,34 @@ export function createBotScheduleTools(
   getHost: () => LocalBotHost,
   signal: AbortSignal
 ): DynamicStructuredTool[] {
+  const desktopMain = !task.mockSource && !task.workId && task.threadId === bot.threadId &&
+    (task.origin.kind === "user" || task.origin.kind === "introduction")
   return [
     tool(
       async (input, config) => {
         try {
           signal.throwIfAborted()
           assertParentBot(config)
-          const host = getHost(),
-            schedules = host
+          const host = getHost()
+          if (input.action === "recover") {
+            if (!desktopMain || !config.toolCall?.id)
+              throw new Error("只能从原桌面主对话核对例行回执")
+            if (input.id && input.priorOperation?.targetId && input.id !== input.priorOperation.targetId)
+              throw new Error("例行标识与原操作目标不一致")
+            return JSON.stringify(host.desktopOperationReceipts(task.id, {
+              ...input.priorOperation, ...(input.id ? { targetId: input.id } : {}), kind: "schedule_save"
+            }))
+          }
+          if (input.priorOperation !== undefined)
+            throw new Error("核对例行回执请使用 recover")
+          const schedules = host
               .snapshot()
               .schedules.filter(
                 (item) =>
                   item.botId === bot.id &&
+                  (!(item.desktopWork || item.workMonitor || item.fixedReminder) ||
+                    (desktopMain &&
+                      (task.origin.kind === "user" || host.hasDirectUserRequest(task.id)))) &&
                   (item.audienceKey ?? "desktop") === (task.mockSource?.audienceKey ?? "desktop")
               )
           if (input.action === "list") return JSON.stringify(schedules)
@@ -615,6 +893,25 @@ export function createBotScheduleTools(
           )
             throw new Error("创建或修改例行任务需要用户直接交办")
           const prior = input.id ? schedules.find((item) => item.id === input.id) : undefined
+          const managedPrior = Boolean(prior?.desktopWork || prior?.workMonitor || prior?.fixedReminder)
+          const callId = config.toolCall?.id
+          const editId = desktopMain && input.action === "save" &&
+            input.workId === undefined && (!prior || managedPrior)
+            ? input.id : undefined
+          const toolEdit = editId && callId && input.requestKey ? {
+            source: {
+              taskId: task.id,
+              callId,
+              key: input.kind || input.workMonitor ? botIdentifier(input.requestKey) : input.requestKey
+            },
+            // Omitted fields are filled only on first admission. The persisted
+            // fingerprint belongs to the submitted edit, not today's schedule.
+            fingerprint: createHash("sha256").update(JSON.stringify(["schedule-edit", input])).digest("hex")
+          } : undefined
+          if (editId && toolEdit) {
+            const replay = host.replayDesktopScheduleEdit(bot.id, editId, toolEdit)
+            if (replay) return JSON.stringify(replay)
+          }
           if (input.id && !prior)
             throw new Error(
               "此 Bot 中不存在该例行任务，未保存。新建时省略 id；修改或删除时先 list 并使用返回的 id。"
@@ -622,20 +919,47 @@ export function createBotScheduleTools(
           if (input.action === "remove") {
             if (!prior) throw new Error("请指定例行任务 ID")
             host.removeSchedule(prior.id, prior.version)
-            return "例行任务已删除，排队中的触发已取消。"
+            return "例行任务已删除，尚未开始的排队触发已取消。已开始的执行按原约定结算。"
           }
           // The tool allows omitted fields. New routines start enabled; edits
           // preserve a paused routine unless the user explicitly enables it.
+          const edit = prior ? {
+            id: prior.id,
+            version: prior.version,
+            ...(input.enabled === false ? { pauseRequested: true as const } : {}),
+            ...(toolEdit ? { tool: toolEdit } : {})
+          } : undefined
           const schedule = parseSchedule({
             ...prior,
             ...input,
+            frequency: input.frequency ?? (input.kind === "fixed_reminder" ? "once" : prior?.frequency),
+            message: input.message ?? prior?.message ?? (input.workMonitor ? "查看原任务的已记录进展" : undefined),
             enabled: input.enabled ?? prior?.enabled ?? true
           })
+          if ([input.workId, input.workMonitor, input.kind].filter(value => value !== undefined).length > 1)
+            throw new Error("继续原任务、工作观察和固定提醒需要分别安排")
+          if (input.workId !== undefined && prior)
+            throw new Error("编辑现有例行时不能更换执行任务")
+          if (input.expiresAt !== undefined && input.kind !== "fixed_reminder")
+            throw new Error("请明确设置固定提醒类型，工作观察的失效时间应放在 workMonitor 中")
+          const followUp = input.kind === "fixed_reminder"
+            ? parseBotFixedReminder({ kind: input.kind, expiresAt: input.expiresAt })
+            : input.workMonitor ? parseBotWorkScheduleMonitor(input.workMonitor) : undefined
+          if (followUp || input.workId !== undefined) {
+            if (!config.toolCall?.id || !input.requestKey)
+              throw new Error("此例行任务需要可重试的当前请求标识")
+            const source = toolEdit?.source ??
+              { taskId: task.id, callId: config.toolCall.id, key: botIdentifier(input.requestKey) }
+            if (input.workId !== undefined)
+              return JSON.stringify(host.saveDesktopWorkScheduleFromTool(bot.id, schedule, botIdentifier(input.workId), source))
+            if (followUp)
+              return JSON.stringify(host.saveDesktopScheduleFollowUp(bot.id, schedule, followUp, source, edit))
+          }
           return JSON.stringify(
             host.saveSchedule(
               bot.id,
               schedule,
-              prior ? { id: prior.id, version: prior.version } : undefined,
+              edit,
               ...(task.mockSource?.transport === "im" ? [task.id] : [])
             )
           )
@@ -657,13 +981,18 @@ export function createBotScheduleTools(
         name: "bot_schedule",
         metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
         description:
-          "Manage this Bot's scheduled routines when the user explicitly asks. To create, use save WITHOUT id; the host generates the ID. To edit or remove, list first and use the exact returned ID, never a name or an invented ID. Save message as complete standalone execution instructions: include inputs or file paths, expected conditions, desired output and when to remain silent. Do not save placeholders such as 'verify' or 'do the earlier task'; chat history may be compressed before execution. Times use the host's local timezone. The app must remain running; sleeping/missed intervals coalesce into one run. once uses an ISO timestamp with timezone, daily/weekly use HH:mm (weekday 0=Sunday); interval minimum 5 minutes. Report an arrangement only after a successful save receipt. If a call fails, correct the arguments or list to verify the actual state; do not claim it succeeded.",
+          "Manage routines only when the current user explicitly asks. Create with save without id. Edit or remove by exact ID from list." +
+          (desktopMain ? "" : " Routines need standalone authorized instructions.") +
+          " Include a timezone in runAt. Daily/weekly use HH:mm (weekday 0=Sunday), interval minimum 5 minutes. Missed intervals coalesce. Report success only after a save receipt." +
+          (desktopMain
+            ? ' For an existing-work follow-up or fixed reminder, choose exactly one mode. To check recorded task progress without running it, set workMonitor with the exact workId from bot_work_list. For one check, set frequency=once, runAt, and workMonitor={workId, mode:"report"}. Confirm an observation only when the save receipt contains workMonitor. report checks at each scheduled time, change reports progress changes, new_result reports a new execution result, until_work_completed reports once when the user marks the work complete. To execute authorized work later, set top-level workId and complete standalone instructions in message. For one-time reminders set kind=fixed_reminder, runAt, and the exact text in message. This only repeats that text and never checks task status or executes its instructions. Do not substitute execution routines for unavailable PR, file or service checks. Use a stable requestKey within the current turn for these three modes. Optional expiresAt must include a timezone. For a lost reply from an earlier desktop user turn, use recover with the known schedule id or priorOperation sourceRequestId, then recheck its exact receiptId if needed. Recover only reads existing receipts, including removed routines. If no exact operation can be confirmed, check the list or ask. Do not save a second routine as a retry.'
+            : " For a one-time routine, set frequency=once and runAt."),
         schema: z.object({
-          action: z.enum(["list", "save", "remove"]),
+          action: z.enum(desktopMain ? ["list", "save", "remove", "recover"] : ["list", "save", "remove"]),
           id: z
             .string()
             .describe(
-              "Existing routine ID returned by list. Omit when creating; never use the routine name as its ID."
+              `Existing routine ID returned by list${desktopMain ? " or recover" : ""}. Omit when creating. Never use the routine name as its ID.`
             )
             .optional(),
           name: z.string().max(120).optional(),
@@ -671,16 +1000,32 @@ export function createBotScheduleTools(
             .string()
             .max(30_000)
             .describe(
-              "Standalone instructions for the future run, including required inputs, acceptance conditions and delivery/silence policy. Omit only when keeping an existing routine's instructions unchanged."
+              desktopMain
+                ? "Execution routines use standalone authorized instructions. Fixed reminders use exact text to repeat. For work observations omit this field, since workMonitor selects the recorded task state."
+                : "Standalone instructions for the future run, including required inputs, acceptance conditions and delivery/silence policy. Omit only when keeping an existing routine's instructions unchanged."
             )
             .optional(),
           frequency: z.enum(["once", "daily", "weekly", "interval"]).optional(),
+          ...(desktopMain ? {
+            kind: z.literal("fixed_reminder").describe("Repeat fixed message text once, without checking task status or executing instructions.").optional(),
+            workId: z.string().min(1).max(128).describe("Execution destination for explicitly authorized future work. Use workMonitor for recorded progress checks.").optional(),
+            expiresAt: z.string().max(64).optional(),
+            workMonitor: z.object({
+              workId: z.string().max(128),
+              mode: z.enum(BOT_WORK_MONITOR_MODES),
+              expiresAt: z.string().max(64).optional()
+            }).strict().describe('Read recorded task state without executing work. For one check use frequency=once, runAt, and mode="report".').optional(),
+            requestKey: z.string().max(128).optional(),
+            priorOperation: botScheduleOperationQuery.optional()
+          } : {}),
           runAt: z.string().optional(),
           runAtTime: z.string().optional(),
           weekday: z.number().int().optional(),
           intervalMinutes: z.number().int().optional(),
-          enabled: z.boolean().optional()
-        })
+          enabled: (desktopMain
+            ? z.boolean().describe("Set false for an explicit pause. Omit when only editing other fields.")
+            : z.boolean()).optional()
+        }).strict()
       }
     )
   ] as DynamicStructuredTool[]

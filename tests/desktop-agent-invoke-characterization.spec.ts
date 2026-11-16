@@ -508,12 +508,38 @@ function testTurnCompletionGateCoversEveryEntryPoint(): void {
   }
 }
 
+function testBotPromptReceiptAppliesOnlyAfterAcceptedSubmission(): void {
+  assertIncludes(invoke, 'const onBotUserPromptPrepared = runExecutionContext.source === "bot"\n        ? runExecutionContext.onUserPromptPrepared : undefined', "only the trusted Bot source can supply post-submit projections")
+  assertSourceOrder(invoke, [
+    'rawMessage: onBotUserPromptPrepared ? "" : rootUserPrompt',
+    'let memoryUserPrompt = runExecutionContext.source === "bot" ? undefined : rootUserPrompt',
+    "if (!preparedPrompt.accepted) {",
+    "effectiveMessage = preparedPrompt.content",
+    "if (onBotUserPromptPrepared) {",
+    'const approvedRequest = runGoalId ? "" : preparedPrompt.submissionContent',
+    "const approved = onBotUserPromptPrepared(",
+    "tracer.setPreparedUserMessage(approvedRequest)",
+    "memoryUserPrompt = runGoalId ? undefined : approved?.memoryUserText || undefined",
+    "memoryUserPrompt !== undefined &&",
+    "`User: ${memoryUserPrompt}\\n\\nAssistant: ${postRunAssistantText}`"
+  ], "ordinary workbench keeps its root prompt and Bot tracing and memory consume only trusted submit receipts")
+  assertSourceOrder(invoke, [
+    "let botPreparedSystemPrompt: string | undefined",
+    "if (!preparedPrompt.accepted) {",
+    "effectiveMessage = preparedPrompt.content",
+    "botPreparedSystemPrompt = approved?.extraSystemPrompt",
+    "extraSystemPrompt: botPreparedSystemPrompt",
+    ": runExecutionContext.extraSystemPrompt"
+  ], "the original system prompt passes through when no accepted Bot receipt adds context")
+}
+
 const tests = [
   testForegroundHandlerInventory,
   testTurnCompletionGateCoversEveryEntryPoint,
   testInvokeReplacementOwnershipOrder,
   testFreshTurnGoalAndTranscriptSemantics,
   testPromptSkillHookAndHarnessPreparation,
+  testBotPromptReceiptAppliesOnlyAfterAcceptedSubmission,
   testRoutingRuntimeCheckpointAndAutoCommit,
   testResumeAndInterruptContinueTheSameLogicalTurn,
   testIdentityFencedCleanupAndCancellation,

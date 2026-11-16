@@ -1,5 +1,16 @@
 import { z } from "zod"
 import { MAX_ATTACHMENT_PICKER_FILES } from "../../../shared/file-attachment"
+import { BOT_INPUT_FILE_ID_PATTERN } from "../../../shared/bots/input-files"
+
+export const BOT_CONVERSATION_DRAFT_PREFIX = "cmb-bot-conversation-draft-v1:"
+
+export function botConversationDraftKey(hostId: string, botId: string, workId?: string): string {
+  return BOT_CONVERSATION_DRAFT_PREFIX + JSON.stringify(workId ? [hostId, botId, workId] : [hostId, botId])
+}
+
+export function botThreadDraftKey(threadId: string): string {
+  return `${BOT_CONVERSATION_DRAFT_PREFIX}thread:${threadId}`
+}
 
 export const botDraftContentSchema = z.object({
   text: z.string().max(200_000),
@@ -8,10 +19,14 @@ export const botDraftContentSchema = z.object({
       z.object({
         filename: z.string().max(512),
         filePath: z.string().min(1).max(4096),
-        content: z.string().max(24_000),
+        // Ordinary attachment parsing appends its truncation notice after the
+        // 24k content budget. Preserve that valid output when linking a draft.
+        content: z.string().max(25_000),
         mimeType: z.string().max(256),
         size: z.number().int().nonnegative(),
-        truncated: z.boolean()
+        truncated: z.boolean(),
+        botInputId: z.string().regex(BOT_INPUT_FILE_ID_PATTERN).optional(),
+        originalUnavailable: z.literal(true).optional()
       })
     )
     .max(MAX_ATTACHMENT_PICKER_FILES)

@@ -7,11 +7,16 @@ import type { RemoteTurnPolicy, StandardTurnSource } from "./standard-thread-tur
 import type { LocalThreadRunOwner } from "./thread-run-lease"
 import type { CurrentRunQueuedMessage } from "./current-run-message-queue"
 
+/** Model-facing request text from trusted Bot preparation. The visible transcript is separate. */
+export const BOT_PREPARED_USER_REQUEST_KEY = "cmb_bot_prepared_user_request"
+
 export interface AgentRunSteerRequest {
   threadId: string
   owner: LocalThreadRunOwner
   runId: string
   message: CurrentRunQueuedMessage
+  /** Trusted Bot receipt only; no change to ordinary steering when absent. */
+  onUserPromptPrepared?: (body: string) => void
 }
 
 export interface AgentRunSteerResult {
@@ -183,6 +188,13 @@ export interface AgentRunExecutionContext {
   onRunCancelled?: () => void
   /** The original user-prompt/steer pipeline is ready; trusted inboxes can offer saved messages. */
   onSteeringReady?: (yieldForegroundCommands?: (stillPending: () => boolean) => number) => void
+  /** Bot-only receipt for verified user text and system context after the original input check. */
+  onUserPromptPrepared?: (body: string, receipt?: { internalGoalInput: true }) => {
+    memoryUserText?: string
+    extraSystemPrompt?: string
+  } | undefined
+  /** Trusted Bot history only. Missing ids stay unchanged; null excludes an unaccepted input. */
+  persistedUserInputProjections?: (messageIds: readonly string[]) => ReadonlyMap<string, string | null>
   /** Trusted Bot inbox only: the exact active main-model round can be superseded.
    * Undefined ends that opportunity; tools, compaction and leaf models do not expose it. */
   onModelRequestState?: (interrupt: (() => boolean) | undefined) => void

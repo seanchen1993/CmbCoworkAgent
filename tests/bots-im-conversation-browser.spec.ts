@@ -396,12 +396,16 @@ async function main() {
     await details.getByRole("heading", { name: "群内任务" }).waitFor()
     await details.getByRole("button", { name: "返回群聊", exact: true }).waitFor()
     assert.equal(await details.getByText("返回主对话", { exact: true }).count(), 0)
-    await details.getByRole("button", { name: "完成任务", exact: true }).click()
-    await details.getByRole("button", { name: "继续处理", exact: true }).waitFor()
+    await details.getByRole("button", { name: "任务详情与操作", exact: true }).click()
+    const workOptions = page.getByRole("dialog", { name: "任务详情与操作", exact: true })
+    await workOptions.getByRole("button", { name: "完成任务", exact: true }).click()
+    await details.getByRole("button", { name: "任务详情与操作", exact: true }).click()
+    await workOptions.getByRole("button", { name: "继续处理", exact: true }).waitFor()
     await page.screenshot({
       animations: "disabled",
       path: join(artifacts, "bot-im-task-scope.png")
     })
+    await page.keyboard.press("Escape")
     await details.getByRole("button", { name: "电脑", exact: true }).click()
     await page.waitForFunction(() =>
       (window as any).fixture.calls.some(
@@ -409,8 +413,11 @@ async function main() {
       )
     )
     await details.getByRole("button", { name: "电脑", exact: true }).click()
-    await details.getByRole("button", { name: "继续处理", exact: true }).click()
-    await details.getByRole("button", { name: "完成任务", exact: true }).waitFor()
+    await details.getByRole("button", { name: "任务详情与操作", exact: true }).click()
+    await workOptions.getByRole("button", { name: "继续处理", exact: true }).click()
+    await details.getByRole("button", { name: "任务详情与操作", exact: true }).click()
+    await workOptions.getByRole("button", { name: "完成任务", exact: true }).waitFor()
+    await page.keyboard.press("Escape")
     await page.getByRole("button", { name: "← 产品协作群", exact: true }).click()
     await page.getByLabel("产品协作群消息记录").waitFor()
     await details.getByRole("button", { name: "记忆", exact: true }).click()

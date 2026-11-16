@@ -1,5 +1,7 @@
 import type { FileInfo } from "@/types"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import { buildAttachmentMessageParts } from "../../../../shared/attachment-message-parts"
+import { formatTransferredBotReplyEdit } from "../../../../shared/bots/message-reply"
 import {
   isMentionedWorkspaceFileForWorkspace,
   readBoundedWorkspaceMentionFile,
@@ -14,6 +16,108 @@ afterEach(() => {
 })
 
 describe("bounded @file attachment reads", () => {
+  it("keeps imported quote mentions literal while retaining authored file choices and editor attachment cleanup", async () => {
+    const quote = { id: "source", ordinal: 1, role: "assistant" as const,
+      text: 'Read @notes.md and @"config.json".\n@notes.md is reference data.' }
+    const edited = formatTransferredBotReplyEdit("📎 old.csv\n\nCheck @current.md", quote)
+    // The ordinary edit path removes display-only paperclip rows, never restores their attachments.
+    const rawMessage = edited.replace(/^(?:📎[^\n]*\n)+(?:\n)?/u, "").trim()
+    expect(rawMessage).not.toContain("old.csv")
+    expect(rawMessage).toContain("\\@notes.md")
+    expect(rawMessage).toContain("@current.md")
+    const reads: string[] = []
+    const resolved = await resolveAtFileAttachments({
+      rawMessage, attachments: [], mentionedFiles: [], workspacePath: "/workspace",
+      workspaceFiles: ["notes.md", "config.json", "current.md"].map(path => ({ path, name: path, is_dir: false } as FileInfo)),
+      maxAttachments: 5, maxTotalChars: 24000,
+      readWorkspaceFile: async path => { reads.push(path); return { success: true, content: "Selected current file" } }
+    })
+    expect(reads).toEqual(["/current.md"])
+    expect(resolved.attachments).toHaveLength(1)
+    expect(resolved.cleanedMessage).toContain("\\@notes.md")
+    expect(resolved.cleanedMessage).not.toContain("old.csv")
+  })
+
+  it("reads a retained chip through the current conversation's attachment capability", async () => {
+    const selected = toMentionedWorkspaceFile({
+      id: "/notes.md", displayPath: "notes.md", workspaceFilePath: "/notes.md", filename: "notes.md"
+    }, "/workspace")
+    const readWorkspaceFile = vi.fn(async () => ({ success: true, content: "workspace preview" }))
+    const readWorkspaceAttachment = vi.fn(async () => ({
+      filename: "notes.md", filePath: "/retained/notes.md", content: "retained bytes",
+      size: 14, mimeType: "text/plain", truncated: false,
+      botInputId: "input-00000000-0000-0000-0000-000000000000"
+    }))
+    const input = {
+      rawMessage: "Review this file", attachments: [], mentionedFiles: [selected],
+      workspacePath: "/workspace", workspaceFiles: [], maxAttachments: 3, maxTotalChars: 24000,
+      readWorkspaceFile
+    }
+
+    const managed = await resolveAtFileAttachments({ ...input, readWorkspaceAttachment })
+    expect(readWorkspaceFile).not.toHaveBeenCalled()
+    expect(readWorkspaceAttachment).toHaveBeenCalledWith("/notes.md", 24000)
+    expect(managed.attachments).toEqual([expect.objectContaining({
+      filePath: "/retained/notes.md", botInputId: expect.any(String)
+    })])
+
+    const ordinary = await resolveAtFileAttachments(input)
+    expect(readWorkspaceFile).toHaveBeenCalledWith("/notes.md", 24000)
+    expect(ordinary.attachments).toEqual([expect.objectContaining({
+      filePath: "/workspace/notes.md", content: "workspace preview"
+    })])
+    expect(ordinary.attachments[0]).not.toHaveProperty("botInputId")
+  })
+
+  it.each(["denied", "missing receipt"])("keeps the managed composer on a retained-input failure (%s)", async reason => {
+    const readWorkspaceFile = vi.fn()
+    const readWorkspaceAttachment = vi.fn(async () => {
+      if (reason === "denied") throw new Error("source changed")
+      return { filename: "notes.md", filePath: "/workspace/notes.md", content: "preview", size: 7,
+        mimeType: "text/plain", truncated: false }
+    })
+    await expect(resolveAtFileAttachments({
+      rawMessage: "Use @notes.md", attachments: [], mentionedFiles: [], workspacePath: "/workspace",
+      workspaceFiles: [{ path: "notes.md", is_dir: false }], maxAttachments: 3, maxTotalChars: 24000,
+      readWorkspaceFile, readWorkspaceAttachment
+    })).rejects.toThrow()
+    expect(readWorkspaceFile).not.toHaveBeenCalled()
+  })
+
+  it("reserves a receipt for each selected Bot file when the first excerpt is large", async () => {
+    const filenames = ["large.txt", "required.csv"]
+    const mentionedFiles = filenames.map(filename => toMentionedWorkspaceFile({
+      id: `/${filename}`, displayPath: filename, workspaceFilePath: `/${filename}`, filename
+    }, "/workspace"))
+    const ids = ["input-00000000-0000-0000-0000-000000000001", "input-00000000-0000-0000-0000-000000000002"]
+    const readWorkspaceAttachment = vi.fn(async (path: string, maxChars: number) => {
+      const filename = path.slice(1)
+      const large = filename === "large.txt"
+      return {
+        filename, filePath: `/retained/${filename}`, content: large ? "a".repeat(maxChars) : "amount\n10",
+        size: large ? 32_000 : 9, mimeType: "text/plain", truncated: large,
+        botInputId: ids[large ? 0 : 1]
+      }
+    })
+    const input = {
+      rawMessage: "Review both files", attachments: [], mentionedFiles,
+      workspacePath: "/workspace", workspaceFiles: [], maxAttachments: 3, maxTotalChars: 24_000,
+      readWorkspaceFile: vi.fn(), readWorkspaceAttachment
+    }
+    const result = await resolveAtFileAttachments(input)
+    expect(readWorkspaceAttachment.mock.calls).toEqual([["/large.txt", 12_000], ["/required.csv", 12_000]])
+    expect(result.mentionAttachmentLimitHit).toBe(false)
+    const { attachmentModelBlocks } = buildAttachmentMessageParts(result.attachments)
+    expect(attachmentModelBlocks).toContain(`filename="large.txt" input_id="${ids[0]}"`)
+    expect(attachmentModelBlocks).toContain(`filename="required.csv" input_id="${ids[1]}"`)
+    expect(attachmentModelBlocks).toContain("amount\n10")
+
+    readWorkspaceAttachment.mockClear()
+    await expect(resolveAtFileAttachments({ ...input, maxTotalChars: 1 })).rejects.toThrow("附件内容已达上限")
+    await expect(resolveAtFileAttachments({ ...input, maxAttachments: 1 })).rejects.toThrow("最多只能发送 1 个附件")
+    expect(readWorkspaceAttachment).not.toHaveBeenCalled()
+  })
+
   it("stops paging as soon as the remaining character budget is filled", async () => {
     const offsets: number[] = []
     const result = await readBoundedWorkspaceMentionFile({

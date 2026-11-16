@@ -1,6 +1,15 @@
 import { BotHistorySources } from "./BotHistorySources"
 import { toast } from "sonner"
-import { parseBotWorkHistoryHref } from "../../../../shared/bots/work-history"
+import { parseBotWorkAttachmentHref, parseBotWorkHistoryHref, parseBotWorkHref } from "../../../../shared/bots/work-history"
+import { parseBotThreadHistoryHref } from "../../../../shared/bots/thread-history"
+import { cleanUserAttachmentContentForDisplay } from "../../../../shared/user-attachment-display"
+import { isThreadDeletionPending, isThreadRetired, useAppStore } from "@/lib/store"
+import {
+  ensureBotWorkThreadSummary,
+  openBotWorkThreadChat,
+  resolveBotWorkThreadForNavigation
+} from "@/lib/bot/work-thread-summary"
+import { matchesBotThreadDraftRef } from "@/lib/bot-conversation-draft"
 import { botHistoryReceipt } from "@/lib/bot-history-receipt"
 import { useChatSourceNavigation } from "@/lib/chat-source-navigation"
 import {
@@ -26,6 +35,7 @@ import { useThreadContext, useThreadStateSelector } from "@/lib/thread-context"
 import {
   ChatHistorySourceContext,
   ChatPresentationContext,
+  ChatDesktopWorkIdContext,
   ChatReplySourceContext,
   ChatActivityPresentationContext,
   ChatExecutionDetailsContext,
@@ -37,7 +47,7 @@ import {
   ChatUserTextPresentationContext,
   ChatToolPresentationContext
 } from "../chat/chat-presentation-context"
-import { botWorkReceipt } from "@/lib/bot-work-receipt"
+import { botWorkCardIds, botWorkReceipt, loadBotWorkCardTitles } from "@/lib/bot-work-receipt"
 import { botWorkResultLabel } from "../../../../shared/bots/work-result"
 import { delegatedTaskReceipt } from "@/lib/bot-exchange-view"
 import { BotExchangePanel } from "./BotExchangePanel"
@@ -47,10 +57,11 @@ import { splitBotInlineReasoning } from "../../../../shared/bots/inline-reasonin
 import { BotBrowserHelpCard } from "./BotBrowserHelpCard"
 import { botBrowserHelpHistory } from "@/lib/bot-browser-help-history"
 import { BotDeliveredFile, BotDeliveredFiles } from "./BotDeliveredFile"
-import { parseBotFileDelivery } from "../../../../shared/bots/file-delivery"
+import { BotFileDeliveryPreview } from "./BotMessageFilePreview"
+import type { OpenResourcePreviewDetail } from "@/lib/resource-preview-events"
 import { botGroupBrowserScope } from "../../../../shared/bots/contracts"
 import { botImBrowserScope } from "../../../../shared/bots/im-channel"
-import { projectBotExecution } from "@/lib/bot-execution-visibility"
+import { projectBotExecution, visibleBotDelivery } from "@/lib/bot-execution-visibility"
 import { botProfileEvent } from "@/lib/bot-profile-event"
 import { botScheduleReceipt } from "@/lib/bot-schedule-view"
 import {
@@ -75,7 +86,11 @@ export function BotConversationTools({
   groupId,
   imConversationId,
   conversationThreadId,
+  desktopWorkId,
+  workRevision = 0,
   onOpenWork,
+  onPreviewWork,
+  onOpenRoutineDetails,
   onOpenBot,
   onOpenGroup,
   groups = [],
@@ -90,7 +105,11 @@ export function BotConversationTools({
   groupId?: string
   imConversationId?: string
   conversationThreadId?: string
+  desktopWorkId?: string
+  workRevision?: number
   onOpenWork?(workId: string): void
+  onPreviewWork?(workId: string, trigger: HTMLButtonElement, title: string): void
+  onOpenRoutineDetails?(): void
   onOpenBot?(botId: string): void
   onOpenGroup?(groupId: string): void
   groups?: readonly BotGroup[]
@@ -130,8 +149,12 @@ export function BotConversationTools({
     return body && BOT_ROUTINE_SILENT.startsWith(body) ? last.id : ""
   })
   const [origins, setOrigins] = useState<BotMessageOrigin[]>([])
+  const originWindow = JSON.stringify([client.hostId, botId, groupId, threadId, windowKey])
+  const [loadedOriginWindow, setLoadedOriginWindow] = useState<string | null>(null)
+  const [originRetry, setOriginRetry] = useState(0)
   useEffect(() => {
     let disposed = false
+    setLoadedOriginWindow(null)
     if (!threadId) {
       setOrigins([])
       return
@@ -148,15 +171,42 @@ export function BotConversationTools({
         found.push(
           ...(await client.messageOrigins(botId, ids.slice(offset, offset + 100), groupId))
         )
-      if (!disposed) setOrigins(found)
+      if (!disposed) {
+        setOrigins(found)
+        setLoadedOriginWindow(originWindow)
+      }
     })().catch((error) => {
-      if (!disposed) console.warn("[Bots] Message origins unavailable", error)
+      if (!disposed) {
+        console.warn("[Bots] Message origins unavailable", error)
+        if (!groupId) toast.error("暂时无法读取消息信息，编辑尚未就绪", {
+          action: { label: "重试", onClick: () => {
+            if (!disposed) setOriginRetry(value => value + 1)
+          } }
+        })
+      }
     })
     return () => {
       disposed = true
     }
-  }, [client, botId, groupId, threadId, windowKey, context])
+  }, [client, botId, groupId, threadId, windowKey, context, originWindow, originRetry])
   const taskByMessage = useMemo(() => mergeBotMessageOrigins(origins, tasks), [tasks, origins])
+  const workTitleScope = JSON.stringify([client.hostId, botId, threadId])
+  const [workTitleState, setWorkTitleState] = useState<{ scope: string; titles: Map<string, string> }>()
+  const workTitles = workTitleState?.scope === workTitleScope ? workTitleState.titles : undefined
+  useEffect(() => {
+    if (!threadId || groupId || !client.works) return
+    let disposed = false
+    const ids = botWorkCardIds(context.getThreadState(threadId).messages, taskByMessage, botId)
+    void loadBotWorkCardTitles(client.works, botId, ids, () => !disposed).then(titles => {
+      if (!disposed) setWorkTitleState(previous =>
+        previous?.scope === workTitleScope && previous.titles.size === titles.size &&
+        [...titles].every(([id, title]) => previous.titles.get(id) === title)
+          ? previous : { scope: workTitleScope, titles })
+    }).catch(error => {
+      if (!disposed) console.warn("[Bots] Current task titles unavailable", error)
+    })
+    return () => { disposed = true }
+  }, [client, botId, groupId, threadId, context, windowKey, taskByMessage, workRevision, workTitleScope])
   const mentionProjectionWarnings = useRef(new Set<string>())
   useEffect(() => { mentionProjectionWarnings.current.clear() }, [windowKey, threadId])
   const replySource = useMemo(
@@ -164,7 +214,12 @@ export function BotConversationTools({
       groupId
         ? null
         : {
+            editReady: loadedOriginWindow === originWindow,
             resolve: (messageId: string) => client.messageReply(botId, messageId),
+            skillFor: (messageId: string) => {
+              const origin = taskByMessage.get(messageId)?.origin
+              return origin?.kind === "user" ? origin.explicitSkill : undefined
+            },
             quoteFor: (message: Message) => {
               const origin = taskByMessage.get(message.id)?.origin
               if (origin?.kind !== "user" || !origin.replyTo || typeof message.content !== "string")
@@ -173,11 +228,11 @@ export function BotConversationTools({
               return parsed?.reply.id === origin.replyTo.id &&
                 parsed.reply.ordinal === origin.replyTo.ordinal &&
                 parsed.reply.role === origin.replyTo.role
-                ? parsed.reply
+                ? { ...parsed.reply, sourceThreadId: origin.replyTo.sourceThreadId }
                 : undefined
             }
           },
-    [client, botId, groupId, taskByMessage]
+    [client, botId, groupId, taskByMessage, loadedOriginWindow, originWindow]
   )
   const presentUserText = useCallback((message: Message, text: string) => {
     if (groupId || typeof message.content !== "string") return text
@@ -225,7 +280,7 @@ export function BotConversationTools({
       const running = tasks.some((task) =>
         ["queued", "running", "waiting_user"].includes(task.state)
       )
-      view = projectBotExecution(messages, running, cardCallIds)
+      view = projectBotExecution(messages, running, cardCallIds, null, undefined, desktopWorkId)
     }
     return {
       ...view,
@@ -241,31 +296,152 @@ export function BotConversationTools({
     windowKey,
     streamingQuietMessage,
     showExecutionDetails,
+    desktopWorkId,
     tasks,
     cardCallIds
   ])
   useEffect(() => {
     if (!exchangeId && exchangeTrigger.current?.isConnected) exchangeTrigger.current.focus()
   }, [exchangeId])
+  const historyNavigation = useRef(0)
+  const [attachmentPreview, setAttachmentPreview] = useState<{
+    ownerThreadId: string
+    client: BotClient
+    botId: string
+    request: OpenResourcePreviewDetail
+  } | null>(null)
+  const closeAttachmentPreview = useCallback(() => {
+    historyNavigation.current++
+    setAttachmentPreview(null)
+  }, [])
+  useEffect(() => {
+    setAttachmentPreview(null)
+    const initial = useAppStore.getState()
+    const unsubscribe = client.hostId === "local" && !groupId && !imConversationId && threadId === bot?.threadId
+      ? useAppStore.subscribe(state => {
+      if (state.mainView !== initial.mainView || state.currentThreadId !== initial.currentThreadId ||
+          state.showCustomizeView) closeAttachmentPreview()
+      }) : () => {}
+    return () => {
+      historyNavigation.current++
+      unsubscribe()
+    }
+  }, [client, threadId, botId, bot?.threadId, groupId, imConversationId, closeAttachmentPreview])
   const openHistorySource = useCallback(
-    (href: string) => {
-      const source = parseBotWorkHistoryHref(href)
-      if (!source || !client.works?.resolveSource || !onOpenWork || groupId) {
-        toast.error("此历史来源暂不可用，请重新查询。")
-        return
+    async (href: string) => {
+      const navigation = ++historyNavigation.current
+      const initial = useAppStore.getState()
+      let viewChanged = initial.showCustomizeView
+      const unsubscribe = useAppStore.subscribe((state) => {
+        if (state.mainView !== initial.mainView || state.currentThreadId !== initial.currentThreadId ||
+            state.showCustomizeView) viewChanged = true
+      })
+      const isCurrent = () => historyNavigation.current === navigation && !viewChanged
+      const unavailable = () => new Error("此历史来源暂不可用，请重新查询。")
+      const sourceNavigation = useChatSourceNavigation.getState()
+      let requested: typeof sourceNavigation.target = null
+      const request = ({ threadId, messageId, ordinal }: NonNullable<typeof sourceNavigation.target>) => {
+        requested = { threadId, messageId, ordinal }
+        sourceNavigation.request(requested)
       }
-      void client.works
-        .resolveSource(botId, source)
-        .then((target) => {
-          useChatSourceNavigation.getState().request(target)
-          onOpenWork(source.workId)
-        })
-        .catch((error) => toast.error(error instanceof Error ? error.message : "无法定位原消息"))
+      const openThread = async (target: NonNullable<typeof sourceNavigation.target>) => {
+        if (!isCurrent()) return
+        if (isThreadDeletionPending(target.threadId) || isThreadRetired(target.threadId)) throw unavailable()
+        request(target)
+        await openBotWorkThreadChat(context, target.threadId)
+      }
+
+      try {
+        if (!isCurrent()) return
+        if (groupId) throw unavailable()
+        const attachment = parseBotWorkAttachmentHref(href)
+        if (attachment) {
+          if (imConversationId || client.hostId !== "local" || !threadId || threadId !== bot?.threadId ||
+              !client.works?.resolveSource || !client.authorizeDeliveredFile) throw unavailable()
+          const { callId, fileIndex, ...historySource } = attachment
+          const target = await client.works.resolveSource(botId, historySource)
+          if (!isCurrent()) return
+          if (target.messageId !== attachment.messageId || isThreadDeletionPending(target.threadId) ||
+              isThreadRetired(target.threadId)) throw unavailable()
+          const source = { threadId: target.threadId, assistantMessageId: target.messageId, callId, fileIndex }
+          const authorized = await client.authorizeDeliveredFile(source)
+          if (!isCurrent()) return
+          if (isThreadDeletionPending(target.threadId) || isThreadRetired(target.threadId)) throw unavailable()
+          // The main chat owns this dialog. Its read-only content keeps the original
+          // source thread, preserving the previewer's receipt and Markdown checks.
+          setAttachmentPreview({ ownerThreadId: threadId, client, botId, request: {
+            threadId: target.threadId, intentId: navigation, filePath: authorized.filePath,
+            workspacePathKind: "absolute", externalPreviewGrant: authorized.grant,
+            externalPreviewGrantExpiresAt: authorized.expiresAt,
+            ...(authorized.markdownBasePath ? { markdownBasePath: authorized.markdownBasePath } : {}),
+            botDeliverySource: source
+          } })
+          return
+        }
+        const workId = parseBotWorkHref(href)
+        if (workId) {
+          if (imConversationId || client.hostId !== "local" || !onOpenWork || !client.works) throw unavailable()
+          const work = await client.works.get(botId, workId)
+          if (!isCurrent()) return
+          if (work.id !== workId || work.botId !== botId || work.audienceKey !== "desktop" ||
+              work.source || (work.conversation && work.conversation.state !== "bound")) throw unavailable()
+          onOpenWork(workId)
+          return
+        }
+        const ordinary = parseBotThreadHistoryHref(href)
+        if (ordinary && client.conversations?.resolveHistory) {
+          const target = await client.conversations.resolveHistory(botId, ordinary)
+          if (!isCurrent()) return
+          if (target.threadId !== ordinary.conversation.threadId || target.messageId !== ordinary.messageId)
+            throw unavailable()
+          await ensureBotWorkThreadSummary(target.threadId, isCurrent, thread =>
+            matchesBotThreadDraftRef(thread, ordinary.conversation))
+          await openThread(target)
+          return
+        }
+
+        const source = parseBotWorkHistoryHref(href)
+        if (!source || !client.works?.resolveSource) throw unavailable()
+        const target = await client.works.resolveSource(botId, source)
+        if (!isCurrent()) return
+        if (target.messageId !== source.messageId) throw unavailable()
+        if (target.detached) {
+          // A retained delivery can outlive the work record. The Host has verified
+          // its historical association and the original message without rebinding it.
+          await ensureBotWorkThreadSummary(target.threadId, isCurrent)
+          await openThread(target)
+          return
+        }
+
+        if (client.hostId === "local" && client.conversations && !imConversationId) {
+          const work = await client.works.get(botId, source.workId)
+          if (!isCurrent()) return
+          if (work.botId !== botId || work.id !== source.workId || work.threadId !== target.threadId)
+            throw unavailable()
+          if (!work.source && work.audienceKey === "desktop") {
+            if (work.conversation && work.conversation.state !== "bound") throw unavailable()
+            const threadId = await resolveBotWorkThreadForNavigation(client, work, isCurrent)
+            if (threadId === target.threadId) await openThread(target)
+            return
+          }
+        }
+
+        // Channel and remote work still open in their own conversation surface.
+        if (!onOpenWork) throw unavailable()
+        request(target)
+        onOpenWork(source.workId)
+      } catch (error) {
+        if (requested && useChatSourceNavigation.getState().target === requested) sourceNavigation.clear()
+        if (isCurrent()) toast.error(error instanceof Error ? error.message : "无法定位原消息")
+      } finally {
+        unsubscribe()
+      }
     },
-    [client, botId, onOpenWork, groupId]
+    [client, botId, bot?.threadId, threadId, onOpenWork, groupId, imConversationId, context]
   )
   const presentTool = useCallback(
-    (tool: ToolCall, result?: Pick<ToolResult, "content" | "is_error">) => {
+    (tool: ToolCall, result?: Pick<ToolResult, "content" | "is_error">, assistantMessageId?: string,
+      deliveryScope?: Message["botHistoryDeliveryScope"]) => {
       if (!result) {
         const stoppedQuestion =
           !showExecutionDetails && tool.name === "request_user_input" && !cardCallIds.has(tool.id)
@@ -309,27 +485,34 @@ export function BotConversationTools({
           </div>
         )
       const history = botHistoryReceipt(tool, result)
-      if (history?.entries.length && !groupId)
+      if (history?.entries.length && !groupId &&
+          (!("thread" in history) || (client.hostId === "local" && !imConversationId &&
+            threadId === bot?.threadId && client.conversations?.resolveHistory)))
         return (
           <BotHistorySources
             page={history}
+            messageId={typeof tool.args?.messageId === "string" ? tool.args.messageId.trim() : undefined}
             onOpen={openHistorySource}
           />
         )
       const workReceipt = botWorkReceipt(tool, result, botId)
-      if (workReceipt && onOpenWork)
+      if (workReceipt && (onPreviewWork || onOpenWork)) {
+        const title = workTitles?.get(workReceipt.id) ?? workReceipt.title
         return (
           <button
             type="button"
             className="bot-exchange-link"
-            onClick={() => onOpenWork(workReceipt.id)}
+            onClick={(event) => onPreviewWork
+              ? onPreviewWork(workReceipt.id, event.currentTarget, title)
+              : onOpenWork?.(workReceipt.id)}
           >
             <span>
-              {workReceipt.label} · {workReceipt.title}
+              {workReceipt.label} · {title}
             </span>
             <ChevronRight size={14} />
           </button>
         )
+      }
       const scheduleReceipt = !showExecutionDetails ? botScheduleReceipt(tool, result) : null
       if (scheduleReceipt && scheduleReceipt.action !== "list") {
         if (scheduleReceipt.action === "remove")
@@ -352,12 +535,15 @@ export function BotConversationTools({
                 aria-label={`查看例行任务：${scheduleReceipt.name}`}
                 onClick={(event) => {
                   event.stopPropagation()
-                  useBotViewStore.getState().update(client.hostId, {
-                    selectedId: botId,
-                    groupId: null,
-                    detailOpen: true,
-                    detailTab: "details"
-                  })
+                  if (onOpenRoutineDetails) onOpenRoutineDetails()
+                  else {
+                    useBotViewStore.getState().update(client.hostId, {
+                      selectedId: botId,
+                      groupId: null,
+                      detailOpen: true,
+                      detailTab: "details"
+                    })
+                  }
                 }}
               >
                 <Clock size={14} aria-hidden="true" />
@@ -372,11 +558,12 @@ export function BotConversationTools({
         )
       }
       if (tool.name === "bot_deliver_files" && !result.is_error && threadId) {
-        const files = parseBotFileDelivery(result.content)
+        const files = visibleBotDelivery(result.content, deliveryScope, desktopWorkId)
         if (!files) return null
         return (
           <BotDeliveredFiles files={files} callId={tool.id} client={client} botId={botId}
-            groupId={groupId} imConversationId={imConversationId} threadId={threadId} />
+            groupId={groupId} imConversationId={imConversationId} threadId={threadId}
+            assistantMessageId={desktopWorkId ? assistantMessageId : undefined} />
         )
       }
       const receipt = delegatedTaskReceipt(tool, result)
@@ -401,7 +588,11 @@ export function BotConversationTools({
     [
       openHistorySource,
       bots,
+      bot?.threadId,
       onOpenWork,
+      onPreviewWork,
+      onOpenRoutineDetails,
+      workTitles,
       schedules,
       tasks,
       client,
@@ -409,6 +600,7 @@ export function BotConversationTools({
       imConversationId,
       botId,
       threadId,
+      desktopWorkId,
       showExecutionDetails,
       cardCallIds,
       executionView.stoppedQuestions
@@ -419,34 +611,35 @@ export function BotConversationTools({
       if (message.role !== "user") return null
       const task = taskByMessage.get(message.id)
       if (task?.origin.kind === "work" && task.origin.dispatch) {
+        const text = typeof message.content === "string"
+          ? message.content
+          : message.content.filter((block) => block.type === "text").map((block) => block.text).join("\n")
         return (
           <section className="bot-work-instruction" aria-label="Bot 交办说明">
             <div className="bot-work-instruction-label">
               {task.origin.dispatch === "create" ? "Bot 交办" : "Bot 补充"}
             </div>
             <div className="bot-work-instruction-text">
-              {typeof message.content === "string"
-                ? message.content
-                : message.content
-                    .filter((block) => block.type === "text")
-                    .map((block) => block.text)
-                    .join("\n")}
+              {cleanUserAttachmentContentForDisplay(text)}
             </div>
           </section>
         )
       }
       if (task?.origin.kind === "work_result") {
         const origin = task.origin
+        const title = workTitles?.get(origin.workId) ?? origin.workTitle
         return (
           <button
             type="button"
             className="bot-exchange-link"
-            onClick={() => onOpenWork?.(origin.workId)}
-            disabled={!onOpenWork}
-            aria-label={botWorkResultLabel(origin.executionState) + "：" + origin.workTitle}
+            onClick={(event) => onPreviewWork
+              ? onPreviewWork(origin.workId, event.currentTarget, title)
+              : onOpenWork?.(origin.workId)}
+            disabled={!onPreviewWork && !onOpenWork}
+            aria-label={botWorkResultLabel(origin.executionState) + "：" + title}
           >
             <span>
-              {botWorkResultLabel(origin.executionState)} · {origin.workTitle}
+              {botWorkResultLabel(origin.executionState)} · {title}
             </span>
             <ChevronRight size={14} />
           </button>
@@ -497,7 +690,7 @@ export function BotConversationTools({
         </button>
       )
     },
-    [taskByMessage, onOpenWork]
+    [taskByMessage, onOpenWork, onPreviewWork, workTitles]
   )
   const presentFile = useCallback(
     (file: { filePath: string; threadId: string; label: ReactNode; messageId?: string }) => {
@@ -513,6 +706,7 @@ export function BotConversationTools({
           <ChatMessagePresentationContext.Provider value={presentMessage}>
             <ChatMessageVisibilityContext.Provider value={executionView.quietMessages}>
               <ChatPresentationContext.Provider value="bot">
+                <ChatDesktopWorkIdContext.Provider value={desktopWorkId}>
                 <ChatExecutionDetailsContext.Provider value={showExecutionDetails}>
                   <ChatFoldedToolCallsContext.Provider value={executionView.foldedTools}>
                     <ChatExecutionCardCallIdsContext.Provider value={cardCallIds}>
@@ -539,11 +733,25 @@ export function BotConversationTools({
                     </ChatExecutionCardCallIdsContext.Provider>
                   </ChatFoldedToolCallsContext.Provider>
                 </ChatExecutionDetailsContext.Provider>
+                </ChatDesktopWorkIdContext.Provider>
               </ChatPresentationContext.Provider>
             </ChatMessageVisibilityContext.Provider>
           </ChatMessagePresentationContext.Provider>
         </ChatToolPresentationContext.Provider>
       </div>
+      {attachmentPreview && attachmentPreview.ownerThreadId === threadId &&
+        attachmentPreview.client === client && attachmentPreview.botId === botId && !groupId && !imConversationId && (
+        <BotFileDeliveryPreview
+          key={`${attachmentPreview.request.threadId}:${attachmentPreview.request.intentId}`}
+          client={client}
+          botId={botId}
+          ownerThreadId={attachmentPreview.ownerThreadId}
+          threadId={attachmentPreview.request.threadId}
+          name={bot?.name ?? "Bot"}
+          request={attachmentPreview.request}
+          clear={closeAttachmentPreview}
+        />
+      )}
       {exchangeId && (
         <BotExchangePanel
           key={exchangeId}

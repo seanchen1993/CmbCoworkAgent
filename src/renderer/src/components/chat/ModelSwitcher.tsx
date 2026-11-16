@@ -1,4 +1,5 @@
-import { useState, useEffect, memo, useMemo, useSyncExternalStore } from "react"
+import { useState, useEffect, useRef, memo, useMemo, useSyncExternalStore } from "react"
+import { toast } from "sonner"
 import { useShallow } from "zustand/react/shallow"
 import { ChevronDown, Check, Key, Zap, Info } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -13,8 +14,10 @@ import {
 import { cn } from "@/lib/utils"
 import {
   resolveHydratedThreadModel,
+  resolveBotWorkViewModel,
   type ModelRoutingMode
 } from "../../../../shared/thread-model-selection"
+import { botWorkModelRoutingMode, isBotCreatedWorkMetadata, resolveLegacyBotWorkModelRef } from "../../../../shared/bots/model-policy"
 import { CustomModelDialog } from "./CustomModelDialog"
 import {
   invalidateModelCatalogCache,
@@ -57,7 +60,7 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
     readModelCatalogCache,
     readModelCatalogCache
   )
-  const routingMode: ModelRoutingMode = modelCatalog?.routingMode ?? "pinned"
+  const globalRoutingMode: ModelRoutingMode = modelCatalog?.routingMode ?? "pinned"
   const routingModeLoaded = modelCatalog !== null
   const defaultModelId = modelCatalog?.defaultModelId ?? ""
   const currentModel = useThreadStateSelector(threadId, selectCurrentModel) ?? ""
@@ -70,44 +73,84 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
     void loadModels()
   }, [loadModels])
 
-  const selectedModel = models.find((m) => m.id === currentModel)
-
   // Smart routing requires both a premium-tier and an economy-tier model to be configured
   const hasEconomyModel = models.some((m) => m.tier === "economy")
   const hasPremiumModel = models.some((m) => !m.tier || m.tier === "premium")
   // canEnableRouting: both tiers must be present (models without tier default to premium)
   const canEnableRouting = hasEconomyModel && hasPremiumModel
 
-  // Resolve display name for the auto-routed model
-  const routedModelName = routingResult
-    ? (models.find((m) => m.id === routingResult.resolvedModelId)?.name ??
-      routingResult.resolvedModelId.replace(/^(?:custom|builtin):/, ""))
-    : null
-  const routedTierLabel = routingResult?.resolvedTier === "economy" ? "经济" : routingResult?.resolvedTier === "premium" ? "强力" : null
-
   const threadSummary = useMemo(
     () => threads.find((thread) => thread.thread_id === threadId) ?? null,
     [threadId, threads]
   )
+  const localBotRouting = isBotCreatedWorkMetadata(threadSummary?.metadata)
+  const routingMode = botWorkModelRoutingMode(threadSummary?.metadata) ?? globalRoutingMode
+  const routingToggleOn = localBotRouting
+    ? threadSummary?.metadata?.botWorkModelRoutingMode === "default" ||
+      (threadSummary?.metadata?.botWorkModelRoutingMode == null && globalRoutingMode === "auto")
+    : routingMode === "auto"
+  const canToggleRouting = localBotRouting || canEnableRouting
+  const [savingModel, setSavingModel] = useState(false)
+  const visibleThread = useRef(threadId)
+  visibleThread.current = threadId
+  const availableDefaultModelId =
+    models.find((model) => model.id === defaultModelId && model.available)?.id ??
+    models.find((model) => model.available)?.id ?? ""
   const hydratedModel = useMemo(
     () =>
       routingModeLoaded
-        ? resolveHydratedThreadModel(threadSummary?.metadata, routingMode)
-        : { modelId: null },
-    [routingMode, routingModeLoaded, threadSummary]
+        ? resolveHydratedThreadModel(threadSummary?.metadata, routingMode, availableDefaultModelId)
+        : { modelId: null, routingResult: null },
+    [routingMode, routingModeLoaded, threadSummary, availableDefaultModelId]
   )
-  const effectiveCurrentModel = currentModel || hydratedModel.modelId || ""
+  // A Bot work can hydrate while global mode is pinned and no catalog is loaded.
+  // Keep its actual last route visible even if that hydration had no model to select.
+  const displayedRoutingResult = routingResult ?? (localBotRouting ? hydratedModel.routingResult : null)
+  const routedModelName = displayedRoutingResult
+    ? (models.find((m) => m.id === displayedRoutingResult.resolvedModelId)?.name ??
+      displayedRoutingResult.resolvedModelId.replace(/^(?:custom|builtin):/, ""))
+    : null
+  const routedTierLabel = displayedRoutingResult?.resolvedTier === "economy" ? "经济" : displayedRoutingResult?.resolvedTier === "premium" ? "强力" : null
+  const botViewModel = localBotRouting
+    ? resolveBotWorkViewModel(routingMode, displayedRoutingResult?.resolvedModelId || "", threadSummary?.metadata, models, availableDefaultModelId)
+    : ""
+  const legacyBotRef = threadSummary?.metadata?.botWorkModelRoutingMode == null &&
+    botViewModel.startsWith("custom:") && !models.some(model => model.id === botViewModel)
+    ? botViewModel : null
+  const [legacyBotSelection, setLegacyBotSelection] = useState<{
+    ref: string; resolved: string; catalog: typeof modelCatalog
+  } | null>(null)
+  useEffect(() => {
+    if (!routingModeLoaded || !legacyBotRef) return
+    let current = true
+    // This existing read-only API preserves registry order when providers share
+    // an API model name. Do not migrate metadata or silently choose the default.
+    void window.api.models.getCustomConfigs().then(configs => {
+      if (current) setLegacyBotSelection({ ref: legacyBotRef,
+        resolved: resolveLegacyBotWorkModelRef(legacyBotRef, configs), catalog: modelCatalog })
+    }).catch(() => {})
+    return () => { current = false }
+  }, [legacyBotRef, modelCatalog, routingModeLoaded])
+  const effectiveCurrentModel = localBotRouting
+    ? legacyBotSelection?.ref === botViewModel && legacyBotSelection.catalog === modelCatalog
+      ? legacyBotSelection.resolved : botViewModel
+    : currentModel || hydratedModel.modelId || ""
+  const selectedModel = models.find((m) => m.id === effectiveCurrentModel)
 
   useEffect(() => {
-    if (hydratedModel.modelId && hydratedModel.modelId !== currentModel) {
+    const nextModel = localBotRouting ? effectiveCurrentModel : hydratedModel.modelId
+    if (nextModel && nextModel !== currentModel) {
       // Hydration only restores the model used by the current view. Persisting here
       // would turn a read-only session open into an updated_at change.
-      restoreCurrentModel?.(hydratedModel.modelId)
+      restoreCurrentModel?.(nextModel)
     }
-  }, [currentModel, hydratedModel.modelId, restoreCurrentModel])
+  }, [currentModel, hydratedModel.modelId, restoreCurrentModel, localBotRouting, effectiveCurrentModel])
 
   useEffect(() => {
     if (!routingModeLoaded || models.length === 0) return
+    // A Bot work's explicit choice must not change merely because the view opens.
+    // Missing credentials/config remain an actionable error at the existing execution boundary.
+    if (localBotRouting) return
 
     const hasValidSelection =
       effectiveCurrentModel && models.some((m) => m.id === effectiveCurrentModel)
@@ -126,10 +169,27 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
         models.find((model) => model.available)
       if (preferred) setCurrentModel?.(preferred.id)
     }
-  }, [defaultModelId, effectiveCurrentModel, models, routingModeLoaded, setCurrentModel])
+  }, [defaultModelId, effectiveCurrentModel, models, routingModeLoaded, setCurrentModel, localBotRouting])
+
+  async function saveBotModelChoice(mode: "default" | "pinned", modelId?: string): Promise<void> {
+    if (savingModel) return
+    setSavingModel(true)
+    try {
+      // Reuse the existing metadata mutation/identity fence. Never change global routing here.
+      await useAppStore.getState().patchThreadMetadata(threadId, {
+        set: { botWorkModelRoutingMode: mode, ...(modelId ? { model: modelId } : {}) }
+      })
+      if (visibleThread.current === threadId && modelId) restoreCurrentModel?.(modelId)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "模型设置未保存，请重试。")
+    } finally {
+      setSavingModel(false)
+    }
+  }
 
   function handleModelSelect(modelId: string): void {
-    setCurrentModel?.(modelId)
+    if (localBotRouting) void saveBotModelChoice("pinned", modelId)
+    else setCurrentModel?.(modelId)
     setOpen(false)
   }
 
@@ -158,7 +218,9 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
                 <span>{selectedModel.name}</span>
               </>
             ) : (
-              <span>选择模型</span>
+              <span title={effectiveCurrentModel || undefined}>
+                {localBotRouting && effectiveCurrentModel ? "所选模型不可用" : "选择模型"}
+              </span>
             )}
             <ChevronDown className="size-3" />
           </Button>
@@ -174,21 +236,23 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
               <Zap
                 className={cn(
                   "size-3.5",
-                  canEnableRouting ? "text-amber-500" : "text-muted-foreground/40"
+                  canToggleRouting ? "text-amber-500" : "text-muted-foreground/40"
                 )}
               />
               <span
                 className={cn(
                   "text-xs font-medium",
-                  !canEnableRouting && "text-muted-foreground/60"
+                  !canToggleRouting && "text-muted-foreground/60"
                 )}
               >
-                智能路由
+                {localBotRouting ? "跟随全局模型策略" : "智能路由（全局）"}
               </span>
               <div className="group relative shrink-0">
                 <Info className="size-3.5 text-muted-foreground/40 hover:text-muted-foreground/70 cursor-default transition-colors" />
                 <div className="pointer-events-none absolute bottom-full left-0 mb-2 w-64 rounded-md border border-border bg-popover px-3 py-2 text-[11px] leading-5 text-muted-foreground shadow-md opacity-0 group-hover:opacity-100 transition-opacity z-50">
-                  {canEnableRouting
+                  {localBotRouting
+                    ? "开启时沿用全局路由策略；关闭时固定此任务的模型。不会修改全局设置。"
+                    : canEnableRouting
                     ? "开启后根据任务复杂度自动选择模型：强力档处理复杂任务（代码、分析），经济档处理简单任务（问答、翻译）"
                     : "需要同时配置强力和经济两个档位的模型，才能开启智能路由。"}
                 </div>
@@ -196,18 +260,27 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
             </div>
             <button
               type="button"
-              disabled={!canEnableRouting || !routingModeLoaded}
+              role="switch"
+              aria-checked={routingToggleOn}
+              aria-label={localBotRouting ? "跟随全局模型策略" : "智能路由（全局）"}
+              disabled={!canToggleRouting || !routingModeLoaded || savingModel ||
+                (localBotRouting && routingToggleOn && !selectedModel?.available)}
               onClick={() => {
-                if (!canEnableRouting || !routingModeLoaded) return
+                if (!canToggleRouting || !routingModeLoaded) return
+                if (localBotRouting) {
+                  const next = routingToggleOn ? "pinned" : "default"
+                  void saveBotModelChoice(next, next === "pinned" ? effectiveCurrentModel : undefined)
+                  return
+                }
                 const next: ModelRoutingMode = routingMode === "auto" ? "pinned" : "auto"
                 updateCachedRoutingMode(next)
                 void window.api.routing.setMode(next)
               }}
               className={cn(
                 "relative inline-flex h-4 w-7 flex-shrink-0 rounded-full border-2 border-transparent transition-colors",
-                !canEnableRouting
+                !canToggleRouting
                   ? "cursor-not-allowed bg-muted-foreground/20"
-                  : routingMode === "auto"
+                  : routingToggleOn
                     ? "cursor-pointer bg-amber-500"
                     : "cursor-pointer bg-muted-foreground/30"
               )}
@@ -215,7 +288,7 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
               <ToggleThumb
                 className={cn(
                   "inline-block h-3 w-3 transform shadow",
-                  routingMode === "auto" ? "translate-x-3" : "translate-x-0"
+                  routingToggleOn ? "translate-x-3" : "translate-x-0"
                 )}
               />
             </button>
@@ -229,7 +302,7 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
                   onClick={() => {
                     if (model.available) handleModelSelect(model.id)
                   }}
-                  disabled={!model.available}
+                  disabled={!model.available || savingModel}
                   title={model.available ? undefined : "请先在模型配置中填写 API 密钥"}
                   className={cn(
                     "w-full flex items-center gap-1.5 px-2 py-1.5 rounded-sm text-xs transition-colors text-left font-mono disabled:cursor-not-allowed disabled:opacity-50",
@@ -289,7 +362,8 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
         open={customDialogOpen}
         selectedModelId={dialogModelId}
         onModelSaved={(modelId) => {
-          setCurrentModel?.(modelId)
+          // Managing provider configuration is not selecting this work's model.
+          if (!localBotRouting) setCurrentModel?.(modelId)
         }}
         onOpenChange={(isOpen) => {
           setCustomDialogOpen(isOpen)

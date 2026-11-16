@@ -523,9 +523,17 @@ async function main() {
         "active"
       )
     }
+    const takeControl = async () => {
+      await page.getByRole("button", { name: /^(获取|归还)控制权$/ }).waitFor()
+      const take = page.getByRole("button", { name: "获取控制权", exact: true })
+      if (await take.count()) await take.click()
+      await page.getByRole("button", { name: "归还控制权", exact: true }).waitFor()
+      await composer().waitFor()
+    }
     await checkReturned(1)
     if (explicitWorkspace) {
-      // Keep direct task-local edits covered in the explicit-directory variant.
+      // Direct task input requires an actual control handoff.
+      await takeControl()
       await composer().fill("M05_EDIT_WORK：把第一版改为第二版。")
       await send()
     } else {
@@ -542,6 +550,7 @@ async function main() {
         .last()
         .waitFor({ timeout: 90000 })
       await page.locator(`[data-work-id="${work.id}"]`).click()
+      await page.getByRole("button", { name: "打开任务", exact: true }).click()
       await page.locator(`[data-chat-thread-id="${work.threadId}"]`).waitFor()
       const followUp = page.getByRole("region", { name: "Bot 交办说明", exact: true }).last()
       await followUp.waitFor()
@@ -562,14 +571,16 @@ async function main() {
     assert.ok(!secondReport.content.includes("第一版安排"))
     await page.getByText("第二版安排", { exact: false }).last().waitFor({ timeout: 90000 })
     await checkReturned(2)
+    await page.getByRole("button", { name: "任务详情与操作", exact: true }).click()
     await page.getByRole("button", { name: "完成任务", exact: true }).click()
+    await page.getByRole("button", { name: "任务详情与操作", exact: true }).click()
     await page.getByRole("button", { name: "继续处理", exact: true }).waitFor()
     assert.equal(
       await page.locator(".bots-conversation").locator('textarea:not([disabled]), [role="textbox"][contenteditable="true"]').count(),
       0
     )
     await page.getByRole("button", { name: "继续处理", exact: true }).click()
-    await composer().waitFor()
+    await takeControl()
     const reopened = await page.evaluate(
       async ({ botId, id }) => (window as any).api.bots.works.get(botId, id),
       { botId: bot.id, id: work.id }
@@ -672,6 +683,7 @@ async function main() {
     await page.getByRole("option", { name: "深色", exact: true }).click()
     await page.keyboard.press("Escape")
     await page.waitForFunction(() => document.documentElement.dataset.colorScheme === "dark")
+    await page.getByRole("button", { name: "搜索任务", exact: true }).click()
     const searchColors = await page.locator(".bot-work-search").evaluate((input) => {
       const style = getComputedStyle(input),
         probe = document.createElement("span")

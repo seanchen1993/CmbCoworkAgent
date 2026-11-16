@@ -38,6 +38,11 @@ async function main() {
     const page = await app.firstWindow()
     await page.waitForFunction(() => Boolean((window as any).m05Directory))
     await page.waitForFunction(() => document.querySelectorAll(".bot-work-row").length === 6)
+    assert.equal(await page.getByRole("textbox", { name: "搜索任务", exact: true }).count(), 0)
+    const createTask = page.getByRole("button", { name: "新建独立任务", exact: true })
+    await createTask.click()
+    await page.getByRole("button", { name: "取消", exact: true }).click()
+    assert.equal(await createTask.evaluate(button => button === document.activeElement), true)
     await page.getByRole("button", { name: "更多任务", exact: true }).click()
     await page.waitForFunction(() => document.querySelectorAll(".bot-work-row").length === 40)
     await page.getByRole("button", { name: "更多任务", exact: true }).click()
@@ -54,10 +59,15 @@ async function main() {
       const s = (window as any).m05Directory
       s.rows.slice(0, 7).forEach((r: any) => (r.title = "Seven " + r.id))
     })
+    await page.getByRole("button", { name: "搜索任务", exact: true }).click()
+    await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "搜索任务" && document.activeElement?.tagName === "INPUT")
     await page.getByRole("textbox", { name: "搜索任务", exact: true }).fill("Seven")
     await page.waitForFunction(() => document.querySelectorAll(".bot-work-row").length === 6)
     await page.getByRole("button", { name: "更多任务", exact: true }).click()
     await page.waitForFunction(() => document.querySelectorAll(".bot-work-row").length === 7)
+    await page.getByRole("textbox", { name: "搜索任务", exact: true }).press("Escape")
+    await page.waitForFunction(() => !document.querySelector(".bot-work-search"))
+    assert.equal(await page.getByRole("button", { name: "搜索任务", exact: true }).evaluate(button => button === document.activeElement), true)
     // Late selection responses cannot restore a previous work after switching Bot.
     await page.evaluate(() => {
       const s = (window as any).m05Directory

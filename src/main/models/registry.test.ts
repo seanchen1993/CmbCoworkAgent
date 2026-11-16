@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
+import { resolveLegacyBotWorkModelRef } from "../../shared/bots/model-policy"
 
 const state = vi.hoisted(() => ({
   manifest: {} as Record<string, unknown>,
@@ -294,6 +295,20 @@ describe("builtin model registry", () => {
       source: "custom"
     })
     expect(getDefaultModelConfig()).toMatchObject({ ref: "custom:saved-default" })
+  })
+
+  it("keeps Bot legacy alias restoration consistent with execution when the display default reorders providers", async () => {
+    await refreshBuiltinModelCatalog(true)
+    const configs = [
+      { id: "provider-a", model: "same-api-model", apiKey: "a", name: "A", baseUrl: "https://a.example.com" },
+      { id: "provider-b", model: "same-api-model", apiKey: "b", name: "B", baseUrl: "https://b.example.com" }
+    ]
+    state.customConfigs = configs
+    state.storedDefault = "custom:provider-b"
+    expect(getModelConfigs()[0].ref).toBe("custom:provider-b")
+    const restored = resolveLegacyBotWorkModelRef("custom:same-api-model", configs)
+    expect(restored).toBe("custom:provider-a")
+    expect(getModelConfigByRef(restored)).toEqual(getModelConfigByRef("custom:same-api-model"))
   })
 
   it("falls back to the saved available model when a pinned model was removed", async () => {

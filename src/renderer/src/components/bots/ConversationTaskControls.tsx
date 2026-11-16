@@ -1,15 +1,22 @@
 import { useEffect, useId, useRef, useState } from "react"
 import { toast } from "sonner"
+import { ArrowLeft, Link2, MoreHorizontal } from "lucide-react"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { Close as PopoverClose } from "@radix-ui/react-popover"
 import { useAppStore } from "@/lib/store"
 import { useThreadContext } from "@/lib/thread-context"
 import { useBotViewStore } from "./view-store"
 import { BotExecutionDetailsToggle } from "./BotExecutionDetailsToggle"
+import { BotUnlinkDialog } from "./BotUnlinkDialog"
 import {
+  clearUnlinkedBotWorkSelection,
   parkLinkedConversationQueue,
-  parkOrdinaryConversationQueue
+  prepareBotConversationLink
 } from "@/lib/bot-conversation-transition"
+import { threadDraftIncarnation } from "@/lib/bot-conversation-draft"
 import type { BotWorkConversationResolution } from "../../../../shared/bots/conversation"
 import type { BotDefinition } from "../../../../shared/bots/contracts"
+import type { BotOrdinaryThreadRef } from "../../../../shared/bots/thread-history"
 import { assertBotNonTeamConversation } from "../../../../shared/bots/team-policy"
 import {
   Dialog,
@@ -19,7 +26,7 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 
-export function returnToBotTask(link: BotWorkConversationResolution) {
+export function returnToBotTask(link: BotWorkConversationResolution, detailTab?: "computer" | "details") {
   const views = useBotViewStore.getState(),
     old = views.hosts.local
   views.update("local", {
@@ -27,7 +34,17 @@ export function returnToBotTask(link: BotWorkConversationResolution) {
     groupId: null,
     showArchived: link.bot.archived,
     detailOpen: true,
+    ...(detailTab ? { detailTab } : {}),
     activeWorkIdByBot: { ...old?.activeWorkIdByBot, [link.bot.id]: link.work.id }
+  })
+  useAppStore.getState().setMainView("bots")
+}
+export function returnToBotMain(botId: string) {
+  const views = useBotViewStore.getState()
+  views.update("local", {
+    selectedId: botId,
+    groupId: null,
+    activeWorkIdByBot: { ...views.hosts.local?.activeWorkIdByBot, [botId]: null }
   })
   useAppStore.getState().setMainView("bots")
 }
@@ -41,13 +58,14 @@ export function ConversationTaskControls({
   refresh(): void
 }) {
   const context = useThreadContext(),
-    [open, setOpen] = useState(false),
+    [linkTarget, setLinkTarget] = useState<BotOrdinaryThreadRef | null>(null),
     [bots, setBots] = useState<BotDefinition[]>([]),
     [botId, setBotId] = useState(""),
     [title, setTitle] = useState(""),
     [goal, setGoal] = useState(""),
     [submitted, setSubmitted] = useState(false),
     [saving, setSaving] = useState(false)
+  const [unlinkTarget, setUnlinkTarget] = useState<{ link: BotWorkConversationResolution; hasOpenPages: boolean } | null>(null)
   const formId = useId()
   const formRef = useRef<HTMLFormElement>(null)
   const botError = submitted && !botId ? "请选择所属 Bot。" : null
@@ -56,10 +74,13 @@ export function ConversationTaskControls({
   const current = useRef(threadId)
   current.current = threadId
   const operation = useRef<{ fingerprint: string; id: string } | null>(null)
+  const unlinkInspection = useRef<(() => void) | null>(null)
   useEffect(() => {
-    setOpen(false)
+    setLinkTarget(null)
+    setUnlinkTarget(null)
     setSubmitted(false)
     operation.current = null
+    return () => unlinkInspection.current?.()
   }, [threadId])
   const fail = (error: unknown) =>
     toast.error(error instanceof Error ? error.message : "操作失败，请重试。")
@@ -68,7 +89,8 @@ export function ConversationTaskControls({
     try {
       const row = await window.api.threads.get(target)
       if (current.current !== target) return
-      assertBotNonTeamConversation(row?.metadata)
+      if (!row || row.thread_id !== target) throw new Error("原会话已变化，请重新打开。")
+      assertBotNonTeamConversation(row.metadata)
       const snapshot = await window.api.bots.snapshot()
       if (current.current !== target) return
       const available = snapshot.bots.filter((b) => !b.archived && !b.deleting)
@@ -80,13 +102,13 @@ export function ConversationTaskControls({
       )
       setGoal("")
       setSubmitted(false)
-      setOpen(true)
+      setLinkTarget({ kind: "local_thread", threadId: target, incarnation: threadDraftIncarnation(row) })
     } catch (error) {
       fail(error)
     }
   }
   const associate = async () => {
-    if (saving) return
+    if (saving || !linkTarget || linkTarget.threadId !== threadId) return
     setSubmitted(true)
     if (!botId || !title.trim() || !goal.trim()) {
       const field = !botId ? "botId" : !title.trim() ? "title" : "goal"
@@ -95,33 +117,27 @@ export function ConversationTaskControls({
       return
     }
     const target = threadId
+    const assertLive = () => {
+      if (current.current !== target) throw new Error("原会话已切换，未完成关联。")
+    }
     setSaving(true)
     try {
-      await parkOrdinaryConversationQueue(context, target)
-      const row = await window.api.threads.get(target)
-      if (current.current !== target) return
-      assertBotNonTeamConversation(row?.metadata)
-      const token = row?.metadata?.cmb_thread_incarnation
+      const commitLink = await prepareBotConversationLink(context, linkTarget, assertLive)
       const input = {
         botId,
         title: title.trim(),
         goal: goal.trim(),
-        conversation: {
-          kind: "local_thread" as const,
-          threadId: target,
-          incarnation: {
-            token: typeof token === "string" ? token : null,
-            legacyCreatedAt: new Date(row!.created_at).getTime()
-          }
-        }
+        conversation: linkTarget
       }
       const fingerprint = JSON.stringify(input)
-      if (operation.current?.fingerprint !== fingerprint)
-        operation.current = { fingerprint, id: crypto.randomUUID() }
-      await window.api.bots.conversations!.link({ ...input, operationId: operation.current.id })
+      await commitLink(() => {
+        if (operation.current?.fingerprint !== fingerprint)
+          operation.current = { fingerprint, id: crypto.randomUUID() }
+        return window.api.bots.conversations!.link({ ...input, operationId: operation.current.id })
+      })
       await useAppStore.getState().loadThreads()
       if (current.current === target) {
-        setOpen(false)
+        setLinkTarget(null)
         operation.current = null
         refresh()
       }
@@ -131,18 +147,47 @@ export function ConversationTaskControls({
       setSaving(false)
     }
   }
-  const unlink = async () => {
-    if (
-      !link ||
-      !window.confirm(
-        "解除此任务关联？原会话、消息和目录保留，不会重新执行；未发送草稿将停放，需你明确继续。"
-      )
-    )
+  const beginUnlink = async () => {
+    const isForeground = ({ mainView, currentThreadId, showCustomizeView } = useAppStore.getState()) =>
+      mainView === "thread" && currentThreadId === threadId && !showCustomizeView
+    if (!link || saving || unlinkInspection.current || !isForeground()) return
+    const inspect = window.api.bots.conversations?.unlinkHasOpenPages
+    if (!inspect) {
+      fail(new Error("无法核对原任务的电脑状态。"))
       return
+    }
+    const finishInspection = () => {
+      if (unlinkInspection.current !== finishInspection) return
+      unlinkInspection.current = null
+      unsubscribe()
+    }
+    const unsubscribe = useAppStore.subscribe(state => {
+      if (!isForeground(state)) finishInspection()
+    })
+    unlinkInspection.current = finishInspection
+    const isCurrent = () => unlinkInspection.current === finishInspection &&
+      current.current === threadId && isForeground()
     setSaving(true)
     try {
-      await parkLinkedConversationQueue(context, link)
-      await window.api.bots.conversations!.unlink(link.bot.id, link.work.id, link.work.version)
+      const hasOpenPages = await inspect(link.bot.id, link.work.id)
+      if (isCurrent()) setUnlinkTarget({ link, hasOpenPages })
+    } catch (error) {
+      if (isCurrent()) fail(error)
+    } finally {
+      finishInspection()
+      setSaving(false)
+    }
+  }
+  const unlink = async () => {
+    if (!unlinkTarget || saving) return
+    const target = unlinkTarget.link
+    setSaving(true)
+    try {
+      await parkLinkedConversationQueue(context, target)
+      await window.api.bots.conversations!.unlink(target.bot.id, target.work.id, target.work.version)
+      clearUnlinkedBotWorkSelection(target)
+      void context.getThreadActions(threadId).syncDurableTranscript().catch(() => undefined)
+      setUnlinkTarget(null)
       await useAppStore.getState().loadThreads()
       if (current.current === threadId) refresh()
     } catch (error) {
@@ -151,8 +196,10 @@ export function ConversationTaskControls({
       setSaving(false)
     }
   }
+  const lifecycleAction = link?.work.state === "completed" || link?.work.dispatchStopped
+    ? "continue" : "complete"
   const lifecycle = async () => {
-    if (!link) return
+    if (!link || saving) return
     setSaving(true)
     try {
       await window.api.bots.works!.lifecycle({
@@ -160,7 +207,7 @@ export function ConversationTaskControls({
         workId: link.work.id,
         expectedVersion: link.work.version,
         operationId: crypto.randomUUID(),
-        action: link.work.state === "completed" ? "continue" : "complete"
+        action: lifecycleAction
       })
       if (current.current === threadId) refresh()
     } catch (error) {
@@ -169,59 +216,102 @@ export function ConversationTaskControls({
       setSaving(false)
     }
   }
+  const canOpenComputer = link?.work.conversation?.state === "bound" &&
+    link.work.threadId === threadId && link.work.botId === link.bot.id &&
+    !link.work.deletionPending && !link.work.deletionCommitted
+  const stopWork = canOpenComputer && !link.bot.archived && !link.bot.deleting &&
+    (!link.work.dispatchStopped || link.work.backgroundBusy || link.work.pendingPeers > 0 ||
+      ["queued", "running", "waiting_user"].includes(link.work.executionState ?? ""))
+    ? window.api.bots.works?.stop : undefined
+  const stop = async () => {
+    if (!link || !stopWork || saving) return
+    setSaving(true)
+    try {
+      await stopWork(link.bot.id, link.work.id)
+      if (current.current === threadId) refresh()
+    } catch (error) {
+      if (current.current === threadId) fail(error)
+    } finally {
+      setSaving(false)
+    }
+  }
   return (
     <>
-      <div className="flex flex-wrap items-center gap-2 border-b border-border/60 px-4 py-2 text-xs text-muted-foreground">
+      <div data-conversation-task-controls data-linked={Boolean(link) || undefined} className="flex min-w-0 items-center gap-2 border-b border-border/50 px-4 py-2 text-xs text-muted-foreground">
         {link ? (
           <>
-            <span className="truncate">
-              {link.bot.name} · {link.work.title} ·{" "}
-              {link.work.state === "completed" ? "已完成" : "进行中"}
-            </span>
-            <BotExecutionDetailsToggle hostId={link.bot.hostId} />
             <button
-              className="rounded border px-2 py-1 hover:bg-muted"
-              onClick={() => returnToBotTask(link)}
+              type="button"
+              className="inline-flex size-7 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              aria-label={`返回 ${link.bot.name} 主对话`}
+              title={`返回 ${link.bot.name} 主对话`}
+              onClick={() => returnToBotMain(link.bot.id)}
             >
-              返回 Bot 任务
+              <ArrowLeft size={14} className="shrink-0" aria-hidden="true" />
             </button>
-            <button
-              className="rounded border px-2 py-1 hover:bg-muted"
-              disabled={saving || link.bot.archived}
-              onClick={() => void lifecycle()}
-            >
-              {link.work.state === "completed" ? "继续处理" : "完成任务"}
-            </button>
-            <button
-              className="rounded px-2 py-1 hover:bg-muted"
-              disabled={saving}
-              onClick={() => void unlink()}
-            >
-              解除任务关联
-            </button>
-            <span className="w-full truncate" title={link.workspacePath}>
-              工作目录：{link.workspacePath}
-            </span>
-            <details>
-              <summary className="cursor-pointer">关联说明</summary>
-              <p>
-                任务与对话共享消息、草稿、模型、模式和目录。Goal、Mods
-                控制请先解除关联后使用，原设置和历史会保留。
-              </p>
-            </details>
+            <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-foreground" title={link.work.title}>{link.work.title}</span>
+            {(link.work.deletionPending || link.work.state === "completed") && <span className="shrink-0">{link.work.deletionPending ? "删除待完成" : "已完成"}</span>}
+            <BotExecutionDetailsToggle hostId={link.bot.hostId} compact />
+            <Popover>
+              <PopoverTrigger asChild>
+                <button type="button" aria-label="任务选项" title="任务选项"
+                  className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                  <MoreHorizontal size={18} aria-hidden="true" />
+                </button>
+              </PopoverTrigger>
+              <PopoverContent align="end" className="w-64 p-1.5" aria-label="任务选项">
+                <p className="truncate px-2 py-1.5 text-xs text-muted-foreground" title={link.workspacePath}>
+                  {link.workspacePath}
+                </p>
+                <div className="my-1 border-t" />
+                {canOpenComputer && (
+                  <PopoverClose asChild>
+                    <button type="button" className="w-full rounded px-2 py-2 text-left text-sm hover:bg-muted disabled:opacity-50"
+                      disabled={saving} onClick={() => returnToBotTask(link, "computer")}>打开原电脑</button>
+                  </PopoverClose>
+                )}
+                {stopWork && (
+                  <PopoverClose asChild>
+                    <button type="button" className="w-full rounded px-2 py-2 text-left text-sm hover:bg-muted disabled:opacity-50"
+                      disabled={saving} title="停止当前执行和后续自动派发" onClick={() => void stop()}>停止任务</button>
+                  </PopoverClose>
+                )}
+                <PopoverClose asChild>
+                  <button type="button" className="w-full rounded px-2 py-2 text-left text-sm hover:bg-muted disabled:opacity-50"
+                    disabled={saving || link.bot.archived || link.work.deletionPending} onClick={() => void lifecycle()}>
+                    {lifecycleAction === "continue" ? "继续处理" : "完成任务"}
+                  </button>
+                </PopoverClose>
+                <PopoverClose asChild>
+                  <button type="button" className="w-full rounded px-2 py-2 text-left text-sm hover:bg-muted disabled:opacity-50"
+                    disabled={saving || link.work.deletionPending} onClick={() => void beginUnlink()}>解除任务关联</button>
+                </PopoverClose>
+              </PopoverContent>
+            </Popover>
           </>
         ) : (
-          <button className="rounded px-2 py-1 hover:bg-muted" onClick={() => void begin()}>
+          <button type="button" className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 hover:bg-muted" onClick={() => void begin()}>
+            <Link2 size={14} aria-hidden="true" />
             关联为 Bot 任务
           </button>
         )}
       </div>
-      <Dialog open={open} onOpenChange={setOpen}>
+      {unlinkTarget && (
+        <BotUnlinkDialog
+          link={unlinkTarget.link}
+          hasOpenPages={unlinkTarget.hasOpenPages}
+          confirming={saving}
+          onCancel={() => setUnlinkTarget(null)}
+          onConfirm={() => void unlink()}
+          onReturn={tab => returnToBotTask(unlinkTarget.link, tab)}
+        />
+      )}
+      <Dialog open={linkTarget !== null} onOpenChange={(open) => { if (!open) setLinkTarget(null) }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>关联为 Bot 任务</DialogTitle>
             <DialogDescription>
-              保留这段会话的消息、模型、模式和工作目录，不会立即执行。已有待发送消息将停放，由你明确继续。
+              原会话和设置保留。关联后继续交办，未发送草稿保留。
             </DialogDescription>
           </DialogHeader>
           <form
@@ -233,9 +323,6 @@ export function ConversationTaskControls({
               void associate()
             }}
           >
-            <p className="text-xs text-muted-foreground">
-              <span className="text-destructive">*</span> 为必填项
-            </p>
             <div className="space-y-1.5">
               <label htmlFor={`${formId}-bot`}>
                 所属 Bot{" "}

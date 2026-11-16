@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import type { BotClient } from "../../../../shared/bots/contracts"
+import { BotError, type BotClient } from "../../../../shared/bots/contracts"
 import type { BotWorkItem, BotWorkSummary } from "../../../../shared/bots/work"
 import { botErrorMessage } from "@/lib/bot-error-message"
+
+function isMissingSelectedWork(cause: unknown): boolean {
+  if (cause instanceof BotError) return cause.code === "NOT_FOUND"
+  // Electron preserves the message but drops the BotError code.
+  return cause instanceof Error &&
+    cause.message === "Error invoking remote method 'bots:work:get': BotError: 工作不属于当前 Bot"
+}
 
 /** One selected Bot directory, driven by the existing host revision, never transcript polling. */
 export function useBotWorks(
@@ -26,7 +33,8 @@ export function useBotWorks(
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const generation = useRef(0),
-    expanded = useRef(false),
+    loadedPages = useRef(1),
+    loadingMore = useRef<number | null>(null),
     current = useRef({ botId, selectedId })
   current.current = { botId, selectedId }
   const load = useCallback(async () => {
@@ -41,34 +49,53 @@ export function useBotWorks(
     try {
       const [page, detail] = await Promise.all([
         client.works.list(botId, undefined, query),
-        selectedId ? client.works.get(botId, selectedId) : Promise.resolve(null)
+        selectedId
+          ? client.works.get(botId, selectedId).then(
+              work => ({ work, error: null }),
+              cause => {
+                if (!isMissingSelectedWork(cause)) throw cause
+                return { work: null, error: botErrorMessage(cause) }
+              }
+            )
+          : { work: null, error: null }
       ])
-      const refreshed: BotWorkSummary[] = []
-      const extra = expanded.current
-        ? displayed.current
-            .filter((item) => !page.items.some((v) => v.id === item.id))
-            .map((item) => item.id)
-        : []
-      for (let offset = 0; offset < extra.length; offset += 40) {
-        if (generation.current !== token) return
-        refreshed.push(...(await client.works.summaries(botId, extra.slice(offset, offset + 40))))
+      let nextCursor = page.nextCursor
+      let refreshedItems = page.items
+      if (query) {
+        // Renames can move work into or out of a search. Reuse its query and
+        // cursors for the loaded pages so both membership and order stay current.
+        const matches = new Map(page.items.map(item => [item.id, item]))
+        for (let index = 1; index < loadedPages.current && nextCursor; index++) {
+          if (generation.current !== token) return
+          const nextPage = await client.works.list(botId, nextCursor, query)
+          for (const item of nextPage.items) {
+            if (!matches.has(item.id)) matches.set(item.id, item)
+          }
+          nextCursor = nextPage.nextCursor
+        }
+        refreshedItems = [...matches.values()]
+      } else if (loadedPages.current > 1) {
+        const refreshed = new Map<string, BotWorkSummary>()
+        const pageIds = new Set(page.items.map(item => item.id))
+        const extra = displayed.current.filter(item => !pageIds.has(item.id)).map(item => item.id)
+        for (let offset = 0; offset < extra.length; offset += 40) {
+          if (generation.current !== token) return
+          const batch = await client.works.summaries(botId, extra.slice(offset, offset + 40), true)
+          for (const work of batch) {
+            // A detached work can still hold a claim for unfinished deletion.
+            if (!work.deletionCommitted && (work.conversation?.state !== "detached" || work.deletionPending))
+              refreshed.set(work.id, work)
+          }
+        }
+        refreshedItems = [...page.items, ...extra.flatMap(id => refreshed.get(id) ?? [])]
       }
       if (generation.current !== token) return
       setLoadedScope(scope)
       setPriority(page.priority)
-      setItems((old) =>
-        expanded.current
-          ? [
-              ...page.items,
-              ...old
-                .filter((item) => !page.items.some((v) => v.id === item.id))
-                .map((item) => refreshed.find((v) => v.id === item.id) ?? item)
-            ]
-          : page.items
-      )
-      if (!expanded.current) setCursor(page.nextCursor)
-      setSelected(detail)
-      setError(null)
+      setItems(refreshedItems)
+      if (query || loadedPages.current === 1) setCursor(nextCursor)
+      setSelected(detail.work)
+      setError(detail.error)
     } catch (cause) {
       if (generation.current === token) {
         setSelected(null)
@@ -104,7 +131,7 @@ export function useBotWorks(
     }
   }, [])
   useEffect(() => {
-    expanded.current = false
+    loadedPages.current = 1
     setItems([])
     setPriority([])
     setCursor(null)
@@ -112,7 +139,7 @@ export function useBotWorks(
     return () => {
       generation.current++
     }
-  }, [client, botId, query])
+  }, [client, botId, audience, query])
   useEffect(() => {
     setSelected(null)
   }, [botId, selectedId])
@@ -123,13 +150,15 @@ export function useBotWorks(
     }
   }, [load, refresh, revision])
   const more = async () => {
-    if (!botId || !cursor || !client.works || loading || pending.current) return
     const token = generation.current
+    if (!botId || !cursor || !client.works || loadedScope !== scope || loading || pending.current ||
+        loadingMore.current === token) return
+    loadingMore.current = token
     setLoading(true)
     try {
       const page = await client.works.list(botId, cursor, query)
       if (token !== generation.current) return
-      expanded.current = true
+      loadedPages.current++
       setItems((old) => [
         ...old,
         ...page.items.filter((item) => !old.some((v) => v.id === item.id))
@@ -139,6 +168,7 @@ export function useBotWorks(
     } catch (cause) {
       if (token === generation.current) setError(botErrorMessage(cause))
     } finally {
+      if (loadingMore.current === token) loadingMore.current = null
       if (token === generation.current) setLoading(false)
     }
   }

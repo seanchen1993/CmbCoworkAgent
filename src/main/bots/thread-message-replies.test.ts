@@ -7,6 +7,7 @@ import { BotStore } from "./store"
 import { formatBotMessageReply } from "../../shared/bots/message-reply"
 import { captureThreadIncarnation } from "../services/thread-incarnation"
 import { createBotThreadReplyResolver } from "./thread-message-replies"
+import { botHistoricalMessageReader, decorateBotHistoryPage, setBotHistoryInputSource } from "./history-input-projection"
 
 const storage = vi.hoisted(() => ({ path: "" }))
 vi.mock("../storage", () => ({
@@ -73,6 +74,47 @@ function fixture() {
   return { store, bot, work, metadata, host, row, requestId: input.requestId }
 }
 describe("beta search in independent work conversations", () => {
+  it("keeps native history and search aligned after unlink without rewriting persisted input", async () => {
+    const f = fixture()
+    const threadId = `detached-${f.bot.id}`
+    db.createThread(threadId, { cmb_thread_incarnation: threadId })
+    const row = db.getThreadCore(threadId)!
+    const ref = { kind: "local_thread" as const, threadId, incarnation: captureThreadIncarnation(row) }
+    const work = f.store.conversations.prepare({ botId: f.bot.id, operationId: threadId,
+      conversation: ref, title: "History", goal: "Review" })
+    f.store.conversations.bound(f.bot.id, work.id, ref)
+    const quote = { id: "quoted", ordinal: 0, role: "assistant" as const, text: "quoted-only" }
+    const raw = formatBotMessageReply("current-body", quote)
+    const task = f.store.enqueue({ botId: f.bot.id, workId: work.id, requestId: threadId, message: raw,
+      replyToId: quote.id, explicitSkill: { name: "Review", path: "/skills/review/SKILL.md" } })
+    f.store.transition(task.id, "running")
+    f.store.transition(task.id, "completed")
+    db.upsertThreadMessages(threadId, [
+      { id: task.requestId, role: "user", created_at: new Date(1), content: raw },
+      { id: "literal", role: "user", created_at: new Date(2), content: raw }
+    ])
+    setBotHistoryInputSource({ works: id => f.store.desktopDeliveryWorks(id), inputs: () => new Map(),
+      origins: (id, incarnation, ids) => f.store.historicalMessageOrigins(id, incarnation, ids, true) })
+    try {
+      for (const detached of [false, true]) {
+        if (detached) {
+          f.store.conversations.beginDetach(f.bot.id, work.id, f.store.getWork(f.bot.id, work.id).version)
+          f.store.conversations.detached(f.bot.id, work.id)
+        }
+        const page = await decorateBotHistoryPage(threadId, db.getThreadMessagesPage(threadId), () => row)
+        expect(page.messages[0].content).toBe(raw)
+        expect(page.messages[0].botHistoryInputOrigin?.explicitSkill?.name).toBe("Review")
+        expect(page.messages[1].botHistoryInputOrigin).toBeUndefined()
+        const read = botHistoricalMessageReader(threadId, () => row)!
+        const replies = (ids: string[]) => new Map([...read(ids)].flatMap(([id, origin]) =>
+          origin.replyTo ? [[id, origin.replyTo] as const] : []))
+        expect(db.searchThreadMessages(threadId, "quoted-only", {}, replies).matches.map(item => item.messageId)).toEqual(["literal"])
+        expect(db.searchThreadMessages(threadId, "current-body", {}, replies).matches.map(item => item.messageId).sort())
+          .toEqual(["literal", task.requestId].sort())
+      }
+      expect(db.getThreadMessagesPage(threadId).messages.every(message => message.content === raw && !message.botHistoryInputOrigin)).toBe(true)
+    } finally { setBotHistoryInputSource(undefined) }
+  })
   it("searches visible reply bodies without matching their quoted transport, in task and linked Chat views", () => {
     const f = fixture()
     const resolve = createBotThreadReplyResolver(f.work.threadId, f.row, f.metadata, f.host)

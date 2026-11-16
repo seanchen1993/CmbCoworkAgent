@@ -60,9 +60,10 @@ import { ResizeHandle } from "@/components/ui/resizable"
 import { ResourcePanelOverlay } from "@/components/panels/ResourcePanelOverlay"
 import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
 import { PetStateBridge } from "@/components/pet/PetStateBridge"
-import { DEFAULT_BROWSER_CDP_CONFIG, useAppStore } from "@/lib/store"
+import { DEFAULT_BROWSER_CDP_CONFIG, initializeStartupWorkspace, useAppStore } from "@/lib/store"
 import { useGitChangeNoticeListener } from "@/components/git/GitChangeNotice"
 import { ThreadProvider } from "@/lib/thread-context"
+import { BotConversationTransitions } from "@/components/bots/BotConversationTransitions"
 import { ElectronIPCTransport } from "@/lib/electron-transport"
 import { getThemeDefinition } from "@/lib/theme-registry"
 import { getThemePreference, subscribeThemePreference } from "@/lib/theme-preference"
@@ -236,12 +237,10 @@ function App(): React.JSX.Element {
   const toastTheme = getThemeDefinition(themePreference).colorScheme
   const {
     currentThreadId,
-    loadThreads,
     loadDashboardAllowed,
     loadGitChangeNoticeEnabled,
     loadModels,
     dashboardAllowed,
-    createThread,
     mainView,
     showCustomizeView,
     accountRevision,
@@ -267,12 +266,10 @@ function App(): React.JSX.Element {
   } = useAppStore(
     useShallow((state) => ({
       currentThreadId: state.currentThreadId,
-      loadThreads: state.loadThreads,
       loadDashboardAllowed: state.loadDashboardAllowed,
       loadGitChangeNoticeEnabled: state.loadGitChangeNoticeEnabled,
       loadModels: state.loadModels,
       dashboardAllowed: state.dashboardAllowed,
-      createThread: state.createThread,
       mainView: state.mainView,
       showCustomizeView: state.showCustomizeView,
       accountRevision: state.accountRevision,
@@ -862,37 +859,30 @@ function App(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
+    let disposed = false
     async function init(): Promise<void> {
       try {
         await migrateDisabledSkillsFromLocalStorage()
         const [, , loadedBrowserCdpConfig] = await Promise.all([
-          loadThreads({ selectInitialThread: true }),
+          initializeStartupWorkspace(() => !disposed),
           loadDashboardAllowed(),
           window.api.browser.getCdpConfig().catch((error: unknown) => {
             console.error("Failed to load Browser CDP config during initialization:", error)
             return DEFAULT_BROWSER_CDP_CONFIG
           })
         ])
+        if (disposed) return
         setBrowserCdpConfig(loadedBrowserCdpConfig)
-        const threads = useAppStore.getState().threads
-        if (threads.length === 0) {
-          await createThread()
-        }
         await loadGitChangeNoticeEnabled()
       } catch (error) {
         console.error("Failed to initialize:", error)
       } finally {
-        setIsLoading(false)
+        if (!disposed) setIsLoading(false)
       }
     }
     init()
-  }, [
-    loadThreads,
-    setBrowserCdpConfig,
-    loadDashboardAllowed,
-    loadGitChangeNoticeEnabled,
-    createThread
-  ])
+    return () => { disposed = true }
+  }, [setBrowserCdpConfig, loadDashboardAllowed, loadGitChangeNoticeEnabled])
 
   useEffect(() => {
     let cancelled = false
@@ -1082,6 +1072,7 @@ function App(): React.JSX.Element {
 
   return (
     <ThreadProvider>
+      <BotConversationTransitions />
       {/*
         isolate：把 app 内部的 z-index 关进自己的层叠上下文。
 
@@ -1322,7 +1313,7 @@ function App(): React.JSX.Element {
                           style={{ width: `${workerSplitLeftPercent}%` }}
                         >
                           {renderedThreadId ? (
-                            <TabbedPanel threadId={renderedThreadId} showTabBar={false} />
+                            <TabbedPanel threadId={renderedThreadId} showTabBar={false} floatingChat />
                           ) : (
                             <div className="flex flex-1 items-center justify-center text-muted-foreground">
                               选择或创建一个任务开始
@@ -1344,7 +1335,7 @@ function App(): React.JSX.Element {
                       !previewFullscreen && (
                         <main className={fullscreenMainClassName} style={fullscreenMainStyle}>
                           {renderedThreadId ? (
-                            <TabbedPanel threadId={renderedThreadId} showTabBar={false} />
+                            <TabbedPanel threadId={renderedThreadId} showTabBar={false} floatingChat />
                           ) : (
                             <div className="flex flex-1 items-center justify-center text-muted-foreground">
                               选择或创建一个任务开始

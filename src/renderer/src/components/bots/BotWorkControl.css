@@ -1,0 +1,70 @@
+.bot-task-control {
+  min-width: 0;
+  width: 100%;
+  padding: 14px 18px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--background);
+  color: var(--foreground);
+}
+.bot-task-control-row,
+.bot-task-control-owner,
+.bot-task-control-actions {
+  display: flex;
+  align-items: center;
+}
+.bot-task-control-row { justify-content: space-between; gap: 14px; }
+.bot-task-control-owner { min-width: 0; gap: 9px; font-size: 13px; }
+.bot-task-control-owner > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-task-control-owner > :first-child { flex-shrink: 0; }
+.bot-task-control-actions { flex-shrink: 0; gap: 8px; }
+.bot-task-control-action,
+.bot-task-control-secondary {
+  border-radius: 999px;
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  transition: background-color 150ms ease;
+}
+.bot-task-control-action { background: var(--foreground); color: var(--background); }
+.bot-task-control-secondary { background: var(--muted); color: var(--foreground); }
+.bot-task-control button:hover:not(:disabled) { opacity: .82; }
+.bot-task-control button:disabled { opacity: .45; cursor: default; }
+.bot-task-control button:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
+.bot-task-control[data-control-state="user"] {
+  position: relative;
+  z-index: 20;
+  width: fit-content;
+  max-width: calc(100% - 36px);
+  margin: 0 auto -10px;
+  padding: 5px 7px 7px 13px;
+  border: 0;
+  border-radius: 18px 18px 0 0;
+  background: var(--bot-control-color);
+  color: #181818;
+}
+.bot-task-control[data-control-state="user"] .bot-task-control-owner { font-size: 12px; gap: 7px; }
+.bot-task-control[data-control-state="user"] .bot-task-control-action {
+  background: color-mix(in srgb, currentColor 7%, transparent);
+  color: inherit;
+}
+.bot-task-control[data-control-state="user"] .bot-task-control-action:hover:not(:disabled) {
+  background: color-mix(in srgb, currentColor 9%, transparent);
+  opacity: 1;
+}
+.bot-task-control[data-control-state="user"] button:focus-visible { outline-color: currentColor; }
+.bot-task-readonly-controls { display: flex; align-items: center; gap: 10px; }
+.bot-task-readonly-controls > .bot-task-control { flex: 1; }
+.bot-task-readonly-footer { padding-top: 4px; }
+.bot-task-control-spinner { animation: bot-control-spin 1s linear infinite; }
+@keyframes bot-control-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .bot-task-control-spinner { animation: none; }
+  .bot-task-control button { transition: none; }
+}
+@media (max-width: 520px) {
+  .bot-task-control { padding: 12px; }
+  .bot-task-control-row { gap: 8px; flex-wrap: wrap; }
+  .bot-task-control-actions { margin-left: auto; }
+}

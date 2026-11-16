@@ -1,4 +1,5 @@
 import { BotError, type BotMessageMention } from "./contracts"
+import { parseBotInputFileIds } from "./input-files"
 
 /** Validate selected identities against exact text, never infer identity from an @name. */
 export function parseBotMessageMentions(
@@ -45,8 +46,15 @@ export function parseBotMessageMentions(
 /** Old sends retain their exact digest bytes. New sends bind both text and selected identities. */
 export function canonicalBotMessageInput(
   message: string,
-  mentions?: readonly BotMessageMention[]
+  mentions?: readonly BotMessageMention[],
+  inputFileIds?: readonly string[],
+  explicitSkill?: import("./skill-selection").BotSkillSelection
 ): string {
   const selected = parseBotMessageMentions(message, mentions)
+  const files = parseBotInputFileIds(inputFileIds)
+  if (explicitSkill) return "\0bot-skill-v1:" + JSON.stringify([message, selected, files, explicitSkill.name, explicitSkill.path])
+  // NUL is forbidden in a real message, so literal JSON prose cannot alias a
+  // structured attachment request. Preserve the pre-existing no-file bytes.
+  if (files.length) return "\0bot-input-v1:" + JSON.stringify([message, selected, files])
   return selected.length ? JSON.stringify([message, selected]) : message
 }

@@ -2,22 +2,30 @@ import { createContext } from "react"
 import type { ReactNode } from "react"
 import type { Message, ToolCall, ToolResult } from "@/types"
 import type { BotMessageReply } from "../../../../shared/bots/contracts"
+import type { BotSkillSelection } from "../../../../shared/bots/skill-selection"
 
-/** Host-resolved Bot references; absent on ordinary chats and group runtime transcripts. */
+/** Display metadata from a trusted origin; never sent as a same-thread reply ID. */
+export type ChatQuotedReply = BotMessageReply & { sourceThreadId?: string }
+
+/** Host-resolved Bot references. */
 export const ChatReplySourceContext = createContext<{
   resolve(messageId: string): Promise<BotMessageReply>
-  quoteFor(message: Message): BotMessageReply | undefined
+  quoteFor(message: Message): ChatQuotedReply | undefined
+  skillFor?(messageId: string): BotSkillSelection | undefined
+  editReady?: boolean
 } | null>(null)
 export const ChatReplyActionsContext = createContext<{
   canReply?: boolean
+  editReady?: boolean
   reply(messageId: string): void
   setDraftReply(reply: BotMessageReply | null): void
-  quoteFor(message: Message): BotMessageReply | undefined
+  quoteFor(message: Message): ChatQuotedReply | undefined
   jump(reply: BotMessageReply): void
 } | null>(null)
 
 /** Presentation only. The existing message store and runtime remain the owners of turns. */
 export const ChatPresentationContext = createContext<"default" | "bot">("default")
+export const ChatDesktopWorkIdContext = createContext<string | undefined>(undefined)
 
 /** The ordinary workbench always keeps its existing execution presentation. */
 export const ChatExecutionDetailsContext = createContext(true)
@@ -30,7 +38,8 @@ export const ChatExecutionCardCallIdsContext = createContext<ReadonlySet<string>
 
 /** Optional workspace presentation; never changes tool execution or approval rendering. */
 export const ChatToolPresentationContext = createContext<
-  ((tool: ToolCall, result?: Pick<ToolResult, "content" | "is_error">) => ReactNode) | null
+  ((tool: ToolCall, result?: Pick<ToolResult, "content" | "is_error">, assistantMessageId?: string,
+    deliveryScope?: Message["botHistoryDeliveryScope"]) => ReactNode) | null
 >(null)
 
 export const ChatMessagePresentationContext = createContext<

@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
 import { LocalBotHost } from "./host"
-import type { BotWorkWorkspace } from "../../shared/bots/work"
+import { createBotWorkTools } from "./work-tools"
+import type { BotWorkProjectPage, BotWorkWorkspace } from "../../shared/bots/work"
 
 const hosts: LocalBotHost[] = [],
   dbs: NativeSqliteAdapter[] = []
@@ -18,7 +19,7 @@ function fixture(running = false) {
   const bot = store.create({ name: "Bot", instructions: "", color: "#123456", modelRef: null })
   const workspaces = {
     resolve: vi.fn(async (): Promise<BotWorkWorkspace> => ({ kind: "default", path: "/default" })),
-    projects: vi.fn(async () => ({ items: [], nextCursor: null }))
+    projects: vi.fn(async (): Promise<BotWorkProjectPage> => ({ items: [], nextCursor: null }))
   }
   const host = new LocalBotHost(store, {
     workspaces,
@@ -42,6 +43,84 @@ function fixture(running = false) {
 }
 const tick = () => new Promise((resolve) => setTimeout(resolve, 20))
 describe("fixed work workspace lifecycle", () => {
+  it("allows the live parent tool to list projects without creating or starting work", async () => {
+    const f = fixture(true)
+    const source = f.host.send({ botId: f.bot.id, requestId: "browse", message: "有哪些项目？" })
+    await tick()
+    const projects = createBotWorkTools(source, () => f.host, new AbortController().signal)
+      .find(tool => tool.name === "bot_work_projects")!
+    const result = await projects.invoke({
+      type: "tool_call", id: "list-projects", name: projects.name, args: {}
+    })
+    expect(JSON.stringify(result)).toContain("bot-work-receipt")
+    expect(f.workspaces.projects).toHaveBeenCalledWith(undefined, undefined)
+    expect(f.store.recentTasks()).toHaveLength(1)
+    expect(f.store.listWorks(f.bot.id).items).toEqual([])
+    f.host.cancel(source.id)
+    const cancelled = await projects.invoke({
+      type: "tool_call", id: "after-stop", name: projects.name, args: {}
+    })
+    expect(JSON.stringify(cancelled)).toContain("已停止")
+    expect(f.workspaces.projects).toHaveBeenCalledTimes(1)
+  })
+  it("does not return project metadata if the source is stopped during discovery", async () => {
+    const f = fixture(true)
+    const source = f.host.send({ botId: f.bot.id, requestId: "browse", message: "列出项目" })
+    await tick()
+    let finish!: (page: BotWorkProjectPage) => void
+    f.workspaces.projects.mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+    const pending = f.host.workProjects(source.id)
+    const rejected = expect(pending).rejects.toThrow("已停止")
+    f.host.cancel(source.id)
+    finish({ items: [], nextCursor: null })
+    await rejected
+    expect(f.store.listWorks(f.bot.id).items).toEqual([])
+  })
+  it.each(["dm", "group"] as const)("preserves named IM %s queries without enabling unfiltered browsing", async (kind) => {
+    const f = fixture(true)
+    const route = f.host.imGateway.register("realm", "owner", {
+      id: "binding", botId: f.bot.id, kind, label: "IM", version: 1,
+      state: "active", conversationKey: "channel", createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    })
+    f.host.imChannel.importImBinding({
+      id: route.id, botId: f.bot.id, kind, label: "IM", channelKey: "channel", version: 1
+    })
+    const senderId = kind === "dm" ? "owner" : "group-member"
+    const ingress = f.host.imGateway.receive("realm", "owner", {
+      route: { bindingId: "binding", botId: f.bot.id, kind, label: "IM", version: 1, senderId },
+      event: {
+        schemaVersion: 1, eventId: "event", platformMessageId: "message", principalId: "owner",
+        conversationKey: "channel", conversationSeq: 1, message: { type: "text", text: "有哪些项目？" },
+        occurredAt: new Date().toISOString(), redelivered: false,
+        lease: { id: "lease", expiresAt: new Date(Date.now() + 60_000).toISOString() }
+      }
+    })
+    f.host.imGateway.settle(ingress.id, "active", undefined, Date.now() + 60_000)
+    f.host.acceptImEvent({
+      bindingId: route.id, eventId: ingress.id, messageId: "message", senderId,
+      text: "有哪些项目？", mentionsBotIds: [f.bot.id]
+    })
+    await tick()
+    const source = f.store.recentTasks().find(task => task.mockSource?.transport === "im")!
+    expect(source.mockSource?.personal).toBe(kind === "dm" ? true : undefined)
+    const projects = createBotWorkTools(source, () => f.host, new AbortController().signal)
+      .find(tool => tool.name === "bot_work_projects")!
+    for (const query of [undefined, "", "  "]) {
+      await expect(f.host.workProjects(source.id, query, 20)).rejects.toThrow("桌面主对话中浏览")
+      await expect(projects.invoke({
+        type: "tool_call", id: "browse", name: projects.name, args: { query, cursor: 20 }
+      })).rejects.toThrow()
+    }
+    expect(f.workspaces.projects).not.toHaveBeenCalled()
+    const result = await projects.invoke({
+      type: "tool_call", id: "named-project", name: projects.name, args: { query: "Orders", cursor: 20 }
+    })
+    expect(JSON.stringify(result)).toContain("bot-work-receipt")
+    expect(f.workspaces.projects).toHaveBeenCalledExactlyOnceWith("Orders", 20)
+    expect(f.store.listWorks(f.bot.id).items).toEqual([])
+    expect(f.store.recentTasks()).toHaveLength(1)
+  })
   it("inherits the IM group's scoped default, while preserving explicit workspace choice", async () => {
     const f = fixture(true)
     const route = f.host.imGateway.register("realm", "owner", {
@@ -158,6 +237,7 @@ describe("fixed work workspace lifecycle", () => {
     await tick()
     const source = f.store.recentTasks().find((t) => t.mockSource)!
     await expect(f.host.workProjects(source.id, "private")).rejects.toThrow("本机主对话")
+    await expect(f.host.workProjects(source.id)).rejects.toThrow("本机主对话")
     await expect(
       f.host.createWork(
         {

@@ -1,5 +1,34 @@
 import { createHash } from "node:crypto"
+import { lstat, realpath, rm, stat } from "node:fs/promises"
+import type {
+  BotConversationToolsPort,
+  BotConversationToolSource,
+  BotOrdinaryThreadsPort,
+  BotThreadHistorySource,
+  BotThreadLinkInput,
+  BotThreadListInput,
+  BotThreadReadInput,
+  BotThreadRenameInput,
+  BotWorkUnlinkInput
+} from "../../shared/bots/thread-history"
 import type { AgentRunTerminal } from "../agent/agent-run-service"
+import { pinTransferredBotInputFile, retainedInputFileIds, verifyInputFiles } from "./input-files"
+import { hashBotFile } from "./file-copy"
+import type { BotHistoricalDeliveryReference, BotHistoricalDeliveryUse } from "./delivery-receipt"
+import {
+  botInputNeedsLifetimePin, removeUninitializedWorkInputPins, workInputPinStorage, type BotInputHistoryResolver
+} from "./attachment-storage"
+import {
+  requireThreadMutationLease,
+  withThreadMutationLeaseLock,
+  withThreadRunMutationLock,
+  type ThreadMutationLease
+} from "../ipc/thread-run-mutation-lock"
+import { botHistoryInputProjection } from "./history-input-projection"
+import { localWorkConversationRef } from "./conversation-link-validation"
+import type { ThreadIncarnationRow } from "../services/thread-incarnation"
+import { validateWorkspaceDirectory } from "../services/workspace-validation"
+import type { FileAttachment } from "../../shared/file-attachment"
 import type {
   BotWorkHistoryInput,
   BotWorkHistoryPort,
@@ -8,8 +37,11 @@ import type {
 import { AsyncResource } from "node:async_hooks"
 import {
   botWorkBrowserScope,
+  type BotSkillWorkspaceTarget,
   type BotWorkWorkspacePort,
   type BotWorkItem,
+  type BotWorkControlInput,
+  type BotWorkInteraction,
   type CreateBotWorkInput
 } from "../../shared/bots/work"
 import type {
@@ -41,20 +73,30 @@ import {
   type BotGroupHistoryCursor,
   type SendBotGroupMessageInput
 } from "../../shared/bots/contracts"
-import type { BotStore, BotWorkflowReference } from "./store"
+import type { BotScheduleEdit, BotScheduleToolEdit, BotStore, BotWorkflowReference, BotWorkScheduleCreation } from "./store"
+import type { BotDesktopOperationQuery } from "./desktop-operation"
 import type { WorkflowRunReference } from "../agent/workflow/run-manager"
 import { canDeferBotTask, canSteerBotTask, canDeliverBotFeedback, isRetryableNotificationTerminal } from "./continuation"
 import type { BotDeliveredFile } from "../../shared/bots/file-delivery"
+import type { BotSkillSelection } from "../../shared/bots/skill-selection"
 import type { BackgroundCommandLifecycle } from "../agent/background-command-lifecycle"
-import type { UserInputRequest } from "../types"
+import type { UserInputRequest, UserInputResponse } from "../types"
 import { parseCreateBotWork } from "../../shared/bots/validation"
 import { parseBotReactionTarget, type BotReactionTarget } from "../../shared/bots/message-reactions"
 import type { BotImBinding } from "../../shared/bots/im-channel"
+import type { BotWorkDeletionIdentity, BotWorkDeletionReceipt } from "./work-deletion"
+import type { BotWorkResultDecision, BotWorkResultReviewAlternative } from "./work-result-review"
+import { BOT_WORK_RESULT_PUBLICATION_RETRY_LIMIT, RetryableBotWorkPublicationError,
+  type BotWorkResultAttachmentReference, type BotWorkResultCommandReference } from "./work-result-settlement"
+import type { BotFixedReminderInput, BotScheduledWorkPublication, BotWorkScheduleMonitorInput } from "../../shared/bots/schedule-observation"
+import { scheduledDesktopMessage } from "../../shared/bots/schedule-observation"
 
 export interface BotRunLease {
   notificationTerminal?(): AgentRunTerminal | undefined
+  /** Approval IDs produced by this physical run's existing wait hook. */
+  approvalRequestIds?: ReadonlySet<string>
   /** Reuse the active runtime's user-prompt pipeline; inbox remains queued until injection. */
-  steer?(task: BotTask, beforeInject: () => boolean): Promise<boolean>
+  steer?(task: BotTask, beforeInject: () => boolean, stillAllowed?: () => boolean): Promise<boolean | { rejected: true }>
   /** Move past an obsolete group question without answering it or cancelling detached work. */
   dismissQuestion?(): void
   /** Yield at a model boundary; keep background-task ownership separate from private input. */
@@ -86,14 +128,30 @@ export interface BotRunLease {
 
 export interface BotRunPort {
   workHistory?: BotWorkHistoryPort
+  ordinaryThreads?: BotOrdinaryThreadsPort
+  conversationTools?: BotConversationToolsPort
+  pendingUserInput?(task: BotTask): UserInputRequest | null
+  answerUserInput?(response: UserInputResponse): boolean
+  pendingApproval?(task: BotTask, requestIds: ReadonlySet<string>): string | undefined
+  subscribeApprovalChanges?(listener: (registeredId?: string) => void): () => void
+  scheduleObservationPublication?: {
+    persist(bot: BotDefinition, publication: BotScheduledWorkPublication): string | null | void
+    announce(publication: BotScheduledWorkPublication): Promise<void>
+  }
+  desktopWorkScheduleDirectory?(work: BotWorkItem): { path: string; incarnation?: string } | undefined
+  /** Existing thread mutation guard; metadata only, never creates or runs a thread. */
+  renameWork?(work: BotWorkItem, commit: () => BotWorkItem, lease?: ThreadMutationLease): Promise<BotWorkItem>
   browser?: boolean
   workspaces?: BotWorkWorkspacePort
+  validateSkillSelection?(selection: BotSkillSelection): Promise<void>
   /** Existing workflow/coordinator managers remain authoritative, including durable pending results. */
   hasPendingWork?(threadIds: readonly string[], options?: { allowPendingCoordinatorNotifications?: boolean }): Promise<boolean>
   /** Synchronous archive fence for existing Team conversations; no worker lifecycle changes. */
   hasPendingCoordinator?(threadIds: readonly string[]): boolean
   /** Cancel only this conversation's detached work through the existing managers. */
   cancelBackground?(threadId: string): void | Promise<void>
+  /** Retire the exact browser scope of a permanently deleted work. */
+  removeWorkBrowser?(scope: string): Promise<void>
   /** Release only a removed member's browser ownership in this group; rejoining remains allowed. */
   removeGroupMemberBrowser?(groupId: string, botId: string): void | Promise<void>
   cancelCommands?(threadId: string, ids: readonly string[]): Promise<void>
@@ -132,9 +190,11 @@ export class LocalBotHost {
       launchedCommands: Set<string>
       preparingSteers: Set<string>
       steeringReady: boolean
+      workReviewCommitted?: true
     }
   >()
   private readonly deletions = new Map<string, Promise<void>>()
+  private readonly workDeletions = new Map<string, Promise<BotWorkDeletionReceipt>>()
   private readonly commandCancellations = new Map<
     string,
     { threadId: string; done: Promise<void> }
@@ -149,6 +209,9 @@ export class LocalBotHost {
   private scheduled = false
   private mockDelivering: Promise<void> | null = null
   private scheduleTimer: ReturnType<typeof setTimeout> | undefined
+  private schedulePublicationRetryAt: number | undefined
+  private readonly schedulePublicationRetries = new Map<string, { failures: number; at?: number }>()
+  private changeRevision = 0
   private lastHistoryMaintenance = -Infinity
   // A tool may wake this queue, but its expiring call scope must not own a new Bot run.
   private readonly pumpInHostContext = AsyncResource.bind(() => {
@@ -177,14 +240,28 @@ export class LocalBotHost {
     )
       throw new Error("Invalid Bot concurrency")
     store.recover()
-    this.unsubscribe = runtime.onAvailable(() => this.wake())
+    if (runtime.scheduleObservationPublication) store.settleQueuedScheduledWorkObservations()
+    const unsubscribeAvailable = runtime.onAvailable(() => this.wake())
+    const unsubscribeApprovals = runtime.subscribeApprovalChanges?.(registeredId => {
+      if (this.stopping) return
+      for (const { task, lease } of this.active.values()) {
+        if (!lease.approvalRequestIds?.size || (registeredId && !lease.approvalRequestIds.has(registeredId)) ||
+            task.mockSource || botTaskGroupId(task) || !botTaskWorkFamily(task)) continue
+        this.changed()
+        break
+      }
+    })
+    this.unsubscribe = () => {
+      unsubscribeAvailable()
+      unsubscribeApprovals?.()
+    }
     this.wake()
     this.armSchedules()
     if (runtime.recover) {
       this.recoveryReady = false
       this.recovery = Promise.resolve()
         .then(() => runtime.recover!(store.notificationThreadIds(), this.lifecycle.signal))
-        .then(() => { this.recoveryReady = true })
+        .then(() => { this.recoveryReady = true; this.wake() })
         .catch((error) => {
           if (!this.lifecycle.signal.aborted) this.reportError(error)
         })
@@ -203,7 +280,10 @@ export class LocalBotHost {
     if (id.startsWith("work-")) {
       const [workId, botId, extra] = id.slice(5).split("--")
       if (!workId || !botId || extra) throw new BotError("INVALID_INPUT", "工作浏览器目标无效")
-      const source = this.getWork(botId, workId).source
+      const work = this.getWork(botId, workId)
+      if (work.deletionPending || work.deletionCommitted)
+        throw new BotError("CONFLICT", "任务正在删除或已删除，无法操作浏览器。")
+      const { source } = work
       if (source && source.transport !== "im")
         throw new BotError("CONFLICT", "模拟渠道不开放本机浏览器")
     } else if (id.startsWith("im-")) {
@@ -295,7 +375,7 @@ export class LocalBotHost {
       revision: this.store.revision(),
       bots: this.store.listBots(),
       tasks: this.store.recentTasks(true),
-      schedules: this.store.schedules(),
+      schedules: this.store.schedulesWithPendingOccurrences(),
       groups: this.store.groups(),
       activities: this.store.activities(),
       workActivity: this.store.workActivities(),
@@ -307,6 +387,11 @@ export class LocalBotHost {
       ])],
       collaborationThreads: this.store.stoppableCollaborationThreads()
     }
+  }
+
+  hasUnread(): boolean {
+    if (this.stopping) throw new BotError("STOPPING", "应用正在退出，请稍后重试")
+    return this.store.hasUnread()
   }
 
   imConversationHistory(botId: string, id: string, before?: string) {
@@ -345,12 +430,21 @@ export class LocalBotHost {
     if (!this.stopping) this.changed(botId)
   }
 
-  private changed(memoryBotId?: string, reactionTarget?: BotReactionTarget): void {
-    const event = {
+  private changed(memoryBotId?: string, reactionTarget?: BotReactionTarget, reminder?: BotChangeEvent["reminder"]): void {
+    try {
+      this.changeRevision = this.store.revision()
+    } catch (error) {
+      if (!reminder) throw error
+      // The committed transcript append has an exact identity independent of
+      // the optional snapshot refresh. Still deliver it to resident chats.
+      this.reportError(error)
+    }
+    const event: BotChangeEvent = {
       hostId: LOCAL_BOT_HOST_ID,
-      revision: this.store.revision(),
+      revision: this.changeRevision,
       ...(reactionTarget ? { reactionTarget } : {}),
-      ...(memoryBotId ? { memoryBotId } : {})
+      ...(memoryBotId ? { memoryBotId } : {}),
+      ...(reminder ? { reminder } : {})
     }
     for (const listener of this.listeners) {
       try {
@@ -383,6 +477,44 @@ export class LocalBotHost {
     if (botTaskGroupId(task)) throw new BotError("CONFLICT", "请在私聊主会话中管理独立工作")
     return task
   }
+  async renameWorkFromTool(
+    source: { taskId: string; callId: string; key: string },
+    workId: string,
+    expectedVersion: number,
+    title: string
+  ): Promise<BotWorkItem> {
+    const validate = () => {
+      const task = this.workToolSource(source.taskId)
+      if (task.workId || !this.store.hasWorkUserRequest(task.id))
+        throw new BotError("CONFLICT", "只能从主对话的当前用户要求修改任务名称")
+      const work = this.store.assertWorkAudience(task, workId)
+      if (work.conversation?.origin === "existing") this.ordinaryThreadSource(source.taskId)
+      return work
+    }
+    return this.renameManagedWork(validate(), () => {
+      validate()
+      return this.store.renameWork(source, workId, expectedVersion, title)
+    })
+  }
+  async renameWorkFromDesktop(work: BotWorkItem, title: string, lease: ThreadMutationLease): Promise<BotWorkItem> {
+    this.requireRunning()
+    return this.renameManagedWork(work, () => {
+      this.requireRunning()
+      return this.store.renameDesktopWork(work, title)
+    }, lease)
+  }
+  private async renameManagedWork(
+    work: BotWorkItem, commit: () => BotWorkItem, lease?: ThreadMutationLease
+  ): Promise<BotWorkItem> {
+    if (!this.runtime.renameWork) throw new BotError("CONFLICT", "当前主机不支持修改任务名称")
+    try {
+      return await this.runtime.renameWork(work, commit, lease)
+    } finally {
+      // A native-title persistence failure can follow a committed work title.
+      // Publish the true work state so both entrances can retry the synchronization.
+      this.changed()
+    }
+  }
   async changeWorkFromTool(
     source: { taskId: string; callId: string; key: string },
     workId: string,
@@ -396,6 +528,9 @@ export class LocalBotHost {
     this.workToolSource(source.taskId)
     if (!this.store.hasWorkUserRequest(task.id))
       throw new BotError("CONFLICT", "当前用户指令已不可用")
+    const work = this.store.assertWorkAudience(task, workId)
+    if (action === "continue" && work.dispatchStopped && work.conversation?.origin === "existing")
+      this.ordinaryThreadSource(task.id)
     const result = this.store.changeWork(
       task.botId,
       workId,
@@ -409,19 +544,207 @@ export class LocalBotHost {
     this.wake()
     return result
   }
+  stopWorkFromTool(
+    source: { taskId: string; callId: string; key: string },
+    workId: string,
+    expectedVersion: number
+  ) {
+    const task = this.workToolSource(source.taskId)
+    const target = this.store.assertWorkAudience(task, workId)
+    if (target.conversation?.origin === "existing") this.ordinaryThreadSource(task.id)
+    const revision = this.store.revision()
+    const receipt = this.store.requestWorkStop(source, workId, expectedVersion)
+    const current = this.store.getWork(receipt.botId, workId)
+    // A lost Stop reply must never cancel work the user has since continued.
+    if (!current.dispatchStopped || current.version !== receipt.version)
+      throw new BotError("CONFLICT", "原停止请求已处理，任务已有后续操作；未重复停止，请查看当前状态")
+    this.stopConversationRuns(receipt.botId, undefined, workId, "work", revision)
+    const stopped = this.store.getWork(receipt.botId, workId)
+    return {
+      ...receipt,
+      cleanupPending: stopped.backgroundBusy ||
+        this.store.pendingWorkFamily(receipt.botId, workId).length > 0
+    }
+  }
+  pauseWorkReviewFromTool(
+    source: BotConversationToolSource,
+    workId: string,
+    expectedVersion: number
+  ) {
+    this.workToolSource(source.taskId)
+    const receipt = this.store.requestWorkReviewPause(source, workId, expectedVersion)
+    this.changed()
+    this.wake()
+    return receipt
+  }
   sendWork(
     source: { taskId: string; callId: string; key: string },
     workId: string,
-    message: string
+    message: string,
+    expectedVersion?: number,
+    inputFileIds: readonly string[] = []
   ) {
     const task = this.workToolSource(source.taskId)
     if (!this.store.hasWorkUserRequest(task.id))
       throw new BotError("CONFLICT", "只有当前用户明确指令可以转达工作消息")
-    const result = this.store.sendWork(source, workId, message)
+    const result = this.store.sendWork(source, workId, message, expectedVersion, inputFileIds)
+    return this.publishWorkSend(result)
+  }
+
+  private publishWorkSend(result: BotTask): BotTask {
     this.changed()
-    this.steerUserMessage(result)
+    // A replay returns the original admission receipt, not the current state.
+    // Never run preparation again for an already consumed or rejected entry.
+    this.steerUserMessage(this.store.getTask(result.id))
     this.wake()
     return result
+  }
+  async sendWorkWithFiles(
+    source: { taskId: string; callId: string; key: string }, workId: string, message: string,
+    expectedVersion: number | undefined, inputFileIds: readonly string[]
+  ) {
+    const task = this.workToolSource(source.taskId)
+    const receipt = this.store.workSendReceipt(source, workId, message, expectedVersion, inputFileIds)
+    if (receipt) return receipt
+    const signal = this.active.get(source.taskId)!.controller.signal
+    const files = this.store.workInputFiles(source.taskId, inputFileIds)
+    const transfers = new Set(files.filter(file => botInputNeedsLifetimePin(file, workId)).map(file => file.id))
+    if (!transfers.size) {
+      await verifyInputFiles(files, signal)
+      signal.throwIfAborted()
+      return this.sendWork(source, workId, message, expectedVersion, inputFileIds)
+    }
+    const target = this.getWork(task.botId, workId)
+    return withThreadRunMutationLock(target.threadId, async () => {
+      signal.throwIfAborted()
+      const prior = this.store.workSendReceipt(source, workId, message, expectedVersion, inputFileIds)
+      if (prior) return prior
+      const work = this.getWork(task.botId, workId)
+      if (work.threadId !== target.threadId) throw new BotError("CONFLICT", "原任务会话已变化")
+      const destination = workInputPinStorage(work)
+      const createdPaths = new Set<string>()
+      const pinnedInputs = new Map<string, string>()
+      let admitted: BotTask
+      try {
+        for (const file of files) {
+          if (transfers.has(file.id))
+            pinnedInputs.set(file.id, await pinTransferredBotInputFile(file, destination, signal, createdPaths))
+          else await verifyInputFiles([file], signal)
+        }
+        signal.throwIfAborted()
+        this.workToolSource(source.taskId)
+        admitted = this.store.sendWork(source, workId, message, expectedVersion, inputFileIds, pinnedInputs)
+      } catch (error) {
+        await Promise.all([...createdPaths].map(path => realpath(path).then(async actual => {
+          if (actual === path) await rm(path, { force: true })
+        }).catch(error => {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") this.reportError(error)
+        })))
+        throw error
+      }
+      return this.publishWorkSend(admitted)
+    })
+  }
+  beginInputPreparation(runTaskId: string, inputTaskId: string): void {
+    const run = this.workToolSource(runTaskId)
+    const input = this.store.getTask(inputTaskId)
+    if (run.botId !== input.botId || run.threadId !== input.threadId ||
+        (input.id !== run.id && input.state !== "queued" && input.injectedInto !== run.id))
+      throw new BotError("CONFLICT", "输入不属于当前运行")
+    this.store.beginInputPreparation(inputTaskId)
+  }
+  recordPreparedInput(runTaskId: string, inputTaskId: string, body: string | null): void {
+    const run = this.workToolSource(runTaskId)
+    const input = this.store.getTask(inputTaskId)
+    if (run.botId !== input.botId || run.threadId !== input.threadId ||
+        (input.id !== run.id && input.state !== "queued" && input.injectedInto !== run.id))
+      throw new BotError("CONFLICT", "附件输入不属于当前运行")
+    const revision = this.store.revision()
+    this.store.recordPreparedInput(inputTaskId, body)
+    if (revision !== this.store.revision()) this.changed()
+  }
+  armWorkResultReview(taskId: string, incarnation: string): boolean {
+    this.workToolSource(taskId)
+    return this.store.armWorkResultReview(taskId, incarnation)
+  }
+  workResultReviewActiveForExecution(taskId: string): boolean {
+    this.requireRunning()
+    return this.store.workResultReviewActiveForExecution(taskId)
+  }
+  recordWorkResultEvidence(taskId: string, input: Parameters<BotStore["recordWorkResultEvidence"]>[1]): void {
+    this.workToolSource(taskId)
+    this.store.recordWorkResultEvidence(taskId, input)
+  }
+  workResultReview(taskId: string) {
+    this.workToolSource(taskId)
+    return this.store.getWorkResultReview(taskId)
+  }
+  canPublishReadyWorkReview(
+    taskId: string,
+    decision: Extract<BotWorkResultDecision, { kind: "ready" }>,
+    inspectedCommands: readonly BotWorkResultCommandReference[]
+  ): boolean {
+    this.workToolSource(taskId)
+    return this.store.canPublishReadyWorkReview(taskId, decision, inspectedCommands)
+  }
+  commitWorkResultReview(
+    taskId: string,
+    decision: BotWorkResultDecision | null,
+    selected: readonly BotWorkResultAttachmentReference[],
+    inspectedCommands: readonly BotWorkResultCommandReference[] = [],
+    alternative?: BotWorkResultReviewAlternative
+  ) {
+    this.workToolSource(taskId)
+    const receipt = this.store.commitWorkResultReview(taskId, decision, selected, inspectedCommands, alternative)
+    this.active.get(taskId)!.workReviewCommitted = true
+    this.changed()
+    this.wake()
+    return receipt
+  }
+  workResultPublication(taskId: string, refreshUnwritten = false) {
+    this.workToolSource(taskId)
+    return this.store.getWorkResultPublication(taskId, refreshUnwritten)
+  }
+  hasPublishedWorkResultMessage(input: Parameters<BotStore["hasPublishedWorkResultMessage"]>[0]): boolean {
+    this.requireRunning()
+    return this.store.hasPublishedWorkResultMessage(input)
+  }
+  acknowledgeWorkResultPublication(taskId: string) {
+    this.workToolSource(taskId)
+    const first = this.store.acknowledgeWorkResultPublication(taskId)
+    try { this.changed() } catch (error) { this.reportError(error) }
+    this.wake()
+    return first
+  }
+  canDispatchWorkResultRepair(taskId: string, incarnation: string): boolean {
+    this.workToolSource(taskId)
+    return this.store.canDispatchWorkResultRepair(taskId, incarnation)
+  }
+  historicalMessageOrigins(...args: Parameters<BotStore["historicalMessageOrigins"]>) {
+    this.requireRunning()
+    return this.store.historicalMessageOrigins(...args)
+  }
+  legacyHistoryRequests(...args: Parameters<BotStore["legacyHistoryRequests"]>) {
+    this.requireRunning()
+    return this.store.legacyHistoryRequests(...args)
+  }
+  inputProjections(botId: string, threadId: string, messageIds: readonly string[], workIds?: readonly string[], purpose?: "reply") {
+    this.requireRunning()
+    return this.store.inputProjections(botId, threadId, messageIds, workIds, purpose)
+  }
+  inputFilesForTask(taskId: string) {
+    const task = this.store.getTask(taskId)
+    return this.store.inputFiles(task.botId,
+      task.origin.kind === "user" || task.origin.kind === "work" ? task.origin.inputFileIds ?? [] : [])
+  }
+  async verifyInputFilesForRun(runTaskId: string, inputTaskId: string): Promise<void> {
+    const run = this.workToolSource(runTaskId), input = this.store.getTask(inputTaskId)
+    if (run.botId !== input.botId || run.threadId !== input.threadId)
+      throw new BotError("CONFLICT", "附件输入不属于当前运行")
+    const files = this.inputFilesForTask(inputTaskId)
+    await verifyInputFiles(input.origin.kind === "work" ? files : files.filter(file => file.blockHash),
+      this.active.get(runTaskId)!.controller.signal)
+    this.workToolSource(runTaskId)
   }
   getWork(botId: string, workId: string) {
     this.getBot(botId)
@@ -434,14 +757,186 @@ export class LocalBotHost {
       throw new BotError("CONFLICT", "任务解绑仅可由正在进行的 Bot 删除协调执行。")
     return this.store.getWork(botId, workId)
   }
+  workDeletionRecord(botId: string, workId: string) {
+    this.requireRunning()
+    return this.store.workDeletionRecord(botId, workId)
+  }
+  assertWorkNotDeleting(work: Pick<BotWorkItem, "botId" | "id">): void {
+    this.store.assertWorkNotDeleting(work)
+  }
+  hasPendingWorkDeletionResults(workId: string): boolean {
+    this.requireRunning()
+    return this.store.pendingWorkDeletionResults(workId).length > 0
+  }
+  removeWork(
+    target: BotWorkDeletionIdentity,
+    cleanup: (readWork: () => BotWorkItem, ready: () => void) => Promise<string | undefined>,
+    assertLive: () => void,
+    source?: BotConversationToolSource
+  ): Promise<BotWorkDeletionReceipt> {
+    this.requireRunning()
+    const assertSource = () => {
+      assertLive()
+      if (source) {
+        const task = this.ordinaryThreadSource(source.taskId)
+        const bot = this.getBot(task.botId)
+        if (task.botId !== target.botId || task.threadId !== bot.threadId || bot.archived)
+          throw new BotError("CONFLICT", "只能在桌面主对话中删除当前 Bot 的工作。")
+      }
+    }
+    assertSource()
+    const { botId, workId, threadId } = target
+    if (this.workDeletions.has(workId))
+      throw new BotError("CONFLICT", "原工作正在删除，请等待清理结果。")
+    let record = this.store.beginWorkDeletion(target, source)
+    if (record.phase === "deleted")
+      return Promise.resolve({ botId, workId, state: "deleted",
+        ...(record.incarnation ? { deletedThreadId: threadId } : {}) })
+    const stopped = record.phase === "stopping" ? this.stopWorkForDeletion(botId, workId, threadId) : Promise.resolve()
+    const readWork = () => {
+      this.requireRunning()
+      assertSource()
+      if (this.workDeletions.get(workId) !== deletion ||
+          this.store.workDeletionRecord(botId, workId)?.phase !== record.phase)
+        throw new BotError("CONFLICT", "工作删除授权已结束。")
+      return this.store.getWork(botId, workId)
+    }
+    const ready = () => {
+      readWork()
+      if (record.phase === "stopping")
+        record = this.store.advanceWorkDeletion(record, "ready")
+    }
+    const deletion = stopped.then(async (): Promise<BotWorkDeletionReceipt> => {
+      readWork()
+      if (record.phase === "stopping" && this.runtime.removeWorkBrowser) {
+        try {
+          await this.runtime.removeWorkBrowser(botWorkBrowserScope(workId, botId))
+        } catch (error) {
+          this.reportError(error)
+          throw new BotError("CONFLICT", "原任务的浏览器页面未能关闭，请重试删除。")
+        }
+        readWork()
+      }
+      const deletedThreadId = await cleanup(readWork, ready)
+      try {
+        this.store.advanceWorkDeletion(record, "deleted")
+      } catch (error) {
+        if (!deletedThreadId) throw error
+        this.reportError(error)
+        return { botId, workId, deletedThreadId, state: "cleanup_pending", error: "原会话已删除，工作清理回执尚未写入。" }
+      }
+      this.changed()
+      return { botId, workId, state: "deleted", ...(deletedThreadId ? { deletedThreadId } : {}) }
+    }).finally(() => this.workDeletions.delete(workId))
+    this.workDeletions.set(workId, deletion)
+    this.changed()
+    this.wake()
+    return deletion
+  }
+
+  private async stopWorkForDeletion(botId: string, workId: string, threadId: string): Promise<void> {
+    const reports = this.store.pendingWorkDeletionResults(workId)
+    for (const task of reports) this.cancelSingleTask(task.id, false)
+    const { taskIds, cleanup } = this.stopConversationRuns(botId, undefined, workId)
+    cleanup.push(this.recovery)
+    for (const task of reports) taskIds.add(task.id)
+    for (const run of this.active.values()) {
+      if (run.task.threadId === threadId || taskIds.has(run.task.id) ||
+          [...run.steered].some(id => taskIds.has(id))) cleanup.push(run.done)
+    }
+    for (const [id, run] of this.commandCancellations) {
+      if (run.threadId === threadId || taskIds.has(id)) cleanup.push(run.done)
+    }
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        Promise.all(cleanup),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new BotError("CONFLICT", "原任务仍在清理，请等待实际退出后重试删除。")), 10_000)
+        })
+      ])
+    } finally {
+      clearTimeout(timeout)
+    }
+    if (this.store.pendingWorkDeletionResults(workId).length ||
+        await this.runtime.hasPendingWork?.([threadId]))
+      throw new BotError("CONFLICT", "原任务仍有待处理的后台工作，请核对后重试删除。")
+    this.store.conversations.assertIdle(botId, workId)
+  }
   markWorksRead(botId: string, throughVersion: number) {
     this.requireRunning()
     this.store.markWorksRead(botId, throughVersion)
     this.changed()
   }
-  workSummaries(botId: string, workIds: string[]) {
+  workSummaries(botId: string, workIds: string[], allowMissing?: true) {
     this.getBot(botId)
-    return this.store.workSummaries(botId, workIds)
+    return this.store.workSummaries(botId, workIds, allowMissing)
+  }
+  /** Only live requests from the work itself or its exact local return chain. */
+  private workInteraction(bot: BotDefinition, taskId: string) {
+    const run = this.active.get(taskId)
+    if (!run || run.controller.signal.aborted || bot.archived || !botTaskWorkFamily(run.task)) return
+    const task = this.store.getTask(taskId)
+    if (task.state !== "waiting_user" || task.mockSource || botTaskGroupId(task)) return
+    let root = task
+    if (!task.workId) {
+      if (task.origin.kind !== "bot") return
+      // A downstream receipt can resume the intermediate peer's original handoff.
+      // Use that handoff only for routing, and the current physical run for the request.
+      const handoff = task.origin.expectsReply ? task : this.store.peerHandoffSource(task)
+      if (!handoff || handoff.threadId !== task.threadId || handoff.mockSource) return
+      const origin = handoff.origin
+      if (origin.kind !== "bot" || !origin.rootWorkId ||
+          origin.feedbackForTaskId || this.store.taskRootCancelled(handoff)) return
+      root = this.store.getTask(origin.rootTaskId)
+      if (root.workId !== origin.rootWorkId || root.mockSource || botTaskGroupId(root)) return
+      const parent = origin.upstreamTaskId ? this.store.getTask(origin.upstreamTaskId) : root
+      if (parent.botId !== origin.fromBotId || parent.mockSource || botTaskGroupId(parent) ||
+          botTaskWorkFamily(parent) !== root.workId || origin.returnWorkId !== parent.workId) return
+    }
+    if (root.botId !== bot.id || !root.workId) return
+    const work = this.store.conversations.forThread(root.threadId)
+    if (!work || work.id !== root.workId || work.botId !== bot.id || work.parentThreadId !== bot.threadId ||
+        work.audienceKey !== "desktop" || work.source || work.state !== "active" || work.deletionPending ||
+        (work.conversation && work.conversation.state !== "bound")) return
+    const asker = this.store.getBot(task.botId)
+    if (asker.archived || asker.deleting) return
+    return {
+      task, run, asker,
+      source: {
+        taskId: task.id, workId: work.id, workTitle: work.title, askedBy: asker.name,
+        ...(work.workspace?.kind === "project" ? { projectName: work.workspace.projectName } : {})
+      }
+    }
+  }
+  pendingWorkQuestions(botId: string): BotWorkInteraction[] {
+    const bot = this.getBot(botId)
+    const interactions: BotWorkInteraction[] = []
+    for (const taskId of this.active.keys()) {
+      const context = this.workInteraction(bot, taskId)
+      if (!context) continue
+      const { task, run, asker, source } = context
+      const request = this.runtime.pendingUserInput?.(task)
+      if (request?.threadId === task.threadId) interactions.push({ ...source, kind: "question", request })
+      if (interactions.length === 12) break
+      const requestIds = run.lease.approvalRequestIds
+      const requestId = requestIds?.size ? this.runtime.pendingApproval?.(task, requestIds) : undefined
+      if (requestId && (task.workId || task.threadId === asker.threadId)) {
+        interactions.push({
+          ...source, kind: "approval", requestId,
+          target: { botId: asker.id, threadId: task.threadId, ...(task.workId ? { workId: task.workId } : {}) }
+        })
+      }
+      if (interactions.length === 12) break
+    }
+    return interactions
+  }
+  answerWorkQuestion(botId: string, taskId: string, response: UserInputResponse): void {
+    const context = this.workInteraction(this.getBot(botId), taskId)
+    const request = context && this.runtime.pendingUserInput?.(context.task)
+    if (!request || request.threadId !== context?.task.threadId || request.requestId !== response.requestId ||
+        !this.runtime.answerUserInput?.(response))
+      throw new BotError("CONFLICT", "问题已处理或已失效，请核对原任务。")
   }
   listWorks(botId: string, cursor?: string, query?: string) {
     this.getBot(botId)
@@ -453,12 +948,106 @@ export class LocalBotHost {
       task.botId,
       cursor,
       query,
-      task.mockSource?.audienceKey ?? "desktop"
+      task.mockSource?.audienceKey ?? "desktop",
+      "model"
     )
   }
-  associatedWorks(botId: string) {
+  projectWorkForModel<T extends Pick<BotWorkItem, "id" | "botId" | "title"> & Partial<Pick<BotWorkItem, "goal" | "activity">>>(work: T): T {
+    return this.store.projectWorkForModel(work)
+  }
+  private ordinaryThreadSource(taskId: string) {
+    const task = this.workToolSource(taskId)
+    if (task.workId || task.mockSource || !this.store.hasWorkUserRequest(taskId))
+      throw new BotError("CONFLICT", "只能在桌面主对话中按当前用户要求访问普通会话")
+    return task
+  }
+  desktopOperationReceipts(taskId: string, query: BotDesktopOperationQuery) {
+    this.ordinaryThreadSource(taskId)
+    return this.store.desktopOperationReceipts(taskId, query)
+  }
+  async ordinaryThreads(taskId: string, input: BotThreadListInput) {
+    this.ordinaryThreadSource(taskId)
+    if (!this.runtime.ordinaryThreads) throw new BotError("CONFLICT", "当前主机不支持普通会话查询")
+    const page = await this.runtime.ordinaryThreads.list(input)
+    this.ordinaryThreadSource(taskId)
+    return page
+  }
+  async ordinaryThreadHistory(taskId: string, input: BotThreadReadInput) {
+    this.ordinaryThreadSource(taskId)
+    if (!this.runtime.ordinaryThreads) throw new BotError("CONFLICT", "当前主机不支持普通会话查询")
+    const page = await this.runtime.ordinaryThreads.read(input)
+    this.ordinaryThreadSource(taskId)
+    return page
+  }
+  async renameOrdinaryThreadFromTool(source: { taskId: string; callId: string; key: string }, input: BotThreadRenameInput) {
+    this.ordinaryThreadSource(source.taskId)
+    if (!this.runtime.ordinaryThreads?.rename) throw new BotError("CONFLICT", "当前主机不支持修改普通会话名称")
+    return this.runtime.ordinaryThreads.rename(input, apply => {
+      this.ordinaryThreadSource(source.taskId)
+      return this.store.renameOrdinaryThread(source, input, apply)
+    })
+  }
+  private conversationToolAuthority(source: BotConversationToolSource, signal: AbortSignal) {
+    const validate = () => {
+      signal.throwIfAborted()
+      const task = this.ordinaryThreadSource(source.taskId)
+      const bot = this.getBot(task.botId)
+      if (bot.archived || task.threadId !== bot.threadId || !source.callId || !source.key.trim() || source.key.length > 160)
+        throw new BotError("CONFLICT", "只能从桌面主对话的当前用户要求管理会话")
+      return bot.id
+    }
+    const botId = validate()
+    return { botId, validate }
+  }
+  async linkOrdinaryThreadFromTool(source: BotConversationToolSource, input: BotThreadLinkInput, signal: AbortSignal) {
+    const { botId, validate } = this.conversationToolAuthority(source, signal)
+    if (!this.runtime.conversationTools) throw new BotError("CONFLICT", "当前主机不支持关联普通会话")
+    return this.runtime.conversationTools.link(botId, input, source, signal, validate)
+  }
+  async unlinkWorkFromTool(source: BotConversationToolSource, input: BotWorkUnlinkInput, signal: AbortSignal) {
+    const { botId, validate } = this.conversationToolAuthority(source, signal)
+    if (!this.runtime.conversationTools) throw new BotError("CONFLICT", "当前主机不支持解除会话关联")
+    return this.runtime.conversationTools.unlink(botId, input, source, signal, validate)
+  }
+  async deleteOrdinaryThreadFromTool(source: BotConversationToolSource, input: import("../../shared/bots/thread-history").BotThreadDeleteInput, signal: AbortSignal) {
+    const { botId, validate } = this.conversationToolAuthority(source, signal)
+    if (!this.runtime.conversationTools?.deleteThread) throw new BotError("CONFLICT", "当前主机不支持删除普通会话")
+    return this.runtime.conversationTools.deleteThread(botId, input, source, signal, validate)
+  }
+  async deleteWorkFromTool(source: BotConversationToolSource, input: BotWorkUnlinkInput, signal: AbortSignal) {
+    const { botId, validate } = this.conversationToolAuthority(source, signal)
+    if (!this.runtime.conversationTools?.deleteWork) throw new BotError("CONFLICT", "当前主机不支持删除工作")
+    return this.runtime.conversationTools.deleteWork(botId, input, source, signal, validate)
+  }
+  ordinaryThreadInputProjections(threadId: string, ids: readonly string[], row: ThreadIncarnationRow) {
+    return botHistoryInputProjection(threadId, row)?.(ids) ?? new Map()
+  }
+  workOwnerCandidates(threadIds: readonly string[]) {
+    this.requireRunning()
+    return this.store.workOwnerCandidates(threadIds)
+  }
+  async resolveOrdinaryThreadSource(botId: string, source: BotThreadHistorySource) {
     this.getBot(botId)
-    return this.store.associatedWorks(botId)
+    if (!this.runtime.ordinaryThreads) throw new BotError("CONFLICT", "当前主机不支持普通会话查询")
+    const ref = localWorkConversationRef(source.conversation)
+    const owner = this.conversationLinks.forThread(ref.threadId)
+    // A link issued before association still names the same original message.
+    // Only navigation reuses work history; ordinary model tools stay restricted.
+    if (owner && !owner.source && owner.audienceKey === "desktop" &&
+        owner.conversation?.state === "bound" && owner.conversation.origin === "existing") {
+      return this.resolveWorkHistorySource(owner.botId, {
+        workId: owner.id,
+        messageId: source.messageId,
+        incarnation: createHash("sha256").update(JSON.stringify(ref.incarnation)).digest("hex")
+      })
+    }
+    const result = await this.runtime.ordinaryThreads.resolve(source)
+    this.getBot(botId)
+    return result
+  }
+  associatedWorks(botId: string, view: "display" | "model" = "display") {
+    this.getBot(botId)
+    return this.store.associatedWorks(botId, view)
   }
   private historyTarget(taskId: string, workId: string) {
     const task = this.workToolSource(taskId)
@@ -479,12 +1068,24 @@ export class LocalBotHost {
   }
   async resolveWorkHistorySource(botId: string, source: BotWorkHistorySource) {
     if (!this.runtime.workHistory) throw new BotError("CONFLICT", "此主机暂不支持历史定位")
+    this.requireRunning()
+    if (this.store.archivedDeliveryWork(botId, source.workId)) {
+      const { resolveDetachedBotWorkHistory } = await import("./work-history")
+      this.requireRunning()
+      const archived = this.store.archivedDeliveryWork(botId, source.workId)
+      if (!archived) throw new BotError("CONFLICT", "原交付附件已不可用，请查看原任务。")
+      return resolveDetachedBotWorkHistory(archived, source, this)
+    }
     const work = this.getWork(botId, source.workId)
+    this.assertWorkNotDeleting(work)
     if (work.source && work.source.transport !== "im")
       throw new BotError("CONFLICT", "不是本机或 IM 任务")
     const result = await this.runtime.workHistory.resolve(work, source)
-    this.getWork(botId, source.workId)
+    this.assertWorkNotDeleting(this.getWork(botId, source.workId))
     return result
+  }
+  desktopDeliveryWorks(threadId: string) {
+    return this.store.desktopDeliveryWorks(threadId)
   }
   /** Main-process authenticated IM adapter only; not exposed as a renderer injection API. */
   get imChannel() {
@@ -542,6 +1143,7 @@ export class LocalBotHost {
     this.requireRunning()
     const task = this.store.getTask(taskId)
     if (task.state !== "running") throw new BotError("CONFLICT", "执行已结束，不能继续交付附件")
+    if (task.workId && this.store.workResultReviewActiveForExecution(task.id)) return
     this.updateImState(() => this.store.im.publishFiles(task, callId, files))
   }
   imFileStatuses(botId: string, threadId: string, callId: string) {
@@ -618,6 +1220,25 @@ export class LocalBotHost {
   initializeMockThread(task: BotTask) {
     if (task.mockSource) this.store.external(task.mockSource).initialize(task.mockSource, task)
   }
+  async validateSkillWorkspace(botId: string, target: BotSkillWorkspaceTarget): Promise<void> {
+    if (this.getBot(botId).archived) throw new BotError("CONFLICT", "请先恢复已归档的 Bot")
+    if (target.kind === "work") {
+      const work = this.getWork(botId, target.workId)
+      this.store.assertWorkNotDeleting(work)
+      if (work.threadId !== target.threadId || work.source || work.audienceKey !== "desktop" ||
+          work.state !== "active" || work.userControl?.settling ||
+          (work.conversation && work.conversation.state !== "bound"))
+        throw new BotError("CONFLICT", "所选任务暂时无法接收消息，请选择其他位置。")
+      const path = work.conversation
+        ? (await import("./work-result-thread")).verifiedWorkResultThread(work).workspacePath
+        : work.workspace?.path
+      // Legacy native work with no pinned workspace provisions the Bot default on dispatch.
+      if (path) await validateWorkspaceDirectory(path)
+      return
+    }
+    if (!this.runtime.workspaces) throw new BotError("CONFLICT", "当前主机不支持选择任务工作目录")
+    await this.runtime.workspaces.resolve(botId, target)
+  }
   async createWork(
     input: CreateBotWorkInput,
     source?: { taskId: string; callId: string; key: string }
@@ -637,12 +1258,24 @@ export class LocalBotHost {
         : await this.runtime.workspaces?.resolve(input.botId, input.workspace)
     this.requireRunning()
     if (source) this.workToolSource(source.taskId)
+    if (source && input.inputFileIds?.length) {
+      await verifyInputFiles(this.store.workInputFiles(source.taskId, input.inputFileIds), this.active.get(source.taskId)!.controller.signal)
+      this.workToolSource(source.taskId)
+    }
+    if (!source && input.explicitSkill && input.inputFileIds?.length) {
+      await verifyInputFiles(this.store.desktopInputFiles(input.botId, input.inputFileIds), AbortSignal.timeout(30_000))
+      this.requireRunning()
+    }
+    if (!source && input.explicitSkill && this.runtime.validateSkillSelection) {
+      await this.runtime.validateSkillSelection(input.explicitSkill)
+      this.requireRunning()
+    }
     const receipt = this.store.createWork(input, source, workspace)
     this.changed()
     this.wake()
     return receipt
   }
-  async workProjects(taskId: string, query: string, cursor?: number) {
+  async workProjects(taskId: string, query?: string, cursor?: number) {
     const validate = () => {
       const task = this.workToolSource(taskId)
       if (
@@ -651,6 +1284,8 @@ export class LocalBotHost {
         !this.store.hasWorkUserRequest(task.id)
       )
         throw new BotError("CONFLICT", "只能在本机主对话的当前用户交办中查找项目")
+      if (task.mockSource && !query?.trim())
+        throw new BotError("CONFLICT", "请在桌面主对话中浏览全部项目；IM 仍可按项目名称查询")
     }
     validate()
     if (!this.runtime.workspaces) throw new BotError("CONFLICT", "当前主机不支持查询项目")
@@ -663,6 +1298,57 @@ export class LocalBotHost {
     return (
       (await this.runtime.hasPendingWork?.([this.store.getWork(botId, workId).threadId])) ?? false
     )
+  }
+  changeWorkControl(input: BotWorkControlInput): BotWorkItem {
+    this.requireRunning()
+    this.store.changeWorkControl(input)
+    this.applyWorkControlStops()
+    this.finishWorkControlHandoffs()
+    this.changed()
+    // Reconsider the existing inbox on return; no new task or request is created.
+    if (input.action === "return") {
+      const work = this.store.getWork(input.botId, input.workId)
+      for (const run of this.active.values())
+        if (run.task.threadId === work.threadId) this.onSteeringReady(run.task.id)
+    }
+    this.wake()
+    return this.store.getWork(input.botId, input.workId)
+  }
+  workControlPending(botId: string, workId: string, taskId?: string) {
+    this.requireRunning()
+    return this.store.workControlPending(botId, workId, taskId)
+  }
+  retainReadyWorkService(taskId: string, serviceId: string, checkId: string, reason: string) {
+    this.workToolSource(taskId)
+    const receipt = this.store.retainReadyWorkService(taskId, serviceId, checkId, reason)
+    this.changed()
+    this.wake()
+    return receipt
+  }
+  private readonly appliedWorkControlStops = new Set<string>()
+  private applyWorkControlStops(): void {
+    if (!this.recoveryReady) return
+    const stops = this.store.workControlStops()
+    const pending = new Set(stops.map(stop => stop.operationId))
+    for (const id of this.appliedWorkControlStops)
+      if (!pending.has(id)) this.appliedWorkControlStops.delete(id)
+    for (const stop of stops) {
+      if (this.appliedWorkControlStops.has(stop.operationId)) continue
+      for (const id of stop.taskIds) this.cancel(id, false)
+      this.appliedWorkControlStops.add(stop.operationId)
+    }
+  }
+  private finishWorkControlHandoffs(): void {
+    if (!this.recoveryReady) return
+    this.applyWorkControlStops()
+    const activeThreads = new Set([
+      ...[...this.active.values()].map(run => run.task.threadId),
+      ...[...this.commandCancellations.values()].map(run => run.threadId)
+    ])
+    if (this.store.finishWorkControlHandoffs(activeThreads)) {
+      this.changed()
+      this.wake()
+    }
   }
   async changeWork(
     botId: string,
@@ -695,6 +1381,7 @@ export class LocalBotHost {
   }
   conversationLinkChanged() {
     this.changed()
+    this.wake()
   }
   async assertConversationLinkIdle(threadId: string, deletingWork?: { botId: string; workId: string }) {
     this.requireRunning()
@@ -851,13 +1538,15 @@ export class LocalBotHost {
     this.wake()
     return receipt
   }
-  publishGroupFiles(taskId: string, callId: string, files: BotDeliveredFile[], content = ""): void {
+  publishGroupFiles(taskId: string, callId: string, files: BotDeliveredFile[], content = "",
+    handoff?: () => { files: BotDeliveredFile[]; outputBindings?: Record<string, string>; forwardedOutputs?: Record<string, string> } | undefined): boolean {
     this.requireRunning()
     const run = this.active.get(taskId)
     if (!run || run.controller.signal.aborted)
       throw new BotError("CONFLICT", "任务已停止，无法继续交付附件")
-    this.store.publishGroupFiles(taskId, callId, files, content)
-    this.changed()
+    const fresh = this.store.publishGroupFiles(taskId, callId, files, content, handoff)
+    if (fresh) this.changed()
+    return fresh
   }
   sendGroup(input: SendBotGroupMessageInput): void {
     this.requireRunning()
@@ -911,30 +1600,39 @@ export class LocalBotHost {
     return this.store.peerHandoff(task.id)
   }
 
-  recordPeerDelivery(taskId: string, files: BotDeliveredFile[]): void {
+  recordPeerDelivery(taskId: string, files: BotDeliveredFile[], outputBindings?: Record<string, string>, forwardedOutputs?: Record<string, string>): void {
     this.requireRunning()
     const run = this.active.get(taskId)
     if (!run || run.controller.signal.aborted)
       throw new BotError("CONFLICT", "任务已停止，无法记录交付附件")
-    this.store.recordPeerDelivery(taskId, files)
+    this.store.recordPeerDelivery(taskId, files, outputBindings, forwardedOutputs)
   }
 
   saveSchedule(
     botId: string,
     input: BotScheduleInput,
-    existing?: { id: string; version: number },
-    sourceTaskId?: string
+    existing?: BotScheduleEdit,
+    sourceTaskId?: string,
+    desktopWork?: BotWorkScheduleCreation
   ): BotSchedule {
     this.requireRunning()
+    if (existing?.tool) this.workToolSource(existing.tool.source.taskId)
     if (!this.nextSchedule) throw new BotError("CONFLICT", "此主机未启用例行任务")
-    if (input.enabled && input.frequency === "once" && Date.parse(input.runAt ?? "") <= Date.now())
+    const expired = input.enabled && input.frequency === "once" && Date.parse(input.runAt ?? "") <= Date.now()
+    if (expired && !desktopWork)
       throw new BotError("INVALID_INPUT", "执行时间必须在未来")
-    const next = input.enabled ? this.nextSchedule(input, new Date()) : null
-    const schedule = this.store.saveSchedule(botId, input, next, existing, sourceTaskId)
+    // A replay may arrive after its one-shot deadline. Only a new record needs a future time.
+    const next = input.enabled && !expired ? this.nextSchedule(input, new Date()) : null
+    const schedule = this.store.saveSchedule(botId, input, next, existing, sourceTaskId, desktopWork)
     this.changed()
     this.wake()
     this.armSchedules()
     return schedule
+  }
+
+  replayDesktopScheduleEdit(botId: string, id: string, edit: BotScheduleToolEdit): BotSchedule | undefined {
+    this.workToolSource(edit.source.taskId)
+    return this.store.replayDesktopScheduleEdit(botId, id, edit)
   }
 
   removeSchedule(id: string, version: number): void {
@@ -945,18 +1643,58 @@ export class LocalBotHost {
     this.armSchedules()
   }
 
+  saveDesktopWorkScheduleFromTool(
+    botId: string,
+    input: BotScheduleInput,
+    workId: string,
+    source: BotConversationToolSource
+  ): BotSchedule {
+    this.workToolSource(source.taskId)
+    return this.saveSchedule(botId, input, undefined, undefined, { workId, source })
+  }
+
+  saveDesktopScheduleFollowUp(
+    botId: string,
+    input: BotScheduleInput,
+    followUp: BotWorkScheduleMonitorInput | BotFixedReminderInput,
+    source: BotConversationToolSource,
+    existing?: BotScheduleEdit
+  ): BotSchedule {
+    this.workToolSource(source.taskId)
+    if (!this.nextSchedule || !this.runtime.scheduleObservationPublication)
+      throw new BotError("CONFLICT", "此主机未启用工作观察或固定提醒")
+    const now = new Date()
+    const next = input.enabled && (input.frequency !== "once" || Date.parse(input.runAt ?? "") > now.getTime())
+      ? this.nextSchedule(input, now)
+      : null
+    const schedule = this.store.saveSchedule(botId, input, next, existing, undefined, undefined, { input: followUp, source })
+    this.changed()
+    this.wake()
+    this.armSchedules()
+    return schedule
+  }
+
   /** Called on OS resume as well as the single deadline timer. Missed intervals coalesce. */
   resume(): void {
+    for (const [id, retry] of this.schedulePublicationRetries) {
+      if (retry.at === undefined) this.schedulePublicationRetries.delete(id)
+    }
+    this.resumeSchedules()
+  }
+
+  private resumeSchedules(): void {
     if (this.stopping || this.faulted) return
     if (this.nextSchedule) {
       const now = Date.now()
       for (const schedule of this.store.schedules()) {
-        if (!schedule.enabled || !schedule.nextRunAt || Date.parse(schedule.nextRunAt) > now)
+        const expiresAt = schedule.workMonitor?.expiresAt ?? schedule.fixedReminder?.expiresAt
+        const expired = expiresAt !== undefined && Date.parse(expiresAt) <= now
+        if (!schedule.enabled || !schedule.nextRunAt || (!expired && Date.parse(schedule.nextRunAt) > now))
           continue
         try {
           const next =
-            schedule.frequency === "once" ? null : this.nextSchedule(schedule, new Date(now + 1))
-          this.store.fireSchedule(schedule, next)
+            expired || schedule.frequency === "once" ? null : this.nextSchedule(schedule, new Date(now + 1))
+          this.store.fireSchedule(schedule, next, Boolean(this.runtime.scheduleObservationPublication))
           this.changed()
         } catch (error) {
           this.reportError(error)
@@ -970,16 +1708,20 @@ export class LocalBotHost {
   private armSchedules(): void {
     clearTimeout(this.scheduleTimer)
     this.scheduleTimer = undefined
-    if (this.stopping || this.faulted || !this.nextSchedule) return
-    const due = this.store
+    if (this.stopping || this.faulted) return
+    const due = this.nextSchedule ? this.store
       .schedules()
       .filter((item) => item.enabled && item.nextRunAt)
-      .map((item) => Date.parse(item.nextRunAt!))
-      .filter(Number.isFinite)
+      .map((item) => {
+        const expiresAt = item.workMonitor?.expiresAt ?? item.fixedReminder?.expiresAt
+        return Math.min(Date.parse(item.nextRunAt!), expiresAt ? Date.parse(expiresAt) : Infinity)
+      })
+      .filter(Number.isFinite) : []
+    if (this.schedulePublicationRetryAt !== undefined) due.push(this.schedulePublicationRetryAt)
     if (!due.length) return
     // A rejected queue insertion backs off; no hot retry loop at an expired deadline.
     const delay = Math.max(1000, Math.min(86_400_000, Math.min(...due) - Date.now()))
-    this.scheduleTimer = setTimeout(() => this.resume(), delay)
+    this.scheduleTimer = setTimeout(() => this.resumeSchedules(), delay)
     this.scheduleTimer.unref?.()
   }
 
@@ -1057,7 +1799,12 @@ export class LocalBotHost {
     this.armSchedules()
     const deletion = Promise.resolve()
       .then(() => cleanup(threads))
-      .then(() => {
+      .then(async () => {
+        // Whole-Bot deletion skips missing native threads and preserves user
+        // conversations. Only those uninitialized native works need this sweep.
+        for (const work of this.store.uninitializedDesktopWorks(id)) {
+          await withThreadRunMutationLock(work.threadId, () => removeUninitializedWorkInputPins(work))
+        }
         this.store.finishDeletion(id, threads)
         this.changed()
       })
@@ -1304,7 +2051,7 @@ export class LocalBotHost {
     const result = this.store.setMessageReaction(canonicalTarget, messageId, emoji, present)
     if (result.revision !== before) {
       this.changed(undefined, canonicalTarget)
-      if (present) this.wake()
+      if (present && (canonicalTarget.kind !== "bot" || !canonicalTarget.workId)) this.wake()
     }
     return result
   }
@@ -1325,16 +2072,135 @@ export class LocalBotHost {
     if (this.store.revision() !== before) this.changed()
   }
 
+  retainInputFile(botId: string, attachment: FileAttachment, snapshotPath: string, workId?: string): FileAttachment {
+    this.requireRunning()
+    return this.store.retainInputFile(botId, attachment, snapshotPath, workId)
+  }
+
+  async acceptedBrowserInputPath(
+    taskId: string, reference: string, signal: AbortSignal, historyStorage?: BotInputHistoryResolver,
+    editableWorkspace?: string
+  ) {
+    this.workToolSource(taskId)
+    const file = this.store.acceptedDesktopInputFile(taskId, reference, true, historyStorage, editableWorkspace)
+    if (!file) return undefined
+    await verifyInputFiles([file], signal)
+    this.workToolSource(taskId)
+    return file.file.filePath
+  }
+
+  acceptedDeliveryInputFile(taskId: string, reference: string, historyStorage?: BotInputHistoryResolver) {
+    this.workToolSource(taskId)
+    return this.store.acceptedDesktopInputFile(taskId, reference, false, historyStorage)
+  }
+
+  async acceptedHistoricalWorkDelivery(
+    taskId: string, reference: BotHistoricalDeliveryReference, storageRoot: string, signal: AbortSignal,
+    use: BotHistoricalDeliveryUse = "deliver"
+  ) {
+    const task = this.workToolSource(taskId)
+    if (!task.workId) return undefined
+    const requestIds = this.store.preparedDesktopWorkAttachmentRequests(task)
+    if (!requestIds.length) return undefined
+    const { findHistoricalBotWorkDelivery, revalidateDesktopBotDelivery } = await import("./delivery-receipt")
+    const workId = task.workId
+    const currentWork = () => {
+      signal.throwIfAborted()
+      this.workToolSource(taskId)
+      const work = this.getWork(task.botId, workId)
+      this.store.assertWorkNotDeleting(work)
+      if (work.threadId !== task.threadId || work.source || work.audienceKey !== "desktop" ||
+          (work.conversation && work.conversation.state !== "bound"))
+        throw new BotError("CONFLICT", "原任务关联已变化，请检查原交付。")
+      return work
+    }
+    const previous = findHistoricalBotWorkDelivery(currentWork(), requestIds, storageRoot, reference, use)
+    if (!previous) return undefined
+    const { source, receipt } = previous
+    const { path, root, digest } = receipt
+    const stat = await lstat(path)
+    if (!stat.isFile() || stat.size !== receipt.file.size || await realpath(path) !== path ||
+        await hashBotFile(root, path, signal) !== digest || await realpath(path) !== path)
+      throw new BotError("CONFLICT", "已保存的成果版本发生变化，请查看原交付。")
+    const work = currentWork()
+    const current = revalidateDesktopBotDelivery({ desktopDeliveryWorks: () => [work] }, source, receipt)
+    if (current.resultId !== receipt.resultId)
+      throw new BotError("CONFLICT", "原交付附件已不可用，请查看原任务。")
+    return current
+  }
+
   send(input: SendBotMessageInput): BotTask {
     this.requireRunning()
-    const task = this.store.enqueue(input)
+    return this.notifyUserMessageAccepted(this.store.enqueue(input))
+  }
+
+  private notifyUserMessageAccepted(task: BotTask): BotTask {
     this.changed()
     this.steerUserMessage(task)
     this.wake()
     return task
   }
 
+  /** The desktop task composer needs a completed user takeover. Internal
+   * assignments and result callbacks retain their original send/enqueue paths. */
+  sendDesktopMessage(input: SendBotMessageInput): BotTask | Promise<BotTask> {
+    this.assertDesktopWorkInputControl(input)
+    if (input.workId && !input.skillDraftFromMain && input.inputFileIds?.length) {
+      const files = this.store.desktopDraftInputFiles(input.inputFileIds)
+      if (files.some(file => file.botId !== input.botId || file.workId !== input.workId)) {
+        const work = this.getWork(input.botId, input.workId)
+        const lease = requireThreadMutationLease(work.threadId)
+        return withThreadMutationLeaseLock(lease, async row => {
+          const transfers = this.store.desktopDraftInputTransfers(input, row)
+          await verifyInputFiles(input.explicitSkill ? files : transfers, AbortSignal.timeout(30_000))
+          this.assertDesktopWorkInputControl(input)
+          return this.notifyUserMessageAccepted(this.store.enqueueWithDesktopDraftInputs(input, row, transfers))
+        })
+      }
+    }
+    return input.explicitSkill
+      ? this.sendWithSelectedSkill(input, () => this.assertDesktopWorkInputControl(input))
+      : this.send(input)
+  }
+
+  private assertDesktopWorkInputControl(input: SendBotMessageInput): void {
+    this.requireRunning()
+    if (!input.workId) return
+    const work = this.getWork(input.botId, input.workId)
+    if (input.skillDraftFromMain || input.skillDraftSourceThreadId !== undefined) {
+      const bot = this.getBot(input.botId)
+      if (!input.explicitSkill || input.skillDraftFromMain !== true ||
+          input.skillDraftSourceThreadId !== bot.threadId || work.parentThreadId !== bot.threadId ||
+          work.botId !== bot.id || work.source || work.audienceKey !== "desktop" ||
+          (work.conversation && work.conversation.state !== "bound"))
+        throw new BotError("CONFLICT", "技能草稿的主对话来源或任务目标已变化，请在原主对话重新选择。")
+      return
+    }
+    if (work.source || work.audienceKey !== "desktop") return
+    if (work.userControl?.settling)
+      throw new BotError("CONFLICT", "正在等待原任务结算，控制权移交后可发送；草稿已保留。")
+    if (!work.userControl)
+      throw new BotError("CONFLICT", "此任务由 Bot 管理，请先获取控制权，或在主 Bot 对话补充要求。草稿已保留。")
+  }
+
+  private async sendWithSelectedSkill(input: SendBotMessageInput, beforeSend: () => void): Promise<BotTask> {
+    this.requireRunning()
+    if (!input.explicitSkill) throw new BotError("INVALID_INPUT", "请选择技能")
+    if (input.inputFileIds?.length) {
+      const files = this.store.desktopInputFiles(input.botId, input.inputFileIds, input.skillDraftFromMain ? undefined : input.workId)
+      if (retainedInputFileIds(files, input.message).length !== files.length)
+        throw new BotError("INVALID_INPUT", "技能草稿附件与保留版本不一致，请重新选择")
+      await verifyInputFiles(files, AbortSignal.timeout(30_000))
+    }
+    beforeSend()
+    return this.send(input)
+  }
+
   private steerUserMessage(task: BotTask): void {
+    if (task.origin.kind === "user" && task.origin.explicitSkill) return
+    const controlToken = task.workId ? this.store.workDispatchToken(task.id) : "bot"
+    if (controlToken === null) return
+    const stillAllowed = () => !task.workId || this.store.workDispatchToken(task.id) === controlToken
     const peerFeedback = task.origin.kind === "bot" && Boolean(task.origin.feedbackForTaskId)
     if (
       task.state !== "queued" ||
@@ -1343,7 +2209,9 @@ export class LocalBotHost {
     )
       return
     const groupId = task.origin.kind === "group" ? task.origin.groupId : undefined
-    const backgroundRun = peerFeedback ? undefined : [...this.active.values()].find(
+    // Forwarded context must not dismiss a background receipt's question or
+    // preempt its model turn. It stays in the existing queue until lease release.
+    const backgroundRun = peerFeedback || task.origin.kind === "work" ? undefined : [...this.active.values()].find(
       (candidate) =>
         candidate.botId === task.botId &&
         candidate.task.threadId === task.threadId &&
@@ -1359,6 +2227,7 @@ export class LocalBotHost {
           !this.stopping &&
           !this.faulted &&
           !backgroundRun.controller.signal.aborted &&
+          stillAllowed() &&
           this.active.get(backgroundRun.task.id) === backgroundRun &&
           this.store
             .pendingConversationTasks(task.botId, groupId, task.workId)
@@ -1391,15 +2260,44 @@ export class LocalBotHost {
         )
           return false
         if (run.steered.has(task.id)) return true // transcript flush retry
+        if (!stillAllowed()) return false
         if (this.store.getTask(task.id).state !== "queued") return false
         if (!this.store.injectIntoRun(task.id, run.task.id)) return false
         run.steered.add(task.id)
         this.changed()
         if (this.store.hasPendingCommandNotifications()) this.wake()
         return true
+      }, stillAllowed)
+      .then((result) => {
+        // Runtime admission can precede injection by a long tool call. Retain
+        // the exact-run marker so a receipt replay does not run Hooks again.
+        if (result === true) return
+        run.preparingSteers.delete(task.id)
+        // A Hook refusal is terminal for this inbox entry, not a request to
+        // retry it as a new run. Transient lease/readiness failures stay queued.
+        if (
+          typeof result === "boolean" ||
+          this.stopping || this.faulted || run.controller.signal.aborted ||
+          this.active.get(run.task.id) !== run ||
+          this.store.getTask(task.id).state !== "queued"
+        ) return
+        // Hook diagnostics stay in the existing local Hook events/logs, never
+        // in a public group, external-channel or result-summary receipt.
+        const message = "输入检查未通过，未执行这条补充消息。"
+        try {
+          this.store.settle(task.id, "failed", message)
+        } catch (error) {
+          this.faulted = true
+          throw error
+        }
+        this.changed()
+        this.wake()
+        this.runtime.onSettled?.(task, "failed", message)
       })
-      .catch(this.reportError)
-      .finally(() => run.preparingSteers.delete(task.id))
+      .catch((error) => {
+        run.preparingSteers.delete(task.id)
+        this.reportError(error)
+      })
   }
 
   onSteeringReady(taskId: string): void {
@@ -1434,6 +2332,11 @@ export class LocalBotHost {
   continuationCommandIds(taskId: string, includeServices = false): string[] {
     this.requireRunning()
     return this.store.continuationCommandIds(taskId, includeServices)
+  }
+
+  workPromptGoal(botId: string, workId: string) {
+    this.requireRunning()
+    return this.store.workPromptGoal(botId, workId)
   }
 
   stoppedTaskContext(taskId: string) {
@@ -1481,6 +2384,11 @@ export class LocalBotHost {
     const before = this.store.revision()
     const active =
       this.active.get(taskId) ?? [...this.active.values()].find((run) => run.steered.has(taskId))
+    if (active?.task.workId) {
+      const work = this.store.getWork(active.task.botId, active.task.workId)
+      if (!work.userControl?.stopping && !work.dispatchStopped)
+        this.store.stopWorkConversationReview(work.botId, work.id, active.task.id)
+    }
     const peers = this.store.stopTaskPeers(active?.task.id ?? taskId)
     this.cancelWorkflows(peers.workflows)
     this.cancelSingleTask(taskId, notifyQueuedCaller)
@@ -1545,11 +2453,13 @@ export class LocalBotHost {
         this.commandCancellations.set(task.id, { threadId: task.threadId, done })
         return
       }
-      if (this.store.taskCheckpoint(taskId) || task.mockSource?.transport === "im" ||
+      if ((task.origin.kind === "work_result" && task.origin.review?.phase === "review") ||
+          this.store.taskCheckpoint(taskId) || task.mockSource?.transport === "im" ||
           (notifyQueuedCaller && ((task.origin.kind === "bot" && (task.origin.expectsReply || task.origin.upstreamTaskId)) ||
           (task.origin.kind === "notification" && task.origin.notificationKind === "workflow"))))
         this.store.settle(taskId, "cancelled", null)
-      else this.store.transition(taskId, "cancelled")
+      else if (!this.store.withdrawHeldWorkResultRepair(task))
+        this.store.transition(taskId, "cancelled")
       this.changed()
       this.wake()
     }
@@ -1590,10 +2500,56 @@ export class LocalBotHost {
     for (const botId of group.memberIds) this.stopConversation(botId, groupId)
   }
 
-  stopConversation(botId: string, groupId?: string, workId?: string): void {
-    const revision = this.store.revision()
+  /** Cancel current conversation activity and keep the work's dispatch policy. */
+  stopConversation(botId: string, groupId?: string, workId?: string, scope?: "background"): void {
+    if (scope === "background") {
+      if (groupId) throw new BotError("INVALID_INPUT", "群聊不支持此停止范围")
+      if (!workId) {
+        const { threadId } = this.getBot(botId)
+        if ([...this.active.values()].some(({ task }) => task.threadId === threadId &&
+            task.origin.kind !== "work_result"))
+          throw new BotError("CONFLICT", "任务状态已变化，请根据当前状态重试")
+        const revision = this.store.revision()
+        const stopped = this.store.stopMainConversationBackground(botId, threadId)
+        this.cancelWorkflows(stopped.workflows)
+        for (const id of stopped.tasks) this.cancelSingleTask(id)
+        if (stopped.commandIds.length)
+          void Promise.resolve(this.runtime.cancelBackgroundCommands?.(stopped.commandIds)).catch(this.reportError)
+        if (this.store.revision() !== revision) {
+          this.changed()
+          this.wake()
+        }
+        return
+      }
+      const work = this.getWork(botId, workId)
+      // The button was shown using an idle foreground snapshot. Never stop a
+      // reply that was accepted before that click reached the Host.
+      if (!work.userControl || work.userControl.settling ||
+          [...this.active.values()].some(({ task }) => task.threadId === work.threadId) ||
+          this.store.pendingWorkFamily(botId, workId, true).some(task =>
+            task.workId === workId && task.threadId === work.threadId && task.origin.kind === "user"))
+        throw new BotError("CONFLICT", "任务状态已变化，请根据当前状态重试")
+    }
+    this.stopConversationRuns(botId, groupId, workId, "conversation")
+  }
+
+  /** Explicit work Stop also prevents future automatic dispatch. */
+  stopWork(botId: string, workId: string): void {
+    this.stopConversationRuns(botId, undefined, workId, "work")
+  }
+
+  private stopConversationRuns(botId: string, groupId?: string, workId?: string, scope?: "work" | "conversation",
+    revision = this.store.revision()) {
     if (groupId && workId) throw new BotError("INVALID_INPUT", "群与工作目标不能混用")
     const bot = groupId ? this.getGroupMember(groupId, botId) : this.getBot(botId)
+    if (workId && scope === "work") {
+      this.store.stopWorkDispatch(botId, workId)
+      for (const { task, controller } of this.active.values()) {
+        if (task.botId === botId && task.origin.kind === "work_result" &&
+            task.origin.review?.phase === "publish" && task.origin.workId === workId &&
+            this.store.getTask(task.id).state === "cancelled") controller.abort()
+      }
+    }
     if (groupId) {
       const review = this.store.groupDiscussionTask(groupId)
       this.store.stopGroupDiscussion(groupId)
@@ -1604,13 +2560,14 @@ export class LocalBotHost {
       : groupId
         ? `group-${groupId}-${botId}`
         : bot.threadId
+    if (workId && scope === "conversation") this.store.stopWorkConversationReview(botId, workId)
     // Read the inbox now, rather than a possibly stale renderer snapshot.
     // cancel() retains runtime cleanup and leaves group work untouched.
     const pending = workId
-      ? this.store.pendingWorkFamily(botId, workId)
+      ? this.store.pendingWorkFamily(botId, workId, scope === "conversation")
       : this.store.pendingConversationTasks(botId, groupId)
     const peers = this.store.stopConversationPeers(botId, threadId)
-    this.cancelWorkflows([
+    const workflowCleanup = this.cancelWorkflows([
       ...peers.workflows,
       ...this.store.suppressConversationWorkflows(threadId, workId)
     ])
@@ -1618,19 +2575,19 @@ export class LocalBotHost {
     // The stopped branch reports once through its owner, not each unstarted descendant.
     for (const task of peers.tasks) this.cancelSingleTask(task.id, false)
     this.store.suppressCommands(threadId)
-    void Promise.resolve(this.runtime.cancelBackground?.(threadId)).catch(this.reportError)
+    const cleanup = [Promise.resolve(this.runtime.cancelBackground?.(threadId))]
+    if (workflowCleanup) cleanup.push(workflowCleanup)
     const commandIds = [...new Set([
       ...peers.commandIds,
       ...(workId ? this.store.suppressWorkPeerCommands(botId, workId) : [])
     ])]
-    if (commandIds.length)
-      void Promise.resolve(this.runtime.cancelBackgroundCommands?.(commandIds)).catch(
-        this.reportError
-      )
+    if (commandIds.length) cleanup.push(Promise.resolve(this.runtime.cancelBackgroundCommands?.(commandIds)))
+    for (const job of cleanup) void job.catch(this.reportError)
     if (revision !== this.store.revision()) {
       this.changed()
       this.wake()
     }
+    return { cleanup, taskIds: new Set([...pending, ...peers.tasks].map(task => task.id)) }
   }
 
   hasActiveRuns(): boolean {
@@ -1670,12 +2627,13 @@ export class LocalBotHost {
     return pending
   }
 
-  private cancelWorkflows(runs: readonly BotWorkflowReference[]): void {
+  private cancelWorkflows(runs: readonly BotWorkflowReference[]) {
     if (!runs.length || !this.runtime.cancelWorkflowInstances) return
     const unique = [...new Map(runs.map((run) => [JSON.stringify([run.threadId, run.runId, run.startedAt]), run])).values()]
     const pending = Promise.resolve().then(() => this.runtime.cancelWorkflowInstances!(unique))
       .catch(this.reportError).finally(() => this.workflowCleanup.delete(pending))
     this.workflowCleanup.add(pending)
+    return pending
   }
 
   private mockRecoveryComplete = false
@@ -1721,11 +2679,21 @@ export class LocalBotHost {
     this.store.advanceGroupDiscussions()
     // Retiring stale group posts can free capacity without dispatching a task.
     if (this.store.hasPendingCommandNotifications() && this.store.flushReplies()) this.wake()
+    this.finishWorkControlHandoffs()
+    for (const run of this.active.values()) {
+      const { task, controller } = run
+      if (
+        task.origin.kind === "work_result" && task.origin.review?.phase === "review" &&
+        !run.workReviewCommitted && !controller.signal.aborted &&
+        (this.store.yieldWorkResultReview(task.id) || !this.store.getWorkResultReview(task.id))
+      ) controller.abort()
+    }
     this.pumpMockDelivery()
     const excluded = new Set([
       ...[...this.active.values()].map((run) => run.task.threadId),
       ...[...this.commandCancellations.values()].map((run) => run.threadId)
     ])
+    this.publishScheduledWorkObservations()
     while (!this.stopping && this.active.size < this.concurrency) {
       const task = this.store.nextQueued(
         [...excluded],
@@ -1735,12 +2703,21 @@ export class LocalBotHost {
           ![...this.active.values()].some((run) => !!botTaskWorkFamily(run.task))
       )
       if (!task) return
+      // A review may have queued before a follow-up reached its submit hook.
+      // Yield before taking the lease, preserving the original result and budget.
+      if (task.origin.kind === "work_result" && task.origin.review?.phase === "review" &&
+          this.store.yieldWorkResultReview(task.id, "queued")) {
+        this.changed()
+        continue
+      }
       if (this.store.taskRootCancelled(task)) {
         this.cancel(task.id)
         excluded.add(task.threadId)
         continue
       }
       excluded.add(task.threadId)
+      const schedule = this.runtime.desktopWorkScheduleDirectory
+        ? this.store.desktopWorkScheduleForDispatch(task) : undefined
       const lease = this.runtime.acquire(
         this.store.getBot(task.botId),
         task,
@@ -1748,14 +2725,16 @@ export class LocalBotHost {
       )
       if (!lease) continue
       try {
-        this.store.transition(task.id, "running", null, task.groupSnapshotOrdinal)
+        if (!schedule) this.store.transition(task.id, "running", null, task.groupSnapshotOrdinal)
       } catch (error) {
         lease.release()
         throw error
       }
       const controller = new AbortController()
       // Start in a microtask so cancellation and waiting hooks always see their active owner.
-      const done = Promise.resolve().then(() => this.execute(task, lease, controller))
+      const done = Promise.resolve().then(() => schedule
+        ? this.prepareScheduledExecution(task, lease, controller, schedule)
+        : this.execute(task, lease, controller))
       this.active.set(task.id, {
         botId: task.botId,
         task,
@@ -1771,6 +2750,63 @@ export class LocalBotHost {
       // Dispatch frees a queued slot even if this run will remain active for a long time.
       if (this.store.hasPendingCommandNotifications()) this.wake()
     }
+  }
+
+  private publishScheduledWorkObservations(): void {
+    const port = this.runtime.scheduleObservationPublication
+    if (!port) return
+    const previousRetryAt = this.schedulePublicationRetryAt
+    const now = Date.now()
+    const deferred = Array.from(this.schedulePublicationRetries)
+      .filter(([, retry]) => retry.at === undefined || retry.at > now)
+      .map(([taskId]) => taskId)
+    const pending = this.store.pendingScheduledWorkPublications(deferred)
+    for (const publication of pending) {
+      let text: string | null | void
+      let acknowledged: boolean
+      try {
+        text = port.persist(this.store.getBot(publication.botId), publication)
+        acknowledged = this.store.acknowledgeScheduledWorkPublication(
+          publication.taskId, text === undefined ? undefined : text
+        )
+      } catch (error) {
+        const failures = (this.schedulePublicationRetries.get(publication.taskId)?.failures ?? 0) + 1
+        const failedAt = Date.now()
+        const expiresAt = publication.reminderExpiresAt ? Date.parse(publication.reminderExpiresAt) : Infinity
+        const retryAt = Math.min(
+          failures <= BOT_WORK_RESULT_PUBLICATION_RETRY_LIMIT ? failedAt + 5_000 : Infinity,
+          expiresAt > failedAt ? expiresAt : Infinity
+        )
+        this.schedulePublicationRetries.set(publication.taskId, {
+          failures, ...(Number.isFinite(retryAt) ? { at: retryAt } : {})
+        })
+        this.reportError(error)
+        continue
+      }
+      this.schedulePublicationRetries.delete(publication.taskId)
+      if (!acknowledged) continue
+      const delivered = typeof text === "string" ? { ...publication, text } : publication
+      try {
+        const { id, threadId, createdAt } = delivered
+        this.changed(undefined, undefined, text === null ? undefined :
+          { id, threadId, content: scheduledDesktopMessage(delivered), createdAt })
+      } catch (error) {
+        this.reportError(error)
+      }
+      if (text !== null) void port.announce(delivered).catch(this.reportError)
+    }
+    this.schedulePublicationRetryAt = undefined
+    for (const [id, { at }] of this.schedulePublicationRetries) {
+      // A due row that disappeared (for example on archive or deletion) must
+      // not keep arming the timer after the eligible queue has drained.
+      if (at !== undefined && at <= now && pending.length < 8) {
+        this.schedulePublicationRetries.delete(id)
+      } else if (at !== undefined) {
+        this.schedulePublicationRetryAt = Math.min(at, this.schedulePublicationRetryAt ?? Infinity)
+      }
+    }
+    if (this.schedulePublicationRetryAt !== previousRetryAt) this.armSchedules()
+    if (pending.length === 8) this.wake()
   }
 
   private pumpMockDelivery(): void {
@@ -1815,6 +2851,7 @@ export class LocalBotHost {
     let deferredCheckpoint: string | undefined
     let deferredFiles: BotDeliveredFile[] | undefined
     let consumedCommandIds: string[] | undefined
+    let retryPublication = false
     try {
       const result = await lease.execute(controller.signal, (waiting) => {
         if (controller.signal.aborted) return
@@ -1822,6 +2859,8 @@ export class LocalBotHost {
         this.store.transition(task.id, waitingCount > 0 ? "waiting_user" : "running")
         this.changed()
         if (waitingCount > 0 && botTaskGroupId(task)) this.wake()
+        if (waitingCount === 0 && task.workId && this.active.get(task.id)?.steeringReady)
+          this.onSteeringReady(task.id)
       })
       if (result.state === "deferred") {
         deferredCheckpoint = result.checkpointId
@@ -1838,6 +2877,7 @@ export class LocalBotHost {
     } catch (error) {
       state = "failed"
       reason = error instanceof Error ? error.message : "任务执行失败"
+      retryPublication = error instanceof RetryableBotWorkPublicationError
     } finally {
       if (controller.signal.aborted) {
         deferredCheckpoint = undefined
@@ -1868,9 +2908,11 @@ export class LocalBotHost {
       try {
         // These messages were consumed by this exact graph, not separate queued runs.
         // Unconsumed messages stay queued and run normally after the lease releases.
+        const retrying = retryPublication && !controller.signal.aborted &&
+          this.store.retryWorkResultPublication(task.id)
         if (deferredCheckpoint)
           this.store.deferTask(task.id, deferredCheckpoint, deferredFiles, consumedCommandIds)
-        else
+        else if (!retrying)
           this.store.settleRun(
             task.id,
             this.active.get(task.id)?.steered ?? [],
@@ -1885,11 +2927,13 @@ export class LocalBotHost {
                     outcome: state === "completed" ? "success" : "error",
                     code: state === "completed" ? "normal" : controller.signal.aborted ? "cancelled" : "setup_error"
                   })
-              : undefined
+              : lease.notificationTerminal?.()
           )
         this.changed()
         try {
-          if (!deferredCheckpoint) {
+          if (!deferredCheckpoint &&
+              !(task.origin.kind === "work_result" && task.origin.review) &&
+              !(task.workId && this.store.workResultReviewActiveForExecution(task.id))) {
             if (publicContribution) this.runtime.onSettled?.(task, state, finalText, files, true)
             else this.runtime.onSettled?.(task, state, finalText, files)
           }
@@ -1914,6 +2958,94 @@ export class LocalBotHost {
     }
   }
 
+  /** Keep the trigger queued for pause/edit/stop while checking its original directory. */
+  private async prepareScheduledExecution(
+    task: BotTask, lease: BotRunLease, controller: AbortController, schedule: BotSchedule
+  ): Promise<void> {
+    const { signal } = controller
+    let started = false
+    try {
+      const token = this.store.workDispatchToken(task.id)
+      const stillQueued = () => token !== null && this.store.workDispatchToken(task.id) === token
+      if (signal.aborted || !stillQueued() || !task.workId) return
+      let missing = false
+      try {
+        const work = this.store.getWork(task.botId, task.workId)
+        if (work.threadId !== task.threadId)
+          throw new BotError("CONFLICT", "原工作已改变，此次例行未执行。")
+        const directory = this.runtime.desktopWorkScheduleDirectory?.(work)
+        if (directory && await this.scheduleDirectoryMissing(directory.path, signal)) {
+          if (signal.aborted || !stillQueued()) return
+          // Re-read the original thread after I/O. A stale probe cannot pause a new target.
+          const current = this.store.getWork(task.botId, task.workId)
+          const verified = this.runtime.desktopWorkScheduleDirectory?.(current)
+          if (current.threadId !== task.threadId || verified?.path !== directory.path ||
+              verified.incarnation !== directory.incarnation)
+            throw new BotError("CONFLICT", "原工作目录已改变，此次例行未执行。")
+          missing = true
+        }
+      } catch (error) {
+        if (!signal.aborted && stillQueued())
+          this.store.settle(task.id, "failed", error instanceof Error ? error.message : "例行任务未能开始")
+        return
+      }
+      if (signal.aborted || !stillQueued()) return
+      if (missing) {
+        // A file-system result observed against an old schedule version cannot change the new one.
+        if (this.store.pauseScheduleForMissingDirectory(task.id, schedule)) this.armSchedules()
+        return
+      }
+      this.store.transition(task.id, "running")
+      started = true
+      this.changed()
+      // This is the same release and settlement path as every other Bot execution.
+      await this.execute(task, lease, controller)
+    } catch (error) {
+      this.faulted = true
+      this.reportError(error)
+    } finally {
+      if (!started) {
+        try {
+          if (signal.aborted && !this.stopping && this.store.getTask(task.id).state === "queued")
+            this.store.transition(task.id, "cancelled")
+          this.changed()
+        } catch (error) {
+          this.faulted = true
+          this.reportError(error)
+        } finally {
+          this.active.delete(task.id)
+          try {
+            lease.release()
+          } catch (error) {
+            this.faulted = true
+            this.reportError(error)
+          }
+          this.wake()
+        }
+      }
+    }
+  }
+
+  private async scheduleDirectoryMissing(path: string, signal: AbortSignal): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let onAbort: (() => void) | undefined
+    return Promise.race([
+      stat(path).then(
+        (entry) => !entry.isDirectory(),
+        (error: NodeJS.ErrnoException) => error.code === "ENOENT" || error.code === "ENOTDIR"
+      ),
+      new Promise<boolean>((resolve) => {
+        onAbort = () => resolve(false)
+        signal.addEventListener("abort", onAbort, { once: true })
+        timer = setTimeout(onAbort, 3_000)
+        timer.unref?.()
+      })
+    ]).finally(() => {
+      clearTimeout(timer)
+      if (onAbort) signal.removeEventListener("abort", onAbort)
+    })
+  }
+
   async stop(): Promise<void> {
     if (!this.stopping) {
       this.stopping = true
@@ -1933,6 +3065,7 @@ export class LocalBotHost {
         .map((run) => run.done)
         .concat(
           [...this.deletions.values()],
+          [...this.workDeletions.values()].map(run => run.then(() => undefined)),
           [...this.commandCancellations.values()].map((run) => run.done),
           [...this.workflowCleanup],
           [...this.workflowRefresh.values()],

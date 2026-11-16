@@ -45,6 +45,7 @@ interface ResolveAtFileAttachmentsParams {
     filePath: string,
     maxChars: number
   ) => Promise<WorkspaceReadFileResult>
+  readWorkspaceAttachment?: (filePath: string, maxChars: number) => Promise<FileAttachment>
   cancelWorkspaceFileReads?: () => void
 }
 
@@ -257,6 +258,7 @@ export async function resolveAtFileAttachments(
     maxAttachments,
     maxTotalChars,
     readWorkspaceFile,
+    readWorkspaceAttachment,
     cancelWorkspaceFileReads
   } = params
   const fallbackAttachments = attachments.length > 0 ? [...attachments] : []
@@ -307,6 +309,7 @@ export async function resolveAtFileAttachments(
     // 先纳入输入框里已经通过 popover 选中过的 @文件，保证它们优先参与去重和带入。
     for (const mentionFile of mentionedFiles) {
       if (!isMentionedWorkspaceFileForWorkspace(mentionFile, workspacePath)) {
+        if (readWorkspaceAttachment) throw new Error("@文件所属工作区已变更，请重新选择。")
         warningMessage = "@文件所属工作区已变更，旧工作区引用未被发送。"
         continue
       }
@@ -346,9 +349,16 @@ export async function resolveAtFileAttachments(
     }
 
     if (mentionCandidates.size > 0) {
+      let pendingRetained = readWorkspaceAttachment
+        ? [...mentionCandidates.keys()].filter(path => !existingAttachmentPaths.has(path)).length
+        : 0
+      if (readWorkspaceAttachment && pendingRetained > maxAttachments - currentAttachments.length)
+        throw new Error(`最多只能发送 ${maxAttachments} 个附件，请调整附件后重试。`)
+      if (pendingRetained > 0 && pendingRetained > maxTotalChars - currentAttachmentChars)
+        throw new Error("附件内容已达上限，请调整附件后重试。")
       for (const { mentionFile, sourcePaths } of mentionCandidates.values()) {
         // 数量上限命中后直接停止，和普通附件的 UX 保持一致。
-        if (currentAttachments.length >= maxAttachments) {
+        if (!readWorkspaceAttachment && currentAttachments.length >= maxAttachments) {
           mentionCountLimitHit = true
           break
         }
@@ -364,6 +374,21 @@ export async function resolveAtFileAttachments(
         if (remaining <= 0) {
           mentionAttachmentLimitHit = true
           break
+        }
+
+        if (readWorkspaceAttachment) {
+          // Share the remaining text budget so every selected file gets an
+          // immutable receipt, even when an earlier file fills its excerpt.
+          const budget = Math.floor(remaining / pendingRetained)
+          const attachment = await readWorkspaceAttachment(mentionFile.workspaceFilePath, budget)
+          if (!attachment.botInputId || attachment.content.length > budget)
+            throw new Error("@文件未能保存为 Bot 输入附件，请重新选择。")
+          pendingRetained -= 1
+          currentAttachments.push(attachment)
+          sourcePaths.forEach(path => handledMentionPaths.add(path))
+          existingAttachmentPaths.add(mentionFile.absolutePath)
+          currentAttachmentChars += attachment.content.length
+          continue
         }
 
         // 真正读取文件内容时才触发异步 IO，前面先把过滤/去重做完，尽量减少无效读取。
@@ -415,7 +440,8 @@ export async function resolveAtFileAttachments(
       mentionAttachmentLimitHit,
       warningMessage
     }
-  } catch {
+  } catch (error) {
+    if (readWorkspaceAttachment) throw error
     return {
       cleanedMessage: rawMessage,
       textEdits: [],

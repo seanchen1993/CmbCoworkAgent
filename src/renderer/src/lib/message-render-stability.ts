@@ -53,6 +53,8 @@ export function areMessageRenderFieldsEqual(
     left.id === right.id &&
     left.role === right.role &&
     left.reasoning === right.reasoning &&
+    areStructuredValuesEqual(left.botHistoryInputOrigin, right.botHistoryInputOrigin) &&
+    areStructuredValuesEqual(left.botHistoryDeliveryScope, right.botHistoryDeliveryScope) &&
     areStructuredValuesEqual(left.content, right.content) &&
     areToolCallsEqual(left.tool_calls, right.tool_calls)
   )

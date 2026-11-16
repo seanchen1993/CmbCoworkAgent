@@ -1,4 +1,4 @@
-import { webcrypto } from "node:crypto"
+import { createHash, webcrypto } from "node:crypto"
 import { DatabaseSync } from "node:sqlite"
 import { NativeSqliteAdapter } from "../../../main/db/native-sqlite-adapter"
 import { BotStore } from "../../../main/bots/store"
@@ -12,6 +12,7 @@ import {
   type BotTask
 } from "../../../shared/bots/contracts"
 import type { QueuedMessage } from "../types"
+import { formatSkillUseBlock } from "../../../shared/skill-use-block"
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -145,6 +146,165 @@ function fixture() {
 }
 
 describe("Bot sends through the original durable draft queue", () => {
+  it.each(["stop", "target changed"] as const)(
+    "does not commit a skill send superseded during catalog validation (%s)", async change => {
+      const f = fixture()
+      const selection = { name: "review", path: "/skills/review/SKILL.md" }
+      f.patch({ botExplicitSkill: selection, botSkillTarget: { kind: "main" },
+        skillBlock: formatSkillUseBlock(selection) })
+      const sender = f.sender()
+      let complete!: (valid: boolean) => void
+      const validate = vi.fn(() => new Promise<boolean>(resolve => { complete = resolve }))
+      const submission = sender.send(f.draft(), validate)
+      expect(validate).toHaveBeenCalledExactlyOnceWith(selection)
+
+      if (change === "stop") sender.stopPreparing()
+      else f.patch({ botSkillTarget: { kind: "work", workId: "other-task" } })
+      const retained = f.draft()
+      complete(true)
+      await submission
+
+      expect(f.client.send).not.toHaveBeenCalled()
+      expect(f.draft()).toBe(retained)
+      expect(f.draft().handoffRequestedAt).toBeUndefined()
+    }
+  )
+
+  it("restores the separate legacy skill selection on explicit resend using the original draft ID", async () => {
+    const f = fixture()
+    const selection = { name: "review", path: "/skills/review/SKILL.md" }
+    const block = formatSkillUseBlock(selection)
+    f.patch({ skillBlock: block })
+    const original = f.draft()
+    const restored = await f.sender().restoreLegacySkill(original)
+    expect(restored).toMatchObject({ ...original, botExplicitSkill: selection, updated_at: expect.any(Date) })
+    expect(restored?.skillBlock).toBe(block)
+    await f.sender().send(restored!)
+    expect(f.client.send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      requestId: original.id, explicitSkill: selection
+    }))
+    expect(f.client.send.mock.calls[0][0].message).not.toContain("CMBDEVCLAW-SKILL-USE-V1")
+  })
+  it.each(["accepted", "conflict", "offline", "absent"] as const)(
+    "checks the unchanged handed-off legacy fingerprint before restoring its selection (%s)", async state => {
+      const f = fixture()
+      f.patch({ skillBlock: formatSkillUseBlock({ name: "review", path: "/skills/review/SKILL.md" }),
+        handoffRequestedAt: new Date(1000) })
+      const original = f.draft(), input = getQueuedBotMessageInput(original)
+      const messageHash = createHash("sha256").update(canonicalBotMessageInput(
+        input.message, input.mentions, input.inputFileIds, input.explicitSkill)).digest("hex")
+      f.client.requestReceipts.mockImplementationOnce(async () => {
+        expect(f.draft()).toBe(original)
+        if (state === "offline") throw new Error("offline")
+        return [{ requestId: original.id, state }]
+      })
+      const restore = f.sender().restoreLegacySkill(original)
+      if (state === "conflict" || state === "offline") {
+        await expect(restore).rejects.toThrow()
+        expect(f.draft()).toBe(original)
+      } else {
+        const restored = await restore
+        if (state === "accepted") expect(f.draft()).toBeUndefined()
+        else expect(restored).toMatchObject({ id: original.id, botExplicitSkill: { name: "review" } })
+      }
+      expect(f.client.requestReceipts).toHaveBeenCalledExactlyOnceWith("bot-1", [{ requestId: original.id, messageHash }])
+      expect(f.client.send).not.toHaveBeenCalled()
+    })
+  it("keeps marker-like body text and malformed separate skill fields as the original draft", async () => {
+    const f = fixture()
+    const marker = formatSkillUseBlock({ name: "review", path: "/skills/review/SKILL.md" })
+    for (const skillBlock of [undefined, "<skill>Reviewed skill</skill>", `extra body\n${marker}`]) {
+      f.patch({ text: marker, skillBlock })
+      const original = f.draft()
+      await expect(f.sender().restoreLegacySkill(original)).rejects.toThrow("原技能选择无法核对")
+      expect(f.draft()).toBe(original)
+    }
+  })
+  it("keeps the old draft when sending is stopped during its original receipt lookup", async () => {
+    const f = fixture()
+    f.patch({ skillBlock: formatSkillUseBlock({ name: "review", path: "/skills/review/SKILL.md" }),
+      handoffRequestedAt: new Date(1000) })
+    const original = f.draft(), sender = f.sender()
+    f.client.requestReceipts.mockImplementationOnce(async () => {
+      sender.stopPreparing()
+      return [{ requestId: original.id, state: "absent" as const }]
+    })
+    await expect(sender.restoreLegacySkill(original)).resolves.toBeUndefined()
+    expect(f.draft()).toBe(original)
+    expect(f.client.send).not.toHaveBeenCalled()
+  })
+  it("binds picker references to the durable inbox, including lost-response reconciliation after reload", async () => {
+    const f = fixture()
+    const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    try {
+      const store = new BotStore(db)
+      const bot = store.create({ name: "Inputs", instructions: "", color: "#ea2845", modelRef: null })
+      const attachment = store.retainInputFile(bot.id, {
+        filename: "design.md", filePath: "/retained/design.md", content: "VERSION ONE",
+        mimeType: "text/markdown", size: 11, truncated: false
+      }, "/snapshot/design.md")
+      f.patch({ botInputFileIds: [attachment.botInputId!] })
+      const client = {
+        send: vi.fn(async (input) => {
+          store.enqueue(input)
+          throw new Error("Response lost")
+        }),
+        requestReceipts: vi.fn(async (id, checks) => store.requestReceipts(id, checks))
+      }
+      client.requestReceipts.mockRejectedValueOnce(new Error("Transport offline"))
+      const sender = () => new BotDraftSender(client, bot.id, f.queue, f.report, f.changed)
+      await sender().send(f.draft())
+      expect(f.draft().botInputFileIds).toEqual([attachment.botInputId])
+      f.reload()
+      await sender().reconcile([f.draft()])
+      expect(f.draft()).toBeUndefined()
+      expect(client.send).toHaveBeenCalledTimes(1)
+      expect(store.recentTasks()).toHaveLength(1)
+      expect(store.recentTasks()[0].origin).toMatchObject({ inputFileIds: [attachment.botInputId] })
+    } finally { db.close() }
+  })
+
+  it("does not acknowledge a draft whose attachment selection changed during its send", async () => {
+    const f = fixture(), first = "input-11111111-1111-1111-1111-111111111111",
+      second = "input-22222222-2222-2222-2222-222222222222"
+    f.patch({ botInputFileIds: [first] })
+    f.client.send.mockImplementationOnce(async input => {
+      f.patch({ botInputFileIds: [second] })
+      return { ...input, origin: { kind: "user", inputFileIds: [first] } } as BotTask
+    })
+    await f.sender().send(f.draft())
+    expect(f.draft().botInputFileIds).toEqual([second])
+    expect(f.client.send).toHaveBeenCalledTimes(1)
+  })
+  it("submits only the persisted work target and sends the skill identity outside prose", async () => {
+    const f = fixture()
+    const explicitSkill = { name: "review", path: "/registered/review/SKILL.md" }
+    f.patch({ botExplicitSkill: explicitSkill, botSkillTarget: { kind: "work", workId: "work-1" } })
+    await f.sender().send(f.draft())
+    expect(f.client.send).not.toHaveBeenCalled()
+    f.client.send.mockImplementationOnce(async input => ({
+      ...input, origin: { kind: "user", explicitSkill }
+    } as BotTask))
+    const sender = new BotDraftSender(f.client, "bot-1", f.queue, f.report, f.changed, () => 2000,
+      { botId: "bot-1", workId: "work-1" }, "bot-main")
+    await sender.send(f.draft())
+    expect(f.client.send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ explicitSkill,
+      skillDraftFromMain: true, skillDraftSourceThreadId: "bot-main" }))
+    expect(f.client.send.mock.calls[0][0].message).not.toContain("<skill>")
+    expect(f.draft()).toBeUndefined()
+  })
+  it("does not turn a task-local skill retry into a main-chat assignment", async () => {
+    const f = fixture()
+    f.patch({ botExplicitSkill: { name: "review", path: "/registered/review/SKILL.md" },
+      botSkillTarget: { kind: "work", workId: "work-1" } })
+    const original = f.draft()
+    const sender = new BotDraftSender(f.client, "bot-1", f.queue, f.report, f.changed, () => 2000,
+      { botId: "bot-1", workId: "work-1" })
+    await sender.send(original)
+    expect(f.client.send).not.toHaveBeenCalled()
+    expect(f.draft()).toBe(original)
+    expect(f.report).toHaveBeenCalledWith(expect.stringContaining("缺少原主对话"))
+  })
   it.each([false, true])(
     "retains selected IDs after restart, hashes metadata and leaves a changed identity draft unacknowledged, groups=%s",
     async (groups) => {
@@ -248,6 +408,74 @@ describe("Bot sends through the original durable draft queue", () => {
     expect(f.client.send).not.toHaveBeenCalled()
     expect(f.draft().handoffRequestedAt).toEqual(new Date(1000))
     expect(f.report.mock.calls.some(([message]) => String(message).includes("保留期"))).toBe(true)
+  })
+
+  it("keeps a stale fresh user quote editable before the actual Store would refuse admission", async () => {
+    const f = fixture()
+    const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    try {
+      const reply = { id: "original", ordinal: 7, role: "user" as const, text: "Original body" }
+      const store = new BotStore(db, () => 1000, undefined, (_thread, id) => id === reply.id ? reply : null)
+      const bot = store.create({ name: "A", instructions: "", color: "#ea2845", modelRef: null })
+      const old = store.enqueue({ botId: bot.id, requestId: reply.id, message: reply.text })
+      store.transition(old.id, "running")
+      store.beginInputPreparation(old.id)
+      store.recordPreparedInput(old.id, "Allowed body")
+      store.transition(old.id, "completed")
+      f.patch({ botReplyTo: reply })
+      const draft = f.draft()
+      const client = {
+        send: vi.fn(async (input) => store.enqueue(input)),
+        messageReply: vi.fn(async (botId: string, messageId: string) => store.messageReply(botId, messageId)),
+        requestReceipts: vi.fn(async (id, checks) => store.requestReceipts(id, checks))
+      }
+      const sender = new BotDraftSender(client, bot.id, f.queue, f.report, f.changed)
+      await sender.send(draft)
+      expect(client.send).not.toHaveBeenCalled()
+      expect(client.requestReceipts).not.toHaveBeenCalled()
+      expect(f.draft()).toBe(draft)
+      expect(f.report).toHaveBeenLastCalledWith(expect.stringContaining("取消回复"))
+      f.patch({ botReplyTo: undefined })
+      await sender.send(f.draft())
+      expect(client.send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        requestId: draft.id, message: getQueuedModelContent({ ...draft, botReplyTo: undefined }, "bot")
+      }))
+    } finally { db.close() }
+  })
+
+  it.each(["accepted", "absent"] as const)("reconciles a previously handed off user quote before any source read (%s)", async state => {
+    const f = fixture()
+    const reply = { id: "original", ordinal: 7, role: "user" as const, text: "Old source body" }
+    f.patch({ botReplyTo: reply, handoffRequestedAt: new Date(1000) })
+    f.client.requestReceipts.mockResolvedValueOnce([{ requestId: f.draft().id, state }])
+    const messageReply = vi.fn().mockRejectedValue(new Error("Source no longer available"))
+    const sender = new BotDraftSender({ ...f.client, messageReply }, "bot-1", f.queue, f.report, f.changed, () => 2000)
+    const draft = f.draft()
+    await sender.send(draft)
+    expect(f.client.requestReceipts).toHaveBeenCalledOnce()
+    expect(messageReply).not.toHaveBeenCalled()
+    if (state === "accepted") expect(f.client.send).not.toHaveBeenCalled()
+    else expect(f.client.send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      requestId: draft.id, replyToId: reply.id, message: getQueuedModelContent(draft, "bot")
+    }))
+    expect(f.saved()).toBe("")
+  })
+
+  it("does not send a user quote query's old draft after a newer edit", async () => {
+    const f = fixture()
+    const reply = { id: "original", ordinal: 7, role: "user" as const, text: "Allowed body" }
+    f.patch({ botReplyTo: reply })
+    let finish!: (value: typeof reply) => void
+    const messageReply = vi.fn(() => new Promise<typeof reply>(resolve => { finish = resolve }))
+    const sender = new BotDraftSender({ ...f.client, messageReply }, "bot-1", f.queue, f.report, f.changed)
+    const pending = sender.send(f.draft())
+    expect(messageReply).toHaveBeenCalledOnce()
+    f.patch({ text: "Newer draft", botReplyTo: undefined })
+    finish(reply)
+    await pending
+    expect(f.client.send).not.toHaveBeenCalled()
+    expect(f.draft()).toMatchObject({ text: "Newer draft", botReplyTo: undefined })
+    expect(f.draft().handoffRequestedAt).toBeUndefined()
   })
 
   it("retains the exact quote and payload across response loss and reload", async () => {

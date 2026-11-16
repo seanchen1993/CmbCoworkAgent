@@ -62,13 +62,13 @@ export const localBotWorkspaces: BotWorkWorkspacePort = {
     }
   },
   async projects(query, cursor) {
+    const filter = query?.trim() ?? ""
     if (
-      !query.trim() ||
-      query.length > 160 ||
+      filter.length > 160 ||
       (cursor !== undefined && (!Number.isSafeInteger(cursor) || cursor < 0))
     )
-      throw new BotError("INVALID_INPUT", "请提供项目名称，或有效的项目分页游标")
-    const page = await catalog({ query, projectCursor: cursor })
+      throw new BotError("INVALID_INPUT", "项目名称过长，或项目分页游标无效")
+    const page = await catalog({ query: filter || undefined, projectCursor: cursor })
     return {
       items: page.projects.map((p) => ({
         projectId: p.projectId,

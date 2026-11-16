@@ -34,14 +34,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { UpdateActionButton } from "@/components/update/UpdateActionButton"
 import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
 import botWorkspaceMarkUrl from "@/assets/bot-workspace-mark.svg"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle
-} from "@/components/ui/dialog"
+import { ThreadDeleteDialog } from "./ThreadDeleteDialog"
 import { ThreadForkCheckpointDialog } from "./ThreadForkCheckpointDialog"
 import { ThreadGroupDeleteDialog } from "./ThreadGroupDeleteDialog"
 import { useAppStore } from "@/lib/store"
@@ -75,6 +68,9 @@ import {
 } from "@/components/ui/context-menu"
 import { WorkspaceRenameDialog } from "./WorkspaceRenameDialog"
 import type { Thread } from "@/types"
+import type { BotThreadOwner } from "../../../../shared/bots/conversation"
+import { useThreadBotOwners } from "../bots/use-thread-bot-owners"
+import { useLocalBotsUnread } from "../bots/use-bots"
 import { selectBoundedSidebarWindow } from "./thread-sidebar-window"
 import { readStoredStringSet, sortPinnedFirst, toggleStoredStringSet } from "@/lib/sidebar-pinning"
 
@@ -90,6 +86,45 @@ const VISIBLE_PROJECTS_STEP = 60
 const BotWorkspaceAvatar = lazy(() =>
   import("../bots/BotAvatar").then(({ BotAvatar }) => ({ default: BotAvatar }))
 )
+
+const BotWorkspaceEntry = memo(function BotWorkspaceEntry({
+  setMainView
+}: {
+  setMainView(view: "bots"): void
+}) {
+  const hasUnread = useLocalBotsUnread()
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      className="w-full justify-start gap-2.5 rounded-lg text-sm font-medium text-foreground/80 transition-colors hover:text-foreground"
+      aria-label="Bots 工作区"
+      aria-description={hasUnread ? "有未读消息" : undefined}
+      onClick={() => setMainView("bots")}
+    >
+      <Suspense
+        fallback={
+          <img
+            src={botWorkspaceMarkUrl}
+            alt=""
+            aria-hidden="true"
+            draggable={false}
+            className="size-5 shrink-0"
+          />
+        }
+      >
+        <BotWorkspaceAvatar
+          color="#ff263c"
+          size={20}
+          className="size-5 shrink-0 overflow-visible"
+        />
+      </Suspense>
+      <span>Bots</span>
+      {hasUnread && <span aria-hidden="true" className="ml-auto size-2 shrink-0 rounded-full bg-status-info" />}
+    </Button>
+  )
+})
+
 type SidebarTab = "chat" | "project"
 
 interface ThreadProject {
@@ -251,7 +286,8 @@ function ThreadListItemImpl({
   onEditingTitleChange,
   isExporting,
   isForking = false,
-  hoverTitle
+  hoverTitle,
+  botOwner
 }: {
   thread: Thread
   isLoading: boolean
@@ -276,8 +312,13 @@ function ThreadListItemImpl({
   onCancelEditing: () => void
   onEditingTitleChange: (value: string) => void
   hoverTitle?: string
+  botOwner?: BotThreadOwner
 }): React.JSX.Element {
   const isRunning = isLoading || scheduledTaskLoading
+  // Unopened threads have no live interaction subscription. Use the existing
+  // owner batch's exact Bot state, without adding per-row listeners or timers.
+  const botWorking = Boolean(botOwner && !botOwner.userControlled && !botOwner.bot.archived &&
+    botOwner.working && !hasPendingApproval && !hasPendingUserInput)
   const forkDisabled = isRunning || hasPendingApproval || hasPendingUserInput || isForking
   const wasRunningRef = useRef(false)
   const onRunFinishedRef = useRef(onRunFinished)
@@ -318,11 +359,17 @@ function ThreadListItemImpl({
             }
           }}
         >
-          <ThreadStatusIcon
-            isLoading={isLoading}
-            pendingApproval={hasPendingApproval}
-            scheduledTaskLoading={scheduledTaskLoading}
-          />
+          {botWorking ? (
+            <span className="grid size-4 shrink-0 place-items-center" role="img" aria-label="正在工作">
+              <span className="size-1.5 rounded-full bg-status-info" />
+            </span>
+          ) : (
+            <ThreadStatusIcon
+              isLoading={isLoading}
+              pendingApproval={hasPendingApproval}
+              scheduledTaskLoading={scheduledTaskLoading}
+            />
+          )}
           <div className="flex-1 min-w-0 overflow-hidden">
             {isEditing ? (
               <input
@@ -379,6 +426,20 @@ function ThreadListItemImpl({
               </div>
             )}
           </div>
+          {botOwner && !isEditing ? (
+            <span
+              className="flex size-5 shrink-0 items-center justify-center rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              role="img"
+              tabIndex={0}
+              aria-label={`${botOwner.userControlled ? "用户接管，关联 Bot：" : "由 "}${botOwner.bot.name}${botOwner.userControlled ? "" : " 管理"}${botOwner.bot.archived ? "（已归档）" : ""}`}
+              title={`${botOwner.userControlled ? "用户接管，关联 Bot：" : "由 "}${botOwner.bot.name}${botOwner.userControlled ? "" : " 管理"}${botOwner.bot.archived ? "（已归档）" : ""}`}
+            >
+              <Suspense fallback={null}>
+                <BotWorkspaceAvatar color={botOwner.bot.color} shape={botOwner.bot.shape} size={20}
+                  busy={botWorking} animated={botWorking} />
+              </Suspense>
+            </span>
+          ) : null}
           {hasContextReminder && !isRunning ? (
             <span className="size-2 rounded-full bg-status-warning-foreground shrink-0" />
           ) : (
@@ -479,7 +540,8 @@ function areThreadListItemPropsEqual(
     prev.isEditing !== next.isEditing ||
     prev.isUnread !== next.isUnread ||
     Boolean(prev.onForkFromCheckpoint) !== Boolean(next.onForkFromCheckpoint) ||
-    prev.hoverTitle !== next.hoverTitle
+    prev.hoverTitle !== next.hoverTitle ||
+    prev.botOwner !== next.botOwner
   ) {
     return false
   }
@@ -824,6 +886,15 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
     () => selectBoundedSidebarWindow(threadProjects, visibleProjectCount, selectedProjectIndex),
     [selectedProjectIndex, threadProjects, visibleProjectCount]
   )
+  const visibleBotThreadIds = useMemo(() => visibleProjectWindow.items.flatMap(project => {
+    if (collapsedProjectKeys.has(project.key)) return []
+    const selected = project.key === currentProjectKey && currentThreadId
+      ? project.threads.findIndex(thread => thread.thread_id === currentThreadId) : -1
+    return selectBoundedSidebarWindow(project.threads,
+      visibleThreadCounts[project.key] ?? DEFAULT_VISIBLE_THREADS, selected).items
+      .filter(isLocalWorkConversation).map(thread => thread.thread_id)
+  }), [visibleProjectWindow, collapsedProjectKeys, currentProjectKey, currentThreadId, visibleThreadCounts])
+  const botThreadOwners = useThreadBotOwners(visibleBotThreadIds)
 
   const projectStatusByKey = useMemo(() => {
     const status = new Map<
@@ -953,7 +1024,8 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
   )
 
   const saveTitle = async (): Promise<void> => {
-    if (editingThreadId && editingTitle.trim()) {
+    if (editingThreadId && editingTitle.trim() &&
+        editingTitle.trim() !== (threads.find(thread => thread.thread_id === editingThreadId)?.title || "")) {
       await updateThread(editingThreadId, { title: editingTitle.trim() })
     }
     setEditingThreadId(null)
@@ -1284,32 +1356,7 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
       ) : activeSidebarTab === "chat" ? (
         <ScrollArea className="flex-1 min-h-0">
           <div className="space-y-0.5 px-1 pb-1">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="w-full justify-start gap-2.5 rounded-lg text-sm font-medium text-foreground/80 transition-colors hover:text-foreground"
-              aria-label="Bots 工作区"
-              onClick={() => setMainView("bots")}
-            >
-              <Suspense
-                fallback={
-                  <img
-                    src={botWorkspaceMarkUrl}
-                    alt=""
-                    aria-hidden="true"
-                    draggable={false}
-                    className="size-5 shrink-0"
-                  />
-                }
-              >
-                <BotWorkspaceAvatar
-                  color="#ff263c"
-                  size={20}
-                  className="size-5 shrink-0 overflow-visible"
-                />
-              </Suspense>
-              <span>Bots</span>
-            </Button>
+            <BotWorkspaceEntry setMainView={setMainView} />
             <Button
               variant="ghost"
               size="sm"
@@ -1639,6 +1686,8 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
 
                           return (
                             <ThreadListItem
+                              botOwner={botThreadOwners.get(thread.thread_id)?.threadCreatedAt === new Date(thread.created_at).getTime()
+                                ? botThreadOwners.get(thread.thread_id) : undefined}
                               key={thread.thread_id}
                               thread={thread}
                               isLoading={isLoading}
@@ -1765,24 +1814,13 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
           onForkingChange={handleForkCheckpointBusyChange}
         />
       ) : null}
-      <Dialog open={!!threadToDelete} onOpenChange={(open) => !open && setThreadToDelete(null)}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>确认删除会话</DialogTitle>
-            <DialogDescription>
-              {`确定要删除「${threadToDelete ? getDisplayThreadTitle(threadToDelete) : ""}」吗？删除后不可恢复。`}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setThreadToDelete(null)}>
-              取消
-            </Button>
-            <Button variant="destructive" onClick={confirmDeleteThread}>
-              删除
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ThreadDeleteDialog
+        open={!!threadToDelete}
+        title="确认删除会话"
+        description={`确定要删除「${threadToDelete ? getDisplayThreadTitle(threadToDelete) : ""}」吗？删除后不可恢复。`}
+        onCancel={() => setThreadToDelete(null)}
+        onConfirm={confirmDeleteThread}
+      />
       <ThreadGroupDeleteDialog
         open={!!projectToDelete}
         title="确认删除工作区会话"

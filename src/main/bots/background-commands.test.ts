@@ -32,6 +32,18 @@ function fixture() {
 }
 
 describe("Bot native command receipts", () => {
+  it.each(["APPROVED", ""])("keeps Hook decisions on command continuation (%s)", approved => {
+    const { store, task, command, result } = fixture()
+    store.beginInputPreparation(task.id)
+    store.recordPreparedInput(task.id, approved)
+    store.acceptCommand(task.id, command)
+    store.transition(task.id, "completed")
+    store.settleCommand(result)
+    const notice = store.nextQueued([])!
+    store.transition(notice.id, "running")
+    expect(store.profileContinuationRequest(notice.id)).toBe(approved || null)
+    expect(store.getTask(task.id).message).toBe("Create a report")
+  })
   it.each(["private", "group", "work"] as const)("keeps cancelled command activity in its %s conversation", (scope) => {
     const { store, bot, task, command, result } = fixture()
     let source = task

@@ -6,7 +6,7 @@ import {
   submitUserInputResponse
 } from "../services/user-input"
 
-function isUserInputResponse(value: unknown): value is UserInputResponse {
+export function isUserInputResponse(value: unknown): value is UserInputResponse {
   if (!value || typeof value !== "object") return false
   const candidate = value as Partial<UserInputResponse>
   return (

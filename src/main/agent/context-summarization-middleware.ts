@@ -25,6 +25,7 @@ import {
 import { isWorkflowNotificationPrompt } from "../../shared/internal-notification-turn"
 import { withCompactedContext } from "./context-usage"
 import { ModError } from "../mods/errors"
+import { BOT_PREPARED_USER_REQUEST_KEY } from "./agent-run-service"
 
 export interface ContextSize {
   type: "messages" | "tokens" | "fraction"
@@ -392,6 +393,8 @@ function messageText(content: unknown): string {
 }
 
 function userRequestText(message: BaseMessage): string {
+  const prepared = message.additional_kwargs?.[BOT_PREPARED_USER_REQUEST_KEY]
+  if (typeof prepared === "string") return prepared.trim()
   const visibleContent = message.additional_kwargs?.[VISIBLE_USER_MESSAGE_KEY]
   if (typeof visibleContent === "string" && visibleContent.trim()) {
     return visibleContent.trim()

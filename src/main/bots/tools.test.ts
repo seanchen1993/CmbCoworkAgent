@@ -7,12 +7,15 @@ import {
   writeFile,
   readFile,
   realpath,
+  rename,
   readdir,
   symlink,
   rm
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join, sep } from "node:path"
+import { projectBotExecution } from "../../renderer/src/lib/bot-execution-visibility"
+import { botScheduleReceipt } from "../../renderer/src/lib/bot-schedule-view"
 import type { BotDefinition, BotSchedule, BotTask } from "../../shared/bots/contracts"
 import type { LocalBotHost } from "./host"
 
@@ -496,7 +499,7 @@ it("delivers verified current-workspace files and rejects missing, private, link
         size: Buffer.byteLength("合成成果：50.75")
       }
     ])
-    expect(publish).toHaveBeenCalledWith(files, "delivery-1")
+    expect(publish).toHaveBeenCalledWith(files, "delivery-1", undefined, [{ requestedPath: "核验 报告.md", filePath: files![0].filePath }, { requestedPath: file, filePath: files![0].filePath }], undefined)
     for (const invalid of ["missing.md", "../private/private.md", privateFile, "escape.md", "."]) {
       const failed = await call(["核验 报告.md", invalid])
       expect(failed.status).toBe("error")
@@ -538,10 +541,54 @@ it("freezes each public delivery and keeps identical call retries stable", async
     expect(await readFile(first[0].attachmentPath!, "utf8")).toBe("VERSION1")
     expect(await readFile(second[0].attachmentPath!, "utf8")).toBe("VERSION2")
     expect(await readFile(source, "utf8")).toBe("VERSION2")
-    expect(publish).toHaveBeenNthCalledWith(1, first, "first")
-    expect(publish).toHaveBeenNthCalledWith(2, first, "first")
-    expect(publish).toHaveBeenNthCalledWith(3, second, "second")
+    expect(publish).toHaveBeenNthCalledWith(1, first, "first", undefined, [{ requestedPath: "report.md", filePath: first[0].filePath }], undefined)
+    expect(publish).toHaveBeenNthCalledWith(2, first, "first", undefined, [{ requestedPath: "report.md", filePath: first[0].filePath }], undefined)
+    expect(publish).toHaveBeenNthCalledWith(3, second, "second", undefined, [{ requestedPath: "report.md", filePath: second[0].filePath }], undefined)
   } finally {
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
+it("projects the host's current publication scope without changing formal file receipts", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "bot-delivery-scope-"))
+  try {
+    await writeFile(join(workspace, "report.md"), "RETAINED RESULT")
+    const scope = {
+      deliveryScope: { kind: "task" as const, threadId: "original-task", onwardPublication: "pending_review" as const },
+      deliveryNote: "Retained in this task; onward publication is pending."
+    }
+    let held = false
+    const capture = vi.fn(() => held ? scope : undefined)
+    const [deliver] = createBotDeliveryTools(workspace, new AbortController().signal, capture)
+    const normal = JSON.parse(String(await deliver.invoke({ files: ["report.md"] })))
+    expect(normal).not.toHaveProperty("deliveryScope")
+    expect(normal).not.toHaveProperty("deliveryNote")
+    // Ownership can be armed after tools were constructed, before actual delivery.
+    held = true
+    const pending = JSON.parse(String(await deliver.invoke({ files: ["report.md"] })))
+    expect(pending).toMatchObject(scope)
+    expect(pending.kind).toBe("bot-file-delivery")
+    expect(parseBotFileDelivery(JSON.stringify(pending))).toEqual(parseBotFileDelivery(JSON.stringify(normal)))
+    expect(await readFile(pending.files[0].attachmentPath, "utf8")).toBe("RETAINED RESULT")
+    await expect(deliver.invoke({ files: ["report.md"], deliveryScope: scope.deliveryScope })).rejects.toThrow()
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
+it("deduplicates file aliases before copying or hashing their contents", async () => {
+  const workspace = await realpath(await mkdtemp(join(tmpdir(), "bot-file-once-")))
+  const snapshots = vi.spyOn(await import("./file-copy"), "snapshotBotDeliveryFile")
+  try {
+    const path = join(workspace, "report.md")
+    await writeFile(path, "ONE RESULT")
+    await symlink("report.md", join(workspace, "alias.md"))
+    const [deliver] = createBotDeliveryTools(workspace, new AbortController().signal)
+    const files = parseBotFileDelivery(String(await deliver.invoke({ files: ["report.md", path, "alias.md"] })))!
+    expect(files).toHaveLength(1)
+    expect(snapshots).toHaveBeenCalledOnce()
+  } finally {
+    snapshots.mockRestore()
     await rm(workspace, { recursive: true, force: true })
   }
 })
@@ -616,7 +663,7 @@ it.each(["public", "internal"] as const)(
       expect(files).toHaveLength(1)
       expect((await stat(files[0].attachmentPath!)).size).toBe(size)
       expect(await hashBotFile(mine, files[0].attachmentPath!, signal)).toBe(await hashBotFile(peer, original, signal))
-      expect(publish).toHaveBeenCalledExactlyOnceWith(files, "receiver")
+      expect(publish).toHaveBeenCalledExactlyOnceWith(files, "receiver", undefined, [], [{ reference: verified[0], filePath: files[0].filePath }])
       // The larger delivery allowance does not grant arbitrary peer paths or uploads.
       const unlisted = join(peer, "private.txt")
       await writeFile(unlisted, "private")
@@ -633,6 +680,399 @@ it.each(["public", "internal"] as const)(
     }
   }
 )
+
+it.each([
+  { shared: false, removed: false }, { shared: true, removed: false },
+  { shared: false, removed: true }, { shared: true, removed: true }
+])("retains a private result before the caller resumes (shared: $shared, removed: $removed)", async ({ shared, removed }) => {
+  const root = await mkdtemp(join(tmpdir(), "bot-private-handoff-"))
+  const capture = vi.fn(), publish = vi.fn()
+  try {
+    const sender = join(root, "sender"), receiver = shared ? sender : join(root, "receiver")
+    await mkdir(sender)
+    if (!shared) await mkdir(receiver)
+    const source = join(sender, "report.md"), signal = new AbortController().signal
+    await writeFile(source, "RESULT_V1")
+    const [returned] = createBotReturnFileTools(sender, signal, capture)
+    const result = await returned.invoke({ type: "tool_call", id: "return-result",
+      name: returned.name, args: { files: ["report.md"] } })
+    const receipt = JSON.parse(String(result.content))
+    expect(receipt.kind).toBe("bot-file-return")
+    expect(receipt.files[0].attachmentPath).toBeTruthy()
+    expect(capture).toHaveBeenCalledExactlyOnceWith(receipt.files, [{ requestedPath: "report.md", filePath: receipt.files[0].filePath }], undefined)
+    expect(parseBotFileDelivery(result.content)).toBeNull()
+    // The next job can overwrite the same filename before the queued caller runs.
+    if (removed) await rm(source)
+    else await writeFile(source, "RESULT_V2")
+    const [delivery] = createBotDeliveryTools(receiver, signal, publish,
+      { workspacePath: sender, files: receipt.files })
+    const delivered = await delivery.invoke({ type: "tool_call", id: "deliver-result",
+      name: delivery.name, args: { files: [source] } })
+    const files = parseBotFileDelivery(delivered.content)!
+    expect(await readFile(files[0].attachmentPath!, "utf8")).toBe("RESULT_V1")
+    if (shared) {
+      expect(files).toEqual(receipt.files)
+      expect(await readdir(sender)).not.toContain("shared")
+    }
+    if (removed) await expect(readFile(source)).rejects.toThrow("ENOENT")
+    else expect(await readFile(source, "utf8")).toBe("RESULT_V2")
+    expect(publish).toHaveBeenCalledExactlyOnceWith(files, "deliver-result", undefined, [], [{ reference: receipt.files[0], filePath: files[0].filePath }])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it.each([false, true])("forwards a case-renamed result, including an older snapshot spelling (shared=%s)", async (shared) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bot-peer-case-")))
+  try {
+    const sender = join(root, "sender"), receiver = shared ? sender : join(root, "receiver")
+    await mkdir(sender)
+    if (!shared) await mkdir(receiver)
+    const source = join(sender, "report.md"), renamed = join(sender, "Report.md")
+    const signal = new AbortController().signal
+    await writeFile(source, "SENT VERSION")
+    const [returned] = createBotReturnFileTools(sender, signal, vi.fn())
+    await returned.invoke({ files: ["report.md"] })
+    await rename(source, renamed)
+    const receipt = JSON.parse(String(await returned.invoke({ files: ["Report.md"] })))
+    expect(receipt.files[0].attachmentPath).toBe(await realpath(receipt.files[0].attachmentPath))
+    // A previous version could persist the attempted spelling instead. Exercise
+    // recovery on filesystems where both spellings name this same existing file.
+    const oldSpelling = join(dirname(receipt.files[0].attachmentPath), "REPORT.md")
+    if (await stat(oldSpelling).catch(() => null)) receipt.files[0].attachmentPath = oldSpelling
+    await writeFile(renamed, "NEXT VERSION")
+    const [delivery] = createBotDeliveryTools(receiver, signal, undefined,
+      { workspacePath: sender, files: receipt.files })
+    const files = parseBotFileDelivery(String(await delivery.invoke({ files: [receipt.files[0].filePath] })))!
+    expect(files).toHaveLength(1)
+    expect(await readFile(files[0].attachmentPath!, "utf8")).toBe("SENT VERSION")
+    expect(files[0].name).toBe("Report.md")
+    expect(files[0].filePath.endsWith("/Report.md")).toBe(true)
+    expect(await readFile(renamed, "utf8")).toBe("NEXT VERSION")
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+it.each([false, true])("reads a legacy receipt after a directory spelling change but rejects a redirected directory (shared=%s)", async (shared) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bot-peer-directory-")))
+  try {
+    const sender = join(root, "sender"), receiver = shared ? sender : join(root, "receiver")
+    await mkdir(join(sender, "results"), { recursive: true })
+    if (!shared) await mkdir(receiver)
+    const source = join(sender, "results/report.md")
+    await writeFile(source, "LEGACY RESULT")
+    const files = [{ filePath: source, name: "report.md", size: 13 }]
+    await rename(join(sender, "results"), join(sender, "Results"))
+    // Case-sensitive filesystems do not preserve the old reference on rename.
+    if (!await stat(source).catch(() => null)) return
+    const signal = new AbortController().signal
+    const [delivery] = createBotDeliveryTools(receiver, signal, undefined, { workspacePath: sender, files })
+    const returned = parseBotFileDelivery(String(await delivery.invoke({ files: [source] })))!
+    expect(await readFile(returned[0].attachmentPath!, "utf8")).toBe("LEGACY RESULT")
+    await rename(join(sender, "Results"), join(sender, "elsewhere"))
+    await symlink("elsewhere", join(sender, "results"))
+    const [redirected] = createBotDeliveryTools(receiver, signal, undefined, { workspacePath: sender, files })
+    const rejected = JSON.parse(String(await redirected.invoke({ files: [source] })))
+    expect(rejected.ok).toBe(false)
+    expect(rejected.error).toContain("已指向其他文件")
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+it.each([
+  { aliasKind: "file", privately: false }, { aliasKind: "directory", privately: false },
+  { aliasKind: "file", privately: true }, { aliasKind: "directory", privately: true }
+])("keeps an unlisted local $aliasKind alias distinct from a peer's retained version (private=$privately)", async ({ aliasKind, privately }) => {
+  const workspace = await realpath(await mkdtemp(join(tmpdir(), "bot-peer-alias-")))
+  try {
+    const signal = new AbortController().signal, source = join(workspace, "results/Report.md")
+    await mkdir(dirname(source))
+    await writeFile(source, "OLD")
+    const relativeAlias = aliasKind === "file" ? "report-alias.md" : "alias/Report.md"
+    await symlink(aliasKind === "file" ? source : dirname(source),
+      join(workspace, aliasKind === "file" ? relativeAlias : "alias"))
+    const [returned] = createBotReturnFileTools(workspace, signal, vi.fn())
+    const receipt = JSON.parse(String(await returned.invoke({ files: ["results/Report.md"] })))
+    await writeFile(source, "NEW")
+    const captured = vi.fn(), peer = { workspacePath: workspace, files: receipt.files }
+    const [delivery] = privately
+      ? createBotReturnFileTools(workspace, signal, captured, peer)
+      : createBotDeliveryTools(workspace, signal,
+        (files, _callId, _content, paths, peers) => captured(files, paths, peers), peer, true)
+    const invoke = (filePath: string) => delivery.invoke({ files: [filePath],
+      ...(!privately ? { content: "Reviewed version" } : {}) })
+    // The exact host receipt deliberately retains the producer's old bytes.
+    const retained = JSON.parse(String(await invoke(source)))
+    expect(retained.files).toEqual(receipt.files)
+    expect(await readFile(retained.files[0].attachmentPath, "utf8")).toBe("OLD")
+    // A different local path selects the recipient's revision, with the same
+    // semantics for an absolute path, a relative path and a private return.
+    for (const path of [join(workspace, relativeAlias), relativeAlias]) {
+      const current = JSON.parse(String(await invoke(path)))
+      expect(await readFile(current.files[0].attachmentPath, "utf8")).toBe("NEW")
+      expect(captured).toHaveBeenLastCalledWith(current.files,
+        [{ requestedPath: path, filePath: source }], undefined)
+    }
+  } finally { await rm(workspace, { recursive: true, force: true }) }
+})
+
+it.each(["file", "directory"])("does not import an unlisted %s alias from a peer's private workspace", async (aliasKind) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bot-peer-private-alias-")))
+  try {
+    const sender = join(root, "sender"), receiver = join(root, "receiver")
+    const source = join(sender, "results/report.md"), signal = new AbortController().signal
+    await mkdir(dirname(source), { recursive: true })
+    await mkdir(receiver)
+    await writeFile(source, "PRIVATE VERSION")
+    const alias = join(sender, aliasKind === "file" ? "latest.md" : "alias/report.md")
+    await symlink(aliasKind === "file" ? source : dirname(source),
+      aliasKind === "file" ? alias : dirname(alias))
+    const [returned] = createBotReturnFileTools(sender, signal, vi.fn())
+    const receipt = JSON.parse(String(await returned.invoke({ files: ["results/report.md"] })))
+    const publish = vi.fn()
+    const [delivery] = createBotDeliveryTools(receiver, signal, publish,
+      { workspacePath: sender, files: receipt.files })
+    const rejected = JSON.parse(String(await delivery.invoke({ files: [alias] })))
+    expect(rejected.ok).toBe(false)
+    expect(publish).not.toHaveBeenCalled()
+    expect(await readdir(receiver)).toEqual([])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+it("delivers exact peer receipt pairs in a desktop work without accepting mixed or explicit historical references", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bot-peer-receipt-pairs-")))
+  try {
+    const workspace = join(root, "work"), peer = join(root, "peer")
+    await mkdir(workspace)
+    await mkdir(peer)
+    const report = join(peer, "report.md"), chart = join(peer, "chart.png")
+    const body = "![Chart](chart.png)", pixels = "retained image bytes"
+    await writeFile(report, body)
+    await writeFile(chart, pixels)
+    const signal = new AbortController().signal
+    const capture = vi.fn<(files: BotDeliveredFile[]) => void>()
+    const [returnFiles] = createBotReturnFileTools(peer, signal, capture)
+    await returnFiles.invoke({ files: ["report.md", "chart.png"] })
+    const files = capture.mock.calls[0][0]
+    const handoff = { workspacePath: peer, files }
+    const [reportReceipt, chartReceipt] = files.map(({ filePath, attachmentPath }) => ({ filePath, attachmentPath }))
+    await writeFile(report, "mutable replacement")
+    await writeFile(chart, "different image bytes")
+
+    const publish = vi.fn()
+    const history = vi.fn(async () => undefined)
+    const [deliver] = createBotDeliveryTools(workspace, signal, publish, handoff, false,
+      undefined, "work", undefined, "receipt-thread", history)
+    const call = (selected: readonly unknown[]) => deliver.invoke({
+      type: "tool_call", id: "delivery", name: deliver.name, args: { files: selected }
+    })
+    const invalid = [
+      { ...reportReceipt, attachmentPath: chartReceipt.attachmentPath },
+      { ...reportReceipt, filePath: join(peer, "unlisted.md") },
+      { ...reportReceipt, source: { threadId: "other-thread", assistantMessageId: "assistant",
+        callId: "other-delivery", fileIndex: 0 } }
+    ]
+    for (const selection of invalid) {
+      const rejected = await call([chartReceipt, selection])
+      expect(rejected.status).toBe("error")
+      expect(rejected.content).toContain("没有匹配的正式回执")
+    }
+    expect(publish).not.toHaveBeenCalled()
+    expect(await readdir(workspace)).toEqual([])
+
+    const sent = await call([reportReceipt, chartReceipt])
+    expect(sent.status).not.toBe("error")
+    const delivered = parseBotFileDelivery(sent.content)!
+    expect(delivered.map(file => file.name)).toEqual(["report.md", "chart.png"])
+    expect(delivered.map(file => file.filePath)).toEqual([report, chart])
+    expect(delivered.every(file => file.attachmentPath?.startsWith(join(workspace, ".bot-deliveries") + sep))).toBe(true)
+    expect(await readdir(workspace)).toEqual([".bot-deliveries"])
+    await expect(readFile(delivered[0].attachmentPath!, "utf8")).resolves.toBe(body)
+    await expect(readFile(delivered[1].attachmentPath!, "utf8")).resolves.toBe(pixels)
+    expect(publish).toHaveBeenCalledOnce()
+
+    const [stringOnly] = createBotDeliveryTools(workspace, signal, undefined, handoff)
+    await expect(stringOnly.invoke({ files: [reportReceipt] })).rejects.toThrow()
+    const byPath = parseBotFileDelivery(await stringOnly.invoke({ files: [reportReceipt.filePath] }))!
+    expect(byPath[0].filePath).toContain(join(workspace, "shared") + sep)
+    await expect(readFile(byPath[0].attachmentPath!, "utf8")).resolves.toBe(body)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it("keeps a peer import identity across tool rebuilds without overwriting the recipient's edits", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bot-peer-resume-")))
+  try {
+    const source = join(root, "source"), target = join(root, "target")
+    await mkdir(source)
+    await mkdir(target)
+    const original = join(source, "report.md"), signal = new AbortController().signal
+    await writeFile(original, "RETURNED VERSION")
+    const capture = vi.fn()
+    const [sender] = createBotReturnFileTools(source, signal, capture)
+    await sender.invoke({ files: ["report.md"] })
+    const peer = { workspacePath: source, files: capture.mock.calls[0][0] }
+    const returned: BotDeliveredFile[][] = []
+    const [first] = createBotReturnFileTools(target, signal, files => { returned.push(files) }, peer)
+    await first.invoke({ files: [original] })
+    const kept = returned[0][0]
+    await writeFile(kept.filePath, "RECIPIENT'S EDIT")
+    await writeFile(original, "PRODUCER'S NEXT TASK")
+    // A checkpoint restart reconstructs both tools from the durable peer receipt.
+    const resumedPeer = JSON.parse(JSON.stringify(peer))
+    const [resumed] = createBotReturnFileTools(target, signal, files => { returned.push(files) }, resumedPeer)
+    await resumed.invoke({ files: [original] })
+    const [deliver] = createBotDeliveryTools(target, signal, files => { returned.push(files) }, resumedPeer)
+    await deliver.invoke({ files: [original] })
+    expect(returned).toEqual([[kept], [kept], [kept]])
+    expect(await readFile(kept.filePath, "utf8")).toBe("RECIPIENT'S EDIT")
+    expect(await readFile(kept.attachmentPath!, "utf8")).toBe("RETURNED VERSION")
+    expect(await readdir(join(target, "shared"))).toHaveLength(1)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+it("does not return a verified file if retaining its bytes fails", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "bot-return-failed-")), capture = vi.fn()
+  try {
+    await writeFile(join(workspace, "report.md"), "RESULT")
+    await writeFile(join(workspace, ".bot-deliveries"), "Not a directory")
+    const [returned] = createBotReturnFileTools(workspace, new AbortController().signal, capture)
+    const result = await returned.invoke({ type: "tool_call", id: "return-failed",
+      name: returned.name, args: { files: ["report.md"] } })
+    expect(result.status).toBe("error")
+    expect(capture).not.toHaveBeenCalled()
+    expect(await readFile(join(workspace, "report.md"), "utf8")).toBe("RESULT")
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
+it.each([false, true])("preserves distinct logical files that share retained bytes (shared=%s)", async (shared) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bot-logical-files-")))
+  try {
+    const source = join(root, "source"), target = shared ? source : join(root, "target")
+    await mkdir(join(source, "a"), { recursive: true })
+    await mkdir(join(source, "b"))
+    if (!shared) await mkdir(target)
+    for (const name of ["a/manifest.json", "b/manifest.json"]) await writeFile(join(source, name), "{}")
+    const signal = new AbortController().signal
+    const [returned] = createBotReturnFileTools(source, signal, vi.fn())
+    const receipt = JSON.parse(String(await returned.invoke({ files: ["a/manifest.json", "b/manifest.json"] })))
+    expect(receipt.files[0].attachmentPath).toBe(receipt.files[1].attachmentPath)
+    const [delivery] = createBotDeliveryTools(target, signal, undefined, { workspacePath: source, files: receipt.files })
+    const ambiguous = JSON.parse(String(await delivery.invoke({
+      files: receipt.files.map((file: BotDeliveredFile) => file.attachmentPath!)
+    })))
+    expect(ambiguous).toMatchObject({ ok: false, error: expect.stringContaining("绝对 filePath") })
+    const files = parseBotFileDelivery(String(await delivery.invoke({ files: receipt.files.map((file: BotDeliveredFile) => file.filePath) })))!
+    expect(files).toHaveLength(2)
+    expect(new Set(files.map(file => file.filePath)).size).toBe(2)
+    for (const file of files) expect(await readFile(file.attachmentPath!, "utf8")).toBe("{}")
+    if (shared) expect(files).toEqual(receipt.files)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+it.each(["different size", "same size", "redirect"])("rejects a changed retained peer source during import: %s", async (change) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bot-retained-integrity-")))
+  const publish = vi.fn()
+  try {
+    const source = join(root, "source"), target = join(root, "target")
+    await mkdir(source); await mkdir(target)
+    await writeFile(join(source, "report.md"), "ORIGINAL")
+    const signal = new AbortController().signal
+    const [returned] = createBotReturnFileTools(source, signal, vi.fn())
+    const receipt = JSON.parse(String(await returned.invoke({ files: ["report.md"] })))
+    const snapshot = receipt.files[0].attachmentPath
+    if (change === "redirect") {
+      await writeFile(join(source, "other.md"), "ORIGINAL")
+      await rm(snapshot)
+      await symlink(join(source, "other.md"), snapshot)
+    } else await writeFile(snapshot, change === "same size" ? "REPLACED" : "DIFFERENT CONTENT")
+    const [delivery] = createBotDeliveryTools(target, signal, publish, { workspacePath: source, files: receipt.files })
+    const result = JSON.parse(String(await delivery.invoke({ files: [receipt.files[0].filePath] })))
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining("已保存的成果") })
+    expect(publish).not.toHaveBeenCalled()
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+it.each(["edit", "remove", "unrelated-error", "publish-error", "missing-snapshot"])("reuses or repairs the retained import without discarding other successful selections: %s", async (change) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bot-repeat-version-")))
+  try {
+    const source = join(root, "source"), target = join(root, "target")
+    await mkdir(source); await mkdir(target)
+    await writeFile(join(source, "report.md"), "ORIGINAL")
+    const signal = new AbortController().signal
+    const [returned] = createBotReturnFileTools(source, signal, vi.fn())
+    const receipt = JSON.parse(String(await returned.invoke({ files: ["report.md"] })))
+    const publish = vi.fn()
+    const [delivery] = createBotDeliveryTools(target, signal, publish, { workspacePath: source, files: receipt.files })
+    const input = { files: [receipt.files[0].filePath] }
+    const first = parseBotFileDelivery(String(await delivery.invoke(input)))!
+    if (change === "edit") await writeFile(first[0].filePath, "REVISION")
+    else if (change === "remove") await rm(first[0].filePath)
+    else {
+      if (change === "publish-error") publish.mockImplementationOnce(() => { throw new Error("Receipt save failed") })
+      if (change === "missing-snapshot") await rm(first[0].attachmentPath!)
+      const failed = JSON.parse(String(await delivery.invoke(change === "unrelated-error" ? { files: ["missing.md"] } : input)))
+      expect(failed.ok).toBe(false)
+    }
+    const repeated = parseBotFileDelivery(String(await delivery.invoke(input)))!
+    expect(repeated).toEqual(first)
+    expect(await readFile(repeated[0].attachmentPath!, "utf8")).toBe("ORIGINAL")
+    expect(await readdir(join(target, "shared"))).toHaveLength(1)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+it("deduplicates one logical version and rejects conflicting versions before publication", async () => {
+  const workspace = await realpath(await mkdtemp(join(tmpdir(), "bot-mixed-version-"))), publish = vi.fn()
+  try {
+    const signal = new AbortController().signal
+    await writeFile(join(workspace, "report.md"), "ORIGINAL")
+    const [returned] = createBotReturnFileTools(workspace, signal, vi.fn())
+    const receipt = JSON.parse(String(await returned.invoke({ files: ["report.md"] })))
+    const [delivery] = createBotDeliveryTools(workspace, signal, publish, { workspacePath: workspace, files: receipt.files })
+    const input = { files: ["report.md", receipt.files[0].filePath] }
+    expect(parseBotFileDelivery(String(await delivery.invoke(input)))).toEqual(receipt.files)
+    expect(publish).toHaveBeenCalledOnce()
+    await writeFile(join(workspace, "report.md"), "REVISION")
+    expect(JSON.parse(String(await delivery.invoke(input)))).toMatchObject({ ok: false, error: expect.stringContaining("不同版本") })
+    expect(publish).toHaveBeenCalledOnce()
+  } finally { await rm(workspace, { recursive: true, force: true }) }
+})
+
+it.each([false, true])("rereads a legacy peer source instead of reusing an editable import (edited=%s)", async (edited) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bot-legacy-reselect-")))
+  try {
+    const source = join(root, "source"), target = join(root, "target")
+    await mkdir(source); await mkdir(target)
+    const original = join(source, "report.md")
+    await writeFile(original, "ORIGINAL")
+    const [returned] = createBotReturnFileTools(target, new AbortController().signal, vi.fn(),
+      { workspacePath: source, files: [{ filePath: original, name: "report.md", size: 8 }] })
+    const first = JSON.parse(String(await returned.invoke({ files: [original] }))).files[0]
+    if (edited) await writeFile(first.filePath, "LOCAL-EDIT")
+    await writeFile(original, "LATEST!")
+    const second = JSON.parse(String(await returned.invoke({ files: [original] }))).files[0]
+    expect(await readFile(second.attachmentPath, "utf8")).toBe("LATEST!")
+    expect(await readFile(first.filePath, "utf8")).toBe(edited ? "LOCAL-EDIT" : "ORIGINAL")
+    expect(await readFile(first.attachmentPath, "utf8")).toBe("ORIGINAL")
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+it("rejects a legacy peer path that was redirected to a different file", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "bot-legacy-identity-")))
+  try {
+    const source = join(root, "source"), target = join(root, "target")
+    await mkdir(source); await mkdir(target)
+    const path = join(source, "report.md")
+    await writeFile(join(source, "private.md"), "NOT RETURNED")
+    await symlink("private.md", path)
+    const publish = vi.fn(), [delivery] = createBotDeliveryTools(target, new AbortController().signal, publish,
+      { workspacePath: source, files: [{ filePath: path, name: "report.md", size: 12 }] })
+    expect(JSON.parse(String(await delivery.invoke({ files: [path] })))).toMatchObject({ ok: false })
+    expect(publish).not.toHaveBeenCalled()
+    expect(await readdir(target)).toEqual([])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
 
 it("keeps internal file return distinct from an explicit public group delivery", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "bot-file-return-"))
@@ -660,7 +1100,7 @@ it("keeps internal file return distinct from an explicit public group delivery",
     const receipt = JSON.parse(String(result.content))
     expect(receipt).toMatchObject({ kind: "bot-file-return", files: [{ name: "draft.md" }] })
     expect(parseBotFileDelivery(result.content)).toBeNull()
-    expect(capture).toHaveBeenCalledExactlyOnceWith(receipt.files, "file-scope")
+    expect(capture).toHaveBeenCalledExactlyOnceWith(receipt.files, [{ requestedPath: "draft.md", filePath: receipt.files[0].filePath }], undefined)
     expect(publish).not.toHaveBeenCalled()
     // Old internal calls had only files. They must not silently become public on resume.
     await expect(call(delivered, { files: ["draft.md"] })).rejects.toThrow()
@@ -677,8 +1117,8 @@ it("keeps internal file return distinct from an explicit public group delivery",
     const publicFiles = parseBotFileDelivery(publicResult.content)!
     expect(publicFiles).toMatchObject(receipt.files)
     expect(publicFiles[0].attachmentPath).toContain(".bot-deliveries/")
-    expect(receipt.files[0]).not.toHaveProperty("attachmentPath")
-    expect(publish).toHaveBeenCalledExactlyOnceWith(publicFiles, "file-scope", "Reviewed result")
+    expect(receipt.files[0].attachmentPath).toBe(publicFiles[0].attachmentPath)
+    expect(publish).toHaveBeenCalledExactlyOnceWith(publicFiles, "file-scope", "Reviewed result", [{ requestedPath: "draft.md", filePath: publicFiles[0].filePath }], undefined)
     controller.abort(new Error("cancelled"))
     await expect(call(returned, { files: ["draft.md"] })).rejects.toThrow("cancelled")
     expect(capture).toHaveBeenCalledTimes(1)
@@ -736,7 +1176,9 @@ it("publishes a group summary or empty content only after every attachment is ve
     expect(publish).toHaveBeenCalledExactlyOnceWith(
       files,
       "group-content",
-      "合计74.13，差额+0.03。"
+      "合计74.13，差额+0.03。",
+      [{ requestedPath: "report.md", filePath: files[0].filePath }],
+      undefined
     )
     expect((await call(["report.md", "missing.md"], "Do not publish partial text")).status).toBe(
       "error"
@@ -767,7 +1209,7 @@ it("publishes a group summary or empty content only after every attachment is ve
     await expect(call(["report.md"])).rejects.toThrow()
     expect(publish).toHaveBeenCalledTimes(1)
     expect(parseBotFileDelivery((await call(["report.md"], "")).content)).toEqual(files)
-    expect(publish).toHaveBeenLastCalledWith(files, "group-content", "")
+    expect(publish).toHaveBeenLastCalledWith(files, "group-content", "", [{ requestedPath: "report.md", filePath: files[0].filePath }], undefined)
     controller.abort(new Error("cancelled"))
     await expect(call(["report.md"], "Do not publish after cancellation")).rejects.toThrow(
       "cancelled"
@@ -818,7 +1260,7 @@ it.each([undefined, false])(
       })
       expect(publish).toHaveBeenCalledExactlyOnceWith(
         parseBotFileDelivery(result.content),
-        "private-file"
+        "private-file", undefined, [{ requestedPath: "report.md", filePath: parseBotFileDelivery(result.content)![0].filePath }], undefined
       )
     } finally {
       await rm(workspace, { recursive: true, force: true })
@@ -1045,24 +1487,180 @@ it("keeps ambiguous-target recovery refs in an error result so the model can ret
   expect(result.content).toBe(evidence)
 })
 
-function fixture(origin: BotTask["origin"] = { kind: "user" }, schedules: BotSchedule[] = []) {
+function fixture(
+  origin: BotTask["origin"] = { kind: "user" },
+  schedules: BotSchedule[] = [],
+  source: Partial<Pick<BotTask, "threadId" | "workId" | "mockSource">> = {}
+) {
   const controller = new AbortController()
   const save = vi.fn((botId, input, existing) => ({ botId, ...input, ...existing }))
+  const saveFollowUp = vi.fn((botId, input, followUp) => ({ botId, ...input, followUp }))
+  const saveWorkSchedule = vi.fn((botId, input, workId) => ({ botId, ...input, workId }))
   const host = {
     snapshot: () => ({ schedules }),
     saveSchedule: save,
+    saveDesktopScheduleFollowUp: saveFollowUp,
+    saveDesktopWorkScheduleFromTool: saveWorkSchedule,
     removeSchedule: vi.fn()
   } as unknown as LocalBotHost
   const [schedule] = createBotScheduleTools(
-    { id: "a" } as BotDefinition,
-    { origin } as BotTask,
+    { id: "a", threadId: "main-thread" } as BotDefinition,
+    { id: "source-task", threadId: "main-thread", origin, ...source } as BotTask,
     () => host,
     controller.signal
   )
-  return { schedule, save, controller }
+  return { schedule, save, saveFollowUp, saveWorkSchedule, controller }
 }
 
 describe("Bot schedule tool contract", () => {
+  it("distinguishes observation, execution and fixed text in the model-visible contract", () => {
+    const { schedule } = fixture()
+    const contract = convertToOpenAITool(schedule).function
+    expect(contract.description).toContain("choose exactly one mode")
+    expect(contract.description).toContain('frequency=once, runAt, and workMonitor={workId, mode:"report"}')
+    expect(contract.description).toContain("Confirm an observation only when the save receipt contains workMonitor")
+    expect(contract.description).toContain("To execute authorized work later, set top-level workId")
+    expect(contract.description).toContain("This only repeats that text and never checks task status or executes its instructions")
+    expect(contract.description).not.toContain("Routines need standalone authorized instructions")
+    expect(contract.parameters).toMatchObject({ properties: {
+      message: { description: expect.stringContaining("For work observations omit this field") },
+      kind: { const: "fixed_reminder", description: expect.stringContaining("without checking task status") },
+      workId: { description: expect.stringContaining("Execution destination") },
+      workMonitor: {
+        description: expect.stringContaining('mode="report"'),
+        required: ["workId", "mode"],
+        properties: { mode: { enum: ["report", "change", "new_result", "until_work_completed"] } }
+      }
+    } })
+  })
+
+  it("keeps the real removal receipt visible with execution details folded", async () => {
+    const { schedule } = fixture({ kind: "user" }, [
+      {
+        id: "routine",
+        botId: "a",
+        version: 1,
+        name: "Review",
+        message: "Review",
+        frequency: "once",
+        runAt: "2030-01-01T00:00:00Z",
+        enabled: false,
+        nextRunAt: null,
+        timezone: "UTC"
+      }
+    ])
+    const call = { id: "remove", name: "bot_schedule", args: { action: "remove", id: "routine" } }
+    const receipt = await schedule.invoke({ type: "tool_call", ...call })
+    expect(receipt).toBeInstanceOf(ToolMessage)
+    const returned = { content: receipt.content, is_error: receipt.status === "error" }
+    expect(botScheduleReceipt(call, returned)).toEqual({ action: "remove", id: "routine" })
+    expect(botScheduleReceipt(call, { ...returned, content: `${receipt.content}。` })).toBeNull()
+    const created_at = new Date()
+    const view = projectBotExecution([
+      { id: "call-message", role: "assistant", content: "", tool_calls: [call], created_at },
+      { id: "receipt-message", role: "tool", tool_call_id: call.id, ...returned, created_at }
+    ], false, new Set())
+    expect(view.hiddenMessages.size).toBe(0)
+    expect(view.foldedTools.size).toBe(0)
+  })
+
+  it("uses the exact execution destination separately from a read-only work observation", async () => {
+    const { schedule, save, saveFollowUp, saveWorkSchedule } = fixture()
+    const args = { action: "save", name: "Continue", message: "Update the report",
+      frequency: "daily", runAtTime: "09:00", workId: "report", requestKey: "run-report" }
+    const call = { type: "tool_call" as const, name: "bot_schedule", id: "continue", args }
+    const mixed = await schedule.invoke({ ...call, args: { ...args, workMonitor: { workId: "report", mode: "change" } } })
+    expect(mixed.status).toBe("error")
+    expect(saveWorkSchedule).not.toHaveBeenCalled()
+    await schedule.invoke(call)
+    expect(saveWorkSchedule).toHaveBeenCalledExactlyOnceWith("a",
+      expect.objectContaining({ message: args.message }), "report",
+      { taskId: "source-task", callId: "continue", key: "run-report" })
+    expect(saveFollowUp).not.toHaveBeenCalled()
+    expect(save).not.toHaveBeenCalled()
+    await schedule.invoke({ ...call, id: "observe", args: {
+      action: "save", name: "Observe", frequency: "daily", runAtTime: "09:00",
+      workMonitor: { workId: "report", mode: "change" }, requestKey: "observe-report"
+    } })
+    expect(saveFollowUp).toHaveBeenCalledExactlyOnceWith("a",
+      expect.objectContaining({ message: "查看原任务的已记录进展" }), { workId: "report", mode: "change" },
+      { taskId: "source-task", callId: "observe", key: "observe-report" }, undefined)
+  })
+
+  it("uses the fixed reminder path only for an explicit kind", async () => {
+    const { schedule, save, saveFollowUp } = fixture()
+    const contract = convertToOpenAITool(schedule).function
+    expect(contract.description).toContain("For one-time reminders set kind=fixed_reminder")
+    expect(contract.parameters).toHaveProperty("properties.priorOperation")
+    const args = { action: "save", name: "Call", message: "Remind me to call",
+      frequency: "once", runAt: "2099-01-01T10:00:00Z" }
+    await schedule.invoke({ type: "tool_call", name: "bot_schedule", id: "legacy", args })
+    expect(save).toHaveBeenCalledOnce()
+    expect(saveFollowUp).not.toHaveBeenCalled()
+    await schedule.invoke({ type: "tool_call", name: "bot_schedule", id: "fixed",
+      args: { ...args, kind: "fixed_reminder", requestKey: "remind-once" } })
+    expect(saveFollowUp).toHaveBeenCalledExactlyOnceWith("a",
+      expect.objectContaining({ frequency: "once", message: args.message }),
+      { kind: "fixed_reminder" }, { taskId: "source-task", callId: "fixed", key: "remind-once" }, undefined)
+  })
+
+  it.each([
+    { kind: "group", groupId: "g", messageId: "message" },
+    { kind: "schedule", scheduleId: "routine" }
+  ] as const)("keeps execution-only descriptions for $kind turns", origin => {
+    const { schedule } = fixture(origin)
+    const contract = convertToOpenAITool(schedule).function
+    expect(contract.description).toContain("Routines need standalone authorized instructions")
+    expect(contract.description).not.toMatch(/fixed_reminder|workMonitor|workId|requestKey|recover/)
+    expect(contract.parameters).toMatchObject({ properties: {
+      message: { description: "Standalone instructions for the future run, including required inputs, acceptance conditions and delivery/silence policy. Omit only when keeping an existing routine's instructions unchanged." }
+    } })
+  })
+
+  it.each([
+    {
+      surface: "desktop task",
+      origin: { kind: "user" },
+      source: { threadId: "work-thread", workId: "work" }
+    },
+    {
+      surface: "personal IM in the shared main thread",
+      origin: { kind: "mock", bindingId: "binding", eventId: "event" },
+      source: { mockSource: {
+        transport: "im", personal: true, bindingId: "binding", grantVersion: 1,
+        conversationId: "dm", audienceKey: "desktop", eventId: "event", messageId: "message", senderId: "owner"
+      } }
+    }
+  ] as const)("keeps the original once routine and rejects desktop-only fields in $surface", async ({ origin, source }) => {
+    const { schedule, save, saveFollowUp, saveWorkSchedule } = fixture(origin, [], source)
+    const contract = convertToOpenAITool(schedule).function
+    expect(contract.description).toContain("set frequency=once and runAt")
+    const desktopInputs = {
+      kind: "fixed_reminder",
+      workId: "report",
+      expiresAt: "2099-01-01T11:00:00Z",
+      workMonitor: { workId: "report", mode: "change" },
+      requestKey: "once",
+      priorOperation: { sourceRequestId: "request" }
+    }
+    const call = { type: "tool_call" as const, name: "bot_schedule", id: "once",
+      args: { action: "save", name: "Report", message: "Remind me to check the report",
+        frequency: "once", runAt: "2099-01-01T10:00:00Z" } }
+    for (const [field, value] of Object.entries(desktopInputs)) {
+      expect(contract.parameters).not.toHaveProperty(`properties.${field}`)
+      await expect(schedule.invoke({ ...call, args: { ...call.args, [field]: value } })).rejects.toThrow()
+    }
+    expect(contract.description).not.toMatch(/fixed_reminder|workMonitor|workId|requestKey|recover/)
+    expect(save).not.toHaveBeenCalled()
+    expect(saveFollowUp).not.toHaveBeenCalled()
+    expect(saveWorkSchedule).not.toHaveBeenCalled()
+
+    expect((await schedule.invoke(call)).status).not.toBe("error")
+    expect(save).toHaveBeenCalledExactlyOnceWith("a",
+      expect.objectContaining({ frequency: "once", message: call.args.message }), undefined,
+      ...("mockSource" in source ? ["source-task"] : []))
+  })
+
   it("returns error ToolMessages for real calls while preserving cancellation and validation", async () => {
     const { schedule, save, controller } = fixture()
     const call = {

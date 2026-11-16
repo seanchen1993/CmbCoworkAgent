@@ -82,6 +82,7 @@ interface OwnedPage {
 }
 
 export type BotBrowserUploadLock = (operation: () => Promise<string>) => Promise<string>
+export type BotRetainedUploadResolver = (reference: string) => Promise<string | undefined>
 
 /** Retain the exact still-owned target when a native operation fails before its observation. */
 export class BotBrowserActionError extends Error {
@@ -487,7 +488,8 @@ export class BotBrowserService {
     action: BotBrowserAction,
     signal: AbortSignal,
     waiting: (active: boolean) => void = () => {},
-    withUploadFileLock?: BotBrowserUploadLock
+    withUploadFileLock?: BotBrowserUploadLock,
+    resolveRetainedUpload?: BotRetainedUploadResolver
   ): Promise<string> {
     signal.throwIfAborted()
     if (action.action === "fill" && typeof action.text !== "string")
@@ -611,7 +613,7 @@ export class BotBrowserService {
       // Keep file → browser lock order. Human waits return fresh evidence without uploading.
       return withUploadFileLock(() => {
         this.check(signal, generation, botId)
-        return this.act(botId, action, signal, waiting)
+        return this.act(botId, action, signal, waiting, undefined, resolveRetainedUpload)
       })
     }
     return this.withScopeLock(botId, async () => {
@@ -679,7 +681,8 @@ export class BotBrowserService {
               "INVALID_INPUT",
               "上传需要 fileId（当前工作目录内的文件路径，保留子目录）和附件控件的 ref 或精确标签 name。直接调用 upload，无需先点击文件选择按钮。"
             )
-          const file = await resolveBotWorkspaceFile(this.workspace(botId), action.fileId, {
+          const retained = await resolveRetainedUpload?.(action.fileId)
+          const file = retained ?? await resolveBotWorkspaceFile(this.workspace(botId), action.fileId, {
             allowAbsolute: true
           })
           if ((await lstat(file)).size > 100 * 1024 * 1024)
@@ -890,6 +893,10 @@ export class BotBrowserService {
       (entry) => entry.botId === botId && !entry.page.isClosed()
     )
     return pages.find((entry) => entry.viewed) ?? pages[0]
+  }
+  /** Exact owner only. Unlink checks must not select a target, capture pixels, or open pages. */
+  hasOpenPages(scope: string): boolean {
+    return [...this.pages.values()].some(entry => entry.botId === scope && !entry.page.isClosed())
   }
   private rememberViewed(entry: OwnedPage): void {
     for (const page of this.pages.values())

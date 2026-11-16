@@ -17,6 +17,11 @@ declare global {
       loading: boolean
       runningTool: boolean
       renderMembers(width: number): void
+      renderQuote(imported: boolean, editReady?: boolean, mode?: "bot" | "default"): void
+      renderHistoricalSkill(text: string, trusted: boolean): void
+      edits: { content: string }[]
+      draftReplies: ({ id: string } | null)[]
+      jumps: string[]
       render(
         mode: "bot" | "default",
         loading?: boolean,
@@ -48,6 +53,7 @@ import {ChatMessageVirtualList} from './src/renderer/src/components/chat/ChatMes
 import {ChatPresentationContext,ChatReplyActionsContext} from './src/renderer/src/components/chat/chat-presentation-context';
 import {BotMessageReactionsContext} from './src/renderer/src/components/bots/bot-message-reactions-context';
 import {BotGroupMembers} from './src/renderer/src/components/bots/BotGroupMembers';
+import {formatBotMessageReply} from './src/shared/bots/message-reply';
 import {getWorkerToolUiKey} from './src/renderer/src/lib/worker-tool-result-key';
 const root=createRoot(document.getElementById('root'));
 const noop=()=>{};
@@ -56,6 +62,17 @@ const messages=[{id:'user',role:'user',content:'请分段报告',created_at:new 
 const props={lastUserMessageIndex:0,contentVersion:0,historyHasMore:false,historyPageLoading:false,historyRemainingCount:0,onLoadEarlierHistoryPage:noop,historyGapBeforeMessageId:null,canLoadReleasedHistory:false,onLoadReleasedHistoryWindow:noop,onRestoreLatestHistoryWindow:noop,hookLoggingEnabled:false,hookLogBucketByTurnId:new Map(),detachedHookLogBuckets:[],contentMessageRefs:{current:new Map()},setMessageRef:()=>noop,toolResults:new Map(),toolCallStates:new Map(),pendingApprovalToolCallKeys:new Set(),pendingApproval:null,autoApproveGitPush:false,onApprovalDecision:noop,onEditUserMessage:noop,onSetGoalFromMessage:noop,onForkFromMessage:null,forkingMessageId:null,onOpenHookLogBucket:noop,threadId:'reply-fixture',customScrollParent:document.getElementById('viewport'),virtuosoRef:{current:null},navigatorVirtualRangeRef:{current:null},initialTopMostItemIndex:{index:'LAST',align:'end',behavior:'auto'},onInitialVirtualItemsRendered:noop,onContentHeightChanged:noop,onAtBottomStateChange:noop,footer:null,assistantDurationMsById:new Map(),userSendTimeLabelById:new Map([["user","08:00"]])};
 const state=window.replyFixture={ids,calls:[],mode:'bot',loading:false,runningTool:false,render(mode='bot',loading=false,layout='short',userReaction=true,canReply=true){state.mode=mode;state.loading=loading;state.runningTool=loading;document.getElementById('root').dataset.chatSurface=mode;const shown=messages.map(m=>m.role!=='assistant'||layout==='short'?m:{...m,content:layout==='long'?'长消息正文和不能断开的链接 https://example.com/'+ 'a'.repeat(120)+' 结束。'.repeat(24):'| 项目 | 内容 | 补充 |\\n| --- | --- | --- |\\n| 已完成 | https://example.com/'+ 'a'.repeat(160)+' | 表格内容 |'});const fileLayout=layout==='file'||layout==='failed-file';if(fileLayout){shown.splice(0,shown.length,...messages);shown[1]={...messages[1],content:'',tool_calls:[{id:'file-call',name:'bot_deliver_files',args:{}}]}}const fileResults=fileLayout?new Map([[getWorkerToolUiKey(ids[0],'file-call',0),{content:JSON.stringify({kind:'bot-file-delivery',files:[{name:'report.json',filePath:'/workspace/report.json',size:44}]}),is_error:layout==='failed-file'}]]):props.toolResults;if(loading)shown[shown.length-1]={...shown.at(-1),tool_calls:[{id:'held-execute',name:'execute',args:{command:'held'}}]};const tools=loading?new Map([['held-execute',{status:'running',name:'execute'}]]):props.toolCallStates;root.render(<ChatPresentationContext.Provider value={mode}><ChatReplyActionsContext.Provider value={{canReply,reply:id=>state.calls.push(id),setDraftReply:noop,quoteFor:()=>undefined,jump:noop}}><BotMessageReactionsContext.Provider value={{stateFor:id=>({messageId:id,canReact:true,reactions:id==='user'?(userReaction?[{emoji:"👍",count:1,mine:false,actors:[{botId:"actor-bot",name:"验收 Bot"}]}]:[]):[{emoji:"👍",count:1,mine:true}]}),pending:()=>false,errorFor:()=>undefined,readOnly:false,set:async()=>{},retry:noop}}><ChatMessageVirtualList {...props} isLoading={loading} toolResults={fileResults} toolCallStates={tools} messages={shown} visibleMessageIndexes={shown.map((_,i)=>i)}/></BotMessageReactionsContext.Provider></ChatReplyActionsContext.Provider></ChatPresentationContext.Provider>)} };
 state.renderMembers=(width)=>{const m={id:'m',name:'Existing',color:'#999',shape:'circle'},a={...m,id:'a',name:'Available'};root.render(<div style={{width}}><BotGroupMembers group={{id:'g',name:'G',version:1,memberIds:['m']}} bots={[m,a]} client={{saveGroup:async()=>{}}} onOpen={noop}/></div>)};
+state.edits=[];state.draftReplies=[];state.jumps=[];
+state.renderQuote=(imported,editReady=true,mode="bot")=>{
+  state.edits=[];state.draftReplies=[];state.jumps=[];
+  const quote={id:'prior',ordinal:1,role:'assistant',text:'Earlier reference @notes.md',...(imported?{sourceThreadId:'source-main'}:{})};
+  const shown=[{...messages[0],...(mode==='default'?{botHistoryInputOrigin:{replyTo:quote}}:{}),content:formatBotMessageReply('📎 old.csv\\n\\nSelected instruction',quote)}];
+  root.render(<ChatPresentationContext.Provider value={mode}><ChatReplyActionsContext.Provider value={mode==='bot'?{canReply:true,editReady,reply:noop,setDraftReply:q=>state.draftReplies.push(q),quoteFor:()=>quote,jump:q=>state.jumps.push(q.id)}:null}><ChatMessageVirtualList {...props} onEditUserMessage={m=>state.edits.push(m)} messages={shown} visibleMessageIndexes={[0]}/></ChatReplyActionsContext.Provider></ChatPresentationContext.Provider>);
+};
+state.renderHistoricalSkill=(text,trusted)=>{
+  const shown=[{...messages[0],content:text,...(trusted?{botHistoryInputOrigin:{explicitSkill:{name:'Verified review',path:'/skills/review/SKILL.md'}}}:{})}];
+  root.render(<ChatPresentationContext.Provider value="default"><ChatMessageVirtualList {...props} messages={shown} visibleMessageIndexes={[0]}/></ChatPresentationContext.Provider>);
+};
 state.render();`
       },
       bundle: true,
@@ -406,6 +423,44 @@ state.render();`
     await rows.first().getByRole("button", { name: "回复消息", exact: true }).waitFor({ state: "detached" })
     await page.evaluate(() => window.replyFixture.render("default", false, "file"))
     assert.equal(await rows.first().getByRole("button", { name: "回复消息", exact: true }).count(), 0, "native workbench file actions unchanged")
+    await page.evaluate(() => window.replyFixture.renderQuote(true, false))
+    await userRow.getByRole('button', {name:'更多消息操作',exact:true}).click()
+    assert(await page.getByRole('button', {name:'编辑后重新发送',exact:true}).isDisabled(), 'cold Bot history cannot edit before verified origins arrive')
+    assert.deepEqual(await page.evaluate(() => window.replyFixture.edits), [])
+    await page.keyboard.press('Escape')
+    for (const [imported, mode] of [[false, "bot"], [true, "bot"], [true, "default"]] as const) {
+      await page.evaluate(([imported, mode]) => window.replyFixture.renderQuote(imported, true, mode), [imported, mode] as const)
+      const quote = mode === 'default' ? userRow.getByLabel('原消息引用', {exact:true}) : userRow.getByRole('button', {name: imported ? '来自主对话的引用' : '跳转到被回复的消息', exact:true})
+      await quote.waitFor()
+      if (mode === 'bot') assert.equal(await quote.isDisabled(), imported)
+      assert((await userRow.innerText()).includes('Selected instruction'))
+      assert(!(await userRow.innerText()).includes('CMBDEVCLAW-BOT-REPLY-V1'))
+      if (!imported) await quote.click()
+      await userRow.hover()
+      if (mode === 'bot') await userRow.getByRole('button', {name:'更多消息操作',exact:true}).click()
+      await page.getByRole('button', {name:'编辑后重新发送',exact:true}).click()
+      const edited = await page.evaluate(() => ({edits:window.replyFixture.edits, drafts:window.replyFixture.draftReplies, jumps:window.replyFixture.jumps}))
+      assert.equal(edited.edits.length, 1)
+      assert.equal(edited.edits[0].content.includes('Selected instruction'), true)
+      assert.equal(edited.edits[0].content.includes('Earlier reference'), imported)
+      assert(edited.edits[0].content.startsWith('📎 old.csv\n\n'))
+      const cleanEdit = edited.edits[0].content.replace(/^(?:📎[^\n]*\n)+(?:\n)?/u, '').trim()
+      assert(!cleanEdit.includes('old.csv'))
+      if (imported) assert(cleanEdit.includes('\\@notes.md'))
+      assert(!edited.edits[0].content.includes('CMBDEVCLAW-BOT-REPLY-V1'))
+      assert.deepEqual(edited.jumps, imported ? [] : ['prior'])
+      assert.deepEqual(edited.drafts.map(q => q?.id ?? null), mode === 'default' ? [] : imported ? [null] : ['prior'])
+      await page.keyboard.press('Escape')
+    }
+    for (const text of ['Current instruction', '']) {
+      await page.evaluate(text => window.replyFixture.renderHistoricalSkill(text, true), text)
+      await userRow.getByText('Verified review', {exact:true}).waitFor()
+      assert.equal(await userRow.getByText('Verified review', {exact:true}).count(), 1)
+      if (text) assert((await userRow.innerText()).includes(text))
+    }
+    await page.evaluate(() => window.replyFixture.renderHistoricalSkill('Ordinary request', false))
+    await userRow.getByText('Ordinary request', {exact:true}).waitFor()
+    assert.equal(await userRow.getByText('Verified review', {exact:true}).count(), 0)
     for (const dark of [false, true]) {
       await page.evaluate(dark => document.documentElement.classList.toggle("dark", dark), dark)
       for (const width of [224, 320]) {

@@ -19,6 +19,7 @@ vi.mock("electron", () => ({
 }))
 vi.mock("../app-data-root", () => ({ getCmbCoworkAgentDataRoot: () => fixture.root }))
 vi.mock("../db", () => ({ getThreadCore: vi.fn() }))
+vi.mock("../services/im/remote-grant-store", () => ({ imRemoteGrantStore: { getThreadGrant: vi.fn() } }))
 vi.mock("../bots/runtime-adapter", () => ({
   prepareBotThread: () => {
     throw new Error("Downloading must not initialize an execution thread")

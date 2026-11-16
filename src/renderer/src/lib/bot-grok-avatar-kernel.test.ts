@@ -99,15 +99,15 @@ it("settles a resting avatar and preserves a continuous shape change and pointer
   expect(grokAvatarGaze({ ...rect, width: 0, height: 0 }, { x: 100, y: 100 })).toEqual([0, -0])
 })
 
-it("advances pointer gaze by elapsed time consistently at 30, 60 and 120 fps", () => {
-  const frames = [30, 60, 120].map((fps) => {
+it("advances pointer gaze by elapsed time consistently at 15, 30, 60 and 120 fps", () => {
+  const frames = [15, 30, 60, 120].map((fps) => {
     const motion = createMotion({ body: "teardrop" })
     motion.setGazeAlways(true)
     motion.setGaze([0.7, -0.4])
     const before = motion.frame()
     motion.advance(0)
     expect(motion.frame()).toEqual(before)
-    for (let frame = 0; frame < fps / 10; frame++) motion.advance(1 / fps)
+    for (let frame = 0; frame < fps / 5; frame++) motion.advance(1 / fps)
     return motion.frame() as { offset: number[]; quat: number[] }
   })
   for (const frame of frames) {

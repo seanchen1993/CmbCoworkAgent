@@ -1,4 +1,5 @@
 import type { WorkspaceFilePreviewWorkspacePathKind } from "../../../shared/workspace-file-preview"
+import type { BotDeliveredFileSource } from "../../../shared/bots/file-delivery"
 import { inferWorkspacePreviewPathKind } from "./resource-preview-paths"
 
 export interface OpenResourcePreviewDetail {
@@ -6,11 +7,14 @@ export interface OpenResourcePreviewDetail {
   filePath: string
   /** Original workspace document used only to resolve Markdown's relative images. */
   markdownBasePath?: string
+  /** Applies Bot Markdown display conventions without granting file access. */
+  botDelivery?: boolean
   /** Monotonic user/application intent used to reject late async authorization results. */
   intentId: number
   workspacePathKind: WorkspaceFilePreviewWorkspacePathKind
   /** Main-issued capability for a trusted non-workspace file. */
   externalPreviewGrant?: string
+  botDeliverySource?: BotDeliveredFileSource
   /** Expiry and authoritative run identity used for operation-triggered renewal. */
   externalPreviewGrantExpiresAt?: number
   externalPreviewProjectId?: string

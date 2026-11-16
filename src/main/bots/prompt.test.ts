@@ -38,6 +38,56 @@ const payload = (prompt: string): Array<{ id: string; content: string }> =>
   JSON.parse(prompt.split("\n").find((line) => line.startsWith("["))!)
 
 describe("Bot first conversation", () => {
+  it("routes new desktop project work while retaining direct work and existing-task continuity", () => {
+    const prompt = buildBotPrompt(bot, task, "/private")
+    expect(prompt).toContain("Respect the user's explicit choice of where to work")
+    expect(prompt).toContain("small, self-contained work here when the current workspace fits")
+    expect(prompt).toContain("Continue work that depends on a live browser page or unsaved form in the conversation that owns it")
+    expect(prompt).toContain("For an already managed task, send directly to its existing workId")
+    expect(prompt).toContain("new assignment targeting a different project workspace, sustained coding or multi-step delivery")
+    expect(prompt).toContain("call bot_work_create before executing the project work")
+    expect(prompt).toContain("an input file path alone does not designate a project")
+    expect(prompt).toContain("instead of falling back to another directory")
+    expect(prompt).toContain("Confirm the real task receipt and end this turn")
+  })
+
+  it("prepares the same dispatch rules for an actual user request arriving during introduction", () => {
+    const prompt = buildBotPrompt(bot, { ...task, origin: { kind: "introduction" } }, "/private")
+    expect(prompt).toContain("apply when an actual user request arrives in this conversation")
+    expect(prompt).toContain("The introduction cue alone is not an assignment")
+    expect(prompt).toContain("call bot_work_create before executing the project work")
+    expect(prompt).toContain("If the user-configured role contains a concrete assignment")
+    expect(prompt).toContain("wait for the actual answer without auto-resolution or a default selection")
+  })
+
+  it("does not apply desktop dispatch defaults to existing work or other sources", () => {
+    const otherTurns: BotTask[] = [
+      { ...task, workId: "work", threadId: "work-thread" },
+      { ...task, threadId: "other-thread" },
+      { ...task, mockSource: {
+        transport: "im", personal: true, bindingId: "binding", grantVersion: 1,
+        conversationId: "im-chat", audienceKey: "owner", eventId: "event",
+        messageId: "message", senderId: "owner"
+      } },
+      { ...task, threadId: "other-thread", origin: { kind: "introduction" } },
+      { ...task, origin: { kind: "group", groupId: "g", messageId: "m" } },
+      { ...task, origin: { kind: "discussion", groupId: "g", messageId: "m", round: 1 } },
+      { ...task, origin: { kind: "bot", fromBotId: "b", rootTaskId: "root", depth: 1, expectsReply: true } },
+      { ...task, origin: { kind: "notification", notificationKind: "command", key: "cmd" } }
+    ]
+    for (const other of otherTurns) {
+      const prompt = buildBotPrompt(bot, other, "/private")
+      expect(prompt).not.toContain("call bot_work_create before executing the project work")
+    }
+    expect(buildBotPrompt(bot, otherTurns[0], "/work")).toContain("ALREADY inside independent task")
+  })
+
+  it("limits standalone execution instructions to execution routines", () => {
+    const prompt = buildBotPrompt(bot, task, "/private")
+    expect(prompt).toContain("For execution routines, store complete standalone instructions")
+    expect(prompt).toContain("required inputs and file paths, expected conditions, output and silence policy")
+    expect(prompt).not.toContain("When the user asks for scheduled work, store complete standalone execution instructions")
+  })
   it("treats reaction feedback as optional context without a new assignment", () => {
     const prompt = buildBotPrompt(
       bot,
@@ -372,7 +422,7 @@ describe("Bot private file handoff", () => {
       'Declared output files relative to your workspace: ["reports/review.md"]'
     )
     expect(prompt).toContain("Create each declared file with the actual file or command tools")
-    expect(prompt).toContain("read it back, then call bot_deliver_files")
+    expect(prompt).toContain("read it back, then call bot_return_files")
     expect(prompt).toContain("Obtain its successful receipt before claiming the files")
     expect(prompt).toContain("host checks declared outputs before a successful reply")
     expect(prompt).toContain("does not infer attachments from written paths")
@@ -412,7 +462,7 @@ describe("Bot private file handoff", () => {
       },
       "/private"
     )
-    expect(verified).toContain("exact verified source path to bot_deliver_files")
+    expect(verified).toContain("exact verified path to bot_deliver_files")
     expect(verified).toContain("Do not run a shell copy")
   })
   it("does not tell a shared-workspace group to copy private peer files", () => {

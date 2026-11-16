@@ -1,23 +1,52 @@
 import { ipcRenderer, type IpcRendererEvent } from "electron"
 import { LOCAL_BOT_HOST_ID, type BotChangeEvent, type BotClient } from "../shared/bots/contracts"
+import type { BotConversationTransitionRequest } from "../shared/bots/conversation"
 
 /** Narrow named operations only; no generic IPC invocation is exposed to renderer code. */
 export const localBotsApi: BotClient = {
   hostId: LOCAL_BOT_HOST_ID,
   conversations: {
+    onTransition(listener) {
+      const receive = (_event: IpcRendererEvent, request: BotConversationTransitionRequest) =>
+        listener(request)
+      const listen = (listening: boolean) => {
+        void ipcRenderer
+          .invoke("bots:conversation:listen", LOCAL_BOT_HOST_ID, listening)
+          .catch((error) => console.warn("[Bots] Conversation transition subscription failed:", error))
+      }
+      ipcRenderer.on("bots:conversation:transition", receive)
+      listen(true)
+      return () => {
+        ipcRenderer.removeListener("bots:conversation:transition", receive)
+        listen(false)
+      }
+    },
+    onTransitionDismissed(listener) {
+      const receive = (_event: IpcRendererEvent, id: string) => listener(id)
+      ipcRenderer.on("bots:conversation:transition-dismissed", receive)
+      return () => ipcRenderer.removeListener("bots:conversation:transition-dismissed", receive)
+    },
+    finishTransition: (id, error) =>
+      ipcRenderer.invoke("bots:conversation:finish-transition", LOCAL_BOT_HOST_ID, id, error),
+    owners: (threadIds) => ipcRenderer.invoke("bots:conversation:owners", LOCAL_BOT_HOST_ID, threadIds),
+    revalidateDraftReply: (conversation, reply) =>
+      ipcRenderer.invoke("bots:conversation:revalidate-draft-reply", LOCAL_BOT_HOST_ID, conversation, reply),
+    resolveHistory: (botId, source) => ipcRenderer.invoke("bots:conversation:resolve-history", LOCAL_BOT_HOST_ID, botId, source),
     resolve: (threadId) =>
       ipcRenderer.invoke("bots:conversation:resolve", LOCAL_BOT_HOST_ID, threadId),
     link: (input) => ipcRenderer.invoke("bots:conversation:link", LOCAL_BOT_HOST_ID, input),
     expose: (botId, workId) =>
       ipcRenderer.invoke("bots:conversation:expose", LOCAL_BOT_HOST_ID, botId, workId),
+    unlinkHasOpenPages: (botId, workId) =>
+      ipcRenderer.invoke("bots:conversation:unlink-has-open-pages", LOCAL_BOT_HOST_ID, botId, workId),
     unlink: (botId, workId, version) =>
       ipcRenderer.invoke("bots:conversation:unlink", LOCAL_BOT_HOST_ID, botId, workId, version)
   },
   im: {
     fileStatuses: (botId, threadId, callId) => ipcRenderer.invoke("bots:im:file-statuses", LOCAL_BOT_HOST_ID, botId, threadId, callId),
     retryFile: (botId, id) => ipcRenderer.invoke("bots:im:file-retry", LOCAL_BOT_HOST_ID, botId, id),
-    exportFile: (botId, id, fileId, workId) =>
-      ipcRenderer.invoke("bots:files:export-im", LOCAL_BOT_HOST_ID, botId, id, fileId, workId),
+    exportFile: (botId, id, fileId, workId, suggestedName) =>
+      ipcRenderer.invoke("bots:files:export-im", LOCAL_BOT_HOST_ID, botId, id, fileId, workId, suggestedName),
     stopConversation: (botId, id) => ipcRenderer.invoke("bots:im:conversation-stop", LOCAL_BOT_HOST_ID, botId, id),
     conversationWorks: (botId, id, cursor, query) =>
       ipcRenderer.invoke("bots:im:conversation-works", LOCAL_BOT_HOST_ID, botId, id, cursor, query),
@@ -37,17 +66,25 @@ export const localBotsApi: BotClient = {
       ipcRenderer.invoke("bots:im:revoke", LOCAL_BOT_HOST_ID, botId, bindingId, version)
   },
   works: {
+    pendingQuestions: (botId) => ipcRenderer.invoke("bots:work:pending-questions", LOCAL_BOT_HOST_ID, botId),
+    answerQuestion: (botId, taskId, response) =>
+      ipcRenderer.invoke("bots:work:answer-question", LOCAL_BOT_HOST_ID, botId, taskId, response),
+    control: (input) => ipcRenderer.invoke("bots:work:control", LOCAL_BOT_HOST_ID, input),
+    controlPending: (botId, workId, taskId) => ipcRenderer.invoke("bots:work:control-pending", LOCAL_BOT_HOST_ID, botId, workId, taskId),
     associations: (botId) => ipcRenderer.invoke("bots:work:associations", LOCAL_BOT_HOST_ID, botId),
     resolveSource: (botId, source) =>
       ipcRenderer.invoke("bots:work:source", LOCAL_BOT_HOST_ID, botId, source),
     markAllRead: (botId, version) =>
       ipcRenderer.invoke("bots:work:mark-all-read", LOCAL_BOT_HOST_ID, botId, version),
-    summaries: (botId, workIds) =>
-      ipcRenderer.invoke("bots:work:summaries", LOCAL_BOT_HOST_ID, botId, workIds),
+    summaries: (botId, workIds, allowMissing) =>
+      ipcRenderer.invoke("bots:work:summaries", LOCAL_BOT_HOST_ID, botId, workIds, allowMissing),
     list: (botId, cursor, query) =>
       ipcRenderer.invoke("bots:work:list", LOCAL_BOT_HOST_ID, botId, cursor, query),
     get: (botId, workId) => ipcRenderer.invoke("bots:work:get", LOCAL_BOT_HOST_ID, botId, workId),
+    validateSkillWorkspace: (botId, target) =>
+      ipcRenderer.invoke("bots:work:validate-skill-workspace", LOCAL_BOT_HOST_ID, botId, target),
     create: (input) => ipcRenderer.invoke("bots:work:create", LOCAL_BOT_HOST_ID, input),
+    stop: (botId, workId) => ipcRenderer.invoke("bots:work:stop", LOCAL_BOT_HOST_ID, botId, workId),
     lifecycle: (input) => ipcRenderer.invoke("bots:work:lifecycle", LOCAL_BOT_HOST_ID, input)
   },
   filePreview: {
@@ -83,10 +120,16 @@ export const localBotsApi: BotClient = {
       groupId,
       workId
     ),
-  exportFile: (botId, fileId, groupId, workId) =>
-    ipcRenderer.invoke("bots:files:export", LOCAL_BOT_HOST_ID, botId, fileId, groupId, workId),
-  exportGroupFile: (groupId, fileId) =>
-    ipcRenderer.invoke("bots:files:export-group", LOCAL_BOT_HOST_ID, groupId, fileId),
+  attachWorkspaceFile: (botId, threadId, fileId, maxChars, workId) =>
+    ipcRenderer.invoke("bots:files:attach-workspace", LOCAL_BOT_HOST_ID, botId, threadId, fileId, maxChars, workId),
+  exportFile: (botId, fileId, groupId, workId, suggestedName) =>
+    ipcRenderer.invoke("bots:files:export", LOCAL_BOT_HOST_ID, botId, fileId, groupId, workId, suggestedName),
+  authorizeDeliveredFile: (source) =>
+    ipcRenderer.invoke("bots:files:authorize-delivery", LOCAL_BOT_HOST_ID, source),
+  exportDeliveredFile: (source) =>
+    ipcRenderer.invoke("bots:files:export-delivery", LOCAL_BOT_HOST_ID, source),
+  exportGroupFile: (groupId, fileId, suggestedName) =>
+    ipcRenderer.invoke("bots:files:export-group", LOCAL_BOT_HOST_ID, groupId, fileId, suggestedName),
   groupFileWorkspace: (groupId) =>
     ipcRenderer.invoke("bots:files:group-workspace", LOCAL_BOT_HOST_ID, groupId),
   shareFile: (botId, fileId, targetBotId, groupId, workId) =>
@@ -138,11 +181,15 @@ export const localBotsApi: BotClient = {
     ipcRenderer.invoke("bots:memory:remove", LOCAL_BOT_HOST_ID, botId, id, version),
   shareMemory: (botId, id, version, targetBotId) =>
     ipcRenderer.invoke("bots:memory:share", LOCAL_BOT_HOST_ID, botId, id, version, targetBotId),
-  saveSchedule: (botId, input, existing) =>
-    ipcRenderer.invoke("bots:schedule:save", LOCAL_BOT_HOST_ID, botId, input, existing),
+  saveSchedule: (botId, input, existing, desktopWork) =>
+    ipcRenderer.invoke(
+      "bots:schedule:save", LOCAL_BOT_HOST_ID, botId, input, existing,
+      ...(desktopWork ? [desktopWork] : [])
+    ),
   removeSchedule: (id, version) =>
     ipcRenderer.invoke("bots:schedule:remove", LOCAL_BOT_HOST_ID, id, version),
   snapshot: () => ipcRenderer.invoke("bots:snapshot", LOCAL_BOT_HOST_ID),
+  hasUnread: () => ipcRenderer.invoke("bots:has-unread", LOCAL_BOT_HOST_ID),
   exchange: (botId, taskId, groupId, workId, imConversationId) =>
     ipcRenderer.invoke("bots:exchange", LOCAL_BOT_HOST_ID, botId, taskId, groupId, workId, imConversationId),
   messageOrigins: (botId, ids, groupId, workId) =>
@@ -180,8 +227,8 @@ export const localBotsApi: BotClient = {
   update: (input) => ipcRenderer.invoke("bots:update", LOCAL_BOT_HOST_ID, input),
   remove: (id, version) => ipcRenderer.invoke("bots:remove", LOCAL_BOT_HOST_ID, id, version),
   send: (input) => ipcRenderer.invoke("bots:send", LOCAL_BOT_HOST_ID, input),
-  stopConversation: (botId, groupId, workId) =>
-    ipcRenderer.invoke("bots:stop-conversation", LOCAL_BOT_HOST_ID, botId, groupId, workId),
+  stopConversation: (botId, groupId, workId, scope) =>
+    ipcRenderer.invoke("bots:stop-conversation", LOCAL_BOT_HOST_ID, botId, groupId, workId, scope),
   stopGroup: (groupId) => ipcRenderer.invoke("bots:stop-group", LOCAL_BOT_HOST_ID, groupId),
   cancel: (taskId) => ipcRenderer.invoke("bots:cancel", LOCAL_BOT_HOST_ID, taskId),
   subscribe(listener) {

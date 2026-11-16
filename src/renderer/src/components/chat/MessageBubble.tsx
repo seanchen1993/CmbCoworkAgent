@@ -1,5 +1,5 @@
-import { parseBotMessageReply } from "../../../../shared/bots/message-reply"
-import { parseBotFileDelivery } from "../../../../shared/bots/file-delivery"
+import { formatTransferredBotReplyEdit, parseBotMessageReply, verifiedBotMessageReply } from "../../../../shared/bots/message-reply"
+import { parseBotHistoryFileDelivery } from "../../../../shared/bots/file-delivery"
 import { cleanUserAttachmentContentForDisplay } from "../../../../shared/user-attachment-display"
 import {
   ContextMenu,
@@ -23,6 +23,7 @@ import React, { useContext, useEffect, useMemo, useRef, useState } from "react"
 import {
   ChatReplyActionsContext,
   ChatPresentationContext,
+  ChatDesktopWorkIdContext,
   ChatActivityPresentationContext,
   ChatMessageIdentityContext,
   ChatExecutionDetailsContext,
@@ -33,9 +34,10 @@ import {
   ChatUserTextPresentationContext
 } from "./chat-presentation-context"
 import { BotMessageActions } from "@/components/bots/BotMessageActions"
+import { BotDeliveredFiles } from "@/components/bots/BotDeliveredFile"
 import { splitBotInlineReasoning } from "@/lib/bot-inline-reasoning"
 import { botToolResultStatus } from "@/lib/bot-tool-result-status"
-import { isBotExecutionTool } from "@/lib/bot-execution-visibility"
+import { isBotExecutionTool, visibleBotDelivery } from "@/lib/bot-execution-visibility"
 import {
   Reply,
   ChevronDown,
@@ -461,8 +463,14 @@ function MessageBubbleImpl({
   searchLocation
 }: MessageBubbleProps): React.JSX.Element | null {
   const replyActions = useContext(ChatReplyActionsContext)
-  const quotedReply = useMemo(() => replyActions?.quoteFor(message), [replyActions, message])
   const presentation = useContext(ChatPresentationContext)
+  const desktopWorkId = useContext(ChatDesktopWorkIdContext)
+  const historicalReply = useMemo(() => message.role === "user" && typeof message.content === "string"
+    ? verifiedBotMessageReply(message.content, message.botHistoryInputOrigin?.replyTo)?.reply : undefined,
+    [message])
+  const activeReply = useMemo(() => replyActions?.quoteFor(message), [replyActions, message])
+  const staticReply = activeReply ? undefined : historicalReply
+  const quotedReply = activeReply ?? staticReply
   const showExecutionDetails = useContext(ChatExecutionDetailsContext)
   const executionCardCallIds = useContext(ChatExecutionCardCallIdsContext)
   const activityPresentation = useContext(ChatActivityPresentationContext)
@@ -482,6 +490,8 @@ function MessageBubbleImpl({
   const [userContentOverflow, setUserContentOverflow] = useState(false)
   const userContentRef = useRef<HTMLDivElement>(null)
   const isUser = message.role === "user"
+  const historicalSkillName = presentation === "default" && isUser
+    ? message.botHistoryInputOrigin?.explicitSkill?.name : undefined
   const isTool = message.role === "tool"
   const isSystem = message.role === "system"
   const isForkingThisMessage = forkingMessageId === message.id
@@ -517,6 +527,19 @@ function MessageBubbleImpl({
     })
     return changed ? projected : message.content
   }, [isUser, message.content, reasoningText, quotedReply])
+  const editUserMessage = () => {
+    if (!onEditUserMessage || replyActions?.editReady === false) return
+    const transferredQuote = staticReply ?? (activeReply?.sourceThreadId ? activeReply : undefined)
+    // An imported reference has no jump/reply identity in this task. Preserve
+    // its context as ordinary quoted text when editing, never as a foreign ID.
+    replyActions?.setDraftReply(transferredQuote ? null : quotedReply ?? null)
+    onEditUserMessage(replyActions || staticReply ? {
+      ...message,
+      content: transferredQuote && typeof displayMessageContent === "string"
+        ? formatTransferredBotReplyEdit(displayMessageContent, transferredQuote)
+        : displayMessageContent
+    } : message)
+  }
   const visibleAssistantContentText = useMemo(() => {
     if (isUser) return ""
     if (typeof displayMessageContent === "string") {
@@ -704,7 +727,7 @@ function MessageBubbleImpl({
     if (typeof displayMessageContent === "string") {
       const displayContent = displayMessageContent
       // Empty content (after potentially stripping the trailing skill-use block below)
-      if (!displayContent.trim()) {
+      if (!displayContent.trim() && !historicalSkillName) {
         return null
       }
 
@@ -714,14 +737,15 @@ function MessageBubbleImpl({
         // rest of the message as plain text. Handles skill-only sends (no text)
         // by still rendering the chip with an empty tail.
         const skillContent = parseUserVisibleSkillContent(displayContent)
+        const skillName = historicalSkillName ?? skillContent.skillName
         const browserContent = parseUserVisibleBuiltinBrowserContent(skillContent.visibleText)
         return (
           <div
             data-user-message-text
             className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]"
           >
-            {skillContent.skillName && (
-              <SkillChip label={skillContent.skillName} compact className="mr-2" />
+            {skillName && (
+              <SkillChip label={skillName} compact className="mr-2" />
             )}
             {browserContent.browserSelected && <BuiltinBrowserChip compact className="mr-2" />}
             <span
@@ -887,7 +911,7 @@ function MessageBubbleImpl({
   const hasDeliveredFiles = presentation === "bot" && message.tool_calls?.some((call, index) => {
     if (call.name !== "bot_deliver_files") return false
     const result = toolResults?.get(getWorkerToolUiKey(message.id, call.id, index))
-    return result && !result.is_error && Boolean(parseBotFileDelivery(result.content))
+    return result && !result.is_error && Boolean(visibleBotDelivery(result.content, message.botHistoryDeliveryScope, desktopWorkId))
   })
   const replyButton =
     replyActions &&
@@ -941,15 +965,22 @@ function MessageBubbleImpl({
                 : "bg-primary/10"
             )}
           >
-            {quotedReply && replyActions && (
+            {staticReply && (
+              <div className="bot-group-reply-preview" aria-label="原消息引用">
+                <Reply size={14} />
+                <span>“{cleanUserAttachmentContentForDisplay(staticReply.preview ?? staticReply.text)}”</span>
+              </div>
+            )}
+            {activeReply && replyActions && (
               <button
                 type="button"
                 className="bot-group-reply-preview"
-                aria-label="跳转到被回复的消息"
-                onClick={() => replyActions.jump(quotedReply)}
+                disabled={Boolean(activeReply.sourceThreadId)}
+                aria-label={activeReply.sourceThreadId ? "来自主对话的引用" : "跳转到被回复的消息"}
+                onClick={() => replyActions.jump(activeReply)}
               >
                 <Reply size={14} />
-                <span>“{cleanUserAttachmentContentForDisplay(quotedReply.preview ?? quotedReply.text)}”</span>
+                <span>“{cleanUserAttachmentContentForDisplay(activeReply.preview ?? activeReply.text)}”</span>
               </button>
             )}
             <div
@@ -1025,14 +1056,10 @@ function MessageBubbleImpl({
                       <button
                         type="button"
                         aria-label="编辑后重新发送"
+                        disabled={replyActions?.editReady === false}
                         title="编辑后重新发送"
                         className="rounded p-1 hover:bg-accent"
-                        onClick={() => {
-                          replyActions?.setDraftReply(quotedReply ?? null)
-                          onEditUserMessage(
-                            replyActions ? { ...message, content: displayMessageContent } : message
-                          )
-                        }}
+                        onClick={editUserMessage}
                       >
                         <PencilLine className="size-3" />
                       </button>
@@ -1068,12 +1095,8 @@ function MessageBubbleImpl({
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
-                    replyActions?.setDraftReply(quotedReply ?? null)
-                    onEditUserMessage?.(
-                      replyActions ? { ...message, content: displayMessageContent } : message
-                    )
-                  }}
+                  onClick={editUserMessage}
+                  disabled={replyActions?.editReady === false}
                   className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
                   title="编辑后重新发送"
                   aria-label="编辑后重新发送"
@@ -1312,14 +1335,23 @@ function MessageBubbleImpl({
                 !executionCardCallIds.has(resolvedToolCall.id)
                   ? presentTool?.(resolvedToolCall, result)
                   : result && !result.is_error && inferredStatus === "completed"
-                    ? presentTool?.(resolvedToolCall, result)
+                    ? presentTool?.(resolvedToolCall, result, message.id, message.botHistoryDeliveryScope)
                     : !result && inferredStatus === "running"
                       ? presentTool?.(resolvedToolCall)
                       : null
-              if (presented)
+              const desktopClient = window.api?.bots
+              const retainedFiles = !presented && presentation === "default" &&
+                desktopClient?.authorizeDeliveredFile && result && !result.is_error &&
+                resolvedToolCall.name === "bot_deliver_files" && inferredStatus === "completed"
+                ? parseBotHistoryFileDelivery(result.content, message.botHistoryDeliveryScope)
+                : null
+              if (presented || (retainedFiles?.some(file => file.attachmentPath) && desktopClient))
                 return (
                   <React.Fragment key={toolId}>
-                    {presented}
+                    {presented ?? (
+                      <BotDeliveredFiles files={retainedFiles!} callId={resolvedToolCall.id}
+                        client={desktopClient!} threadId={threadId} assistantMessageId={message.id} />
+                    )}
                     <ModCards threadId={threadId} callId={resolvedToolCall.id ?? ""} />
                   </React.Fragment>
                 )

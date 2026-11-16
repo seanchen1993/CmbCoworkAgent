@@ -25,13 +25,16 @@ describe("thread directory pagination", () => {
     const deleteEnd = storeSource.indexOf("finalizeThreadDeletions:", deleteStart)
     const deletion = storeSource.slice(deleteStart, deleteEnd)
     const backendDelete = deletion.indexOf("await window.api.threads.delete(")
+    const cleanup = storeSource.slice(
+      storeSource.indexOf("export function applyCommittedThreadDeletion("),
+      storeSource.indexOf("const THREAD_DIRECTORY_PAGE_LIMIT")
+    )
 
     expect(deleteStart).toBeGreaterThanOrEqual(0)
     expect(backendDelete).toBeGreaterThanOrEqual(0)
     expect(deletion.indexOf("markThreadDirectoryMutation(threadId)")).toBeLessThan(backendDelete)
-    expect(deletion.indexOf("markThreadDirectoryMutation(threadId)", backendDelete)).toBeGreaterThan(
-      backendDelete
-    )
+    expect(deletion.indexOf("applyCommittedThreadDeletion(threadId,", backendDelete)).toBeGreaterThan(backendDelete)
+    expect(cleanup).toContain("markThreadDirectoryMutation(threadId)")
   })
 
   it("keeps a 100k no-op first-page refresh O(page) and reference-stable", () => {

@@ -15,9 +15,27 @@ function fixture() {
 }
 
 describe("Bot stopped task context", () => {
+  it("keeps stopped control facts without replaying unaccepted or replaced instructions", () => {
+    const { store, bot } = fixture()
+    const unaccepted = store.enqueue({ botId: bot.id, requestId: "blocked", message: "REJECTED REQUEST" })
+    store.transition(unaccepted.id, "cancelled")
+    const rewritten = store.enqueue({ botId: bot.id, requestId: "rewritten", message: "REMOVED REQUEST" })
+    store.transition(rewritten.id, "running")
+    store.recordPreparedInput(rewritten.id, "Accepted request")
+    store.transition(rewritten.id, "interrupted")
+    const current = store.enqueue({ botId: bot.id, requestId: "new", message: "Only reply hello" })
+    expect(store.stoppedTaskContext(current.id)).toEqual([
+      { taskId: rewritten.id, state: "interrupted", source: "user", messagePreview: "Accepted request" },
+      { taskId: unaccepted.id, state: "cancelled", source: "user", messagePreview: "" }
+    ])
+    expect(store.getTask(rewritten.id).message).toBe("REMOVED REQUEST")
+    expect(store.getTask(unaccepted.id).message).toBe("REJECTED REQUEST")
+  })
+
   it("provides actual stopped receipts, excluding other Bots, group work and unfinished tasks", () => {
     const { store, bot, peer } = fixture()
     const stopped = store.enqueue({ botId: bot.id, requestId: "stopped", message: "Prior work" })
+    store.recordPreparedInput(stopped.id, stopped.message)
     store.transition(stopped.id, "cancelled")
     const interrupted = store.enqueue(
       { botId: bot.id, requestId: "interrupted", message: "Original workflow result" },
@@ -61,6 +79,7 @@ describe("Bot stopped task context", () => {
       goal: "Run once"
     })
     store.transition(task.id, "running")
+    store.recordPreparedInput(task.id, task.message)
     store.transition(task.id, "interrupted")
     const other = store.createWork({
       botId: bot.id,
@@ -96,6 +115,7 @@ describe("Bot stopped task context", () => {
     const ids: string[] = []
     for (let i = 0; i < 8; i++) {
       const t = store.enqueue({ botId: bot.id, requestId: `old-${i}`, message: "界".repeat(1000) })
+      store.recordPreparedInput(t.id, t.message)
       store.transition(t.id, "cancelled")
       ids.push(t.id)
     }

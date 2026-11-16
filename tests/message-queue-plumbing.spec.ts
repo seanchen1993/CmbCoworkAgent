@@ -1845,8 +1845,13 @@ function testDrainGatedOnGoalNotActive(): void {
 function testEnqueueBranchParksDraft(): void {
   assertMatches(
     chat,
-    /if \(willEnqueueWhileBusy\) \{[\s\S]{0,160}addQueuedMessage\(composedDraft\)/,
+    /if \(willEnqueueWhileBusy \|\| queueRestoredDraft\) \{[\s\S]{0,1000}addQueuedMessage\(composedDraft\)/,
     "busy branch parks the composed draft"
+  )
+  assertMatches(
+    chat,
+    /if \(queueRestoredDraft\) \{[\s\S]{0,500}if \(storageError\)[\s\S]{0,500}clearClaimedDraft\(\)/,
+    "a recovered Bot draft stays in the composer until the ordinary queue is durable"
   )
 }
 
@@ -1899,8 +1904,8 @@ function testCancelSuppressesAutoDrain(): void {
   assertOccurrences(
     chat,
     "setQueueAutoDrainSuppressed(false)",
-    4,
-    "suppression clears for live enqueue/send and both guide fallback paths"
+    5,
+    "suppression clears for live enqueue/send, both guide fallbacks and explicit parked-draft resume"
   )
 }
 
@@ -2813,8 +2818,8 @@ function testPumpClaimsCurrentVersionAndWaitsForHandoff(): void {
   const pumpBody = chat.slice(pumpStart, pumpStart + 3000)
   assertIncludes(
     pumpBody,
-    "if (queuedMessages.some((queued) => queued.handoffRequestedAt)) return",
-    "auto-drain waits until every handed-off draft is reconciled"
+    "const next = nextOrdinaryQueuedMessage(queuedMessages)",
+    "auto-drain uses the eligible FIFO and fences unresolved handoffs"
   )
 }
 

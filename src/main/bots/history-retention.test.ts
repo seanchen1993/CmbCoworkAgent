@@ -30,6 +30,7 @@ function fixture() {
   const complete = (key: string) => {
     const task = store.enqueue({ botId: bot.id, requestId: key, message: `work-${key}` })
     store.transition(task.id, "running")
+    store.recordPreparedInput(task.id, task.message)
     store.settle(task.id, "completed", null, "Done")
     return task
   }
@@ -55,6 +56,79 @@ function fixture() {
 }
 
 describe("Bot control history retention", () => {
+  it.each([false, true])("forgets unconsumed preparation when a fresh dispatch is denied (rewritten=%s)", rewrite => {
+    const f = fixture()
+    const original = f.store.enqueue({ botId: f.bot.id, requestId: "prepare-again", message: "Build report" })
+    f.store.transition(original.id, "running")
+    const input = f.store.enqueue({ botId: f.bot.id, requestId: "prepared-not-injected", message: "Unapproved new request" })
+    f.store.beginInputPreparation(input.id)
+    f.store.recordPreparedInput(input.id, rewrite ? "First preparation only" : input.message)
+    expect(f.store.inputProjections(f.bot.id, f.bot.threadId, [input.requestId]).get(input.requestId)).toBeNull()
+    f.store.settle(original.id, "completed", null)
+    f.store.transition(input.id, "running")
+    f.store.beginInputPreparation(input.id)
+    f.store.settle(input.id, "failed", null, undefined, undefined, false, { outcome: "error", code: "prompt_blocked" })
+    const project = () => f.store.inputProjections(f.bot.id, f.bot.threadId, [input.requestId])
+    expect(project()).toEqual(new Map([[input.requestId, null]]))
+    f.fillTail()
+    f.store.pruneTaskHistory()
+    expect(() => f.store.getTask(input.id)).toThrow()
+    expect(f.reopen().inputProjections(f.bot.id, f.bot.threadId, [input.requestId])).toEqual(new Map([[input.requestId, null]]))
+  })
+
+  it("retains accepted-input decisions through pruning and restart without changing visible history", () => {
+    const f = fixture()
+    const rejected = f.store.enqueue({ botId: f.bot.id, requestId: "rejected", message: "Rejected original" })
+    f.store.transition(rejected.id, "running")
+    f.store.beginInputPreparation(rejected.id)
+    f.store.settle(rejected.id, "failed", "Input was not accepted")
+    const changed = f.store.enqueue({ botId: f.bot.id, requestId: "changed", message: "Removed original" })
+    f.store.transition(changed.id, "running")
+    f.store.recordPreparedInput(changed.id, "Accepted replacement")
+    f.store.settle(changed.id, "completed", null, "Done")
+    const same = f.complete("unchanged-legacy")
+    const ids = [rejected.requestId, changed.requestId, same.requestId, "unmanaged-message"]
+    const expected = new Map([["rejected", null], ["changed", "Accepted replacement"]])
+    expect(f.store.inputProjections(f.bot.id, f.bot.threadId, ids)).toEqual(expected)
+    expect(f.store.inputProjections(f.peer.id, f.bot.threadId, ids).size).toBe(0)
+    expect(f.store.inputProjections(f.bot.id, f.peer.threadId, ids).size).toBe(0)
+    expect(f.store.getTask(changed.id).message).toBe("Removed original")
+    f.fillTail()
+    expect(f.store.pruneTaskHistory()).toBe(3)
+    expect(() => f.store.getTask(changed.id)).toThrow()
+    const restarted = f.reopen()
+    expect(restarted.inputProjections(f.bot.id, f.bot.threadId, ids)).toEqual(expected)
+    // The accepted replacement stays private; public task/source records gain no extra body.
+    const publicOrigin = restarted.messageOrigins(f.bot.id, ids)
+    expect(JSON.stringify(publicOrigin)).not.toContain("Accepted replacement")
+  })
+
+  it("distinguishes an accepted empty input, unchanged input, and an input that never ran", () => {
+    const f = fixture()
+    const pending = f.store.enqueue({ botId: f.bot.id, requestId: "pending", message: "Not yet checked" })
+    f.store.beginInputPreparation(pending.id)
+    const empty = f.store.enqueue({ botId: f.bot.id, requestId: "empty", message: "Removed by policy" })
+    f.store.transition(empty.id, "running")
+    f.store.recordPreparedInput(empty.id, "")
+    f.store.settle(empty.id, "completed", null, "Done")
+    const unchanged = f.store.enqueue({ botId: f.bot.id, requestId: "same", message: "Allowed body" })
+    f.store.recordPreparedInput(unchanged.id, unchanged.message)
+    expect(f.reopen().inputProjections(f.bot.id, f.bot.threadId,
+      [pending.requestId, empty.requestId, unchanged.requestId])).toEqual(new Map([
+      ["pending", null], ["empty", ""], ["same", null]
+    ]))
+    f.store.transition(unchanged.id, "running")
+    expect(f.reopen().inputProjections(f.bot.id, f.bot.threadId, [unchanged.requestId]).get(unchanged.requestId)).toBeNull()
+    f.store.recordPreparedInput(unchanged.id, unchanged.message)
+    expect(f.reopen().inputProjections(f.bot.id, f.bot.threadId, [unchanged.requestId]).size).toBe(0)
+    f.store.settle(unchanged.id, "completed", null, "Done")
+    const legacy = f.store.enqueue({ botId: f.bot.id, requestId: "legacy-failure", message: "Old valid input" })
+    f.store.transition(legacy.id, "running")
+    f.store.recordPreparedInput(legacy.id, legacy.message)
+    f.store.settle(legacy.id, "failed", "Old tool failure")
+    expect(f.reopen().inputProjections(f.bot.id, f.bot.threadId, [legacy.requestId]).size).toBe(0)
+  })
+
   it("retains Bot assignment labels and source references after execution pruning", () => {
     const f = fixture()
     const source = f.store.enqueue({ botId: f.bot.id, requestId: "parent", message: "用户原话" })
@@ -71,6 +145,14 @@ describe("Bot control history retention", () => {
     f.store.transition(notice.id, "running")
     f.store.settle(notice.id, "completed", null, "已反馈")
     f.transcripts.set(work.threadId, new Map([[task.requestId, task.message]]))
+    // The latest settlement stays with the work; older dispatch provenance
+    // still goes through the normal archive path.
+    f.advance(1)
+    const revision = f.store.enqueue({
+      botId: f.bot.id, workId: work.id, requestId: "revision", message: "继续分析"
+    })
+    f.store.transition(revision.id, "running")
+    f.store.settle(revision.id, "completed", null, "后续完成")
     f.fillTail()
     f.store.pruneTaskHistory()
     expect(f.native.prepare("SELECT message FROM bot_exchange_archive WHERE id=?").get(task.id)).toEqual({ message: null })
@@ -121,6 +203,7 @@ describe("Bot control history retention", () => {
       message: "Rename Peer after checking"
     })
     f.store.transition(source.id, "running")
+    f.store.recordPreparedInput(source.id, source.message)
     f.store.acceptCommand(source.id, {
       id: "long-command",
       threadId: source.threadId,
@@ -264,6 +347,65 @@ describe("Bot control history retention", () => {
     f.advance(60 * DAY)
     f.store.pruneTaskHistory()
     expect(f.native.prepare("SELECT COUNT(*) AS n FROM bot_task_receipts").get()?.n).toBe(0)
+  })
+
+  it("looks up settlements only for a bounded expired page and advances past retained results", () => {
+    const f = fixture()
+    const works = Array.from({ length: 100 }, (_, i) => {
+      const created = f.store.createWork({
+        botId: f.bot.id, operationId: `work-${i}`, title: `Work ${i}`, goal: "Prepare the report"
+      })
+      f.store.transition(created.task.id, "running")
+      f.store.settle(created.task.id, "completed", null)
+      return created
+    })
+    f.advance(1)
+    const later = f.complete("expired-after-retained-page")
+    f.advance(1)
+    for (let i = 0; i < works.length; i++) {
+      if (i % 16 === 0) f.store.flushReplies()
+      const report = f.store.nextQueued([])!
+      f.store.transition(report.id, "running")
+      f.store.settle(report.id, "completed", null, "Delivered")
+    }
+    const prepare = vi.spyOn(f.adapter, "prepare")
+    const settlementLookups = () => prepare.mock.calls.filter(([sql]) =>
+      sql.includes("SELECT t.id,t.state,t.updated_at,t.rowid AS ordinal")
+    ).length
+    expect(f.store.pruneTaskHistory()).toBe(0)
+    expect(settlementLookups()).toBe(0)
+
+    f.advance(31 * DAY)
+    prepare.mockClear()
+    expect(f.store.pruneTaskHistory()).toBe(0)
+    expect(settlementLookups()).toBe(100)
+    expect(f.store.getTask(later.id).state).toBe("completed")
+
+    const run = f.adapter.run.bind(f.adapter)
+    const fault = vi.spyOn(f.adapter, "run").mockImplementation((sql, args) => {
+      if (sql === "DELETE FROM bot_tasks WHERE id=?") throw new Error("disk failure")
+      return run(sql, args)
+    })
+    try {
+      expect(() => f.store.pruneTaskHistory()).toThrow("disk failure")
+    } finally {
+      fault.mockRestore()
+    }
+    prepare.mockClear()
+    expect(f.store.pruneTaskHistory()).toBe(1)
+    expect(settlementLookups()).toBe(0)
+    expect(() => f.store.getTask(later.id)).toThrow("不存在")
+    for (const { task } of works) expect(f.store.getTask(task.id).state).toBe("completed")
+
+    const { work, task: old } = works[0]
+    const revision = f.store.enqueue({
+      botId: f.bot.id, workId: work.id, requestId: "work-revision", message: "Update the report"
+    })
+    f.store.transition(revision.id, "running")
+    f.store.settle(revision.id, "completed", null)
+    expect(f.store.pruneTaskHistory()).toBe(1)
+    expect(() => f.store.getTask(old.id)).toThrow("不存在")
+    expect(f.store.getTask(revision.id).state).toBe("completed")
   })
 
   it("preserves recent delivered file references and original bytes across history pruning and reopening", async () => {

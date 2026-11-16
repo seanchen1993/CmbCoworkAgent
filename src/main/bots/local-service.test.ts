@@ -3,6 +3,8 @@ import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync, readFileSync
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
+import { createHash } from "node:crypto"
+import type { BotRunPort } from "./host"
 
 const fixture = vi.hoisted(() => ({
   stop: vi.fn(),
@@ -11,6 +13,8 @@ const fixture = vi.hoisted(() => ({
   hasPersonalBrowserScope: vi.fn(),
   browserAudience: undefined as ((viewer: string, scope: string) => boolean) | undefined,
   getWork: vi.fn(),
+  desktopDeliveryWorks: vi.fn(),
+  inputProjections: vi.fn(),
   browserWorkspace: undefined as ((scope: string) => string) | undefined,
   memoryClose: vi.fn(),
   memoryChanged: vi.fn(),
@@ -25,6 +29,8 @@ const fixture = vi.hoisted(() => ({
   readReactions: undefined as ((...args: unknown[]) => unknown) | undefined,
   removeReactions: vi.fn(),
   openDatabase: vi.fn(),
+  validateExplicitSkillReference: vi.fn(),
+  validateSkillSelection: undefined as BotRunPort["validateSkillSelection"],
   dataRoot: "/synthetic-test",
   trace: [] as string[]
 }))
@@ -33,6 +39,7 @@ vi.mock("../db", () => ({
   getThreadMessagesByIds: fixture.getMessages,
   getThreadMessagesAfterAnyId: fixture.getFollowingMessages
 }))
+vi.mock("./fork-input-projection", () => ({ readForkInputProjections: () => new Map() }))
 vi.mock("../agent/pending-notification-scheduler", () => ({
   pendingNotificationScheduler: { setManagedDispatcher: vi.fn() }
 }))
@@ -51,6 +58,9 @@ vi.mock("./store", () => ({
 }))
 vi.mock("./host", () => ({
   LocalBotHost: class {
+    constructor(_store: unknown, runtime: BotRunPort) {
+      fixture.validateSkillSelection = runtime.validateSkillSelection
+    }
     telemetry = { due: () => [], settle: () => 0 }
     stop = fixture.stop
     memoryChanged = fixture.memoryChanged
@@ -59,7 +69,12 @@ vi.mock("./host", () => ({
     browserScope = fixture.browserScope
     hasPersonalBrowserScope = fixture.hasPersonalBrowserScope
     getWork = fixture.getWork
+    desktopDeliveryWorks = fixture.desktopDeliveryWorks
+    inputProjections = fixture.inputProjections
   }
+}))
+vi.mock("../agent/standard-thread-turn", () => ({
+  validateExplicitSkillReference: fixture.validateExplicitSkillReference
 }))
 vi.mock("./runtime-adapter", () => ({ createLocalBotRunPort: vi.fn() }))
 vi.mock("./memory", () => ({
@@ -93,9 +108,12 @@ beforeEach(() => {
   fixture.readReactions = undefined
   fixture.browserWorkspace = undefined
   fixture.browserAudience = undefined
+  fixture.validateSkillSelection = undefined
   fixture.dataRoot = "/synthetic-test"
   fixture.openDatabase.mockReturnValue({ database: { close: fixture.databaseClose } })
   fixture.hasActiveRuns.mockReturnValue(true)
+  fixture.desktopDeliveryWorks.mockReturnValue([])
+  fixture.inputProjections.mockReturnValue(new Map())
   fixture.browserClose.mockImplementation(async () => {
     fixture.trace.push("browser")
   })
@@ -111,6 +129,20 @@ beforeEach(() => {
 })
 
 describe("Bot local service shutdown", () => {
+  it("wires exact installed skill validation into the production Bot Host", async () => {
+    const service = await import("./local-service")
+    service.getLocalBotHost()
+    const selection = { name: "review", path: "/registered/review/SKILL.md" }
+    fixture.validateExplicitSkillReference.mockResolvedValueOnce(null).mockResolvedValueOnce("原技能不可用")
+    try {
+      await expect(fixture.validateSkillSelection!(selection)).resolves.toBeUndefined()
+      await expect(fixture.validateSkillSelection!(selection)).rejects.toThrow("原技能不可用")
+      expect(fixture.validateExplicitSkillReference.mock.calls).toEqual([
+        [selection, undefined, true], [selection, undefined, true]
+      ])
+    } finally { await service.stopLocalBotHost() }
+  })
+
   it("resolves desktop browser audiences through the Host's personal binding proof", async () => {
     const service = await import("./local-service")
     service.getBotBrowserService()
@@ -160,6 +192,26 @@ describe("Bot local service shutdown", () => {
     }
   })
 
+  it("keeps prior owners' admitted user quotes after unlink and rebind, scoped to the original thread", async () => {
+    const service = await import("./local-service")
+    service.getLocalBotHost()
+    fixture.getThread.mockReturnValue({ created_at: 10, metadata: JSON.stringify({ cmb_thread_incarnation: "original" }) })
+    fixture.desktopDeliveryWorks.mockReturnValue([{
+      id: "former-work", botId: "former-owner", threadId: "owned-thread", audienceKey: "desktop",
+      conversation: { state: "detached", origin: "existing", ref: { kind: "local_thread", threadId: "owned-thread",
+        incarnation: { token: "original", legacyCreatedAt: 10 } } }
+    }])
+    fixture.getMessages.mockReturnValue([{ id: "source", ordinal: 12, role: "user", content: "PRIVATE-OLD" }])
+    fixture.inputProjections.mockReturnValue(new Map([["source", "Allowed summary"]]))
+    expect(fixture.readReply!("owned-thread", "source")).toMatchObject({ text: "Allowed summary" })
+    expect(fixture.inputProjections).toHaveBeenCalledWith("former-owner", "owned-thread", ["source"], ["former-work"], "reply")
+    fixture.inputProjections.mockReturnValue(new Map([["source", null]]))
+    expect(fixture.readReply!("owned-thread", "source")).toBeNull()
+    fixture.getThread.mockReturnValue({ created_at: 20, metadata: JSON.stringify({ cmb_thread_incarnation: "replacement" }) })
+    expect(fixture.readReply!("owned-thread", "source")).toMatchObject({ text: "PRIVATE-OLD" })
+    await service.stopLocalBotHost()
+  })
+
   it("resolves a private file-only reply from its own successful delivery receipt and sent bytes", async () => {
     const service = await import("./local-service")
     service.getLocalBotHost()
@@ -178,6 +230,8 @@ describe("Bot local service shutdown", () => {
     expect(reply.id).toBe("file-card")
     expect(reply.text).toContain("report.json")
     expect(reply.text).toContain("/workspace/.sent/v1.json")
+    expect(reply.text).not.toContain('"filePath"')
+    expect(reply.text).not.toContain('"attachmentPath"')
     expect(reply.preview).toBe("📎 report.json")
     expect(reply.text).not.toContain('"path":"/workspace/report.json"')
     for (const following of [
@@ -189,6 +243,75 @@ describe("Bot local service shutdown", () => {
       fixture.getFollowingMessages.mockReturnValue(following)
       expect((fixture.readReply!("owned-thread", "file-card") as { text: string }).text).toBe("")
     }
+    await service.stopLocalBotHost()
+  })
+
+  it("quotes a desktop receipt only within the current native work's delivery scope", async () => {
+    const service = await import("./local-service")
+    service.getLocalBotHost()
+    const threadId = "owned-thread", token = "target", workspace = "/workspace-new"
+    const incarnation = { token, legacyCreatedAt: 10 }
+    fixture.getThread.mockReturnValue({ created_at: 10, metadata: JSON.stringify({
+      cmb_thread_incarnation: token, workspacePath: workspace
+    }) })
+    fixture.desktopDeliveryWorks.mockReturnValue([{
+      id: "target-work", botId: "bot", threadId, audienceKey: "desktop",
+      conversation: { state: "detached", origin: "existing", ref: { kind: "local_thread", threadId, incarnation } }
+    }])
+    fixture.getMessages.mockReturnValue([{
+      id: "file-card", ordinal: 12, role: "assistant", content: "Original summary",
+      tool_calls: [{ id: "delivery", name: "bot_deliver_files", args: {} }]
+    }])
+    const quote = (receiptThread: string, receiptWorkId: string) => {
+      fixture.getFollowingMessages.mockReturnValue([{
+        ordinal: 13, role: "tool", name: "bot_deliver_files", tool_call_id: "delivery",
+        content: JSON.stringify({ kind: "bot-file-delivery", receiptThread, receiptWorkId,
+          files: [{ name: "report.json", size: 44, filePath: `${workspace}/report.json`,
+            attachmentPath: `${workspace}/.bot-deliveries/${"a".repeat(64)}/report.json` }] })
+      }])
+      return fixture.readReply!(threadId, "file-card", true)
+    }
+    const receipt = `thread-${createHash("sha256").update(JSON.stringify([threadId, incarnation])).digest("hex")}`
+    expect(quote(`thread-${"b".repeat(64)}`, "source-work")).toEqual({ id: "file-card", ordinal: 12,
+      role: "assistant", text: "Original summary" })
+    expect(quote(receipt, "target-work")).toMatchObject({ preview: "📎 report.json",
+      text: expect.stringContaining(JSON.stringify({ source: {
+        threadId, assistantMessageId: "file-card", callId: "delivery", fileIndex: 0
+      } }).slice(1, -1)) })
+    await service.stopLocalBotHost()
+  })
+
+  it("keeps the original desktop work selection when distinct deliveries share the same snapshot", async () => {
+    const service = await import("./local-service")
+    service.getLocalBotHost()
+    const threadId = "owned-thread", token = "local-batches"
+    const incarnation = { token, legacyCreatedAt: 10 }
+    fixture.getThread.mockReturnValue({ created_at: 10, metadata: JSON.stringify({ cmb_thread_incarnation: token }) })
+    fixture.desktopDeliveryWorks.mockReturnValue([{
+      id: "work", botId: "bot", threadId, audienceKey: "desktop",
+      conversation: { state: "detached", origin: "existing", ref: { kind: "local_thread", threadId, incarnation } }
+    }])
+    const receiptThread = `thread-${createHash("sha256").update(JSON.stringify([threadId, incarnation])).digest("hex")}`
+    const quotes: string[] = []
+    for (const directory of ["a", "b"]) {
+      fixture.getMessages.mockReturnValue([{
+        id: `card-${directory}`, ordinal: 12, role: "assistant", content: "",
+        tool_calls: [{ id: "delivery", name: "bot_deliver_files", args: {} }]
+      }])
+      fixture.getFollowingMessages.mockReturnValue([{
+        id: `receipt-${directory}`, role: "tool", name: "bot_deliver_files", tool_call_id: "delivery",
+        content: JSON.stringify({ kind: "bot-file-delivery", receiptThread, receiptWorkId: "work",
+          files: [{ name: "report.md", size: 20,
+            filePath: "/workspace/report.md", attachmentPath: "/workspace/.sent/shared.md" }] })
+      }])
+      const reply = fixture.readReply!(threadId, `card-${directory}`, true) as { text: string }
+      const reference = JSON.parse(reply.text.split("\n")[1])
+      expect(reference).toEqual({ name: "report.md", size: 20, path: "/workspace/.sent/shared.md",
+        attachmentPath: "/workspace/.sent/shared.md", filePath: "/workspace/report.md",
+        source: { threadId, assistantMessageId: `card-${directory}`, callId: "delivery", fileIndex: 0 } })
+      quotes.push(reply.text)
+    }
+    expect(quotes[0]).not.toBe(quotes[1])
     await service.stopLocalBotHost()
   })
   it("uses the initialized host for committed reaction cleanup and fences cleanup during shutdown", async () => {

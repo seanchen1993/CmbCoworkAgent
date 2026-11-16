@@ -1,10 +1,14 @@
-import { useState, useCallback, useEffect, useMemo } from "react"
-import ReactMarkdown, { type Components } from "react-markdown"
+import { useState, useCallback, useEffect, useMemo, type ComponentPropsWithoutRef } from "react"
+import ReactMarkdown, { type Components, type ExtraProps } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import remarkBreaks from "remark-breaks"
 import rehypeHighlight from "rehype-highlight"
 import { Copy, Check, FolderOpen, Eye, Code2, ChevronDown, ChevronUp } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { remarkBotAutolinks } from "@/lib/bot-autolink-remark"
+
+const REMARK_PLUGINS = [remarkGfm, remarkBreaks]
+const BOT_DELIVERY_REMARK_PLUGINS = [...REMARK_PLUGINS, () => remarkBotAutolinks({ originInProseOnly: true })]
 
 interface MarkdownPreviewProps {
   content: string
@@ -15,6 +19,7 @@ interface MarkdownPreviewProps {
   defaultExpanded?: boolean
   whiteBackground?: boolean
   viewMode?: "preview" | "source"
+  botDelivery?: boolean
   /**
    * 读取本地图片（相对路径已解析为可读路径），返回 base64 内容。
    * 未提供时本地相对路径图片按原样渲染（一般会裂图）。
@@ -36,6 +41,19 @@ function isExternalHref(href: string | undefined): href is string {
   }
 }
 
+// Keep relative destinations inert. Delivery links open through the app's
+// external-window handler so they cannot replace the conversation.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function MarkdownLink({ node: _node, href, children, openInBrowser, ...props }:
+  ComponentPropsWithoutRef<"a"> & ExtraProps & { openInBrowser?: boolean }) {
+  if (!isExternalHref(href)) return <span {...props}>{children}</span>
+  return (
+    <a href={href} {...props} {...(openInBrowser ? { target: "_blank", rel: "noopener noreferrer" } : {})}>
+      {children}
+    </a>
+  )
+}
+
 // Hoisted to module scope so prop identities stay stable across renders.
 // Wide tables must scroll horizontally instead of overflowing the preview
 // (same treatment as StreamingMarkdown / DashboardAnalysisMarkdown).
@@ -49,16 +67,11 @@ const MARKDOWN_COMPONENTS: Components = {
       </div>
     )
   },
-  // 非完整地址不渲染成链接，避免点击后触发同窗口默认跳转。
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  a({ node: _node, href, children, ...props }) {
-    if (!isExternalHref(href)) return <span {...props}>{children}</span>
-    return (
-      <a href={href} {...props}>
-        {children}
-      </a>
-    )
-  }
+  a: MarkdownLink
+}
+const BOT_DELIVERY_MARKDOWN_COMPONENTS: Components = {
+  ...MARKDOWN_COMPONENTS,
+  a: props => <MarkdownLink {...props} openInBrowser />
 }
 
 // 常见图片扩展名 -> MIME，用于把 base64 拼成 data URL。
@@ -187,6 +200,7 @@ export function MarkdownPreview({
   defaultExpanded = true,
   whiteBackground = false,
   viewMode,
+  botDelivery = false,
   readBinaryFile
 }: MarkdownPreviewProps) {
   const [copySuccess, setCopySuccess] = useState(false)
@@ -197,7 +211,7 @@ export function MarkdownPreview({
   // img 需要访问当前文件的 path 和读取回调，无法用模块级常量组件，按实例组装。
   const markdownComponents = useMemo<Components>(
     () => ({
-      ...MARKDOWN_COMPONENTS,
+      ...(botDelivery ? BOT_DELIVERY_MARKDOWN_COMPONENTS : MARKDOWN_COMPONENTS),
       // `node` is destructured out so it isn't spread onto the DOM element.
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       img({ node: _node, src, alt, ...props }) {
@@ -212,7 +226,7 @@ export function MarkdownPreview({
         )
       }
     }),
-    [path, readBinaryFile]
+    [botDelivery, path, readBinaryFile]
   )
 
   const toggleExpanded = useCallback(() => {
@@ -350,7 +364,7 @@ export function MarkdownPreview({
               <ReactMarkdown
                 components={markdownComponents}
                 rehypePlugins={[rehypeHighlight]}
-                remarkPlugins={[remarkGfm, remarkBreaks]}
+                remarkPlugins={botDelivery ? BOT_DELIVERY_REMARK_PLUGINS : REMARK_PLUGINS}
               >
                 {content ?? ""}
               </ReactMarkdown>

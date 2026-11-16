@@ -27,6 +27,7 @@ import { AIMessage, HumanMessage } from "@langchain/core/messages"
 import { createMiddleware } from "langchain"
 import { randomUUID } from "crypto"
 import type { Message } from "../types"
+import { BOT_PREPARED_USER_REQUEST_KEY } from "./agent-run-service"
 import { isInternalNotificationMessage } from "../../shared/checkpoint-transcript"
 import {
   advanceCompletedMessageContentRoute,
@@ -41,8 +42,12 @@ export interface CurrentRunQueuedMessage {
   id: string
   content: string
   displayContent?: string
+  /** Set only after the Bot's trusted submit preparation. Empty means omit the request anchor. */
+  botPreparedUserRequest?: string
   /** Trusted Bot-only data, never a user instruction or permission grant. */
   peerFeedback?: { senderBotId: string; sourceTaskId: string; targetTaskId: string }
+  /** Optional Bot work authority for admission and foreground command handoff. */
+  botCanDispatch?: () => boolean
   /** Trusted host receipt, called synchronously before durable transcript/model injection.
    * False withdraws a cancelled inbox message. Throws fail the turn before model side effects. */
   beforeInject?: () => boolean
@@ -517,14 +522,15 @@ async function drainCurrentRunMessagesForInjection(
                   cmb_peer_feedback_source: message.peerFeedback
                 }
               }
-            : {}),
-          ...(visibleContent !== message.content && !message.peerFeedback
-            ? {
+            : visibleContent !== message.content || message.botPreparedUserRequest !== undefined
+              ? {
                 additional_kwargs: {
-                  [VISIBLE_USER_MESSAGE_KEY]: visibleContent
+                  ...(visibleContent !== message.content ? { [VISIBLE_USER_MESSAGE_KEY]: visibleContent } : {}),
+                  ...(message.botPreparedUserRequest !== undefined
+                    ? { [BOT_PREPARED_USER_REQUEST_KEY]: message.botPreparedUserRequest } : {})
                 }
               }
-            : {})
+              : {})
         })
       }
     ),

@@ -4,27 +4,74 @@ import { LinkedBotConversation } from "@/components/bots/LinkedBotConversation"
 import { ConversationTaskControls } from "@/components/bots/ConversationTaskControls"
 import { isRegularChatThread, isManagedLocalWorkConversation } from "@/lib/thread-classification"
 import { isRemoteInboxThread } from "@/lib/remote-thread-display"
-import { lazy, Suspense, useEffect, useRef } from "react"
-import { useThreadActions, useThreadStateSelector } from "@/lib/thread-context"
+import { lazy, Suspense, useEffect, useRef, useState } from "react"
+import { useThreadActions, useThreadContext, useThreadStateSelector } from "@/lib/thread-context"
 import { TabBar } from "./TabBar"
 import { ChatContainer, type ChatSurface } from "@/components/chat/ChatContainer"
 import { ArrowLeft, Loader2 } from "lucide-react"
 import { workspaceFilePreviewModeForPath } from "@/lib/file-preview-mode"
+import { resolveAgentModeFromMetadata } from "../../../../shared/agent-mode-metadata"
+import { bindDetachedBotThreadDraft, hasBotThreadDraft } from "@/lib/bot-conversation-draft"
 
 const FileViewer = lazy(() => import("./FileViewer").then((m) => ({ default: m.FileViewer })))
 
 interface TabbedPanelProps {
   threadId: string
   showTabBar?: boolean
+  floatingChat?: boolean
   chatSurface?: ChatSurface
   hideWelcomeSkillTabs?: boolean
   readOnlyReason?: string | null
   onHarnessSessionCreated?: (threadId: string) => void
 }
 
+type ChatProps = React.ComponentProps<typeof ChatContainer>
+
+function OrdinaryChat(props: ChatProps) {
+  const [hasDraft] = useState(() => hasBotThreadDraft(props.threadId))
+  return hasDraft ? <OrdinaryChatWithDraft {...props} /> : <ChatContainer {...props} />
+}
+
+function OrdinaryChatWithDraft({ threadId, ...props }: ChatProps) {
+  const context = useThreadContext()
+  const [loading, setLoading] = useState(true)
+  const [activeDraft, setActiveDraft] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [attempt, retry] = useState(0)
+  useEffect(() => {
+    let disposed = false
+    let unbind: (() => void) | undefined
+    void window.api.threads.get(threadId).then(row => {
+      if (disposed || !row) return
+      unbind = bindDetachedBotThreadDraft(context, threadId, row, setError, () => setActiveDraft(false))
+      setActiveDraft(Boolean(unbind))
+    }).catch(() => {
+      if (!disposed) setError("暂时无法恢复原任务的草稿，请重试。")
+    }).finally(() => { if (!disposed) setLoading(false) })
+    return () => { disposed = true; unbind?.() }
+  }, [context, threadId, attempt])
+  if (loading) return <div className="flex flex-1 items-center justify-center">
+    <Loader2 aria-label="恢复原草稿" className="size-5 animate-spin" />
+  </div>
+  const resident = error && context.getThreadState(threadId)
+  const hasResidentDraft = resident && Boolean(resident.draftInput || resident.draftBotReplyTo ||
+    resident.draftAttachments.length || resident.draftMentionedWorkspaceFiles.length || resident.draftSkill ||
+    resident.draftBuiltinBrowser)
+  const recoveryError = activeDraft ? null : error
+  return <>
+    {error && <div data-chat-notice role="alert" className="px-4 py-2 text-sm text-muted-foreground">
+      {error}
+      <button type="button" onClick={() => { setLoading(true); setError(null); retry(value => value + 1) }} className="ml-2 underline">重试</button>
+    </div>}
+    <ChatContainer {...props} threadId={threadId} restoredBotDraft={activeDraft} restoredBotDraftError={recoveryError}
+      readOnlyReason={props.readOnlyReason ?? (hasResidentDraft ? null : recoveryError)} />
+  </>
+}
+
 export function TabbedPanel({
   threadId,
   showTabBar = true,
+  floatingChat = false,
   chatSurface = "default",
   hideWelcomeSkillTabs = false,
   readOnlyReason = null,
@@ -36,6 +83,7 @@ export function TabbedPanel({
   const mayAssociate = Boolean(
     window.api.bots?.conversations &&
     isRegularChatThread(row) &&
+    resolveAgentModeFromMetadata(row?.metadata) === "normal" &&
     !isRemoteInboxThread(row) &&
     !row?.metadata?.remoteState &&
     !row?.metadata?.remoteReadOnly &&
@@ -69,7 +117,9 @@ export function TabbedPanel({
     : undefined
 
   return (
-    <div className="flex flex-1 flex-col min-w-0 min-h-0 overflow-hidden">
+    <div className="relative flex flex-1 flex-col min-w-0 min-h-0 overflow-hidden"
+      data-thread-floating-chat={floatingChat && isAgentTab || undefined}>
+      <div data-thread-floating-header>
       {(linked.value || mayAssociate) && !linked.loading && !linked.error && (
         <ConversationTaskControls
           threadId={threadId}
@@ -80,11 +130,10 @@ export function TabbedPanel({
       {/* Tab Bar (optional - can be rendered externally in titlebar) */}
       {showTabBar && <TabBar />}
 
-      {/* Subtle gradient fade from titlebar */}
-      <div className="h-1 shrink-0 bg-gradient-to-b from-sidebar/80 to-transparent" />
+      </div>
 
       {/* Content Area */}
-      <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
+      <div data-thread-chat-content className="flex flex-1 flex-col min-h-0 overflow-hidden">
         {linked.loading ? (
           <div className="flex flex-1 items-center justify-center">
             <Loader2 className="animate-spin size-5" />
@@ -100,7 +149,7 @@ export function TabbedPanel({
           linked.value ? (
             <LinkedBotConversation key={threadId} link={linked.value} />
           ) : (
-            <ChatContainer
+            <OrdinaryChat
               key={threadId}
               threadId={threadId}
               surface={chatSurface}

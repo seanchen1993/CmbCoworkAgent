@@ -342,6 +342,8 @@ export type PreparedUserPrompt =
   | {
       accepted: true
       content: string
+      /** Actual submit body after rewrite, excluding Hook/skill additional context. */
+      submissionContent: string
       explicitSkillHookContext?: string
     }
   | {
@@ -388,17 +390,31 @@ async function buildSkillLifecycleRegistryForHooks(
 
 export async function validateExplicitSkillReference(
   input: { name: string; path: string },
-  visibilityScope?: ProjectModeSkillScope
+  visibilityScope?: ProjectModeSkillScope,
+  exactIdentity = false
 ): Promise<string | null> {
+  const skill = await resolveEnabledExplicitSkill(
+    { skillName: input.name, skillPath: input.path }, visibilityScope, exactIdentity
+  )
+  return skill ? null : `显式选择的技能不存在或已禁用：${input.name}`
+}
+
+async function resolveEnabledExplicitSkill(
+  input: { skillName: string; skillPath: string },
+  visibilityScope?: ProjectModeSkillScope,
+  exactIdentity = false
+): Promise<SkillLifecycleMatch | null> {
   const registry = await buildSkillLifecycleRegistryForHooks(visibilityScope)
-  const skill = registry?.resolveExplicit({ skillName: input.name, skillPath: input.path })
-  return !skill || isDisabledSkillMatch(skill)
-    ? `显式选择的技能不存在或已禁用：${input.name}`
-    : null
+  const skill = registry?.resolveExplicit(input)
+  if (!skill || isDisabledSkillMatch(skill)) return null
+  if (exactIdentity && (skill.name.trim() !== input.skillName.trim() ||
+      skill.path.trim() !== input.skillPath.trim())) return null
+  return skill
 }
 
 async function activateExplicitSkillFromMessage({
   message,
+  exactIdentity,
   workspacePath,
   pluginOutputDir,
   systemId,
@@ -422,6 +438,7 @@ async function activateExplicitSkillFromMessage({
   skillVisibility
 }: {
   message: string
+  exactIdentity?: boolean
   workspacePath: string
   pluginOutputDir?: string
   systemId?: string
@@ -447,13 +464,8 @@ async function activateExplicitSkillFromMessage({
   const parsed = parseSkillUseBlock(message)
   if (!parsed) return null
 
-  const registry = await buildSkillLifecycleRegistryForHooks(skillVisibility)
-  const skill = registry?.resolveExplicit({
-    skillName: parsed.skillName,
-    skillPath: parsed.skillPath
-  })
-
-  if (!skill || isDisabledSkillMatch(skill)) {
+  const skill = await resolveEnabledExplicitSkill(parsed, skillVisibility, exactIdentity)
+  if (!skill) {
     return {
       parsed,
       blocked: true,
@@ -517,7 +529,9 @@ export async function prepareStandardUserPrompt({
   rawMessage,
   initialModelInput,
   trustedExplicitSkill,
+  exactTrustedExplicitSkill,
   allowExplicitSkillFromMessage = true,
+  internalGoalInput,
   threadId,
   workspacePath,
   turnState,
@@ -535,8 +549,12 @@ export async function prepareStandardUserPrompt({
    * trusting a user-authored CMBDEVCLAW-SKILL-USE block.
    */
   trustedExplicitSkill?: SkillUseBlockMetadata
+  /** Desktop Bot drafts preserve the precise catalog identity through dispatch. */
+  exactTrustedExplicitSkill?: boolean
   /** Desktop transport payloads are trusted by default; untrusted transports disable this. */
   allowExplicitSkillFromMessage?: boolean
+  /** Trusted caller provenance; absent preserves existing callers' marker handling. */
+  internalGoalInput?: boolean
   threadId: string
   workspacePath: string
   turnState: PromptPreparationTurnState
@@ -567,6 +585,7 @@ export async function prepareStandardUserPrompt({
   }
   const explicitSkillActivation = await activateExplicitSkillFromMessage({
     message: explicitSkillActivationMessage,
+    exactIdentity: Boolean(trustedExplicitSkillBlock && exactTrustedExplicitSkill),
     workspacePath,
     pluginOutputDir: harnessAgentContext.pluginOutputDir,
     systemId: harnessAgentContext.systemId,
@@ -594,9 +613,9 @@ export async function prepareStandardUserPrompt({
       reason: explicitSkillActivation.reason || "显式选择的技能被 Hook 拦截"
     }
   }
-  const isInternalGoalModelInput =
+  const isInternalGoalModelInput = internalGoalInput ?? (
     initialModelInput.startsWith("[Starting active goal]") ||
-    initialModelInput.startsWith("[Continuing active goal]")
+    initialModelInput.startsWith("[Continuing active goal]"))
   const hookVisibleMessage = isInternalGoalModelInput ? initialModelInput : rawMessage
   const promptSubmitContext: HookContext = {
     toolArgs: { message: hookVisibleMessage, rawMessage },
@@ -645,6 +664,10 @@ export async function prepareStandardUserPrompt({
     promptSubmitResult?.updatedInput?.message ??
     promptSubmitResult?.updatedInput?.prompt ??
     promptSubmitResult?.updatedInput?.userPrompt
+  const hasUpdatedMessage = typeof updatedMessage === "string" &&
+    (updatedMessage.length > 0 || internalGoalInput === false)
+  const submissionContent = hasUpdatedMessage
+    ? updatedMessage : initialModelInput
   if (isInternalGoalModelInput) {
     preparedMessage = buildInternalGoalPromptFromHookResult(initialModelInput, {
       updatedInput: promptSubmitResult?.updatedInput,
@@ -653,8 +676,10 @@ export async function prepareStandardUserPrompt({
         promptSubmitResult?.additionalContext
       ]
     })
-  } else if (typeof updatedMessage === "string" && updatedMessage.length > 0) {
-    preparedMessage = applyPromptRewritePreservingGoalMarker(initialModelInput, updatedMessage)
+  } else if (hasUpdatedMessage) {
+    preparedMessage = internalGoalInput === false
+      ? updatedMessage
+      : applyPromptRewritePreservingGoalMarker(initialModelInput, updatedMessage)
   }
   if (
     !isInternalGoalModelInput &&
@@ -672,6 +697,16 @@ export async function prepareStandardUserPrompt({
   if (!isInternalGoalModelInput && promptContextBlocks.length > 0) {
     preparedMessage = `${promptContextBlocks.join("\n\n")}\n\n${preparedMessage}`
   }
+  // Trusted Bot submissions use the same refusal path for an input fully
+  // removed by its submit Hook, on both a new run and an in-flight addition.
+  if (internalGoalInput === false && promptSubmitResult && hasUpdatedMessage && !preparedMessage.trim()) {
+    return {
+      accepted: false,
+      blockedBy: "user_prompt_submit",
+      reason: "输入处理后没有可提交的内容。",
+      hookResult: promptSubmitResult
+    }
+  }
   if (promptSubmitResult?.systemMessage) {
     onSystemMessage?.(promptSubmitResult.systemMessage)
   }
@@ -681,6 +716,7 @@ export async function prepareStandardUserPrompt({
   return {
     accepted: true,
     content: preparedMessage,
+    submissionContent,
     explicitSkillHookContext: explicitSkillActivation?.hookContext
   }
 }

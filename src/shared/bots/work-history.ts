@@ -36,12 +36,18 @@ export interface BotWorkAssociation {
   goal: string
   createdAt: number
 }
+export interface BotWorkHistoryTarget {
+  threadId: string
+  messageId: string
+  ordinal: number
+  detached?: true
+}
 export interface BotWorkHistoryPort {
   query(work: BotWorkItem, input: BotWorkHistoryInput): Promise<BotWorkHistoryPage>
   resolve(
     work: BotWorkItem,
     source: BotWorkHistorySource
-  ): Promise<{ threadId: string; messageId: string; ordinal: number }>
+  ): Promise<BotWorkHistoryTarget>
 }
 
 export function botWorkHistoryHref(source: BotWorkHistorySource): string {
@@ -59,4 +65,47 @@ export function parseBotWorkHistoryHref(href: string): BotWorkHistorySource | nu
   } catch {
     return null
   }
+}
+
+/** An exact retained attachment, resolved through its original work identity before file authorization. */
+export interface BotWorkAttachmentSource extends BotWorkHistorySource {
+  callId: string
+  fileIndex: number
+}
+
+const ATTACHMENT_SELECTOR = "?attachment="
+
+export function botWorkAttachmentHref(source: BotWorkAttachmentSource): string {
+  return botWorkHistoryHref(source) + ATTACHMENT_SELECTOR +
+    encodeURIComponent(JSON.stringify({ callId: source.callId, fileIndex: source.fileIndex }))
+      .replace(/[!'()*]/g, character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`)
+}
+
+export function parseBotWorkAttachmentHref(href: string): BotWorkAttachmentSource | null {
+  if (href.length > 8192) return null
+  const separator = href.indexOf(ATTACHMENT_SELECTOR)
+  if (separator < 0) return null
+  const source = parseBotWorkHistoryHref(href.slice(0, separator))
+  if (!source) return null
+  try {
+    const attachment = JSON.parse(decodeURIComponent(href.slice(separator + ATTACHMENT_SELECTOR.length)))
+    if (!attachment || typeof attachment !== "object" || Array.isArray(attachment) ||
+        Object.keys(attachment).some(key => key !== "callId" && key !== "fileIndex") ||
+        typeof attachment.callId !== "string" || !attachment.callId || attachment.callId.length > 1024 ||
+        attachment.callId.includes("\0") || !Number.isSafeInteger(attachment.fileIndex) ||
+        attachment.fileIndex < 0 || attachment.fileIndex >= 8) return null
+    return { ...source, callId: attachment.callId, fileIndex: attachment.fileIndex }
+  } catch { return null }
+}
+
+export function botWorkHref(workId: string): string {
+  return "#bot-work/" + encodeURIComponent(workId)
+}
+
+export function parseBotWorkHref(href: string): string | undefined {
+  if (!href.startsWith("#bot-work/") || href.length > 500) return
+  try {
+    const id = decodeURIComponent(href.slice("#bot-work/".length))
+    return /^[A-Za-z0-9_-]{1,128}$/.test(id) ? id : undefined
+  } catch { return }
 }

@@ -199,15 +199,15 @@ state.render('removed');`
       const state = await page.evaluate(() => (window as any).historyFixture)
       if (mode === "private") {
         assert.deepEqual(state.privateSaves, [
-          ["private-bot", "/private/report.md"],
-          ["private-bot", "/private/report.md"]
+          ["private-bot", "/private/report.md", undefined, undefined, "report.md"],
+          ["private-bot", "/private/report.md", undefined, undefined, "report.md"]
         ])
         assert.equal(state.reads.at(-1).botGroupId, undefined)
         assert.equal(state.reads.at(-1).threadId, "private-thread")
       } else {
         assert.deepEqual(state.saves.slice(-2), [
-          ["g", "/group/.deliveries/snapshot.md"],
-          ["g", "/group/.deliveries/snapshot.md"]
+          ["g", "/group/.deliveries/snapshot.md", "report.md"],
+          ["g", "/group/.deliveries/snapshot.md", "report.md"]
         ])
         assert.equal(state.privateSaves.length, 0)
         assert.equal(state.reads.at(-1).botGroupId, "g")

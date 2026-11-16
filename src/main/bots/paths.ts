@@ -3,7 +3,7 @@ import { join, relative, isAbsolute } from "node:path"
 import { botIdentifier } from "../../shared/bots/validation"
 
 /** Control paths are host-owned; no renderer path or model output is accepted here. */
-export function botDirectory(root: string, kind: "workspaces" | "memories", botId: string): string {
+export function botDirectory(root: string, kind: "workspaces" | "memories" | "attachments", botId: string): string {
   botIdentifier(botId)
   mkdirSync(root, { recursive: true })
   const base = realpathSync(root)

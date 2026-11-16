@@ -1,3 +1,5 @@
+import type { BotDeliveredFileSource } from "./bots/file-delivery"
+
 export const WORKSPACE_FILE_PREVIEW_CANCELLED = "WORKSPACE_FILE_PREVIEW_CANCELLED"
 
 // A preview page must stay cheap to clone over IPC and cheap to project in React.
@@ -70,6 +72,8 @@ export interface WorkspaceFilePreviewReadRequest extends WorkspaceFilePreviewReq
 
 export interface WorkspaceFilePreviewOpenMediaRequest extends WorkspaceFilePreviewRequestBase {
   mimeType?: string
+  /** Bind a delivered Markdown image request to the still-linked desktop work. */
+  botDeliveryImage?: BotDeliveredFileSource
 }
 
 export interface WorkspaceFilePreviewCancelRequest {

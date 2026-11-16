@@ -401,7 +401,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     chat,
-    "coordinator: disableCoordinatorModeOption",
+    "coordinator: Boolean(coordinatorModeDisabledReason)",
     "ChatContainer disables only the unavailable coordinator stop instead of locking the whole slider"
   )
 
@@ -945,7 +945,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     chat,
-    "guardCoordinatorPlainText(getQueuedDisplayContent(composedDraft))",
+    "guardCoordinatorPlainText(getQueuedDisplayContent(composedDraft, !managedTurn))",
     "ChatContainer keeps user-typed coordinator internal markers visible as ordinary text"
   )
   // The `keepPrepareApprovalForSaveMetadata` assertions were removed: that
@@ -1749,14 +1749,14 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "lastUserIndex = i\n        break",
     "agent Stop hook values context treats internal coordinator notification messages as the current-turn boundary"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    "isTrustedCoordinatorNotificationInvoke || isBotInternalTurnInvoke ? undefined : message",
+    /const stopContextUserMessage = isTrustedCoordinatorNotificationInvoke \|\| isBotInternalTurnInvoke \|\|\s+onBotUserPromptPrepared \? undefined : message/,
     "agent Stop hook context does not seed trusted coordinator or command receipts as user messages"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    "userMessage: isInternalNotificationTurn ? undefined : message",
+    /userMessage: isInternalNotificationTurn \? undefined :\s+onBotUserPromptPrepared \? botPreparedUserRequest : message/,
     "agent Stop hook context does not override internal (coordinator OR workflow) notification turns with placeholder text"
   )
   assertIncludes(
@@ -2064,7 +2064,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     stopContext,
-    "getCoordinatorVisibleUserMessage(msg)",
+    "getHookUserMessage(msg)",
     "agent IPC uses visible user message metadata when collecting Stop hook context"
   )
   assertIncludes(
@@ -3181,7 +3181,7 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   assertSourceOrder(
     threadsIpcForRollback,
     "while (deletingThreads.has(threadId))",
-    "const deletion = performThreadDeletion(event, threadId, options?.groupGuard)",
+    "const deletion = performThreadDeletion(event, threadId, options?.groupGuard, assertOwnership)",
     "a new deletion WAITS OUT any in-flight deletion of the same thread before starting"
   )
   assertMatches(
