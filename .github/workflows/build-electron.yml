@@ -24,6 +24,9 @@ on:
         description: Sign the macOS installer with Developer ID and notarize it
         type: boolean
         default: false
+      macos_recipient_certificate:
+        description: Optional PEM RSA public certificate for encrypted installer delivery
+        type: string
 
 concurrency:
   group: build-electron-${{ github.ref }}
@@ -623,7 +626,7 @@ jobs:
           ENV_ENCRYPTION_KEY: ${{ secrets.ENV_ENCRYPTION_KEY }}
 
       - name: Check configuration before public upload
-        if: inputs.macos_configuration == 'uat' && !github.event.repository.private
+        if: inputs.macos_configuration == 'uat' && !github.event.repository.private && inputs.macos_recipient_certificate == ''
         run: |
           node --input-type=module <<'NODE'
           import { readFileSync } from "node:fs"
@@ -635,7 +638,7 @@ jobs:
             value.trim()
           )
           if (carriesCredentials) {
-            console.error("::error::This UAT configuration contains client credentials. Use a private Actions artifact destination.")
+            console.error("::error::This UAT configuration contains client credentials. Supply a recipient certificate or use a private Actions repository.")
             process.exitCode = 1
           }
           NODE
@@ -722,10 +725,31 @@ jobs:
           xcrun stapler staple "$DMG_PATH"
           xcrun stapler validate "$DMG_PATH"
 
+      - name: Prepare macOS installer for delivery
+        id: delivery
+        shell: bash
+        env:
+          DMG_PATH: ${{ steps.pkg.outputs.dmg }}
+          RECIPIENT_CERTIFICATE: ${{ inputs.macos_recipient_certificate }}
+        run: |
+          set -euo pipefail
+          delivery_path="$DMG_PATH"
+          if [[ -n "$RECIPIENT_CERTIFICATE" ]]; then
+            openssl="$(brew --prefix openssl@3)/bin/openssl"
+            cert_path="$(mktemp "${RUNNER_TEMP}/cmbdevclaw-recipient.XXXXXX")"
+            trap 'rm -f "$cert_path"' EXIT
+            printf '%s\n' "$RECIPIENT_CERTIFICATE" > "$cert_path"
+            delivery_path="${DMG_PATH}.cms"
+            "$openssl" cms -encrypt -binary -aes-256-gcm -outform DER \
+              -in "$DMG_PATH" -out "$delivery_path" -recip "$cert_path" \
+              -keyopt rsa_padding_mode:oaep -keyopt rsa_oaep_md:sha256
+          fi
+          echo "path=$delivery_path" >> "$GITHUB_OUTPUT"
+
       - name: Upload macOS installer
         uses: actions/upload-artifact@v4
         with:
           name: CMBDevClaw-macos-arm64-${{ steps.pkg.outputs.version }}-${{ inputs.macos_configuration }}-${{ inputs.sign_macos && 'notarized' || 'adhoc' }}-installer
-          path: ${{ steps.pkg.outputs.dmg }}
+          path: ${{ steps.delivery.outputs.path }}
           if-no-files-found: error
           compression-level: 0

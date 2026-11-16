@@ -147,8 +147,16 @@ npm run dist
 UAT 配置可能使用内网渲染地址，Actions 检查 DMG、应用签名和内置 `rg`，企业登录在内网验收。
 选择 `smoke` 时使用空 `.env`，离线验证应用主窗口和终端。
 
-Vite 会将应用引用的环境变量打进安装包。如果配置包含客户端凭据，请使用私有 Actions 仓库或受控 Mac 交付产物。
-公开 Actions 的 UAT 构建会在上传前检查凭据。启用 `sign_macos` 可让用户按 macOS 默认信任策略安装下载的应用。
+Vite 会将应用引用的环境变量打进安装包。如果配置包含客户端凭据，公开 Actions 构建需在
+`macos_recipient_certificate` 中提供收件方的 RSA 公钥证书（PEM 格式），产物为加密的 `.dmg.cms`。
+在受控设备上用对应的证书和私钥解密，私钥保存在设备上。私有 Actions 仓库可直接上传 DMG。
+
+```bash
+openssl cms -decrypt -binary -inform DER -in CMBDevClaw.dmg.cms \
+  -recip recipient.pem -inkey recipient.key -out CMBDevClaw.dmg
+```
+
+启用 `sign_macos` 可让用户按 macOS 默认信任策略安装下载的应用。
 签名需要 GitHub Secrets `CSC_LINK`（Base64 编码的 `.p12`）和 `CSC_KEY_PASSWORD`，
 公证需要 `APPLE_API_KEY_BASE64`（Base64 编码的 `.p8`）、`APPLE_API_KEY_ID` 和 `APPLE_API_ISSUER`。
 
