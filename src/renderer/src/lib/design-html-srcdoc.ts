@@ -1,9 +1,14 @@
+import type { DesignPreviewResources } from "./design-preview-resources"
+import { applyHtmlSourceEdits } from "../../../shared/design-html-mutations"
 import { parse, type Node } from "acorn"
 
 // Design previews execute page interactions and editor scripts. Keep this
 // builder separate from the static workspace file preview policy.
 export interface DesignHtmlPreviewDocumentOptions {
   html: string
+  resources?: DesignPreviewResources
+  rootHtmlPath?: string
+  ancestors?: string[]
   htmlPath?: string
   readTextFile?: (resolvedPath: string) => Promise<string | null>
   readDataUrlFile?: (resolvedPath: string) => Promise<string | null>
@@ -169,7 +174,7 @@ function escapeInlineStyleContent(content: string): string {
 function encodeBase64(content: string): string {
   const bytes = new TextEncoder().encode(content)
   let binary = ""
-  for (const byte of bytes) binary += String.fromCharCode(byte)
+  for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192))
   return btoa(binary)
 }
 
@@ -182,10 +187,7 @@ function applyStringReplacements(
   replacements: Array<{ start: number; end: number; value: string }>
 ): string {
   if (replacements.length === 0) return input
-  const sorted = [...replacements].sort((left, right) => right.start - left.start)
-  return sorted.reduce((current, replacement) => {
-    return `${current.slice(0, replacement.start)}${replacement.value}${current.slice(replacement.end)}`
-  }, input)
+  return applyHtmlSourceEdits(input, replacements)
 }
 
 function cssUrlQuote(value: string): string {
@@ -206,7 +208,7 @@ async function inlineCssAssetUrls(
     const rawValue = (match[1] ?? match[2] ?? match[3] ?? "").trim()
     if (!rawValue) continue
 
-    const resolvedPath = resolveLocalAssetPath(cssBasePath, rawValue, htmlPath)
+    const resolvedPath = /^data:/i.test(rawValue) ? rawValue : resolveLocalAssetPath(cssBasePath, rawValue, htmlPath)
     if (!resolvedPath) continue
 
     const dataUrl = await readDataUrlWithCache(resolvedPath)
@@ -215,7 +217,7 @@ async function inlineCssAssetUrls(
     replacements.push({
       start: match.index,
       end: match.index + match[0].length,
-      value: `url(${cssUrlQuote(dataUrl)})`
+      value: `url(${cssUrlQuote(dataUrl + (rawValue.match(/#[^#]*$/)?.[0] ?? ""))})`
     })
   }
 
@@ -368,12 +370,18 @@ export async function buildDesignHtmlPreviewDocument({
   html,
   htmlPath,
   readTextFile,
-  readDataUrlFile
+  readDataUrlFile,
+  resources,
+  rootHtmlPath = htmlPath,
+  ancestors = []
 }: DesignHtmlPreviewDocumentOptions): Promise<string> {
   if (!htmlPath || (!readTextFile && !readDataUrlFile)) return html
 
+  resources?.checkDocument(html)
+  if (ancestors.length > 4 || ancestors.includes(htmlPath)) throw new Error("嵌入页面嵌套过深或循环引用")
   const parser = new DOMParser()
   const doc = parser.parseFromString(html, "text/html")
+  if (resources) doc.documentElement.dataset.designResourceOwner = resources.id
   const stylesheetLinks = Array.from(
     doc.querySelectorAll<HTMLLinkElement>('link[rel~="stylesheet"][href]')
   )
@@ -391,7 +399,7 @@ export async function buildDesignHtmlPreviewDocument({
     doc.querySelectorAll<HTMLElement>("img[srcset], source[srcset]")
   )
   const svgImageElements = Array.from(
-    doc.querySelectorAll<SVGElement>("image[href], image[xlink\\:href]")
+    doc.querySelectorAll<SVGElement>("image[href], image[xlink\\:href], use[href], use[xlink\\:href], feImage[href], feImage[xlink\\:href]")
   )
 
   const readCache = new Map<string, Promise<string | null>>()
@@ -413,10 +421,12 @@ export async function buildDesignHtmlPreviewDocument({
 
   const dataUrlCache = new Map<string, Promise<string | null>>()
   const readDataUrlWithCache = (resolvedPath: string): Promise<string | null> => {
+    if (/^data:/i.test(resolvedPath)) return resources ? resources.resolve(resolvedPath, async () => resolvedPath) : Promise.resolve(resolvedPath)
     if (!readDataUrlFile) return Promise.resolve(null)
     const cached = dataUrlCache.get(resolvedPath)
     if (cached) return cached
-    const request = readDataUrlFile(resolvedPath).catch(() => null)
+    const read = () => readDataUrlFile(resolvedPath).catch(() => null)
+    const request = resources ? resources.resolve(resolvedPath, read) : read()
     dataUrlCache.set(resolvedPath, request)
     return request
   }
@@ -455,7 +465,7 @@ export async function buildDesignHtmlPreviewDocument({
         !/^\.\.?\//.test(source.value)
       )
         continue
-      const resolved = resolveLocalAssetPath(basePath, source.value, htmlPath)
+      const resolved = resolveLocalAssetPath(basePath, source.value, rootHtmlPath)
       if (!resolved) continue
       replacements.push({
         start: source.start,
@@ -479,7 +489,7 @@ export async function buildDesignHtmlPreviewDocument({
       const condition = match[6].trim()
       // Preserve advanced layer/supports rules for the browser.
       if (/\b(?:layer|supports)\b/i.test(condition)) continue
-      const resolved = resolveLocalAssetPath(basePath, reference, htmlPath)
+      const resolved = resolveLocalAssetPath(basePath, reference, rootHtmlPath)
       if (!resolved) continue
       let value = ""
       if (!ancestors.has(resolved)) {
@@ -498,16 +508,27 @@ export async function buildDesignHtmlPreviewDocument({
       applyStringReplacements(css, replacements),
       basePath,
       readDataUrlWithCache,
-      htmlPath
+      rootHtmlPath
     )
   }
 
   await Promise.all([
+    ...Array.from(doc.querySelectorAll<HTMLIFrameElement>("iframe[data-design-capture-frame][src]")).map(async frame => {
+      const src = frame.getAttribute("src")!
+      const resolved = resolveLocalAssetPath(htmlPath, src, rootHtmlPath)
+      if (!resolved || !readTextFile) throw new Error("嵌入页面路径无效")
+      const child = await readWithCache(resolved)
+      if (child === null) throw new Error("嵌入页面文件缺失")
+      const prepared = await buildDesignHtmlPreviewDocument({ html: child, htmlPath: resolved, rootHtmlPath, ancestors: [...ancestors, htmlPath], resources, readTextFile, readDataUrlFile })
+      frame.removeAttribute("src")
+      frame.setAttribute("srcdoc", prepared)
+      frame.setAttribute("sandbox", "allow-scripts allow-same-origin")
+    }),
     ...stylesheetLinks.map(async (link) => {
       const href = link.getAttribute("href")
       if (!href || !readTextFile) return
 
-      const resolvedPath = resolveLocalAssetPath(htmlPath, href)
+      const resolvedPath = resolveLocalAssetPath(htmlPath, href, rootHtmlPath)
       if (!resolvedPath) return
 
       const cssContent = await readWithCache(resolvedPath)
@@ -523,7 +544,7 @@ export async function buildDesignHtmlPreviewDocument({
       const src = script.getAttribute("src")
       if (!src || !readTextFile) return
 
-      const resolvedPath = resolveLocalAssetPath(htmlPath, src)
+      const resolvedPath = resolveLocalAssetPath(htmlPath, src, rootHtmlPath)
       if (!resolvedPath) return
 
       const jsContent = await readWithCache(resolvedPath)
@@ -556,21 +577,26 @@ export async function buildDesignHtmlPreviewDocument({
       if (!styleValue) return
       element.setAttribute(
         "style",
-        await inlineCssAssetUrls(styleValue, htmlPath, readDataUrlWithCache)
+        await inlineCssAssetUrls(styleValue, htmlPath, readDataUrlWithCache, rootHtmlPath)
       )
     }),
     ...srcElements.map(async (element) => {
       const src = element.getAttribute("src")
       if (!src) return
-      const resolvedPath = resolveLocalAssetPath(htmlPath, src)
+      if (resources && /^data:/i.test(src)) {
+        const url = await resources.resolve(src, async () => src)
+        if (url) element.setAttribute("src", url)
+        return
+      }
+      const resolvedPath = resolveLocalAssetPath(htmlPath, src, rootHtmlPath)
       if (!resolvedPath) return
       const dataUrl = await readDataUrlWithCache(resolvedPath)
-      if (dataUrl) element.setAttribute("src", dataUrl)
+      if (dataUrl) element.setAttribute("src", dataUrl + (src.match(/#[^#]*$/)?.[0] ?? ""))
     }),
     ...posterElements.map(async (element) => {
       const poster = element.getAttribute("poster")
       if (!poster) return
-      const resolvedPath = resolveLocalAssetPath(htmlPath, poster)
+      const resolvedPath = resolveLocalAssetPath(htmlPath, poster, rootHtmlPath)
       if (!resolvedPath) return
       const dataUrl = await readDataUrlWithCache(resolvedPath)
       if (dataUrl) element.setAttribute("poster", dataUrl)
@@ -584,10 +610,10 @@ export async function buildDesignHtmlPreviewDocument({
       for (const attr of ["href", "xlink:href"]) {
         const href = element.getAttribute(attr)
         if (!href) continue
-        const resolvedPath = resolveLocalAssetPath(htmlPath, href)
+        const resolvedPath = resolveLocalAssetPath(htmlPath, href, rootHtmlPath)
         if (!resolvedPath) continue
         const dataUrl = await readDataUrlWithCache(resolvedPath)
-        if (dataUrl) element.setAttribute(attr, dataUrl)
+        if (dataUrl) element.setAttribute(attr, dataUrl + (href.match(/#[^#]*$/)?.[0] ?? ""))
       }
     }),
     ...inlineScriptTags.map(async (script) => {
@@ -623,5 +649,7 @@ export async function buildDesignHtmlPreviewDocument({
     if (moduleImports[key]) script.src = moduleImports[key]
   }
 
-  return serializeDocument(doc)
+  const serialized = serializeDocument(doc)
+  if (new TextEncoder().encode(serialized).byteLength > 15 * 1024 * 1024) throw new Error("预览文档超过 15MB，请缩小页面范围")
+  return serialized
 }

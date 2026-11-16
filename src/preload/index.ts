@@ -4822,6 +4822,7 @@ const api = {
       open: (id) => ipcRenderer.invoke("design:session-open", id),
       close: (id) => ipcRenderer.invoke("design:session-close", id),
       patch: (id, patch, meta) => ipcRenderer.invoke("design:session-patch", { id, patch, meta }),
+      patchUi: (id, patch) => ipcRenderer.invoke("design:session-ui-patch", { id, patch }),
       start: (request) => ipcRenderer.invoke("design:session-start", request),
       stop: (id) => ipcRenderer.invoke("design:session-stop", id),
       setWorkspace: (id, path) => ipcRenderer.invoke("design:session-workspace", { id, path }),

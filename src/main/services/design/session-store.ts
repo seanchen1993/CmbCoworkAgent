@@ -1,3 +1,4 @@
+import type { DesignUiPatch } from "../../../shared/design-ui-patch"
 import type { NativeSqliteAdapter } from "../../db/native-sqlite-adapter"
 import type {
   DesignSessionSnapshot,
@@ -35,6 +36,7 @@ export class DesignSessionStore {
         state TEXT NOT NULL, workspace_path TEXT, active_run_id TEXT,
         last_seen_seq INTEGER NOT NULL DEFAULT 0
       );
+      CREATE TABLE IF NOT EXISTS design_session_ui (session_id TEXT PRIMARY KEY, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS design_messages (
         session_id TEXT NOT NULL, id TEXT NOT NULL, ordinal INTEGER NOT NULL,
         payload TEXT NOT NULL, PRIMARY KEY(session_id, id)
@@ -101,7 +103,8 @@ export class DesignSessionStore {
       "SELECT payload FROM design_messages WHERE session_id = ? ORDER BY ordinal",
       [row.id]
     ).map((message) => JSON.parse(String(message.payload)) as Message)
-    const state = { ...JSON.parse(String(row.state)), messages }
+    const ui = this.rows("SELECT payload FROM design_session_ui WHERE session_id = ?", [row.id])[0]
+    const state = { ...JSON.parse(String(row.state)), ...(ui ? JSON.parse(String(ui.payload)) : {}), messages }
     state.selectedModelId = normalizeDesignModelId(state.selectedModelId)
     if (state.draftPreview) {
       const draft = this.rows(
@@ -126,6 +129,17 @@ export class DesignSessionStore {
       "UPDATE design_sessions SET last_seen_seq = ?, meta = json_set(meta, '$.unread', json(?)) WHERE id = ?",
       [lastSeenSeq, JSON.stringify(unread), id]
     )
+  }
+
+  saveUi(id: string, seq: number, patch: DesignUiPatch, meta: DesignSessionSnapshot["meta"]): void {
+    this.db.run("BEGIN IMMEDIATE")
+    try {
+      const previous = this.rows("SELECT payload FROM design_session_ui WHERE session_id = ?", [id])[0]
+      const ui = { ...(previous ? JSON.parse(String(previous.payload)) : {}), ...patch }
+      this.db.run("INSERT INTO design_session_ui VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET payload=excluded.payload", [id, JSON.stringify(ui)])
+      this.db.run("UPDATE design_sessions SET seq=?, meta=? WHERE id=?", [seq, JSON.stringify(meta), id])
+      this.db.run("COMMIT")
+    } catch (error) { this.db.run("ROLLBACK"); throw error }
   }
 
   /** Message projection, journal cursor and run status advance in one transaction. */
@@ -212,6 +226,7 @@ export class DesignSessionStore {
           snapshot.lastSeenSeq
         ]
       )
+      this.db.run("DELETE FROM design_session_ui WHERE session_id = ?", [snapshot.id])
       messages.forEach((message, ordinal) => {
         this.db.run(
           "DELETE FROM design_messages WHERE session_id = ? AND ordinal = ? AND id != ?",
@@ -320,6 +335,7 @@ export class DesignSessionStore {
     this.db.run("BEGIN IMMEDIATE")
     try {
       for (const table of [
+        "design_session_ui",
         "design_messages",
         "design_runs",
         "design_session_events",

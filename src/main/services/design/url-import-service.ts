@@ -87,10 +87,16 @@ export async function validateCapturedArtifact(
     await abortableCapture(window.loadURL(pathToFileURL(filePath).href), deadline)
     const valid = await abortableCapture(
       window.webContents.executeJavaScript(`(() => {
-      const body = document.body;
-      return !!body && body.getBoundingClientRect().height > 0 &&
-        (!!body.innerText.trim() || !!body.querySelector('img,svg,canvas,video')) &&
-        [...document.images].every(image => !image.getAttribute('src') || (image.complete && image.naturalWidth > 0));
+      const validate = (doc, depth = 0) => {
+        if (depth > 4) return false;
+        const body = doc.body;
+        if (!body || body.getBoundingClientRect().height <= 0) return false;
+        if (![...doc.images].every(image => !image.getAttribute('src') || (image.complete && image.naturalWidth > 0))) return false;
+        const frames = [...doc.querySelectorAll('iframe[data-design-capture-frame]')];
+        if (!frames.every(frame => !frame.getClientRects().length || (frame.contentDocument && validate(frame.contentDocument, depth + 1)))) return false;
+        return !!body.innerText.trim() || !!body.querySelector('img,svg,canvas,video') || frames.length > 0;
+      };
+      return validate(document);
     })()`),
       deadline
     )
@@ -266,7 +272,8 @@ export class DesignUrlImportService {
       progress("saving_assets", "保存样式、图片和字体资源")
       const assets = await this.dependencies.localize({
         html: page.snapshot.html,
-        pageUrl: page.snapshot.url,
+        pageUrl: page.snapshot.baseUrl ?? page.snapshot.url,
+        frames: page.snapshot.frames,
         directory: staging,
         signal,
         fetch: this.dependencies.fetch,
@@ -275,6 +282,10 @@ export class DesignUrlImportService {
       page.assertCurrent()
       const warnings = [...page.snapshot.warnings, ...page.warnings, ...assets.warnings]
       const html = installSnapshotRuntime(assets.html)
+      for (const frame of assets.frames ?? []) {
+        await fs.mkdir(path.join(staging, "frames"), { recursive: true })
+        await fs.writeFile(path.join(staging, "frames", `${frame.id}.html`), installSnapshotRuntime(frame.html), { signal })
+      }
       const filePath = path.join(staging, "index.html")
       await fs.writeFile(filePath, html, { signal })
       await fs.writeFile(path.join(staging, "source-preview.png"), page.screenshot, { signal })
@@ -287,6 +298,7 @@ export class DesignUrlImportService {
             capturedAt: new Date().toISOString(),
             viewport: request.viewport ?? null,
             warnings,
+            frames: (assets.frames ?? []).map(frame => ({ id: frame.id, file: `frames/${frame.id}.html` })),
             resources: assets.resources
           },
           null,

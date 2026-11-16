@@ -86,7 +86,7 @@ try {
   const prepared = await page.evaluate(
     async ({ modules, fixture }) => {
       const { buildDesignHtmlPreviewDocument } = await import(modules.design)
-      const { buildStaticHtmlPreviewDocument } = await import(modules.static)
+      const { buildHtmlPreviewDocument } = await import(modules.static)
       const { buildDesignVariationDocument } = await import(modules.variation)
       const { DESIGN_PREVIEW_NAVIGATION_SCRIPT } = await import(modules.navigation)
       const textReads: string[] = []
@@ -120,7 +120,7 @@ try {
       const inlineOnly = await buildDesignHtmlPreviewDocument({
         html: '<button id="inline" onclick="this.textContent=\'Works\'">Inline</button>'
       })
-      const safe = await buildStaticHtmlPreviewDocument({ html: fixture })
+      const { srcDoc: safe } = await buildHtmlPreviewDocument({ html: fixture, runtimeId: "workspace-regression" })
       const safeDoc = new DOMParser().parseFromString(safe, "text/html")
       const boundaryReads: string[] = []
       await buildDesignHtmlPreviewDocument({
@@ -148,9 +148,11 @@ try {
     { modules, fixture }
   )
   assert.equal(prepared.noPath, fixture)
-  assert.equal(prepared.staticScriptCount, 0)
-  assert.equal(prepared.staticEventCount, 0)
-  assert.match(prepared.safe, /script-src 'none'/)
+  // Workspace previews preserve interactions under their network-isolating CSP.
+  assert(prepared.staticScriptCount > 0)
+  assert(prepared.staticEventCount > 0)
+  assert.match(prepared.safe, /connect-src 'none'/)
+  assert.match(prepared.safe, /frame-src 'none'/)
   assert.deepEqual(prepared.boundaryReads, [])
   assert.deepEqual(prepared.textReads.sort(), ["/design/assets/page.css", "/design/assets/page.js"])
   assert.deepEqual(prepared.dataReads, ["/design/assets/icon.svg"])

@@ -1096,3 +1096,39 @@ describe("background design conversations", () => {
     }
   })
 })
+
+it("saves UI deltas without cloning or storing HTML and merges them on full saves/restart", () => {
+  const h = harness()
+  h.create()
+  h.manager.patch("ds_a", { html: '<html><body>'+"正文".repeat(100000)+'</body></html>' })
+  const before = h.store.get("ds_a")!
+  const save = vi.spyOn(h.store, "save")
+  const get = vi.spyOn(h.manager, "get")
+  const delta = h.manager.patchUi("ds_a", { inputValue: "新草稿", zoom: 75 })
+  expect(get).not.toHaveBeenCalled()
+  expect(save).not.toHaveBeenCalled()
+  expect(delta.snapshot).toBeUndefined()
+  expect(JSON.stringify(delta).length).toBeLessThan(2000)
+  expect(delta.baseSeq).toBe(before.seq)
+  expect(h.store.get("ds_a")?.state.inputValue).toBe("新草稿")
+  expect(h.store.get("ds_a")?.state.html).toBe(before.state.html)
+  const reopened = new DesignRunManager(h.store, h.deps)
+  expect(reopened.get("ds_a").state.zoom).toBe(75)
+  reopened.patch("ds_a", { originalPrompt: "完整保存" })
+  expect(h.store.get("ds_a")?.state.inputValue).toBe("新草稿")
+  expect(h.store.get("ds_a")?.state.originalPrompt).toBe("完整保存")
+  expect(() => h.manager.patchUi("ds_a", { html: "bad" } as never)).toThrow("无效字段")
+})
+
+it("retains newer composer UI while buffered model events finalize", async () => {
+  const h = harness()
+  h.create()
+  const emit = await h.start()
+  emit({ type: "token", token: "缓冲中的文字" })
+  h.manager.patchUi("ds_a", { inputValue: "生成期间准备的下一条需求", zoom: 80 })
+  const completedHtml = "<html><body><h1>已完成</h1></body></html>"
+  emit({ type: "done", html: completedHtml })
+  expect(h.manager.get("ds_a").state.inputValue).toBe("生成期间准备的下一条需求")
+  expect(h.store.get("ds_a")?.state.zoom).toBe(80)
+  expect(h.store.get("ds_a")?.state.html).toBe(completedHtml)
+})

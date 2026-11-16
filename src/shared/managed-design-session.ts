@@ -1,3 +1,4 @@
+import type { DesignUiPatch } from "./design-ui-patch"
 import type {
   TabState,
   Message,
@@ -117,6 +118,8 @@ export interface DesignSessionChange {
   meta: SessionMeta
   snapshot?: DesignSessionSnapshot
   deleted?: boolean
+  uiPatch?: DesignUiPatch
+  baseSeq?: number
   draftHtmlOmitted?: boolean
 }
 export interface DesignSessionSeed {
@@ -126,6 +129,7 @@ export interface DesignSessionSeed {
   workspacePath: string | null
 }
 export interface DesignSessionApi {
+  patchUi?: (id: string, patch: DesignUiPatch) => Promise<DesignSessionChange>
   inspectEditable?: (id: string) => Promise<DesignEditableDocument>
   edit?: (id: string, command: DesignEditCommand) => Promise<DesignSessionSnapshot>
   patchHistory?: (

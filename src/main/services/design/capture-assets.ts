@@ -15,11 +15,12 @@ interface SavedAsset {
 
 export interface CaptureAssetOptions {
   html: string
+  frames?: Array<{ id: string; html: string; url: string; baseUrl?: string }>
   pageUrl: string
   directory: string
   signal: AbortSignal
   fetch: (url: string, init: RequestInit) => Promise<Response>
-  readBlob?: (url: string) => Promise<string | null>
+  readBlob?: (url: string, frameId?: string) => Promise<string | null>
   limits?: { count?: number; perFile?: number; total?: number }
 }
 
@@ -37,6 +38,7 @@ export async function localizeCaptureAssets(options: CaptureAssetOptions): Promi
   html: string
   warnings: DesignImportWarning[]
   resources: Array<{ source: string; file: string; bytes: number }>
+  frames?: Array<{ id: string; html: string }>
 }> {
   const failure = new AbortController()
   options = { ...options, signal: AbortSignal.any([options.signal, failure.signal]) }
@@ -54,7 +56,8 @@ export async function localizeCaptureAssets(options: CaptureAssetOptions): Promi
   let downloads = 0
   const downloadQueue: Array<() => void> = []
   const download = async (
-    url: string
+    url: string,
+    owner: string
   ): Promise<{ content: Buffer; mime: string; finalUrl: string }> => {
     if (downloads >= 4) await new Promise<void>((resolve) => downloadQueue.push(resolve))
     downloads++
@@ -63,7 +66,7 @@ export async function localizeCaptureAssets(options: CaptureAssetOptions): Promi
       const response = await options.fetch(url, {
         signal: options.signal,
         credentials: "include",
-        referrer: options.pageUrl,
+        referrer: options.frames?.find(frame => frame.id === owner)?.baseUrl ?? options.frames?.find(frame => frame.id === owner)?.url ?? options.pageUrl,
         referrerPolicy: "strict-origin-when-cross-origin"
       })
       return {
@@ -138,7 +141,8 @@ export async function localizeCaptureAssets(options: CaptureAssetOptions): Promi
     base: string,
     inAsset: boolean,
     parents: Set<string>,
-    inline = false
+    inline = false,
+    owner = "main"
   ): Promise<string> => {
     let ast: cssTree.CssNode
     try {
@@ -170,11 +174,11 @@ export async function localizeCaptureAssets(options: CaptureAssetOptions): Promi
     for (const { node, imported } of urls) {
       check()
       if (!node.value || node.value.startsWith("#")) continue
-      const resource = await load(node.value, base, parents, imported)
+      const resource = await load(node.value, base, parents, imported, owner)
       node.value = resource
         ? inAsset
           ? path.posix.basename(resource.file)
-          : resource.file
+          : (owner === "main" ? "" : "../") + resource.file
         : "data:,"
     }
     return cssTree.generate(ast)
@@ -183,7 +187,8 @@ export async function localizeCaptureAssets(options: CaptureAssetOptions): Promi
     value: string,
     base: string,
     parents: Set<string>,
-    critical = false
+    critical = false,
+    owner = "main"
   ): Promise<SavedAsset | null> => {
     check()
     let url: URL
@@ -227,7 +232,7 @@ export async function localizeCaptureAssets(options: CaptureAssetOptions): Promi
             mime: string,
             finalUrl = key
           if (url.protocol === "data:" || url.protocol === "blob:") {
-            const data = url.protocol === "data:" ? key : await options.readBlob?.(key)
+            const data = url.protocol === "data:" ? key : await options.readBlob?.(key, owner)
             if (!data) throw new Error("临时资源无法读取")
             const match = data.match(/^data:([^;,]*)(;base64)?,([\s\S]*)$/i)
             if (!match) throw new Error("资源编码无效")
@@ -240,7 +245,7 @@ export async function localizeCaptureAssets(options: CaptureAssetOptions): Promi
             if (content.byteLength > limit.perFile || bytes > limit.total)
               throw new Error("资源超出大小限制")
           } else {
-            const response = await download(key)
+            const response = await download(key, owner)
             mime = response.mime
             finalUrl = response.finalUrl
             content = response.content
@@ -250,7 +255,7 @@ export async function localizeCaptureAssets(options: CaptureAssetOptions): Promi
           if (critical && mime !== "text/css") throw new Error("样式表返回的类型不是 CSS")
           if (mime === "text/css")
             content = Buffer.from(
-              await rewriteCss(content.toString("utf8"), finalUrl, true, new Set([...parents, key]))
+              await rewriteCss(content.toString("utf8"), finalUrl, true, new Set([...parents, key]), false, owner)
             )
           check()
           const file = `assets/${createHash("sha256").update(content).digest("hex").slice(0, 24)}${extension(mime)}`
@@ -294,56 +299,73 @@ export async function localizeCaptureAssets(options: CaptureAssetOptions): Promi
       throw new Error("关键样式资源无法保存")
     return resource && hash ? { ...resource, file: resource.file + hash } : resource
   }
-  const document = parse(options.html)
-  const visit = async (node: HtmlNode): Promise<void> => {
-    check()
-    if ("tagName" in node) {
-      const element = node as HtmlElement
-      const attribute = (name: string) => element.attrs.find((item) => item.name === name)
-      const stylesheet =
-        element.tagName === "link" && attribute("rel")?.value.split(/\s+/).includes("stylesheet")
-      for (const attr of [...element.attrs]) {
-        if (attr.name === "style")
-          attr.value = await rewriteCss(attr.value, options.pageUrl, false, new Set(), true)
-        if (attr.name === "srcset") attr.value = "" // currentSrc has been frozen by the snapshotter.
-        if (
-          (attr.name === "src" && ["img", "input"].includes(element.tagName)) ||
-          (attr.name === "poster" && element.tagName === "video") ||
-          (attr.name === "href" &&
-            (stylesheet || ["image", "use", "feImage"].includes(element.tagName)))
-        ) {
-          if (attr.value.startsWith("#")) continue
-          const asset = await load(attr.value, options.pageUrl, new Set(), stylesheet)
-          attr.value =
-            asset?.file ??
-            "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1' height='1'/%3E"
+  const frames = new Map((options.frames ?? []).map(frame => [frame.id, frame]))
+  if (frames.size > 32 || [...frames.keys()].some(id => !/^f_\d+$/.test(id))) throw new Error("嵌入页面标识或数量无效")
+  let documentBytes = 0
+  const savedFrames: Array<{ id: string; html: string }> = []
+  const failedFrames = new Set<string>()
+  const rewriteDocument = async (html: string, base: string, owner: string): Promise<string> => {
+    documentBytes += Buffer.byteLength(html)
+    if (documentBytes > 15 * 1024 * 1024) throw new Error("文档总大小超过 15MB")
+    const document = parse(html)
+    const prefix = owner === "main" ? "" : "../"
+    const visit = async (node: HtmlNode): Promise<void> => {
+      check()
+      if ("tagName" in node) {
+        const element = node as HtmlElement
+        const attribute = (name: string) => element.attrs.find(item => item.name === name)
+        if (element.tagName === "iframe") {
+          const id = attribute("data-design-capture-frame")?.value ?? ""
+          if (frames.has(id) && !failedFrames.has(id)) {
+            const src = attribute("src")
+            if (src) src.value = `${prefix}frames/${id}.html`
+          } else {
+            element.tagName = element.nodeName = "div"
+            element.attrs = element.attrs.filter(attr => ["id", "class", "style"].includes(attr.name))
+            element.childNodes = [{ nodeName: "#text", value: "嵌入内容暂不可读取", parentNode: element }]
+            warn("frame_unavailable", `嵌入页面 ${id || "未知"} 不可读取，已保留布局占位。`)
+          }
         }
-      }
-      if (element.tagName === "style") {
-        for (const child of element.childNodes) {
-          if (child.nodeName === "#text")
-            (child as DefaultTreeAdapterMap["textNode"]).value = await rewriteCss(
-              (child as DefaultTreeAdapterMap["textNode"]).value,
-              options.pageUrl,
-              false,
-              new Set()
-            )
+        const stylesheet = element.tagName === "link" && attribute("rel")?.value.split(/\s+/).includes("stylesheet")
+        for (const attr of [...element.attrs]) {
+          if (attr.name === "style") attr.value = await rewriteCss(attr.value, base, false, new Set(), true, owner)
+          if (attr.name === "srcset") attr.value = ""
+          if ((attr.name === "src" && ["img", "input"].includes(element.tagName)) ||
+              (attr.name === "poster" && element.tagName === "video") ||
+              (attr.name === "href" && (stylesheet || ["image", "use", "feImage"].includes(element.tagName)))) {
+            if (attr.value.startsWith("#")) continue
+            const asset = await load(attr.value, base, new Set(), stylesheet, owner)
+            attr.value = asset ? prefix + asset.file : "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1' height='1'/%3E"
+          }
         }
+        if (element.tagName === "style") for (const child of element.childNodes) if (child.nodeName === "#text") {
+          const text = child as DefaultTreeAdapterMap["textNode"]
+          text.value = await rewriteCss(text.value, base, false, new Set(), false, owner)
+        }
+        if (element.tagName === "template") await Promise.all((element as DefaultTreeAdapterMap["template"]).content.childNodes.map(visit))
       }
-      if (element.tagName === "template") {
-        const content = (element as DefaultTreeAdapterMap["template"]).content
-        await Promise.all(content.childNodes.map(visit))
-      }
+      if ("childNodes" in node) await Promise.all(node.childNodes.map(visit))
     }
-    if ("childNodes" in node) await Promise.all(node.childNodes.map(visit))
+    await visit(document)
+    return serialize(document)
   }
   try {
-    await visit(document)
+    // Children are extracted in tree order. Reverse processing resolves failures
+    // before the parent document decides whether to retain its frame reference.
+    for (const frame of [...frames.values()].reverse()) {
+      try { savedFrames.push({ id: frame.id, html: await rewriteDocument(frame.html, frame.baseUrl ?? frame.url, frame.id) }) }
+      catch {
+        check()
+        failedFrames.add(frame.id)
+        warn("frame_resources", `嵌入页面 ${frame.id} 资源保存失败，已降级为占位。`)
+      }
+    }
+    const html = await rewriteDocument(options.html, options.pageUrl, "main")
+    check()
+    return { html, warnings, resources, frames: savedFrames }
   } catch (error) {
     failure.abort(error)
     await Promise.allSettled([...cache.values()])
     throw error
   }
-  check()
-  return { html: serialize(document), warnings, resources }
 }

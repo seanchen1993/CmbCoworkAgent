@@ -1,3 +1,4 @@
+import { DESIGN_LIGHT_UI_FIELDS, isDesignUiPatch, type DesignUiPatch } from "../../../shared/design-ui-patch"
 import { randomUUID } from "node:crypto"
 import type { DesignAnnotationHistoryEntry } from "../../../renderer/src/components/design/types"
 import {
@@ -286,6 +287,25 @@ export class DesignRunManager {
   migrate(seeds: DesignSessionSeed[]): SessionMeta[] {
     for (const seed of seeds) if (!this.store.wasDeleted(seed.id)) this.create(seed, true)
     return this.list()
+  }
+
+  patchUi(id: string, patch: DesignUiPatch): DesignSessionChange {
+    if (!isDesignUiPatch(patch)) throw new Error("界面状态更新包含无效字段")
+    const current = this.sessions.get(id)
+    if (!current) throw new Error("设计会话不存在")
+    const next = { ...current, seq: current.seq + 1, meta: { ...current.meta, updatedAt: Date.now() }, state: { ...current.state, ...patch } }
+    this.store.saveUi(id, next.seq, patch, next.meta)
+    this.sessions.set(id, next)
+    // A buffered generation update may already own a snapshot. Merge the UI fields
+    // there as well so its later full commit cannot overwrite a newer draft.
+    for (const run of this.active.values()) if (run.request.designSessionId === id && run.snapshot) {
+      run.snapshot.state = { ...run.snapshot.state, ...patch }
+      run.snapshot.seq = next.seq
+      run.snapshot.meta = { ...run.snapshot.meta, updatedAt: next.meta.updatedAt }
+    }
+    const change: DesignSessionChange = { id, baseSeq: current.seq, seq: next.seq, meta: next.meta, uiPatch: { ...patch } }
+    this.deps.publish(change)
+    return change
   }
 
   patch(id: string, patch: Partial<TabState>, meta?: Partial<SessionMeta>): DesignSessionSnapshot {
@@ -1153,6 +1173,11 @@ export class DesignRunManager {
     patchJournal?: DesignPatchJournal,
     editReceipt?: DesignEditReceipt
   ): DesignSessionSnapshot {
+    const current = this.sessions.get(next.id)
+    if (current && next.seq < current.seq) {
+      for (const key of DESIGN_LIGHT_UI_FIELDS) Object.assign(next.state, { [key]: current.state[key] })
+      next.seq = current.seq
+    }
     const previousDraft = this.sessions.get(next.id)?.state.draftPreview
     next.state.singleVariant = !!this.sessions.get(next.id)?.state.singleVariant || isSingleDesignVariant(next.state, next.meta)
     next.seq++

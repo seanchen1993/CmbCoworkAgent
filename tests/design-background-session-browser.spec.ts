@@ -59,6 +59,7 @@ const bundle = await build({
   jsx: "automatic",
   alias: { "@": resolve("src/renderer/src") },
   define: {
+    "import.meta.url": "location.href",
     "import.meta.env": '{"DEV":true}',
     "process.env.NODE_ENV": '"test"'
   },
@@ -93,7 +94,9 @@ const bundle = await build({
 const reactRuntime = await build({ stdin: { contents: `import * as React from 'react'; import {createRoot} from 'react-dom/client'; window.React=React; window.ReactDOM={createRoot};`, resolveDir: process.cwd() }, bundle: true, write: false, platform: "browser", format: "iife" })
 const vueRuntime = process.env.DESIGN_VUE_RUNTIME ? readFileSync(process.env.DESIGN_VUE_RUNTIME, "utf8") : null
 const uiStyles = process.env.DESIGN_UI_STYLES
+const previewWorker = await build({ entryPoints: ["src/renderer/src/lib/design-preview-worker.ts"], bundle: true, write: false, format: "esm", platform: "browser" })
 const server = createServer((_request, response) => {
+  if (_request.url === "/design-preview-worker.ts") { response.setHeader("Content-Type", "text/javascript"); response.end(previewWorker.outputFiles[0].contents); return }
   if (uiStyles && _request.url === "/ui.css") {
     response.setHeader("Content-Type", "text/css")
     response.end(readFileSync(uiStyles))
@@ -175,6 +178,7 @@ try {
       subscriptions.delete(id)
       return
     }
+    if (method === "patchUi") return manager.patchUi(id, args[1] as never)
     if (method === "patch") return manager.patch(id, args[1] as never, args[2] as never)
     if (method === "inspectEditable") return manager.inspectEditable(id)
     if (method === "edit") return manager.edit(id, args[1] as never)
@@ -244,6 +248,7 @@ try {
         "open",
         "close",
         "patch",
+        "patchUi",
         "start",
         "stop",
         "retry",

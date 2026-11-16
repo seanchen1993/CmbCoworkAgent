@@ -1,3 +1,4 @@
+import { DesignPreviewResources } from "@/lib/design-preview-resources"
 import {
   useEffect,
   useLayoutEffect,
@@ -26,9 +27,9 @@ interface Props {
   scopeId: string
   frameRef: MutableRefObject<HTMLIFrameElement | null>
   style: CSSProperties
-  onLoad: (draft: boolean) => void
+  onLoad: (draft: boolean, html?: string) => void
   initialScroll?: { x: number; y: number }
-  onVisible: (runId: string, revision: number) => void
+  onVisible: (runId: string, revision: number, html?: string) => void
 }
 
 function createFrameLoad(html: string, draft?: DesignDraftPreview | null, artifactRevision = 0) {
@@ -45,13 +46,17 @@ function createFrameLoad(html: string, draft?: DesignDraftPreview | null, artifa
 export function DesignPreviewFrame(props: Props) {
   const draftPath = props.draft?.draftPath
   const sourceHtml = props.html
+  const owners = useRef(new Map<string, DesignPreviewResources>())
+  useEffect(() => () => { for (const resource of owners.current.values()) resource.dispose(); owners.current.clear() }, [])
   const [prepared, setPrepared] = useState<{ source: string; path: string; html: string } | null>(
     null
   )
   useEffect(() => {
     if (!draftPath) return
     let cancelled = false
+    const resources = new DesignPreviewResources()
     void buildDesignHtmlPreviewDocument({
+      resources,
       html: sourceHtml,
       htmlPath: draftPath,
       readTextFile: async (path) => {
@@ -64,9 +69,10 @@ export function DesignPreviewFrame(props: Props) {
       }
     })
       .then((html) => {
-        if (!cancelled) setPrepared({ source: sourceHtml, path: draftPath, html })
+        if (!cancelled) { owners.current.set(html, resources); setPrepared({ source: sourceHtml, path: draftPath, html }) }
+        else resources.dispose()
       })
-      .catch((error) => console.warn("[Design] Draft dependencies unavailable", error))
+      .catch((error) => { resources.dispose(); console.warn("[Design] Draft dependencies unavailable", error) })
     return () => {
       cancelled = true
     }
@@ -75,10 +81,18 @@ export function DesignPreviewFrame(props: Props) {
     ? `${props.scopeId}:draft:${props.draft.runId}`
     : `${props.scopeId}:final`
   const html =
-    props.draft && prepared?.source === sourceHtml && prepared.path === draftPath
+    props.draft && prepared && prepared.path === draftPath
       ? prepared.html
       : props.html
-  return <DesignPreviewContext key={contextKey} {...props} html={html} />
+  const releasePrevious = (visibleHtml?: string) => {
+    if (!visibleHtml) return
+    const current = [...owners.current].find(([source, resource]) => source === visibleHtml || resource.owns(visibleHtml))
+    if (!current) return
+    for (const [source, resources] of owners.current) if (source !== current[0] && source !== html) { resources.dispose(); owners.current.delete(source) }
+  }
+  return <DesignPreviewContext key={contextKey} {...props} html={html}
+    onLoad={(draft, loadedHtml) => { releasePrevious(loadedHtml); props.onLoad(draft, loadedHtml) }}
+    onVisible={(run, revision, visibleHtml) => { releasePrevious(visibleHtml); props.onVisible(run, revision, visibleHtml) }} />
 }
 
 function DesignPreviewContext({
@@ -123,7 +137,7 @@ function DesignPreviewContext({
           ready: true
         }
         livePending.current = null
-        onVisible(String(event.data.patchId), event.data.revision)
+        onVisible(String(event.data.patchId), event.data.revision, live.current.html)
         setLiveTick((v) => v + 1)
       } else if (event.data.type === "__design_live_resync") {
         if (livePending.current) clearTimeout(livePending.current.timer)
@@ -223,7 +237,7 @@ function DesignPreviewContext({
           clearTimeout(inFlight.current.timer)
           inFlight.current = null
         }
-        latest.current.onVisible(message.runId, message.revision)
+        latest.current.onVisible(message.runId, message.revision, appliedHtml.current)
         setTick((v) => v + 1)
       } else if (message.type === "__design_preview_resync") {
         if (inFlight.current) clearTimeout(inFlight.current.timer)
@@ -306,10 +320,10 @@ function DesignPreviewContext({
         onLoad={() => {
           if (!draft) {
             live.current = { html: load.initialHtml, revision: load.revision, ready: true }
-            if (appliedPatch) onVisible(appliedPatch.id, load.revision)
+            if (appliedPatch) onVisible(appliedPatch.id, load.revision, load.initialHtml)
             setLiveTick((v) => v + 1)
           }
-          onLoad(!!draft)
+          onLoad(!!draft, load.initialHtml)
           if (initialScroll)
             requestAnimationFrame(() => {
               const win = frameRef.current?.contentWindow
@@ -330,7 +344,7 @@ function DesignPreviewContext({
           if (draft) {
             // The initial ready event can race listener registration; a full snapshot repairs it.
             applied.current = { instance: load.instance, revision: load.revision, ready: true }
-            latest.current.onVisible(draft.runId, load.revision)
+            latest.current.onVisible(draft.runId, load.revision, load.initialHtml)
             setTick((v) => v + 1)
           }
         }}

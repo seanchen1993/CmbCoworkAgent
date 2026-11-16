@@ -1,3 +1,4 @@
+import { captureFrameTree, type CaptureFrameTree } from "./frame-capture"
 import { BrowserWindow, type WebContents } from "electron"
 import { getBuiltinBrowserSession } from "../../browser/core/browser-profile-session"
 import { getGlobalBrowserService } from "../../browser/core/browser-service-registry"
@@ -6,7 +7,7 @@ import type {
   DesignImportProgress,
   DesignImportWarning
 } from "../../../shared/design-url-import"
-import { extractDesignPageSnapshot, type CapturedPageSnapshot } from "./page-snapshot"
+import { type CapturedPageSnapshot } from "./page-snapshot"
 import { extractDesignStyleSnapshot, type DesignStyleSnapshot } from "./system-style-snapshot"
 
 export function abortableCapture<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -38,7 +39,7 @@ export async function waitForDesignPage(): Promise<boolean> {
       const meaningful =
         !!document.body &&
         (document.body.innerText.trim().length > 0 ||
-          [...document.querySelectorAll("img,canvas,svg,video")].some(
+          [...document.querySelectorAll("img,canvas,svg,video,iframe")].some(
             (node) => node.getClientRects().length > 0
           ))
       const imagesReady = [...document.images]
@@ -62,7 +63,7 @@ export interface DesignCapturedPage {
   snapshot: CapturedPageSnapshot
   screenshot: Buffer
   warnings: DesignImportWarning[]
-  readBlob: (url: string) => Promise<string | null>
+  readBlob: (url: string, frameId?: string) => Promise<string | null>
   assertCurrent: () => void
   dispose: () => void
 }
@@ -73,6 +74,7 @@ export async function captureDesignPage(
   progress: (stage: DesignImportProgress["stage"], message: string) => void,
   options?: { includeDesignStyles: boolean }
 ): Promise<DesignCapturedPage> {
+  let frames: CaptureFrameTree | undefined
   let window: BrowserWindow | null = null
   let contents: WebContents
   if (request.source === "current-browser") {
@@ -119,6 +121,7 @@ export async function captureDesignPage(
   const dispose = () => {
     if (disposed) return
     disposed = true
+    frames?.dispose()
     contents.removeListener("did-start-navigation", onNavigation)
     contents.removeListener("did-navigate", onNavigated)
     contents.removeListener("render-process-gone", onGone)
@@ -151,13 +154,12 @@ export async function captureDesignPage(
     locked = true
     const url = contents.getURL()
     progress("extracting", "提取页面内容和样式")
-    const snapshot = await execute<CapturedPageSnapshot>(
-      `(${extractDesignPageSnapshot.toString()})()`
-    )
+    frames = await captureFrameTree(contents, combined)
+    const snapshot = frames.snapshot
     if (!/^https?:\/\//i.test(snapshot.url)) throw new Error("仅支持抓取 HTTP 或 HTTPS 网页")
     if (Buffer.byteLength(snapshot.html) > 15 * 1024 * 1024)
       throw new Error("页面快照超过 15MB，请缩小页面范围")
-    if (!snapshot.textLength && !snapshot.restrictedReason && !/<(?:img|svg|canvas|video)\b/i.test(snapshot.html))
+    if (!snapshot.textLength && !snapshot.restrictedReason && !/<(?:img|svg|canvas|video|iframe)\b/i.test(snapshot.html))
       throw new Error("页面没有可还原的正文或图像")
     if ([401, 403, 429].includes(httpStatus))
       snapshot.restrictedReason ||= `页面返回 HTTP ${httpStatus}，请在浏览器中检查登录或访问限制。`
@@ -168,6 +170,7 @@ export async function captureDesignPage(
       : undefined
     const assertCurrent = () => {
       combined.throwIfAborted()
+      frames?.assertCurrent()
       if (contents.isDestroyed() || contents.getURL() !== url)
         throw new Error("来源页面已改变，请重新抓取")
     }
@@ -180,16 +183,7 @@ export async function captureDesignPage(
         ? []
         : [{ code: "render_unsettled", message: "页面仍在变化，已保存当前可见状态。" }],
       assertCurrent,
-      readBlob: (blobUrl) =>
-        execute<string | null>(`(async () => {
-        const response = await fetch(${JSON.stringify(blobUrl)});
-        const blob = await response.blob();
-        if (blob.size > 10485760) return null;
-        return await new Promise((resolve, reject) => {
-          const reader = new FileReader(); reader.onload = () => resolve(reader.result);
-          reader.onerror = () => reject(new Error("临时图片读取失败")); reader.readAsDataURL(blob);
-        });
-      })()`),
+      readBlob: frames.readBlob,
       dispose: () => {
         combined.removeEventListener("abort", abort)
         dispose()

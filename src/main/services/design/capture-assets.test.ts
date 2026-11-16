@@ -127,3 +127,23 @@ describe("captured design resources", () => {
     )
   })
 })
+
+it("localizes a frame tree with shared resource budgets and per-frame blob readers", async () => {
+  const output = await directory()
+  const fetch = vi.fn(async (url: string) => new Response(url.endsWith(".css") ? 'p{background:url(./shared.svg)}' : '<svg xmlns="http://www.w3.org/2000/svg"/>', { headers: { "content-type": url.endsWith(".css") ? "text/css" : "image/svg+xml" } }))
+  const readBlob = vi.fn(async () => 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg"/%3E')
+  const result = await localizeCaptureAssets({
+    directory: output, pageUrl: "https://parent.test/root", signal: new AbortController().signal, fetch, readBlob,
+    html: '<h1>父页面</h1><iframe data-design-capture-frame="f_1" src="frames/f_1.html"></iframe><iframe data-design-capture-frame="f_9" src="frames/f_9.html"></iframe>',
+    frames: [
+      { id: "f_1", url: "https://child.test/path/page", html: '<link rel="stylesheet" href="app.css"><img src="shared.svg"><iframe data-design-capture-frame="f_2" src="frames/f_2.html"></iframe>' },
+      { id: "f_2", url: "about:srcdoc", baseUrl: "https://child.test/path/page", html: '<p>嵌套页面</p><img src="shared.svg"><img src="blob:https://child.test/image">' }
+    ]
+  })
+  expect(result.html).toContain('src="frames/f_1.html"')
+  expect(result.html).not.toContain('src="frames/f_9.html"')
+  expect(result.frames?.find(frame => frame.id === "f_1")?.html).toContain('src="../frames/f_2.html"')
+  expect(result.frames?.find(frame => frame.id === "f_2")?.html).toContain('src="../assets/')
+  expect(readBlob).toHaveBeenCalledWith("blob:https://child.test/image", "f_2")
+  expect(fetch.mock.calls.filter(([url]) => url === "https://child.test/path/shared.svg")).toHaveLength(1)
+})

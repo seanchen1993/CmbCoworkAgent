@@ -1,3 +1,4 @@
+import { insertDesignBodyScript } from "../../../shared/design-html-mutations"
 import type { DesignImportWarning } from "../../../shared/design-url-import"
 
 export interface CapturedPageSnapshot {
@@ -5,12 +6,21 @@ export interface CapturedPageSnapshot {
   title: string
   url: string
   textLength: number
+  baseUrl?: string
+  nodeCount?: number
+  frames?: Array<CapturedPageSnapshot & { id: string }>
   restrictedReason?: string
   warnings: DesignImportWarning[]
 }
 
 /** Executed in an isolated world. All helpers must remain inside this function. */
-export async function extractDesignPageSnapshot(): Promise<CapturedPageSnapshot> {
+export async function extractDesignPageSnapshot(options?: { bridgeKey: string; allowedFrameIds: string[] }): Promise<CapturedPageSnapshot> {
+  const startUrl = location.href
+  const yieldCapture = async () => {
+    await new Promise(resolve => setTimeout(resolve, 0))
+    if (options && !(window as unknown as Record<string, unknown>)[options.bridgeKey]) throw new Error("提取已取消或页面已改变")
+    if (location.href !== startUrl || !document.documentElement.isConnected) throw new Error("提取期间页面发生变化")
+  }
   const warnings: DesignImportWarning[] = []
   const warn = (code: string, message: string) => {
     if (!warnings.some((item) => item.code === code)) warnings.push({ code, message })
@@ -79,7 +89,29 @@ export async function extractDesignPageSnapshot(): Promise<CapturedPageSnapshot>
         warn("stylesheet", "部分动态样式无法读取，已尽量保留来源样式。")
     }
   }
+  const captureEmbedded = (source: Element, target: Element) => {
+    if (!(source instanceof HTMLIFrameElement || source instanceof HTMLObjectElement || source instanceof HTMLEmbedElement)) return
+    const bridge = options ? (window as unknown as Record<string, { slots?: WeakMap<Element, string> }>)[options.bridgeKey] : undefined
+    const id = bridge?.slots?.get(source)
+    if (source instanceof HTMLIFrameElement && id && options?.allowedFrameIds.includes(id)) {
+      for (const attr of ["src", "srcdoc", "data-design-capture-frame", "sandbox", "allow", "credentialless"]) target.removeAttribute(attr)
+      target.setAttribute("data-design-capture-frame", id)
+      target.setAttribute("src", `frames/${id}.html`)
+      target.setAttribute("sandbox", "allow-scripts allow-same-origin")
+      return
+    }
+    const placeholder = document.createElement("div")
+    for (const attr of [...target.attributes]) if (["id", "class", "style"].includes(attr.name)) placeholder.setAttribute(attr.name, attr.value)
+    const computed = getComputedStyle(source)
+    placeholder.style.width = computed.width
+    placeholder.style.height = computed.height
+    placeholder.style.background = "#f2f2f2"
+    placeholder.textContent = "嵌入内容暂不可读取"
+    target.replaceWith(placeholder)
+    warn("embedded_content", "部分嵌入内容不可读取或超过预算，已保留布局占位。")
+  }
   for (let i = 0; i < sourceNodes.length; i++) {
+    if (i && i % 250 === 0) await yieldCapture()
     const source = sourceNodes[i],
       target = clonedNodes[i]
     captureOpenLayer(source, target)
@@ -113,22 +145,11 @@ export async function extractDesignPageSnapshot(): Promise<CapturedPageSnapshot>
         warn("canvas_unreadable", "部分 Canvas 无法读取，已保留其布局占位。")
       }
     }
-    if (
-      source instanceof HTMLIFrameElement ||
-      source instanceof HTMLObjectElement ||
-      source instanceof HTMLEmbedElement
-    ) {
-      const placeholder = document.createElement("div")
-      const computed = getComputedStyle(source)
-      placeholder.style.cssText = `width:${computed.width};height:${computed.height};background:#f2f2f2;color:#666;display:grid;place-items:center;overflow:hidden`
-      placeholder.textContent = "嵌入内容"
-      target.replaceWith(placeholder)
-      warn("embedded_content", "嵌入页面和插件内容已使用布局占位，未复制其业务交互。")
-    }
+    captureEmbedded(source, target)
   }
   // Flatten open shadow trees. Inline computed styles preserve scoped styling.
   let shadowNodes = 0
-  const copyShadow = (source: Element, target: Element, depth: number) => {
+  const copyShadow = async (source: Element, target: Element, depth: number): Promise<void> => {
     if (depth > 8) {
       warn("shadow_depth", "部分深层组件未能完整提取。")
       return
@@ -141,9 +162,10 @@ export async function extractDesignPageSnapshot(): Promise<CapturedPageSnapshot>
       shadowNodes += originals.length
       if (shadowNodes > 5000) throw new Error("组件内部元素过多，请缩小页面范围后重试")
       const copies = [...target.querySelectorAll("*")]
-      originals.forEach((node, index) => {
+      for (const [index, node] of originals.entries()) {
+        if (index && index % 100 === 0) await yieldCapture()
         const copy = copies[index]
-        if (!copy) return
+        if (!copy) continue
         captureOpenLayer(node, copy)
         const computed = getComputedStyle(node)
         copy.setAttribute(
@@ -156,17 +178,18 @@ export async function extractDesignPageSnapshot(): Promise<CapturedPageSnapshot>
             ...slot.assignedNodes({ flatten: true }).map((child) => child.cloneNode(true))
           )
         }
-        copyShadow(node, copy, depth + 1)
-      })
+        captureEmbedded(node, copy)
+        await copyShadow(node, copy, depth + 1)
+      }
       target.querySelectorAll("style,link[rel~=stylesheet]").forEach((node) => node.remove())
       warn("shadow_dom", "开放 Shadow DOM 已转换为普通元素，组件交互不随快照迁移。")
     }
   }
-  sourceNodes.forEach((source, index) => {
-    if (source.shadowRoot) copyShadow(source, clonedNodes[index], 0)
+  for (const [index, source] of sourceNodes.entries()) {
+    if (source.shadowRoot) await copyShadow(source, clonedNodes[index], 0)
     else if (source.tagName.includes("-") && !source.children.length && visible(source))
       warn("custom_element", "部分自定义组件可能包含无法读取的内部内容，请检查预览。")
-  })
+  }
   for (const sheet of document.adoptedStyleSheets ?? []) {
     try {
       extraStyles.push(
@@ -188,8 +211,11 @@ export async function extractDesignPageSnapshot(): Promise<CapturedPageSnapshot>
   // Include template content in sanitization, even though it is currently inert.
   const clean = (root: ParentNode) => {
     root
-      .querySelectorAll("script,base,meta[http-equiv],object,embed,iframe,noscript")
+      .querySelectorAll("script,base,meta[http-equiv],object,embed,noscript")
       .forEach((node) => node.remove())
+    root.querySelectorAll("iframe").forEach(node => {
+      if (!options?.allowedFrameIds.includes(node.getAttribute("data-design-capture-frame") ?? "")) node.remove()
+    })
     root.querySelectorAll("link").forEach((node) => {
       if (!(node as HTMLLinkElement).relList.contains("stylesheet")) node.remove()
     })
@@ -210,6 +236,7 @@ export async function extractDesignPageSnapshot(): Promise<CapturedPageSnapshot>
       if (node.tagName === "STYLE")
         node.textContent = node.textContent?.replace(/<\/style/gi, "\\3c /style") ?? ""
       for (const attr of ["src", "href", "poster", "xlink:href"]) {
+        if (node.tagName === "IFRAME" && attr === "src") continue
         const value = node.getAttribute(attr)
         if (!value || value.startsWith("#") || value.startsWith("data:")) continue
         try {
@@ -246,6 +273,8 @@ export async function extractDesignPageSnapshot(): Promise<CapturedPageSnapshot>
     title: document.title,
     url: location.href,
     textLength: text.length,
+    baseUrl: document.baseURI,
+    nodeCount: sourceNodes.length + shadowNodes,
     restrictedReason,
     warnings
   }
@@ -282,8 +311,5 @@ export function designSnapshotRuntime(): void {
 }
 
 export function installSnapshotRuntime(html: string): string {
-  return html.replace(
-    /<\/body>/i,
-    `<script data-design-capture-runtime>(${designSnapshotRuntime.toString()})()</script></body>`
-  )
+  return insertDesignBodyScript(html, `(${designSnapshotRuntime.toString()})()`, "data-design-capture-runtime")
 }

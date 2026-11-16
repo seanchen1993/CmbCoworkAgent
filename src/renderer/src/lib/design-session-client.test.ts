@@ -303,3 +303,22 @@ describe("design view reconnect", () => {
     expect(h.client.get("ds_a")!.seq).toBe(5)
   })
 })
+
+it("merges lightweight UI broadcasts and replies once and reopens when its base is missing", async () => {
+  const h = fixture()
+  await h.client.initialize([])
+  await h.client.open("ds_a")
+  const cached = h.client.get("ds_a")!
+  const listener = vi.fn()
+  h.client.subscribe(listener)
+  const delta: DesignSessionChange = { id: "ds_a", baseSeq: cached.seq, seq: cached.seq + 1, meta: cached.meta, uiPatch: { zoom: 75 } }
+  h.api.patchUi = vi.fn(async () => { h.change(delta); return delta })
+  await h.client.patch("ds_a", { zoom: 75 })
+  expect(h.api.patch).not.toHaveBeenCalled()
+  expect(h.client.get("ds_a")?.state.zoom).toBe(75)
+  expect(h.client.get("ds_a")?.state.messages).toBe(cached.state.messages)
+  expect(listener).toHaveBeenCalledTimes(1)
+  h.change({ ...delta, baseSeq: 9, seq: 10 })
+  await Promise.resolve()
+  expect(h.api.open).toHaveBeenCalledTimes(2)
+})

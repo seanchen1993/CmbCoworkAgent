@@ -1,3 +1,4 @@
+import { isDesignUiPatch } from "../../../../shared/design-ui-patch"
 import {
   createDesignState,
   type DesignSessionChange,
@@ -51,6 +52,14 @@ export class DesignSessionClient {
       !change.deleted &&
       (!change.snapshot || this.snapshots.get(change.id)?.seq === change.seq)
     ) return
+    if (change.uiPatch) {
+      const cached = this.snapshots.get(change.id)
+      if (!cached || cached.seq !== change.baseSeq) {
+        if (this.opened.has(change.id)) void this.api.open(change.id).then(snapshot => this.apply(snapshot)).catch(console.error)
+        return
+      }
+      change = { ...change, snapshot: { ...cached, seq: change.seq, meta: change.meta, state: { ...cached.state, ...change.uiPatch } } }
+    }
     if (change.draftHtmlOmitted && change.snapshot?.state.draftPreview) {
       const cached = this.snapshots.get(change.id)?.state.draftPreview
       const draft = change.snapshot.state.draftPreview
@@ -151,13 +160,24 @@ export class DesignSessionClient {
     return this.pending.get(id) ?? Promise.resolve()
   }
 
+  private async sendPatch(id: string, patch: Partial<TabState>, meta?: Partial<SessionMeta>): Promise<DesignSessionSnapshot> {
+    if (!meta && this.api.patchUi && isDesignUiPatch(patch)) {
+      const change = await this.api.patchUi(id, patch)
+      this.accept(change)
+      const cached = this.get(id)
+      if (cached && cached.seq >= change.seq) return cached
+      return this.apply(await this.api.open(id))
+    }
+    return this.apply(await (meta === undefined ? this.api.patch(id, patch) : this.api.patch(id, patch, meta)))
+  }
+
   private flushInput(id: string): void {
     const draft = this.inputDrafts.get(id)
     if (!draft) return
     clearTimeout(draft.timer)
     this.inputDrafts.delete(id)
     void this.enqueue(id, async () =>
-      this.apply(await this.api.patch(id, { inputValue: draft.inputValue }))
+      this.sendPatch(id, { inputValue: draft.inputValue })
     ).then(draft.resolve, draft.reject)
   }
   inspectEditable(id: string): Promise<DesignEditableDocument> {
@@ -223,7 +243,7 @@ export class DesignSessionClient {
       })
       return promise
     }
-    return this.enqueue(id, async () => this.apply(await this.api.patch(id, patch, meta)))
+    return this.enqueue(id, () => this.sendPatch(id, patch, meta))
   }
   tweak(id: string, command: DesignTweakCommand): Promise<DesignSessionSnapshot> {
     return this.enqueue(id, async () => {

@@ -1,4 +1,5 @@
 import { parse, type DefaultTreeAdapterTypes as Tree } from "parse5"
+import { applyHtmlSourceEdits } from "./design-html-mutations"
 
 export const designAttr = (el: Tree.Element, key: string): string | undefined =>
   el.attrs.find((a) => a.name === key)?.value
@@ -108,9 +109,9 @@ export function decorateDesignNodes(html: string): string {
         (html[n.element.sourceCodeLocation!.startTag!.endOffset - 2] === "/" ? 2 : 1),
       id: n.id
     }))
-  for (const edit of edits.sort((a, b) => b.offset - a.offset))
-    html = html.slice(0, edit.offset) + ` data-design-node="${edit.id}"` + html.slice(edit.offset)
-  return html
+  return applyHtmlSourceEdits(html, edits.map(edit => ({
+    start: edit.offset, end: edit.offset, value: ` data-design-node="${edit.id}"`
+  })))
 }
 
 export function stripDesignHostRuntime(html: string): string {
@@ -129,7 +130,5 @@ export function stripDesignHostRuntime(html: string): string {
     else if ("childNodes" in node) node.childNodes.forEach(visit)
   }
   visit(doc)
-  for (const r of ranges.sort((a, b) => b.start - a.start))
-    html = html.slice(0, r.start) + html.slice(r.end)
-  return html
+  return applyHtmlSourceEdits(html, ranges.map(range => ({ ...range, value: "" })))
 }

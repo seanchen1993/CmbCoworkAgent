@@ -2896,6 +2896,7 @@ export function registerDesignHandlers(): void {
       return manager.patch(id, patch, meta)
     },
   )
+  ipcMain.handle("design:session-ui-patch", (_event, { id, patch }: { id: string; patch: import("../../shared/design-ui-patch").DesignUiPatch }) => manager.patchUi(id, patch))
   ipcMain.handle("design:session-tweak", (_event, { id, command }: { id: string; command: DesignTweakCommand }) => {
     const snapshot = manager.tweak(id, command)
     if ((command.scope === "artifact" || !snapshot.state.draftPreview) && snapshot.state.artifactPath) {

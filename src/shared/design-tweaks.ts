@@ -1,3 +1,4 @@
+import { insertDesignBodyScript } from "./design-html-mutations"
 import { parse, serialize, type DefaultTreeAdapterTypes as Tree } from "parse5"
 import type { DesignTweakSchemaEntry, DesignTweakValue } from "./design-protocol"
 
@@ -639,14 +640,10 @@ export function materializeTweaks(
         parentNode: block
       }
     ]
-  let result = serialize(doc).replace(
-    /<script\b[^>]*\bdata-design-tweaks-runtime[^>]*>[\s\S]*?<\/script\s*>/gi,
-    ""
-  )
-  if (includeRuntime)
-    result = result.replace(
-      /<\/body\s*>/i,
-      `<script data-design-tweaks-runtime>${DESIGN_TWEAKS_RUNTIME.replace(/<\/script/gi, "<\\/script")}</script></body>`
-    )
-  return result
+  for (const node of all.filter(node => node.tagName === "script" && attribute(node, "data-design-tweaks-runtime") !== undefined)) {
+    if (node.parentNode && "childNodes" in node.parentNode)
+      node.parentNode.childNodes = node.parentNode.childNodes.filter(child => child !== node)
+  }
+  const result = serialize(doc)
+  return includeRuntime ? insertDesignBodyScript(result, DESIGN_TWEAKS_RUNTIME, "data-design-tweaks-runtime") : result
 }

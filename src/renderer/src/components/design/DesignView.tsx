@@ -1,3 +1,5 @@
+import { prepareDesignPreview, commitPreparedDesignPreview, disposePreparedDesignPreviews } from "@/lib/design-preview-preparation"
+import { ensureEditMode } from "../../../../shared/design-legacy-edit-mode"
 import { useDesignUrlImport } from "./use-design-url-import"
 import type { DesignImportResult } from "../../../../shared/design-url-import"
 import { closeResourcePanelOverlay, openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
@@ -78,8 +80,8 @@ import { DesignLiveOutput } from "./DesignLiveOutput"
 import { TweaksParameterPanel } from "./TweaksParameterPanel"
 import { useDesignTweaks } from "./use-design-tweaks"
 import { useDesignDirectEdit } from "./use-design-direct-edit"
-import { materializeTweaks, readTweakDeclaration, readyTweakKeys } from "../../../../shared/design-tweaks"
-import { decorateDesignNodes, stripDesignHostRuntime } from "../../../../shared/design-node-ids"
+import { materializeTweaks, readyTweakKeys } from "../../../../shared/design-tweaks"
+import { stripDesignHostRuntime } from "../../../../shared/design-node-ids"
 import { shouldUseDesignPatch, type DesignPatchTarget } from "../../../../shared/design-patch"
 import type {
   AnswerValue,
@@ -307,7 +309,7 @@ function getCurrentDesignHtml(state: TabState | undefined): string {
 }
 
 function hasExistingDesignArtifact(state: TabState | undefined): boolean {
-  return Boolean(state?.draftPreview?.html.trim()) || getCurrentDesignHtml(state).length > 0
+  return Boolean(state?.draftPreview?.html.trim() || state?.html?.trim())
 }
 
 function canChangePageTemplate(state: TabState | undefined): boolean {
@@ -339,13 +341,14 @@ type DesignIterationRollbackSnapshot = {
 }
 
 function makeIterationRollbackSnapshot(
-  state: TabState | undefined
+  state: TabState | undefined,
+  source?: TabState
 ): DesignIterationRollbackSnapshot | null {
   if (!state) return null
   // Keep this in sync when adding user-editable TabState fields that must survive failed iterations.
   return {
-    html: state.html,
-    variations: state.variations,
+    html: source?.html ?? state.html,
+    variations: source?.variations ?? state.variations,
     activeVariationId: state.activeVariationId,
     comments: state.comments,
     draftComment: state.draftComment,
@@ -967,28 +970,13 @@ function normalizeSingleTabSession(
   }
 }
 
-async function readPreviewDependencyTextFile(resolvedPath: string): Promise<string | null> {
-  const result = await window.api.file.readText(resolvedPath)
-  return result.success ? (result.content ?? null) : null
-}
-
 async function readPreviewDependencyDataUrlFile(resolvedPath: string): Promise<string | null> {
   const result = await window.api.file.readDataUrl(resolvedPath)
   return result.success ? (result.dataUrl ?? null) : null
 }
 
 async function prepareHtmlForSrcDoc(html: string, htmlPath?: string | null): Promise<string> {
-  html = decorateDesignNodes(html)
-  const inlinedHtml = htmlPath
-    ? await buildDesignHtmlPreviewDocument({
-        html,
-        htmlPath,
-        readTextFile: readPreviewDependencyTextFile,
-        readDataUrlFile: readPreviewDependencyDataUrlFile
-      })
-    : html
-  const htmlWithBase = htmlPath ? injectBaseHref(inlinedHtml, makeFileHref(htmlPath)) : inlinedHtml
-  return ensureEditMode(htmlWithBase)
+  return prepareDesignPreview(html, htmlPath ?? "")
 }
 
 // ── Per-session storage ───────────────────────────────────
@@ -1077,17 +1065,19 @@ const SCROLL_INJECT = `(function(){
     var h=Math.max(de?de.scrollHeight:0,body?body.scrollHeight:0,de?de.offsetHeight:0,body?body.offsetHeight:0,window.innerHeight||0);
     window.parent.postMessage({type:'__iframe_scroll',x:window.scrollX,y:window.scrollY,width:w,height:h},'*');
   }
-  window.addEventListener('scroll',report,{passive:true});
-  window.addEventListener('resize',report);
+  var queued=false;
+  function schedule(){if(queued)return;queued=true;requestAnimationFrame(function(){queued=false;report();});}
+  window.addEventListener('scroll',schedule,{passive:true});
+  window.addEventListener('resize',schedule);
   if(typeof ResizeObserver!=='undefined'){
-    window.__st_ro=new ResizeObserver(report);
+    window.__st_ro=new ResizeObserver(schedule);
     window.__st_ro.observe(document.documentElement);
     if(document.body)window.__st_ro.observe(document.body);
   }
   report();
   window.__st_cleanup=function(){
-    window.removeEventListener('scroll',report);
-    window.removeEventListener('resize',report);
+    window.removeEventListener('scroll',schedule);
+    window.removeEventListener('resize',schedule);
     if(window.__st_ro){window.__st_ro.disconnect();delete window.__st_ro;}
     window.__st_active=false;delete window.__st_cleanup;
   };
@@ -1199,169 +1189,6 @@ const EDIT_SELECT_INJECT = `(function(){
 
 const EDIT_SELECT_CLEANUP = `(function(){if(window.__ed_cleanup)window.__ed_cleanup();})();`
 
-/**
- * Ensures every HTML file has a functioning EDITMODE block so Edit mode always works.
- *
- * Strategy 1 – markers already present: return as-is.
- * Strategy 2 – model wrote TWEAK_DEFAULTS without markers: inject the markers.
- * Strategy 3 – CSS custom properties in :root {}: derive EDITMODE from them.
- * Strategy 4 – hardcoded hex colors in <style>: replace them with CSS var() refs,
- *               inject a :root block, and add the EDITMODE script. Always succeeds.
- */
-function ensureEditMode(html: string): string {
-  if (readTweakDeclaration(html)) return materializeTweaks(html)
-  // 1. Already correct
-  if (/\/\*EDITMODE-BEGIN\*\//.test(html)) return html
-
-  // 2. Model wrote `const TWEAK_DEFAULTS = {...};` but without markers
-  const plainMatch = html.match(/\bconst\s+TWEAK_DEFAULTS\s*=\s*(\{[\s\S]{1,4000}?\})\s*;/)
-  if (plainMatch) {
-    return html.replace(plainMatch[1], `/*EDITMODE-BEGIN*/${plainMatch[1]}/*EDITMODE-END*/`)
-  }
-
-  // 3. CSS custom properties already declared in :root
-  const cssVars: Record<string, unknown> = {}
-  for (const rootBlock of html.matchAll(/:root\s*\{([^}]+)\}/g)) {
-    for (const [, name, rawVal] of rootBlock[1].matchAll(/--([a-zA-Z][\w-]+)\s*:\s*([^;]+);/g)) {
-      const v = rawVal.trim()
-      const key = name.replace(/-([a-z])/g, (_: string, c: string) => c.toUpperCase())
-      if (/^#[0-9a-fA-F]{3,8}$/.test(v)) cssVars[key] = v
-      else if (/^[\d.]+$/.test(v)) cssVars[key] = parseFloat(v)
-      else if (/^(true|false)$/.test(v)) cssVars[key] = v === "true"
-    }
-  }
-  if (Object.keys(cssVars).length > 0) return appendEditScript(html, cssVars)
-
-  // 4. No CSS variables at all — extract hardcoded hex colors from <style> blocks,
-  //    replace them with CSS var() references, and inject :root + EDITMODE script.
-  return injectColorVars(html)
-}
-
-/** Append an EDITMODE script to html. vars keys are camelCase → CSS --kebab-case vars. */
-function appendEditScript(html: string, vars: Record<string, unknown>): string {
-  const setLines = Object.keys(vars)
-    .map((k) => {
-      const cv = "--" + k.replace(/([A-Z])/g, "-$1").toLowerCase()
-      return `r.style.setProperty('${cv}',String(t['${k}']));`
-    })
-    .join("")
-  const script = `\n<script>(function(){
-var TWEAK_DEFAULTS=/*EDITMODE-BEGIN*/${JSON.stringify(vars)}/*EDITMODE-END*/;
-function applyTweaks(edits){var t=Object.assign({},TWEAK_DEFAULTS,edits||{}),r=document.documentElement;${setLines}}
-window.addEventListener('message',function(e){if(e.data&&e.data.type==='__set_tweak_keys')applyTweaks(e.data.edits);});
-window.parent.postMessage({type:'__edit_mode_available'},'*');
-applyTweaks({});
-})()</script>`
-  // Try </body>, then </html>, then just append
-  if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, script + "\n</body>")
-  if (/<\/html>/i.test(html)) return html.replace(/<\/html>/i, script + "\n</html>")
-  return html + script
-}
-
-/** Strategy 4: replace hardcoded hex colors in <style> with CSS vars, then inject EDITMODE. */
-function injectColorVars(html: string): string {
-  // Collect 6-digit hex colors from <style> blocks AND inline style="" attributes
-  const styleContent = [...html.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi)]
-    .map((m) => m[1])
-    .join("\n")
-  const inlineContent = [...html.matchAll(/style="([^"]*)"/gi)].map((m) => m[1]).join("\n")
-  const allCssContent = styleContent + "\n" + inlineContent
-
-  const freq: Map<string, number> = new Map()
-  for (const [, h] of allCssContent.matchAll(/#([0-9a-fA-F]{6})\b/g)) {
-    const c = "#" + h.toLowerCase()
-    freq.set(c, (freq.get(c) ?? 0) + 1)
-  }
-  // Also try 3-digit hex from inline styles
-  for (const [, h] of inlineContent.matchAll(/#([0-9a-fA-F]{3})\b/g)) {
-    const c = "#" + h[0] + h[0] + h[1] + h[1] + h[2] + h[2] // expand to 6-digit
-    freq.set(c, (freq.get(c) ?? 0) + 1)
-  }
-
-  // Take up to 6 most-used colors (skip pure black/white as they're usually decorative)
-  const palette = [...freq.entries()]
-    .sort(([, a], [, b]) => b - a)
-    .map(([c]) => c)
-    .filter((c) => c !== "#000000" && c !== "#ffffff" && c !== "#fff" && c !== "#000")
-    .slice(0, 6)
-
-  // If there are no interesting colors, still provide generic numeric tweaks
-  const vars: Record<string, unknown> = {}
-  const colorNames = ["primary", "secondary", "accent", "background", "surface", "muted"]
-
-  type Entry = { key: string; cssVar: string; hex: string }
-  const entries: Entry[] = palette.map((hex, i) => {
-    const key = colorNames[i] ?? `color${i + 1}`
-    return { key, cssVar: `--${colorNames[i] ?? "color-" + (i + 1)}`, hex }
-  })
-  entries.forEach(({ key, hex }) => {
-    vars[key] = hex
-  })
-
-  // Numeric tweaks extracted from CSS
-  const fsMatch = styleContent.match(/\bfont-size\s*:\s*([\d.]+)px/)
-  if (fsMatch) vars["fontSize"] = parseFloat(fsMatch[1])
-  const rrMatch = styleContent.match(/\bborder-radius\s*:\s*([\d.]+)px/)
-  if (rrMatch) vars["borderRadius"] = parseFloat(rrMatch[1])
-
-  // Fallback: if no colors at all, use sensible generic defaults
-  if (entries.length === 0) {
-    vars["primaryColor"] = "#3b82f6"
-    vars["fontSize"] = vars["fontSize"] ?? 16
-    vars["borderRadius"] = vars["borderRadius"] ?? 8
-    return appendEditScript(html, vars)
-  }
-
-  // Replace hardcoded colors in <style> blocks with var() references
-  let patched = html.replace(
-    /<style([^>]*)>([\s\S]*?)<\/style>/gi,
-    (_: string, attrs: string, content: string) => {
-      let updated = content
-      for (const { hex, cssVar } of entries) {
-        updated = updated.replace(
-          new RegExp(hex.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"),
-          `var(${cssVar})`
-        )
-      }
-      return `<style${attrs}>${updated}</style>`
-    }
-  )
-
-  // Build :root variable block
-  const rootBlock = `:root{${entries.map(({ cssVar, hex }) => `${cssVar}:${hex}`).join(";")}}\n`
-
-  // Inject :root into first <style> tag if present; otherwise inject a new <style> in <head>
-  if (/<style[^>]*>/i.test(patched)) {
-    patched = patched.replace(/<style([^>]*)>/, `<style$1>\n${rootBlock}`)
-  } else if (/<\/head>/i.test(patched)) {
-    patched = patched.replace(/<\/head>/i, `<style>\n${rootBlock}</style>\n</head>`)
-  } else {
-    patched = `<style>\n${rootBlock}</style>\n` + patched
-  }
-
-  // Build setProperty lines: color vars + optional numeric vars
-  const colorSet = entries
-    .map(({ key, cssVar }) => `r.style.setProperty('${cssVar}',String(t['${key}']));`)
-    .join("")
-  const numSet = [
-    vars["fontSize"] ? `r.style.setProperty('--font-size',t.fontSize+'px');` : "",
-    vars["borderRadius"] ? `r.style.setProperty('--border-radius',t.borderRadius+'px');` : ""
-  ].join("")
-
-  const script = `\n<script>(function(){
-var TWEAK_DEFAULTS=/*EDITMODE-BEGIN*/${JSON.stringify(vars)}/*EDITMODE-END*/;
-function applyTweaks(edits){var t=Object.assign({},TWEAK_DEFAULTS,edits||{}),r=document.documentElement;${colorSet}${numSet}}
-window.addEventListener('message',function(e){if(e.data&&e.data.type==='__set_tweak_keys')applyTweaks(e.data.edits);});
-window.parent.postMessage({type:'__edit_mode_available'},'*');
-applyTweaks({});
-})()</script>`
-
-  // Try </body>, then </html>, then just append
-  if (/<\/body>/i.test(patched)) return patched.replace(/<\/body>/i, script + "\n</body>")
-  if (/<\/html>/i.test(patched)) return patched.replace(/<\/html>/i, script + "\n</html>")
-  return patched + script
-}
-
 // Merge edits into the /*EDITMODE-BEGIN*/.../*EDITMODE-END*/ JSON block in an HTML string
 function mergeEditModeKeys(html: string, edits: Record<string, unknown>): string {
   return html.replace(/\/\*EDITMODE-BEGIN\*\/([\s\S]*?)\/\*EDITMODE-END\*\//, (_, existing) => {
@@ -1377,30 +1204,13 @@ function mergeEditModeKeys(html: string, edits: Record<string, unknown>): string
 
 function injectBaseHref(html: string, baseHref: string): string {
   if (!baseHref.trim()) return html
-  if (/<base\b/i.test(html)) return html
-  const safeHref = baseHref.replace(/"/g, "&quot;")
-  const baseTag = `<base href="${safeHref}">`
-
-  if (/<head[\s>]/i.test(html)) {
-    return html.replace(/<head([^>]*)>/i, `<head$1>\n${baseTag}`)
+  const doc = new DOMParser().parseFromString(html, "text/html")
+  if (!doc.querySelector("base")) {
+    const base = doc.createElement("base")
+    base.href = baseHref
+    doc.head.prepend(base)
   }
-  if (/<html[\s>]/i.test(html)) {
-    return html.replace(
-      /<html([^>]*)>/i,
-      `<html$1>\n<head>\n${baseTag}\n<meta charset="UTF-8">\n<meta name="viewport" content="width=device-width, initial-scale=1.0">\n</head>`
-    )
-  }
-  return `<!DOCTYPE html>
-<html>
-<head>
-${baseTag}
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-</head>
-<body>
-${html}
-</body>
-</html>`
+  return "<!DOCTYPE html>\n" + doc.documentElement.outerHTML
 }
 
 // Send a postMessage into the iframe
@@ -1548,7 +1358,7 @@ export function DesignView({
   const visibleDraft = showSavedVersion ? null : ts.draftPreview
   const visibleHtml = visibleDraft?.html ?? ts.html
   const hasPreviewContent = Boolean(visibleHtml.trim())
-  const showCanvasPanel = hasPreviewContent || ts.generationState === "generating"
+  const showCanvasPanel = hasPreviewContent || Boolean(currentSessionId && getDesignSessionClient().get(currentSessionId)?.state.html.trim()) || ts.generationState === "generating"
   const questionsInConversation = !showCanvasPanel && ts.rightTab === "questions"
   const isWelcome = !hasPreviewContent && !questionsInConversation && ts.messages.length === 0 &&
     !["asking", "generating", "questions_ready"].includes(ts.generationState)
@@ -1596,6 +1406,8 @@ export function DesignView({
     updateTs(activeTabId, (prev) => ({ zoom: typeof val === "function" ? val(prev.zoom) : val }))
 
   // ── helpers ──────────────────────────────────────────────
+
+  useEffect(() => () => disposePreparedDesignPreviews(), [])
 
   const updateTs = useCallback(
     (tabId: string, patch: Partial<TabState> | ((prev: TabState) => Partial<TabState>), meta?: Partial<SessionMeta>, render = true) => {
@@ -1648,6 +1460,44 @@ export function DesignView({
     [requirementEntry, updateTs]
   )
 
+  const localUiFrame = useRef<number | null>(null)
+  const localUiTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const localUiPending = useRef<{ id: string; patch: Partial<TabState> } | null>(null)
+  const flushLocalUi = useCallback(() => {
+    if (localUiTimer.current) clearTimeout(localUiTimer.current)
+    localUiTimer.current = null
+    const pending = localUiPending.current
+    localUiPending.current = null
+    if (pending) void getDesignSessionClient().patch(pending.id, pending.patch).catch(error => showToast(String(error)))
+  }, [showToast])
+  const updateLocalUi = useCallback((patch: Partial<TabState>, persist = false) => {
+    const tabId = activeTabIdRef.current
+    const previous = tabStatesRef.current[tabId]
+    if (!previous || Object.entries(patch).every(([key, value]) => previous[key as keyof TabState] === value)) return
+    tabStatesRef.current = { ...tabStatesRef.current, [tabId]: { ...previous, ...patch } }
+    if (localUiFrame.current === null) localUiFrame.current = requestAnimationFrame(() => {
+      localUiFrame.current = null
+      setTabStates(tabStatesRef.current)
+    })
+    const id = currentSessionIdRef.current
+    if (persist && id) {
+      if (localUiPending.current?.id !== id) flushLocalUi()
+      localUiPending.current = { id, patch: { ...localUiPending.current?.patch, ...patch } }
+      if (localUiTimer.current) clearTimeout(localUiTimer.current)
+      localUiTimer.current = setTimeout(flushLocalUi, 500)
+    }
+  }, [flushLocalUi])
+  useEffect(() => {
+    const flush = () => flushLocalUi()
+    window.addEventListener("pagehide", flush)
+    return () => {
+      window.removeEventListener("pagehide", flush)
+      flushLocalUi()
+      if (localUiFrame.current !== null) cancelAnimationFrame(localUiFrame.current)
+      localUiFrame.current = null
+    }
+  }, [currentSessionId, flushLocalUi])
+
   const directEditor = useDesignDirectEdit({
     id: currentSessionId,
     active: (activeMode === "edit" || activeMode === "move") && !sessionOpening,
@@ -1657,7 +1507,7 @@ export function DesignView({
     tweakRevision: ts.tweaks?.revision,
     variationId: ts.activeVariationId,
     iframe: iframeRef,
-    onSelect: (selectedElement) => updateTs(activeTabIdRef.current, { selectedElement }),
+    onSelect: (selectedElement) => updateLocalUi({ selectedElement }),
     onError: showToast
   })
 
@@ -1679,12 +1529,12 @@ export function DesignView({
       const wrapperX = (previewScrollRef.current?.scrollLeft ?? 0) / scale
       const wrapperY = (previewScrollRef.current?.scrollTop ?? 0) / scale
       const win = iframeRef.current?.contentWindow
-      updateTs(activeTabIdRef.current, {
+      updateLocalUi({
         iframeScrollX: wrapperX + (iframeX ?? win?.scrollX ?? 0),
         iframeScrollY: wrapperY + (iframeY ?? win?.scrollY ?? 0)
-      })
+      }, true)
     },
-    [updateTs]
+    [updateLocalUi]
   )
 
   const updatePreviewContentSize = useCallback(
@@ -1699,12 +1549,12 @@ export function DesignView({
       ) {
         return
       }
-      updateTs(activeTabIdRef.current, {
+      updateLocalUi({
         iframeContentWidth: nextWidth,
         iframeContentHeight: nextHeight
       })
     },
-    [updateTs]
+    [updateLocalUi]
   )
 
   const loadAvailableSkills = useCallback(async (): Promise<void> => {
@@ -1935,6 +1785,8 @@ export function DesignView({
         state.selectedElement = previous.selectedElement
         state.iframeScrollX = previous.iframeScrollX
         state.iframeScrollY = previous.iframeScrollY
+        state.iframeContentWidth = previous.iframeContentWidth
+        state.iframeContentHeight = previous.iframeContentHeight
       }
       sourceHtml = snapshot.state.html
       if (initial) setWorkspacePath(snapshot.workspacePath)
@@ -1963,7 +1815,11 @@ export function DesignView({
             tabStatesRef.current = { [SINGLE_DESIGN_TAB_ID]: hydrated }
             setTabStates(tabStatesRef.current)
           })
-          .catch((error) => console.warn("[Design] Preview hydration failed", error))
+          .catch((error) => {
+            console.warn("[Design] Preview hydration failed", error)
+            if (!disposed && currentSessionIdRef.current === id && client.get(id)?.state.html === raw)
+              setSessionLoadError(error instanceof Error ? error.message : String(error))
+          })
       }
     }
     const unsubscribe = client.subscribe(applySnapshot)
@@ -2861,9 +2717,11 @@ export function DesignView({
         const tabId = activeTabIdRef.current
         const state = tabStatesRef.current[tabId]
         if (!state) return
+        const source = getDesignSessionClient().get(currentSessionIdRef.current ?? "")?.state ?? state
+        const sourceVariations = source.variations.length ? source.variations : parseVariations(source.html)
         const targetHtml = state.activeVariationId
-          ? (state.variations.find((v) => v.id === state.activeVariationId)?.html ?? state.html)
-          : state.html
+          ? (sourceVariations.find((v) => v.id === state.activeVariationId)?.html ?? source.html)
+          : source.html
         const updated = mergeEditModeKeys(targetHtml, edits)
         scheduleArtifactSave({
           artifactId: makeDesignArtifactId(currentSessionIdRef.current, tabId),
@@ -2875,7 +2733,7 @@ export function DesignView({
         updateTs(tabId, (latest) =>
           latest.activeVariationId
             ? {
-                variations: latest.variations.map((variation) =>
+                variations: sourceVariations.map((variation) =>
                   variation.id === latest.activeVariationId
                     ? { ...variation, html: updated }
                     : variation
@@ -2964,11 +2822,8 @@ export function DesignView({
           artifactRevision: state.artifactRevision ?? 0,
           observations,
           viewport: { width: iframeRef.current?.contentWindow?.innerWidth ?? 1440, height: iframeRef.current?.contentWindow?.innerHeight ?? 1000 } } : undefined,
-        // Package sessions use the durable source in the main process, not the
-        // preview document containing inlined multi-megabyte vendor bundles.
-        currentHtml: isIteration && !local && !state.creationSelection?.template.package
-          ? getCurrentDesignHtml(tabStatesRef.current[SINGLE_DESIGN_TAB_ID])
-          : undefined,
+        // The manager supplies durable source, including local frame/asset paths.
+        currentHtml: undefined,
         imageData: image?.base64,
         mimeType: image?.mimeType,
         skill,
@@ -3168,7 +3023,7 @@ ${commentLines}${variantNote}`
         state
       )
       const cleanMsg = `📝 ${text.trim().slice(0, 60)}`
-      const rollbackSnapshot = makeIterationRollbackSnapshot(state)
+      const rollbackSnapshot = makeIterationRollbackSnapshot(state, getDesignSessionClient().get(currentSessionIdRef.current ?? "")?.state)
       if (rollbackSnapshot && draft) {
         rollbackSnapshot.comments = [
           ...rollbackSnapshot.comments,
@@ -3232,7 +3087,7 @@ ${commentLines}${variantNote}`
         state
       )
       const cleanMsg = `📝 ${text.trim().slice(0, 60)}`
-      const rollbackSnapshot = makeIterationRollbackSnapshot(state)
+      const rollbackSnapshot = makeIterationRollbackSnapshot(state, getDesignSessionClient().get(currentSessionIdRef.current ?? "")?.state)
 
       if (rollbackSnapshot) rollbackSnapshot.comments = rollbackSnapshot.comments.map((item) =>
         item.id === commentId ? { ...item, text } : item
@@ -3313,7 +3168,7 @@ ${commentLines}${variantNote}`
       state
     )
     const cleanMsg = `📝 发送 ${pending.length} 条批注`
-    const rollbackSnapshot = makeIterationRollbackSnapshot(state)
+    const rollbackSnapshot = makeIterationRollbackSnapshot(state, getDesignSessionClient().get(currentSessionIdRef.current ?? "")?.state)
 
     updateTs(tabId, (prev) => ({
       comments: [],
@@ -3625,7 +3480,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
     const cleanMsg = userInstruction
       ? `✏️ ${userInstruction.slice(0, 60)}`
       : `✏️ 发送 ${annotationCount} 条绘制标记`
-    const rollbackSnapshot = makeIterationRollbackSnapshot(state)
+    const rollbackSnapshot = makeIterationRollbackSnapshot(state, getDesignSessionClient().get(currentSessionIdRef.current ?? "")?.state)
 
     updateTs(tabId, (prev) => ({
       inputValue: "",
@@ -3856,7 +3711,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
           skillReference,
           stateBeforeSend?.artifactPath ?? null,
           false,
-          hasExistingDesign ? makeIterationRollbackSnapshot(stateBeforeSend) : undefined
+          hasExistingDesign ? makeIterationRollbackSnapshot(stateBeforeSend, getDesignSessionClient().get(currentSessionIdRef.current ?? "")?.state) : undefined
         )
       } else {
         startGenerationFromImage(
@@ -3919,7 +3774,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
 
       const iterationPrompt = `User follow-up instruction: ${prompt}${variantNote}\n\n始终使用中文回答。`
       const artifactPath = currentState?.artifactPath
-      const rollbackSnapshot = makeIterationRollbackSnapshot(currentState)
+      const rollbackSnapshot = makeIterationRollbackSnapshot(currentState, getDesignSessionClient().get(currentSessionIdRef.current ?? "")?.state)
 
       startGeneration(
         iterationPrompt + contextSuffix,
@@ -4759,7 +4614,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       {requirementEntry ? (
         <RequirementDesignContextBar
           entry={requirementEntry}
-          html={getCurrentDesignHtml(ts)}
+          html={getCurrentDesignHtml(getDesignSessionClient().get(currentSessionId)?.state ?? ts)}
           htmlId={currentSessionId}
           artifactPath={ts.artifactPath}
           artifactMetadata={ts.artifactMetadata as Record<string, unknown> | null}
@@ -4768,7 +4623,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
               ? "需求关联正在初始化，请稍候"
               : isGenerating
                 ? "设计正在生成中，完成后才能同步到需求"
-                : !getCurrentDesignHtml(ts).trim()
+                : !getCurrentDesignHtml(getDesignSessionClient().get(currentSessionId)?.state ?? ts).trim()
                   ? "当前设计会话尚未生成可同步的原型 HTML，暂时无法同步到关联需求"
                   : undefined
           }
@@ -5626,7 +5481,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                                 appliedPatch={ts.appliedPatch}
                                 artifactRevision={ts.artifactRevision ?? 0}
                                 initialScroll={{ x: ts.iframeScrollX, y: ts.iframeScrollY }}
-                                onVisible={(runId, revision) => { const id = currentSessionIdRef.current; if (id) getDesignSessionClient().previewVisible(id, runId, revision) }}
+                                onVisible={(runId, revision, visibleHtml) => { if (!visibleDraft && visibleHtml) commitPreparedDesignPreview(visibleHtml); const id = currentSessionIdRef.current; if (id) getDesignSessionClient().previewVisible(id, runId, revision) }}
                                 style={{
                                   display: "block",
                                   position: "absolute",
@@ -5646,7 +5501,8 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                                       ? "auto"
                                       : "none"
                                 }}
-                                onLoad={(isDraft) => {
+                                onLoad={(isDraft, loadedHtml) => {
+                                  if (!isDraft && loadedHtml) commitPreparedDesignPreview(loadedHtml)
                                   directEditor.onLoad()
                                   // Block link/form navigation so clicks inside the preview
                                   // never navigate the iframe away from the design
@@ -5658,7 +5514,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                                   injectIntoIframe(iframeRef.current, SCROLL_INJECT)
                                   if (isDraft) return
                                   // Reset scroll state — new iframe always starts at (0, 0)
-                                  updateTs(activeTabId, {
+                                  updateLocalUi({
                                     iframeScrollX: 0,
                                     iframeScrollY: 0,
                                     iframeContentWidth: 0,

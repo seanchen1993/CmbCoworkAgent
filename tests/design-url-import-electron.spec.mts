@@ -25,7 +25,10 @@ const listen = async (server: Server) => {
 }
 const assets = createServer(async (request, response) => {
   const url = request.url || ""
-  if (url === "/styles/main.css") {
+  if (url === "/frame-cross") {
+    response.setHeader("content-type", "text/html; charset=utf-8")
+    response.end(`<html><body><h2>CROSS_FRAME</h2><img src="/pixel.svg"><img id="frame-blob"><script>document.getElementById('frame-blob').src=URL.createObjectURL(new Blob(['<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>'],{type:'image/svg+xml'}));</script></body></html>`)
+  } else if (url === "/styles/main.css") {
     response.setHeader("content-type", "text/css")
     response.end(
       '@import "nested/colors.css";@font-face{font-family:CaptureFont;src:url(../font.woff2)}body{font-family:CaptureFont;background:rgb(240,245,250)}#content{background-image:url(../pixel.svg);padding:12px}'
@@ -54,6 +57,21 @@ const assetsOrigin = await listen(assets)
 const website = createServer((request, response) => {
   const pathname = new URL(request.url || "/", "http://site.test").pathname
   response.setHeader("content-type", "text/html; charset=utf-8")
+  if (pathname === "/frames") {
+    response.end(`<html><head><title>FRAME_TREE</title></head><body>
+      <iframe src="/same" onload="this.contentDocument.querySelector('h2').textContent='FIRST_INSTANCE'"></iframe>
+      <iframe src="/same" onload="this.contentDocument.querySelector('h2').textContent='SECOND_INSTANCE'"></iframe>
+      <iframe src="${assetsOrigin}/frame-cross"></iframe>
+      <iframe src="/huge"></iframe>
+      <iframe srcdoc="<html><body>SRCDOC_FRAME<iframe src='${origin}/nested'></iframe></body></html>"></iframe>
+      </body></html>`)
+    return
+  }
+  if (pathname === "/huge") { response.end("<html><body>" + "<span>超出节点预算</span>".repeat(30001) + "</body></html>"); return }
+  if (pathname === "/same" || pathname === "/nested") {
+    response.end(`<html><body><h2>${pathname === "/same" ? "SAME_FRAME" : "NESTED_FRAME"}</h2><img src="${assetsOrigin}/pixel.svg"></body></html>`)
+    return
+  }
   if (pathname === "/login") {
     response.setHeader("set-cookie", "auth=shared-profile; HttpOnly; Path=/; SameSite=Lax")
     response.end("<p>登录已完成</p>")
@@ -238,6 +256,18 @@ try {
   await finish("current-page", false)
   console.log("PASS current-page capture preserves tab storage, input state and open dialog/popover state")
 
+  const frameResult = await run("frame-tree", { url: origin + "/frames" })
+  assert.equal(frameResult.success, true, JSON.stringify(frameResult))
+  const frameDirectory = path.join(path.dirname(frameResult.artifactPath!), "frames")
+  const frameFiles = await fs.readdir(frameDirectory)
+  assert.equal(frameFiles.length, 6)
+  assert.ok(frameResult.warnings.some(warning => warning.code === "frame_screenshot"))
+  const allFrameHtml = (await Promise.all(frameFiles.map(file => fs.readFile(path.join(frameDirectory, file), "utf8")))).join("\n")
+  for (const text of ["FIRST_INSTANCE", "SECOND_INSTANCE", "CROSS_FRAME", "SRCDOC_FRAME", "NESTED_FRAME"]) assert.ok(allFrameHtml.includes(text), text)
+  assert.doesNotMatch(allFrameHtml, /createObjectURL|src="https?:/)
+  await finish("frame-tree")
+  console.log("PASS same URL instances, cross-origin, srcdoc, nested frame capture and per-frame blobs")
+
   const pending = run("cancel-test", { url: origin + "/slow" })
   await new Promise((resolve) => setTimeout(resolve, 250))
   const wrongOwner = await application.evaluate(() =>
@@ -257,8 +287,26 @@ try {
   assert.equal((await navigation).status, "failed")
   console.log("PASS cancellation ownership and navigation races")
 
+  website.closeAllConnections()
+  assets.closeAllConnections()
   await new Promise<void>((resolve) => website.close(() => resolve()))
   await new Promise<void>((resolve) => assets.close(() => resolve()))
+  const offlineFrames = path.join(temporary, "offline-frames")
+  await fs.cp(path.dirname(frameResult.artifactPath!), offlineFrames, { recursive: true })
+  const frameOffline = await application.evaluate(async ({ BrowserWindow }, filePath) => {
+    const preview = new BrowserWindow({ show: false, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } })
+    try {
+      await preview.loadFile(filePath)
+      return await preview.webContents.executeJavaScript(`(() => {
+        const read = doc => ({ text: doc.body.innerText, images: [...doc.images].every(img => img.complete && img.naturalWidth > 0), frames: [...doc.querySelectorAll('iframe')].map(frame => read(frame.contentDocument)) });
+        return read(document);
+      })()`)
+    } finally { preview.destroy() }
+  }, path.join(offlineFrames, "index.html"))
+  const offlineText = JSON.stringify(frameOffline)
+  for (const text of ["FIRST_INSTANCE", "SECOND_INSTANCE", "CROSS_FRAME", "SRCDOC_FRAME", "NESTED_FRAME"]) assert.ok(offlineText.includes(text), text)
+  assert.doesNotMatch(offlineText, /"images":false/)
+  console.log("PASS independent offline frame tree with complete images")
   const exported = path.join(temporary, "exported")
   await fs.cp(path.dirname(result.artifactPath!), exported, { recursive: true })
   const offline = await application.evaluate(
