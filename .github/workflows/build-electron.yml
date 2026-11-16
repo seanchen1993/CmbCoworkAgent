@@ -21,11 +21,11 @@ on:
           - smoke
         default: uat
       sign_macos:
-        description: Sign the macOS installer with Developer ID and notarize it
+        description: Sign and notarize the macOS DMG and portable app
         type: boolean
         default: false
       macos_recipient_certificate:
-        description: Optional PEM RSA public certificate for encrypted installer delivery
+        description: Optional PEM RSA public certificate for encrypted macOS delivery
         type: string
 
 concurrency:
@@ -609,6 +609,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check macOS signing credentials
+        if: inputs.sign_macos
+        shell: bash
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          missing=0
+          for secret in CSC_LINK CSC_KEY_PASSWORD APPLE_API_KEY_BASE64 APPLE_API_KEY_ID APPLE_API_ISSUER; do
+            if [[ -z "${!secret}" ]]; then
+              echo "::error::Missing GitHub Actions secret: $secret"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -661,9 +680,7 @@ jobs:
           set -euo pipefail
           args=(--mac dmg --arm64 --publish=never --config.mac.notarize=false)
           if [[ "$SIGN_MACOS" == "true" ]]; then
-            : "${CSC_LINK:?Set the CSC_LINK secret to the base64 Developer ID Application certificate (.p12)}"
-            : "${CSC_KEY_PASSWORD:?Set the CSC_KEY_PASSWORD secret to the certificate password}"
-            args+=(--config.forceCodeSigning=true --config.dmg.sign=true)
+            args+=(--config.forceCodeSigning=true --config.mac.type=distribution --config.dmg.sign=true)
           else
             unset CSC_LINK CSC_KEY_PASSWORD
             args+=(--config.mac.identity=-)
@@ -678,11 +695,11 @@ jobs:
           echo "dmg=${images[0]}" >> "$GITHUB_OUTPUT"
           echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
-      - name: Verify and smoke-test the packaged app
+      - name: Verify the app in the DMG
+        id: smoke
         shell: bash
         env:
           DMG_PATH: ${{ steps.pkg.outputs.dmg }}
-          MACOS_CONFIGURATION: ${{ inputs.macos_configuration }}
         run: |
           set -euo pipefail
           hdiutil verify "$DMG_PATH"
@@ -694,62 +711,126 @@ jobs:
           app_path="$smoke_dir/CMBDevClaw.app"
           ditto "$mount_point/CMBDevClaw.app" "$app_path"
           codesign --verify --deep --strict --verbose=2 "$app_path"
-          if [[ "$MACOS_CONFIGURATION" == "uat" ]]; then
-            node scripts/smoke-macos-package.mjs "$app_path" --bundle-only
-          else
-            node scripts/smoke-macos-package.mjs "$app_path"
-          fi
+          node scripts/smoke-macos-package.mjs "$app_path" --bundle-only
+          echo "app=$app_path" >> "$GITHUB_OUTPUT"
 
-      - name: Notarize and staple the signed DMG
+      - name: Notarize and staple the signed DMG and app
         if: inputs.sign_macos
         shell: bash
         env:
           DMG_PATH: ${{ steps.pkg.outputs.dmg }}
+          APP_PATH: ${{ steps.smoke.outputs.app }}
           APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
           set -euo pipefail
-          : "${APPLE_API_KEY_BASE64:?Set the APPLE_API_KEY_BASE64 secret to the base64 App Store Connect API key (.p8)}"
-          : "${APPLE_API_KEY_ID:?Set the APPLE_API_KEY_ID secret}"
-          : "${APPLE_API_ISSUER:?Set the APPLE_API_ISSUER secret}"
           codesign --verify --strict --verbose=2 "$DMG_PATH"
+          for signed_item in "$DMG_PATH" "$APP_PATH"; do
+            if ! codesign -d --verbose=2 "$signed_item" 2>&1 | grep '^Authority=Developer ID Application:'; then
+              echo "::error::Missing Developer ID Application signature: $signed_item"
+              exit 1
+            fi
+          done
+
           key_path="$(mktemp "${RUNNER_TEMP}/cmbdevclaw-notary-key.XXXXXX")"
           trap 'rm -f "$key_path"' EXIT
           printf '%s' "$APPLE_API_KEY_BASE64" | base64 -D > "$key_path"
-          result="$(xcrun notarytool submit "$DMG_PATH" --key "$key_path" \
-            --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" --wait --timeout 20m \
-            --output-format json)"
+          credentials=(--key "$key_path" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER")
+          status=0
+          result="$(xcrun notarytool submit "$DMG_PATH" "${credentials[@]}" --wait --timeout 20m \
+            --output-format json)" || status=$?
           printf '%s\n' "$result"
-          jq -e '.status == "Accepted"' <<< "$result"
+          if [[ "$status" -ne 0 ]] || ! jq -e '.status == "Accepted"' <<< "$result"; then
+            submission="$(jq -r '.id // empty' <<< "$result" 2>/dev/null || true)"
+            if [[ -n "$submission" ]]; then
+              xcrun notarytool log "$submission" "${credentials[@]}" || true
+            fi
+            echo "::error::Apple notarization did not accept the macOS disk image"
+            exit 1
+          fi
+
+          # Notarization returns a ticket for the signed app nested in the submitted DMG.
           xcrun stapler staple "$DMG_PATH"
           xcrun stapler validate "$DMG_PATH"
+          spctl --assess --type open --context context:primary-signature --verbose "$DMG_PATH"
+          xcrun stapler staple "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
 
-      - name: Prepare macOS installer for delivery
+      - name: Create and verify the portable app ZIP
+        id: portable
+        shell: bash
+        env:
+          DMG_PATH: ${{ steps.pkg.outputs.dmg }}
+          APP_PATH: ${{ steps.smoke.outputs.app }}
+          MACOS_CONFIGURATION: ${{ inputs.macos_configuration }}
+          SIGN_MACOS: ${{ inputs.sign_macos }}
+        run: |
+          set -euo pipefail
+          zip_path="${DMG_PATH%.dmg}-portable.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$zip_path"
+
+          unzip_dir="$(mktemp -d "${RUNNER_TEMP}/cmbdevclaw-portable.XXXXXX")"
+          ditto -x -k "$zip_path" "$unzip_dir"
+          unzipped_app="$unzip_dir/CMBDevClaw.app"
+          codesign --verify --deep --strict --verbose=2 "$unzipped_app"
+          if [[ "$SIGN_MACOS" == "true" ]]; then
+            xcrun stapler validate "$unzipped_app"
+            syspolicy_check distribution "$unzipped_app"
+          fi
+          if [[ "$MACOS_CONFIGURATION" == "uat" ]]; then
+            node scripts/smoke-macos-package.mjs "$unzipped_app" --bundle-only
+          else
+            node scripts/smoke-macos-package.mjs "$unzipped_app"
+          fi
+          echo "zip=$zip_path" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare macOS packages for delivery
         id: delivery
         shell: bash
         env:
           DMG_PATH: ${{ steps.pkg.outputs.dmg }}
+          ZIP_PATH: ${{ steps.portable.outputs.zip }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+          MACOS_CONFIGURATION: ${{ inputs.macos_configuration }}
+          SIGNING: ${{ inputs.sign_macos && 'notarized' || 'adhoc' }}
           RECIPIENT_CERTIFICATE: ${{ inputs.macos_recipient_certificate }}
         run: |
           set -euo pipefail
-          delivery_path="$DMG_PATH"
+          prefix="dist/CMBDevClaw-${VERSION}-macos-arm64-${MACOS_CONFIGURATION}-${SIGNING}"
+          delivery_dmg="$prefix.dmg"
+          delivery_zip="$prefix-portable.zip"
           if [[ -n "$RECIPIENT_CERTIFICATE" ]]; then
             openssl="$(brew --prefix openssl@3)/bin/openssl"
             cert_path="$(mktemp "${RUNNER_TEMP}/cmbdevclaw-recipient.XXXXXX")"
             trap 'rm -f "$cert_path"' EXIT
             printf '%s\n' "$RECIPIENT_CERTIFICATE" > "$cert_path"
-            delivery_path="${DMG_PATH}.cms"
-            "$openssl" cms -encrypt -binary -aes-256-gcm -outform DER \
-              -in "$DMG_PATH" -out "$delivery_path" -recip "$cert_path" \
-              -keyopt rsa_padding_mode:oaep -keyopt rsa_oaep_md:sha256
+            delivery_dmg="$delivery_dmg.cms"
+            delivery_zip="$delivery_zip.cms"
+            encrypt() {
+              "$openssl" cms -encrypt -binary -aes-256-gcm -outform DER \
+                -in "$1" -out "$2" -recip "$cert_path" \
+                -keyopt rsa_padding_mode:oaep -keyopt rsa_oaep_md:sha256
+            }
+            encrypt "$DMG_PATH" "$delivery_dmg"
+            encrypt "$ZIP_PATH" "$delivery_zip"
+          else
+            mv "$DMG_PATH" "$delivery_dmg"
+            mv "$ZIP_PATH" "$delivery_zip"
           fi
-          echo "path=$delivery_path" >> "$GITHUB_OUTPUT"
+          echo "dmg=$delivery_dmg" >> "$GITHUB_OUTPUT"
+          echo "zip=$delivery_zip" >> "$GITHUB_OUTPUT"
 
-      - name: Upload macOS installer
-        uses: actions/upload-artifact@v4
+      - name: Upload macOS DMG
+        uses: actions/upload-artifact@v7
         with:
-          name: CMBDevClaw-macos-arm64-${{ steps.pkg.outputs.version }}-${{ inputs.macos_configuration }}-${{ inputs.sign_macos && 'notarized' || 'adhoc' }}-installer
-          path: ${{ steps.delivery.outputs.path }}
+          path: ${{ steps.delivery.outputs.dmg }}
+          archive: false
           if-no-files-found: error
-          compression-level: 0
+
+      - name: Upload macOS portable app ZIP
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.delivery.outputs.zip }}
+          archive: false
+          if-no-files-found: error

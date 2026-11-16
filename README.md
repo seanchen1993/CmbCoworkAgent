@@ -140,25 +140,61 @@ npm run dist
 
 ### macOS ARM64 打包与验证
 
-当前 macOS 目标为 Apple Silicon（ARM64），系统要求 macOS 13 或更高。使用 Node.js 22 和 npm 10 以上版本。macOS 通过重新下载安装 DMG 升级。
+当前 macOS 目标为 Apple Silicon（ARM64），系统要求 macOS 13 或更高。打包使用 Node.js 22 和 npm 10 以上版本。
 
-在 GitHub Actions 中手动运行 **Build Electron App**，选择目标分支和 `macos-arm64`。
+在 GitHub Actions 中手动运行 **Build Electron App**，选择目标分支和 `platform=macos-arm64`。
 默认 `macos_configuration=uat`，与 Windows/UOS 共用 `ENV_ENCRYPTION_KEY`，解密同一份 `.env` 后打包。
-UAT 配置可能使用内网渲染地址，Actions 检查 DMG、应用签名和内置 `rg`，企业登录在内网验收。
+UAT 配置可能使用内网渲染地址，Actions 检查 DMG、解压后的 `.app`、签名和原生组件，企业登录在内网验收。
 选择 `smoke` 时使用空 `.env`，离线验证应用主窗口和终端。
 
-Vite 会将应用引用的环境变量打进安装包。如果配置包含客户端凭据，公开 Actions 构建需在
-`macos_recipient_certificate` 中提供收件方的 RSA 公钥证书（PEM 格式），产物为加密的 `.dmg.cms`。
-在受控设备上用对应的证书和私钥解密，私钥保存在设备上。私有 Actions 仓库可直接上传 DMG。
+#### 签名与公证
+
+给用户分发时启用 `sign_macos`。工作流使用 Developer ID 签名，向 Apple 提交公证，并验证
+DMG 和 ZIP 内 `.app` 的公证票据。关闭 `sign_macos` 时使用临时签名，供构建和冒烟验证。
+[Apple 公证流程](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)
+
+由 Apple Developer Program 团队的 Account Holder 创建 **Developer ID Application** 证书。
+在持有对应私钥的 Mac 上，从“钥匙串访问 → 我的证书”将证书和配对私钥一起导出为带密码的 `.p12`。
+[创建 Developer ID 证书](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/) · [导出签名身份](https://developer.apple.com/documentation/xcode/sharing-your-teams-signing-certificates)
+
+公证使用同一团队的 **App Store Connect Team API Key**。首次使用 API 时由 Account Holder 申请访问。
+由 Account Holder 或 Admin 在 **Users and Access → Integrations → App Store Connect API → Team Keys**
+创建 `Developer` 角色的团队密钥，下载一次性提供的 `AuthKey_<KEY_ID>.p8`，记录该密钥的 Key ID 和页面上的 Issuer ID。
+[Apple Team API Keys](https://developer.apple.com/help/app-store-connect/get-started/app-store-connect-api/) · [公证凭据](https://www.electron.build/v26/docs/notarization/)
+
+在仓库 **Settings → Secrets and variables → Actions** 中配置以下 GitHub Secrets。
+
+| Secret | 值 |
+| --- | --- |
+| `CSC_LINK` | 含证书及私钥的 `.p12` 文件的单行 Base64 |
+| `CSC_KEY_PASSWORD` | 导出 `.p12` 时设置的密码 |
+| `APPLE_API_KEY_BASE64` | App Store Connect 团队 `.p8` 私钥文件的单行 Base64 |
+| `APPLE_API_KEY_ID` | 同一团队 API Key 的 Key ID |
+| `APPLE_API_ISSUER` | App Store Connect 显示的 Issuer ID |
+
+#### 下载与打开
+
+构建完成后，从对应 Actions 运行页面的 **Artifacts** 直接下载 DMG 或便携 ZIP。
+企业 UAT 分发使用文件名含 `uat-notarized` 的产物。
+
+- `.dmg` 打开后，将 `CMBDevClaw.app` 拖到“应用程序”并启动。
+- `-portable.zip` 解压后，可以在 Finder 中直接双击 `CMBDevClaw.app`。
+
+升级时先退出应用，再用新版本替换 `.app`。
+
+Vite 会将应用引用的配置值写入产物。公开仓库打包包含客户端凭据的 UAT 配置时，在
+`macos_recipient_certificate` 提供收件方的 RSA 公钥证书（PEM 格式），工作流上传加密的
+`.dmg.cms` 和 `-portable.zip.cms`。私有 Actions 仓库可在授权范围内直接分发安装包和便携 ZIP。
+收到 `.cms` 时，在受控设备上用 OpenSSL 3 和配对的证书及私钥解密，再按上述方式打开。
 
 ```bash
 openssl cms -decrypt -binary -inform DER -in CMBDevClaw.dmg.cms \
   -recip recipient.pem -inkey recipient.key -out CMBDevClaw.dmg
 ```
 
-启用 `sign_macos` 可让用户按 macOS 默认信任策略安装下载的应用。
-签名需要 GitHub Secrets `CSC_LINK`（Base64 编码的 `.p12`）和 `CSC_KEY_PASSWORD`，
-公证需要 `APPLE_API_KEY_BASE64`（Base64 编码的 `.p8`）、`APPLE_API_KEY_ID` 和 `APPLE_API_ISSUER`。
+运行命令时使用实际的产物文件名。解密便携包时，输入文件以 `-portable.zip.cms` 结尾，输出以 `-portable.zip` 结尾。
+
+#### 本地打包和验证
 
 在受控 Mac 上，按 [环境变量加密指南](docs/env-encryption-guide.md) 配置解密密钥后执行以下命令。
 

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { constants, existsSync } from "node:fs"
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, join, resolve } from "node:path"
 import process from "node:process"
@@ -104,9 +105,23 @@ async function main() {
   )
   const executable = join(contents, "MacOS", executableName)
   const ripgrep = join(resources, "bin", "darwin", "rg")
-  for (const binary of [executable, ripgrep]) {
+  const ptyRoot = join(resources, "app.asar.unpacked", "node_modules", "node-pty")
+  // node-pty looks for the native module in this order and starts its sibling helper.
+  const ptyDirectory = [
+    join(ptyRoot, "build", "Release"),
+    join(ptyRoot, "build", "Debug"),
+    join(ptyRoot, "prebuilds", "darwin-arm64")
+  ].find((directory) => existsSync(join(directory, "pty.node")))
+  assert.ok(ptyDirectory, `No native PTY module found in ${ptyRoot}`)
+  const ptyModule = join(ptyDirectory, "pty.node")
+  const spawnHelper = join(ptyDirectory, "spawn-helper")
+  for (const binary of [executable, ripgrep, spawnHelper]) {
+    await access(binary, constants.X_OK)
+  }
+  for (const binary of [executable, ripgrep, ptyModule, spawnHelper]) {
     assert.equal(run("/usr/bin/lipo", ["-archs", binary]), "arm64", `${binary} must be ARM64`)
   }
+  console.log("PASS bundled ARM64 native PTY and executable spawn-helper")
 
   const isolated = await mkdtemp(join(tmpdir(), "cmb-macos-package-"))
   try {
