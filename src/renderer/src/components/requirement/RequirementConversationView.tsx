@@ -145,7 +145,11 @@ function isRequirementPrdGenerationCompleted(
   manifest: RequirementPrdManifest | null | undefined
 ): boolean {
   const status = manifest?.prd.status.trim().toLowerCase()
-  return status === "generated" || status === "published"
+  return (
+    status === "generated" ||
+    status === "published" ||
+    Boolean(manifest?.prd.prDetailUrl?.trim())
+  )
 }
 
 function buildRequirementInitializationMessage(requirement: RequirementRecord): string {

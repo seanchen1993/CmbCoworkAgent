@@ -19,7 +19,6 @@ import {
   requirementDevelopmentFolderFromFilePath
 } from "@/lib/requirement-development"
 import type { RequirementRecord } from "./requirement-data"
-import { shouldHideRequirementDevelopment } from "./requirement-persona"
 import { REQUIREMENT_ACTION_HINTS, RequirementActionButton } from "./RequirementActionButton"
 
 export function RequirementDevelopmentActions({
@@ -55,8 +54,6 @@ export function RequirementDevelopmentActions({
   const inProgress = Boolean(existingThreadId)
   const [resetOpen, setResetOpen] = useState(false)
   const [resetting, setResetting] = useState(false)
-
-  if (shouldHideRequirementDevelopment()) return <></>
 
   return (
     <>

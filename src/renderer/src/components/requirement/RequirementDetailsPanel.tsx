@@ -37,16 +37,12 @@ import {
   findRequirementDevelopmentThreads,
   normalizeRequirementPrdFilePath
 } from "@/lib/requirement-development"
-import { shouldHideRequirementDevelopment } from "./requirement-persona"
 import type {
   NeedDesignChoice,
   RequirementPrdManifest,
   RequirementRecord
 } from "./requirement-data"
-import {
-  getRequirementPrototypeFunctionKey,
-  isRequirementSpacePublished
-} from "./requirement-data"
+import { getRequirementPrototypeFunctionKey, isRequirementSpacePublished } from "./requirement-data"
 import {
   RequirementFunctionCard,
   RequirementPrototypeAction,
@@ -350,7 +346,8 @@ export function RequirementDetailsPanel({
   const selectedPrototypeStatus = selectedFunction
     ? prototypeStatuses.find(
         (item) =>
-          getRequirementPrototypeFunctionKey(item.functionInfo) === getRequirementPrototypeFunctionKey(selectedFunction)
+          getRequirementPrototypeFunctionKey(item.functionInfo) ===
+          getRequirementPrototypeFunctionKey(selectedFunction)
       )
     : undefined
   const hasFullPrdDesignSession = Boolean(fullPrdDesignEntry?.htmlId)
@@ -372,7 +369,9 @@ export function RequirementDetailsPanel({
   const prototypeStatusByFunction = useMemo(
     () =>
       new Map(
-        prototypeStatuses.map((item) => [getRequirementPrototypeFunctionKey(item.functionInfo), item] as const)
+        prototypeStatuses.map(
+          (item) => [getRequirementPrototypeFunctionKey(item.functionInfo), item] as const
+        )
       ),
     [prototypeStatuses]
   )
@@ -850,7 +849,9 @@ export function RequirementDetailsPanel({
                 prd={requirementSpaceManifest.prd}
                 fallbackName={requirement.title}
                 onOpenFile={() =>
-                  openWorkspaceFilePreview(normalizeRequirementPrdFilePath(requirementSpaceManifest.prd.file))
+                  openWorkspaceFilePreview(
+                    normalizeRequirementPrdFilePath(requirementSpaceManifest.prd.file)
+                  )
                 }
                 onRevealFile={() => revealRequirementFile(requirementSpaceManifest.prd.file)}
                 onOpenDetails={() => setFullPrdWorkspaceOpen(true)}
@@ -1099,22 +1100,20 @@ export function RequirementDetailsPanel({
                     ) : null}
                   </div>
                 </div>
-                {!shouldHideRequirementDevelopment() ? (
-                  <div className="mt-2 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/60 bg-background px-3 py-2.5">
-                    <div>
-                      <h4 className="text-xs font-semibold text-foreground">需求开发</h4>
-                      <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-                        基于当前需求内容进入开发流程。
-                      </p>
-                    </div>
-                    <RequirementDevelopmentActions
-                      requirement={requirement}
-                      onStartDevelopment={onStartDevelopment}
-                      onContinueDevelopment={onContinueDevelopment}
-                      onResetDevelopment={onResetDevelopment}
-                    />
+                <div className="mt-2 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/60 bg-background px-3 py-2.5">
+                  <div>
+                    <h4 className="text-xs font-semibold text-foreground">需求开发</h4>
+                    <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                      基于当前需求内容进入开发流程。
+                    </p>
                   </div>
-                ) : null}
+                  <RequirementDevelopmentActions
+                    requirement={requirement}
+                    onStartDevelopment={onStartDevelopment}
+                    onContinueDevelopment={onContinueDevelopment}
+                    onResetDevelopment={onResetDevelopment}
+                  />
+                </div>
               </RequirementPrdSummaryCard>
 
               {fullPrdDesignEntry?.htmlFile && threadId ? (

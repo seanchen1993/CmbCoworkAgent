@@ -9,7 +9,7 @@ export function readStoredRequirementPersona(): RequirementPersona | null {
   return stored === "business" || stored === "design" || stored === "development" ? stored : null
 }
 
-export function shouldHideRequirementDevelopment(): boolean {
+export function isRequirementDevelopmentUnavailable(): boolean {
   const persona = readStoredRequirementPersona()
   return persona === "business" || persona === "design"
 }
