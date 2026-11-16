@@ -89,7 +89,6 @@ import { OverviewPanel } from "./panels/OverviewPanel"
 import { ProjectModePanel } from "./panels/ProjectModePanel"
 import { DrilldownArrow } from "./DrilldownArrow"
 import { EfficiencyPanel } from "./panels/EfficiencyPanel"
-import { ProjectMetricGroupFilter } from "./panels/ProjectMetricGroupFilter"
 import { AwardsPanel, type AwardSkillRow, type TeamBenchmarkRow } from "./panels/AwardsPanel"
 import { formatAwardAdoptionExportValues } from "@/lib/award-code-adoption"
 import { STAGE_BUCKET_LABELS, type StageBucket } from "../../../../shared/harness-stage-bucket"
@@ -2831,10 +2830,6 @@ function DashboardContent({
   const [projectMetricRefreshKey, setProjectMetricRefreshKey] = useState(0)
   const [activeMainTab, setActiveMainTab] = useState<DashboardMainTab>("overview")
   const [projectModeAllowed, setProjectModeAllowed] = useState(false)
-  const [selectedGroupNames, setSelectedGroupNames] = useState<string[]>([])
-  const [groupOptions, setGroupOptions] = useState<string[]>([])
-  const [groupOptionsLoading, setGroupOptionsLoading] = useState(false)
-  const [groupOptionsError, setGroupOptionsError] = useState<string | null>(null)
   const [knowledgeRefreshKey, setKnowledgeRefreshKey] = useState(0)
   const knowledgeOverview = useKnowledgeOverview(
     activeMainTab === "knowledge" && projectModeAllowed,
@@ -2842,39 +2837,6 @@ function DashboardContent({
     selectedOrgLv1List,
     knowledgeRefreshKey
   )
-  useEffect(() => {
-    setSelectedGroupNames([])
-    setGroupOptions([])
-  }, [selectedOrgLv1List])
-  useEffect(() => {
-    if (activeMainTab !== "efficiency" || !projectModeAllowed || selectedOrgLv1List.length === 0) {
-      setGroupOptionsLoading(false)
-      return
-    }
-    let cancelled = false
-    setGroupOptionsLoading(true)
-    setGroupOptionsError(null)
-    void window.api.dashboard
-      .projectMetricGroupOptions({ range, upperOrgLv1: selectedOrgLv1List })
-      .then((result) => {
-        if (cancelled) return
-        if (!result.success) throw new Error(result.error || "获取项目组失败")
-        const options = result.data ?? []
-        setGroupOptions(options)
-        setSelectedGroupNames((current) => current.filter((group) => options.includes(group)))
-      })
-      .catch((error) => {
-        if (cancelled) return
-        setGroupOptions([])
-        setGroupOptionsError(error instanceof Error ? error.message : String(error))
-      })
-      .finally(() => {
-        if (!cancelled) setGroupOptionsLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [activeMainTab, projectModeAllowed, projectMetricRefreshKey, range, selectedOrgLv1List])
   const [analysisOpen, setAnalysisOpen] = useState(false)
   const [analysisAgentAllowed, setAnalysisAgentAllowed] = useState(false)
   const [traceEvolverReviewAdmin, setTraceEvolverReviewAdmin] = useState(false)
@@ -5272,21 +5234,9 @@ function DashboardContent({
                 options={orgOptions}
                 loading={loading}
                 onChange={(rooms) => {
-                  setSelectedGroupNames([])
-                  setGroupOptions([])
                   setOrgFilter(rooms)
                 }}
               />
-              {activeMainTab === "efficiency" && projectModeAllowed ? (
-                <ProjectMetricGroupFilter
-                  value={selectedGroupNames}
-                  options={groupOptions}
-                  loading={groupOptionsLoading}
-                  disabled={selectedOrgLv1List.length === 0}
-                  error={groupOptionsError}
-                  onChange={setSelectedGroupNames}
-                />
-              ) : null}
             </>
           ) : null
         }
@@ -5547,7 +5497,6 @@ function DashboardContent({
               error={efficiencyError}
               range={range}
               upperOrgLv1={selectedOrgLv1List}
-              groupNames={selectedGroupNames}
               projectMetricRefreshKey={projectMetricRefreshKey}
             />
           ) : (

@@ -260,12 +260,19 @@ import {
   type StageBucket
 } from "../../shared/harness-stage-bucket"
 import { SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT } from "../services/system-constraint-read-reporter"
+import { PROJECT_METRIC_TEAM } from "../../shared/project-metrics"
 import type {
   ProjectMetricFilters,
   ProjectMetricListOptions,
   ProjectMetricTrendFilters
 } from "../../shared/project-metrics"
 import {
+  fetchProjectMetricEligibleHarnessIds,
+  fetchProjectMetricOverview,
+  fetchProjectMetricIndicatorExport,
+  makeMockProjectMetricOverview,
+  makeMockProjectMetricIndicatorExport,
+  type ProjectMetricDependencies,
   fetchProjectMetricGroupOptions,
   fetchProjectMetricProjects,
   fetchProjectMetricSummary,
@@ -1562,6 +1569,85 @@ function projectMetricAllowedRoomNames(access: DashboardAccessContext): string[]
   if (isDashboardProjectModeAdmin(access)) return null
   const roomName = access.upperOrgLv1.trim()
   return roomName ? [roomName] : []
+}
+
+function projectMetricHarnessFilter(field: string, ids: string[]): Record<string, unknown> {
+  const clauses: Record<string, unknown>[] = []
+  for (let i = 0; i < ids.length; i += 1000)
+    clauses.push({ terms: { [field]: ids.slice(i, i + 1000) } })
+  return clauses.length
+    ? { bool: { should: clauses, minimum_should_match: 1 } }
+    : { match_none: {} }
+}
+
+function projectMetricDependencies(access: DashboardAccessContext): ProjectMetricDependencies {
+  let fieldsChecked: Promise<void> | undefined
+  return {
+    query: esQuery,
+    eventIndex: getEsIndex("event"),
+    traceIndex: getEsIndex("trace"),
+    factIndex: getEsIndex("projectFact"),
+    featureIndex: (import.meta.env.VITE_ES_INDEX_FEATURE_INFO as string) || "devclaw_feature_info",
+    monthlyIndex:
+      (import.meta.env.VITE_ES_INDEX_GITEE_PUSH_INFO as string) || "devclaw_gitee_push_info",
+    allowedRoomNames: projectMetricAllowedRoomNames(access),
+    validateFactFields: () => {
+      fieldsChecked ??= (async () => {
+        const raw = asRecord(
+          await esQuery(
+            getEsIndex("projectFact"),
+            { fields: ["featureCodes", "devWorkHours"] },
+            { operation: "field_caps" }
+          )
+        )
+        const fields = asRecord(raw.fields)
+        const feature = asRecord(asRecord(fields.featureCodes).keyword)
+        const hours = Object.values(asRecord(fields.devWorkHours)).map(asRecord)
+        if (
+          feature.searchable !== true ||
+          !hours.length ||
+          hours.some(
+            (field) =>
+              ![
+                "long",
+                "integer",
+                "short",
+                "float",
+                "double",
+                "scaled_float",
+                "half_float"
+              ].includes(String(field.type)) || field.searchable !== true
+          )
+        ) {
+          throw new Error(
+            "项目索引 mapping 需包含可查询的 featureCodes(keyword) 和 devWorkHours(数值)，仅写入 _source 不足以统计"
+          )
+        }
+      })()
+      return fieldsChecked
+    },
+    codeStats: async (range, rooms, ids) => {
+      const extra: Record<string, unknown>[] = [
+        { term: { upperOrgLv2: PROJECT_METRIC_TEAM } },
+        ...(rooms === null
+          ? []
+          : [rooms.length ? { terms: { upperOrgLv1: rooms } } : { match_none: {} }])
+      ]
+      const raw = await fetchProjectModeCodeAggs(null, range, (aggs) => aggs, [
+        ...extra,
+        projectMetricHarnessFilter("properties.harnessProjectId", ids)
+      ])
+      assertProjectModeResultComplete(raw)
+      if (!asRecord(asRecord(raw).aggregations).code_adopt_pushed)
+        throw new Error("代码采纳统计未完整返回，请重试")
+      const stats = normalizeCodeStatsFromAggs(raw)
+      return {
+        pushedAdoptedLines: stats.pushedAdoptedLines,
+        pushedEffectiveGeneratedLines: stats.pushedEffectiveGeneratedLines,
+        pushedAdoptionRate: stats.pushedAdoptionRate
+      }
+    }
+  }
 }
 
 function getDashboardEsIndexByAlias(): Record<DashboardEsIndexAlias, string> {
@@ -14176,19 +14262,22 @@ async function fetchDashboardEfficiency(
   // truth for projectFromLean). An empty set is meaningful, not an error: it
   // means no Lean-bound projects matched, and every terms IN [] below then
   // aggregates to zero.
-  const { ids: leanProjectIds, truncated } = await fetchProjectModeFilteredProjectIds(
-    projectModeSnapshotFilters(orgFilterClause, true)
+  const leanProjectIds = await fetchProjectMetricEligibleHarnessIds(
+    projectMetricDependencies(access)
   )
+  const truncated = false
 
   const codeExtraFilters = [
+    { term: { upperOrgLv2: PROJECT_METRIC_TEAM } },
     ...(orgFilterClause ? [orgFilterClause] : []),
     { exists: { field: "properties.harnessProjectId" } },
-    { terms: { "properties.harnessProjectId": leanProjectIds } }
+    projectMetricHarnessFilter("properties.harnessProjectId", leanProjectIds)
   ]
 
   const traceFilters = [
     ...projectModeTraceFilters(range, orgFilterClause),
-    { terms: { harnessProjectId: leanProjectIds } }
+    { term: { upperOrgLv2: PROJECT_METRIC_TEAM } },
+    projectMetricHarnessFilter("harnessProjectId", leanProjectIds)
   ]
   const computeQuery = (index: "trace" | "event", body: Record<string, unknown>) =>
     esQuery(getEsIndex(index), body)
@@ -15782,22 +15871,54 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     "dashboard:projectMetricGroupOptions",
     async (_, filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">) => {
       if (import.meta.env.DEV) {
-        return { success: true, data: makeMockProjectMetricGroupOptions(filters) }
+        return { success: true, data: makeMockProjectMetricGroupOptions() }
       }
       try {
         const access = requireDashboardProjectModeAccess()
         return {
           success: true,
-          data: await fetchProjectMetricGroupOptions(filters, {
-            query: esQuery,
-            eventIndex: getEsIndex("event"),
-            traceIndex: getEsIndex("trace"),
-            factIndex: getEsIndex("projectFact"),
-            allowedRoomNames: projectMetricAllowedRoomNames(access)
-          })
+          data: await fetchProjectMetricGroupOptions(filters, projectMetricDependencies(access))
         }
       } catch (e) {
         logDashboardRequestError("projectMetricGroupOptions", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:projectMetricOverview",
+    async (_, filters: ProjectMetricFilters) => {
+      if (import.meta.env.DEV)
+        return { success: true, data: makeMockProjectMetricOverview(filters) }
+      try {
+        const access = requireDashboardProjectModeAccess()
+        return {
+          success: true,
+          data: await fetchProjectMetricOverview(filters, projectMetricDependencies(access))
+        }
+      } catch (e) {
+        logDashboardRequestError("projectMetricOverview", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:projectMetricIndicatorExport",
+    async (_, filters: ProjectMetricFilters) => {
+      if (import.meta.env.DEV)
+        return { success: true, data: makeMockProjectMetricIndicatorExport(filters) }
+      try {
+        const access = requireDashboardProjectModeAccess()
+        return {
+          success: true,
+          data: await fetchProjectMetricIndicatorExport(filters, projectMetricDependencies(access))
+        }
+      } catch (e) {
+        logDashboardRequestError("projectMetricIndicatorExport", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
@@ -15814,13 +15935,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         const access = requireDashboardProjectModeAccess()
         return {
           success: true,
-          data: await fetchProjectMetricSummary(filters, {
-            query: esQuery,
-            eventIndex: getEsIndex("event"),
-            traceIndex: getEsIndex("trace"),
-            factIndex: getEsIndex("projectFact"),
-            allowedRoomNames: projectMetricAllowedRoomNames(access)
-          })
+          data: await fetchProjectMetricSummary(filters, projectMetricDependencies(access))
         }
       } catch (e) {
         logDashboardRequestError("projectMetricSummary", e)
@@ -15840,13 +15955,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         const access = requireDashboardProjectModeAccess()
         return {
           success: true,
-          data: await fetchProjectMetricTrend(filters, {
-            query: esQuery,
-            eventIndex: getEsIndex("event"),
-            traceIndex: getEsIndex("trace"),
-            factIndex: getEsIndex("projectFact"),
-            allowedRoomNames: projectMetricAllowedRoomNames(access)
-          })
+          data: await fetchProjectMetricTrend(filters, projectMetricDependencies(access))
         }
       } catch (e) {
         logDashboardRequestError("projectMetricTrend", e)
@@ -15866,13 +15975,11 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         const access = requireDashboardProjectModeAccess()
         return {
           success: true,
-          data: await fetchProjectMetricProjects(filters, options ?? {}, {
-            query: esQuery,
-            eventIndex: getEsIndex("event"),
-            traceIndex: getEsIndex("trace"),
-            factIndex: getEsIndex("projectFact"),
-            allowedRoomNames: projectMetricAllowedRoomNames(access)
-          })
+          data: await fetchProjectMetricProjects(
+            filters,
+            options ?? {},
+            projectMetricDependencies(access)
+          )
         }
       } catch (e) {
         logDashboardRequestError("projectMetricProjects", e)

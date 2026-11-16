@@ -818,7 +818,6 @@ export function EfficiencyPanel({
   onPluginFilterChange,
   range,
   upperOrgLv1,
-  groupNames,
   projectMetricRefreshKey
 }: {
   data: DashboardEfficiencyData | null
@@ -828,7 +827,6 @@ export function EfficiencyPanel({
   onPluginFilterChange: (filter: EfficiencyPluginFilter) => void
   range: { from: string; to: string }
   upperOrgLv1: string[]
-  groupNames: string[]
   projectMetricRefreshKey: number
 }): React.JSX.Element {
   return (
@@ -836,7 +834,6 @@ export function EfficiencyPanel({
       <ProjectMetricsSection
         range={range}
         upperOrgLv1={upperOrgLv1}
-        groupNames={groupNames}
         refreshKey={projectMetricRefreshKey}
       />
 

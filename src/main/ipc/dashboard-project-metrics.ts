@@ -1,88 +1,80 @@
-import type {
-  ProjectMetricFilters,
-  ProjectMetricIssueCategoryCount,
-  ProjectMetricListOptions,
-  ProjectMetricProjectItem,
-  ProjectMetricProjectsData,
-  ProjectMetricSummaryData,
-  ProjectMetricSummaryGroup,
-  ProjectMetricTrendData,
-  ProjectMetricTrendDateField,
-  ProjectMetricTrendFilters
+import {
+  PROJECT_METRIC_TEAM,
+  type ProjectMetricFilters,
+  type ProjectMetricListOptions,
+  type ProjectMetricProjectItem,
+  type ProjectMetricProjectsData,
+  type ProjectMetricSummaryData,
+  type ProjectMetricTrendData,
+  type ProjectMetricTrendFilters,
+  type ProjectMetricOverviewData,
+  type ProjectMetricMonthlyCode,
+  type ProjectMetricIndicatorExportData,
+  type ProjectMetricCodeOverview
 } from "../../shared/project-metrics"
+import {
+  formatProjectDate,
+  projectNaturalMonth,
+  projectRangeBounds,
+  projectWorkingDays,
+  PROJECT_CALENDAR_NOTE
+} from "../../shared/project-metric-calendar"
+import { fetchTestProjectIds } from "./project-mode-test-projects"
+import { assertProjectModeResultComplete } from "./project-mode-query-scope"
+import { readOrgText } from "./dashboard-org-fields"
+import { projectInPeriod, projectMetricGroups } from "./dashboard-project-metric-calculations"
 
-type EsQuery = (
+type RecordValue = Record<string, unknown>
+type Query = (
   index: string,
-  body: Record<string, unknown>,
+  body: RecordValue,
   options?: { timeoutMs?: number }
 ) => Promise<unknown>
-
-interface ProjectMetricDependencies {
-  query: EsQuery
+export interface ProjectMetricDependencies {
+  query: Query
   eventIndex: string
   traceIndex: string
   factIndex: string
-  /** null 表示管理员不限室；空数组表示当前用户无可访问室。 */
+  featureIndex?: string
+  monthlyIndex?: string
+  /** null 表示管理员不限室；空数组表示无可访问室。 */
   allowedRoomNames: string[] | null
+  validateFactFields?: () => Promise<void>
+  codeStats?: (
+    range: ProjectMetricFilters["range"],
+    rooms: string[] | null,
+    harnessIds: string[]
+  ) => Promise<ProjectMetricCodeOverview>
 }
-
-interface LeanSnapshotProject {
+interface SnapshotProject {
   harnessProjectId: string
   prjCode: string
   adapterName: string
 }
-
-interface LeanSnapshotState {
-  projects: LeanSnapshotProject[]
-  harnessProjectIdsByPrjCode: Map<string, string[]>
-  pluginsByPrjCode: Map<string, string[]>
-  prjCodes: string[]
+interface Snapshot {
+  projects: SnapshotProject[]
+  byCode: Map<string, SnapshotProject[]>
   pluginOptions: string[]
-  truncated: boolean
 }
-
-interface FactProject {
-  prjCode: string
-  prjName: string
-  phaseStatus: string
-  roomName: string
-  groupName: string
-  bugNum: number | null
-  kenanIssueCount: number | null
-  kenanIssueCategories: ProjectMetricIssueCategoryCount[]
-  notAdjustFuns: number | null
-  createDate: string | null
-  firstStStartDate: string | null
-  firstStEndDate: string | null
-  firstUatStartDate: string | null
-  firstOnlineDate: string | null
-  approvedDate: string | null
+interface Hit {
+  _source?: RecordValue
+  sort?: unknown[]
 }
-
-interface FactSummaryGroups {
-  devclaw: ProjectMetricSummaryGroup
-  nonDevclaw: ProjectMetricSummaryGroup
+interface Response {
+  hits?: { hits?: Hit[]; total?: number | { value: number; relation?: string } }
+  aggregations?: RecordValue
 }
-
-interface EsHit {
-  _source?: Record<string, unknown>
-}
-
-interface EsResponse {
-  hits?: {
-    total?: number | { value?: number }
-    hits?: EsHit[]
-  }
-  aggregations?: Record<string, unknown>
-}
-
-const HARNESS_PROJECT_SNAPSHOT_EVENT = "harness.project.snapshot"
-const PROJECT_METRIC_JOIN_KEY_LIMIT = 10_000
+const PAGE_SIZE = 500
+const TERMS_BATCH_SIZE = 1000
 const SNAPSHOT_CACHE_TTL_MS = 5 * 60 * 1000
-const DAY_MS = 86_400_000
-const FACT_SOURCE_INCLUDES = [
+const snapshotCache = new WeakMap<
+  Query,
+  Map<string, { expiresAt: number; projects: SnapshotProject[] }>
+>()
+const FACT_FIELDS = [
   "prjCode",
   "prjName",
+  "teamName",
   "phaseStatus",
   "roomName",
   "groupName",
@@ -95,1312 +87,1014 @@ const FACT_SOURCE_INCLUDES = [
   "firstStEndDate",
   "firstUatStartDate",
   "firstOnlineDate",
-  "approvedDate"
+  "approvedDate",
+  "featureCodes",
+  "devWorkHours"
 ]
-
-let snapshotCache: { expiresAt: number; value: LeanSnapshotState } | null = null
-
-async function queryProjectMetricEs(
-  deps: ProjectMetricDependencies,
-  queryName: string,
-  index: string,
-  body: Record<string, unknown>
-): Promise<unknown> {
-  console.log(
-    `[Dashboard][ProjectMetrics][ES] ${queryName}\nindex: ${index}\ndsl: ${JSON.stringify(body, null, 2)}`
-  )
-  return deps.query(index, body)
+function record(value: unknown): RecordValue {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as RecordValue) : {}
 }
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {}
-}
-
-function asString(value: unknown): string {
+function string(value: unknown): string {
   return typeof value === "string" ? value.trim() : ""
 }
-
-function asNullableString(value: unknown): string | null {
-  const normalized = asString(value)
-  return normalized || null
-}
-
-function asNumber(value: unknown, fallback = 0): number {
-  if (typeof value === "number" && Number.isFinite(value)) return value
-  if (typeof value === "string" && value.trim()) {
-    const parsed = Number(value)
-    if (Number.isFinite(parsed)) return parsed
-  }
-  return fallback
-}
-
-function asNullableNumber(value: unknown): number | null {
-  if (value === null || value === undefined || value === "") return null
-  const parsed = asNumber(value, Number.NaN)
-  return Number.isFinite(parsed) ? parsed : null
-}
-
-function getTotalHits(raw: EsResponse, fallback: number): number {
-  const total = raw.hits?.total
-  if (typeof total === "number") return total
-  return asNumber(asRecord(total).value, fallback)
-}
-
-function uniqueSorted(values: string[]): string[] {
-  return Array.from(new Set(values.filter(Boolean))).sort((left, right) =>
-    left.localeCompare(right, "zh-CN")
+function number(value: unknown): number | null {
+  if (
+    value === null ||
+    value === undefined ||
+    (typeof value === "string" && !value.trim()) ||
+    typeof value === "boolean"
   )
+    return null
+  const n = Number(value)
+  return Number.isFinite(n) && n >= 0 ? n : null
 }
-
-function matchNoneOrTerms(field: string, values: string[]): Record<string, unknown> {
-  return values.length > 0 ? { terms: { [field]: values } } : { match_none: {} }
+function strings(value: unknown): string[] {
+  return Array.isArray(value) ? [...new Set(value.map(string).filter(Boolean))].sort() : []
 }
-
-function notTerms(field: string, values: string[]): Record<string, unknown> {
-  return values.length > 0
-    ? { bool: { must_not: [{ terms: { [field]: values } }] } }
-    : { match_all: {} }
+function chunks<T>(values: T[]): T[][] {
+  const result: T[][] = []
+  for (let i = 0; i < values.length; i += TERMS_BATCH_SIZE)
+    result.push(values.slice(i, i + TERMS_BATCH_SIZE))
+  return result
 }
-
-function shanghaiDateParts(value: string): { year: number; month: number; day: number } {
-  const date = new Date(value)
-  if (!Number.isFinite(date.getTime())) throw new Error("项目度量日期范围无效")
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Shanghai",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  }).formatToParts(date)
-  const read = (type: Intl.DateTimeFormatPartTypes): number =>
-    Number(parts.find((part) => part.type === type)?.value ?? 0)
-  return { year: read("year"), month: read("month"), day: read("day") }
+function terms(field: string, values: string[]): RecordValue {
+  return values.length
+    ? {
+        bool: {
+          should: chunks(values).map((batch) => ({ terms: { [field]: batch } })),
+          minimum_should_match: 1
+        }
+      }
+    : { match_none: {} }
 }
-
-function formatShanghaiBoundary(parts: { year: number; month: number; day: number }): string {
-  return `${String(parts.year).padStart(4, "0")}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")} 00:00:00`
+function failure(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason)
 }
-
-function nextShanghaiDay(parts: { year: number; month: number; day: number }): {
-  year: number
-  month: number
-  day: number
-} {
-  const date = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + 1))
-  return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate() }
+async function query(
+  deps: ProjectMetricDependencies,
+  name: string,
+  index: string,
+  body: RecordValue
+): Promise<Response> {
+  console.log(
+    `[Dashboard][ProjectMetrics][ES] ${name}\nindex: ${index}\ndsl: ${JSON.stringify(body)}`
+  )
+  const raw = (await deps.query(index, body)) as Response
+  assertProjectModeResultComplete(raw)
+  return raw
 }
-
-function projectDateRange(range: ProjectMetricFilters["range"]): {
-  gte: string
-  lt: string
-} {
-  return {
-    gte: formatShanghaiBoundary(shanghaiDateParts(range.from)),
-    lt: formatShanghaiBoundary(nextShanghaiDay(shanghaiDateParts(range.to)))
-  }
-}
-
-function effectiveRoomNames(
-  requestedRoomNames: string[],
-  allowedRoomNames: string[] | null
-): string[] | null {
-  if (allowedRoomNames === null) return requestedRoomNames.length > 0 ? requestedRoomNames : null
-  const allowed = uniqueSorted(allowedRoomNames)
-  if (requestedRoomNames.length === 0) return allowed
-  const allowedSet = new Set(allowed)
-  return requestedRoomNames.filter((roomName) => allowedSet.has(roomName))
-}
-
-function buildFactBaseFilters(
-  filters: ProjectMetricFilters,
-  allowedRoomNames: string[] | null,
-  dateField: ProjectMetricTrendDateField = "createDate"
-): Record<string, unknown>[] {
-  const result: Record<string, unknown>[] = [
-    { range: { [dateField]: projectDateRange(filters.range) } }
-  ]
-  const rooms = effectiveRoomNames(uniqueSorted(filters.upperOrgLv1 ?? []), allowedRoomNames)
-  const groups = uniqueSorted(filters.groupNames ?? [])
-  const phases = uniqueSorted(filters.phaseStatuses ?? [])
-  if (rooms !== null) result.push(matchNoneOrTerms("roomName", rooms))
-  if (groups.length > 0) result.push({ terms: { groupName: groups } })
-  if (phases.length > 0) result.push({ terms: { phaseStatus: phases } })
-
-  const minimum = filters.functionPointMin
-  const maximum = filters.functionPointMax
-  if (minimum !== null && minimum !== undefined) {
-    result.push({ range: { notAdjustFuns: { gte: minimum } } })
-  }
-  if (maximum !== null && maximum !== undefined) {
-    result.push({ range: { notAdjustFuns: { lte: maximum } } })
+/** 项目编号是事实文档的唯一业务主键；完整分页，不受 ES from/size 窗口限制。 */
+async function facts(
+  deps: ProjectMetricDependencies,
+  filters: RecordValue[],
+  fields = FACT_FIELDS,
+  index = deps.factIndex,
+  key = "prjCode"
+): Promise<RecordValue[]> {
+  const result: RecordValue[] = []
+  let after: unknown[] | undefined
+  const cursors = new Set<string>()
+  let total: number | undefined
+  for (;;) {
+    const raw = await query(deps, "事实完整分页", index, {
+      size: PAGE_SIZE,
+      track_total_hits: true,
+      query: { bool: { filter: filters } },
+      sort: [{ [key]: "asc" }],
+      _source: { includes: fields },
+      ...(after ? { search_after: after } : {})
+    })
+    const page = raw.hits?.hits
+    if (!Array.isArray(page)) throw new Error("项目事实未完整返回，请重试")
+    const count = raw.hits?.total
+    const countValue = typeof count === "number" ? count : count?.value
+    if (
+      countValue === undefined ||
+      !Number.isSafeInteger(countValue) ||
+      countValue < 0 ||
+      (typeof count === "object" && count.relation === "gte")
+    )
+      throw new Error("项目事实缺少精确总数，请重试")
+    if (total !== undefined && total !== countValue)
+      throw new Error("项目事实正在同步，分页总数发生变化，请稍后重试")
+    total = countValue
+    for (const hit of page) result.push(record(hit._source))
+    if (total !== undefined && result.length === total) break
+    if (page.length < PAGE_SIZE) {
+      if (total !== undefined && result.length !== total)
+        throw new Error("项目事实分页不完整，请重试")
+      break
+    }
+    const last = page[page.length - 1]
+    after = last.sort
+    if (!after?.length) throw new Error("项目事实分页缺少游标，请重试")
+    const cursor = JSON.stringify(after)
+    if (cursors.has(cursor)) throw new Error("项目事实分页游标重复，请重试")
+    cursors.add(cursor)
   }
   return result
 }
 
-export async function fetchProjectMetricGroupOptions(
-  filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">,
-  deps: ProjectMetricDependencies
-): Promise<string[]> {
-  if (!filters.upperOrgLv1?.length) return []
-  const raw = (await queryProjectMetricEs(deps, "项目组可选项", deps.factIndex, {
-    size: 0,
-    query: {
-      bool: {
-        filter: buildFactBaseFilters(
-          { range: filters.range, upperOrgLv1: filters.upperOrgLv1 },
-          deps.allowedRoomNames
-        )
-      }
-    },
-    aggs: { groups: { terms: { field: "groupName", size: 1000 } } }
-  })) as EsResponse
-  const aggregation = nestedRecord(asRecord(raw.aggregations), "groups")
-  if (asNumber(aggregation.sum_other_doc_count) > 0) {
-    throw new Error("项目组数量超过筛选上限，组列表不完整")
+/** 不限制周期或当前室，否则跨室关联会误判。分类只返回主进程内部使用。 */
+async function snapshot(deps: ProjectMetricDependencies): Promise<Snapshot> {
+  const excluded = new Set(await fetchTestProjectIds(deps.eventIndex, [], deps.query))
+  let cache = snapshotCache.get(deps.query)
+  if (!cache) {
+    cache = new Map()
+    snapshotCache.set(deps.query, cache)
   }
-  const buckets = Array.isArray(aggregation.buckets) ? aggregation.buckets : []
-  return uniqueSorted(buckets.map((bucket) => asString(asRecord(bucket).key)).filter(Boolean))
-}
-
-async function fetchLeanSnapshotState(deps: ProjectMetricDependencies): Promise<LeanSnapshotState> {
-  if (snapshotCache && snapshotCache.expiresAt > Date.now()) return snapshotCache.value
-
-  const raw = (await queryProjectMetricEs(deps, "精益项目快照", deps.eventIndex, {
-    size: PROJECT_METRIC_JOIN_KEY_LIMIT,
-    track_total_hits: true,
-    query: {
-      bool: {
-        filter: [
-          { term: { eventName: HARNESS_PROJECT_SNAPSHOT_EVENT } },
-          { term: { "properties.projectFromLean": true } },
-          { exists: { field: "properties.projectCode" } }
-        ]
-      }
-    },
-    sort: [{ "properties.projectId": { order: "asc" } }],
-    _source: {
-      includes: ["properties.projectId", "properties.projectCode", "properties.adapterName"]
-    }
-  })) as EsResponse
-
-  const hits = raw.hits?.hits ?? []
-  const projects = hits
-    .map((hit): LeanSnapshotProject | null => {
-      const properties = asRecord(asRecord(hit._source).properties)
-      const harnessProjectId = asString(properties.projectId)
-      const prjCode = asString(properties.projectCode)
-      if (!harnessProjectId || !prjCode) return null
-      return {
-        harnessProjectId,
-        prjCode,
-        adapterName: asString(properties.adapterName)
-      }
-    })
-    .filter((project): project is LeanSnapshotProject => project !== null)
-
-  const harnessProjectIdsByPrjCode = new Map<string, string[]>()
-  const pluginsByPrjCode = new Map<string, string[]>()
-  for (const project of projects) {
-    harnessProjectIdsByPrjCode.set(
-      project.prjCode,
-      uniqueSorted([
-        ...(harnessProjectIdsByPrjCode.get(project.prjCode) ?? []),
-        project.harnessProjectId
-      ])
-    )
-    if (project.adapterName) {
-      pluginsByPrjCode.set(
-        project.prjCode,
-        uniqueSorted([...(pluginsByPrjCode.get(project.prjCode) ?? []), project.adapterName])
-      )
-    }
-  }
-
-  const value: LeanSnapshotState = {
-    projects,
-    harnessProjectIdsByPrjCode,
-    pluginsByPrjCode,
-    prjCodes: uniqueSorted(projects.map((project) => project.prjCode)),
-    pluginOptions: uniqueSorted(projects.map((project) => project.adapterName)),
-    truncated: getTotalHits(raw, hits.length) > hits.length
-  }
-  snapshotCache = { expiresAt: Date.now() + SNAPSHOT_CACHE_TTL_MS, value }
-  return value
-}
-
-function selectedDevclawPrjCodes(
-  snapshot: LeanSnapshotState,
-  adapterName?: string | null
-): string[] {
-  const normalizedAdapter = asString(adapterName)
-  if (!normalizedAdapter) return snapshot.prjCodes
-  return uniqueSorted(
-    snapshot.projects
-      .filter((project) => project.adapterName === normalizedAdapter)
-      .map((project) => project.prjCode)
-  )
-}
-
-function summaryAggs(): Record<string, unknown> {
-  return {
-    avg_bug_count: { avg: { field: "bugNum" } },
-    bug_sample_count: { value_count: { field: "bugNum" } },
-    sum_kenan_issue_count: { sum: { field: "kenanIssueCount" } },
-    kenan_issue_categories: {
-      nested: { path: "kenanIssueCategoryCount" },
-      aggs: {
-        by_category: {
-          terms: {
-            field: "kenanIssueCategoryCount.category",
-            size: 1000,
-            order: { _key: "asc" }
-          },
-          aggs: { issue_count: { sum: { field: "kenanIssueCategoryCount.count" } } }
-        }
-      }
-    },
-    avg_function_points: { avg: { field: "notAdjustFuns" } },
-    function_point_sample_count: { value_count: { field: "notAdjustFuns" } },
-    defect_density_valid: {
-      filter: {
+  const cached = cache.get(deps.eventIndex)
+  const useCache = Boolean(cached && cached.expiresAt > Date.now())
+  const snapshotProjects: SnapshotProject[] = useCache ? cached!.projects : []
+  let after: RecordValue | undefined
+  const cursors = new Set<string>()
+  for (; !useCache; ) {
+    const raw = await query(deps, "精益非测试项目快照", deps.eventIndex, {
+      size: 0,
+      query: {
         bool: {
-          filter: [{ exists: { field: "bugNum" } }, { range: { notAdjustFuns: { gt: 0 } } }]
+          filter: [
+            { term: { eventName: "harness.project.snapshot" } },
+            { term: { "properties.projectFromLean": true } },
+            { exists: { field: "properties.projectCode" } }
+          ]
         }
       },
       aggs: {
-        sum_bug_count: { sum: { field: "bugNum" } },
-        sum_function_points: { sum: { field: "notAdjustFuns" } }
-      }
-    },
-    test_lead_valid: durationAgg("createDate", "firstStStartDate"),
-    uat_lead_valid: durationAgg("createDate", "firstUatStartDate"),
-    delivery_valid: durationAgg("approvedDate", "firstOnlineDate")
-  }
-}
-
-function durationAgg(startField: string, endField: string): Record<string, unknown> {
-  return {
-    filter: {
-      bool: {
-        filter: [
-          { exists: { field: startField } },
-          { exists: { field: endField } },
-          {
-            script: {
-              script: {
-                lang: "painless",
-                source: `return !doc['${endField}'].value.isBefore(doc['${startField}'].value);`
+        projects: {
+          composite: {
+            size: PAGE_SIZE,
+            sources: [{ projectId: { terms: { field: "properties.projectId" } } }],
+            ...(after ? { after } : {})
+          },
+          aggs: {
+            snapshot: {
+              top_hits: {
+                size: 1,
+                _source: {
+                  includes: [
+                    "properties.projectId",
+                    "properties.projectCode",
+                    "properties.adapterName"
+                  ]
+                }
               }
             }
           }
-        ]
-      }
-    },
-    aggs: {
-      avg_seconds: {
-        avg: {
-          script: {
-            lang: "painless",
-            source: `return ChronoUnit.MILLIS.between(doc['${startField}'].value, doc['${endField}'].value) / 1000.0;`
-          }
         }
       }
+    })
+    const aggregation = record(raw.aggregations?.projects)
+    if (!Array.isArray(aggregation.buckets)) throw new Error("精益项目快照未完整返回，请重试")
+    for (const value of aggregation.buckets) {
+      const bucket = record(value)
+      const hits = record(record(bucket.snapshot).hits).hits
+      if (!Array.isArray(hits) || hits.length !== 1) throw new Error("精益项目快照缺少项目事实")
+      const p = record(record(record(hits[0])._source).properties)
+      const harnessProjectId = string(p.projectId)
+      const prjCode = string(p.projectCode)
+      if (harnessProjectId && prjCode)
+        snapshotProjects.push({ harnessProjectId, prjCode, adapterName: string(p.adapterName) })
+    }
+    if (!aggregation.buckets.length || !aggregation.after_key) break
+    after = record(aggregation.after_key)
+    const cursor = JSON.stringify(after)
+    if (!string(after.projectId) || cursors.has(cursor)) throw new Error("精益项目快照分页游标无效")
+    cursors.add(cursor)
+  }
+  if (!useCache)
+    cache.set(deps.eventIndex, {
+      expiresAt: Date.now() + SNAPSHOT_CACHE_TTL_MS,
+      projects: snapshotProjects
+    })
+  // 测试标记每次重新读取；缓存只复用项目关联，不缓存测试排除结果。
+  const projects = snapshotProjects.filter((p) => !excluded.has(p.harnessProjectId))
+  const byCode = new Map<string, SnapshotProject[]>()
+  for (const p of projects) byCode.set(p.prjCode, [...(byCode.get(p.prjCode) ?? []), p])
+  return { projects, byCode, pluginOptions: strings(projects.map((p) => p.adapterName)) }
+}
+
+export async function fetchProjectMetricEligibleHarnessIds(
+  deps: ProjectMetricDependencies
+): Promise<string[]> {
+  return strings((await snapshot(deps)).projects.map((p) => p.harnessProjectId))
+}
+
+function validateFilters(filters: ProjectMetricFilters): void {
+  projectRangeBounds(filters.range)
+  if (
+    filters.dateBasis !== undefined &&
+    !["created", "developmentCompleted"].includes(filters.dateBasis)
+  )
+    throw new Error("项目日期口径无效")
+  for (const [min, max] of [
+    [filters.functionPointMin, filters.functionPointMax],
+    [filters.tokenConsumptionMin, filters.tokenConsumptionMax]
+  ]) {
+    if (
+      [min, max].some(
+        (v) => v != null && (typeof v !== "number" || !Number.isFinite(v) || v < 0)
+      ) ||
+      (min != null && max != null && min > max)
+    )
+      throw new Error("项目数值筛选区间无效")
+  }
+  if (
+    filters.upperOrgLv1 !== undefined &&
+    (!Array.isArray(filters.upperOrgLv1) || filters.upperOrgLv1.some((v) => typeof v !== "string"))
+  )
+    throw new Error("室筛选无效")
+  if (filters.groupNames?.length) throw new Error("本期不支持组筛选")
+}
+function roomsFor(filters: ProjectMetricFilters, deps: ProjectMetricDependencies): string[] | null {
+  const requested = strings(filters.upperOrgLv1)
+  if (deps.allowedRoomNames === null) return requested.length ? requested : null
+  const allowed = new Set(deps.allowedRoomNames)
+  return requested.length ? requested.filter((room) => allowed.has(room)) : [...allowed]
+}
+function organizationFilters(rooms: string[] | null): RecordValue[] {
+  return [
+    { term: { teamName: PROJECT_METRIC_TEAM } },
+    { range: { createDate: { gte: "2026-06-01 00:00:00" } } },
+    ...(rooms === null ? [] : [terms("roomName", rooms)])
+  ]
+}
+function periodFilter(filters: ProjectMetricFilters, online = false): RecordValue {
+  const range = projectRangeBounds(filters.range)
+  if (online) return { range: { firstOnlineDate: range } }
+  if (filters.dateBasis === "created") return { range: { createDate: range } }
+  return {
+    bool: {
+      should: [
+        { range: { firstStStartDate: range } },
+        {
+          bool: {
+            must_not: [{ exists: { field: "firstStStartDate" } }],
+            filter: [{ range: { firstUatStartDate: range } }]
+          }
+        }
+      ],
+      minimum_should_match: 1
     }
   }
 }
-
-function parseFactProject(hit: EsHit): FactProject | null {
-  const source = asRecord(hit._source)
-  const prjCode = asString(source.prjCode)
-  if (!prjCode) return null
+function inAdvancedScope(item: ProjectMetricProjectItem, filters: ProjectMetricFilters): boolean {
+  if (filters.phaseStatuses?.length && !filters.phaseStatuses.includes(item.phaseStatus))
+    return false
+  if (
+    filters.functionPointMin != null &&
+    (item.notAdjustFuns === null || item.notAdjustFuns < filters.functionPointMin)
+  )
+    return false
+  if (
+    filters.functionPointMax != null &&
+    (item.notAdjustFuns === null || item.notAdjustFuns > filters.functionPointMax)
+  )
+    return false
+  if (item.developmentMode === "non_devclaw") return true
+  if (filters.adapterName && !item.plugins.includes(filters.adapterName)) return false
+  const tokens =
+    item.totalInputTokens !== null && item.totalOutputTokens !== null
+      ? item.totalInputTokens + item.totalOutputTokens
+      : null
+  if (
+    filters.tokenConsumptionMin != null &&
+    (tokens === null || tokens < filters.tokenConsumptionMin)
+  )
+    return false
+  if (
+    filters.tokenConsumptionMax != null &&
+    (tokens === null || tokens > filters.tokenConsumptionMax)
+  )
+    return false
+  return true
+}
+function parseFact(source: RecordValue, state: Snapshot): ProjectMetricProjectItem {
+  const prjCode = string(source.prjCode)
+  const smart = state.byCode.has(prjCode)
+  const date = (key: string): string | null => string(source[key]) || null
+  const approvedDate = date("approvedDate")
+  const createDate = date("createDate")
+  const st = date("firstStStartDate")
+  const uat = date("firstUatStartDate")
+  const fp = number(source.notAdjustFuns)
+  const bug = number(source.bugNum)
+  const featureCodes = strings(source.featureCodes)
   return {
     prjCode,
-    prjName: asString(source.prjName),
-    phaseStatus: asString(source.phaseStatus),
-    roomName: asString(source.roomName),
-    groupName: asString(source.groupName),
-    bugNum: asNullableNumber(source.bugNum),
-    kenanIssueCount: asNullableNumber(source.kenanIssueCount),
+    prjName: string(source.prjName),
+    teamName: string(source.teamName),
+    roomName: string(source.roomName),
+    groupName: string(source.groupName),
+    phaseStatus: string(source.phaseStatus),
+    developmentMode: smart ? "devclaw" : "non_devclaw",
+    plugins: strings(state.byCode.get(prjCode)?.map((p) => p.adapterName)),
+    bugNum: bug,
+    notAdjustFuns: fp,
+    kenanIssueCount: number(source.kenanIssueCount),
     kenanIssueCategories: (Array.isArray(source.kenanIssueCategoryCount)
       ? source.kenanIssueCategoryCount
       : []
     )
-      .map((item) => {
-        const category = asRecord(item)
-        return { category: asString(category.category), count: asNumber(category.count) }
+      .map((v) => {
+        const c = record(v)
+        return { category: string(c.category), count: number(c.count) ?? 0 }
       })
-      .filter((item) => item.category && item.count > 0),
-    notAdjustFuns: asNullableNumber(source.notAdjustFuns),
-    createDate: asNullableString(source.createDate),
-    firstStStartDate: asNullableString(source.firstStStartDate),
-    firstStEndDate: asNullableString(source.firstStEndDate),
-    firstUatStartDate: asNullableString(source.firstUatStartDate),
-    firstOnlineDate: asNullableString(source.firstOnlineDate),
-    approvedDate: asNullableString(source.approvedDate)
+      .filter((c) => c.category && c.count > 0),
+    devWorkHours: number(source.devWorkHours),
+    featureCodes,
+    features: featureCodes.map((featureCode) => ({ featureCode, featureName: null })),
+    createDate,
+    approvedDate,
+    firstStStartDate: st,
+    firstStEndDate: date("firstStEndDate"),
+    firstUatStartDate: uat,
+    firstOnlineDate: date("firstOnlineDate"),
+    testLeadDays: projectWorkingDays(createDate, st),
+    uatLeadDays: projectWorkingDays(createDate, uat),
+    deliveryDays: projectWorkingDays(approvedDate, date("firstOnlineDate")),
+    approvalDevelopmentDays: projectWorkingDays(approvedDate, st || uat),
+    approvalCreationDays: projectWorkingDays(approvedDate, createDate),
+    defectDensityPer100Fp: bug !== null && fp !== null && fp > 0 ? (bug * 100) / fp : null,
+    pushedAdoptedLines: smart ? 0 : null,
+    totalInputTokens: smart ? 0 : null,
+    totalOutputTokens: smart ? 0 : null,
+    inputTokensPerAdoptedLine: null,
+    outputTokensPerAdoptedLine: null,
+    tokensPerAdoptedLine: null
   }
 }
-
-function nestedRecord(record: Record<string, unknown>, key: string): Record<string, unknown> {
-  return asRecord(record[key])
-}
-
-function nullableAggValue(record: Record<string, unknown>, key: string): number | null {
-  const value = nestedRecord(record, key).value
-  return value === null || value === undefined ? null : asNullableNumber(value)
-}
-
-function ratio(numerator: number, denominator: number, multiplier: number): number | null {
-  return denominator > 0 ? (numerator * multiplier) / denominator : null
-}
-
-function hasTokenConsumptionFilter(filters: ProjectMetricFilters): boolean {
-  return (
-    (filters.tokenConsumptionMin !== null && filters.tokenConsumptionMin !== undefined) ||
-    (filters.tokenConsumptionMax !== null && filters.tokenConsumptionMax !== undefined)
-  )
-}
-
-function matchesTokenConsumptionFilter(
-  tokens: HarnessTokenTotals,
-  filters: ProjectMetricFilters
-): boolean {
-  const total = tokens.input + tokens.output
-  const minimum = filters.tokenConsumptionMin
-  const maximum = filters.tokenConsumptionMax
-  return (
-    (minimum === null || minimum === undefined || total >= minimum) &&
-    (maximum === null || maximum === undefined || total <= maximum)
-  )
-}
-
-function parseSummaryGroup(
-  developmentMode: ProjectMetricSummaryGroup["developmentMode"],
-  bucket: Record<string, unknown>
-): ProjectMetricSummaryGroup {
-  const density = nestedRecord(bucket, "defect_density_valid")
-  const densityBug = asNumber(nestedRecord(density, "sum_bug_count").value)
-  const densityFp = asNumber(nestedRecord(density, "sum_function_points").value)
-  const testLead = nestedRecord(bucket, "test_lead_valid")
-  const uatLead = nestedRecord(bucket, "uat_lead_valid")
-  const delivery = nestedRecord(bucket, "delivery_valid")
-  const testLeadSeconds = nullableAggValue(testLead, "avg_seconds")
-  const uatLeadSeconds = nullableAggValue(uatLead, "avg_seconds")
-  const deliverySeconds = nullableAggValue(delivery, "avg_seconds")
-  const projectCount = asNumber(bucket.doc_count)
-  const categories = nestedRecord(nestedRecord(bucket, "kenan_issue_categories"), "by_category")
-  if (asNumber(categories.sum_other_doc_count) > 0) {
-    throw new Error("非功能问题类别过多，类别汇总不完整")
-  }
-  const categoryBuckets = Array.isArray(categories.buckets) ? categories.buckets : []
-  return {
-    developmentMode,
-    projectCount,
-    avgBugCount: nullableAggValue(bucket, "avg_bug_count"),
-    avgKenanIssueCount: ratio(
-      asNumber(nestedRecord(bucket, "sum_kenan_issue_count").value),
-      projectCount,
-      1
-    ),
-    kenanIssueCategories: categoryBuckets
-      .map((item) => {
-        const record = asRecord(item)
-        return {
-          category: asString(record.key),
-          count: asNumber(nestedRecord(record, "issue_count").value)
-        }
-      })
-      .filter((item) => item.category && item.count > 0),
-    avgFuncPointCount: nullableAggValue(bucket, "avg_function_points"),
-    defectDensityPer100Fp: ratio(densityBug, densityFp, 100),
-    avgTestLeadDays: testLeadSeconds === null ? null : testLeadSeconds / 86_400,
-    avgUatLeadDays: uatLeadSeconds === null ? null : uatLeadSeconds / 86_400,
-    avgDeliveryDays: deliverySeconds === null ? null : deliverySeconds / 86_400,
-    avgInputTokens: developmentMode === "devclaw" ? 0 : null,
-    avgOutputTokens: developmentMode === "devclaw" ? 0 : null,
-    avgPushedAdoptedLines: developmentMode === "devclaw" ? 0 : null,
-    inputTokensPerAdoptedLine: developmentMode === "devclaw" ? 0 : null,
-    outputTokensPerAdoptedLine: developmentMode === "devclaw" ? 0 : null,
-    samples: {
-      bug: asNumber(nestedRecord(bucket, "bug_sample_count").value),
-      kenanIssue: projectCount,
-      functionPoint: asNumber(nestedRecord(bucket, "function_point_sample_count").value),
-      defectDensity: asNumber(density.doc_count),
-      testLead: asNumber(testLead.doc_count),
-      uatLead: asNumber(uatLead.doc_count),
-      delivery: asNumber(delivery.doc_count),
-      token: 0,
-      codeLines: 0,
-      tokensPerLine: 0
-    }
-  }
-}
-
-async function fetchFactSummary(
+async function cumulative(
   deps: ProjectMetricDependencies,
-  filters: ProjectMetricFilters,
-  allDevclawCodes: string[],
-  selectedDevclawCodes: string[],
-  dateField: ProjectMetricTrendDateField = "createDate"
-): Promise<FactSummaryGroups> {
-  const raw = (await queryProjectMetricEs(deps, "总体事实聚合", deps.factIndex, {
-    size: 0,
-    track_total_hits: false,
-    query: { bool: { filter: buildFactBaseFilters(filters, deps.allowedRoomNames, dateField) } },
-    aggs: {
-      by_project_type: {
-        filters: {
-          filters: {
-            devclaw: matchNoneOrTerms("prjCode", selectedDevclawCodes),
-            non_devclaw: notTerms("prjCode", allDevclawCodes)
-          }
-        },
-        aggs: summaryAggs()
-      }
-    }
-  })) as EsResponse
-  const buckets = nestedRecord(asRecord(raw.aggregations), "by_project_type").buckets
-  const byType = asRecord(buckets)
-  return {
-    devclaw: parseSummaryGroup("devclaw", asRecord(byType.devclaw)),
-    nonDevclaw: parseSummaryGroup("non_devclaw", asRecord(byType.non_devclaw))
-  }
-}
-
-async function fetchSelectedDevclawFacts(
-  deps: ProjectMetricDependencies,
-  filters: ProjectMetricFilters,
-  selectedDevclawCodes: string[],
-  dateField: ProjectMetricTrendDateField = "createDate"
-): Promise<FactProject[]> {
-  if (selectedDevclawCodes.length === 0) return []
-  const raw = (await queryProjectMetricEs(deps, "DevClaw 项目事实", deps.factIndex, {
-    size: PROJECT_METRIC_JOIN_KEY_LIMIT,
-    track_total_hits: false,
-    query: {
-      bool: {
-        filter: [
-          ...buildFactBaseFilters(filters, deps.allowedRoomNames, dateField),
-          { terms: { prjCode: selectedDevclawCodes } }
-        ]
-      }
-    },
-    _source: { includes: FACT_SOURCE_INCLUDES }
-  })) as EsResponse
-  return (raw.hits?.hits ?? [])
-    .map(parseFactProject)
-    .filter((project): project is FactProject => project !== null)
-}
-
-function harnessIdsForProjects(snapshot: LeanSnapshotState, prjCodes: string[]): string[] {
-  return uniqueSorted(
-    prjCodes.flatMap((prjCode) => snapshot.harnessProjectIdsByPrjCode.get(prjCode) ?? [])
-  )
-}
-
-async function fetchPushedAdoptedLinesByHarnessProject(
-  deps: ProjectMetricDependencies,
-  harnessProjectIds: string[]
-): Promise<Map<string, number>> {
-  const result = new Map<string, number>()
-  if (harnessProjectIds.length === 0) return result
-  const raw = (await queryProjectMetricEs(deps, "项目已 Push 采纳行数", deps.eventIndex, {
-    size: 0,
-    track_total_hits: false,
-    query: {
-      bool: {
-        filter: [
-          { term: { eventName: "code_adopt" } },
-          { exists: { field: "properties.adoptedLineCount" } },
-          { exists: { field: "properties.generatedLineCount" } },
-          { exists: { field: "properties.effectiveGeneratedLineCount" } },
-          { term: { "properties.pushed": true } },
-          { terms: { "properties.harnessProjectId": harnessProjectIds } }
-        ]
-      }
-    },
-    aggs: {
-      by_harness_project: {
-        terms: {
-          field: "properties.harnessProjectId",
-          size: Math.max(1, harnessProjectIds.length)
-        },
-        aggs: {
-          pushed_adopted_lines: { sum: { field: "properties.adoptedLineCount" } }
-        }
-      }
-    }
-  })) as EsResponse
-  const buckets = nestedRecord(asRecord(raw.aggregations), "by_harness_project").buckets
-  if (!Array.isArray(buckets)) return result
-  for (const bucket of buckets) {
-    const record = asRecord(bucket)
-    const id = asString(record.key)
-    if (id) result.set(id, asNumber(nestedRecord(record, "pushed_adopted_lines").value))
-  }
-  return result
-}
-
-interface HarnessTokenTotals {
-  input: number
-  output: number
-}
-
-async function fetchTokensByHarnessProject(
-  deps: ProjectMetricDependencies,
-  harnessProjectIds: string[]
-): Promise<Map<string, HarnessTokenTotals>> {
-  const result = new Map<string, HarnessTokenTotals>()
-  if (harnessProjectIds.length === 0) return result
-  const raw = (await queryProjectMetricEs(deps, "项目 Token", deps.traceIndex, {
-    size: 0,
-    track_total_hits: false,
-    query: {
-      bool: {
-        filter: [
-          { exists: { field: "harnessProjectId" } },
-          { terms: { harnessProjectId: harnessProjectIds } }
-        ]
-      }
-    },
-    aggs: {
-      by_harness_project: {
-        terms: { field: "harnessProjectId", size: Math.max(1, harnessProjectIds.length) },
-        aggs: {
-          total_input_tokens: { sum: { field: "totalInputTokens" } },
-          total_output_tokens: { sum: { field: "totalOutputTokens" } }
-        }
-      }
-    }
-  })) as EsResponse
-  const buckets = nestedRecord(asRecord(raw.aggregations), "by_harness_project").buckets
-  if (!Array.isArray(buckets)) return result
-  for (const bucket of buckets) {
-    const record = asRecord(bucket)
-    const id = asString(record.key)
-    if (!id) continue
-    result.set(id, {
-      input: asNumber(nestedRecord(record, "total_input_tokens").value),
-      output: asNumber(nestedRecord(record, "total_output_tokens").value)
-    })
-  }
-  return result
-}
-
-function sumPushedAdoptedLines(
-  snapshot: LeanSnapshotState,
-  byHarness: Map<string, number>,
-  prjCode: string
-): number {
-  return (snapshot.harnessProjectIdsByPrjCode.get(prjCode) ?? []).reduce(
-    (sum, harnessProjectId) => sum + (byHarness.get(harnessProjectId) ?? 0),
-    0
-  )
-}
-
-function sumTokens(
-  snapshot: LeanSnapshotState,
-  byHarness: Map<string, HarnessTokenTotals>,
-  prjCode: string
-): HarnessTokenTotals {
-  return (snapshot.harnessProjectIdsByPrjCode.get(prjCode) ?? []).reduce(
-    (sum, harnessProjectId) => {
-      const value = byHarness.get(harnessProjectId)
-      return {
-        input: sum.input + (value?.input ?? 0),
-        output: sum.output + (value?.output ?? 0)
-      }
-    },
-    { input: 0, output: 0 }
-  )
-}
-
-function millisBetween(start: string | null, end: string | null): number | null {
-  if (!start || !end) return null
-  const startMs = Date.parse(start.replace(" ", "T"))
-  const endMs = Date.parse(end.replace(" ", "T"))
-  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) return null
-  return endMs - startMs
-}
-
-function buildProjectItem(
-  fact: FactProject,
-  snapshot: LeanSnapshotState,
-  pushedAdoptedLinesByHarness: Map<string, number> | null,
-  tokensByHarness: Map<string, HarnessTokenTotals> | null
-): ProjectMetricProjectItem {
-  const devclaw = snapshot.harnessProjectIdsByPrjCode.has(fact.prjCode)
-  const pushedAdoptedLines =
-    devclaw && pushedAdoptedLinesByHarness
-      ? sumPushedAdoptedLines(snapshot, pushedAdoptedLinesByHarness, fact.prjCode)
-      : null
-  const tokens =
-    devclaw && tokensByHarness ? sumTokens(snapshot, tokensByHarness, fact.prjCode) : null
-  const testLeadMs = millisBetween(fact.createDate, fact.firstStStartDate)
-  const uatLeadMs = millisBetween(fact.createDate, fact.firstUatStartDate)
-  const deliveryMs = millisBetween(fact.approvedDate, fact.firstOnlineDate)
-  return {
-    ...fact,
-    developmentMode: devclaw ? "devclaw" : "non_devclaw",
-    plugins: devclaw ? (snapshot.pluginsByPrjCode.get(fact.prjCode) ?? []) : [],
-    defectDensityPer100Fp:
-      fact.bugNum !== null && fact.notAdjustFuns !== null && fact.notAdjustFuns > 0
-        ? (fact.bugNum * 100) / fact.notAdjustFuns
-        : null,
-    pushedAdoptedLines,
-    testLeadDays: testLeadMs === null ? null : testLeadMs / DAY_MS,
-    uatLeadDays: uatLeadMs === null ? null : uatLeadMs / DAY_MS,
-    deliveryDays: deliveryMs === null ? null : deliveryMs / DAY_MS,
-    totalInputTokens: tokens?.input ?? null,
-    totalOutputTokens: tokens?.output ?? null,
-    inputTokensPerAdoptedLine:
-      tokens && pushedAdoptedLines && pushedAdoptedLines > 0
-        ? tokens.input / pushedAdoptedLines
-        : null,
-    outputTokensPerAdoptedLine:
-      tokens && pushedAdoptedLines && pushedAdoptedLines > 0
-        ? tokens.output / pushedAdoptedLines
-        : null,
-    tokensPerAdoptedLine:
-      tokens && pushedAdoptedLines && pushedAdoptedLines > 0
-        ? (tokens.input + tokens.output) / pushedAdoptedLines
-        : null
-  }
-}
-
-function buildKeywordFilter(keyword?: string): Record<string, unknown> | null {
-  const normalized = asString(keyword)
-  if (!normalized) return null
-  const wildcard = `*${escapeWildcard(normalized)}*`
-  return {
-    bool: {
-      should: [{ wildcard: { prjCode: wildcard } }, { match_phrase: { prjName: normalized } }],
-      minimum_should_match: 1
-    }
-  }
-}
-
-function escapeWildcard(value: string): string {
-  return value.replace(/[\\*?]/g, "\\$&")
-}
-
-function buildDepartmentKeywordFilter(keyword?: string): Record<string, unknown> | null {
-  const normalized = asString(keyword)
-  if (!normalized) return null
-  const wildcard = `*${escapeWildcard(normalized)}*`
-  return {
-    bool: {
-      should: [{ wildcard: { roomName: wildcard } }, { wildcard: { groupName: wildcard } }],
-      minimum_should_match: 1
-    }
-  }
-}
-
-function normalizePageSize(value?: number): 20 | 50 | 100 {
-  return value === 50 || value === 100 ? value : 20
-}
-
-function normalizePage(value: number | undefined, pageSize: number): number {
-  const maxPage = Math.max(1, Math.floor(PROJECT_METRIC_JOIN_KEY_LIMIT / pageSize))
-  return Math.min(maxPage, Math.max(1, Math.floor(value ?? 1)))
-}
-
-function factSort(options: ProjectMetricListOptions): Record<string, unknown>[] {
-  const order = options.sortOrder === "asc" ? "asc" : "desc"
-  if (!options.sortBy || options.sortBy === "deliveryDays") {
-    return [
+  ids: string[],
+  kind: "code" | "token"
+): Promise<Map<string, { input: number; output: number; lines: number }>> {
+  const result = new Map<string, { input: number; output: number; lines: number }>()
+  for (const batch of chunks(ids)) {
+    const code = kind === "code"
+    const raw = await query(
+      deps,
+      code ? "累计已Push采纳行数" : "累计Token",
+      code ? deps.eventIndex : deps.traceIndex,
       {
-        _script: {
-          type: "number",
-          order,
-          script: {
-            lang: "painless",
-            source:
-              "if (doc['approvedDate'].size() == 0 || doc['firstOnlineDate'].size() == 0) return params.missing; def approved = doc['approvedDate'].value; def online = doc['firstOnlineDate'].value; if (online.isBefore(approved)) return params.missing; return ChronoUnit.MILLIS.between(approved, online);",
-            params: { missing: order === "asc" ? 9e18 : -1 }
+        size: 0,
+        query: {
+          bool: {
+            filter: [
+              { terms: { [code ? "properties.harnessProjectId" : "harnessProjectId"]: batch } },
+              ...(code
+                ? [
+                    { term: { eventName: "code_adopt" } },
+                    { term: { "properties.pushed": true } },
+                    ...[
+                      "adoptedLineCount",
+                      "generatedLineCount",
+                      "effectiveGeneratedLineCount"
+                    ].map((f) => ({ exists: { field: `properties.${f}` } }))
+                  ]
+                : [])
+            ]
+          }
+        },
+        aggs: {
+          projects: {
+            terms: {
+              field: code ? "properties.harnessProjectId" : "harnessProjectId",
+              size: batch.length
+            },
+            aggs: code
+              ? { lines: { sum: { field: "properties.adoptedLineCount" } } }
+              : {
+                  input: { sum: { field: "totalInputTokens" } },
+                  output: { sum: { field: "totalOutputTokens" } }
+                }
           }
         }
-      },
-      { prjCode: { order: "asc" } }
-    ]
-  }
-  const field =
-    options.sortBy === "bugNum" || options.sortBy === "kenanIssueCount"
-      ? options.sortBy
-      : "notAdjustFuns"
-  return [{ [field]: { order, missing: "_last" } }, { prjCode: { order: "asc" } }]
-}
-
-function isDerivedMetricSort(
-  sortBy: ProjectMetricListOptions["sortBy"]
-): sortBy is "pushedAdoptedLines" | "tokensPerAdoptedLine" {
-  return sortBy === "pushedAdoptedLines" || sortBy === "tokensPerAdoptedLine"
-}
-
-function derivedMetricSortValue(
-  item: ProjectMetricProjectItem,
-  sortBy: "pushedAdoptedLines" | "tokensPerAdoptedLine"
-): number | null {
-  return sortBy === "pushedAdoptedLines" ? item.pushedAdoptedLines : item.tokensPerAdoptedLine
-}
-
-function sortByDerivedMetric(
-  items: ProjectMetricProjectItem[],
-  sortBy: "pushedAdoptedLines" | "tokensPerAdoptedLine",
-  sortOrder: ProjectMetricListOptions["sortOrder"]
-): ProjectMetricProjectItem[] {
-  const direction = sortOrder === "asc" ? 1 : -1
-  return [...items].sort((left, right) => {
-    const leftValue = derivedMetricSortValue(left, sortBy)
-    const rightValue = derivedMetricSortValue(right, sortBy)
-    if (leftValue === null && rightValue !== null) return 1
-    if (leftValue !== null && rightValue === null) return -1
-    if (leftValue !== null && rightValue !== null && leftValue !== rightValue) {
-      return (leftValue - rightValue) * direction
-    }
-    return left.prjCode.localeCompare(right.prjCode)
-  })
-}
-
-async function enrichProjectFacts(
-  facts: FactProject[],
-  snapshot: LeanSnapshotState,
-  deps: ProjectMetricDependencies,
-  requireTokens = false
-): Promise<ProjectMetricProjectItem[]> {
-  const devclawCodes = facts
-    .filter((project) => snapshot.harnessProjectIdsByPrjCode.has(project.prjCode))
-    .map((project) => project.prjCode)
-  const harnessProjectIds = harnessIdsForProjects(snapshot, devclawCodes)
-  const [codeResult, tokenResult] = await Promise.allSettled([
-    fetchPushedAdoptedLinesByHarnessProject(deps, harnessProjectIds),
-    fetchTokensByHarnessProject(deps, harnessProjectIds)
-  ] as const)
-  if (requireTokens && tokenResult.status === "rejected") throw tokenResult.reason
-  return facts.map((fact) =>
-    buildProjectItem(
-      fact,
-      snapshot,
-      codeResult.status === "fulfilled" ? codeResult.value : null,
-      tokenResult.status === "fulfilled" ? tokenResult.value : null
+      }
     )
-  )
+    const aggregation = record(raw.aggregations?.projects)
+    if (!Array.isArray(aggregation.buckets) || Number(aggregation.sum_other_doc_count ?? 0) > 0)
+      throw new Error("项目累计遥测未完整返回")
+    for (const value of aggregation.buckets) {
+      const b = record(value)
+      result.set(string(b.key), {
+        input: number(record(b.input).value) ?? 0,
+        output: number(record(b.output).value) ?? 0,
+        lines: number(record(b.lines).value) ?? 0
+      })
+    }
+  }
+  return result
 }
-
+interface Context {
+  snapshot: Snapshot
+  items: ProjectMetricProjectItem[]
+  warnings: string[]
+}
+async function context(
+  filters: ProjectMetricFilters,
+  deps: ProjectMetricDependencies,
+  state?: Snapshot
+): Promise<Context> {
+  validateFilters(filters)
+  await deps.validateFactFields?.()
+  const s = state ?? (await snapshot(deps))
+  const raw = await facts(deps, [
+    ...organizationFilters(roomsFor(filters, deps)),
+    {
+      bool: {
+        should: [periodFilter(filters), periodFilter(filters, true)],
+        minimum_should_match: 1
+      }
+    }
+  ])
+  const codes = new Set<string>()
+  const items = raw.map((p) => {
+    const code = string(p.prjCode)
+    if (!code || codes.has(code)) throw new Error("项目事实编号缺失或重复")
+    codes.add(code)
+    return parseFact(p, s)
+  })
+  const ids = strings(
+    items.flatMap((p) => s.byCode.get(p.prjCode)?.map((h) => h.harnessProjectId) ?? [])
+  )
+  const [code, token] = await Promise.allSettled([
+    cumulative(deps, ids, "code"),
+    cumulative(deps, ids, "token")
+  ])
+  const warnings = [PROJECT_CALENDAR_NOTE]
+  if (code.status === "rejected") warnings.push(`代码数据不可用：${failure(code.reason)}`)
+  if (token.status === "rejected") {
+    if (filters.tokenConsumptionMin != null || filters.tokenConsumptionMax != null)
+      throw token.reason
+    warnings.push(`Token 数据不可用：${failure(token.reason)}`)
+  }
+  for (const item of items) {
+    if (item.developmentMode !== "devclaw") continue
+    const harness = s.byCode.get(item.prjCode) ?? []
+    item.pushedAdoptedLines =
+      code.status === "fulfilled"
+        ? harness.reduce((sum, h) => sum + (code.value.get(h.harnessProjectId)?.lines ?? 0), 0)
+        : null
+    item.totalInputTokens =
+      token.status === "fulfilled"
+        ? harness.reduce((sum, h) => sum + (token.value.get(h.harnessProjectId)?.input ?? 0), 0)
+        : null
+    item.totalOutputTokens =
+      token.status === "fulfilled"
+        ? harness.reduce((sum, h) => sum + (token.value.get(h.harnessProjectId)?.output ?? 0), 0)
+        : null
+    const lines = item.pushedAdoptedLines
+    if (
+      lines !== null &&
+      lines > 0 &&
+      item.totalInputTokens !== null &&
+      item.totalOutputTokens !== null
+    ) {
+      item.inputTokensPerAdoptedLine = item.totalInputTokens / lines
+      item.outputTokensPerAdoptedLine = item.totalOutputTokens / lines
+      item.tokensPerAdoptedLine = (item.totalInputTokens + item.totalOutputTokens) / lines
+    }
+  }
+  return { snapshot: s, items, warnings }
+}
+function summarize(ctx: Context, filters: ProjectMetricFilters): ProjectMetricSummaryData {
+  return {
+    groups: projectMetricGroups(
+      ctx.items.filter((p) => inAdvancedScope(p, filters)),
+      filters
+    ),
+    pluginOptions: ctx.snapshot.pluginOptions,
+    truncated: false,
+    warnings: ctx.warnings
+  }
+}
 export async function fetchProjectMetricSummary(
   filters: ProjectMetricFilters,
   deps: ProjectMetricDependencies
 ): Promise<ProjectMetricSummaryData> {
-  const snapshot = await fetchLeanSnapshotState(deps)
-  return fetchProjectMetricSummaryWithSnapshot(filters, deps, snapshot)
+  return summarize(await context(filters, deps), filters)
 }
-
-async function fetchProjectMetricSummaryWithSnapshot(
-  filters: ProjectMetricFilters,
-  deps: ProjectMetricDependencies,
-  snapshot: LeanSnapshotState,
-  dateField: ProjectMetricTrendDateField = "createDate"
-): Promise<ProjectMetricSummaryData> {
-  const selectedCodes = selectedDevclawPrjCodes(snapshot, filters.adapterName)
-  const tokenConsumptionFiltered = hasTokenConsumptionFilter(filters)
-  let factSummary!: FactSummaryGroups
-  let devclawFacts!: FactProject[]
-  await Promise.all([
-    fetchFactSummary(deps, filters, snapshot.prjCodes, selectedCodes, dateField).then((value) => {
-      factSummary = value
-    }),
-    fetchSelectedDevclawFacts(deps, filters, selectedCodes, dateField).then((value) => {
-      devclawFacts = value
-    })
-  ])
-  const harnessProjectIds = harnessIdsForProjects(
-    snapshot,
-    devclawFacts.map((project) => project.prjCode)
-  )
-  const [codeResult, tokenResult] = await Promise.allSettled([
-    fetchPushedAdoptedLinesByHarnessProject(deps, harnessProjectIds),
-    fetchTokensByHarnessProject(deps, harnessProjectIds)
-  ] as const)
-
-  if (tokenConsumptionFiltered) {
-    if (tokenResult.status === "rejected") throw tokenResult.reason
-    devclawFacts = devclawFacts.filter((project) =>
-      matchesTokenConsumptionFilter(
-        sumTokens(snapshot, tokenResult.value, project.prjCode),
-        filters
-      )
-    )
-    const filteredSummary = await fetchFactSummary(
-      deps,
-      filters,
-      snapshot.prjCodes,
-      devclawFacts.map((project) => project.prjCode),
-      dateField
-    )
-    factSummary.devclaw = filteredSummary.devclaw
-  }
-
-  const devclaw = factSummary.devclaw
-  const devclawProjectCount = devclawFacts.length
-  if (codeResult.status === "fulfilled") {
-    let allProjectLineTotal = 0
-    for (const project of devclawFacts) {
-      const pushedAdoptedLines = sumPushedAdoptedLines(snapshot, codeResult.value, project.prjCode)
-      allProjectLineTotal += pushedAdoptedLines
-    }
-    devclaw.avgPushedAdoptedLines =
-      devclawProjectCount > 0 ? allProjectLineTotal / devclawProjectCount : null
-    devclaw.samples.codeLines = devclawProjectCount
-  } else {
-    devclaw.avgPushedAdoptedLines = null
-  }
-
-  if (tokenResult.status === "fulfilled") {
-    const total = devclawFacts.reduce(
-      (sum, project) => {
-        const tokens = sumTokens(snapshot, tokenResult.value, project.prjCode)
-        return { input: sum.input + tokens.input, output: sum.output + tokens.output }
-      },
-      { input: 0, output: 0 }
-    )
-    devclaw.avgInputTokens = devclawProjectCount > 0 ? total.input / devclawProjectCount : null
-    devclaw.avgOutputTokens = devclawProjectCount > 0 ? total.output / devclawProjectCount : null
-    devclaw.samples.token = devclawProjectCount
-  } else {
-    devclaw.avgInputTokens = null
-    devclaw.avgOutputTokens = null
-  }
-
-  if (codeResult.status === "fulfilled" && tokenResult.status === "fulfilled") {
-    let lineTotal = 0
-    let inputTokenTotal = 0
-    let outputTokenTotal = 0
-    let sampleCount = 0
-    for (const project of devclawFacts) {
-      const pushedAdoptedLines = sumPushedAdoptedLines(snapshot, codeResult.value, project.prjCode)
-      if (pushedAdoptedLines <= 0) continue
-      const tokens = sumTokens(snapshot, tokenResult.value, project.prjCode)
-      lineTotal += pushedAdoptedLines
-      inputTokenTotal += tokens.input
-      outputTokenTotal += tokens.output
-      sampleCount += 1
-    }
-    devclaw.inputTokensPerAdoptedLine = ratio(inputTokenTotal, lineTotal, 1)
-    devclaw.outputTokensPerAdoptedLine = ratio(outputTokenTotal, lineTotal, 1)
-    devclaw.samples.tokensPerLine = sampleCount
-  } else {
-    devclaw.inputTokensPerAdoptedLine = null
-    devclaw.outputTokensPerAdoptedLine = null
-  }
-
-  return {
-    groups: [devclaw, factSummary.nonDevclaw],
-    pluginOptions: snapshot.pluginOptions,
-    truncated: snapshot.truncated
-  }
-}
-
-function recentProjectMetricMonths(): Array<{
-  month: string
-  range: ProjectMetricFilters["range"]
-}> {
-  const current = shanghaiDateParts(new Date().toString())
-  return Array.from({ length: 6 }, (_, index) => {
-    const first = new Date(Date.UTC(current.year, current.month - 7 + index, 1))
-    const last = new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth() + 1, 0))
-    const month = `${first.getUTCFullYear()}-${String(first.getUTCMonth() + 1).padStart(2, "0")}`
-    return {
-      month,
-      range: { from: `${month}-01`, to: `${month}-${last.getUTCDate()}` }
-    }
+function recentMonths(): Array<{ month: string; range: ProjectMetricFilters["range"] }> {
+  const now = formatProjectDate(Date.now()).slice(0, 7)
+  return Array.from({ length: 6 }, (_, i) => {
+    const date = new Date(Date.UTC(+now.slice(0, 4), +now.slice(5, 7) - 7 + i, 1))
+    const month = date.toISOString().slice(0, 7)
+    const last = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)).getUTCDate()
+    return { month, range: { from: `${month}-01`, to: `${month}-${last}` } }
   })
 }
-
 export async function fetchProjectMetricTrend(
   filters: ProjectMetricTrendFilters,
   deps: ProjectMetricDependencies
 ): Promise<ProjectMetricTrendData> {
-  const snapshot = await fetchLeanSnapshotState(deps)
-  // endDate 的月份范围查询本身排除无结项日期的项目，不叠加立项日期条件。
-  const dateField = filters.dateField === "endDate" ? "endDate" : "createDate"
-  // 共用一次项目快照；每月复用总体指标的完整筛选和计算口径。
-  const results = await Promise.all(
-    recentProjectMetricMonths().map(async ({ month, range }) => ({
-      month,
-      summary: await fetchProjectMetricSummaryWithSnapshot(
-        { ...filters, range },
-        deps,
-        snapshot,
-        dateField
-      )
-    }))
+  const months = recentMonths()
+  const ctx = await context(
+    { ...filters, range: { from: months[0].range.from, to: months[5].range.to } },
+    deps
   )
   return {
-    months: results.map(({ month, summary }) => ({ month, groups: summary.groups })),
-    truncated: results.some(({ summary }) => summary.truncated)
+    months: months.map(({ month, range }) => ({
+      month,
+      groups: summarize(ctx, { ...filters, range }).groups
+    })),
+    truncated: false,
+    warnings: ctx.warnings
   }
 }
-
-export function makeMockProjectMetricTrend(
-  filters: ProjectMetricTrendFilters
-): ProjectMetricTrendData {
-  return {
-    months: recentProjectMetricMonths().map(({ month, range }, index) => {
-      const summary = makeMockProjectMetricSummary({ ...filters, range })
-      return {
-        month,
-        groups: summary.groups.map((group) => {
-          const factor =
-            (group.developmentMode === "devclaw" ? 1.25 - index * 0.05 : 1.1 - index * 0.02) +
-            (filters.dateField === "endDate" ? 0.08 : 0)
-          return {
-            ...group,
-            avgBugCount: group.avgBugCount === null ? null : group.avgBugCount * factor,
-            avgFuncPointCount:
-              group.avgFuncPointCount === null ? null : group.avgFuncPointCount / factor,
-            defectDensityPer100Fp:
-              group.defectDensityPer100Fp === null
-                ? null
-                : group.defectDensityPer100Fp * factor * factor,
-            avgTestLeadDays: group.avgTestLeadDays === null ? null : group.avgTestLeadDays * factor,
-            avgUatLeadDays: group.avgUatLeadDays === null ? null : group.avgUatLeadDays * factor,
-            avgDeliveryDays: group.avgDeliveryDays === null ? null : group.avgDeliveryDays * factor,
-            avgInputTokens: group.avgInputTokens === null ? null : group.avgInputTokens * factor,
-            avgOutputTokens: group.avgOutputTokens === null ? null : group.avgOutputTokens * factor,
-            avgPushedAdoptedLines:
-              group.avgPushedAdoptedLines === null ? null : group.avgPushedAdoptedLines / factor,
-            inputTokensPerAdoptedLine:
-              group.inputTokensPerAdoptedLine === null
-                ? null
-                : group.inputTokensPerAdoptedLine * factor * factor,
-            outputTokensPerAdoptedLine:
-              group.outputTokensPerAdoptedLine === null
-                ? null
-                : group.outputTokensPerAdoptedLine * factor * factor
-          }
-        })
-      }
-    }),
-    truncated: false
-  }
-}
-
 export async function fetchProjectMetricProjects(
   filters: ProjectMetricFilters,
   options: ProjectMetricListOptions,
   deps: ProjectMetricDependencies
 ): Promise<ProjectMetricProjectsData> {
-  const snapshot = await fetchLeanSnapshotState(deps)
-  const selectedCodes = selectedDevclawPrjCodes(snapshot, filters.adapterName)
-  const factFilters = buildFactBaseFilters(filters, deps.allowedRoomNames)
-  const developmentMode = options.developmentMode ?? "all"
-  const tokenConsumptionFiltered = hasTokenConsumptionFilter(filters)
-  if (developmentMode === "non_devclaw") {
-    factFilters.push(
-      filters.adapterName || tokenConsumptionFiltered
-        ? { match_none: {} }
-        : notTerms("prjCode", snapshot.prjCodes)
-    )
-  } else if (filters.adapterName || tokenConsumptionFiltered || developmentMode === "devclaw") {
-    factFilters.push(matchNoneOrTerms("prjCode", selectedCodes))
-  }
-  const keywordFilter = buildKeywordFilter(options.keyword)
-  if (keywordFilter) factFilters.push(keywordFilter)
-  const departmentKeywordFilter = buildDepartmentKeywordFilter(options.departmentKeyword)
-  if (departmentKeywordFilter) factFilters.push(departmentKeywordFilter)
-
-  const pageSize = options.exportAll
-    ? PROJECT_METRIC_JOIN_KEY_LIMIT
-    : normalizePageSize(options.pageSize)
-  const page = options.exportAll ? 1 : normalizePage(options.page, pageSize)
-  const derivedSortBy = isDerivedMetricSort(options.sortBy) ? options.sortBy : null
-  const derivedSort = derivedSortBy !== null
-  const applicationFiltered = derivedSort || tokenConsumptionFiltered
-  const raw = (await queryProjectMetricEs(
-    deps,
-    applicationFiltered ? "项目明细派生筛选排序候选事实集" : "项目明细",
-    deps.factIndex,
-    {
-      ...(applicationFiltered ? {} : { from: (page - 1) * pageSize }),
-      size: applicationFiltered ? PROJECT_METRIC_JOIN_KEY_LIMIT : pageSize,
-      track_total_hits: true,
-      query: { bool: { filter: factFilters } },
-      sort: derivedSort ? [{ prjCode: { order: "asc" } }] : factSort(options),
-      _source: { includes: FACT_SOURCE_INCLUDES }
-    }
-  )) as EsResponse
-  const facts = (raw.hits?.hits ?? [])
-    .map(parseFactProject)
-    .filter((project): project is FactProject => project !== null)
-  const enriched = await enrichProjectFacts(facts, snapshot, deps, tokenConsumptionFiltered)
-  const tokenFiltered = tokenConsumptionFiltered
-    ? enriched.filter((item) =>
-        matchesTokenConsumptionFilter(
-          { input: item.totalInputTokens ?? 0, output: item.totalOutputTokens ?? 0 },
-          filters
+  if (
+    options.developmentMode === "non_devclaw" &&
+    (filters.adapterName ||
+      filters.tokenConsumptionMin != null ||
+      filters.tokenConsumptionMax != null)
+  )
+    throw new Error("常规项目不支持插件或Token筛选")
+  if (options.pageSize !== undefined && ![20, 50, 100].includes(options.pageSize))
+    throw new Error("项目页大小无效")
+  if (options.page !== undefined && (!Number.isSafeInteger(options.page) || options.page < 1))
+    throw new Error("项目页码无效")
+  const sortKeys = [
+    "deliveryDays",
+    "bugNum",
+    "kenanIssueCount",
+    "notAdjustFuns",
+    "pushedAdoptedLines",
+    "tokensPerAdoptedLine"
+  ] as const
+  if (options.sortBy && !sortKeys.includes(options.sortBy)) throw new Error("项目排序字段无效")
+  if (options.sortOrder && !["asc", "desc"].includes(options.sortOrder))
+    throw new Error("项目排序方向无效")
+  if (
+    options.developmentMode &&
+    !["all", "devclaw", "non_devclaw"].includes(options.developmentMode)
+  )
+    throw new Error("项目开发方式无效")
+  const ctx = await context(filters, deps)
+  const keyword = string(options.keyword).toLowerCase()
+  const department = string(options.departmentKeyword).toLowerCase()
+  const items = ctx.items.filter(
+    (p) =>
+      projectInPeriod(
+        filters.dateBasis === "created" ? p.createDate : p.firstStStartDate || p.firstUatStartDate,
+        filters.range
+      ) &&
+      inAdvancedScope(p, filters) &&
+      (!options.developmentMode ||
+        options.developmentMode === "all" ||
+        p.developmentMode === options.developmentMode) &&
+      (!keyword || `${p.prjCode} ${p.prjName}`.toLowerCase().includes(keyword)) &&
+      (!department || p.roomName.toLowerCase().includes(department))
+  )
+  const key = options.sortBy ?? "deliveryDays"
+  items.sort((a, b) => {
+    const x = a[key],
+      y = b[key]
+    if (x === null && y !== null) return 1
+    if (x !== null && y === null) return -1
+    const difference = (x ?? 0) - (y ?? 0)
+    return difference
+      ? difference * (options.sortOrder === "asc" ? 1 : -1)
+      : a.prjCode.localeCompare(b.prjCode)
+  })
+  const pageSize = options.exportAll ? Math.max(1, items.length) : (options.pageSize ?? 20)
+  const page = options.exportAll ? 1 : (options.page ?? 1)
+  const selected = items.slice((page - 1) * pageSize, page * pageSize)
+  if (selected.some((p) => p.featureCodes.length)) {
+    try {
+      const names = new Map<string, string>()
+      for (const batch of chunks(strings(selected.flatMap((p) => p.featureCodes)))) {
+        const raw = await facts(
+          deps,
+          [{ terms: { featureCode: batch } }],
+          ["featureCode", "featureName"],
+          deps.featureIndex ?? "devclaw_feature_info",
+          "featureCode"
         )
-      )
-    : enriched
-  const ordered = derivedSortBy
-    ? sortByDerivedMetric(tokenFiltered, derivedSortBy, options.sortOrder)
-    : tokenFiltered
-  const items = applicationFiltered
-    ? ordered.slice((page - 1) * pageSize, page * pageSize)
-    : ordered
-  const actualTotal = getTotalHits(raw, facts.length)
-
+        for (const f of raw) names.set(string(f.featureCode), string(f.featureName))
+      }
+      for (const p of selected)
+        p.features = p.featureCodes.map((featureCode) => ({
+          featureCode,
+          featureName: names.get(featureCode) || null
+        }))
+    } catch (error) {
+      ctx.warnings.push(`特性名称暂不可用：${failure(error)}`)
+    }
+  }
   return {
-    items,
-    total: applicationFiltered ? ordered.length : actualTotal,
+    items: selected,
+    total: items.length,
     page,
     pageSize,
-    truncated:
-      snapshot.truncated ||
-      ((applicationFiltered || Boolean(options.exportAll)) && actualTotal > facts.length)
+    truncated: false,
+    warnings: ctx.warnings
   }
 }
 
+async function featureCoverage(
+  filters: ProjectMetricFilters,
+  deps: ProjectMetricDependencies,
+  s: Snapshot
+) {
+  await deps.validateFactFields?.()
+  const raw = await facts(
+    deps,
+    [...organizationFilters(roomsFor(filters, deps)), periodFilter(filters)],
+    ["prjCode", "featureCodes"]
+  )
+  const candidates = new Set(raw.flatMap((p) => strings(p.featureCodes)))
+  const smart = new Set<string>()
+  for (const batch of chunks([...candidates])) {
+    // 只返回分类结果，不泄露其他室的事实；反查不按组织、周期收窄。
+    const associated = await facts(
+      deps,
+      [
+        { range: { createDate: { gte: "2026-06-01 00:00:00" } } },
+        { terms: { featureCodes: batch } }
+      ],
+      ["prjCode", "featureCodes"]
+    )
+    for (const p of associated)
+      if (s.byCode.has(string(p.prjCode)))
+        for (const code of strings(p.featureCodes)) if (candidates.has(code)) smart.add(code)
+  }
+  return {
+    total: candidates.size,
+    intelligent: smart.size,
+    rate: candidates.size ? smart.size / candidates.size : null
+  }
+}
+async function monthlyRecords(
+  month: string,
+  deps: ProjectMetricDependencies
+): Promise<RecordValue[]> {
+  const raw = await query(
+    deps,
+    "组织月度入库数据",
+    deps.monthlyIndex ?? "devclaw_gitee_push_info",
+    {
+      size: 1000,
+      track_total_hits: true,
+      query: {
+        bool: {
+          filter: [
+            { term: { teamName: PROJECT_METRIC_TEAM } },
+            { term: { timeRange: month } },
+            { terms: { orgLevel: ["team", "room"] } }
+          ]
+        }
+      },
+      _source: {
+        includes: [
+          "orgLevel",
+          "teamName",
+          "roomName",
+          "timeRange",
+          "totalPushedLines",
+          "devagentIdePushedLines",
+          "devagentCloudPushedLines",
+          "devagentCliPushedLines",
+          "updatedAt"
+        ]
+      }
+    }
+  )
+  const hits = raw.hits?.hits
+  const total = raw.hits?.total
+  const count = typeof total === "number" ? total : total?.value
+  if (
+    !hits ||
+    count === undefined ||
+    (typeof total === "object" && total.relation === "gte") ||
+    count !== hits.length
+  )
+    throw new Error("月度组织数据未完整返回")
+  return hits.map((hit) => record(hit._source))
+}
+
+/** 补齐仅出现在既有组织选项来源中的室，不把其他团队或未归类桶带入导出。 */
+async function traceRooms(
+  filters: ProjectMetricFilters,
+  deps: ProjectMetricDependencies
+): Promise<string[]> {
+  const rooms = new Set<string>()
+  const cursors = new Set<string>()
+  let after: RecordValue | undefined
+  for (;;) {
+    const raw = await query(deps, "团队室选项", deps.traceIndex, {
+      size: 0,
+      query: {
+        bool: {
+          filter: [
+            { term: { upperOrgLv2: PROJECT_METRIC_TEAM } },
+            { range: { startedAt: { gte: filters.range.from, lte: filters.range.to } } }
+          ]
+        }
+      },
+      aggs: {
+        rooms: {
+          composite: {
+            size: PAGE_SIZE,
+            sources: [{ room: { terms: { field: "upperOrgLv1" } } }],
+            ...(after ? { after } : {})
+          }
+        }
+      }
+    })
+    const aggregation = record(raw.aggregations?.rooms)
+    if (!Array.isArray(aggregation.buckets)) throw new Error("团队室选项未完整返回")
+    for (const value of aggregation.buckets) {
+      const room = readOrgText(record(record(value).key).room)
+      if (room) rooms.add(room)
+    }
+    if (!aggregation.buckets.length || !aggregation.after_key) break
+    after = record(aggregation.after_key)
+    const cursor = JSON.stringify(after)
+    if (!string(after.room) || cursors.has(cursor)) throw new Error("团队室选项分页游标无效")
+    cursors.add(cursor)
+  }
+  return [...rooms]
+}
+function monthlyOverview(
+  month: string,
+  raw: RecordValue[],
+  rooms: string[] | null,
+  code: ProjectMetricCodeOverview | null
+): ProjectMetricMonthlyCode {
+  const scopes = rooms === null ? [null] : rooms
+  const selected = scopes.map((room) => {
+    const records = raw.filter(
+      (p) =>
+        p.orgLevel === (room === null ? "team" : "room") && (room === null || p.roomName === room)
+    )
+    if (records.length > 1) throw new Error("同组织同月存在重复填报记录")
+    return records[0]
+  })
+  const sum = (field: string): number | null =>
+    selected.length && selected.every((p) => p && number(p[field]) !== null)
+      ? selected.reduce((sum, p) => sum + number(p[field])!, 0)
+      : null
+  const total = sum("totalPushedLines")
+  const dates = selected
+    .map((p) => string(p?.updatedAt))
+    .filter(Boolean)
+    .sort()
+  const sources: ProjectMetricMonthlyCode["sources"] = [
+    ["devagent-ide", sum("devagentIdePushedLines")],
+    ["devagent-cloud", sum("devagentCloudPushedLines")],
+    ["devagent-cli", sum("devagentCliPushedLines")],
+    ["devclaw", code?.pushedAdoptedLines ?? null]
+  ].map(([source, lines]) => ({
+    source: source as ProjectMetricMonthlyCode["sources"][number]["source"],
+    pushedLines: lines as number | null,
+    rate: total !== null && total > 0 && lines !== null ? Number(lines) / total : null,
+    missing: total === null || lines === null
+  }))
+  const complete = sources.every((source) => !source.missing)
+  const cumulativeLines = complete
+    ? sources.reduce((sum, source) => sum + source.pushedLines!, 0)
+    : null
+  return {
+    month,
+    totalPushedLines: total,
+    updatedAt: dates[0] || null,
+    cumulative: {
+      pushedLines: cumulativeLines,
+      rate:
+        total !== null && total > 0 && cumulativeLines !== null ? cumulativeLines / total : null,
+      missing: !complete
+    },
+    sources
+  }
+}
+async function overview(
+  filters: ProjectMetricFilters,
+  deps: ProjectMetricDependencies,
+  s: Snapshot,
+  monthly?: RecordValue[]
+): Promise<ProjectMetricOverviewData> {
+  const rooms = roomsFor(filters, deps)
+  const month = projectNaturalMonth(filters.range)
+  const [features, code, records] = await Promise.allSettled([
+    featureCoverage(filters, deps, s),
+    deps.codeStats
+      ? deps.codeStats(filters.range, rooms, strings(s.projects.map((p) => p.harnessProjectId)))
+      : Promise.reject(new Error("代码查询未配置")),
+    month ? (monthly ? Promise.resolve(monthly) : monthlyRecords(month, deps)) : Promise.resolve([])
+  ])
+  const data: ProjectMetricOverviewData = {
+    features: features.status === "fulfilled" ? features.value : null,
+    code: code.status === "fulfilled" ? code.value : null,
+    monthly: null,
+    featureError: features.status === "rejected" ? failure(features.reason) : null,
+    codeError: code.status === "rejected" ? failure(code.reason) : null,
+    monthlyError: records.status === "rejected" ? failure(records.reason) : null
+  }
+  if (month && records.status === "fulfilled") {
+    try {
+      data.monthly = monthlyOverview(month, records.value, rooms, data.code)
+    } catch (error) {
+      data.monthlyError = failure(error)
+    }
+  }
+  return data
+}
+export async function fetchProjectMetricOverview(
+  filters: ProjectMetricFilters,
+  deps: ProjectMetricDependencies
+): Promise<ProjectMetricOverviewData> {
+  validateFilters(filters)
+  return overview(filters, deps, await snapshot(deps))
+}
+export async function fetchProjectMetricIndicatorExport(
+  filters: ProjectMetricFilters,
+  deps: ProjectMetricDependencies
+): Promise<ProjectMetricIndicatorExportData> {
+  if (deps.allowedRoomNames !== null) throw new Error("导出团队及各室指标需要全团队读取权限")
+  const teamFilters = { ...filters, upperOrgLv1: [] }
+  const ctx = await context(teamFilters, deps)
+  const month = projectNaturalMonth(filters.range)
+  const monthly = month ? await monthlyRecords(month, deps) : []
+  const [roomFacts, options] = await Promise.all([
+    facts(deps, organizationFilters(null), ["prjCode", "roomName"]),
+    traceRooms(filters, deps)
+  ])
+  const rooms = strings([
+    ...options,
+    ...roomFacts.map((p) => p.roomName),
+    ...monthly.filter((p) => p.orgLevel === "room").map((p) => p.roomName)
+  ])
+  const teamOverview = await overview(teamFilters, deps, ctx.snapshot, monthly)
+  const check = (o: ProjectMetricOverviewData): void => {
+    if (o.featureError || o.codeError || o.monthlyError)
+      throw new Error(o.featureError || o.codeError || o.monthlyError || "导出数据查询失败")
+  }
+  check(teamOverview)
+  // 有限、顺序查询每个室，分类及累计遥测已在团队上下文中一次取齐。
+  const results: ProjectMetricIndicatorExportData["rooms"] = []
+  for (const roomName of rooms) {
+    const roomFilters = { ...filters, upperOrgLv1: [roomName] }
+    const o = await overview(roomFilters, deps, ctx.snapshot, monthly)
+    check(o)
+    results.push({
+      roomName,
+      summary: summarize(
+        { ...ctx, items: ctx.items.filter((p) => p.roomName === roomName) },
+        roomFilters
+      ),
+      overview: o
+    })
+  }
+  if (ctx.warnings.some((w) => w.includes("不可用")))
+    throw new Error("项目累计代码或Token查询失败，请重试后导出")
+  return {
+    team: { summary: summarize(ctx, teamFilters), overview: teamOverview },
+    rooms: results,
+    exportedAt: formatProjectDate(Date.now())
+  }
+}
+
+// 保留现有接口；研发效能页面不再请求组数据。
+export async function fetchProjectMetricGroupOptions(
+  filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">,
+  deps: ProjectMetricDependencies
+): Promise<string[]> {
+  validateFilters(filters)
+  if (!filters.upperOrgLv1?.length) return []
+  const raw = await facts(
+    deps,
+    [...organizationFilters(roomsFor(filters, deps)), periodFilter(filters)],
+    ["prjCode", "groupName"]
+  )
+  return strings(raw.map((p) => p.groupName))
+}
+export function makeMockProjectMetricGroupOptions(): string[] {
+  return []
+}
+function mockItems(): ProjectMetricProjectItem[] {
+  const s: Snapshot = { projects: [], byCode: new Map(), pluginOptions: ["CMBDevClaw"] }
+  s.byCode.set("T26MCB21", [
+    { harnessProjectId: "mock-harness", prjCode: "T26MCB21", adapterName: "CMBDevClaw" }
+  ])
+  return [
+    parseFact(
+      {
+        prjCode: "T26MCB21",
+        prjName: "项目度量示例",
+        teamName: PROJECT_METRIC_TEAM,
+        roomName: "零售信息应用开发二室(杭州)",
+        featureCodes: ["BU135598-F16114", "BU135598-F16127", "BU135598-F16128", "BU135598-F16198"],
+        devWorkHours: 217,
+        notAdjustFuns: 214.72,
+        approvedDate: "2026-10-09 17:29:27",
+        createDate: "2026-10-12 00:00:00",
+        firstStStartDate: "2026-10-19 09:15:47",
+        firstUatStartDate: "2026-10-14 11:33:19",
+        firstOnlineDate: "2026-10-14 00:00:00",
+        bugNum: 2,
+        kenanIssueCount: 0
+      },
+      s
+    )
+  ]
+}
 export function makeMockProjectMetricSummary(
   filters: ProjectMetricFilters
 ): ProjectMetricSummaryData {
-  const pluginSelected = Boolean(asString(filters.adapterName))
-  return {
-    groups: [
-      {
-        developmentMode: "devclaw",
-        projectCount: pluginSelected ? 18 : 42,
-        avgBugCount: 6.4,
-        avgKenanIssueCount: 1.5,
-        kenanIssueCategories: pluginSelected
-          ? [
-              { category: "安全", count: 18 },
-              { category: "性能", count: 9 }
-            ]
-          : [
-              { category: "安全", count: 42 },
-              { category: "性能", count: 21 }
-            ],
-        avgFuncPointCount: 112.8,
-        defectDensityPer100Fp: 5.67,
-        avgTestLeadDays: 24.6,
-        avgUatLeadDays: 28.4,
-        avgDeliveryDays: 18.2,
-        avgInputTokens: 678_571,
-        avgOutputTokens: 56_190,
-        avgPushedAdoptedLines: 5120,
-        inputTokensPerAdoptedLine: 132.53,
-        outputTokensPerAdoptedLine: 10.97,
-        samples: {
-          bug: pluginSelected ? 18 : 42,
-          kenanIssue: pluginSelected ? 18 : 42,
-          functionPoint: pluginSelected ? 17 : 40,
-          defectDensity: pluginSelected ? 17 : 39,
-          testLead: pluginSelected ? 16 : 38,
-          uatLead: pluginSelected ? 15 : 36,
-          delivery: pluginSelected ? 16 : 37,
-          token: pluginSelected ? 18 : 42,
-          codeLines: pluginSelected ? 18 : 42,
-          tokensPerLine: pluginSelected ? 15 : 36
-        }
-      },
-      {
-        developmentMode: "non_devclaw",
-        projectCount: 136,
-        avgBugCount: 8.9,
-        avgKenanIssueCount: 2,
-        kenanIssueCategories: [
-          { category: "安全", count: 180 },
-          { category: "性能", count: 92 }
-        ],
-        avgFuncPointCount: 105.2,
-        defectDensityPer100Fp: 8.46,
-        avgTestLeadDays: 31.4,
-        avgUatLeadDays: 35.2,
-        avgDeliveryDays: 22.8,
-        avgInputTokens: null,
-        avgOutputTokens: null,
-        avgPushedAdoptedLines: null,
-        inputTokensPerAdoptedLine: null,
-        outputTokensPerAdoptedLine: null,
-        samples: {
-          bug: 136,
-          kenanIssue: 136,
-          functionPoint: 129,
-          defectDensity: 126,
-          testLead: 121,
-          uatLead: 118,
-          delivery: 124,
-          token: 0,
-          codeLines: 0,
-          tokensPerLine: 0
-        }
-      }
-    ],
-    pluginOptions: ["AutoBizDevOps", "CmbCowork Compose Delivery"],
-    truncated: false
-  }
-}
-
-const MOCK_PROJECTS: ProjectMetricProjectItem[] = [
-  {
-    prjCode: "T26HRZ51",
-    prjName: "高风险反洗钱尽调消费逻辑改造",
-    developmentMode: "devclaw",
-    plugins: ["AutoBizDevOps"],
-    phaseStatus: "结项完成",
-    roomName: "零售基础客群经营开发室(成都)",
-    groupName: "经营分析一组",
-    bugNum: 6,
-    kenanIssueCount: 3,
-    kenanIssueCategories: [
-      { category: "安全", count: 2 },
-      { category: "性能", count: 1 }
-    ],
-    notAdjustFuns: 348.12,
-    defectDensityPer100Fp: 1.72,
-    pushedAdoptedLines: 6000,
-    createDate: "2026-07-06 00:00:00",
-    firstStStartDate: "2026-07-27 09:44:49",
-    firstStEndDate: "2026-07-27 10:20:07",
-    firstUatStartDate: "2026-07-31 00:00:00",
-    firstOnlineDate: "2026-08-03 00:00:00",
-    approvedDate: "2026-07-06 00:00:00",
-    testLeadDays: 21.41,
-    uatLeadDays: 25,
-    deliveryDays: 28,
-    totalInputTokens: 2_400_000,
-    totalOutputTokens: 180_000,
-    inputTokensPerAdoptedLine: 400,
-    outputTokensPerAdoptedLine: 30,
-    tokensPerAdoptedLine: 430
-  },
-  {
-    prjCode: "T26HTL91",
-    prjName: "客户经营平台交付优化",
-    developmentMode: "devclaw",
-    plugins: ["CmbCowork Compose Delivery"],
-    phaseStatus: "上线完成",
-    roomName: "零售客户经营开发室",
-    groupName: "经营分析二组",
-    bugNum: 3,
-    kenanIssueCount: 1,
-    kenanIssueCategories: [{ category: "性能", count: 1 }],
-    notAdjustFuns: 126.5,
-    defectDensityPer100Fp: 2.37,
-    pushedAdoptedLines: 3000,
-    createDate: "2026-07-12 00:00:00",
-    firstStStartDate: "2026-07-30 10:00:00",
-    firstStEndDate: "2026-07-31 17:00:00",
-    firstUatStartDate: "2026-08-04 00:00:00",
-    firstOnlineDate: "2026-08-08 00:00:00",
-    approvedDate: "2026-07-15 00:00:00",
-    testLeadDays: 18.42,
-    uatLeadDays: 23,
-    deliveryDays: 24,
-    totalInputTokens: 1_860_000,
-    totalOutputTokens: 142_000,
-    inputTokensPerAdoptedLine: 620,
-    outputTokensPerAdoptedLine: 47.33,
-    tokensPerAdoptedLine: 667.33
-  },
-  {
-    prjCode: "T26NON01",
-    prjName: "渠道业务流程改造",
-    developmentMode: "non_devclaw",
-    plugins: [],
-    phaseStatus: "ST完成",
-    roomName: "渠道应用研发室",
-    groupName: "渠道研发一组",
-    bugNum: 9,
-    kenanIssueCount: 0,
-    kenanIssueCategories: [],
-    notAdjustFuns: null,
-    defectDensityPer100Fp: null,
-    pushedAdoptedLines: null,
-    createDate: "2026-07-18 00:00:00",
-    firstStStartDate: "2026-08-02 09:30:00",
-    firstStEndDate: "2026-08-03 17:00:00",
-    firstUatStartDate: null,
-    firstOnlineDate: null,
-    approvedDate: "2026-07-20 00:00:00",
-    testLeadDays: 15.4,
-    uatLeadDays: null,
-    deliveryDays: null,
-    totalInputTokens: null,
-    totalOutputTokens: null,
-    inputTokensPerAdoptedLine: null,
-    outputTokensPerAdoptedLine: null,
-    tokensPerAdoptedLine: null
-  }
-]
-
-export function makeMockProjectMetricGroupOptions(
-  filters: Pick<ProjectMetricFilters, "upperOrgLv1">
-): string[] {
-  if (!filters.upperOrgLv1?.length) return []
-  const rooms = new Set(filters.upperOrgLv1)
-  return uniqueSorted(
-    MOCK_PROJECTS.filter((project) => rooms.has(project.roomName)).map(
-      (project) => project.groupName
-    )
+  const items = mockItems().filter(
+    (p) => !filters.upperOrgLv1?.length || filters.upperOrgLv1.includes(p.roomName)
   )
+  return {
+    groups: projectMetricGroups(
+      items.filter((p) => inAdvancedScope(p, filters)),
+      filters
+    ),
+    pluginOptions: ["CMBDevClaw"],
+    truncated: false,
+    warnings: [PROJECT_CALENDAR_NOTE]
+  }
 }
-
 export function makeMockProjectMetricProjects(
   filters: ProjectMetricFilters,
   options: ProjectMetricListOptions = {}
 ): ProjectMetricProjectsData {
-  const mode = options.developmentMode ?? "all"
-  const keyword = asString(options.keyword).toLocaleLowerCase("zh-CN")
-  const departmentKeyword = asString(options.departmentKeyword).toLocaleLowerCase("zh-CN")
-  const adapterName = asString(filters.adapterName)
-  const tokenConsumptionFiltered = hasTokenConsumptionFilter(filters)
-  const filtered = MOCK_PROJECTS.filter((item) => mode === "all" || item.developmentMode === mode)
-    .filter((item) => !filters.upperOrgLv1?.length || filters.upperOrgLv1.includes(item.roomName))
-    .filter((item) => !filters.groupNames?.length || filters.groupNames.includes(item.groupName))
-    .filter((item) => !adapterName || item.plugins.includes(adapterName))
-    .filter(
-      (item) =>
-        !tokenConsumptionFiltered ||
-        (item.developmentMode === "devclaw" &&
-          matchesTokenConsumptionFilter(
-            { input: item.totalInputTokens ?? 0, output: item.totalOutputTokens ?? 0 },
-            filters
-          ))
-    )
-    .filter(
-      (item) =>
-        !keyword ||
-        item.prjCode.toLocaleLowerCase("zh-CN").includes(keyword) ||
-        item.prjName.toLocaleLowerCase("zh-CN").includes(keyword)
-    )
-    .filter(
-      (item) =>
-        !departmentKeyword ||
-        item.roomName.toLocaleLowerCase("zh-CN").includes(departmentKeyword) ||
-        item.groupName.toLocaleLowerCase("zh-CN").includes(departmentKeyword)
-    )
-  const sortBy = options.sortBy ?? "deliveryDays"
-  const direction = options.sortOrder === "asc" ? 1 : -1
-  const sorted = [...filtered].sort((left, right) => {
-    const leftValue = left[sortBy]
-    const rightValue = right[sortBy]
-    if (leftValue === null && rightValue !== null) return 1
-    if (leftValue !== null && rightValue === null) return -1
-    if (leftValue !== null && rightValue !== null && leftValue !== rightValue) {
-      return (leftValue - rightValue) * direction
-    }
-    return left.prjCode.localeCompare(right.prjCode)
-  })
-  const pageSize = options.exportAll
-    ? PROJECT_METRIC_JOIN_KEY_LIMIT
-    : normalizePageSize(options.pageSize)
-  const page = options.exportAll ? 1 : normalizePage(options.page, pageSize)
+  const items = mockItems().filter(
+    (p) =>
+      (!filters.upperOrgLv1?.length || filters.upperOrgLv1.includes(p.roomName)) &&
+      projectInPeriod(
+        filters.dateBasis === "created" ? p.createDate : p.firstStStartDate || p.firstUatStartDate,
+        filters.range
+      ) &&
+      inAdvancedScope(p, filters) &&
+      (!options.developmentMode ||
+        options.developmentMode === "all" ||
+        p.developmentMode === options.developmentMode)
+  )
   return {
-    items: sorted.slice((page - 1) * pageSize, page * pageSize),
-    total: sorted.length,
-    page,
-    pageSize,
-    truncated: false
+    items,
+    total: items.length,
+    page: 1,
+    pageSize: options.pageSize ?? 20,
+    truncated: false,
+    warnings: [PROJECT_CALENDAR_NOTE]
+  }
+}
+export function makeMockProjectMetricTrend(
+  filters: ProjectMetricTrendFilters
+): ProjectMetricTrendData {
+  return {
+    months: recentMonths().map(({ month, range }) => ({
+      month,
+      groups: makeMockProjectMetricSummary({ ...filters, range }).groups
+    })),
+    truncated: false,
+    warnings: [PROJECT_CALENDAR_NOTE]
+  }
+}
+export function makeMockProjectMetricOverview(
+  filters: ProjectMetricFilters
+): ProjectMetricOverviewData {
+  const items = makeMockProjectMetricProjects(filters).items
+  const codes = new Set(items.flatMap((p) => p.featureCodes))
+  const code = {
+    pushedAdoptedLines: 1800,
+    pushedEffectiveGeneratedLines: 2400,
+    pushedAdoptionRate: 0.75
+  }
+  const month = projectNaturalMonth(filters.range)
+  const row = {
+    orgLevel: "team",
+    teamName: PROJECT_METRIC_TEAM,
+    totalPushedLines: 1055649,
+    devagentIdePushedLines: 211403,
+    devagentCloudPushedLines: 5497,
+    devagentCliPushedLines: 6256,
+    updatedAt: "2026-11-16 15:54:05"
+  }
+  return {
+    features: { total: codes.size, intelligent: codes.size, rate: codes.size ? 1 : null },
+    code,
+    monthly: month ? monthlyOverview(month, [row], null, code) : null,
+    featureError: null,
+    codeError: null,
+    monthlyError: null
+  }
+}
+export function makeMockProjectMetricIndicatorExport(
+  filters: ProjectMetricFilters
+): ProjectMetricIndicatorExportData {
+  const team = {
+    summary: makeMockProjectMetricSummary({ ...filters, upperOrgLv1: [] }),
+    overview: makeMockProjectMetricOverview({ ...filters, upperOrgLv1: [] })
+  }
+  return {
+    team,
+    rooms: [{ roomName: "零售信息应用开发二室(杭州)", ...team }],
+    exportedAt: formatProjectDate(Date.now())
   }
 }

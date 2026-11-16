@@ -15,10 +15,10 @@ import {
   PROJECT_METRIC_TOOLTIP_CLASS,
   ProjectMetricIssueBreakdown
 } from "./ProjectMetricIssueBreakdown"
+import { PROJECT_METRIC_INDICATORS } from "../../../../../shared/project-metric-indicators"
 import type {
   ProjectMetricSummaryGroup,
   ProjectMetricTrendData,
-  ProjectMetricTrendDateField,
   ProjectMetricTrendFilters
 } from "../../../../../shared/project-metrics"
 
@@ -34,6 +34,13 @@ const METRICS: Array<{
   sample: keyof ProjectMetricSummaryGroup["samples"]
   color: string
 }> = [
+  ...PROJECT_METRIC_INDICATORS.slice(0, 4).map((metric) => ({
+    key: metric.key as MetricKey,
+    label: metric.label,
+    unit: metric.unit,
+    sample: metric.sample,
+    color: "#0ea5e9"
+  })),
   { key: "avgBugCount", label: "平均缺陷数", unit: "个", sample: "bug", color: "#3b82f6" },
   {
     key: "avgKenanIssueCount",
@@ -59,21 +66,21 @@ const METRICS: Array<{
   {
     key: "avgTestLeadDays",
     label: "平均发起 ST 耗时",
-    unit: "天",
+    unit: "工作日",
     sample: "testLead",
     color: "#10b981"
   },
   {
     key: "avgUatLeadDays",
     label: "平均发起 UAT 耗时",
-    unit: "天",
+    unit: "工作日",
     sample: "uatLead",
     color: "#06b6d4"
   },
   {
     key: "avgDeliveryDays",
     label: "平均特性上线耗时",
-    unit: "天",
+    unit: "工作日",
     sample: "delivery",
     color: "#f59e0b"
   },
@@ -147,10 +154,10 @@ export function ProjectMetricTrend({
 }): React.JSX.Element {
   const [selected, setSelected] = useState<MetricKey[]>(["avgBugCount"])
   const [scaleMode, setScaleMode] = useState<"raw" | "normalized">("raw")
-  const [dateField, setDateField] = useState<ProjectMetricTrendDateField>("createDate")
   const [data, setData] = useState<ProjectMetricTrendData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [retry, setRetry] = useState(0)
 
   useEffect(() => {
     let active = true
@@ -159,7 +166,7 @@ export function ProjectMetricTrend({
     setData(null)
     async function load(): Promise<void> {
       try {
-        const result = await window.api.dashboard.projectMetricTrend({ ...filters, dateField })
+        const result = await window.api.dashboard.projectMetricTrend(filters)
         if (!active) return
         if (!result.success || !result.data) throw new Error(result.error || "获取项目指标趋势失败")
         setData(result.data)
@@ -173,7 +180,7 @@ export function ProjectMetricTrend({
     return () => {
       active = false
     }
-  }, [filters, refreshKey, dateField])
+  }, [filters, refreshKey, retry])
 
   const metrics = METRICS.filter((metric) => selected.includes(metric.key))
   const tooltipMetrics = [
@@ -240,6 +247,7 @@ export function ProjectMetricTrend({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3">
           <h3 className="text-xs font-semibold text-foreground">指标月度趋势</h3>
+
           <Popover>
             <PopoverTrigger asChild>
               <Button
@@ -320,29 +328,6 @@ export function ProjectMetricTrend({
               </Button>
             ))}
           </div>
-          <div
-            className="flex gap-1 rounded-md border border-border p-0.5"
-            role="group"
-            aria-label="按项目日期展示"
-          >
-            {(
-              [
-                { value: "createDate", label: "立项时间" },
-                { value: "endDate", label: "结项时间" }
-              ] as const
-            ).map((option) => (
-              <Button
-                key={option.value}
-                variant={dateField === option.value ? "secondary" : "ghost"}
-                size="sm"
-                className="h-7 px-2 text-xs"
-                aria-pressed={dateField === option.value}
-                onClick={() => setDateField(option.value)}
-              >
-                {option.label}
-              </Button>
-            ))}
-          </div>
         </div>
         <div className="flex flex-wrap gap-4 text-[11px] text-muted-foreground">
           {MODES.map((mode) => (
@@ -357,7 +342,7 @@ export function ProjectMetricTrend({
       </div>
       {selected.includes("avgKenanIssueCount") ? (
         <p className="mt-2 text-[11px] text-muted-foreground">
-          按项目{dateField === "endDate" ? "结项" : "立项"}
+          按项目{filters.dateBasis === "created" ? "立项" : "开发完成"}
           月份分组，展示这些项目截至最近同步时的累计非功能问题数。
         </p>
       ) : null}
@@ -370,11 +355,13 @@ export function ProjectMetricTrend({
       {/*    插件、Token 消耗筛选仅作用于 CMBDevClaw 侧，两侧样本范围不对称。*/}
       {/*  </p>*/}
       {/*) : null}*/}
-      {data?.truncated ? (
-        <p className="mt-2 text-xs text-status-warning-foreground">
-          项目关联样本超过 10,000 条，趋势可能存在统计不完整或开发方式误分类。
-        </p>
-      ) : null}
+      {data?.warnings
+        .filter((warning) => warning.includes("不可用"))
+        .map((warning) => (
+          <p key={warning} className="mt-2 text-xs text-destructive">
+            {warning}
+          </p>
+        ))}
       {loading ? (
         <div className="flex h-72 items-center justify-center text-xs text-muted-foreground">
           <Loader2 className="mr-2 size-4 animate-spin" />
@@ -386,6 +373,14 @@ export function ProjectMetricTrend({
           role="alert"
         >
           {error}
+          <Button
+            variant="ghost"
+            size="sm"
+            className="ml-2 text-xs"
+            onClick={() => setRetry((value) => value + 1)}
+          >
+            重试趋势
+          </Button>
         </div>
       ) : metrics.length === 0 ? (
         <div className="flex h-72 items-center justify-center text-xs text-muted-foreground">
@@ -432,7 +427,13 @@ export function ProjectMetricTrend({
                     return (
                       <div className={PROJECT_METRIC_TOOLTIP_CLASS}>
                         <div className="mb-2 font-semibold">
-                          {month.month} {dateField === "endDate" ? "结项" : "立项"}项目
+                          {month.month}{" "}
+                          {selected.includes("featuresPerPersonMonth")
+                            ? "首次上线"
+                            : filters.dateBasis === "created"
+                              ? "立项"
+                              : "开发完成"}
+                          项目
                         </div>
                         <table className="text-[11px]">
                           <thead>

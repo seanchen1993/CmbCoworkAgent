@@ -174,6 +174,8 @@ import type {
   ProjectMetricFilters,
   ProjectMetricListOptions,
   ProjectMetricProjectsData,
+  ProjectMetricOverviewData,
+  ProjectMetricIndicatorExportData,
   ProjectMetricSummaryData,
   ProjectMetricTrendData,
   ProjectMetricTrendFilters
@@ -2762,6 +2764,12 @@ interface CustomAPI {
     projectMetricGroupOptions: (
       filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">
     ) => Promise<{ success: boolean; data?: string[]; error?: string }>
+    projectMetricOverview: (
+      filters: ProjectMetricFilters
+    ) => Promise<{ success: boolean; data?: ProjectMetricOverviewData; error?: string }>
+    projectMetricIndicatorExport: (
+      filters: ProjectMetricFilters
+    ) => Promise<{ success: boolean; data?: ProjectMetricIndicatorExportData; error?: string }>
     projectMetricSummary: (
       filters: ProjectMetricFilters
     ) => Promise<{ success: boolean; data?: ProjectMetricSummaryData; error?: string }>

@@ -4031,6 +4031,14 @@ const api = {
       filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">
     ): Promise<{ success: boolean; data?: string[]; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectMetricGroupOptions", filters),
+    projectMetricOverview: (
+      filters: ProjectMetricFilters
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectMetricOverview", filters),
+    projectMetricIndicatorExport: (
+      filters: ProjectMetricFilters
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectMetricIndicatorExport", filters),
     projectMetricSummary: (
       filters: ProjectMetricFilters
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
