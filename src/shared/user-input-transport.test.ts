@@ -66,16 +66,10 @@ describe("stripUserInputTransportDecorations", () => {
 })
 
 describe("built-in browser prefixes", () => {
-  it("uses reusable-operation wording", () => {
-    expect(BUILTIN_BROWSER_PROMPT_PREFIX).toContain("匹配的可复用操作")
-    expect(BUILTIN_BROWSER_PROMPT_PREFIX).not.toContain("匹配的录制脚本")
-  })
-
-  it("uses the iframe extractor when iframe content cannot be read", () => {
-    expect(BUILTIN_BROWSER_PROMPT_PREFIX).not.toContain("页面读取先用 browser_snapshot")
-    expect(BUILTIN_BROWSER_PROMPT_PREFIX).toContain("iframe 内容无法读取时")
-    expect(BUILTIN_BROWSER_PROMPT_PREFIX).toContain("inAppBrowser_extract_iframes")
-    expect(BUILTIN_BROWSER_PROMPT_PREFIX).toContain("支持跨域")
+  it("routes browser operations through the local skill", () => {
+    expect(BUILTIN_BROWSER_PROMPT_PREFIX).toContain("cmbdevclaw-in-app-browser 技能")
+    expect(BUILTIN_BROWSER_PROMPT_PREFIX).not.toContain("inAppBrowser_extract_iframes")
+    expect(BUILTIN_BROWSER_PROMPT_PREFIX).not.toContain("WPS 在线文档")
   })
 
   it("stay the pair the composer actually prepends", () => {

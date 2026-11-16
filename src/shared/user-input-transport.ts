@@ -15,8 +15,8 @@ import { SKILL_USE_TAG_NAME } from "./skill-use-block"
 export const LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX = "使用内置浏览器 browser_*工具："
 export const LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX =
   "使用内置浏览器 browser_*工具（不允许使用截图功能）："
-const BROWSER_TASK_ROUTING_PROMPT =
-  "先用 inAppBrowser_list_recordings 查找匹配的可复用操作，匹配时优先执行；否则使用普通浏览器工具。iframe 内容无法读取时，调用 inAppBrowser_extract_iframes（支持跨域）。WPS 在线文档正文无法读取时，调用 inAppBrowser_read_wps_document。按返回的 nextTextOffset 或 nextLinkOffset 继续读取截断内容。"
+const BROWSER_SKILL_ROUTING_PROMPT =
+  "请使用 cmbdevclaw-in-app-browser 技能，并按照该技能中的工具选择、网页操作、安全限制和故障排查说明执行。"
 export const BUILTIN_BROWSER_INSTRUCTIONS_OPEN = "<builtin-browser-instructions>"
 export const BUILTIN_BROWSER_INSTRUCTIONS_CLOSE = "</builtin-browser-instructions>"
 
@@ -25,10 +25,10 @@ function wrapBuiltinBrowserInstructions(instructions: string): string {
 }
 
 export const BUILTIN_BROWSER_PROMPT_PREFIX = wrapBuiltinBrowserInstructions(
-  `使用内置浏览器 browser_* 工具。${BROWSER_TASK_ROUTING_PROMPT}`
+  BROWSER_SKILL_ROUTING_PROMPT
 )
 export const BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX = wrapBuiltinBrowserInstructions(
-  `使用内置浏览器 browser_* 工具，不允许使用截图功能。${BROWSER_TASK_ROUTING_PROMPT}`
+  `${BROWSER_SKILL_ROUTING_PROMPT}本次任务不允许使用截图功能。`
 )
 
 export function stripBuiltinBrowserInstructions(content: string): string | null {

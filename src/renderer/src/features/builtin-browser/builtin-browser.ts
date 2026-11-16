@@ -15,7 +15,9 @@ const LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX =
   "使用内置浏览器 browser_*工具。仅当当前模型支持图片识别/视觉输入时，才允许调用截图工具；否则不要调用截图工具，改用 DOM 快照、文本、locator、evaluate 等非视觉方式："
 export const BUILTIN_BROWSER_SCREENSHOT_DISABLED_PROMPT = "（不允许使用截图功能）"
 
-let builtinBrowserScreenshotEnabled = false
+// Keep the MCP screenshot capability available. The builtin-browser skill owns
+// the stricter model-vision/OCR eligibility check before the tool is invoked.
+let builtinBrowserScreenshotEnabled = true
 const builtinBrowserScreenshotListeners = new Set<() => void>()
 
 export function isBuiltinBrowserScreenshotEnabled(): boolean {
@@ -46,7 +48,7 @@ export const BUILTIN_BROWSER_COMMAND = {
   title: "内置浏览器",
   command: "/browser",
   usage: "/browser <浏览器任务>",
-  description: "使用内置浏览器 browser_* 工具执行网页操作",
+  description: "使用 cmbdevclaw-in-app-browser 技能执行安全的网页操作",
   insertText: "",
   keywords: ["browser", "内置浏览器", "浏览器", "网页操作"]
 }

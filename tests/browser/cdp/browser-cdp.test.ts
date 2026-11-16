@@ -72,7 +72,8 @@ describe("autoRegisterPlaywrightMcpConnector", () => {
         command: "npx",
         args: [
           "-y",
-          "@playwright/mcp@latest",
+          "--prefer-offline",
+          "@playwright/mcp@0.0.85",
           "--cdp-endpoint=http://127.0.0.1:55001"
         ],
         createdAt: "2026-07-27T00:00:00.000Z",
@@ -87,7 +88,12 @@ describe("autoRegisterPlaywrightMcpConnector", () => {
       name: "In-app-browser",
       kind: "stdio",
       command: "npx",
-      args: ["-y", "@playwright/mcp@latest", "--cdp-endpoint=http://127.0.0.1:9222"],
+      args: [
+        "-y",
+        "--prefer-offline",
+        "@playwright/mcp@0.0.85",
+        "--cdp-endpoint=http://127.0.0.1:9222"
+      ],
       env: undefined,
       enabled: true,
       lazyLoad: false
@@ -103,7 +109,12 @@ describe("autoRegisterPlaywrightMcpConnector", () => {
         enabled: true,
         lazyLoad: true,
         command: "npx",
-        args: ["-y", "@playwright/mcp@latest", "--cdp-endpoint=http://127.0.0.1:9222"],
+        args: [
+          "-y",
+          "--prefer-offline",
+          "@playwright/mcp@0.0.85",
+          "--cdp-endpoint=http://127.0.0.1:9222"
+        ],
         createdAt: "2026-07-27T00:00:00.000Z",
         updatedAt: "2026-07-27T00:00:00.000Z"
       }
@@ -116,7 +127,12 @@ describe("autoRegisterPlaywrightMcpConnector", () => {
       name: "In-app-browser",
       kind: "stdio",
       command: "npx",
-      args: ["-y", "@playwright/mcp@latest", "--cdp-endpoint=http://127.0.0.1:9222"],
+      args: [
+        "-y",
+        "--prefer-offline",
+        "@playwright/mcp@0.0.85",
+        "--cdp-endpoint=http://127.0.0.1:9222"
+      ],
       env: undefined,
       enabled: true,
       lazyLoad: false
@@ -134,7 +150,8 @@ describe("autoRegisterPlaywrightMcpConnector", () => {
         command: "npx",
         args: [
           "-y",
-          "@playwright/mcp@latest",
+          "--prefer-offline",
+          "@playwright/mcp@0.0.85",
           "--cdp-endpoint=http://127.0.0.1:55001"
         ],
         createdAt: "2026-07-27T00:00:00.000Z",
@@ -151,7 +168,8 @@ describe("autoRegisterPlaywrightMcpConnector", () => {
       command: "npx",
       args: [
         "-y",
-        "@playwright/mcp@latest",
+        "--prefer-offline",
+        "@playwright/mcp@0.0.85",
         "--cdp-endpoint=http://127.0.0.1:55001"
       ],
       env: undefined,
@@ -183,7 +201,8 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
         command: "npx",
         args: [
           "-y",
-          "@playwright/mcp@latest",
+          "--prefer-offline",
+          "@playwright/mcp@0.0.85",
           `--cdp-endpoint=http://127.0.0.1:${runtimePort}`
         ],
         createdAt: "2026-07-27T00:00:00.000Z",
@@ -203,7 +222,8 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
       command: "npx",
       args: [
         "-y",
-        "@playwright/mcp@latest",
+        "--prefer-offline",
+        "@playwright/mcp@0.0.85",
         `--cdp-endpoint=http://127.0.0.1:${runtimePort}`
       ],
       env: undefined,
@@ -228,7 +248,8 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
         command: "npx",
         args: [
           "-y",
-          "@playwright/mcp@latest",
+          "--prefer-offline",
+          "@playwright/mcp@0.0.85",
           `--cdp-endpoint=http://127.0.0.1:${runtimePort}`
         ],
         createdAt: "2026-07-27T00:00:00.000Z",
@@ -248,7 +269,8 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
       command: "npx",
       args: [
         "-y",
-        "@playwright/mcp@latest",
+        "--prefer-offline",
+        "@playwright/mcp@0.0.85",
         `--cdp-endpoint=http://127.0.0.1:${runtimePort}`
       ],
       env: undefined,
@@ -273,7 +295,8 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
         command: "npx",
         args: [
           "-y",
-          "@playwright/mcp@latest",
+          "--prefer-offline",
+          "@playwright/mcp@0.0.85",
           `--cdp-endpoint=http://127.0.0.1:${runtimePort}`
         ],
         createdAt: "2026-07-27T00:00:00.000Z",
@@ -293,7 +316,8 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
       command: "npx",
       args: [
         "-y",
-        "@playwright/mcp@latest",
+        "--prefer-offline",
+        "@playwright/mcp@0.0.85",
         `--cdp-endpoint=http://127.0.0.1:${runtimePort}`
       ],
       env: undefined,
