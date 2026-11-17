@@ -1,4 +1,6 @@
 import { pageBotWorkInputs, type BotWorkInput } from "./work-input"
+import { parseSkillUseBlock } from "../agent/skill-lifecycle/marker"
+import type { SkillUseBlockMetadata } from "../../shared/skill-use-block"
 import type { AgentRunTerminal } from "../agent/agent-run-service"
 import { BotImGatewayStore } from "./im-gateway-store"
 import { BotTelemetryStore, type BotTelemetryContext } from "./telemetry-store"
@@ -1576,17 +1578,28 @@ export class BotStore {
       throw new BotError("CONFLICT", "交办来源不属于当前任务会话")
     const ids = task.origin.sourceMessageIds ?? []
     const originals = new Map<string, BotWorkInput>()
+    const selections = new Map<string, SkillUseBlockMetadata>()
     // Batch by captured IDs, rather than scanning or copying the source transcript.
     for (let i = 0; i < ids.length; i += 64) {
       const batch = ids.slice(i, i + 64)
       for (const row of this.rows(
-        `SELECT request_id,message FROM bot_tasks WHERE bot_id=? AND thread_id=?
+        `SELECT request_id,message,origin_json,mock_source_json FROM bot_tasks WHERE bot_id=? AND thread_id=?
          AND (id=? OR injected_into=?) AND request_id IN (${batch.map(() => "?").join(",")})`,
         [task.botId, source.threadId, source.id, source.id, ...batch]
-      )) originals.set(String(row.request_id), {
-        id: String(row.request_id), role: "user", text: String(row.message),
-        kind: String(row.request_id) === source.requestId ? "request" : "correction"
-      })
+      )) {
+        const id = String(row.request_id)
+        originals.set(id, {
+          id, role: "user", text: String(row.message),
+          kind: id === source.requestId ? "request" : "correction"
+        })
+        // Match the main Bot's composer trust boundary. Parse the complete input
+        // before paging: a slash selection can follow a very long request. Neither
+        // model-written routing notes nor historical references select a skill.
+        if (!row.mock_source_json && JSON.parse(String(row.origin_json || "{}")).kind === "user") {
+          const selected = parseSkillUseBlock(String(row.message))
+          if (selected) selections.set(id, { name: selected.skillName, path: selected.skillPath })
+        }
+      }
     }
     const references = new Map(task.origin.sourceContext.references.map(item => [item.id, item]))
     const inputs = ids.map(id => {
@@ -1596,7 +1609,10 @@ export class BotStore {
         kind: originals.get(id)?.kind ?? "reference" as const }
     })
     if (!inputs.length) throw new BotError("CONFLICT", "交办来源为空")
-    return { ...pageBotWorkInputs(inputs, messageIndex, offset), assignmentId: task.id }
+    // IDs preserve applied user-input order; the last explicit selection wins.
+    const explicitSkill = ids.map(id => selections.get(id)).filter(Boolean).at(-1)
+    return { ...pageBotWorkInputs(inputs, messageIndex, offset), assignmentId: task.id,
+      ...(explicitSkill ? { explicitSkill } : {}) }
   }
 
   hasWorkUserRequest(taskId: string): boolean {

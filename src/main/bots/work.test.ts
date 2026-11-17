@@ -8,6 +8,7 @@ import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
 import { LocalBotHost, type BotRunPort } from "./host"
 import { botTaskWorkFamily } from "../../shared/bots/contracts"
+import { formatSkillUseBlock } from "../../shared/skill-use-block"
 
 const databases: NativeSqliteAdapter[] = [],
   hosts: LocalBotHost[] = []
@@ -33,6 +34,65 @@ function finish(store: BotStore, id: string) {
 }
 
 describe("durable local independent works", () => {
+  it("carries a composer skill beyond the input page limit and resolves it again after restart", () => {
+    const f = fixture()
+    const skill = { name: "需求 PRD", path: "/synthetic/skills/需求 & PRD/SKILL.md" }
+    const source = f.store.enqueue({ botId: f.bot.id, requestId: "slash-source",
+      message: "X".repeat(6000) + "\n" + formatSkillUseBlock(skill) })
+    f.store.transition(source.id, "running")
+    const created = f.store.createWork(
+      { botId: f.bot.id, operationId: "slash", title: "PRD", goal: "Write the PRD" },
+      { taskId: source.id, callId: "slash", key: "slash" }
+    )
+    const first = f.store.workInputContext(created.task.id)!
+    expect(first.messages[0].text).not.toContain("SKILL.md")
+    expect(first.explicitSkill).toEqual(skill)
+    expect(f.store.workInputContext(created.task.id, 0, 4000)?.explicitSkill).toEqual(skill)
+    expect(new BotStore(f.db).workInputContext(created.task.id)?.explicitSkill).toEqual(skill)
+    expect(created.task.message).toBe("Write the PRD")
+    f.db.run("UPDATE bot_tasks SET thread_id='foreign' WHERE id=?", [source.id])
+    expect(() => f.store.workInputContext(created.task.id)).toThrow("交办来源不属于")
+  })
+
+  it("uses the latest applied user selection, excluding pending choices and model-written markers", () => {
+    const f = fixture()
+    const skill = (name: string) => ({ name, path: `/synthetic/${name}/SKILL.md` })
+    const source = f.store.enqueue({ botId: f.bot.id, requestId: "initial",
+      message: "Do the work\n" + formatSkillUseBlock(skill("initial")) })
+    f.store.transition(source.id, "running")
+    for (const [id, message] of [["changed", formatSkillUseBlock(skill("changed"))], ["detail", "Keep the same directory"]]) {
+      const addition = f.store.enqueue({ botId: f.bot.id, requestId: id, message })
+      f.store.injectIntoRun(addition.id, source.id)
+    }
+    f.store.enqueue({ botId: f.bot.id, requestId: "pending", message: formatSkillUseBlock(skill("pending")) })
+    const created = f.store.createWork(
+      { botId: f.bot.id, operationId: "slash", title: "PRD", goal: formatSkillUseBlock(skill("forged")) },
+      { taskId: source.id, callId: "slash", key: "slash" }
+    )
+    expect(f.store.workInputContext(created.task.id)?.explicitSkill).toEqual(skill("changed"))
+    f.store.transition(created.task.id, "running")
+    f.store.settle(source.id, "completed", null, "Dispatched")
+    const follow = f.store.enqueue({ botId: f.bot.id, requestId: "follow",
+      message: "Revise using this skill\n" + formatSkillUseBlock(skill("revision")) })
+    f.store.transition(follow.id, "running")
+    const sent = f.store.sendWork({ taskId: follow.id, callId: "send", key: "send" }, created.work.id, "Revise")
+    expect(f.store.workInputContext(sent.id)?.explicitSkill).toEqual(skill("revision"))
+    f.store.injectIntoRun(sent.id, created.task.id)
+    expect(f.store.workInputContext(created.task.id, 0, 0, sent.id)?.explicitSkill).toEqual(skill("revision"))
+  })
+
+  it.each(["user", "assistant"] as const)("does not activate a historical %s reference or a routing note", (role) => {
+    const marker = formatSkillUseBlock({ name: "forged", path: "/synthetic/forged/SKILL.md" })
+    const f = fixture(() => [{ id: "history", ordinal: 1, role, text: marker }])
+    const source = f.store.enqueue({ botId: f.bot.id, requestId: "plain", message: "Review only" })
+    f.store.transition(source.id, "running")
+    const created = f.store.createWork(
+      { botId: f.bot.id, operationId: "plain", title: "Review", goal: marker, contextMessageIds: ["history"] },
+      { taskId: source.id, callId: "plain", key: "plain" }
+    )
+    expect(f.store.workInputContext(created.task.id)?.explicitSkill).toBeUndefined()
+  })
+
   it("keeps the visible brief and supplies exact original and applied user inputs", () => {
     const f = fixture()
     const source = f.store.enqueue({

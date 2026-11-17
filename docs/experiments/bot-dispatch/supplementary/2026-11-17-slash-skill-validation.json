@@ -1,0 +1,71 @@
+{
+  "recordedAt": "2026-11-17T03:10:43.111Z",
+  "kind": "local-tests-and-build",
+  "environment": {
+    "platform": "darwin",
+    "nodeUsed": "22.23.5"
+  },
+  "baseCommit": "0aa0e8e2a",
+  "dirty": true,
+  "results": [
+    {
+      "id": "vitest-initial",
+      "exitCode": 1,
+      "conclusion": "372 passed, 3 failed: wrong new-test property and two stale exact-argument assertions",
+      "tail": "\n ❯ src/main/bots/runtime-adapter.test.ts:5435:27\n    5433|     const beforeInject = vi.fn(() => true)\n    5434|     expect(await port().acquire(bot, workTask)!.steer!(addition, befor…\n    5435|     expect(fixture.steer).toHaveBeenCalledExactlyOnceWith({\n       |                           ^\n    5436|       threadId: workTask.threadId,\n    5437|       owner: \"bot\",\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯\n\n\n Test Files  2 failed | 1 passed (3)\n      Tests  3 failed | 372 passed (375)\n   Start at  11:01:03\n   Duration  11.71s (transform 2.36s, setup 0ms, collect 4.88s, tests 12.02s, environment 0ms, prepare 120ms)",
+      "failures": [
+        " FAIL  src/main/agent/bot-skill-selection.test.ts > activates a host-selected skill in the executor scope and retains its directive after preparation\nAssertionError: the given combination of arguments (undefined and string) is invalid for this assertion. You can use an array, a map, an object, a set, a string, or a weakset instead of a string\n ❯ src/main/agent/bot-skill-selection.test.ts:131:26\n    129|   expect(result.accepted).toBe(true)\n    130|   if (!result.accepted) throw new Error(result.reason)\n    131|   expect(result.message).toContain(\"<name>review</name>\")\n       |                          ^\n    132|   expect(result.message).toContain(skill.path)\n    133|   expect(scope.activeSkillNames.has(\"review\")).toBe(true)\n",
+        " FAIL  src/main/bots/runtime-adapter.test.ts > Bot steering uses the original runtime > supplies the exact managed lease and durable message identity\nAssertionError: expected \"spy\" to be called with arguments: [ { threadId: 't', …(3) } ]\n\nReceived: \n\n  1st spy call:\n\n@@ -1,9 +1,10 @@\n  [\n    {\n      \"message\": {\n-       \"beforeInject\": Any<Function>,\n+       \"allowTrustedTransportSkillMarker\": true,\n+       \"beforeInject\": [Function beforeInject],\n        \"content\": \"Include tests\",\n        \"id\": \"addition-message\",\n      },\n      \"owner\": \"bot\",\n      \"runId\": \"task\",\n\n\nNumber of calls: 1\n\n ❯ src/main/bots/runtime-adapter.test.ts:5402:27\n    5400|     }\n    5401|     expect(await lease.steer!(addition, beforeInject)).toBe(true)\n    5402|     expect(fixture.steer).toHaveBeenCalledWith({\n       |                           ^\n    5403|       threadId: task.threadId,\n    5404|       owner: \"bot\",\n",
+        " FAIL  src/main/bots/runtime-adapter.test.ts > Bot steering uses the original runtime > injects an authored work follow-up unchanged and claims it only when consumed\nAssertionError: expected \"spy\" to be called once with arguments: [ { threadId: 't', …(3) } ]\n\nReceived: \n\n  1st spy call:\n\n@@ -1,9 +1,10 @@\n  [\n    {\n      \"message\": {\n-       \"beforeInject\": Any<Function>,\n+       \"allowTrustedTransportSkillMarker\": false,\n+       \"beforeInject\": [Function beforeInject],\n        \"content\": \"Update the plan to 4 pm in the existing work directory.\",\n        \"id\": \"authored-follow-up\",\n      },\n      \"owner\": \"bot\",\n      \"runId\": \"task\",\n\n\nNumber of calls: 1\n\n ❯ src/main/bots/runtime-adapter.test.ts:5435:27\n    5433|     const beforeInject = vi.fn(() => true)\n    5434|     expect(await port().acquire(bot, workTask)!.steer!(addition, befor…\n    5435|     expect(fixture.steer).toHaveBeenCalledExactlyOnceWith({\n       |                           ^\n    5436|       threadId: workTask.threadId,\n    5437|       owner: \"bot\",\n"
+      ]
+    },
+    {
+      "id": "node-typecheck-initial",
+      "exitCode": 2,
+      "conclusion": "test used message instead of content",
+      "tail": "> cmbdevclaw@1.5.5 typecheck:node\n> tsc --noEmit -p tsconfig.node.json --composite false\n\nsrc/main/agent/bot-skill-selection.test.ts(131,17): error TS2339: Property 'message' does not exist on type '{ accepted: true; content: string; explicitSkillHookContext?: string | undefined; }'.\nsrc/main/agent/bot-skill-selection.test.ts(132,17): error TS2339: Property 'message' does not exist on type '{ accepted: true; content: string; explicitSkillHookContext?: string | undefined; }'."
+    },
+    {
+      "id": "vitest-corrected",
+      "exitCode": 0,
+      "conclusion": "375 passed across 3 files; the additionally requested current-run-message-queue.test.ts does not exist and did not add a suite",
+      "tail": "  uploadId: 'upload',\n  bytes: 68,\n  stage: 'platform_upload_and_enqueue',\n  state: 'accepted',\n  reused: false\n}\n\n ✓ src/main/bots/runtime-adapter.test.ts (338 tests) 10937ms\n   ✓ Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once  2409ms\n   ✓ Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once  2248ms\n   ✓ Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once  2313ms\n\n Test Files  3 passed (3)\n      Tests  375 passed (375)\n   Start at  11:03:32\n   Duration  12.83s (transform 2.86s, setup 0ms, collect 5.85s, tests 12.66s, environment 0ms, prepare 119ms)"
+    },
+    {
+      "id": "node-typecheck-corrected",
+      "exitCode": 0,
+      "conclusion": "passed",
+      "tail": "> cmbdevclaw@1.5.5 typecheck:node\n> tsc --noEmit -p tsconfig.node.json --composite false"
+    },
+    {
+      "id": "isolated-build",
+      "exitCode": 0,
+      "conclusion": "Electron main/preload/renderer built",
+      "tail": "✓ built in 21.12s\nIsolated Bot test build: <temp>/bot-integration-build-Flr7ty"
+    },
+    {
+      "id": "composer",
+      "exitCode": 0,
+      "conclusion": "19 passed",
+      "tail": "✓ testModelAllParts\n✓ testModelAttachmentOnlyNoText\n✓ testModelAttachmentAndSkillNoText\n✓ testDisplayPlainText\n✓ testDisplayWithAttachmentPrefix\n✓ testDisplaySkillOnly\n✓ testDisplayAttachmentAndSkill\n✓ testPreviewCollapsesWhitespace\n✓ testPreviewStripsSkillBlock\n✓ testPreviewEmptyFallback\n✓ testGuardPassesPlainText\n✓ testGuardPrefixesCoordinatorMarker\n✓ testPumpClaimsOnlyUnchangedDraftVersion\n✓ testGuidedReconciliationPrioritizesDurableState\n\n19 passed"
+    },
+    {
+      "id": "runtime-queue",
+      "exitCode": 0,
+      "conclusion": "43 passed",
+      "tail": "✓ testDurablePersistenceCountMustCoverEveryInjectedMessage\n[Runtime] Injected 1 queued current-run message(s) in beforeModel for thread thread-2\n✓ testInjectionThreadIsolation\n[Runtime] Injected 1 queued current-run message(s) in beforeModel for thread thread-1\n✓ testQueueRejectsReQueueOfAlreadyInjectedId\n[Runtime] Injected 1 queued current-run message(s) in beforeModel for thread thread-1\n✓ testQueueAcceptsFreshIdAfterAnotherWasInjected\n✓ testAcceptedQueueReturnsTrue\n[Runtime] Injected 1 queued current-run message(s) in beforeModel for thread thread-1\n✓ testClearResetsInjectedTracking\n✓ testDeleteBeforeAsyncPreparationPreventsLateQueue\n[Runtime] Injected 1 queued current-run message(s) in beforeModel for thread thread-1\n✓ testContinuationTransferPreservesAcceptedGuide\n✓ testContinuationTransferPreservesWithdrawal\n\n43 passed"
+    },
+    {
+      "id": "queue-plumbing",
+      "exitCode": 0,
+      "conclusion": "52 passed (source wiring checks, not UI execution)",
+      "tail": "✓ testAlreadyInjectedNeverReturnsToOrdinaryQueue\n✓ testFailedPumpRestoresQueueHead\n✓ testSubmitLockSpecRunsInMainSuite\n✓ testGuideClaimsLocalOwnershipBeforeIpc\n✓ testDisabledSliderModesRemainVisibleAndExplained\n✓ testPumpHoldsSharedSubmitInFlightLock\n✓ testLiveSubmitReleasePublishesQueuePumpWake\n✓ testSteerPathsGuardCoordinatorMarker\n✓ testEditLengthErrorDoesNotPolluteThreadError\n✓ testGuidedEditReconcilesBeforeDowngrading\n✓ testPumpClaimsCurrentVersionAndWaitsForHandoff\n✓ testGuidedItemsCannotBeReorderedLocally\n✓ testSubmitInFlightLockSurvivesRemount\n✓ testDeleteThreadCleansLocalStorageQueue\n\n52 passed"
+    },
+    {
+      "id": "skill-lifecycle",
+      "exitCode": 0,
+      "conclusion": "41 passed test groups",
+      "tail": "[Hooks] PreToolUse hook (command) \"node -e \"eval(Buffer.from('Y29uc29sZS5sb2coSlNPTi5zdHJpbmdpZ\" → exit=0, blocked=false\nPASS D2d background execute PreToolUse continue:false throws HookHaltError\n[Hooks] PostToolUse hook (command) → exit=0, decision=-\nPASS D2e text tool PostToolUse continue:false throws HookHaltError\n[Hooks] PostToolUse hook (command) → exit=0, decision=-\nPASS D2f PostToolUse suppressOutput hides hook stdout in read_file feedback\n[Hooks] PreSkillUse hook (command) \"node -e \"eval(Buffer.from('CmNvbnN0IGZzID0gcmVxdWlyZSgnZnMnK\" → exit=0, blocked=false\nPASS D3 same skill read fires hooks once\n[Hooks] PreSkillUse hook (command) \"node -e \"eval(Buffer.from('CmNvbnN0IGZzID0gcmVxdWlyZSgnZnMnK\" → exit=0, blocked=false\n[Hooks] PreSkillUse hook (command) \"node -e \"eval(Buffer.from('CmNvbnN0IGZzID0gcmVxdWlyZSgnZnMnK\" → exit=0, blocked=false\nPASS D3b same-name skills fire separately\n[Hooks] PreSkillUse hook (command) \"node -e \"eval(Buffer.from('Y29uc29sZS5sb2coSlNPTi5zdHJpbmdpZ\" → exit=0, blocked=false\nPASS D4/D5 PreSkillUse context queue drains cleanly\nPASS D6 non-skill read does not fire hooks\n[LocalSandbox] grepRaw: source=ripgrep, pattern=\"secret-marker-for-disabled-skill\", results=2, rgMs=7\nPASS D7 disabled skills are hidden from read/ls/glob/grep"
+    }
+  ]
+}

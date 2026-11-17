@@ -18,6 +18,10 @@ const fingerprintFiles = [
   "src/main/bots/runtime-adapter.ts",
   "src/main/bots/host.ts",
   "src/main/bots/store.ts",
+  "src/main/agent/standard-thread-turn.ts",
+  "src/main/agent/current-run-message-queue.ts",
+  "src/main/ipc/agent.ts",
+  "tests/support/bot-slash-skill-fixture.ts",
   "src/shared/bots/contracts.ts"
 ]
 export const experimentSha256 = (value) => createHash("sha256").update(value).digest("hex")

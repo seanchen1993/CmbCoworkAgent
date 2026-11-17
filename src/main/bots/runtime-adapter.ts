@@ -688,6 +688,8 @@ export function createLocalBotRunPort(
                   message.message.slice(browserPrefix.length)
                 : message.message) + inputContext,
               ...(mentionContext || inputContext ? { displayContent: message.message } : {}),
+              ...(sourceInputs?.explicitSkill ? { trustedExplicitSkill: sourceInputs.explicitSkill } : {}),
+              allowTrustedTransportSkillMarker: !message.mockSource && message.origin.kind === "user",
               beforeInject: () => {
                 if (!beforeInject()) return false
                 injected = true
@@ -1246,6 +1248,7 @@ export function createLocalBotRunPort(
                 // shared context and generated routines cannot impersonate that selection.
                 // The original runtime still resolves the registered skill and runs its hooks.
                 allowTrustedTransportSkillMarker: !mock && task.origin.kind === "user",
+                trustedExplicitSkill: workInputs?.explicitSkill,
                 ...(simulated
                   ? {}
                   : { capabilityService: createBotMcpScope(getGlobalMcpCapabilityService()) }),

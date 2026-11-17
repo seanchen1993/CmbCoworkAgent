@@ -60,7 +60,7 @@ import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
 // allowed_tools); skill-lifecycle/marker has a name+path-only twin under the
 // same tag. Match the composer so a remote turn persists what a desktop turn
 // would have.
-import { formatSkillUseBlock as formatComposerSkillUseBlock } from "../../shared/skill-use-block"
+import { formatSkillUseBlock as formatComposerSkillUseBlock, type SkillUseBlockMetadata } from "../../shared/skill-use-block"
 import { resolveThreadOutputStyle, type AgentOutputStyle } from "../../shared/agent-output-style"
 import {
   areForcedCoordinatorRequestsAllowed,
@@ -829,6 +829,8 @@ type CurrentRunMessagePreparer = {
   prepare: (message: {
     content: string
     displayContent?: string
+    trustedExplicitSkill?: SkillUseBlockMetadata
+    allowExplicitSkillFromMessage: boolean
   }) => Promise<CurrentRunMessagePreparation>
 }
 const currentRunMessagePreparers = new Map<string, CurrentRunMessagePreparer>()
@@ -2460,7 +2462,8 @@ function registerCurrentRunMessagePreparer({
         : queuedMessage.content
       const prepared = await prepareStandardUserPrompt({
         rawMessage: queuedMessage.content,
-        allowExplicitSkillFromMessage: messageControlsEnabled,
+        allowExplicitSkillFromMessage: messageControlsEnabled && queuedMessage.allowExplicitSkillFromMessage,
+        trustedExplicitSkill: messageControlsEnabled ? queuedMessage.trustedExplicitSkill : undefined,
         allowedSkillNames,
         initialModelInput: initialQueuedModelInput,
         threadId,
@@ -5436,7 +5439,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       return { queued: false, reason: "invalid_peer_feedback" }
     const messageId = message.id
     const messageContent = message.content
-    const messageDisplayContent = message.displayContent
+    const messageDisplayContent = message.trustedExplicitSkill
+      ? [message.displayContent || message.content, formatComposerSkillUseBlock(message.trustedExplicitSkill)].join("\n\n")
+      : message.displayContent
     const activeController = activeRuns.get(threadId)
     if (!activeController || activeController.signal.aborted) {
       console.log(
@@ -5474,7 +5479,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             ? { accepted: true, content: messageContent }
             : await preparer.prepare({
                 content: messageContent,
-                displayContent: messageDisplayContent
+                displayContent: messageDisplayContent,
+                trustedExplicitSkill: message.trustedExplicitSkill,
+                allowExplicitSkillFromMessage: request.owner === "desktop" || message.allowTrustedTransportSkillMarker === true
               })
         } catch (error) {
           const preparationError = error instanceof Error ? error.message : "引导消息预处理失败"

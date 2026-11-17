@@ -114,6 +114,41 @@ it.each(["message", "trusted"] as const)(
   }
 )
 
+it("activates a host-selected skill in the executor scope and retains its directive after preparation", async () => {
+  const skill = { name: "review", path: join(source, "review", "SKILL.md") }
+  const scope = createHookScope(), tracker = createSkillUseTracker(), activated = vi.fn()
+  const state = { hookScope: scope, skillUseTracker: tracker, skillHookKeys: new Set<string>() }
+  const prepare = () => prepareStandardUserPrompt({
+    rawMessage: "Bot routing note", initialModelInput: "Bot routing note\nHost-linked input",
+    trustedExplicitSkill: skill, allowExplicitSkillFromMessage: false, allowedSkillNames: ["review"],
+    threadId: "independent-worker", workspacePath: root, turnState: state,
+    harnessAgentContext: {}, onHookResult: vi.fn(), onHookSkippedFactory: () => vi.fn(),
+    onExplicitSkillActivated: activated
+  })
+  const result = await prepare()
+  expect(result.accepted).toBe(true)
+  if (!result.accepted) throw new Error(result.reason)
+  expect(result.content).toContain("<name>review</name>")
+  expect(result.content).toContain(skill.path)
+  expect(scope.activeSkillNames.has("review")).toBe(true)
+  expect(tracker.getPendingPostSkillUses()).toMatchObject([{ name: "review", trigger: "explicit", triggerToolName: "skill_select" }])
+  expect(activated).toHaveBeenCalledOnce()
+  await prepare() // A live correction must not duplicate the skill lifecycle within the run.
+  expect(state.skillHookKeys.size).toBe(1)
+  expect(tracker.getPendingPostSkillUses()).toHaveLength(1)
+})
+
+it("does not treat a worker's generated marker as an explicit selection", async () => {
+  const tracker = createSkillUseTracker(), scope = createHookScope()
+  const message = formatSkillUseBlock({ name: "review", path: join(source, "review", "SKILL.md") })
+  await prepareStandardUserPrompt({ rawMessage: message, initialModelInput: message,
+    allowExplicitSkillFromMessage: false, threadId: "worker", workspacePath: root,
+    turnState: { hookScope: scope, skillUseTracker: tracker, skillHookKeys: new Set() },
+    harnessAgentContext: {}, onHookResult: vi.fn(), onHookSkippedFactory: () => vi.fn() })
+  expect(scope.activeSkillNames.size).toBe(0)
+  expect(tracker.getUsedSkillNames()).toEqual([])
+})
+
 it("refreshes a checkpointed catalog when all becomes selected, none, or all again", async () => {
   const checkpointer = new MemorySaver(),
     prompts: string[] = []

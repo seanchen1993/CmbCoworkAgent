@@ -497,6 +497,19 @@ beforeEach(() => {
   )
 })
 describe("Bot Runtime integration", () => {
+  it("activates only the host-resolved work skill in the worker's own runtime", async () => {
+    const skill = { name: "review", path: "/synthetic/skills/review/SKILL.md" }
+    fixture.workInputContext.mockReturnValueOnce({ messages: [], totalMessages: 1, explicitSkill: skill } as any)
+    const worker: BotTask = { ...task, workId: "work", origin: { kind: "work", sourceTaskId: "main",
+      sourceContext: { version: 1, references: [] } } }
+    await port().acquire({ ...bot, allowedSkillNames: ["review"] }, worker)!
+      .execute(new AbortController().signal, vi.fn())
+    const context = fixture.start.mock.calls[0][2]
+    expect(context.trustedExplicitSkill).toEqual(skill)
+    expect(context.allowTrustedTransportSkillMarker).toBe(false)
+    expect(context.remotePolicy?.allowedSkillNames).toEqual(["review"])
+  })
+
   it.each([undefined, null, [], ["review", "template-skill"]])(
     "passes Bot skill selection %j into the host-owned run policy",
     async (allowedSkillNames) => {
@@ -5393,6 +5406,7 @@ describe("Bot steering uses the original runtime", () => {
       message: {
         id: addition.requestId,
         content: addition.message,
+        allowTrustedTransportSkillMarker: true,
         beforeInject: expect.any(Function)
       }
     })
@@ -5426,6 +5440,7 @@ describe("Bot steering uses the original runtime", () => {
       message: {
         id: addition.requestId,
         content: addition.message,
+        allowTrustedTransportSkillMarker: false,
         beforeInject: expect.any(Function)
       }
     })
@@ -5443,6 +5458,20 @@ describe("Bot steering uses the original runtime", () => {
     expect(fixture.workInputContext).toHaveBeenCalledWith("revision")
     expect(message.content).toContain("Only inspect; never modify files.")
     expect(message.displayContent).toBe("Inspect src")
+    expect(message.allowTrustedTransportSkillMarker).toBe(false)
+    expect(message.trustedExplicitSkill).toBeUndefined()
+  })
+  it("carries a new explicit skill through a live work correction without trusting the routing note", async () => {
+    const skill = { name: "review", path: "/synthetic/skills/review/SKILL.md" }
+    fixture.workInputContext.mockReturnValueOnce({ messages: [], totalMessages: 1, explicitSkill: skill } as any)
+    fixture.steer.mockResolvedValue({ queued: true })
+    const running: BotTask = { ...task, workId: "work", origin: { kind: "work", sourceTaskId: "main" } }
+    const addition: BotTask = { ...running, id: "revision", requestId: "revision-message", message: "Revise",
+      origin: { kind: "work", sourceTaskId: "main", dispatch: "follow_up", sourceContext: { version: 1, references: [] } } }
+    expect(await port().acquire(bot, running)!.steer!(addition, () => true)).toBe(true)
+    expect(fixture.steer.mock.calls[0][0].message).toMatchObject({
+      trustedExplicitSkill: skill, allowTrustedTransportSkillMarker: false, displayContent: "Revise"
+    })
   })
   it("does not inject private user messages into peers, routines or another conversation", async () => {
     fixture.pendingQuestion.mockReturnValue(question)

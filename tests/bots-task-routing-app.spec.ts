@@ -23,6 +23,7 @@ import { waitForBotAppState } from "./support/bot-app-state"
 import { botTestAppOutput } from "./support/bot-test-app"
 import { selectedBotRoutingModel } from "./support/bot-routing-model"
 import { createBotExperimentArchive } from "./support/bot-experiment-archive.mjs"
+import { installSlashSkillFixture, slashSkillRequest, verifySlashSkillResult, verifySlashSkillRevision } from "./support/bot-slash-skill-fixture"
 
 type Route = "inline" | "independent" | "continue" | "background"
 type Case = {
@@ -31,7 +32,7 @@ type Case = {
   preferred: Route
   files?: Record<string, string>
   message: (directory: string) => string
-  verify?: (directory: string, result: any) => Promise<void> | void
+  verify?: (directory: string, result: any, data: any) => Promise<void> | void
 }
 function assertNodeTests(output: string, minimum: number) {
   assert.match(output, /(?:#|ℹ) fail 0/)
@@ -50,6 +51,30 @@ const reconciliationInputs = {
   "payments.csv": "id,paid\nA,100.00\nA,20.00\nB,80.00\nC,200.00\nX,30.00\n"
 }
 const cases: Case[] = [
+  {
+    id: "slash-skill-natural",
+    label: "仅斜杠选技能，不要求独立任务，观察实际读取与交办顺序",
+    preferred: "independent",
+    files: {
+      "需求.md": "虚构图书借阅：每人最多同时借3本，借期14天，归还后才能再次借出。\n",
+      "约束.md": "只做内部使用，不收罚款，逾期提醒。不要扩展采购或支付。\n",
+      "现有接口.md": "已有查询图书库存接口，申请、归还和提醒功能待实现。\n"
+    },
+    message: (directory) => slashSkillRequest(directory, false),
+    verify: (directory, result, data) => verifySlashSkillResult(directory, result, data, false)
+  },
+  {
+    id: "slash-skill",
+    label: "主 Bot 斜杠技能选择、独立任务激活及文件回传",
+    preferred: "independent",
+    files: {
+      "需求.md": "虚构图书借阅：每人最多同时借3本，借期14天，归还后才能再次借出。\n",
+      "约束.md": "只做内部使用，不收罚款，逾期提醒。不要扩展采购或支付。\n",
+      "现有接口.md": "已有查询图书库存接口，申请、归还和提醒功能待实现。\n"
+    },
+    message: slashSkillRequest,
+    verify: verifySlashSkillResult
+  },
   {
     id: "greeting",
     label: "日常问答",
@@ -223,6 +248,8 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
   const out = botTestAppOutput()
   const root = await mkdtemp(join(tmpdir(), "bot-routing-cases-"))
   await chmod(root, 0o700)
+  if (!process.env.BOT_ROUTING_CASE || process.env.BOT_ROUTING_CASE.split(",").some(id => id.startsWith("slash-skill")))
+    await installSlashSkillFixture(root)
   await archive.configure({ model: config.model, out, workspace: root, apiKey: config.apiKey })
   const reportPath = join(out, "artifacts", `routing-${Date.now()}.json`)
   const results: any[] = []
@@ -521,6 +548,14 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
         message,
         tools: [...new Set(allTools.map((c: any) => c.name))],
         mainTools: tools,
+        ...(test.id.startsWith("slash-skill") ? {
+          mainToolCalls: calls.map((call: any) => ({ name: call.name, args: call.args })),
+          workToolCalls: data.workMessages.map((ms: any[], index: number) => ({
+            threadId: data.works[index].threadId,
+            calls: ms.flatMap((m: any) => m.tool_calls ?? [])
+              .map((call: any) => ({ name: call.name, args: call.args }))
+          }))
+        } : {}),
         toolErrors: messages
           .filter((m: any) => m.role === "tool" && (m.is_error || m.status === "error"))
           .map((m: any) => ({ tool: m.name, content: m.content })),
@@ -604,9 +639,17 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
       try {
         const { result, data } = await turn(bot, test, test.message(directory))
         await archive.checkpoint(report(), `verify:${test.id}`)
-        await test.verify?.(directory, result)
+        await test.verify?.(directory, result, data)
         result.validation = "passed"
         await save()
+        if (test.id === "slash-skill") {
+          const revision = await turn(bot,
+            { id: "slash-skill-revision", label: "不再选择技能，继续原任务修改并回传", preferred: "continue" },
+            "刚才那份 PRD 的借期改为21天，其他规则不变。继续原任务，更新 prd.md 并按原技能校验后重新交给我。")
+          await verifySlashSkillRevision(directory, revision.result, data.works[0].id)
+          revision.result.validation = "passed"
+          await save()
+        }
         if (["event-plan", "background-plan"].includes(test.id) && data.works.length === 1) {
           const work = data.works[0]
           assert.equal(work.workspace.path, await realpath(directory))

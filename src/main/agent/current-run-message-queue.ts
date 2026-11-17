@@ -26,6 +26,7 @@
 import { AIMessage, HumanMessage } from "@langchain/core/messages"
 import { createMiddleware } from "langchain"
 import { randomUUID } from "crypto"
+import type { SkillUseBlockMetadata } from "../../shared/skill-use-block"
 import type { Message } from "../types"
 import { isInternalNotificationMessage } from "../../shared/checkpoint-transcript"
 import {
@@ -41,6 +42,10 @@ export interface CurrentRunQueuedMessage {
   id: string
   content: string
   displayContent?: string
+  /** Host-resolved composer selection; never inferred from a Bot's routing text. */
+  trustedExplicitSkill?: SkillUseBlockMetadata
+  /** Only a local user composer may select via a raw trailing marker. */
+  allowTrustedTransportSkillMarker?: boolean
   /** Trusted Bot-only data, never a user instruction or permission grant. */
   peerFeedback?: { senderBotId: string; sourceTaskId: string; targetTaskId: string }
   /** Trusted host receipt, called synchronously before durable transcript/model injection.
