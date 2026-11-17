@@ -1,6 +1,7 @@
 import { ProjectAnalysisMembership } from "./ProjectAnalysisScope"
 import type { DashboardTimeControl } from "./TimeControlBar"
 import { useProjectAgentLauncher } from "./project-agent-workspace"
+import { PROJECT_ANALYSIS_AGENT_ENABLED } from "../../../../shared/project-analysis-agent"
 import { Fragment, useEffect, useMemo, useRef, useState, type ButtonHTMLAttributes } from "react"
 import {
   AlertCircle,
@@ -33,7 +34,10 @@ import type {
   RunAnalysisSessions,
   RunAnalysisStages
 } from "../../../../shared/project-run-analysis"
-import { RUN_ANALYSIS_NOTES } from "../../../../shared/project-run-analysis"
+import {
+  RUN_ANALYSIS_MEMBERSHIP_LABELS,
+  RUN_ANALYSIS_NOTES
+} from "../../../../shared/project-run-analysis"
 import {
   DEFAULT_RUN_ANALYSIS_FILTERS,
   NUMERIC_FILTERS,
@@ -122,7 +126,7 @@ export function ProjectRunAnalysis({
   onOpenFeatureCommits,
   onOpenCodeTrace
 }: ProjectRunAnalysisProps): React.JSX.Element {
-  const [membership, setMembership] = useState<RunAnalysisMembership>("active")
+  const [membership, setMembership] = useState<RunAnalysisMembership>("executed")
   const [filters, setFilters] = useState<RunAnalysisFilters>({ ...DEFAULT_RUN_ANALYSIS_FILTERS })
   const [preset, setPreset] = useState("")
   const [sort, setSort] = useState<RunAnalysisSort>("idle")
@@ -222,12 +226,8 @@ export function ProjectRunAnalysis({
     : options.upperOrgLv1
       ? [options.upperOrgLv1]
       : []
-  const membershipLabel =
-    membership === "active"
-      ? "进行中的全部项目"
-      : membership === "executed"
-        ? "所选日期内有执行（含归档）"
-        : "所选日期内新建项目（含归档）"
+  const membershipLabel = RUN_ANALYSIS_MEMBERSHIP_LABELS[membership]
+  const membershipUsesDate = membership === "executed" || membership === "created"
   const all = mode === "feature" ? matches : groups
   const maxPage = Math.max(1, Math.ceil(all.length / 20)),
     currentPage = Math.min(page, maxPage)
@@ -377,8 +377,20 @@ export function ProjectRunAnalysis({
       g = group ? (match as RunAnalysisProjectMatch) : null
     return (
       <tr key={JSON.stringify([r.projectId, r.featureSlug])} className="border-t align-top">
-        <td className="max-w-64 px-3 py-3">
-          <div className="font-medium">{r.projectName}</div>
+        <td className="min-w-56 max-w-80 px-3 py-3">
+          <div className="flex items-center gap-2">
+            <span className="min-w-0 truncate font-medium" title={r.projectName}>
+              {r.projectName}
+            </span>
+            {r.projectCode && (
+              <span
+                className="max-w-32 shrink-0 select-text truncate rounded border border-border/60 bg-muted/50 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
+                title={r.projectCode}
+              >
+                {r.projectCode}
+              </span>
+            )}
+          </div>
           <div className="mt-1 text-[11px] text-muted-foreground">
             {r.adapterName ?? "未知插件"} · {r.creator ?? "未知创建人"}
           </div>
@@ -519,7 +531,7 @@ export function ProjectRunAnalysis({
       scopeDetails: [
         `室：${selectedRooms.join("、") || "当前权限范围"}`,
         `名单：${membershipLabel}`,
-        ...(membership !== "active" ? [`名单日期：${date(range.from)} 至 ${date(range.to)}`] : []),
+        ...(membershipUsesDate ? [`名单日期：${date(range.from)} 至 ${date(range.to)}`] : []),
         `筛选：${filterChips.map(({ label }) => label).join("；") || "无附加条件"}`
       ],
       onInspect: (target) => {
@@ -545,10 +557,12 @@ export function ProjectRunAnalysis({
           )}
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" onClick={openAgent}>
-            <Bot className="mr-1 size-3" />
-            项目分析 Agent
-          </Button>
+          {PROJECT_ANALYSIS_AGENT_ENABLED && (
+            <Button size="sm" onClick={openAgent}>
+              <Bot className="mr-1 size-3" />
+              项目分析 Agent
+            </Button>
+          )}
           <Button
             size="sm"
             variant="outline"
@@ -580,20 +594,20 @@ export function ProjectRunAnalysis({
       </div>
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <ProjectAnalysisMembership value={membership} onChange={setMembership} />
-        {membership !== "active" && (
+        {membershipUsesDate && (
           <span className="text-muted-foreground">
             {date(range.from)} 至 {date(range.to)}
           </span>
         )}
         <span className="text-muted-foreground">
           指标为累计数据；
-          {membership === "active" ? "当前范围不受顶部日期限制" : "所选日期仅用于筛选项目范围"}
+          {membershipUsesDate ? "所选日期仅用于筛选项目范围" : "当前范围不受顶部日期限制"}
         </span>
       </div>
       <div className="flex flex-wrap items-center gap-2 border-t pt-3">
         <Input
           aria-label="项目或特性关键词"
-          placeholder="搜索项目或特性"
+          placeholder="搜索项目名称、编号或特性"
           className="h-8 min-w-32 flex-1 text-xs sm:max-w-72"
           value={filters.keyword}
           onChange={(e) => update("keyword", e.target.value)}

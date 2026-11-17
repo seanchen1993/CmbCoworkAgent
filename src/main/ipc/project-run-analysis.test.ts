@@ -229,29 +229,38 @@ describe("partial historical child observability", () => {
 
 describe("runtime analysis cursor session drilldown", () => {
   const request = { projectId: "p", featureSlug: "f", metric: "noSkill" as const }
-  it("reads only scalar headers with the identical main-Agent/no-Skill filter", async () => {
-    const query = vi.fn(async () => ({
-      hits: {
-        total: { value: 1, relation: "eq" },
-        hits: [
-          {
-            _source: { traceId: "trace", threadId: "thread", startedAt: range.from, usedSkills: [] }
-          }
-        ]
-      }
-    }))
-    const data = await fetchRunAnalysisSessions(
-      query,
-      "traces",
-      [{ term: { harnessProjectId: "p" } }],
-      request
-    )
-    expect(data.rows).toHaveLength(1)
-    const body = (query.mock.calls as unknown as [string, Json][])[0][1]
-    expect(body.query.bool.filter).toContainEqual(noSkillMainConversationFilter())
-    expect(body._source.includes).not.toContain("_raw")
-    expect(body.size).toBe(50)
-  })
+  it.each([1, { value: 1, relation: "eq" }])(
+    "reads scalar session headers with total %j and the identical main-Agent/no-Skill filter",
+    async (total) => {
+      const query = vi.fn(async () => ({
+        hits: {
+          total,
+          hits: [
+            {
+              _source: {
+                traceId: "trace",
+                threadId: "thread",
+                startedAt: range.from,
+                usedSkills: []
+              }
+            }
+          ]
+        }
+      }))
+      const data = await fetchRunAnalysisSessions(
+        query,
+        "traces",
+        [{ term: { harnessProjectId: "p" } }],
+        request
+      )
+      expect(data.rows).toHaveLength(1)
+      expect(data.total).toBe(1)
+      const body = (query.mock.calls as unknown as [string, Json][])[0][1]
+      expect(body.query.bool.filter).toContainEqual(noSkillMainConversationFilter())
+      expect(body._source.includes).not.toContain("_raw")
+      expect(body.size).toBe(50)
+    }
+  )
   it("preserves a null sort value and rejects repeated/missing cursors or lower-bound totals", async () => {
     const hits = Array.from({ length: 50 }, (_, i) => ({
       _source: { traceId: `t${i}` },
@@ -275,39 +284,46 @@ describe("runtime analysis cursor session drilldown", () => {
 })
 
 describe("precise complete conversation lookup", () => {
-  it("pushes the selected trace ID and identical metric filters to ES and reads at most two matches", async () => {
-    const query = vi.fn(async () => ({
-      hits: {
-        total: { value: 1, relation: "eq" },
-        hits: [{ _source: { traceId: "late-in-long-thread", _raw: "complete" } }]
+  it.each([1, { value: 1, relation: "eq" }])(
+    "reads a precise complete conversation with total %j and identical metric filters",
+    async (total) => {
+      const query = vi.fn(async () => ({
+        hits: {
+          total,
+          hits: [{ _source: { traceId: "late-in-long-thread", _raw: "complete" } }]
+        }
+      }))
+      const request = {
+        projectId: "p",
+        featureSlug: "f",
+        traceId: "late-in-long-thread",
+        metric: "noSkill" as const
       }
-    }))
-    const request = {
-      projectId: "p",
-      featureSlug: "f",
-      traceId: "late-in-long-thread",
-      metric: "noSkill" as const
+      const result = await fetchRunAnalysisTrace(
+        query,
+        "trace",
+        [{ term: { harnessProjectId: "p" } }, { term: { harnessFeatureSlug: "f" } }],
+        request,
+        ["_raw", "traceId"],
+        (hit) => hit._source
+      )
+      expect(result).toEqual({ traceId: "late-in-long-thread", _raw: "complete" })
+      const body = (query.mock.calls as unknown as [string, Json][])[0][1]
+      expect(body.size).toBe(2)
+      expect(body.query.bool.filter).toContainEqual({ term: { traceId: request.traceId } })
+      expect(body.query.bool.filter).toContainEqual(noSkillMainConversationFilter())
+      expect(body).not.toHaveProperty("from")
     }
-    const result = await fetchRunAnalysisTrace(
-      query,
-      "trace",
-      [{ term: { harnessProjectId: "p" } }, { term: { harnessFeatureSlug: "f" } }],
-      request,
-      ["_raw", "traceId"],
-      (hit) => hit._source
-    )
-    expect(result).toEqual({ traceId: "late-in-long-thread", _raw: "complete" })
-    const body = (query.mock.calls as unknown as [string, Json][])[0][1]
-    expect(body.size).toBe(2)
-    expect(body.query.bool.filter).toContainEqual({ term: { traceId: request.traceId } })
-    expect(body.query.bool.filter).toContainEqual(noSkillMainConversationFilter())
-    expect(body).not.toHaveProperty("from")
-  })
+  )
   it("rejects missing or ambiguous evidence and failed shards", async () => {
     const request = { projectId: "p", featureSlug: "f", traceId: "t" }
     for (const raw of [
       { hits: { total: { value: 0, relation: "eq" }, hits: [] } },
       { hits: { total: { value: 2, relation: "eq" }, hits: [{}, {}] } },
+      { hits: { total: 0, hits: [] } },
+      { hits: { total: 2, hits: [{}, {}] } },
+      { hits: { total: -1, hits: [{}] } },
+      { hits: { total: { value: 1, relation: "gte" }, hits: [{}] } },
       { _shards: { failed: 1 } }
     ]) {
       await expect(

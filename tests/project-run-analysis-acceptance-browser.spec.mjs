@@ -149,7 +149,7 @@ const bundle = await build({
           <div data-testid="dashboard-time-control"><TimeControlBar key={currentRange.from+currentRange.to} {...timeControl} range={currentRange}/></div>
           {menu!=='project' ? <div>其他菜单内容</div> : integrated ? <ProjectModePanel data={null} loading={overviewRequest.loading} error={overviewRequest.error} codeSource={null}
             codeStatsOverride={null} codeStatsLoading={false} onCodeSourceChange={()=>{}}
-            createdInRangeProjectsOnly runAnalysisRange={currentRange} runAnalysisTimeControl={timeControl} runAnalysisOptions={{upperOrgLv1:[room]}}
+            createdInRangeProjectsOnly runAnalysisAllowed runAnalysisRange={currentRange} runAnalysisTimeControl={timeControl} runAnalysisOptions={{upperOrgLv1:[room]}}
             projectPages={{}} projectPageLoading={{active:false,archived:false}} projectPageError={{}}
             onProjectPageChange={()=>{}} onOpenTraces={()=>{}} onOpenFeatureCommits={()=>{}} onOpenProjectCommits={()=>{}}
             loadFeatureNodes={async()=>[]} loadOperationalDetails={async()=>null} loadStageAnalysis={async()=>null}/>
@@ -186,7 +186,12 @@ const bundle = await build({
   ],
   define: {
     "process.env.NODE_ENV": '"production"',
-    "import.meta.env": JSON.stringify({ DEV: false, VITE_API_BASE_URL: "" })
+    // Preserve coverage of the retained Agent workflows while the release switch is off.
+    "import.meta.env": JSON.stringify({
+      DEV: false,
+      VITE_API_BASE_URL: "",
+      VITE_PROJECT_ANALYSIS_AGENT_ENABLED: "true"
+    })
   }
 })
 const browser = await chromium.launch({
@@ -229,9 +234,21 @@ try {
     )
   const tableRows = page.getByRole("region", { name: "项目分析" }).locator("table > tbody > tr")
   await page.evaluate(() => window.runQA.setActive(true))
-  await waitLoad("A:active")
-  await finish("A:active")
+  await waitLoad("A:executed")
+  await finish("A:executed")
+  await page.getByText("1 / 2 页 · 30条").waitFor()
+  const membershipSelect = page.getByRole("combobox", { name: "查看范围", exact: true })
+  assert.equal(await membershipSelect.inputValue(), "executed")
+  assert.deepEqual(await membershipSelect.locator("option").allTextContents(), [
+    "所选日期内有执行（含归档）",
+    "所选日期内新建项目（含归档）",
+    "全部项目"
+  ])
+  await membershipSelect.selectOption("all")
+  await waitLoad("A:all")
+  await finish("A:all")
   await page.getByText("1 / 2 页 · 36条").waitFor()
+  await page.getByText("指标为累计数据；当前范围不受顶部日期限制", { exact: true }).waitFor()
   assert.equal(await tableRows.count(), 20)
   await page.evaluate(() => window.runQA.setActive(false))
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)))
@@ -239,7 +256,7 @@ try {
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)))
   assert.equal(
     await page.evaluate(() => window.runQA.calls.filter((c) => c.type === "load").length),
-    1,
+    2,
     "Returning to the same fresh scope must reuse results"
   )
   await page.getByRole("button", { name: "下一页", exact: true }).click()
@@ -264,7 +281,7 @@ try {
     assert.match(value, /20轮共 30 轮主对话/)
   assert.equal(
     await page.evaluate(() => window.runQA.calls.filter((c) => c.type === "load").length),
-    1,
+    2,
     "UI filtering must not requery"
   )
   await page.getByRole("button", { name: "清除全部筛选", exact: true }).click()
@@ -291,6 +308,12 @@ try {
   }
   for (const oldTab of ["综合概览", "代码采纳", "调用与代理"])
     assert.equal(await page.getByRole("button", { name: oldTab, exact: true }).count(), 0)
+  await page.getByRole("textbox", { name: "项目或特性关键词" }).fill("lean-000002")
+  await page.getByText("1 / 1 页 · 3条").waitFor()
+  for (const value of await tableRows.locator("td:first-child").allTextContents()) {
+    assert.match(value, /LEAN-000002/)
+    assert.doesNotMatch(value, /项目编号|精益项目/)
+  }
   await page.getByRole("textbox", { name: "项目或特性关键词" }).fill("客户经营平台 1")
   await page.getByRole("combobox", { name: "快速筛选", exact: true }).selectOption("noSkill")
   assert.equal(
@@ -304,13 +327,19 @@ try {
   await page.getByRole("button", { name: "清除全部筛选", exact: true }).click()
   assert.equal(
     await page.evaluate(() => window.runQA.calls.filter((c) => c.type === "load").length),
-    1,
+    2,
     "Quick filters, chips and search never requery ES"
   )
   const downloadPromise = page.waitForEvent("download")
   await page.getByRole("button", { name: "导出Excel", exact: true }).click()
   const download = await downloadPromise
   const workbook = XLSX.readFile(await download.path())
+  const exported = XLSX.utils.sheet_to_json(workbook.Sheets["匹配特性"], { defval: null })
+  assert.equal(exported.find((row) => row.项目ID === "demo-1").项目编号, "LEAN-000002")
+  assert.equal(exported.find((row) => row.项目ID === "demo-1").是否精益项目, "否")
+  assert.equal(exported.find((row) => row.项目ID === "demo-2").是否精益项目, "是")
+  assert.equal(exported.find((row) => row.项目ID === "demo-0").项目编号, null)
+  assert.equal(exported.find((row) => row.项目ID === "demo-0").是否精益项目, "未记录")
   assert.equal(
     XLSX.utils.sheet_to_json(workbook.Sheets["匹配特性"]).length,
     36,
@@ -318,8 +347,19 @@ try {
   )
   await page.getByRole("button", { name: "复制汇总", exact: true }).click()
   assert.match(await page.evaluate(() => window.runQA.copied), /36/)
+  assert.match(await page.evaluate(() => window.runQA.copied), /LEAN-000002/)
   await page.getByRole("button", { name: "按项目", exact: true }).click()
   assert.equal(await tableRows.count(), 12)
+  const projectDownloadPromise = page.waitForEvent("download")
+  await page.getByRole("button", { name: "导出Excel", exact: true }).click()
+  const projectWorkbook = XLSX.readFile(await (await projectDownloadPromise).path())
+  const exportedProjects = XLSX.utils.sheet_to_json(projectWorkbook.Sheets["项目汇总"], {
+    defval: null
+  })
+  assert.equal(exportedProjects.length, 12)
+  assert.equal(exportedProjects.find((row) => row.项目ID === "demo-2").项目编号, "LEAN-000003")
+  assert.equal(exportedProjects.find((row) => row.项目ID === "demo-2").是否精益项目, "是")
+  assert.equal(exportedProjects.find((row) => row.项目ID === "demo-0").是否精益项目, "未记录")
   await tableRows.first().getByRole("button", { name: /^展开/ }).click()
   await page.getByText("匹配特性", { exact: true }).waitFor()
   await page.getByRole("button", { name: "按特性", exact: true }).click()
@@ -357,17 +397,17 @@ try {
   await page.keyboard.press("Escape")
   await page.getByRole("dialog").waitFor({ state: "hidden" })
   await page.evaluate(() => window.runQA.setRoom("B"))
-  await waitLoad("B:active")
+  await waitLoad("B:all")
   assert.equal(await tableRows.count(), 0, "Old room results cannot remain visible")
   assert.equal(
     await page.getByRole("button", { name: "导出Excel", exact: true }).isDisabled(),
     true
   )
   await page.evaluate(() => window.runQA.setRoom("C"))
-  await waitLoad("C:active")
-  await finish("C:active")
+  await waitLoad("C:all")
+  await finish("C:all")
   await tableRows.first().getByText(/C ·/).waitFor()
-  await finish("B:active")
+  await finish("B:all")
   assert.equal(
     await tableRows.getByText(/B ·/).count(),
     0,
@@ -375,7 +415,7 @@ try {
   )
   await page.getByRole("button", { name: "刷新", exact: true }).click()
   await page.waitForFunction(
-    () => window.runQA.calls.filter((c) => c.type === "load" && c.key === "C:active").length === 2
+    () => window.runQA.calls.filter((c) => c.type === "load" && c.key === "C:all").length === 2
   )
   assert.equal(
     await page.evaluate(
@@ -383,7 +423,7 @@ try {
     ),
     true
   )
-  await page.evaluate(() => window.runQA.fail("C:active"))
+  await page.evaluate(() => window.runQA.fail("C:all"))
   await page.getByRole("alert").filter({ hasText: "验收模拟查询失败" }).waitFor()
   assert.equal(
     await page.getByRole("button", { name: "导出Excel", exact: true }).isDisabled(),
@@ -391,12 +431,12 @@ try {
   )
   await page.getByRole("button", { name: "重试", exact: true }).click()
   await page.waitForFunction(
-    () => window.runQA.calls.filter((c) => c.type === "load" && c.key === "C:active").length === 3
+    () => window.runQA.calls.filter((c) => c.type === "load" && c.key === "C:all").length === 3
   )
-  await finish("C:active")
+  await finish("C:all")
   await tableRows.first().getByText(/C ·/).waitFor()
   await page.evaluate(() => window.runQA.setRoom("D"))
-  await waitLoad("D:active")
+  await waitLoad("D:all")
   assert.equal(
     await page.evaluate(
       () => window.runQA.calls.filter((c) => c.type === "load").at(-1).options.refresh
@@ -404,7 +444,7 @@ try {
     false,
     "Refreshing once must not permanently disable the scoped cache"
   )
-  await finish("D:active")
+  await finish("D:all")
   await tableRows.first().getByText(/D ·/).waitFor()
   await page.screenshot({ path: join(output, "analysis-wide.png") })
   await page.setViewportSize({ width: 760, height: 720 })
@@ -436,7 +476,12 @@ try {
     (n) => window.runQA.calls.filter((c) => c.type === "load").length === n + 1,
     beforeIntegration
   )
-  await finish("D:active")
+  await finish("D:executed")
+  await page.getByText("1 / 2 页 · 30条").waitFor()
+  assert.equal(await membershipSelect.inputValue(), "executed")
+  await membershipSelect.selectOption("all")
+  await waitLoad("D:all")
+  await finish("D:all")
   await page.getByText("1 / 2 页 · 36条").waitFor()
   await page.getByRole("tab", { name: "项目列表", exact: true }).click()
   assert.equal(await page.getByRole("region", { name: "项目分析" }).count(), 0)
@@ -444,7 +489,7 @@ try {
   await page.getByText("1 / 2 页 · 36条").waitFor()
   assert.equal(
     await page.evaluate(() => window.runQA.calls.filter((c) => c.type === "load").length),
-    beforeIntegration + 1
+    beforeIntegration + 2
   )
   // Comparison controls are independent and preserve strict boundaries.
   await page.getByRole("button", { name: "更多筛选", exact: true }).click()
@@ -700,10 +745,10 @@ try {
   await page.getByRole("button", { name: "发送", exact: true }).click()
   await waitAgent(5)
   await page.evaluate(() => window.runQA.setRoom("E"))
-  await waitLoad("E:active")
+  await waitLoad("E:all")
   assert.equal(await page.getByRole("heading", { name: "项目分析 Agent", exact: true }).count(), 0)
   await agentReply(4, "旧室的结果不能出现")
-  await finish("E:active")
+  await finish("E:all")
   await page.getByText("1 / 2 页 · 36条").waitFor()
   assert.equal(await tableRows.getByRole("button", { name: /^分析/ }).count(), 0)
   await page.getByRole("button", { name: "项目分析 Agent", exact: true }).click()
@@ -1285,8 +1330,8 @@ try {
     window.runQA.reportWorkspace.rooms = []
     window.runQA.setRoom("F")
   })
-  await waitLoad("F:active")
-  await finish("F:active")
+  await waitLoad("F:all")
+  await finish("F:all")
   await page.getByRole("button", { name: "项目分析 Agent", exact: true }).click()
   await page.getByRole("tab", { name: "综合报告", exact: true }).click()
   const adminRoom = page.getByRole("combobox", { name: "报告所属室", exact: true })
@@ -1315,9 +1360,9 @@ try {
     window.runQA.workspaceFailure = true
     window.runQA.setRoom("G")
   })
-  await waitLoad("G:active")
+  await waitLoad("G:all")
   await replyReport(8, "report-3", 2, adminRequest.scope, false)
-  await finish("G:active")
+  await finish("G:all")
   await page.getByRole("button", { name: "项目分析 Agent", exact: true }).click()
   await page.getByRole("tab", { name: "综合报告", exact: true }).click()
   await page.getByRole("alert").filter({ hasText: "验收工作区暂时不可用" }).waitFor()
@@ -1601,9 +1646,9 @@ try {
   assert.equal(await page.getByRole("button", { name: "继续运行", exact: true }).count(), 0)
   await page.keyboard.press("Escape")
   // The app-level workspace survives complete route unmounts, independently of page tabs.
-  await page.getByRole("combobox", { name: "查看范围", exact: true }).selectOption("active")
-  await waitLoad("H:active")
-  await finish("H:active")
+  await page.getByRole("combobox", { name: "查看范围", exact: true }).selectOption("all")
+  await waitLoad("H:all")
+  await finish("H:all")
   await page.getByRole("button", { name: "项目分析 Agent", exact: true }).click()
   await page.getByRole("tab", { name: "项目分析", exact: true }).click()
   await choose("项目 Agent 模型", "备用测试模型")
@@ -1646,8 +1691,8 @@ try {
   await page.keyboard.press("Escape")
   await page.evaluate(() => window.runQA.setMenu("project"))
   await page.getByRole("tab", { name: "项目分析", exact: true }).click()
-  await waitLoad("H:active")
-  await finish("H:active")
+  await waitLoad("H:executed")
+  await finish("H:executed")
   await page.getByRole("button", { name: "项目分析 Agent", exact: true }).click()
   await page.getByRole("tab", { name: "综合报告", exact: true }).click()
   await waitReportVersion(2)

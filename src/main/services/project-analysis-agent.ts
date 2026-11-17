@@ -100,7 +100,7 @@ const optionsSchema = z
     fromLeanOnly: z.boolean().nullable().optional(),
     adapterName: text.nullable().optional(),
     adapterVersion: text.nullable().optional(),
-    membership: z.enum(["active", "executed", "created"]).optional(),
+    membership: z.enum(["active", "executed", "created", "all"]).optional(),
     refresh: z.boolean().optional()
   })
   .strict()

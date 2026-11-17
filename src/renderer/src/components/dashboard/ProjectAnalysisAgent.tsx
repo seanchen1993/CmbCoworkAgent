@@ -389,7 +389,7 @@ export function ProjectAnalysisAgent({
             )}
             <ProjectAnalysisScope
               range={context.range}
-              membership={context.options.membership ?? "active"}
+              membership={context.options.membership ?? "executed"}
               busy={loading || !sourceAvailable}
               timeControl={timeControl}
               onMembershipChange={onMembershipChange}

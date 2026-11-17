@@ -19,6 +19,13 @@ import {
 } from "../../shared/project-attention"
 import { ProjectAttentionRankingCache } from "./project-attention-ranking"
 import { mapAwardBatches } from "./dashboard-awards-skill"
+import type {
+  RunAnalysisData,
+  RunAnalysisOptions,
+  RunAnalysisSessionRequest
+} from "../../shared/project-run-analysis"
+import type { RunAnalysisScope } from "./project-run-analysis"
+import { matches } from "./es-aggregation-test-fixture"
 
 vi.mock("../services/event-reporter", () => ({ trackEvent: () => undefined }))
 
@@ -33,6 +40,7 @@ const names = [
   "asRecord",
   "asString",
   "asNumber",
+  "getTotalHits",
   "clampLimit",
   "parseStageBucketCodeStats",
   "buildStageBuckets",
@@ -55,7 +63,10 @@ const names = [
   "fetchProjectModeProjectMetrics",
   "enrichProjectModeProjectViews",
   "fetchProjectModeMetricSortedPage",
-  "fetchProjectModeProjectPage"
+  "fetchProjectModeProjectPage",
+  "runAnalysisSnapshotFilters",
+  "runAnalysisDetailFilters",
+  "fetchProjectRunAnalysis"
 ]
 const functions = source.statements.filter(
   (node) => isFunctionDeclaration(node) && names.includes(node.name?.text ?? "")
@@ -219,6 +230,13 @@ function fixture(featureCount = 1) {
   runInNewContext(compiled, context)
   return {
     api: context.testFunctions as {
+      runAnalysisDetailFilters: (
+        request: RunAnalysisSessionRequest
+      ) => Promise<Record<string, unknown>[]>
+      fetchProjectRunAnalysis: (
+        selectedRange: typeof range,
+        options: RunAnalysisOptions
+      ) => Promise<RunAnalysisData>
       fetchProjectModeProjectPage: (...args: unknown[]) => Promise<{
         projects: Array<{
           features: Array<{ codeStats: { generatedLines: number } }>
@@ -242,6 +260,86 @@ function fixture(featureCount = 1) {
 }
 
 describe("project list lifetime IPC flow", () => {
+  it.each([1, { value: 1, relation: "eq" }])(
+    "permits detail drilldown with a matching snapshot and total %j",
+    async (total) => {
+      const { api, esQuery } = fixture()
+      esQuery.mockResolvedValueOnce({ hits: { total } })
+      const filters = await api.runAnalysisDetailFilters({
+        projectId: "p",
+        featureSlug: "f",
+        upperOrgLv1: "本室",
+        fromLeanOnly: true,
+        adapterName: "研发插件"
+      })
+      expect(filters).toContainEqual({ term: { harnessProjectId: "p" } })
+      expect(filters).toContainEqual({ term: { harnessFeatureSlug: "f" } })
+      const query = JSON.stringify(esQuery.mock.calls[0][1])
+      expect(query).toContain('"properties.projectId":"p"')
+      expect(query).toContain('"upperOrgLv1":"本室"')
+      expect(query).toContain('"properties.projectFromLean":true')
+      expect(query).toContain('"properties.adapterName":"研发插件"')
+      expect(query).not.toContain("lifecycleStatus")
+    }
+  )
+  it.each([0, { value: 0, relation: "eq" }, undefined, -1, NaN])(
+    "refuses unavailable or invalid detail access results (%j)",
+    async (total) => {
+      const { api, esQuery } = fixture()
+      esQuery.mockResolvedValueOnce({ hits: { total } })
+      await expect(
+        api.runAnalysisDetailFilters({ projectId: "p", featureSlug: "f" })
+      ).rejects.toThrow(
+        total === 0 || (typeof total === "object" && total?.value === 0)
+          ? "未找到该项目"
+          : "校验结果不完整"
+      )
+    }
+  )
+  it("all analysis includes archived and dormant projects while retaining organization and Lean filters", async () => {
+    const { api, context } = fixture()
+    const fetchAnalysis = vi.fn(async (queryScope: RunAnalysisScope) => ({
+      rows: [],
+      membership: queryScope.membership
+    }))
+    Object.assign(context, {
+      structuredClone,
+      runAnalysisCache: new ProjectModePageCache(),
+      fetchRunAnalysis: fetchAnalysis
+    })
+    const options: RunAnalysisOptions = {
+      membership: "all",
+      upperOrgLv1: "本室",
+      fromLeanOnly: true,
+      adapterName: "研发插件"
+    }
+    expect(await api.fetchProjectRunAnalysis(range, options)).toMatchObject({ membership: "all" })
+    const allScope = fetchAnalysis.mock.calls[0][0]
+    const archived = {
+      eventName: "harness.project.snapshot",
+      upperOrgLv1: "本室",
+      properties: {
+        lifecycleStatus: "archived",
+        lifecycleCreatedAt: "2020-01-01",
+        projectFromLean: true,
+        adapterName: "研发插件"
+      }
+    }
+    const allQuery = { bool: { filter: allScope.snapshotFilters } }
+    expect(matches(archived, allQuery)).toBe(true)
+    expect(matches({ ...archived, upperOrgLv1: "其他室" }, allQuery)).toBe(false)
+    expect(
+      matches(
+        { ...archived, properties: { ...archived.properties, projectFromLean: false } },
+        allQuery
+      )
+    ).toBe(false)
+    await api.fetchProjectRunAnalysis(range, { ...options, membership: "active" })
+    expect(fetchAnalysis).toHaveBeenCalledTimes(2)
+    expect(
+      matches(archived, { bool: { filter: fetchAnalysis.mock.calls[1][0].snapshotFilters } })
+    ).toBe(false)
+  })
   it.each(["active", "archived"])(
     "routes elapsed sorting for %s projects through the ranking",
     async (status) => {

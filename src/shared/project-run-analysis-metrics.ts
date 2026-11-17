@@ -3,7 +3,7 @@ import type {
   RunAnalysisData,
   RunAnalysisFeature
 } from "./project-run-analysis"
-import { RUN_ANALYSIS_NOTES } from "./project-run-analysis"
+import { RUN_ANALYSIS_MEMBERSHIP_LABELS, RUN_ANALYSIS_NOTES } from "./project-run-analysis"
 
 export const NUMERIC_FILTERS = {
   idleDays: { label: "距最近执行", unit: "天", factor: 1 },
@@ -259,9 +259,14 @@ export function attentionReasons(
   const q = f.keyword.trim().toLocaleLowerCase()
   if (
     q &&
-    ![row.projectId, row.projectName, row.systemName, row.featureSlug, row.featureTitle].some((v) =>
-      v?.toLocaleLowerCase().includes(q)
-    )
+    ![
+      row.projectId,
+      row.projectName,
+      row.projectCode,
+      row.systemName,
+      row.featureSlug,
+      row.featureTitle
+    ].some((v) => v?.toLocaleLowerCase().includes(q))
   )
     return null
   if (f.plugin && JSON.stringify([row.adapterName, row.adapterVersion]) !== f.plugin) return null
@@ -475,9 +480,12 @@ export function groupRunAnalysis(
 }
 export function runAnalysisSummary(data: RunAnalysisData, matches: RunAnalysisMatch[]): string {
   const projects = new Set(matches.map((m) => m.row.projectId)).size
+  const codes = [
+    ...new Set(matches.flatMap(({ row }) => (row.projectCode ? [row.projectCode] : [])))
+  ]
   const reasons = new Map<string, number>()
   for (const m of matches) for (const r of m.reasons) reasons.set(r, (reasons.get(r) ?? 0) + 1)
-  return `项目分析：当前筛选匹配${projects}个项目、${matches.filter((m) => m.row.featureSlug !== null).length}个特性。名单范围：${{ active: "进行中的全部项目", executed: "所选时间内有执行的项目/特性", created: "本期新建项目" }[data.membership]}；${data.range.from} 至 ${data.range.to}。指标为累计口径，数据截至${data.dataAsOf}。${[...reasons].map(([r, n]) => `${r}：${n}个特性`).join("；")}`
+  return `项目分析：当前筛选匹配${projects}个项目、${matches.filter((m) => m.row.featureSlug !== null).length}个特性。${codes.length ? `项目编号：${codes.join("、")}。` : ""}名单范围：${RUN_ANALYSIS_MEMBERSHIP_LABELS[data.membership]}；${data.range.from} 至 ${data.range.to}。指标为累计口径，数据截至${data.dataAsOf}。${[...reasons].map(([r, n]) => `${r}：${n}个特性`).join("；")}`
 }
 export function runAnalysisExportRows(
   data: RunAnalysisData,
@@ -492,6 +500,8 @@ export function runAnalysisExportRows(
     快照时间: r.snapshotAt,
     项目ID: r.projectId,
     项目: r.projectName,
+    项目编号: r.projectCode ?? null,
+    是否精益项目: r.projectFromLean === true ? "是" : r.projectFromLean === false ? "否" : "未记录",
     系统: r.systemName,
     插件: r.adapterName,
     版本: r.adapterVersion,

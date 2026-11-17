@@ -1,4 +1,5 @@
 import { lazy, Suspense, useLayoutEffect, useSyncExternalStore } from "react"
+import { PROJECT_ANALYSIS_AGENT_ENABLED } from "../../../../shared/project-analysis-agent"
 import {
   readProjectAgentWorkspace,
   setProjectAgentAccount,
@@ -19,16 +20,17 @@ export function ProjectAgentWorkspaceHost({
   enabled: boolean
   accountRevision: number
 }) {
+  const available = enabled && PROJECT_ANALYSIS_AGENT_ENABLED
   const workspace = useSyncExternalStore(
     subscribeProjectAgentWorkspace,
     readProjectAgentWorkspace,
     readProjectAgentWorkspace
   )
   useLayoutEffect(() => {
-    setProjectAgentAccount(enabled ? accountRevision : null)
+    setProjectAgentAccount(available ? accountRevision : null)
     return () => setProjectAgentAccount(null)
-  }, [accountRevision, enabled])
-  if (!enabled || !workspace || workspace.accountRevision !== accountRevision) return null
+  }, [accountRevision, available])
+  if (!available || !workspace || workspace.accountRevision !== accountRevision) return null
   return (
     <Suspense fallback={null}>
       <Agent

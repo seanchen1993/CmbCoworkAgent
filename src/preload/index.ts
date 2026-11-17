@@ -3957,6 +3957,8 @@ const api = {
     isAllowed: (): Promise<boolean> => ipcRenderer.invoke("dashboard:isAllowed"),
     isProjectModeAllowed: (): Promise<boolean> =>
       ipcRenderer.invoke("dashboard:isProjectModeAllowed"),
+    isProjectAnalysisAllowed: (): Promise<boolean> =>
+      ipcRenderer.invoke("dashboard:isProjectAnalysisAllowed"),
     orgFilterDefaults: (): Promise<string[]> => ipcRenderer.invoke("dashboard:orgFilterDefaults"),
     isTraceEvolverReviewAdmin: (): Promise<boolean> =>
       ipcRenderer.invoke("dashboard:isTraceEvolverReviewAdmin"),

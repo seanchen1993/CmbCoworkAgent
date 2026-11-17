@@ -17,6 +17,7 @@ export function makeMockRunAnalysis(
   const rooms =
     typeof options.upperOrgLv1 === "string" ? [options.upperOrgLv1] : (options.upperOrgLv1 ?? [])
   const rows = Array.from({ length: 36 }, (_, i) => {
+    const projectIndex = Math.floor(i / 3)
     const first = new Date(now - (i + 2) * day).toISOString(),
       last = new Date(now - i * day).toISOString()
     const codeStats =
@@ -34,6 +35,9 @@ export function makeMockRunAnalysis(
     return {
       ...emptyRunAnalysisMetrics(),
       projectId: `demo-${Math.floor(i / 3)}`,
+      projectCode:
+        projectIndex % 4 === 0 ? null : `LEAN-${String(projectIndex + 1).padStart(6, "0")}`,
+      projectFromLean: projectIndex % 4 === 0 ? null : projectIndex % 4 !== 1,
       projectName: `演示 · ${["客户经营平台", "授信审批优化", "数据运营工作台", "渠道服务改造"][Math.floor(i / 3) % 4]} ${Math.floor(i / 3) + 1}`,
       systemName: "开发示例",
       adapterName: "业务研发插件",
@@ -79,6 +83,7 @@ export function makeMockRunAnalysis(
     }
   }).filter(
     (r) =>
+      (!options.fromLeanOnly || r.projectFromLean === true) &&
       (!options.adapterName || r.adapterName === options.adapterName) &&
       (options.membership !== "executed" || r.executedInRange) &&
       (options.membership !== "created" ||

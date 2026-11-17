@@ -56,6 +56,10 @@ const call = (name: string, args: Record<string, unknown>) =>
 
 describe("project analysis agent", () => {
   it("validates filters and refuses client-supplied data or malformed scope", () => {
+    expect(
+      parseProjectAnalysisInput({ ...input, options: { ...input.options, membership: "all" } })
+        .options.membership
+    ).toBe("all")
     expect(() =>
       parseProjectAnalysisInput({ ...input, panelSnapshot: { projectCount: 999 } })
     ).toThrow("参数无效")

@@ -1,6 +1,10 @@
 import type { RunAnalysisOptions, RunAnalysisRange } from "./project-run-analysis"
 import type { RunAnalysisFilters } from "./project-run-analysis-metrics"
 
+/** Release switch for the isolated analysis/report Agent; disabled unless explicitly enabled. */
+export const PROJECT_ANALYSIS_AGENT_ENABLED =
+  import.meta.env.VITE_PROJECT_ANALYSIS_AGENT_ENABLED === "true"
+
 export interface ProjectAnalysisTarget {
   projectId: string
   /** Omitted means matching features in a project; null means unbound executions. */

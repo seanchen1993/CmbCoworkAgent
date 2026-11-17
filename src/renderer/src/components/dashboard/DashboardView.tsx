@@ -2229,6 +2229,7 @@ function DashboardContent({
   const [projectMetricRefreshKey, setProjectMetricRefreshKey] = useState(0)
   const [activeMainTab, setActiveMainTab] = useState<DashboardMainTab>("overview")
   const [projectModeAllowed, setProjectModeAllowed] = useState(false)
+  const [projectAnalysisAllowed, setProjectAnalysisAllowed] = useState(false)
   const [selectedGroupNames, setSelectedGroupNames] = useState<string[]>([])
   const [groupOptions, setGroupOptions] = useState<string[]>([])
   const [groupOptionsLoading, setGroupOptionsLoading] = useState(false)
@@ -2362,6 +2363,15 @@ function DashboardContent({
         if (cancelled) return
         setProjectModeAllowed(false)
         leaveProjectModeGatedTabs()
+      })
+
+    window.api.dashboard
+      .isProjectAnalysisAllowed()
+      .then((allowed) => {
+        if (!cancelled) setProjectAnalysisAllowed(allowed)
+      })
+      .catch(() => {
+        if (!cancelled) setProjectAnalysisAllowed(false)
       })
 
     return () => {
@@ -4799,6 +4809,7 @@ function DashboardContent({
                 codeStatsLoading={projectModeCodeStatsLoading}
                 onCodeSourceChange={selectProjectModeCodeSource}
                 createdInRangeProjectsOnly={createdInRangeProjectsOnly}
+                runAnalysisAllowed={projectAnalysisAllowed}
                 runAnalysisRange={range}
                 runAnalysisTimeControl={{
                   granularity,

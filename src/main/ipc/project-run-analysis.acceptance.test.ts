@@ -114,6 +114,31 @@ function harness(events: Doc[], traces: Doc[], stripNullKeys = false) {
 }
 
 describe("运行分析独立场景验收", () => {
+  it("读取项目编号与精益关联标记，历史缺失保留为空，未归因特性也继承项目属性", async () => {
+    const h = harness(
+      [
+        snapshot("p", ["same"], { projectCode: "001234", projectFromLean: true }),
+        snapshot("q", ["same"], { projectCode: "LOCAL-1", projectFromLean: false }),
+        snapshot("legacy", ["same"])
+      ],
+      [trace("unbound", { harnessFeatureSlug: undefined })]
+    )
+    const result = await fetchRunAnalysis(scope(), h.query)
+    expect(result.rows.filter((row) => row.projectId === "p")).toHaveLength(2)
+    for (const row of result.rows.filter((row) => row.projectId === "p"))
+      expect(row).toMatchObject({ projectCode: "001234", projectFromLean: true })
+    expect(result.rows.find((row) => row.projectId === "q")).toMatchObject({
+      projectCode: "LOCAL-1",
+      projectFromLean: false
+    })
+    expect(result.rows.find((row) => row.projectId === "legacy")).toMatchObject({
+      projectCode: null,
+      projectFromLean: null
+    })
+    expect(h.requests[0].body.aggs.rows.aggs.snapshot.top_hits._source.includes).toEqual(
+      expect.arrayContaining(["properties.projectCode", "properties.projectFromLean"])
+    )
+  })
   it("只把无技能主轮次计入，继承技能及后台/子轮次不混入，同一子代理多轮只算一个", async () => {
     const h = harness(
       [snapshot("p", ["same"])],

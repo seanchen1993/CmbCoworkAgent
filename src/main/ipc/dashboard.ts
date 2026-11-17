@@ -11,6 +11,7 @@ import {
 } from "./project-operations-period"
 import type { ProjectOperationsPeriodInput } from "../../shared/project-operations-period"
 import type { ProjectAnalysisAgentInput } from "../../shared/project-analysis-agent"
+import { PROJECT_ANALYSIS_AGENT_ENABLED } from "../../shared/project-analysis-agent"
 import {
   completeRunAnalysisStages,
   partitionRunAnalysisStageAggs,
@@ -1315,6 +1316,7 @@ const DISLIKE_TYPE_OPTIONS = [
 ] as const
 
 const DASHBOARD_ALLOWED_IDS_ENV = "VITE_DASHBOARD_ALLOWED_YST_IDS"
+const DASHBOARD_PROJECT_ANALYSIS_IDS_ENV = "VITE_DASHBOARD_PROJECT_ANALYSIS_YST_IDS"
 const DASHBOARD_UNRESTRICTED_IDS_ENV = "VITE_DASHBOARD_UNRESTRICTED_YST_IDS"
 const TRACE_EVOLVER_REVIEW_ADMIN_IDS_ENV = "VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS"
 const DASHBOARD_AWARDS_ADMIN_IDS_ENV = "VITE_DASHBOARD_AWARDS_ADMIN_YST_IDS"
@@ -1404,6 +1406,28 @@ function isDashboardProjectModeAllowed(): boolean {
   if (import.meta.env.DEV) return true
   const access = getDashboardAccessContext()
   return access.loggedIn
+}
+
+function isDashboardProjectAnalysisAllowed(
+  access: DashboardAccessContext = getDashboardAccessContext()
+): boolean {
+  if (import.meta.env.DEV) return true
+  return (
+    access.loggedIn &&
+    Boolean(access.ystId) &&
+    splitEnvIds(import.meta.env[DASHBOARD_PROJECT_ANALYSIS_IDS_ENV] as string | undefined).has(
+      access.ystId
+    )
+  )
+}
+
+function requireDashboardProjectAnalysisAccess(): void {
+  if (!isDashboardProjectAnalysisAllowed()) throw new Error("无项目分析访问权限")
+}
+
+function requireDashboardProjectAnalysisAgentAccess(): void {
+  if (!PROJECT_ANALYSIS_AGENT_ENABLED) throw new Error("项目分析 Agent 暂未开放")
+  requireDashboardProjectAnalysisAccess()
 }
 
 function isDashboardProjectModeAdmin(
@@ -13978,7 +14002,9 @@ async function fetchProjectRunAnalysis(
   )
     throw new Error("运行分析时间范围无效")
   const membership: RunAnalysisData["membership"] =
-    options.membership === "created" || options.membership === "executed"
+    options.membership === "created" ||
+    options.membership === "executed" ||
+    options.membership === "all"
       ? options.membership
       : "active"
   const org = buildProjectModeOrgFilter(options, access)
@@ -14051,8 +14077,9 @@ async function runAnalysisDetailFilters(
     })
   )
   assertProjectModeResultComplete(raw)
-  if (asNumber(asRecord(asRecord(raw.hits).total).value) < 1)
-    throw new Error("项目不在当前可访问范围内")
+  const total = getTotalHits(raw, NaN)
+  if (!Number.isSafeInteger(total) || total < 0) throw new Error("项目范围校验结果不完整，请重试")
+  if (total === 0) throw new Error("当前可访问及筛选范围内未找到该项目，请刷新项目列表后重试")
   return [
     ...projectModeTraceFilters(null, org),
     { term: { harnessProjectId: request.projectId } },
@@ -15815,8 +15842,20 @@ async function runDashboardHandlerInProjectScope<T>(
   args: readonly unknown[],
   operation: () => Promise<T>
 ): Promise<T | { success: false; error: string }> {
-  if (import.meta.env.DEV || !excludesTestProjects(channel, args)) return operation()
   try {
+    // Gate every analysis entry before any data query, including direct IPC calls.
+    if (
+      channel === "dashboard:projectModeAnalysisAgent" ||
+      channel.startsWith("dashboard:projectReport")
+    ) {
+      requireDashboardProjectAnalysisAgentAccess()
+    } else if (
+      channel.startsWith("dashboard:projectModeRunAnalysis") ||
+      channel === "dashboard:projectModePeriodMetrics"
+    ) {
+      requireDashboardProjectAnalysisAccess()
+    }
+    if (import.meta.env.DEV || !excludesTestProjects(channel, args)) return operation()
     const access = requireDashboardProjectModeAccess()
     const scope = testProjectLookupScope(channel, args)
     const accessFilter = buildProjectModeOrgFilter(scope, access)
@@ -16062,6 +16101,8 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   _ipcMain.handle("dashboard:isProjectModeAllowed", async () => {
     return isDashboardProjectModeAllowed()
   })
+
+  _ipcMain.handle("dashboard:isProjectAnalysisAllowed", () => isDashboardProjectAnalysisAllowed())
 
   _ipcMain.handle("dashboard:orgFilterDefaults", () => getDashboardOrgFilterDefaults())
 

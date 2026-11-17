@@ -26,6 +26,12 @@ const record = (v: unknown): Json =>
 const text = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v : null)
 const number = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0)
 const value = (v: unknown): number => number(record(v).value)
+/** ES may return the exact hit count as a number or a value/relation object. */
+function exactTotalHits(total: unknown): number | null {
+  const count = typeof total === "number" ? total : record(total).value
+  if (typeof total !== "number" && record(total).relation !== "eq") return null
+  return typeof count === "number" && Number.isSafeInteger(count) && count >= 0 ? count : null
+}
 const iso = (v: unknown): string | null =>
   typeof v === "number" && Number.isFinite(v) ? new Date(v).toISOString() : null
 export const runAnalysisKey = (project: string, feature: string | null): string =>
@@ -288,6 +294,8 @@ const SNAPSHOT_FIELDS = [
   ...[
     "projectId",
     "name",
+    "projectCode",
+    "projectFromLean",
     "systemName",
     "adapterName",
     "adapterVersion",
@@ -320,6 +328,8 @@ export async function fetchRunAnalysis(
       ...emptyRunAnalysisMetrics(),
       projectId,
       projectName: text(p.name) ?? projectId,
+      projectCode: text(p.projectCode),
+      projectFromLean: typeof p.projectFromLean === "boolean" ? p.projectFromLean : null,
       systemName: text(p.systemName),
       adapterName: text(p.adapterName),
       adapterVersion: text(p.adapterVersion),
@@ -624,8 +634,8 @@ export async function fetchRunAnalysisSessions(
   )
   assertProjectModeResultComplete(raw)
   const hits = record(raw.hits)
-  if (!Array.isArray(hits.hits) || record(hits.total).relation !== "eq")
-    throw new Error("运行分析会话未完整返回")
+  const total = exactTotalHits(hits.total)
+  if (!Array.isArray(hits.hits) || total === null) throw new Error("运行分析会话未完整返回")
   const items = hits.hits.map(record)
   const next = items.length === 50 ? items[items.length - 1].sort : null
   if (
@@ -636,7 +646,7 @@ export async function fetchRunAnalysisSessions(
   )
     throw new Error("运行分析会话游标缺失或未前进")
   return {
-    total: number(record(hits.total).value),
+    total,
     after: Array.isArray(next) ? next : null,
     rows: items.map((item) => {
       const s = record(item._source)
@@ -685,12 +695,7 @@ export async function fetchRunAnalysisTrace<T>(
   )
   assertProjectModeResultComplete(raw)
   const hits = record(raw.hits)
-  if (
-    !Array.isArray(hits.hits) ||
-    hits.hits.length !== 1 ||
-    record(hits.total).relation !== "eq" ||
-    number(record(hits.total).value) !== 1
-  )
+  if (!Array.isArray(hits.hits) || hits.hits.length !== 1 || exactTotalHits(hits.total) !== 1)
     throw new Error("未找到该口径下唯一的完整会话记录")
   return normalize(record(hits.hits[0]))
 }

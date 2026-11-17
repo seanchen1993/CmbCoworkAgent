@@ -8,6 +8,7 @@ import {
   filterRunAnalysis,
   groupRunAnalysis,
   runAnalysisExportRows,
+  runAnalysisSummary,
   runAnalysisPreset,
   runAnalysisPresetCounts,
   runAnalysisFilterErrors,
@@ -19,6 +20,44 @@ const range = { from: "2026-01-01T00:00:00.000Z", to: "2026-12-31T23:59:59.999Z"
 const data = makeMockRunAnalysis(range)
 
 describe("runtime analysis full-range presentation", () => {
+  it("searches and exports project codes and Lean status without merging distinct projects sharing a code", () => {
+    const sample = structuredClone(data)
+    for (const row of sample.rows) {
+      row.projectCode = ["demo-0", "demo-1"].includes(row.projectId) ? "001234" : null
+      row.projectFromLean =
+        row.projectId === "demo-0" ? true : row.projectId === "demo-1" ? false : null
+    }
+    const matches = filterRunAnalysis(
+      sample,
+      { ...DEFAULT_RUN_ANALYSIS_FILTERS, keyword: "001234" },
+      "idle",
+      true
+    )
+    expect(matches).toHaveLength(6)
+    const grouped = groupRunAnalysis(sample, matches, "idle", true)
+    expect(grouped).toHaveLength(2)
+    for (const rows of [
+      runAnalysisExportRows(sample, matches),
+      runAnalysisExportRows(sample, grouped)
+    ]) {
+      expect(rows.every((row) => row.项目编号 === "001234")).toBe(true)
+      expect(rows.find((row) => row.项目ID === "demo-0")?.是否精益项目).toBe("是")
+      expect(rows.find((row) => row.项目ID === "demo-1")?.是否精益项目).toBe("否")
+    }
+    const all = filterRunAnalysis(sample, DEFAULT_RUN_ANALYSIS_FILTERS, "idle", true)
+    expect(runAnalysisExportRows(sample, all).find((row) => row.项目ID === "demo-2")).toMatchObject(
+      {
+        项目编号: null,
+        是否精益项目: "未记录"
+      }
+    )
+    expect(runAnalysisSummary(sample, matches)).toContain("项目编号：001234。")
+    expect(
+      makeMockRunAnalysis(range, { fromLeanOnly: true }).rows.every(
+        (row) => row.projectFromLean === true
+      )
+    ).toBe(true)
+  })
   it("combines configured conditions with AND and excludes missing/zero-denominator samples", () => {
     const f: RunAnalysisFilters = {
       ...DEFAULT_RUN_ANALYSIS_FILTERS,

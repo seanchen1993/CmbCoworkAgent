@@ -1,7 +1,8 @@
 import { TimeControlBar, type DashboardTimeControl } from "./TimeControlBar"
-import type {
-  RunAnalysisMembership,
-  RunAnalysisRange
+import {
+  RUN_ANALYSIS_MEMBERSHIP_LABELS,
+  type RunAnalysisMembership,
+  type RunAnalysisRange
 } from "../../../../shared/project-run-analysis"
 
 /** The analysis panel and Agent edit the same membership selection. */
@@ -24,9 +25,11 @@ export function ProjectAnalysisMembership({
         disabled={disabled}
         onChange={(event) => onChange(event.target.value as RunAnalysisMembership)}
       >
-        <option value="active">进行中的全部项目</option>
-        <option value="executed">所选日期内有执行（含归档）</option>
-        <option value="created">所选日期内新建项目（含归档）</option>
+        {(["executed", "created", "all"] as const).map((membership) => (
+          <option key={membership} value={membership}>
+            {RUN_ANALYSIS_MEMBERSHIP_LABELS[membership]}
+          </option>
+        ))}
       </select>
     </label>
   )
@@ -62,9 +65,9 @@ export function ProjectAnalysisScope({
         }
       />
       <p className="text-xs text-muted-foreground">
-        {membership === "active"
-          ? "与面板筛选同步；进行中的全部项目不受日期限制。"
-          : "与面板筛选同步；日期用于筛选项目，指标为累计值。"}
+        {membership === "executed" || membership === "created"
+          ? "与面板筛选同步；日期用于筛选项目，指标为累计值。"
+          : `与面板筛选同步；${RUN_ANALYSIS_MEMBERSHIP_LABELS[membership]}不受日期限制，指标为累计值。`}
       </p>
     </div>
   )
