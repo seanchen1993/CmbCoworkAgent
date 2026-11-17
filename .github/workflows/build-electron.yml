@@ -645,24 +645,6 @@ jobs:
         env:
           ENV_ENCRYPTION_KEY: ${{ secrets.ENV_ENCRYPTION_KEY }}
 
-      - name: Check configuration before public upload
-        if: inputs.macos_configuration == 'uat' && !github.event.repository.private && inputs.macos_recipient_certificate == ''
-        run: |
-          node --input-type=module <<'NODE'
-          import { readFileSync } from "node:fs"
-          import { parseEnv } from "node:util"
-
-          const fields = Object.entries(parseEnv(readFileSync(".env", "utf8")))
-          const carriesCredentials = fields.some(([name, value]) =>
-            /^(?:MAIN_|PRELOAD_|RENDERER_)?VITE_(?:.*_)?(?:API_KEY|PASSWORD|TOKEN|SECRET|PRIVATE_KEY)$/.test(name) &&
-            value.trim()
-          )
-          if (carriesCredentials) {
-            console.error("::error::This UAT configuration contains client credentials. Supply a recipient certificate or use a private Actions repository.")
-            process.exitCode = 1
-          }
-          NODE
-
       - name: Check packaging hook
         run: npm run test:packaging
 

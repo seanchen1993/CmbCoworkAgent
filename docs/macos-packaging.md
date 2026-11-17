@@ -41,14 +41,14 @@ npm run test:mac-package -- /path/to/CMBDevClaw.app --bundle-only
 
 在 **Build Electron App → Run workflow** 中选择当前分支：
 
-| 输入                          | 用途                                                 |
-| ----------------------------- | ---------------------------------------------------- |
-| `platform=macos-arm64`        | 只运行独立的 macOS job，跳过 Windows/Linux           |
-| `macos_configuration=smoke`   | 离线测试构建，不需要环境解密密钥                     |
-| `macos_configuration=uat`     | 解密现有 `.env`，需要 `ENV_ENCRYPTION_KEY`           |
-| `sign_macos=false`            | Ad-hoc 签名测试包                                    |
-| `sign_macos=true`             | Developer ID 正式签名、公证、装订票据                |
-| `macos_recipient_certificate` | 可选的 PEM RSA 公钥证书，沿用参考分支的 CMS 加密交付 |
+| 输入                          | 用途                                                         |
+| ----------------------------- | ------------------------------------------------------------ |
+| `platform=macos-arm64`        | 只运行独立的 macOS job，跳过 Windows/Linux                   |
+| `macos_configuration=smoke`   | 离线测试构建，不需要环境解密密钥                             |
+| `macos_configuration=uat`     | 复用 Windows/Linux 的 `.env` 解密流程和 `ENV_ENCRYPTION_KEY` |
+| `sign_macos=false`            | Ad-hoc 签名测试包                                            |
+| `sign_macos=true`             | Developer ID 正式签名、公证、装订票据                        |
+| `macos_recipient_certificate` | 可选的 PEM RSA 公钥证书，沿用参考分支的 CMS 加密交付         |
 
 原有 Windows/Linux 默认构建和 `v*` tag 触发规则保持不变；macOS 通过手动触发生成 Actions artifacts。
 
@@ -66,7 +66,9 @@ macOS job 在 `macos-15` ARM64 runner 上使用 Node.js 22，安装完整 option
 
 正式签名模式缺少凭据、公证未通过或签名验证失败时构建会直接失败，不会上传冒充正式签名的测试包。公证通过后，对 DMG 和从中提取的 `.app` 分别装订票据，再生成便携 ZIP。
 
-UAT 配置沿用参考分支的交付规则：当公开仓库的构建配置携带客户端凭据时，需要填写接收者证书进行加密交付，或者在私有仓库运行。填写证书后上传 `.dmg.cms` 和 `.zip.cms`。接收者可以使用 OpenSSL 3 解密：
+UAT 默认与 Windows/Linux 使用相同的交付方式：复用仓库已有的 `ENV_ENCRYPTION_KEY` 解密 `.env`，直接上传 DMG 和 ZIP，接收者证书可以留空。公开仓库携带客户端凭据不再单独阻止 macOS 构建。`ENV_ENCRYPTION_KEY` 保护的是仓库中的 `.env`，构建后内嵌在应用里的配置仍可能被产物接收者读取。
+
+需要额外加密产物时，再填写 `macos_recipient_certificate`；它与 `.env` 解密密钥、Apple 签名凭据分别独立。填写后上传 `.dmg.cms` 和 `.zip.cms`。接收者可以使用 OpenSSL 3 解密：
 
 ```bash
 openssl cms -decrypt -binary -inform DER \
