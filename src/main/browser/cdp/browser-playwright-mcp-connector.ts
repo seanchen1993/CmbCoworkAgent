@@ -5,7 +5,7 @@ import { getCurrentBrowserCdpPort } from "./browser-cdp"
 const PLAYWRIGHT_MCP_NAME = "In-app-browser"
 const MANAGED_PLAYWRIGHT_MCP_COMMAND = "npx"
 const MANAGED_PLAYWRIGHT_MCP_LAZY_LOAD = false
-const MANAGED_PLAYWRIGHT_MCP_VERSION = "0.0.85"
+const MANAGED_PLAYWRIGHT_MCP_VERSION = "0.0.82"
 
 function findManagedPlaywrightMcpConnector() {
   return getMcpConnectors().find(

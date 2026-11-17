@@ -73,7 +73,7 @@ describe("autoRegisterPlaywrightMcpConnector", () => {
         args: [
           "-y",
           "--prefer-offline",
-          "@playwright/mcp@0.0.85",
+          "@playwright/mcp@0.0.82",
           "--cdp-endpoint=http://127.0.0.1:55001"
         ],
         createdAt: "2026-07-27T00:00:00.000Z",
@@ -91,7 +91,7 @@ describe("autoRegisterPlaywrightMcpConnector", () => {
       args: [
         "-y",
         "--prefer-offline",
-        "@playwright/mcp@0.0.85",
+        "@playwright/mcp@0.0.82",
         "--cdp-endpoint=http://127.0.0.1:9222"
       ],
       env: undefined,
@@ -112,7 +112,7 @@ describe("autoRegisterPlaywrightMcpConnector", () => {
         args: [
           "-y",
           "--prefer-offline",
-          "@playwright/mcp@0.0.85",
+          "@playwright/mcp@0.0.82",
           "--cdp-endpoint=http://127.0.0.1:9222"
         ],
         createdAt: "2026-07-27T00:00:00.000Z",
@@ -130,7 +130,7 @@ describe("autoRegisterPlaywrightMcpConnector", () => {
       args: [
         "-y",
         "--prefer-offline",
-        "@playwright/mcp@0.0.85",
+        "@playwright/mcp@0.0.82",
         "--cdp-endpoint=http://127.0.0.1:9222"
       ],
       env: undefined,
@@ -151,7 +151,7 @@ describe("autoRegisterPlaywrightMcpConnector", () => {
         args: [
           "-y",
           "--prefer-offline",
-          "@playwright/mcp@0.0.85",
+          "@playwright/mcp@0.0.82",
           "--cdp-endpoint=http://127.0.0.1:55001"
         ],
         createdAt: "2026-07-27T00:00:00.000Z",
@@ -169,7 +169,7 @@ describe("autoRegisterPlaywrightMcpConnector", () => {
       args: [
         "-y",
         "--prefer-offline",
-        "@playwright/mcp@0.0.85",
+        "@playwright/mcp@0.0.82",
         "--cdp-endpoint=http://127.0.0.1:55001"
       ],
       env: undefined,
@@ -202,7 +202,7 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
         args: [
           "-y",
           "--prefer-offline",
-          "@playwright/mcp@0.0.85",
+          "@playwright/mcp@0.0.82",
           `--cdp-endpoint=http://127.0.0.1:${runtimePort}`
         ],
         createdAt: "2026-07-27T00:00:00.000Z",
@@ -223,7 +223,7 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
       args: [
         "-y",
         "--prefer-offline",
-        "@playwright/mcp@0.0.85",
+        "@playwright/mcp@0.0.82",
         `--cdp-endpoint=http://127.0.0.1:${runtimePort}`
       ],
       env: undefined,
@@ -249,7 +249,7 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
         args: [
           "-y",
           "--prefer-offline",
-          "@playwright/mcp@0.0.85",
+          "@playwright/mcp@0.0.82",
           `--cdp-endpoint=http://127.0.0.1:${runtimePort}`
         ],
         createdAt: "2026-07-27T00:00:00.000Z",
@@ -270,7 +270,7 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
       args: [
         "-y",
         "--prefer-offline",
-        "@playwright/mcp@0.0.85",
+        "@playwright/mcp@0.0.82",
         `--cdp-endpoint=http://127.0.0.1:${runtimePort}`
       ],
       env: undefined,
@@ -296,7 +296,7 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
         args: [
           "-y",
           "--prefer-offline",
-          "@playwright/mcp@0.0.85",
+          "@playwright/mcp@0.0.82",
           `--cdp-endpoint=http://127.0.0.1:${runtimePort}`
         ],
         createdAt: "2026-07-27T00:00:00.000Z",
@@ -317,7 +317,7 @@ describe("syncPlaywrightMcpConnectorForBrowserCdpConfig", () => {
       args: [
         "-y",
         "--prefer-offline",
-        "@playwright/mcp@0.0.85",
+        "@playwright/mcp@0.0.82",
         `--cdp-endpoint=http://127.0.0.1:${runtimePort}`
       ],
       env: undefined,
