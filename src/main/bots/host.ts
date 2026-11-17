@@ -110,7 +110,7 @@ export interface BotRunLease {
         error?: string
         result?: string
         files?: BotDeliveredFile[]
-        /** Successful group text was delivered explicitly, not through the final scratch reply. */
+        /** Group text is published explicitly; final scratch stays private, including on failure. */
         explicitGroupMessages?: boolean
         publicContribution?: boolean
       }
@@ -679,23 +679,24 @@ export class LocalBotHost {
     this.workToolSource(taskId)
     return this.store.getWorkResultReview(taskId)
   }
-  canPublishReadyWorkReview(
-    taskId: string,
-    decision: Extract<BotWorkResultDecision, { kind: "ready" }>,
-    inspectedCommands: readonly BotWorkResultCommandReference[]
-  ): boolean {
+  recordWorkResultServiceReady(taskId: string, serviceId: string, reason: string, inspected?: BotWorkResultCommandReference) {
     this.workToolSource(taskId)
-    return this.store.canPublishReadyWorkReview(taskId, decision, inspectedCommands)
+    const result = this.store.recordWorkResultServiceReady(taskId, serviceId, reason, inspected)
+    this.changed()
+    this.wake()
+    return result
   }
   commitWorkResultReview(
     taskId: string,
     decision: BotWorkResultDecision | null,
     selected: readonly BotWorkResultAttachmentReference[],
     inspectedCommands: readonly BotWorkResultCommandReference[] = [],
-    alternative?: BotWorkResultReviewAlternative
+    alternative?: BotWorkResultReviewAlternative,
+    response?: { messageId: string; finalText: string; serviceIds?: string[]; filesSelected?: true },
+    reportRejectionInCurrentTurn = false
   ) {
     this.workToolSource(taskId)
-    const receipt = this.store.commitWorkResultReview(taskId, decision, selected, inspectedCommands, alternative)
+    const receipt = this.store.commitWorkResultReview(taskId, decision, selected, inspectedCommands, alternative, response, reportRejectionInCurrentTurn)
     this.active.get(taskId)!.workReviewCommitted = true
     this.changed()
     this.wake()
@@ -1064,7 +1065,22 @@ export class LocalBotHost {
     const work = this.historyTarget(taskId, input.workId)
     const result = await this.runtime.workHistory.query(work, input)
     this.historyTarget(taskId, input.workId)
-    return result
+    return { ...result, delegations: this.store.workDelegations(work.botId, work.id) }
+  }
+  workExchange(taskId: string, workId: string, delegationTaskId: string) {
+    const work = this.historyTarget(taskId, workId)
+    const exchange = this.store.exchange(work.botId, delegationTaskId, undefined, work.id)
+    return {
+      taskId: exchange.taskId, recipient: exchange.recipient.name,
+      turnState: exchange.state,
+      reply: exchange.reply ? { ...exchange.reply,
+        message: exchange.reply.message.slice(0, 30_000),
+        truncated: exchange.reply.message.length > 30_000 } : null
+    }
+  }
+  workHistoryCommands(botId: string, workId: string, incarnation: string) {
+    this.getWork(botId, workId)
+    return this.store.workHistoryCommands(botId, workId, incarnation)
   }
   async resolveWorkHistorySource(botId: string, source: BotWorkHistorySource) {
     if (!this.runtime.workHistory) throw new BotError("CONFLICT", "此主机暂不支持历史定位")
@@ -1633,6 +1649,15 @@ export class LocalBotHost {
   replayDesktopScheduleEdit(botId: string, id: string, edit: BotScheduleToolEdit): BotSchedule | undefined {
     this.workToolSource(edit.source.taskId)
     return this.store.replayDesktopScheduleEdit(botId, id, edit)
+  }
+
+  desktopScheduleRequestTime(taskId: string): number {
+    this.workToolSource(taskId)
+    // Reuse the operation's admitted user-input binding, including a consumed steer.
+    // No target exists yet for a new schedule; this binding is read only, not persisted.
+    const source = this.store.desktopOperationBinding(taskId, { kind: "schedule_save", targetId: "" })
+    if (!source) throw new BotError("CONFLICT", "无法确认相对时间所属的用户请求")
+    return this.store.getTask(source.requestTaskId).createdAt
   }
 
   removeSchedule(id: string, version: number): void {

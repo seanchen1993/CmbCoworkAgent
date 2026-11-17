@@ -18,6 +18,34 @@ const work: BotWorkSummary = {
 }
 
 describe("resolveBotWorkStatus", () => {
+  it.each([
+    ["<think>Internal assessment</think>Files delivered.", "Files delivered."],
+    ["<think>All verified: import.mjs fix present, 44 pass / 0 fail", ""],
+    ["Files delivered.", "Files delivered."]
+  ])("keeps inline reasoning out of result summaries: %s", (raw, visible) => {
+    for (const kind of ["reported", "ready", "blocked"] as const) {
+      const resultConclusion = { kind, summary: raw }
+      const current = { ...work, executionState: "completed" as const, resultConclusion }
+      expect(resolveBotWorkStatus(current).summary).toBe(visible)
+      expect(resolveBotWorkStatus({ ...current, resultConclusion: { ...resultConclusion, unavailableDependency: true } }).summary)
+        .toBe(visible)
+      if (kind === "blocked") {
+        expect(resolveBotWorkStatus({ ...current, executionState: "failed" }).summary).toBe(visible)
+        expect(resolveBotWorkStatus({ ...current, backgroundBusy: true }).summary).toBe(visible)
+      }
+      expect(resultConclusion.summary).toBe(raw)
+    }
+  })
+
+  it("shows a returned result without claiming verification or hiding execution failures", () => {
+    const reported = { ...work, resultConclusion: { kind: "reported" as const, summary: "Original result" } }
+    expect(resolveBotWorkStatus({ ...reported, executionState: "completed" }))
+      .toMatchObject({ label: "结果已回传", tone: "idle" })
+    expect(resolveBotWorkStatus({ ...reported, executionState: "failed" }).label).toBe("执行失败")
+    expect(resolveBotWorkStatus({ ...reported, executionState: "interrupted" }).label).toBe("需要核对结果")
+    expect(resolveBotWorkStatus({ ...reported, executionState: "completed", backgroundBusy: true }).label)
+      .toBe("后台处理中")
+  })
   const userControl = { settling: false, heldInputs: 1 }
 
   it("uses the Host's delivered-result service exemption without hiding current execution or control", () => {
@@ -92,8 +120,8 @@ describe("resolveBotWorkStatus", () => {
     })
 
     it.each([
-      ["waiting", { label: "成果待核查", tone: "idle", icon: "queued" }],
-      ["checking", { label: "核查成果中", tone: "active", icon: "running" }],
+      ["waiting", { label: "等待回传", tone: "idle", icon: "queued" }],
+      ["checking", { label: "正在整理结果", tone: "active", icon: "running" }],
       // The review also has this phase when execution stopped before any review began.
       ["interrupted", { label: "需要核对结果", tone: "error", icon: "alert" }]
     ] as const)("shows the resumed review's %s state", (resultReviewState, expected) => {
@@ -203,15 +231,15 @@ describe("resolveBotWorkStatus", () => {
     },
     {
       update: { executionState: "completed", resultReviewState: "waiting" },
-      expected: { label: "成果待核查", tone: "idle", icon: "queued" }
+      expected: { label: "等待回传", tone: "idle", icon: "queued" }
     },
     {
       update: { executionState: "completed", resultReviewState: "checking" },
-      expected: { label: "核查成果中", tone: "active", icon: "running" }
+      expected: { label: "正在整理结果", tone: "active", icon: "running" }
     },
     {
       update: { executionState: "completed", resultReviewState: "interrupted" },
-      expected: { label: "核查已中断", tone: "error", icon: "alert" }
+      expected: { label: "回传已中断", tone: "error", icon: "alert" }
     },
     {
       update: { executionState: "completed", readyServiceState: "result_ready", backgroundBusy: true },

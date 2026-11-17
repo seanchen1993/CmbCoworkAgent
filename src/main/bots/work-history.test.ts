@@ -82,11 +82,38 @@ function setup(name: string) {
     inputProjections: (_botId, _threadId, ids: readonly string[]) =>
       new Map(ids.filter(id => preparedInputs.has(id)).map(id => [id, preparedInputs.get(id)!])),
     projectWorkForModel: (item: Pick<BotWorkItem, "id" | "botId" | "title">) => item,
-    workPromptGoal: () => work.goal
+    workPromptGoal: () => work.goal,
+    workHistoryCommands: vi.fn(() => ({ coverage: "unavailable", commands: [] }))
   } as unknown as LocalBotHost
   return { work, history: createLocalBotWorkHistory(() => host), preparedInputs, host }
 }
 describe("linked task history", () => {
+  it("keeps current execution receipts separate from chat in searches, located reads and older pages", async () => {
+    const { work, history, host } = setup("command-history")
+    const execution = { coverage: "partial" as const, taskId: "execution", state: "cancelled" as const,
+      commands: [{ callId: "test", command: "Compound shell command", exitCode: 0,
+        output: "EXIT=1; fail 1", excerpt: false }] }
+    vi.mocked(host.workHistoryCommands).mockReturnValue(execution)
+    db.upsertThreadMessages(work.threadId, [
+      { id: "answer", role: "assistant", content: "Work stopped", created_at: new Date() }
+    ])
+    expect(await history.query(work, { workId: work.id })).toMatchObject({ currentExecution: execution,
+      entries: [{ text: "Work stopped" }] })
+    expect(host.workHistoryCommands).toHaveBeenCalledWith("owner", work.id, expect.any(String))
+    expect(await history.query(work, { workId: work.id, query: "Work" })).toMatchObject({ currentExecution: execution,
+      entries: [{ text: "Work stopped" }] })
+    expect(await history.query(work, { workId: work.id, query: "EXIT=1" })).toMatchObject({ currentExecution: execution, entries: [] })
+    expect(await history.query(work, { workId: work.id, messageId: "answer" })).toMatchObject({ currentExecution: execution })
+    db.upsertThreadMessages(work.threadId, Array.from({ length: 16 }, (_, index) => ({
+      id: `later-${index}`, role: "assistant" as const, content: `Later chat ${index}`, created_at: new Date()
+    })))
+    const recent = await history.query(work, { workId: work.id })
+    expect(recent.nextCursor).toBeTruthy()
+    const older = await history.query(work, { workId: work.id, cursor: recent.nextCursor! })
+    expect(older).toMatchObject({ currentExecution: execution })
+    expect(older.entries.some(entry => entry.text === "Work stopped")).toBe(true)
+    expect(older.entries.some(entry => entry.text.includes("EXIT=1"))).toBe(false)
+  })
   it("queries accepted bodies while preserving raw user history and ordinary UI search", async () => {
     const { work, history, preparedInputs, host } = setup("prepared-history")
     db.upsertThreadMessages(work.threadId, [

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
 import { LocalBotHost, type BotRunLease } from "./host"
-import { createBotWorkTools } from "./work-tools"
+import { createBotWorkTools, createBotWorkResultTools } from "./work-tools"
 import * as inputFilePreparation from "./input-files"
 import { buildAttachmentMessageParts } from "../../shared/attachment-message-parts"
 import { BOT_ROUTINE_SILENT } from "../../shared/bots/routine-silence"
@@ -109,7 +109,7 @@ describe("user control of Bot work", () => {
     const publication = () => resultTurns().find(turn => turn.origin.kind === "work_result" && turn.origin.review?.phase === "publish")
     await vi.waitFor(() => expect(f.starts).toContain(publication()?.id))
     expect(f.host.workResultPublication(publication()!.id)).toMatchObject({
-      executionTaskId: f.task.id, kind: cancel ? "ready" : "blocked",
+      executionTaskId: f.task.id, kind: cancel ? "ready" : "reported",
       summary: cancel ? "Verified report" : expect.stringContaining("Original report")
     })
     expect(f.host.acknowledgeWorkResultPublication(publication()!.id)).toBe(true)
@@ -294,8 +294,10 @@ describe("user control of Bot work", () => {
     f.control("take")
     f.finishes.get(f.task.id)!({ state: "completed" })
     await vi.waitFor(() => expect(f.store.getWork(f.bot.id, f.work.id).userControl?.settling).toBe(false))
-    const expected = [{ taskId: held.id, message: `📎 Report.txt\n\n${instruction}`, truncated: false }]
+    const expected = [{ taskId: held.id, message: `📎 Report.txt\n\n${instruction}\n\n原要求：\nReview the report`, truncated: false }]
     expect(f.host.workControlPending(f.bot.id, f.work.id).items).toEqual(expected)
+    expect(expected[0].message).not.toContain("Host")
+    expect(f.store.getTask(held.id).message).toBe(held.message)
     expect(f.host.workControlPending(f.bot.id, f.work.id, held.id).items).toEqual(expected)
     f.control("return")
     await vi.waitFor(() => expect(f.starts).toContain(held.id))
@@ -774,4 +776,54 @@ describe("user control of Bot work", () => {
     f.control("return", "return-again")
     expect(f.starts).not.toContain(deleted.id)
   })
+})
+
+
+it.each([true, false])("adopts a checked service during normal results (takeover=%s)", async takeover => {
+  const f = await fixture()
+  f.host.recordPreparedInput(f.task.id, f.task.id, "Keep the checked preview running")
+  expect(f.host.armWorkResultReview(f.task.id, "original-incarnation")).toBe(true)
+  const lifecycle = f.host.commandLifecycle(f.task.id)
+  lifecycle.accepted({ id: "preview", threadId: f.work.threadId, command: "node preview.mjs",
+    cwd: "/synthetic", startedAt: 1, notifyOnComplete: false })
+  f.host.recordWorkResultEvidence(f.task.id, { foregroundCommand: { callId: "health", command: "node check.mjs",
+    exactCommand: true, startedAt: 2, exitCode: 0, output: "Expected preview; HTTP 200", excerpt: false } })
+  if (takeover) expect(f.control("take").userControl?.settling).toBe(true)
+  f.finishes.get(f.task.id)!({ state: "completed", result: "Preview running" })
+  const review = () => f.store.recentTasks().find(t => t.origin.kind === "work_result" && t.origin.review?.phase === "review")
+  await vi.waitFor(() => expect(f.starts).toContain(review()?.id))
+  const evidenceId = "a".repeat(64)
+  const access = {
+    current: () => f.host.workResultReview(review()!.id), serviceIds: new Set<string>(),
+    inspectedCommands: new Map([[evidenceId, { evidenceId, sourceTaskId: f.task.id, kind: "foreground", callId: "health" }]])
+  } as unknown as ReturnType<typeof import("./work-result-runtime").createWorkResultEvidenceAccess>
+  const keep = createBotWorkResultTools(review()!, () => f.host, f.signals.get(review()!.id)!, access)
+    .find(tool => tool.name === "bot_work_result_keep_service")!
+  const result = await keep.invoke({ type: "tool_call", id: "keep", name: keep.name,
+    args: { serviceId: "preview", evidenceId, reason: "Original preview passed its requested HTTP check" } })
+  expect(JSON.parse(String(result.content))).toEqual({ serviceId: "preview", ready: true })
+  if (!takeover) {
+  const reused = await keep.invoke({ type: "tool_call", id: "reuse-ready", name: keep.name,
+    args: { serviceId: "preview", reason: "This report still includes the already checked preview" } })
+  expect(JSON.parse(String(reused.content))).toEqual({ serviceId: "preview", ready: true })
+  expect([...access.serviceIds]).toEqual(["preview"])
+  }
+
+  if (takeover) await vi.waitFor(() => expect(f.store.getWork(f.bot.id, f.work.id).userControl?.settling).toBe(false))
+  expect(f.signals.get(review()!.id)?.aborted).toBe(false)
+  if (takeover) {
+    expect(f.host.workResultReview(review()!.id)?.remainingRepairs).toBe(0)
+    expect(() => f.host.commitWorkResultReview(review()!.id,
+      { kind: "repair", gap: "Missing detail", instruction: "Change the preview", evidenceIds: [] },
+      [], [], undefined, undefined, true)).toThrow("不能自动执行补修")
+    expect(f.signals.get(review()!.id)?.aborted).toBe(false)
+  }
+  expect(f.host.commitWorkResultReview(review()!.id, null, [], [], undefined,
+    { messageId: "normal-preview", finalText: "Preview is running", serviceIds: ["preview"] }))
+    .toMatchObject({ state: "publish", publication: {
+      kind: "reported", responseMessageId: "normal-preview", serviceIds: ["preview"]
+    } })
+  expect(f.store.activeCommandThreads()).toContain(f.work.threadId)
+  expect(f.cancelBackgroundCommands).not.toHaveBeenCalled()
+  expect(f.store.recentTasks().some(t => t.origin.kind === "work" && t.origin.dispatch === "repair")).toBe(false)
 })

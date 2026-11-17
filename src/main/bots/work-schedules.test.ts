@@ -81,6 +81,47 @@ const interval: BotScheduleInput = {
 }
 const DAY = 24 * 60 * 60 * 1000
 
+it.each(["user", "introduction"] as const)("anchors relative schedules to a consumed user input in a %s run", async origin => {
+  const f = fixture({
+    scheduleObservationPublication: { persist() {}, async announce() {} },
+    acquire: (_bot, task) => !task.workId && ["user", "introduction"].includes(task.origin.kind) ? {
+      release() {},
+      execute: signal => new Promise(resolve => {
+        signal.addEventListener("abort", () => resolve({ state: "completed" }), { once: true })
+      })
+    } : null
+  })
+  // Introductions only start for a new Bot with no task history.
+  const bot = origin === "introduction"
+    ? f.store.create({ name: "New owner", instructions: "", color: "#123456", modelRef: null })
+    : f.bot
+  if (origin === "introduction") f.host.introduce(bot.id)
+  else f.host.send({ botId: bot.id, requestId: "long-main", message: "Help me plan" })
+  await vi.waitFor(() => expect(f.store.recentTasks().some(t => !t.workId && t.origin.kind === origin && t.state === "running")).toBe(true))
+  const parent = f.store.recentTasks().find(t => !t.workId && t.origin.kind === origin && t.state === "running")!
+  const work = origin === "introduction"
+    ? f.store.createWork({ botId: bot.id, operationId: "intro-work", title: "Report", goal: "Prepare report" }).work
+    : f.work
+  const [tool] = createBotScheduleTools(bot, parent, () => f.host, new AbortController().signal)
+  f.advance(600_000)
+  const user = f.store.enqueue({ botId: bot.id, requestId: "later-user", message: "In one minute, check this work once" })
+  f.store.recordPreparedInput(user.id, user.message)
+  f.store.injectIntoRun(user.id, parent.id)
+  const args = { action: "save", name: "Later check", afterSeconds: 60, requestKey: "relative-observation",
+    workMonitor: { workId: work.id, mode: "report" } }
+  const save = async (id: string) => {
+    const result = await tool.invoke({ type: "tool_call", name: tool.name, id, args })
+    expect(result.status, String(result.content)).not.toBe("error")
+    return JSON.parse(String(result.content)) as BotSchedule
+  }
+  const first = await save("relative-first")
+  expect(first.runAt).toBe("2030-01-01T00:11:00.000Z")
+  f.advance(20_000)
+  expect((await save("relative-retry")).id).toBe(first.id)
+  expect(f.store.schedules()).toHaveLength(1)
+  expect(f.store.schedules()[0].runAt).toBe(first.runAt)
+})
+
 function fillRecentHistory(f: ReturnType<typeof fixture>, suffix = "") {
   for (let i = 0; i < 100; i++) {
     const task = f.store.enqueue({ botId: f.bot.id, requestId: `ordinary-${i}${suffix}`, message: "Unrelated chat" })
@@ -612,6 +653,28 @@ describe("read-only scheduled work observations", () => {
       f.store.settle(task.id, "completed", null)
     }
   }
+
+  it.each([false, true])("reports the current execution and whether its result changed (new=%s)", (changed) => {
+    const f = fixture()
+    settleReports(f)
+    const monitor = observe(f, "report")
+    if (changed) {
+      const revision = f.store.enqueue({
+        botId: f.bot.id, workId: f.work.id, requestId: "new-report", message: "Update the report"
+      })
+      f.store.transition(revision.id, "running")
+      f.store.settle(revision.id, "completed", null, "Updated report")
+      settleReports(f)
+    }
+    const trigger = begin(f, monitor)
+    f.store.settleScheduledWorkObservation(trigger)
+    f.store.settleScheduledWorkObservation(trigger)
+    const publications = f.store.pendingScheduledWorkPublications()
+    expect(publications).toHaveLength(1)
+    expect(publications[0].text).toContain("当前执行已完成。")
+    expect(publications[0].text).toContain(changed ? "较上次记录有新结果。" : "较上次记录没有新结果。")
+    expect(publications[0].text).not.toContain("仍在跟进")
+  })
 
   function beginReviewedRevision(f: ReturnType<typeof fixture>, requestId: string) {
     f.advance(1)
@@ -1244,6 +1307,7 @@ describe("read-only scheduled work observations", () => {
       expect(publication.text).toContain(outcome === "outcome_unknown" ? "待确认" : "失败")
       if (outcome === "failed_and_unknown") expect(publication.text).toContain("待确认")
       expect(publication.text).not.toContain("最近一次执行结果为已完成")
+      expect(publication.text).not.toContain("当前执行已完成")
 
       f.advance(1)
       const independent = send("independent-report")
@@ -2082,7 +2146,7 @@ describe("read-only scheduled work observations", () => {
     const waiting = f.store.changeWork(f.bot.id, f.work.id, f.store.getWork(f.bot.id, f.work.id).version,
       source.callId, "continue", source)
     expect(waiting).toMatchObject({ executionState: "interrupted", resultReviewState: "waiting" })
-    expect.soft(resolveBotWorkStatus(waiting).label).toBe("成果待核查")
+    expect.soft(resolveBotWorkStatus(waiting).label).toBe("等待回传")
     f.store.settle(user.id, "completed", null)
     f.store.flushReplies()
     const resumed = f.store.nextQueued([])!
@@ -2092,7 +2156,7 @@ describe("read-only scheduled work observations", () => {
     f.store.transition(resumed.id, "running")
     const checking = f.store.getWork(f.bot.id, f.work.id)
     expect(checking).toMatchObject({ executionState: "interrupted", resultReviewState: "checking" })
-    expect.soft(resolveBotWorkStatus(checking).label).toBe("核查成果中")
+    expect.soft(resolveBotWorkStatus(checking).label).toBe("正在整理结果")
     expect(f.store.getWorkResultReview(resumed.id)?.outcome.state).toBe("interrupted")
     const summary = kind === "ready" ? "The saved report checks out" : "The saved report is missing its final page"
     expect(f.store.commitWorkResultReview(resumed.id,

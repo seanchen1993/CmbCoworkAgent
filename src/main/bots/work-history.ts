@@ -275,6 +275,10 @@ export function createLocalBotWorkHistory(getHost: () => LocalBotHost): BotWorkH
       const { title } = host.projectWorkForModel({ id: work.id, botId: work.botId, title: latest.current.title })
       return {
         work: { id: work.id, title, goal: goal?.slice(0, 2000) ?? "" },
+        ...(!latest.current.source &&
+          latest.current.audienceKey === "desktop" ? {
+            currentExecution: host.workHistoryCommands(work.botId, work.id, latest.incarnation)
+          } : {}),
         entries,
         scanned,
         truncated,

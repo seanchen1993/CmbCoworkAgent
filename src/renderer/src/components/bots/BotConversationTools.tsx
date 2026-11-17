@@ -1,4 +1,5 @@
 import { BotHistorySources } from "./BotHistorySources"
+import { BotWorkInstruction } from "./BotWorkInstruction"
 import { toast } from "sonner"
 import { parseBotWorkAttachmentHref, parseBotWorkHistoryHref, parseBotWorkHref } from "../../../../shared/bots/work-history"
 import { parseBotThreadHistoryHref } from "../../../../shared/bots/thread-history"
@@ -615,14 +616,11 @@ export function BotConversationTools({
           ? message.content
           : message.content.filter((block) => block.type === "text").map((block) => block.text).join("\n")
         return (
-          <section className="bot-work-instruction" aria-label="Bot 交办说明">
-            <div className="bot-work-instruction-label">
-              {task.origin.dispatch === "create" ? "Bot 交办" : "Bot 补充"}
-            </div>
-            <div className="bot-work-instruction-text">
-              {cleanUserAttachmentContentForDisplay(text)}
-            </div>
-          </section>
+          <BotWorkInstruction
+            key={message.id}
+            label={task.origin.dispatch === "create" ? "Bot 交办" : "Bot 补充"}
+            text={cleanUserAttachmentContentForDisplay(text)}
+          />
         )
       }
       if (task?.origin.kind === "work_result") {

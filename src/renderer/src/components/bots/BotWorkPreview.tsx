@@ -450,7 +450,7 @@ export function BotWorkPreview({
         )}
         {conclusion && (
           <p className="bot-work-preview-note">
-            <span className="min-w-0 break-words">{conclusion}</span>
+            <span className="min-w-0 line-clamp-3 break-words" title={conclusion}>{conclusion}</span>
             {onOpenMain && <button type="button" className="shrink-0" onClick={onOpenMain}>前往主对话</button>}
           </p>
         )}

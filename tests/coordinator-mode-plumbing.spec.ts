@@ -440,7 +440,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
   const tabbedPanel = await readProjectFile("src/renderer/src/components/tabs/TabbedPanel.tsx")
   assertMatches(
     tabbedPanel,
-    /<ChatContainer\s+key=\{threadId\}/,
+    /<OrdinaryChat\s+key=\{threadId\}\s+threadId=\{threadId\}/,
     "TabbedPanel remounts ChatContainer when switching threads so old agent mode state cannot leak across threads"
   )
   assertIncludes(

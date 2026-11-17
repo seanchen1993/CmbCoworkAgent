@@ -2535,15 +2535,11 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                   aria-expanded={personalDetailOpen}
                   onClick={togglePersonalDetail}
                 >
-                  <BotRuntimeAvatar
-                    threadId={selectedThreadId}
-                    taskCreatedAt={botActiveTaskCreatedAt(tasks, selectedThreadId)}
-                    settlement={tasksByBot.get(selected.id)?.at(-1)}
+                  <BotAvatar
+                    animated={false}
                     color={selected.color}
                     shape={selected.shape}
                     size={28}
-                    busy={selectedState === "running"}
-                    waiting={selectedState === "waiting_user"}
                   />
                   <span>{selected.name}</span>
                 </button>
@@ -2925,9 +2921,6 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                 <BotAvatarEditor
                   bot={selected}
                   client={client}
-                  settlement={tasksByBot.get(selected.id)?.at(-1)}
-                  busy={selectedState === "running"}
-                  waiting={selectedState === "waiting_user"}
                 />
                 <div className="bot-profile-identity">
                   <BotNameInput

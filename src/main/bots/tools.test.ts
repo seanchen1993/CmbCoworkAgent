@@ -1501,11 +1501,12 @@ function fixture(
     saveSchedule: save,
     saveDesktopScheduleFollowUp: saveFollowUp,
     saveDesktopWorkScheduleFromTool: saveWorkSchedule,
+    desktopScheduleRequestTime: () => Date.parse("2099-01-01T10:00:00Z"),
     removeSchedule: vi.fn()
   } as unknown as LocalBotHost
   const [schedule] = createBotScheduleTools(
     { id: "a", threadId: "main-thread" } as BotDefinition,
-    { id: "source-task", threadId: "main-thread", origin, ...source } as BotTask,
+    { id: "source-task", threadId: "main-thread", createdAt: Date.parse("2099-01-01T10:00:00Z"), origin, ...source } as BotTask,
     () => host,
     controller.signal
   )
@@ -1513,11 +1514,43 @@ function fixture(
 }
 
 describe("Bot schedule tool contract", () => {
+  it.each([
+    { kind: "fixed_reminder", message: "Call" },
+    { workMonitor: { workId: "report", mode: "report" } },
+    { workId: "report", message: "Continue the authorized task" }
+  ])("resolves relative timing once against the admitted request for $kind$workId", async (mode) => {
+    const { schedule, saveFollowUp, saveWorkSchedule } = fixture()
+    const args = { action: "save", name: "Later", afterSeconds: 60, requestKey: "relative", ...mode }
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2099-01-01T10:00:10Z"))
+    try {
+      const first = await schedule.invoke({ type: "tool_call", name: "bot_schedule", id: "first", args })
+      clock.mockReturnValue(Date.parse("2099-01-01T10:00:40Z"))
+      const retry = await schedule.invoke({ type: "tool_call", name: "bot_schedule", id: "retry", args })
+      expect(first.status).not.toBe("error")
+      expect(retry.status).not.toBe("error")
+      const calls = mode.workId ? saveWorkSchedule.mock.calls : saveFollowUp.mock.calls
+      expect(calls).toHaveLength(2)
+      for (const call of calls) expect(call[1]).toMatchObject({ frequency: "once", runAt: "2099-01-01T10:01:00.000Z" })
+    } finally { clock.mockRestore() }
+  })
+
+  it.each([{ runAt: "2099-01-01T10:01:00Z" }, { frequency: "daily" }, { intervalMinutes: 5 }, { action: "list" }])(
+    "rejects conflicting relative-time rules without saving: %j", async (conflict) => {
+      const { schedule, save, saveFollowUp, saveWorkSchedule } = fixture()
+      const result = await schedule.invoke({ type: "tool_call", name: "bot_schedule", id: "conflict",
+        args: { action: "save", name: "Later", message: "Call", afterSeconds: 60, ...conflict } })
+      expect(result.status).toBe("error")
+      expect(save).not.toHaveBeenCalled()
+      expect(saveFollowUp).not.toHaveBeenCalled()
+      expect(saveWorkSchedule).not.toHaveBeenCalled()
+    }
+  )
+
   it("distinguishes observation, execution and fixed text in the model-visible contract", () => {
     const { schedule } = fixture()
     const contract = convertToOpenAITool(schedule).function
     expect(contract.description).toContain("choose exactly one mode")
-    expect(contract.description).toContain('frequency=once, runAt, and workMonitor={workId, mode:"report"}')
+    expect(contract.description).toContain('frequency=once, either runAt or afterSeconds, and workMonitor={workId, mode:"report"}')
     expect(contract.description).toContain("Confirm an observation only when the save receipt contains workMonitor")
     expect(contract.description).toContain("To execute authorized work later, set top-level workId")
     expect(contract.description).toContain("This only repeats that text and never checks task status or executes its instructions")

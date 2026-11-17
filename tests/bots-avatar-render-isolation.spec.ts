@@ -96,6 +96,19 @@ window.avatarFixture.render();`
       await page.evaluate(() => (window as any).avatarFixture.paints.unchanged),
       before.unchanged
     )
+    await page.emulateMedia({ reducedMotion: "reduce" })
+    await page.waitForTimeout(50)
+    await page.evaluate(() => (window as any).avatarFixture.step(60))
+    const reducedPaints = await page.evaluate(() => (window as any).avatarFixture.paints.changed)
+    await page.evaluate(() => (window as any).avatarFixture.step(120))
+    assert.equal(await page.evaluate(() => (window as any).avatarFixture.paints.changed), reducedPaints,
+      "reduced motion stops continuous painting even while the task is busy")
+    assert.equal(await page.evaluate(() => (window as any).avatarFixture.pending()), 0)
+    await page.emulateMedia({ reducedMotion: "no-preference" })
+    await page.waitForTimeout(50)
+    await page.evaluate(() => (window as any).avatarFixture.step(60))
+    assert((await page.evaluate(() => (window as any).avatarFixture.paints.changed)) > reducedPaints,
+      "removing reduced motion resumes the same busy avatar")
     // Use Chromium's actual IntersectionObserver: a working face leaving the
     // viewport must stop drawing, then resume without changing its task state.
     await page.locator("#root").evaluate((node) => { node.style.marginTop = "2000px" })

@@ -9,7 +9,6 @@ import { formatBotMessageReply, formatTransferredBotReplyEdit, parseBotMessageRe
 import { parseBuiltinBrowserEditDraft } from "../../renderer/src/features/builtin-browser/chat-integration"
 import { BOT_BROWSER_PROMPT_PREFIX } from "../../shared/user-input-transport"
 import { buildMessageSameRoleDuplicateId } from "../../shared/message-role-collision"
-import { reviewBotWorkResult } from "./work-result-review"
 
 describe("private Bot reply references", () => {
   it("accepts the exact old desktop attachment quote when a saved draft has not been sent yet", () => {
@@ -97,17 +96,14 @@ describe("private Bot reply references", () => {
       if (mode === "review") {
         store.transition(result.id, "running")
         const context = store.getWorkResultReview(result.id)!
-        await reviewBotWorkResult({ requests: context.requests, outcome: context.outcome, remainingRepairs: 2, catalogue: [] },
-          async request => {
-            visible = JSON.parse(request.data).requests[0]
-            return JSON.stringify({ kind: "blocked", summary: "No evidence", evidenceIds: [] })
-          }, async () => { throw Error("Unexpected evidence read") }, new AbortController().signal)
+        visible = { text: context.requests[0].text, truncated: false }
       } else visible = JSON.parse(result.message).requestContext.messages[0]
       expect(visible!.text).toContain(instruction)
       expect(visible!.text.indexOf(instruction)).toBeLessThan(visible!.text.indexOf("Reference format:"))
       expect(visible!.text).toContain("仅供参考")
-      expect(visible!.truncated).toBe(true)
-      expect(visible!.text.length).toBe(mode === "review" ? 2000 : 4000)
+      expect(visible!.truncated).toBe(mode !== "review")
+      if (mode === "ordinary") expect(visible!.text.length).toBe(4000)
+      else expect(visible!.text.length).toBeGreaterThan(2000)
       expect(store.getTask(task.id).message).toBe(task.message)
     } finally { raw.close() }
   })

@@ -874,6 +874,9 @@ function createGradedToolConcurrencyMiddleware(
       if (tier === "shared") {
         const runSharedTool = () =>
           lock.read(async () => {
+            // Cancellation may happen while queued. Do not invoke an already
+            // cancelled tool wrapper: it may never settle and retain this lock.
+            request.runtime?.signal?.throwIfAborted()
             const waited = Date.now() - waitStart
             if (waited > 50)
               console.log(`[Runtime] shared-lock acquired ${label} after ${waited}ms`)
@@ -887,6 +890,7 @@ function createGradedToolConcurrencyMiddleware(
         return runSharedTool()
       }
       return lock.write(async () => {
+        request.runtime?.signal?.throwIfAborted()
         const waited = Date.now() - waitStart
         if (waited > 50) console.log(`[Runtime] exclusive-lock acquired ${label} after ${waited}ms`)
         return handler(request)

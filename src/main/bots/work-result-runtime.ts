@@ -1,29 +1,17 @@
-import { ChatOpenAI } from "@langchain/openai"
-import { HumanMessage, SystemMessage } from "@langchain/core/messages"
-import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons"
+import { coordinatorTranscriptContentToText } from "../../shared/internal-notification-turn"
 import { BotError, type BotDefinition, type BotTask } from "../../shared/bots/contracts"
-import { botWorkFollowsGlobalModel, botWorkModelRoutingMode } from "../../shared/bots/model-policy"
 import { botWorkAttachmentHref, botWorkHistoryHref, botWorkHref } from "../../shared/bots/work-history"
 import { getThreadMessagesByIds } from "../db"
 import { readThreadMessagesPageInWorker } from "../thread-message-hydration/client"
-import {
-  getAvailableModelConfigOrDefault,
-  getModelConfigByRef,
-  toModelRef
-} from "../models/registry"
-import { samplingFields, topKModelKwargs } from "../models/sampling-params"
-import { getGlobalRoutingMode } from "../storage"
-import { resolveModel } from "../routing"
 import { getLocalThreadRunLease } from "../agent/thread-run-lease"
 import type { LocalBotHost } from "./host"
 import { createBotResultEvidenceReader, type BotResultEvidence } from "./work-result-evidence"
-import { BOT_WORK_REVIEW_BASE_CATALOGUE, reviewBotWorkResult, type BotWorkResultDecision } from "./work-result-review"
 import { includeWorkResultAnswers, projectWorkResultProcess } from "./work-result-process"
 import { verifiedWorkResultThread } from "./work-result-thread"
 import { botHistoryMessageBody } from "./work-history"
-import { announceBotResultMessage, persistBotResultMessage } from "./work-result-publication"
+import { announceBotResultMessage, persistBotResultMessage, completeBotResultMessage } from "./work-result-publication"
 import { botSnapshotSourceRoot } from "./attachment-storage"
-import { BOT_WORK_RESULT_COMMAND_EVIDENCE_BASE, RetryableBotWorkPublicationError, hasWorkCommandOutput, workResultMoreAttachmentsLabel, workResultServiceReadAllowance, type BotWorkResultCommandReference } from "./work-result-settlement"
+import { RetryableBotWorkPublicationError, normalWorkResultSummary, hasWorkCommandOutput, workResultMoreAttachmentsLabel, workResultServiceReadAllowance, type BotWorkResultCommandReference, type BotWorkResultAttachmentReference } from "./work-result-settlement"
 import { isBinaryExtension } from "../ipc/plugin-file-gates"
 
 const MAX_RESULT_TEXT_RECORDS = 3
@@ -36,56 +24,6 @@ function assertLease(task: BotTask, signal: AbortSignal) {
   const lease = getLocalThreadRunLease(task.threadId)
   if (lease?.owner !== "bot" || lease.runId !== task.id)
     throw new Error("原结果核查的执行归属已变化。")
-}
-
-async function reviewModel(
-  bot: BotDefinition,
-  threadId: string,
-  linked: boolean,
-  metadata: Record<string, unknown>
-) {
-  const requested = linked
-    ? !botWorkFollowsGlobalModel(metadata) && typeof metadata.model === "string"
-      ? metadata.model
-      : undefined
-    : (bot.modelRef ?? undefined)
-  const routingMode = linked
-    ? (botWorkModelRoutingMode(metadata) ?? getGlobalRoutingMode())
-    : bot.modelRef
-      ? "pinned"
-      : getGlobalRoutingMode()
-  if (linked && botWorkModelRoutingMode(metadata) === "pinned") {
-    const pinned = getModelConfigByRef(requested)
-    // Match the normal work entry: a deleted explicit pin must not resolve
-    // through a legacy model-name alias to a different provider configuration.
-    if (!pinned || toModelRef(pinned) !== requested)
-      throw new Error("此任务固定的模型配置已不存在，请重新选择模型后继续。")
-  }
-  const fallback = getAvailableModelConfigOrDefault()
-  const selected = await resolveModel({
-    taskSource: "chat",
-    threadId,
-    requestedModelId: requested ?? (fallback ? toModelRef(fallback) : undefined),
-    routingMode,
-    ...(routingMode === "auto" ? { continuation: "resume" as const } : {})
-  })
-  const config = getModelConfigByRef(selected.resolvedModelId)
-  if (!config?.apiKey?.trim()) throw new Error("原任务模型暂不可用。")
-  return new ChatOpenAI({
-    model: config.model,
-    apiKey: config.apiKey,
-    configuration: { baseURL: config.baseUrl },
-    maxTokens: Math.min(config.maxOutputTokens ?? 2500, 2500),
-    maxRetries: 0,
-    timeout: 20_000,
-    ...samplingFields(config.model, { temperature: config.temperature, topP: config.topP }),
-    // Match the Runtime's text-only helpers so reasoning does not consume the decision budget.
-    modelKwargs: {
-      ...topKModelKwargs(config.model, config.topK),
-      chat_template_kwargs: { enable_thinking: false },
-      ...(/deepseek/i.test(config.model) ? { thinking: { type: "disabled" } } : {})
-    }
-  })
 }
 
 async function parseEvidence(
@@ -143,12 +81,12 @@ async function parseEvidence(
   }
 }
 
-export async function runPrivateWorkResultReview(
+export function createWorkResultEvidenceAccess(
   host: LocalBotHost,
   bot: BotDefinition,
   task: BotTask,
   signal: AbortSignal
-): Promise<void> {
+) {
   const current = () => {
     assertLease(task, signal)
     const context = host.workResultReview(task.id)
@@ -281,7 +219,6 @@ export async function runPrivateWorkResultReview(
     },
     (input) => parseEvidence(task.id, input)
   )
-  const defaultAttachments = original.defaultAttachments
   const executionEvidence = original.evidence.find(
     execution => execution.taskId === original.executionTaskId && execution.threadId === original.work.threadId
   )
@@ -293,7 +230,10 @@ export async function runPrivateWorkResultReview(
         evidenceId: "", kind: "foreground", sourceTaskId: source.taskId, callId
       })
       foregroundEvidence.push({ kind: "text", sourceTaskId: source.taskId, messageId: `foreground-command:${callId}`,
-        label: earlier ? "同一请求较早回合的前台命令" : "本轮前台命令",
+        // Repeated runs otherwise look identical before inspection. Use the
+        // existing Host observation time, without exposing command arguments.
+        label: (earlier ? "同一请求较早回合的前台命令" : "本轮前台命令") +
+          (Number.isFinite(receipt.observedAt) ? ` · observedAt(ms)=${receipt.observedAt}` : ""),
         // This bounded observation is complete as an exit-code record. Any
         // omitted output is explicitly marked inside it, and cannot be inferred.
         text: JSON.stringify(receipt),
@@ -302,153 +242,48 @@ export async function runPrivateWorkResultReview(
           (receipt.exactCommand === true || hasWorkCommandOutput(receipt.output)) })
     }
   }
-  const reviewSignal = AbortSignal.any([signal, AbortSignal.timeout(25_000)])
-  const decision = await AsyncLocalStorageProviderSingleton.getInstance()
-    .run(undefined, async () => {
-      const previousInputs = original.previousProcesses ?? []
-      const [model, page, previousPages] = await Promise.all([
-        reviewModel(bot, original.work.threadId, Boolean(original.work.conversation), original.metadata),
-        finalMessageId && original.executionRequestId
-          ? readThreadMessagesPageInWorker(original.work.threadId, {
-              targetMessageId: finalMessageId, limit: 24, byteBudget: 96 * 1024
-            }).catch(() => null)
-          : null,
-        Promise.all(previousInputs.map(execution =>
-          readThreadMessagesPageInWorker(original.work.threadId, {
-            targetMessageId: execution.finalMessageId, limit: 24, byteBudget: 96 * 1024
-          }).catch(() => null)))
-      ])
-      reviewSignal.throwIfAborted()
-      current()
-      // These receipts were observed within the authorized tool invocation,
-      // independently of how many rows or bytes of the transcript fit below.
-      addForegroundCommands(executionEvidence, false)
-      for (const sourceId of [...(original.earlierForegroundCommandIds ?? [])].reverse())
-        addForegroundCommands(original.evidence.find(item => item.taskId === sourceId), true)
-      const latest = page && finalMessageId
-        ? projectWorkResultProcess(page, {
-            taskId: original.executionTaskId,
-            requestId: original.executionRequestId,
-            supplementRequestIds: original.executionSupplementRequestIds,
-            finalMessageId,
-            foregroundCommands: executionEvidence?.foregroundCommands,
-            earlierExecutions: original.evidence.length > 1
-          })
-        : undefined
-      const previous = previousInputs.map((execution, index) => {
-        const earlierPage = previousPages[index]
-        return earlierPage ? projectWorkResultProcess(earlierPage, {
-          ...execution, earlierExecutions: true
-        }, true) : { coverage: "unavailable" as const, steps: [] }
-      })
-      const process = includeWorkResultAnswers(latest, previous)
-      const first = reader.list()
-      const second = first.nextCursor ? reader.list(first.nextCursor) : undefined
-      const serviceAllowance = workResultServiceReadAllowance(original.services)
-      const extra = serviceAllowance && second?.nextCursor ? reader.list(second.nextCursor) : undefined
-      const listed = [...first.items, ...(second?.items ?? []), ...(extra?.items ?? [])]
-      const catalogue = listed.slice(0, BOT_WORK_REVIEW_BASE_CATALOGUE + serviceAllowance)
-      const defaultAttachmentIds = catalogue.filter(item => item.kind === "snapshot" &&
-        defaultAttachments.some(ref => ref.sourceTaskId === item.reference.sourceTaskId &&
-          ref.callId === item.reference.callId && ref.fileIndex === item.reference.fileIndex)).map(item => item.id)
-      const decide = (policy: Pick<typeof original, "settlingForServices" | "remainingRepairs" | "services">) => reviewBotWorkResult(
-        {
-          requests: original.requests,
-          outcome: original.outcome,
-          process,
-          remainingRepairs: policy.remainingRepairs,
-          catalogue,
-          commandEvidenceIds: catalogue.filter(item => item.kind === "text" &&
-            commandReferences.has(referenceKey(item.reference.sourceTaskId, item.reference.messageId!))).map(item => item.id),
-          attachmentDefaults: {
-            ids: defaultAttachmentIds,
-            unlisted: defaultAttachments.length - defaultAttachmentIds.length
-          },
-          services: policy.services,
-          settlingForServices: policy.settlingForServices,
-          catalogueTruncated:
-            Boolean((extra ?? second)?.nextCursor) || listed.length > catalogue.length ||
-            original.commands.length >= BOT_WORK_RESULT_COMMAND_EVIDENCE_BASE + serviceAllowance ||
-            foregroundEvidence.length >= 8 ||
-            original.evidence.filter((execution) => execution.finalMessageId).length >
-              MAX_RESULT_TEXT_RECORDS
-        },
-        async (request, signal) => {
-          current()
-          const response = await model.invoke(
-            [new SystemMessage(request.system), new HumanMessage(request.data)],
-            { signal }
-          )
-          return typeof response.content === "string"
-            ? response.content
-            : response.content
-                .flatMap((block) =>
-                  typeof block === "object" &&
-                  block.type === "text" &&
-                  typeof block.text === "string"
-                    ? [block.text]
-                    : []
-                )
-                .join("")
-        },
-        async (id, signal) => {
-          const read = await reader.read(id, { signal })
-          if (read.status === "ok" && !read.truncated && read.evidence.kind === "text") {
-            const ref = commandReferences.get(referenceKey(read.evidence.reference.sourceTaskId,
-              read.evidence.reference.messageId!))
-            if (ref) inspectedCommands.set(id, { ...ref, evidenceId: id })
-          }
-          return read
-        },
-        reviewSignal
-      )
-      const decision = await decide(original)
-      // A user can request or cancel handoff while review is in flight.
-      // Reconsider once under the same lease and deadline if its policy changed.
-      const policy = current()
-      const changedPolicy = (candidate: typeof policy) =>
-        Boolean(candidate.settlingForServices) !== Boolean(original.settlingForServices)
-      if (!reviewSignal.aborted && changedPolicy(policy) &&
-          !(decision?.kind === "ready" && host.canPublishReadyWorkReview(task.id, decision,
-            decision.evidenceIds.flatMap(id => inspectedCommands.get(id) ?? [])))) {
-        const reconsidered = await decide(policy).catch(() => null)
-        if (!changedPolicy(current())) {
-          const alternative = reconsidered?.kind !== "repair" ? reconsidered : null
-          return { decision, catalogue, alternative }
-        }
-        // A failed transport or invalid second verdict does not erase the
-        // first report. The commit revalidates its actual service dependencies.
-        const firstConclusion = decision?.kind !== "repair" ? decision : null
-        return { decision: reconsidered ?? firstConclusion, catalogue,
-          alternative: reconsidered ? firstConclusion : null }
-      }
-      return { decision, catalogue }
-    })
-    .catch(() => null)
-  current()
-  const { decision: verdict, catalogue, alternative } = decision ?? { decision: null, catalogue: [] }
-  const selectedAttachments = (verdict: BotWorkResultDecision | null) =>
-    !verdict || verdict.kind === "repair"
-      ? []
-      : catalogue.flatMap((item) => {
-          const { sourceTaskId, callId, fileIndex } = item.reference
-          return verdict.attachments?.includes(item.id) &&
-            typeof callId === "string" &&
-            typeof fileIndex === "number"
-            ? [{ sourceTaskId, callId, fileIndex }]
-            : []
+  addForegroundCommands(executionEvidence, false)
+  for (const sourceId of [...(original.earlierForegroundCommandIds ?? [])].reverse())
+    addForegroundCommands(original.evidence.find(item => item.taskId === sourceId), true)
+  const readProcess = async () => {
+    const previousInputs = original.previousProcesses ?? []
+    const [page, previousPages] = await Promise.all([
+      finalMessageId && original.executionRequestId
+        ? readThreadMessagesPageInWorker(original.work.threadId, {
+            targetMessageId: finalMessageId, limit: 24, byteBudget: 96 * 1024
+          }).catch(() => null)
+        : null,
+      Promise.all(previousInputs.map(execution =>
+        readThreadMessagesPageInWorker(original.work.threadId, {
+          targetMessageId: execution.finalMessageId, limit: 24, byteBudget: 96 * 1024
+        }).catch(() => null)))
+    ])
+    signal.throwIfAborted()
+    current()
+    // These receipts were observed within the authorized tool invocation,
+    // independently of how many rows or bytes of the transcript fit below.
+    const latest = page && finalMessageId
+      ? projectWorkResultProcess(page, {
+          taskId: original.executionTaskId,
+          requestId: original.executionRequestId,
+          supplementRequestIds: original.executionSupplementRequestIds,
+          finalMessageId,
+          foregroundCommands: executionEvidence?.foregroundCommands,
+          earlierExecutions: original.evidence.length > 1
         })
-  const citedServiceChecks = new Set([
-    ...Object.values(verdict && verdict.kind !== "repair" ? verdict.serviceChecks ?? {} : {}),
-    ...Object.values(alternative?.serviceChecks ?? {})
-  ])
-  const checks = [...citedServiceChecks].flatMap(id => inspectedCommands.get(id) ?? [])
-  const attachments = selectedAttachments(verdict)
-  if (alternative && (alternative.serviceChecks || verdict?.kind === "ready"))
-    host.commitWorkResultReview(task.id, verdict, attachments, checks,
-      { decision: alternative, attachments: selectedAttachments(alternative) })
-  else if (checks.length) host.commitWorkResultReview(task.id, verdict, attachments, checks)
-  else host.commitWorkResultReview(task.id, verdict, attachments)
+      : undefined
+    const previous = previousInputs.map((execution, index) => {
+      const earlierPage = previousPages[index]
+      return earlierPage ? projectWorkResultProcess(earlierPage, {
+        ...execution, earlierExecutions: true
+      }, true) : { coverage: "unavailable" as const, steps: [] }
+    })
+    return includeWorkResultAnswers(latest, previous)
+  }
+  const selection: { attachments?: BotWorkResultAttachmentReference[] } = {}
+  // Historical ready services are not automatically dependencies of this report.
+  const serviceIds = new Set<string>()
+  return { current, reader, commandReferences, inspectedCommands, serviceIds, selection, referenceKey, readProcess }
 }
 
 export async function publishWorkResult(
@@ -465,10 +300,14 @@ export async function publishWorkResult(
   let work: ReturnType<LocalBotHost["getWork"]>
   let identity: ReturnType<typeof verifiedWorkResultThread>
   try {
-    written = getThreadMessagesByIds(task.threadId, [task.requestId])[0] ?? null
-    const pending = host.workResultPublication(task.id, !written)
+    const pending = host.workResultPublication(task.id)
     if (!pending) throw new BotError("CONFLICT", "原结果交付身份已变化。")
-    publication = pending
+    written = getThreadMessagesByIds(task.threadId, [pending.responseMessageId ?? task.requestId])[0] ?? null
+    // A normal reply exists before publication. Refresh dependencies only while
+    // it still contains the original text, never after links have been committed.
+    const unfinished = pending.responseMessageId && written?.role === "assistant" &&
+      coordinatorTranscriptContentToText(written.content).trim() === (pending.responseText ?? pending.summary)
+    publication = (!written || unfinished ? host.workResultPublication(task.id, true) : pending) ?? pending
     work = host.getWork(bot.id, publication.workId)
     identity = verifiedWorkResultThread(work)
     if (work.threadId !== publication.workThreadId || identity.incarnation !== publication.incarnation)
@@ -495,34 +334,43 @@ export async function publishWorkResult(
   const more = publication.moreAttachments
   const moreHref = more?.messageId ? historyHref(more.messageId) :
     publication.finalMessageId ? historyHref(publication.finalMessageId) : botWorkHref(work.id)
-  const content = [
-    publication.summary,
+  const summary = publication.responseMessageId ? normalWorkResultSummary(publication.summary, work.id, publication) : publication.summary
+  const suffix = [
     ...(links.length ? [links.join("\n")] : []),
     ...(more ? [`[${workResultMoreAttachmentsLabel(more.count)}，点击查看](${moreHref})`] : []),
     ...(publication.finalMessageId
       ? [`[查看原任务结果](${historyHref(publication.finalMessageId)})`]
       : [])
   ].join("\n\n")
+  const withLinks = (text: string) => [text, ...(suffix ? [suffix] : [])].join("\n\n")
+  const content = withLinks(summary)
   try {
     prepareMainThread()
-    persistBotResultMessage(task.threadId, publication.id, content, task.createdAt, written)
+    if (publication.responseMessageId) {
+      completeBotResultMessage(task.threadId, publication.responseMessageId,
+        publication.responseText ?? publication.summary, content, written ?? undefined,
+        summary !== publication.summary ? withLinks(publication.summary) : undefined)
+    } else {
+      persistBotResultMessage(task.threadId, publication.id, content, task.createdAt, written)
+    }
     if (!host.acknowledgeWorkResultPublication(task.id)) return
   } catch (error) {
     if (signal.aborted || error instanceof BotError) throw error
     throw new RetryableBotWorkPublicationError({ cause: error })
   }
   const ready = publication.kind === "ready"
+  const reported = publication.kind === "reported"
   await announceBotResultMessage({
     threadId: task.threadId,
-    id: publication.id,
+    id: publication.responseMessageId ?? publication.id,
     content,
-    attention: ready
+    attention: ready || reported
       ? "task-complete"
       : publication.kind === "needs_user"
         ? "interaction"
         : "task-error",
-    notificationTitle: `${bot.name} · ${ready ? "任务成果可查看" : "任务需要你查看"}`,
-    notificationBody: publication.summary,
+    notificationTitle: `${bot.name} · ${ready ? "任务成果可查看" : reported ? "任务结果已回传" : "任务需要你查看"}`,
+    notificationBody: summary,
     ...(ready ? { petTitle: work.title } : {})
   })
 }

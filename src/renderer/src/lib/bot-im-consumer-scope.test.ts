@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { Children, isValidElement, type ReactElement } from "react"
+import { BotWorkInstruction } from "../components/bots/BotWorkInstruction"
 import { buildAttachmentMessageParts } from "../../../shared/attachment-message-parts"
 import type { BotClient, BotDefinition, BotSchedule, BotTask } from "../../../shared/bots/contracts"
 import { botGroupBrowserScope } from "../../../shared/bots/contracts"
@@ -145,7 +146,10 @@ describe("Bot conversation scoped consumers", () => {
       ]]
       for (const content of contents) {
         const card = presentMessage({ id: requestId, role: "user", content })
-        const [heading, body] = Children.toArray(card.props.children) as ReactElement<{ children: string }>[]
+        expect(card.type).toBe(BotWorkInstruction)
+        expect(card.key).toBe(requestId)
+        const rendered = BotWorkInstruction(card.props)
+        const [heading, body] = Children.toArray(rendered.props.children) as ReactElement<{ children: string }>[]
         expect(heading.props.children).toBe(label)
         expect(body.props.children).toBe(`📎 Report.txt\n\n${instruction}`)
       }

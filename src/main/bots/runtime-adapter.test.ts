@@ -40,6 +40,7 @@ import { botContinuationMessageId, type BotStoppedTaskContext } from "./continua
 import { inputAttachmentHash } from "./input-files"
 import { botAttachmentReceiptKey } from "./attachment-storage"
 import type { BotHistoricalDeliveryReference } from "./delivery-receipt"
+import { verifiedWorkResultThread } from "./work-result-thread"
 import { setBotHistoryInputSource } from "./history-input-projection"
 
 const fixture = vi.hoisted(() => ({
@@ -97,6 +98,10 @@ const fixture = vi.hoisted(() => ({
   armResultReview: vi.fn(() => true),
   resultReviewActive: vi.fn(() => false),
   recordResultEvidence: vi.fn(),
+  resultContext: vi.fn(),
+  commitResult: vi.fn(),
+  resultAccess: vi.fn(() => ({ serviceIds: new Set<string>(), selection: {} })),
+  resultTools: vi.fn(() => [{ name: "bot_work_result_continue" }]),
   publishImFiles: vi.fn(),
   inputProjections: vi.fn(() => new Map<string, string | null>()),
   inputFilesForTask: vi.fn<() => BotInputFile[]>(() => []),
@@ -179,7 +184,8 @@ const fixture = vi.hoisted(() => ({
   >(() => ["return-files"]),
   publishFiles: vi.fn()
 }))
-vi.mock("./work-tools", () => ({ createBotWorkTools: fixture.workTools }))
+vi.mock("./work-result-runtime", () => ({ createWorkResultEvidenceAccess: fixture.resultAccess }))
+vi.mock("./work-tools", () => ({ createBotWorkTools: fixture.workTools, createBotWorkResultTools: fixture.resultTools }))
 vi.mock("../services/im/withheld-text-notices", () => ({
   conversationSwitchedToText: () => false
 }))
@@ -404,6 +410,8 @@ function port(
         armWorkResultReview: fixture.armResultReview,
         workResultReviewActiveForExecution: fixture.resultReviewActive,
         recordWorkResultEvidence: fixture.recordResultEvidence,
+        workResultReview: fixture.resultContext,
+        commitWorkResultReview: fixture.commitResult,
         inputProjections: fixture.inputProjections,
         inputFilesForTask: fixture.inputFilesForTask,
         hasDirectUserRequest: fixture.hasDirectUserRequest,
@@ -454,6 +462,8 @@ function metadata(groupId?: string) {
   }
 }
 beforeEach(() => {
+  fixture.resultContext.mockReset()
+  fixture.commitResult.mockReset()
   vi.clearAllMocks()
   fixture.browserInputPath.mockReset().mockResolvedValue(undefined)
   fixture.publishFiles.mockReset().mockImplementation((taskId, _callId, _files, _content, prepare) => {
@@ -614,6 +624,33 @@ describe("Bot Runtime integration", () => {
       await rm(directory, { recursive: true, force: true })
       await rm(moved, { recursive: true, force: true })
     }
+  })
+
+  it("records admitted work schedule input without treating Goal continuation as new scope", async () => {
+    const work: BotWorkItem = {
+      id: "schedule-work", botId: bot.id, threadId: "schedule-work-thread", parentThreadId: bot.threadId,
+      title: "Report", goal: "Original goal", audienceKey: "desktop", state: "active", version: 1,
+      threadInitialized: true, createdAt: 1, updatedAt: 1, executionState: null, pendingPeers: 0,
+      backgroundBusy: false, workspace: { kind: "default", path: "/synthetic/workspaces/a" }
+    }
+    const source = { ...task, threadId: work.threadId, workId: work.id,
+      origin: { kind: "schedule" as const, scheduleId: "daily" } }
+    fixture.thread.mockReturnValue({ thread_id: work.threadId, created_at: 1,
+      metadata: JSON.stringify({ ...metadata(), agentMode: "normal", botWorkId: work.id,
+        botAudienceKey: "desktop", cmb_thread_incarnation: "schedule-work-incarnation" }) })
+    fixture.start.mockImplementationOnce(async (_request, _delivery, context: AgentRunExecutionContext) => {
+      expect(context.onUserPromptPrepared).toBeTypeOf("function")
+      expect(context.onUserPromptPrepared!("Hook admitted scope")).toBeUndefined()
+      expect(context.onUserPromptPrepared!("Internal continuation", { internalGoalInput: true })).toBeUndefined()
+      return { completion: Promise.resolve() }
+    })
+    const lease = port(work).acquire(bot, source, work)!
+    try {
+      await lease.execute(new AbortController().signal, vi.fn())
+      expect(fixture.preparedInput).toHaveBeenCalledExactlyOnceWith(source.id, source.id, "Hook admitted scope")
+      expect(fixture.armResultReview).not.toHaveBeenCalled()
+      expect(fixture.beginInputPreparation).not.toHaveBeenCalled()
+    } finally { lease.release() }
   })
 
   it.each([
@@ -3508,7 +3545,7 @@ describe("Bot Runtime integration", () => {
     const result: BotTask = { ...relay, origin: { kind: "bot", fromBotId: "leaf",
       rootTaskId: "root", depth: 2, groupId: "g", expectsReply: false, upstreamTaskId: relay.id } }
     await expect(port().acquire(bot, result)!.execute(new AbortController().signal, vi.fn()))
-      .rejects.toThrow("Report not ready")
+      .resolves.toMatchObject({ state: "failed", explicitGroupMessages: true, error: "Report not ready", result: expect.stringContaining("Done") })
     expect(fixture.verifyFiles).toHaveBeenCalledWith("/synthetic/workspaces/group-g", ["report.json"], expect.any(AbortSignal))
     expect(fixture.start.mock.calls.at(-1)![2].foregroundCommandLifecycle).toHaveProperty("settled")
     expect(fixture.start.mock.calls.at(-1)![2].backgroundCommandLifecycle).toHaveProperty("retainSource", true)
@@ -3530,7 +3567,7 @@ describe("Bot Runtime integration", () => {
     }
     await expect(
       port().acquire(bot, result)!.execute(new AbortController().signal, vi.fn())
-    ).rejects.toThrow("Original report still missing")
+    ).resolves.toMatchObject({ state: "failed", error: "Original report still missing", result: expect.stringContaining("Done") })
     expect(fixture.verifyFiles).toHaveBeenCalledWith(
       "/synthetic/workspaces/a",
       ["report.json"],
@@ -3561,9 +3598,9 @@ describe("Bot Runtime integration", () => {
     )
     expect(result).toMatchObject({ state: "completed", files })
     fixture.verifyFiles.mockRejectedValueOnce(new Error("Required output missing"))
-    await expect(port().acquire(bot, peerTask)!.execute(signal, vi.fn())).rejects.toThrow(
-      "Required output missing"
-    )
+    await expect(port().acquire(bot, peerTask)!.execute(signal, vi.fn())).resolves.toMatchObject({
+      state: "failed", error: "Required output missing", result: expect.stringContaining("Done")
+    })
     fixture.verifyFiles.mockClear()
     await port()
       .acquire(bot, {
@@ -3572,6 +3609,38 @@ describe("Bot Runtime integration", () => {
       } as BotTask)!
       .execute(signal, vi.fn())
     expect(fixture.verifyFiles).not.toHaveBeenCalled()
+  })
+  it.each(["partial", "empty", "cancelled"])("preserves failed peer handoff boundaries (%s)", async (kind) => {
+    const controller = new AbortController()
+    const failure = new Error("Required output missing")
+    fixture.start.mockImplementationOnce(async (_request, _delivery, context) => {
+      context.onFinalAssistant?.({ messageId: "partial", finalText: kind === "empty" ? "" : "<think>private reasoning</think>Existing review findings" })
+      context.onRunTerminated?.({ outcome: "success", code: "done" })
+      return { completion: Promise.resolve() }
+    })
+    fixture.verifyFiles.mockImplementationOnce(async () => {
+      if (kind === "cancelled") controller.abort(new Error("User stopped"))
+      throw failure
+    })
+    const peerTask: BotTask = {
+      ...task,
+      origin: { kind: "bot", fromBotId: "b", rootTaskId: "root", depth: 1,
+        expectsReply: true, outputFiles: ["report.md"] }
+    }
+    const execution = port().acquire(bot, peerTask)!.execute(controller.signal, vi.fn())
+    if (kind === "empty") {
+      await expect(execution).rejects.toThrow("Required output missing")
+    } else if (kind === "cancelled") {
+      await expect(execution).rejects.toThrow("User stopped")
+    } else {
+      const result = await execution
+      expect(result.state).toBe("failed")
+      expect(result.error).toBe("Required output missing")
+      expect(result.result).toContain("本次交付未完成")
+      expect(result.result).toContain("Existing review findings")
+      expect(result.result).not.toContain("private reasoning")
+      expect(result.files).toBeUndefined()
+    }
   })
   it("never verifies or publishes declared outputs after a failed run", async () => {
     fixture.start.mockImplementation(async (_request, _delivery, context) => {
@@ -6678,7 +6747,7 @@ it("does not complete a private output contract when snapshot preparation fails"
   } }
   const lease = port().acquire(bot, peerTask)!
   try {
-    await expect(lease.execute(new AbortController().signal, vi.fn())).rejects.toThrow("Unable to retain result")
+    await expect(lease.execute(new AbortController().signal, vi.fn())).resolves.toMatchObject({ state: "failed", error: expect.stringContaining("Unable to retain result") })
     expect(fixture.publishFiles).not.toHaveBeenCalled()
     expect(fixture.recordPeerDelivery).not.toHaveBeenCalled()
   } finally { lease.release() }
@@ -7327,7 +7396,7 @@ it.each([[false, false, false], [true, false, false], [false, true, false], [tru
       try {
         const result = lease.execute(new AbortController().signal, vi.fn())
         if (!current && turn === Number(resumed)) {
-          await expect(result).rejects.toThrow()
+          await expect(result).resolves.toMatchObject({ state: "failed" })
           expect(store.peerHandoff(callback.id).outputBindings).toEqual({})
         } else {
           const completed = await result
@@ -7681,7 +7750,7 @@ it.each(
       }
       const execution = port().acquire(bot, peerTask)!.execute(signal, vi.fn())
       if (change === "remove-snapshot") {
-        await expect(execution).rejects.toThrow("ENOENT")
+        await expect(execution).resolves.toMatchObject({ state: "failed", error: expect.stringContaining("ENOENT") })
       } else {
         const result = await execution
         expect(result).toMatchObject({ state: "completed", files: [snapshot] })
@@ -8086,7 +8155,7 @@ it("checks and captures the original peer output contract in a workflow summary"
     key: "wf", runStartedAt: "2026-10-31T01:00:00Z", sourceTaskId: "original-peer", rootTaskId: "root" } }
   fixture.verifyFiles.mockRejectedValueOnce(new Error("Required report missing"))
   await expect(port().acquire(bot, notice)!.execute(new AbortController().signal, vi.fn()))
-    .rejects.toThrow("Required report missing")
+    .resolves.toMatchObject({ state: "failed", error: "Required report missing" })
   const file = { filePath: "/synthetic/workspaces/a/report.md", name: "report.md", size: 12 }
   fixture.verifyFiles.mockResolvedValue([file])
   await expect(port().acquire(bot, notice)!.execute(new AbortController().signal, vi.fn()))
@@ -8164,7 +8233,7 @@ it("accepts an intermediate peer result without verifying the unfinished aggrega
     const lastLease = runtime.acquire(b, last)!
     try {
       // The final receipt still owes the actual output; no fabricated success.
-      await expect(lastLease.execute(new AbortController().signal, vi.fn())).rejects.toThrow("ENOENT")
+      await expect(lastLease.execute(new AbortController().signal, vi.fn())).resolves.toMatchObject({ state: "failed", error: expect.stringContaining("ENOENT") })
     } finally { lastLease.release() }
     await writeFile(join(workspace, "report.txt"), "Both reviews integrated")
     const successful = runtime.acquire(b, last)!
@@ -8355,4 +8424,33 @@ it("rechecks Team metadata at the existing execution authorization boundary", as
   const context = fixture.start.mock.calls[0][2] as AgentRunExecutionContext
   expect(context.verifyResolvedThread!({ workspacePath: metadata().workspacePath,
     metadata: { ...metadata(), agentMode: "coordinator" } })).toContain("不支持 Team")
+})
+
+
+it.each([false, true])("uses the normal parent result turn and its final receipt (already continued=%s)", async continued => {
+  const linked = { id: "work", botId: bot.id, threadId: "worker", parentThreadId: bot.threadId,
+    audienceKey: "desktop", title: "Report", state: "active" } as BotWorkItem
+  fixture.thread.mockImplementation((id: string) => ({ created_at: 1, metadata: JSON.stringify(id === linked.threadId
+    ? { botHostId: "local", botId: bot.id, botWorkId: linked.id, botAudienceKey: "desktop", workspacePath: "/work" }
+    : metadata()) }))
+  const result = { work: linked, incarnation: verifiedWorkResultThread(linked).incarnation,
+    requests: [{ id: "original", text: "Prepare report" }], outcome: { state: "completed", text: "Report created", truncated: false },
+    requestsOmitted: true, remainingRepairs: 2, services: { items: [], truncated: false } }
+  fixture.resultContext.mockReturnValueOnce(result).mockReturnValue(continued ? undefined : result)
+  const returned: BotTask = { ...task, origin: { kind: "work_result", workId: linked.id,
+    workThreadId: linked.threadId, workTitle: linked.title, executionTaskId: "execution", executionState: "completed",
+    review: { requestTaskId: "original", phase: "review" } } }
+  await expect(port(linked).acquire(bot, returned)!.execute(new AbortController().signal, vi.fn()))
+    .resolves.toMatchObject({ state: "completed" })
+  expect(fixture.start).toHaveBeenCalledTimes(1)
+  const [request, , context] = fixture.start.mock.calls[0]
+  expect(JSON.parse(request.message)).toMatchObject({ kind: "host_work_result", requests: result.requests,
+    requestsOmitted: true, outcome: result.outcome })
+  expect(context.remotePolicy?.allowedToolNames).toEqual(["bot_work_result_continue"])
+  expect(context.additionalTools).toEqual([{ name: "bot_work_result_continue" }])
+  expect(context.shouldRaiseCompletionAttention?.()).toBe(false)
+  expect(fixture.workTools).not.toHaveBeenCalled()
+  if (continued) expect(fixture.commitResult).not.toHaveBeenCalled()
+  else expect(fixture.commitResult).toHaveBeenCalledWith(task.id, null, [], [], undefined,
+    { messageId: "reply", finalText: "Done" })
 })

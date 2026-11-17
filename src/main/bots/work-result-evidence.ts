@@ -106,11 +106,14 @@ export function createBotResultEvidenceReader(
   }
 
   return {
-    list(cursor?: string) {
+    reference(id: string) { return describe(scope, lookup(id)) },
+    // Adjacent pages requested synchronously share one authorized load. Reads
+    // still reload on every access, including after asynchronous file parsing.
+    list(cursor?: string, pageCount: 1 | 2 | 3 = 1) {
       const items = load().map(entry => describe(scope, entry))
       const pageScope = hash(JSON.stringify([scope, items.map(item => item.id)]))
       const offset = decodeCursor(cursor, pageScope, items.length)
-      const next = offset + PAGE_SIZE
+      const next = offset + PAGE_SIZE * pageCount
       return {
         items: items.slice(offset, next),
         ...(next < items.length ? { nextCursor: encodeCursor(pageScope, next) } : {})

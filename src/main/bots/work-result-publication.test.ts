@@ -1,3 +1,4 @@
+import { botWorkAttachmentHref } from "../../shared/bots/work-history"
 import { DatabaseSync } from "node:sqlite"
 import { afterEach, expect, it, vi } from "vitest"
 import type { BotDeliveredFile } from "../../shared/bots/file-delivery"
@@ -6,8 +7,8 @@ import { LocalBotHost } from "./host"
 import { botImScopeId } from "./im-gateway-store"
 import { BotStore } from "./store"
 import { createBotResultEvidenceReader } from "./work-result-evidence"
-import { reviewBotWorkResult } from "./work-result-review"
-import { RetryableBotWorkPublicationError } from "./work-result-settlement"
+import type { BotWorkResultDecision } from "./work-result-review"
+import { normalWorkResultSummary, RetryableBotWorkPublicationError } from "./work-result-settlement"
 
 const databases: NativeSqliteAdapter[] = []
 afterEach(() => databases.splice(0).forEach(db => db.close()))
@@ -177,6 +178,48 @@ it("does not withdraw a publication already acknowledged when the user stops the
   expect(f.store.getTask(publication.id).state).toBe("completed")
 })
 
+it.each(["completed", "failed"] as const)("keeps the actual %s outcome when independent review is unavailable", state => {
+  const { store, start } = fixture()
+  const { work, task } = start()
+  const result = "24 tests passed; category whitespace differs from the requirement."
+  store.settle(task.id, state, state === "failed" ? "execution failed" : null, result)
+  const review = startReview(store, work.id)
+  const committed = store.commitWorkResultReview(review.id, null)
+  expect(committed).toMatchObject({ state: "publish", publication: {
+    kind: state === "completed" ? "reported" : "blocked", summary: expect.stringContaining(result)
+  } })
+  if (committed.state !== "publish") throw new Error("Expected publication")
+  expect(committed.publication.summary).toContain("未独立核验")
+  expect(store.commitWorkResultReview(review.id, null)).toEqual(committed)
+  store.settle(review.id, "completed", null)
+  store.flushReplies()
+  const publication = publicationTask(store, work.id)!
+  store.transition(publication.id, "running")
+  expect(store.acknowledgeWorkResultPublication(publication.id)).toBe(true)
+  expect(store.getWork(work.botId, work.id)).toMatchObject({
+    state: "active", executionState: state,
+    resultConclusion: { kind: state === "completed" ? "reported" : "blocked" }
+  })
+  store.settle(publication.id, "completed", null)
+  const next = store.enqueue({ botId: work.botId, workId: work.id, requestId: "next-input", message: "Continue this task" })
+  store.transition(next.id, "running")
+  store.recordPreparedInput(next.id, next.message)
+  expect(store.getWork(work.botId, work.id).resultConclusion).toBeUndefined()
+})
+
+it("bounds the unverified outcome without hiding that it is incomplete", () => {
+  const { store, start } = fixture()
+  const { work, task } = start()
+  store.settle(task.id, "completed", null, "x".repeat(1600) + "TAIL_NOT_SHOWN")
+  const review = startReview(store, work.id)
+  const committed = store.commitWorkResultReview(review.id, null)
+  expect(committed).toMatchObject({ state: "publish", publication: {
+    summary: expect.stringContaining("完整结果请查看原任务")
+  } })
+  if (committed.state !== "publish") throw new Error("Expected publication")
+  expect(committed.publication.summary).not.toContain("TAIL_NOT_SHOWN")
+})
+
 it.each(["execution interrupted", "review interrupted", "review unavailable", "service unverified"] as const)(
   "keeps exact formal attachments and their anchors when %s",
   (scenario) => {
@@ -203,7 +246,7 @@ it.each(["execution interrupted", "review interrupted", "review unavailable", "s
     const publication = publicationTask(store, work.id)!
     store.transition(publication.id, "running")
     expect(store.getWorkResultPublication(publication.id)).toMatchObject({
-      kind: scenario.endsWith("interrupted") ? "interrupted" : "blocked",
+      kind: scenario.endsWith("interrupted") ? "interrupted" : scenario === "review unavailable" ? "reported" : "blocked",
       attachments: [{ sourceTaskId: task.id, callId: "formal", fileIndex: 0, assistantMessageId: "file-anchor", file }]
     })
   }
@@ -315,12 +358,15 @@ it.each([
 )
 
 it.each([
-  { action: "retain", message: "Keep the submitted CSV. Add an explanation to the final response.", kind: "ready" },
-  { action: "withdraw", message: "Do not send the CSV. Report in text only.", kind: "ready" },
-  { action: "omit", message: "Do not send the CSV. Report in text only.", kind: "blocked" },
-  { action: "replace", message: "Send only the revised workbook.", kind: "ready" }
-] as const)("publishes the reviewed attachment selection after an in-run supplement ($action)", async ({
-  action, message, kind
+  { action: "retain", message: "Keep the submitted CSV. Add an explanation to the final response.", kind: "ready", normal: false },
+  { action: "withdraw", message: "Do not send the CSV. Report in text only.", kind: "ready", normal: false },
+  { action: "omit", message: "Do not send the CSV. Report in text only.", kind: "reported", normal: false },
+  { action: "replace", message: "Send only the revised workbook.", kind: "ready", normal: false },
+  { action: "retain", message: "Keep the submitted CSV. Add an explanation to the final response.", kind: "reported", normal: true },
+  { action: "withdraw", message: "Do not send the CSV. Report in text only.", kind: "reported", normal: true },
+  { action: "replace", message: "Send only the revised workbook.", kind: "reported", normal: true }
+] as const)("publishes the selected attachment after an in-run supplement ($action, normal=$normal)", async ({
+  action, message, kind, normal
 }) => {
   const { bot, store, start } = fixture()
   const { work, task } = start()
@@ -358,22 +404,14 @@ it.each([
   )
   const catalogue = reader.list().items
   const originalId = catalogue.find(item => item.reference.callId === originalReceipt.callId)!.id
-  const defaultIds = catalogue.filter(item => defaults.some(ref =>
-    ref.sourceTaskId === item.reference.sourceTaskId && ref.callId === item.reference.callId &&
-    ref.fileIndex === item.reference.fileIndex
-  )).map(item => item.id)
-  const report = { kind: "ready", summary: "Updated result and explanation", evidenceIds: [] }
-  const invoke = vi.fn().mockResolvedValue(JSON.stringify({
-    ...report,
+  const decision: BotWorkResultDecision | null = normal || action === "omit" ? null : {
+    kind: "ready", summary: "Updated result and explanation", evidenceIds: [],
     ...(action === "retain" ? { attachments: [originalId] } : action === "withdraw" ? { attachments: [] } : {})
-  }))
-  const decision = await reviewBotWorkResult({
-    ...context, catalogue, attachmentDefaults: { ids: defaultIds, unlisted: defaults.length - defaultIds.length }
-  }, invoke, (id, signal) => reader.read(id, { signal }), new AbortController().signal)
-  expect(invoke).toHaveBeenCalledOnce()
-  expect(decision?.kind ?? null).toBe(action === "omit" ? null : "ready")
+  }
   store.commitWorkResultReview(review.id, decision,
-    decision && decision.kind !== "repair" && decision.attachments?.includes(originalId) ? [originalReceipt] : [])
+    action === "retain" ? [originalReceipt] : [], [], undefined,
+    normal ? { messageId: "normal-response", finalText: "Updated result and explanation",
+      ...(action === "retain" || action === "withdraw" ? { filesSelected: true as const } : {}) } : undefined)
   store.settle(review.id, "completed", null)
 
   store.flushReplies()
@@ -419,7 +457,7 @@ it.each(["interrupted", "unverified"])("keeps eight exact files and reports the 
   store.transition(publication.id, "running")
   const result = store.getWorkResultPublication(publication.id)!
   expect(result).toMatchObject({
-    kind: mode === "interrupted" ? "interrupted" : "blocked",
+    kind: mode === "interrupted" ? "interrupted" : "reported",
     moreAttachments: { count: 2, messageId: "card-1" }
   })
   expect(result.attachments.map(item => item.callId)).toEqual(
@@ -821,4 +859,110 @@ it("keeps a retry across recovery and bounds repeated failures", () => {
   reopened.settle(pending.id, "failed", "投递未确认")
   reopened.recover()
   expect(reopened.nextQueued([])).toBeNull()
+})
+
+
+it("does not expose a truncated reasoning-only result as a publication summary", () => {
+  expect(normalWorkResultSummary("<think>Private assessment without a closing tag", "work")).toBe("")
+})
+
+it("settles a normal parent reply with its existing message identity and retained attachments", () => {
+  const f = fixture()
+  const { work, task } = f.start()
+  f.store.recordWorkResultEvidence(task.id, { callId: "files", files: [
+    { filePath: "/work/result.md", attachmentPath: "/retained/result.md", name: "result.md", size: 10 }
+  ] })
+  f.store.settle(task.id, "completed", null, "Created the report")
+  const review = startReview(f.store, work.id)
+  const cleanSummary = "报告已生成，见原文件。"
+  const response = { messageId: "normal-parent-final", finalText: "<think>PRIVATE_REASONING</think>" + cleanSummary + "\n\n- [result.md](" +
+    botWorkAttachmentHref({ workId: work.id, messageId: "invented", incarnation: "invented", callId: "invented", fileIndex: 0 }) + ")" }
+  const result = f.store.commitWorkResultReview(review.id, null, [], [], undefined, response)
+  expect(result).toMatchObject({ state: "publish", publication: {
+    responseMessageId: response.messageId, responseText: response.finalText, kind: "reported", summary: cleanSummary,
+    attachments: [{ callId: "files", fileIndex: 0 }]
+  } })
+  expect(f.store.commitWorkResultReview(review.id, null, [], [], undefined, response)).toEqual(result)
+  f.store.settle(review.id, "completed", null)
+  f.store.flushReplies()
+  const publication = publicationTask(f.store, work.id)!
+  f.store.transition(publication.id, "running")
+  const reopened = new BotStore(f.db)
+  expect(reopened.getWorkResultPublication(publication.id)?.responseMessageId).toBe(response.messageId)
+  expect(reopened.acknowledgeWorkResultPublication(publication.id)).toBe(true)
+  expect(reopened.acknowledgeWorkResultPublication(publication.id)).toBe(false)
+  expect(reopened.workActivities()).toContainEqual(expect.objectContaining({ botId: f.bot.id, preview: cleanSummary }))
+  expect(reopened.getWork(f.bot.id, work.id).state).toBe("active")
+  expect(reopened.getWork(f.bot.id, work.id).resultPublicationId).toBe(response.messageId)
+})
+
+it.each([false, true])("mirrors only the visible normal reply to personal IM once (old receipt=%s)", oldReceipt => {
+  const { store, bot, start, db } = fixture()
+  const bindingId = bindPersonalIm(store, bot.id)
+  const { work, task } = start()
+  store.settle(task.id, "completed", null, "Result")
+  const review = startReview(store, work.id)
+  const finalText = "<think>PRIVATE_REASONING</think>Visible result"
+  expect(store.commitWorkResultReview(review.id, null, [], [], undefined,
+    { messageId: "normal-final", finalText })).toMatchObject({
+    publication: { responseText: finalText, summary: "Visible result" }
+  })
+  store.settle(review.id, "completed", null)
+  store.flushReplies()
+  const publication = publicationTask(store, work.id)!
+  if (oldReceipt) db.run("UPDATE bot_work_commands SET receipt=json_set(receipt,'$.summary',?) WHERE command_id=?",
+    [finalText, `publication:${publication.requestId}`])
+  store.transition(publication.id, "running")
+  expect(store.acknowledgeWorkResultPublication(publication.id)).toBe(true)
+  expect(store.acknowledgeWorkResultPublication(publication.id)).toBe(false)
+  expect(store.im.beginDelivery("text")).toMatchObject({ bindingId, workId: work.id, text: "Visible result" })
+  expect(store.im.beginDelivery("text")).toBeNull()
+  expect(store.workActivities()).toContainEqual(expect.objectContaining({ botId: bot.id, preview: "Visible result" }))
+})
+
+it("does not accept a normal report after cancellation or mix it with an independent verdict", () => {
+  const f = fixture()
+  const { work, task } = f.start()
+  f.store.settle(task.id, "completed", null, "Done")
+  const review = startReview(f.store, work.id)
+  const response = { messageId: "normal-parent-final", finalText: "Done" }
+  expect(() => f.store.commitWorkResultReview(review.id,
+    { kind: "ready", summary: "Verified", evidenceIds: [] }, [], [], undefined, response)).toThrow()
+  f.store.transition(review.id, "cancelled")
+  expect(() => f.store.commitWorkResultReview(review.id, null, [], [], undefined, response)).toThrow()
+  expect(publicationTask(f.store, work.id)).toBeUndefined()
+})
+
+
+it.each([false, true])("keeps normal report dependencies and original reply bytes when a ready service exits (old receipt=%s)", oldReceipt => {
+  const f = fixture()
+  const bindingId = bindPersonalIm(f.store, f.bot.id)
+  const finalText = "<think>PRIVATE_REASONING</think>Preview running"
+  const { work, task } = f.start()
+  f.store.acceptCommand(task.id, { id: "preview", threadId: work.threadId, command: "preview", cwd: "/work",
+    startedAt: 1, notifyOnComplete: false })
+  f.store.recordWorkResultEvidence(task.id, { foregroundCommand: { callId: "health", command: "check preview",
+    exactCommand: true, startedAt: 2, exitCode: 0, output: "Expected preview; HTTP 200", excerpt: false } })
+  f.store.settle(task.id, "completed", null, "Preview running")
+  const review = startReview(f.store, work.id)
+  f.store.recordWorkResultServiceReady(review.id, "preview", "Required preview health checked",
+    { evidenceId: "a".repeat(64), sourceTaskId: task.id, kind: "foreground", callId: "health" })
+  f.store.commitWorkResultReview(review.id, null, [], [], undefined,
+    { messageId: "normal-preview", finalText, serviceIds: ["preview"] })
+  f.store.settle(review.id, "completed", null)
+  f.store.flushReplies()
+  const publication = publicationTask(f.store, work.id)!
+  if (oldReceipt) f.db.run("UPDATE bot_work_commands SET receipt=json_set(receipt,'$.summary',?) WHERE command_id=?",
+    [finalText, `publication:${publication.requestId}`])
+  f.store.transition(publication.id, "running")
+  f.store.settleCommand({ id: "preview", threadId: work.threadId, exitCode: 0, output: "Stopped",
+    cancelled: false, truncated: false })
+  expect(f.store.getWorkResultPublication(publication.id, true)).toMatchObject({
+    kind: "reported", unavailableDependency: true, serviceIds: ["preview"],
+    responseMessageId: "normal-preview", responseText: finalText,
+    summary: "成果所需的服务当前不可用。原报告为「Preview running」"
+  })
+  expect(f.store.acknowledgeWorkResultPublication(publication.id)).toBe(true)
+  expect(f.store.im.beginDelivery("text")).toMatchObject({ bindingId,
+    text: "成果所需的服务当前不可用。原报告为「Preview running」" })
 })

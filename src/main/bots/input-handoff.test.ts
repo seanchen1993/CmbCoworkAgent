@@ -122,6 +122,20 @@ it("passes the selected immutable versions through real work tools, with replay 
   expect(f.store.recentTasks().filter(task => task.workId === created.work.id)).toHaveLength(2)
 })
 
+it("does not forward an unselected attachment at the beginning of the admitted source", async () => {
+  const f = await fixture(), file = await f.pick("private.txt", "UNSELECTED PRIVATE CONTENT")
+  const body = buildAttachmentMessageParts([file]).attachmentModelBlocks.trim() + "\n只检查公开格式要求"
+  const source = f.host.send({ botId: f.bot.id, requestId: "leading-attachment", message: body, inputFileIds: [file.botInputId!] })
+  await vi.waitFor(() => expect(f.store.getTask(source.id).state).toBe("running"))
+  f.host.recordPreparedInput(source.id, source.id, body)
+  const result = await f.host.createWork({ botId: f.bot.id, operationId: "no-files", title: "Format", goal: "检查公开格式" },
+    { taskId: source.id, callId: "no-files", key: "no-files" })
+  expect(result.task.message).toContain("只检查公开格式要求")
+  expect(result.task.message).not.toContain("UNSELECTED PRIVATE CONTENT")
+  expect(result.task.message).not.toContain(file.filePath)
+  expect(result.task.origin).not.toHaveProperty("inputFileIds")
+})
+
 it("rejects removed, rewritten, duplicated, foreign and merely queued input blocks", async () => {
   const f = await fixture(), file = await f.pick("sample.txt", "PRIVATE VALUE")
   const block = buildAttachmentMessageParts([file]).attachmentModelBlocks

@@ -1,4 +1,5 @@
 import type { BotWorkSummary } from "../../../../shared/bots/work"
+import { splitBotInlineReasoning } from "../bot-inline-reasoning"
 
 interface BotWorkStatusPresentation {
   label: string
@@ -20,7 +21,7 @@ export function resolveBotWorkStatus(work: BotWorkSummary): BotWorkStatusPresent
   // A resumed review can verify saved results without rewriting the execution's history.
   const hasReviewUpdate = resultReviewState === "waiting" || resultReviewState === "checking" ||
     work.resultNeedsUser || work.resultConclusion?.unavailableDependency ||
-    (!work.userControl && !!work.resultConclusion)
+    (!work.userControl && !!work.resultConclusion && work.resultConclusion.kind !== "reported")
   if (uncertainOutcome && (work.dispatchStopped || !hasReviewUpdate))
     return { label: "需要核对结果", tone: "error", icon: "alert" }
   if (work.dispatchStopped) {
@@ -30,22 +31,26 @@ export function resolveBotWorkStatus(work: BotWorkSummary): BotWorkStatusPresent
   if (work.pendingPeers > 0) return { label: "协作中", tone: "active", icon: "idle" }
   if (work.resultNeedsUser)
     return { label: "成果需确认", tone: "attention", icon: "alert" }
+  // Old/bounded receipts can retain a leading, even truncated, reasoning block.
+  // Use the same visible body as Bot chat without rewriting the saved result.
+  const summary = work.resultConclusion ? splitBotInlineReasoning(work.resultConclusion.summary).body : undefined
   if (work.resultConclusion?.unavailableDependency)
-    return { label: "成果待核对", tone: "attention", icon: "alert", summary: work.resultConclusion.summary }
+    return { label: "成果待核对", tone: "attention", icon: "alert", summary }
   const blockedSummary = !work.userControl && work.resultConclusion?.kind === "blocked"
-    ? { summary: work.resultConclusion.summary } : {}
+    ? { summary } : {}
   const deliveredWithServices = !work.userControl && work.resultConclusion?.kind === "ready" &&
     work.resultConclusion.backgroundServicesOnly === true
   if (work.backgroundBusy && !work.readyServiceState && !deliveredWithServices)
     return { label: "后台处理中", tone: "active", icon: "idle", ...blockedSummary }
-  if (resultReviewState === "checking") return { label: "核查成果中", tone: "active", icon: "running" }
-  if (resultReviewState === "waiting") return { label: "成果待核查", tone: "idle", icon: "queued" }
-  if (resultReviewState === "interrupted") return { label: "核查已中断", tone: "error", icon: "alert" }
+  if (resultReviewState === "checking") return { label: "正在整理结果", tone: "active", icon: "running" }
+  if (resultReviewState === "waiting") return { label: "等待回传", tone: "idle", icon: "queued" }
+  if (resultReviewState === "interrupted") return { label: "回传已中断", tone: "error", icon: "alert" }
   if (work.userControl && work.userControl.heldInputs > 0)
     return { label: "等待归还", tone: "idle", icon: "queued" }
   if (work.resultConclusion && !work.userControl && (executionState === "completed" || uncertainOutcome ||
       (executionState === "failed" && work.resultConclusion.kind === "ready"))) {
-    const { kind, summary } = work.resultConclusion
+    const { kind } = work.resultConclusion
+    if (kind === "reported") return { label: "结果已回传", tone: "idle", icon: "idle", summary }
     return kind === "ready"
       ? { label: "成果已就绪", tone: "complete", icon: "ready", summary }
       : { label: "成果待核对", tone: "attention", icon: "alert", summary }

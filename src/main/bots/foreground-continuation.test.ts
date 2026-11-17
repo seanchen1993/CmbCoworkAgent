@@ -42,6 +42,23 @@ function fixture() {
 }
 
 describe("yielded foreground command ownership", () => {
+  it.each([false, true])("preserves observation times on retained receipts (unknown=%s)", unknown => {
+    const { db, store, peer, command, result } = fixture()
+    store.acceptCommand(peer.id, command, true)
+    store.deferTask(peer.id, "saved")
+    const observer = new BotStore(db, () => 3000)
+    observer.settleCommand(result, unknown)
+    const receipts = observer.continuationCommandResults(peer.id)
+    expect(receipts).toEqual([expect.objectContaining({
+      startedAt: 10, observedAt: 3000, state: unknown ? "outcome_unknown" : "completed"
+    })])
+    expect(receipts[0]).not.toHaveProperty("finishedAt")
+    observer.settleCommand(result, unknown)
+    expect(observer.continuationCommandResults(peer.id)).toEqual(receipts)
+    expect(observer.nextQueued([])?.id).toBe(peer.id)
+    expect(observer.recentTasks().filter(task => task.origin.kind === "notification")).toEqual([])
+  })
+
   it("answers private input while holding the original peer task until its real result", () => {
     const { store, bot, peer, requester, command, result } = fixture()
     store.acceptCommand(peer.id, command, true)

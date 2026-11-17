@@ -41,8 +41,8 @@ export interface BotWorkSummary {
   resultNeedsUser?: string
   /** Acknowledged message in this work's parent chat, for direct navigation. */
   resultPublicationId?: string
-  /** Current acknowledged review; does not complete the durable work itself. */
-  resultConclusion?: { kind: "ready" | "blocked"; summary: string;
+  /** Current acknowledged result; reported is not independent verification. */
+  resultConclusion?: { kind: "reported" | "ready" | "blocked"; summary: string;
     /** Display only: remaining background work consists solely of this work's silent services. */
     backgroundServicesOnly?: true
     /** Display only: an acknowledged result's required service has stopped. */

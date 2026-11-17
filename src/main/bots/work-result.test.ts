@@ -60,6 +60,129 @@ function settle(
 }
 
 describe("private work result settlement", () => {
+  it("reads a suppressed background cancellation receipt without resuming the stopped task", () => {
+    const f = fixture()
+    beginVerifiedWork(f)
+    f.store.acceptCommand(f.task.id, { id: "cancelled-background", threadId: f.work.threadId,
+      command: "wait then report", cwd: "/tmp", startedAt: 1000 })
+    f.store.settle(f.task.id, "completed", null, "Background started")
+    f.store.suppressCommands(f.work.threadId)
+    f.store.settleCommand({ id: "cancelled-background", threadId: f.work.threadId, exitCode: 130,
+      output: "Task cancelled by user.", cancelled: true, truncated: false })
+    const before = f.store.recentTasks()
+    expect(f.store.workHistoryCommands(f.bot.id, f.work.id, "incarnation")).toMatchObject({
+      coverage: "partial", commands: [], backgroundCommands: [{ id: "cancelled-background",
+        state: "cancelled", startedAt: "1970-01-01T00:00:01.000Z", observedAt: expect.any(String),
+        result: { exitCode: 130, cancelled: true, output: "Task cancelled by user." } }]
+    })
+    expect(f.store.recentTasks()).toEqual(before)
+    expect(f.store.workHistoryCommands(f.bot.id, f.work.id, "another-incarnation")).toEqual({
+      coverage: "unavailable", commands: []
+    })
+    const user = f.store.enqueue({ botId: f.bot.id, requestId: "new-input", message: "Continue with a different task" })
+    f.store.transition(user.id, "running")
+    f.store.recordPreparedInput(user.id, user.message)
+    const next = f.store.sendWork({ taskId: user.id, callId: "next", key: "next" }, f.work.id, user.message)
+    f.store.transition(next.id, "running")
+    f.store.recordPreparedInput(next.id, next.message)
+    expect(f.store.armWorkResultReview(next.id, "incarnation")).toBe(true)
+    expect(f.store.workHistoryCommands(f.bot.id, f.work.id, "incarnation")).not.toHaveProperty("backgroundCommands")
+  })
+
+  it("reads a cancelled command launched by a callback whose owner remains the original user", () => {
+    const f = fixture()
+    beginVerifiedWork(f)
+    f.store.acceptCommand(f.task.id, { id: "first", threadId: f.work.threadId,
+      command: "first step", cwd: "/tmp", startedAt: 1000 })
+    f.store.settle(f.task.id, "completed", null, "Started")
+    f.store.settleCommand({ id: "first", threadId: f.work.threadId, exitCode: 0,
+      output: "First done", cancelled: false, truncated: false })
+    const callback = f.store.recentTasks().find(task => task.origin.kind === "notification" && task.origin.key === "first")!
+    f.store.transition(callback.id, "running")
+    f.store.acceptCommand(callback.id, { id: "second", threadId: f.work.threadId,
+      command: "second step", cwd: "/tmp", startedAt: 1010 })
+    f.store.settle(callback.id, "completed", null, "Second pending")
+    f.store.suppressCommands(f.work.threadId)
+    f.store.settleCommand({ id: "second", threadId: f.work.threadId, exitCode: 130,
+      output: "Task cancelled by user.", cancelled: true, truncated: false })
+    const before = f.store.recentTasks()
+    const result = f.store.workHistoryCommands(f.bot.id, f.work.id, "incarnation")
+    expect(result).toMatchObject({ taskId: callback.id, backgroundCommands: [
+      { id: "second", sourceTaskId: f.task.id, state: "cancelled", result: { cancelled: true, exitCode: 130 } },
+      { id: "first", sourceTaskId: f.task.id, state: "completed", result: { exitCode: 0 } }
+    ] })
+    expect(f.store.recentTasks()).toEqual(before)
+    // Retention can remove the first settled receipt while the second still runs.
+    f.db.run("DELETE FROM bot_commands WHERE id=?", ["first"])
+    expect(f.store.workHistoryCommands(f.bot.id, f.work.id, "incarnation")).toMatchObject({
+      backgroundCommands: [{ id: "second", sourceTaskId: f.task.id, state: "cancelled" }]
+    })
+    expect(f.store.recentTasks()).toEqual(before)
+  })
+
+  it("reads retained command failure from a background callback without a new user-input preparation", () => {
+    const f = fixture()
+    beginVerifiedWork(f)
+    f.store.acceptCommand(f.task.id, { id: "background", threadId: f.work.threadId,
+      command: "check", cwd: "/tmp", startedAt: 1 })
+    f.store.settle(f.task.id, "completed", null, "Background started")
+    f.store.settleCommand({ id: "background", threadId: f.work.threadId, exitCode: 0,
+      output: "Finished", cancelled: false, truncated: false })
+    const callback = f.store.recentTasks().find(task => task.origin.kind === "notification" &&
+      task.origin.key === "background")!
+    expect(callback).toBeDefined()
+    f.store.transition(callback.id, "running")
+    f.store.recordWorkResultEvidence(callback.id, { foregroundCommand: {
+      callId: "callback-check", command: "node --test", exitCode: 1, output: "fail 1", excerpt: false
+    } })
+    f.store.transition(callback.id, "cancelled")
+    expect(f.store.workHistoryCommands(f.bot.id, f.work.id, "incarnation")).toMatchObject({
+      coverage: "partial", taskId: callback.id, state: "cancelled",
+      commands: [{ callId: "callback-check", exitCode: 1, output: "fail 1" }],
+      backgroundCommands: [{ id: "background", state: "completed", result: { output: "Finished", exitCode: 0 } }]
+    })
+  })
+
+  it.each([false, true])("reads retained command failure after cancellation without reviving work (injected=%s)", (injected) => {
+    const f = fixture()
+    beginVerifiedWork(f)
+    if (injected) {
+      const supplement = f.store.enqueue({ botId: f.bot.id, workId: f.work.id,
+        requestId: "supplement", message: "Use the revised format" })
+      f.store.recordPreparedInput(supplement.id, supplement.message)
+      expect(f.store.injectIntoRun(supplement.id, f.task.id)).toBe(true)
+    }
+    for (let index = 0; index < 5; index++)
+      f.store.recordWorkResultEvidence(f.task.id, { foregroundCommand: {
+        callId: `command-${index}`, command: "Compound shell command", exitCode: 0,
+        output: index === 4 ? "EXIT=1; fail 1" : "earlier output", excerpt: false
+      } })
+    f.store.transition(f.task.id, "cancelled")
+    const before = f.store.recentTasks()
+    const result = f.store.workHistoryCommands(f.bot.id, f.work.id, "incarnation")
+    expect(result).toMatchObject({ coverage: "partial", taskId: f.task.id, state: "cancelled" })
+    expect(result.commands).toHaveLength(3)
+    expect(result.commands.at(-1)).toMatchObject({ exitCode: 0, output: "EXIT=1; fail 1" })
+    expect(f.store.workHistoryCommands(f.bot.id, f.work.id, "replacement")).toEqual({
+      coverage: "unavailable", commands: []
+    })
+    expect(() => f.store.workHistoryCommands("another-bot", f.work.id, "incarnation")).toThrow()
+    expect(f.store.recentTasks()).toEqual(before)
+    const user = f.store.enqueue({ botId: f.bot.id, requestId: "resume", message: "Try the revised task" })
+    f.store.transition(user.id, "running")
+    f.store.recordPreparedInput(user.id, user.message)
+    const next = f.store.sendWork({ taskId: user.id, callId: "send", key: "send" }, f.work.id, user.message)
+    expect(f.store.workHistoryCommands(f.bot.id, f.work.id, "incarnation")).toMatchObject({
+      coverage: "unavailable", commands: []
+    })
+    f.store.transition(next.id, "running")
+    f.store.recordPreparedInput(next.id, next.message)
+    expect(f.store.armWorkResultReview(next.id, "incarnation")).toBe(true)
+    expect(f.store.workHistoryCommands(f.bot.id, f.work.id, "incarnation")).toMatchObject({
+      taskId: next.id, coverage: "unavailable", commands: []
+    })
+  })
+
   const ready = { kind: "ready" as const, summary: "核验完成。", evidenceIds: [] as string[] }
 
   it("retains a verified command that exits while another tool waits for the user", () => {
@@ -487,8 +610,11 @@ describe("private work result settlement", () => {
     expect(store.getWorkResultReview(privateReview(store).id)?.requests).toEqual([
       { id: initial.id, text: "Prepare a local report. Do not send it outside the workspace." },
       { id: supplement.id, text: "Use the approved February data" },
-      { id: task.id, text: "Prepare a local report" }
+      { id: task.id, text: task.message }
     ])
+    expect(task.message).toContain("Do not send it outside the workspace.")
+    expect(task.message).toContain("Use the approved February data")
+    expect(task.message).not.toContain(unrelated.message)
   })
 
   it.each(["assignment", "injected supplement"])("excludes main-chat prose after the target rewrites the %s", rewritten => {
@@ -670,7 +796,7 @@ describe("private work result settlement", () => {
     expect(f.store.im.fileStatuses(f.bot.id, other.work.threadId, "updated-file")).toEqual([])
   })
 
-  it("dispatches at most two repairs on the original work and keeps their budget across recovery", () => {
+  it.each([false, true])("bounds repairs across recovery (normal report=%s)", normal => {
     const f = fixture()
     beginVerifiedWork(f)
     f.store.settle(f.task.id, "completed", null, "First outcome")
@@ -693,8 +819,18 @@ describe("private work result settlement", () => {
     }
     const review = privateReview(store)
     expect(store.getWorkResultReview(review.id)?.remainingRepairs).toBe(0)
-    expect(store.commitWorkResultReview(review.id, { kind: "repair", gap: "Still missing",
-      instruction: "Try again", evidenceIds: [] })).toMatchObject({ state: "publish", publication: { kind: "blocked" } })
+    expect(() => store.commitWorkResultReview(review.id, { kind: "repair", gap: "Still missing",
+      instruction: "Try again", evidenceIds: [] }, [], [], undefined, undefined, true)).toThrow("自动跟进已达上限")
+    expect(store.getWorkResultReview(review.id)?.remainingRepairs).toBe(0)
+    if (normal) {
+      const response = { messageId: "bounded-normal-final", finalText: "已有成果保留，自动跟进达到上限。" }
+      const result = store.commitWorkResultReview(review.id, null, [], [], undefined, response)
+      expect(result).toMatchObject({ state: "publish", publication: { responseMessageId: response.messageId } })
+      expect(store.commitWorkResultReview(review.id, null, [], [], undefined, response)).toEqual(result)
+    } else {
+      expect(store.commitWorkResultReview(review.id, { kind: "repair", gap: "Still missing",
+        instruction: "Try again", evidenceIds: [] })).toMatchObject({ state: "publish", publication: { kind: "blocked" } })
+    }
     expect(store.recentTasks().filter(task => task.origin.kind === "work" && task.origin.dispatch === "repair")).toHaveLength(2)
   })
 
@@ -828,6 +964,22 @@ describe("private work result settlement", () => {
     const review = f.store.getWorkResultReview(privateReview(f.store).id)!
     expect(review.commands.map(command => command.id)).toEqual(["after-input"])
     expect(review.outcome.text).toBe("Current check finished")
+  })
+
+  it.each([9, 10])("marks bounded request history as incomplete with %s supplements", count => {
+    const f = fixture()
+    beginVerifiedWork(f)
+    const inputs = Array.from({ length: count }, (_, index) => {
+      const input = f.store.enqueue({ botId: f.bot.id, workId: f.work.id,
+        requestId: `scope-${index}`, message: `Approved constraint ${index}` })
+      f.store.recordPreparedInput(input.id, input.message)
+      expect(f.store.injectIntoRun(input.id, f.task.id)).toBe(true)
+      return input
+    })
+    f.store.settleRun(f.task.id, inputs.map(input => input.id), "completed", null, "Result")
+    const result = f.store.getWorkResultReview(privateReview(f.store).id)!
+    expect(result.requestsOmitted).toBe(count > 9)
+    expect(result.requests.slice(1).map(input => input.id)).toEqual(inputs.slice(-9).map(input => input.id))
   })
 
   it("uses the admitted supplement in the same physical result review without replenishing the budget", () => {
@@ -1023,17 +1175,24 @@ describe("private work result settlement", () => {
     expect(publication.origin).toMatchObject({ review: { phase: "publish" } })
     f.store.transition(publication.id, "running")
     expect(f.store.getWorkResultPublication(publication.id)).toMatchObject({
-      executionTaskId: receipt.id, kind: "blocked",
-      summary: expect.stringMatching(/未自动核查[\s\S]*Original completed work/),
+      executionTaskId: receipt.id, kind: "reported",
+      summary: expect.stringMatching(/原任务返回的结果[\s\S]*Original completed work/),
       attachments: [{ sourceTaskId: f.task.id, finalMessageId: "final", file }]
     })
     expect(f.store.acknowledgeWorkResultPublication(publication.id)).toBe(true)
     expect(f.store.acknowledgeWorkResultPublication(publication.id)).toBe(false)
+    f.store.changeWorkControl({ botId: f.bot.id, workId: f.work.id,
+      expectedVersion: f.store.getWork(f.bot.id, f.work.id).version, action: "return",
+      operationId: "return-after-report", confirmedTaskIds: [held.id] })
+    const reopened = new BotStore(f.db)
+    expect(reopened.getWork(f.bot.id, f.work.id).resultConclusion?.kind).toBe("reported")
+    expect(reopened.getTask(held.id).state).toBe("queued")
+    expect(resolveBotWorkStatus(reopened.getWork(f.bot.id, f.work.id)).label).toBe("等待执行")
     f.store.flushReplies()
     expect(notices(f.store)).toHaveLength(1)
   })
 
-  it("fences a private decision already running when the user takes control", () => {
+  it("allows only reporting from a running result turn after takeover and settles interruption", () => {
     const f = fixture()
     beginVerifiedWork(f)
     f.store.settle(f.task.id, "completed", null, "Original result")
@@ -1041,14 +1200,49 @@ describe("private work result settlement", () => {
     f.store.changeWorkControl({ botId: f.bot.id, workId: f.work.id,
       expectedVersion: f.store.getWork(f.bot.id, f.work.id).version, action: "take", operationId: "take-review" })
     expect(f.store.finishWorkControlHandoffs(new Set([review.threadId]))).toBe(true)
-    expect(f.store.getWorkResultReview(review.id)).toBeUndefined()
+    expect(f.store.getWorkResultReview(review.id)?.remainingRepairs).toBe(0)
     expect(() => f.store.commitWorkResultReview(review.id, {
       kind: "repair", gap: "Late decision", instruction: "Should not run", evidenceIds: []
-    })).toThrow("原执行或核查资格已变化")
+    }, [], [], undefined, undefined, true)).toThrow("不能自动执行补修")
     f.store.settle(review.id, "cancelled", null)
     f.store.flushReplies()
     expect(notices(f.store).filter(task => task.state === "queued").map(task => task.origin))
       .toEqual([expect.objectContaining({ review: { requestTaskId: f.task.id, phase: "publish" } })])
+    const publication = notices(f.store).find(task => task.state === "queued")!
+    f.store.transition(publication.id, "running")
+    expect(f.store.getWorkResultPublication(publication.id)?.kind).toBe("interrupted")
+    f.store.settle(publication.id, "completed", null)
+    f.store.changeWorkControl({ botId: f.bot.id, workId: f.work.id,
+      expectedVersion: f.store.getWork(f.bot.id, f.work.id).version, action: "return",
+      operationId: "return-report", confirmedTaskIds: [] })
+    const user = f.store.enqueue({ botId: f.bot.id, requestId: "resume-report", message: "Continue handling the result" })
+    f.store.transition(user.id, "running")
+    f.store.recordPreparedInput(user.id, user.message)
+    const source = { taskId: user.id, callId: "resume-report", key: "resume-report" }
+    expect(f.store.changeWork(f.bot.id, f.work.id, f.store.getWork(f.bot.id, f.work.id).version,
+      source.callId, "continue", source).resultReviewState).toBe("waiting")
+    f.store.settle(user.id, "completed", null)
+    const resumed = privateReview(f.store)
+    expect(f.store.getWorkResultReview(resumed.id)?.remainingRepairs).toBe(0)
+    expect(f.store.commitWorkResultReview(resumed.id, null, [], [], undefined,
+      { messageId: "resumed-report", finalText: "Original result" })).toMatchObject({ state: "publish",
+        publication: { kind: "reported", responseMessageId: "resumed-report" } })
+    expect(f.store.getTask(f.task.id).state).toBe("completed")
+  })
+
+  it("keeps a failed original execution blocked when handing control to the user", () => {
+    const f = fixture()
+    beginVerifiedWork(f)
+    f.store.changeWorkControl({ botId: f.bot.id, workId: f.work.id,
+      expectedVersion: f.store.getWork(f.bot.id, f.work.id).version, action: "take", operationId: "take-failed" })
+    f.store.settle(f.task.id, "failed", "Execution failed", "Partial result")
+    f.store.finishWorkControlHandoffs(new Set())
+    f.store.flushReplies()
+    const publication = notices(f.store).find(task => task.state === "queued")!
+    f.store.transition(publication.id, "running")
+    expect(f.store.getWorkResultPublication(publication.id)).toMatchObject({
+      kind: "blocked", summary: expect.stringContaining("Partial result")
+    })
   })
 
   it.each([false, true])("holds the accepted repair through take and return, honoring exact cancellation (%s)", cancelled => {
@@ -1213,6 +1407,8 @@ describe("private work result settlement", () => {
   it("records an interrupted review once, without re-running the original or pretending the outcome was verified", () => {
     const f = fixture()
     beginVerifiedWork(f)
+    const file = { filePath: "/work/report.md", attachmentPath: "/retained/report.md", name: "report.md", size: 10 }
+    f.store.recordWorkResultEvidence(f.task.id, { callId: "retained-file", files: [file] })
     f.store.settle(f.task.id, "completed", null, "Original output")
     const review = privateReview(f.store)
     const reopened = new BotStore(f.db)
@@ -1225,8 +1421,19 @@ describe("private work result settlement", () => {
     const publication = notices(reopened).find(task => task.state === "queued")!
     reopened.transition(publication.id, "running")
     expect(reopened.getWorkResultPublication(publication.id)).toMatchObject({
-      kind: "interrupted", executionTaskId: f.task.id, summary: expect.stringContaining("已有成果待核验")
+      kind: "interrupted", executionTaskId: f.task.id,
+      summary: "结果回传中断，已有执行记录和附件仍保留在原任务中。可以查看原任务，或在本对话说「继续处理结果」。",
+      attachments: [{ sourceTaskId: f.task.id, callId: "retained-file", file }]
     })
+    // Without the Host final callback receipt, do not guess a transcript final
+    // or turn a partially persisted report into a successful completion.
+    expect(reopened.getWorkResultPublication(publication.id)?.responseMessageId).toBeUndefined()
+    expect(notices(reopened).filter(task => task.state === "queued" || task.state === "running")).toHaveLength(1)
+    expect(reopened.acknowledgeWorkResultPublication(publication.id)).toBe(true)
+    reopened.settle(publication.id, "completed", null)
+    reopened.recover()
+    reopened.flushReplies()
+    expect(notices(reopened).filter(task => task.state === "queued" || task.state === "running")).toHaveLength(0)
   })
 
   it("resumes an interrupted result through the original desktop Continue receipt with its remaining budget", () => {
@@ -2093,7 +2300,6 @@ describe("private work result settlement", () => {
         ...(scenario === "unbound" ? {} : { serviceChecks: { preview: inspectedCheckId } })
       }
       const inspected = scenario === "unread" ? [] : [reference]
-      expect(f.store.canPublishReadyWorkReview(f.review.id, decision, inspected)).toBe(false)
       const receipt = f.store.commitWorkResultReview(f.review.id, decision, [], inspected)
       expect(receipt).toMatchObject({ state: "publish", publication: { kind: "blocked", attachments: [{ file: f.file }] } })
       expect(f.db.exec("SELECT service_ready_json FROM bot_commands WHERE id='preview'")[0].values[0][0]).toBeNull()
@@ -2111,7 +2317,6 @@ describe("private work result settlement", () => {
     const decision = { ...ready, serviceIds: ["exited-preview", "preview"], evidenceIds: [inspectedCheckId],
       serviceChecks: { preview: inspectedCheckId } }
     const proof = [inspectedForeground(f)]
-    expect(f.store.canPublishReadyWorkReview(f.review.id, decision, proof)).toBe(false)
     expect(f.store.commitWorkResultReview(f.review.id, decision, [], proof)).toMatchObject({
       state: "publish", publication: { kind: "blocked", attachments: [{ file: f.file }] }
     })
@@ -2505,7 +2710,7 @@ describe("independent work result return", () => {
     expect(reopened.getTask(later.id).message).toBe("REMOVED SUPPLEMENT")
   })
 
-  it.each([false, true])("reports the original schedule identity without its instruction (blocked: %s)", blocked => {
+  it.each([false, true])("marks scheduled result context incomplete and identifies the exact occurrence after editing (blocked: %s)", blocked => {
     const f = fixture()
     settle(f.store, f.task)
     const input = {
@@ -2523,6 +2728,10 @@ describe("independent work result return", () => {
       workId: f.work.id, message: input.message, origin: { kind: "schedule", scheduleId: schedule.id }
     })
     f.store.transition(trigger.id, "running")
+    if (!blocked) {
+      f.store.recordPreparedInput(trigger.id, "Approved routine instruction")
+      f.store.recordPreparedInput(trigger.id, null)
+    }
     const edited = f.store.saveSchedule(f.bot.id, {
       ...input, message: "Edited routine instruction", enabled: false
     }, null, f.store.schedules()[0])
@@ -2533,16 +2742,104 @@ describe("independent work result return", () => {
         { outcome: "error", code: "prompt_blocked" })
     else
       f.store.settle(trigger.id, "completed", null, "Receipt label is BLUE")
-    f.store.flushReplies()
-    const notice = notices(f.store).find(task => task.requestId === `work-result-${trigger.id}`)!
+    const reopened = new BotStore(f.db)
+    reopened.flushReplies()
+    const notice = notices(reopened).find(task => task.requestId === `work-result-${trigger.id}`)!
     expect(notice.origin).toMatchObject({ executionTaskId: trigger.id })
     expect(JSON.parse(notice.message)).toMatchObject({
       executionState: blocked ? "failed" : "completed",
-      executionSource: { kind: "schedule", scheduleId: schedule.id },
-      requestContext: { messages: [], messagesOmitted: blocked },
+      executionSource: { kind: "schedule", scheduleId: schedule.id, executionTaskId: trigger.id,
+        scheduleAtReport: { exists: true, enabled: false, nextRunAt: null, recordedAt: expect.any(String) } },
+      requestContext: { messages: [], messagesOmitted: true },
       result: blocked ? expect.stringContaining("输入检查未通过") : "Receipt label is BLUE"
     })
+    if (blocked) expect(JSON.parse(notice.message).executionSource).not.toHaveProperty("instruction")
+    else expect(JSON.parse(notice.message).executionSource.instruction).toEqual({
+      text: "Approved routine instruction", truncated: false
+    })
+    expect(reopened.getTask(trigger.id).origin).not.toHaveProperty("allowedInputFileIds")
+    expect(() => reopened.recordPreparedInput(trigger.id, "late overwrite")).toThrow("已停止")
     expect(notice.message).not.toMatch(/Original routine instruction|Edited routine instruction|Private submit diagnostic/)
+  })
+
+  it("preserves the admitted routine instruction after checkpoint recovery without replay", () => {
+    const f = fixture()
+    settle(f.store, f.task)
+    const input = { name: "Read receipt", message: "UNAPPROVED original instruction",
+      frequency: "once" as const, enabled: true, runAt: "2030-01-01T00:00:00.000Z" }
+    const schedule = f.store.saveSchedule(f.bot.id, input, input.runAt, undefined, undefined,
+      { workId: f.work.id, operationId: "checkpoint-routine" })
+    f.store.fireSchedule(schedule, null)
+    const trigger = f.store.nextQueued([])!
+    f.store.transition(trigger.id, "running")
+    f.store.recordPreparedInput(trigger.id, "Only read the existing receipt; do not regenerate it.")
+    f.store.deferTask(trigger.id, "after-receipt-read")
+    const reopened = new BotStore(f.db)
+    expect(reopened.taskCheckpoint(trigger.id)).toBe("after-receipt-read")
+    reopened.recover()
+    reopened.flushReplies()
+    reopened.recover()
+    reopened.flushReplies()
+    expect(reopened.getTask(trigger.id).state).toBe("interrupted")
+    const reports = notices(reopened).filter(task => task.requestId === `work-result-${trigger.id}`)
+    expect(reports).toHaveLength(1)
+    const report = JSON.parse(reports[0].message)
+    expect(report.executionState).toBe("interrupted")
+    expect(report.executionSource.instruction).toEqual({
+      text: "Only read the existing receipt; do not regenerate it.", truncated: false
+    })
+    expect(reports[0].message).not.toContain("UNAPPROVED original instruction")
+    expect(reopened.recentTasks().filter(task => task.origin.kind === "schedule" &&
+      task.origin.scheduleId === schedule.id)).toHaveLength(1)
+  })
+
+  it.each(["finished", "rearmed", "deleted"] as const)("reports routine state independently of the completed occurrence (%s)", state => {
+    const f = fixture()
+    settle(f.store, f.task)
+    const input = { name: "Routine", message: "Read only", frequency: "once" as const,
+      enabled: true, runAt: "2030-01-01T00:00:00.000Z" }
+    const schedule = f.store.saveSchedule(f.bot.id, input, input.runAt, undefined, undefined,
+      { workId: f.work.id, operationId: "routine" })
+    f.store.fireSchedule(schedule, null)
+    const trigger = f.store.nextQueued([])!
+    f.store.transition(trigger.id, "running")
+    f.store.recordPreparedInput(trigger.id, "Admitted scope")
+    f.store.settle(trigger.id, "completed", null, "Exists")
+    const fired = f.store.schedules()[0]
+    const future = "2031-01-01T00:00:00.000Z"
+    if (state === "rearmed") f.store.saveSchedule(f.bot.id, { ...input, runAt: future }, future, fired)
+    if (state === "deleted") f.store.removeSchedule(fired.id, fired.version)
+    f.store.flushReplies()
+    const notice = notices(f.store).find(task => task.requestId === `work-result-${trigger.id}`)!
+    const report = JSON.parse(notice.message)
+    expect(report.pendingExecution).toBe(false)
+    expect(report.executionSource.scheduleAtReport).toEqual({
+      recordedAt: expect.any(String), exists: state !== "deleted",
+      ...(state !== "deleted" ? { frequency: "once", enabled: state === "rearmed",
+        nextRunAt: state === "rearmed" ? future : null,
+        lastTriggeredAt: state === "rearmed" ? null : fired.lastTriggeredAt } : {})
+    })
+    expect(report.executionSource.instruction.text).toBe("Admitted scope")
+  })
+
+  it("reports the committed automatic pause when a routine's directory is missing", () => {
+    const f = fixture()
+    settle(f.store, f.task)
+    const schedule = f.store.saveSchedule(f.bot.id, {
+      name: "Routine", message: "Read only", frequency: "interval", intervalMinutes: 10, enabled: true
+    }, "2030-01-01T00:00:00.000Z", undefined, undefined,
+      { workId: f.work.id, operationId: "routine" })
+    f.store.fireSchedule(schedule, "2030-01-01T00:10:00.000Z")
+    const trigger = f.store.nextQueued([])!
+    expect(f.store.pauseScheduleForMissingDirectory(trigger.id, f.store.schedules()[0])).toBe(true)
+    f.store.flushReplies()
+    expect(f.store.getTask(trigger.id).state).toBe("failed")
+    const notice = notices(f.store).find(task => task.requestId === `work-result-${trigger.id}`)!
+    const report = JSON.parse(notice.message)
+    expect(report.result).toContain("例行已暂停")
+    expect(report.executionSource.scheduleAtReport).toMatchObject({ exists: true, frequency: "interval",
+      enabled: false, nextRunAt: null, lastTriggeredAt: expect.any(String) })
+    expect(report.executionSource).not.toHaveProperty("instruction")
   })
 
   it("retains an explicitly empty prepared body and refuses to change it after cancellation", () => {

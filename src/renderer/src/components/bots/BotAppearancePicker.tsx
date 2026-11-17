@@ -1,7 +1,7 @@
 import { botErrorMessage } from "@/lib/bot-error-message"
 import { botAppearanceColor } from "@/lib/bot-chat-accent"
 import { botAvatarRings } from "@/assets/bot-avatar-rings"
-import { useRef, useState, type ComponentProps } from "react"
+import { useRef, useState } from "react"
 import { Loader2 } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import {
@@ -11,7 +11,6 @@ import {
   type BotDefinition
 } from "../../../../shared/bots/contracts"
 import { BotAvatar } from "./BotAvatar"
-import { BotRuntimeAvatar } from "./BotRuntimeAvatar"
 import { BOT_COLORS } from "../../../../shared/bots/appearance"
 const SHAPE_LABELS: Record<BotAvatarShape, string> = {
   drop: "水滴",
@@ -89,16 +88,10 @@ export function BotAppearancePicker({
 
 export function BotAvatarEditor({
   bot,
-  client,
-  busy,
-  settlement,
-  waiting = false
+  client
 }: {
   bot: BotDefinition
   client: BotClient
-  busy: boolean
-  settlement?: ComponentProps<typeof BotRuntimeAvatar>["settlement"]
-  waiting?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -126,14 +119,10 @@ export function BotAvatarEditor({
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button className="bot-avatar-edit-trigger" aria-label="编辑 Bot 头像">
-          <BotRuntimeAvatar
-            threadId={bot.threadId}
+          <BotAvatar
             color={current.color}
             shape={current.shape}
             size={64}
-            busy={busy}
-            settlement={settlement}
-            waiting={waiting}
           />
         </button>
       </PopoverTrigger>

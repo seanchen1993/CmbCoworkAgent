@@ -872,6 +872,11 @@ export function createBotScheduleTools(
           }
           if (input.priorOperation !== undefined)
             throw new Error("核对例行回执请使用 recover")
+          if (input.afterSeconds !== undefined &&
+              (input.action !== "save" || input.runAt !== undefined || input.runAtTime !== undefined ||
+                input.weekday !== undefined || input.intervalMinutes !== undefined ||
+                (input.frequency !== undefined && input.frequency !== "once")))
+            throw new Error("相对时间仅用于一次安排，不能同时指定其他时间规则")
           const schedules = host
               .snapshot()
               .schedules.filter(
@@ -932,7 +937,13 @@ export function createBotScheduleTools(
           const schedule = parseSchedule({
             ...prior,
             ...input,
-            frequency: input.frequency ?? (input.kind === "fixed_reminder" ? "once" : prior?.frequency),
+            // Like DSH schedule_create.after_seconds, resolve relative time in the Host.
+            // The admitted request timestamp also keeps retries from moving the deadline.
+            ...(input.afterSeconds !== undefined
+              ? { runAt: new Date(host.desktopScheduleRequestTime(task.id) + input.afterSeconds * 1_000).toISOString() }
+              : {}),
+            frequency: input.afterSeconds !== undefined ? "once" :
+              input.frequency ?? (input.kind === "fixed_reminder" ? "once" : prior?.frequency),
             message: input.message ?? prior?.message ?? (input.workMonitor ? "查看原任务的已记录进展" : undefined),
             enabled: input.enabled ?? prior?.enabled ?? true
           })
@@ -985,7 +996,7 @@ export function createBotScheduleTools(
           (desktopMain ? "" : " Routines need standalone authorized instructions.") +
           " Include a timezone in runAt. Daily/weekly use HH:mm (weekday 0=Sunday), interval minimum 5 minutes. Missed intervals coalesce. Report success only after a save receipt." +
           (desktopMain
-            ? ' For an existing-work follow-up or fixed reminder, choose exactly one mode. To check recorded task progress without running it, set workMonitor with the exact workId from bot_work_list. For one check, set frequency=once, runAt, and workMonitor={workId, mode:"report"}. Confirm an observation only when the save receipt contains workMonitor. report checks at each scheduled time, change reports progress changes, new_result reports a new execution result, until_work_completed reports once when the user marks the work complete. To execute authorized work later, set top-level workId and complete standalone instructions in message. For one-time reminders set kind=fixed_reminder, runAt, and the exact text in message. This only repeats that text and never checks task status or executes its instructions. Do not substitute execution routines for unavailable PR, file or service checks. Use a stable requestKey within the current turn for these three modes. Optional expiresAt must include a timezone. For a lost reply from an earlier desktop user turn, use recover with the known schedule id or priorOperation sourceRequestId, then recheck its exact receiptId if needed. Recover only reads existing receipts, including removed routines. If no exact operation can be confirmed, check the list or ask. Do not save a second routine as a retry.'
+            ? ' For an existing-work follow-up or fixed reminder, choose exactly one mode. To check recorded task progress without running it, set workMonitor with the exact workId from bot_work_list. For one check, set frequency=once, either runAt or afterSeconds, and workMonitor={workId, mode:"report"}. Confirm an observation only when the save receipt contains workMonitor. report checks at each scheduled time, change reports progress changes, new_result reports a new execution result, until_work_completed reports once when the user marks the work complete. To execute authorized work later, set top-level workId and complete standalone instructions in message. For one-time reminders set kind=fixed_reminder, either runAt or afterSeconds, and the exact text in message. This only repeats that text and never checks task status or executes its instructions. Do not substitute execution routines for unavailable PR, file or service checks. Use a stable requestKey within the current turn for these three modes. Optional expiresAt must include a timezone. For a lost reply from an earlier desktop user turn, use recover with the known schedule id or priorOperation sourceRequestId, then recheck its exact receiptId if needed. Recover only reads existing receipts, including removed routines. If no exact operation can be confirmed, check the list or ask. Do not save a second routine as a retry.'
             : " For a one-time routine, set frequency=once and runAt."),
         schema: z.object({
           action: z.enum(desktopMain ? ["list", "save", "remove", "recover"] : ["list", "save", "remove"]),
@@ -1007,6 +1018,8 @@ export function createBotScheduleTools(
             .optional(),
           frequency: z.enum(["once", "daily", "weekly", "interval"]).optional(),
           ...(desktopMain ? {
+            afterSeconds: z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
+              .describe("For a one-time relative request such as in five minutes, supply 300 here instead of calculating runAt. Measured from this user request; cannot combine with other timing fields.").optional(),
             kind: z.literal("fixed_reminder").describe("Repeat fixed message text once, without checking task status or executing instructions.").optional(),
             workId: z.string().min(1).max(128).describe("Execution destination for explicitly authorized future work. Use workMonitor for recorded progress checks.").optional(),
             expiresAt: z.string().max(64).optional(),
@@ -1014,7 +1027,7 @@ export function createBotScheduleTools(
               workId: z.string().max(128),
               mode: z.enum(BOT_WORK_MONITOR_MODES),
               expiresAt: z.string().max(64).optional()
-            }).strict().describe('Read recorded task state without executing work. For one check use frequency=once, runAt, and mode="report".').optional(),
+            }).strict().describe('Read recorded task state without executing work. For one check use frequency=once, either runAt or afterSeconds, and mode="report".').optional(),
             requestKey: z.string().max(128).optional(),
             priorOperation: botScheduleOperationQuery.optional()
           } : {}),

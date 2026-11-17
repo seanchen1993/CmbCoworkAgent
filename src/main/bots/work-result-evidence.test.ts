@@ -17,6 +17,40 @@ const text = (messageId: string, body = "evidence"): BotResultEvidence => ({
 })
 
 describe("work result evidence", () => {
+  it.each([2, 3] as const)("loads %s adjacent catalogue pages once without caching later authority", async pageCount => {
+    const entries = Array.from({ length: 27 }, (_, index) => text(String(index)))
+    let authorized = true
+    const load = vi.fn(() => authorized ? entries : null)
+    const reader = createBotResultEvidenceReader(binding, load)
+    const separate = createBotResultEvidenceReader(binding, () => entries)
+    const expected = [] as ReturnType<typeof separate.list>["items"]
+    let cursor: string | undefined
+    for (let i = 0; i < pageCount; i++) {
+      const page = separate.list(cursor)
+      expected.push(...page.items)
+      cursor = page.nextCursor
+    }
+    const combined = reader.list(undefined, pageCount)
+    expect(combined).toEqual({ items: expected, nextCursor: cursor })
+    expect(load).toHaveBeenCalledTimes(1)
+    expect(reader.list(combined.nextCursor)).toEqual(separate.list(cursor))
+    authorized = false
+    await expect(reader.read(combined.items[0].id, { signal: new AbortController().signal }))
+      .rejects.toThrow("不可访问")
+    expect(() => reader.list(undefined, pageCount)).toThrow("不可访问")
+  })
+
+  it.each([0, 8, 9, 16, 17, 24])("keeps exhaustion and record ordering for %s entries", count => {
+    const entries = Array.from({ length: count }, (_, index) => text(String(index)))
+    const reader = createBotResultEvidenceReader(binding, () => entries)
+    for (const pageCount of [2, 3] as const) {
+      const page = reader.list(undefined, pageCount)
+      expect(page.items.map(item => item.reference.messageId))
+        .toEqual(entries.slice(0, pageCount * 8).map((_, index) => String(index)))
+      expect(Boolean(page.nextCursor)).toBe(count > pageCount * 8)
+    }
+  })
+
   it("paginates exact records and refuses IDs or cursors from another review", async () => {
     const entries = Array.from({ length: 9 }, (_, index) => text(String(index)))
     const first = createBotResultEvidenceReader(binding, () => entries)

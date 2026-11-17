@@ -1,20 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { createHash } from "node:crypto"
-import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
-import type { ChatOpenAIFields } from "@langchain/openai"
 import type { BotDefinition, BotTask } from "../../shared/bots/contracts"
 import type { BotWorkItem } from "../../shared/bots/work"
-import { BOT_ROUTINE_SILENT } from "../../shared/bots/routine-silence"
-import { botWorkAttachmentHref, parseBotWorkAttachmentHref } from "../../shared/bots/work-history"
+import { botWorkAttachmentHref, botWorkHistoryHref, parseBotWorkAttachmentHref } from "../../shared/bots/work-history"
 import type { Message } from "../types"
 import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../agent/thread-run-lease"
 import type { LocalBotHost } from "./host"
-import { publishWorkResult, runPrivateWorkResultReview } from "./work-result-runtime"
+import { publishWorkResult, createWorkResultEvidenceAccess } from "./work-result-runtime"
 import { verifiedWorkResultThread } from "./work-result-thread"
 import {
   RetryableBotWorkPublicationError,
+  normalWorkResultSummary,
   type BotWorkResultAttachmentReference
 } from "./work-result-settlement"
 import { includeWorkResultAnswers, projectForegroundCommand, projectWorkResultProcess, type BotWorkResultProcess } from "./work-result-process"
@@ -23,21 +18,21 @@ const f = vi.hoisted(() => ({
   metadata: {} as Record<string, unknown>,
   configRef: "custom:original",
   model: "original",
-  constructModel: vi.fn<(fields: ChatOpenAIFields) => void>(),
+  constructModel: vi.fn(),
   invoke: vi.fn(),
   route: vi.fn(async () => ({ resolvedModelId: "custom:original" })),
   write: vi.fn(),
-  read: vi.fn(() => [] as Array<{ id: string; role: string; content: string }>),
+  read: vi.fn((_thread?: string, _ids?: string[]) => [] as Array<{ id: string; role: string; content: string }>),
   readPage: vi.fn(),
   mirror: vi.fn(),
   attention: vi.fn(),
   notify: vi.fn(),
   pet: vi.fn()
 }))
-vi.mock("@langchain/openai", () => ({
-  ChatOpenAI: class {
-    constructor(fields: ChatOpenAIFields) { f.constructModel(fields) }
-    invoke = f.invoke
+vi.mock("../agent/runtime", () => ({
+  getModelInstance: (...args: unknown[]) => {
+    f.constructModel(...args)
+    return { invoke: f.invoke }
   }
 }))
 vi.mock("../routing", () => ({ resolveModel: f.route }))
@@ -114,6 +109,7 @@ const contextFor = (target: BotWorkItem) => ({
   ]
 })
 const context = () => contextFor(work)
+
 afterEach(() => {
   f.metadata = {}
   f.configRef = "custom:original"
@@ -124,267 +120,6 @@ afterEach(() => {
 })
 
 describe("Bot work result runtime", () => {
-  it.each([[12, 0, 4, false], [8, 4, 4, false], [8, 4, 5, false], [8, 1, 8, true]] as const)(
-    "keeps service proofs and failed checks reachable with %i files and %i/%i commands (single service=%s)",
-    async (fileCount, others, background, single) => {
-      const serviceIds = single ? ["web"] : ["web", "api", "worker", "admin"]
-      const commit = vi.fn()
-      const fg = serviceIds.map((id, index) => ({ callId: `service-${id}`, command: "node",
-        startedAt: 10 + index, observedAt: 20 + index, exitCode: 0, output: `${id} HTTP 200`, excerpt: false }))
-      const files = Array.from({ length: fileCount }, (_, fileIndex) => ({
-        sourceTaskId: "exec", callId: `files-${Math.floor(fileIndex / 8)}`, fileIndex: fileIndex % 8, file: {
-          name: `file-${fileIndex}.md`, filePath: `/workspace/file-${fileIndex}.md`,
-          attachmentPath: `/workspace/.bot-deliveries/${"a".repeat(64)}/file-${fileIndex}.md`, size: 12
-        }
-      }))
-      const host = { workResultReview: () => ({ ...context(),
-        services: { items: serviceIds.map(id => ({ id, command: `start-${id}`, state: "accepted", ready: false })), truncated: false },
-        evidence: [{ taskId: "exec", threadId: work.threadId, finalMessageId: "final", deliveries: files,
-          foregroundCommands: [...fg, ...fg.slice(0, others).map((receipt, index) => ({
-            ...receipt, callId: `ordinary-${index}`, output: "Ordinary formatting check failed",
-            exitCode: background > 4 ? 1 : 0
-          }))] }],
-        defaultAttachments: files,
-        commands: Array.from({ length: background }, (_, index) => ({
-          id: `build-${index}`, sourceTaskId: "exec", state: "completed",
-          result: { output: `build ${index} complete`, exitCode: background > 4 && !single ? 1 : 0,
-            truncated: false, cancelled: false, unknown: false }
-        }))
-      }), commitWorkResultReview: commit } as unknown as LocalBotHost
-      f.read.mockReturnValue([{ id: "final", role: "assistant", content: "The services and reports are ready" }])
-      claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
-      let visible: string[] = []
-      let entries: string[] = []
-      f.invoke.mockImplementationOnce(async messages => {
-        const data = JSON.parse(messages[1].content)
-        visible = data.catalogue.flatMap(item =>
-          item.reference.messageId?.startsWith("foreground-command:service-") ? [item.reference.messageId] : [])
-        entries = data.catalogue.map(item => item.reference.messageId)
-        return { content: '{"kind":"blocked","summary":"Service proof unreachable","evidenceIds":[]}' }
-      })
-      await runPrivateWorkResultReview(host, bot, task, new AbortController().signal)
-      expect(visible.sort()).toEqual(serviceIds.map(id => `foreground-command:service-${id}`).sort())
-      if (single) expect(entries).toEqual(expect.arrayContaining(["foreground-command:ordinary-0", "final"]))
-    })
-
-  it.each(["blocked", "unbound-ready", "cancel-take"] as const)(
-    "reconsiders an in-flight review once under the current control policy (%s)", async scenario => {
-    const commit = vi.fn()
-    let settlingForServices = false
-    const health = { callId: "health", command: "node health.mjs", startedAt: 2, observedAt: 3,
-      exitCode: 0, output: "Expected preview: HTTP 200", excerpt: false }
-    const host = { workResultReview: () => ({
-      ...context(), remainingRepairs: settlingForServices ? 0 : 2, settlingForServices,
-      evidence: [{ taskId: "exec", threadId: work.threadId, deliveries: [], foregroundCommands: [health] }],
-      services: { items: [{ id: "preview", command: "node serve.mjs", state: "accepted", ready: false }], truncated: false }
-    }), canPublishReadyWorkReview: () => false, commitWorkResultReview: commit } as unknown as LocalBotHost
-    claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
-    let proofId = ""
-    f.invoke.mockImplementationOnce(async messages => {
-      expect(JSON.parse(messages[1].content)).toMatchObject({ remainingRepairs: 2 })
-      settlingForServices = true
-      return { content: JSON.stringify(scenario === "unbound-ready"
-        ? { kind: "ready", summary: "Preview ready", evidenceIds: [], serviceIds: ["preview"] }
-        : scenario === "cancel-take"
-          ? { kind: "blocked", summary: "Original release index gap", evidenceIds: [], serviceIds: [] }
-          : { kind: "blocked", summary: "Missing release index", evidenceIds: [], serviceIds: [] }) }
-    }).mockImplementationOnce(async messages => {
-      const data = JSON.parse(messages[1].content)
-      expect(data).toMatchObject({ remainingRepairs: 0, settlingForServices: true })
-      proofId = data.catalogue.find(item => item.reference.messageId === "foreground-command:health")!.id
-      return { content: JSON.stringify({ kind: "inspect", evidenceIds: [proofId] }) }
-    }).mockImplementationOnce(async () => {
-      if (scenario === "cancel-take") settlingForServices = false
-      return { content: JSON.stringify({ kind: "blocked", summary: "Missing release index", evidenceIds: [proofId],
-        serviceIds: ["preview"], serviceChecks: { preview: proofId } }) }
-    })
-    await runPrivateWorkResultReview(host, bot, task, new AbortController().signal)
-    expect(f.invoke).toHaveBeenCalledTimes(3)
-    if (scenario === "cancel-take")
-      expect(commit).toHaveBeenCalledExactlyOnceWith(task.id,
-        { kind: "blocked", summary: "Original release index gap", evidenceIds: [], serviceIds: [] }, [],
-        [{ evidenceId: proofId, kind: "foreground", sourceTaskId: "exec", callId: "health" }],
-        { decision: expect.objectContaining({ serviceChecks: { preview: proofId } }), attachments: [] })
-    else
-      expect(commit).toHaveBeenCalledExactlyOnceWith(task.id,
-        expect.objectContaining({ kind: "blocked", serviceChecks: { preview: proofId } }), [],
-        [{ evidenceId: proofId, kind: "foreground", sourceTaskId: "exec", callId: "health" }])
-  })
-
-  it.each([
-    ["transport failure with a blocked report", "blocked", null],
-    ["transport failure with a ready offline report", "ready", null],
-    ["file decision", "blocked", { kind: "needs_user", summary: "Which release index should be used?", evidenceIds: [], serviceIds: [] }],
-    ["explicitly offline report", "blocked", { kind: "blocked", summary: "Missing release index", evidenceIds: [], serviceIds: [] }],
-    ["report with no selection", "blocked", { kind: "blocked", summary: "Missing release index", evidenceIds: [] }]
-  ] as const)("keeps independently read service evidence across %s", async (_, kind, reconsidered) => {
-    const commit = vi.fn()
-    let settlingForServices = false
-    const health = { callId: "health", command: "node health.mjs", startedAt: 2, observedAt: 3,
-      exitCode: 0, output: "Expected preview: HTTP 200", excerpt: false }
-    const host = { workResultReview: () => ({
-      ...context(), remainingRepairs: settlingForServices ? 0 : 2, settlingForServices,
-      evidence: [{ taskId: "exec", threadId: work.threadId, deliveries: [], foregroundCommands: [health] }],
-      services: { items: [{ id: "preview", command: "node serve.mjs", state: "accepted", ready: false }], truncated: false }
-    }), canPublishReadyWorkReview: () => false, commitWorkResultReview: commit } as unknown as LocalBotHost
-    claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
-    let proofId = ""
-    const firstAssessment = () => ({ kind, summary: kind === "ready" ? "Offline report verified" : "Missing release index",
-      evidenceIds: [proofId], serviceIds: kind === "ready" ? [] : ["preview"], serviceChecks: { preview: proofId } })
-    f.invoke.mockImplementationOnce(async messages => {
-      const data = JSON.parse(messages[1].content)
-      proofId = data.catalogue.find(item => item.reference.messageId === "foreground-command:health")!.id
-      return { content: JSON.stringify({ kind: "inspect", evidenceIds: [proofId] }) }
-    }).mockImplementationOnce(async () => {
-      settlingForServices = true
-      return { content: JSON.stringify(firstAssessment()) }
-    }).mockImplementationOnce(async () => {
-      if (!reconsidered) throw new Error("provider transport closed")
-      return { content: JSON.stringify(reconsidered) }
-    })
-    await runPrivateWorkResultReview(host, bot, task, new AbortController().signal)
-    expect(f.invoke).toHaveBeenCalledTimes(3)
-    const validReconsideration = reconsidered && "serviceIds" in reconsidered ? reconsidered : null
-    expect(commit).toHaveBeenCalledExactlyOnceWith(task.id, validReconsideration ?? firstAssessment(), [],
-      [{ evidenceId: proofId, kind: "foreground", sourceTaskId: "exec", callId: "health" }],
-      ...(validReconsideration ? [{ decision: firstAssessment(), attachments: [] }] : []))
-  })
-
-  it.each(["foreground", "background", "unread", "uncited", "final text", "truncated"] as const)(
-    "passes only an actually read final command citation to service settlement (%s)", async scenario => {
-      const commit = vi.fn()
-      const receipt = { callId: "http-check", command: "node", startedAt: 2, observedAt: 3,
-        exitCode: 0, output: "HTTP 200 healthy=true", excerpt: false }
-      const host = { workResultReview: () => ({ ...context(),
-        services: { items: [{ id: "preview", command: "serve", state: "accepted", ready: false }], truncated: false },
-        evidence: [{ taskId: "exec", threadId: work.threadId, finalMessageId: "final", deliveries: [],
-          foregroundCommands: scenario === "background" || scenario === "truncated" ? [] : [receipt] }],
-        commands: scenario === "background" || scenario === "truncated" ? [{ id: "http-check", sourceTaskId: "exec", state: "completed",
-          result: { output: receipt.output, exitCode: 0, truncated: scenario === "truncated", cancelled: false, unknown: false } }] : []
-      }), commitWorkResultReview: commit } as unknown as LocalBotHost
-      f.read.mockReturnValue([{ id: "final", role: "assistant", content: "The preview is ready" }])
-      claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
-      let cited = ""
-      f.invoke.mockImplementationOnce(async messages => {
-        const data = JSON.parse(messages[1].content)
-        cited = data.catalogue.find(item => scenario === "final text" ? item.label === "原任务执行结果" : item.label.includes("命令"))!.id
-        return { content: JSON.stringify(scenario === "unread"
-          ? { kind: "ready", summary: "Preview ready", evidenceIds: [], serviceIds: ["preview"] }
-          : { kind: "inspect", evidenceIds: [cited] }) }
-      })
-      if (scenario !== "unread") f.invoke.mockImplementationOnce(async () => ({ content: JSON.stringify({
-        kind: "ready", summary: "Preview ready", serviceIds: ["preview"],
-        evidenceIds: scenario === "uncited" ? [] : [cited],
-        ...(scenario === "uncited" ? {} : { serviceChecks: { preview: cited } }) }) }))
-      try {
-        await runPrivateWorkResultReview(host, bot, task, new AbortController().signal)
-      } finally {
-        f.read.mockReturnValue([])
-        f.invoke.mockReset()
-      }
-      const args = commit.mock.calls[0]
-      expect(args.slice(0, 3)).toEqual([task.id, expect.objectContaining({ kind: "ready" }), []])
-      if (scenario === "foreground" || scenario === "background") {
-        expect(args[1].serviceChecks).toEqual({ preview: cited })
-        expect(args[3]).toEqual([{ evidenceId: cited, sourceTaskId: "exec", kind: scenario,
-          ...(scenario === "foreground" ? { callId: "http-check" } : { commandId: "http-check" }) }])
-      } else expect(args).toHaveLength(3)
-    }
-  )
-
-  it("never maps an inspected snapshot's claimed HTTP result to a process check", async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), "bot-snapshot-service-proof-")))
-    try {
-      const bytes = Buffer.from("HTTP 200 healthy=true; the preview is ready")
-      const retained = join(root, ".bot-deliveries", createHash("sha256").update(bytes).digest("hex"))
-      await mkdir(retained, { recursive: true })
-      await writeFile(join(retained, "report.mjs"), bytes)
-      f.metadata = { workspacePath: root }
-      const commit = vi.fn()
-      const host = { workResultReview: () => ({ ...context(), commands: [],
-        services: { items: [{ id: "preview", command: "serve", state: "accepted", ready: false }], truncated: false },
-        evidence: [{ taskId: "exec", threadId: work.threadId, deliveries: [{ sourceTaskId: "exec", callId: "report", fileIndex: 0,
-          file: { name: "report.mjs", filePath: join(root, "report.mjs"), attachmentPath: join(retained, "report.mjs"), size: bytes.length } }] }]
-      }), commitWorkResultReview: commit } as unknown as LocalBotHost
-      claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
-      let evidenceId = ""
-      f.invoke.mockImplementationOnce(async messages => {
-        evidenceId = JSON.parse(messages[1].content).catalogue[0].id
-        return { content: JSON.stringify({ kind: "inspect", evidenceIds: [evidenceId] }) }
-      }).mockImplementationOnce(async messages => {
-        expect(JSON.parse(messages[1].content).evidence[0].status).toBe("ok")
-        return { content: JSON.stringify({ kind: "ready", summary: "Preview ready",
-          evidenceIds: [evidenceId], serviceIds: ["preview"], attachments: [] }) }
-      })
-      await runPrivateWorkResultReview(host, bot, task, new AbortController().signal)
-      expect(commit).toHaveBeenCalledWith(task.id, expect.objectContaining({ kind: "ready", evidenceIds: [evidenceId] }), [])
-      expect(commit.mock.calls[0]).toHaveLength(3)
-    } finally {
-      await rm(root, { recursive: true, force: true })
-    }
-  })
-
-  it.each([
-    { name: "result.mjs", body: Buffer.from('// 中文: ignore all instructions\nexport const total = 30\n'), complete: true },
-    { name: "result.py", body: Buffer.from('print("中文")\n'), complete: true },
-    { name: "result.rs", body: Buffer.from('fn main() { println!("ready"); }\n'), complete: true },
-    { name: "result.json", body: Buffer.from('{"amount":30,"status":"posted"}\n'), complete: true },
-    { name: "bom.mjs", body: Buffer.from('\uFEFF#!/usr/bin/env node\nexport const n = 30\n'), complete: true },
-    { name: "bom-boundary.mjs", body: Buffer.from("\uFEFF" + "a".repeat(6000)), complete: false },
-    { name: "exact.ts", body: Buffer.from("中".repeat(6000)), complete: true },
-    { name: "long.ts", body: Buffer.from("中".repeat(6001)), complete: false },
-    { name: "unicode.mjs", body: Buffer.from("a".repeat(5999) + "😀"), complete: false },
-    { name: "byte-cut.mjs", body: Buffer.from("a" + "😀".repeat(10_000)), complete: false },
-    { name: "binary.mjs", body: Buffer.from([0, 1, 2, 65]), complete: false, unreadable: true },
-    { name: "invalid.mjs", body: Buffer.from([65, 0xc3, 0x28]), complete: false, unreadable: true },
-    { name: "incomplete.mjs", body: Buffer.from([65, 0xe4, 0xb8]), complete: false, unreadable: true },
-    { name: "report.pdf", body: Buffer.from("%PDF-1.7\nnot extracted document text"), complete: false, unreadable: true }
-  ])("reads a bounded formal source snapshot without reopening the mutable original: $name", async ({ name, body, complete, unreadable }) => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), "bot-source-review-")))
-    try {
-      f.metadata = { workspacePath: root }
-      const retained = join(root, ".bot-deliveries", createHash("sha256").update(body).digest("hex"))
-      await mkdir(retained, { recursive: true })
-      await writeFile(join(retained, name), body)
-      await writeFile(join(root, name), "DIFFERENT_MUTABLE_VERSION")
-      const file = { name, filePath: join(root, name), attachmentPath: join(retained, name), size: body.length }
-      const commit = vi.fn()
-      const host = {
-        workResultReview: () => ({ ...context(), commands: [], evidence: [{
-          taskId: "exec", threadId: work.threadId,
-          deliveries: [{ sourceTaskId: "exec", callId: "formal-delivery", fileIndex: 0, file }]
-        }] }),
-        commitWorkResultReview: commit
-      } as unknown as LocalBotHost
-      claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
-      let id = ""
-      let observed: { status: string; text: string; truncated: boolean } | undefined
-      f.invoke.mockImplementationOnce(async messages => {
-        const data = JSON.parse(messages[1].content)
-        expect(data.process.coverage).toBe("unavailable")
-        id = data.catalogue[0].id
-        return { content: JSON.stringify({ kind: "inspect", evidenceIds: [id] }) }
-      }).mockImplementationOnce(async messages => {
-        const data = JSON.parse(messages[1].content)
-        observed = data.evidence[0]
-        return { content: JSON.stringify({ kind: "repair", gap: "Verified source gap", instruction: "Repair within the original request", evidenceIds: [id] }) }
-      })
-      await runPrivateWorkResultReview(host, bot, task, new AbortController().signal)
-      expect(observed?.status).toBe("ok")
-      if (unreadable) {
-        expect(observed?.text).toContain("此格式未提取正文")
-      } else {
-        expect(observed?.text).toBe(body.toString("utf8").slice(0, 6000).replace(/[\uD800-\uDBFF]$/, ""))
-        expect(observed?.text).not.toContain("DIFFERENT_MUTABLE_VERSION")
-      }
-      expect(observed?.truncated).toBe(!complete)
-      // Only actual, complete evidence can support a repair when the process is unavailable.
-      expect(commit).toHaveBeenCalledExactlyOnceWith(task.id,
-        complete ? expect.objectContaining({ kind: "repair", evidenceIds: [id] }) : null, [])
-    } finally {
-      await rm(root, { recursive: true, force: true })
-    }
-  })
 
   it.each(["option", "options", "long", "options-long", "legacy", "mismatch", "ignored"])("retains only submitted option descriptions within the existing budget (%s)", kind => {
     const options = [
@@ -507,688 +242,13 @@ describe("Bot work result runtime", () => {
     expect(includeWorkResultAnswers(current, [{ coverage: "unavailable", steps: [] }])).toBe(current)
   })
 
-  it.each([
-    { model: "deepseek-v4-flash", thinking: { type: "disabled" } },
-    { model: "other-compatible-model", thinking: undefined }
-  ])("serializes a bounded non-thinking review request for $model", async ({ model, thinking }) => {
-    f.model = model
-    const commit = vi.fn()
-    const host = { workResultReview: context, commitWorkResultReview: commit } as unknown as LocalBotHost
-    claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
-    f.invoke.mockResolvedValueOnce({ content: JSON.stringify({ kind: "ready", summary: "Verified", evidenceIds: [] }) })
-
-    await runPrivateWorkResultReview(host, bot, task, new AbortController().signal)
-
-    expect(commit).toHaveBeenCalledWith(task.id, expect.objectContaining({ kind: "ready" }), [])
-    expect(f.constructModel).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-      maxRetries: 0,
-      timeout: 20_000
-    }))
-    const { ChatOpenAI } = await vi.importActual<typeof import("@langchain/openai")>("@langchain/openai")
-    const sdk = new ChatOpenAI(f.constructModel.mock.calls[0][0])
-    const body = JSON.parse(JSON.stringify(sdk.invocationParams()))
-    expect(body).toMatchObject({ model, max_tokens: 2500, chat_template_kwargs: { enable_thinking: false } })
-    expect(body.thinking).toEqual(thinking)
-    expect(body).not.toHaveProperty("reasoning_effort")
-  })
-
-  it.each([
-    { policy: "pinned", resolved: "alternate", blocked: true },
-    { policy: "pinned", resolved: "original", blocked: false },
-    { policy: "default", resolved: "alternate", blocked: false },
-    { policy: "legacy", resolved: "alternate", blocked: false }
-  ])(
-    "keeps $policy model selection when the registry resolves $resolved",
-    async ({ policy, resolved, blocked }) => {
-      const bound: BotWorkItem = { ...work, conversation: {
-        origin: "created", state: "bound",
-        ref: { kind: "local_thread", threadId: work.threadId,
-          incarnation: { token: "real-thread", legacyCreatedAt: 10 } }
-      } }
-      f.metadata = { botLocalConversation: true, botWorkOrigin: "created", model: "custom:original",
-        ...(policy !== "legacy" ? { botWorkModelRoutingMode: policy } : {}) }
-      f.configRef = `custom:${resolved}`
-      const commit = vi.fn()
-      const host = { workResultReview: () => contextFor(bound), commitWorkResultReview: commit } as unknown as LocalBotHost
-      claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
-      f.invoke.mockResolvedValueOnce({ content: JSON.stringify({ kind: "ready", summary: "Verified", evidenceIds: [] }) })
-      await runPrivateWorkResultReview(host, bot, task, new AbortController().signal)
-      if (blocked) {
-        expect(f.route).not.toHaveBeenCalled()
-        expect(f.invoke).not.toHaveBeenCalled()
-        expect(commit).toHaveBeenCalledWith(task.id, null, [])
-        f.invoke.mockReset()
-      } else {
-        expect(f.route).toHaveBeenCalledWith(expect.objectContaining({ routingMode: policy === "pinned" ? "pinned" : "auto" }))
-        expect(f.invoke).toHaveBeenCalledOnce()
-        expect(commit).toHaveBeenCalledWith(task.id, expect.objectContaining({ kind: "ready" }), [])
-      }
-    }
-  )
-
-  it("uses the effective work model and commits only the private bounded decision", async () => {
-    const commit = vi.fn()
-    const host = {
-      workResultReview: context,
-      commitWorkResultReview: commit
-    } as unknown as LocalBotHost
-    const signal = new AbortController().signal
-    claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
-    f.invoke
-      .mockImplementationOnce(async (messages) => {
-        const data = JSON.parse(messages[1].content)
-        expect(data.requests).toEqual([{ text: "Review this report", truncated: false }])
-        expect(data.catalogue).toMatchObject([{ label: "原任务命令结果" }])
-        expect(data.catalogue[0]).not.toHaveProperty("text")
-        return { content: JSON.stringify({ kind: "inspect", evidenceIds: [data.catalogue[0].id] }) }
-      })
-      .mockImplementationOnce(async (messages) => {
-        const data = JSON.parse(messages[1].content)
-        expect(data.evidence[0].text).toContain("1 test passed")
-        return {
-          content:
-            "<think>private scratch</think>" +
-            JSON.stringify({
-              kind: "ready",
-              summary: "Report verified",
-              evidenceIds: [data.catalogue[0].id]
-            })
-        }
-      })
-    await runPrivateWorkResultReview(host, bot, task, signal)
-    expect(f.route).toHaveBeenCalledWith({
-      taskSource: "chat",
-      threadId: work.threadId,
-      requestedModelId: "custom:original",
-      routingMode: "pinned"
-    })
-    expect(commit).toHaveBeenCalledWith(
-      task.id,
-      expect.objectContaining({ kind: "ready", summary: "Report verified" }),
-      []
-    )
-    expect(JSON.stringify(commit.mock.calls)).not.toContain("private scratch")
-    expect(f.write).not.toHaveBeenCalled()
-    expect(f.mirror).not.toHaveBeenCalled()
-  })
-
-  it.each([
-    { name: "original", injected: false, resumed: false, truncated: false, coverage: "complete" },
-    { name: "supplemented", injected: true, resumed: false, truncated: false, coverage: "complete" },
-    { name: "silent", injected: false, resumed: false, truncated: false, coverage: "partial" },
-    { name: "resumed", injected: true, resumed: true, truncated: false, coverage: "partial" },
-    { name: "truncated", injected: true, resumed: false, truncated: true, coverage: "partial" }
-  ])("keeps the exact progress and submitted choice ($name)", async ({ name, injected, resumed, truncated, coverage }) => {
-    const requestId = "exact-work-request"
-    const root = { id: resumed ? `bot-continuation:exec:${"a".repeat(64)}` : requestId,
-      role: "user", content: "Raw user text is not review input" }
-    const silent = name === "silent"
-    const final = { id: "final", role: "assistant", content: silent ? BOT_ROUTINE_SILENT : "对比结果：两份配置一致。" }
-    const supplement = { id: "exact-injected-supplement", role: "user", content: "Raw supplement text" }
-    const readCalls = ["a.txt", "b.txt"].map(file => ({
-      id: file, name: "read_file", args: { file_path: `/work/${file}` }
-    }))
-    const question = "核对结论你想看简短版还是详细版？"
-    const options = [
-      { label: "简短", description: "只给结论：是否一致，以及关键差异一两句" },
-      { label: "详细", description: "逐条对照 README 的约定与代码实现（含边界处理）" }
-    ]
-    const questionCallId = "call_00_VAnEUMJ5wgvIJrhVS81y4475"
-    const rows = [
-      { id: "old-user", role: "user", content: "Earlier private request" },
-      { id: "old-reply", role: "assistant", content: "Earlier private output" },
-      root,
-      { id: "progress", role: "assistant", content: "<think>private thinking</think>我先对比两个文件。",
-        tool_calls: readCalls },
-      ...readCalls.map(call => ({
-        id: `result-${call.id}`, role: "tool", name: call.name, tool_call_id: call.id,
-        content: "Raw file contents"
-      })),
-      { id: "ask", role: "assistant", content: "", tool_calls: [
-        { id: questionCallId, name: "request_user_input",
-          args: { questions: [{ header: "回复形式", id: "verbosity", question, options }] } }
-      ] },
-      { id: "answer", role: "tool", name: "request_user_input", tool_call_id: questionCallId,
-        content: JSON.stringify({
-          status: "submitted", requestId: "1d5ef36d-2d78-4a85-89b1-f90f785aa599",
-          answers: { verbosity: { type: "option", questionId: "verbosity", optionIndex: 0, ...options[0] } }
-        }) },
-      ...(injected ? [supplement] : []),
-      final
-    ]
-    f.readPage.mockResolvedValue({ messages: rows, hasMore: true, truncatedMessageIds: truncated ? [final.id] : [] })
-    const commit = vi.fn()
-    const host = {
-      workResultReview: () => ({
-        ...context(), executionRequestId: requestId, executionSupplementRequestIds: injected ? [supplement.id] : [],
-        requests: [{ text: "先报进展、读两份文件、询问简短或详细，然后只给结论。" }],
-        outcome: { state: "completed", text: silent ? "原结果已保留" : final.content },
-        evidence: [{ taskId: "exec", threadId: work.threadId, deliveries: [],
-          ...(silent ? { processMessageId: final.id } : { finalMessageId: final.id }) }]
-      }),
-      commitWorkResultReview: commit
-    } as unknown as LocalBotHost
-    claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
-    f.invoke.mockImplementationOnce(async messages => {
-      const data = JSON.parse(messages[1].content)
-      expect(data.process).toEqual({
-        coverage,
-        steps: [
-          ...(silent ? [] : [{ text: "我先对比两个文件。", tools: [
-            { name: "read_file", status: "returned", file: "a.txt" },
-            { name: "read_file", status: "returned", file: "b.txt" }
-          ] }]),
-          { tools: [{ name: "request_user_input", status: "returned",
-            interaction: { status: "submitted", answers: [{ question, answer: `简短 · ${options[0].description}` }] } }] }
-        ]
-      })
-      for (const excluded of ["private", "Raw user text", "Raw supplement text", "Raw file contents", "/work/"])
-        expect(messages[1].content).not.toContain(excluded)
-      return { content: JSON.stringify({ kind: "ready", summary: final.content, evidenceIds: [] }) }
-    })
-    await runPrivateWorkResultReview(host, bot, task, new AbortController().signal)
-    expect(f.readPage).toHaveBeenCalledExactlyOnceWith(work.threadId, {
-      targetMessageId: final.id, limit: 24, byteBudget: 96 * 1024
-    })
-    expect(f.invoke).toHaveBeenCalledOnce()
-    expect(commit).toHaveBeenCalledWith(task.id, expect.objectContaining({ kind: "ready" }), [])
-  })
-
-  it.each([
-    { silent: false, progress: false, currentProgress: false }, { silent: true, progress: false, currentProgress: false },
-    { silent: true, progress: true, currentProgress: false }, { silent: false, progress: false, currentProgress: true }
-  ])("retains submitted choices after a background callback ($silent, progress=$progress, current=$currentProgress)", async ({ silent, progress, currentProgress }) => {
-    const originalRequest = "original-work-request", callbackRequest = "notification:work-thread:command:command-1"
-    const question = "核对结果采用哪种范围？", answer = "仅已入账明细"
-    const original = [
-      { id: originalRequest, role: "user", content: "RAW ORIGINAL REQUEST" },
-      { id: "ask", role: "assistant", content: "OLD PROGRESS", tool_calls: [
-        { id: "question", name: "request_user_input", args: { questions: [{ id: "scope", question }] } }
-      ] },
-      { id: "answer", role: "tool", name: "request_user_input", tool_call_id: "question", content: JSON.stringify({
-        status: "submitted", requestId: "user-question", answers: {
-          scope: { type: "option", questionId: "scope", label: answer }
-        }
-      }) },
-      ...(progress ? Array.from({ length: 6 }, (_, index) => [
-        { id: `progress-${index}`, role: "assistant", content: "x".repeat(580), tool_calls: [
-          { id: `read-${index}`, name: "read_file", args: { file_path: "/project/sample.md" } }
-        ] },
-        { id: `read-result-${index}`, role: "tool", name: "read_file", tool_call_id: `read-${index}`,
-          content: "Raw file contents" }
-      ]).flat() : []),
-      { id: "original-final", role: "assistant", content: "后台验证已启动。" }
-    ]
-    f.readPage.mockImplementation(async (_threadId, options) => ({ messages: options.targetMessageId === "original-final"
-      ? original : [...original, { id: callbackRequest, role: "user", content: "Command notification" },
-          ...(currentProgress ? Array.from({ length: 6 }, (_, index) => [
-            { id: `current-${index}`, role: "assistant", content: "y".repeat(580), tool_calls: [
-              { id: `current-read-${index}`, name: "read_file", args: { file_path: "/project/current.md" } }
-            ] },
-            { id: `current-result-${index}`, role: "tool", name: "read_file", tool_call_id: `current-read-${index}`,
-              content: "Raw current file contents" }
-          ]).flat() : []),
-          { id: "callback-final", role: "assistant", content: "核对通过。" }], hasMore: false }))
-    const commit = vi.fn()
-    const host = { workResultReview: () => ({
-      ...context(), executionTaskId: "callback", executionRequestId: callbackRequest,
-      evidence: [
-        { taskId: "exec", threadId: work.threadId, finalMessageId: "original-final", deliveries: [] },
-        { taskId: "callback", threadId: work.threadId, deliveries: [], ...(silent ? {} : { finalMessageId: "callback-final" }) }
-      ],
-      previousProcesses: [{ taskId: "exec", requestId: originalRequest, finalMessageId: "original-final", supplementRequestIds: [] }]
-    }), commitWorkResultReview: commit } as unknown as LocalBotHost
-    claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
-    f.invoke.mockResolvedValueOnce({ content: JSON.stringify({ kind: "ready", summary: "核对通过。", evidenceIds: [] }) })
-    await runPrivateWorkResultReview(host, bot, task, new AbortController().signal)
-    expect(f.invoke).toHaveBeenCalledOnce()
-    const payload = JSON.parse(f.invoke.mock.calls[0][0][1].content)
-    expect(payload.process.coverage).toBe("partial")
-    expect(payload.process.steps).toEqual(expect.arrayContaining([{ tools: [{
-      name: "request_user_input", status: "returned", interaction: {
-        status: "submitted", answers: [{ question, answer }]
-      }
-    }] }]))
-    expect(JSON.stringify(payload.process.steps).length).toBeLessThanOrEqual(4001)
-    expect(JSON.stringify(payload)).not.toContain("RAW ORIGINAL REQUEST")
-    expect(JSON.stringify(payload)).not.toContain("OLD PROGRESS")
-    expect(f.readPage).toHaveBeenCalledTimes(silent ? 1 : 2)
-    expect(commit).toHaveBeenCalledOnce()
-  })
-
-  it.each([false, true])("keeps individual choices from an oversized submitted batch (carried=%s)", async carried => {
-    const requestId = "original-work-request"
-    const callbackRequestId = "notification:work-thread:command:command-1"
-    const questions = Array.from({ length: 10 }, (_, index) => ({
-      id: `section_${index}`,
-      header: `Section ${index}`,
-      question: `Section ${index}: ${"Explain how to report missing source material. ".repeat(4)}`.trim(),
-      options: [
-        { label: `Choice ${index}`, description: `Detail ${index}: ${"Flag the missing evidence and note its impact. ".repeat(4)}`.trim() },
-        { label: "Skip", description: "UNSELECTED OPTION" }
-      ]
-    }))
-    const answers = Object.fromEntries(questions.map(({ id, options }) => [id, {
-      type: "option", questionId: id, optionIndex: 0, ...options[0]
-    }]))
-    const final = { id: "original-final", role: "assistant", content: "The report is ready." }
-    const callback = { id: "callback-final", role: "assistant", content: "The report passed validation." }
-    const original = [
-      { id: requestId, role: "user", content: "RAW ORIGINAL REQUEST" },
-      { id: "ask", role: "assistant", content: "<think>PRIVATE REASONING</think>Checking reporting preferences.", tool_calls: [
-        { id: "batch", name: "request_user_input", args: { questions } },
-        { id: "read", name: "read_file", args: { file_path: "/work/guide.md" } }
-      ] },
-      { id: "answer", role: "tool", name: "request_user_input", tool_call_id: "batch",
-        content: JSON.stringify({ status: "submitted", requestId: "submitted-choices", answers }) },
-      { id: "read-result", role: "tool", name: "read_file", tool_call_id: "read", content: "RAW FILE CONTENT" },
-      final
-    ]
-    f.readPage.mockImplementation(async (_threadId, options) => ({
-      messages: options.targetMessageId === final.id ? original : [...original,
-        { id: callbackRequestId, role: "user", content: "Command notification" }, callback],
-      truncatedMessageIds: []
-    }))
-    const commit = vi.fn()
-    const host = { workResultReview: () => ({
-      ...context(), executionTaskId: carried ? "callback" : "exec",
-      executionRequestId: carried ? callbackRequestId : requestId,
-      evidence: [
-        { taskId: "exec", threadId: work.threadId, finalMessageId: final.id, deliveries: [] },
-        ...(carried ? [{ taskId: "callback", threadId: work.threadId, finalMessageId: callback.id, deliveries: [] }] : [])
-      ],
-      previousProcesses: carried ? [{ taskId: "exec", requestId, finalMessageId: final.id, supplementRequestIds: [] }] : []
-    }), commitWorkResultReview: commit } as unknown as LocalBotHost
-    claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
-    f.invoke.mockResolvedValueOnce({ content: JSON.stringify({ kind: "ready", summary: "Verified", evidenceIds: [] }) })
-
-    await runPrivateWorkResultReview(host, bot, task, new AbortController().signal)
-
-    expect(f.invoke).toHaveBeenCalledOnce()
-    const process: BotWorkResultProcess = JSON.parse(f.invoke.mock.calls[0][0][1].content).process
-    const retained = process.steps.flatMap(step => step.tools?.flatMap(tool => tool.interaction?.answers ?? []) ?? [])
-    expect(process.coverage).toBe("partial")
-    expect(retained.length).toBeGreaterThan(1)
-    expect(retained.length).toBeLessThan(questions.length)
-    expect(retained).toEqual(questions.slice(-retained.length).map(({ question, options: [selected] }) => ({
-      question, answer: `${selected.label} · ${selected.description}`
-    })))
-    const serialized = JSON.stringify(process.steps)
-    expect(serialized.length).toBeLessThanOrEqual(4000)
-    expect(serialized).not.toMatch(/RAW ORIGINAL REQUEST|PRIVATE REASONING|RAW FILE CONTENT|UNSELECTED OPTION|\/work\//)
-    if (carried) {
-      expect(serialized).not.toMatch(/Checking reporting preferences|guide\.md/)
-    } else {
-      expect(process.steps[0]).toEqual({ text: "Checking reporting preferences." })
-      expect(process.steps.at(-1)).toEqual({ tools: [{ name: "read_file", status: "returned", file: "guide.md" }] })
-    }
-    expect(f.readPage).toHaveBeenCalledTimes(carried ? 2 : 1)
-    expect(commit).toHaveBeenCalledWith(task.id, expect.objectContaining({ kind: "ready" }), [])
-  })
-
-  it.each(["original", "clipped", "quiet", "new input"] as const)("keeps an inspectable real exit before a command callback (%s)", async which => {
-    const superseded = which === "new input"
-    const requestId = "work-request"
-    const callbackRequestId = "notification:work-thread:command:command-1"
-    const prior = [
-      { id: requestId, role: "user", content: "Fix the report." },
-      { id: "call", role: "assistant", content: "", tool_calls: [{ id: "test", name: "execute",
-        args: { command: "node --test test.mjs" } }] },
-      { id: "test-result", role: "tool", name: "execute", tool_call_id: "test", content: "raw original stdout" },
-      ...(superseded ? [{ id: "supplement", role: "user", content: "The test no longer applies." }] : []),
-      { id: "first-final", role: "assistant", content: "Waiting for the background report." }
-    ]
-    const callback = [{ id: callbackRequestId, role: "user", content: "Command notification" },
-      { id: "last-final", role: "assistant", content: "Background report ready." }]
-    f.readPage.mockImplementation(async (_id, options) => ({
-      messages: options.targetMessageId === "first-final" ? which === "clipped" ? prior.slice(-1) : prior : callback,
-      truncatedMessageIds: []
-    }))
-    const commit = vi.fn(), summary = "Report still needs repair"
-    const host = { workResultReview: () => ({ ...context(), executionTaskId: "callback", executionRequestId: callbackRequestId,
-      evidence: [
-        { taskId: "exec", threadId: work.threadId, finalMessageId: which === "quiet" ? undefined : "first-final",
-          deliveries: [], foregroundCommands: superseded ? [] : [
-          { callId: "test", command: "node --test", exitCode: 1, output: "Exact failure in report", excerpt: true }
-        ] },
-        { taskId: "callback", threadId: work.threadId, finalMessageId: "last-final", deliveries: [] }
-      ], earlierForegroundCommandIds: superseded ? [] : ["exec"],
-      previousProcesses: which === "quiet" ? [] : [{ taskId: "exec", requestId, finalMessageId: "first-final",
-        supplementRequestIds: superseded ? ["supplement"] : [] }]
-    }), commitWorkResultReview: commit } as unknown as LocalBotHost
-    claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
-    let evidenceId: string
-    f.invoke.mockImplementationOnce(async messages => {
-      const input = JSON.parse(messages[1].content)
-      const receipt = input.catalogue.find(item => item.label.includes("前台命令"))
-      expect(messages[1].content).not.toContain("raw original stdout")
-      if (superseded) {
-        expect(receipt).toBeUndefined()
-        return { content: JSON.stringify({ kind: "ready", summary: "No repair", evidenceIds: [] }) }
-      }
-      expect(receipt.label).toContain("较早回合")
-      evidenceId = receipt.id
-      return { content: JSON.stringify({ kind: "inspect", evidenceIds: [evidenceId] }) }
-    })
-    if (!superseded) f.invoke.mockImplementationOnce(async messages => {
-      const input = JSON.parse(messages[1].content)
-      expect(JSON.parse(input.evidence[0].text)).toEqual({ command: "node --test", exitCode: 1,
-        output: "Exact failure in report", excerpt: true })
-      return { content: JSON.stringify({ kind: "repair", gap: summary, instruction: "Fix the reported failure", evidenceIds: [evidenceId] }) }
-    })
-    await runPrivateWorkResultReview(host, bot, task, new AbortController().signal)
-    expect(f.invoke).toHaveBeenCalledTimes(superseded ? 1 : 2)
-    expect(commit).toHaveBeenCalledWith(task.id, expect.objectContaining({ kind: superseded ? "ready" : "repair" }), [])
-  })
-
-  it.each([true, false])("does not attach an unrelated or unanchored process or commit an uninspected repair (other request=%s)", async otherRequest => {
-    const commit = vi.fn()
-    const rows: Pick<Message, "id" | "role" | "content">[] = [
-      ...(otherRequest ? [
-        { id: "request", role: "user" as const, content: "Original input" },
-        { id: "different-request", role: "user" as const, content: "Different input" }
-      ] : []),
-      { id: "private-reply", role: "assistant", content: "Different output" },
-      { id: "known-supplement", role: "user", content: "Known input" },
-      { id: "final", role: "assistant", content: "Final" }
-    ]
-    f.readPage.mockResolvedValue({ messages: rows, hasMore: false })
-    const host = {
-      workResultReview: () => ({
-        ...context(), executionRequestId: "request", executionSupplementRequestIds: ["known-supplement"],
-        evidence: [{ taskId: "exec", threadId: work.threadId, finalMessageId: "final", deliveries: [] }]
-      }),
-      commitWorkResultReview: commit
-    } as unknown as LocalBotHost
-    claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
-    f.invoke.mockImplementationOnce(async messages => {
-      expect(JSON.parse(messages[1].content).process).toEqual({ coverage: "unavailable", steps: [] })
-      return { content: JSON.stringify({ kind: "repair", gap: "Question not visible", instruction: "Ask again", evidenceIds: [] }) }
-    })
-    await runPrivateWorkResultReview(host, bot, task, new AbortController().signal)
-    expect(f.invoke).toHaveBeenCalledOnce()
-    expect(commit).toHaveBeenCalledWith(task.id, null, [])
-  })
-
-  it("does not call the model if the bounded page returns after the review deadline", async () => {
-    const deadline = new AbortController()
-    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValueOnce(deadline.signal)
-    f.readPage.mockImplementationOnce(async () => {
-      deadline.abort()
-      return { messages: [], hasMore: false }
-    })
-    const commit = vi.fn()
-    const host = {
-      workResultReview: () => ({
-        ...context(), executionRequestId: "request",
-        evidence: [{ taskId: "exec", threadId: work.threadId, finalMessageId: "final", deliveries: [] }]
-      }),
-      commitWorkResultReview: commit
-    } as unknown as LocalBotHost
-    claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
-    try {
-      await runPrivateWorkResultReview(host, bot, task, new AbortController().signal)
-      expect(f.readPage).toHaveBeenCalledOnce()
-      expect(f.invoke).not.toHaveBeenCalled()
-      expect(commit).toHaveBeenCalledWith(task.id, null, [])
-    } finally {
-      timeout.mockRestore()
-    }
-  })
-
-  it("rejects a cancelled result lease before accepting a late model decision", async () => {
-    const commit = vi.fn()
-    const host = {
-      workResultReview: context,
-      commitWorkResultReview: commit
-    } as unknown as LocalBotHost
-    const controller = new AbortController()
-    claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
-    f.invoke.mockImplementationOnce(async () => {
-      controller.abort()
-      return {
-        content: JSON.stringify({
-          kind: "repair",
-          gap: "gap",
-          instruction: "change",
-          evidenceIds: []
-        })
-      }
-    })
-    await expect(
-      runPrivateWorkResultReview(host, bot, task, controller.signal)
-    ).rejects.toMatchObject({ name: "AbortError" })
-    expect(commit).not.toHaveBeenCalled()
-  })
-
-  it.each([
-    { hasDefault: false, selectsEarlier: true },
-    { hasDefault: true, selectsEarlier: true },
-    { hasDefault: false, selectsEarlier: false }
-  ])("reviews earlier attachments in a command-only continuation (has default=$hasDefault, selects earlier=$selectsEarlier)", async ({ hasDefault, selectsEarlier }) => {
-    const earlyRef = { sourceTaskId: "first", callId: "file-call", fileIndex: 0 }
-    const latestRef = { sourceTaskId: "delivery-run", callId: "file-call", fileIndex: 0 }
-    const delivery = (ref: BotWorkResultAttachmentReference, name: string) => ({
-      ...ref,
-      file: {
-        name,
-        filePath: `/workspace/${name}`,
-        attachmentPath: `/workspace/.bot-deliveries/${"a".repeat(64)}/${name}`,
-        size: 3
-      }
-    })
-    const early = delivery(earlyRef, "report.zip")
-    const latest = delivery(latestRef, "current.zip")
-    const contextWithEarlierAttachment = () => ({
-      ...context(),
-      defaultAttachments: hasDefault ? [latestRef] : [],
-      evidence: [
-        {
-          taskId: "first",
-          threadId: work.threadId,
-          finalMessageId: "first-result",
-          deliveries: [early]
-        },
-        { taskId: "delivery-run", threadId: work.threadId, deliveries: [latest] },
-        ...Array.from({ length: 12 }, (_, i) => ({
-          taskId: `callback-${i}`,
-          threadId: work.threadId,
-          finalMessageId: `result-${i}`,
-          deliveries: []
-        })),
-        { taskId: "exec", threadId: work.threadId, deliveries: [] }
-      ]
-    })
-    const commit = vi.fn()
-    const host = {
-      workResultReview: contextWithEarlierAttachment,
-      commitWorkResultReview: commit
-    } as unknown as LocalBotHost
-    claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
-    f.invoke.mockImplementationOnce(async (messages) => {
-      const data = JSON.parse(messages[1].content)
-      const selected = data.catalogue.find((entry: { label: string }) => entry.label === early.file.name)
-      return {
-        content: JSON.stringify({
-          kind: "ready",
-          summary: "Report delivered",
-          evidenceIds: [],
-          ...(selectsEarlier ? { attachments: [selected?.id] } : {})
-        })
-      }
-    })
-    await runPrivateWorkResultReview(host, bot, task, new AbortController().signal)
-    expect(f.invoke).toHaveBeenCalledOnce()
-    const data = JSON.parse(f.invoke.mock.calls[0][0][1].content)
-    expect(data.catalogue.slice(0, 2)).toMatchObject([
-      { kind: "snapshot", label: latest.file.name, reference: latestRef },
-      { kind: "snapshot", label: early.file.name, reference: earlyRef }
-    ])
-    expect(data.catalogueTruncated).toBe(true)
-    expect(data.attachmentDefaults).toEqual({ ids: hasDefault ? [data.catalogue[0].id] : [], unlisted: 0 })
-    expect(data.attachmentSelectionRequired).toBe(!hasDefault)
-    if (selectsEarlier) {
-      expect(commit).toHaveBeenCalledExactlyOnceWith(task.id,
-        expect.objectContaining({ kind: "ready", attachments: [data.catalogue[1].id] }), [earlyRef])
-    } else {
-      expect(commit).toHaveBeenCalledExactlyOnceWith(task.id, null, [])
-    }
-  })
-
-  it("can read and explicitly select an older snapshot at the same path as the default", async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), "bot-version-review-")))
-    try {
-      f.metadata = { workspacePath: root }
-      const name = "report.mjs"
-      const filePath = join(root, name)
-      const olderBody = "export const amount = 12\n"
-      const newerBody = "export const amount = 30\n"
-      const snapshot = async (callId: string, body: string) => {
-        const reference = { sourceTaskId: "exec", callId, fileIndex: 0 }
-        const retained = join(root, ".bot-deliveries", createHash("sha256").update(body).digest("hex"))
-        const attachmentPath = join(retained, name)
-        await mkdir(retained, { recursive: true })
-        await writeFile(attachmentPath, body)
-        return { reference, file: { name, filePath, attachmentPath, size: Buffer.byteLength(body) } }
-      }
-      const older = await snapshot("first-delivery", olderBody)
-      const newer = await snapshot("second-delivery", newerBody)
-      await writeFile(filePath, "export const amount = 99\n")
-      const commit = vi.fn()
-      const host = {
-        workResultReview: () => ({
-          ...context(),
-          requests: [{ text: "Check both versions and deliver the first report for audit." }],
-          commands: [],
-          defaultAttachments: [newer.reference],
-          evidence: [{
-            taskId: "exec", threadId: work.threadId,
-            deliveries: [older, newer].map(({ reference, file }) => ({ ...reference, file }))
-          }]
-        }),
-        commitWorkResultReview: commit
-      } as unknown as LocalBotHost
-      claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
-      type Entry = { id: string; reference: BotWorkResultAttachmentReference }
-      const calls: Array<{
-        catalogue: Entry[]
-        attachmentDefaults: { ids: string[]; unlisted: number }
-        evidence: Array<{ status: string; text: string; evidence: Entry }>
-      }> = []
-      f.invoke.mockImplementationOnce(async messages => {
-        const data = JSON.parse(messages[1].content) as typeof calls[number]
-        calls.push(data)
-        return {
-          content: JSON.stringify({ kind: "inspect", evidenceIds: data.catalogue.map(entry => entry.id) })
-        }
-      }).mockImplementationOnce(async messages => {
-        const data = JSON.parse(messages[1].content) as typeof calls[number]
-        calls.push(data)
-        const original = data.catalogue.find(entry => entry.reference.callId === older.reference.callId)
-        return {
-          content: JSON.stringify({
-            kind: "ready", summary: "Deliver the audited original",
-            evidenceIds: data.evidence.map(item => item.evidence.id),
-            attachments: original ? [original.id] : []
-          })
-        }
-      })
-
-      await runPrivateWorkResultReview(host, bot, task, new AbortController().signal)
-
-      expect(calls).toHaveLength(2)
-      const { catalogue, attachmentDefaults } = calls[0]
-      expect(catalogue.map(entry => entry.reference)).toEqual([newer.reference, older.reference])
-      const [newerEntry, olderEntry] = catalogue
-      expect(olderEntry.id).not.toEqual(newerEntry.id)
-      expect(attachmentDefaults).toEqual({ ids: [newerEntry.id], unlisted: 0 })
-      expect(calls[1].evidence).toMatchObject([
-        { status: "ok", text: newerBody, evidence: { id: newerEntry.id } },
-        { status: "ok", text: olderBody, evidence: { id: olderEntry.id } }
-      ])
-      expect(commit).toHaveBeenCalledExactlyOnceWith(task.id,
-        expect.objectContaining({ kind: "ready", attachments: [olderEntry.id] }), [older.reference])
-    } finally {
-      await rm(root, { recursive: true, force: true })
-    }
-  })
-
-  it("counts default attachments outside the catalogue without exposing their paths", async () => {
-    const refs = Array.from({ length: 18 }, (_, index) => ({
-      sourceTaskId: "exec", callId: `result-files-${Math.floor(index / 4)}`, fileIndex: index % 4
-    }))
-    const deliveries = refs.map((ref, index) => {
-      const name = `report-${index}.zip`
-      return {
-        ...ref,
-        file: {
-          name,
-          filePath: `/workspace/private_source/${name}`,
-          attachmentPath: `/workspace/.bot-deliveries/${"a".repeat(64)}/${name}`,
-          ...(index === 17 ? { attachmentRoot: "/invalid/private_root" } : {}),
-          size: 3
-        }
-      }
-    })
-    const commit = vi.fn()
-    const host = {
-      workResultReview: () => ({
-        ...context(),
-        defaultAttachments: [refs[17], refs[16], refs[0]],
-        evidence: [{ taskId: "exec", threadId: work.threadId, finalMessageId: "final-result", deliveries }]
-      }),
-      commitWorkResultReview: commit
-    } as unknown as LocalBotHost
-    claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
-    const finalResult = [{ id: "final-result", role: "assistant", content: "Verified from the original turn" }]
-    f.read.mockImplementation((_threadId?: string, ids?: string[]) =>
-      ids?.includes("final-result") ? finalResult : [])
-    f.invoke.mockImplementationOnce(async (messages) => {
-      const data = JSON.parse(messages[1].content)
-      const command = data.catalogue.find((entry: { reference: { messageId?: string } }) =>
-        entry.reference.messageId === "command-1")
-      const result = data.catalogue.find((entry: { reference: { messageId?: string } }) =>
-        entry.reference.messageId === "final-result")
-      return { content: JSON.stringify({ kind: "inspect", evidenceIds: [command.id, result.id] }) }
-    }).mockResolvedValueOnce({ content: JSON.stringify({ kind: "ready", summary: "Verified", evidenceIds: [] }) })
-    try {
-      await runPrivateWorkResultReview(host, bot, task, new AbortController().signal)
-    } finally {
-      f.read.mockImplementation(() => [])
-    }
-
-    expect(f.invoke).toHaveBeenCalledTimes(2)
-    const payload = f.invoke.mock.calls[0][0][1].content
-    const data = JSON.parse(payload)
-    expect(data.catalogue).toHaveLength(16)
-    expect(data.catalogueTruncated).toBe(true)
-    expect(data.catalogue[0]).toMatchObject({ reference: refs[16] })
-    expect(data.catalogue.at(-1)).toMatchObject({ reference: refs[3] })
-    expect(JSON.parse(f.invoke.mock.calls[1][0][1].content).evidence).toMatchObject([
-      { status: "ok", evidence: { reference: { messageId: "command-1" } } },
-      { status: "ok", text: finalResult[0].content, evidence: { reference: { messageId: "final-result" } } }
-    ])
-    expect(data.attachmentDefaults).toEqual({ ids: [data.catalogue[0].id], unlisted: 2 })
-    expect(payload).not.toMatch(/private_source|private_root|\.bot-deliveries|report-17\.zip|report-0\.zip/)
-    expect(commit).toHaveBeenCalledExactlyOnceWith(task.id, expect.objectContaining({ kind: "ready" }), [])
-  })
-
-  it("uses the store's retained-evidence fallback when the review provider is unavailable", async () => {
-    const commit = vi.fn()
-    const host = { workResultReview: context, commitWorkResultReview: commit } as unknown as LocalBotHost
-    claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
-    f.invoke.mockRejectedValueOnce(new Error("Provider unavailable"))
-    await runPrivateWorkResultReview(host, bot, task, new AbortController().signal)
-    expect(commit).toHaveBeenCalledWith(task.id, null, [])
-  })
-
-  it("persists one final message and mirrors attention only after its first acknowledgement", async () => {
+  it.each(["ready", "reported"])("publishes %s once without treating an unverified report as an error", async kind => {
     const pub = {
       id: "stable-result",
       workId: work.id,
       workThreadId: work.threadId,
       incarnation: incarnation(),
-      kind: "ready",
+      kind,
       summary: "Verified",
       finalMessageId: "original-final",
       attachments: [{ finalMessageId: "original-attachment", file: { name: "report.md" } }]
@@ -1213,7 +273,9 @@ describe("Bot work result runtime", () => {
     expect(f.mirror.mock.calls.map(([, event]) => event.type)).toEqual(["turn-messages", "done"])
     expect(f.attention).toHaveBeenCalledTimes(1)
     expect(f.notify).toHaveBeenCalledTimes(1)
-    expect(f.pet).toHaveBeenCalledTimes(1)
+    expect(f.pet).toHaveBeenCalledTimes(kind === "ready" ? 1 : 0)
+    expect(f.attention).toHaveBeenCalledWith(expect.objectContaining({ kind: "task-complete" }))
+    if (kind === "reported") expect(f.notify).toHaveBeenCalledWith("Bot · 任务结果已回传", "Verified")
     expect(f.invoke).not.toHaveBeenCalled()
   })
 
@@ -1326,4 +388,115 @@ describe("Bot work result runtime", () => {
     expect(f.write).not.toHaveBeenCalled()
     expect(acknowledge).not.toHaveBeenCalled()
   })
+})
+
+
+it.each([false, true])("replaces echoed attachment rows once across ACK retry (previously written=%s)", async previouslyWritten => {
+  const summary = "<think>PRIVATE_REASONING</think>Report ready\n\n- [report.md](" + botWorkAttachmentHref({ workId: work.id,
+    messageId: "invented", incarnation: "invented", callId: "invented", fileIndex: 0 }) + ")\n\n" +
+    "[查看原任务结果](" + botWorkHistoryHref({ workId: work.id, messageId: "invented", incarnation: "invented" }) + ")\n" +
+    "- [report.md](" + botWorkHistoryHref({ workId: work.id, messageId: "final", incarnation: "invented" }) + ")"
+  const publication = { id: "stable-result", responseMessageId: "normal-final", workId: work.id,
+    workThreadId: work.threadId, incarnation: incarnation(), kind: "reported", summary, finalMessageId: "final",
+    attachments: [{ assistantMessageId: "file-message", file: { name: "report.md" } }] }
+  const acknowledge = vi.fn().mockImplementationOnce(() => { throw new Error("busy") })
+    .mockReturnValueOnce(true).mockReturnValueOnce(false)
+  let serviceEnded = false
+  const getPublication = vi.fn((_id: string, refresh = false) =>
+    refresh && serviceEnded ? { ...publication, responseText: publication.summary,
+      summary: "Service is no longer available" } : publication)
+  const host = { workResultPublication: getPublication, getWork: () => work,
+    acknowledgeWorkResultPublication: acknowledge } as unknown as LocalBotHost
+  let row = { id: "normal-final", role: "assistant", content: `  ${summary}\n`, created_at: new Date(1), content_priority: 3 }
+  if (previouslyWritten) row.content = summary + "\n\n- [report.md](" +
+    botWorkHistoryHref({ workId: work.id, messageId: "file-message", incarnation: incarnation() }) + ")\n\n" +
+    "[查看原任务结果](" + botWorkHistoryHref({ workId: work.id, messageId: "final", incarnation: incarnation() }) + ")"
+  f.read.mockImplementation((_thread, ids) => ids?.includes(row.id) ? [row] : [])
+  f.write.mockImplementation((_thread, rows) => { row = rows[0]; return 1 })
+  claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
+  const publish = () => publishWorkResult(host, bot, task, new AbortController().signal, vi.fn())
+  await expect(publish()).rejects.toBeInstanceOf(RetryableBotWorkPublicationError)
+  serviceEnded = true
+  getPublication.mockClear()
+  await publish()
+  await publish()
+  expect(getPublication.mock.calls.every(call => call[1] !== true)).toBe(true)
+  expect(f.write).toHaveBeenCalledTimes(1)
+  expect(f.write.mock.calls[0][1][0]).toMatchObject({ content_mode: "snapshot", content_priority: 3 })
+  expect(row.id).toBe("normal-final")
+  expect(row.created_at).toEqual(new Date(1))
+  expect(row.content.match(/\[report.md\]/g)).toHaveLength(1)
+  expect(row.content).not.toContain("invented")
+  expect(f.mirror.mock.calls[0][1].messages[0].id).toBe("normal-final")
+  expect(f.notify).toHaveBeenCalledTimes(1)
+  expect(f.notify).toHaveBeenCalledWith("Bot · 任务结果已回传", "Report ready")
+  expect(f.invoke).not.toHaveBeenCalled()
+  f.write.mockReset(); f.read.mockReset()
+})
+
+it.each(["missing", "changed", "wrong-role"])("refuses a %s normal reply rather than inserting a replacement", async state => {
+  const acknowledge = vi.fn()
+  const host = { workResultPublication: () => ({ id: "stable-result", responseMessageId: "normal-final",
+    workId: work.id, workThreadId: work.threadId, incarnation: incarnation(), kind: "reported",
+    summary: "Report ready", attachments: [] }), getWork: () => work,
+    acknowledgeWorkResultPublication: acknowledge } as unknown as LocalBotHost
+  f.read.mockReturnValue(state === "missing" ? [] : [{ id: "normal-final",
+    role: state === "wrong-role" ? "user" : "assistant", content: state === "changed" ? "Edited" : "Report ready" }])
+  claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
+  await expect(publishWorkResult(host, bot, task, new AbortController().signal, vi.fn())).rejects.toThrow("原正常回复已变化")
+  expect(f.write).not.toHaveBeenCalled()
+  expect(acknowledge).not.toHaveBeenCalled()
+})
+
+
+it("allows optional evidence reads without any private model invocation", async () => {
+  const host = { workResultReview: () => ({ ...context(), services: { items: [{ id: "old-ready", ready: true }] } }) } as unknown as LocalBotHost
+  claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
+  const access = createWorkResultEvidenceAccess(host, bot, task, new AbortController().signal)
+  expect([...access.serviceIds]).toEqual([])
+  const catalogue = access.reader.list()
+  const command = catalogue.items.find(item => item.kind === "text")!
+  expect(command).toBeDefined()
+  const read = await access.reader.read(command.id, { signal: new AbortController().signal })
+  expect(read).toMatchObject({ status: "ok", text: expect.stringContaining("1 test passed") })
+  expect(f.invoke).not.toHaveBeenCalled()
+})
+
+
+it("deduplicates delivered filenames pointing at the current final message, preserving other evidence", () => {
+  const href = botWorkHistoryHref({ workId: work.id, messageId: "final", incarnation: "model-supplied" })
+  const earlier = botWorkHistoryHref({ workId: work.id, messageId: "earlier", incarnation: "original" })
+  const foreign = botWorkHistoryHref({ workId: "other", messageId: "final", incarnation: "original" })
+  const publication = { finalMessageId: "final", attachments: [{ sourceTaskId: "task", callId: "files", fileIndex: 0,
+    file: { name: "report.md", filePath: "/report.md", size: 1 } }] }
+  const retained = `[测试记录](${href})\n- [report.md](${earlier})\n- [report.md](${foreign})\n参考 [report.md](${href})\n    [report.md](${href})`
+  expect(normalWorkResultSummary(`- [report.md](${href})\n${retained}`, work.id, publication)).toBe(retained)
+  expect(normalWorkResultSummary(`[report.md](${href})`, work.id, { ...publication, attachments: [] }))
+    .toBe(`[report.md](${href})`)
+})
+
+it("removes echoed escaped attachment labels without removing other citations", () => {
+  const href = botWorkAttachmentHref({ workId: work.id, messageId: "old", incarnation: "old", callId: "files", fileIndex: 0 })
+  const foreign = botWorkAttachmentHref({ workId: "other", messageId: "old", incarnation: "old", callId: "files", fileIndex: 0 })
+  const citation = `[测试记录](${botWorkHistoryHref({ workId: work.id, messageId: "test", incarnation: "original" })})`
+  expect(normalWorkResultSummary(`完成\n- [报告\\[最终\\].md](${href})\n${citation}\n[其他成果](${foreign})`, work.id))
+    .toBe(`完成\n${citation}\n[其他成果](${foreign})`)
+})
+
+
+it.each(["```", "~~~~"])("preserves attachment syntax in %s fenced and indented examples", fence => {
+  const href = botWorkAttachmentHref({ workId: work.id, messageId: "m", incarnation: "i", callId: "c", fileIndex: 0 })
+  const link = `[example.md](${href})`
+  const text = `链接格式示例：\n${fence}markdown\n${link}\n${fence}\n\n    ${link}\n\t${link}`
+  expect(normalWorkResultSummary(text, work.id)).toBe(text)
+  expect(normalWorkResultSummary(`${text}\n- ${link}`, work.id)).toBe(text)
+})
+
+it.each(["1.", "2)", "123456789."])("deduplicates %s formal attachment rows without stripping numbered citations", marker => {
+  const href = botWorkAttachmentHref({ workId: work.id, messageId: "old", incarnation: "old", callId: "files", fileIndex: 0 })
+  const foreign = botWorkAttachmentHref({ workId: "other", messageId: "old", incarnation: "old", callId: "files", fileIndex: 0 })
+  const citation = `${marker} [测试记录](${botWorkHistoryHref({ workId: work.id, messageId: "test", incarnation: "original" })})`
+  const result = `${marker} [查看原任务结果](${botWorkHistoryHref({ workId: work.id, messageId: "old", incarnation: "old" })})`
+  const retained = `${citation}\n${marker} [其他成果](${foreign})\n\n    ${marker} [代码示例](${href})`
+  expect(normalWorkResultSummary(`${marker} [report.md](${href})\n${result}\n${retained}`, work.id)).toBe(retained)
 })

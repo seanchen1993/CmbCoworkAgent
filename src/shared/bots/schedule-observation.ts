@@ -31,7 +31,7 @@ export interface BotScheduledWorkSnapshot {
     /** Physical turn status. A completed report can describe a failed command. */
     state: BotTaskState
     commandOutcome?: "failed" | "outcome_unknown" | "failed_and_unknown"
-    review?: "ready" | "blocked" | "needs_user"
+    review?: "reported" | "ready" | "blocked" | "needs_user"
   }
 }
 

@@ -1,5 +1,7 @@
+import { parseBotWorkAttachmentHref, parseBotWorkHistoryHref } from "../../shared/bots/work-history"
 import type { BotDeliveredFile } from "../../shared/bots/file-delivery"
 import type { BotTask, BotTaskState } from "../../shared/bots/contracts"
+import { splitBotInlineReasoning } from "../../shared/bots/inline-reasoning"
 
 export interface BotWorkResultAttachmentReference {
   sourceTaskId: string
@@ -71,7 +73,11 @@ export interface BotWorkResultPublication {
   /** Visible result in the same request chain, possibly before the final execution. */
   finalMessageId?: string
   sourceCreatedAt: number
-  kind: "ready" | "blocked" | "needs_user" | "interrupted"
+  /** Already persisted final reply of the normal parent Bot turn; never a model-supplied ID. */
+  responseMessageId?: string
+  /** Original streamed text, retained if dependency validation amends the publication. */
+  responseText?: string
+  kind: "reported" | "ready" | "blocked" | "needs_user" | "interrupted"
   summary: string
   /** Absent on older receipts, whose persisted publication text must remain identical on retry. */
   attachmentLinkVersion?: 1
@@ -91,7 +97,7 @@ export type BotWorkResultPublicationChoice = Pick<BotWorkResultPublication,
 export function describeUnavailableWorkService(result: Pick<BotWorkResultPublicationChoice, "kind" | "summary">) {
   return { unavailableDependency: true as const, ...(result.kind === "ready"
     ? { kind: "blocked" as const, summary: "成果所需的服务已停止或就绪状态已失效，请在原任务查看已交付内容。" }
-    : { kind: result.kind, summary: `成果所需的服务当前不可用。原核查记录为「${result.summary}」` }) }
+    : { kind: result.kind, summary: `成果所需的服务当前不可用。${result.kind === "reported" ? "原报告" : "原核查记录"}为「${splitBotInlineReasoning(result.summary).body}」` }) }
 }
 
 export function workResultMoreAttachmentsLabel(count: number): string {
@@ -134,4 +140,30 @@ export class RetryableBotWorkPublicationError extends Error {
   constructor(options?: ErrorOptions) {
     super("原结果投递未确认，请在原任务查看已有成果。", options)
   }
+}
+
+/** Formal attachment rows and the current result link are generated from Host receipts. */
+export function normalWorkResultSummary(text: string, workId: string,
+  publication?: Pick<BotWorkResultPublication, "finalMessageId" | "attachments">): string {
+  const deliveredNames = new Set(publication?.attachments.map(item => item.file.name
+    .replace(/\p{Cc}/gu, " ").replace(/([\\[\]])/g, "\\$1").slice(0, 160)))
+  let fence: { marker: string; length: number } | undefined
+  return splitBotInlineReasoning(text).body.split("\n").filter(line => {
+    const delimiter = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
+    if (delimiter) {
+      if (!fence) fence = { marker: delimiter[1][0], length: delimiter[1].length }
+      else if (delimiter[1][0] === fence.marker && delimiter[1].length >= fence.length && !delimiter[2].trim()) fence = undefined
+      return true
+    }
+    if (fence || /^(?: {4}|\t)/.test(line)) return true
+    const link = line.trim().match(/^(?:(?:[-*+]|\d{1,9}[.)])\s+)?\[((?:\\.|[^\]\\])+)\]\((#bot-history\/[^\s)]+)\)$/)
+    if (!link) return true
+    if (parseBotWorkAttachmentHref(link[2])?.workId === workId) return false
+    const history = parseBotWorkHistoryHref(link[2])
+    if (history?.workId !== workId) return true
+    // A file label pointing at this result is an echoed delivery row, not an
+    // attachment preview. Keep other messages and prose citations intact.
+    if (publication?.finalMessageId === history.messageId && deliveredNames.has(link[1])) return false
+    return link[1] !== "查看原任务结果"
+  }).join("\n").trimEnd()
 }

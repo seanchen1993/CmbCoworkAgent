@@ -4,6 +4,8 @@ import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { runInNewContext } from "node:vm"
 import { ToolMessage } from "@langchain/core/messages"
+import { tool } from "@langchain/core/tools"
+import { z } from "zod"
 import ts from "typescript"
 import { describe, expect, it, vi } from "vitest"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
@@ -139,6 +141,37 @@ const humanWaits = [
   { name: "bot_request_browser_help", args: undefined },
   { name: "bot_browser", args: { action: "request_help" } }
 ]
+
+describe("cancelled queued tools", () => {
+  it.each(["edit_file", "read_file"])("does not enter an aborted %s or strand the next turn", async (name) => {
+    const gate = createGate()
+    const entered = deferred(), finish = deferred()
+    const holder = gate.wrapToolCall(request("write_file", "holder"), async () => {
+      entered.resolve()
+      await finish.promise
+    })
+    await entered.promise
+    const controller = new AbortController()
+    const reason = new Error("Cancelled while waiting for the previous tool")
+    const operation = vi.fn(async () => "done")
+    // Use the installed tool wrapper: invoking it with an already-aborted
+    // signal can leave its promise pending even when the operation returns.
+    const wrapped = tool(operation, { name, description: "Queued cancellation regression", schema: z.object({}) })
+    const handler = vi.fn(async () => wrapped.invoke({}, { signal: controller.signal }))
+    let outcome: unknown = "pending"
+    const queued = gate.wrapToolCall({ ...request(name, "queued"), runtime: { signal: controller.signal } }, handler)
+      .then(value => { outcome = value }, error => { outcome = error })
+    controller.abort(reason)
+    finish.resolve()
+    await holder
+    await vi.waitFor(() => expect(outcome).toBe(reason), { timeout: 300 })
+    await queued
+    expect(handler).not.toHaveBeenCalled()
+    expect(operation).not.toHaveBeenCalled()
+    await expect(gate.wrapToolCall(request("bot_remember", "next-turn"), async () => "saved"))
+      .resolves.toBe("saved")
+  })
+})
 
 describe("shared Bot workspaces", () => {
   it("serializes writes across conversations sharing a directory while other directories proceed", async () => {

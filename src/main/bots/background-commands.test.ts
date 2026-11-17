@@ -32,6 +32,21 @@ function fixture() {
 }
 
 describe("Bot native command receipts", () => {
+  it.each([false, true])("reports recorded start and observation times without inventing an exit time (unknown=%s)", unknown => {
+    const { db, store, task, command, result } = fixture()
+    store.acceptCommand(task.id, { ...command, startedAt: 1000 })
+    store.transition(task.id, "completed")
+    const observer = new BotStore(db, () => 3000)
+    observer.settleCommand(result, unknown)
+    const notice = observer.nextQueued([])!
+    const receipt = JSON.parse(notice.message.split("\n\n")[2])
+    expect(receipt).toMatchObject({ startedAt: 1000, observedAt: 3000,
+      state: unknown ? "outcome_unknown" : "completed" })
+    expect(receipt).not.toHaveProperty("finishedAt")
+    expect(receipt).not.toHaveProperty("completedAt")
+    observer.settleCommand(result, unknown)
+    expect(observer.recentTasks().filter(entry => entry.requestId === notice.requestId)).toHaveLength(1)
+  })
   it.each(["APPROVED", ""])("keeps Hook decisions on command continuation (%s)", approved => {
     const { store, task, command, result } = fixture()
     store.beginInputPreparation(task.id)

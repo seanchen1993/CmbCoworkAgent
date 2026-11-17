@@ -1,3 +1,4 @@
+import { coordinatorTranscriptContentToText } from "../../shared/internal-notification-turn"
 import { getThreadMessagesByIds, upsertThreadMessages } from "../db"
 import { BotError } from "../../shared/bots/contracts"
 import { BOT_FIXED_REMINDER_DELAY_MS, delayedBotReminderText, scheduledDesktopMessage,
@@ -34,6 +35,25 @@ export function persistBotResultMessage(
     )
   )
     throw new Error("未确认原结果已写入主对话。")
+}
+
+/** Attach retained result links to the normal reply without creating another message. */
+export function completeBotResultMessage(
+  threadId: string, id: string, originalText: string, content: string,
+  existing = getThreadMessagesByIds(threadId, [id])[0],
+  previousGeneratedContent?: string
+): void {
+  const existingText = coordinatorTranscriptContentToText(existing?.content)
+  if (!existing || existing.id !== id || existing.role !== "assistant" ||
+      (existingText.trim() !== originalText && existingText !== content && existingText !== previousGeneratedContent))
+    throw new BotError("CONFLICT", "原正常回复已变化，未重复发布成果。")
+  if (existingText === content) return
+  // Final stream rows carry snapshot authority. Preserve the existing priority
+  // and verify the durable bytes before the caller acknowledges delivery.
+  if (!upsertThreadMessages(threadId,
+    [{ ...existing, content, content_mode: "snapshot" }], { preserveExistingOrder: true }) ||
+    getThreadMessagesByIds(threadId, [id])[0]?.content !== content)
+    throw new Error("未确认附件链接已写入原回复。")
 }
 
 /** A null receipt means the first write was skipped because the reminder expired. */

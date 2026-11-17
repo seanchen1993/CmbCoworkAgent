@@ -123,7 +123,8 @@ import {
   describeUnavailableWorkService,
   type BotWorkResultReviewCommit,
   type BotWorkResultReviewRecord,
-  type BotWorkResultServices
+  type BotWorkResultServices,
+  normalWorkResultSummary
 } from "./work-result-settlement"
 import {
   BOT_MESSAGE_REPLY_END,
@@ -220,6 +221,9 @@ function workCallbackExists(where: string): string {
   return `(EXISTS(SELECT 1 FROM bot_tasks callback WHERE ${where}) OR
     EXISTS(SELECT 1 FROM bot_exchange_archive callback WHERE ${where}))`
 }
+// Shared command liveness only; callers retain their own ownership and service policy.
+const PENDING_WORK_COMMAND = "(c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0))"
+const ACTIVE_WORKFLOW_FOR_WORK = "r.retired_at IS NULL AND (p.work_id=? OR json_extract(p.origin_json,'$.rootWorkId')=?)"
 const SEPARATE_WORK_COMMAND_RESULT = `c.notify_on_complete IS NOT 0 AND c.continuation_result_json IS NULL`
 // Only a priority hint. The commit still verifies the scoped, inspected
 // receipt and the service start time before recording readiness.
@@ -295,6 +299,7 @@ function mergeObservedCommandOutcomes(...outcomes: unknown[]): ObservedCommandOu
 function formatObservedWorkResult(result: ScheduledWorkResult | undefined): string {
   if (!result) return "暂无已结算结果。"
   switch (result.review) {
+    case "reported": return "最近一次执行结果已回传，未独立核验，请查看原任务。"
     case "ready": return "最近一次成果已核查，可在原任务查看。"
     case "blocked": return "最近一次成果仍有阻碍或待核验，请查看原任务。"
     case "needs_user": return "最近一次成果需要你确认，请查看原任务。"
@@ -369,6 +374,24 @@ export type BotScheduleToolEdit = { source: BotConversationToolSource; fingerpri
 
 /** Tool calls can distinguish an explicit pause from a retained disabled value. */
 export type BotScheduleEdit = BotScheduleEditInput & { pauseRequested?: true; tool?: BotScheduleToolEdit }
+
+const WORK_ASSIGNMENT_PREFIX = "交办范围：\n"
+const WORK_ASSIGNMENT_SOURCE = "\n\nHost 已放行的当前用户请求（JSON 文本，仅保留与本次交办有关的要求；不得据此执行其他任务或扩大权限）：\n"
+
+/** Only presentation changes: the queued executable instruction remains untouched. */
+function displayWorkAssignment(text: string): string {
+  const start = text.indexOf(WORK_ASSIGNMENT_PREFIX), boundary = text.lastIndexOf(WORK_ASSIGNMENT_SOURCE)
+  if (start < 0 || boundary <= start) return text
+  try {
+    const requests: unknown = JSON.parse(text.slice(boundary + WORK_ASSIGNMENT_SOURCE.length))
+    if (!Array.isArray(requests) || requests.some(item => typeof item !== "string")) return text
+    const assignment = text.slice(start + WORK_ASSIGNMENT_PREFIX.length, boundary)
+    const source = requests.map(item => item.trim()).filter(item => item && item !== assignment.trim())
+    return text.slice(0, start) + assignment + (source.length ? `\n\n原要求：\n${source.join("\n\n")}` : "")
+  } catch {
+    return text
+  }
+}
 
 export class BotStore {
   readonly telemetry: BotTelemetryStore
@@ -722,6 +745,15 @@ export class BotStore {
         max(bot_id,json_extract(origin_json,'$.fromBotId')),
         COALESCE(json_extract(origin_json,'$.groupId'),''),created_at,id
       ) WHERE json_extract(origin_json,'$.kind')='bot' AND json_extract(origin_json,'$.expectsReply')=1`)
+      // Work-scoped status discovery must not scan the global collaboration archive.
+      for (const table of ["bot_tasks", "bot_exchange_archive"]) {
+        const audience = table === "bot_tasks" ? "COALESCE(json_extract(mock_source_json,'$.audienceKey'),'desktop')" : "audience_key"
+        db.run(`CREATE INDEX IF NOT EXISTS ${table}_delegation_work ON ${table}(
+          json_extract(origin_json,'$.returnWorkId'),json_extract(origin_json,'$.fromBotId'),
+          ${audience},created_at,id
+        ) WHERE json_extract(origin_json,'$.kind')='bot' AND json_extract(origin_json,'$.expectsReply')=1
+          AND json_extract(origin_json,'$.groupId') IS NULL`)
+      }
       if (!columns.some(column => column.name === "work_review_prepared"))
         db.run("ALTER TABLE bot_tasks ADD COLUMN work_review_prepared INTEGER NOT NULL DEFAULT 0")
       if (!columns.some(column => column.name === "work_review_request_id"))
@@ -797,7 +829,7 @@ export class BotStore {
         `SELECT t.* FROM bot_tasks t WHERE ${source} AND t.state IN ('queued','running','waiting_user')`, [bindingId]
       ).map(row => this.task(row))
       const commands = this.rows(
-        `SELECT c.id,c.state FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)) AND ${source}`, [bindingId]
+        `SELECT c.id,c.state FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id WHERE ${PENDING_WORK_COMMAND} AND ${source}`, [bindingId]
       )
       for (const command of commands)
         this.db.run("UPDATE bot_commands SET suppressed=1 WHERE id=?", [command.id])
@@ -1103,7 +1135,7 @@ export class BotStore {
     const control: WorkControlRecord | undefined = row.control_json == null
       ? undefined : JSON.parse(String(row.control_json))
     const published = typeof row.result_conclusion === "string" && !row.deletion_phase
-      ? JSON.parse(row.result_conclusion) as { kind: "ready" | "blocked" | "needs_user"; summary: string; messageId: string;
+      ? JSON.parse(row.result_conclusion) as { kind: "reported" | "ready" | "blocked" | "needs_user"; summary: string; messageId: string;
           backgroundServicesOnly?: number; unavailableDependency?: "reported" | "current" }
       : undefined
     const current = published?.unavailableDependency === "current"
@@ -1174,7 +1206,7 @@ export class BotStore {
   /** Bounded metadata projection; no transcript or command output enters the directory. */
   private workActivityProjection(view: "display" | "model" = "display"): string {
     const preview = "(SELECT preview FROM bot_activity a WHERE a.kind='work' AND a.id=w.id)"
-    const backgroundCommand = `(c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0))
+    const backgroundCommand = `${PENDING_WORK_COMMAND}
       AND (c.thread_id=w.thread_id OR json_extract(p.origin_json,'$.rootWorkId')=w.id)`
     const activeWorkflow = `EXISTS(SELECT 1 FROM bot_workflow_refs r WHERE r.retired_at IS NULL AND r.source_task_id IN (
       SELECT wf_owner.id FROM bot_tasks wf_owner WHERE wf_owner.work_id=w.id OR json_extract(wf_owner.origin_json,'$.rootWorkId')=+w.id
@@ -1247,7 +1279,7 @@ export class BotStore {
         AND w.source_json IS NULL AND w.audience_key='desktop'
         AND json_extract(w.work_review_json,'$.phase')='settled'
         AND json_extract(w.work_review_json,'$.resultDecisionSuperseded') IS NOT 1
-        THEN (SELECT json_object('kind',json_extract(${preparedPublication},'$.kind'),'messageId',publication.fingerprint,
+        THEN (SELECT json_object('kind',json_extract(${preparedPublication},'$.kind'),'messageId',COALESCE(json_extract(${preparedPublication},'$.responseMessageId'),publication.fingerprint),
           'summary',json_extract(${preparedPublication},'$.summary'),
           'unavailableDependency',CASE WHEN json_extract(${preparedPublication},'$.unavailableDependency')=1 THEN 'reported'
             WHEN EXISTS (
@@ -1278,7 +1310,7 @@ export class BotStore {
           WHERE publication.command_id='publication:' || (${finalPublicationId})
           AND publication.command_id='publication:' || publication.fingerprint
           AND json_extract(publication.receipt,'$.id')=publication.fingerprint
-          AND json_extract(${preparedPublication},'$.kind') IN ('needs_user','ready','blocked')
+          AND json_extract(${preparedPublication},'$.kind') IN ('reported','needs_user','ready','blocked')
           AND json_extract(publication.receipt,'$.botId')=w.bot_id
           AND json_extract(publication.receipt,'$.workId')=w.id
           AND json_extract(publication.receipt,'$.workThreadId')=w.thread_id
@@ -1495,8 +1527,8 @@ export class BotStore {
           SELECT work_id FROM bot_tasks WHERE work_id IS NOT NULL AND state IN ('queued','running','waiting_user')
           UNION SELECT json_extract(origin_json,'$.rootWorkId') FROM bot_tasks WHERE state IN ('queued','running','waiting_user') AND json_extract(origin_json,'$.rootWorkId') IS NOT NULL
           UNION SELECT a.id FROM bot_activity a WHERE a.kind='work' AND a.attention_version>a.seen_version
-          UNION SELECT x.id FROM bot_commands c JOIN bot_work_items x ON x.thread_id=c.thread_id WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0))
-          UNION SELECT json_extract(t.origin_json,'$.rootWorkId') FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)))
+          UNION SELECT x.id FROM bot_commands c JOIN bot_work_items x ON x.thread_id=c.thread_id WHERE ${PENDING_WORK_COMMAND}
+          UNION SELECT json_extract(t.origin_json,'$.rootWorkId') FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id WHERE ${PENDING_WORK_COMMAND})
         ORDER BY CASE execution_state WHEN 'waiting_user' THEN 0 WHEN 'running' THEN 1 ELSE 2 END,w.updated_at DESC,w.ordinal DESC LIMIT 6`,
         [botId, audience ?? null, audience ?? null, query, query]
       ).map((row) => this.workSummary(row)),
@@ -1894,7 +1926,7 @@ export class BotStore {
             ? this.forwardedInput(source.taskId, input.inputFileIds, id)
             : { text: buildAttachmentMessageParts(desktopFiles.map(file => file.attachment!)).attachmentModelBlocks,
                 ids: desktopFiles.map(file => file.id) }
-          const message = goal + (source ? "" : contextText) + attachments.text
+          const message = (source ? this.workAssignment(this.getTask(source.taskId), goal) : goal + contextText) + attachments.text
           parseSendBotMessage({ botId: bot.id, requestId: input.operationId, message })
           const task = this.enqueue(
             {
@@ -2006,7 +2038,7 @@ export class BotStore {
             {
               botId: task.botId,
               workId,
-              message: literalWorkAttachments(message.trim()) + attachments.text,
+              message: this.workAssignment(task, literalWorkAttachments(message.trim())) + attachments.text,
               requestId: `work-message-${createHash("sha256")
                 .update(JSON.stringify([task.id, source.callId]))
                 .digest("hex")}`
@@ -2225,7 +2257,9 @@ export class BotStore {
       WHERE w.id=? AND t.work_id=w.id AND t.state='queued' ${taskId ? "AND t.id=?" : ""}
       ORDER BY t.created_at,t.id`, taskId ? [workId, taskId] : [workId])
       .map(row => {
-        const text = cleanUserAttachmentContentForDisplay(this.replyInputBody(String(row.message), JSON.parse(String(row.origin_json)), true))
+        const origin = JSON.parse(String(row.origin_json)) as BotTaskOrigin
+        const projected = cleanUserAttachmentContentForDisplay(this.replyInputBody(String(row.message), origin, true))
+        const text = origin.kind === "work" ? displayWorkAssignment(projected) : projected
         return { taskId: String(row.id), message: taskId ? text : text.slice(0, 1200),
           truncated: !taskId && text.length > 1200 }
       })
@@ -2281,7 +2315,7 @@ export class BotStore {
         // automatic check only when the user actually receives control.
         if (review && !review.deliveryOnly && ["executing", "waiting", "checking"].includes(review.phase) &&
             (!review.repairTaskId || !control.heldTaskIds.includes(review.repairTaskId)))
-          this.preserveWorkReviewDelivery(work.id, review)
+          this.preserveWorkReviewDelivery(work.id, review, !control.stopTaskIds)
         changed = true
       }
       if (changed) this.changed()
@@ -2298,8 +2332,8 @@ export class BotStore {
         (c.state='accepted' AND (?=1 OR c.notify_on_complete IS NOT 0 OR c.service_ready_json IS NULL
           OR p.id IS NULL OR p.state IN ('cancelled','interrupted','outcome_unknown')))) LIMIT 1`,
       [work.threadId, work.id, work.dispatchStopped ? 1 : 0]).length > 0 ||
-      this.rows(`SELECT 1 FROM bot_workflow_refs r JOIN bot_tasks t ON t.id=r.source_task_id
-        WHERE r.retired_at IS NULL AND (t.work_id=? OR json_extract(t.origin_json,'$.rootWorkId')=?) LIMIT 1`, [work.id, work.id]).length > 0
+      this.rows(`SELECT 1 FROM bot_workflow_refs r JOIN bot_tasks p ON p.id=r.source_task_id
+        WHERE ${ACTIVE_WORKFLOW_FOR_WORK} LIMIT 1`, [work.id, work.id]).length > 0
   }
 
   /** Model identifies the readiness check; the Host supplies the actual completed receipt.
@@ -2454,7 +2488,7 @@ export class BotStore {
               [workId, workId]
             ).length ||
               this.rows(
-                `SELECT c.id FROM bot_commands c LEFT JOIN bot_tasks t ON t.id=c.source_task_id WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)) AND (c.thread_id=? OR json_extract(t.origin_json,'$.rootWorkId')=?) LIMIT 1`,
+                `SELECT c.id FROM bot_commands c LEFT JOIN bot_tasks t ON t.id=c.source_task_id WHERE ${PENDING_WORK_COMMAND} AND (c.thread_id=? OR json_extract(t.origin_json,'$.rootWorkId')=?) LIMIT 1`,
                 [work.threadId, workId]
               ).length ||
               this.rows(
@@ -2805,7 +2839,7 @@ export class BotStore {
         [botId]
       ).length ||
       this.rows(
-        `SELECT c.id FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id JOIN bot_work_items w ON w.id=json_extract(t.origin_json,'$.rootWorkId') WHERE w.bot_id=? AND (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)) LIMIT 1`,
+        `SELECT c.id FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id JOIN bot_work_items w ON w.id=json_extract(t.origin_json,'$.rootWorkId') WHERE w.bot_id=? AND ${PENDING_WORK_COMMAND} LIMIT 1`,
         [botId]
       ).length ||
       this.rows(
@@ -3562,6 +3596,14 @@ export class BotStore {
   recordPreparedInput(taskId: string, body: string | null): void {
     const task = this.getTask(taskId)
     const origin = task.origin
+    // A desktop routine's admitted instruction is result evidence, not a user
+    // request or attachment grant. Preserve it separately from the mutable schedule.
+    if (origin.kind === "schedule" && task.workId && !task.mockSource) {
+      if (task.state !== "queued" && !ACTIVE_STATES.includes(task.state as (typeof ACTIVE_STATES)[number]))
+        throw new BotError("CONFLICT", "例行执行已停止")
+      if (body !== null) this.db.run("UPDATE bot_tasks SET prepared_input=? WHERE id=?", [body, taskId])
+      return
+    }
     if (!tracksBotInputPreparation(task)) return
     if (task.state !== "queued" && !ACTIVE_STATES.includes(task.state as (typeof ACTIVE_STATES)[number]))
       throw new BotError("CONFLICT", "附件所属请求已停止")
@@ -3612,7 +3654,7 @@ export class BotStore {
         WHERE publication.command_id='publication:work-result-publication-' ||
           json_extract(w.work_review_json,'$.requestTaskId') || '-' ||
           json_extract(w.work_review_json,'$.executionTaskId') || '-final'
-        AND json_extract(publication.receipt,'$.kind') IN ('needs_user','ready','blocked'))
+        AND json_extract(publication.receipt,'$.kind') IN ('reported','needs_user','ready','blocked'))
       AND EXISTS (SELECT 1 FROM bot_tasks input WHERE input.id=?
         AND ${this.workReviewUserInputSql("input")}
         AND input.rowid>COALESCE((SELECT original.rowid FROM bot_tasks original WHERE original.id=COALESCE(
@@ -3698,9 +3740,38 @@ export class BotStore {
 
   private inputSources(task: BotTask): BotTask[] {
     return [task, ...this.rows(
-      "SELECT id FROM bot_tasks WHERE injected_into=? AND bot_id=? AND thread_id=? AND state='running'",
+      "SELECT id FROM bot_tasks WHERE injected_into=? AND bot_id=? AND thread_id=? AND state='running' ORDER BY created_at,rowid",
       [task.id, task.botId, task.threadId]
     ).map(row => this.getTask(String(row.id)))]
+  }
+
+  /** Like DSH's trigger/routing-note split, preserve admitted constraints separately from the assignment. */
+  private workAssignment(task: BotTask, assignment: string): string {
+    const requests: string[] = []
+    for (const source of this.inputSources(task)) {
+      // Only actual desktop user submissions, never peer feedback or internal continuations.
+      if (source.mockSource || source.origin.kind !== "user") continue
+      const row = this.rows("SELECT * FROM bot_tasks WHERE id=?", [source.id])[0]
+      if (!row || row.work_review_prepared !== 1) continue
+      const projected = this.inputProjection(row)
+      if (projected === null) continue
+      let body = this.replyInputBody(projected ?? source.message, source.origin, true)
+      // Files retain their separate, explicitly selected handoff. Do not copy unselected file bodies.
+      for (const file of this.inputFiles(source.botId, source.origin.inputFileIds ?? [])) {
+        if (!file.attachment) continue
+        const block = buildAttachmentMessageParts([file.attachment]).attachmentModelBlocks.trim()
+        body = body.replaceAll(block, "")
+      }
+      if (body.trim()) requests.push(body)
+    }
+    if (!requests.length || (requests.length === 1 && requests[0] === assignment)) return assignment
+    // Keep source text literal; it cannot mint attachment, skill or internal-goal transport markers.
+    const sourceText = `[${requests.map(body => JSON.stringify(body).replace(/[<>\[\]]/g,
+      character => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`)).join(",")}]`
+    const message = `${WORK_ASSIGNMENT_PREFIX}${assignment}${WORK_ASSIGNMENT_SOURCE}${sourceText}`
+    if (message.length > 30000)
+      throw new BotError("INVALID_INPUT", "交办说明与原请求超过上限，请缩短交办说明；原请求不会被静默截断。")
+    return message
   }
 
   /** A prepared desktop/owner-IM continuation may reuse its work's formal attachments. */
@@ -4443,7 +4514,7 @@ export class BotStore {
     const work = this.getWork(botId, workId)
     return this.transaction(() => {
       const commands = this.rows(
-        `SELECT c.id,c.state FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)) AND c.thread_id!=? AND json_extract(t.origin_json,'$.rootWorkId')=?`,
+        `SELECT c.id,c.state FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id WHERE ${PENDING_WORK_COMMAND} AND c.thread_id!=? AND json_extract(t.origin_json,'$.rootWorkId')=?`,
         [work.threadId, workId]
       )
       for (const command of commands)
@@ -4517,6 +4588,31 @@ export class BotStore {
     return {
       audienceKey: work?.audienceKey ?? "desktop",
       threadId: work?.threadId ?? (groupId ? `group-${groupId}-${botId}` : this.getBot(botId).threadId)
+    }
+  }
+
+  workDelegations(botId: string, workId: string) {
+    const viewer = this.getBot(botId)
+    if (viewer.deleting) throw new BotError("NOT_FOUND", "Bot 正在删除")
+    const scope = this.exchangeScope(botId, undefined, workId)
+    const rows = ["bot_tasks", "bot_exchange_archive"].flatMap(table => {
+      const audience = table === "bot_tasks" ? "COALESCE(json_extract(mock_source_json,'$.audienceKey'),'desktop')" : "audience_key"
+      return this.rows(`SELECT id,bot_id,state,created_at FROM ${table}
+        WHERE json_extract(origin_json,'$.kind')='bot' AND json_extract(origin_json,'$.expectsReply')=1
+          AND json_extract(origin_json,'$.groupId') IS NULL
+          AND json_extract(origin_json,'$.returnWorkId')=?
+          AND json_extract(origin_json,'$.fromBotId')=? AND ${audience}=?
+        ORDER BY created_at DESC,id DESC LIMIT 21`, [workId, botId, scope.audienceKey])
+    }).sort((a, b) => Number(b.created_at) - Number(a.created_at) ||
+      (String(a.id) < String(b.id) ? 1 : String(a.id) > String(b.id) ? -1 : 0)).slice(0, 21)
+    const ids = [...new Set(rows.slice(0, 20).map(row => String(row.bot_id)))]
+    const names = new Map(ids.length ? this.rows(`SELECT id,name FROM bots WHERE id IN (${ids.map(() => "?").join(",")})`, ids)
+      .map(row => [String(row.id), String(row.name)]) : [])
+    return {
+      items: rows.slice(0, 20).flatMap(row => names.has(String(row.bot_id)) ? [{ taskId: String(row.id),
+        recipient: names.get(String(row.bot_id))!, turnState: String(row.state) as BotTaskState,
+        createdAt: Number(row.created_at) }] : []),
+      hasMore: rows.length > 20
     }
   }
 
@@ -5850,9 +5946,10 @@ export class BotStore {
       )[0]
       if (!row) return // duplicate completion, removed owner, or a foreign conversation
       const state = unknown ? "outcome_unknown" : result.cancelled ? "cancelled" : "completed"
+      const observedAt = this.now()
       this.db.run("UPDATE bot_commands SET state=?,updated_at=?,result_json=? WHERE id=?", [
         state,
-        this.now(),
+        observedAt,
         JSON.stringify({ exitCode: result.exitCode, cancelled: result.cancelled, unknown,
           output: result.output.slice(-4000), truncated: result.truncated || result.output.length > 4000 }),
         result.id
@@ -5867,6 +5964,8 @@ export class BotStore {
             command: String(row.command).slice(0, 8_000),
             cwd: row.cwd,
             state,
+            startedAt: Number(row.started_at),
+            observedAt,
             exitCode: result.exitCode,
             output,
             truncated: result.truncated || output.length < result.output.length
@@ -5900,6 +5999,9 @@ export class BotStore {
           command: String(row.command).slice(0, 8_000),
           cwd: row.cwd,
           state,
+          startedAt: Number(row.started_at),
+          // Host observation, not an inferred process exit time (especially after restart).
+          observedAt,
           exitCode: result.exitCode,
           output,
           truncated: result.truncated || output.length < result.output.length
@@ -6427,14 +6529,17 @@ export class BotStore {
         !silentCompletion
       ) {
         const group = this.getGroup(groupId)
+        // A failed explicit-publication turn may retain private findings for its
+        // caller. Keep the public failure notice, without publishing that body.
+        const publicResult = explicitGroupMessages && state === "failed" ? "" : visibleResult
         const text = (
-          visibleResult ||
+          publicResult ||
           error ||
           (state === "cancelled"
             ? botTaskStateLabel(state)
             : `${botTaskStateLabel(state)}；没有可确认的结果。`)
         ).slice(0, 60_000)
-        const mentions = visibleResult
+        const mentions = publicResult
           ? bindBotGroupMentions(
               text,
               group.memberIds.map((id) => this.getBot(id)).filter((bot) => !bot.deleting)
@@ -6458,7 +6563,7 @@ export class BotStore {
           this.noteActivity(
             "group",
             group.id,
-            visibleResult || error || botTaskStateLabel(state),
+            publicResult || error || botTaskStateLabel(state),
             true,
             this.getBot(task.botId).name
           )
@@ -6956,6 +7061,48 @@ export class BotStore {
       : { taskId: task.id, threadId: task.threadId, deliveries: [] }
   }
 
+  /** Read-only receipts for the latest physical turn, never a claim of complete execution history. */
+  workHistoryCommands(botId: string, workId: string, incarnation: string) {
+    const unavailable = { coverage: "unavailable" as const, commands: [] }
+    const work = this.getWork(botId, workId)
+    const review = this.workResultReview(workId)
+    if (work.source || work.audienceKey !== "desktop" || !review || review.incarnation !== incarnation)
+      return unavailable
+    const row = this.rows(`SELECT t.* FROM bot_tasks t
+      WHERE t.bot_id=? AND t.work_id=? AND t.thread_id=? AND t.injected_into IS NULL
+      AND NOT ${omittedWorkResult("t")}
+      ORDER BY t.created_at DESC,t.rowid DESC LIMIT 1`, [botId, workId, work.threadId])[0]
+    if (!row || row.mock_source_json || row.state === "queued") return unavailable
+    const task = this.task(row)
+    const scope = this.currentWorkReviewScope(task, review)
+    if (!scope) return unavailable
+    const evidence = this.workResultExecutionEvidence(task)
+    if (evidence.taskId !== task.id || evidence.threadId !== work.threadId) return unavailable
+    const commands = (evidence.foregroundCommands ?? []).slice(-3)
+    // Stopping suppresses callbacks, not the durable receipt. Read the current
+    // physical turn and its durable background owner, without reviving execution.
+    const callback = task.origin.kind === "notification" && task.origin.notificationKind === "command"
+      ? task.origin : undefined
+    const callbackId = callback?.key ?? null
+    const backgroundCommands = this.rows(`SELECT id,source_task_id,state,started_at,updated_at,result_json FROM bot_commands
+      WHERE bot_id=? AND thread_id=? AND (source_task_id=? OR id=? OR source_task_id=COALESCE(?,(
+        SELECT source_task_id FROM bot_commands WHERE id=? AND bot_id=? AND thread_id=?)))
+      AND (work_review_scope_id=? OR (work_review_scope_id IS NULL AND ?))
+      ORDER BY updated_at DESC,id LIMIT 3`,
+      [botId, work.threadId, task.id, callbackId, callback?.sourceTaskId ?? null, callbackId, botId, work.threadId,
+        scope, !review.commandScopeId ? 1 : 0]).map(row => ({
+        id: String(row.id), sourceTaskId: String(row.source_task_id), state: String(row.state),
+        startedAt: new Date(Number(row.started_at)).toISOString(),
+        ...(row.result_json ? { observedAt: new Date(Number(row.updated_at)).toISOString(),
+          result: JSON.parse(String(row.result_json)) as {
+            output: string; exitCode: number | null; truncated: boolean; cancelled: boolean; unknown: boolean
+          } } : {})
+      }))
+    return { coverage: commands.length || backgroundCommands.length ? "partial" as const : "unavailable" as const,
+      taskId: task.id, state: task.state, commands,
+      ...(backgroundCommands.length ? { backgroundCommands } : {}) }
+  }
+
   private newerWorkReviewUser(work: BotWorkItem, review: BotWorkResultReviewRecord): boolean {
     return Boolean(this.rows(`SELECT 1 FROM bot_tasks t WHERE t.bot_id=? AND t.thread_id=? AND t.work_id IS NULL
       AND t.rowid>(SELECT rowid FROM bot_tasks WHERE id=?)
@@ -6985,11 +7132,11 @@ export class BotStore {
     const commands = this.rows(`SELECT p.*,c.state AS command_state,c.notify_on_complete,c.service_ready_json
       FROM bot_commands c JOIN bot_tasks p ON p.id=c.source_task_id
       WHERE (p.work_id=? OR json_extract(p.origin_json,'$.rootWorkId')=?)
-        AND (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0))`, [work.id, work.id])
+        AND ${PENDING_WORK_COMMAND}`, [work.id, work.id])
       .filter(row => belongs(this.task(row)))
     if (commands.some(row => stopping || row.command_state !== "accepted" || row.notify_on_complete !== 0)) return "waiting"
     if (this.rows(`SELECT p.* FROM bot_workflow_refs r JOIN bot_tasks p ON p.id=r.source_task_id
-      WHERE r.retired_at IS NULL AND (p.work_id=? OR json_extract(p.origin_json,'$.rootWorkId')=?)`,
+      WHERE ${ACTIVE_WORKFLOW_FOR_WORK}`,
       [work.id, work.id]).some(row => belongs(this.task(row)))) return "waiting"
     // The private review chooses the services the current result actually needs.
     // Older silent services retain their original cleanup owner, not a veto on later offline results.
@@ -7105,7 +7252,9 @@ export class BotStore {
   }
 
   /** Withdraw future automatic work while keeping the result already owed to the user. */
-  private preserveWorkReviewDelivery(workId: string, review: BotWorkResultReviewRecord): void {
+  private preserveWorkReviewDelivery(workId: string, review: BotWorkResultReviewRecord, keepRunningReport = false): void {
+    const reporting = keepRunningReport && review.phase === "checking" && Boolean(review.reviewTaskId &&
+      this.rows("SELECT 1 FROM bot_tasks WHERE id=? AND state='running'", [review.reviewTaskId]).length)
     const repair = review.repairTaskId && this.rows("SELECT state,work_review_prepared FROM bot_tasks WHERE id=?",
       [review.repairTaskId])[0]
     const unstartedRepair = Boolean(review.repairTaskId && (!repair || repair.state === "queued" ||
@@ -7113,9 +7262,9 @@ export class BotStore {
     this.cancelQueuedWorkReviewTask(review.reviewTaskId)
     if (unstartedRepair) this.cancelQueuedWorkReviewTask(review.repairTaskId)
     this.saveWorkResultReview(workId, {
-      ...review, deliveryOnly: true, reviewTaskId: undefined,
+      ...review, deliveryOnly: true, reviewTaskId: reporting ? review.reviewTaskId : undefined,
       repairTaskId: unstartedRepair ? undefined : review.repairTaskId,
-      phase: review.phase === "checking" || unstartedRepair ? "waiting" : review.phase
+      phase: !reporting && (review.phase === "checking" || unstartedRepair) ? "waiting" : review.phase
     })
   }
 
@@ -7128,16 +7277,22 @@ export class BotStore {
     const task = this.getTask(taskId)
     if (task.origin.kind !== "work_result" || task.origin.review?.phase !== "review" || task.state !== state)
       return undefined
-    const work = this.reviewTarget(task.botId, task.origin.workId, true)
-    const review = work && this.workResultReview(work.id)
-    if (!work || !review || review.deliveryOnly || review.phase !== "checking" || review.reviewTaskId !== task.id ||
+    const review = this.workResultReview(task.origin.workId)
+    const work = review?.deliveryOnly
+      ? this.reviewSettlementTarget(task.botId, task.origin.workId)
+      : this.reviewTarget(task.botId, task.origin.workId, true)
+    if (!work || !review || review.phase !== "checking" || review.reviewTaskId !== task.id ||
         review.requestTaskId !== task.origin.review.requestTaskId || review.executionTaskId !== task.origin.executionTaskId ||
         work.threadId !== task.origin.workThreadId || work.parentThreadId !== task.threadId || !review.outcome) return undefined
     return { task, work, review, outcome: review.outcome }
   }
 
   getWorkResultReview(taskId: string) {
-    const live = this.getLiveWorkResultReview(taskId)
+    return this.prepareWorkResultReview(this.getLiveWorkResultReview(taskId))
+  }
+
+  /** Reuse an admission already read in this synchronous transaction; never cache across awaits. */
+  private prepareWorkResultReview(live: ReturnType<BotStore["getLiveWorkResultReview"]>) {
     if (!live || this.newerWorkReviewUser(live.work, live.review) ||
         this.pendingWorkReviewInput(live.work, live.review)) return undefined
     const { review, work, outcome } = live
@@ -7166,9 +7321,10 @@ export class BotStore {
         (id IN (SELECT id FROM executions) AND (json_extract(origin_json,'$.kind')='user'
           OR json_extract(origin_json,'$.dispatch')='follow_up')))
       AND mock_source_json IS NULL AND work_review_prepared=1
-      AND json_extract(origin_json,'$.kind') IN ('user','work') ORDER BY rowid DESC LIMIT 9`,
+      AND json_extract(origin_json,'$.kind') IN ('user','work') ORDER BY rowid DESC LIMIT 10`,
       [executionIds, work.botId, work.threadId, work.id, review.requestTaskId])
-    for (const row of supplements.reverse()) {
+    const requestsOmitted = supplements.length > 9
+    for (const row of supplements.slice(0, 9).reverse()) {
       const id = String(row.id), text = this.preparedReviewInput(id, false, true)
       if (text !== undefined) requests.push({ id, text })
     }
@@ -7269,8 +7425,8 @@ export class BotStore {
       work, executionTaskId: review.executionTaskId, requestTaskId: review.requestTaskId,
       executionRequestId: execution.requestId,
       executionSupplementRequestIds: processSupplements(execution.id), previousProcesses, earlierForegroundCommandIds,
-      incarnation: review.incarnation, requests, outcome,
-      remainingRepairs: settlingForServices ? 0 : BOT_WORK_RESULT_REPAIR_LIMIT - review.repairs,
+      incarnation: review.incarnation, requests, requestsOmitted, outcome,
+      remainingRepairs: review.deliveryOnly || settlingForServices ? 0 : BOT_WORK_RESULT_REPAIR_LIMIT - review.repairs,
       defaultAttachments: [...this.retainedWorkReviewAttachments(work, review, BOT_WORK_RESULT_DEFAULT_ATTACHMENT_LIMIT)].map(
         ({ sourceTaskId, callId, fileIndex }) => ({ sourceTaskId, callId, fileIndex })
       ),
@@ -7316,13 +7472,16 @@ export class BotStore {
   private resumeInterruptedWorkResultReview(botId: string, workId: string): boolean {
     const work = this.reviewTarget(botId, workId)
     const review = work && this.workResultReview(workId)
-    if (!work || review?.phase !== "interrupted" || review.deliveryOnly || !review.outcome ||
+    if (!work || review?.phase !== "interrupted" || (review.deliveryOnly && !review.reviewTaskId) || !review.outcome ||
         !this.preparedReviewInput(review.requestTaskId) || !this.preparedReviewInput(review.authorityTaskId))
       return false
     const row = this.rows("SELECT * FROM bot_tasks WHERE id=? AND bot_id=? AND work_id=? AND thread_id=?",
       [review.executionTaskId, botId, workId, work.threadId])[0]
     if (!row || this.workResultReviewRequest(this.task(row)) !== review.requestTaskId) return false
-    this.saveWorkResultReview(workId, { ...review, phase: "waiting", reviewTaskId: undefined })
+    // Keep the interrupted report identity for a delivery-only retry. Paused
+    // automatic work has no report identity and must still use the direct fallback.
+    this.saveWorkResultReview(workId, { ...review, phase: "waiting",
+      reviewTaskId: review.deliveryOnly ? review.reviewTaskId : undefined })
     return true
   }
 
@@ -7416,7 +7575,9 @@ export class BotStore {
     work: BotWorkItem,
     review: BotWorkResultReviewRecord,
     result: BotWorkResultPublicationChoice,
-    alternative?: BotWorkResultPublicationChoice
+    alternative?: BotWorkResultPublicationChoice,
+    responseMessageId?: string,
+    serviceIds?: string[]
   ): BotWorkResultPublication {
     const finalMessageId = this.workReviewResultMessageId(work.threadId, review)
     const publication: BotWorkResultPublication & { alternative?: BotWorkResultPublicationChoice } = {
@@ -7426,6 +7587,9 @@ export class BotStore {
       ...(finalMessageId ? { finalMessageId } : {}),
       sourceCreatedAt: this.getTask(review.authorityTaskId).createdAt,
       ...result, attachmentLinkVersion: 1,
+      ...(responseMessageId ? { responseMessageId, responseText: result.summary,
+        summary: normalWorkResultSummary(result.summary, work.id) } : {}),
+      ...(serviceIds?.length ? { serviceIds } : {}),
       ...(alternative ? { alternative } : {})
     }
     const origin: BotWorkResultOrigin = {
@@ -7478,13 +7642,15 @@ export class BotStore {
   private queueUnverifiedWorkReviewPublication(
     work: BotWorkItem,
     review: BotWorkResultReviewRecord,
-    kind: "blocked" | "interrupted",
-    summary: string
+    kind: "reported" | "blocked" | "interrupted",
+    summary: string,
+    responseMessageId?: string,
+    serviceIds?: string[]
   ) {
     const attachments: BotWorkResultAttachment[] = []
     const moreAttachments = this.collectWorkReviewPublicationAttachments(
-      work, review, attachments, BOT_WORK_RESULT_INTERRUPTED_ATTACHMENT_LIMIT)
-    return this.queueWorkReviewPublication(work, review, { kind, summary, attachments, ...(moreAttachments ? { moreAttachments } : {}) })
+      work, review, attachments, responseMessageId ? BOT_WORK_RESULT_DEFAULT_ATTACHMENT_LIMIT : BOT_WORK_RESULT_INTERRUPTED_ATTACHMENT_LIMIT)
+    return this.queueWorkReviewPublication(work, review, { kind, summary, attachments, ...(moreAttachments ? { moreAttachments } : {}) }, undefined, responseMessageId, serviceIds)
   }
 
   /** The original task retains any files beyond the publication's own limit. */
@@ -7574,17 +7740,45 @@ export class BotStore {
     return { valid, adopted }
   }
 
-  canPublishReadyWorkReview(
-    taskId: string,
-    decision: Extract<BotWorkResultDecision, { kind: "ready" }>,
-    inspectedCommands: readonly BotWorkResultCommandReference[]
-  ): boolean {
-    const live = this.getLiveWorkResultReview(taskId)
-    const context = this.getWorkResultReview(taskId)
-    if (!live || !context) return false
-    const { valid, adopted } = this.validateWorkReviewServices(live.work, live.review, context, decision, inspectedCommands)
-    return valid && (!context.settlingForServices || context.services.items.every(service =>
-      service.state !== "accepted" || service.ready || adopted.has(service.id)))
+  private selectedWorkResultAttachments(
+    context: NonNullable<ReturnType<BotStore["getWorkResultReview"]>>,
+    selected: readonly BotWorkResultAttachmentReference[]
+  ): BotWorkResultAttachment[] {
+    if (selected.length > BOT_WORK_RESULT_SELECTED_ATTACHMENT_LIMIT ||
+        new Set(selected.map(item => JSON.stringify([item.sourceTaskId, item.callId, item.fileIndex]))).size !== selected.length)
+      throw new BotError("INVALID_INPUT", "成果附件选择无效")
+    const attachments = selected.map(ref => {
+      const execution = context.evidence.find(item => item.taskId === ref.sourceTaskId)
+      const attachment = execution?.deliveries.find(item => item.callId === ref.callId && item.fileIndex === ref.fileIndex)
+      if (!attachment?.file.attachmentPath)
+        throw new BotError("CONFLICT", "成果附件版本已失效或不属于当前核查")
+      return { ...attachment, ...(execution?.finalMessageId ? { finalMessageId: execution.finalMessageId } : {}) }
+    })
+    if (new Set(attachments.map(item => item.file.filePath)).size !== attachments.length)
+      throw new BotError("INVALID_INPUT", "同一成果文件只能选择一个版本")
+    return attachments
+  }
+
+  /** Adopt an explicitly inspected service check without settling the normal result turn. */
+  recordWorkResultServiceReady(taskId: string, serviceId: string, reason: string,
+    inspected?: BotWorkResultCommandReference): { serviceId: string; ready: true } {
+    return this.transaction(() => {
+      const live = this.getLiveWorkResultReview(taskId)
+      const context = this.prepareWorkResultReview(live)
+      if (!live || !context) throw new BotError("CONFLICT", "原结果或任务归属已变化。")
+      const service = context.services.items.find(item => item.id === serviceId && item.state === "accepted")
+      if (!service) throw new BotError("CONFLICT", "原服务已结束或不属于本次任务。")
+      if (service.ready) return { serviceId, ready: true }
+      if (!inspected) throw new BotError("INVALID_INPUT", "请先读取该次真实就绪检查的完整命令回执。")
+      const { adopted } = this.validateWorkReviewServices(live.work, live.review, context,
+        { kind: "ready", summary: reason, evidenceIds: [inspected.evidenceId], serviceIds: [serviceId],
+          serviceChecks: { [serviceId]: inspected.evidenceId } }, [inspected])
+      const proof = adopted.get(serviceId)
+      if (!proof) throw new BotError("CONFLICT", "所读命令不能证明该服务已就绪。")
+      this.db.run("UPDATE bot_commands SET service_ready_json=? WHERE id=? AND state='accepted'", [JSON.stringify(proof), serviceId])
+      this.changed()
+      return { serviceId, ready: true }
+    })
   }
 
   commitWorkResultReview(
@@ -7592,21 +7786,26 @@ export class BotStore {
     initialDecision: BotWorkResultDecision | null,
     initialSelection: readonly BotWorkResultAttachmentReference[] = [],
     inspectedCommands: readonly BotWorkResultCommandReference[] = [],
-    alternative?: BotWorkResultReviewAlternative
+    alternative?: BotWorkResultReviewAlternative,
+    response?: { messageId: string; finalText: string; serviceIds?: string[]; filesSelected?: true },
+    reportRejectionInCurrentTurn = false
   ): BotWorkResultReviewCommit {
     return this.transaction(() => {
       const task = this.getTask(taskId)
       if (task.origin.kind !== "work_result" || task.origin.review?.phase !== "review")
         throw new BotError("CONFLICT", "当前回合不属于原结果核查")
       const key = `work-review:${task.origin.review.requestTaskId}:${task.origin.executionTaskId}`
-      const fingerprint = createHash("sha256").update(JSON.stringify(alternative
+      if (response && (initialDecision || (initialSelection.length && !response.filesSelected) || inspectedCommands.length || alternative ||
+          !response.messageId.trim() || !response.finalText.trim()))
+        throw new BotError("INVALID_INPUT", "正常回传不能附带独立核查决定。")
+      const fingerprint = createHash("sha256").update(JSON.stringify(response ? [null, response, initialSelection] : alternative
         ? [initialDecision, initialSelection, inspectedCommands, alternative]
         : inspectedCommands.length ? [initialDecision, initialSelection, inspectedCommands] : [initialDecision, initialSelection])).digest("hex")
       const old = this.workCommandReceipt<BotWorkResultReviewCommit>(key, fingerprint)
       if (old) return old
       if (this.yieldWorkResultReview(taskId)) return { state: "yielded" }
       const live = this.getLiveWorkResultReview(taskId)
-      const context = this.getWorkResultReview(taskId)
+      const context = this.prepareWorkResultReview(live)
       if (!live || !context || this.workReviewBackground(live.work, live.review) !== "settled")
         throw new BotError("CONFLICT", "原执行或核查资格已变化，请查看原任务")
       const { work, review } = live
@@ -7629,14 +7828,27 @@ export class BotStore {
         for (const [id, evidence] of proofs)
           this.db.run("UPDATE bot_commands SET service_ready_json=? WHERE id=? AND state='accepted'", [JSON.stringify(evidence), id])
         if (!decision) {
-          if (selected.length) throw new BotError("INVALID_INPUT", "未核查时不能选择附件。")
-          const publication = this.queueUnverifiedWorkReviewPublication(work, review, "blocked",
-            "未能核验本轮成果，请在原任务中查看已有结果。")
+          if (selected.length && !response?.filesSelected) throw new BotError("INVALID_INPUT", "未选择正式附件。")
+          const summary = response?.finalText ?? [
+            `原执行状态：${botTaskStateLabel(context.outcome.state)}。独立核查未完成。`,
+            ...(context.outcome.text.trim() ? ["原任务返回的结果（未独立核验）：", context.outcome.text.slice(0, 1600)] : []),
+            ...(context.outcome.truncated || context.outcome.text.length > 1600
+              ? ["完整结果请查看原任务。"] : [])
+          ].join("\n\n")
+          const kind = context.outcome.state === "completed" ? "reported" : "blocked"
+          const attachments = response?.filesSelected ? this.selectedWorkResultAttachments(context, selected) : undefined
+          const moreAttachments = attachments?.length === BOT_WORK_RESULT_SELECTED_ATTACHMENT_LIMIT
+            ? this.collectWorkReviewPublicationAttachments(work, review, attachments, BOT_WORK_RESULT_SELECTED_ATTACHMENT_LIMIT) : undefined
+          const publication = attachments
+            ? this.queueWorkReviewPublication(work, review, { kind, summary, attachments,
+                ...(moreAttachments ? { moreAttachments } : {}) }, undefined, response?.messageId, response?.serviceIds)
+            : this.queueUnverifiedWorkReviewPublication(work, review, kind, summary, response?.messageId, response?.serviceIds)
           this.saveWorkResultReview(work.id, { ...review, phase: "settled" })
           return { state: "publish", publication }
         }
         if (decision.kind === "repair") {
-          if (context.settlingForServices) {
+          if (review.deliveryOnly || context.settlingForServices) {
+            if (reportRejectionInCurrentTurn) throw new BotError("CONFLICT", "等待用户接管，不能自动执行补修；请汇报已有成果和未解决的问题。")
             const publication = this.queueUnverifiedWorkReviewPublication(work, review, "blocked",
               `等待接管时未自动执行补修，原服务仍待核验。已有成果保留在原任务。\n\n缺口：${decision.gap}`)
             this.saveWorkResultReview(work.id, { ...review, phase: "settled" })
@@ -7646,6 +7858,7 @@ export class BotStore {
             throw new BotError("CONFLICT", "本次结果不能继续自动补修")
           const attempt = createHash("sha256").update(JSON.stringify([decision.gap.trim(), decision.instruction.trim()])).digest("hex")
           if (review.repairs >= BOT_WORK_RESULT_REPAIR_LIMIT || attempt === review.lastRepairFingerprint) {
+            if (reportRejectionInCurrentTurn) throw new BotError("CONFLICT", "自动跟进已达上限或重复；请汇报已有成果和未解决的问题。")
             const publication = this.queueUnverifiedWorkReviewPublication(work, review, "blocked",
               `无法继续自动补齐：${decision.gap}。已有成果待核验，请查看原任务。`)
             this.saveWorkResultReview(work.id, { ...review, phase: "settled" })
@@ -7664,18 +7877,9 @@ export class BotStore {
         }
         const resolve = (decision: BotWorkResultServiceAssessment, selected: readonly BotWorkResultAttachmentReference[],
           servicesValid: boolean): BotWorkResultPublicationChoice => {
-          if (selected.length !== (decision.attachments?.length ?? 0) || selected.length > BOT_WORK_RESULT_SELECTED_ATTACHMENT_LIMIT ||
-              new Set(selected.map(item => JSON.stringify([item.sourceTaskId, item.callId, item.fileIndex]))).size !== selected.length)
+          if (selected.length !== (decision.attachments?.length ?? 0))
             throw new BotError("INVALID_INPUT", "成果附件选择无效")
-          const attachments = selected.map(ref => {
-            const execution = context.evidence.find(item => item.taskId === ref.sourceTaskId)
-            const attachment = execution?.deliveries.find(item => item.callId === ref.callId && item.fileIndex === ref.fileIndex)
-            if (!attachment?.file.attachmentPath)
-              throw new BotError("CONFLICT", "成果附件版本已失效或不属于当前核查")
-            return { ...attachment, ...(execution?.finalMessageId ? { finalMessageId: execution.finalMessageId } : {}) }
-          })
-          if (new Set(attachments.map(item => item.file.filePath)).size !== attachments.length)
-            throw new BotError("INVALID_INPUT", "同一成果文件只能选择一个版本")
+          const attachments = this.selectedWorkResultAttachments(context, selected)
           // An explicit smaller selection can intentionally exclude files. Show
           // the historical remainder when either publication limit was reached.
           const moreAttachments = decision.attachments === undefined || attachments.length === BOT_WORK_RESULT_SELECTED_ATTACHMENT_LIMIT
@@ -7828,16 +8032,18 @@ export class BotStore {
             if (index >= 0) previousFiles.push({ file: attachment.file, outboxId: `im-personal-${source.id}:file:${index}` })
           }
         }
+        const summary = publication.responseMessageId
+          ? normalWorkResultSummary(publication.summary, publication.workId, publication) : publication.summary
         const mirroredText = publication.moreAttachments
-          ? `${publication.summary}\n\n${workResultMoreAttachmentsLabel(publication.moreAttachments.count)}。请在 CmbCowork 中打开原任务。`
-          : publication.summary
+          ? `${summary}\n\n${workResultMoreAttachmentsLabel(publication.moreAttachments.count)}。请在 CmbCowork 中打开原任务。`
+          : summary
         this.im.mirrorPersonal({ ...task, createdAt: publication.sourceCreatedAt }, mirroredText,
           publication.attachments.map(attachment => attachment.file), {
             threadId: publication.workThreadId,
             callIds: publication.attachments.map(attachment => attachment.callId), previousFiles
           })
-        this.noteActivity("bot", task.botId, publication.summary, true)
-        this.noteWorkActivity(publication.workId, publication.summary, true)
+        this.noteActivity("bot", task.botId, summary, true)
+        this.noteWorkActivity(publication.workId, summary, true)
         return true
       })
     })
@@ -7900,11 +8106,13 @@ export class BotStore {
 
   private settlePrivateWorkResult(task: BotTask): void {
     if (task.origin.kind !== "work_result" || task.origin.review?.phase !== "review") return
-    const work = this.reviewTarget(task.botId, task.origin.workId, true)
-    const review = work && this.workResultReview(work.id)
+    const review = this.workResultReview(task.origin.workId)
+    const work = review?.deliveryOnly
+      ? this.reviewSettlementTarget(task.botId, task.origin.workId)
+      : this.reviewTarget(task.botId, task.origin.workId, true)
     if (!work || !review || review.phase !== "checking" || review.reviewTaskId !== task.id) return
     this.queueUnverifiedWorkReviewPublication(work, review, "interrupted",
-      "核查中断，已有成果待核验。可以查看原任务，或在本对话说「继续核查」。")
+      "结果回传中断，已有执行记录和附件仍保留在原任务中。可以查看原任务，或在本对话说「继续处理结果」。")
     this.saveWorkResultReview(work.id, { ...review, phase: "interrupted" })
   }
 
@@ -7928,12 +8136,15 @@ export class BotStore {
       if (!this.canQueueWorkResultReviewDuringTake(work, review)) continue
       const background = this.workReviewBackground(work, review)
       if (background === "waiting") continue
-      if (review.deliveryOnly) {
-        const summary = [`原任务本轮${botTaskStateLabel(review.outcome.state)}，成果未自动核查。`,
+      if (review.deliveryOnly && !review.reviewTaskId) {
+        const reported = review.outcome.state === "completed" && background === "settled" &&
+          review.attempts === 0 && review.repairs === 0
+        const summary = [reported ? "原任务本轮已完成，以下为原任务返回的结果。" :
+          `原任务本轮${botTaskStateLabel(review.outcome.state)}，成果未自动核查。`,
           ...(background === "service_unverified" ? ["原服务尚无就绪核验证据。"] : []),
           review.outcome.text.slice(0, 1600),
           ...(review.outcome.truncated || review.outcome.text.length > 1600 ? ["完整结果请查看原任务。"] : [])].join("\n\n")
-        this.queueUnverifiedWorkReviewPublication(work, review, "blocked", summary)
+        this.queueUnverifiedWorkReviewPublication(work, review, reported ? "reported" : "blocked", summary)
         this.saveWorkResultReview(work.id, { ...review, phase: "settled" })
         continue
       }
@@ -8152,7 +8363,7 @@ export class BotStore {
     if (review?.phase === "settled" && !review.resultDecisionSuperseded) {
       const result = this.scheduledWorkResultCandidate(work)
       if (result?.kind === "execution" && result.taskId === task.id &&
-          ["ready", "blocked"].includes(this.settledWorkReviewResult(review)?.review ?? ""))
+          ["reported", "ready", "blocked"].includes(this.settledWorkReviewResult(review)?.review ?? ""))
         this.saveWorkResultReview(work.id, { ...review, resultDecisionSuperseded: true })
     }
     // recordPreparedInput writes this host-only receipt atomically with the body,
@@ -8163,8 +8374,8 @@ export class BotStore {
         (!task.mockSource || (task.mockSource.transport === "im" && task.mockSource.personal)) &&
         task.origin.allowedInputFileIds === undefined)
       includeRequestContext = false
-    const requestBody = this.replyInputBody(
-      String(this.rows("SELECT prepared_input FROM bot_tasks WHERE id=?", [task.id])[0]?.prepared_input ?? task.message), task.origin, true)
+    const preparedBody = this.rows("SELECT prepared_input FROM bot_tasks WHERE id=?", [task.id])[0]?.prepared_input
+    const requestBody = this.replyInputBody(String(preparedBody ?? task.message), task.origin, true)
     // A refused creation has no prepared-input callback. Fence the original
     // goal and derived title here as well as on the rewrite path.
     if (!includeRequestContext && task.requestId === `work-start-${work.id}`)
@@ -8211,14 +8422,21 @@ export class BotStore {
               { text, truncated: Boolean(row.truncated) }
           })
       ],
-      messagesOmitted: !includeRequestContext || supplements.length > 8
+      // Scheduled instructions are intentionally not forwarded as user requests.
+      // An empty request list therefore is not complete execution context.
+      messagesOmitted: !includeRequestContext || supplements.length > 8 || task.origin.kind === "schedule"
     }
     const message = JSON.stringify({
       workId: work.id,
       title: origin.workTitle,
       executionState: task.state,
       ...(task.origin.kind === "schedule"
-        ? { executionSource: { kind: "schedule", scheduleId: task.origin.scheduleId } }
+        ? { executionSource: {
+            kind: "schedule", scheduleId: task.origin.scheduleId, executionTaskId: task.id,
+            ...(includeRequestContext && typeof preparedBody === "string"
+              ? { instruction: { text: requestBody.slice(0, 4000), truncated: requestBody.length > 4000 } }
+              : {})
+          } }
         : {}),
       requestContext,
       result: text.slice(0, 16000),
@@ -8271,7 +8489,7 @@ export class BotStore {
     const review = binding?.phase === "review" ? this.workResultReview(origin.workId) : undefined
     if (binding?.phase === "review") {
       const target = this.reviewTarget(String(row.target_bot_id), origin.workId, true)
-      if (!target || !review || review.deliveryOnly || review.phase !== "waiting" || review.requestTaskId !== binding.requestTaskId ||
+      if (!target || !review || (review.deliveryOnly && !review.reviewTaskId) || review.phase !== "waiting" || review.requestTaskId !== binding.requestTaskId ||
           review.executionTaskId !== origin.executionTaskId || binding.attempt !== review.attempts + 1 ||
           !this.canQueueWorkResultReviewDuringTake(target, review)) {
         this.db.run("DELETE FROM bot_reply_outbox WHERE task_id=?", [row.task_id])
@@ -8282,11 +8500,28 @@ export class BotStore {
         return
       }
     }
+    let message = String(row.message)
+    if (!binding) {
+      const report = JSON.parse(message)
+      if (report.executionSource?.kind === "schedule") {
+        // Read after settlement and its accompanying schedule changes commit.
+        // Keep lifecycle transitions intact; only enrich the report being sent.
+        const scheduleRow = this.rows("SELECT payload FROM bot_schedules WHERE id=? AND bot_id=?",
+          [report.executionSource.scheduleId, row.target_bot_id])[0]
+        const schedule = scheduleRow ? JSON.parse(String(scheduleRow.payload)) as BotSchedule : undefined
+        report.executionSource.scheduleAtReport = {
+          recordedAt: new Date(this.now()).toISOString(), exists: Boolean(schedule),
+          ...(schedule ? { frequency: schedule.frequency, enabled: schedule.enabled,
+            nextRunAt: schedule.nextRunAt, lastTriggeredAt: schedule.lastTriggeredAt ?? null } : {})
+        }
+        message = JSON.stringify(report)
+      }
+    }
     const task = this.enqueue(
       {
         botId: String(row.target_bot_id),
         requestId: binding ? String(row.task_id) : "work-result-" + row.task_id,
-        message: String(row.message)
+        message
       },
       origin
     )
@@ -8536,7 +8771,7 @@ export class BotStore {
     const pending = Boolean(publication && !publication.published)
     return { kind: pending ? "pending" : "review", taskId, state,
       ...(publication?.published && publication.tracks_dependency ? { publicationId: String(publication.publication_id) } : {}),
-      ...((publication?.published || pending) && (kind === "ready" || kind === "blocked" || kind === "needs_user")
+      ...((publication?.published || pending) && (kind === "reported" || kind === "ready" || kind === "blocked" || kind === "needs_user")
         ? { review: kind } : {}) }
   }
 
@@ -8679,15 +8914,21 @@ export class BotStore {
       if (kind !== "silent") {
         const title = (snapshot?.title ?? "原任务")
           .replace(/\s+/g, " ").replace(/[\\`*_{}\[\]()<>|]/g, "\\$&")
-        const workStatus = snapshot?.workState === "completed" ? "已标记完成" : "仍在跟进"
+        const workStatus = snapshot?.workState === "completed" ? "已标记完成。" : ""
         const lastExecution = snapshot?.resultDependencyUnavailable
           ? "最近一次成果所需服务当前不可用，请查看原任务。" : formatObservedWorkResult(snapshot?.result)
-        const currentExecution = snapshot?.executionState && snapshot.executionState !== snapshot.result?.state
+        const currentExecution = snapshot?.executionState &&
+          !(snapshot.executionState === "completed" && (snapshot.dispatchStopped || snapshot.result?.commandOutcome))
           ? `当前执行${botTaskStateLabel(snapshot.executionState)}。` : ""
-        const executionFlags = snapshot?.dispatchStopped ? "已停止自动派发。" :
-          snapshot?.backgroundBusy ? "后台工作仍在进行。" : ""
+        const executionFlags = (snapshot?.dispatchStopped ? "已停止自动派发。" : "") +
+          (snapshot?.backgroundBusy ? "后台工作仍在进行。" : "") +
+          (snapshot?.pendingPeers ? `仍有 ${snapshot.pendingPeers} 项协作待回传。` : "")
+        const resultChange = observation.mode === "report" && observation.lastSuccessful && snapshot?.result
+          ? snapshot.result.taskId === observation.lastSuccessful.result?.taskId
+            ? "较上次记录没有新结果。" : "较上次记录有新结果。"
+          : ""
         const text = error ? `例行观察「${title}」未能完成。${error}` :
-          `例行观察「${title}」${workStatus}。${lastExecution}${currentExecution}${executionFlags}`
+          `例行观察「${title}」：${workStatus}${currentExecution}${executionFlags}${resultChange}${lastExecution}`
         this.queueScheduledPublication(task, observation.scheduledAt, text, kind === "failed")
       }
       return { taskId, scheduleId, botId: bot.id, threadId: bot.threadId, workId: observation.workId,
@@ -9086,7 +9327,7 @@ export class BotStore {
         OR EXISTS(SELECT 1 FROM bot_commands c WHERE c.bot_id=member.bot_id AND c.thread_id=member.thread_id
           AND (c.source_task_id=member.id OR c.observation_root_task_id=member.id)
           AND c.notify_on_complete IS NOT 0
-          AND (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)))
+          AND ${PENDING_WORK_COMMAND})
       LIMIT 1`, [schedule.workId, schedule.botId, schedule.id]).length > 0
   }
 
@@ -9661,7 +9902,7 @@ export class BotStore {
     return new Set(
       this.rows(
         `SELECT c.bot_id FROM bot_commands c LEFT JOIN bot_tasks t ON t.id=c.source_task_id
-       WHERE c.group_id=? AND (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)) AND COALESCE(
+       WHERE c.group_id=? AND ${PENDING_WORK_COMMAND} AND COALESCE(
          c.suppressed=1 AND c.continuation_result_json IS NULL AND t.state IN ('completed','superseded'),0)=0
        UNION SELECT t.bot_id FROM bot_workflow_refs r JOIN bot_tasks t ON t.id=r.source_task_id
        WHERE json_extract(t.origin_json,'$.groupId')=? AND r.retired_at IS NULL AND r.suppressed=0`,
