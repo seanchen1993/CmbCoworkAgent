@@ -129,11 +129,13 @@ export async function readRuntimeScopedFileAsync(
       hostStateError("FILE_CHANGED")
     await checkParents()
     signal?.throwIfAborted()
+    const fingerprint = runtimeDigest(JSON.stringify([scopeIdentity, relative, runtimeDigest(bytes)]))
     return {
       path: relative,
       present: true,
       bytes,
-      fingerprint: runtimeDigest(JSON.stringify([scopeIdentity, relative, runtimeDigest(bytes)]))
+      fingerprint,
+      generation: JSON.stringify([identity(initial), fingerprint])
     }
   } finally {
     await fd.close()

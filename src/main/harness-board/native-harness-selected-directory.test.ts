@@ -171,7 +171,7 @@ function feature(featureId: string, workspace = repository) {
     selectedDeployUnits: []
   })
 }
-it("reuses verified project bytes until an in-place edit or replacement changes their generation", async () => {
+it("reuses project parsing but checks exact bytes even when file metadata stays unchanged", async () => {
   const binding = await feature("project-generation")
   const path = join(state.root, "harness-board-projects.json")
   const original = readFileSync(path, "utf8")
@@ -180,17 +180,21 @@ it("reuses verified project bytes until an in-place edit or replacement changes 
   const time = new Date("2026-11-02T00:00:00Z")
   utimesSync(path, time, time)
   const before = statSync(path, { bigint: true })
+  const metadata = safeFiles.probeRuntimeScopedFile(state.root, "harness-board-projects.json")
+  vi.spyOn(safeFiles, "probeRuntimeScopedFile").mockReturnValue(metadata)
   const reads = vi.spyOn(safeFiles, "readRuntimeScopedFile")
+  const parse = vi.spyOn(JSON, "parse")
   assertNativeHarnessFeatureCurrent(binding)
   assertNativeHarnessFeatureCurrent(binding)
-  expect(reads).toHaveBeenCalledOnce()
+  expect(reads).toHaveBeenCalledTimes(2)
+  expect(parse.mock.calls.filter(([bytes]) => bytes === original)).toHaveLength(1)
 
   writeFileSync(path, modified)
   utimesSync(path, time, time)
   const edited = statSync(path, { bigint: true })
   expect(edited).toMatchObject({ ino: before.ino, size: before.size, mtimeNs: before.mtimeNs })
   expect(() => assertNativeHarnessFeatureCurrent(binding)).toThrow("HARNESS_NATIVE_PROJECT_CHANGED")
-  expect(reads).toHaveBeenCalledTimes(2)
+  expect(reads).toHaveBeenCalledTimes(3)
 
   const replacement = join(state.root, "replacement-projects.json")
   writeFileSync(replacement, original)
@@ -200,7 +204,8 @@ it("reuses verified project bytes until an in-place edit or replacement changes 
   expect(statSync(path, { bigint: true }).ino).not.toBe(edited.ino)
   assertNativeHarnessFeatureCurrent(binding)
   assertNativeHarnessFeatureCurrent(binding)
-  expect(reads).toHaveBeenCalledTimes(3)
+  expect(reads).toHaveBeenCalledTimes(5)
+  expect(parse.mock.calls.filter(([bytes]) => bytes === original)).toHaveLength(2)
 })
 
 it("keeps a failed first-start preflight free of durable goal, workspace and Host creation", async () => {

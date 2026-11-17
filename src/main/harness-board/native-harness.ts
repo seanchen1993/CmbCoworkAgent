@@ -255,13 +255,18 @@ export function findNativeHarnessFeatureByRunId(hostRunId: string) {
 export function observeDurableNativeHarnessProject(projectId: string) {
   const root = getOpenworkDir()
   const relative = "harness-board-projects.json"
-  const { fingerprint } = probeRuntimeScopedFile(root, relative)
+  // A same-size overwrite can leave identical timestamps. Cache parsing by verified bytes.
+  const { bytes, fingerprint, generation } = readRuntimeScopedFile(
+    root, relative, HARNESS_PROJECT_STORE_MAX_BYTES
+  )
   if (projectCache?.fingerprint !== fingerprint) {
-    const { bytes } = readRuntimeScopedFile(root, relative, HARNESS_PROJECT_STORE_MAX_BYTES, fingerprint)
     const value = bytes && JSON.parse(bytes.toString("utf8"))
     projectCache = { fingerprint, projects: value?.projects ?? [] }
   }
-  return { fingerprint, project: projectCache.projects.find((item) => item.projectId === projectId) }
+  return {
+    fingerprint: generation ?? fingerprint,
+    project: projectCache.projects.find((item) => item.projectId === projectId)
+  }
 }
 
 function currentNativeHarnessProject(binding: HarnessNativeFeatureBinding): HarnessProjectMetadata {

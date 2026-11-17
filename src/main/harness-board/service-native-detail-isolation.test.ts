@@ -261,10 +261,10 @@ it("keeps the verified Host owner when an older project read completes after a s
   expect(assertCurrent).toBeDefined()
 
   const store = await import("./async-json-store")
-  const read = store.readHarnessJsonFileBounded
+  const read = store.parseHarnessJsonBytesBounded
   const captured = Promise.withResolvers<void>()
   const release = Promise.withResolvers<void>()
-  vi.spyOn(store, "readHarnessJsonFileBounded").mockImplementationOnce(async (...args) => {
+  vi.spyOn(store, "parseHarnessJsonBytesBounded").mockImplementationOnce(async (...args) => {
     const snapshot = await read(...args)
     captured.resolve()
     await release.promise

@@ -89,6 +89,7 @@ export interface ScopedFileObservation {
   path: string
   present: boolean
   fingerprint: string
+  generation?: string
   bytes?: Buffer
   size?: number
 }
@@ -231,11 +232,13 @@ function observeRuntimeScopedFile(
         size: Number(initial.size),
         fingerprint: metadataFingerprint!
       }
+    const fingerprint = runtimeDigest(JSON.stringify([scopeIdentity, relative, runtimeDigest(bytes)]))
     return {
       path: relative,
       present: true,
       bytes,
-      fingerprint: runtimeDigest(JSON.stringify([scopeIdentity, relative, runtimeDigest(bytes)]))
+      fingerprint,
+      generation: JSON.stringify([initialIdentity, fingerprint])
     }
   } finally {
     closeSync(fd)

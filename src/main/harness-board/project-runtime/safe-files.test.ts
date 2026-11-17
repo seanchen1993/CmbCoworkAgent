@@ -8,6 +8,7 @@ import {
   runtimeDirectory,
   runtimeDirectoryIdentity
 } from "./safe-files"
+import { readRuntimeScopedFileAsync } from "./safe-files-async"
 
 vi.mock("node:fs", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:fs")>())
@@ -101,16 +102,22 @@ describe("canonical scoped file safety", () => {
     expect(close).toHaveBeenCalledOnce()
   })
 
-  it("pins the opened descriptor to a preceding metadata probe", () => {
+  it("pins the opened descriptor and distinguishes generations with identical bytes", async () => {
     const f = fixture()
     const relative = "inputs/entry.txt"
     const probe = probeRuntimeScopedFile(f.root, relative)
-    expect(readRuntimeScopedFile(f.root, relative, f.bytes.length, probe.fingerprint).bytes)
-      .toEqual(f.bytes)
+    const before = readRuntimeScopedFile(f.root, relative, f.bytes.length, probe.fingerprint)
+    expect(before.bytes).toEqual(f.bytes)
+    expect(await readRuntimeScopedFileAsync(f.root, relative)).toEqual(before)
+
     fs.renameSync(f.file, join(f.root, "previous.txt"))
     fs.writeFileSync(f.file, f.bytes)
     expect(() => readRuntimeScopedFile(f.root, relative, f.bytes.length, probe.fingerprint))
       .toThrow("FILE_CHANGED")
+    const replacement = readRuntimeScopedFile(f.root, relative)
+    expect(replacement.fingerprint).toBe(before.fingerprint)
+    expect(replacement.generation).not.toBe(before.generation)
+    expect(await readRuntimeScopedFileAsync(f.root, relative)).toEqual(replacement)
   })
 
   it("does not turn probe access errors into missing-file observations", () => {

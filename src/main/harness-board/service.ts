@@ -17,11 +17,8 @@ import {
   isAutobizLegacyProjectRoot
 } from "../plugins/business-adapters/autobiz-package-admission"
 import { isInternalHarnessProjectId, readInternalHarnessProject, readInternalHarnessProjectWorkspaceIndex } from "./internal-project-context"
-import {
-  readRuntimeScopedFile,
-  probeRuntimeScopedFile,
-  runtimeDirectoryIdentity
-} from "./project-runtime/safe-files"
+import { readRuntimeScopedFile, runtimeDirectoryIdentity } from "./project-runtime/safe-files"
+import { readRuntimeScopedFileAsync } from "./project-runtime/safe-files-async"
 import {
   assertPackageExtensionCompatibility,
   assertPackageExtensionCompatibilityAsync,
@@ -127,6 +124,7 @@ import type {
 import { HARNESS_PROJECT_CONTEXT_MAX_PROJECTS } from "./catalog-protocol"
 import { readProjectKnowledgeDeployUnits } from "./knowledge-deploy-units"
 import {
+  parseHarnessJsonBytesBounded,
   readHarnessJsonFileBounded,
   withHarnessStoreMutation,
   writeHarnessJsonFileAtomic
@@ -1944,10 +1942,13 @@ const capabilityFeatureWorkspacesByKey = new Map<string, string>()
 const nativeProjectAuthorityById = new Map<string, HarnessProjectMetadata>()
 let nativeProjectAuthorityFingerprint: string | undefined
 let projectStoreWriting = false
+let projectStoreRevision = 0
 
-function projectStoreFingerprint(): string | undefined {
+async function observeProjectStore() {
   try {
-    return probeRuntimeScopedFile(getOpenworkDir(), "harness-board-projects.json").fingerprint
+    return await readRuntimeScopedFileAsync(
+      getOpenworkDir(), "harness-board-projects.json", HARNESS_PROJECT_STORE_MAX_BYTES
+    )
   } catch {
     return undefined
   }
@@ -1955,7 +1956,7 @@ function projectStoreFingerprint(): string | undefined {
 
 function refreshManagedRunProjectDirectoryCache(
   store: HarnessProjectStoreFile,
-  nativeFingerprint = projectStoreFingerprint()
+  nativeFingerprint: string | undefined
 ): void {
   managedRunProjectDirectoryById.clear()
   capabilityProjectWorkspacesById.clear()
@@ -1994,16 +1995,22 @@ export function assertHarnessProjectAdapterCurrent(
 
 async function readProjectStore(): Promise<HarnessProjectStoreFile> {
   assertHarnessConfigAvailable()
-  const before = projectStoreFingerprint()
-  const parsed = await readHarnessJsonFileBounded(
-    HARNESS_BOARD_FILE,
-    HARNESS_PROJECT_STORE_MAX_BYTES,
-    "Harness project store"
-  )
+  const revision = projectStoreRevision
+  const snapshot = await observeProjectStore()
+  const parsed = snapshot
+    ? await parseHarnessJsonBytesBounded(
+        snapshot.bytes ?? Buffer.alloc(0), HARNESS_PROJECT_STORE_MAX_BYTES, "Harness project store"
+      )
+    : await readHarnessJsonFileBounded(
+        HARNESS_BOARD_FILE, HARNESS_PROJECT_STORE_MAX_BYTES, "Harness project store"
+      )
   const store = parsed === null ? emptyProjectStore() : normalizeProjectStore(parsed)
-  const after = projectStoreFingerprint()
+  const current = await observeProjectStore()
+  const before = snapshot?.generation ?? snapshot?.fingerprint
+  const after = current?.generation ?? current?.fingerprint
   // A delayed read can finish after a save has already published a newer directory index.
-  if (before === after && (before !== undefined || parsed === null))
+  if (!projectStoreWriting && revision === projectStoreRevision &&
+    before === after && (before !== undefined || parsed === null))
     refreshManagedRunProjectDirectoryCache(store, before ?? "")
   return store
 }
@@ -2090,6 +2097,7 @@ async function mutateProjectStore<T>(
     for (const project of store.projects) normalizeProject(project)
     // The worker replaces the file before the reply refreshes this process's index.
     projectStoreWriting = true
+    projectStoreRevision += 1
     try {
       await writeHarnessJsonFileAtomic(
         HARNESS_BOARD_FILE,
@@ -2097,7 +2105,8 @@ async function mutateProjectStore<T>(
         HARNESS_PROJECT_STORE_MAX_BYTES,
         "Harness project store"
       )
-      refreshManagedRunProjectDirectoryCache(store)
+      const current = await observeProjectStore()
+      refreshManagedRunProjectDirectoryCache(store, current?.generation ?? current?.fingerprint)
     } finally {
       projectStoreWriting = false
     }
