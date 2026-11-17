@@ -57,9 +57,11 @@ export class ProjectCompositionService {
   constructor(
     databasePath: string,
     host: HostProjectService,
-    private readonly deps: ProjectCompositionServiceDependencies
+    private readonly deps: ProjectCompositionServiceDependencies,
+    openStore?: () => ProjectCompositionStore
   ) {
-    this.store = new ProjectCompositionStore(databasePath, undefined, deps.assertWorkspaceIdle)
+    this.store = openStore?.() ??
+      new ProjectCompositionStore(databasePath, undefined, deps.assertWorkspaceIdle)
     this.workspaces = new CompositionWorkspaces(
       join(dirname(databasePath), "composition-workspaces"),
       this.store,

@@ -116,7 +116,7 @@ function buildPluginServerConfig(
   userInfo: ReturnType<typeof getUserInfo>,
   pluginRoot: string
 ): Record<string, unknown> {
-  const expand = (value: string) => value.replaceAll("${CLAUDE_PLUGIN_ROOT}", pluginRoot)
+  const expand = (value: string) => value.replaceAll("${CLAUDE_PLUGIN_ROOT}", () => pluginRoot)
   // Resolve only this explicit package variable against the admitted source; never substitute
   // arbitrary environment/credentials or use the mutable installation for a pinned runtime.
   const strings = (values: Record<string, string> | undefined) => values &&
@@ -262,7 +262,8 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
   private revision = 0
   private closed = false
   private closing: Promise<void> | null = null
-  private retirementFailure: unknown
+  private pendingMutableInvalidations = 0
+  private readonly failedRetirements = new Map<MultiServerMCPClient, Error>()
   private readonly clients = new Set<MultiServerMCPClient>()
   private readonly retiring = new Map<MultiServerMCPClient, Promise<void>>()
   private readonly inflight = new Set<Promise<unknown>>()
@@ -272,9 +273,16 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
     return this.unconfirmedStdioReaders
   }
 
-  private assertOpen(): void {
+  private get cleanupUnconfirmed(): boolean {
+    return this.failedRetirements.size > 0 ||
+      (!this.capabilityToken && (this.pendingMutableInvalidations > 0 || this.retiring.size > 0))
+  }
+
+  private assertOpen(revision?: number): void {
     if (this.closed) throw new ModError("MODS_MCP_SERVICE_CLOSED")
-    if (this.retirementFailure) throw new ModError("MODS_MCP_CLEANUP_UNCONFIRMED")
+    if (revision !== undefined && revision !== this.revision)
+      throw new ModError("MODS_MCP_CONTEXT_EXPIRED")
+    if (this.cleanupUnconfirmed) throw new ModError("MODS_MCP_CLEANUP_UNCONFIRMED")
   }
 
   private track<T>(work: () => Promise<T>): Promise<T> {
@@ -296,10 +304,14 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
       .then(
         () => {
           this.clients.delete(client)
+          this.failedRetirements.delete(client)
         },
         (error) => {
-          this.retirementFailure = error
-          throw error
+          const failure = error instanceof Error
+            ? error
+            : new ModError("MODS_MCP_CLEANUP_UNCONFIRMED")
+          this.failedRetirements.set(client, failure)
+          throw failure
         }
       )
       .finally(() => {
@@ -319,22 +331,29 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
   }
 
   async listTools(): Promise<McpCapabilityTool[]> {
-    return this.track(async () => {
-      await this.ensureInitialized()
-      this.assertOpen()
-      return [...(this.cache?.tools ?? [])]
-    })
+    return (await this.getSnapshot()).tools
   }
 
   async getSnapshot(): Promise<{ fingerprint: string; tools: McpCapabilityTool[] }> {
-    return this.track(async () => {
-      await this.ensureInitialized()
-      this.assertOpen()
-      return {
-        fingerprint: this.cache?.fingerprint ?? "",
-        tools: [...(this.cache?.tools ?? [])]
-      }
-    })
+    try {
+      return await this.track(async () => {
+        await this.ensureInitialized()
+        this.assertOpen()
+        return {
+          fingerprint: this.cache?.fingerprint ?? "",
+          tools: [...(this.cache?.tools ?? [])]
+        }
+      })
+    } catch (error) {
+      // Ordinary discovery still allows native tools. Retained owners and MCP execution
+      // keep the strict lifetime fence while connection cleanup remains unconfirmed.
+      // A save may finish retiring the client before an interrupted discovery reaches here.
+      const cleanupInterrupted = error instanceof ModError &&
+        error.code === "MODS_MCP_CLEANUP_UNCONFIRMED"
+      if (!this.capabilityToken && !this.closed && (cleanupInterrupted || this.cleanupUnconfirmed))
+        return { fingerprint: "", tools: [] }
+      throw error
+    }
   }
 
   async getTool(idOrAlias: string): Promise<McpCapabilityTool | null> {
@@ -364,8 +383,9 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
     const pluginId = owner.pluginId
     const sourcePath = owner.sourcePath
     const root = owner.root
+    const revision = this.revision
     const check = () => {
-      this.assertOpen()
+      this.assertOpen(revision)
       signal.throwIfAborted()
       assertCurrent()
     }
@@ -502,9 +522,9 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
         // Approval can await UI while settings change. Never send to a replaced connection,
         // even when the server still advertises the same name and schema.
         if (
-          getModCallContext()?.assertMcpTool &&
-          (this.cache !== connection ||
-            buildFingerprint(this.readSources()) !== connection?.fingerprint)
+          this.cache !== connection ||
+          (getModCallContext()?.assertMcpTool &&
+            buildFingerprint(this.readSources()) !== connection.fingerprint)
         )
           throw new ModError("MODS_MCP_CONTEXT_EXPIRED")
       })
@@ -521,6 +541,7 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
           this.assertOpen()
           this.assertSourceContent()
           assertCurrent?.()
+          if (this.cache !== connection) throw new ModError("MODS_MCP_CONTEXT_EXPIRED")
           return signal
             ? callClient.callTool(request, undefined, { signal })
             : callClient.callTool(request)
@@ -549,7 +570,7 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
     })
   }
 
-  async invalidate(reason?: string): Promise<void> {
+  async invalidate(reason?: string, retryFailedCleanup = false): Promise<void> {
     if (reason) {
       console.log(`[MCP] invalidate requested: ${reason}`)
     }
@@ -558,11 +579,27 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
     const previous = this.cache
     this.cache = null
     this.schemaCache.clear()
+    // Only an explicit mutable catalog write can retry clients that were already quarantined.
+    const retry = retryFailedCleanup && !this.capabilityToken
+      ? [...this.failedRetirements.keys()]
+      : []
+    const pending = this.initPromise
+    const holdsMutableConnections = !this.capabilityToken && Boolean(previous?.client || pending)
+    if (holdsMutableConnections) this.pendingMutableInvalidations++
 
-    // A pending rebuild observes the revision fence and retires its candidate before it settles.
-    if (this.initPromise) await this.initPromise.catch(() => {})
-    if (previous?.client) await this.retire(previous.client)
-    if (this.retirementFailure) throw this.retirementFailure
+    try {
+      // A pending rebuild observes the revision fence and retires its candidate before it settles.
+      if (pending) await pending.catch(() => {})
+      const clients = new Set(retry.filter(client => this.failedRetirements.has(client)))
+      if (previous?.client) clients.add(previous.client)
+      const outcomes = await Promise.allSettled([...clients].map(client => this.retire(client)))
+      const failed = outcomes.find(outcome => outcome.status === "rejected")
+      if (failed?.status === "rejected") throw failed.reason
+      const failure = this.failedRetirements.values().next().value
+      if (failure) throw failure
+    } finally {
+      if (holdsMutableConnections) this.pendingMutableInvalidations--
+    }
   }
 
   async close(): Promise<void> {
@@ -571,13 +608,14 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
     this.revision++
     this.cache = null
     this.schemaCache.clear()
-    this.retirementFailure = undefined
+    this.failedRetirements.clear()
     const task = (async () => {
       // Include connect/list/invoke and rebuild continuations; closing an empty cache is not a drain.
       await Promise.allSettled([...this.inflight])
       if (this.initPromise) await this.initPromise.catch(() => {})
       await Promise.allSettled([...this.retiring.values()])
-      if (this.retirementFailure) throw this.retirementFailure
+      const failure = this.failedRetirements.values().next().value
+      if (failure) throw failure
       const results = await Promise.allSettled(
         [...this.clients].map((client) => this.retire(client))
       )
@@ -826,14 +864,18 @@ export function getGlobalMcpCapabilityService(): McpCapabilityService {
   return globalCapabilityService
 }
 
-export async function invalidateGlobalMcpCapabilityService(reason?: string): Promise<void> {
-  await Promise.all(
+/** Catalog writes are already durable. Retained services keep their admitted sources. */
+export async function invalidateMutableMcpCapabilityServices(reason: string): Promise<void> {
+  const results = await Promise.allSettled(
     [
-      ...selectedCapabilityServices.values(),
       ...derivedCapabilityServices.values(),
       ...(globalCapabilityService ? [globalCapabilityService] : [])
-    ].map((service) => service.invalidate(reason))
+    ].map((service) => service.invalidate(reason, true))
   )
+  if (results.some((result) => result.status === "rejected")) {
+    // Keep quarantine and report cleanup separately from the persisted configuration change.
+    console.warn("[MCP] Settings saved, connection cleanup unconfirmed:", reason)
+  }
 }
 
 export async function closeGlobalMcpCapabilityService(): Promise<void> {

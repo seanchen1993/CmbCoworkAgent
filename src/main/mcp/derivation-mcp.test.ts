@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, expect, it, vi } from "vitest"
+import type { IpcMain, IpcMainInvokeEvent } from "electron"
 const fixture = vi.hoisted(() => ({
   root: "",
   plugins: [] as Array<{
@@ -17,12 +18,22 @@ const fixture = vi.hoisted(() => ({
 const clients = vi.hoisted(() => [] as Array<Record<string, unknown>>)
 const runtime = vi.hoisted(() => ({
   connectGate: undefined as Promise<void> | undefined,
+  clientGate: undefined as Promise<void> | undefined,
+  lookupClient: vi.fn(),
+  callTool: vi.fn(async () => ({ content: [] })),
   listGate: undefined as Promise<void> | undefined,
   closeGate: undefined as Promise<void> | undefined,
   failClose: false,
   connects: 0,
   lists: 0,
-  closes: 0
+  closes: 0,
+  tools: [] as Array<{ name: string }>,
+  upsertConnector: vi.fn(() => "saved-connector"),
+  setPluginEnabled: vi.fn((id: string, enabled: boolean) => {
+    const plugin = fixture.plugins.find((item) => item.id === id)
+    if (plugin) plugin.enabled = enabled
+  }),
+  notifyHooksChanged: vi.fn()
 }))
 vi.mock("@langchain/mcp-adapters", () => ({
   MultiServerMCPClient: class {
@@ -34,12 +45,15 @@ vi.mock("@langchain/mcp-adapters", () => ({
       await runtime.connectGate
       return undefined
     }
-    getClient() {
+    async getClient() {
+      runtime.lookupClient()
+      await runtime.clientGate
       return {
+        callTool: runtime.callTool,
         listTools: async () => {
           runtime.lists++
           await runtime.listGate
-          return { tools: [] }
+          return { tools: runtime.tools }
         }
       }
     }
@@ -51,8 +65,12 @@ vi.mock("@langchain/mcp-adapters", () => ({
     }
   }
 }))
-vi.mock("../storage", () => ({
+vi.mock("../storage", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../storage")>()),
   getEnabledMcpConnectors: () => [],
+  upsertMcpConnector: runtime.upsertConnector,
+  setPluginEnabled: runtime.setPluginEnabled,
+  invalidateEnabledSkillsCache: vi.fn(),
   getPlugins: () => fixture.plugins,
   getUserInfo: () => ({}),
   getOpenworkDir: () => fixture.root,
@@ -62,7 +80,8 @@ vi.mock("../storage", () => ({
   getEnabledPluginSkillSourceMetadata: () => [],
   parseMcpJsonFile: (path: string) => JSON.parse(readFileSync(path, "utf8")).mcpServers
 }))
-vi.mock("../mods/manager", () => ({
+vi.mock("../mods/manager", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../mods/manager")>()),
   getModsManager: () => null,
   authorizeCurrentModInput: async () => {}
 }))
@@ -70,11 +89,16 @@ import {
   getGlobalMcpCapabilityService,
   getProjectMcpCapabilityService,
   closeProjectCapabilityMcpService,
-  closeGlobalMcpCapabilityService
+  closeGlobalMcpCapabilityService,
+  invalidateMutableMcpCapabilityServices
 } from "./capability-service"
 import { RetainedPackageSnapshots } from "../harness-board/project-runtime/package-snapshots"
 import { collectSnapshotGarbage } from "../harness-board/project-runtime/snapshot-retention"
 import { readdirSync } from "node:fs"
+vi.mock("../hooks/notifications", () => ({ notifyHooksChanged: runtime.notifyHooksChanged }))
+import { registerMcpHandlers } from "../ipc/mcp"
+import { registerPluginHandlers } from "../ipc/plugins"
+import { createScopedMcpCapabilityService } from "../agent/runtime"
 
 it("keeps a selected retained package until its MCP service physically finishes closing", async () => {
   fixture.root = await mkdtemp(join(tmpdir(), "selected-mcp-retention-"))
@@ -130,10 +154,17 @@ afterEach(async () => {
   fixture.plugins = []
   clients.length = 0
   runtime.connectGate = undefined
+  runtime.clientGate = undefined
+  runtime.lookupClient.mockClear()
+  runtime.callTool.mockClear()
   runtime.listGate = undefined
   runtime.closeGate = undefined
   runtime.failClose = false
   runtime.connects = runtime.lists = runtime.closes = 0
+  runtime.tools = []
+  runtime.upsertConnector.mockClear()
+  runtime.setPluginEnabled.mockClear()
+  runtime.notifyHooksChanged.mockClear()
   if (fixture.root) await rm(fixture.root, { recursive: true, force: true })
 })
 it("excludes a late original's persistent Hooks and MCP from its directory-derived project", async () => {
@@ -386,6 +417,185 @@ it.each(["connect", "list"] as const)(
     expect(f.collect().removed).toEqual([f.snapshot.digest])
   }
 )
+
+it("reports saved connectors and retries quarantined cleanup only on the next settings write", async () => {
+  const f = await retainedService()
+  setDerivationFamilies([{ familyId: "family", originalId: "owned", members: ["owned", "copy"] }])
+  fixture.plugins.push({ ...fixture.plugins[0], id: "copy" })
+  const global = getGlobalMcpCapabilityService()
+  const derived = getProjectMcpCapabilityService("copy")
+  runtime.tools = [{ name: "fixture_tool" }]
+  await expect(global.listTools()).resolves.toHaveLength(1)
+  await expect(derived.listTools()).resolves.toHaveLength(1)
+  const [globalTool] = await global.listTools()
+  await expect(f.service.listTools()).resolves.toHaveLength(1)
+  expect(runtime.connects).toBe(3)
+  const handlers = new Map<string, Parameters<IpcMain["handle"]>[1]>()
+  registerMcpHandlers({
+    handle: (channel, handler) => handlers.set(channel, handler)
+  } as Pick<IpcMain, "handle"> as IpcMain)
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+  runtime.failClose = true
+  try {
+    const connector = { name: "Saved", url: "https://fixture.invalid/mcp" }
+    const firstCleanup = Promise.withResolvers<void>()
+    runtime.closeGate = firstCleanup.promise
+    const stored = handlers.get("mcp:create")!({} as IpcMainInvokeEvent, connector)
+    try {
+      await vi.waitFor(() => expect(runtime.closes).toBe(2))
+      await expect(global.getSnapshot!()).resolves.toEqual({ fingerprint: "", tools: [] })
+      await expect(derived.listTools()).resolves.toEqual([])
+      await expect(global.invoke(globalTool.capabilityId, {})).rejects.toThrow(
+        "MODS_MCP_CLEANUP_UNCONFIRMED"
+      )
+      await expect(f.service.listTools()).resolves.toHaveLength(1)
+      expect(runtime.connects).toBe(3)
+      expect(runtime.callTool).not.toHaveBeenCalled()
+    } finally {
+      firstCleanup.resolve()
+      runtime.closeGate = undefined
+      await expect(stored).resolves.toEqual({ id: "saved-connector" })
+    }
+    expect(runtime.upsertConnector).toHaveBeenCalledOnce()
+    expect(runtime.upsertConnector).toHaveBeenCalledWith(connector)
+    expect(warn).toHaveBeenCalledWith(
+      "[MCP] Settings saved, connection cleanup unconfirmed:",
+      "mcp:create"
+    )
+    expect(runtime.closes).toBe(2)
+    await expect(global.listTools()).resolves.toEqual([])
+    await expect(derived.listTools()).resolves.toEqual([])
+    await expect(global.getSnapshot!()).resolves.toEqual({ fingerprint: "", tools: [] })
+    await expect(derived.getSnapshot!()).resolves.toEqual({ fingerprint: "", tools: [] })
+    const ordinary = createScopedMcpCapabilityService(
+      global,
+      createHookScope(),
+      () => [],
+      undefined,
+      undefined,
+      { workspacePath: fixture.root, threadId: "ordinary", bindMod: false }
+    )
+    await expect(ordinary.listTools()).resolves.toEqual([])
+    await expect(global.getTool("fixture_tool")).rejects.toThrow("MODS_MCP_CLEANUP_UNCONFIRMED")
+    await expect(f.service.listTools()).resolves.toHaveLength(1)
+    expect(runtime.connects).toBe(3)
+    expect(f.collect().protected).toEqual([f.snapshot.digest])
+
+    const updated = { ...connector, id: "saved-connector" }
+    await expect(handlers.get("mcp:update")!({} as IpcMainInvokeEvent, updated)).resolves.toEqual({
+      id: "saved-connector"
+    })
+    expect(runtime.closes).toBe(4)
+    await expect(global.listTools()).resolves.toEqual([])
+    expect(runtime.closes).toBe(4)
+
+    runtime.failClose = false
+    const cleanup = Promise.withResolvers<void>()
+    runtime.closeGate = cleanup.promise
+    const retry = handlers.get("mcp:update")!({} as IpcMainInvokeEvent, updated)
+    try {
+      await vi.waitFor(() => expect(runtime.closes).toBe(6))
+      await expect(global.listTools()).resolves.toEqual([])
+      await expect(derived.listTools()).resolves.toEqual([])
+      expect(runtime.connects).toBe(3)
+    } finally {
+      cleanup.resolve()
+      runtime.closeGate = undefined
+      await expect(retry).resolves.toEqual({ id: "saved-connector" })
+    }
+    await expect(global.listTools()).resolves.toHaveLength(1)
+    await expect(derived.listTools()).resolves.toHaveLength(1)
+    await expect(f.service.listTools()).resolves.toHaveLength(1)
+    expect(runtime.connects).toBe(5)
+    expect(runtime.closes).toBe(6)
+    expect(f.collect().protected).toEqual([f.snapshot.digest])
+  } finally {
+    runtime.failClose = false
+    warn.mockRestore()
+  }
+})
+
+it("keeps cold ordinary discovery usable when a settings write retires its initializing client", async () => {
+  await retainedService()
+  runtime.tools = [{ name: "fixture_tool" }]
+  const global = getGlobalMcpCapabilityService()
+  const ordinary = createScopedMcpCapabilityService(
+    global,
+    createHookScope(),
+    () => [],
+    undefined,
+    undefined,
+    { workspacePath: fixture.root, threadId: "ordinary", bindMod: false }
+  )
+  const connecting = Promise.withResolvers<void>()
+  runtime.connectGate = connecting.promise
+  const discovery = ordinary.listTools().catch((error: unknown) => error)
+  try {
+    await vi.waitFor(() => expect(runtime.connects).toBe(1))
+    const saving = invalidateMutableMcpCapabilityServices("connector saved during discovery")
+    connecting.resolve()
+    await saving
+    expect(await discovery).toEqual([])
+    expect(runtime.closes).toBe(1)
+    await expect(global.listTools()).resolves.toHaveLength(1)
+    expect(runtime.connects).toBe(2)
+  } finally {
+    connecting.resolve()
+    runtime.connectGate = undefined
+  }
+})
+
+it("returns a saved plugin disable and notifies Hooks while leaving a retained MCP owner active", async () => {
+  const f = await retainedService()
+  const global = getGlobalMcpCapabilityService()
+  runtime.tools = [{ name: "fixture_tool" }]
+  await expect(global.listTools()).resolves.toHaveLength(1)
+  await expect(f.service.listTools()).resolves.toHaveLength(1)
+  const handlers = new Map<string, Parameters<IpcMain["handle"]>[1]>()
+  registerPluginHandlers({
+    handle: (channel, handler) => handlers.set(channel, handler)
+  } as Pick<IpcMain, "handle"> as IpcMain)
+  const pluginId = fixture.plugins[0].id
+  runtime.failClose = true
+  try {
+    await expect(handlers.get("plugins:setEnabled")!({} as IpcMainInvokeEvent, {
+      id: pluginId,
+      enabled: false
+    })).resolves.toEqual({ success: true })
+    expect(runtime.setPluginEnabled).toHaveBeenCalledWith(pluginId, false)
+    expect(fixture.plugins[0].enabled).toBe(false)
+    expect(runtime.notifyHooksChanged).toHaveBeenCalledWith("plugin-enabled-changed")
+    expect(runtime.closes).toBe(1)
+    await expect(global.getSnapshot!()).resolves.toEqual({ fingerprint: "", tools: [] })
+    await expect(f.service.listTools()).resolves.toHaveLength(1)
+    expect(runtime.connects).toBe(2)
+    expect(f.collect().protected).toEqual([f.snapshot.digest])
+  } finally {
+    runtime.failClose = false
+  }
+})
+
+it("does not dispatch an ordinary call waiting on a connector replaced by settings", async () => {
+  await retainedService()
+  runtime.tools = [{ name: "fixture_tool" }]
+  const global = getGlobalMcpCapabilityService()
+  const [tool] = await global.listTools()
+  expect(tool).toBeDefined()
+  runtime.lookupClient.mockClear()
+  const waiting = Promise.withResolvers<void>()
+  runtime.clientGate = waiting.promise
+  const invocation = global.invoke(tool.capabilityId, {})
+  const rejected = expect(invocation).rejects.toThrow("MODS_MCP_CONTEXT_EXPIRED")
+  try {
+    await vi.waitFor(() => expect(runtime.lookupClient).toHaveBeenCalledOnce())
+    await invalidateMutableMcpCapabilityServices("connector disabled")
+  } finally {
+    waiting.resolve()
+    runtime.clientGate = undefined
+    await rejected
+  }
+  expect(runtime.callTool).not.toHaveBeenCalled()
+})
 
 it("keeps the lease and closes admission when SDK cleanup rejects", async () => {
   const f = await retainedService()

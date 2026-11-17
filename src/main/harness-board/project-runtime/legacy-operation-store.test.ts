@@ -1,8 +1,34 @@
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { expect, it } from "vitest"
+import { DatabaseSync } from "node:sqlite"
+import { expect, it, vi } from "vitest"
 import { LegacyOperationStore } from "./legacy-operation-store"
+
+it("releases an unreadable ledger on initialization failure so it can be repaired", () => {
+  const root = mkdtempSync(join(tmpdir(), "legacy-operation-unreadable-"))
+  const path = join(root, "operations.sqlite")
+  const close = vi.spyOn(DatabaseSync.prototype, "close")
+  try {
+    writeFileSync(path, Buffer.alloc(8192, 0x5a))
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      expect(() => new LegacyOperationStore(path)).toThrow(
+        expect.objectContaining({ code: "ERR_SQLITE_ERROR", errcode: 26 })
+      )
+      expect(close).toHaveBeenCalledTimes(attempt)
+    }
+    renameSync(path, join(root, "unreadable.sqlite"))
+    const repaired = new LegacyOperationStore(path)
+    try {
+      expect(repaired.recoverInterrupted()).toEqual([])
+    } finally {
+      repaired.close()
+    }
+  } finally {
+    close.mockRestore()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 it("shares an atomic legacy lease across instances and retains unknown ownership on restart", () => {
   const root = mkdtempSync(join(tmpdir(), "legacy-operation-store-"))

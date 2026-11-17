@@ -30,8 +30,8 @@ async function fixture(selected: string[]) {
   }
   const access = {
     sources: async () => [{ sourceDir: source }],
-    currentSources: () => [{ sourceDir: source }],
-    disabledDirs: () => []
+    currentSources: vi.fn(() => [{ sourceDir: source }]),
+    disabledDirs: vi.fn<() => string[]>(() => [])
   }
   const entries = await listClawSkillSources(access)
   const policy = (await createClawSkillPolicy(
@@ -41,7 +41,7 @@ async function fixture(selected: string[]) {
   const sandbox = new LocalSandbox({ rootDir: root, runId: "claw-skills-fixture" })
   sandbox.setClawSkillPolicy(policy)
   sandbox.setSkillLifecycleRegistry(new SkillLifecycleRegistry(policy.lifecycleSources))
-  return { root, source, parent, child, denied, sandbox, policy }
+  return { root, source, parent, child, denied, sandbox, policy, access }
 }
 
 describe("LocalSandbox Claw Skill structured entrypoints", () => {
@@ -101,6 +101,48 @@ describe("LocalSandbox Claw Skill structured entrypoints", () => {
     expect(
       matches.some(({ text }) => text.includes("SECRET-parent") || text.includes("SECRET-denied"))
     ).toBe(false)
+  })
+
+  it("reads live skill roots once for each glob and grep result list", async () => {
+    const f = await fixture(["child"])
+    const workspace = join(f.root, "workspace")
+    mkdirSync(workspace)
+    for (let index = 0; index < 24; index++) {
+      writeFileSync(join(workspace, `file-${index}.txt`), `SUPPORT-ordinary-${index}`)
+    }
+    const late = join(f.source, "late")
+    mkdirSync(late)
+    writeFileSync(join(late, "SKILL.md"), "---\nname: late\n---\n")
+    writeFileSync(join(late, "support.txt"), "SUPPORT-late")
+    const alias = join(f.root, "denied-alias")
+    symlinkSync(f.denied, alias, process.platform === "win32" ? "junction" : "dir")
+
+    const readsPerBatch: number[] = []
+    const originalFilter = f.policy.filterVisiblePaths.bind(f.policy)
+    const batch = vi.spyOn(f.policy, "filterVisiblePaths").mockImplementation((...args) => {
+      const before = f.access.currentSources.mock.calls.length
+      const visible = originalFilter(...args)
+      readsPerBatch.push(f.access.currentSources.mock.calls.length - before)
+      return visible
+    })
+    const globbed = await f.sandbox.globInfo("**/*.txt", f.root)
+    expect(globbed).toHaveLength(25)
+    expect(globbed.some(({ path }) => path.replace(/\\/g, "/").includes("/parent/child/"))).toBe(
+      true
+    )
+    expect(readsPerBatch).toEqual([1])
+
+    const matches = await f.sandbox.grepRaw("SUPPORT-", f.root)
+    if (!Array.isArray(matches)) throw new Error(`Unexpected grep failure: ${matches}`)
+    expect(matches).toHaveLength(25)
+    expect(matches.some(({ text }) => text.includes("SUPPORT-child"))).toBe(true)
+    expect(matches.some(({ text }) => /SUPPORT-(?:parent|denied|late)/.test(text))).toBe(false)
+    expect(readsPerBatch).toEqual([1, 1])
+    expect(batch.mock.calls[1][0].length).toBeGreaterThan(20)
+
+    f.access.disabledDirs.mockReturnValue([f.child])
+    expect(await f.sandbox.globInfo("**/*.txt", f.root)).toHaveLength(24)
+    expect(await f.sandbox.read(join(f.child, "support.txt"))).toContain("excluded")
   })
 
   it("rejects skill cwd before the workspace early-allow and detects a changed document", async () => {

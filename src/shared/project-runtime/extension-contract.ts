@@ -7,6 +7,7 @@ export const REQUIRED_BUSINESS_CHECKS_PROTOCOL = "devclaw.required-business-chec
 export const CONTEXT_HANDOFF_PROTOCOL = "devclaw.context-handoff/v1" as const
 export const DECLARED_CONTEXT_FILES_PROTOCOL = "devclaw.declared-context-files/v1" as const
 export const CONTEXT_MATERIALS_PROTOCOL = "devclaw.context-materials/v1" as const
+export const HOST_CONTEXT_MATERIAL_ROOT_LIMIT = 8
 export const EXECUTION_RESOURCES_PROTOCOL = "devclaw.execution-resources/v1" as const
 /** Explicit checked artifact selection, currently consumed by the reviewed legacy adapter. */
 export const VERIFIED_ARTIFACTS_PROTOCOL = "devclaw.verified-artifacts/v1" as const
@@ -33,6 +34,8 @@ export interface ExtensionContextContract {
 export interface ContextMaterials {
   roots: Array<{ id: string; source: "package" | "knowledge"; path?: string }>
   configuration: string[]
+  /** Expand one declared knowledge root to the original Harness feature read roots. */
+  featureInputs?: true
 }
 
 export interface DeclaredContextFile {
@@ -158,8 +161,9 @@ export function parseExtensionContract(
         if (!raw.requires.includes(CONTEXT_MATERIALS_PROTOCOL) || !provider.actionId ||
           provider.entry !== undefined || provider.files !== undefined)
           return invalid("MATERIALS_PROTOCOL_REQUIRED")
-        const selection = object(provider.materials, ["roots", "configuration"])
-        if (!Array.isArray(selection.roots) || selection.roots.length > 8 ||
+        const selection = object(provider.materials, ["roots", "configuration"], ["featureInputs"])
+        if ((selection.featureInputs !== undefined && selection.featureInputs !== true) ||
+          !Array.isArray(selection.roots) || selection.roots.length > HOST_CONTEXT_MATERIAL_ROOT_LIMIT ||
           !Array.isArray(selection.configuration) || selection.configuration.length > 16 ||
           (!selection.roots.length && !selection.configuration.length) ||
           new Set(selection.configuration).size !== selection.configuration.length ||
@@ -169,14 +173,22 @@ export function parseExtensionContract(
           const root = object(value, ["id", "source"], ["path"])
           if (typeof root.id !== "string" || !/^[a-zA-Z][\w.-]{0,63}$/.test(root.id) ||
             (root.source !== "package" && root.source !== "knowledge") ||
-            (root.source === "knowledge" && !context!.knowledge.binding))
+            (root.source === "knowledge" && !context!.knowledge.binding && !selection.featureInputs))
             return invalid("MATERIALS_INVALID")
           return { id: root.id, source: root.source,
             ...(root.path === undefined ? {} : { path: relativeEntry(root.path) }) }
         })
-        if (new Set(roots.map(root => root.id)).size !== roots.length)
+        if (new Set(roots.map(root => root.id)).size !== roots.length ||
+          (selection.featureInputs &&
+            (roots.filter(root => root.source === "knowledge").length !== 1 ||
+              roots.some(root => root.source === "knowledge" && (
+                root.id.length > 60 || root.path !== undefined ||
+                roots.some(other => other.source === "package" &&
+                  other.id.startsWith(root.id + "-"))
+              )))))
           return invalid("MATERIALS_INVALID")
-        materials = { roots, configuration: [...selection.configuration] as string[] }
+        materials = { roots, configuration: [...selection.configuration] as string[],
+          ...(selection.featureInputs ? { featureInputs: true as const } : {}) }
       }
       if (
         !Array.isArray(provider.operations) ||

@@ -323,14 +323,14 @@
       "knowledgeRoot": {
         "type": "directory",
         "title": "本次任务知识目录",
-        "description": "绑定已确认的组织知识根；按所选部署单元frontmatter及最近AGENTS.md选择知识。",
-        "required": true
+        "description": "仅供兼容独立试跑。项目模式使用项目绑定的组织知识库。",
+        "required": false
       },
       "selectedDeployUnits": {
         "type": "string",
         "title": "所选部署单元（JSON）",
-        "description": "必须提供非空JSON数组，每项为deployUnitId及appType(frontend/backend)；使用实际元数据或人工确认，不含凭据。",
-        "required": true
+        "description": "仅供兼容独立试跑。项目模式使用编辑特性配置中选择的发布单元。",
+        "required": false
       },
       "executionAdapter": {
         "type": "string",
@@ -359,6 +359,7 @@
         "session-context"
       ],
       "materials": {
+        "featureInputs": true,
         "roots": [
           {
             "id": "knowledge",

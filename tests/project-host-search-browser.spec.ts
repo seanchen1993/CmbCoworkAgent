@@ -48,6 +48,7 @@ interface FixtureWindow {
     mutationCalls: string[]
     guideDismissals: string[]
     templates: number
+    templatePluginIds: Array<string | undefined>
   }
 }
 
@@ -133,6 +134,10 @@ async function main() {
       const hostAdapter={id:'delayed-host',name:'延迟模板项目插件',version:'1.0.0',type:'plugin',
         enabled:true,runtimeMode:'host',description:'受控Host模板',pullKnowledgeAvailable:false,
         boardCompatibility:{compatible:false,status:'host-runtime',label:'原生项目模板'}};
+      const legacyAdapter={id:'legacy',name:'普通项目插件',version:'1.0.0',type:'plugin',
+        enabled:true,runtimeMode:'legacy',description:'原有项目',pullKnowledgeAvailable:false,
+        boardCompatibility:{compatible:true,status:'ready',label:'兼容'}};
+      const adapters=[hostAdapter,legacyAdapter];
       const names=Array.from({length:40},(_,index)=>index===20?'目标第21个项目':index===31?'新词结果':
         index===32?'旧词结果':index===33?'旧账号迟到结果':'通用项目 '+index);
       function projects(account){return names.map((name,index)=>({projectId:'host-'+String(index).padStart(3,'0'),
@@ -142,7 +147,7 @@ async function main() {
       const pendingRegistry=[],pendingReviews=[],reviewCalls=[];
       const guideDismissals=[],mutationCalls=[];
       window.addEventListener('ui-guide:dismiss-current-entry',event=>guideDismissals.push(event.detail.guideId));
-      const search={calls,released,templates:0,createCalls:0,createInputs:[],guideDismissals,mutationCalls,reviewCalls,
+      const search={calls,released,templates:0,templatePluginIds:[],createCalls:0,createInputs:[],guideDismissals,mutationCalls,reviewCalls,
         openDerived:()=>openDerivedProject('delayed-host','延迟模板项目插件'),
         openHostStartUse:()=>openPluginStartUse({threadId:'source-chat',expectedWorkspace:'C:/source',
           pluginId:hostAdapter.id,expected:{name:hostAdapter.name,version:hostAdapter.version}},
@@ -151,7 +156,7 @@ async function main() {
         changeSourceWorkspace:workspace=>window.fixtureChangeSourceWorkspace(workspace),
         pendingDerived:()=>readDerivedProjectIntent(),finishTemplateDelay:()=>templateDelay=false,
         holdRegistry:()=>registryDelayed=true,
-        releaseRegistry:()=>{registryDelayed=false;pendingRegistry.splice(0).forEach(resolve=>resolve([structuredClone(hostAdapter)]))},
+        releaseRegistry:()=>{registryDelayed=false;pendingRegistry.splice(0).forEach(resolve=>resolve(structuredClone(adapters)))},
         holdReviews:()=>reviewsHeld=true,
         releaseReviews:()=>{reviewsHeld=false;pendingReviews.splice(0).forEach(release=>release())},
         releaseCreate:()=>releaseCreate?.(),hold:query=>held.add(query),fail:query=>failures.add(query),
@@ -160,9 +165,9 @@ async function main() {
         releaseTemplates:(count=Infinity)=>{while(count-->0&&pendingTemplates.length)pendingTemplates.shift()([structuredClone(template)])},
         changeAccount:()=>window.fixtureChangeAccount()};window.hostSearch=search;
       const nothing=async()=>{},unsubscribe=()=>()=>{};
-      const emptyCatalog={projects:[],registry:[hostAdapter],projectNextCursor:null,registryNextCursor:null,
-        summary:{totalProjects:0,matchedProjects:0,activeProjects:0,archivedProjects:0,totalRegistry:1},
-        stats:{durationMs:0,responseBytes:0,projectRows:0,registryRows:1,cancelled:false}};
+      const emptyCatalog={projects:[],registry:adapters,projectNextCursor:null,registryNextCursor:null,
+        summary:{totalProjects:0,matchedProjects:0,activeProjects:0,archivedProjects:0,totalRegistry:2},
+        stats:{durationMs:0,responseBytes:0,projectRows:0,registryRows:2,cancelled:false}};
       window.electron={ipcRenderer:{invoke:async()=>[],on:unsubscribe,removeListener(){}},
         process:{platform:'win32'}};
       window.api={featureGates:{isEnabled:async()=>({enabled:true,reason:'fixture'})},
@@ -209,11 +214,11 @@ async function main() {
             return {...input,projectId:'created-before-account-switch',
               'harness-adapter':{id:input.adapterId,name:hostAdapter.name,version:hostAdapter.version,type:'plugin'}}},
           catalogPage:async()=>structuredClone(emptyCatalog),registry:async()=>registryDelayed?
-          new Promise(resolve=>pendingRegistry.push(resolve)):[structuredClone(hostAdapter)],
+          new Promise(resolve=>pendingRegistry.push(resolve)):structuredClone(adapters),
           getProjectDetails:async()=>({}),cancelCatalogRequests:nothing,cancelKnowledgePreviewRequests:nothing,
           cancelEnterpriseRequests:nothing,stopWatchRefs:nothing,onWatchRefsChanged:unsubscribe,onManagedRunChanged:unsubscribe,onManagedRunScheduleChanged:unsubscribe,getManagedRunSchedule:async()=>null,getActiveManagedRunSchedules:async()=>[],
           getDeployUnitMappings:async()=>[],getLeanTokenConfig:async()=>({leanToken:''}),
-          localProjects:{templates:async()=>{search.templates++;return templateDelay?
+          localProjects:{templates:async pluginId=>{search.templates++;search.templatePluginIds.push(pluginId);return templateDelay?
               new Promise(resolve=>pendingTemplates.push(resolve)):[structuredClone(template)]},
             list:async(after='',query='')=>{const account=window.fixtureAccount();calls.push({account,after,query});
               if(failures.has(query))throw Error('PROJECT_SEARCH_QUERY_INVALID');
@@ -271,6 +276,16 @@ async function main() {
       if (await summary.locator("..").getAttribute("open") === null) await summary.click()
     }
     await search.waitFor()
+    await page.getByText("暂无项目", { exact: true }).waitFor()
+    await tick()
+    assert.equal(await page.evaluate("window.hostSearch.calls.length"), 0)
+    assert.equal(await page.evaluate("window.hostSearch.templates"), 0)
+    await search.fill("普通列表搜索")
+    await page.getByText("未找到匹配项目", { exact: true }).waitFor()
+    await page.waitForTimeout(350)
+    assert.equal(await page.evaluate("window.hostSearch.calls.length"), 0, "closed Host history does not search")
+    await search.fill("")
+    await expandHistory()
     await page.waitForFunction(
       () => document.querySelectorAll('[data-project-runtime="host"]').length === 20
     )
@@ -329,8 +344,8 @@ async function main() {
     await search.fill("旧账号")
     await waitQuery("旧账号")
     await page.evaluate(() => (window as unknown as FixtureWindow).hostSearch.changeAccount())
-    await waitQuery("", "", 1)
     await expandHistory()
+    await waitQuery("", "", 1)
     await page.getByRole("button", { name: "打开项目 账号1 通用项目 0", exact: true }).waitFor()
     await page.evaluate(() => (window as unknown as FixtureWindow).hostSearch.release("旧账号"))
     await tick()
@@ -339,8 +354,8 @@ async function main() {
     assert.equal(await page.getByRole("button", { name: /打开项目 账号0/ }).count(), 0)
     assert.equal(
       await page.evaluate(() => (window as unknown as FixtureWindow).hostSearch.templates),
-      2,
-      "typing and paging must not rescan template sources"
+      0,
+      "opening and searching history must not scan Host templates"
     )
     await search.fill("不存在的关键词")
     await waitQuery("不存在的关键词", "", 1)
@@ -371,31 +386,38 @@ async function main() {
     await page.evaluate(() => (window as unknown as FixtureWindow).hostSearch.release("重试查询"))
     await page.getByText("未找到匹配项目", { exact: true }).waitFor()
 
-    // A fresh account remount starts with no cached template list. Keep every template
-    // request held so opening the form cannot repair a discarded initial response itself.
+    // A fresh account and an ordinary project form defer templates until a Host is selected.
     await page.evaluate(() => {
       const fixture = (window as unknown as FixtureWindow).hostSearch
       fixture.delayTemplates()
       fixture.changeAccount()
     })
+    await expandHistory()
     await waitQuery("", "", 2)
     await search.fill("目标第21个")
     await waitQuery("目标第21个", "", 2)
-    await expandHistory()
     await page.getByRole("button", { name: "打开项目 账号2 目标第21个项目", exact: true }).waitFor()
-    await page.evaluate(() => (window as unknown as FixtureWindow).hostSearch.releaseTemplates(1))
-    await tick()
+    assert.equal(await page.evaluate("window.hostSearch.templates"), 0)
     await page.getByRole("button", { name: "新建项目", exact: true }).click()
     await page.getByRole("button", { name: "选择插件", exact: true }).click()
+    await page.getByRole("option", { name: /普通项目插件/ }).click()
+    await tick()
+    assert.equal(await page.evaluate("window.hostSearch.templates"), 0)
+    await page.getByRole("button", { name: /普通项目插件/ }).click()
     const hostOption = page.getByRole("option", { name: /延迟模板项目插件/ })
     assert.equal(await hostOption.isEnabled(), true)
     await hostOption.click()
+    await page.getByRole("status").filter({ hasText: "正在核对插件模板" }).waitFor()
+    assert.deepEqual(await page.evaluate("window.hostSearch.templatePluginIds"), ["delayed-host"])
+    await page.evaluate(() => (window as unknown as FixtureWindow).hostSearch.releaseTemplates(1))
     await page.getByRole("textbox", { name: /系统编号/ }).waitFor()
     await page.getByRole("textbox", { name: /项目名称/ }).fill("搜索后使用延迟模板")
+    await tick()
+    assert.equal(await page.evaluate("window.hostSearch.templates"), 1)
     assert.equal(
       await page.getByText("项目插件尚未就绪，请启用插件并更新列表。", { exact: true }).count(),
       0,
-      "a valid initial template response must survive intervening project searches"
+      "the template loaded for the original form can select a valid Host plugin"
     )
     await page.getByRole("button", { name: "取消", exact: true }).click()
     await page.evaluate(() => (window as unknown as FixtureWindow).hostSearch.releaseTemplates())
@@ -577,8 +599,9 @@ async function main() {
       fixture.changeAccount()
       fixture.releaseCreate()
     })
-    await waitQuery("", "", 4)
+    await page.getByText("暂无项目", { exact: true }).waitFor()
     await tick()
+    assert.equal(await page.evaluate("window.hostSearch.calls.some(call => call.account === 4)"), false)
     assert.equal(
       await page.getByRole("status", { name: "正在准备插件项目表单", exact: true }).count(),
       0

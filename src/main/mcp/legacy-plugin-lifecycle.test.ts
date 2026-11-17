@@ -52,32 +52,35 @@ import { AIMessage, ToolMessage, type BaseMessage } from "@langchain/core/messag
 import { FakeChatModel } from "@langchain/core/utils/testing"
 import { z } from "zod"
 
-it("passes only a portable static test-peer flag through real SDK stdio and logs in its private TEMP", async () => {
+it("uses a literal plugin path with a portable SDK stdio peer and logs only in its private TEMP", async () => {
   fixture.root = await mkdtemp(join(tmpdir(), "portable-peer-temp-"))
   const privateTemp = join(fixture.root, "private-temp")
-  await mkdir(privateTemp)
+  const pluginRoot = join(fixture.root, "plugin $& source")
+  await Promise.all([mkdir(privateTemp), mkdir(pluginRoot)])
   const original = { TEMP: process.env.TEMP, TMP: process.env.TMP, PATH: process.env.PATH }
   process.env.TEMP = privateTemp
   process.env.TMP = privateTemp
   process.env.PATH = dirname(process.execPath) + delimiter + (original.PATH ?? "")
-  await cp(resolve("tests/support/project-package-mcp-server.mjs"), join(fixture.root, "server.mjs"))
-  await writeFile(join(fixture.root, ".mcp.json"), JSON.stringify({ mcpServers: {
+  await cp(resolve("tests/support/project-package-mcp-server.mjs"), join(pluginRoot, "server.mjs"))
+  await writeFile(join(pluginRoot, ".mcp.json"), JSON.stringify({ mcpServers: {
     portable: { command: "node", args: ["${CLAUDE_PLUGIN_ROOT}/server.mjs", "-", "portable"],
       env: { CMB_E2E_PACKAGE_MCP_JOURNAL: "-" } }
   } }))
-  fixture.plugins = [{ id: "portable", path: fixture.root, enabled: true, mcpServerCount: 1 }]
+  fixture.plugins = [{ id: "portable", path: pluginRoot, enabled: true, mcpServerCount: 1 }]
   const service = getGlobalMcpCapabilityService()
   try {
-    const [tool] = await service.listTools()
+    const tools = await service.listTools()
+    expect(tools).toHaveLength(1)
+    const [tool] = tools
     expect((await service.invoke(tool.capabilityId, { text: "actual-private-temp" })).text).toContain("portable:actual-private-temp")
     const journal = join(privateTemp, "package-mcp.jsonl")
     const rows = readFileSync(journal, "utf8").trim().split("\n").map((line) => JSON.parse(line))
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({ event: "call", text: "actual-private-temp", revision: "portable" })
-    expect(decodeURIComponent(rows[0].source).replaceAll("\\", "/")).toContain(fixture.root.replaceAll("\\", "/") + "/server.mjs")
+    expect(decodeURIComponent(rows[0].source).replaceAll("\\", "/")).toContain(pluginRoot.replaceAll("\\", "/") + "/server.mjs")
     await closeGlobalMcpCapabilityService()
     await vi.waitFor(() => expect(() => process.kill(rows[0].pid, 0)).toThrow(), { timeout: 5000 })
-    await writeFile(join(fixture.root, ".mcp.json"), JSON.stringify({ mcpServers: {
+    await writeFile(join(pluginRoot, ".mcp.json"), JSON.stringify({ mcpServers: {
       portable: { command: "node", args: ["${CLAUDE_PLUGIN_ROOT}/server.mjs", "-", "no-test-flag"] }
     } }))
     const unlogged = getGlobalMcpCapabilityService()

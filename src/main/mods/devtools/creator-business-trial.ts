@@ -88,7 +88,7 @@ const namespace = "creator-business-trial:"
  * original Harness/Legacy/controller; this class is neither an engine nor an approval store. */
 export class CreatorBusinessTrials {
   private readonly nonce = randomUUID()
-  private readonly snapshots: RetainedPackageSnapshots
+  private retainedSnapshots?: RetainedPackageSnapshots
   private readonly originals = new WeakMap<TrialRecord, string>()
   private readonly proofs = new Map<
     string,
@@ -130,7 +130,6 @@ export class CreatorBusinessTrials {
       assertSources(sources: BusinessTrialCandidate["sources"]): void
     }
   ) {
-    this.snapshots = new RetainedPackageSnapshots(join(deps.root, "packages"))
     this.evidence = new CreatorLegacyTrialEvidence(deps.root, {
       settings: deps.settings,
       owner: (binding) => this.evidenceOwner(binding),
@@ -169,6 +168,10 @@ export class CreatorBusinessTrials {
         /* Original deleted/replaced conversations cannot inherit trial approval. */
       }
     })
+  }
+  private get snapshots(): RetainedPackageSnapshots {
+    if (this.closed) throw Error("BUSINESS_TRIAL_CLOSED")
+    return (this.retainedSnapshots ??= new RetainedPackageSnapshots(join(this.deps.root, "packages")))
   }
   private key(id: string) {
     return `mods-business-trial-v1:${id}`

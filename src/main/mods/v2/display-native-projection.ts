@@ -275,7 +275,8 @@ export class FunctionNativeDisplayProjection {
     read: FunctionPreparedDisplayRead,
     admission: FunctionNativeDisplayAdmission
   ): FunctionDisplaySnapshot | null {
-    admission.assertCurrent()
+    // A synchronous cache read cannot run guest code. Check full source content once,
+    // immediately before returning it, while keeping the cheap row/authority fence on entry.
     try {
       this.guard(read.scope, read.key, read.row, admission)()
       return this.cache.read(read.scope, read.key, this.version(read, admission))

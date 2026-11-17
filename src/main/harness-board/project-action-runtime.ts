@@ -9,7 +9,13 @@ import type { FlowActionExecutionFacts } from "../mods/flows/action-execution-fa
 export type ProjectRuntimeInputScope = Pick<
   HostProjectState,
   "workspace" | "installedPluginId" | "packageId" | "pluginDigest" | "manifest"
-> & Partial<Pick<HostProjectState, "stageIndex">>
+> & Partial<Pick<HostProjectState, "stageIndex" | "harnessFeatureInputs">>
+
+export interface ProjectRuntimeContextMaterials {
+  roots: Array<{ id: string; path: string; source?: "package" | "knowledge"; identity?: string }>
+  configuration: import("../../shared/mods/types").ModObject
+  featureInputs?: { selectedDeployUnits: string[] }
+}
 
 interface ProjectActionRuntime {
   /** Original manager instance capture; no lookup of a replacement owner during cleanup. */
@@ -42,10 +48,7 @@ interface ProjectActionRuntime {
   captureInputAuthorityIdentity?(project: ProjectRuntimeInputScope, snapshotRoot: string): () => string
   publishRequiredContext?(workspace: string, text: string, signal: AbortSignal): Promise<string>
   readDeclaredContext?(project: ProjectRuntimeInputScope, snapshotRoot: string, stageId: string): string
-  readContextMaterials?(project: ProjectRuntimeInputScope, snapshotRoot: string): {
-    roots: Array<{ id: string; path: string; source?: "package" | "knowledge" }>
-    configuration: import("../../shared/mods/types").ModObject
-  }
+  readContextMaterials?(project: ProjectRuntimeInputScope, snapshotRoot: string): ProjectRuntimeContextMaterials
   flows: Pick<FlowManager, "startSaved" | "waitForSettlement" | "run" | "cancel"> &
     Partial<Pick<FlowManager, "assertWorkspaceResourcesSettled">>
   catalog(workspace: string, threadId: string): Promise<ClawActionDescriptor[]>

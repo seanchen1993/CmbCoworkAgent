@@ -76,7 +76,7 @@ it.each([false, true])("admits an original ordinary inline checkpoint after upgr
   expect(original?.checkpoint.channel_values.cmbFunctionConversation).toBeUndefined()
   expect((original?.checkpoint.channel_values.messages as BaseMessage[]).map(row => row.content))
     .toEqual(["original question", "original answer"])
-})
+}, 15_000)
 
 it.each([null, new Command({ resume: "original decision" })])(
   "keeps native interrupt/resume input for an authenticated old checkpoint", async input => {

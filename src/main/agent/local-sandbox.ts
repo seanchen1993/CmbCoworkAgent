@@ -3017,15 +3017,42 @@ export class LocalSandbox
     realpathCache: Map<string, string | null> = new Map()
   ): boolean {
     if (this._hiddenSkillDirKeys.size === 0 && !this._clawSkillPolicy) return false
-    const candidates = new Set<string>()
-    let resolved: string
+    const resolved = this.resolveSkillFilterPath(filePath)
+    return (
+      this._clawSkillPolicy?.isPathHidden(resolved, { traverse: true }) === true ||
+      this.isHiddenSkillDirectory(resolved, realpathCache)
+    )
+  }
+
+  private resolveSkillFilterPath(filePath: string): string {
     try {
-      resolved = this._resolvePath(filePath)
+      return this._resolvePath(filePath)
     } catch {
-      resolved = filePath
+      return filePath
     }
-    candidates.add(resolved)
-    if (this._clawSkillPolicy?.isPathHidden(resolved, { traverse: true })) return true
+  }
+
+  private filterHiddenSkillPaths<T extends { path: string }>(
+    items: T[],
+    realpathCache: Map<string, string | null>
+  ): T[] {
+    const visible = this._clawSkillPolicy?.filterVisiblePaths(
+      items,
+      (item) => this.resolveSkillFilterPath(item.path),
+      { traverse: true }
+    ) ?? items
+    if (this._hiddenSkillDirKeys.size === 0) return visible
+    return visible.filter(
+      (item) => !this.isHiddenSkillDirectory(this.resolveSkillFilterPath(item.path), realpathCache)
+    )
+  }
+
+  private isHiddenSkillDirectory(
+    resolved: string,
+    realpathCache: Map<string, string | null>
+  ): boolean {
+    if (this._hiddenSkillDirKeys.size === 0) return false
+    const candidates = new Set([resolved])
     const realResolved = this.realpathDeepestExistingCached(resolved, realpathCache)
     if (realResolved) candidates.add(realResolved)
 
@@ -3588,9 +3615,7 @@ export class LocalSandbox
         )
 
         // Filter out matches inside disabled skills so their content cannot leak via grep.
-        if (this._hiddenSkillDirKeys.size > 0 || this._clawSkillPolicy) {
-          results = results.filter((m) => !this.isHiddenSkillPath(m.path, realpathCache))
-        }
+        results = this.filterHiddenSkillPaths(results, realpathCache)
 
         // Filter out any results from sensitive directories
         if (this.windowsSandbox === "elevated") {
@@ -3690,9 +3715,7 @@ export class LocalSandbox
     }
     let infos = await super.globInfo(effectivePattern, effectivePath)
     // Hide files that fall inside any disabled skill so the agent cannot list them.
-    if (this._hiddenSkillDirKeys.size > 0 || this._clawSkillPolicy) {
-      infos = infos.filter((f) => !this.isHiddenSkillPath(f.path, realpathCache))
-    }
+    infos = this.filterHiddenSkillPaths(infos, realpathCache)
     // Filter out any results that fall within sensitive directories
     if (this.windowsSandbox === "elevated") {
       infos = infos.filter((f) => {

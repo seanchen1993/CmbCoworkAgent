@@ -47,7 +47,7 @@ export function InstalledPluginProjectEntry(props: {
       props.pluginId,
       {
         plugins: () => window.api.plugins.list(),
-        templates: () => window.api.harnessBoard.localProjects.templates()
+        templates: () => window.api.harnessBoard.localProjects.templates(props.pluginId)
       },
       () =>
         mounted.current &&

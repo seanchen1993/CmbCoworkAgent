@@ -13,6 +13,7 @@ export function FunctionMessageText({
   text,
   isExpanded,
   isFirstOfReply,
+  isHistory,
   fallback,
   renderText
 }: {
@@ -23,6 +24,7 @@ export function FunctionMessageText({
   text: string
   isExpanded: boolean
   isFirstOfReply: boolean
+  isHistory?: boolean
   fallback: ReactNode
   renderText(text: string): ReactNode
 }): ReactNode {
@@ -47,6 +49,7 @@ export function FunctionMessageText({
       presentationId={presentationId}
       messageId={role === "user" ? messageId : undefined}
       className="contents"
+      allowUnboundHistory={isHistory}
       facts={facts}
       fallback={fallback}
       renderNative={(safe) => (typeof safe.text === "string" ? renderText(safe.text) : null)}

@@ -3,7 +3,6 @@ import type {
   LocalProjectCommand,
   LocalProjectView
 } from "../../../../shared/project-runtime/platform-api"
-import { ProjectFunctionConsent } from "./ProjectFunctionConsent"
 import { Button } from "@/components/ui/button"
 import type { HarnessNativeFeatureBinding } from "../../../../shared/harness-board-types"
 
@@ -26,7 +25,6 @@ export function NativeFeatureReview(props: {
   view?: LocalProjectView
   readOnly?: boolean
   onRefresh(): void | Promise<void>
-  onReady(ready: boolean): void
   onPendingChange(pending: boolean): void
   continuation?: LocalProjectView["continuation"]
   onContinuation(value: LocalProjectView["continuation"]): void
@@ -35,33 +33,18 @@ export function NativeFeatureReview(props: {
   const continuation = props.continuation ?? props.view?.continuation
   useEffect(() => {
     if (props.readOnly) {
-      props.onReady(false)
       props.onPendingChange(false)
     }
-  }, [props.readOnly, props.onReady, props.onPendingChange])
+  }, [props.readOnly, props.onPendingChange])
   return (
     <section className="space-y-3 rounded border p-3" aria-label="需求权限与确认">
       <p className="break-all text-xs text-muted-foreground">
         本条需求的实际运行与产物目录：{props.binding.workspace}
       </p>
-      {props.readOnly ? (
+      {props.readOnly && (
         <p role="status" className="text-sm">
           已归档，仅查看历史记录。
         </p>
-      ) : (
-        <ProjectFunctionConsent
-          key={JSON.stringify([
-            props.binding.workspace,
-            props.binding.workspaceIdentity,
-            props.view?.operations
-              .map((operation) => `${operation.operationId}:${operation.status}`)
-              .join("|") ?? "pending"
-          ])}
-          projectId={props.binding.hostRunId}
-          version={props.view?.project.version ?? 0}
-          api={window.api.harnessBoard.nativeFeatureMods}
-          onReady={props.onReady}
-        />
       )}
       {continuation && continuation.reason !== "completed" && (
         <p role="status" className="text-sm">
@@ -146,6 +129,7 @@ function NativeRunReview({
         </p>
       )}
       {view.resultReviewError && <p role="alert">{view.resultReviewError}</p>}
+      {view.inputWaitError && <p role="alert">{view.inputWaitError}</p>}
       {view.inputWait && (
         <div className="flex gap-2">
           <Button variant="outline" onClick={() => onViewThread(view.inputWait!.threadId)}>

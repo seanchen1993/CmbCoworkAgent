@@ -13,6 +13,7 @@ import {
 } from "../mods/v2/native-configuration-scope"
 import type { projectRuntimeFunctionSource } from "../harness-board/project-runtime-function-source"
 import type { projectRuntimeDependencies } from "../harness-board/project-runtime-dependencies"
+import type { captureProjectUseFeaturePreflight } from "../harness-board/project-use-authorization"
 
 export type NativeProjectSourceContext = ReturnType<typeof projectRuntimeFunctionSource> & {
   project: { projectId: string; version: number; pluginDigest: string }
@@ -22,6 +23,58 @@ export type NativeProjectSourceContext = ReturnType<typeof projectRuntimeFunctio
   executionGuard?(): void
   dependencies?: ReturnType<typeof projectRuntimeDependencies>
   approvalAtProject?: true
+  projectUsePreflight?: NonNullable<ReturnType<typeof captureProjectUseFeaturePreflight>>
+}
+
+export interface NativeProjectSourcePreflight {
+  workspace: string
+  assertCurrent(): void
+}
+
+function unreadyConfiguration(error: unknown): boolean {
+  return error instanceof ModFunctionError &&
+    /^(MODS_USER_CONFIG_|MODS_SECRET_|PROJECT_MODS_APPROVAL_REQUIRED$)/.test(error.code)
+}
+
+/** A parent receipt already pins each source, but the candidate directory is not bound yet. */
+async function reviewProspectiveProjectSource(
+  context: NativeProjectSourceContext,
+  authority: NonNullable<NativeProjectSourceContext["projectUsePreflight"]>
+) {
+  const source = await context.manager.prepareRuntimeSourceFacts(context.input)
+  const providers = await context.dependencies?.resolveAll() ?? []
+  await Promise.all(providers.map((provider) => context.manager.prepareRuntimeSourceFacts({
+    workspace: context.input.workspace,
+    plugin: provider.plugin
+  })))
+  const assertCurrent = () => {
+    context.guard()
+    authority.assertCurrent()
+    if (((source && !source.configurationOnly) || providers.length > 0) && !authority.enabled())
+      throw new ModFunctionError("PROJECT_MODS_APPROVAL_REQUIRED")
+    context.manager.assertRuntimeSourceConfiguration(context.input)
+    if (source && !source.configurationOnly && !authority.approved({
+      pluginId: context.input.plugin.id, name: source.name, digest: source.digest
+    })) throw new ModFunctionError("PROJECT_MODS_APPROVAL_REQUIRED")
+    for (const provider of providers) {
+      provider.assertCurrent()
+      context.manager.assertRuntimeSourceConfiguration({
+        workspace: context.input.workspace, plugin: provider.plugin
+      })
+      if (!authority.approved({
+        pluginId: provider.plugin.id, name: provider.facts.name, digest: provider.facts.digest
+      })) throw new ModFunctionError("PROJECT_MODS_APPROVAL_REQUIRED")
+    }
+    context.guard()
+  }
+  try {
+    assertCurrent()
+    return { ready: true as const, assertCurrent, assertExecutionReady: assertCurrent }
+  } catch (error) {
+    if (unreadyConfiguration(error))
+      return { ready: false as const, assertCurrent: () => context.guard() }
+    throw error
+  }
 }
 
 /** The original native editor and exact-source consent, with a host-owned target resolver. */
@@ -30,7 +83,8 @@ export function registerNativeProjectSourceHandlers(
   prefix: string,
   scope: (
     event: IpcMainInvokeEvent,
-    key: string
+    key: string,
+    preflight?: NativeProjectSourcePreflight
   ) => NativeProjectSourceContext | Promise<NativeProjectSourceContext>
 ) {
   const pending = new Set<string>()
@@ -381,8 +435,14 @@ export function registerNativeProjectSourceHandlers(
     }
   )
   /** Main-only execution preflight; never registered as a preview or authorization IPC. */
-  return async (event: IpcMainInvokeEvent, projectId: string) => {
-    const context = await scope(event, projectId)
+  return async (
+    event: IpcMainInvokeEvent,
+    projectId: string,
+    preflight?: NativeProjectSourcePreflight
+  ) => {
+    const context = await scope(event, projectId, preflight)
+    if (context.projectUsePreflight)
+      return reviewProspectiveProjectSource(context, context.projectUsePreflight)
     const snapshot = await reviewContext(context, projectId)
     const dependencies = snapshot.dependencies ?? []
     const executable = (!!snapshot.source && !snapshot.source.configurationOnly) || dependencies.length > 0
@@ -416,8 +476,7 @@ export function registerNativeProjectSourceHandlers(
       context.guard()
     }
     try { assertCurrent() } catch (error) {
-      if (error instanceof ModFunctionError &&
-        /^(MODS_USER_CONFIG_|MODS_SECRET_|PROJECT_MODS_APPROVAL_REQUIRED$)/.test(error.code))
+      if (unreadyConfiguration(error))
         return { ready: false as const, assertCurrent: () => context.guard() }
       throw error
     }

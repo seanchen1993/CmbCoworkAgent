@@ -20,7 +20,7 @@ async function main() {
       resolveDir: process.cwd(),
       contents: `
       import React,{useState} from 'react';import{createRoot}from'react-dom/client';
-      import{FeatureDetailPage}from${JSON.stringify(entry)};
+      import{FeatureCreateDialog,FeatureDetailPage}from${JSON.stringify(entry)};
       const root=createRoot(document.getElementById('root')),calls=[];
       const nodes=[{id:'collect',label:'整理资料',nodeStatus:'not_started',status:{label:'未开始',uiKind:'unknown'},artifacts:[],hooks:[]}];
       let current={project:{projectId:'container',name:'原项目',projectRootPath:'C:/container',lifecycle:{status:'active'}},
@@ -28,11 +28,15 @@ async function main() {
         workflow:{display:{mode:'ordered_nodes'},nodes:nodes.map(n=>({...n,states:[]}))},
         run:{slug:'request-a',title:'需求A',currentNodeId:'collect',nodes,featureStatus:'pending',skipNodeAvailable:false,selectedDeployUnits:[],resolvedSessionWorkspacePath:'C:/source'},
         adapterSnapshot:{mock:false},sessions:[]};
-      let settle,holdContinue=false,continuation;
+      let settle,holdContinue=false,continuation,nextStartError,requiredDirectoryField=false;
       const readiness={'C:/source':false,'C:/isolated':true},sourceReads=[],directorySelections=[],reviewScopes=[],configReads=[],configSaves=[],navigation=[],editRequests=[],selectedHistoryThreads=[],historySurfaces=[];
       const configValues={},configRevisions={};let configurationEnabled=false,holdNextReview=false,releaseReview,releasedReviews=0,applicationEnabled=true,configurationReady=true,holdApproval=false,releaseApproval,approvalReleases=0;
       const configuration=workspace=>({pluginId:'provider',plugin:'受控执行能力',digest:'b'.repeat(64),workspace,
-        savedRevision:configRevisions[workspace]??0,state:'inactive',fields:[{key:'note',label:'目录备注',description:'受控测试参数',type:'string',supported:true,required:false,value:configValues[workspace]??'stored:'+workspace}]});
+        savedRevision:configRevisions[workspace]??0,state:'inactive',fields:[
+          {key:'note',label:'目录备注',description:'受控测试参数',type:'string',supported:true,required:false,value:configValues[workspace]??'stored:'+workspace},
+          {key:'selectedDeployUnits',label:'手填发布单元',description:'旧包字段',type:'string',supported:true,required:false,value:'[]'},
+          {key:'knowledgeRoot',label:'手填知识目录',description:'插件参数',type:'string',supported:true,required:requiredDirectoryField,value:workspace}
+        ]});
       const nativeView=()=>({project:{projectId:'run-a',name:'需求A',goal:'整理供应商资料并核对缺项',workspace:'C:/isolated',pluginDigest:'a'.repeat(64),version:1,stageIndex:0,status:'active',
         manifest:{stages:[{id:'collect',title:'整理资料',approval:'human',resultApproval:'none'}]}},operations:[{operationId:'op-a',stageId:'collect',expectedVersion:1,inputFingerprint:'fingerprint-a',status:'started'}]});
       window.api={builtinRobot:{getStatus:async()=>({settings:{enabled:false},connectionState:'offline',identityState:'unknown'}),onStatus:()=>()=>{},getRemoteAccess:async()=>({featureGrants:[],threadGrants:[]}),onRemoteAccessChanged:()=>()=>{}},
@@ -58,18 +62,32 @@ async function main() {
           nativeFeatureCommand:async(projectId,featureId,command)=>{
             calls.push({projectId,featureId,command});
             if(command.kind==='approve'&&holdApproval)await new Promise(resolve=>releaseApproval=()=>{holdApproval=false;approvalReleases++;resolve()});
-            if(command.kind==='start-feature') {current={...current,nativeBinding:{...current.nativeBinding,workspace:command.workspacePath,initialUserMessage:command.initialUserMessage},nativeProject:nativeView()};await new Promise(resolve=>settle=resolve)}
+            if(command.kind==='start-feature') {
+              if(nextStartError){const message=nextStartError;nextStartError=undefined;throw Error(message)}
+              current={...current,nativeBinding:{...current.nativeBinding,workspace:command.workspacePath,initialUserMessage:command.initialUserMessage},nativeProject:nativeView()};await new Promise(resolve=>settle=resolve)
+            }
             if(command.kind==='continue'&&holdContinue) {current={...current,nativeProject:nativeView()};await new Promise(resolve=>settle=resolve)}
             if(command.kind==='cancel') {const operation=current.nativeProject.operations.find(item=>item.operationId===command.operationId);
               if(!operation||operation.status==='unknown')throw Error('INVALID_CANCELLATION_TARGET');
               current={...current,nativeProject:{...current.nativeProject,operations:current.nativeProject.operations.map(item=>item.operationId===command.operationId?{...item,status:'cancelled'}:item)}};settle?.()}
             return structuredClone({...current.nativeProject,...(command.kind==='continue'&&continuation?{continuation}: {})});
           },getRunDetail:async()=>structuredClone(current)}};
-      function Fixture(){const[detail,setDetail]=useState(current),[epoch,setEpoch]=useState(0);window.stageFixture={calls,sourceReads,directorySelections,reviewScopes,configReads,configSaves,navigation,editRequests,selectedHistoryThreads,historySurfaces,binding:()=>structuredClone(current.nativeBinding),operations:()=>structuredClone(current.nativeProject?.operations??[]),
+      const featureMappings=[
+        {deployUnitId:'unit-a',deployUnitIdMapping:'map-a',localRepoPath:'C:/repo-a'},
+        {deployUnitId:'unit-b',deployUnitIdMapping:'map-b',localRepoPath:'C:/repo-b'}
+      ];
+      const featureConfigSaves=[];
+      function Fixture(){
+        const [featureConfig,setFeatureConfig]=useState(null);
+        const [featureWorkspace,setFeatureWorkspace]=useState({source:'directory',path:'C:/source'});
+        const [selectedMappings,setSelectedMappings]=useState(new Set(['map-a']));
+        const[detail,setDetail]=useState(current),[epoch,setEpoch]=useState(0);window.stageFixture={calls,sourceReads,directorySelections,reviewScopes,configReads,configSaves,navigation,editRequests,selectedHistoryThreads,historySurfaces,binding:()=>structuredClone(current.nativeBinding),operations:()=>structuredClone(current.nativeProject?.operations??[]),
+        rejectNextStart:(message='所选目录的插件参数尚未完成')=>{nextStartError=message},clearCalls:()=>{calls.length=0},requireDirectoryField:()=>{requiredDirectoryField=true},
+        openFeatureConfig:readOnly=>setFeatureConfig({readOnly}),featureConfigSaves,
         holdReview:()=>holdNextReview=true,releaseReview:()=>releaseReview(),releasedReviews:()=>releasedReviews,
         holdApproval:()=>holdApproval=true,releaseApproval:()=>releaseApproval(),releasedApprovals:()=>approvalReleases,
         setUnstartedScope:(workspace,identity,enabled)=>{configurationEnabled=true;readiness[workspace]=enabled;const{nativeProject,...unstarted}=current;
-          current={...unstarted,nativeBinding:{...unstarted.nativeBinding,workspace,repositoryWorkspace:workspace,workspaceMode:'selected-directory',workspaceIdentity:identity,repositoryWorkspaceIdentity:identity,worktree:undefined,initialUserMessage:undefined},run:{...unstarted.run,resolvedSessionWorkspacePath:workspace}};setDetail(structuredClone(current))},
+          current={...unstarted,nativeBinding:{...unstarted.nativeBinding,workspace,repositoryWorkspace:workspace,workspaceMode:'selected-directory',workspaceIdentity:identity,repositoryWorkspaceIdentity:identity,worktree:undefined,initialUserMessage:undefined,supportsDeployUnits:true},run:{...unstarted.run,resolvedSessionWorkspacePath:workspace,selectedDeployUnits:[{deployUnitId:'unit-a'}]}};setDetail(structuredClone(current))},
         pinReadinessScope:()=>{current={...current,nativeBinding:{...current.nativeBinding,initialUserMessage:'固定当前目录以观察就绪门禁'}};setDetail(structuredClone(current))},
         setSourceReady:value=>{readiness[current.nativeBinding.workspace]=value;setEpoch(value=>value+1)},
         setHistoricalWorktree:()=>{const{nativeProject,...historical}=current;current={...historical,nativeBinding:{...historical.nativeBinding,workspaceMode:undefined,initialUserMessage:undefined,worktree:{root:'C:/isolated'}}};setDetail(structuredClone(current));setEpoch(value=>value+1)},
@@ -84,8 +102,32 @@ async function main() {
         setContinuation:value=>continuation=value,setHoldContinue:value=>holdContinue=value,refresh:()=>setDetail(structuredClone(current)),
         setOperation:operation=>{const view=nativeView();current={...current,nativeProject:{...view,operations:[{...view.operations[0],...operation}]}};calls.length=0;setDetail(structuredClone(current))}};
         return <div style={{height:'100vh'}}><FeatureDetailPage key={epoch} detail={detail} loading={false} isViewingSession={false}
-          onBackToList={()=>{}} onBackToProject={()=>navigation.push('project')} onEditDeployUnits={()=>editRequests.push(current.nativeBinding.workspace)}
-          onRefresh={()=>setDetail(structuredClone(current))} onFeatureImManagementSaved={()=>{}}/></div>}
+          onBackToList={()=>{}} onBackToProject={()=>navigation.push('project')} onEditDeployUnits={preferred=>{
+            editRequests.push(preferred??current.nativeBinding.workspace);
+            setFeatureWorkspace({source:'directory',path:preferred??current.nativeBinding.workspace});setFeatureConfig({readOnly:false});
+          }}
+          onRefresh={()=>setDetail(structuredClone(current))} onFeatureImManagementSaved={()=>{}}/>
+          {featureConfig && <FeatureCreateDialog mode="edit" featureName="需求A" readOnly={featureConfig.readOnly}
+            project={{projectId:'container',supportsDeployUnits:true,supportsSessionContextInjection:true,
+              harnessAdapter:{id:'host',name:'原项目插件'}}}
+            workspace={featureWorkspace} onWorkspaceChange={setFeatureWorkspace} rows={featureMappings} catalogUnits={[]}
+            selectedDeployUnitIds={selectedMappings} agentsReadyDeployUnits={['unit-a','unit-b']}
+            localAgentmdDeployUnitMappings={[]} deployUnitMappingsLoading={false} workflowConfig={null}
+            workflowLoading={false} workflowTemplate="" selectedWorkflowNodeIds={new Set()} creating={false} error={null}
+            onOpenChange={open=>{if(!open)setFeatureConfig(null)}} onChange={()=>{}} onSelectPath={()=>{}}
+            onWorkflowTemplateChange={()=>{}} onWorkflowNodeToggle={()=>{}} onOpenDeployUnitSettings={()=>{}}
+            onDeployUnitToggle={(id,checked)=>setSelectedMappings(previous=>{
+              const next=new Set(previous);if(checked)next.add(id);else next.delete(id);return next
+            })}
+            onSubmit={()=>{featureConfigSaves.push({sessionWorkspace:featureWorkspace,
+              selectedDeployUnits:featureMappings.filter(row=>selectedMappings.has(row.deployUnitIdMapping))});
+              if(featureWorkspace.source==='directory') {
+                const workspace=featureWorkspace.path;
+                current={...current,nativeBinding:{...current.nativeBinding,workspace,repositoryWorkspace:workspace},
+                  run:{...current.run,resolvedSessionWorkspacePath:workspace}};
+                setDetail(structuredClone(current));
+              }
+              setFeatureConfig(null)}}/>}</div>}
       root.render(<Fixture/>);
     `
     },
@@ -108,7 +150,7 @@ async function main() {
           builder.onLoad({ filter: /HarnessBoardView\.tsx$/ }, () => ({
             loader: "tsx",
             resolveDir: dirname(entry),
-            contents: readFileSync(entry, "utf8") + "\nexport { FeatureDetailPage }\n"
+            contents: readFileSync(entry, "utf8") + "\nexport { FeatureCreateDialog, FeatureDetailPage }\n"
           }))
           builder.onResolve({ filter: /(?:^|\/)thread-context$/ }, () => ({
             path: "thread-context",
@@ -193,18 +235,14 @@ async function main() {
     await page.goto("https://harness.test/")
     await page.addStyleTag({ content: compiler.build(candidates) })
     await page.addScriptTag({ content: bundled.outputFiles[0].text })
-    await page
-      .getByText("当前目录的插件功能已关闭，请在插件设置中恢复后重新核对。", { exact: true })
-      .waitFor()
+    await page.getByRole("button", { name: "托管运行当前特性", exact: true }).waitFor()
     assert.equal(
       await page.getByRole("button", { name: "项目能力", exact: true }).count(),
       0,
       "A mature project uses its original controls without a second composition entry"
     )
-    assert.deepEqual(await page.evaluate("window.stageFixture.sourceReads[0]"), {
-      workspace: "C:/source",
-      workspaceEnabled: false
-    })
+    assert.equal(await page.evaluate("window.stageFixture.sourceReads.length"), 0)
+    assert.equal(await page.getByRole("region", { name: "本包功能权限", exact: true }).count(), 0)
     assert(
       await page.getByRole("button", { name: "托管运行当前特性", exact: true }).isEnabled(),
       "The first selected-directory run can open its original picker before default-scope readiness"
@@ -212,7 +250,15 @@ async function main() {
     await page.getByRole("region", { name: "当前阶段指引", exact: true })
       .getByRole("button", { name: "填写需求并开始", exact: true }).click()
     const dialog = page.getByRole("dialog", { name: "开启托管运行", exact: true })
+    const confirm = dialog.getByRole("button", { name: "确认并开启托管", exact: true })
     await dialog.waitFor()
+    await dialog
+      .getByText("当前目录的插件功能已关闭，请在插件设置中恢复后重新核对。", { exact: true })
+      .waitFor()
+    assert.deepEqual(await page.evaluate("window.stageFixture.sourceReads[0]"), {
+      workspace: "C:/source",
+      workspaceEnabled: false
+    })
     assert.equal(
       await dialog.getByRole("textbox", { name: "会话工作区", exact: true }).inputValue(),
       "C:/source"
@@ -260,7 +306,35 @@ async function main() {
     await dialog
       .getByRole("textbox", { name: "启动会话的初始用户消息" })
       .fill("整理供应商资料并核对缺项")
-    await dialog.getByRole("button", { name: "确认并开启托管", exact: true }).click()
+    await page.evaluate("window.stageFixture.rejectNextStart()")
+    await confirm.click()
+    await dialog.getByRole("alert").filter({ hasText: "所选目录的插件参数尚未完成" }).waitFor()
+    assert.equal(await dialog.getByRole("textbox", { name: "会话工作区", exact: true }).inputValue(), "C:/isolated")
+    assert.equal(await dialog.getByRole("textbox", { name: "启动会话的初始用户消息" }).inputValue(), "整理供应商资料并核对缺项")
+    assert.equal(await page.evaluate("window.stageFixture.binding().workspace"), "C:/source")
+    await dialog.getByRole("button", { name: "在特性配置中设置此目录", exact: true }).click()
+    await dialog.waitFor({ state: "hidden" })
+    assert.equal(await page.evaluate("window.stageFixture.editRequests.at(-1)"), "C:/isolated")
+    assert.equal(await page.evaluate("window.stageFixture.binding().workspace"), "C:/source")
+    const featureConfig = page.getByRole("dialog", { name: "编辑特性配置", exact: true })
+    const featureWorkspace = featureConfig.getByRole("textbox", { name: "会话工作区", exact: true })
+    assert.equal(await featureWorkspace.inputValue(), "C:/isolated")
+    await featureConfig.getByRole("button", { name: "取消", exact: true }).click()
+    await page.getByRole("button", { name: "托管运行当前特性", exact: true }).click()
+    const managedWorkspace = dialog.getByRole("textbox", { name: "会话工作区", exact: true })
+    const managedGoal = dialog.getByRole("textbox", { name: "启动会话的初始用户消息" })
+    assert.equal(await managedWorkspace.inputValue(), "C:/isolated")
+    assert.equal(await managedGoal.inputValue(), "整理供应商资料并核对缺项")
+    assert.equal(await page.evaluate("window.stageFixture.binding().workspace"), "C:/source")
+    await dialog.getByRole("button", { name: "在特性配置中设置此目录", exact: true }).click()
+    await featureConfig.getByRole("button", { name: "保存", exact: true }).click()
+    await page.getByRole("button", { name: "托管运行当前特性", exact: true }).click()
+    assert.equal(await managedWorkspace.inputValue(), "C:/isolated")
+    assert.equal(await managedGoal.inputValue(), "整理供应商资料并核对缺项")
+    assert.equal(await page.evaluate("window.stageFixture.binding().workspace"), "C:/isolated")
+    pass("returning from the original feature editor preserves the launch draft after cancellation and save")
+    await page.evaluate("window.stageFixture.clearCalls()")
+    await confirm.click()
     await dialog.waitFor({ state: "hidden" })
     await page.getByRole("button", { name: "停止托管运行", exact: true }).waitFor()
     assert(
@@ -349,20 +423,17 @@ async function main() {
     )
     await dialog.getByRole("button", { name: "取消", exact: true }).click()
     await dialog.waitFor({ state: "hidden" })
-    assert(await page.getByRole("button", { name: "编辑特性配置", exact: true }).isDisabled())
+    assert(await page.getByRole("button", { name: "查看特性配置", exact: true }).isEnabled())
     await page.getByLabel("特性配置修改限制", { exact: true }).hover()
-    await page.getByRole("tooltip").filter({ hasText: "默认会话目录已固定" }).waitFor()
+    await page.getByRole("tooltip").filter({ hasText: "发布单元和会话目录已固定" }).waitFor()
     assert.deepEqual(await page.evaluate("window.stageFixture.calls"), fixedCalls)
     assert.deepEqual(await page.evaluate("window.stageFixture.directorySelections"), selections)
     await page.evaluate("window.stageFixture.setSourceReady(false)")
-    await page
+    await page.getByRole("button", { name: "托管运行当前特性", exact: true }).click()
+    await dialog
       .getByText("当前目录的插件功能已关闭，请在插件设置中恢复后重新核对。", { exact: true })
       .waitFor()
-    assert(
-      await page.getByRole("button", { name: "托管运行当前特性", exact: true }).isDisabled(),
-      "A fixed run must still pass its current execution-scope readiness gate"
-    )
-    assert.equal(await dialog.count(), 0)
+    assert(await confirm.isDisabled(), "A fixed run must pass readiness before confirming")
     assert.deepEqual(await page.evaluate("window.stageFixture.calls"), fixedCalls)
     assert.deepEqual(await page.evaluate("window.stageFixture.directorySelections"), selections)
     assert.equal(await page.evaluate("window.stageFixture.binding().workspace"), "C:/isolated")
@@ -370,16 +441,17 @@ async function main() {
     pass(
       "fixed runs retain the execution directory and remain blocked when that scope is not ready"
     )
+    await dialog.getByRole("button", { name: "取消", exact: true }).click()
 
     await page.evaluate("window.stageFixture.setHistoricalWorktree()")
-    await page
+    await page.getByRole("button", { name: "托管运行当前特性", exact: true }).click()
+    await dialog
       .getByText("当前目录的插件功能已关闭，请在插件设置中恢复后重新核对。", { exact: true })
       .waitFor()
-    assert(
-      await page.getByRole("button", { name: "托管运行当前特性", exact: true }).isDisabled(),
-      "Historical worktree bindings must not acquire the first selected-directory picker exception"
-    )
-    assert.equal(await dialog.count(), 0)
+    assert(await confirm.isDisabled())
+    assert(await dialog.getByRole("textbox", { name: "会话工作区", exact: true }).isDisabled(),
+      "Historical worktree bindings must not acquire the first selected-directory picker")
+    await dialog.getByRole("button", { name: "取消", exact: true }).click()
     assert.deepEqual(await page.evaluate("window.stageFixture.calls"), fixedCalls)
     assert.deepEqual(await page.evaluate("window.stageFixture.directorySelections"), selections)
     assert.deepEqual(errors, [])
@@ -400,16 +472,23 @@ async function main() {
       return editor
     }
     await page.evaluate("window.stageFixture.setUnstartedScope('C:/review-a','scope-a1',true)")
+    assert.equal(await permission.count(), 0)
+    await page.getByRole("button", { name: "托管运行当前特性", exact: true }).click()
+    await dialog.getByText("发布单元：unit-a", { exact: true }).waitFor()
     await page.waitForFunction(
       "window.stageFixture.reviewScopes.some(scope=>scope.workspace==='C:/review-a'&&scope.identity==='scope-a1')"
     )
     const firstEditor = await openConfiguration()
+    assert.equal(await firstEditor.getByText("手填发布单元", { exact: true }).count(), 0)
+    assert.equal(await firstEditor.getByText("手填知识目录", { exact: true }).count(), 0)
     await firstEditor.getByRole("textbox", { name: "目录备注", exact: true }).fill("A的未保存草稿")
-    await page.evaluate("window.stageFixture.setUnstartedScope('C:/review-b','scope-b1',true)")
+    await page.evaluate("window.stageFixture.requireDirectoryField(); window.stageFixture.setUnstartedScope('C:/review-b','scope-b1',true)")
     await page.waitForFunction(
       "window.stageFixture.reviewScopes.some(scope=>scope.workspace==='C:/review-b'&&scope.identity==='scope-b1')"
     )
     const secondEditor = await openConfiguration()
+    await secondEditor.getByRole("textbox", { name: /^手填知识目录/ }).waitFor()
+    assert.equal(await secondEditor.getByText("手填发布单元", { exact: true }).count(), 0)
     const note = secondEditor.getByRole("textbox", { name: "目录备注", exact: true })
     assert.equal(
       await note.inputValue(),
@@ -507,10 +586,11 @@ async function main() {
         )
         return summary?.textContent?.includes(ready ? "已就绪" : "待完成") === true
       }, nextReady)
+      const message = dialog.getByRole("textbox", { name: "启动会话的初始用户消息" })
+      if (await message.isEditable()) await message.fill("保留当前运行的需求")
       await page.evaluate("window.stageFixture.pinReadinessScope()")
-      const manage = page.getByRole("button", { name: "托管运行当前特性", exact: true })
       assert.equal(
-        await manage.isEnabled(),
+        await confirm.isEnabled(),
         nextReady,
         "The fixed readiness gate must reflect the newer completed B review"
       )
@@ -526,7 +606,7 @@ async function main() {
         () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
       )
       assert.equal(
-        await manage.isEnabled(),
+        await confirm.isEnabled(),
         nextReady,
         "A late A result may neither clear a ready B scope nor enable a blocked B scope"
       )
@@ -548,8 +628,7 @@ async function main() {
           window as unknown as { stageFixture: { setStopState(status: string): void } }
         ).stageFixture.setStopState(status)
       }, status)
-      await page.getByRole("alert").filter({ hasText: "应用插件功能已关闭" }).waitFor()
-      await page.getByRole("alert").filter({ hasText: "请先补齐上方必填参数" }).waitFor()
+      assert.equal(await permission.count(), 0, "Knock-on authorization reads are deferred while a run is active")
       const stop = page.getByRole("button", { name: "停止托管运行", exact: true })
       assert(
         await stop.isEnabled(),
@@ -615,13 +694,16 @@ async function main() {
       await edit.isEnabled(),
       "An unstarted historical binding without a worktree keeps its original edit entry"
     )
+    const editRequestsBefore = await page.evaluate<number>("window.stageFixture.editRequests.length")
     await edit.click()
-    assert.deepEqual(await page.evaluate("window.stageFixture.editRequests"), ["C:/isolated"])
+    assert.deepEqual(await page.evaluate("window.stageFixture.editRequests.slice(" + editRequestsBefore + ")"), ["C:/isolated"])
+    await featureConfig.getByRole("button", { name: "取消", exact: true }).click()
     assert.deepEqual(errors, [])
     pass(
       "historical non-worktree unstarted bindings remain editable without requiring mode metadata"
     )
 
+    await page.getByRole("button", { name: "托管运行当前特性", exact: true }).click()
     await page.waitForFunction(() => {
       const summary = document.querySelector(
         'section[aria-label="本包功能权限"] > details > summary'
@@ -633,7 +715,7 @@ async function main() {
     await page.evaluate("window.stageFixture.setArchivedHistory()")
     await page.getByText("项目已归档，仅可查看历史记录。", { exact: true }).waitFor()
     assert(await page.getByRole("button", { name: "停止托管运行", exact: true }).isDisabled())
-    assert(await page.getByRole("button", { name: "编辑特性配置", exact: true }).isDisabled())
+    assert(await page.getByRole("button", { name: "查看特性配置", exact: true }).isDisabled())
     assert(await page.getByRole("button", { name: "新增会话", exact: true }).isDisabled())
     assert(await page.getByRole("button", { name: "继续执行", exact: true }).isDisabled())
     assert(await page.getByRole("button", { name: "批准并执行", exact: true }).isDisabled())
@@ -710,6 +792,52 @@ async function main() {
     pass(
       "archival during a pending approval keeps the canceled historical ledger and ignores the late response without continuing execution or remounting consent"
     )
+
+    await page.evaluate("window.stageFixture.openFeatureConfig(false)")
+    await featureConfig.waitFor()
+    assert(await featureConfig.getByRole("tab", { name: /选择要开发的发布单元/ }).isEnabled())
+    await featureConfig.getByRole("checkbox", { name: "选择发布单元 unit-a", exact: true }).uncheck()
+    await featureConfig.getByRole("checkbox", { name: "选择发布单元 unit-b", exact: true }).check()
+    assert.equal(await featureConfig.getByLabel("公共系统约束", { exact: true }).count(), 2)
+    await featureConfig.getByRole("button", { name: "作为会话工作区", exact: true }).click()
+    await featureConfig.getByRole("button", { name: "保存", exact: true }).click()
+    assert.deepEqual(await page.evaluate("window.stageFixture.featureConfigSaves.slice(1)"), [{
+      sessionWorkspace: { source: "deployUnit", deployUnitId: "unit-b" },
+      selectedDeployUnits: [{ deployUnitId: "unit-b", deployUnitIdMapping: "map-b", localRepoPath: "C:/repo-b" }]
+    }])
+    await page.evaluate("window.stageFixture.openFeatureConfig(true)")
+    const frozenConfig = page.getByRole("dialog", { name: "查看特性配置", exact: true })
+    await frozenConfig.waitFor()
+    assert(await frozenConfig.getByRole("checkbox", { name: "选择发布单元 unit-b", exact: true }).isDisabled())
+    assert(await frozenConfig.getByRole("textbox", { name: "会话工作区", exact: true }).isDisabled())
+    assert.equal(await frozenConfig.getByRole("button", { name: "保存", exact: true }).count(), 0)
+    await frozenConfig.getByRole("button", { name: "关闭", exact: true }).click()
+    assert.deepEqual(errors, [])
+    pass("the original feature configuration edits selected units and exposes frozen values read-only")
+
+    await page.evaluate(`
+      window.stageFixture.setStopState('prepared', false, false)
+      window.stageFixture.setUnstartedScope('C:/isolated', 'stale-deploy-unit', true)
+      window.stageFixture.rejectNextStart(
+        "Error invoking remote method 'harnessBoard:nativeFeatureCommand': Error: PROJECT_KNOWLEDGE_DEPLOY_UNITS_MISMATCH"
+      )
+    `)
+    const launch = page.getByRole("button", { name: "托管运行当前特性", exact: true })
+    await launch.click()
+    await dialog.getByText("发布单元：unit-a", { exact: true }).waitFor()
+    assert.equal(await managedWorkspace.inputValue(), "C:/isolated")
+    assert.equal(await dialog.getByRole("button", { name: "返回编辑特性配置", exact: true }).count(), 0)
+    await managedGoal.fill("核对切换知识库后的发布要求")
+    await confirm.click()
+    await dialog.getByRole("alert").filter({ hasText: "已选发布单元与当前系统约束知识库不匹配" }).waitFor()
+    await dialog.getByRole("button", { name: "返回编辑特性配置", exact: true }).click()
+    await featureConfig.waitFor()
+    await featureConfig.getByRole("button", { name: "取消", exact: true }).click()
+    await launch.click()
+    assert.equal(await managedWorkspace.inputValue(), "C:/isolated")
+    assert.equal(await managedGoal.inputValue(), "核对切换知识库后的发布要求")
+    assert.deepEqual(errors, [])
+    pass("stale knowledge selection returns to the original feature editor and preserves the launch draft")
   } catch (error) {
     failure = String(error)
     console.error({ errors, body: await page.locator("body").innerText() })

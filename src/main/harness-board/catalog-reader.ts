@@ -18,7 +18,11 @@ import {
   runtimeRelativePath
 } from "./project-runtime/safe-files"
 import { HOST_PACKAGE_LIMITS } from "./project-runtime/package-snapshots"
-import { EXTENSION_BOARD_API_VERSION, parseProjectRuntimeManifest } from "../../shared/project-runtime"
+import {
+  EXTENSION_BOARD_API_VERSION,
+  parseProjectRuntimeManifest,
+  projectRuntimeExtensionContract
+} from "../../shared/project-runtime"
 import type {
   HarnessAdapterRegistryItem,
   HarnessBoardCatalogPageInput,
@@ -339,6 +343,7 @@ type BoardConfigReader = (path: string) => BoardConfigSnapshot
 interface CatalogPackageObservation {
   semantics: AutobizPackageSemantics
   runtimeMode: "legacy" | "host"
+  featureInputs: boolean
   assertCurrent(): void
 }
 
@@ -390,11 +395,14 @@ function observeCatalogPackage(root: string, boardPresent: boolean): CatalogPack
   // The existing Host create API reads this fixed root declaration. Do not route an
   // unassembled catalog or an unrelated capability entry to a different create API.
   const runtimeBytes = read("devclaw.project-runtime.json", 65_536)
-  const runtimeMode = runtimeBytes
-    ? parseProjectRuntimeManifest(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(runtimeBytes))).mode
-    : "legacy"
+  const runtime = runtimeBytes
+    ? JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(runtimeBytes))
+    : undefined
+  const runtimeMode = runtime === undefined ? "legacy" : parseProjectRuntimeManifest(runtime).mode
+  const featureInputs = runtimeMode === "host" &&
+    projectRuntimeExtensionContract(runtime)?.context?.provider?.materials?.featureInputs === true
   assertCurrent()
-  return { semantics, runtimeMode, assertCurrent }
+  return { semantics, runtimeMode, featureInputs, assertCurrent }
 }
 
 function setConfigCache(path: string, signature: string, value: BoardConfigSnapshot): void {
@@ -1182,11 +1190,16 @@ function toProjectListItem(
     },
     ...(project.creator ? { creator: project.creator } : {}),
     boardCompatibility,
-    supportsDeployUnits: boardCompatibility.compatible && !project.nativeBinding,
-    supportsSessionContextInjection:
-      boardCompatibility.compatible && !project.nativeBinding && supportsSessionContext(plugin, readConfig),
-    supportsKnowledgeBaseContext:
-      boardCompatibility.compatible && !project.nativeBinding && supportsKnowledgeBaseContext(plugin, readConfig),
+    supportsDeployUnits: boardCompatibility.compatible &&
+      (!project.nativeBinding || (nativeReady && project.nativeBinding.supportsDeployUnits === true)),
+    supportsSessionContextInjection: boardCompatibility.compatible && (
+      project.nativeBinding ? nativeReady && project.nativeBinding.supportsDeployUnits === true
+        : supportsSessionContext(plugin, readConfig)
+    ),
+    supportsKnowledgeBaseContext: boardCompatibility.compatible && (
+      project.nativeBinding ? nativeReady && project.nativeBinding.supportsDeployUnits === true
+        : supportsKnowledgeBaseContext(plugin, readConfig)
+    ),
     lifecycle: project.lifecycle
   }
 }
@@ -1194,7 +1207,8 @@ function toProjectListItem(
 function toRegistryItem(
   plugin: PluginMetadata,
   readConfig: BoardConfigReader = readBoardConfig,
-  runtimeMode: "legacy" | "host" = "legacy"
+  runtimeMode: "legacy" | "host" = "legacy",
+  featureInputs = false
 ): HarnessAdapterRegistryItem {
   const boardCompatibility: HarnessBoardCompatibility = runtimeMode === "host"
     ? { status: "host-runtime", compatible: true, appApiVersion: APP_BOARD_API_VERSION,
@@ -1216,7 +1230,7 @@ function toRegistryItem(
     description: text(plugin.description, MAX_REGISTRY_TEXT),
     ...(text(plugin.useScenario, 512) ? { useScenario: text(plugin.useScenario, 512) } : {}),
     supportsKnowledgeBaseContext:
-      isRecord(commands) && text(commands.session_context_inject).includes("${knowledgePath}"),
+      featureInputs || (isRecord(commands) && text(commands.session_context_inject).includes("${knowledgePath}")),
     boardCompatibility
   }
 }
@@ -1350,7 +1364,8 @@ export function readHarnessCatalogPage(
     ) {
       if ((index & 15) === 0 && isCancelled(cancelFlag)) break
       const plugin = boardPlugins[index]
-      const projected = toRegistryItem(plugin, readConfig, observations.get(plugin.path)?.runtimeMode)
+      const observation = observations.get(plugin.path)
+      const projected = toRegistryItem(plugin, readConfig, observation?.runtimeMode, observation?.featureInputs)
       const rowBytes = Buffer.byteLength(JSON.stringify(projected), "utf8") + (registry.length ? 1 : 0)
       if (pageBytes + rowBytes > maxResponseBytes) break
       pageBytes += rowBytes

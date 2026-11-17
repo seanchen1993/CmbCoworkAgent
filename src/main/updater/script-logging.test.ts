@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs"
 import { spawn, spawnSync } from "child_process"
 import { tmpdir } from "os"
-import { join } from "path"
+import { dirname, join } from "path"
 import AdmZip from "adm-zip"
 
 const state = vi.hoisted(() => ({ root: "" }))
@@ -30,6 +30,7 @@ import {
 const gitBash = "C:\\Program Files\\Git\\bin\\bash.exe"
 const bash = process.platform === "win32" ? gitBash : "bash"
 const bashAvailable = process.platform !== "win32" || existsSync(gitBash)
+const STATUS_CONTROL_C_EXIT = 0xc000013a
 
 beforeEach(() => {
   state.root = mkdtempSync(join(tmpdir(), "cmb 更新 script-"))
@@ -42,13 +43,14 @@ afterEach(() => {
 })
 
 function runDetachedLauncher(launcher: string): Promise<number | null> {
+  const directory = dirname(launcher)
   return new Promise((resolve, reject) => {
     const child = spawn("cmd.exe", ["/d", "/c", launcher], {
       detached: true,
       stdio: "ignore",
       windowsHide: true,
       timeout: 15000,
-      env: { ...process.env, TEMP: state.root, TMP: state.root }
+      env: { ...process.env, TEMP: directory, TMP: directory }
     })
     child.once("error", reject)
     child.once("exit", (code, signal) => {
@@ -58,14 +60,21 @@ function runDetachedLauncher(launcher: string): Promise<number | null> {
   })
 }
 
-async function runPowerShell(content: string): Promise<{ status: number | null; log: string }> {
-  const script = join(state.root, "diagnostic.ps1")
+async function runPowerShell(
+  content: string,
+  directory = state.root
+): Promise<{ status: number | null; log: string }> {
+  const script = join(directory, "diagnostic.ps1")
+  const logPath = join(directory, "diagnostic.launcher.log")
   writePowerShellScript(script, content)
   const launcher = writePs1Launcher(script)
   const status = await runDetachedLauncher(launcher)
   return {
     status,
-    log: readFileSync(join(state.root, "diagnostic.launcher.log"), "utf-8")
+    log:
+      status === STATUS_CONTROL_C_EXIT && !existsSync(logPath)
+        ? "Launcher interrupted before creating its log"
+        : readFileSync(logPath, "utf-8")
   }
 }
 
@@ -74,15 +83,22 @@ describe.skipIf(process.platform !== "win32")(
   { timeout: 30000 },
   () => {
     it("records quiet success, caught failure, unhandled failure and preserves past attempts", async () => {
-      const success = await runPowerShell("Write-UpdateStage 'fixture-success'")
-      expect(success.status).toBe(0)
-      expect(success.log).toContain("Script body completed")
-      expect(success.log).toContain("launch-exit code=0")
-      const failure = await runPowerShell("throw 'fixture-error'")
-      expect(failure.status).toBe(1)
-      expect(failure.log).toContain("fixture-success")
-      expect(failure.log).toContain("Unhandled error: fixture-error")
-      expect(failure.log).toContain("launch-exit code=1")
+      for (const mayRetry of [true, false]) {
+        const directory = mkdtempSync(join(state.root, "history-attempt-"))
+        const success = await runPowerShell("Write-UpdateStage 'fixture-success'", directory)
+        if (mayRetry && success.status === STATUS_CONTROL_C_EXIT) continue
+        expect(success.status, success.log).toBe(0)
+        expect(success.log).toContain("Script body completed")
+        expect(success.log).toContain("launch-exit code=0")
+
+        const failure = await runPowerShell("throw 'fixture-error'", directory)
+        if (mayRetry && failure.status === STATUS_CONTROL_C_EXIT) continue
+        expect(failure.status, failure.log).toBe(1)
+        expect(failure.log).toContain("fixture-success")
+        expect(failure.log).toContain("Unhandled error: fixture-error")
+        expect(failure.log).toContain("launch-exit code=1")
+        return
+      }
     })
 
     it("captures syntax errors before the script can start logging", async () => {

@@ -22,6 +22,7 @@ type UserInputResult = UserInputResponse | AutoResolvedUserInputResponse
 interface PendingUserInput {
   acknowledged?: boolean
   request: UserInputRequest
+  durable: boolean
   resolve: (response: UserInputResult) => void
   reject: (error: Error) => void
   abortSignal?: AbortSignal
@@ -81,6 +82,7 @@ let hostPersistence:
   | {
       store: (create: boolean) => HostUserInputStore | undefined
       isCurrent: (record: HostUserInputRecord) => boolean
+      mayRecover?: (threadId: string) => boolean
     }
   | undefined
 
@@ -110,15 +112,29 @@ export function bindHostUserInputScope(
   hostInputScopes.set(threadId, scope)
   return () => {
     if (hostInputScopes.get(threadId) !== scope) return
-    const waiting = hostPersistence?.store(false)?.pending(threadId)
-    if (!waiting?.continuation || pendingUserInputThreads.has(threadId))
-      cancelUserInputsForThread(threadId, "Host execution ended before consuming this request.")
-    hostInputScopes.delete(threadId)
+    const reason = "Host execution ended before consuming this request."
+    try {
+      const waiting = hostPersistence?.store(false)?.pending(threadId)
+      if (!waiting?.continuation || pendingUserInputThreads.has(threadId))
+        cancelUserInputsForThread(threadId, reason)
+    } catch (error) {
+      // Losing the durable ledger must not strand an in-process tool wait.
+      cancelLiveUserInputsForThread(threadId, reason)
+      throw error
+    } finally {
+      hostInputScopes.delete(threadId)
+    }
   }
 }
 
+const HOST_CHECKPOINT_REQUEST_PREFIX = "host-input:"
+
+export function isHostCheckpointRequestId(requestId: string): boolean {
+  return requestId.startsWith(HOST_CHECKPOINT_REQUEST_PREFIX)
+}
+
 function checkpointRequestId(operationId: string, toolCallId: string): string {
-  return `host-input:${createHash("sha256")
+  return `${HOST_CHECKPOINT_REQUEST_PREFIX}${createHash("sha256")
     .update(JSON.stringify([operationId, toolCallId]))
     .digest("hex")}`
 }
@@ -214,8 +230,14 @@ export function claimHostInputContinuation(requestId: string): HostUserInputReco
   return store.claimContinuation(requestId)
 }
 
+function recoverableHostStore(threadId: string): HostUserInputStore | undefined {
+  if (!hostInputScopes.has(threadId) && hostPersistence?.mayRecover?.(threadId) === false)
+    return undefined
+  return hostPersistence?.store(false)
+}
+
 function persistentRequest(threadId: string): UserInputRequest | null {
-  const store = hostPersistence?.store(false)
+  const store = recoverableHostStore(threadId)
   const record = store?.pending(threadId)
   if (!record) {
     persistentQuestionViews.delete(threadId)
@@ -283,33 +305,30 @@ export function getPendingUserInputForThread(threadId: string): UserInputRequest
   const requestId = pendingUserInputThreads.get(threadId)
   if (!requestId) return persistentRequest(threadId)
   persistentQuestionViews.delete(threadId)
+  const pending = pendingUserInputs.get(requestId)
+  if (!pending?.durable) return pending?.request ?? null
   const store = hostPersistence?.store(false)
   const record = store?.get(requestId)
-  if (record) {
-    try {
-      const scope = hostInputScopes.get(threadId)
-      if (scope) scope.assertCurrent()
-      else if (!hostPersistence!.isCurrent(record)) throw Error("HOST_USER_INPUT_SCOPE_CHANGED")
-    } catch {
-      expireHostRequest(requestId)
-      return null
-    }
+  if (!record) return null
+  try {
+    const scope = hostInputScopes.get(threadId)
+    if (scope) scope.assertCurrent()
+    else if (!hostPersistence!.isCurrent(record)) throw Error("HOST_USER_INPUT_SCOPE_CHANGED")
+  } catch {
+    expireHostRequest(record)
+    return null
   }
-  return pendingUserInputs.get(requestId)?.request ?? null
+  return pending.request
 }
 
-function expireHostRequest(requestId: string): void {
-  const store = hostPersistence?.store(false)
-  const record = store?.get(requestId)
-  store?.cancel(requestId, "Host request identity or authority is no longer current.")
+function expireHostRequest({ request }: HostUserInputRecord): void {
+  const { requestId, threadId } = request
+  cancelStoredRequest(requestId, "Host request identity or authority is no longer current.")
   const pending = cleanupPending(requestId)
-  const threadId = pending?.request.threadId ?? record?.request.threadId
-  if (threadId) {
-    sendToThread(threadId, "cancel", {
-      requestId,
-      reason: "Host request expired. Reconcile the original operation before continuing."
-    })
-  }
+  sendToThread(threadId, "cancel", {
+    requestId,
+    reason: "Host request expired. Reconcile the original operation before continuing."
+  })
   pending?.reject(new Error("HOST_USER_INPUT_SCOPE_CHANGED"))
 }
 
@@ -457,9 +476,9 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
 
   return new Promise<UserInputResult>((resolve, reject) => {
     const abortHandler = (): void => {
-      hostPersistence?.store(false)?.cancel(request.requestId, "The agent run was cancelled.")
       const pending = cleanupPending(request.requestId)
       if (!pending) return
+      if (pending.durable) cancelStoredRequest(request.requestId, "The agent run was cancelled.")
       sendToThread(threadId, "cancel", {
         requestId: request.requestId,
         reason: "The agent run was cancelled."
@@ -522,6 +541,7 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
 
     pendingUserInputs.set(request.requestId, {
       request,
+      durable: Boolean(hostScope),
       resolve,
       reject,
       abortSignal,
@@ -565,9 +585,9 @@ export function submitUserInputResponse(
   options: { notifyRenderer?: boolean; reason?: string } = {}
 ): boolean {
   const current = pendingUserInputs.get(response.requestId)
-  const store = hostPersistence?.store(false)
+  const store = current && !current.durable ? undefined : hostPersistence?.store(false)
   const durable = store?.get(response.requestId)
-  if (!current && !durable) return false
+  if (!durable && (!current || current.durable)) return false
   if (durable) {
     if (durable.status === "cancelled") return false
     try {
@@ -580,7 +600,7 @@ export function submitUserInputResponse(
           throw Error("HOST_USER_INPUT_SCOPE_CHANGED")
       }
     } catch {
-      expireHostRequest(response.requestId)
+      expireHostRequest(durable)
       return false
     }
     // Closing a card is presentation only; it does not supply an answer or cancel the operation.
@@ -648,17 +668,30 @@ export function submitUserInputResponse(
   return true
 }
 
-export function cancelUserInputsForThread(threadId: string, reason: string): number {
+function cancelStoredRequest(requestId: string, reason: string): void {
+  try {
+    hostPersistence?.store(false)?.cancel(requestId, reason)
+  } catch (error) {
+    console.warn("[UserInput] Failed to cancel stored Host input:", error)
+  }
+}
+
+function cancelLiveUserInputsForThread(threadId: string, reason: string): number {
   let count = 0
   for (const [requestId, pending] of pendingUserInputs) {
     if (pending.request.threadId !== threadId) continue
-    hostPersistence?.store(false)?.cancel(requestId, reason)
+    if (pending.durable) cancelStoredRequest(requestId, reason)
     cleanupPending(requestId)
     sendToThread(threadId, "cancel", { requestId, reason })
     pending.reject(new Error(reason))
     count++
   }
-  const store = hostPersistence?.store(false)
+  return count
+}
+
+export function cancelUserInputsForThread(threadId: string, reason: string): number {
+  let count = cancelLiveUserInputsForThread(threadId, reason)
+  const store = recoverableHostStore(threadId)
   const recovered = store?.pending(threadId)
   if (recovered) {
     store!.cancel(recovered.request.requestId, reason)

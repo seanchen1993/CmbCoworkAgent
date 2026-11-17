@@ -1,6 +1,7 @@
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
 import { afterEach, expect, it, vi } from "vitest"
 vi.mock("electron", () => ({
   BrowserWindow: { getAllWindows: () => [] }
@@ -16,6 +17,7 @@ import {
   configureHostUserInputPersistence,
   requestUserInput,
   getPendingUserInputForThread,
+  hasHostUserInputScope,
   submitUserInputResponse,
   cancelUserInputsForThread,
   markHostInputExternalBoundary,
@@ -322,6 +324,30 @@ it("records cancellation and rejects answers to a cancelled durable request", as
   expect(submitUserInputResponse(answer(id))).toBe(false)
 })
 
+it("clears the in-process tool wait when releasing a damaged durable scope", async () => {
+  const f = fixture()
+  const release = bindHostUserInputScope(request.threadId, binding, () => {})
+  const pending = requestUserInput({ threadId: request.threadId, questions: request.questions })
+  const rejected = expect(pending).rejects.toThrow("Host execution ended")
+  const id = getPendingUserInputForThread(request.threadId)!.requestId
+  const damagedPath = `${f.path}.damaged`
+  writeFileSync(damagedPath, "invalid SQLite contents".repeat(128))
+  configureHostUserInputPersistence({
+    store: () => new HostUserInputStore(damagedPath), isCurrent: () => false
+  })
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+  try {
+    expect(release).toThrow(/not a database/i)
+    await rejected
+    expect(hasHostUserInputScope(request.threadId)).toBe(false)
+  } finally {
+    warn.mockRestore()
+    configureHostUserInputPersistence({ store: () => f.store, isCurrent: () => false })
+  }
+  expect(getPendingUserInputForThread(request.threadId)).toBeNull()
+  expect(f.store.get(id)?.status).toBe("cancelled")
+})
+
 it("requires explicit cancellation of a recovered request and never times out into a default answer", async () => {
   const f = fixture()
   cleanup.push(bindHostUserInputScope(request.threadId, binding, () => {}))
@@ -350,6 +376,26 @@ it("never upgrades an observed external Hook lifetime into a resumable checkpoin
     prepareHostInputInterrupt(request.threadId, "input-call", request.questions)
   ).toBeUndefined()
   expect(f.store.pending(request.threadId)).toBeUndefined()
+})
+
+it("uses an indexed operation lookup for resumable input on a reopened ledger", () => {
+  const { path } = fixture()
+  const oldSchema = new DatabaseSync(path)
+  try {
+    oldSchema.exec("DROP INDEX host_unconsumed_user_input_by_operation")
+  } finally {
+    oldSchema.close()
+  }
+  const reopened = new HostUserInputStore(path)
+  cleanup.push(() => reopened.close())
+  const db = new DatabaseSync(path, { readOnly: true })
+  cleanup.push(() => db.close())
+  const plan = db.prepare(`EXPLAIN QUERY PLAN SELECT id FROM host_user_inputs
+    WHERE status IN ('waiting','answered') AND json_extract(data,'$.binding.operationId')=?
+    AND json_extract(data,'$.continuation.protocol')='host-user-input-interrupt/v1' LIMIT 1`
+  ).get(binding.operationId)
+  expect(plan?.detail).toContain("SEARCH host_user_inputs USING INDEX host_unconsumed_user_input_by_operation")
+  expect(reopened.unconsumedContinuation(binding.operationId)).toBeUndefined()
 })
 
 it("invalidates an already displayed checkpoint when an external Hook starts before settlement", () => {

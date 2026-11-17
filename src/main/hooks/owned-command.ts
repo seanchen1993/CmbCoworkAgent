@@ -42,6 +42,7 @@ export function startOwnedHookCommand(input: {
   env: Record<string, string>
   stdin: string
   signal?: AbortSignal
+  onExecutionExit?(): void
   stdout(chunk: Buffer): void
   stderr(chunk: Buffer): void
 }): {
@@ -73,7 +74,7 @@ export function startOwnedHookCommand(input: {
   let stopped = false
   let closed = false
   let cleanupUnconfirmed = false
-  let escalation: ReturnType<typeof setTimeout> | undefined
+  let escalation: Promise<void> | undefined
   let cleanupTimer: ReturnType<typeof setTimeout> | undefined
   let rejectCompletion!: (error: Error) => void
   const stop = (): void => {
@@ -87,18 +88,22 @@ export function startOwnedHookCommand(input: {
         /* The bounded close fence below reports uncertainty. */
       }
     } else if (child.pid) {
+      const group = -child.pid
       try {
-        process.kill(-child.pid, "SIGTERM")
+        process.kill(group, "SIGTERM")
+        escalation = new Promise<void>((resolve) => {
+          setTimeout(() => {
+            try {
+              process.kill(group, "SIGKILL")
+            } catch (cause) {
+              if ((cause as NodeJS.ErrnoException).code !== "ESRCH") cleanupUnconfirmed = true
+            }
+            resolve()
+          }, 100)
+        })
       } catch (cause) {
         if ((cause as NodeJS.ErrnoException).code !== "ESRCH") cleanupUnconfirmed = true
       }
-      escalation = setTimeout(() => {
-        try {
-          process.kill(-child.pid!, "SIGKILL")
-        } catch (cause) {
-          if ((cause as NodeJS.ErrnoException).code !== "ESRCH") cleanupUnconfirmed = true
-        }
-      }, 100)
     }
     cleanupTimer = setTimeout(() => {
       input.signal?.removeEventListener("abort", stop)
@@ -111,6 +116,7 @@ export function startOwnedHookCommand(input: {
       error = cause
     })
     child.once("exit", () => {
+      input.onExecutionExit?.()
       // A shell can exit while a daemon still holds its pipe writers. Reap that group too.
       if (!windows) stop()
     })
@@ -134,7 +140,7 @@ export function startOwnedHookCommand(input: {
         resolve({ code, error })
       }
       // Do not cancel Unix escalation just because the launcher closed its own pipes.
-      if (escalation) setTimeout(finish, 110)
+      if (escalation) void escalation.then(finish)
       else finish()
     })
   })

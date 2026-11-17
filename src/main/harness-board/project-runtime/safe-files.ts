@@ -90,15 +90,17 @@ export interface ScopedFileObservation {
   present: boolean
   fingerprint: string
   bytes?: Buffer
+  size?: number
 }
 
-/** Synchronous bounded reads are also used immediately before the database commit. */
+/** An optional probe fingerprint pins the same metadata generation on the opened descriptor. */
 export function readRuntimeScopedFile(
   root: string,
   relative: string,
-  maxBytes = 4 * 1024 * 1024
+  maxBytes = 4 * 1024 * 1024,
+  expectedMetadataFingerprint?: string
 ): ScopedFileObservation {
-  return observeRuntimeScopedFile(root, relative, maxBytes, false)
+  return observeRuntimeScopedFile(root, relative, maxBytes, false, expectedMetadataFingerprint)
 }
 
 /** Safe presence only: identical scope/link/identity checks, without interpreting resource bytes. */
@@ -110,7 +112,8 @@ function observeRuntimeScopedFile(
   root: string,
   relative: string,
   maxBytes: number,
-  presenceOnly: boolean
+  presenceOnly: boolean,
+  expectedMetadataFingerprint?: string
 ): ScopedFileObservation {
   const parents: Array<{ path: string; identity: string }> = []
   let directory: string
@@ -170,10 +173,13 @@ function observeRuntimeScopedFile(
   }
   const absent = (): ScopedFileObservation => {
     checkParents()
+    const fingerprint = runtimeDigest(JSON.stringify([scopeIdentity, relative, "missing"]))
+    if (expectedMetadataFingerprint !== undefined && fingerprint !== expectedMetadataFingerprint)
+      hostStateError("FILE_CHANGED")
     return {
       path: relative,
       present: false,
-      fingerprint: runtimeDigest(JSON.stringify([scopeIdentity, relative, "missing"]))
+      fingerprint
     }
   }
   if (missingParent) return absent()
@@ -196,7 +202,12 @@ function observeRuntimeScopedFile(
   const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
   try {
     const initial = fstatSync(fd, { bigint: true })
-    if (!initial.isFile() || identity(initial) !== identity(before)) hostStateError("FILE_CHANGED")
+    const initialIdentity = identity(initial)
+    if (!initial.isFile() || initialIdentity !== identity(before)) hostStateError("FILE_CHANGED")
+    const metadataFingerprint = presenceOnly || expectedMetadataFingerprint !== undefined
+      ? runtimeDigest(JSON.stringify([scopeIdentity, relative, initialIdentity])) : undefined
+    if (expectedMetadataFingerprint !== undefined && expectedMetadataFingerprint !== metadataFingerprint)
+      hostStateError("FILE_CHANGED")
     const bytes = Buffer.alloc(presenceOnly ? 0 : Number(initial.size))
     let offset = 0
     while (offset < bytes.length) {
@@ -206,8 +217,8 @@ function observeRuntimeScopedFile(
     }
     const named = lstatSync(path, { bigint: true })
     if (
-      identity(fstatSync(fd, { bigint: true })) !== identity(initial) ||
-      identity(named) !== identity(initial) ||
+      identity(fstatSync(fd, { bigint: true })) !== initialIdentity ||
+      identity(named) !== initialIdentity ||
       named.isSymbolicLink() ||
       realpathSync(path) !== path
     )
@@ -217,7 +228,8 @@ function observeRuntimeScopedFile(
       return {
         path: relative,
         present: true,
-        fingerprint: runtimeDigest(JSON.stringify([scopeIdentity, relative, identity(initial)]))
+        size: Number(initial.size),
+        fingerprint: metadataFingerprint!
       }
     return {
       path: relative,

@@ -103,12 +103,17 @@ export class LegacyOperationStore {
     private readonly compositionGuard?: <T>(workspace: string, work: () => T) => T
   ) {
     this.db = new DatabaseSync(path)
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
-      CREATE TABLE IF NOT EXISTS legacy_bindings (project_id TEXT PRIMARY KEY, workspace TEXT NOT NULL, plugin_id TEXT NOT NULL, data TEXT NOT NULL);
-      CREATE UNIQUE INDEX IF NOT EXISTS legacy_binding_scope ON legacy_bindings(workspace,plugin_id);
-      CREATE TABLE IF NOT EXISTS legacy_import_freezes (project_id TEXT PRIMARY KEY, data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS legacy_operations (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, request_id TEXT NOT NULL, workspace TEXT NOT NULL, plugin_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL, UNIQUE(project_id,request_id));
-      CREATE UNIQUE INDEX IF NOT EXISTS legacy_active_scope ON legacy_operations(workspace,plugin_id) WHERE status IN ('started','unknown');`)
+    try {
+      this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
+        CREATE TABLE IF NOT EXISTS legacy_bindings (project_id TEXT PRIMARY KEY, workspace TEXT NOT NULL, plugin_id TEXT NOT NULL, data TEXT NOT NULL);
+        CREATE UNIQUE INDEX IF NOT EXISTS legacy_binding_scope ON legacy_bindings(workspace,plugin_id);
+        CREATE TABLE IF NOT EXISTS legacy_import_freezes (project_id TEXT PRIMARY KEY, data TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS legacy_operations (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, request_id TEXT NOT NULL, workspace TEXT NOT NULL, plugin_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL, UNIQUE(project_id,request_id));
+        CREATE UNIQUE INDEX IF NOT EXISTS legacy_active_scope ON legacy_operations(workspace,plugin_id) WHERE status IN ('started','unknown');`)
+    } catch (error) {
+      this.db.close()
+      throw error
+    }
   }
   close(): void {
     this.db.close()

@@ -31,7 +31,7 @@ export function nativeFeatureChatGuide(detail: HarnessRunDetailViewModel | null)
       project?.status === "completed"
         ? null
         : (stage?.userGuide ??
-          "请说明希望达成的目标、已有资料和验收要求。可先在这里讨论，再到特性详情核对项目设置、填写完整需求并启动。普通讨论不会自动推进阶段。")
+          "请说明希望达成的目标、已有资料和验收要求。可先在这里讨论，再到特性详情填写完整需求并启动。普通讨论不会自动推进阶段。")
   }
 }
 
@@ -108,8 +108,8 @@ export function nativeFeatureGuidance(
   if (view && !stage) return guide("请在特性详情核对阶段状态后继续。", "review")
   return guide(
     view
-      ? "当前阶段尚未执行。核对项目设置后，点击“托管运行当前特性”继续。"
-      : "先完成项目设置，再填写完整需求并启动。助手会按插件的阶段提示词执行。普通聊天不会自动启动阶段。",
+      ? "当前阶段尚未执行。点击“托管运行当前特性”核对本次执行并继续。"
+      : "点击“托管运行当前特性”填写完整需求并启动。助手会按插件的阶段提示词执行。普通聊天不会自动启动阶段。",
     "start"
   )
 }

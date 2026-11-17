@@ -13,7 +13,8 @@ import {
   wrapProjectRuntimeManifest,
   CONTEXT_HANDOFF_PROTOCOL
 } from "../../../shared/project-runtime"
-import { DECLARED_CONTEXT_FILES_PROTOCOL, EXECUTION_RESOURCES_PROTOCOL } from "../../../shared/project-runtime"
+import { CONTEXT_MATERIALS_PROTOCOL, DECLARED_CONTEXT_FILES_PROTOCOL, EXECUTION_RESOURCES_PROTOCOL } from "../../../shared/project-runtime"
+import { PROJECT_ACTION_LOCK_PATH } from "../../../shared/project-runtime/action-bindings"
 import { FunctionModsManager } from "../../mods/v2/manager"
 import { ModControlStore } from "../../mods/control-store"
 import { FunctionUserConfigValues } from "../../mods/v2/user-config-values"
@@ -24,6 +25,8 @@ import { HostProjectStore } from "./host-store"
 import { HostPackageSnapshots } from "./package-snapshots"
 import { setProjectActionRuntime } from "../project-action-runtime"
 import { captureLegacyCompositionInputs } from "./composition-legacy-inputs"
+import { createProjectActionBinding } from "./action-input"
+import { runtimeDirectoryIdentity } from "./safe-files"
 
 const cleanup: Array<() => void> = []
 afterEach(() =>
@@ -218,6 +221,46 @@ it("reads declared knowledge from the original saved binding without starting a 
   mkdirSync(empty)
   f.values.save(f.root, "document-native-id", f.schema, "knowledge", empty, 1, () => {})
   expect(() => f.input.readDeclaredContext(f.state, f.source, "draft")).toThrow()
+})
+
+it("shares the material scan byte limit across original project knowledge roots", async () => {
+  const f = await fixture()
+  const binding = createProjectActionBinding("context", {
+    pluginId: "knowledge-provider-id", plugin: "knowledge-provider", digest: "b".repeat(64),
+    actionId: "context", name: "Select context", command: "context", inputSchema: { type: "object" }
+  }, {})
+  f.state.manifest.actions = [{ id: binding.id, ref: binding.ref }]
+  writeFileSync(join(f.source, PROJECT_ACTION_LOCK_PATH), JSON.stringify({
+    apiVersion: "devclaw.project-actions-lock/v1", bindings: [binding]
+  }))
+  writeFileSync(join(f.source, "devclaw.project-runtime.json"), JSON.stringify(
+    wrapProjectRuntimeManifest(f.state.manifest, {
+      apiVersion: "devclaw.extension-contract/v1",
+      requires: [CONTEXT_HANDOFF_PROTOCOL, CONTEXT_MATERIALS_PROTOCOL],
+      context: {
+        sourceAccess: "read-only", mutableData: "host", configuration: "host-resolved",
+        knowledge: { required: true },
+        provider: {
+          actionId: binding.id, operations: ["session-context"],
+          materials: { featureInputs: true, configuration: [], roots: [{ id: "knowledge", source: "knowledge" }] }
+        }
+      }
+    })
+  ))
+  const second = join(f.root, "second")
+  mkdirSync(second)
+  f.state.harnessFeatureInputs = {
+    selectedDeployUnits: ["orders-api"],
+    knowledgeRoots: [f.knowledge, second].map((path, index) => ({
+      id: String(index), path, identity: runtimeDirectoryIdentity(path)
+    }))
+  }
+  const bytes = Buffer.alloc(11 * 1024 * 1024)
+  writeFileSync(join(f.knowledge, "material1.bin"), bytes)
+  writeFileSync(join(second, "material2.bin"), bytes)
+  expect(() => f.input.inputIdentity(f.state, f.source)).not.toThrow()
+  writeFileSync(join(second, "material3.bin"), bytes)
+  expect(() => f.input.inputIdentity(f.state, f.source)).toThrow("PROJECT_KNOWLEDGE_LIMIT")
 })
 
 it("exposes only declared public configuration through the original saved configuration store", async () => {

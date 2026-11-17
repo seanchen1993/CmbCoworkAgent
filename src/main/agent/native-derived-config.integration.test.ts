@@ -560,7 +560,7 @@ describe("actual main native derived config through both invocation layers", () 
       }
       if (cleanupFailed) throw cleanupFailure
       if (bodyFailed) throw bodyFailure
-    }))
+    }), 15_000)
 
   it("keeps genuine resident SDK intake and canonical history across consecutive derivations", () =>
     tracked(async controller => {

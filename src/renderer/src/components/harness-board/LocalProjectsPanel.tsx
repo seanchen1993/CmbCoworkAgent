@@ -770,6 +770,11 @@ export function LocalProjectRun({
         </button>
       </div>
       <p className="whitespace-pre-wrap break-words text-sm">{project.goal}</p>
+      {view.inputWaitError && (
+        <p role="alert" className="text-sm text-destructive">
+          {view.inputWaitError}
+        </p>
+      )}
       {view.inputWait && (
         <div role="status" className="rounded border p-3 text-sm space-y-2">
           <p>

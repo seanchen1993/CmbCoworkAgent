@@ -39,7 +39,8 @@ export function FunctionUserConfig({
   expectedDigest,
   focusKey,
   api = window.api.mods,
-  hideRuntimeControls = false
+  hideRuntimeControls = false,
+  hiddenOptionalFields
 }: {
   threadId: string
   pluginId: string
@@ -49,6 +50,7 @@ export function FunctionUserConfig({
   focusKey?: string
   api?: FunctionConfigApi
   hideRuntimeControls?: boolean
+  hiddenOptionalFields?: readonly string[]
   onSaved?(): void
 }) {
   return (
@@ -63,6 +65,7 @@ export function FunctionUserConfig({
       focusKey={focusKey}
       api={api}
       hideRuntimeControls={hideRuntimeControls}
+      hiddenOptionalFields={hiddenOptionalFields}
     />
   )
 }
@@ -76,7 +79,8 @@ function FunctionUserConfigEditor({
   expectedDigest,
   focusKey,
   api = window.api.mods,
-  hideRuntimeControls = false
+  hideRuntimeControls = false,
+  hiddenOptionalFields
 }: {
   threadId: string
   pluginId: string
@@ -86,6 +90,7 @@ function FunctionUserConfigEditor({
   focusKey?: string
   api?: FunctionConfigApi
   hideRuntimeControls?: boolean
+  hiddenOptionalFields?: readonly string[]
   onSaved?(): void
 }) {
   const [open, setOpen] = useState(initiallyOpen === true)
@@ -454,7 +459,8 @@ function FunctionUserConfigEditor({
         )}
         {!view && !error && <p className="text-muted-foreground">正在读取参数…</p>}
         {view?.fields
-          .filter((field) => !focusKey || field.key === focusKey)
+          .filter((field) => (!focusKey || field.key === focusKey) &&
+            (field.required || !hiddenOptionalFields?.includes(field.key)))
           .map((field) => (
             <div key={field.key} className="space-y-2 rounded-lg border bg-background/50 p-3">
               <label

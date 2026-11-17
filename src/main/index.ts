@@ -463,7 +463,7 @@ import { LocalSandbox } from "./agent/local-sandbox"
 import { closeRuntime } from "./agent/runtime"
 import { makeBroadcastHookResultCallback } from "./hooks/result-callback"
 import { fireSessionEndAll, hasActiveSessions } from "./hooks/session-lifecycle"
-import { getModsManager } from "./mods/manager"
+import { getResidentModsManager } from "./mods/manager"
 import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
 import { startBuiltinModelCatalogRefresh, stopBuiltinModelCatalogRefresh } from "./models/registry"
 import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollback"
@@ -1765,7 +1765,7 @@ if (browserNativeMessagingHostLaunch) {
       return
     }
     // Capture resident Mods and gate new entries before any asynchronous teardown.
-    const modsEnd = getModsManager()?.prepareFunctionEnd("logout")
+    const modsEnd = getResidentModsManager()?.prepareFunctionEnd("logout")
     if (!activeSessions && !activeTasks && !pendingTraceReports && !modsEnd?.count) {
       modsEnd?.finish()
       sessionEndDone = true

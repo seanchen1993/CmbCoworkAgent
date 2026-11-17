@@ -4,6 +4,7 @@ import type { ModObject } from "../../../shared/mods/types"
 import type { PlatformCapabilityRef } from "../../../shared/mods/v2/platform-capabilities"
 import type { NativePlatformCallContext } from "./platform-capabilities-types"
 import { isSameWorkspacePath } from "../../../shared/workspace-path"
+import { HOST_CONTEXT_MATERIAL_ROOT_LIMIT } from "../../../shared/project-runtime/extension-contract"
 import {
   activeNativeProjectReadOnlyChecksAccessScope,
   assertNativeProjectReadOnlyCheckDispatch,
@@ -18,8 +19,15 @@ export interface NativeProjectContextScope {
   stageId: string
   inputIdentity: string
   provider: { pluginId: string; plugin: string; digest: string; actionId: string }
-  roots: readonly { id: string; label?: string; path: string; source?: "package" | "knowledge" }[]
+  roots: readonly {
+    id: string
+    label?: string
+    path: string
+    source?: "package" | "knowledge"
+    identity?: string
+  }[]
   configuration: ModObject
+  featureInputs?: { selectedDeployUnits: string[] }
   assertCurrent(): void
 }
 export interface NativeProjectContextProof {
@@ -45,6 +53,12 @@ interface ActiveScope extends NativeProjectContextScope {
 }
 const scopes = new AsyncLocalStorage<ActiveScope>()
 const proofs = new WeakSet<object>()
+const sensitiveMaterialName =
+  /^(?:\..*|(?:credentials?|secrets?|tokens?|passwords?|authorized_keys|known_hosts)(?:\..*)?|id_(?:rsa|dsa|ecdsa|ed25519)(?:\..*)?|.*\.(?:pem|key|p12|pfx|keystore))$/i
+
+export function isSensitiveProjectMaterialName(name: string): boolean {
+  return sensitiveMaterialName.test(name)
+}
 
 export function assertNativeProjectContextProof(
   value: unknown
@@ -63,8 +77,9 @@ export async function withNativeProjectContext<T>(
     !input.operationId ||
     !input.stageId ||
     !input.inputIdentity ||
-    input.roots.length > 8 ||
+    input.roots.length > HOST_CONTEXT_MATERIAL_ROOT_LIMIT ||
     Buffer.byteLength(JSON.stringify(input.configuration)) > 4096 ||
+    (input.featureInputs && Buffer.byteLength(JSON.stringify(input.featureInputs)) > 32 * 1024) ||
     new Set(input.roots.map((root) => root.id)).size !== input.roots.length ||
     input.roots.some(
       (root) => !/^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$/.test(root.id) || (root.label?.length ?? 0) > 200
@@ -76,6 +91,7 @@ export async function withNativeProjectContext<T>(
     provider: { ...input.provider },
     roots: input.roots.map((root) => ({ ...root })),
     configuration: structuredClone(input.configuration),
+    ...(input.featureInputs ? { featureInputs: structuredClone(input.featureInputs) } : {}),
     active: true,
     calls: 0,
     bytes: 0,
@@ -211,7 +227,8 @@ function accessScope(scope: NativeProjectContextScope): string {
         scope.inputIdentity,
         scope.provider,
         scope.roots,
-        scope.configuration
+        scope.configuration,
+        ...(scope.featureInputs ? [scope.featureInputs] : [])
       ])
     )
     .digest("hex")

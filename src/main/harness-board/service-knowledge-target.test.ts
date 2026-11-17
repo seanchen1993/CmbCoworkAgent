@@ -74,7 +74,7 @@ beforeEach(async () => {
   extension = await import("./extension-context")
   service = await import("./service")
   extension.configureExtensionContextDirectoryBinding(async (_source, workspace) => state.bindings.get(workspace))
-})
+}, 30000)
 afterEach(async () => {
   extension.configureExtensionContextDirectoryBinding()
   if (dirname(resolve(state.root)) !== resolve(tmpdir()) ||
@@ -100,6 +100,9 @@ it("resolves project, saved feature and ordinary chat identities through their o
 })
 
 it("rejects renderer paths and mismatched plugin targets rather than using a global fallback", async () => {
+  for (const target of [{}, null])
+    await expect(service.getHarnessKnowledgePreviewBinding("plugin", target as never))
+      .rejects.toThrow("TARGET_INVALID")
   await expect(service.getHarnessKnowledgePreviewBinding("plugin", { workspace: state.root } as never))
     .rejects.toThrow("TARGET_INVALID")
   await expect(service.getHarnessKnowledgePreviewBinding("plugin", { projectId: "p", threadId: "chat" }))

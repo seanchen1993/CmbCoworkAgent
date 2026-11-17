@@ -13,7 +13,7 @@ vi.mock("electron", () => ({
   dialog: {},
   ipcMain: {}
 }))
-vi.mock("../mcp/capability-service", () => ({ invalidateGlobalMcpCapabilityService: vi.fn() }))
+vi.mock("../mcp/capability-service", () => ({ invalidateMutableMcpCapabilityServices: vi.fn() }))
 vi.mock("../hooks/notifications", () => ({ notifyHooksChanged: vi.fn() }))
 vi.mock("../mods/manager", () => ({ getModsManager: () => undefined }))
 let root: string

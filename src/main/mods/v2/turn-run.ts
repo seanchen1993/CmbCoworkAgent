@@ -9,6 +9,7 @@ import type { FunctionTurnBinding } from "./turn-lifecycle"
 export class FunctionTurnRun {
   private manager?: ModsManager
   private ended = false
+  private observing = false
   private readonly binding: FunctionTurnBinding
 
   constructor(input: Omit<FunctionTurnBinding, "assertCurrent"> & { owner: LocalThreadRunOwner }) {
@@ -26,10 +27,13 @@ export class FunctionTurnRun {
     if (this.ended) throw new ModFunctionError("MODS_TURN_ENDING")
     this.manager ??= getModsManager()
     await this.manager?.startFunctionTurn(this.binding)
+    this.observing = this.manager?.functionTurns.captureSettlement(
+      this.binding.threadId, this.binding.runId
+    ) !== undefined
   }
 
   observeStream(mode: string, payload: unknown): void {
-    if (this.ended || !this.manager) return
+    if (this.ended || !this.observing || !this.manager) return
     const child = childTurnStreamOwner(mode, payload)
     if (child)
       this.manager.functionTurns.observeChildStream(

@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
+import { DatabaseSync } from "node:sqlite"
 import { afterEach, expect, it, vi } from "vitest"
 import {
   CreatorLegacyTrialEvidence,
@@ -8,11 +9,13 @@ import {
 } from "./creator-trial-legacy-evidence"
 import {
   executeProjectCheckpoint,
-  projectCheckpointAvailable
+  projectCheckpointAvailable,
+  projectCheckpointDescriptionAvailableForBinding
 } from "../../harness-board/project-runtime/project-checkpoint"
 import {
   issueRuntimePluginSourceToken,
-  withRuntimePluginSource
+  withRuntimePluginSource,
+  type RuntimePluginSourceBinding
 } from "../../plugins/runtime-source-scope"
 import { runtimeDigest } from "../../harness-board/project-runtime/safe-files"
 import type { PluginMetadata } from "../../types"
@@ -108,6 +111,35 @@ function fixture(mode: "valid" | "changed" | "unconfirmed" = "valid") {
     }
   }
 }
+
+it("leaves damaged trial receipts untouched until an owned evidence operation opens them", () => {
+  const root = mkdtempSync(join(tmpdir(), "creator-legacy-evidence-bad-"))
+  cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+  const path = join(root, "stage-checks.sqlite")
+  writeFileSync(path, "invalid SQLite contents".repeat(128))
+  const exec = vi.spyOn(DatabaseSync.prototype, "exec")
+  cleanup.push(() => exec.mockRestore())
+  const unowned = {
+    owner: () => undefined,
+    canDescribe: () => false,
+    changed: () => {}
+  }
+  const inactive = new CreatorLegacyTrialEvidence(root, unowned)
+  inactive.close()
+  expect(() => inactive.read("trial", "feature")).toThrow("CREATOR_TRIAL_EVIDENCE_CLOSED")
+  const evidence = new CreatorLegacyTrialEvidence(root, unowned)
+  cleanup.push(() => evidence.close())
+  const ordinary = { mode: "legacy", projectId: "old-project", featureId: "feature" } as
+    RuntimePluginSourceBinding
+  const contracts = [{ nodeId: "review", checkId: "check", contractDigest: "a".repeat(64),
+    artifacts: [{ id: "report", path: "report.md" }] }]
+  expect(projectCheckpointDescriptionAvailableForBinding(ordinary)).toBe(false)
+  expect(exec).not.toHaveBeenCalled()
+  expect(() => evidence.freeze("trial", "feature", contracts)).toThrow(/not a database/i)
+  expect(exec).toHaveBeenCalledOnce()
+  rmSync(path)
+  expect(() => evidence.freeze("trial", "feature", contracts)).not.toThrow()
+})
 
 it("records genuine native checkpoint evidence, retains original run/thread identity and never repeats its commit", async () => {
   const f = fixture()

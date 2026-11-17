@@ -27,16 +27,20 @@ vi.mock("electron", () => ({
   dialog: { showOpenDialog: () => state.choose(), showMessageBox: async () => ({ response: 1 }) }
 }))
 vi.mock("../storage", () => ({ getOpenworkDir: () => state.root, getPlugins: () => state.plugins }))
-vi.mock("../db", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../db")>()),
-  getThreadCore: () => ({
+vi.mock("../db", async (importOriginal) => {
+  const readThread = () => ({
     metadata: {
       workspacePath: state.workspace,
       cmb_thread_incarnation: state.incarnation,
       harnessProjectSession: { projectId: "parent", kind: "chat" }
     }
   })
-}))
+  return {
+    ...(await importOriginal<typeof import("../db")>()),
+    getThreadCore: readThread,
+    getThreadCanonicalIdentity: readThread
+  }
+})
 vi.mock("../harness-board/service", () => ({
   getHarnessCapabilityWorkspaces: () => [state.workspace],
   getHarnessCapabilityFeatureWorkspace: () => undefined
@@ -274,8 +278,8 @@ async function fixture() {
         bindOwner: () => {}
       }
     )
-    closeComposition = () => composition().close()
-    waitForComposition = (runId) => composition().waitForSettlement(runId)
+    closeComposition = () => composition.service().close()
+    waitForComposition = (runId) => composition.service().waitForSettlement(runId)
   }
   register()
   const call = <T>(method: string, input: unknown): Promise<T> => {

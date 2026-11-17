@@ -1,4 +1,4 @@
-import { getThreadCore } from "../db"
+import { getThreadCanonicalIdentity } from "../db"
 import {
   getHarnessCapabilityWorkspaces,
   getHarnessCapabilityFeatureWorkspace
@@ -21,7 +21,7 @@ export function captureNativeCapabilityContext(threadId: string, workspace: stri
   const read = () => {
     child?.assertCurrent()
     return resolveCapabilityContext(workspace, child?.parentThreadId ?? threadId, {
-      thread: getThreadCore,
+      thread: getThreadCanonicalIdentity,
       projectWorkspaces: getHarnessCapabilityWorkspaces,
       featureWorkspace: getHarnessCapabilityFeatureWorkspace,
       hostProject: (id, root, binding) => {

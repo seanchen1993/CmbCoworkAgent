@@ -162,10 +162,19 @@ export class ModControlStore {
         if (!columns.has(column)) this.db.exec(`ALTER TABLE mods_calls ADD COLUMN ${column} TEXT`)
       }
       this.db.exec(`
-      UPDATE mods_calls SET workspace=json_extract(scope,'$.workspace'),thread_id=json_extract(scope,'$.threadId')
+      CREATE INDEX IF NOT EXISTS mods_calls_pending_scope_backfill ON mods_calls(id)
+        WHERE workspace IS NULL AND scope IS NOT NULL;
+      UPDATE mods_calls INDEXED BY mods_calls_pending_scope_backfill
+        SET workspace=json_extract(scope,'$.workspace'),thread_id=json_extract(scope,'$.threadId')
         WHERE workspace IS NULL AND scope IS NOT NULL;
       CREATE INDEX IF NOT EXISTS mods_calls_workspace ON mods_calls(workspace,at);
       CREATE INDEX IF NOT EXISTS mods_calls_thread ON mods_calls(thread_id,at);
+      CREATE INDEX IF NOT EXISTS mods_calls_interrupted ON mods_calls(status) WHERE status = 'running';
+      CREATE INDEX IF NOT EXISTS mods_completion_evidence_interrupted
+        ON mods_completion_evidence(status) WHERE status = 'running';
+      CREATE INDEX IF NOT EXISTS mods_jobs_unsettled
+        ON mods_jobs(json_extract(payload,'$.state'))
+        WHERE json_extract(payload,'$.state') IN ('queued','running');
     `)
       this.functionState = new FunctionStateStore(this.db)
       this.setSetting("schema", "7")

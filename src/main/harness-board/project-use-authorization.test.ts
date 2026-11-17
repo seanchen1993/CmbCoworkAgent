@@ -23,6 +23,7 @@ import {
   admitProjectUseFeature,
   revokeProjectUseAuthorization,
   captureProjectUseFeature,
+  captureProjectUseFeaturePreflight,
   configureProjectUseIpcTrust,
   projectUseIpcOwner,
   type ProjectUseParentAuthority
@@ -95,6 +96,11 @@ beforeEach(async () => {
   configurationOnly = false
   configureProjectUseAuthority({
     parent: (id) => (parent?.projectId === id ? parent : undefined),
+    prepareParent: async (id) => (parent?.projectId === id ? parent : undefined),
+    assertAdapterChange: (id) => {
+      if ([...children.values()].some((binding) => binding.projectId === id))
+        throw Error("已有原生需求的项目不能更换插件绑定")
+    },
     child: (id) => children.get(id),
     assertChild: (binding) => {
       if (JSON.stringify(children.get(binding.hostRunId)) !== JSON.stringify(binding))
@@ -105,8 +111,8 @@ beforeEach(async () => {
     setProjectUseGrantResolver: (value: typeof resolveGrant) => {
       resolveGrant = value
     },
-    projectUseSourceFacts: async () => ({
-      name: "generic-project",
+    projectUseSourceFacts: async (plugin: PluginMetadata) => ({
+      name: plugin.name,
       digest: "d".repeat(64),
       configurationOnly,
       capabilities: configurationOnly ? [] : ["read_file"],
@@ -288,6 +294,33 @@ it("captures owner revocation for pure Host stages and rejects an absent registe
   ).toThrow("PROJECT_USE_AUTHORIZATION_INVALID")
 })
 
+it("checks prospective workspaces without enabling an off directory or delegating a grant", async () => {
+  const review = await reviewProjectUse(input, owner)
+  const prepared = prepareProjectUseCreation(creation(review), owner)
+  prepared.commit()
+  await publish(review)
+  prepared.complete()
+  const binding = child(review)
+  const directory = join(state.root, "candidate")
+  await mkdir(directory)
+  const target = process.platform === "win32" ? realpathSync(directory).toLowerCase() : realpathSync(directory)
+  const check = captureProjectUseFeaturePreflight(binding, directory)!
+  expect(check.enabled()).toBe(true)
+  expect(check.approved({ pluginId: input.adapterId, name: "generic-project", digest: "d".repeat(64) }))
+    .toBe(true)
+  expect(check.approved({ pluginId: input.adapterId, name: "generic-project", digest: "f".repeat(64) }))
+    .toBe(false)
+  expect(directories.has(target)).toBe(false)
+  expect(() => resolveGrant({
+    workspace: target, name: "generic-project", pluginId: input.adapterId,
+    scope: { projectId: binding.hostRunId, packageDigest: review.packageDigest }
+  })).toThrow("PROJECT_USE_AUTHORIZATION_INVALID")
+  store.setSetting("enabled:" + target, "false")
+  directoryEpoch++
+  expect(() => check.assertCurrent()).toThrow("PROJECT_USE_AUTHORIZATION_CHANGED")
+  expect(captureProjectUseFeaturePreflight(binding, directory)?.enabled()).toBe(false)
+})
+
 it("rejects different windows, changed directories, absent consent and changed global epochs", async () => {
   const review = await reviewProjectUse(input, owner)
   expect(() => prepareProjectUseCreation(creation(review), {})).toThrow(
@@ -423,6 +456,58 @@ it("recognizes existing consent without reopening explicit application or direct
   expect(directories.get(first.workspace)).toBe(false)
   expect(applicationEnables).toBe(1)
   expect(store.getProjectUseAuthorization(first.projectId)).toEqual(before)
+})
+
+it("reviews the replacement Host source against the original empty Project authority", async () => {
+  const first = await reviewProjectUse(input, owner)
+  const created = prepareProjectUseCreation(creation(first), owner)
+  created.commit()
+  await publish(first)
+  expect(created.complete().state).toBe("ready")
+
+  const root = join(state.root, "replacement")
+  const replacement = {
+    ...state.plugins[0], id: "different-main-id", path: root, name: "replacement-project"
+  }
+  for (const file of createProjectTemplate({
+    packageId: replacement.name, name: "Replacement project", version: "1.0.0"
+  }).files) {
+    await mkdir(dirname(join(root, file.path)), { recursive: true })
+    await writeFile(join(root, file.path), file.text)
+  }
+  state.plugins.push(replacement)
+  const request = {
+    ...input, adapterId: replacement.id, expectedNativeTemplate: undefined,
+    existingProjectId: first.projectId
+  }
+  const review = await reviewProjectUse(request, owner)
+  expect(review.authorizationCurrent).toBe(false)
+  expect(review.projectId).toBe(first.projectId)
+  expect(review.plugin).toMatchObject({
+    pluginId: replacement.id,
+    digest: derivationContentIdentity((await snapshotDerivationSource(root)).files)
+  })
+  const edit = { ...creation(review), adapterId: replacement.id }
+  expect(() => prepareProjectUseUpdate(first.projectId, creation(review), owner))
+    .toThrow("PROJECT_USE_REVIEW_REQUIRED")
+
+  const oldParent = parent!
+  parent = { ...oldParent, identity: "another-parent" }
+  expect(() => prepareProjectUseUpdate(first.projectId, edit, owner))
+    .toThrow("PROJECT_USE_REVIEW_CHANGED")
+  parent = oldParent
+  child(first)
+  await expect(reviewProjectUse(request, owner)).rejects.toThrow("已有原生需求的项目不能更换插件绑定")
+  expect(() => prepareProjectUseUpdate(first.projectId, edit, owner))
+    .toThrow("已有原生需求的项目不能更换插件绑定")
+  expect(store.getProjectUseAuthorization(first.projectId)?.policy.plugin.pluginId).toBe(input.adapterId)
+  children.clear()
+
+  const prepared = prepareProjectUseUpdate(first.projectId, edit, owner)
+  prepared.commit()
+  parent = { ...oldParent, installedPluginId: replacement.id, identity: "published-replacement" }
+  expect(prepared.complete().state).toBe("ready")
+  expect(store.getProjectUseAuthorization(first.projectId)?.policy.plugin.pluginId).toBe(replacement.id)
 })
 
 it("binds pending reviews to account identity in the same frame while allowing token refresh", async () => {

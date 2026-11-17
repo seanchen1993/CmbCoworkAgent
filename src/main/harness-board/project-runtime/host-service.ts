@@ -8,6 +8,7 @@ import type { StageRecoveryCommandPolicy } from "./stage-recovery-policy"
 import { readStageRecoveryPolicy } from "./stage-recovery-policy"
 import { prepareStageRecoveryReadOnlyRoots } from "../../hooks/stage-recovery-command"
 import type {
+  HarnessHostFeatureInputs,
   HostActionResult,
   HostExecutionTicket,
   HostProjectOperation,
@@ -40,7 +41,8 @@ import {
   hostInteger,
   hostResultReview,
   assertHostResultReview,
-  parseHostStageInstructions
+  parseHostStageInstructions,
+  parseHarnessHostFeatureInputs
 } from "./host-state-protocol"
 import {
   assertHostReceiptsCurrent,
@@ -54,6 +56,7 @@ import { assertHostPackageSupported } from "./package-preflight"
 import { withSnapshotPathRetention, withSnapshotRetention } from "./snapshot-retention"
 import { readHostActionCheckEvidence, readHistoricalHostCheckDiagnostics } from "./action-check-evidence"
 import { inspectHostPlanMigration } from "./plan-migration"
+import { assertHarnessFeatureMaterialInputs } from "./package-input-identity"
 import { captureHostBranchInputs } from "./host-branch-inputs"
 import type { HostPlanMigrationReview } from "../../../shared/project-runtime/host-types"
 import {
@@ -256,7 +259,8 @@ export class HostProjectService {
               workspace: state.workspace,
               installedPluginId: state.installedPluginId,
               goal: state.goal,
-              manifest: state.manifest
+              manifest: state.manifest,
+              harnessFeatureInputs: state.harnessFeatureInputs
             })
           const admittedMetadata = metadata(project)
           let active = true
@@ -361,8 +365,11 @@ export class HostProjectService {
   list(limit = 50, afterProjectId = "", query = ""): HostProjectState[] {
     return this.store.listProjects(limit, afterProjectId, query)
   }
-  operations(projectId: string, limit = 50): HostProjectOperation[] {
-    return this.store.listOperations(projectId, limit).map(operation => this.withCheckDiagnostics(operation))
+  operations(projectId: string, limit = 50, includeCheckDiagnostics = true): HostProjectOperation[] {
+    const operations = this.store.listOperations(projectId, limit)
+    return includeCheckDiagnostics
+      ? operations.map((operation) => this.withCheckDiagnostics(operation))
+      : operations
   }
 
   /** Raw authority facts only; diagnostic enrichment is reserved for explicit observations. */
@@ -655,6 +662,9 @@ export class HostProjectService {
         packageVersion: installed.packageVersion,
         pluginDigest: snapshot.digest,
         manifest: snapshot.manifest,
+        ...(source.harnessFeatureInputs
+          ? { harnessFeatureInputs: structuredClone(source.harnessFeatureInputs) }
+          : {}),
         schemaVersion: 1,
         stateOwner: "host",
         version: 1,
@@ -705,7 +715,10 @@ export class HostProjectService {
           packageId: candidate.packageId,
           packageVersion: candidate.packageVersion,
           pluginDigest: candidate.pluginDigest,
-          manifest: candidate.manifest
+          manifest: candidate.manifest,
+          ...(candidate.harnessFeatureInputs
+            ? { harnessFeatureInputs: candidate.harnessFeatureInputs }
+            : {})
         },
         input.stageId,
         { projectId: source.projectId, expectedVersion: source.version },
@@ -722,6 +735,7 @@ export class HostProjectService {
       installedPluginId: string
       goal: string
       expectedPlugin?: PluginStartUseIdentity
+      harnessFeatureInputs?: HarnessHostFeatureInputs
     },
     assertCreatorCurrent: () => void = () => {},
     importReceipt?: import("../../../shared/project-runtime/host-types").HostLegacyImportReceipt
@@ -734,10 +748,14 @@ export class HostProjectService {
         "workspace",
         "installedPluginId",
         "goal",
-        ...(Object.hasOwn(input, "expectedPlugin") ? ["expectedPlugin"] : [])
+        ...(Object.hasOwn(input, "expectedPlugin") ? ["expectedPlugin"] : []),
+        ...(Object.hasOwn(input, "harnessFeatureInputs") ? ["harnessFeatureInputs"] : [])
       ])
       input = structuredClone(input)
-      const { expectedPlugin, ...projectInput } = input
+      const { expectedPlugin, harnessFeatureInputs, ...projectInput } = input
+      const featureInputs = Object.hasOwn(input, "harnessFeatureInputs")
+        ? parseHarnessHostFeatureInputs(harnessFeatureInputs)
+        : undefined
       if (expectedPlugin) {
         hostRecord(expectedPlugin, ["pluginId", "name", "version", "digest"])
         if (
@@ -799,6 +817,7 @@ export class HostProjectService {
         hostStateError("PACKAGE_IDENTITY_MISMATCH")
       const creation = {
         ...projectInput,
+        ...(featureInputs ? { harnessFeatureInputs: featureInputs } : {}),
         workspace,
         packageId: installed.packageId,
         packageVersion: installed.packageVersion,
@@ -832,6 +851,8 @@ export class HostProjectService {
         assertRetainedCurrent()
       }
       assertCreatorCurrent()
+      if (featureInputs)
+        assertHarnessFeatureMaterialInputs(featureInputs, readPackageExtensionContract(snapshot.root)?.context, true)
       return importReceipt ? this.store.createImported(creation, importReceipt) : this.store.create(creation)
     })
   }

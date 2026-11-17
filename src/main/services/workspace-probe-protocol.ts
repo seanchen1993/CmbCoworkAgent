@@ -16,6 +16,7 @@ export interface WorkspaceProbeResponse {
   nonce: string
   workspace: string
   completedAt: bigint
+  reusable?: true
   result: { canonical: string } | { error: "timeout" | "not-directory" | "unavailable" }
 }
 

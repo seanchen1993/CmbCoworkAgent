@@ -3,6 +3,7 @@ import { basename, isAbsolute, join, relative, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it, vi } from "vitest"
 import ts from "typescript"
+import { formatGmt8Timestamp } from "../../shared/gmt8-time"
 import { isSameWorkspacePath } from "../../shared/workspace-path"
 import { readRuntimeScopedFile } from "./project-runtime/safe-files"
 import * as limits from "./store-limits"
@@ -47,6 +48,7 @@ function fixture() {
   const dependencies = {
     ...limits,
     readRuntimeScopedFile: read,
+    formatGmt8Timestamp,
     isSameWorkspacePath,
     basename,
     isAbsolute,

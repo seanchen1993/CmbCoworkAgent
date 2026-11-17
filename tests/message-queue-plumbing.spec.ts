@@ -17,9 +17,12 @@
  *   npx -y tsx tests/message-queue-plumbing.spec.ts
  */
 
+import { AsyncLocalStorage } from "node:async_hooks"
+import { runInNewContext } from "node:vm"
 import { readFileSync } from "fs"
 import { join, resolve } from "path"
 import ts from "typescript"
+import { failPhysicalStreamRunBeforeSetupPublication } from "../src/main/agent/physical-stream-run-setup"
 
 const PROJECT_ROOT = resolve(__dirname, "..")
 
@@ -517,12 +520,6 @@ function testClearOnEveryRunExit(): void {
     "onActiveError: (error) => closePhysicalStreamRunBeforeSetupPublication(window, channel, error)"
   assertOccurrences(agentIpc, activeSetupFailureHandler, 3,
     "invoke, resume, and interrupt preserve terminal diagnostics for active setup errors")
-  assertOccurrences(
-    agentIpc.replaceAll(activeSetupFailureHandler, ""),
-    "closePhysicalStreamRunBeforeSetupPublication(window, channel, error)",
-    3,
-    "every pre-publication strict flush failure reports a terminal renderer outcome"
-  )
   const desktopAdapterStart = agentIpc.indexOf('ipcMain.on("agent:invoke",')
   const desktopAdapterEnd = agentIpc.indexOf("// Handle agent resume", desktopAdapterStart)
   assert(desktopAdapterStart >= 0 && desktopAdapterEnd > desktopAdapterStart,
@@ -551,9 +548,19 @@ function testClearOnEveryRunExit(): void {
     "safeSendToWindow(window, channel, { type: \"done\" })", "return",
     "malformed submission completes and returns before starting a run")
   assertOccurrences(desktopAdapterBody, "const channel = resolveAgentStreamRequestChannel(",
-    1, "the desktop adapter has exactly one malformed-submission terminal channel")
+    2, "malformed submissions and failed admissions each close their request-scoped stream")
+  assertSourceOrder(desktopAdapterBody,
+    ".then((handle) => handle.completion)",
+    "if (!done) closePhysicalStreamRunBeforeSetupPublication(window, channel, error)",
+    "admission and physical completion failures use the same request terminal fallback")
   const physicalLifecycleSource = agentIpc.slice(0, desktopAdapterStart) +
     agentIpc.slice(desktopAdapterEnd)
+  assertOccurrences(
+    physicalLifecycleSource.replaceAll(activeSetupFailureHandler, ""),
+    "closePhysicalStreamRunBeforeSetupPublication(window, channel, error)",
+    3,
+    "every pre-publication strict flush failure reports a terminal renderer outcome"
+  )
   assertOccurrences(
     physicalLifecycleSource,
     "const channel = resolveAgentStreamRequestChannel(",
@@ -3226,4 +3233,113 @@ function main(): void {
   console.log(`\n${tests.length} passed`)
 }
 
+async function testDesktopInvocationFailureSettlesOnlyItsOwnStream(): Promise<void> {
+  const source = read("src/main/ipc/agent.ts")
+  const sender = source.slice(source.indexOf("function safeSendToWindow("),
+    source.indexOf("function sendHookNotice("))
+  const adapter = source.slice(source.indexOf('ipcMain.on("agent:invoke",'),
+    source.indexOf("// Handle agent resume"))
+  type Context = { onDesktopStreamDone: (channel: string) => void }
+  type Request = {
+    threadId: string
+    streamRequestId: string
+    coordinatorInternalNotification?: boolean
+  }
+  const runContext = new AsyncLocalStorage<Context>()
+  const received: string[] = []
+  const window = {
+    isDestroyed: () => false,
+    webContents: { isDestroyed: () => false, send: (channel: string, event: { type: string }) => {
+      received.push(`${channel}:${event.type}`)
+    } }
+  }
+  let invoke: ((event: object, request: Request) => void) | undefined
+  const sandbox = {
+    BrowserWindow: { fromWebContents: () => window },
+    ipcMain: { on: (_name: string, handler: typeof invoke) => { invoke = handler } },
+    console: { error() {}, warn() {} },
+    resolveAgentStreamRequestChannel: (base: string, id: string) => `${base}:${id}`,
+    captureComposerMentionSubmission: () => undefined,
+    isPlainComposerSubmission: () => false,
+    createBrowserWindowAgentRunDelivery: () => ({ window }),
+    agentRunExecutionContextStorage: runContext,
+    failPhysicalStreamRunBeforeSetupPublication,
+    async startAgentRun(request: Request, _delivery: object, context: Context) {
+      const stage = request.streamRequestId
+      if (stage === "admission") throw new Error("admission failed")
+      const completion = runContext.run(context, async () => {
+        await Promise.resolve()
+        if (stage === "finished" || stage === "unrelated") {
+          const channel = stage === "finished" ? "agent:stream:thread:finished" : "another-run"
+          runInNewContext(`safeSendToWindow(BrowserWindow.fromWebContents(), ${JSON.stringify(channel)}, { type: "done" })`, sandbox)
+        }
+        throw new Error("completion failed")
+      })
+      return { completion }
+    }
+  }
+  runInNewContext(ts.transpileModule(`${sender}\n${adapter}`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 }
+  }).outputText, sandbox)
+  for (const streamRequestId of ["admission", "physical", "finished", "unrelated"])
+    invoke?.({}, { threadId: "thread", streamRequestId })
+  invoke?.({}, { threadId: "thread", streamRequestId: "internal", coordinatorInternalNotification: true })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  for (const id of ["admission", "physical", "unrelated"]) {
+    const prefix = `agent:stream:thread:${id}:`
+    assert(received.filter(event => event.startsWith(prefix)).join(",") ===
+      `${prefix}error,${prefix}done`, `${id} failure must close its own stream`)
+  }
+  assert(received.filter(event => event.startsWith("agent:stream:thread:finished:")).join(",") ===
+    "agent:stream:thread:finished:done", "a delivered terminal event must not be replayed")
+  assert(received.filter(event => event.includes(":internal:")).join(",") ===
+    "agent:stream:thread:coordinator-internal:internal:error,agent:stream:thread:coordinator-internal:internal:done",
+    "an internal notification failure must close its own subscriber's stream")
+  console.log("✓ testDesktopInvocationFailureSettlesOnlyItsOwnStream")
+}
+
+function testDesktopEarlyRejectionsKeepCoordinatorChannel(): void {
+  const source = read("src/main/ipc/agent.ts")
+  const pickRequest = "}: AgentInvokeParams = request"
+  const from = source.indexOf(pickRequest, source.indexOf("registerAgentRunImplementation("))
+  const to = source.indexOf("const initialInvokeParsedMetadata", from)
+  assert(from >= 0 && to > from, "the physical invoke request and its early gates exist")
+  const prefix = "internal prompt "
+  class PreparingFork extends Error {
+    code = "MODS_CONVERSATION_FORK_PREPARING"
+  }
+  const runEarlyGates = runInNewContext(ts.transpileModule(`((request, delivery, runExecutionContext) => {
+    const { threadId, message, streamRequestId, coordinatorInternalNotification,
+      requestedUserMessageId, managedExecution } = request
+    ${source.slice(from + pickRequest.length, to)}
+  })`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, {
+    COORDINATOR_NOTIFICATION_PROMPT_PREFIX: prefix,
+    resolveAgentStreamRequestChannel: (base: string, id: string) => `${base}:${id}`,
+    uuid: () => "user-message",
+    nativePluginPromptRun: () => undefined,
+    managedBizRetryService: { blocksThread: (id: string) => id === "decision" },
+    getThreadCore: () => ({}),
+    captureThreadIncarnation: () => "incarnation",
+    getDb: () => ({}),
+    ModFunctionError: PreparingFork,
+    assertFunctionConversationForkReady: () => { throw new PreparingFork() }
+  })
+  const received: string[] = []
+  for (const threadId of ["decision", "fork"]) {
+    runEarlyGates({ threadId, message: prefix + "result", streamRequestId: "request",
+      coordinatorInternalNotification: true }, {
+      send: (channel: string, event: { type: string }) => received.push(`${channel}:${event.type}`)
+    }, { source: "desktop" })
+  }
+  assert(received.join(",") === ["decision", "fork"].map(thread =>
+    `agent:stream:${thread}:coordinator-internal:request:error`).join(","),
+    "early decision and fork rejections must reach the coordinator request's subscriber")
+  console.log("✓ testDesktopEarlyRejectionsKeepCoordinatorChannel")
+}
+
 main()
+testDesktopEarlyRejectionsKeepCoordinatorChannel()
+void testDesktopInvocationFailureSettlesOnlyItsOwnStream().catch(error => {
+  console.error(error)
+  process.exitCode = 1
+})

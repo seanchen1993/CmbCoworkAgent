@@ -101,6 +101,18 @@ describe("canonical scoped file safety", () => {
     expect(close).toHaveBeenCalledOnce()
   })
 
+  it("pins the opened descriptor to a preceding metadata probe", () => {
+    const f = fixture()
+    const relative = "inputs/entry.txt"
+    const probe = probeRuntimeScopedFile(f.root, relative)
+    expect(readRuntimeScopedFile(f.root, relative, f.bytes.length, probe.fingerprint).bytes)
+      .toEqual(f.bytes)
+    fs.renameSync(f.file, join(f.root, "previous.txt"))
+    fs.writeFileSync(f.file, f.bytes)
+    expect(() => readRuntimeScopedFile(f.root, relative, f.bytes.length, probe.fingerprint))
+      .toThrow("FILE_CHANGED")
+  })
+
   it("does not turn probe access errors into missing-file observations", () => {
     const f = fixture()
     vi.spyOn(fs, "openSync").mockImplementation(() => {

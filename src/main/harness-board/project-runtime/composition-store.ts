@@ -49,16 +49,21 @@ export class ProjectCompositionStore {
       runtimeDirectory(directory)
     }
     this.db = new DatabaseSync(path, { timeout: 5000 })
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-      CREATE TABLE IF NOT EXISTS composition_runs (
-        id TEXT PRIMARY KEY, project_id TEXT NOT NULL, request_id TEXT NOT NULL,
-        version INTEGER NOT NULL, data TEXT NOT NULL, UNIQUE(project_id,request_id));
-      CREATE TABLE IF NOT EXISTS composition_leases (
-        workspace TEXT PRIMARY KEY, project_id TEXT NOT NULL UNIQUE,
-        run_id TEXT NOT NULL UNIQUE REFERENCES composition_runs(id));
-      CREATE TABLE IF NOT EXISTS composition_unit_workspaces (
-        workspace TEXT PRIMARY KEY, run_id TEXT NOT NULL, unit_id TEXT NOT NULL,
-        directory_identity TEXT NOT NULL, directory_path TEXT NOT NULL, UNIQUE(run_id,unit_id));`)
+    try {
+      this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+        CREATE TABLE IF NOT EXISTS composition_runs (
+          id TEXT PRIMARY KEY, project_id TEXT NOT NULL, request_id TEXT NOT NULL,
+          version INTEGER NOT NULL, data TEXT NOT NULL, UNIQUE(project_id,request_id));
+        CREATE TABLE IF NOT EXISTS composition_leases (
+          workspace TEXT PRIMARY KEY, project_id TEXT NOT NULL UNIQUE,
+          run_id TEXT NOT NULL UNIQUE REFERENCES composition_runs(id));
+        CREATE TABLE IF NOT EXISTS composition_unit_workspaces (
+          workspace TEXT PRIMARY KEY, run_id TEXT NOT NULL, unit_id TEXT NOT NULL,
+          directory_identity TEXT NOT NULL, directory_path TEXT NOT NULL, UNIQUE(run_id,unit_id));`)
+    } catch (error) {
+      this.db.close()
+      throw error
+    }
   }
   close(): void {
     this.db.close()

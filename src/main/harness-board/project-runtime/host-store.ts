@@ -46,7 +46,7 @@ export class HostProjectStore {
   private readonly db: DatabaseSync
   private projectRead?: StatementSync
   private operationRead?: StatementSync
-  private bindingOperationsRead?: StatementSync
+  private operationHistoryRead?: StatementSync
   private readonly tickets = new WeakMap<HostExecutionTicket, string>()
 
   constructor(
@@ -76,6 +76,7 @@ export class HostProjectStore {
             idempotency_key TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL,
             owner_nonce TEXT, transition_result TEXT, UNIQUE(project_id, idempotency_key)
           );
+          CREATE INDEX IF NOT EXISTS host_operations_by_project ON host_operations(project_id);
           CREATE UNIQUE INDEX IF NOT EXISTS host_one_active_operation ON host_operations(project_id)
             WHERE status IN ('prepared','started','cancel_requested','succeeded','unknown');
           CREATE TABLE IF NOT EXISTS host_plan_migrations (
@@ -180,22 +181,15 @@ export class HostProjectStore {
   listOperations(projectId: string, limit = 50): HostProjectOperation[] {
     hostInteger(limit, 1)
     if (limit > 200) hostStateError("LIMIT_INVALID")
-    return this.db
-      .prepare("SELECT id FROM host_operations WHERE project_id=? ORDER BY rowid DESC LIMIT ?")
-      .all(hostText(projectId), limit)
-      .map((row) => this.requireOperation(String(row.id)))
+    return (this.operationHistoryRead ??= this.db.prepare(
+      "SELECT id,project_id,idempotency_key,status,data FROM host_operations " +
+      "WHERE project_id=? ORDER BY rowid DESC LIMIT ?"
+    )).all(hostText(projectId), limit).map((row) => this.parseOperationRow(row))
   }
 
-  /** Preserve the original twenty-row admission window and fail closed on any invalid row.
-   * Read once without constructing UI facts, diagnostics or issuing one SQL read per operation.
-   */
+  /** Validate every row in the original twenty-operation admission window. */
   getRecentBindingOperation(projectId: string, operationId: string): HostProjectOperation | undefined {
-    const rows = (this.bindingOperationsRead ??= this.db.prepare(
-      "SELECT id,project_id,idempotency_key,status,data FROM host_operations " +
-      "WHERE project_id=? ORDER BY rowid DESC LIMIT 20"
-    )).all(hostText(projectId))
-    const operations = rows.map(row => this.parseOperationRow(row))
-    return operations.find(operation => operation.operationId === operationId)
+    return this.listOperations(projectId, 20).find((operation) => operation.operationId === operationId)
   }
 
   findOperation(projectId: string, idempotencyKey: string): HostProjectOperation | undefined {
@@ -317,7 +311,8 @@ export class HostProjectStore {
       "packageId",
       "packageVersion",
       "pluginDigest",
-      "manifest"
+      "manifest",
+      ...(Object.hasOwn(input, "harnessFeatureInputs") ? ["harnessFeatureInputs"] : [])
     ])
     if (!isAbsolute(input.workspace)) hostStateError("WORKSPACE_INVALID")
     const timestamp = this.now()

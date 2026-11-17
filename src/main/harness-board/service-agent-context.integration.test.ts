@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest"
 const state = vi.hoisted(() => ({
   root: "",
   configured: true,
+  apiVersion: 1,
   selected: [] as Array<{
     deployUnitId: string
     deployUnitIdMapping: string
@@ -34,7 +35,7 @@ vi.mock("./catalog-client", () => ({
         configSnapshot: {
           error: null,
           value: {
-            apiVersion: 1,
+            apiVersion: state.apiVersion,
             inspectCommands: {
               [process.platform]: state.configured
                 ? {
@@ -56,6 +57,7 @@ beforeEach(async () => {
   state.root = await mkdtemp(join(tmpdir(), "cmb-s0-context-"))
   state.selected = []
   state.configured = true
+  state.apiVersion = 1
   await mkdir(join(state.root, "board_core"))
 })
 afterEach(() => rm(state.root, { recursive: true, force: true }))
@@ -143,17 +145,39 @@ it.each([true, false])(
   }
 )
 
-it("blocks missing injection commands and empty successful payloads for selected required knowledge", async () => {
-  state.selected = [
-    {
-      deployUnitId: "required-unit",
-      deployUnitIdMapping: "required-unit",
-      localRepoPath: state.root
-    }
-  ]
+function selectRequiredUnit(): void {
+  state.selected = [{
+    deployUnitId: "required-unit",
+    deployUnitIdMapping: "required-unit",
+    localRepoPath: state.root
+  }]
+}
+
+it("accepts legacy adapters that return a valid prompt without a per-unit report", async () => {
+  selectRequiredUnit()
+  expect((await context({ ok: true, sessionContext: "legacy constraints" }))?.harnessAgentsPrompt)
+    .toBe("legacy constraints")
+})
+
+it("retains the legacy fallback when the platform has no injection command", async () => {
+  selectRequiredUnit()
+  state.configured = false
+  const result = await context({ ok: true })
+  expect(result?.harnessAgentsPrompt).toBeUndefined()
+  expect(result?.sessionContextInjectWarning).toContain("已回退")
+})
+
+it("requires a selected-unit report from the extension board protocol", async () => {
+  selectRequiredUnit()
+  state.apiVersion = 2
+  await expect(context({ ok: true, sessionContext: "unverified constraints" }))
+    .rejects.toBeInstanceOf(HarnessRequiredContextError)
   state.configured = false
   await expect(context({ ok: true })).rejects.toBeInstanceOf(HarnessRequiredContextError)
-  state.configured = true
+})
+
+it("rejects empty successful payloads for reported required knowledge", async () => {
+  selectRequiredUnit()
   await expect(
     context({ ok: true, sessionContext: "", agentmdLoadStatus: [report("required-unit", true)] })
   ).rejects.toBeInstanceOf(HarnessRequiredContextError)

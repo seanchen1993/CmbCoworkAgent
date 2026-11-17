@@ -104,19 +104,28 @@ export async function readHarnessJsonFileBounded(
     if (isMissingFileError(error)) return null
     throw error
   }
+  let storedBytes: Buffer
   try {
     const storedLimit = getMarketContentStoredLimit(path, maxBytes)
-    const bytes = decodeMarketContent(await readOpenedFileBounded(handle, storedLimit, label))
-    if (bytes.byteLength > maxBytes)
-      throw new HarnessStoreLimitError(label, bytes.byteLength, maxBytes)
-    if (bytes.byteLength === 0) return null
-    if (bytes.byteLength < HARNESS_JSON_WORKER_THRESHOLD_BYTES) {
-      return JSON.parse(bytes.toString("utf8")) as unknown
-    }
-    return parseHarnessJsonInWorker(bytes, label)
+    storedBytes = await readOpenedFileBounded(handle, storedLimit, label)
   } finally {
     await handle.close().catch(() => undefined)
   }
+  return parseHarnessJsonBytesBounded(storedBytes, maxBytes, label)
+}
+
+export async function parseHarnessJsonBytesBounded(
+  storedBytes: Buffer,
+  maxBytes: number,
+  label: string
+): Promise<unknown | null> {
+  const bytes = decodeMarketContent(storedBytes)
+  if (bytes.byteLength > maxBytes)
+    throw new HarnessStoreLimitError(label, bytes.byteLength, maxBytes)
+  if (bytes.byteLength === 0) return null
+  if (bytes.byteLength < HARNESS_JSON_WORKER_THRESHOLD_BYTES)
+    return JSON.parse(bytes.toString("utf8")) as unknown
+  return parseHarnessJsonInWorker(bytes, label)
 }
 
 export async function writeHarnessJsonFileAtomic(

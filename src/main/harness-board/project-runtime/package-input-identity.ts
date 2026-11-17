@@ -1,6 +1,7 @@
-import { existsSync, readdirSync } from "node:fs"
+import { existsSync, opendirSync, readdirSync } from "node:fs"
 import { join } from "node:path"
-import type { ProjectRuntimeInputScope } from "../project-action-runtime"
+import { setImmediate } from "node:timers/promises"
+import type { ProjectRuntimeContextMaterials, ProjectRuntimeInputScope } from "../project-action-runtime"
 import { extensionContextStorageKey } from "../extension-context"
 import type { FunctionModsManager } from "../../mods/v2/manager"
 import { readPackageExtensionContract } from "../../plugins/extension-contract"
@@ -12,6 +13,13 @@ import { readDeclaredContextFiles } from "./declared-context-files"
 import { readRetainedExecutionResources } from "./execution-resources"
 import { parseProjectCheckConfigurationKeys } from "../../../shared/project-runtime/action-bindings"
 import {
+  HOST_CONTEXT_MATERIAL_ROOT_LIMIT,
+  type ExtensionContextContract
+} from "../../../shared/project-runtime/extension-contract"
+import type { HarnessHostFeatureInputs } from "../../../shared/project-runtime/host-types"
+import { isSensitiveProjectMaterialName } from "../../mods/v2/project-context-scope"
+import {
+  probeRuntimeScopedFile,
   readRuntimeScopedFile,
   runtimeDigest,
   runtimeDirectory,
@@ -28,42 +36,143 @@ type InputManager = Pick<
   | "assertRuntimeSourceConfiguration"
 >
 
+const KNOWLEDGE_FILE_LIMIT = 16 * 1024 * 1024
+const KNOWLEDGE_METADATA_ENTRIES_PER_TURN = 16
+const KNOWLEDGE_METADATA_MS_PER_TURN = 8
+type KnowledgeBudget = { entries: number; bytes: number }
+
+function* directoryEntries(parent: string) {
+  const directory = opendirSync(parent)
+  try {
+    for (let item = directory.readSync(); item; item = directory.readSync()) yield item
+  } finally {
+    directory.closeSync()
+  }
+}
+
 /** Hash actual declared knowledge bytes. No content or local path is returned across IPC. */
 export function fingerprintProjectKnowledge(directory: string, required = false): string {
-  if (!required && !existsSync(directory)) return runtimeDigest("empty-knowledge/v1")
+  return fingerprintKnowledgeRoot(directory, required)
+}
+
+function fingerprintKnowledgeRoot(
+  directory: string,
+  required: boolean,
+  materialBudget?: KnowledgeBudget
+): string {
+  const scan = observeKnowledgeRoot(directory, required, materialBudget)
+  let current = scan.next()
+  while (!current.done) current = scan.next()
+  return current.value
+}
+
+function* observeKnowledgeRoot(
+  directory: string,
+  required: boolean,
+  materialBudget?: KnowledgeBudget,
+  metadataOnly = false
+): Generator<void, string> {
+  if (!materialBudget && !required && !existsSync(directory))
+    return runtimeDigest("empty-knowledge/v1")
   const root = runtimeDirectory(directory)
   const files: Array<[string, string]> = []
-  let count = 0,
-    total = 0
-  const visit = (relative: string, depth: number) => {
+  const budget = materialBudget ?? { entries: 0, bytes: 0 }
+  const bytesAtStart = budget.bytes
+  function* visit(relative: string, depth: number): Generator<void> {
     if (depth > 16) throw Error("PROJECT_KNOWLEDGE_LIMIT")
     const parent = join(root, relative)
     // A selected directory is an explicit read boundary. Do not follow directory symlinks.
-    runtimeDirectory(parent)
-    files.push([relative || ".", runtimeDirectoryIdentity(parent)])
-    for (const item of readdirSync(parent, { withFileTypes: true }).sort((a, b) =>
-      a.name.localeCompare(b.name)
-    )) {
-      if (++count > 4096) throw Error("PROJECT_KNOWLEDGE_LIMIT")
+    if (metadataOnly) runtimeDirectory(parent)
+    else files.push([relative || ".", runtimeDirectoryIdentity(parent)])
+    const entries = metadataOnly ? directoryEntries(parent) :
+      readdirSync(parent, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))
+    for (const item of entries) {
+      if (++budget.entries > 4096) throw Error("PROJECT_KNOWLEDGE_LIMIT")
+      if (metadataOnly) yield
+      if (materialBudget && isSensitiveProjectMaterialName(item.name)) continue
       const path = relative ? `${relative}/${item.name}` : item.name
-      if (item.isDirectory()) visit(path, depth + 1)
+      if (item.isDirectory()) yield* visit(path, depth + 1)
       else {
         if (!item.isFile() || item.isSymbolicLink()) throw Error("PROJECT_KNOWLEDGE_UNSAFE")
-        const file = readRuntimeScopedFile(root, path, 16 * 1024 * 1024)
-        if (!file.bytes) throw Error("PROJECT_KNOWLEDGE_CHANGED")
-        total += file.bytes.length
-        if (total > 32 * 1024 * 1024) throw Error("PROJECT_KNOWLEDGE_LIMIT")
-        files.push([path, file.fingerprint])
+        const file = metadataOnly
+          ? probeRuntimeScopedFile(root, path)
+          : readRuntimeScopedFile(root, path, KNOWLEDGE_FILE_LIMIT)
+        const size = file.bytes?.length ?? file.size
+        if (size === undefined) throw Error("PROJECT_KNOWLEDGE_CHANGED")
+        if (size > KNOWLEDGE_FILE_LIMIT) throw Error("PROJECT_KNOWLEDGE_LIMIT")
+        budget.bytes += size
+        if (budget.bytes > 32 * 1024 * 1024) throw Error("PROJECT_KNOWLEDGE_LIMIT")
+        if (!metadataOnly) files.push([path, file.fingerprint])
       }
     }
   }
-  visit("", 0)
-  if (required && total === 0) throw Error("PROJECT_KNOWLEDGE_REQUIRED")
-  if (total === 0) return runtimeDigest("empty-knowledge/v1")
+  yield* visit("", 0)
+  if (budget.bytes === bytesAtStart) {
+    if (required) throw Error("PROJECT_KNOWLEDGE_REQUIRED")
+    if (!materialBudget) return runtimeDigest("empty-knowledge/v1")
+  }
   return runtimeDigest(JSON.stringify(files))
 }
 
-/** Reads existing native configuration, source and rule stores; never creates a parallel config. */
+export function fingerprintHarnessFeatureKnowledge(
+  inputs: HarnessHostFeatureInputs,
+  required: boolean
+): string {
+  const budget = { entries: 0, bytes: 0 }
+  const roots = inputs.knowledgeRoots.map(root => [
+    root.id, fingerprintKnowledgeRoot(root.path, false, budget)
+  ])
+  if (required && !budget.bytes) throw Error("PROJECT_KNOWLEDGE_REQUIRED")
+  return runtimeDigest(JSON.stringify({ selectedDeployUnits: inputs.selectedDeployUnits, roots }))
+}
+
+/** Keep the first-start metadata inspection bounded per turn. Commit fences use the real bytes. */
+export async function assertHarnessFeatureKnowledgeAvailable(
+  inputs: HarnessHostFeatureInputs,
+  required: boolean
+): Promise<void> {
+  const budget = { entries: 0, bytes: 0 }
+  let entries = 0
+  let startedAt = performance.now()
+  for (const root of inputs.knowledgeRoots) {
+    for (const _ of observeKnowledgeRoot(root.path, false, budget, true)) {
+      if (++entries < KNOWLEDGE_METADATA_ENTRIES_PER_TURN &&
+        performance.now() - startedAt < KNOWLEDGE_METADATA_MS_PER_TURN) continue
+      await setImmediate()
+      entries = 0
+      startedAt = performance.now()
+    }
+  }
+  if (required && !budget.bytes) throw Error("PROJECT_KNOWLEDGE_REQUIRED")
+}
+
+/** Bound roots must stay the exact read copies chosen in the existing UAT project form. */
+export function assertHarnessFeatureMaterialInputs(
+  inputs: HarnessHostFeatureInputs,
+  context: ExtensionContextContract | undefined,
+  requireInitialIdentity = false
+): void {
+  const materials = context?.provider?.materials
+  if (
+    !context || !materials?.featureInputs ||
+    !inputs.selectedDeployUnits.length ||
+    (context.knowledge.required && !inputs.knowledgeRoots.length) ||
+    inputs.knowledgeRoots.length +
+      materials.roots.filter(root => root.source === "package").length > HOST_CONTEXT_MATERIAL_ROOT_LIMIT
+  )
+    throw Error("PROJECT_HOST_FEATURE_INPUTS_INVALID")
+  if (!requireInitialIdentity) return
+  for (const root of inputs.knowledgeRoots) {
+    try {
+      if (runtimeDirectoryIdentity(root.path) === root.identity) continue
+    } catch {
+      // The read copy was moved, removed or replaced.
+    }
+    throw Error("PROJECT_KNOWLEDGE_ROOT_CHANGED")
+  }
+}
+
+/** Reads existing native configuration, source and rule stores. */
 export function createHostProjectInputIdentity(
   manager: InputManager,
   host: {
@@ -120,20 +229,44 @@ export function createHostProjectInputIdentity(
       manager.assertRuntimeSourceConfiguration(input)
       const facts = manager.getRuntimeSourceFacts(input)
       if (!facts) throw Error("PROJECT_INPUT_SOURCE_NOT_PREPARED")
+      const featureInputs = project.harnessFeatureInputs
+      if (featureInputs) assertHarnessFeatureMaterialInputs(featureInputs, context)
       const key = context.knowledge.binding
-      const field = key && facts.userConfig?.[key]
+      const field = !featureInputs && key && facts.userConfig?.[key]
       const selected = key && field && field.type === "directory" && !field.multiple && !field.sensitive
         ? manager.readUserConfigDirectoryIdentity(project.workspace, facts.name, key) : undefined
-      const roots = materials.roots.map(material => {
-        const base = material.source === "package" ? root : selected
-        if (!base) throw Error("PROJECT_KNOWLEDGE_BINDING_INVALID")
-        const canonical = runtimeDirectory(base)
-        const path = material.path ? runtimeDirectory(join(canonical, material.path)) : canonical
-        // runtimeDirectory rejects aliases/symlinks, including a redirected parent segment.
-        return { id: material.id, path, source: material.source }
-      })
-      const configuration = manager.readRuntimePublicConfiguration(input, materials.configuration)
-      return { roots, configuration }
+      const roots = materials.roots.flatMap<ProjectRuntimeContextMaterials["roots"][number]>(
+        (material) => {
+          if (material.source === "knowledge" && featureInputs) {
+            return featureInputs.knowledgeRoots.map((bound, index) => ({
+              id: material.id + "-" + (index + 1),
+              path: bound.path,
+              identity: runtimeDirectoryIdentity(bound.path),
+              source: "knowledge"
+            }))
+          }
+          const base = material.source === "package" ? root : selected
+          if (!base) throw Error("PROJECT_KNOWLEDGE_BINDING_INVALID")
+          const canonical = runtimeDirectory(base)
+          const path = material.path ? runtimeDirectory(join(canonical, material.path)) : canonical
+          return [{ id: material.id, path, source: material.source }]
+        }
+      )
+      const configuration = manager.readRuntimePublicConfiguration(
+        input,
+        featureInputs
+          ? materials.configuration.filter(key =>
+              key !== "selectedDeployUnits" || facts.userConfig?.[key]?.required === true
+            )
+          : materials.configuration
+      )
+      return {
+        roots,
+        configuration,
+        ...(featureInputs
+          ? { featureInputs: { selectedDeployUnits: [...featureInputs.selectedDeployUnits] } }
+          : {})
+      }
     },
     readDeclaredContext(project: ProjectRuntimeInputScope, root: string, stageId: string): string {
       const declaration = readPackageExtensionContract(root)?.context
@@ -195,7 +328,11 @@ export function createHostProjectInputIdentity(
       let knowledge: string | undefined
       let boundKnowledge: string | undefined
       let mutableContext: string | undefined
-      if (context?.knowledge.binding) {
+      const featureInputs = project.harnessFeatureInputs
+      if (featureInputs) {
+        assertHarnessFeatureMaterialInputs(featureInputs, context)
+        knowledge = fingerprintHarnessFeatureKnowledge(featureInputs, context?.knowledge.required === true)
+      } else if (context?.knowledge.binding) {
         const key = context.knowledge.binding
         const field =
           own?.userConfig && Object.hasOwn(own.userConfig, key) ? own.userConfig[key] : undefined

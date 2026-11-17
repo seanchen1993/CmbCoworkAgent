@@ -38,7 +38,37 @@ async function main() {
         return <ModsChatScope.Provider value={{threadId:'thread',...state,presentationCache:cache?state.presentationCache:null}}><div style={{width}}>{visible&&<FunctionMessageText threadId='thread' messageId='message-1' role='assistant' text={text} isExpanded isFirstOfReply fallback={<p>{text}</p>}
           renderText={safe=><div style={{height:240}}><p>{safe}</p><button onClick={()=>clicks.push('native')}>Native action</button><a href='#native' onClick={e=>{e.preventDefault();clicks.push('link')}}>Native link</a></div>}/>}</div>
           {stream&&<FunctionMessageText threadId='thread' messageId='message-1' presentationId='stream-block' role='assistant' text={stream} isExpanded isFirstOfReply renderText={safe=><p>{safe}</p>}/>}</ModsChatScope.Provider>}
-      host.render(<Fixture/>)}
+      host.render(<Fixture/>);
+      window.mountUnboundHistory=()=>{
+        const requests=[],actions=[];
+        window.api.mods.chatDisplayCapability=(thread,workspace)=>
+          new Promise((resolve,reject)=>requests.push({thread,workspace,resolve,reject}));
+        function UnboundFixture(){
+          const [workspace,setWorkspace]=useState(null);
+          const state=useModsChatState('forked-thread',workspace,undefined,'fork-incarnation');
+          window.unboundHistory={requests,actions,workspace:setWorkspace,
+            current:state.isCurrent,ready:state.ready,enabled:state.enabled,
+            mounts:()=>calls.filter(([kind])=>kind==='mount').length,
+            refreshAndClick:()=>{
+              for(const fn of configs)fn({scope:'authorization'});
+              document.querySelector('#history-action')?.click()
+            }};
+          return <ModsChatScope.Provider value={{threadId:'forked-thread',...state}}>
+            <FunctionMessageText threadId='forked-thread' messageId='user' role='user'
+              isExpanded isFirstOfReply isHistory text='Recovered fork prompt'
+              fallback={<p>Recovered fork prompt</p>} renderText={safe=><p>{safe}</p>}/>
+            <FunctionMessageText threadId='forked-thread' messageId='assistant' role='assistant'
+              isExpanded isFirstOfReply isHistory text='Recovered fork answer'
+              fallback={<p>Recovered fork answer <button id='history-action'
+                onClick={()=>actions.push('history')}>History interaction</button></p>}
+              renderText={safe=><p>{safe}</p>}/>
+            <FunctionMessageText threadId='forked-thread' messageId='streaming' role='assistant'
+              isExpanded isFirstOfReply text='Live message'
+              fallback={<p>Live message</p>} renderText={safe=><p>{safe}</p>}/>
+          </ModsChatScope.Provider>
+        }
+        host.render(<UnboundFixture/>)
+      }}
     `,
       [browserWorkerPlugin()]
     )
@@ -176,6 +206,35 @@ async function main() {
     console.log(
       "PASS offscreen invalidation, source retirement/replacement, global/config changes and exact facts reject cached text"
     )
+    await call("window.mountUnboundHistory()")
+    await page.waitForFunction("window.unboundHistory.requests.length===1")
+    assert.deepEqual(await call("window.unboundHistory.requests.map(r=>[r.thread,r.workspace])"),
+      [["forked-thread", null]])
+    const mounts = await call("window.unboundHistory.mounts()")
+    const prompt = page.getByText("Recovered fork prompt", { exact: true })
+    assert.equal(await prompt.count(), 0)
+    await call("window.unboundHistory.requests[0].resolve(false)")
+    await prompt.waitFor()
+    await page.getByText("Recovered fork answer").waitFor()
+    assert.equal(await page.getByText("Live message", { exact: true }).count(), 0)
+    assert.deepEqual(await call("const s=window.unboundHistory; [s.ready,s.enabled,s.current()]"),
+      [false, false, false])
+    const action = page.getByRole("button", { name: "History interaction" })
+    await action.click()
+    await call("window.unboundHistory.refreshAndClick()")
+    assert.deepEqual(await call("window.unboundHistory.actions"), ["history"])
+    await prompt.waitFor({ state: "detached" })
+    await call("window.unboundHistory.requests[1].resolve(true)")
+    await settle()
+    assert.equal(await prompt.count(), 0)
+    await call("window.unboundHistory.workspace('C:/mismatched-worktree')")
+    await page.waitForFunction("window.unboundHistory.requests.length===3")
+    assert.equal(await call("window.unboundHistory.requests[2].workspace"), "C:/mismatched-worktree")
+    await call("window.unboundHistory.requests[2].reject(Error('MODS_SCOPE_CHANGED'))")
+    await page.getByText("无法确认当前显示保护，请重新读取。").first().waitFor()
+    assert.equal(await prompt.count(), 0)
+    assert.equal(await call("window.unboundHistory.mounts()"), mounts)
+    console.log("PASS an explicitly unbound fork displays only confirmed-off history without mounting Mods")
     assert.deepEqual(errors, [])
   } finally {
     await browser.close()

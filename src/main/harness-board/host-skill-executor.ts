@@ -390,10 +390,14 @@ export async function executeHostProjectSkill(
     })
   let handle: Awaited<ReturnType<typeof startAgentRun>>
   const operationHandles: Array<Awaited<ReturnType<typeof startAgentRun>>> = []
+  let hostInputCleanupConfirmed = true
+  const markHostInputCleanupUnconfirmed = (error: unknown) => {
+    hostInputCleanupConfirmed = false
+    terminal = { outcome: "unknown", code: "host_user_input_cleanup_unconfirmed" }
+    console.warn("[Host] User input cleanup remains unconfirmed:", error)
+  }
   const { cancelOwnedRuntimeWorkflows } = await import("../agent/workflow/run-manager")
   const cancelOwnedWorkflows = () => cancelOwnedRuntimeWorkflows(token)
-  context.signal.addEventListener("abort", cancelOwnedWorkflows, { once: true })
-  if (context.signal.aborted) cancelOwnedWorkflows()
   const releaseUserInputScope = bindHostUserInputScope(
     threadId,
     {
@@ -416,6 +420,15 @@ export async function executeHostProjectSkill(
     context.continuationIntent,
     preparedContext?.contextResumeProof
   )
+  const releaseHostInput = () => {
+    try {
+      releaseUserInputScope()
+    } catch (error) {
+      markHostInputCleanupUnconfirmed(error)
+    }
+  }
+  context.signal.addEventListener("abort", cancelOwnedWorkflows, { once: true })
+  if (context.signal.aborted) cancelOwnedWorkflows()
   const baseRunContext: AgentRunExecutionContext = {
     source: "desktop",
     ...(context.worktreeIsolation ? { worktreeIsolation: context.worktreeIsolation } : {}),
@@ -480,13 +493,18 @@ export async function executeHostProjectSkill(
     )
     operationHandles.push(handle)
   } catch (error) {
-    releaseUserInputScope()
-    closeUnknownStream()
+    releaseHostInput()
     try {
-      await settlePackageRuntime()
+      try {
+        closeUnknownStream()
+      } finally {
+        await settlePackageRuntime()
+      }
     } finally {
       context.signal.removeEventListener("abort", cancelOwnedWorkflows)
     }
+    if (!hostInputCleanupConfirmed)
+      context.recordTerminal({ outcome: "unknown", code: "host_user_input_cleanup_unconfirmed" })
     throw error
   }
   try {
@@ -522,7 +540,7 @@ export async function executeHostProjectSkill(
         ? "host_workflow_continuation_unconfirmed" : "runtime_completion_rejected" }
     closeUnknownStream()
   } finally {
-    releaseUserInputScope()
+    releaseHostInput()
     // Completion is the original physical run-body settlement, not its earlier terminal label.
     // Close only this token's scoped service; a global MCP service belongs to other tasks.
     try {
@@ -542,6 +560,15 @@ export async function executeHostProjectSkill(
       context.signal.removeEventListener("abort", cancelOwnedWorkflows)
     }
   }
+  let waiting: ReturnType<typeof getHostInputWait>
+  if (hostInputCleanupConfirmed) {
+    try {
+      waiting = getHostInputWait(context.operation.operationId)
+    } catch (error) {
+      markHostInputCleanupUnconfirmed(error)
+    }
+  }
+  if (!hostInputCleanupConfirmed) closeUnknownStream()
   if (!terminal) closeUnknownStream()
   // An earlier once-only success label cannot prove that effects had physically settled
   // when ordinary Stop arrived. Read only the original producer's closed-scope proof.
@@ -562,7 +589,6 @@ export async function executeHostProjectSkill(
     outcome: "unknown",
     code: "runtime_terminal_missing"
   }
-  const waiting = getHostInputWait(context.operation.operationId)
   if (
     waiting &&
     result.code === "host_user_input_waiting" &&

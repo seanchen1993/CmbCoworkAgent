@@ -6,7 +6,7 @@ import { Worker } from "node:worker_threads"
 import { fileURLToPath } from "node:url"
 import { build, type Metafile } from "esbuild"
 import { createHash, randomUUID } from "node:crypto"
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs"
+import { mkdtempSync, readFileSync, realpathSync, rmdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest"
@@ -87,7 +87,7 @@ afterAll(async () => {
 /** Real AppDB/physical lease/Manager policy; no public stamp or JSON mints the source. */
 async function fixture(options: { enhanced?: boolean; protected?: boolean; fresh?: boolean;
   large?: boolean; plugin?: boolean; integrity?: "verified" | "unverified";
-  intent?: "blank" | "plumbing" } = {}) {
+  intent?: "blank" | "plumbing"; detachableWorkspace?: boolean } = {}) {
   const root = realpathSync(mkdtempSync(join(directory, "workspace-")))
   const workspace = process.platform === "win32" ? root.toLowerCase() : root
   const threadId = randomUUID(), physicalRunId = randomUUID(), uuid = randomUUID()
@@ -127,7 +127,9 @@ async function fixture(options: { enhanced?: boolean; protected?: boolean; fresh
     workspace, signal: controller.signal, origin, assertCurrent: guard,
     ...(options.intent ? { transcript: { write: transcript, disposition: options.intent } } : {}),
     ...(options.enhanced ? { visible } : {}) })
-  const manager = new ModsManager(join(root, "mods.sqlite"), () => [], async () => true,
+  const controlPath = options.detachableWorkspace
+    ? join(directory, `${threadId}.mods.sqlite`) : join(root, "mods.sqlite")
+  const manager = new ModsManager(controlPath, () => [], async () => true,
     () => undefined, undefined, { ...DEFAULT_MOD_POLICY, required: false }, () => true)
   manager.configure(workspace, false, options.protected ?? true)
   const binding: ModThreadBinding = { workspace, threadId, turnId: randomUUID(),
@@ -336,6 +338,21 @@ function nativeControlMessages(checkpoint: Checkpoint) {
 }
 
 describe("canonical Human display from actual Saver and native Worker sources", () => {
+  it("returns only sealed text from a removed workspace even without a live display capability", async () => {
+    const f = await fixture({ enhanced: true, detachableWorkspace: true })
+    await f.retain()
+    rmdirSync(f.runtime.target.ref.workspace)
+    const stillCurrent = () => {
+      expect(appDb.getDb()).toBe(f.database)
+      expect(appDb.getThreadCore(f.threadId)?.thread_id).toBe(f.threadId)
+    }
+    expect(readFunctionConversationCanonicalThreadMessages(f.threadId, stillCurrent))
+      .toEqual([expect.objectContaining({ content: "visible [REDACTED]" })])
+    f.database.run("UPDATE thread_messages SET content_json=? WHERE thread_id=? AND message_id=?",
+      [JSON.stringify("unsealed replacement"), f.threadId, f.uuid])
+    expect(() => readFunctionConversationCanonicalThreadMessages(f.threadId, stillCurrent)).toThrow()
+  })
+
   it.each(["./runtime-projection-worker.ts",
     "../thread-message-hydration/thread-message-hydration-worker.ts"])(
     "bundles %s with typed display data and without Main capability dependencies", entry => {

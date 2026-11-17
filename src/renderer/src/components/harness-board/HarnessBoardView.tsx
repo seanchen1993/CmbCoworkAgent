@@ -1,4 +1,5 @@
 import { NativeFeatureReview } from "./NativeFeatureReview"
+import { ProjectFunctionConsent } from "./ProjectFunctionConsent"
 import { nativeFeatureChatGuide, nativeFeatureGuidance, nativeFeatureSessionLabel } from "./native-feature-guidance"
 import { NativeProjectChatGuideContext, NativeProjectChatPresence } from "./native-project-chat-context"
 import { HARNESS_NAME_PATTERN as harnessNamePattern } from "../../../../shared/harness-name"
@@ -2869,6 +2870,7 @@ function DeployUnitSearchInput({
 
 export function ProjectFormDialog({
   hostTemplates,
+  hostTemplateLookup,
   hostStartUse,
   open,
   creating,
@@ -2888,6 +2890,7 @@ export function ProjectFormDialog({
   onSubmit
 }: {
   hostTemplates?: LocalProjectTemplate[]
+  hostTemplateLookup?: { pending: boolean; error?: string; onRetry: () => void }
   hostStartUse?: HostPluginStartUseIntent
   onHostCreated?: (view: LocalProjectView) => void
   open: boolean
@@ -3098,7 +3101,15 @@ export function ProjectFormDialog({
                     : `将在 ${resolveProjectRootPath(form)} 路径下创建本项目的插件工作目录。`}
                 </p>
               )}
-              {selectedAdapter?.runtimeMode === "host" && <ProjectUseConsent state={nativeReview} />}
+              {selectedAdapter?.runtimeMode === "host" && (
+                hostTemplateLookup?.pending ? <p role="status">正在核对插件模板…</p>
+                  : hostTemplateLookup?.error ? <div role="alert" className="text-sm text-destructive">
+                      {hostTemplateLookup.error}
+                      <Button type="button" variant="link" onClick={hostTemplateLookup.onRetry}>
+                        重新核对模板
+                      </Button>
+                    </div> : <ProjectUseConsent state={nativeReview} />
+              )}
             </section>
 
             {error && (
@@ -3142,7 +3153,7 @@ export function ProjectFormDialog({
 }
 
 function ProjectEditDialog({
-  projectId,
+  project,
   open,
   saving,
   form,
@@ -3157,7 +3168,7 @@ function ProjectEditDialog({
   onOpenSystemConstraints,
   onSubmit
 }: {
-  projectId?: string
+  project: HarnessProjectListItem | null
   open: boolean
   saving: boolean
   form: HarnessProjectMetadataUpdateInput
@@ -3187,18 +3198,30 @@ function ProjectEditDialog({
   )
   const projectCodeValidationError = projectCodeError ?? projectCodeLengthError
   const selectedAdapter = findSelectedAdapter(registry, form.adapterId)
-  const selectedAdapterMessage = selectedAdapter?.runtimeMode === "host" ? null
-    : boardCompatibilityMessage(selectedAdapter?.boardCompatibility)
-  const nativeReview = useProjectUseReview(open && projectId &&
-    selectedAdapter?.runtimeMode === "host" ? {
+  const nativeAdapterId = project?.nativeBinding ? project.harnessAdapter.id : undefined
+  const editRegistry = useMemo(() => nativeAdapterId
+    ? registry.filter((item) => item.runtimeMode === "host" || item.id === nativeAdapterId)
+    : registry, [nativeAdapterId, registry])
+  const usesHostAdapter = !!nativeAdapterId && selectedAdapter?.runtimeMode === "host"
+  const changesHostAdapter = !!nativeAdapterId && form.adapterId !== nativeAdapterId
+  const retainsLegacyAdapter = selectedAdapter?.runtimeMode === "host" &&
+    !project?.nativeBinding && project?.harnessAdapter.id === form.adapterId
+  const selectedAdapterMessage = usesHostAdapter ? null : boardCompatibilityMessage(
+    retainsLegacyAdapter ? project.boardCompatibility : selectedAdapter?.boardCompatibility
+  )
+  const checkHostAdapter = usesHostAdapter && selectedAdapter.enabled !== false
+  const nativeReview = useProjectUseReview(open && project && checkHostAdapter ? {
       adapterId: selectedAdapter.id,
       adapterType: "plugin",
       workspacePath: form.workspacePath,
       projectDir: form.projectDir,
-      existingProjectId: projectId
+      existingProjectId: project.projectId
     } : undefined)
-  const authorizesCode = !nativeReview.review?.authorizationCurrent &&
+  const approval = nativeReview.review?.authorizationCurrent ? undefined : nativeReview.approval
+  const authorizesCode = !!approval &&
     nativeReview.review?.sources.some((source) => !source.configurationOnly)
+  const saveDisabled = saving || verification.pending || metadataRequiredMissing(form) ||
+    metadataNameInvalid(form) || metadataLengthInvalid(form)
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -3315,9 +3338,9 @@ function ProjectEditDialog({
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 插件选择 *
                 <AdapterPicker
-                  allowHost={selectedAdapter?.runtimeMode === "host"}
+                  allowHost={!!nativeAdapterId}
                   value={form.adapterId}
-                  registry={registry}
+                  registry={editRegistry}
                   installingPluginNames={installingPluginNames}
                   portalContainer={dialogPortalContainer}
                   onInstallPlugin={onInstallPlugin}
@@ -3332,9 +3355,9 @@ function ProjectEditDialog({
               <KnowledgeBaseSelector
                 items={knowledgeBases?.knowledgeBases ?? []}
                 selectedIds={form.knowledgeBaseIds ?? []}
-                supportsKnowledgeBaseContext={
-                  selectedAdapter?.supportsKnowledgeBaseContext === true
-                }
+                supportsKnowledgeBaseContext={(retainsLegacyAdapter
+                  ? project.supportsKnowledgeBaseContext
+                  : selectedAdapter?.supportsKnowledgeBaseContext) === true}
                 disabled={saving}
                 portalContainer={dialogPortalContainer}
                 onOpenSystemConstraints={onOpenSystemConstraints}
@@ -3344,11 +3367,10 @@ function ProjectEditDialog({
                 workspacePath={form.workspacePath}
                 projectDir={form.projectDir}
                 readOnly
-                artifactsInProjectDirectory={selectedAdapter?.runtimeMode !== "host"}
+                artifactsInProjectDirectory={!usesHostAdapter}
                 error={getHarnessNameError("项目文件夹", form.projectDir)}
               />
-              {selectedAdapter?.runtimeMode === "host" &&
-                <ProjectUseConsent state={nativeReview} editing />}
+              {checkHostAdapter && <ProjectUseConsent state={nativeReview} editing />}
             </section>
 
             {error && (
@@ -3362,21 +3384,18 @@ function ProjectEditDialog({
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={saving}>
             取消
           </Button>
+          {usesHostAdapter && !changesHostAdapter && approval && (
+            <Button variant="outline" onClick={() => onSubmit(approval)} disabled={saveDisabled}>
+              {authorizesCode ? "保存并授权" : "保存并确认插件"}
+            </Button>
+          )}
           <Button
-            onClick={() => onSubmit(nativeReview.review?.authorizationCurrent
-              ? undefined : nativeReview.approval)}
-            disabled={
-              saving ||
-              verification.pending ||
-              metadataRequiredMissing(form) ||
-              metadataNameInvalid(form) ||
-              metadataLengthInvalid(form) ||
-              (selectedAdapter?.runtimeMode === "host" && !nativeReview.approval)
-            }
+            onClick={() => onSubmit(changesHostAdapter ? approval : undefined)}
+            disabled={saveDisabled || (changesHostAdapter && !approval)}
             className="gap-2"
           >
             {saving ? <Loader2 className="size-4 animate-spin" /> : <Pencil className="size-4" />}
-            {authorizesCode ? "保存并授权" : "保存"}
+            {changesHostAdapter && authorizesCode ? "保存并授权" : "保存"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -3618,6 +3637,7 @@ function FeatureCreateDialog({
   nodePlan,
   onRecheckNodes,
   workspace,
+  readOnly = false,
   onWorkspaceChange,
   catalogUnits,
   onSelectPath,
@@ -3646,6 +3666,7 @@ function FeatureCreateDialog({
   nodePlan?: NativeNodePlan
   onRecheckNodes?: () => void
   workspace: HarnessSessionWorkspace
+  readOnly?: boolean
   onWorkspaceChange: (value: HarnessSessionWorkspace) => void
   catalogUnits: HarnessDeployUnitConfig[]
   onSelectPath: (mapping: HarnessDeployUnitMapping) => void
@@ -3708,6 +3729,7 @@ function FeatureCreateDialog({
     ? `由 ${sessionContextProviderName} 加载会话工作区及所选发布单元的系统约束`
     : "由 CMBDevClaw 加载会话工作区及所选发布单元的系统约束"
   const workflowTabDisabled = editing || (!workflowLoading && !workflowConfig)
+  const hasFeatureTabs = supportsDeployUnits || !workflowTabDisabled
   const workspacePath =
     resolveFeatureWorkspace(
       workspace,
@@ -3787,7 +3809,7 @@ function FeatureCreateDialog({
             variant="link"
             size="sm"
             className="h-auto min-w-0 px-0 py-0 text-xs"
-            disabled={creating}
+            disabled={creating || readOnly}
             onClick={onOpenDeployUnitSettings}
           >
             管理发布单元
@@ -3836,6 +3858,7 @@ function FeatureCreateDialog({
                   onClick={(event) => {
                     if (
                       creating ||
+                      readOnly ||
                       !(event.target instanceof Element) ||
                       !event.currentTarget.contains(event.target) ||
                       event.target.closest("button, input, select, [role='combobox']")
@@ -3848,7 +3871,7 @@ function FeatureCreateDialog({
                   <input
                     type="checkbox"
                     checked={checked}
-                    disabled={creating}
+                    disabled={creating || readOnly}
                     aria-label={`选择发布单元 ${mapping.deployUnitId}`}
                     className="size-4 shrink-0 accent-primary"
                     onChange={(event) =>
@@ -3871,7 +3894,7 @@ function FeatureCreateDialog({
                       <Button
                         type="button"
                         variant="outline"
-                        disabled={creating || paths.length === 0}
+                        disabled={creating || readOnly || paths.length === 0}
                         aria-label={`${mapping.deployUnitId}代码库路径`}
                         className="h-9 min-w-0 flex-1 justify-start gap-2 px-2 font-normal"
                         title={mapping.localRepoPath}
@@ -3900,7 +3923,7 @@ function FeatureCreateDialog({
                               key={path}
                               type="button"
                               variant="ghost"
-                              disabled={creating}
+                              disabled={creating || readOnly}
                               className={cn(
                                 "flex h-auto min-h-12 w-full flex-col items-start justify-center gap-1 rounded-sm px-2.5 py-2 text-left font-normal",
                                 path === mapping.localRepoPath && "bg-muted/70"
@@ -3947,7 +3970,7 @@ function FeatureCreateDialog({
                         type="button"
                         variant="outline"
                         size="sm"
-                        disabled={creating || !mapping.localRepoPath}
+                        disabled={creating || readOnly || !mapping.localRepoPath}
                         aria-pressed={isWorkspace}
                         className={cn(
                           "h-7 w-28 shrink-0 rounded-full border px-2 text-xs font-medium shadow-none",
@@ -3990,21 +4013,24 @@ function FeatureCreateDialog({
         onOpenAutoFocus={(event) => {
           if (editing) {
             event.preventDefault()
-            ;(workspaceInputRef.current ?? dialogTitleRef.current)?.focus({ preventScroll: true })
+            const target = readOnly
+              ? dialogTitleRef.current
+              : (workspaceInputRef.current ?? dialogTitleRef.current)
+            target?.focus({ preventScroll: true })
           }
         }}
         onPointerDownOutside={preventHarnessDialogOutsideClose}
       >
         <DialogHeader>
           <DialogTitle ref={dialogTitleRef} tabIndex={-1}>
-            {editing ? "编辑特性配置" : "创建特性"}
+            {readOnly ? "查看特性配置" : editing ? "编辑特性配置" : "创建特性"}
           </DialogTitle>
         </DialogHeader>
         <form
           className="grid min-h-0 min-w-0 gap-4 overflow-x-hidden overflow-y-auto py-1"
           onSubmit={(event) => {
             event.preventDefault()
-            if (!workspacePath.trim() ||
+            if (readOnly || !workspacePath.trim() ||
               (nodePlan?.entryInputFallbacks?.length && acknowledgedNodePlan !== nodePlan.planId)) return
             onSubmit(nodePlan?.planId === acknowledgedNodePlan)
           }}
@@ -4032,7 +4058,7 @@ function FeatureCreateDialog({
               placeholder="请选择会话工作区路径"
               aria-label="会话工作区"
               aria-required="true"
-              disabled={creating}
+              disabled={creating || readOnly}
               className={cn(
                 "min-w-0 cursor-pointer bg-background text-foreground shadow-none focus-visible:border-ring focus-visible:ring-0",
                 workspacePath && "truncate text-left [direction:rtl]"
@@ -4046,7 +4072,8 @@ function FeatureCreateDialog({
               }}
             />
           </label>
-          <TooltipProvider delayDuration={150}>
+          {readOnly && <p className="text-xs text-muted-foreground">{nativeFeatureDirectoryLockReason}</p>}
+          {hasFeatureTabs && <TooltipProvider delayDuration={150}>
             <Tabs
               key={`${project?.projectId ?? "none"}-${defaultTab}-${workflowTabDisabled ? "workflow-disabled" : "workflow-enabled"}`}
               defaultValue={defaultTab}
@@ -4098,7 +4125,7 @@ function FeatureCreateDialog({
                 {workflowPanel}
               </TabsContent>
             </Tabs>
-          </TooltipProvider>
+          </TooltipProvider>}
           {error && (
             <div className="min-w-0 max-w-full whitespace-pre-wrap rounded-md border border-status-critical/30 bg-status-critical/10 px-3 py-2 text-sm text-status-critical [overflow-wrap:anywhere]">
               {error}
@@ -4111,9 +4138,9 @@ function FeatureCreateDialog({
               onClick={() => onOpenChange(false)}
               disabled={creating}
             >
-              取消
+              {readOnly ? "关闭" : "取消"}
             </Button>
-            <Button
+            {!readOnly && <Button
               type="submit"
               disabled={
                 creating ||
@@ -4133,7 +4160,7 @@ function FeatureCreateDialog({
                 <Plus className="size-4" />
               )}
               {editing ? "保存" : "创建"}
-            </Button>
+            </Button>}
           </DialogFooter>
         </form>
       </DialogContent>
@@ -5999,7 +6026,7 @@ function ProjectDetailPage({
                         ? "请先编辑项目信息，填写项目编号"
                         : !hasKnowledgePath
                           ? project.knowledgeBaseIds.length === 0
-                            ? "请先在项目设置中配置知识库"
+                            ? "请先在「编辑项目」中选择知识库"
                             : "知识沉淀工作区不可用，请前往公共系统约束 Tab 下载或处理"
                           : !hasLeanToken
                             ? "请先配置精益平台token"
@@ -6447,7 +6474,7 @@ function RemoteFeatureAccessPanel({
 }
 
 const nativeFeatureDirectoryLockReason =
-  "此特性的默认会话目录已固定，当前版本暂不支持更改。需使用其他目录时请新建特性。"
+  "此特性的发布单元和会话目录已固定。需要变更时，请新建特性。"
 
 function nativeFeatureDirectoryLocked(detail: HarnessRunDetailViewModel | null | undefined): boolean {
   return Boolean(
@@ -6488,7 +6515,7 @@ function FeatureDetailPage({
   fallbackFeatureTitle?: string
   onBackToList: () => void
   onBackToProject: () => void
-  onEditDeployUnits: () => void
+  onEditDeployUnits: (preferredWorkspace?: string) => void
   onRefresh: () => void | Promise<void>
   managedScheduleRefreshRevision: number
   onFeatureImManagementSaved: (projectId: string, featureId: string, enabled: boolean) => void
@@ -6505,6 +6532,19 @@ function FeatureDetailPage({
     return detail.run.nodes[0]?.id ?? null
   }, [detail])
   const detailKey = detail ? `${detail.project.projectId}:${detail.run.slug}` : ""
+  const activeDetailKey = useRef(detailKey)
+  const managedRunEditDraft = useRef<{
+    workspace: string
+    originalWorkspace: string | undefined
+    userMessage: string
+  } | undefined>(undefined)
+  useLayoutEffect(() => {
+    activeDetailKey.current = detailKey
+    return () => {
+      activeDetailKey.current = ""
+      managedRunEditDraft.current = undefined
+    }
+  }, [detailKey])
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [stageGroupFilter, setStageGroupFilter] = useState<StageGroupFilter>({
     detailKey: "",
@@ -6565,7 +6605,12 @@ function FeatureDetailPage({
     detail?.nativeBinding?.workspaceIdentity
   ])
   const nativeReady = nativeReadyScope === nativeScope
-  const nativeSettingsRef = useRef<HTMLDivElement>(null)
+  const nativeReviewRef = useRef<HTMLDivElement>(null)
+  const nativeOperationUnknown = detail?.nativeProject?.operations.some(
+    (operation) => operation.stageId === nativeStageId &&
+      operation.expectedVersion === detail.nativeProject?.project.version &&
+      operation.status === "unknown"
+  ) ?? false
   const nativeGuide = nativeFeatureGuidance(detail)
   const nativeChatGuide = useMemo(() => nativeFeatureChatGuide(detail), [detail])
   const nativeCanChooseWorkspace = detail?.nativeBinding?.workspaceMode === "selected-directory" &&
@@ -6640,6 +6685,20 @@ function FeatureDetailPage({
   const [managedRunDialogOpen, setManagedRunDialogOpen] = useState(false)
   const [managedRunWorkspacePath, setManagedRunWorkspacePath] = useState("")
   const [managedRunUserMessage, setManagedRunUserMessage] = useState("")
+  const [nativeManagedRunError, setNativeManagedRunError] = useState("")
+  const needsDeployUnitReselection = nativeManagedRunError === "PROJECT_KNOWLEDGE_DEPLOY_UNITS_MISMATCH"
+  const nativeRunWorkspace = detail?.nativeBinding?.workspace
+  const nativeRunWorkspaceMatches = !!nativeRunWorkspace &&
+    isSameWorkspacePath(managedRunWorkspacePath, nativeRunWorkspace)
+  const previousRunWorkspace = useRef(nativeRunWorkspace)
+  useLayoutEffect(() => {
+    const previous = previousRunWorkspace.current
+    previousRunWorkspace.current = nativeRunWorkspace
+    if (!nativeRunWorkspace || !previous || isSameWorkspacePath(previous, nativeRunWorkspace)) return
+    setManagedRunWorkspacePath((current) =>
+      isSameWorkspacePath(current, previous) ? nativeRunWorkspace : current
+    )
+  }, [nativeRunWorkspace])
   const managedRunDefaultUserMessageRef = useRef("")
   const [managedRunImEnabled, setManagedRunImEnabled] = useState(true)
   const [pickingManagedRunWorkspace, setPickingManagedRunWorkspace] = useState(false)
@@ -6939,7 +6998,10 @@ function FeatureDetailPage({
     setPickingManagedRunWorkspace(true)
     try {
       const workspacePath = normalizeWorkspacePath(await window.api.workspace.select())
-      if (workspacePath) setManagedRunWorkspacePath(workspacePath)
+      if (workspacePath) {
+        setNativeManagedRunError("")
+        setManagedRunWorkspacePath(workspacePath)
+      }
     } catch (error) {
       toast.error(cleanIpcError(error))
     } finally {
@@ -6949,12 +7011,10 @@ function FeatureDetailPage({
 
   const handleOpenManagedRunDialog = useCallback(async (): Promise<void> => {
     if (!detail || updatingManagedRun || nativeReviewPending ||
-      openingManagedRunDialog || projectInteractionDisabled)
+      openingManagedRunDialog || projectInteractionDisabled || nativeOperationUnknown)
       return
     setOpeningManagedRunDialog(true)
     try {
-      if (detail.nativeBinding && !nativeReady && !nativeCanChooseWorkspace)
-        throw new Error("请先完成插件必填参数，并核对项目授权与插件开关")
       if (!detail.nativeBinding) await window.api.harnessBoard.validateManagedRunStart({
         projectId: detail.project.projectId,
         featureId: detail.run.slug
@@ -6962,9 +7022,15 @@ function FeatureDetailPage({
       const defaultWorkspacePath = normalizeWorkspacePath(detail.nativeBinding
         ? detail.nativeBinding.workspace : detail.run.resolvedSessionWorkspacePath)
       if (!defaultWorkspacePath) throw new Error(MISSING_FEATURE_WORKSPACE)
-      setManagedRunWorkspacePath(defaultWorkspacePath)
-      const defaultUserMessage = detail.nativeProject?.project.goal ??
-        detail.nativeBinding?.initialUserMessage ?? getHarnessRunNextAction(detail)?.userMessage ?? ""
+      const draft = managedRunEditDraft.current
+      managedRunEditDraft.current = undefined
+      setNativeManagedRunError("")
+      setNativeReadyScope("")
+      setManagedRunWorkspacePath(draft && nativeCanChooseWorkspace &&
+        isSameWorkspacePath(draft.originalWorkspace, defaultWorkspacePath)
+        ? draft.workspace : defaultWorkspacePath)
+      const defaultUserMessage = detail.nativeProject?.project.goal ?? detail.nativeBinding?.initialUserMessage ??
+        draft?.userMessage ?? getHarnessRunNextAction(detail)?.userMessage ?? ""
       managedRunDefaultUserMessageRef.current = defaultUserMessage
       setManagedRunUserMessage(defaultUserMessage)
       setManagedRunImEnabled(!detail.nativeBinding && featureImManagementAvailable)
@@ -6978,13 +7044,23 @@ function FeatureDetailPage({
   }, [
     detail,
     featureImManagementAvailable,
-    openingManagedRunDialog,
-    nativeReady,
     nativeCanChooseWorkspace,
+    openingManagedRunDialog,
+    nativeOperationUnknown,
     nativeReviewPending,
     projectInteractionDisabled,
     updatingManagedRun
   ])
+
+  const editManagedRunFeatureConfig = (preferredWorkspace?: string): void => {
+    managedRunEditDraft.current = {
+      workspace: managedRunWorkspacePath,
+      originalWorkspace: nativeRunWorkspace,
+      userMessage: managedRunUserMessage
+    }
+    setManagedRunDialogOpen(false)
+    onEditDeployUnits(preferredWorkspace)
+  }
 
   const handleManagedRunChange = useCallback(
     async (
@@ -7020,8 +7096,9 @@ function FeatureDetailPage({
       setUpdatingManagedRun(true)
       try {
         if (detail.nativeBinding) {
-          if (shouldStart && !nativeReady && !nativeCanChooseWorkspace)
-            throw new Error("请先完成插件必填参数，并核对项目授权与插件开关")
+          if (shouldStart && (nativeOperationUnknown || (nativeRunWorkspaceMatches && !nativeReady)))
+            return false
+          setNativeManagedRunError("")
           setManagedRunDialogOpen(false)
           const native = detail.nativeProject
           setNativeContinuations(current => ({
@@ -7041,7 +7118,6 @@ function FeatureDetailPage({
             await window.api.harnessBoard.nativeFeatureCommand(detail.project.projectId, detail.run.slug,
               { kind: "cancel", operationId: activeOperation.operationId })
           }
-          await onRefresh()
           return true
         }
         let startStatus: "running" | "completed" | "failed" | "cancelled" | "corrupt" | null = null
@@ -7108,21 +7184,32 @@ function FeatureDetailPage({
         }
         return true
       } catch (error) {
-        toast.error(cleanIpcError(error))
+        if (detail.nativeBinding && shouldStart && activeDetailKey.current === detailKey) {
+          setNativeManagedRunError(cleanIpcError(error))
+          setManagedRunDialogOpen(true)
+        } else {
+          toast.error(cleanIpcError(error))
+        }
         return false
       } finally {
-        if (detail?.nativeBinding) await onRefresh()
+        if (detail?.nativeBinding) {
+          await Promise.resolve(onRefresh()).catch((error) =>
+            console.warn("[ManagedRun] Failed to refresh native feature:", error)
+          )
+        }
         managedRunActionInFlightRef.current = false
         setUpdatingManagedRun(false)
       }
     },
     [
       detail,
+      detailKey,
       onRefresh,
       nativeReady,
-      nativeCanChooseWorkspace,
       nativeOperation,
+      nativeOperationUnknown,
       nativeReviewPending,
+      nativeRunWorkspaceMatches,
       projectInteractionDisabled,
       setCombinedFeatureImManagement,
       updatingManagedRun
@@ -7469,8 +7556,7 @@ function FeatureDetailPage({
                       openingManagedRunDialog ||
                       ((updatingManagedRun || nativeReviewPending) &&
                         !(detail?.nativeBinding && managedRunIsRunning)) ||
-                      (!!detail?.nativeBinding && !nativeReady && !nativeCanChooseWorkspace &&
-                        !managedRunIsRunning)
+                      nativeOperationUnknown
                       || (!detail?.nativeBinding && !managedRunIsRunning &&
                         (managedSchedule.loading || Boolean(managedSchedule.schedule) || Boolean(managedSchedule.error)))
                     }
@@ -7522,13 +7608,13 @@ function FeatureDetailPage({
                         variant="ghost"
                         size="sm"
                         className={cn(harnessDetailSecondaryButtonClassName, "w-[176px]")}
-                        onClick={onEditDeployUnits}
+                        onClick={() => onEditDeployUnits()}
                         disabled={
-                          loading || !detail || projectInteractionDisabled || featureDirectoryLocked
+                          loading || !detail || projectInteractionDisabled
                         }
                       >
                         <Pencil className="size-4" />
-                        编辑特性配置
+                        {featureDirectoryLocked ? "查看特性配置" : "编辑特性配置"}
                       </Button>
                     </span>
                   </TooltipTrigger>
@@ -7602,18 +7688,18 @@ function FeatureDetailPage({
                 handleHookSessionSelect(nativeGuide.threadId)
               } else if (activeSessionThreadIdForView) {
                 handleBackToFeature()
-              } else if (nativeGuide.action === "start" && (nativeReady || nativeCanChooseWorkspace)) {
+              } else if (nativeGuide.action === "start") {
                 void handleOpenManagedRunDialog()
               } else {
-                nativeSettingsRef.current?.scrollIntoView({ block: "start" })
-                nativeSettingsRef.current?.focus({ preventScroll: true })
+                nativeReviewRef.current?.scrollIntoView({ block: "start" })
+                nativeReviewRef.current?.focus({ preventScroll: true })
               }
             }}
           >
             {nativeGuide.action === "input" ? "前往答复" : activeSessionThreadIdForView
-              ? nativeGuide.action === "start" ? "前往项目设置" : "查看特性详情"
+              ? "查看特性详情"
               : nativeGuide.action === "start"
-                ? nativeReady || nativeCanChooseWorkspace ? "填写需求并开始" : "完成项目设置"
+                ? "填写需求并开始"
                 : "查看当前步骤"}
           </Button>
         </section>
@@ -7627,7 +7713,7 @@ function FeatureDetailPage({
                 guide: nativeChatGuide,
                 actionLabel: nativeChatGuide.action === "input"
                   ? "前往答复"
-                  : nativeChatGuide.action === "start" ? "前往项目设置" : "查看特性详情",
+                  : "查看特性详情",
                 disabled: updatingManagedRun || nativeReviewPending || openingManagedRunDialog,
                 onAction: () => {
                   if (nativeChatGuide.action === "input" && nativeChatGuide.threadId) {
@@ -7693,7 +7779,7 @@ function FeatureDetailPage({
               featureId={detail.run.slug}
               onViewThread={handleHookSessionSelect}
             />
-            {detail.nativeBinding && <div ref={nativeSettingsRef} tabIndex={-1}><NativeFeatureReview
+            {detail.nativeBinding && <div ref={nativeReviewRef} tabIndex={-1}><NativeFeatureReview
               key={`${detail.project.projectId}:${detail.run.slug}:${detail.nativeProject?.project.stageIndex ?? 0}`}
               projectId={detail.project.projectId} featureId={detail.run.slug}
               binding={detail.nativeBinding} view={detail.nativeProject} onRefresh={onRefresh}
@@ -7702,8 +7788,6 @@ function FeatureDetailPage({
               onContinuation={(value) => setNativeContinuations(current => ({
                 ...current, [detail.nativeBinding!.hostRunId]: value
               }))}
-              onReady={(ready) => setNativeReadyScope(current => ready ? nativeScope :
-                current === nativeScope ? "" : current)}
               onPendingChange={(pending) => setNativePendingScope(current =>
                 pending ? detail.nativeBinding!.hostRunId :
                   current === detail.nativeBinding!.hostRunId ? "" : current
@@ -7958,7 +8042,7 @@ function FeatureDetailPage({
       )}
       {detail?.nativeBinding && (
       <Dialog
-        open={managedRunDialogOpen}
+        open={managedRunDialogOpen && !projectInteractionDisabled}
         onOpenChange={(open) => {
           if (!updatingManagedRun) setManagedRunDialogOpen(open)
         }}
@@ -8020,6 +8104,51 @@ function FeatureDetailPage({
                 className="w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 text-sm font-normal shadow-sm outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
               />
             </label>
+            {detail.nativeBinding.supportsDeployUnits && (
+              <div className="space-y-1 text-xs">
+                <p>发布单元：{detail.run.selectedDeployUnits.map(({ deployUnitId }) => deployUnitId).join("、") || "尚未选择"}</p>
+                <p className="text-muted-foreground">系统约束沿用项目已绑定的知识库和特性发布单元。</p>
+                {(!detail.run.selectedDeployUnits.length || needsDeployUnitReselection) && !featureDirectoryLocked && (
+                  <Button type="button" variant="link" className="p-0" disabled={updatingManagedRun}
+                    onClick={() => editManagedRunFeatureConfig()}>
+                    返回编辑特性配置
+                  </Button>
+                )}
+              </div>
+            )}
+            {managedRunDialogOpen && !projectInteractionDisabled && nativeRunWorkspaceMatches && (
+              <ProjectFunctionConsent
+                key={nativeScope}
+                projectId={detail.nativeBinding.hostRunId}
+                version={detail.nativeProject?.project.version ?? 0}
+                api={window.api.harnessBoard.nativeFeatureMods}
+                title="插件参数与执行权限"
+                useFeatureInputs={detail.nativeBinding.supportsDeployUnits === true}
+                onReady={(ready) => setNativeReadyScope(current => ready ? nativeScope :
+                  current === nativeScope ? "" : current)}
+              />
+            )}
+            {!nativeRunWorkspaceMatches && (
+              <div className="text-xs text-muted-foreground">
+                <p>确认时会核对所选目录的插件参数与授权。若需要配置此目录，可先在「编辑特性配置」中将它保存为会话工作区。</p>
+                {nativeCanChooseWorkspace && managedRunWorkspacePath && (
+                  <Button
+                    type="button"
+                    variant="link"
+                    className="p-0"
+                    disabled={updatingManagedRun}
+                    onClick={() => editManagedRunFeatureConfig(managedRunWorkspacePath)}
+                  >
+                    在特性配置中设置此目录
+                  </Button>
+                )}
+              </div>
+            )}
+            {nativeManagedRunError && <p role="alert" className="break-words text-sm text-destructive">
+              {needsDeployUnitReselection
+                ? projectRuntimeRecoveryMessage(nativeManagedRunError)
+                : nativeManagedRunError}
+            </p>}
             <div className="mt-2 flex items-start justify-between gap-4 rounded-lg border border-border/70 bg-background/70 px-3 py-2.5">
               <div>
                 <div className="flex items-center gap-1.5 text-sm font-medium">
@@ -8073,8 +8202,10 @@ function FeatureDetailPage({
               onClick={() => void handleConfirmManagedRun()}
               disabled={
                 !managedRunWorkspacePath.trim() || updatingManagedRun || pickingManagedRunWorkspace ||
-                (!!detail?.nativeBinding && ((!nativeReady && !nativeCanChooseWorkspace) ||
-                  (!detail.nativeProject && !managedRunUserMessage.trim())))
+                nativeOperationUnknown ||
+                (nativeRunWorkspaceMatches && !nativeReady) ||
+                (!detail.nativeProject && !managedRunUserMessage.trim()) ||
+                Boolean(detail.nativeBinding.supportsDeployUnits && !detail.run.selectedDeployUnits.length)
               }
             >
               {updatingManagedRun && <Loader2 className="size-4 animate-spin" />}
@@ -8896,32 +9027,25 @@ function EnterpriseHarnessBoardView({
   hostQueryRef.current = query
   const hostCursorRef = useRef<string | undefined>(undefined)
   const [hostHasMore, setHostHasMore] = useState(false)
-  const [hostTemplates, setHostTemplates] = useState<LocalProjectTemplate[]>([])
+  const [hostTemplate, setHostTemplate] = useState<LocalProjectTemplate>()
+  const [hostTemplateError, setHostTemplateError] = useState<{ key: string; message: string }>()
+  const [hostTemplateAttempt, setHostTemplateAttempt] = useState(0)
   const [selectedHostProject, setSelectedHostProject] = useState<string>()
   const [hostError, setHostError] = useState<string>()
-  const [hostLoading, setHostLoading] = useState(true)
+  const [hostLoading, setHostLoading] = useState(false)
+  const [hostHistoryOpen, setHostHistoryOpen] = useState(false)
   const [hostStartUse, setHostStartUse] = useState<HostPluginStartUseIntent>()
   const hostStartUseIntent = useHostPluginStartUseIntent()
   const hostReadSequence = useRef(0)
-  const hostTemplateReadSequence = useRef(0)
-  const refreshHostProjects = useCallback(async (more = false, includeTemplates = true) => {
+  const refreshHostProjects = useCallback(async (more = false) => {
     const sequence = ++hostReadSequence.current
     const search = hostQueryRef.current
     const account = useAppStore.getState().accountRevision
     setHostLoading(true)
     try {
-      const templateSequence = includeTemplates ? ++hostTemplateReadSequence.current : undefined
-      const templateRead = includeTemplates
-        ? window.api.harnessBoard.localProjects.templates().then((templates) => {
-            // Template identities belong to the account, not to the current search text.
-            if (templateSequence === hostTemplateReadSequence.current &&
-              account === useAppStore.getState().accountRevision) setHostTemplates(templates)
-          })
-        : undefined
-      const [, items] = await Promise.all([
-        templateRead,
-        window.api.harnessBoard.localProjects.list(more ? hostCursorRef.current : undefined, search)
-      ])
+      const items = await window.api.harnessBoard.localProjects.list(
+        more ? hostCursorRef.current : undefined, search
+      )
       if (sequence !== hostReadSequence.current || search !== hostQueryRef.current ||
         account !== useAppStore.getState().accountRevision) return
       setHostProjects((previous) => more ? [...previous, ...items.filter((item) =>
@@ -8939,30 +9063,18 @@ function EnterpriseHarnessBoardView({
     }
   }, [])
   useEffect(() => {
-    void refreshHostProjects()
-    return () => {
-      hostReadSequence.current++
-      hostTemplateReadSequence.current++
-    }
-  }, [refreshHostProjects])
-  const hostSearchMounted = useRef(false)
-  useEffect(() => {
-    if (!hostSearchMounted.current) {
-      hostSearchMounted.current = true
-      return
-    }
-    hostReadSequence.current++
+    if (!hostHistoryOpen) return
     hostCursorRef.current = undefined
     setHostLoading(true)
     setHostError(undefined)
     setHostProjects([])
     setHostHasMore(false)
-    const timer = setTimeout(() => void refreshHostProjects(false, false), 250)
+    const timer = setTimeout(() => void refreshHostProjects(), 250)
     return () => {
       clearTimeout(timer)
       hostReadSequence.current++
     }
-  }, [query, refreshHostProjects])
+  }, [hostHistoryOpen, query, refreshHostProjects])
   const [initialCatalogSnapshot] = useState(readHarnessBoardCatalogCache)
   const [projects, setProjects] = useState<HarnessProjectListItem[]>(
     () => initialCatalogSnapshot?.projects ?? []
@@ -9042,6 +9154,37 @@ function EnterpriseHarnessBoardView({
   const [featureNativePlan, setFeatureNativePlan] = useState<NativeNodeIntent | null>(null)
   const [creating, setCreating] = useState(false)
   const [form, setForm] = useState<HarnessProjectCreateInput>(() => createEmptyProjectForm())
+  const createAdapter = dialogOpen && !hostStartUse
+    ? findSelectedAdapter(projectDialogAdapterRegistry, form.adapterId) : null
+  const isEnabledHostAdapter = createAdapter?.runtimeMode === "host" && createAdapter.enabled !== false
+  const hostAdapterId = isEnabledHostAdapter ? createAdapter.id : undefined
+  const hostAdapterName = isEnabledHostAdapter ? createAdapter.name : undefined
+  const hostAdapterVersion = isEnabledHostAdapter ? createAdapter.version : undefined
+  const hostAdapterKey = JSON.stringify([hostAdapterId, hostAdapterName, hostAdapterVersion])
+  const selectedHostTemplate = hostTemplate && hostTemplate.installedPluginId === hostAdapterId &&
+    hostTemplate.name === hostAdapterName && hostTemplate.version === hostAdapterVersion
+    ? hostTemplate : undefined
+  const selectedHostTemplateError = hostTemplateError?.key === hostAdapterKey
+    ? hostTemplateError.message : undefined
+  useEffect(() => {
+    if (!hostAdapterId || selectedHostTemplate) return
+    let current = true
+    const account = useAppStore.getState().accountRevision
+    const isCurrent = () => current && account === useAppStore.getState().accountRevision
+    setHostTemplateError(undefined)
+    void window.api.harnessBoard.localProjects.templates(hostAdapterId).then((templates) => {
+      if (!isCurrent()) return
+      const template = templates.find((item) => item.installedPluginId === hostAdapterId &&
+        item.name === hostAdapterName && item.version === hostAdapterVersion)
+      if (template?.expectedTemplate && !template.unavailableReason) setHostTemplate(template)
+      else setHostTemplateError({ key: hostAdapterKey, message: template?.unavailableReason ??
+        "项目插件尚未就绪，请启用插件并更新列表。" })
+    }).catch((cause) => {
+      if (isCurrent()) setHostTemplateError({ key: hostAdapterKey, message: cleanIpcError(cause) })
+    })
+    return () => { current = false }
+  }, [hostAdapterId, hostAdapterName, hostAdapterVersion, hostAdapterKey, hostTemplateAttempt,
+    selectedHostTemplate])
   const [formError, setFormError] = useState<string | null>(null)
   const [workspaceValidating, setWorkspaceValidating] = useState(false)
   const [workspaceError, setWorkspaceError] = useState<string | null>(null)
@@ -10426,6 +10569,8 @@ function EnterpriseHarnessBoardView({
 
   const resetCreateForm = useCallback(() => {
     setHostStartUse(undefined)
+    setHostTemplate(undefined)
+    setHostTemplateError(undefined)
     setDerivedCreationSource(null)
     setForm(createEmptyProjectForm())
     setFormError(null)
@@ -10443,17 +10588,12 @@ function EnterpriseHarnessBoardView({
   }, [])
 
   const openCreateDialog = useCallback(() => {
-    setHostStartUse(undefined)
-    void refreshHostProjects()
-    setDerivedCreationSource(null)
+    resetCreateForm()
     setCreatedDerivedProject(null)
     setCreatedProjectNodesOpen(false)
-    setForm(createEmptyProjectForm())
-    setFormError(null)
-    setWorkspaceError(null)
     openProjectDialogAdapterSession()
     setDialogOpen(true)
-  }, [openProjectDialogAdapterSession, refreshHostProjects])
+  }, [openProjectDialogAdapterSession, resetCreateForm])
 
   useEffect(() => {
     if (!hostStartUseIntent || dialogOpen || editingProject) return
@@ -10467,12 +10607,11 @@ function EnterpriseHarnessBoardView({
     setHostStartUse(intent)
     setForm(createEmptyProjectForm(intent.report.identity.pluginId))
     setFormError(null)
-    void refreshHostProjects()
     openProjectDialogAdapterSession()
     dismissCurrentPageEntryGuide("project-mode-getting-started")
     setDialogOpen(true)
     dismissHostPluginStartUse(intent.id)
-  }, [hostStartUseIntent, dialogOpen, editingProject, openProjectDialogAdapterSession, refreshHostProjects,
+  }, [hostStartUseIntent, dialogOpen, editingProject, openProjectDialogAdapterSession,
     showProjectListForCreation])
 
   const handleCreateDialogOpenChange = useCallback(
@@ -10559,9 +10698,7 @@ function EnterpriseHarnessBoardView({
         if (!current()) return
       }
       const expectedNativeTemplate = selectedAdapter?.runtimeMode === "host"
-        ? hostStartUse?.report.identity ?? hostTemplates.find(
-            template => template.installedPluginId === selectedAdapter.id
-          )?.expectedTemplate
+        ? hostStartUse?.report.identity ?? selectedHostTemplate?.expectedTemplate
         : undefined
       if (selectedAdapter?.runtimeMode === "host" && !expectedNativeTemplate)
         throw Error("插件身份尚未核对，请重新选择插件")
@@ -11376,17 +11513,16 @@ function EnterpriseHarnessBoardView({
   const selectedProject = selectedProjectId
     ? (projects.find((project) => project.projectId === selectedProjectId) ?? null)
     : null
-  const openFeatureDeployUnitEditDialog = useCallback((): void => {
+  const openFeatureDeployUnitEditDialog = useCallback((preferredWorkspace?: string): void => {
     if (!selectedProject || !runDetailWithSessions || selectedFeature?.deleted) return
-    if (nativeFeatureDirectoryLocked(runDetailWithSessions)) {
-      toast.info(nativeFeatureDirectoryLockReason)
-      return
-    }
-
     const requestId = ++featureWorkflowRequestIdRef.current
-    setFeatureWorkspace(
-      runDetailWithSessions.run.sessionWorkspace ?? { source: "directory", path: "" }
-    )
+    const selectedWorkspace =
+      runDetailWithSessions.nativeBinding && !nativeFeatureDirectoryLocked(runDetailWithSessions)
+        ? normalizeWorkspacePath(preferredWorkspace)
+        : ""
+    setFeatureWorkspace(selectedWorkspace
+      ? { source: "directory", path: selectedWorkspace }
+      : runDetailWithSessions.run.sessionWorkspace ?? { source: "directory", path: "" })
     setFeatureMappingDrafts(
       Object.fromEntries(
         runDetailWithSessions.run.selectedDeployUnits.map((item) => [
@@ -11396,7 +11532,11 @@ function EnterpriseHarnessBoardView({
       )
     )
     setFeatureDialogMode("edit")
-    setFeatureDialogProject(selectedProject)
+    setFeatureDialogProject(runDetailWithSessions.nativeBinding ? {
+      ...selectedProject,
+      supportsDeployUnits: runDetailWithSessions.nativeBinding.supportsDeployUnits === true,
+      supportsSessionContextInjection: runDetailWithSessions.nativeBinding.supportsDeployUnits === true
+    } : selectedProject)
     setFeatureName(runDetailWithSessions.run.slug)
     setFeatureError(null)
     setFeatureWorkflowConfig(null)
@@ -11411,7 +11551,11 @@ function EnterpriseHarnessBoardView({
       )
     )
 
-    void refreshFeaturePublicConstraints(selectedProject.projectId, requestId)
+    void refreshFeaturePublicConstraints(
+      selectedProject.projectId,
+      requestId,
+      runDetailWithSessions.run.slug
+    )
   }, [
     refreshFeaturePublicConstraints,
     runDetailWithSessions,
@@ -11424,6 +11568,7 @@ function EnterpriseHarnessBoardView({
       featureDialogMode !== "edit" ||
       !featureDialogProject ||
       !selectedFeature ||
+      nativeFeatureDirectoryLocked(runDetailWithSessions) ||
       updatingFeatureDeployUnits
     ) {
       return
@@ -11481,6 +11626,7 @@ function EnterpriseHarnessBoardView({
     featureDialogMode,
     featureDialogProject,
     refreshSelectedRunDetail,
+    runDetailWithSessions,
     selectedDeployUnitIds,
     selectedFeature,
     updatingFeatureDeployUnits
@@ -11650,7 +11796,7 @@ function EnterpriseHarnessBoardView({
   }, [derivedProjectIntent, projects, loadingProjects, dialogOpen, editingProject, openProjectDetail])
 
   useEffect(() => {
-    if (!derivedProjectIntent || derivedProjectIntent.projectId || loadingProjects || hostLoading ||
+    if (!derivedProjectIntent || derivedProjectIntent.projectId || loadingProjects ||
       dialogOpen || editingProject || creating || hostStartUseIntent || hostStartUse) return
     const requested = derivedProjectIntent
     if (!derivedProjectIntentCurrent(requested)) {
@@ -11658,23 +11804,27 @@ function EnterpriseHarnessBoardView({
       return
     }
     let cancelled = false
-    void window.api.harnessBoard.registry().then((registry) => {
+    void window.api.harnessBoard.registry().then(async (registry) => {
+      if (cancelled || !boardMountedRef.current) return
+      const matches = registry.filter((item) => item.id === requested.pluginId)
+      const adapter = matches[0]
+      const templates = matches.length === 1 && adapter.name === requested.name &&
+        adapter.enabled !== false && adapter.runtimeMode === "host"
+        ? await window.api.harnessBoard.localProjects.templates(adapter.id) : []
+      const template = templates.find((item) => item.installedPluginId === adapter.id &&
+        item.name === adapter.name && item.version === adapter.version &&
+        item.expectedTemplate && !item.unavailableReason)
       if (cancelled || !boardMountedRef.current) return
       const intent = consumeDerivedProjectIntent(requested)
       if (!intent) return
-      const matches = registry.filter((item) => item.id === intent.pluginId)
-      const adapter = matches[0]
       if (matches.length !== 1 || adapter.name !== intent.name || adapter.enabled === false ||
-        (adapter.runtimeMode === "host"
-          ? !hostTemplates.some((template) => template.installedPluginId === adapter.id &&
-            template.name === adapter.name && template.version === adapter.version &&
-            template.expectedTemplate && !template.unavailableReason)
-          : !adapter.boardCompatibility.compatible)) {
+        (adapter.runtimeMode === "host" ? !template : !adapter.boardCompatibility.compatible)) {
         setHostError("所选插件已变化、停用或暂不可用，请更新插件列表后重新打开项目入口。")
         return
       }
       showProjectListForCreation()
       setHostStartUse(undefined)
+      setHostTemplate(template)
       setCreatedDerivedProject(null)
       setCreatedProjectNodesOpen(false)
       setDerivedCreationSource(intent)
@@ -11689,8 +11839,8 @@ function EnterpriseHarnessBoardView({
         setHostError(cleanIpcError(cause))
     })
     return () => { cancelled = true }
-  }, [derivedProjectIntent, loadingProjects, hostLoading, dialogOpen, editingProject, creating,
-    hostStartUseIntent, hostStartUse, hostTemplates, openProjectDialogAdapterSession,
+  }, [derivedProjectIntent, loadingProjects, dialogOpen, editingProject, creating,
+    hostStartUseIntent, hostStartUse, openProjectDialogAdapterSession,
     showProjectListForCreation])
 
   const handleUpdateProjectPlugin = useCallback(
@@ -12485,12 +12635,12 @@ function EnterpriseHarnessBoardView({
 
   if (selectedHostProject) return (
     <div className="h-full overflow-y-auto p-4">
-      <Button variant="ghost" onClick={() => { setSelectedHostProject(undefined); void refreshHostProjects() }}>
+      <Button variant="ghost" onClick={() => { setSelectedHostProject(undefined); if (hostHistoryOpen) void refreshHostProjects() }}>
         <ArrowLeft className="mr-2 size-4" />项目列表
       </Button>
       <SparksDocumentationLink initialFile="project-platform.md" label="使用说明" />
       <LocalProjectRun key={selectedHostProject} projectId={selectedHostProject}
-        onChanged={() => void refreshHostProjects()} />
+        onChanged={() => { if (hostHistoryOpen) void refreshHostProjects() }} />
     </div>
   )
 
@@ -12527,6 +12677,7 @@ function EnterpriseHarnessBoardView({
           nodePlan={featureNativePlan?.plan}
           onRecheckNodes={handleRecheckNativeNodes}
           mode={featureDialogMode}
+          readOnly={featureDialogMode === "edit" && nativeFeatureDirectoryLocked(runDetailWithSessions)}
           project={featureDialogProject}
           featureName={featureName}
           workflowConfig={featureWorkflowConfig}
@@ -12632,6 +12783,7 @@ function EnterpriseHarnessBoardView({
           nodePlan={featureNativePlan?.plan}
           onRecheckNodes={handleRecheckNativeNodes}
           mode={featureDialogMode}
+          readOnly={featureDialogMode === "edit" && nativeFeatureDirectoryLocked(runDetailWithSessions)}
           project={featureDialogProject}
           featureName={featureName}
           workflowConfig={featureWorkflowConfig}
@@ -12658,7 +12810,7 @@ function EnterpriseHarnessBoardView({
           onSubmit={handleSubmitFeatureDialog}
         />
         <ProjectEditDialog
-          projectId={editingProject?.projectId}
+          project={editingProject}
           open={editingProject !== null}
           saving={savingEdit}
           form={editForm}
@@ -12711,7 +12863,7 @@ function EnterpriseHarnessBoardView({
               variant="ghost"
               size="sm"
               className={harnessDetailRefreshButtonClassName}
-              onClick={() => { void loadProjects({ force: true }); void refreshHostProjects() }}
+              onClick={() => { void loadProjects({ force: true }); if (hostHistoryOpen) void refreshHostProjects() }}
             >
               {loadingProjects ? (
                 <Loader2 className="size-4 animate-spin" />
@@ -12766,22 +12918,28 @@ function EnterpriseHarnessBoardView({
               </TabsList>
               {projectModeTab === "projects" && (
                 <div className="text-sm text-muted-foreground">
-                  {hostLoading ? "正在更新项目列表…" : `当前 ${catalogSummary.matchedProjects} 个项目`}
+                  当前 {catalogSummary.matchedProjects} 个项目
                 </div>
               )}
             </div>
 
             <TabsContent value="projects" className="mt-0">
               {hostError && <p role="alert" className="mb-3 text-sm text-destructive">{hostError}</p>}
-              {!!hostProjects.length && <details className="mb-3 space-y-2 rounded border p-3">
+              <details
+                className="mb-3 space-y-2 rounded border p-3"
+                open={hostHistoryOpen}
+                onToggle={(event) => setHostHistoryOpen(event.currentTarget.open)}
+              >
                 <summary className="cursor-pointer text-sm">历史独立运行（兼容查看）</summary>
-                <HostProjectListItems projects={hostProjects}
-                  onSelect={setSelectedHostProject} />
-                {hostHasMore && <button type="button" className="text-sm underline"
-                  disabled={hostLoading}
-                  onClick={() => void refreshHostProjects(true, false)}>加载更多历史运行</button>}
-              </details>}
-              {loadingProjects || (hostLoading && projects.length === 0 && hostProjects.length === 0) ? (
+                {hostHistoryOpen && <>
+                  {hostLoading && <p role="status" className="text-sm">正在查找项目…</p>}
+                  <HostProjectListItems projects={hostProjects} onSelect={setSelectedHostProject} />
+                  {hostHasMore && <button type="button" className="text-sm underline"
+                    disabled={hostLoading}
+                    onClick={() => void refreshHostProjects(true)}>加载更多历史运行</button>}
+                </>}
+              </details>
+              {loadingProjects ? (
                 <div
                   role="status"
                   className={cn(
@@ -12791,10 +12949,10 @@ function EnterpriseHarnessBoardView({
                 >
                   <div className="flex items-center gap-3 rounded-full border border-border/70 bg-background/70 px-4 py-2 text-sm shadow-sm">
                     <Loader2 className="size-4 animate-spin text-status-info" />
-                    {loadingProjects ? "正在同步项目看板" : "正在查找项目…"}
+                    正在同步项目看板
                   </div>
                 </div>
-              ) : projects.length === 0 && (hostProjects.length > 0 || hostError) ? null : projects.length === 0 ? (
+              ) : projects.length === 0 && hostHistoryOpen && (hostLoading || hostProjects.length > 0 || hostError) ? null : projects.length === 0 ? (
                 <div className="flex min-h-[360px] items-center justify-center">
                   <div
                     className={cn(
@@ -12991,6 +13149,7 @@ function EnterpriseHarnessBoardView({
           nodePlan={featureNativePlan?.plan}
           onRecheckNodes={handleRecheckNativeNodes}
         mode={featureDialogMode}
+        readOnly={featureDialogMode === "edit" && nativeFeatureDirectoryLocked(runDetailWithSessions)}
         project={featureDialogProject}
         featureName={featureName}
         workflowConfig={featureWorkflowConfig}
@@ -13058,7 +13217,12 @@ function EnterpriseHarnessBoardView({
         <Button variant="ghost" onClick={() => dismissDerivedProject(derivedProjectIntent.id)}>取消打开</Button>
       </div>}
       <ProjectFormDialog
-        hostTemplates={hostTemplates}
+        hostTemplates={selectedHostTemplate ? [selectedHostTemplate] : undefined}
+        hostTemplateLookup={hostAdapterId ? {
+          pending: !selectedHostTemplate && !selectedHostTemplateError,
+          error: selectedHostTemplateError,
+          onRetry: () => setHostTemplateAttempt((value) => value + 1)
+        } : undefined}
         hostStartUse={hostStartUse}
         open={dialogOpen}
         creating={creating}
@@ -13078,7 +13242,7 @@ function EnterpriseHarnessBoardView({
         onSubmit={(approval) => void handleSubmit(approval)}
       />
       <ProjectEditDialog
-        projectId={editingProject?.projectId}
+        project={editingProject}
         open={editingProject !== null}
         saving={savingEdit}
         form={editForm}

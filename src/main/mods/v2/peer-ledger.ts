@@ -19,6 +19,8 @@ export class FunctionPeerLedger {
         updated_at INTEGER NOT NULL, payload TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS peer_scope ON peer_messages(workspace, session_id, created_at);
+      CREATE INDEX IF NOT EXISTS peer_unsettled ON peer_messages(status)
+        WHERE status IN ('queued', 'processing');
     `)
     // A physical run cannot survive a main-process restart. Never replay its uncertain work.
     this.db

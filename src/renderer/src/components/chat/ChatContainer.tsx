@@ -2054,7 +2054,13 @@ export function ChatContainer({
     [currentThread]
   )
   const modsDirectoryScope = useMemo(() => rendererThreadDirectoryScope(currentThread), [currentThread])
-  const modsChatState = useModsChatState(threadId, currentForkWorkspacePath, modsDirectoryScope)
+  const unboundHistoryIncarnation = useMemo(() =>
+    currentThread && currentThread.metadata?.workspacePath == null
+      ? JSON.stringify([currentThread.created_at, currentThread.metadata?.cmb_thread_incarnation])
+      : undefined, [currentThread])
+  const modsChatState = useModsChatState(
+    threadId, currentForkWorkspacePath, modsDirectoryScope, unboundHistoryIncarnation
+  )
   const developmentScope = JSON.stringify([threadId, currentForkWorkspacePath])
   const creatorNavigation = useRef({ threadId, readOnly, workspace: currentForkWorkspacePath })
   creatorNavigation.current = { threadId, readOnly, workspace: currentForkWorkspacePath }

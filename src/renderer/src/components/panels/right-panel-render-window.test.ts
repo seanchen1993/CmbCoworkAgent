@@ -84,4 +84,9 @@ describe("right panel render windows", () => {
       'loadPluginCatalogPages(key, "app-plugin-catalog", isCurrent)'
     )
   })
+
+  it("binds the main split column outside the Agent focus view", () => {
+    const appSource = readFileSync(new URL("../../App.tsx", import.meta.url), "utf8")
+    expect(appSource).toContain("ref={isAgentFocusActive ? workerSplitRef : rightPanelMainRef}")
+  })
 })

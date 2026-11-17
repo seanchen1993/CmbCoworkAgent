@@ -90,6 +90,27 @@ function legacy(file: string, version = "1"): void {
   }
 }
 
+it("indexes the exact recovery queries so settled rows are outside the startup work", () => {
+  const file = path()
+  legacy(file)
+  const store = new ModControlStore(file)
+  store.close()
+  const db = new DatabaseSync(file)
+  try {
+    for (const [sql, index] of [
+      ["UPDATE mods_calls INDEXED BY mods_calls_pending_scope_backfill SET workspace = json_extract(scope,'$.workspace') WHERE workspace IS NULL AND scope IS NOT NULL", "mods_calls_pending_scope_backfill"],
+      ["UPDATE mods_calls SET status = 'unknown' WHERE status = 'running'", "mods_calls_interrupted"],
+      ["UPDATE mods_completion_evidence SET status = 'interrupted' WHERE status = 'running'", "mods_completion_evidence_interrupted"],
+      ["SELECT payload FROM mods_jobs WHERE json_extract(payload,'$.state') IN ('queued','running')", "mods_jobs_unsettled"]
+    ]) {
+      const plan = db.prepare("EXPLAIN QUERY PLAN " + sql).all().map((row) => row.detail).join("\n")
+      expect(plan).toContain(index)
+    }
+  } finally {
+    db.close()
+  }
+})
+
 function snapshot(file: string): unknown {
   const db = new DatabaseSync(file)
   try {

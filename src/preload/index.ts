@@ -3335,7 +3335,7 @@ const api = {
       ipcRenderer.invoke("mods:claw-change", { threadId, mutation }),
     clawStart: (threadId: string, expectedRevision: number, goal: string): Promise<import("../shared/mods/flows/types").FlowRun> =>
       ipcRenderer.invoke("mods:claw-start", { threadId, expectedRevision, goal }),
-    chatDisplayCapability: (threadId: string, expectedWorkspace: string): Promise<boolean> =>
+    chatDisplayCapability: (threadId: string, expectedWorkspace: string | null): Promise<boolean> =>
       ipcRenderer.invoke("mods:chat-display-capability", { threadId, expectedWorkspace }),
     builtinCatalog: (): Promise<import("../shared/mods/builtins").DevClawBuiltinStatus[]> =>
       ipcRenderer.invoke("mods:builtin-catalog"),
@@ -4892,7 +4892,7 @@ const api = {
       },
       actionResults: (projectId: string, operationId: string) => ipcRenderer.invoke("project-runtime:action-results", projectId, operationId),
       versions: (projectId: string) => ipcRenderer.invoke("project-runtime:versions", projectId),
-      templates: () => ipcRenderer.invoke("project-runtime:templates"),
+      templates: (installedPluginId) => ipcRenderer.invoke("project-runtime:templates", installedPluginId),
       list: (afterProjectId?: string, query?: string) =>
         ipcRenderer.invoke("project-runtime:list", afterProjectId, query),
       get: (projectId: string) => ipcRenderer.invoke("project-runtime:get", projectId),

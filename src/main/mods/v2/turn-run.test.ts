@@ -151,3 +151,22 @@ it("does not create phantom events when no Mods manager is installed", async () 
   expect(start).not.toHaveBeenCalled()
   expect(complete).not.toHaveBeenCalled()
 })
+
+it("skips per-chunk observation with a resident manager and no admitted Mods turn", async () => {
+  fixture.manager = {
+    startFunctionTurn: vi.fn(async () => {}),
+    functionTurns: lifecycle,
+    releaseExpiredRuntimeBindings: cleanup
+  }
+  const observe = vi.spyOn(lifecycle, "observeStream")
+  const readMessage = vi.fn(() => new AIMessageChunk({ content: "ordinary answer" }))
+  const payload = [undefined, {}]
+  Object.defineProperty(payload, 0, { get: readMessage })
+  const turn = run()
+  await turn.start()
+  turn.observeStream("messages", payload)
+  expect(readMessage).not.toHaveBeenCalled()
+  expect(observe).not.toHaveBeenCalled()
+  turn.finish("answer")
+  expect(cleanup).toHaveBeenCalledWith("background")
+})

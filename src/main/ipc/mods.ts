@@ -19,7 +19,7 @@ import { withTrustedFunctionWait } from "../mods/v2/trusted-function-wait"
 import { setProjectRuntimeFunctions } from "../harness-board/project-runtime-function-source"
 import { ApplicationCompletionPolicies } from "../mods/v2/application-completion-policy"
 import { createHostProjectInputIdentity } from "../harness-board/project-runtime/package-input-identity"
-import { readModsChatDisplayCapability } from "./mods-display-capability"
+import { assertUnboundModsChatHistory, readModsChatDisplayCapability } from "./mods-display-capability"
 import { captureDirectDisplayScope } from "./mods-display-thread-scope"
 import { registerBuiltinAdvisorHandlers } from "./builtin-advisor"
 import { registerCommunityExampleHandlers } from "./mods-community-examples"
@@ -30,7 +30,7 @@ import { projectRuntimeDependencies } from "../harness-board/project-runtime-dep
 import { pluginChatStartUseEntries } from "../plugins/plugin-chat-start-use"
 import { readPluginChatIntegrations } from "../plugins/plugin-chat-integrations"
 import { notifyHooksChanged } from "../hooks/notifications"
-import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
+import { invalidateMutableMcpCapabilityServices } from "../mcp/capability-service"
 import { listPluginSkills } from "./skills"
 import { getEnabledPluginSkillSourceMetadata } from "../storage"
 import { readNativeSkillUsagePolicy } from "../plugins/native-skill-usage"
@@ -88,12 +88,14 @@ import { join } from "node:path"
 import { writeFile } from "node:fs/promises"
 import { pathToFileURL } from "node:url"
 import {
-  getDb, getThreadCore, getThreadRuntimeScope, getThreadMessagesByIds, getUserMessagePromptOrigin
+  getDb, getThreadCanonicalIdentity, getThreadCore, getThreadRuntimeScope,
+  getThreadMessagesByIds, getUserMessagePromptOrigin
 } from "../db"
 import { functionConversationTranscriptFields, isFunctionConversationNotice } from
   "../../shared/mods/v2/conversation-transcript"
 import {
   getModsGlobalEnabled,
+  getModsGlobalEnabledState,
   getGitChangeNoticeSetting,
   setGitChangeNoticeEnabled,
   getOpenworkDir,
@@ -107,7 +109,7 @@ import {
   getStoredAgentGraphRecursionLimit,
   getWindowsSandboxMode
 } from "../storage"
-import { ModsManager, setModsManager, setModsUnavailable } from "../mods/manager"
+import { getModsManager, ModsManager, setModsManager, setModsUnavailable } from "../mods/manager"
 import { ModError, modErrorCode } from "../mods/errors"
 import { installPluginFromDir } from "./plugins"
 import { CreatorProjectDeliveries } from "../mods/devtools/creator-project-delivery"
@@ -115,7 +117,7 @@ import { CreatorSourceSets } from "../mods/devtools/creator-source-set"
 import { observeProjectDeliveryInstallation, readProjectDeliveryInventory } from "../plugins/plugin-delivery-observation"
 import { withPluginCatalogMutation } from "../plugins/catalog-mutation"
 import { bundledModExamplesRoot } from "../mods/bundled-examples"
-import { readManagedModDeployment } from "../mods/policy"
+import { readManagedModDeployment, type ManagedModDeployment } from "../mods/policy"
 import { ModCommandQueue } from "../mods/command-queue"
 import { bindStandaloneModCommand } from "../mods/command-backend"
 import { withFunctionMcpCommand } from "../mods/v2/mcp-command"
@@ -248,7 +250,9 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     collect: (root, expected) => collectSnapshotGarbage(root, () => snapshotAudit(root), expected)
   })
   let manager: ModsManager
+  let deployment: ManagedModDeployment | undefined
   try {
+    deployment = readManagedModDeployment(join(__dirname, "../resources/mods-policy.json"))
     manager = new ModsManager(
       join(getOpenworkDir(), "mods-control.sqlite"),
       getPlugins,
@@ -286,12 +290,12 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       },
       (threadId, scope) => window()?.webContents.send("mods:cards-changed", { threadId, ...(scope === undefined ? {} : { scope }) }),
       join(__dirname, "mod-host.js"),
-      readManagedModDeployment(join(__dirname, "../resources/mods-policy.json")),
+      deployment,
       getModsGlobalEnabled
     )
   } catch (error) {
     const code = error instanceof ModError ? modErrorCode(error) : "MODS_CONTROL_RECOVERY_REQUIRED"
-    setModsUnavailable(code)
+    setModsUnavailable(code, deployment, getModsGlobalEnabledState)
     ipcMain.handle("mods:status", (event) => {
       trusted(event)
       return {
@@ -304,9 +308,14 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         recovery: code
       }
     })
-    ipcMain.handle("mods:chat-display-capability", (event) => {
+    ipcMain.handle("mods:chat-display-capability", (event,
+      input?: { threadId: string; expectedWorkspace: string | null }) => {
       trusted(event)
-      throw new ModError(code)
+      // Share the main-process admission decision with ordinary native chat.
+      getModsManager()
+      if (input?.expectedWorkspace === null)
+        assertUnboundModsChatHistory(input.threadId, getThreadCanonicalIdentity)
+      return false
     })
     ipcMain.handle("mods:global-enabled", (event) => {
       trusted(event)
@@ -1435,7 +1444,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       manager.pluginsChanged([pluginId])
       invalidateEnabledSkillsCache()
       invalidatePluginHooksCache()
-      await invalidateGlobalMcpCapabilityService("plugin:start-use-enable")
+      await invalidateMutableMcpCapabilityServices("plugin:start-use-enable")
       notifyHooksChanged("plugin-enabled-changed")
     },
     diagnostics: async (plugin, input, guard, destination) => {
@@ -1702,15 +1711,20 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   development.configureTrialUndoStatus(threadId => trialUndo.status(threadId))
   const readDeliveryPlugins = () => readProjectDeliveryInventory(
     getPluginsDir(), getInstalledPluginIds, getPlugins)
+  let creatorBusinessAssembly: BusinessModAssemblyService | undefined
   const creatorBusiness = new CreatorBusinessService({
     root: join(getOpenworkDir(), "creator-business"), settings: manager.store,
-    assembly: new BusinessModAssemblyService(join(getOpenworkDir(), "creator-business-assemblies"), {
-      plugins: readDeliveryPlugins, validatePackage: inspectCompletePluginDirectory,
-      install: installDerivedPluginDirectory,
-      observeInstallation: (input, guard) => withPluginCatalogMutation(() =>
-        observeProjectDeliveryInstallation(getPluginsDir(), readDeliveryPlugins, input, guard)),
-      invalidate: () => { invalidateEnabledSkillsCache(); invalidatePluginHooksCache() }
-    }),
+    get assembly() {
+      return (creatorBusinessAssembly ??= new BusinessModAssemblyService(
+        join(getOpenworkDir(), "creator-business-assemblies"), {
+          plugins: readDeliveryPlugins, validatePackage: inspectCompletePluginDirectory,
+          install: installDerivedPluginDirectory,
+          observeInstallation: (input, guard) => withPluginCatalogMutation(() =>
+            observeProjectDeliveryInstallation(getPluginsDir(), readDeliveryPlugins, input, guard)),
+          invalidate: () => { invalidateEnabledSkillsCache(); invalidatePluginHooksCache() }
+        }
+      ))
+    },
     plugins: readDeliveryPlugins,
     normalizeWorkspace: workspace => manager.workspaceKey(workspace),
     context: threadId => development.projectAuthoringContext(threadId),
@@ -3021,10 +3035,20 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     }
   )
   ipcMain.handle("mods:chat-display-capability", (event,
-    input: { threadId: string; expectedWorkspace: string }) => {
+    input: { threadId: string; expectedWorkspace: string | null }) => {
     trusted(event)
+    if (input?.expectedWorkspace === null) {
+      if (deployment?.required !== false || getModsGlobalEnabledState() !== false)
+        throw new ModError("MODS_SCOPE_CHANGED")
+      assertUnboundModsChatHistory(input.threadId, getThreadCanonicalIdentity)
+      return false
+    }
     if (!input || typeof input.expectedWorkspace !== "string" || !input.expectedWorkspace.trim())
       throw new ModError("MODS_SCOPE_CHANGED")
+    // History is already sealed by the transcript reader. With optional Mods confirmed off,
+    // display of that history only needs the saved lexical binding, even if the directory is gone.
+    if (deployment?.required === false && getModsGlobalEnabledState() === false &&
+      readThreadWorkspacePath(input.threadId) === input.expectedWorkspace) return false
     const expectedWorkspace = manager.workspaceKey(input.expectedWorkspace)
     return readModsChatDisplayCapability(manager,
       settingsScope(event, input.threadId, expectedWorkspace))

@@ -71,6 +71,52 @@ describe("persistent host project state", () => {
       expect(() => store.get("local-docs")).toThrow("STORAGE_MISMATCH")
     } finally { raw.close() }
   })
+  it("indexes old histories and validates the exact newest-first window in one read", () => {
+    const { store, root, path } = fixture()
+    store.create({ ...hostProjectFixture(join(root, "other")), projectId: "other" })
+    const operations = Array.from({ length: 22 }, (_, index) => {
+      const operation = store.prepare(prepareFixture({ idempotencyKey: `history-${22 - index}` }))
+      store.cancel(operation.operationId)
+      return operation.operationId
+    })
+    store.prepare(prepareFixture({ projectId: "other" }))
+
+    const previous = new DatabaseSync(path)
+    try {
+      previous.exec("DROP INDEX host_operations_by_project")
+    } finally {
+      previous.close()
+    }
+    const reopened = openStore(path)
+    const raw = new DatabaseSync(path)
+    try {
+      const prepare = vi.spyOn(DatabaseSync.prototype, "prepare")
+      const recent = reopened.listOperations("local-docs", 20)
+      expect(recent.map((operation) => operation.operationId))
+        .toEqual(operations.slice(2).reverse())
+      expect(reopened.getRecentBindingOperation("local-docs", operations[2])?.operationId)
+        .toBe(operations[2])
+      expect(reopened.getRecentBindingOperation("local-docs", operations[1])).toBeUndefined()
+      expect(prepare).toHaveBeenCalledTimes(1)
+
+      const [query] = prepare.mock.calls[0]
+      prepare.mockRestore()
+      expect(raw.prepare(`EXPLAIN QUERY PLAN ${query}`).all("local-docs", 20)
+        .map((row) => row.detail)).toEqual([expect.stringContaining("host_operations_by_project")])
+
+      const corrupt = raw.prepare("UPDATE host_operations SET status='failed' WHERE id=?")
+      corrupt.run(operations[1])
+      expect(reopened.getRecentBindingOperation("local-docs", operations[21])?.operationId)
+        .toBe(operations[21])
+      expect(() => reopened.listOperations("local-docs", 21)).toThrow("STORAGE_MISMATCH")
+      corrupt.run(operations[2])
+      expect(() => reopened.getRecentBindingOperation("local-docs", operations[21]))
+        .toThrow("STORAGE_MISMATCH")
+    } finally {
+      raw.close()
+    }
+  })
+
   it("keeps Unicode case matching before pagination and after reopening storage", () => {
     const { store, root, path } = fixture()
     for (let index = 0; index < 24; index++)

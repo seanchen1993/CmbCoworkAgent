@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto"
+import { isAbsolute } from "node:path"
 import type {
+  HarnessHostFeatureInputs,
   HostResultReview,
   HostProjectOperation,
   HostProjectState,
@@ -9,6 +11,7 @@ import type {
   HostLegacyImportReceipt
 } from "../../../shared/project-runtime/host-types"
 import { parseProjectRuntimeManifest } from "../../../shared/project-runtime"
+import { HOST_CONTEXT_MATERIAL_ROOT_LIMIT } from "../../../shared/project-runtime/extension-contract"
 import { hostImportApprovalBinding } from "../../../shared/project-runtime/import-approval-policy"
 import { parseHostCheckDiagnostics } from "./host-check-diagnostics"
 
@@ -131,6 +134,30 @@ export function hostGoal(value: unknown): string {
   return value
 }
 
+export function parseHarnessHostFeatureInputs(value: unknown): HarnessHostFeatureInputs {
+  const raw = hostRecord(value, ["selectedDeployUnits", "knowledgeRoots"])
+  if (
+    !Array.isArray(raw.selectedDeployUnits) ||
+    !raw.selectedDeployUnits.length || raw.selectedDeployUnits.length > 32 ||
+    !Array.isArray(raw.knowledgeRoots) || raw.knowledgeRoots.length > HOST_CONTEXT_MATERIAL_ROOT_LIMIT
+  )
+    return hostStateError("FEATURE_INPUTS_INVALID")
+  const selectedDeployUnits = Array.from(raw.selectedDeployUnits, (id) => hostText(id))
+  const knowledgeRoots = Array.from(raw.knowledgeRoots, (item) => {
+    const root = hostRecord(item, ["id", "path", "identity"])
+    const path = hostText(root.path, 4096)
+    if (!isAbsolute(path)) return hostStateError("FEATURE_INPUTS_INVALID")
+    return { id: hostText(root.id), path, identity: hostText(root.identity, 4352) }
+  })
+  if (
+    new Set(selectedDeployUnits).size !== selectedDeployUnits.length ||
+    new Set(knowledgeRoots.map(root => root.id)).size !== knowledgeRoots.length ||
+    new Set(knowledgeRoots.map(root => root.path)).size !== knowledgeRoots.length
+  )
+    return hostStateError("FEATURE_INPUTS_INVALID")
+  return { selectedDeployUnits, knowledgeRoots }
+}
+
 export function parseHostProjectState(value: unknown): HostProjectState {
   const raw = hostRecord(value, [
     "schemaVersion",
@@ -148,7 +175,8 @@ export function parseHostProjectState(value: unknown): HostProjectState {
     "packageId",
     "packageVersion",
     "pluginDigest",
-    "manifest"
+    "manifest",
+    ...(value && Object.hasOwn(value, "harnessFeatureInputs") ? ["harnessFeatureInputs"] : [])
   ])
   if (
     raw.schemaVersion !== 1 ||
@@ -203,7 +231,10 @@ export function parseHostProjectState(value: unknown): HostProjectState {
     packageId,
     packageVersion,
     pluginDigest: hostDigest(raw.pluginDigest),
-    manifest
+    manifest,
+    ...(Object.hasOwn(raw, "harnessFeatureInputs")
+      ? { harnessFeatureInputs: parseHarnessHostFeatureInputs(raw.harnessFeatureInputs) }
+      : {})
   }
 }
 

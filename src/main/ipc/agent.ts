@@ -1421,8 +1421,8 @@ function rejectRuntimeRestoredCheckpointResume(
   } catch (error) {
     console.warn("[Goal] failed to persist runtime-restored checkpoint rejection notice:", error)
   }
-  if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
-    window.webContents.send(channel, {
+  if (window) {
+    safeSendToWindow(window, channel, {
       type: "custom",
       data: {
         type: "goal_notice",
@@ -1433,7 +1433,7 @@ function rejectRuntimeRestoredCheckpointResume(
         createdAt
       }
     })
-    window.webContents.send(channel, { type: "done" })
+    safeSendToWindow(window, channel, { type: "done" })
   }
   return true
 }
@@ -1591,9 +1591,7 @@ function handleGoalNonStartingControlCommand(params: {
     sendDoneForTerminatingControl = false
   } = params
   const sendDoneEvent = (): void => {
-    if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
-      window.webContents.send(channel, { type: "done" })
-    }
+    if (window) safeSendToWindow(window, channel, { type: "done" })
   }
   const done = (): void => {
     if (sendDone) sendDoneEvent()
@@ -2785,6 +2783,8 @@ function safeSendToWindow(window: BrowserWindow, channel: string, payload: unkno
   if (window.isDestroyed() || window.webContents.isDestroyed()) return
   try {
     window.webContents.send(channel, payload)
+    if ((payload as { type?: unknown } | null | undefined)?.type === "done")
+      agentRunExecutionContextStorage.getStore()?.onDesktopStreamDone?.(channel)
   } catch (error) {
     console.warn("[Agent] Failed to send stream event:", error)
   }
@@ -6240,6 +6240,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         managedExecution,
         coordinatorInternalNotification
       }: AgentInvokeParams = request
+      const baseChannel = `agent:stream:${threadId}`
+      const isTrustedCoordinatorNotificationInvoke = coordinatorInternalNotification === true &&
+        message.trimStart().startsWith(COORDINATOR_NOTIFICATION_PROMPT_PREFIX)
+      const ambientChannel = isTrustedCoordinatorNotificationInvoke
+        ? `${baseChannel}:coordinator-internal`
+        : baseChannel
+      const channel = resolveAgentStreamRequestChannel(ambientChannel, streamRequestId)
       // The original visible row and final Human input share one address even for callers
       // that omit an ID. Generating another ID during persistence would split that occurrence.
       const userMessageId = requestedUserMessageId?.trim() || uuid()
@@ -6250,10 +6257,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         throw Error("MODS_PLUGIN_PROMPT_INTERNAL_TEXT")
       if (!managedExecution && managedBizRetryService.blocksThread(threadId)) {
         const error = "请在决策入口操作"
-        delivery.send(
-          resolveAgentStreamRequestChannel(`agent:stream:${threadId}`, streamRequestId),
-          { type: "error", error }
-        )
+        delivery.send(channel, { type: "error", error })
         runExecutionContext.onRunTerminated?.({
           outcome: "error",
           code: "human_decision_pending",
@@ -6275,8 +6279,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           if (!(error instanceof ModFunctionError) ||
             error.code !== "MODS_CONVERSATION_FORK_PREPARING") throw error
           const message = "会话正在复制，请稍后再试。"
-          delivery.send(resolveAgentStreamRequestChannel(`agent:stream:${threadId}`,
-            streamRequestId), { type: "error", error: message })
+          delivery.send(channel, { type: "error", error: message })
           runExecutionContext.onRunTerminated?.({ outcome: "error",
             code: "conversation_fork_preparing", message })
           return
@@ -6293,7 +6296,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const initialInvokeWorkspacePath = initialInvokeParsedMetadata.workspacePath
       if (pluginPrompt && (initialInvokeAgentMode !== "normal" || initialInvokeCoordinatorRequest.enabled))
         throw Error("MODS_PLUGIN_PROMPT_SCOPE_UNSUPPORTED")
-      const baseChannel = `agent:stream:${threadId}`
       // May be a managed transport's shim rather than a real window — only
       // id / isDestroyed / webContents.send / webContents.isDestroyed exist on
       // it. See AgentRunDelivery.window before using anything else.
@@ -6305,11 +6307,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         modelId
       })
 
-      const hasCoordinatorNotificationPrefixAtInvoke = message
-        .trimStart()
-        .startsWith(COORDINATOR_NOTIFICATION_PROMPT_PREFIX)
-      const isTrustedCoordinatorNotificationInvoke =
-        coordinatorInternalNotification === true && hasCoordinatorNotificationPrefixAtInvoke
       // A completed background workflow delivers its result via an INTERNAL
       // notification turn whose message is exactly WORKFLOW_NOTIFICATION_TURN_PROMPT
       // (recognized at ~5100). Like the coordinator notification above, that turn
@@ -6322,10 +6319,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // non-workflow thread stays an ordinary user message and preempts normally).
       const isWorkflowNotificationInvoke =
         !pluginPrompt && isWorkflowNotificationTurnMessage(message) && initialInvokeAgentMode === "workflow"
-      const ambientChannel = isTrustedCoordinatorNotificationInvoke
-        ? `${baseChannel}:coordinator-internal`
-        : baseChannel
-      const channel = resolveAgentStreamRequestChannel(ambientChannel, streamRequestId)
       if (rejectAgentStartDuringShutdown(window, channel)) return
       if (
         runExecutionContext.source === "desktop" &&
@@ -10852,20 +10845,25 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         return
       }
     }
+    const ambientChannel = request.coordinatorInternalNotification
+      ? `agent:stream:${request.threadId}:coordinator-internal`
+      : `agent:stream:${request.threadId}`
+    const channel = resolveAgentStreamRequestChannel(ambientChannel, request.streamRequestId)
+    let done = false
     void startAgentRun(request, createBrowserWindowAgentRunDelivery(window), {
       source: "desktop",
+      onDesktopStreamDone: (eventChannel) => {
+        if (eventChannel === channel) done = true
+      },
       ...(!request.managedExecution && !request.coordinatorInternalNotification &&
         isPlainComposerSubmission(request.composerSubmission, request.message)
         ? { plainComposerSubmission: request.composerSubmission } : {}),
       ...(fileComposerSubmission ? { fileComposerSubmission } : {})
     })
-      .then((handle) => {
-        void handle.completion.catch((error) => {
-          console.error(`[Agent] Run completion failed for thread ${handle.threadId}:`, error)
-        })
-      })
+      .then((handle) => handle.completion)
       .catch((error) => {
-        console.error(`[Agent] Failed to start run for thread ${request.threadId}:`, error)
+        console.error(`[Agent] Run failed for thread ${request.threadId}:`, error)
+        if (!done) closePhysicalStreamRunBeforeSetupPublication(window, channel, error)
       })
   })
 

@@ -67,7 +67,7 @@ export async function readMaterial(
   return receipt.value
 }
 
-export async function readKnowledge(sdk: MaterialSDK, roots: string[], executionId: string) {
+export async function readKnowledge(sdk: MaterialSDK, roots: string[], executionId: string, rootId = "knowledge") {
   let sequence = 0
   const documents = new Map<string, { path: string; text: string; digest: string }>()
   const directories = new Map<string, Array<{ kind: string; path: string }>>()
@@ -75,7 +75,7 @@ export async function readKnowledge(sdk: MaterialSDK, roots: string[], execution
     if (documents.has(path)) return
     if (documents.size >= 512) throw Error("AUTOBIZ_KNOWLEDGE_DOCUMENT_LIMIT")
     const document = await readMaterial(sdk, executionId + ":materials:" + sequence++, "read", {
-      rootId: "knowledge",
+      rootId,
       path
     })
     if (
@@ -94,7 +94,7 @@ export async function readKnowledge(sdk: MaterialSDK, roots: string[], execution
     let offset = 0
     while (true) {
       const page = await readMaterial(sdk, executionId + ":materials:" + sequence++, "list", {
-        rootId: "knowledge",
+        rootId,
         ...(path ? { path } : {}),
         offset,
         limit: 32

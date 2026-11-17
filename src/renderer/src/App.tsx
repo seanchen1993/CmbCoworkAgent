@@ -106,6 +106,7 @@ import {
 } from "@/lib/app-catalog-cache"
 import { loadPluginCatalogPages, loadSkillCatalogPages } from "@/lib/skill-plugin-catalog"
 import { invalidateModelCatalogCache } from "@/lib/model-catalog-cache"
+import { useModsGlobalEnabled } from "@/lib/mods-global-enabled"
 
 configureAppCatalogLoaders({
   skills: (key, isCurrent) => loadSkillCatalogPages(key, "app-skill-catalog", isCurrent),
@@ -424,6 +425,7 @@ function App(): React.JSX.Element {
   const renderRoutePending = renderedRoute !== selectedRenderRoute
   const renderedMainView = renderedRoute.mainView
   const renderedThreadId = renderedRoute.threadId
+  const modsGloballyEnabled = useModsGlobalEnabled()
   const platformWorkspacePath = useAppStore((state) => {
     const workspace = state.threads.find((thread) =>
       thread.thread_id === renderedThreadId)?.metadata?.workspacePath
@@ -1292,7 +1294,7 @@ function App(): React.JSX.Element {
                     {/* Center - Content Panel */}
                     {(isAgentFocusActive || !previewFullscreen) && (
                       <main
-                        ref={workerSplitRef}
+                        ref={isAgentFocusActive ? workerSplitRef : rightPanelMainRef}
                         className={isAgentFocusActive
                           ? "relative flex flex-1 min-w-0 overflow-hidden bg-grid-subtle"
                           : fullscreenMainClassName}
@@ -1313,9 +1315,9 @@ function App(): React.JSX.Element {
                           )}
                           {!isAgentFocusActive && renderedMainView === "thread" && renderedThreadId && platformWorkspaceReady && (
                             <Suspense fallback={null}>
-                              <PlatformWorkspace key={platformWorkspaceScope} scopeKey={platformWorkspaceScope}
+                              {modsGloballyEnabled && <PlatformWorkspace key={platformWorkspaceScope} scopeKey={platformWorkspaceScope}
                                 threadId={renderedThreadId}
-                                active={!showCustomizeView && !renderRoutePending && !browserFullscreen} />
+                                active={!showCustomizeView && !renderRoutePending && !browserFullscreen} />}
                               {editorBirth !== null && <NativeEditorIntentHost key={`editor:${platformWorkspaceScope}:${editorBirth}`}
                                 threadId={renderedThreadId} workspace={platformWorkspacePath}
                                 scopeKey={editorBirth} api={window.api.mods}

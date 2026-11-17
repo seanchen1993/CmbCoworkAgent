@@ -20,7 +20,10 @@ import {
   createNativeHarnessFeature,
   ensureNativeHarnessFeatureRun,
   initializeNativeHarnessProject,
-  closeNativeHarnessFeatureStore
+  closeNativeHarnessFeatureStore,
+  assertNativeHarnessProjectMutable,
+  readNativeHarnessFeatureStage,
+  type NativeHarnessRuntime
 } from "./native-harness"
 
 let store: HostProjectStore
@@ -30,6 +33,7 @@ let project: HarnessProjectMetadata
 let workspace: string
 let pluginRoot: string
 let executions: number
+let runtime: NativeHarnessRuntime
 const write = (path: string, text: string | Buffer) => {
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, text)
@@ -95,7 +99,7 @@ beforeEach(() => {
       return "succeeded"
     }
   })
-  configureNativeHarnessRuntime({
+  runtime = {
     create: async (input, guard) => {
       if (!host.get(input.projectId)) await host.localCreate(input, guard)
       return {
@@ -105,7 +109,8 @@ beforeEach(() => {
     },
     view: (id) =>
       host.get(id) ? { project: host.get(id)!, operations: host.operations(id, 100) } : undefined
-  })
+  }
+  configureNativeHarnessRuntime(runtime)
 })
 afterEach(() => {
   vi.restoreAllMocks()
@@ -229,6 +234,39 @@ it("reports the newest attempt of the current stage rather than an older retry",
     id: current.operationId,
     status: "prepared"
   })
+})
+
+it("uses purpose-specific reads and keeps an unreadable input wait explicitly unknown", async () => {
+  const binding = await createFeature()
+  await ensureNativeHarnessFeatureRun(project.projectId, "request", "Review an uncertain run")
+  const operation = host.prepare({
+    projectId: binding.hostRunId, expectedVersion: 1, idempotencyKey: "interrupted"
+  })
+  store.start(operation.operationId, operation.inputFingerprint)
+  store.recoverInterrupted()
+  const originalView = runtime.view
+  const view = vi.spyOn(runtime, "view")
+  expect(readNativeHarnessFeatureStage(project.projectId, "request")).toMatchObject({
+    name: "draft", status: "unknown"
+  })
+  expect(() => assertNativeHarnessProjectMutable(project.projectId)).toThrow("尚未结算")
+  expect(view.mock.calls).toEqual([
+    [binding.hostRunId, "summary"], [binding.hostRunId, "summary"]
+  ])
+
+  view.mockClear().mockImplementation((id) => ({
+    ...originalView(id)!, inputWaitError: "Unavailable input ledger"
+  }))
+  expect(facts(await prompt())).toMatchObject({
+    lastRecordedOperation: { id: operation.operationId, status: "unknown" },
+    waitingForInput: { status: "unknown", reason: "input_ledger_unreadable" }
+  })
+  expect(view.mock.calls).toEqual([
+    [binding.hostRunId, "discussion"], [binding.hostRunId, "discussion"]
+  ])
+  view.mockImplementationOnce(originalView)
+  await expect(prompt()).rejects.toThrow("HARNESS_NATIVE_DISCUSSION_CONTEXT_CHANGED")
+  expect(executions).toBe(0)
 })
 
 it("rejects corrupted retained source and cancellation without substituting installed bytes", async () => {

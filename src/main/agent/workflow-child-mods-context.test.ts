@@ -36,6 +36,7 @@ import { currentFunctionExecution, withFunctionWriteLease } from "../mods/v2/exe
 import { ModsManager } from "../mods/manager"
 import { functionFileScope } from "../mods/v2/file-permission-host"
 import { captureNativeCapabilityContext } from "../mods/project-capability-context"
+import { registerBuiltinProjectFacts } from "../mods/builtins/project-facts"
 import {
   captureRuntimePluginSourceThreadGuard, currentRuntimePluginSource,
   issueRuntimePluginSourceToken, registerRuntimePluginSourceChild, withRuntimePluginSource
@@ -66,6 +67,77 @@ function fixture(isolated = false) {
   return { parentThreadId, parent, workspace, fileRoot, signal,
     childThreadId: randomUUID(), agentId: "actual-workflow-agent" }
 }
+
+it("uses fresh capability scope fields without copying file history or accepting BLOB metadata", () => {
+  const { parentThreadId, workspace } = fixture()
+  const binding = { projectId: "host-project", operationId: "first", stageId: "review" }
+  const metadata = {
+    workspacePath: workspace,
+    cmb_thread_incarnation: "scope-owner",
+    hostProjectRuntime: binding,
+    llmFileHistory: "x".repeat(2 * 1024 * 1024)
+  }
+  const persist = (value: string | Buffer) =>
+    db.getDb().run("UPDATE threads SET metadata=? WHERE thread_id=?", [value, parentThreadId])
+  const raw = JSON.stringify(metadata)
+  persist(raw)
+  close.push(
+    registerBuiltinProjectFacts((id, path) => {
+      expect([id, path]).toEqual([parentThreadId, workspace])
+      return {
+        identity: "actual-host-binding",
+        facts: {
+          state: "observed",
+          stageNumber: 1,
+          totalStages: 1,
+          currentStageNumber: 1,
+          projectStatus: "active",
+          operationStatus: "prepared",
+          approval: "not-required",
+          checks: { passed: 0, failed: 0, blocked: 0, unknown: 0 },
+          declaredArtifacts: 0,
+          receiptsMatchCurrentVersion: true,
+          recordedAttempts: 0,
+          historyMayBeLimited: false
+        },
+        review: {
+          projectId: binding.projectId,
+          stageId: binding.stageId,
+          pluginDigest: "digest",
+          firstProjectAttempt: true,
+          firstStageAttempt: true,
+          evidence: {
+            projectName: "host",
+            stageTitle: "review",
+            operationId: binding.operationId,
+            matchesProjectVersion: true,
+            checks: []
+          }
+        }
+      }
+    })
+  )
+  const parse = vi.spyOn(JSON, "parse")
+  try {
+    const captured = captureNativeCapabilityContext(parentThreadId, workspace)
+    expect(captured).toMatchObject({ usage: "project", projectId: binding.projectId })
+    expect(JSON.parse(captured.identity)[3]).toEqual(binding)
+    captured.assertCurrent()
+    expect(parse.mock.calls.some(([value]) => value === raw)).toBe(false)
+    persist(JSON.stringify({ ...metadata, llmFileHistory: "another history" }))
+    captured.assertCurrent()
+    persist(
+      JSON.stringify({ ...metadata, hostProjectRuntime: { ...binding, operationId: "second" } })
+    )
+    expect(captured.assertCurrent).toThrow("COMPOSITION_CONTEXT_CHANGED")
+    persist(Buffer.from(raw))
+    expect(() => captureNativeCapabilityContext(parentThreadId, workspace)).toThrow(
+      "CAPABILITY_CONTEXT_CHANGED"
+    )
+  } finally {
+    parse.mockRestore()
+  }
+})
 
 it.each([
   { isolated: false, mode: undefined }, { isolated: true, mode: undefined },

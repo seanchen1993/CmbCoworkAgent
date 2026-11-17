@@ -49,21 +49,29 @@ describe("real workspace worker checks", () => {
     await expect(validateWorkspaceDirectory(directory)).rejects.toThrow("不存在或不可访问")
   })
 
-  it("does not reuse a prior successful symlink target", async () => {
+  it("rechecks symlink targets when the same real worker is reused", async () => {
     const first = join(root, "first"),
       second = join(root, "second"),
       alias = join(root, "alias")
     mkdirSync(first)
     mkdirSync(second)
     symlinkSync(first, alias, process.platform === "win32" ? "junction" : "dir")
-    await expect(validateWorkspaceDirectory(alias)).resolves.toBe(realpathSync(first))
-    unlinkSync(alias)
-    symlinkSync(second, alias, process.platform === "win32" ? "junction" : "dir")
-    await expect(validateWorkspaceDirectory(alias)).resolves.toBe(realpathSync(second))
+    const factory = vi.fn((options: Parameters<typeof createWorkspaceProbeTestWorker>[0]) =>
+      createWorkspaceProbeTestWorker(options))
+    const client = new WorkspaceProbeClient(factory)
+    try {
+      await expect(client.probe(alias)).resolves.toBe(realpathSync(first))
+      unlinkSync(alias)
+      symlinkSync(second, alias, process.platform === "win32" ? "junction" : "dir")
+      await expect(client.probe(alias)).resolves.toBe(realpathSync(second))
+      expect(factory).toHaveBeenCalledOnce()
+    } finally {
+      await client.close()
+    }
   })
 
   it("uses an on-time real probe result after a 3200ms blocked main loop, with the original 3000ms budget", async () => {
-    // Warm only Vite's factory module. The measured call still creates a new thread and reads FS.
+    // A warmed worker still reads the directory again under the original deadline.
     await validateWorkspaceDirectory(root)
     const start = performance.now()
     const pending = validateWorkspaceDirectory(root)

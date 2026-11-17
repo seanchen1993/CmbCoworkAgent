@@ -1,7 +1,8 @@
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, existsSync, renameSync } from "node:fs"
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, existsSync, renameSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
 import { tmpdir } from "node:os"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { ProjectCompositionStore } from "./composition-store"
 
 describe("first project flow storage", () => {
@@ -51,6 +52,32 @@ describe("first project flow storage", () => {
       expect(existsSync(path)).toBe(true)
       new ProjectCompositionStore(path).close()
     } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+  it("fails closed and releases every invalid database handle before in-process recovery", () => {
+    const root = mkdtempSync(join(tmpdir(), "composition-corrupt-"))
+    const path = join(root, "state.sqlite")
+    const close = vi.spyOn(DatabaseSync.prototype, "close")
+    const work = vi.fn()
+    try {
+      writeFileSync(path, "invalid SQLite contents".repeat(128))
+      for (let attempt = 0; attempt < 3; attempt++) {
+        expect(() => new ProjectCompositionStore(path).guardWorkspaceMutation(root, work))
+          .toThrow(/not a database/i)
+      }
+      expect(work).not.toHaveBeenCalled()
+      expect(close).toHaveBeenCalledTimes(3)
+      rmSync(path)
+      const repaired = new ProjectCompositionStore(path)
+      try {
+        repaired.guardWorkspaceMutation(root, work)
+        expect(work).toHaveBeenCalledOnce()
+      } finally {
+        repaired.close()
+      }
+    } finally {
+      close.mockRestore()
       rmSync(root, { recursive: true, force: true })
     }
   })

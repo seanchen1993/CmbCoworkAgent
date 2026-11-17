@@ -15,10 +15,15 @@ export type LocalProjectSummary = Pick<
   HostProjectState,
   "projectId" | "name" | "workspace" | "status" | "stageIndex" | "updatedAt" | "packageVersion"
 >
+export function hostProjectViewState(project: HostProjectState): Omit<HostProjectState, "harnessFeatureInputs"> {
+  const { harnessFeatureInputs: _inputs, ...view } = project
+  return view
+}
+
 export interface LocalProjectView {
   importedSource?: { sourceProjectId: string; prefixStageIds: string[]; reexecuteStageIds?: string[] }
   resultApprovalRequired?: boolean
-  project: HostProjectState
+  project: ReturnType<typeof hostProjectViewState>
   operations: HostProjectOperation[]
   preview?: { state: "active" | "expired"; revision?: number }
   resultReview?: import("./host-types").HostResultReview
@@ -27,6 +32,7 @@ export interface LocalProjectView {
   migrationReview?: import("./host-types").HostPlanMigrationReview
   inputWait?: { operationId: string; requestId: string; threadId: string; status: "waiting" | "answered";
     resumable: boolean }
+  inputWaitError?: string
 }
 export type LocalProjectCommand =
   | { kind: "prepare"; expectedVersion: number; idempotencyKey: string; stageInstructions?: string }
@@ -71,7 +77,7 @@ export interface LocalProjectApi {
     projectId: string,
     operationId: string
   ): Promise<import("./action-results").ProjectActionResults>
-  templates(): Promise<LocalProjectTemplate[]>
+  templates(installedPluginId?: string): Promise<LocalProjectTemplate[]>
   list(afterProjectId?: string, query?: string): Promise<LocalProjectSummary[]>
   get(projectId: string): Promise<LocalProjectView>
   versions(projectId: string): Promise<import("./version-report").ProjectVersionReport>

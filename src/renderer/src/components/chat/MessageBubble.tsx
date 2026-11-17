@@ -673,6 +673,7 @@ function MessageBubbleImpl({
         text={text}
         isExpanded={userContentExpanded}
         isFirstOfReply={shouldShowMessageHead && index === firstTextIndex}
+        isHistory={!isLoading && !isStreaming}
         fallback={fallback}
         renderText={renderText}
       />

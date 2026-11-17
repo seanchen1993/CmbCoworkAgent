@@ -157,6 +157,8 @@ async function buildProjectDoc(
 ): Promise<{ docId: string; doc: Record<string, unknown> }> {
   const features = (detail?.runs ?? []).map(toFeatureSnapshot)
   const docId = projectDocId(project.projectId)
+  const managedRunFirstStartedAt =
+    project.managedRunFirstStartedAt ?? detail?.project?.managedRunFirstStartedAt
 
   // The bound adapter plugin's version (HarnessProjectListItem.harnessAdapter
   // carries id/name but not version, so resolve it separately). Best-effort.
@@ -208,8 +210,8 @@ async function buildProjectDoc(
     systemConstraintFirstLoadedAt: project.systemConstraintFirstLoadedAt,
     // 同款单调标记：项目是否至少开启过一次托管运行。随快照每轮重新 upsert，所以丢事件
     // 不影响它；「托管运行次数」是另一条路，按时间范围聚合 harness.managed_run.started。
-    managedRunEverStarted: Boolean(project.managedRunFirstStartedAt),
-    managedRunFirstStartedAt: project.managedRunFirstStartedAt,
+    managedRunEverStarted: Boolean(managedRunFirstStartedAt),
+    managedRunFirstStartedAt,
     featureCount: features.length,
     features,
     ...(detail?.error ? { error: detail.error } : {})

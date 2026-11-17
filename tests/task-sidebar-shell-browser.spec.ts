@@ -40,7 +40,7 @@ async function main() {
           <button aria-pressed={module==='work'} onClick={()=>useAppStore.getState().setRightModule('work')}>work</button>
           <button onClick={()=>useAppStore.getState().setRightPanelCollapsed(!collapsed)}>{collapsed?'Expand':'Collapse'}</button>
         </nav><main style={{height:650,display:'flex'}} ref={layout.rightPanelSplitRef}>
-          <section data-chat-column style={{flex:1,minWidth:0}}><textarea className='composer-textarea' aria-label='Composer'/>
+          <section data-chat-column ref={layout.rightPanelMainRef} style={{flex:1,minWidth:0,...layout.mainStyle}}><textarea className='composer-textarea' aria-label='Composer'/>
             <ClawSidebar threadId='a' flow={flow} disabled={false} onStart={async()=>true} onFollowUp={()=>{}}><PersistentDrawing/></ClawSidebar>
           </section>
           <RightPanelDock hidden={collapsed||focused} resizable={layout.showRightResizeHandle}
@@ -195,6 +195,22 @@ async function main() {
       assert(
         ((await page.evaluate("window.shellFixture.fullscreen()")) as boolean[]).includes(true)
       )
+      if (mode === "browser") {
+        const before = await page.locator("[data-chat-column]").boundingBox()
+        const separator = await divider.boundingBox()
+        assert(before && separator)
+        await page.mouse.move(separator.x + separator.width / 2, separator.y + 80)
+        await page.mouse.down()
+        await page.mouse.move(separator.x + separator.width / 2 + 80, separator.y + 80)
+        await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
+        const during = await page.locator("[data-chat-column]").boundingBox()
+        assert(during)
+        assert(Math.abs(during.width - before.width - 80) < 2, "the left pane must follow the pointer")
+        await page.mouse.up()
+        const after = await page.locator("[data-chat-column]").boundingBox()
+        assert(after)
+        assert(Math.abs(after.width - during.width) < 2, "releasing the pointer must not move the split")
+      }
       await nav.getByText("Task", { exact: true }).click()
       assert.deepEqual(await page.evaluate("window.shellFixture.fullscreen()"), [false, false])
       assert((await shell.boundingBox())!.width >= 250)

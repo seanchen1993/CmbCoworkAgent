@@ -16,7 +16,7 @@ import { captureProjectCapabilityContext } from "../mods/project-capability-cont
 import { runtimeDirectory, runtimeDigest } from "../harness-board/project-runtime/safe-files"
 import { resolveCompositionWorkflows } from "../harness-board/project-runtime/composition-workflow"
 import { ProjectCompositionService } from "../harness-board/project-runtime/composition-service"
-import type { CompositionRun } from "../harness-board/project-runtime/composition-store"
+import { ProjectCompositionStore, type CompositionRun } from "../harness-board/project-runtime/composition-store"
 import { ProjectCompositionPreviews } from "../harness-board/project-runtime/composition-preview"
 import type { HostProjectService } from "../harness-board/project-runtime/host-service"
 import type { HostProjectOperation } from "../../shared/project-runtime/host-types"
@@ -85,6 +85,7 @@ export function registerProjectCompositionHandlers(ipc: IpcMain, deps: Dependenc
     }
   >()
   let runtime: ProjectCompositionService | undefined
+  let store: ProjectCompositionStore | undefined
   let legacyPackages: RetainedPackageSnapshots | undefined
   const key = (definition: ProjectCompositionDefinition) => JSON.stringify(definition)
 
@@ -192,10 +193,15 @@ export function registerProjectCompositionHandlers(ipc: IpcMain, deps: Dependenc
       .filter(Boolean)
       .join("\n\n")
   }
+  const databasePath = () => join(getOpenworkDir(), "project-compositions", "state.sqlite")
+  function compositionStore(): ProjectCompositionStore {
+    return (store ??= new ProjectCompositionStore(databasePath(), undefined, deps.assertWorkspaceIdle))
+  }
+
   function composition(): ProjectCompositionService {
     if (!runtime) {
       runtime = new ProjectCompositionService(
-        join(getOpenworkDir(), "project-compositions", "state.sqlite"),
+        databasePath(),
         deps.host(),
         {
           legacy: deps.legacy?.({
@@ -321,7 +327,8 @@ export function registerProjectCompositionHandlers(ipc: IpcMain, deps: Dependenc
             const auth = authorizeRun(context.runId)
             deps.bindOwner(operation, auth.owner)
           }
-        }
+        },
+        compositionStore
       )
       runtime.recoverInterrupted()
     }
@@ -913,5 +920,5 @@ export function registerProjectCompositionHandlers(ipc: IpcMain, deps: Dependenc
       }
     }
   )
-  return composition
+  return { service: composition, store: compositionStore }
 }

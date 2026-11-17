@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { existsSync, mkdirSync, realpathSync } from "node:fs"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import { DatabaseSync } from "node:sqlite"
@@ -17,8 +17,11 @@ import type {
 } from "../../shared/harness-board-types"
 import {
   parseProjectRuntimeManifest,
+  projectRuntimeExtensionContract,
+  PROJECT_RUNTIME_MAX_BYTES,
   type ProjectRuntimeManifest
 } from "../../shared/project-runtime"
+import type { HarnessHostFeatureInputs } from "../../shared/project-runtime/host-types"
 import type { LocalProjectView } from "../../shared/project-runtime/platform-api"
 import type { PluginStartUseIdentity } from "../../shared/plugin-start-use"
 import { getOpenworkDir, getPlugins } from "../storage"
@@ -31,9 +34,13 @@ import {
   runtimeDirectory,
   runtimeDirectoryIdentity
 } from "./project-runtime/safe-files"
+import { readRuntimeScopedFileAsync } from "./project-runtime/safe-files-async"
+import { readProjectKnowledgeDeployUnits } from "./knowledge-deploy-units"
 import { HARNESS_PROJECT_STORE_MAX_BYTES } from "./store-limits"
-import { hostGoal } from "./project-runtime/host-state-protocol"
+import { hostGoal, parseHarnessHostFeatureInputs } from "./project-runtime/host-state-protocol"
+import { HOST_CONTEXT_MATERIAL_ROOT_LIMIT } from "../../shared/project-runtime/extension-contract"
 import { resolveWorkflowWorktreeIsolationBoundary } from "../services/git-worktree"
+import { resolveProjectKnowledgeBases } from "../services/knowledge-base-manager"
 
 interface NativeFeatureRecord extends HarnessNativeFeatureBinding {
   manifest: ProjectRuntimeManifest
@@ -41,7 +48,12 @@ interface NativeFeatureRecord extends HarnessNativeFeatureBinding {
   selectedDeployUnits: HarnessDeployUnitMapping[]
   createdAt: number
   goal?: string
+  requiresKnowledge?: true
+  packageMaterialRoots?: number
+  harnessFeatureInputs?: HarnessHostFeatureInputs
 }
+
+export type NativeHarnessViewProjection = "summary" | "discussion"
 
 export interface NativeHarnessRuntime {
   create(
@@ -52,19 +64,33 @@ export interface NativeHarnessRuntime {
       workspace: string
       installedPluginId: string
       expectedPlugin: PluginStartUseIdentity
+      harnessFeatureInputs?: HarnessHostFeatureInputs
     },
     guard?: () => void
   ): Promise<LocalProjectView>
-  view(hostRunId: string): LocalProjectView | undefined
+  view(hostRunId: string, projection?: NativeHarnessViewProjection): LocalProjectView | undefined
 }
+type NativeFeaturePreflight = (input: {
+  original: HarnessNativeFeatureBinding
+  workspace: string
+  assertCurrent(): void
+}) => Promise<() => void>
+
 let runtime: NativeHarnessRuntime | undefined
 export function configureNativeHarnessRuntime(value: NativeHarnessRuntime): void {
   runtime = value
 }
-export function nativeHarnessRuntimeView(id: string): LocalProjectView | undefined {
+export function nativeHarnessRuntimeView(
+  id: string,
+  projection?: NativeHarnessViewProjection
+): LocalProjectView | undefined {
   if (!runtime) throw Error("HARNESS_NATIVE_RUNTIME_UNAVAILABLE")
-  return runtime.view(id)
+  return runtime.view(id, projection)
 }
+
+const NATIVE_FEATURE_ROWS =
+  "SELECT project_id,feature_id,host_run_id,data FROM native_harness_features"
+const MAX_DATE_TIMESTAMP = 8_640_000_000_000_000
 
 /** Separate durable identity index; HostStore remains the only execution state owner. */
 export class NativeHarnessFeatureStore {
@@ -72,18 +98,33 @@ export class NativeHarnessFeatureStore {
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true })
     this.database = new DatabaseSync(path)
-    this.database.exec(`CREATE TABLE IF NOT EXISTS native_harness_features (
-      project_id TEXT NOT NULL, feature_id TEXT NOT NULL, host_run_id TEXT NOT NULL UNIQUE,
-      data TEXT NOT NULL, PRIMARY KEY (project_id, feature_id))`)
+    try {
+      this.database.exec(`CREATE TABLE IF NOT EXISTS native_harness_features (
+        project_id TEXT NOT NULL, feature_id TEXT NOT NULL, host_run_id TEXT NOT NULL UNIQUE,
+        data TEXT NOT NULL, PRIMARY KEY (project_id, feature_id))`)
+    } catch (error) {
+      this.database.close()
+      throw error
+    }
   }
-  private decode(row: unknown): NativeFeatureRecord | undefined {
+  private decode(row: Record<string, unknown> | undefined): NativeFeatureRecord | undefined {
     if (!row) return undefined
-    const data = JSON.parse((row as { data: string }).data) as NativeFeatureRecord
+    if (typeof row.data !== "string") throw Error("HARNESS_NATIVE_BINDING_INVALID")
+    const data = JSON.parse(row.data) as NativeFeatureRecord | null
     if (
+      !data ||
       data.engine !== "host" ||
       !data.projectId ||
+      data.projectId !== row.project_id ||
       !data.featureId ||
+      data.featureId !== row.feature_id ||
       !data.hostRunId ||
+      data.hostRunId !== row.host_run_id ||
+      typeof data.title !== "string" ||
+      (data.goal !== undefined && typeof data.goal !== "string") ||
+      typeof data.createdAt !== "number" ||
+      !Number.isFinite(data.createdAt) ||
+      Math.abs(data.createdAt) > MAX_DATE_TIMESTAMP ||
       !isAbsolute(data.workspace) ||
       !isAbsolute(data.repositoryWorkspace) ||
       data.expectedPlugin?.pluginId !== data.installedPluginId ||
@@ -99,29 +140,43 @@ export class NativeHarnessFeatureStore {
               !data.repositoryWorkspaceIdentity ||
               data.repositoryWorkspaceIdentity.length > 8192)) ||
           (!data.repositoryWorkspaceIdentity && data.workspace !== data.repositoryWorkspace))) ||
+      (data.supportsDeployUnits !== undefined && data.supportsDeployUnits !== true) ||
+      (data.requiresKnowledge !== undefined && (!data.supportsDeployUnits || data.requiresKnowledge !== true)) ||
+      (data.packageMaterialRoots !== undefined && (!data.supportsDeployUnits ||
+        !Number.isInteger(data.packageMaterialRoots) || data.packageMaterialRoots < 0 ||
+        data.packageMaterialRoots >= HOST_CONTEXT_MATERIAL_ROOT_LIMIT)) ||
       (data.packageDigest !== undefined && !/^[a-f0-9]{64}$/.test(data.packageDigest))
     )
       throw Error("HARNESS_NATIVE_BINDING_INVALID")
     data.manifest = parseProjectRuntimeManifest(data.manifest)
+    if (data.harnessFeatureInputs) {
+      if (!data.supportsDeployUnits || !data.goal) throw Error("HARNESS_NATIVE_BINDING_INVALID")
+      data.harnessFeatureInputs = parseHarnessHostFeatureInputs(data.harnessFeatureInputs)
+    }
     return data
   }
   get(projectId: string, featureId: string): NativeFeatureRecord | undefined {
     return this.decode(
       this.database
-        .prepare("SELECT data FROM native_harness_features WHERE project_id=? AND feature_id=?")
+        .prepare(`${NATIVE_FEATURE_ROWS} WHERE project_id=? AND feature_id=?`)
         .get(projectId, featureId)
     )
   }
   byRun(id: string): NativeFeatureRecord | undefined {
     return this.decode(
-      this.database.prepare("SELECT data FROM native_harness_features WHERE host_run_id=?").get(id)
+      this.database.prepare(`${NATIVE_FEATURE_ROWS} WHERE host_run_id=?`).get(id)
     )
   }
   list(projectId: string): NativeFeatureRecord[] {
-    return this.database
-      .prepare("SELECT data FROM native_harness_features WHERE project_id=? ORDER BY rowid")
+    const rows = this.database
+      .prepare(`${NATIVE_FEATURE_ROWS} WHERE project_id=? ORDER BY rowid`)
       .all(projectId)
-      .map((row) => this.decode(row)!)
+    try {
+      return rows.map((row) => this.decode(row)!)
+    } catch (error) {
+      // Classify stored records only. Database access failures reach the caller unchanged.
+      throw Error("HARNESS_NATIVE_FEATURE_INDEX_UNREADABLE", { cause: error })
+    }
   }
   insert(record: NativeFeatureRecord): void {
     this.database
@@ -144,6 +199,7 @@ export class NativeHarnessFeatureStore {
   }
 }
 let cached: { path: string; store: NativeHarnessFeatureStore } | undefined
+let projectCache: { fingerprint: string; projects: HarnessProjectMetadata[] } | undefined
 function store(): NativeHarnessFeatureStore {
   const path = join(getOpenworkDir(), "harness-native-features.sqlite")
   if (cached?.path !== path) {
@@ -158,6 +214,7 @@ function existingStore(): NativeHarnessFeatureStore | undefined {
 export function closeNativeHarnessFeatureStore(): void {
   cached?.store.close()
   cached = undefined
+  projectCache = undefined
 }
 function publicBinding(record: NativeFeatureRecord): HarnessNativeFeatureBinding {
   return {
@@ -180,6 +237,7 @@ function publicBinding(record: NativeFeatureRecord): HarnessNativeFeatureBinding
         }
       : {}),
     installedPluginId: record.installedPluginId,
+    ...(record.supportsDeployUnits ? { supportsDeployUnits: true as const } : {}),
     expectedPlugin: structuredClone(record.expectedPlugin),
     ...(record.packageDigest ? { packageDigest: record.packageDigest } : {}),
     ...(record.goal ? { initialUserMessage: record.goal } : {}),
@@ -194,17 +252,26 @@ export function findNativeHarnessFeatureByRunId(hostRunId: string) {
   const record = existingStore()?.byRun(hostRunId)
   return record && publicBinding(record)
 }
-export function assertNativeHarnessFeatureCurrent(binding: HarnessNativeFeatureBinding): void {
-  const file = readRuntimeScopedFile(
-    getOpenworkDir(),
-    "harness-board-projects.json",
-    HARNESS_PROJECT_STORE_MAX_BYTES
-  )
-  const value = file.bytes && JSON.parse(file.bytes.toString("utf8"))
-  const project = value?.projects?.find(
-    (item: HarnessProjectMetadata) => item.projectId === binding.projectId
-  )
+export function observeDurableNativeHarnessProject(projectId: string) {
+  const root = getOpenworkDir()
+  const relative = "harness-board-projects.json"
+  const { fingerprint } = probeRuntimeScopedFile(root, relative)
+  if (projectCache?.fingerprint !== fingerprint) {
+    const { bytes } = readRuntimeScopedFile(root, relative, HARNESS_PROJECT_STORE_MAX_BYTES, fingerprint)
+    const value = bytes && JSON.parse(bytes.toString("utf8"))
+    projectCache = { fingerprint, projects: value?.projects ?? [] }
+  }
+  return { fingerprint, project: projectCache.projects.find((item) => item.projectId === projectId) }
+}
+
+function currentNativeHarnessProject(binding: HarnessNativeFeatureBinding): HarnessProjectMetadata {
+  const { project } = observeDurableNativeHarnessProject(binding.projectId)
   assertNativeHarnessFeatureBinding(binding, project)
+  return project as HarnessProjectMetadata
+}
+
+export function assertNativeHarnessFeatureCurrent(binding: HarnessNativeFeatureBinding): void {
+  currentNativeHarnessProject(binding)
 }
 
 /** The caller supplies current host-owned project facts, never renderer metadata. */
@@ -239,7 +306,7 @@ export function assertNativeHarnessFeatureBinding(
 export function readNativeHarnessFeatureStage(projectId: string, featureId: string) {
   const record = existingStore()?.get(projectId, featureId)
   if (!record) throw Error("HARNESS_NATIVE_FEATURE_MISSING")
-  const view = runtime ? recordView(record) : undefined
+  const view = runtime ? recordView(record, "summary") : undefined
   if (!runtime && record.packageDigest) throw Error("HARNESS_NATIVE_RUNTIME_UNAVAILABLE")
   const manifest = view?.project.manifest ?? record.manifest
   const stage = manifest.stages[view?.project.stageIndex ?? 0]
@@ -253,7 +320,7 @@ export function readNativeHarnessDiscussionState(projectId: string, featureId: s
   const binding = publicBinding(record)
   assertNativeHarnessFeatureCurrent(binding)
   if (!runtime && record.packageDigest) throw Error("HARNESS_NATIVE_RUNTIME_UNAVAILABLE")
-  const view = runtime ? recordView(record) : undefined
+  const view = runtime ? recordView(record, "discussion") : undefined
   return structuredClone({
     binding,
     manifest: view?.project.manifest ?? record.manifest,
@@ -262,7 +329,9 @@ export function readNativeHarnessDiscussionState(projectId: string, featureId: s
     status: view?.project.status ?? "not_started",
     version: view?.project.version ?? null,
     operations: view?.operations ?? [],
-    inputWait: view?.inputWait ?? null
+    inputWait: view?.inputWaitError
+      ? { status: "unknown" as const, reason: "input_ledger_unreadable" }
+      : view?.inputWait ?? null
   })
 }
 
@@ -271,7 +340,14 @@ export async function nativeHarnessPlugin(id: string) {
   if (!plugin) return undefined
   const description = await readProjectRuntimeDescription(plugin.path)
   if (description?.status !== "ready" || description.manifest.mode !== "host") return undefined
-  return { plugin, manifest: description.manifest }
+  const file = await readRuntimeScopedFileAsync(
+    plugin.path, "devclaw.project-runtime.json", PROJECT_RUNTIME_MAX_BYTES
+  )
+  if (!file.bytes || createHash("sha256").update(file.bytes).digest("hex") !== description.declarationDigest)
+    throw Error("PROJECT_PACKAGE_IDENTITY_MISMATCH")
+  const contract = projectRuntimeExtensionContract(JSON.parse(file.bytes.toString("utf8")))
+  return { plugin, manifest: description.manifest,
+    ...(contract?.context?.provider?.materials?.featureInputs ? { featureInputs: true as const } : {}) }
 }
 
 export function nativeProjectRoot(project: HarnessProjectMetadata): string {
@@ -285,10 +361,26 @@ export function initializeNativeHarnessProject(project: HarnessProjectMetadata):
   mkdirSync(root, { recursive: true })
   if (realpathSync(root) !== root) throw Error("HARNESS_NATIVE_WORKSPACE_INVALID")
 }
-export function assertNativeFeatureConfiguration(
+function assertNativeFeatureConfiguration(
   sessionWorkspace: HarnessSessionWorkspace,
-  selectedDeployUnits: readonly HarnessDeployUnitMapping[] = []
+  selectedDeployUnits: readonly HarnessDeployUnitMapping[],
+  featureInputs: boolean
 ): void {
+  if (featureInputs && (sessionWorkspace?.source === "directory" ||
+    (sessionWorkspace?.source === "deployUnit" &&
+      selectedDeployUnits.some((unit) => unit.deployUnitId === sessionWorkspace.deployUnitId)))) {
+    if (selectedDeployUnits.length) {
+      try {
+        parseHarnessHostFeatureInputs({
+          selectedDeployUnits: [...new Set(selectedDeployUnits.map((unit) => unit.deployUnitId))],
+          knowledgeRoots: []
+        })
+      } catch {
+        throw Error("所选发布单元超过原生流程支持的数量或编号长度，请在编辑特性配置中调整。")
+      }
+    }
+    return
+  }
   if (sessionWorkspace?.source !== "directory" || selectedDeployUnits.length)
     throw Error(
       "原生项目请选择目录作为需求工作区；多仓库或部署单元请使用插件声明的配置，旧发布单元配置不会注入原生流程"
@@ -303,7 +395,6 @@ export async function createNativeHarnessFeature(input: {
   selectedDeployUnits: HarnessDeployUnitMapping[]
   guard?: () => void | Promise<void>
 }): Promise<HarnessNativeFeatureBinding> {
-  assertNativeFeatureConfiguration(input.sessionWorkspace, input.selectedDeployUnits)
   const { project, featureId } = input
   return withHarnessStoreMutation(`native-feature:${project.projectId}:${featureId}`, async () => {
     await input.guard?.()
@@ -316,7 +407,13 @@ export async function createNativeHarnessFeature(input: {
     await input.guard?.()
     const manifestFile = snapshot.files.find((file) => file.path === "devclaw.project-runtime.json")
     if (!manifestFile) throw Error("PROJECT_PLUGIN_UNAVAILABLE")
-    const manifest = parseProjectRuntimeManifest(JSON.parse(manifestFile.bytes.toString("utf8")))
+    const rawManifest = JSON.parse(manifestFile.bytes.toString("utf8")) as unknown
+    const manifest = parseProjectRuntimeManifest(rawManifest)
+    const context = projectRuntimeExtensionContract(rawManifest)?.context
+    const materials = context?.provider?.materials
+    const featureInputs = project.nativeBinding.supportsDeployUnits === true
+    if (featureInputs && !materials?.featureInputs) throw Error("PROJECT_PACKAGE_IDENTITY_MISMATCH")
+    assertNativeFeatureConfiguration(input.sessionWorkspace, input.selectedDeployUnits, featureInputs)
     if (
       manifest.mode !== "host" ||
       manifest.plugin.id !== source.plugin.name ||
@@ -350,6 +447,9 @@ export async function createNativeHarnessFeature(input: {
       repositoryWorkspaceIdentity: workspaceIdentity,
       installedPluginId: source.plugin.id,
       expectedPlugin,
+      ...(featureInputs ? { supportsDeployUnits: true as const } : {}),
+      ...(featureInputs && context?.knowledge.required ? { requiresKnowledge: true as const } : {}),
+      ...(featureInputs ? { packageMaterialRoots: materials!.roots.filter(root => root.source === "package").length } : {}),
       manifest,
       sessionWorkspace: input.sessionWorkspace,
       selectedDeployUnits: input.selectedDeployUnits,
@@ -365,14 +465,28 @@ export async function ensureNativeHarnessFeatureRun(
   featureId: string,
   goal: string,
   guard: () => void = () => {},
-  executionWorkspace?: string
+  executionWorkspace?: string,
+  preflight?: NativeFeaturePreflight
 ): Promise<LocalProjectView> {
   return withHarnessStoreMutation(`native-feature:${projectId}:${featureId}`, async () => {
-    if (!runtime) throw Error("HARNESS_NATIVE_RUNTIME_UNAVAILABLE")
+    const hostRuntime = runtime
+    if (!hostRuntime) throw Error("HARNESS_NATIVE_RUNTIME_UNAVAILABLE")
     guard()
     const record = store().get(projectId, featureId)
     if (!record) throw Error("HARNESS_NATIVE_FEATURE_MISSING")
-    assertNativeHarnessFeatureCurrent(publicBinding(record))
+    const original = publicBinding(record)
+    const initialProject = currentNativeHarnessProject(original)
+    if (record.packageDigest && !hostRuntime.view(record.hostRunId))
+      throw Error("HARNESS_NATIVE_EXECUTION_MISSING")
+    const originalRecord = JSON.stringify(record)
+    const firstStart = !record.goal
+    const pinnedInputs = record.harnessFeatureInputs
+    const pendingKnowledge =
+      !firstStart && !record.packageDigest && !!pinnedInputs?.knowledgeRoots.length &&
+      !hostRuntime.view(record.hostRunId)
+    const selectingWorkspace = firstStart && !record.packageDigest &&
+      record.workspaceMode === "selected-directory"
+    let workspace = record.workspace
     if (executionWorkspace !== undefined) {
       if (
         typeof executionWorkspace !== "string" ||
@@ -380,37 +494,128 @@ export async function ensureNativeHarnessFeatureRun(
         executionWorkspace.length > 4096
       )
         throw Error("HARNESS_NATIVE_WORKSPACE_INVALID")
-      const selected = runtimeDirectory(realpathSync(executionWorkspace))
-      if (
-        (record.goal || record.packageDigest || record.workspaceMode !== "selected-directory") &&
-        selected !== record.workspace
-      )
+      workspace = runtimeDirectory(realpathSync(executionWorkspace))
+      if (!selectingWorkspace && workspace !== record.workspace)
         throw Error("本次执行已固定目录，不能更换运行目录")
-      if (!record.goal && !record.packageDigest && record.workspaceMode === "selected-directory") {
-        record.repositoryWorkspaceIdentity ??= record.workspaceIdentity
-        record.workspace = selected
-        record.workspaceIdentity = runtimeDirectoryIdentity(selected)
-      }
+    }
+    const workspaceIdentity = runtimeDirectoryIdentity(workspace)
+    const knowledgeIds = initialProject.knowledgeBaseIds ?? []
+    const assertPreflightCurrent = () => {
+      guard()
+      const currentProject = currentNativeHarnessProject(original)
+      if (
+        runtime !== hostRuntime ||
+        JSON.stringify(store().get(projectId, featureId)) !== originalRecord ||
+        runtimeDirectoryIdentity(workspace) !== workspaceIdentity ||
+        (pendingKnowledge && hostRuntime.view(record.hostRunId) !== undefined) ||
+        (record.supportsDeployUnits && firstStart &&
+          JSON.stringify(currentProject.knowledgeBaseIds ?? []) !== JSON.stringify(knowledgeIds))
+      )
+        throw Error("HARNESS_NATIVE_BINDING_CHANGED")
     }
     if (record.worktree) await resolveWorkflowWorktreeIsolationBoundary(record.worktree)
-    guard()
+    assertPreflightCurrent()
     goal = hostGoal(goal)
     if (record.goal && record.goal !== goal) throw Error("HARNESS_NATIVE_REQUIREMENT_CHANGED")
+
+    let harnessFeatureInputs = pinnedInputs
+    if (firstStart) {
+      if (record.supportsDeployUnits) {
+        const selectedDeployUnits = [...new Set(record.selectedDeployUnits.map((unit) => unit.deployUnitId))]
+        if (!selectedDeployUnits.length)
+          throw Error("请在编辑特性配置中选择发布单元后重试")
+        const sources = await resolveProjectKnowledgeBases(knowledgeIds)
+        if (sources.length !== knowledgeIds.length || (record.requiresKnowledge && !sources.length))
+          throw Error("请在编辑项目中选择已同步的系统约束知识库后重试")
+        if (sources.length + (record.packageMaterialRoots ?? 0) > HOST_CONTEXT_MATERIAL_ROOT_LIMIT)
+          throw Error("已选知识库超过插件支持的材料根目录数量，请在编辑项目中调整选择")
+        harnessFeatureInputs = parseHarnessHostFeatureInputs({
+          selectedDeployUnits,
+          knowledgeRoots: sources.map((source) => ({
+            id: source.id,
+            path: runtimeDirectory(source.path),
+            identity: runtimeDirectoryIdentity(source.path)
+          }))
+        })
+      }
+    } else if (pendingKnowledge && pinnedInputs) {
+      // Keep the durable input selection if Host creation was interrupted. A normal UAT
+      // checkout swap changes the inode while leaving each pinned library and path intact.
+      const sources = await resolveProjectKnowledgeBases(pinnedInputs.knowledgeRoots.map((root) => root.id))
+      assertPreflightCurrent()
+      const byId = new Map(sources.map((source) => [source.id, source.path]))
+      const knowledgeRoots = pinnedInputs.knowledgeRoots.map((root) => {
+        const path = byId.get(root.id)
+        if (!path || runtimeDirectory(path) !== root.path)
+          throw Error("PROJECT_KNOWLEDGE_BINDING_CHANGED")
+        return { ...root, identity: runtimeDirectoryIdentity(path) }
+      })
+      const changed = knowledgeRoots.some(
+        (root, index) => root.identity !== pinnedInputs.knowledgeRoots[index].identity
+      )
+      if (changed) {
+        if (!preflight) throw Error("PROJECT_KNOWLEDGE_PREFLIGHT_REQUIRED")
+        harnessFeatureInputs = parseHarnessHostFeatureInputs({ ...pinnedInputs, knowledgeRoots })
+      }
+    }
+    if (firstStart || pendingKnowledge) {
+      assertPreflightCurrent()
+      const assertReady = await preflight?.({ original, workspace, assertCurrent: assertPreflightCurrent })
+      if (harnessFeatureInputs && (firstStart || harnessFeatureInputs !== pinnedInputs)) {
+        const { assertHarnessFeatureKnowledgeAvailable } = await import("./project-runtime/package-input-identity")
+        assertPreflightCurrent()
+        try {
+          await assertHarnessFeatureKnowledgeAvailable(harnessFeatureInputs, record.requiresKnowledge === true)
+        } catch (error) {
+          if (error instanceof Error && error.message === "PROJECT_KNOWLEDGE_LIMIT")
+            throw Error("系统约束知识库超过运行支持的材料大小或数量。请在编辑项目中调整知识库后重试。")
+          throw Error("系统约束知识库缺少可读取的材料。请重新同步知识库，或在编辑项目中调整选择后重试。")
+        }
+        assertPreflightCurrent()
+        if (harnessFeatureInputs.knowledgeRoots.length) {
+          const availableDeployUnits = new Set(await readProjectKnowledgeDeployUnits(
+            harnessFeatureInputs.knowledgeRoots.map((root) => root.path), "host"
+          ))
+          if (harnessFeatureInputs.selectedDeployUnits.some((id) => !availableDeployUnits.has(id))) {
+            if (firstStart) throw Error("PROJECT_KNOWLEDGE_DEPLOY_UNITS_MISMATCH")
+            throw Error("首次启动记录待恢复，但原发布单元已不在当前系统约束知识库。请恢复原发布单元后重试，或新建特性。")
+          }
+        }
+      }
+      assertPreflightCurrent()
+      assertReady?.()
+    }
+    const assertKnowledgeRoots = () => {
+      if (!firstStart && !pendingKnowledge) return
+      for (const root of harnessFeatureInputs?.knowledgeRoots ?? []) {
+        if (runtimeDirectoryIdentity(root.path) !== root.identity)
+          throw Error("PROJECT_KNOWLEDGE_BINDING_CHANGED")
+      }
+    }
+    assertKnowledgeRoots()
+    if (selectingWorkspace) {
+      record.repositoryWorkspaceIdentity ??= record.workspaceIdentity
+      record.workspace = workspace
+      record.workspaceIdentity = workspaceIdentity
+    }
+    if (harnessFeatureInputs) record.harnessFeatureInputs = harnessFeatureInputs
     record.goal = goal
     // Persist the original request before Host creation so a crash/retry never substitutes it.
     store().update(record)
     const assertCurrent = () => {
       guard()
       assertNativeHarnessFeatureCurrent(publicBinding(record))
+      assertKnowledgeRoots()
     }
-    const view = await runtime.create(
+    const view = await hostRuntime.create(
       {
         projectId: record.hostRunId,
         name: record.title,
         goal,
         workspace: record.workspace,
         installedPluginId: record.installedPluginId,
-        expectedPlugin: record.expectedPlugin
+        expectedPlugin: record.expectedPlugin,
+        ...(harnessFeatureInputs ? { harnessFeatureInputs } : {})
       },
       assertCurrent
     )
@@ -432,8 +637,11 @@ function assertNativeView(record: NativeFeatureRecord, view: LocalProjectView): 
   )
     throw Error("HARNESS_NATIVE_BINDING_CHANGED")
 }
-function recordView(record: NativeFeatureRecord): LocalProjectView | undefined {
-  const view = nativeHarnessRuntimeView(record.hostRunId)
+function recordView(
+  record: NativeFeatureRecord,
+  projection?: NativeHarnessViewProjection
+): LocalProjectView | undefined {
+  const view = nativeHarnessRuntimeView(record.hostRunId, projection)
   if (view) assertNativeView(record, view)
   else if (record.packageDigest) throw Error("HARNESS_NATIVE_EXECUTION_MISSING")
   // A crash between Host creation and identity publication resumes through the exact create CAS.
@@ -443,7 +651,7 @@ export function assertNativeHarnessProjectMutable(projectId: string, adapterChan
   const records = existingStore()?.list(projectId) ?? []
   if (adapterChange && records.length) throw Error("已有原生需求的项目不能更换插件绑定")
   for (const record of records) {
-    const view = recordView(record)
+    const view = recordView(record, "summary")
     if (
       view?.operations.some((op) =>
         ["prepared", "started", "cancel_requested", "unknown", "succeeded"].includes(op.status)
@@ -471,9 +679,9 @@ export function updateNativeHarnessFeatureConfiguration(
   sessionWorkspace: HarnessSessionWorkspace,
   selectedDeployUnits: HarnessDeployUnitMapping[]
 ) {
-  assertNativeFeatureConfiguration(sessionWorkspace, selectedDeployUnits)
   const record = store().get(projectId, featureId)
   if (!record) throw Error("HARNESS_NATIVE_FEATURE_MISSING")
+  assertNativeFeatureConfiguration(sessionWorkspace, selectedDeployUnits, record.supportsDeployUnits === true)
   assertNativeHarnessFeatureCurrent(publicBinding(record))
   if (record.worktree || record.goal || record.packageDigest)
     throw Error("需求已固定隔离工作区，不能更换原执行的工作区配置")
@@ -584,18 +792,60 @@ function summary(
     }
   }
 }
+function readNativeProjectDetailStorage<T>(failure: string, read: () => T): T {
+  try {
+    return read()
+  } catch (error) {
+    if (error instanceof Error) {
+      const { code, errcode } = error as NodeJS.ErrnoException & { errcode?: number }
+      if (code === "ERR_SQLITE_ERROR" && typeof errcode === "number") {
+        // SQLite stores the primary result code in the low byte of extended codes.
+        const primaryCode = errcode & 0xff
+        const SQLITE_CORRUPT = 11
+        const SQLITE_NOTADB = 26
+        if (primaryCode === SQLITE_CORRUPT || primaryCode === SQLITE_NOTADB)
+          throw Error(failure, { cause: error })
+      }
+    }
+    throw error
+  }
+}
+
 export async function nativeHarnessProjectDetail(
   project: HarnessProjectMetadata
 ): Promise<HarnessProjectDetailViewModel> {
-  const records = store().list(project.projectId)
-  const views = records.map((record) => recordView(record))
+  const records = readNativeProjectDetailStorage("HARNESS_NATIVE_FEATURE_INDEX_UNREADABLE", () =>
+    store().list(project.projectId)
+  )
+  const views = readNativeProjectDetailStorage("HARNESS_NATIVE_EXECUTION_UNREADABLE", () =>
+    records.map((record) => recordView(record, "summary"))
+  )
   const manifest =
     views[0]?.project.manifest ??
     records[0]?.manifest ??
     (await nativeHarnessPlugin(project.nativeBinding!.installedPluginId))?.manifest
   if (!manifest) throw Error("PROJECT_PLUGIN_UNAVAILABLE")
+  const firstHostRun = views.reduce(
+    (earliest, view) => Math.min(earliest, view?.project.createdAt ?? Infinity),
+    Infinity
+  )
+  const managedRunFirstStartedAt = project.managedRunFirstStartedAt ??
+    (Number.isFinite(firstHostRun) ? new Date(firstHostRun).toISOString() : undefined)
+  let projectRootPath: string
+  try {
+    projectRootPath = nativeProjectRoot(project)
+  } catch (error) {
+    const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined
+    if (code === "ENOENT" || code === "ENOTDIR")
+      throw Error("HARNESS_NATIVE_PROJECT_DIRECTORY_MISSING", { cause: error })
+    throw error
+  }
   return {
-    project: { ...project, projectRootPath: nativeProjectRoot(project) },
+    project: {
+      ...project,
+      projectRootPath,
+      ...(managedRunFirstStartedAt ? { managedRunFirstStartedAt } : {})
+    },
     adapterSnapshot: { mode: "project", mock: false },
     workflow: workflow(manifest),
     runs: records.map((record, index) => summary(record, views[index])),
@@ -614,6 +864,7 @@ export function nativeHarnessRunDetail(
   const view = recordView(record)
   const manifest = view?.project.manifest ?? record.manifest
   const overview = summary(record, view)
+  const stageIndex = view?.project.stageIndex ?? 0
   return {
     nativeBinding: publicBinding(record),
     ...(view ? { nativeProject: view } : {}),
@@ -635,8 +886,8 @@ export function nativeHarnessRunDetail(
       overallStatus: overview.overallStatus,
       currentNodeId: overview.currentNodeId,
       unmatchedHooks: [],
-      nodes: manifest.stages.map((stage) => {
-        const nodeStatus = stageStatus(view, stage.id)
+      nodes: manifest.stages.map((stage, index) => {
+        const nodeStatus = index < stageIndex ? "done" : stageStatus(view, stage.id)
         return {
           id: stage.id,
           label: stage.title,

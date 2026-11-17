@@ -556,7 +556,7 @@ async function createManualSession(
   assert.equal(await composer.inputValue(), editedDraft, "Reading guidance must preserve the draft")
   await page!.screenshot({ path: join(fixture.isolated, `${project.projectCode}-${feature.slug}-${entry}-user-guide.png`) })
   if (entry === "detail") {
-    await chatGuide.getByRole("button", { name: "前往项目设置", exact: true }).click()
+    await chatGuide.getByRole("button", { name: "查看特性详情", exact: true }).click()
     await page!.getByRole("region", { name: "需求权限与确认", exact: true }).waitFor()
     await stageGuide.getByRole("button", { name: "填写需求并开始", exact: true }).click()
     const startDialog = page!.getByRole("dialog", { name: "开启托管运行", exact: true })
@@ -844,7 +844,7 @@ async function archiveAndReadExistingHistory(
       .click()
     const main = page!.getByRole("main")
     await main.getByText("项目已归档，仅可查看历史记录。", { exact: true }).waitFor()
-    for (const name of ["托管运行当前特性", "编辑特性配置", "新增会话"])
+    for (const name of ["托管运行当前特性", "查看特性配置", "新增会话"])
       assert(
         await main.getByRole("button", { name, exact: true }).isDisabled(),
         `Archived history cannot use ${name}`
@@ -1150,7 +1150,7 @@ async function main() {
     const dialog = page.getByRole("dialog", { name: "新建项目", exact: true })
     await dialog.waitFor()
     await dialog.getByRole("textbox", { name: "项目名称 *", exact: true }).waitFor()
-    for (const name of ["项目编号 *", "系统编号 *", "系统名称 *", "插件配置"])
+    for (const name of ["项目编号 *", "系统编号 *", "系统名称 *", "项目开发配置"])
       await dialog.getByText(name, { exact: true }).waitFor()
     for (const field of [
       dialog.getByPlaceholder("输入项目编号搜索", { exact: true }),

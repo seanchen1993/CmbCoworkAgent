@@ -51,6 +51,8 @@ export interface ProjectUseParentAuthority {
 }
 interface Authority {
   parent(projectId: string): ProjectUseParentAuthority | undefined
+  prepareParent(projectId: string): Promise<ProjectUseParentAuthority | undefined>
+  assertAdapterChange(projectId: string): void
   child(hostRunId: string): HarnessNativeFeatureBinding | undefined
   assertChild(binding: HarnessNativeFeatureBinding): void
 }
@@ -234,14 +236,14 @@ export async function reviewProjectUse(
   const rt = requireRuntime()
   const workspaceProof = reviewWorkspace(input, rt)
   const { workspace } = workspaceProof
-  const parent = input.existingProjectId ? authority?.parent(input.existingProjectId) : undefined
+  const parent = input.existingProjectId ? await authority?.prepareParent(input.existingProjectId) : undefined
   if (
     input.existingProjectId &&
-    (!parent?.active ||
-      parent.installedPluginId !== input.adapterId ||
-      !isSameWorkspacePath(parent.workspace, workspace))
+    (!parent?.active || !isSameWorkspacePath(parent.workspace, workspace))
   )
     fail("PROJECT_USE_AUTHORIZATION_INVALID")
+  if (parent && parent.installedPluginId !== input.adapterId)
+    authority?.assertAdapterChange(parent.projectId)
   const plugin = getPlugins().find((item) => item.id === input.adapterId)
   if (!plugin?.enabled) fail("PROJECT_PACKAGE_IDENTITY_MISMATCH")
   const original = await snapshotDerivationSource(plugin.path)
@@ -447,8 +449,12 @@ function prepareProjectUseCommit(
           rt.control.settingsStamp(item.policy.workspace) !== item.settingsStamp))
     )
       fail()
-    if (item.existing && authority?.parent(item.policy.projectId)?.identity !== item.parentIdentity)
-      fail()
+    if (item.existing) {
+      const parent = authority?.parent(item.policy.projectId)
+      if (!parent?.active || parent.identity !== item.parentIdentity) fail()
+      if (parent.installedPluginId !== item.policy.plugin.pluginId)
+        authority?.assertAdapterChange(parent.projectId)
+    }
     item.assertSources()
   }
   assertCurrent()
@@ -573,6 +579,43 @@ export function captureProjectUseFeature(
     { projectId: binding.hostRunId, packageDigest: receipt.policy.packageDigest },
     rt.workspaceKey(binding.workspace)
   )?.assertCurrent
+}
+
+/** Check the parent receipt for a prospective Feature directory without initializing it. */
+export function captureProjectUseFeaturePreflight(
+  binding: HarnessNativeFeatureBinding,
+  workspace: string
+) {
+  const rt = requireRuntime()
+  const receipt = rt.store.getProjectUseAuthorization(binding.projectId)
+  if (!receipt) return undefined
+  const captured = projectUseScope(
+    { projectId: binding.hostRunId, packageDigest: receipt.policy.packageDigest },
+    rt.workspaceKey(binding.workspace)
+  )
+  if (!captured) fail("PROJECT_USE_AUTHORIZATION_INVALID")
+  const target = rt.workspaceKey(workspace)
+  const directoryStamp = rt.control.settingsStamp(target)
+  const applicationStamp = rt.control.applicationStamp()
+  const assertCurrent = () => {
+    captured.assertCurrent()
+    if (
+      rt.control.settingsStamp(target) !== directoryStamp ||
+      rt.control.applicationStamp() !== applicationStamp
+    )
+      fail("PROJECT_USE_AUTHORIZATION_CHANGED")
+  }
+  assertCurrent()
+  return {
+    assertCurrent,
+    enabled: () => rt.control.globallyEnabled() &&
+      (rt.control.enabled(target) || rt.store.getSetting("enabled:" + target, "") === ""),
+    approved: (source: { pluginId: string; name: string; digest: string }) =>
+      receipt.policy.sources.some((approved) =>
+        !approved.configurationOnly && approved.pluginId === source.pluginId &&
+        approved.name === source.name && approved.digest === source.digest
+      )
+  }
 }
 
 /** One initialization of a newly registered scope; an explicit directory off remains a tombstone. */

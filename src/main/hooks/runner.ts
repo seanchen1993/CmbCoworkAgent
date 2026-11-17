@@ -893,6 +893,7 @@ async function executeCommandHook(
     if (source?.stageDebug?.commandHooks) recoveryJournal = beginStageRecoveryHook(source, hook)
     owned = startOwnedHookCommand({
       executable: cmd, args, windowsShellCommand, cwd, env, stdin: stdinPayload, signal,
+      onExecutionExit: () => clearTimeout(timer),
       stdout: chunk => collect(stdout, chunk), stderr: chunk => collect(stderr, chunk)
     })
   } catch (error) {

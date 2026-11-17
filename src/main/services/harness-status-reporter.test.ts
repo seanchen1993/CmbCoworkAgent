@@ -75,6 +75,25 @@ describe("test-project snapshot reporting", () => {
     })
   })
 
+  it.each([undefined, "2026-11-04T01:00:00.000Z"])(
+    "reports recorded Host starts while giving the UAT marker precedence (%s)",
+    async (storedStart) => {
+      const hostStart = "2026-11-04T07:19:16.000Z"
+      service.listHarnessProjects.mockResolvedValue([
+        { ...project(true), managedRunFirstStartedAt: storedStart }
+      ])
+      service.getHarnessProjectDetails.mockResolvedValue({
+        p1: { project: { managedRunFirstStartedAt: hostStart }, runs: [] }
+      })
+      await reportProjectSnapshotNow("p1")
+      const [, request] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+      expect(JSON.parse(request.body as string).document.properties).toMatchObject({
+        managedRunEverStarted: true,
+        managedRunFirstStartedAt: storedStart ?? hostStart
+      })
+    }
+  )
+
   it.each([true, false])(
     "changes classification to %s while preserving a non-empty snapshot on inspect failure",
     async (flag) => {

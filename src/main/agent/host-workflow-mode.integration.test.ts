@@ -1,13 +1,19 @@
 // Actual createAgentRuntime + graph + HTTP model request capture.
 // The model is a local deterministic server; no workflow launch or model billing occurs.
 import { randomUUID } from "node:crypto"
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { HumanMessage } from "@langchain/core/messages"
 import { afterAll, beforeAll, expect, it, vi } from "vitest"
-const fixture = vi.hoisted(() => ({ root: "", database: "", endpoint: "" }))
+import type { PluginMetadata } from "../types"
+const fixture = vi.hoisted(() => ({
+  root: "",
+  database: "",
+  endpoint: "",
+  plugins: [] as PluginMetadata[]
+}))
 vi.mock("electron", () => ({
   app: {
     getPath: () => fixture.root || tmpdir(),
@@ -21,10 +27,17 @@ vi.mock("electron", () => ({
 vi.mock("../storage", async (original) => ({
   ...(await original<typeof import("../storage")>()),
   getDbPath: () => fixture.database,
-  getPlugins: () => [],
+  getPlugins: () => fixture.plugins,
   getEnabledSkillsSources: async () => [],
   getEnabledSkillMiddlewareSources: async () => [],
-  getEnabledPluginSkillSourceMetadata: () => [],
+  getEnabledPluginSkillSourceMetadata: () =>
+    fixture.plugins.map((plugin) => ({
+      sourceDir: join(plugin.path, "skills"),
+      pluginId: plugin.id,
+      pluginName: plugin.name,
+      pluginRoot: plugin.path,
+      isProjectModePlugin: false
+    })),
   getEnabledPluginSkillMiddlewareSources: async () => [],
   getDisabledSkillDirs: () => [],
   getSkillsDir: () => join(fixture.root, "skills"),
@@ -55,6 +68,9 @@ import { closeWorkspaceProbeWorker } from "../services/workspace-probe-client"
 import { removeWorkspaceProbeTestWorker } from "../services/workspace-probe.test-helper"
 import * as db from "../db"
 import { createAgentRuntime, closeCheckpointer } from "./runtime"
+import { prepareStandardUserPrompt } from "./standard-thread-turn"
+import { createHookScope } from "../hooks/scope"
+import { createSkillUseTracker } from "./skill-lifecycle/tracker"
 import {
   issueRuntimePluginSourceToken,
   withRuntimePluginSource
@@ -130,6 +146,103 @@ afterAll(async () => {
   else process.env.CMB_COWORK_AGENT_HOME = previousHome
   rmSync(fixture.root, { recursive: true, force: true })
 })
+
+it("runs ordinary chat and healthy slash skills while a damaged plugin stays unavailable", async () => {
+  const threadId = randomUUID()
+  db.createThread(threadId, { agentMode: "normal", workspacePath: fixture.root })
+  const install = (name: string, valid: boolean) => {
+    const path = join(fixture.root, name)
+    const skill = join(path, "skills", name, "SKILL.md")
+    mkdirSync(join(path, "skills", name), { recursive: true })
+    writeFileSync(skill, `---\nname: ${name}\ndescription: ${name} reference\n---\nSkill body`)
+    writeFileSync(
+      join(path, "devclaw.capabilities.json"),
+      valid
+        ? JSON.stringify({
+            apiVersion: "devclaw.capabilities/v1",
+            capabilities: [
+              {
+                id: name,
+                kind: "skill",
+                title: name,
+                usage: "chat",
+                entry: `skills/${name}/SKILL.md`
+              }
+            ]
+          })
+        : "damaged declaration"
+    )
+    fixture.plugins.push({
+      id: name,
+      name,
+      path,
+      version: "1.0.0",
+      enabled: true,
+      skillCount: 1,
+      description: "",
+      author: "",
+      hookCount: 0,
+      mcpServerCount: 0,
+      createdAt: "",
+      updatedAt: ""
+    })
+    return { name, path: skill }
+  }
+  const damaged = install("damaged-reference", false)
+  const healthy = install("healthy-reference", true)
+  const controller = new AbortController()
+  try {
+    const prepare = (trustedExplicitSkill: { name: string; path: string }) =>
+      prepareStandardUserPrompt({
+        signal: controller.signal,
+        rawMessage: "Review this",
+        initialModelInput: "Review this",
+        trustedExplicitSkill,
+        threadId,
+        workspacePath: fixture.root,
+        harnessAgentContext: {},
+        turnState: {
+          hookScope: createHookScope(),
+          skillHookKeys: new Set(),
+          skillUseTracker: createSkillUseTracker(),
+          turnId: randomUUID()
+        },
+        onHookResult: vi.fn(),
+        onHookSkippedFactory: () => vi.fn()
+      })
+    expect(await prepare(healthy)).toMatchObject({ accepted: true })
+    expect(await prepare(damaged)).toMatchObject({ accepted: false, blockedBy: "explicit_skill" })
+    const runtime = await createAgentRuntime({
+      threadId,
+      workspacePath: fixture.root,
+      agentMode: "normal",
+      toolStrategy: "standard",
+      disableMcpTools: true,
+      memoryEnabled: false,
+      disableMemoryInjection: true,
+      turnCompletionTodoGateEnabled: false,
+      abortSignal: controller.signal
+    })
+    const start = requests.length
+    await runtime.invoke(
+      { messages: [new HumanMessage("Reply Done without calling tools.")] },
+      { configurable: { thread_id: threadId }, recursionLimit: 30, signal: controller.signal }
+    )
+    expect(requests.length).toBeGreaterThan(start)
+    const prompt = JSON.stringify(
+      requests
+        .slice(start)
+        .flatMap((request) => request.messages.filter((message) => message.role === "system"))
+    )
+    expect(prompt).toContain("healthy-reference")
+    expect(prompt).not.toContain("damaged-reference")
+  } finally {
+    fixture.plugins.length = 0
+    controller.abort()
+    await closeCheckpointer(threadId)
+  }
+}, 30000)
+
 it.each(["ordinary", "normal", "workflow"] as const)(
   "exposes workflow to the real model only for the explicitly frozen Host mode: %s",
   async (mode) => {

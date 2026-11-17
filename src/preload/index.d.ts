@@ -1091,7 +1091,7 @@ interface CustomAPI {
     onPeerMessagesChanged(callback: (event: { threadId: string }) => void): () => void
     onConversationNotice(callback: (event: import("../shared/mods/v2/conversation-notice")
       .FunctionConversationNoticeEvent) => void): () => void
-    chatDisplayCapability(threadId: string, expectedWorkspace: string): Promise<boolean>
+    chatDisplayCapability(threadId: string, expectedWorkspace: string | null): Promise<boolean>
     builtinCatalog(): Promise<import("../shared/mods/builtins").DevClawBuiltinStatus[]>
     builtinAdvisor(threadId: string, expectedWorkspace: string,
       action: "view" | "enable" | "disable" | "analyze" | "cancel" | "dismiss"):

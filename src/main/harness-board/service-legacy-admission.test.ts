@@ -158,16 +158,27 @@ it("creates a native Harness container by exact Host id without invoking board-s
   })
 })
 
-it("preserves old creation and rejects an existing binding changed to a native Host declaration", async () => {
+it("keeps a legacy project editable after a plugin upgrade and rejects a Host rebind", async () => {
   await mkdir(join(state.root, "sample"))
   const project = await service.createHarnessProject(input())
   expect(project["harness-adapter"].id).toBe("plugin")
   expect(await readFile(join(state.root, "created-marker.txt"), "utf8")).toBe(
     "created by original command"
   )
-  const before = await readFile(join(state.root, "harness-board-projects.json"), "utf8")
   await declareHost()
-  await expect(service.updateHarnessProjectMetadata(project.projectId, input())).rejects.toThrow(
+  const updated = await service.updateHarnessProjectMetadata(project.projectId, {
+    ...input(), name: "Renamed legacy project"
+  })
+  expect(updated.name).toBe("Renamed legacy project")
+  expect(updated.nativeBinding).toBeUndefined()
+  expect(updated["harness-adapter"]).toEqual(project["harness-adapter"])
+
+  state.plugins.push({ ...state.plugins[0], id: "another-host" })
+  await writeFile(join(state.root, "plugins.json"), JSON.stringify(state.plugins))
+  const before = await readFile(join(state.root, "harness-board-projects.json"), "utf8")
+  await expect(service.updateHarnessProjectMetadata(project.projectId, {
+    ...input(), adapterId: "another-host"
+  })).rejects.toThrow(
     "旧项目不能直接改为原生执行"
   )
   expect(await readFile(join(state.root, "harness-board-projects.json"), "utf8")).toBe(before)

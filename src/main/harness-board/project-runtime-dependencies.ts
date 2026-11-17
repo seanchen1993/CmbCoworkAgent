@@ -45,9 +45,8 @@ export function projectRuntimeDependencies(input: {
     return [...values.values()]
   }
 
-  async function resolve(pluginId: string) {
-    const expected = (await bindings()).find((value) => value.pluginId === pluginId)
-    if (!expected) throw Error("PROJECT_DEPENDENCY_NOT_DECLARED")
+  async function resolveBinding(expected: ProjectFunctionDependencyReview) {
+    const pluginId = expected.pluginId
     const found = input.plugins().find((value) => value.id === pluginId)
     if (!found?.enabled) throw Error("PROJECT_DEPENDENCY_UNAVAILABLE")
     const plugin = { ...found }
@@ -76,6 +75,14 @@ export function projectRuntimeDependencies(input: {
     assertCurrent()
     return { plugin, expected, facts, assertCurrent }
   }
+
+  async function resolve(pluginId: string) {
+    const expected = (await bindings()).find((value) => value.pluginId === pluginId)
+    if (!expected) throw Error("PROJECT_DEPENDENCY_NOT_DECLARED")
+    return resolveBinding(expected)
+  }
+
+  const resolveAll = async () => Promise.all((await bindings()).map(resolveBinding))
 
   async function review(): Promise<ProjectFunctionDependencyReview[]> {
     const declared = await bindings()
@@ -138,5 +145,5 @@ export function projectRuntimeDependencies(input: {
     input.assertCurrent()
     return declared
   }
-  return { review, resolve }
+  return { review, resolve, resolveAll }
 }

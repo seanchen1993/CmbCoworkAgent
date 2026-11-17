@@ -1,6 +1,7 @@
 import type { JsonObject, Register } from "devclaw-mods"
 import { selectStageKnowledge, stageMapping } from "./stage-selection"
 import { knowledgeRoots, readKnowledge, readMaterial } from "./material-selection"
+import type { SelectedDeployment } from "./selector"
 
 const ref = { provider: "native.project-context", id: "materials", version: "1.0.0" }
 
@@ -34,21 +35,43 @@ export const register: Register = (on) => {
           | {
               stageId?: string
               configuration?: { selectedDeployUnits?: string }
-              roots?: Array<{ id: string }>
+              roots?: Array<{ id: string; source?: string }>
+              featureInputs?: { selectedDeployUnits?: string[] }
             }
           | undefined
-        if (
-          typeof value?.stageId !== "string" ||
-          typeof value.configuration?.selectedDeployUnits !== "string" ||
-          !Array.isArray(value.roots) ||
-          !["knowledge", "package"].every((id) => value.roots?.some((root) => root.id === id))
-        )
+        if (typeof value?.stageId !== "string" || !Array.isArray(value.roots) ||
+          !value.roots.some(root => root.id === "package"))
           throw Error("AUTOBIZ_KNOWLEDGE_BOUND_CONFIGURATION_REQUIRED")
         const config = event.input.config as JsonObject | undefined
         const groups = stageMapping(config?.stageTags, value.stageId)
         const roots = knowledgeRoots(config?.knowledgeRoots)
-        const selected = JSON.parse(value.configuration.selectedDeployUnits)
-        const documents = await readKnowledge($, roots, event.input.executionId)
+        const structured = value.featureInputs !== undefined
+        let selected: SelectedDeployment[]
+        let rootIds: string[]
+        if (structured) {
+          const units = value.featureInputs?.selectedDeployUnits
+          if (!Array.isArray(units)) throw Error("AUTOBIZ_KNOWLEDGE_BOUND_CONFIGURATION_REQUIRED")
+          selected = units.map(deployUnitId => ({ deployUnitId }))
+          rootIds = value.roots.filter(root => root.source === "knowledge").map(root => root.id)
+        } else {
+          if (typeof value.configuration?.selectedDeployUnits !== "string" ||
+            !value.roots.some(root => root.id === "knowledge"))
+            throw Error("AUTOBIZ_KNOWLEDGE_BOUND_CONFIGURATION_REQUIRED")
+          selected = JSON.parse(value.configuration.selectedDeployUnits)
+          if (!Array.isArray(selected) || selected.some(unit => unit?.appType === undefined))
+            throw Error("AUTOBIZ_KNOWLEDGE_SELECTION_INVALID")
+          rootIds = ["knowledge"]
+        }
+        if (!rootIds.length) throw Error("AUTOBIZ_KNOWLEDGE_BOUND_CONFIGURATION_REQUIRED")
+        const documents: Array<{ path: string; text: string; digest: string; rootId?: string }> = []
+        for (const rootId of rootIds) {
+          const read = await readKnowledge(
+            $, roots, structured ? event.input.executionId + ":" + rootId : event.input.executionId, rootId
+          )
+          documents.push(...(structured
+            ? read.map(document => ({ ...document, path: rootId + "/" + document.path, rootId }))
+            : read))
+        }
         const selection = selectStageKnowledge(documents, selected, value.stageId, groups)
         const method = await readMaterial($, event.input.executionId + ":method", "read", {
           rootId: "package",

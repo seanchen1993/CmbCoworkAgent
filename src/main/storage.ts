@@ -2054,16 +2054,21 @@ let modsGlobalSwitch: ReturnType<typeof createDisabledSwitchReader> | undefined
 
 /** Application-level safety switch for both legacy Mods and Function Mods. */
 export function getModsGlobalEnabled(): boolean {
+  return getModsGlobalEnabledState() === true
+}
+
+/** Recovery needs a confirmed switch value before admitting ordinary chat. */
+export function getModsGlobalEnabledState(): boolean | undefined {
   try {
     const settings = getSettingsStore()
-    modsGlobalSwitch ??= createDisabledSwitchReader(
-      settings.path,
-      () => settings.get(MODS_GLOBAL_ENABLED_KEY, false) === true
-    )
-    return modsGlobalSwitch.read()
+    modsGlobalSwitch ??= createDisabledSwitchReader(settings.path, () => {
+      const value = settings.get(MODS_GLOBAL_ENABLED_KEY, false)
+      return typeof value === "boolean" ? value : undefined
+    })
+    return modsGlobalSwitch.readState()
   } catch (error) {
     console.warn("[Storage] Failed to load Mods global switch; using disabled:", error)
-    return false
+    return undefined
   }
 }
 
@@ -3481,11 +3486,12 @@ export function getEnabledPluginMcpConfigs(): Record<string, PluginMcpServerConf
         configs[`plugin:${plugin.id}/${name}`] = cfg
         continue
       }
+      const replacement = () => runtimeRoot
       const replaceRoot = (value: string): string =>
         value
-          .replaceAll("${CLAUDE_PLUGIN_ROOT}", runtimeRoot)
-          .replaceAll("${PLUGIN_ROOT}", runtimeRoot)
-          .replaceAll(plugin.path, runtimeRoot)
+          .replaceAll("${CLAUDE_PLUGIN_ROOT}", replacement)
+          .replaceAll("${PLUGIN_ROOT}", replacement)
+          .replaceAll(plugin.path, replacement)
       configs[`plugin:${plugin.id}/${name}`] = {
         ...cfg,
         ...(cfg.command ? { command: replaceRoot(cfg.command) } : {}),

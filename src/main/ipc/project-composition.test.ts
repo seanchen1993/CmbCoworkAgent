@@ -52,19 +52,19 @@ vi.mock("../storage", () => ({
     return [{ id: state.installedId, name: "source", version: "1", path: state.root, enabled: state.enabled }]
   }
 }))
-vi.mock("../db", () => ({
-  getDb: state.getDb,
-  getThreadCore: () => {
+vi.mock("../db", () => {
+  const readThread = () => {
     state.threadReads++
-    return ({
-    metadata: {
-      workspacePath: state.root,
-      cmb_thread_incarnation: state.incarnation,
-      ...(state.project ? { harnessProjectSession: { projectId: "parent", kind: "chat" } } : {})
+    return {
+      metadata: {
+        workspacePath: state.root,
+        cmb_thread_incarnation: state.incarnation,
+        ...(state.project ? { harnessProjectSession: { projectId: "parent", kind: "chat" } } : {})
+      }
     }
-    })
   }
-}))
+  return { getDb: state.getDb, getThreadCore: readThread, getThreadCanonicalIdentity: readThread }
+})
 vi.mock("../harness-board/service", () => ({
   getHarnessCapabilityWorkspaces: () => [state.root],
   getHarnessCapabilityFeatureWorkspace: () => undefined

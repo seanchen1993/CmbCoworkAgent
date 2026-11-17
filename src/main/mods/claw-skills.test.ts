@@ -1,4 +1,14 @@
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -247,6 +257,64 @@ describe("Claw Skill catalog and real filesystem selection", () => {
     const selectedAlias = join(f.root, "selected-alias")
     symlinkSync(allowed, selectedAlias, process.platform === "win32" ? "junction" : "dir")
     expect(policy.isPathHidden(join(selectedAlias, "SKILL.md"))).toBe(false)
+  })
+
+  it("checks ordinary skill sources once and revalidates file changes and current usage", async () => {
+    const f = fixture()
+    const dir = f.add("one")
+    f.add("two")
+    const document = join(dir, "SKILL.md")
+    const timestamp = new Date("2025-01-02T03:04:05Z")
+    utimesSync(document, timestamp, timestamp)
+    const originalStat = statSync(document, { bigint: true })
+    const currentSources = vi.spyOn(f.access, "currentSources")
+    const disabledDirs = vi.spyOn(f.access, "disabledDirs")
+    const usage = {
+      usage: "chat" as const,
+      allowsSkill: () => true,
+      assertCurrent: vi.fn()
+    }
+    const policy = (await createClawSkillPolicy(undefined, f.access, undefined, usage))!
+    expect(policy.skillPaths).toHaveLength(2)
+    for (const call of [currentSources, disabledDirs, usage.assertCurrent]) call.mockClear()
+    policy.assertAllCurrent()
+    expect(currentSources).toHaveBeenCalledTimes(1)
+    expect(disabledDirs).toHaveBeenCalledTimes(1)
+    expect(usage.assertCurrent).toHaveBeenCalledTimes(1)
+
+    f.disable([dir])
+    expect(() => policy.assertAllCurrent()).toThrow("CLAW_SKILL_DISABLED")
+    f.disable([])
+    f.sources([{ sourceDir: join(f.root, "moved") }])
+    expect(() => policy.assertAllCurrent()).toThrow("CLAW_SKILL_SOURCE_UNAVAILABLE")
+    f.sources([{ sourceDir: f.root }])
+
+    const original = readFileSync(document, "utf8")
+    writeFileSync(document, original.replace("SECRET", "EDITED"))
+    utimesSync(document, timestamp, timestamp)
+    expect(statSync(document, { bigint: true })).toMatchObject({
+      ino: originalStat.ino,
+      size: originalStat.size,
+      mtimeNs: originalStat.mtimeNs
+    })
+    expect(() => policy.assertAllCurrent()).toThrow("CLAW_SKILL_SOURCE_CHANGED")
+    expect(() => policy.assertSkillReference({ name: "one", path: document })).toThrow(
+      "CLAW_SKILL_SOURCE_CHANGED"
+    )
+    writeFileSync(document, original)
+    expect(() => policy.assertAllCurrent()).not.toThrow()
+
+    // A new alias must not inherit the previously approved root, even when the original bytes remain.
+    const relocated = join(f.root, "renamed")
+    renameSync(dir, relocated)
+    symlinkSync(relocated, dir, process.platform === "win32" ? "junction" : "dir")
+    expect(() => policy.assertAllCurrent()).toThrow("CLAW_SKILL_SOURCE_CHANGED")
+    rmSync(dir, { recursive: true, force: true })
+    renameSync(relocated, dir)
+    usage.assertCurrent.mockImplementation(() => {
+      throw Error("usage changed")
+    })
+    expect(() => policy.assertAllCurrent()).toThrow("usage changed")
   })
 
   it("rechecks document digest, global disablement and source removal at actual use", async () => {

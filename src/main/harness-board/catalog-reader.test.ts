@@ -150,6 +150,54 @@ describe("Harness catalog reader", () => {
       boardCompatibility: { compatible: true }, supportsDeployUnits: false })
   })
 
+  it("offers UAT knowledge selection only for a Host package with feature inputs", async () => {
+    const paths = await makeCatalog(1)
+    const plugin = JSON.parse(readFileSync(paths.plugins, "utf8"))[0]
+    const template = createProjectTemplate({ packageId: "host-only", name: "Host" })
+    const runtime = JSON.parse(
+      template.files.find((file) => file.path === "devclaw.project-runtime.json")!.text
+    )
+    writeFileSync(join(plugin.path, "devclaw.project-runtime.json"), JSON.stringify({
+      apiVersion: "devclaw.project-runtime/v2",
+      runtime,
+      extensionContract: {
+        apiVersion: "devclaw.extension-contract/v1",
+        requires: ["devclaw.context-handoff/v1", "devclaw.context-materials/v1"],
+        context: {
+          sourceAccess: "read-only",
+          mutableData: "host",
+          configuration: "host-resolved",
+          knowledge: { required: true },
+          provider: {
+            actionId: "knowledge.context",
+            operations: ["session-context"],
+            materials: {
+              roots: [{ id: "knowledge", source: "knowledge" }],
+              configuration: [],
+              featureInputs: true
+            }
+          }
+        }
+      }
+    }))
+    const stored = JSON.parse(readFileSync(paths.projects, "utf8"))
+    stored.projects[0].nativeBinding = {
+      engine: "host", installedPluginId: plugin.id, supportsDeployUnits: true
+    }
+    stored.projects[0].knowledgeBaseIds = ["selected"]
+    writeFileSync(paths.projects, JSON.stringify(stored))
+    const catalog = readHarnessCatalogPage(paths.projects, paths.plugins, {})
+    expect(catalog.registry[0]).toMatchObject({
+      runtimeMode: "host", supportsKnowledgeBaseContext: true
+    })
+    expect(catalog.projects[0]).toMatchObject({
+      supportsDeployUnits: true,
+      supportsSessionContextInjection: true,
+      supportsKnowledgeBaseContext: true,
+      knowledgeBaseIds: ["selected"]
+    })
+  })
+
   it("lists Host templates without board resources and keeps disabled installation state explicit", async () => {
     const paths = await makeCatalog(2)
     const plugins = JSON.parse(readFileSync(paths.plugins, "utf8"))

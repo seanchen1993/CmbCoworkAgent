@@ -1,28 +1,55 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { hostProjectFixture } from "../harness-board/project-runtime/host-fixtures.test-helper"
+import { DatabaseSync } from "node:sqlite"
+import {
+  hostProjectFixture,
+  prepareFixture,
+  TEST_FINGERPRINT
+} from "../harness-board/project-runtime/host-fixtures.test-helper"
 import { derivationContentIdentity, snapshotDerivationSource } from "../plugins/derivation-source"
 import type { BrowserWindow, IpcMain, IpcMainInvokeEvent } from "electron"
 import { canonicalTmpdir } from "../../../tests/support/canonical-temp-dir"
 import { ModControlStore } from "../mods/control-store"
 import type { FunctionModsManager } from "../mods/v2/manager"
 import { configureProjectUseRuntime } from "../harness-board/project-use-authorization"
+import { ProjectCompositionStore } from "../harness-board/project-runtime/composition-store"
+import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../agent/thread-run-lease"
+import { HostUserInputStore } from "../services/host-user-input-store"
+import { configureHostUserInputPersistence } from "../services/user-input"
+
+type RegisterComposition = typeof import("./project-composition").registerProjectCompositionHandlers
+type HostStore = import("../harness-board/project-runtime/host-store").HostProjectStore
 
 const state = vi.hoisted(() => ({
   service: undefined as unknown,
   plugins: [] as Array<{ id: string; path: string; name: string; version: string; enabled: boolean }>,
   binding: undefined as import("../../shared/harness-board-types").HarnessNativeFeatureBinding | undefined,
+  nativeRuntime: undefined as import("../harness-board/native-harness").NativeHarnessRuntime | undefined,
   ensureNative: vi.fn(),
+  assertFeatureCurrent: vi.fn(),
   nativeReady: vi.fn(async (...args: unknown[]) => {
     void args
     return { ready: true, assertCurrent: () => {}, assertExecutionReady: () => {} }
   }),
-  afterSnapshot: undefined as (() => void) | undefined
+  afterSnapshot: undefined as ((directory: string) => void) | undefined,
+  dataRoot: undefined as string | undefined,
+  threadWorkspaces: {} as Record<string, string>,
+  registerComposition: undefined as RegisterComposition | undefined,
+  composition: undefined as ReturnType<RegisterComposition> | undefined,
+  closeAdmission: undefined as (() => void) | undefined,
+  hostStoreOpened: vi.fn(),
+  openHostStore: undefined as ((path: string) => HostStore) | undefined
 }))
 vi.mock("../harness-board/native-harness", () => ({
-  configureNativeHarnessRuntime: () => {},
-  assertNativeHarnessFeatureCurrent: () => {},
+  configureNativeHarnessRuntime: (nativeRuntime: import("../harness-board/native-harness").NativeHarnessRuntime) => {
+    state.nativeRuntime = nativeRuntime
+  },
+  assertNativeHarnessFeatureCurrent: (binding: import("../../shared/harness-board-types").HarnessNativeFeatureBinding) => {
+    state.assertFeatureCurrent(binding)
+    if (JSON.stringify(state.binding) !== JSON.stringify(binding)) throw Error("HARNESS_NATIVE_BINDING_CHANGED")
+  },
+  assertNativeHarnessProjectMutable: () => {},
   readNativeHarnessFeature: (project: string, feature: string) =>
     state.binding?.projectId === project && state.binding?.featureId === feature ? state.binding : undefined,
   findNativeHarnessFeatureByRunId: (id: string) => state.binding?.hostRunId === id ? state.binding : undefined,
@@ -32,19 +59,36 @@ vi.mock("../harness-board/service", () => ({
   // These IPC fixtures represent pre-existing native projects without owner receipts.
   // Real parent/child providers and aggregate consent are covered by the service integration.
   readHarnessProjectUseParent: () => undefined,
+  prepareHarnessProjectUseParent: async () => undefined,
   assertHarnessProjectUseChild: () => { throw Error("UNEXPECTED_OWNER_ADMISSION") }
 }))
 vi.mock("./native-harness-source", () => ({
   registerNativeHarnessSourceHandlers: () => (...args: unknown[]) => state.nativeReady(...args)
 }))
 vi.mock("electron", () => ({ BrowserWindow: {} }))
-vi.mock("../storage", () => ({ getOpenworkDir: () => "C:/unused-runtime-authority", getPlugins: () => state.plugins,
+vi.mock("../storage", () => ({ getOpenworkDir: () => state.dataRoot ?? "C:/unused-runtime-authority", getPlugins: () => state.plugins,
   getUserInfo: () => null }))
-vi.mock("../db", () => ({ getThreadCore: () => undefined }))
+vi.mock("../db", async (importOriginal) => {
+  const readTestThread = (id: string) => state.threadWorkspaces[id]
+    ? { metadata: JSON.stringify({ workspacePath: state.threadWorkspaces[id] }) } : undefined
+  return {
+    ...await importOriginal<typeof import("../db")>(),
+    getThreadCore: readTestThread,
+    getThreadRuntimeScope: readTestThread
+  }
+})
 vi.mock("../harness-board/project-runtime/host-service", () => ({
   HostProjectService: class { constructor() { return state.service as object } }
 }))
-vi.mock("../harness-board/project-runtime/host-store", () => ({ HostProjectStore: class {} }))
+vi.mock("../harness-board/project-runtime/host-store", () => ({ HostProjectStore: class {
+  constructor(path: string) {
+    if (state.openHostStore) return state.openHostStore(path)
+    if (state.dataRoot) {
+      state.hostStoreOpened()
+      throw Error("HOST_DATABASE_UNREADABLE")
+    }
+  }
+} }))
 vi.mock("../harness-board/project-runtime/package-snapshots", async (importOriginal) => ({
   ...await importOriginal<typeof import("../harness-board/project-runtime/package-snapshots")>(),
   HostPackageSnapshots: class {}
@@ -53,7 +97,7 @@ vi.mock("../plugins/derivation-source", async (importOriginal) => {
   const original = await importOriginal<typeof import("../plugins/derivation-source")>()
   return { ...original, snapshotDerivationSource: async (directory: string) => {
     const snapshot = await original.snapshotDerivationSource(directory)
-    state.afterSnapshot?.()
+    state.afterSnapshot?.(directory)
     return snapshot
   } }
 })
@@ -62,12 +106,23 @@ vi.mock("./project-runtime-legacy", () => ({ registerLegacyProjectRuntimeHandler
 vi.mock("./project-runtime-import", () => ({ registerProjectImportHandlers: () => {} }))
 vi.mock("./project-preview", () => ({ registerProjectPreviewHandlers: () => {} }))
 vi.mock("./project-runtime-mods", () => ({ registerProjectRuntimeModsHandlers: () => {} }))
-vi.mock("./project-composition", () => ({ registerProjectCompositionHandlers: () => () => ({}) }))
+vi.mock("./project-composition", () => ({
+  registerProjectCompositionHandlers: (...args: Parameters<RegisterComposition>) =>
+    state.registerComposition ? (state.composition = state.registerComposition(...args)) : {}
+}))
 vi.mock("./user-input", () => ({ configureHostInputResumeHandler: () => {} }))
-vi.mock("../services/user-input", () => ({ getHostInputWait: () => undefined, getHostInputContinuation: () => undefined }))
 vi.mock("../agent/workflow/run-manager", () => ({ workflowRunManager: {} }))
 vi.mock("../agent/local-sandbox", () => ({ LocalSandbox: {} }))
-vi.mock("../agent/thread-run-lease", () => ({ registerLocalThreadRunAdmissionGuard: () => {}, listLocalThreadRunLeases: () => [] }))
+vi.mock("../agent/thread-run-lease", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../agent/thread-run-lease")>()
+  return {
+    ...actual,
+    registerLocalThreadRunAdmissionGuard: (guard: Parameters<typeof actual.registerLocalThreadRunAdmissionGuard>[0]) => {
+      if (state.registerComposition)
+        state.closeAdmission = actual.registerLocalThreadRunAdmissionGuard(guard)
+    }
+  }
+})
 vi.mock("../agent/agent-run-service", () => ({ createBrowserWindowAgentRunDelivery: () => ({}) }))
 vi.mock("../harness-board/project-action-runtime", () => ({ getProjectActionRuntime: () => ({}) }))
 vi.mock("../mods/manager", () => ({ getModsManager: () => ({ store: {} }) }))
@@ -88,6 +143,26 @@ vi.mock("../mods/v2/platform-project-runtime-native", () => ({
 }))
 vi.mock("../harness-board/project-runtime/composition-legacy-production", () => ({ createLegacyCompositionDependencies: () => ({}) }))
 import { registerProjectRuntimeHandlers } from "./project-runtime"
+
+it("rejects internal Host feature material fields from the standalone renderer create IPC", async () => {
+  const localCreate = vi.fn()
+  state.service = { recoverInterrupted: () => {}, localCreate }
+  const contents = { mainFrame: {}, isDestroyed: () => false }
+  const owner = { isDestroyed: () => false, webContents: contents } as unknown as BrowserWindow
+  const handlers = new Map<string, (...args: unknown[]) => unknown>()
+  registerProjectRuntimeHandlers({
+    handle: (name: string, handler: (...args: unknown[]) => unknown) => handlers.set(name, handler)
+  } as unknown as IpcMain, () => owner)
+  const event = { sender: contents, senderFrame: contents.mainFrame } as unknown as IpcMainInvokeEvent
+  await expect(handlers.get("project-runtime:create")!(event, {
+    installedPluginId: "installed",
+    name: "Standalone project",
+    workspace: "C:/fixture",
+    goal: "Review",
+    harnessFeatureInputs: { selectedDeployUnits: ["orders"], knowledgeRoots: [] }
+  })).rejects.toThrow("PROJECT_INVALID_INPUT")
+  expect(localCreate).not.toHaveBeenCalled()
+})
 
 it("captures explicit prepare instructions before the native preparation await", async () => {
   const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
@@ -198,14 +273,65 @@ beforeEach(() => {
     } })
 })
 afterEach(() => {
+  state.closeAdmission?.()
+  state.composition?.store().close()
+  state.closeAdmission = undefined
+  state.composition = undefined
+  state.registerComposition = undefined
+  state.threadWorkspaces = {}
+  state.dataRoot = undefined
+  state.hostStoreOpened.mockClear()
+  state.openHostStore = undefined
   authorizationStore.close()
   state.plugins = []
   state.binding = undefined
+  state.nativeRuntime = undefined
   state.ensureNative.mockReset()
+  state.assertFeatureCurrent.mockClear()
   state.nativeReady.mockReset().mockResolvedValue({ ready: true, assertCurrent: () => {},
     assertExecutionReady: () => {} })
   state.afterSnapshot = undefined
   for (const root of templateRoots.splice(0)) rmSync(root, { recursive: true, force: true })
+})
+
+it("admits ordinary chat with an existing composition store and an unreadable Host database", async () => {
+  const root = mkdtempSync(join(canonicalTmpdir(), "composition-chat-admission-"))
+  templateRoots.push(root)
+  state.dataRoot = root
+  const workspace = join(root, "leased-workspace")
+  const unrelated = join(root, "unrelated-workspace")
+  mkdirSync(workspace)
+  mkdirSync(unrelated)
+  mkdirSync(join(root, "local-projects"))
+  writeFileSync(join(root, "local-projects", "state.sqlite"), "unreadable Host database")
+  state.threadWorkspaces = { chat: workspace, unrelated }
+  state.registerComposition = (await vi.importActual<typeof import("./project-composition")>(
+    "./project-composition"
+  )).registerProjectCompositionHandlers
+  const seed = new ProjectCompositionStore(join(root, "project-compositions", "state.sqlite"))
+  try {
+    nativeHandlers()
+    expect(claimLocalThreadRunLease({ threadId: "chat", owner: "desktop", runId: "plain" }).acquired)
+      .toBe(true)
+    releaseLocalThreadRunLease("chat", "desktop", "plain")
+
+    seed.create({
+      apiVersion: "devclaw.project-composition/v1",
+      parentProjectId: "parent",
+      workspace,
+      units: [{ id: "step", kind: "flow", inputs: [], outputs: [],
+        source: { pluginId: "plugin", capabilityId: "step", packageDigest: "a".repeat(64) } }]
+    }, "request")
+    expect(() => claimLocalThreadRunLease({ threadId: "chat", owner: "desktop", runId: "leased" }))
+      .toThrow("COMPOSITION_WORKSPACE_BUSY")
+    expect(claimLocalThreadRunLease({ threadId: "unrelated", owner: "desktop", runId: "other" }).acquired)
+      .toBe(true)
+    expect(state.hostStoreOpened).not.toHaveBeenCalled()
+  } finally {
+    releaseLocalThreadRunLease("chat", "desktop", "leased")
+    releaseLocalThreadRunLease("unrelated", "desktop", "other")
+    seed.close()
+  }
 })
 
 function nativeHandlers() {
@@ -277,6 +403,24 @@ it("returns exact ordinary template content identities without scanning unrelate
     installedPluginId: other.id,
     expectedTemplate: { pluginId: other.id, digest: expected }
   })
+})
+
+it("reads only the selected Host template even if another installed template cannot be snapshotted", async () => {
+  const broken = installedTemplate()
+  const selected = installedTemplate()
+  const scanned: string[] = []
+  state.afterSnapshot = (directory) => {
+    scanned.push(directory)
+    if (directory === broken.path) throw Error("UNRELATED_SOURCE_CHANGED")
+  }
+  const handlers = nativeHandlers()
+  await expect(handlers.call("templates", selected.id)).resolves.toMatchObject([
+    { installedPluginId: selected.id, expectedTemplate: { pluginId: selected.id } }
+  ])
+  expect(scanned).toEqual([selected.path])
+  await expect(handlers.call("templates", "absent")).resolves.toEqual([])
+  expect(scanned).toEqual([selected.path])
+  await expect(handlers.call("templates")).rejects.toThrow("UNRELATED_SOURCE_CHANGED")
 })
 
 it("discovers a Host template after one hundred enabled ordinary plugins", async () => {
@@ -462,12 +606,21 @@ it("dispatches Feature first-start using the original Host continuation and perm
     get: () => project, operations: () => [operation],
     prepareRuntimeInputs: async () => {}, continue: continuation, cancel
   }
-  state.ensureNative.mockImplementation(async (_project, _feature, _goal, guard) => guard())
+  const beforeCreate = vi.fn()
+  state.ensureNative.mockImplementation(async (_project, _feature, _goal, guard, workspace, preflight) => {
+    const assertReady = await preflight({ original: state.binding, workspace, assertCurrent: guard })
+    assertReady()
+    beforeCreate()
+  })
   const h = nativeHandlers()
   const starting = h.native("container", "feature-a", {
     kind: "start-feature", initialUserMessage: "Actual independent Feature request"
   })
   await entered.promise
+  expect(beforeCreate).toHaveBeenCalledOnce()
+  expect(state.nativeReady).toHaveBeenCalledTimes(2)
+  expect(state.nativeReady.mock.calls[0][2]).toMatchObject({ assertCurrent: expect.any(Function) })
+  expect(state.nativeReady.mock.calls[1]).toHaveLength(2)
   await expect(h.native("container", "feature-a", {
     kind: "start-feature", initialUserMessage: "Late second request"
   })).rejects.toThrow("PROJECT_OPERATION_ALREADY_RUNNING")
@@ -498,9 +651,11 @@ it("rejects another Feature and a late binding replacement before native approva
     inputFingerprint: "a".repeat(64), decision: "approved"
   })
   await entered.promise
+  expect(state.assertFeatureCurrent).toHaveBeenCalledOnce()
   state.binding = { ...state.binding!, repositoryWorkspace: "C:/other-repository" }
   release.resolve()
-  await expect(deciding).rejects.toThrow("HARNESS_NATIVE_FEATURE_CHANGED")
+  await expect(deciding).rejects.toThrow("HARNESS_NATIVE_BINDING_CHANGED")
+  expect(state.assertFeatureCurrent).toHaveBeenCalledTimes(2)
   expect(approve).not.toHaveBeenCalled()
 })
 
@@ -511,6 +666,179 @@ it("keeps standalone Host history visible and excludes Feature-owned executions"
     recoverInterrupted: () => {}, list: () => [project, standalone]
   }
   expect(nativeHandlers().call("list")).toEqual([expect.objectContaining({ projectId: "standalone" })])
+})
+
+it("retries first Host recovery after repairing storage and closes each failed candidate", async () => {
+  const { HostProjectStore } = await vi.importActual<
+    typeof import("../harness-board/project-runtime/host-store")
+  >("../harness-board/project-runtime/host-store")
+  const root = mkdtempSync(join(canonicalTmpdir(), "host-recovery-retry-"))
+  templateRoots.push(root)
+  state.dataRoot = root
+  const path = join(root, "local-projects", "state.sqlite")
+  const seed = new HostProjectStore(path)
+  const project = seed.create(hostProjectFixture(root))
+  const operation = seed.prepare(prepareFixture())
+  const ticket = seed.start(operation.operationId, TEST_FINGERPRINT)
+  seed.bindExecutionThread(ticket, "original-thread")
+  seed.close()
+
+  const candidates: HostStore[] = []
+  state.openHostStore = (database) => {
+    const store = new HostProjectStore(database)
+    candidates.push(store)
+    return store
+  }
+  const recover = vi.fn(() => candidates.at(-1)!.recoverInterrupted())
+  state.service = {
+    recoverInterrupted: recover,
+    get: (id: string) => candidates.at(-1)!.get(id),
+    operations: (id: string, limit: number) => candidates.at(-1)!.listOperations(id, limit),
+    importedSource: () => undefined
+  }
+  const close = vi.spyOn(HostProjectStore.prototype, "close")
+  const raw = new DatabaseSync(path)
+  try {
+    const status = raw.prepare("UPDATE host_operations SET status=? WHERE id=?")
+    status.run("cancel_requested", operation.operationId)
+    const handlers = nativeHandlers()
+    for (let attempt = 0; attempt < 2; attempt++) {
+      expect(() => handlers.call("get", project.projectId)).toThrow("STORAGE_MISMATCH")
+    }
+    expect(close.mock.contexts).toEqual(candidates)
+    expect(close).toHaveBeenCalledTimes(2)
+
+    status.run("started", operation.operationId)
+    const expected = {
+      project: { projectId: project.projectId },
+      operations: [expect.objectContaining({
+        operationId: operation.operationId,
+        status: "unknown",
+        execution: expect.objectContaining({ threadId: "original-thread" })
+      })]
+    }
+    expect(handlers.call("get", project.projectId)).toMatchObject(expected)
+    expect(handlers.call("get", project.projectId)).toMatchObject(expected)
+    expect(recover).toHaveBeenCalledTimes(3)
+    expect(close).toHaveBeenCalledTimes(2)
+  } finally {
+    raw.close()
+    const closed = close.mock.contexts
+    close.mockRestore()
+    for (const candidate of candidates) {
+      if (!closed.includes(candidate)) candidate.close()
+    }
+  }
+})
+
+it.each(["unknown", "started"] as const)(
+  "keeps %s Host history readable when the separate input ledger is corrupt",
+  async (status) => {
+    const { HostProjectStore } = await vi.importActual<
+      typeof import("../harness-board/project-runtime/host-store")
+    >("../harness-board/project-runtime/host-store")
+    const root = mkdtempSync(join(canonicalTmpdir(), "host-view-input-ledger-"))
+    templateRoots.push(root)
+    const inputPath = join(root, "user-input.sqlite")
+    const store = new HostProjectStore(join(root, "state.sqlite"))
+    try {
+      const project = store.create(hostProjectFixture(root))
+      const historical = store.prepare(prepareFixture())
+      store.cancel(historical.operationId)
+      const pending = store.prepare(prepareFixture({ idempotencyKey: "interrupted" }))
+      const ticket = store.start(pending.operationId, TEST_FINGERPRINT)
+      store.bindExecutionThread(ticket, "original-thread")
+      if (status === "unknown") store.recoverInterrupted()
+      const resumeInput = vi.fn()
+      const execute = vi.fn((operationId: string) => store.start(operationId, TEST_FINGERPRINT))
+      state.service = {
+        get: (id: string) => store.get(id),
+        operations: (id: string, limit: number) => store.listOperations(id, limit),
+        importedSource: () => undefined,
+        recoverInterrupted: () => {},
+        prepareRuntimeInputs: async () => {},
+        start: execute,
+        resumeInput
+      }
+      const handlers = nativeHandlers()
+      const healthy = new HostUserInputStore(inputPath)
+      try {
+        configureHostUserInputPersistence({ store: () => healthy, isCurrent: () => false })
+        expect(handlers.call("get", project.projectId)).not.toHaveProperty("inputWaitError")
+      } finally {
+        healthy.close()
+      }
+      const damaged = Buffer.from("invalid SQLite input ledger".repeat(128))
+      writeFileSync(inputPath, damaged)
+      const openInput = vi.fn(() => new HostUserInputStore(inputPath))
+      configureHostUserInputPersistence({
+        store: openInput,
+        isCurrent: () => false
+      })
+      const expected = {
+        project: { projectId: project.projectId },
+        operations: [
+          expect.objectContaining({ operationId: pending.operationId, status }),
+          expect.objectContaining({ operationId: historical.operationId, status: "cancelled" })
+        ],
+        inputWaitError: expect.stringContaining("续接输入记录不可读")
+      }
+      const detail = handlers.call("get", project.projectId)
+      expect(detail).toMatchObject(expected)
+      expect(detail).not.toHaveProperty("inputWait")
+      expect(state.nativeRuntime?.view(project.projectId)).toMatchObject(expected)
+      openInput.mockClear()
+      const summary = state.nativeRuntime?.view(project.projectId, "summary")
+      expect(summary).toMatchObject({ project: expected.project, operations: expected.operations })
+      expect(summary).not.toHaveProperty("inputWaitError")
+      expect(openInput).not.toHaveBeenCalled()
+      expect(state.nativeRuntime?.view(project.projectId, "discussion")).toMatchObject(expected)
+      expect(openInput).toHaveBeenCalledOnce()
+      await expect(handlers.call("command", project.projectId, {
+        kind: "resume-input", operationId: pending.operationId, requestId: "host-input:original"
+      })).rejects.toMatchObject({ code: "ERR_SQLITE_ERROR", errcode: 26 })
+      expect(resumeInput).not.toHaveBeenCalled()
+      await expect(handlers.call("command", project.projectId, {
+        kind: "start", operationId: pending.operationId
+      })).rejects.toThrow("OPERATION_NOT_PREPARED")
+      expect(store.getOperation(pending.operationId)?.status).toBe(status)
+      expect(readFileSync(inputPath)).toEqual(damaged)
+    } finally {
+      configureHostUserInputPersistence(undefined)
+      store.close()
+    }
+  }
+)
+
+it("omits result review work from Host project summaries and rechecks it in run detail", () => {
+  const { project, operation } = nativeFeatureFixture()
+  const proposal = { ...project, manifest: { stages: [{ resultApproval: "human" }] } }
+  const succeeded = { ...operation, status: "succeeded" }
+  const operations = vi.fn(() => [succeeded])
+  const resultReview = vi.fn(() => { throw Error("PROJECT_HOST_INPUT_CHANGED") })
+  state.service = {
+    recoverInterrupted: () => {},
+    get: () => proposal,
+    importedSource: () => undefined,
+    operations,
+    resultReview
+  }
+  nativeHandlers()
+  const summary = state.nativeRuntime?.view(project.projectId, "summary")
+  expect(summary).toMatchObject({ operations: [succeeded] })
+  expect(summary).not.toHaveProperty("resultReviewError")
+  expect(operations).toHaveBeenLastCalledWith(project.projectId, 20, false)
+  expect(resultReview).not.toHaveBeenCalled()
+  expect(state.nativeRuntime?.view(project.projectId, "discussion")).toEqual(summary)
+  expect(resultReview).not.toHaveBeenCalled()
+
+  expect(state.nativeRuntime?.view(project.projectId)).toMatchObject({
+    operations: [succeeded],
+    resultApprovalRequired: true,
+    resultReviewError: expect.stringContaining("成果或检查已变化")
+  })
+  expect(operations).toHaveBeenLastCalledWith(project.projectId, 20, true)
+  expect(resultReview).toHaveBeenCalledExactlyOnceWith(succeeded.operationId)
 })
 
 it("does not let a Feature replace its fixed package through the standalone migration command", async () => {
@@ -526,7 +854,42 @@ it("does not let a Feature replace its fixed package through the standalone migr
   expect(prepareRuntimeInputs).not.toHaveBeenCalled()
 })
 
-it("blocks the first native continuation before any Skill when its actual scope is not ready", async () => {
+it("passes the prospective directory to native readiness before creating the first Host run", async () => {
+  const { project } = nativeFeatureFixture()
+  const beforeCreate = vi.fn()
+  const continuation = vi.fn()
+  state.service = { recoverInterrupted: () => {}, importedSource: () => undefined,
+    get: () => project, operations: () => [], continue: continuation }
+  state.ensureNative.mockImplementation(async (_project, _feature, _goal, guard, workspace, preflight) => {
+    await preflight({ original: state.binding, workspace, assertCurrent: guard })
+    beforeCreate()
+  })
+  state.nativeReady.mockResolvedValue({ ready: false, assertCurrent: () => {}, assertExecutionReady: () => {} })
+  const handlers = nativeHandlers()
+  await expect(handlers.native("container", "feature-a", {
+    kind: "start-feature", initialUserMessage: "First goal", workspacePath: "C:/chosen-execution"
+  })).rejects.toThrow("所选运行目录")
+  expect(state.nativeReady).toHaveBeenCalledWith(expect.anything(), "host-a",
+    expect.objectContaining({ workspace: "C:/chosen-execution" }))
+  expect(beforeCreate).not.toHaveBeenCalled()
+  expect(continuation).not.toHaveBeenCalled()
+})
+
+it("refuses to create a replacement at the Host adapter for a missing published Feature", async () => {
+  nativeFeatureFixture()
+  const localCreate = vi.fn()
+  state.service = { recoverInterrupted: () => {}, get: () => undefined, localCreate }
+  nativeHandlers()
+  const binding = state.binding!
+  await expect(state.nativeRuntime!.create({
+    projectId: binding.hostRunId, installedPluginId: binding.installedPluginId,
+    name: binding.title, workspace: binding.workspace, goal: "Original user request",
+    expectedPlugin: binding.expectedPlugin
+  })).rejects.toThrow("HARNESS_NATIVE_EXECUTION_MISSING")
+  expect(localCreate).not.toHaveBeenCalled()
+})
+
+it("blocks an already persisted native continuation before any Skill when its actual scope is not ready", async () => {
   const { project } = nativeFeatureFixture()
   const continuation = vi.fn()
   const prepareRuntimeInputs = vi.fn()

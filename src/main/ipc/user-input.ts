@@ -2,7 +2,7 @@ import { BrowserWindow, type IpcMain } from "electron"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { getOpenworkDir, getPlugins } from "../storage"
-import { getThreadCore } from "../db"
+import { getThreadCore, getThreadRuntimeScope } from "../db"
 import { isHostUserInputRecoverable } from "../services/host-user-input-recovery"
 import { HostUserInputStore } from "../services/host-user-input-store"
 import type { UserInputResponse } from "../types"
@@ -11,7 +11,8 @@ import {
   configureHostUserInputPersistence,
   getPendingUserInputForThread,
   submitUserInputResponse,
-  getHostInputContinuation
+  getHostInputContinuation,
+  isHostCheckpointRequestId
 } from "../services/user-input"
 
 let resumeHostInput:
@@ -47,6 +48,16 @@ export function registerUserInputHandlers(ipcMain: IpcMain): void {
       if (!durable && (create || existsSync(path))) durable = new HostUserInputStore(path)
       return durable
     },
+    mayRecover: (threadId) => {
+      try {
+        const metadata = getThreadRuntimeScope(threadId)?.metadata
+        if (!metadata) return false
+        const binding = JSON.parse(metadata)?.hostProjectRuntime
+        return typeof binding?.projectId === "string" && typeof binding?.operationId === "string"
+      } catch {
+        return false
+      }
+    },
     isCurrent: (record) =>
       isHostUserInputRecoverable(
         record,
@@ -74,8 +85,12 @@ export function registerUserInputHandlers(ipcMain: IpcMain): void {
       return
     }
 
-    if (!acknowledgeUserInputRequest(ack.requestId, ack.threadId)) {
-      console.warn("[UserInput] Received ack for unknown request:", ack.requestId)
+    try {
+      if (!acknowledgeUserInputRequest(ack.requestId, ack.threadId)) {
+        console.warn("[UserInput] Received ack for unknown request:", ack.requestId)
+      }
+    } catch (error) {
+      console.warn("[UserInput] Could not process a stored Host acknowledgement:", error)
     }
   })
 
@@ -93,11 +108,18 @@ export function registerUserInputHandlers(ipcMain: IpcMain): void {
       return
     }
 
-    if (!submitUserInputResponse(response)) {
-      console.warn("[UserInput] Received response for unknown request:", response.requestId)
+    let record: ReturnType<typeof getHostInputContinuation>
+    try {
+      if (!submitUserInputResponse(response)) {
+        console.warn("[UserInput] Received response for unknown request:", response.requestId)
+        return
+      }
+      if (!isHostCheckpointRequestId(response.requestId)) return
+      record = getHostInputContinuation(response.requestId)
+    } catch (error) {
+      console.warn("[UserInput] Could not process a stored Host response:", error)
       return
     }
-    const record = getHostInputContinuation(response.requestId)
     if (
       record?.continuation?.priorToolsSettled &&
       record.status === "answered" &&

@@ -1,5 +1,8 @@
 import { join } from "node:path"
-import type { HarnessProjectCreateInput } from "../../src/shared/harness-board-types"
+import type {
+  HarnessProjectCreateInput,
+  HarnessProjectMetadataUpdateInput
+} from "../../src/shared/harness-board-types"
 import type { PluginMetadata } from "../../src/main/types"
 import type { HarnessProjectUseReview } from "../../src/shared/project-use-authorization"
 import { testSecretProtector } from "./mods-secret-protector"
@@ -48,6 +51,8 @@ export async function projectUseConsentFixture(root: string, plugins: () => Plug
   )
   authority.configureProjectUseAuthority({
     parent: service.readHarnessProjectUseParent,
+    prepareParent: service.prepareHarnessProjectUseParent,
+    assertAdapterChange: (projectId) => native.assertNativeHarnessProjectMutable(projectId, true),
     child: native.findNativeHarnessFeatureByRunId,
     assertChild: service.assertHarnessProjectUseChild
   })
@@ -107,6 +112,19 @@ export async function projectUseConsentFixture(root: string, plugins: () => Plug
     guestLoads: () => guestLoads,
     async create(input: HarnessProjectCreateInput) {
       return createReviewed(input, await review(input))
+    },
+    async update(projectId: string, input: HarnessProjectMetadataUpdateInput) {
+      const reviewed = await authority.reviewProjectUse({
+        adapterId: input.adapterId,
+        adapterType: input.adapterType,
+        workspacePath: input.workspacePath,
+        projectDir: input.projectDir,
+        existingProjectId: projectId
+      }, owner)
+      return service.updateHarnessProjectMetadata(projectId, {
+        ...input,
+        projectUseApproval: { reviewId: reviewed.reviewId, reviewDigest: reviewed.reviewDigest }
+      }, owner)
     },
     close() {
       manager.close()

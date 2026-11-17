@@ -6078,7 +6078,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     : await readNativeSkillUsagePolicy(
         getPlugins(),
         () => captureNativeCapabilityContext(threadId, workspacePath),
-        options.abortSignal
+        options.abortSignal,
+        { explicitSkillPath: options.coordinatorExplicitSelectedSkill?.skillPath }
       )
   const clawSkillPolicy = await createClawSkillPolicy(
     clawSources.skills,

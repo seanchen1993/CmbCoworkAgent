@@ -205,6 +205,8 @@ export interface AgentRunExecutionContext {
    * unrecognized one as a plain failure.
    */
   onRunTerminated?: (terminal: AgentRunTerminal) => void
+  /** Desktop transport records delivery of the request's terminal stream event. */
+  onDesktopStreamDone?: (channel: string) => void
   onDetachedResultAvailable?: (signal: AgentRunDetachedResultSignal) => void
 }
 

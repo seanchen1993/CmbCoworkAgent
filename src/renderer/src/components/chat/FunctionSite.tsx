@@ -157,11 +157,12 @@ export function FunctionSiteContent({
 }
 
 /** A mounted desktop slot. The main process issues its drawing owner token. */
-export function FunctionSite(props: Parameters<typeof FunctionSiteSurface>[0]): React.JSX.Element {
+export function FunctionSite(props: Parameters<typeof FunctionSiteSurface>[0] &
+  { allowUnboundHistory?: boolean }): React.JSX.Element {
   const enabled = useModsChatScope(props.threadId)
-  const ready = useModsChatReady(props.threadId)
+  const ready = useModsChatReady(props.threadId, props.allowUnboundHistory)
   const loadError = useModsChatLoadError(props.threadId)
-  const isCurrent = useModsChatCurrent(props.threadId)
+  const isCurrent = useModsChatCurrent(props.threadId, props.allowUnboundHistory)
   const blockRevokedInteraction = (event: SyntheticEvent) => {
     if (isCurrent()) return
     event.preventDefault()

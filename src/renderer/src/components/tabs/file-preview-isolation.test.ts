@@ -186,13 +186,6 @@ describe("persisted active file preview isolation", () => {
     expect(fileViewer).toContain("externalPreviewGrant")
     expect(fileViewer).toContain("await resolveExternalPreviewGrant()")
     expect(fileViewer).not.toContain("requestExternalFileRead")
-    const knowledgeHandler = harnessIpc.slice(
-      harnessIpc.indexOf('"harnessBoard:getKnowledgePreview"'),
-      harnessIpc.indexOf('"harnessBoard:cancelKnowledgePreviewRequests"')
-    )
-    expect(knowledgeHandler).toContain("return readKnowledgeBasePreviewInWorker(")
-    expect(knowledgeHandler).not.toContain("issueExternalFileReadGrant")
-    expect(knowledgeHandler).not.toContain("authorizeKnowledgePreview")
     expect(externalGrants).toContain("realpath(entry.rootPath)")
     expect(externalGrants).toContain("realpath(candidate)")
     expect(previewIpc).toContain('"workspace:authorizeToolFilePreview"')
@@ -226,6 +219,62 @@ describe("persisted active file preview isolation", () => {
       expect(modelsIpc).not.toContain(removedChannel)
       expect(preload).not.toContain(removedChannel)
     }
+  })
+
+  it("only grants scoped knowledge previews after Main resolves their bound listing", async () => {
+    const start = harnessIpc.lastIndexOf(
+      "ipcMain.handle(", harnessIpc.indexOf('"harnessBoard:getKnowledgePreview"')
+    )
+    const end = harnessIpc.lastIndexOf(
+      "ipcMain.handle(", harnessIpc.indexOf('"harnessBoard:cancelKnowledgePreviewRequests"')
+    )
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(end).toBeGreaterThan(start)
+    const workerListing = { files: ["rules.md"] }
+    const protectedListing = { ...workerListing, previewGrant: "sender-bound-grant" }
+    const boundDirectory = { root: "host-bound-directory" }
+    const target = { projectId: "project" }
+    const calls: unknown[][] = []
+    const bindingError = Error("HARNESS_KNOWLEDGE_TARGET_INVALID")
+    const handle = runInNewContext(ts.transpileModule(`
+      let handler
+      const ipcMain = { handle: (_channel, callback) => { handler = callback } }
+      ${harnessIpc.slice(start, end)}
+      handler
+    `, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, {
+      ensureEnterpriseSenderCleanup: () => {},
+      listKnowledgeBases: async () => ({ knowledgeBases: [{
+        idKey: "rules", name: "Rules", localPath: "ordinary-knowledge-directory", localValid: true
+      }] }),
+      readKnowledgeBasePreviewInWorker: (selected: unknown) => {
+        calls.push(["ordinary", selected])
+        return workerListing
+      },
+      getHarnessKnowledgePreviewBinding: async (id: string, selected: unknown) => {
+        calls.push(["binding", id, selected])
+        if (selected !== target) throw bindingError
+        return boundDirectory
+      },
+      readHarnessKnowledgePreviewInWorker: (id: string, _scope: string, binding: unknown) => {
+        calls.push(["scoped", id, binding])
+        return workerListing
+      },
+      authorizeKnowledgePreview: (listing: unknown, senderId: number) => {
+        calls.push(["grant", listing, senderId])
+        return protectedListing
+      }
+    }) as (event: { sender: { id: number } }, id: string, scope?: unknown) => Promise<unknown>
+    const event = { sender: { id: 21 } }
+    expect(await handle(event, "rules")).toEqual(workerListing)
+    expect(calls.splice(0)).toEqual([["ordinary", {
+      idKey: "rules", name: "Rules", path: "ordinary-knowledge-directory"
+    }]])
+    await expect(handle(event, "rules", null)).rejects.toBe(bindingError)
+    expect(calls.splice(0)).toEqual([["binding", "rules", null]])
+    expect(await handle(event, "rules", target)).toEqual(protectedListing)
+    expect(calls).toEqual([
+      ["binding", "rules", target], ["scoped", "rules", boundDirectory], ["grant", workerListing, 21]
+    ])
   })
 
   it("keeps collapsed resource drawers from inheriting standard right-panel state", () => {

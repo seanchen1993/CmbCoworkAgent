@@ -1577,6 +1577,7 @@ async function testForkCopiesOnlyReferencedLargeToolResults(): Promise<void> {
 
 async function testForkThreadCopiesHistoricalForkableCheckpoints(): Promise<void> {
   const db = await import("../src/main/db/index.ts")
+  const { assertUnboundModsChatHistory } = await import("../src/main/ipc/mods-display-capability.ts")
   const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
   const { deleteThreadCheckpoint, getThreadCheckpointPath } = await import("../src/main/storage.ts")
   const { closeCheckpointer } = await import("../src/main/agent/runtime.ts")
@@ -1594,7 +1595,8 @@ async function testForkThreadCopiesHistoricalForkableCheckpoints(): Promise<void
   try {
     db.createThread(sourceThreadId, {
       title: "History source",
-      agentMode: "normal"
+      agentMode: "normal",
+      workspacePath: tmpdir()
     })
 
     const sourceSaver = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId), undefined, {
@@ -1653,8 +1655,14 @@ async function testForkThreadCopiesHistoricalForkableCheckpoints(): Promise<void
     await sourceSaver.flushStrict()
     await sourceSaver.close()
 
-    const forked = await forkThread({ sourceThreadId, title: "History fork" })
+    const forked = await forkThread({
+      sourceThreadId, title: "History fork", overrides: { workspacePath: null }
+    })
     targetThreadId = forked.thread.thread_id
+    assert.equal(forked.thread.metadata?.workspacePath ?? null, null)
+    assertUnboundModsChatHistory(targetThreadId, db.getThreadRuntimeScope)
+    assert.throws(() => assertUnboundModsChatHistory(sourceThreadId, db.getThreadRuntimeScope),
+      /MODS_SCOPE_CHANGED/)
 
     const targetSaver = new SqlJsSaver(getThreadCheckpointPath(targetThreadId))
     const targetCheckpoints: Array<{ id: string; parentId?: string }> = []
@@ -1682,6 +1690,12 @@ async function testForkThreadCopiesHistoricalForkableCheckpoints(): Promise<void
     )
 
     const handlers = registerTestThreadHandlers(registerThreadHandlers)
+    const readMessages = handlers.get("threads:messages")
+    assert(readMessages, "thread messages handler should be registered")
+    const sender = { isDestroyed: () => false, mainFrame: {}, on() {}, removeListener() {} }
+    const messages = (await readMessages({ sender }, targetThreadId)) as Message[]
+    assert.equal(messages.find((message) => message.id === "assistant-old")?.content, "old answer")
+    assert.equal(messages.find((message) => message.id === "assistant-new")?.content, "new answer")
     const listForkableCheckpoints = handlers.get("threads:list-forkable-checkpoints")
     assert(listForkableCheckpoints, "listForkableCheckpoints handler should be registered")
     const listed = (await listForkableCheckpoints(null, targetThreadId)) as Array<{

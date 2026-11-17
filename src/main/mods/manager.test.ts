@@ -35,6 +35,7 @@ import {
   authorizeCurrentModInput,
   hasModOperationApproval,
   getModsManager,
+  getResidentModsManager,
   setModsManager,
   setModsUnavailable
 } from "./manager"
@@ -1251,10 +1252,44 @@ describe("project Mods lifecycle and UI authority", () => {
     setModsUnavailable("MODS_CONTROL_RECOVERY_REQUIRED")
     try {
       expect(() => getModsManager()).toThrow("RECOVERY_REQUIRED")
+      expect(getResidentModsManager()).toBeUndefined()
     } finally {
       setModsManager(undefined)
     }
   })
+
+  it("only bypasses unavailable Mods when the parsed deployment is optional and the switch is off", () => {
+    const code = "MODS_CONTROL_RECOVERY_REQUIRED"
+    const optional = DEFAULT_MOD_POLICY
+    const mandatory = { ...optional, required: true }
+    let enabled: boolean | undefined = false
+    const readSwitch = vi.fn(() => enabled)
+
+    try {
+      setModsUnavailable(code, undefined, readSwitch)
+      expect(() => getModsManager()).toThrow(code)
+      setModsUnavailable(code, mandatory, readSwitch)
+      expect(() => getModsManager()).toThrow(code)
+      expect(readSwitch).not.toHaveBeenCalled()
+
+      setModsUnavailable(code, optional)
+      expect(() => getModsManager()).toThrow(code)
+      setModsUnavailable(code, optional, readSwitch)
+      expect(getModsManager()).toBeUndefined()
+
+      enabled = true
+      expect(() => getModsManager()).toThrow(code)
+      enabled = undefined
+      expect(() => getModsManager()).toThrow(code)
+      expect(getResidentModsManager()).toBeUndefined()
+
+      setModsManager(undefined)
+      expect(getModsManager()).toBeUndefined()
+    } finally {
+      setModsManager(undefined)
+    }
+  })
+
   it("enforces mandatory deployment policy with ordinary Mods disabled", async () => {
     const f = await fixture({
       ...DEFAULT_MOD_POLICY,

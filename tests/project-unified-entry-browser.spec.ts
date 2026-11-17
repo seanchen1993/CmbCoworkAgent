@@ -61,10 +61,12 @@ async function main() {
       import{parseProjectRuntimeManifestV1}from'./src/shared/project-runtime/manifest';
       const root=createRoot(document.getElementById('root')),calls=[],reviews=[],views={},templates=[{installedPluginId:'host',name:'四阶段项目插件',version:'0.1.3',stages:['转换','需求','规格','设计'],expectedTemplate:{pluginId:'host',name:'四阶段项目插件',version:'0.1.3',digest:'a'.repeat(64)}}];
       let installedIdentity={...templates[0].expectedTemplate};
+      let editReviewMode='current';window.setEditReviewMode=mode=>{editReviewMode=mode};
       window.replaceInstalled=kind=>{installedIdentity={...installedIdentity,...(kind==='version'?{version:'0.1.4'}:{digest:'b'.repeat(64)})}};
       window.resetInstalled=()=>{installedIdentity={pluginId:'host',name:'四阶段项目插件',version:'0.1.3',digest:'a'.repeat(64)};templates[0].expectedTemplate={...installedIdentity}};
       let holdCreate=false,finishCreate;window.holdCreate=()=>holdCreate=true;window.finishCreate=()=>finishCreate();
       const registry=[{id:'host',name:'四阶段项目插件',version:'0.1.3',type:'plugin',enabled:true,runtimeMode:'host',boardCompatibility:{compatible:false,status:'host-runtime',label:'原生项目模板'}},
+        {id:'replacement-host',name:'可替换原生插件',version:'1.0.0',type:'plugin',enabled:true,runtimeMode:'host',boardCompatibility:{compatible:false,status:'host-runtime'}},
         {id:'legacy',name:'既有项目插件',version:'1.0.0',type:'plugin',boardCompatibility:{compatible:true,status:'ready',label:'兼容'}},
         {id:'disabled',name:'停用项目插件',version:'1.0.0',type:'plugin',runtimeMode:'host',enabled:false,boardCompatibility:{compatible:false,status:'host-runtime'}},
         {id:'invalid',name:'不兼容插件',version:'1.0.0',type:'plugin',boardCompatibility:{compatible:false,status:'invalid',reason:'原声明不可用'}},
@@ -75,15 +77,22 @@ async function main() {
           stages:['转换','需求','规格','设计'].map((title,index)=>({id:'stage'+index,title,skill:'draft',actionIds:[],artifactIds:[],checkIds:[],approval:'none'})),actions:[],artifacts:[],checks:[],environment:[],
           capabilities:{execution:true,conditionalTransition:true,idempotency:true,reconciliation:true,cancellation:true}})},operations:[]}}
       window.api={plugins:{prepareStartUse:async()=>({kind:'host-project',canOpen:true,identity:installedIdentity,issues:[]})},file:{selectDirectory:async()=>({canceled:false,filePaths:['C:/fixture/project']})},
-        harnessBoard:{searchEnterpriseProjects:async()=>[],reviewProjectUse:async input=>(reviews.push(input),{reviewId:'review-'+input.projectDir,reviewDigest:'c'.repeat(64),projectId:input.existingProjectId??'allocated',workspace:input.workspacePath+'/'+input.projectDir,plugin:installedIdentity,packageDigest:'d'.repeat(64),sources:[{pluginId:'host',name:'四阶段项目插件',digest:'e'.repeat(64),capabilities:['process.run'],actionIds:[],configurationOnly:false}],scopeNotice:'仅用于本项目通过原界面登记的目录。',requiresApplicationEnable:false,...(input.existingProjectId?{authorizationCurrent:true}:{}),expiresAt:Date.now()+60000}),createProject:async input=>{calls.push(['legacy-create',input]);return{}},
+        harnessBoard:{searchEnterpriseProjects:async()=>[],reviewProjectUse:async input=>{
+          reviews.push(input);
+          if(input.existingProjectId && editReviewMode==='unavailable') throw Error('PROJECT_PACKAGE_IDENTITY_MISMATCH');
+          const replacement=input.adapterId==='replacement-host';
+          const plugin=replacement?{pluginId:'replacement-host',name:'可替换原生插件',version:'1.0.0',digest:'f'.repeat(64)}:installedIdentity;
+          return {reviewId:'review-'+input.projectDir,reviewDigest:'c'.repeat(64),projectId:input.existingProjectId??'allocated',workspace:input.workspacePath+'/'+input.projectDir,plugin,packageDigest:'d'.repeat(64),sources:[{pluginId:plugin.pluginId,name:plugin.name,digest:'e'.repeat(64),capabilities:['process.run'],actionIds:[],configurationOnly:false}],scopeNotice:'仅用于本项目通过原界面登记的目录。',requiresApplicationEnable:false,...(input.existingProjectId?{authorizationCurrent:!replacement&&editReviewMode==='current'}:{}),expiresAt:Date.now()+60000};
+        },createProject:async input=>{calls.push(['legacy-create',input]);return{}},
           localProjects:{get:async id=>{calls.push(['get',id]);return structuredClone(views[id])},mods:{read:async id=>({projectId:id,projectVersion:1,packageDigest:'a'.repeat(64),workspace:'C:/fixture/project'}),approve:async()=>{throw Error('NO_AUTO_APPROVAL')}},
             create:async input=>{calls.push(['host-create',input]);if(JSON.stringify(input.expectedPlugin??input.expectedTemplate)!==JSON.stringify(installedIdentity))throw Error('PROJECT_HOST_PACKAGE_IDENTITY_MISMATCH');const result=make(input);views[result.project.projectId]=result;if(holdCreate)await new Promise(resolve=>finishCreate=resolve);return structuredClone(result)},
             command:async()=>{throw Error('NO_AUTO_START')}}}};
       const knowledgeBases={ready:true,knowledgeBases:[{idKey:'fixture-rules',name:'工程约束',gitRef:'main',visibility:'visible',workspaces:[{role:'read',status:'success',localValid:true}]}]};
       const blank=()=>({name:'既有项目',description:'独立目标',projectCode:'P001',systemId:'S1',systemName:'系统',projectDir:'legacy',workspacePath:'C:/fixture',adapterType:'plugin',adapterId:'',projectFromLean:false,isTestProject:true});
-      function Fixture(){const[open,setOpen]=useState(false),[editing,setEditing]=useState(false),[form,setForm]=useState(blank),[selected,setSelected]=useState(),[items,setItems]=useState([]),[startUse,setStartUse]=useState(),[workspaceError,setWorkspaceError]=useState(null),[workspaceValidating,setWorkspaceValidating]=useState(false);
+      function Fixture(){const[open,setOpen]=useState(false),[editing,setEditing]=useState(null),[form,setForm]=useState(blank),[selected,setSelected]=useState(),[items,setItems]=useState([]),[startUse,setStartUse]=useState(),[workspaceError,setWorkspaceError]=useState(null),[workspaceValidating,setWorkspaceValidating]=useState(false);
         window.startSaved=()=>{setStartUse({id:'saved-intent',accountRevision:0,input:{threadId:'creator',expectedWorkspace:'C:/author',pluginId:'host',expected:installedIdentity},report:{kind:'host-project',canOpen:true,identity:installedIdentity,issues:[]}});setForm({...blank(),adapterId:'host'});setOpen(true)};
-        window.editSaved=()=>{setForm({...blank(),adapterId:'host',knowledgeBaseIds:['fixture-rules']});setEditing(true)};
+        window.editSaved=(legacy=false)=>{setForm({...blank(),adapterId:'host',knowledgeBaseIds:['fixture-rules']});setEditing({projectId:'existing-owner',harnessAdapter:{id:'host',type:'plugin'},
+          ...(legacy?{boardCompatibility:{compatible:false,status:'host-runtime',message:'此旧项目绑定的插件已改为原生项目模板。'}}:{nativeBinding:{engine:'host',installedPluginId:'host'}})})};
         window.fixture={calls,reviews,setWorkspaceState:(error,pending)=>{setWorkspaceError(error);setWorkspaceValidating(pending)},refreshTemplate:()=>{templates[0].expectedTemplate={...installedIdentity};setForm(value=>({...value}))},missingTemplate:()=>delete templates[0].expectedTemplate,remount:()=>{setSelected(undefined);setItems(Object.values(views).map(v=>v.project))}};
         if(selected)return <><button onClick={()=>setSelected(undefined)}>项目列表</button><LocalProjectRun key={selected} projectId={selected} onChanged={()=>{}}/></>;
         return <><button onClick={()=>{setStartUse(undefined);setForm(blank());setOpen(true)}}>新建项目</button><HostProjectListItems projects={items} onSelect={setSelected}/>
@@ -91,9 +100,9 @@ async function main() {
             workspaceError={workspaceError} workspaceValidating={workspaceValidating} installingPluginNames={new Set()} error={null} verification={{pending:false,error:null}} onOpenChange={setOpen} onChange={setForm}
             onInstallPlugin={()=>{throw Error('NO_AUTO_INSTALL')}} onPickWorkspace={()=>{}} onSubmit={async approval=>{await window.api.harnessBoard.createProject({...form,...(approval?{projectUseApproval:approval}:{})});setOpen(false)}}
             onHostCreated={view=>{setItems(Object.values(views).map(v=>v.project));setOpen(false);setSelected(view.project.projectId)}}/>
-          <ProjectEditDialog projectId="existing-owner" open={editing} saving={false} form={form} registry={registry} knowledgeBases={knowledgeBases} onOpenSystemConstraints={()=>{}}
-            installingPluginNames={new Set()} error={null} verification={{pending:false,error:null}} onOpenChange={setEditing} onChange={setForm}
-            onInstallPlugin={()=>{throw Error('NO_AUTO_INSTALL')}} onSubmit={approval=>{calls.push(['edit',{...form,...(approval?{projectUseApproval:approval}:{})}]);setEditing(false)}}/></>}
+          <ProjectEditDialog project={editing} open={editing!==null} saving={false} form={form} registry={registry} knowledgeBases={knowledgeBases} onOpenSystemConstraints={()=>{}}
+            installingPluginNames={new Set()} error={null} verification={{pending:false,error:null}} onOpenChange={open=>{if(!open)setEditing(null)}} onChange={setForm}
+            onInstallPlugin={()=>{throw Error('NO_AUTO_INSTALL')}} onSubmit={approval=>{calls.push(['edit',{...form,...(approval?{projectUseApproval:approval}:{})}]);setEditing(null)}}/></>}
       root.render(<Fixture/>);
     `
     }
@@ -263,6 +272,10 @@ async function main() {
     await page.evaluate("window.editSaved()")
     const editing = page.getByRole("dialog", { name: "编辑项目", exact: true })
     await editing.getByText("已沿用创建项目时的授权。", { exact: false }).waitFor()
+    await editing.getByRole("button", { name: /选择插件，当前：四阶段项目插件/ }).click()
+    await editing.getByRole("option", { name: /四阶段项目插件/ }).waitFor()
+    assert.equal(await editing.getByRole("option", { name: /既有项目插件/ }).count(), 0)
+    await editing.getByRole("option", { name: /四阶段项目插件/ }).click()
     await editing.getByRole("button", { name: "选择系统约束，当前：工程约束（main）", exact: true }).waitFor()
     await editing.getByRole("textbox", { name: "项目名称 *", exact: true }).fill("仅修改项目名称")
     assert.equal(await editing.getByRole("button", { name: "保存并授权", exact: true }).count(), 0)
@@ -274,6 +287,50 @@ async function main() {
       !Object.hasOwn(saved, "projectUseApproval"),
       "metadata edit does not authorize or enable again"
     )
+    await editing.waitFor({ state: "detached" })
+    const reviewsBeforeLegacyEdit = await page.evaluate("window.fixture.reviews.length")
+    await page.evaluate("window.editSaved(true)")
+    await editing.getByText("此旧项目绑定的插件已改为原生项目模板。", { exact: true }).waitFor()
+    const legacySave = editing.getByRole("button", { name: "保存", exact: true })
+    assert(await legacySave.isEnabled(), "metadata save remains available for a legacy binding")
+    await editing.getByRole("textbox", { name: "项目名称 *", exact: true }).fill("旧项目说明已更新")
+    await page.waitForTimeout(450)
+    assert.equal(await page.evaluate("window.fixture.reviews.length"), reviewsBeforeLegacyEdit)
+    await legacySave.click()
+    const legacySaved = await page.evaluate("window.fixture.calls[4][1]")
+    assert.equal(legacySaved.name, "旧项目说明已更新")
+    assert.equal(legacySaved.adapterId, "host")
+    assert.deepEqual(legacySaved.knowledgeBaseIds, ["fixture-rules"])
+    assert(!Object.hasOwn(legacySaved, "projectUseApproval"))
+    await editing.waitFor({ state: "detached" })
+    await page.evaluate("window.setEditReviewMode('unavailable');window.editSaved()")
+    await editing.getByRole("alert").filter({ hasText: /所选插件已变化或不可用/ }).waitFor()
+    await editing.getByRole("textbox", { name: "项目名称 *", exact: true }).fill("原生插件不可用时仍可编辑")
+    await editing.getByRole("button", { name: "保存", exact: true }).click()
+    const unavailableSaved = await page.evaluate("window.fixture.calls[5][1]")
+    assert.equal(unavailableSaved.name, "原生插件不可用时仍可编辑")
+    assert(!Object.hasOwn(unavailableSaved, "projectUseApproval"))
+    await editing.waitFor({ state: "detached" })
+
+    await page.evaluate("window.setEditReviewMode('current');window.editSaved()")
+    await editing.getByRole("button", { name: /选择插件，当前：四阶段项目插件/ }).click()
+    await editing.getByRole("option", { name: /可替换原生插件/ }).click()
+    await editing.getByRole("button", { name: "保存并授权", exact: true }).click()
+    const rebound = await page.evaluate("window.fixture.calls[6][1]")
+    assert.equal(rebound.adapterId, "replacement-host")
+    assert.equal(rebound.projectUseApproval.reviewDigest, "c".repeat(64))
+    const rebindReview = await page.evaluate("window.fixture.reviews.at(-1)")
+    assert.equal(rebindReview.adapterId, "replacement-host")
+    assert.equal(rebindReview.existingProjectId, "existing-owner")
+    await editing.waitFor({ state: "detached" })
+
+    await page.evaluate("window.setEditReviewMode('renew');window.editSaved()")
+    await editing.getByRole("button", { name: "保存并授权", exact: true }).waitFor()
+    await editing.getByRole("button", { name: "保存", exact: true }).click()
+    const savedWithoutRenewal = await page.evaluate("window.fixture.calls[7][1]")
+    assert(!Object.hasOwn(savedWithoutRenewal, "projectUseApproval"))
+    await editing.waitFor({ state: "detached" })
+    await page.evaluate("window.setEditReviewMode('current')")
     const reviewsBeforeInvalid = await page.evaluate("window.fixture.reviews.length")
     await page.evaluate(() => {
       const fixture = window as unknown as {

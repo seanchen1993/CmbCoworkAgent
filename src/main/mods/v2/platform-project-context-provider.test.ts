@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile, readFile, link, symlink } from "node:fs/promises"
+import { mkdir, mkdtemp, rename, rm, writeFile, readFile, link, symlink } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it } from "vitest"
@@ -13,7 +13,7 @@ import type { NativeProjectContextScope } from "./project-context-scope"
 import type { ModObject } from "../../../shared/mods/types"
 import { withNativeProjectReadOnlyChecks } from "./project-readonly-check-scope"
 import { encodeMarketContent, MARKET_CONTENT_PREFIX, protectMarketDirectory } from "../../services/market-content"
-import { runtimeDigest } from "../../harness-board/project-runtime/safe-files"
+import { runtimeDigest, runtimeDirectoryIdentity } from "../../harness-board/project-runtime/safe-files"
 import { issueRuntimePluginSourceToken, withRuntimePluginSource } from "../../plugins/runtime-source-scope"
 
 const cleanup: Array<() => Promise<void> | void> = []
@@ -64,9 +64,10 @@ async function fixture(extraPermission = false, checkOnly = false, compactText =
           target,action:"select",input:{input:{}},requestKey:"nested"});
         if(event.input.input.mode === "status") return await $.platform.status({ref,target,requestKey:"read-original"});
         const state=await $.platform.read({ref,target});
-        const list=await $.platform.act({ref,target,action:"list",input:{rootId:"knowledge"},requestKey:event.input.executionId+":list"});
-        const file=await $.platform.act({ref,target,action:"read",input:{rootId:"knowledge",path:event.input.input.path||"guide.md"},requestKey:${compactText ? 'event.input.executionId+":read"' : '"read-original"'}});
-        return {status:"succeeded",text:${compactText ? '"Context read completed"' : 'JSON.stringify({state:state.value,list:list.value,file})'},output:{state:state.value,list:list.value,file}};
+        const rootId=event.input.input.rootId||"knowledge";
+        const list=await $.platform.act({ref,target,action:"list",input:{rootId,...(event.input.input.listPath?{path:event.input.input.listPath}:{})},requestKey:event.input.executionId+":list"});
+        const file=await $.platform.act({ref,target,action:"read",input:{rootId,path:event.input.input.path||"guide.md"},requestKey:${compactText ? 'event.input.executionId+":read"' : '"read-original"'}});
+        return {status:"succeeded",text:${compactText ? '"Context read completed"' : 'JSON.stringify({state:state.value,list:list.value,file})'},output:{state:state.value,list:list.value,file,...(event.input.input.listPath?{listError:list.error}:{})}};
       }
     })
   }`
@@ -225,6 +226,38 @@ it("rejects configuration revision changes without requiring the retired context
   await f.manager.saveUserConfig(f.root, "configuration-thread", f.provider.pluginId,
     f.provider.digest, "label", "changed", 0, f.controller.signal, () => {})
   expect(() => guard()).toThrow("MODS_CONFIG_VALUE_CHANGED")
+})
+
+it("projects two pinned knowledge roots as handles and rejects a replaced read directory", async () => {
+  const f = await fixture(false, false, true)
+  const second = join(f.root, "second")
+  await mkdir(second)
+  await writeFile(join(second, "guide.md"), "Second approved material")
+  f.scope.roots = [f.knowledge, second].map((path, i) => ({
+    id: "knowledge-" + (i + 1), path, source: "knowledge", identity: runtimeDirectoryIdentity(path)
+  }))
+  f.scope.featureInputs = { selectedDeployUnits: ["orders-api"] }
+  const result = await withNativeProjectContext(f.scope, () => f.execute({ rootId: "knowledge-2" }))
+  expect(result.value.output).toMatchObject({
+    state: {
+      featureInputs: { selectedDeployUnits: ["orders-api"] },
+      roots: [{ id: "knowledge-1", source: "knowledge" }, { id: "knowledge-2", source: "knowledge" }]
+    },
+    file: { status: "succeeded", value: { text: "Second approved material" } }
+  })
+  expect(JSON.stringify(result.value.output)).not.toContain(JSON.stringify(second).slice(1, -1))
+  const missing = await withNativeProjectContext(f.scope, () => f.execute({
+    rootId: "knowledge-2", listPath: "missing-subdirectory"
+  }))
+  expect(missing.value.output).toMatchObject({ listError: "PROJECT_CONTEXT_MATERIAL_UNAVAILABLE" })
+  expect(JSON.stringify(missing.value.output)).not.toContain(JSON.stringify(second).slice(1, -1))
+
+  await rename(second, join(f.root, "previous-second"))
+  await mkdir(second)
+  await writeFile(join(second, "guide.md"), "Unapproved replacement")
+  const replaced = await withNativeProjectContext(f.scope, () => f.execute({ rootId: "knowledge-2" }))
+  expect(replaced.value.output).toMatchObject({ file: { error: "PROJECT_CONTEXT_ROOT_CHANGED" } })
+  expect(JSON.stringify(replaced.value.output)).not.toContain("Unapproved replacement")
 })
 
 it("decodes only package materials through the real provider while preserving raw digest and plaintext limits", async () => {

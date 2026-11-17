@@ -3,10 +3,11 @@ import matter from "./frontmatter.cjs"
 export interface KnowledgeDocument {
   path: string
   text: string
+  rootId?: string
 }
 export interface SelectedDeployment {
   deployUnitId: string
-  appType: "frontend" | "backend"
+  appType?: "frontend" | "backend"
 }
 export interface SelectedKnowledge extends KnowledgeDocument {
   type: string
@@ -63,7 +64,7 @@ export function selectKnowledge(documents: KnowledgeDocument[], selected: Select
         typeof item.deployUnitId !== "string" ||
         !item.deployUnitId.trim() ||
         item.deployUnitId.length > 256 ||
-        !["frontend", "backend"].includes(item.appType)
+        (item.appType !== undefined && !["frontend", "backend"].includes(item.appType))
     ) ||
     new Set(selected.map((item) => item.deployUnitId)).size !== selected.length
   )
@@ -80,56 +81,64 @@ export function selectKnowledge(documents: KnowledgeDocument[], selected: Select
     throw Error("AUTOBIZ_KNOWLEDGE_PATH_COLLISION")
   const output = new Map<string, SelectedKnowledge>()
   for (const selection of selected) {
-    const match = parsed.find((item) => item.header.deploy_unit === selection.deployUnitId)
-    if (!match) throw Error("AUTOBIZ_KNOWLEDGE_DEPLOYMENT_MISSING:" + selection.deployUnitId)
-    let directory = match.path.includes("/") ? match.path.slice(0, match.path.lastIndexOf("/")) : ""
-    let agents: typeof match | undefined
-    while (true) {
-      agents = parsed.find((item) => item.path === (directory ? directory + "/" : "") + "AGENTS.md")
-      if (agents || !directory) break
-      directory = directory.includes("/") ? directory.slice(0, directory.lastIndexOf("/")) : ""
-    }
-    if (!agents) throw Error("AUTOBIZ_KNOWLEDGE_ANCESTOR_AGENTS_MISSING:" + selection.deployUnitId)
-    const types = [
-      "Product Knowledge",
-      "Service Knowledge",
-      selection.appType === "frontend" ? "Component Reference" : "Reference"
-    ]
-    let selectedCount = 0
+    const matches = new Map<string, (typeof parsed)[number]>()
     for (const document of parsed) {
-      if (directory && !document.path.startsWith(directory + "/")) continue
-      const info = document.header
-      if (
-        !types.includes(String(info.type)) ||
-        (info.type !== "Product Knowledge" && info.deploy_unit !== selection.deployUnitId)
-      )
-        continue
-      selectedCount++
-      const prior = output.get(document.path)
-      if (prior) {
-        prior.deployUnitIds.push(selection.deployUnitId)
-        continue
-      }
-      output.set(document.path, {
-        path: document.path,
-        text: document.text,
-        type: String(info.type),
-        title:
-          typeof info.title === "string" ? info.title : titleOf(document.path.split("/").at(-1)!),
-        description: typeof info.description === "string" ? info.description : "",
-        tags: Array.isArray(info.tags)
-          ? info.tags.map(String)
-          : typeof info.tags === "string"
-            ? info.tags
-                .split(",")
-                .map((value) => value.trim())
-                .filter(Boolean)
-            : [],
-        deployUnitIds: [selection.deployUnitId]
-      })
+      const root = document.rootId ?? ""
+      if (document.header.deploy_unit === selection.deployUnitId && !matches.has(root))
+        matches.set(root, document)
     }
-    if (!selectedCount)
-      throw Error("AUTOBIZ_KNOWLEDGE_SELECTED_CONTENT_MISSING:" + selection.deployUnitId)
+    if (!matches.size) throw Error("AUTOBIZ_KNOWLEDGE_DEPLOYMENT_MISSING:" + selection.deployUnitId)
+    for (const match of matches.values()) {
+      let directory = match.path.includes("/") ? match.path.slice(0, match.path.lastIndexOf("/")) : ""
+      let agents: typeof match | undefined
+      while (true) {
+        agents = parsed.find((item) => item.path === (directory ? directory + "/" : "") + "AGENTS.md")
+        if (agents || !directory) break
+        directory = directory.includes("/") ? directory.slice(0, directory.lastIndexOf("/")) : ""
+      }
+      if (!agents) throw Error("AUTOBIZ_KNOWLEDGE_ANCESTOR_AGENTS_MISSING:" + selection.deployUnitId)
+      const types = [
+        "Product Knowledge",
+        "Service Knowledge",
+        ...(!selection.appType ? ["Component Reference", "Reference"] :
+          [selection.appType === "frontend" ? "Component Reference" : "Reference"])
+      ]
+      let selectedCount = 0
+      for (const document of parsed) {
+        if (document.rootId !== match.rootId || (directory && !document.path.startsWith(directory + "/"))) continue
+        const info = document.header
+        if (
+          !types.includes(String(info.type)) ||
+          (info.type !== "Product Knowledge" && info.deploy_unit !== selection.deployUnitId)
+        )
+          continue
+        selectedCount++
+        const prior = output.get(document.path)
+        if (prior) {
+          prior.deployUnitIds.push(selection.deployUnitId)
+          continue
+        }
+        output.set(document.path, {
+          path: document.path,
+          text: document.text,
+          type: String(info.type),
+          title:
+            typeof info.title === "string" ? info.title : titleOf(document.path.split("/").at(-1)!),
+          description: typeof info.description === "string" ? info.description : "",
+          tags: Array.isArray(info.tags)
+            ? info.tags.map(String)
+            : typeof info.tags === "string"
+              ? info.tags
+                  .split(",")
+                  .map((value) => value.trim())
+                  .filter(Boolean)
+              : [],
+          deployUnitIds: [selection.deployUnitId]
+        })
+      }
+      if (!selectedCount)
+        throw Error("AUTOBIZ_KNOWLEDGE_SELECTED_CONTENT_MISSING:" + selection.deployUnitId)
+    }
   }
   return [...output.values()]
 }

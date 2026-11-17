@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process"
 import {
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -8,6 +9,9 @@ import {
   renameSync,
   rmdirSync,
   rmSync,
+  statSync,
+  truncateSync,
+  utimesSync,
   writeFileSync
 } from "node:fs"
 import { basename, dirname, join } from "node:path"
@@ -21,7 +25,11 @@ import { HostProjectService } from "./project-runtime/host-service"
 import { HostPackageSnapshots } from "./project-runtime/package-snapshots"
 import { hostProjectFixture, TEST_FINGERPRINT } from "./project-runtime/host-fixtures.test-helper"
 import { runtimeDirectoryIdentity } from "./project-runtime/safe-files"
+import * as safeFiles from "./project-runtime/safe-files"
+import { readProjectKnowledgeDeployUnits } from "./knowledge-deploy-units"
 import * as worktreeApi from "../services/git-worktree"
+import * as knowledge from "../services/knowledge-base-manager"
+import { CONTEXT_HANDOFF_PROTOCOL, CONTEXT_MATERIALS_PROTOCOL, EXTENSION_CONTRACT_API_VERSION, wrapProjectRuntimeManifest } from "../../shared/project-runtime"
 
 const state = vi.hoisted(() => ({ root: "", plugins: [] as PluginMetadata[] }))
 vi.mock("../storage", () => ({
@@ -42,9 +50,11 @@ import {
   ensureNativeHarnessFeatureRun,
   initializeNativeHarnessProject,
   nativeHarnessFeatureConfiguration,
+  nativeHarnessProjectDetail,
   nativeHarnessRunDetail,
   readNativeHarnessFeature,
-  updateNativeHarnessFeatureConfiguration
+  updateNativeHarnessFeatureConfiguration,
+  type NativeHarnessRuntime
 } from "./native-harness"
 
 let project: HarnessProjectMetadata
@@ -161,6 +171,369 @@ function feature(featureId: string, workspace = repository) {
     selectedDeployUnits: []
   })
 }
+it("reuses verified project bytes until an in-place edit or replacement changes their generation", async () => {
+  const binding = await feature("project-generation")
+  const path = join(state.root, "harness-board-projects.json")
+  const original = readFileSync(path, "utf8")
+  const modified = original.replaceAll("installed-docs", "alternate-docs")
+  expect(modified.length).toBe(original.length)
+  const time = new Date("2026-11-02T00:00:00Z")
+  utimesSync(path, time, time)
+  const before = statSync(path, { bigint: true })
+  const reads = vi.spyOn(safeFiles, "readRuntimeScopedFile")
+  assertNativeHarnessFeatureCurrent(binding)
+  assertNativeHarnessFeatureCurrent(binding)
+  expect(reads).toHaveBeenCalledOnce()
+
+  writeFileSync(path, modified)
+  utimesSync(path, time, time)
+  const edited = statSync(path, { bigint: true })
+  expect(edited).toMatchObject({ ino: before.ino, size: before.size, mtimeNs: before.mtimeNs })
+  expect(() => assertNativeHarnessFeatureCurrent(binding)).toThrow("HARNESS_NATIVE_PROJECT_CHANGED")
+  expect(reads).toHaveBeenCalledTimes(2)
+
+  const replacement = join(state.root, "replacement-projects.json")
+  writeFileSync(replacement, original)
+  utimesSync(replacement, time, time)
+  renameSync(path, join(state.root, "previous-projects.json"))
+  renameSync(replacement, path)
+  expect(statSync(path, { bigint: true }).ino).not.toBe(edited.ino)
+  assertNativeHarnessFeatureCurrent(binding)
+  assertNativeHarnessFeatureCurrent(binding)
+  expect(reads).toHaveBeenCalledTimes(3)
+})
+
+it("keeps a failed first-start preflight free of durable goal, workspace and Host creation", async () => {
+  const initial = await feature("retry")
+  const candidate = join(state.root, "candidate-directory")
+  mkdirSync(candidate)
+  const preflight = vi.fn<NonNullable<Parameters<typeof ensureNativeHarnessFeatureRun>[5]>>(async ({
+    workspace, original, assertCurrent
+  }) => {
+    expect(workspace).toBe(realpathSync(candidate))
+    expect(original).toEqual(initial)
+    expect(host.get(original.hostRunId)).toBeUndefined()
+    assertCurrent()
+    throw Error("MISSING_CONFIGURATION")
+  })
+  await expect(ensureNativeHarnessFeatureRun(
+    project.projectId, "retry", "Original goal", undefined, candidate, preflight
+  )).rejects.toThrow("MISSING_CONFIGURATION")
+  expect(preflight).toHaveBeenCalledOnce()
+  expect(readNativeHarnessFeature(project.projectId, "retry")).toEqual(initial)
+  expect(host.get(initial.hostRunId)).toBeUndefined()
+  updateNativeHarnessFeatureConfiguration(
+    project.projectId, "retry", candidate, { source: "directory", path: candidate }, []
+  )
+  const run = await ensureNativeHarnessFeatureRun(project.projectId, "retry", "Corrected goal")
+  expect(run.project.goal).toBe("Corrected goal")
+  expect(run.project.workspace).toBe(realpathSync(candidate))
+})
+
+function writeDeployUnitManifest(path: string, deployUnitIds: string[]) {
+  writeFileSync(join(path, "agents.manifest.json"), JSON.stringify({
+    systems: [{ deployUnits: deployUnitIds.map((deployUnitId) => ({ deployUnitId })) }]
+  }))
+}
+
+function configureFeatureInputs(knowledgeBaseIds: string[], deployUnitIds: string[]) {
+  project = {
+    ...project,
+    nativeBinding: { ...project.nativeBinding!, supportsDeployUnits: true },
+    knowledgeBaseIds
+  }
+  writeFileSync(join(state.root, "harness-board-projects.json"),
+    JSON.stringify({ version: 1, projects: [project] }))
+  writeFileSync(join(state.plugins[0].path, "devclaw.project-runtime.json"),
+    JSON.stringify(wrapProjectRuntimeManifest(hostProjectFixture(repository).manifest, {
+      apiVersion: EXTENSION_CONTRACT_API_VERSION,
+      requires: [CONTEXT_HANDOFF_PROTOCOL, CONTEXT_MATERIALS_PROTOCOL],
+      context: {
+        sourceAccess: "read-only",
+        mutableData: "host",
+        configuration: "host-resolved",
+        knowledge: { required: true },
+        provider: {
+          actionId: "knowledge.context",
+          operations: ["session-context"],
+          materials: {
+            featureInputs: true,
+            roots: [{ id: "knowledge", source: "knowledge" }],
+            configuration: []
+          }
+        }
+      }
+    })))
+  return knowledgeBaseIds.map(id => {
+    const path = join(state.root, id)
+    mkdirSync(path)
+    writeFileSync(join(path, "constraints.md"), "Published system constraints")
+    writeDeployUnitManifest(path, deployUnitIds)
+    return { id, name: id, path: realpathSync(path) }
+  })
+}
+
+it("validates the Host deploy-unit limit before creating or changing a Feature", async () => {
+  configureFeatureInputs([], [])
+  const units = Array.from({ length: 33 }, (_, index) => ({
+    deployUnitIdMapping: `map-${index}`, deployUnitId: `unit-${index}`, localRepoPath: repository
+  }))
+  const sessionWorkspace = { source: "directory" as const, path: repository }
+  const createInput = { project, featureId: "too-many-units", repositoryWorkspace: repository, sessionWorkspace }
+  await expect(createNativeHarnessFeature({ ...createInput, selectedDeployUnits: units }))
+    .rejects.toThrow("所选发布单元超过原生流程支持的数量或编号长度")
+  expect(readNativeHarnessFeature(project.projectId, createInput.featureId)).toBeUndefined()
+
+  await createNativeHarnessFeature({ ...createInput, selectedDeployUnits: units.slice(0, 32) })
+  expect(() => updateNativeHarnessFeatureConfiguration(
+    project.projectId, createInput.featureId, repository, sessionWorkspace, units
+  )).toThrow("所选发布单元超过原生流程支持的数量或编号长度")
+  expect(nativeHarnessFeatureConfiguration(project.projectId, createInput.featureId)?.selectedDeployUnitMappings)
+    .toEqual(units.slice(0, 32))
+})
+
+it("yields during a large first-start knowledge scan and rechecks changes before writing", async () => {
+  const roots = configureFeatureInputs(["large-library"], ["current-unit"])
+  const root = roots[0].path
+  for (let index = 0; index < 64; index++) writeFileSync(join(root, `notes-${index}.md`), "content")
+  vi.spyOn(knowledge, "resolveProjectKnowledgeBases").mockResolvedValue(roots)
+  const binding = await createNativeHarnessFeature({
+    project, featureId: "yielding-start", repositoryWorkspace: repository,
+    sessionWorkspace: { source: "directory", path: repository },
+    selectedDeployUnits: [{ deployUnitIdMapping: "map", deployUnitId: "current-unit", localRepoPath: repository }]
+  })
+  let probes = 0
+  let probesAtArchive = 0
+  const read = safeFiles.probeRuntimeScopedFile
+  vi.spyOn(safeFiles, "probeRuntimeScopedFile").mockImplementation((directory, relative) => {
+    const result = read(directory, relative)
+    if (directory === root && ++probes === 1) setImmediate(() => {
+      probesAtArchive = probes
+      const archived = { ...project, lifecycle: { ...project.lifecycle, status: "archived" } }
+      writeFileSync(join(state.root, "harness-board-projects.json"),
+        JSON.stringify({ version: 1, projects: [archived] }))
+    })
+    return result
+  })
+
+  await expect(ensureNativeHarnessFeatureRun(project.projectId, binding.featureId, "Review"))
+    .rejects.toThrow("HARNESS_NATIVE_PROJECT_CHANGED")
+  expect(probesAtArchive).toBeGreaterThan(0)
+  expect(probesAtArchive).toBeLessThan(probes)
+  expect(readNativeHarnessFeature(project.projectId, binding.featureId)).toEqual(binding)
+  expect(host.get(binding.hostRunId)).toBeUndefined()
+})
+
+function nativeRunView(input: Parameters<NativeHarnessRuntime["create"]>[0]) {
+  return {
+    project: { ...hostProjectFixture(repository), projectId: input.projectId, name: input.name,
+      workspace: input.workspace, goal: input.goal, installedPluginId: input.installedPluginId,
+      schemaVersion: 1 as const, stateOwner: "host" as const, status: "active" as const,
+      version: 1, stageIndex: 0, createdAt: 1, updatedAt: 1 },
+    operations: []
+  }
+}
+
+it("keeps original deploy unit selections independent for two same-directory features", async () => {
+  const roots = configureFeatureInputs(["platform", "orders"], ["changed", "two"])
+  vi.spyOn(knowledge, "resolveProjectKnowledgeBases").mockResolvedValue(roots)
+  const received = vi.fn(async (input: Parameters<NativeHarnessRuntime["create"]>[0]) => nativeRunView(input))
+  configureNativeHarnessRuntime({ create: received, view: () => undefined })
+  const mapping = (id: string) => ({ deployUnitIdMapping: id, deployUnitId: id, localRepoPath: repository })
+  for (const id of ["one", "two"]) {
+    await createNativeHarnessFeature({
+      project, featureId: id, repositoryWorkspace: repository,
+      sessionWorkspace: { source: "deployUnit", deployUnitId: id }, selectedDeployUnits: [mapping(id)]
+    })
+  }
+  updateNativeHarnessFeatureConfiguration(
+    project.projectId, "one", repository, { source: "deployUnit", deployUnitId: "changed" },
+    [mapping("changed")]
+  )
+  await ensureNativeHarnessFeatureRun(project.projectId, "one", "Feature one")
+  await ensureNativeHarnessFeatureRun(project.projectId, "two", "Feature two")
+  expect(received.mock.calls.map(([input]) => input.harnessFeatureInputs?.selectedDeployUnits))
+    .toEqual([["changed"], ["two"]])
+  expect(received.mock.calls[1][0].harnessFeatureInputs?.knowledgeRoots).toEqual(
+    roots.map(({ id, path }) => ({ id, path, identity: runtimeDirectoryIdentity(path) }))
+  )
+})
+
+it.each([
+  { scenario: "empty read copies", expected: "缺少可读取的材料" },
+  { scenario: "aggregate knowledge budget exceeded", expected: "超过运行支持的材料大小或数量" }
+])("keeps first start editable with $scenario", async ({ scenario, expected }) => {
+  const roots = configureFeatureInputs(["platform", "orders", "shared"], ["orders"])
+  if (scenario === "empty read copies") {
+    for (const root of roots) {
+      rmSync(join(root.path, "constraints.md"))
+      rmSync(join(root.path, "agents.manifest.json"))
+    }
+  } else {
+    for (const root of roots) truncateSync(join(root.path, "constraints.md"), 12 * 1024 * 1024)
+  }
+  const resolveRoots = vi.spyOn(knowledge, "resolveProjectKnowledgeBases").mockResolvedValue(roots)
+  const create = vi.fn(async (input: Parameters<NativeHarnessRuntime["create"]>[0]) => nativeRunView(input))
+  configureNativeHarnessRuntime({ create, view: () => undefined })
+  const candidate = join(state.root, "candidate")
+  mkdirSync(candidate)
+  await createNativeHarnessFeature({
+    project, featureId: "invalid-knowledge", repositoryWorkspace: repository,
+    sessionWorkspace: { source: "directory", path: repository },
+    selectedDeployUnits: [{ deployUnitIdMapping: "orders", deployUnitId: "orders", localRepoPath: repository }]
+  })
+  await expect(ensureNativeHarnessFeatureRun(
+    project.projectId, "invalid-knowledge", "Initial prompt", undefined, candidate
+  )).rejects.toThrow(expected)
+  expect(create).not.toHaveBeenCalled()
+  expect(readNativeHarnessFeature(project.projectId, "invalid-knowledge")).toMatchObject({
+    workspace: repository
+  })
+  expect(readNativeHarnessFeature(project.projectId, "invalid-knowledge")?.initialUserMessage)
+    .toBeUndefined()
+
+  const [replacement] = configureFeatureInputs(["replacement"], ["orders"])
+  resolveRoots.mockResolvedValue([replacement])
+  await expect(ensureNativeHarnessFeatureRun(
+    project.projectId, "invalid-knowledge", "Revised prompt"
+  )).resolves.toMatchObject({ project: { goal: "Revised prompt", workspace: repository } })
+  expect(create.mock.calls[0][0].harnessFeatureInputs?.knowledgeRoots[0].id).toBe("replacement")
+})
+
+it("keeps the feature editable when the project changes to a library without its selected unit", async () => {
+  const original = configureFeatureInputs(["original-library"], ["old-unit"])
+  const resolveRoots = vi.spyOn(knowledge, "resolveProjectKnowledgeBases").mockResolvedValue(original)
+  const create = vi.fn(async (input: Parameters<NativeHarnessRuntime["create"]>[0]) => nativeRunView(input))
+  configureNativeHarnessRuntime({ create, view: () => undefined })
+  const mapping = (id: string) => ({ deployUnitIdMapping: id, deployUnitId: id, localRepoPath: repository })
+  await createNativeHarnessFeature({
+    project, featureId: "changed-library", repositoryWorkspace: repository,
+    sessionWorkspace: { source: "deployUnit", deployUnitId: "old-unit" },
+    selectedDeployUnits: [mapping("old-unit")]
+  })
+
+  const replacement = configureFeatureInputs(["replacement-library"], ["new-unit"])
+  resolveRoots.mockResolvedValue(replacement)
+  await expect(ensureNativeHarnessFeatureRun(project.projectId, "changed-library", "First goal"))
+    .rejects.toThrow("PROJECT_KNOWLEDGE_DEPLOY_UNITS_MISMATCH")
+  expect(resolveRoots).toHaveBeenLastCalledWith(["replacement-library"])
+  expect(create).not.toHaveBeenCalled()
+  expect(readNativeHarnessFeature(project.projectId, "changed-library")?.initialUserMessage)
+    .toBeUndefined()
+
+  updateNativeHarnessFeatureConfiguration(
+    project.projectId, "changed-library", repository,
+    { source: "deployUnit", deployUnitId: "new-unit" }, [mapping("new-unit")]
+  )
+  await expect(ensureNativeHarnessFeatureRun(project.projectId, "changed-library", "Revised goal"))
+    .resolves.toMatchObject({ project: { goal: "Revised goal" } })
+  expect(create.mock.calls[0][0].harnessFeatureInputs).toMatchObject({
+    selectedDeployUnits: ["new-unit"], knowledgeRoots: [{ id: "replacement-library" }]
+  })
+})
+
+it("rejects an aliased manifest in Host without changing the original UAT manifest query", async () => {
+  const [aliased, ordinary] = configureFeatureInputs(["aliased", "ordinary"], ["scoped-unit"])
+  writeDeployUnitManifest(state.root, ["aliased-unit"])
+  const manifestName = "agents.manifest.json"
+  rmSync(join(aliased.path, manifestName))
+  linkSync(join(state.root, manifestName), join(aliased.path, manifestName))
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined)
+
+  const roots = [aliased.path, ordinary.path]
+  expect(await readProjectKnowledgeDeployUnits(roots)).toEqual(["aliased-unit", "scoped-unit"])
+  expect(await readProjectKnowledgeDeployUnits(roots, "host")).toEqual(["scoped-unit"])
+  expect(warning).toHaveBeenCalledOnce()
+})
+
+it("refreshes only pinned UAT root identities after an interrupted first Host creation", async () => {
+  const [pinned] = configureFeatureInputs(["platform"], ["original"])
+  const resolveRoots = vi.spyOn(knowledge, "resolveProjectKnowledgeBases").mockResolvedValue([pinned])
+  const create = vi.fn<NativeHarnessRuntime["create"]>()
+    .mockRejectedValueOnce(Error("INTERRUPTED_HOST_CREATE"))
+    .mockImplementation(async (input, guard) => { guard?.(); return nativeRunView(input) })
+  configureNativeHarnessRuntime({ create, view: () => undefined })
+  await createNativeHarnessFeature({
+    project, featureId: "retry-sync", repositoryWorkspace: repository,
+    sessionWorkspace: { source: "directory", path: repository },
+    selectedDeployUnits: [{
+      deployUnitIdMapping: "original", deployUnitId: "original", localRepoPath: repository
+    }]
+  })
+  const start = (preflight?: NonNullable<Parameters<typeof ensureNativeHarnessFeatureRun>[5]>) =>
+    ensureNativeHarnessFeatureRun(project.projectId, "retry-sync", "Original goal", undefined, undefined, preflight)
+  await expect(start()).rejects.toThrow("INTERRUPTED_HOST_CREATE")
+  const initial = create.mock.calls[0][0].harnessFeatureInputs!
+  expect(initial.knowledgeRoots[0].identity).toBe(runtimeDirectoryIdentity(pinned.path))
+
+  renameSync(pinned.path, join(state.root, "old-platform-checkout"))
+  mkdirSync(pinned.path)
+  writeFileSync(join(pinned.path, "constraints.md"), "Updated system constraints")
+  writeDeployUnitManifest(pinned.path, ["original"])
+  const refreshedIdentity = runtimeDirectoryIdentity(pinned.path)
+  expect(refreshedIdentity).not.toBe(initial.knowledgeRoots[0].identity)
+  project = { ...project, knowledgeBaseIds: ["unrelated"] }
+  writeFileSync(join(state.root, "harness-board-projects.json"),
+    JSON.stringify({ version: 1, projects: [project] }))
+
+  await expect(start()).rejects.toThrow("PROJECT_KNOWLEDGE_PREFLIGHT_REQUIRED")
+  const wrongPath = join(state.root, "wrong-path")
+  mkdirSync(wrongPath)
+  resolveRoots.mockResolvedValueOnce([{ ...pinned, path: wrongPath }])
+  const preflight = vi.fn<NonNullable<Parameters<typeof ensureNativeHarnessFeatureRun>[5]>>()
+    .mockRejectedValueOnce(Error("REVOKED_BEFORE_RETRY"))
+    .mockImplementation(async ({ original, assertCurrent }) => {
+      expect(original.initialUserMessage).toBe("Original goal")
+      assertCurrent()
+      return assertCurrent
+    })
+  await expect(start(preflight)).rejects.toThrow("PROJECT_KNOWLEDGE_BINDING_CHANGED")
+  expect(preflight).not.toHaveBeenCalled()
+  await expect(start(preflight)).rejects.toThrow("REVOKED_BEFORE_RETRY")
+  await expect(start()).rejects.toThrow("PROJECT_KNOWLEDGE_PREFLIGHT_REQUIRED")
+  writeDeployUnitManifest(pinned.path, ["another-unit"])
+  await expect(start(preflight)).rejects.toThrow("请恢复原发布单元后重试")
+  expect(create).toHaveBeenCalledOnce()
+
+  writeDeployUnitManifest(pinned.path, ["original"])
+  await expect(start(preflight)).resolves.toMatchObject({ project: { goal: "Original goal" } })
+  expect(resolveRoots.mock.calls.every(([ids]) => ids.join(",") === "platform")).toBe(true)
+  expect(create.mock.calls[1][0].harnessFeatureInputs).toEqual({
+    selectedDeployUnits: ["original"],
+    knowledgeRoots: [{ ...initial.knowledgeRoots[0], identity: refreshedIdentity }]
+  })
+})
+
+it("retains knowledge proof if Host already created before feature publication", async () => {
+  const [pinned] = configureFeatureInputs(["platform"], ["original"])
+  const resolveRoots = vi.spyOn(knowledge, "resolveProjectKnowledgeBases").mockResolvedValue([pinned])
+  let retained: ReturnType<typeof nativeRunView> | undefined
+  const create = vi.fn<NativeHarnessRuntime["create"]>()
+    .mockImplementationOnce(async (input) => {
+      retained = nativeRunView(input)
+      throw Error("INTERRUPTED_FEATURE_PUBLICATION")
+    })
+    .mockImplementation(async (input) => nativeRunView(input))
+  configureNativeHarnessRuntime({ create, view: () => retained })
+  await createNativeHarnessFeature({
+    project, featureId: "resume-publication", repositoryWorkspace: repository,
+    sessionWorkspace: { source: "directory", path: repository },
+    selectedDeployUnits: [{
+      deployUnitIdMapping: "original", deployUnitId: "original", localRepoPath: repository
+    }]
+  })
+  const start = (preflight?: NonNullable<Parameters<typeof ensureNativeHarnessFeatureRun>[5]>) =>
+    ensureNativeHarnessFeatureRun(project.projectId, "resume-publication", "Original goal", undefined, undefined, preflight)
+  await expect(start()).rejects.toThrow("INTERRUPTED_FEATURE_PUBLICATION")
+  renameSync(pinned.path, join(state.root, "old-platform-checkout"))
+  mkdirSync(pinned.path)
+  const preflight = vi.fn()
+  await start(preflight)
+  expect(resolveRoots).toHaveBeenCalledOnce()
+  expect(preflight).not.toHaveBeenCalled()
+  expect(create.mock.calls[1][0].harnessFeatureInputs).toEqual(create.mock.calls[0][0].harnessFeatureInputs)
+})
+
 function git(...args: string[]) {
   return execFileSync("git", ["-C", repository, ...args], {
     encoding: "utf8",
@@ -415,6 +788,8 @@ it("retains real Host history and artifact reads after archive while rejecting i
     JSON.stringify({ version: 1, projects: [project] }))
   const detail = nativeHarnessRunDetail(project, "archived-history")
   expect(detail.project.lifecycle?.status).toBe("archived")
+  expect((await nativeHarnessProjectDetail(project)).project.managedRunFirstStartedAt)
+    .toBe(new Date(run.project.createdAt).toISOString())
   expect(detail.nativeProject?.project).toEqual(host.get(run.project.projectId))
   expect(detail.nativeProject?.operations).toContainEqual(expect.objectContaining({
     operationId: operation.operationId, status: "cancelled"

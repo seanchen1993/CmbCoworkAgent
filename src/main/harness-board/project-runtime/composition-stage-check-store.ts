@@ -34,13 +34,16 @@ export class CompositionStageCheckStore {
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true })
     this.db = new DatabaseSync(path)
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-      CREATE TABLE IF NOT EXISTS contracts (run TEXT NOT NULL, unit TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(run,unit));
-      CREATE TABLE IF NOT EXISTS transitions (id TEXT PRIMARY KEY, run TEXT NOT NULL, unit TEXT NOT NULL, status TEXT NOT NULL, data TEXT);
-      CREATE TABLE IF NOT EXISTS receipts (seq INTEGER PRIMARY KEY, run TEXT NOT NULL, unit TEXT NOT NULL, data TEXT NOT NULL);`)
-    this.db.exec(
-      "CREATE TABLE IF NOT EXISTS source_baselines (run TEXT NOT NULL, unit TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(run,unit))"
-    )
+    try {
+      this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+        CREATE TABLE IF NOT EXISTS contracts (run TEXT NOT NULL, unit TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(run,unit));
+        CREATE TABLE IF NOT EXISTS transitions (id TEXT PRIMARY KEY, run TEXT NOT NULL, unit TEXT NOT NULL, status TEXT NOT NULL, data TEXT);
+        CREATE TABLE IF NOT EXISTS receipts (seq INTEGER PRIMARY KEY, run TEXT NOT NULL, unit TEXT NOT NULL, data TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS source_baselines (run TEXT NOT NULL, unit TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(run,unit));`)
+    } catch (error) {
+      this.db.close()
+      throw error
+    }
   }
   freezeSourceBaseline(runId: string, unitId: string, baseline: SourceHandoffBaseline): void {
     compositionText(runId)

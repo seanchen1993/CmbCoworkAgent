@@ -1,12 +1,29 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
+import type { IpcMain, IpcMainInvokeEvent } from "electron"
+import type { BrowserService } from "../../../src/main/browser/core/browser-service"
 
 const storageMocks = vi.hoisted(() => ({
   getBrowserCdpConfig: vi.fn(),
+  saveBrowserCdpConfigAsync: vi.fn(),
   getMcpConnectors: vi.fn(),
   upsertMcpConnector: vi.fn()
 }))
 
+const capabilityMocks = vi.hoisted(() => ({
+  invalidateMutableMcpCapabilityServices: vi.fn()
+}))
+
 vi.mock("../../../src/main/storage", () => storageMocks)
+vi.mock("../../../src/main/mcp/capability-service", () => capabilityMocks)
+vi.mock("../../../src/main/browser/core/browser-service", () => ({}))
+vi.mock("../../../src/main/ipc/browser-profile-import", () => ({}))
+vi.mock("../../../src/main/browser/record/common/browser-script-execution-service", () => ({
+  onBrowserScriptExecutionStateChange: vi.fn()
+}))
+vi.mock("../../../src/main/browser/record/common/browser-script-library-service", () => ({}))
+vi.mock("../../../src/main/browser/record/script-record/script-recording-service", () => ({}))
+
+import { registerBrowserIpcHandlers } from "../../../src/main/ipc/browser"
 
 import {
   autoRegisterPlaywrightMcpConnector,
@@ -53,6 +70,32 @@ describe("browser CDP configuration", () => {
 
     expect(getCurrentBrowserCdpPort()).toBe(port)
   })
+})
+
+it("returns a persisted CDP setting after invalidating only mutable connector consumers", async () => {
+  const handlers = new Map<string, Parameters<IpcMain["handle"]>[1]>()
+  const ipc = {
+    handle: (channel, handler) => handlers.set(channel, handler),
+    on: vi.fn()
+  } satisfies Pick<IpcMain, "handle" | "on">
+  registerBrowserIpcHandlers({
+    ipcMain: ipc as IpcMain,
+    browserService: {} as BrowserService,
+    getMainWindow: () => null
+  })
+  const saved = { enabled: false, profileImportEnabled: false }
+  storageMocks.saveBrowserCdpConfigAsync.mockResolvedValue(saved)
+  storageMocks.getMcpConnectors.mockReturnValue([{
+    id: "connector-1", name: "In-app-browser", kind: "stdio", enabled: true,
+    command: "npx", args: []
+  }])
+  await expect(handlers.get("browser:saveCdpConfig")!({} as IpcMainInvokeEvent, { enabled: false }))
+    .resolves.toEqual(saved)
+  expect(storageMocks.upsertMcpConnector).toHaveBeenCalledWith(expect.objectContaining({
+    id: "connector-1", enabled: false
+  }))
+  expect(capabilityMocks.invalidateMutableMcpCapabilityServices)
+    .toHaveBeenCalledWith("browser:saveCdpConfig")
 })
 
 describe("autoRegisterPlaywrightMcpConnector", () => {

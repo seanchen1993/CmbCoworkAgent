@@ -8,8 +8,14 @@ import type { WorkspaceProbeRequest, WorkspaceProbeResponse } from "./workspace-
 class HeldWorker extends EventEmitter {
   terminations = 0
   rejectTermination = false
-  constructor(readonly request: WorkspaceProbeRequest) {
+  readonly requests: WorkspaceProbeRequest[]
+  constructor(public request: WorkspaceProbeRequest) {
     super()
+    this.requests = [request]
+  }
+  postMessage(request: WorkspaceProbeRequest) {
+    this.request = request
+    this.requests.push(request)
   }
   unref() {
     /* The fixture owns no native thread. */
@@ -38,13 +44,13 @@ class HeldWorker extends EventEmitter {
 }
 const workers: HeldWorker[] = []
 const clients: WorkspaceProbeClient[] = []
-function fixture(timeout = 3_000, maxWaiters = 1) {
+function fixture(timeout = 3_000, maxWaiters = 1, maxWorkers = 1) {
   const factory = vi.fn((options: WorkerOptions) => {
     const worker = new HeldWorker(options.workerData as WorkspaceProbeRequest)
     workers.push(worker)
     return worker as unknown as Worker
   })
-  const client = new WorkspaceProbeClient(factory, timeout, 1, maxWaiters)
+  const client = new WorkspaceProbeClient(factory, timeout, maxWorkers, maxWaiters)
   clients.push(client)
   return { client, factory }
 }
@@ -56,6 +62,75 @@ afterEach(async () => {
 })
 
 describe("workspace probe physical ownership", () => {
+  it("reuses an explicitly completed worker while checking each directory with a fresh request", async () => {
+    const { client, factory } = fixture()
+    const path = resolve("workspace")
+    const first = client.probe(path)
+    const worker = workers[0]
+    worker.reply({ reusable: true, result: { canonical: path } })
+    await expect(first).resolves.toBe(path)
+
+    const second = client.probe(path)
+    await vi.waitFor(() => expect(worker.requests).toHaveLength(2))
+    expect(factory).toHaveBeenCalledOnce()
+    expect(worker.requests[1].nonce).not.toBe(worker.requests[0].nonce)
+    expect(worker.requests[1].generation).toBeGreaterThan(worker.requests[0].generation)
+    const other = resolve("replacement")
+    worker.reply({ reusable: true, result: { canonical: other } })
+    await expect(second).resolves.toBe(other)
+
+    await expect(client.close(0)).rejects.toThrow("cleanup remains unconfirmed")
+    expect(worker.terminations).toBe(1)
+    worker.exit()
+    await client.close()
+  })
+
+  it("keeps a reused worker's slot until physical exit after cancellation", async () => {
+    const { client, factory } = fixture(3_000, 0)
+    const first = client.probe(resolve("first"))
+    const worker = workers[0]
+    worker.reply({ reusable: true })
+    await first
+
+    const controller = new AbortController()
+    const second = client.probe(resolve("second"), controller.signal)
+    const rejected = expect(second).rejects.toMatchObject({ name: "AbortError" })
+    controller.abort()
+    await rejected
+    worker.reply({ reusable: true })
+    await expect(client.probe(resolve("another"))).rejects.toMatchObject({ reason: "capacity" })
+    expect(worker.terminations).toBe(1)
+    expect(factory).toHaveBeenCalledOnce()
+    worker.exit()
+    await Promise.resolve()
+
+    const third = client.probe(resolve("third"))
+    expect(workers).toHaveLength(2)
+    workers[1].reply()
+    workers[1].exit()
+    await third
+  })
+
+  it("reuses the idle worker while a different worker still owns the other slot", async () => {
+    const { client, factory } = fixture(3_000, 0, 2)
+    const first = client.probe(resolve("first"))
+    const second = client.probe(resolve("second"))
+    const [reusable, busy] = workers
+    const queued = client.probe(resolve("over-capacity"))
+    await expect(queued).rejects.toMatchObject({ reason: "capacity" })
+    reusable.reply({ reusable: true, result: { canonical: resolve("first") } })
+    await expect(first).resolves.toBe(resolve("first"))
+
+    const third = client.probe(resolve("third"))
+    await vi.waitFor(() => expect(reusable.requests).toHaveLength(2))
+    expect(busy.requests).toHaveLength(1)
+    expect(factory).toHaveBeenCalledTimes(2)
+    reusable.reply({ reusable: true, result: { canonical: resolve("third") } })
+    busy.reply({ reusable: true, result: { canonical: resolve("second") } })
+    await expect(third).resolves.toBe(resolve("third"))
+    await expect(second).resolves.toBe(resolve("second"))
+  })
+
   it("drains an already-posted result before an exit callback without waiting for message dispatch", async () => {
     const { client } = fixture()
     const pending = client.probe(resolve("workspace"))

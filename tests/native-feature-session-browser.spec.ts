@@ -233,7 +233,7 @@ async function main() {
             assert((await chatGuide.innerText()).includes("普通聊天不会自动启动阶段"))
             assert((await chatGuide.innerText()).includes("无需手动输入斜杠命令"))
             assert.equal(await draft.inputValue(), "用户继续调整草稿，尚未发送")
-            await chatGuide.getByRole("button", { name: "前往项目设置", exact: true }).click()
+            await chatGuide.getByRole("button", { name: "查看特性详情", exact: true }).click()
             await page.getByRole("region", { name: "需求权限与确认", exact: true }).waitFor()
             const start = guide.getByRole("button", { name: "填写需求并开始", exact: true })
             await start.waitFor()

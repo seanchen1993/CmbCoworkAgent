@@ -8,6 +8,8 @@ import type { HostSkillExecutionContext } from "../harness-board/project-runtime
 import { HostProjectService } from "../harness-board/project-runtime/host-service"
 import { HostProjectStore } from "../harness-board/project-runtime/host-store"
 import { HostPackageSnapshots } from "../harness-board/project-runtime/package-snapshots"
+import { runtimeDirectoryIdentity } from "../harness-board/project-runtime/safe-files"
+import { hostProjectViewState } from "../../shared/project-runtime/platform-api"
 import { createHostProjectInputIdentity } from "../harness-board/project-runtime/package-input-identity"
 import { FunctionModsManager } from "../mods/v2/manager"
 import { FunctionGuestRuntime } from "../mods/v2/guest-runtime"
@@ -66,7 +68,8 @@ it.each([
     scenario: "English delivery policy replacement",
     utFailure: undefined,
     executionAdapter: "node-test/v1" as const,
-    englishPolicy: true
+    englishPolicy: true,
+    featureBound: true
   },
   {
     scenario: "Java Maven Python workflow",
@@ -80,7 +83,7 @@ it.each([
   }
 ])(
   "runs five Host stages with $scenario, original checks and approvals",
-  async ({ utFailure, executionAdapter, englishPolicy }) => {
+  async ({ utFailure, executionAdapter, englishPolicy, featureBound }) => {
     const root = mkdtempSync(join(tmpdir(), "autobiz-lean-host-"))
     cleanup.push(() => rmSync(root, { recursive: true, force: true }))
     const workspace = join(root, "workspace"),
@@ -92,6 +95,17 @@ it.each([
       join(knowledge, "orders.md"),
       "---\ntype: Service Knowledge\ndeploy_unit: orders-api\ntitle: 订单服务\n---\n订单领域：性能要求必须保留。此处是隔离测试知识。"
     )
+    const secondKnowledge = join(root, "knowledge-secondary")
+    if (featureBound) {
+      mkdirSync(secondKnowledge)
+      const manifest = JSON.stringify({ schemaVersion: "v1",
+        systems: [{ deployUnits: [{ deployUnitId: "orders-api" }] }] })
+      for (const path of [knowledge, secondKnowledge])
+        writeFileSync(join(path, "agents.manifest.json"), manifest)
+      writeFileSync(join(secondKnowledge, "AGENTS.md"), "第二知识库约束。")
+      writeFileSync(join(secondKnowledge, "orders.md"),
+        "---\ntype: Service Knowledge\ndeploy_unit: orders-api\n---\n独立的订单审计知识。")
+    }
     const control = new ModControlStore(join(root, "mods.sqlite"))
     cleanup.push(() => control.close())
     const ruleInstall = join(root, "installed-rules")
@@ -355,28 +369,30 @@ it.each([
       new AbortController().signal,
       () => {}
     )
-    await functions.saveUserConfig(
-      workspace,
-      "creator",
-      own.pluginId,
-      own.digest!,
-      "knowledgeRoot",
-      knowledge,
-      0,
-      new AbortController().signal,
-      () => {}
-    )
-    await functions.saveUserConfig(
-      workspace,
-      "creator",
-      own.pluginId,
-      own.digest!,
-      "selectedDeployUnits",
-      JSON.stringify([{ deployUnitId: "orders-api", appType: "backend" }]),
-      1,
-      new AbortController().signal,
-      () => {}
-    )
+    if (!featureBound) {
+      await functions.saveUserConfig(
+        workspace,
+        "creator",
+        own.pluginId,
+        own.digest!,
+        "knowledgeRoot",
+        knowledge,
+        0,
+        new AbortController().signal,
+        () => {}
+      )
+      await functions.saveUserConfig(
+        workspace,
+        "creator",
+        own.pluginId,
+        own.digest!,
+        "selectedDeployUnits",
+        JSON.stringify([{ deployUnitId: "orders-api", appType: "backend" }]),
+        1,
+        new AbortController().signal,
+        () => {}
+      )
+    }
     await functions.saveUserConfig(
       workspace,
       "creator",
@@ -384,7 +400,7 @@ it.each([
       own.digest!,
       "executionAdapter",
       executionAdapter,
-      2,
+      featureBound ? 0 : 2,
       new AbortController().signal,
       () => {}
     )
@@ -518,7 +534,8 @@ it.each([
     })
     const store = new HostProjectStore(join(root, "host.sqlite"))
     cleanup.push(() => store.close())
-    const host = new HostProjectService(store, new HostPackageSnapshots(join(root, "snapshots")), {
+    const snapshots = new HostPackageSnapshots(join(root, "snapshots"))
+    const host = new HostProjectService(store, snapshots, {
       resolveInstalledPlugin: async (id) =>
         id === "saved-native"
           ? {
@@ -557,6 +574,11 @@ it.each([
       const prepared = await context.prepareThread?.(threadId)
       expect(prepared?.requiredContextText).toContain("隔离测试知识")
       expect(prepared?.requiredContextText).toContain("订单领域边界")
+      if (featureBound) {
+        expect(prepared?.requiredContextText).toContain("第二知识库约束")
+        expect(prepared?.requiredContextText).toContain("独立的订单审计知识")
+        expect(prepared?.requiredContextText).not.toContain(secondKnowledge)
+      }
       if (englishPolicy) {
         if (stage.id === "e2e") expect(prepared?.requiredContextText).toContain("END_REVIEW_ONLY")
         else expect(prepared?.requiredContextText).not.toContain("END_REVIEW_ONLY")
@@ -696,8 +718,38 @@ it.each([
       name: "订单需求",
       workspace,
       installedPluginId: "saved-native",
-      goal: "订单查询必须在2秒内返回"
+      goal: "订单查询必须在2秒内返回",
+      ...(featureBound ? {
+        harnessFeatureInputs: {
+          selectedDeployUnits: ["orders-api"],
+          knowledgeRoots: [knowledge, secondKnowledge].map((path, index) => ({
+            id: String(index), path, identity: runtimeDirectoryIdentity(path)
+          }))
+        }
+      } : {})
     })
+    if (featureBound) {
+      const state = store.get("orders")!
+      expect(state.harnessFeatureInputs?.selectedDeployUnits).toEqual(["orders-api"])
+      expect(state.harnessFeatureInputs?.knowledgeRoots.map(root => root.path))
+        .toEqual([knowledge, secondKnowledge])
+      expect(hostProjectViewState(state)).not.toHaveProperty("harnessFeatureInputs")
+      const snapshot = snapshots.read(state.pluginDigest).root
+      const fingerprint = input.inputIdentity(state, snapshot)
+      const otherFeature = structuredClone(state)
+      otherFeature.harnessFeatureInputs!.selectedDeployUnits = ["inventory-api"]
+      expect(input.inputIdentity(otherFeature, snapshot)).not.toBe(fingerprint)
+      const materialPath = join(secondKnowledge, "orders.md")
+      const original = readFileSync(materialPath)
+      writeFileSync(materialPath, "changed second approved input")
+      expect(input.inputIdentity(state, snapshot)).not.toBe(fingerprint)
+      writeFileSync(materialPath, original)
+      expect(input.inputIdentity(state, snapshot)).toBe(fingerprint)
+      const unexposed = join(secondKnowledge, ".env")
+      writeFileSync(unexposed, "non-material fixture")
+      expect(input.inputIdentity(state, snapshot)).toBe(fingerprint)
+      rmSync(unexposed)
+    }
     const run = async () => {
       const project = host.get("orders")!
       const operation = host.prepare({

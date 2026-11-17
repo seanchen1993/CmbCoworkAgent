@@ -144,6 +144,47 @@ it("preserves Unix detached group escalation when the launcher exits first", asy
   }
 })
 
+it("Unix blocking exit cancels its execution deadline while owned descendants settle", async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!
+  Object.defineProperty(process, "platform", { value: "linux" })
+  vi.useFakeTimers()
+  const kill = vi.spyOn(process, "kill").mockReturnValue(true)
+  try {
+    const f = fixture()
+    const deadline = vi.fn()
+    const timer = setTimeout(deadline, 20)
+    const owned = startOwnedHookCommand({ ...f.input, onExecutionExit: () => clearTimeout(timer) })
+    f.child.emit("exit", 2)
+    f.child.emit("close", 2)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(deadline).not.toHaveBeenCalled()
+    expect((await owned.completion).code).toBe(2)
+    expect(kill).toHaveBeenCalledWith(-f.child.pid, "SIGKILL")
+  } finally {
+    Object.defineProperty(process, "platform", descriptor)
+  }
+})
+
+it("Unix shell exit settles without escalation when there are no remaining processes", async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!
+  Object.defineProperty(process, "platform", { value: "linux" })
+  vi.useFakeTimers()
+  const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+    throw Object.assign(new Error("group exited"), { code: "ESRCH" })
+  })
+  try {
+    const f = fixture()
+    const owned = startOwnedHookCommand(f.input)
+    f.child.emit("exit", 2)
+    f.child.emit("close", 2)
+    expect((await owned.completion).code).toBe(2)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(kill.mock.calls).toEqual([[-f.child.pid, "SIGTERM"]])
+  } finally {
+    Object.defineProperty(process, "platform", descriptor)
+  }
+})
+
 it("Unix group permission failure stays unconfirmed after launcher exit zero", async () => {
   const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!
   Object.defineProperty(process, "platform", { value: "linux" })

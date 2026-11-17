@@ -40,14 +40,15 @@ export interface CreatorLegacyTrialEvidenceOwner {
 /** Native observation/checkpoint plumbing shared by reviewed plugin adapters. It owns no model,
  * workflow, business validator, approval or source token. Unknown commits are never replayed. */
 export class CreatorLegacyTrialEvidence {
-  private readonly store: CompositionStageCheckStore
+  private stageChecks?: CompositionStageCheckStore
   private readonly stopObserver: () => void
   private readonly stopCheckpoint: () => void
   private readonly diagnostics = new Map<string, string>()
   private readonly sources = new Map<string, string>()
+  private closed = false
 
   constructor(
-    root: string,
+    private readonly root: string,
     private readonly deps: {
       settings?: BusinessDraftSettings
       owner(
@@ -57,7 +58,6 @@ export class CreatorLegacyTrialEvidence {
       changed(trialId: string): void
     }
   ) {
-    this.store = new CompositionStageCheckStore(join(root, "stage-checks.sqlite"))
     this.stopObserver = registerStageCheckReceiptObserver({
       available: (binding) => !!this.owner(binding),
       observe: async (invocation) => {
@@ -88,8 +88,8 @@ export class CreatorLegacyTrialEvidence {
       available: (binding) => !!this.owner(binding),
       canDescribe: (binding) =>
         !!binding.featureId &&
-        !!this.store.contracts(binding.projectId, binding.featureId) &&
-        !!this.deps.canDescribe?.(binding),
+        !!this.deps.canDescribe?.(binding) &&
+        !!this.store.contracts(binding.projectId, binding.featureId),
       execute: async (binding, input) => {
         const owner = this.owner(binding)
         if (!owner) throw Error("CREATOR_TRIAL_EVIDENCE_SCOPE_CHANGED")
@@ -154,6 +154,11 @@ export class CreatorLegacyTrialEvidence {
         }
       }
     })
+  }
+
+  private get store(): CompositionStageCheckStore {
+    if (this.closed) throw Error("CREATOR_TRIAL_EVIDENCE_CLOSED")
+    return (this.stageChecks ??= new CompositionStageCheckStore(join(this.root, "stage-checks.sqlite")))
   }
 
   private owner(binding: Readonly<RuntimePluginSourceBinding>) {
@@ -242,8 +247,10 @@ export class CreatorLegacyTrialEvidence {
     }
   }
   close() {
+    if (this.closed) return
+    this.closed = true
     this.stopCheckpoint()
     this.stopObserver()
-    this.store.close()
+    this.stageChecks?.close()
   }
 }

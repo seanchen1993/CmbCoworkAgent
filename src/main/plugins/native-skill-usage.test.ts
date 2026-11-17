@@ -151,6 +151,74 @@ it("fails closed for oversized or malformed explicit declarations", async () => 
   ).rejects.toThrow()
 })
 
+it("isolates damaged sources only during ordinary discovery and still checks authority", async () => {
+  const healthy = fixture(),
+    damaged = fixture()
+  const plugins = [...damaged.plugins, ...healthy.plugins]
+  const chosen = join(healthy.root, "skills/chat/SKILL.md")
+  const unavailable = join(damaged.root, "skills/legacy/SKILL.md")
+  const alias = join(healthy.root, "alias")
+  symlinkSync(
+    join(damaged.root, "skills/legacy"),
+    alias,
+    process.platform === "win32" ? "junction" : "dir"
+  )
+  const aliased = join(alias, "SKILL.md")
+  const path = join(damaged.root, "devclaw.capabilities.json")
+  writeFileSync(path, "not-json")
+  let stale = false
+  const capture = () => ({
+    usage: "chat" as const,
+    assertCurrent() {
+      if (stale) throw Error("scope changed")
+    }
+  })
+  const ordinary = await readNativeSkillUsagePolicy(plugins, capture, undefined, {
+    explicitSkillPath: chosen
+  })
+  expect(ordinary?.allowsSkill(chosen)).toBe(true)
+  expect(ordinary?.allowsSkill(unavailable)).toBe(false)
+  expect(ordinary?.allowsSkill(aliased)).toBe(false)
+  for (const explicitSkillPath of [unavailable, aliased]) {
+    await expect(
+      readNativeSkillUsagePolicy(plugins, capture, undefined, { explicitSkillPath })
+    ).rejects.toBeInstanceOf(SyntaxError)
+  }
+  await expect(
+    readNativeSkillUsagePolicy(plugins, () => ({ ...capture(), usage: "project" }), undefined, {})
+  ).rejects.toBeInstanceOf(SyntaxError)
+  await expect(
+    readNativeSkillUsagePolicy(
+      plugins,
+      () => {
+        throw Error("scope inaccessible")
+      },
+      undefined,
+      {}
+    )
+  ).rejects.toThrow("scope inaccessible")
+  stale = true
+  expect(() => ordinary?.assertCurrent()).toThrow("scope changed")
+  stale = false
+  const controller = new AbortController()
+  await expect(
+    readNativeSkillUsagePolicy(
+      plugins,
+      () => {
+        controller.abort(Error("scope cancelled"))
+        return capture()
+      },
+      controller.signal,
+      {}
+    )
+  ).rejects.toThrow("scope cancelled")
+  writeFileSync(path, JSON.stringify(damaged.manifest))
+  expect(ordinary?.allowsSkill(unavailable)).toBe(false)
+  ordinary?.assertCurrent()
+  writeFileSync(join(healthy.root, "devclaw.capabilities.json"), "now-invalid")
+  expect(() => ordinary?.assertCurrent()).toThrow("NATIVE_CAPABILITY_DECLARATION_CHANGED")
+})
+
 it("cannot expose a disallowed declared skill through another directory alias", async () => {
   const f = fixture()
   symlinkSync(
@@ -262,4 +330,15 @@ it("blocks a project flow's stage skills in chat even without separate skill dec
       }
     }))
   ).rejects.toThrow()
+  const discovered = await readNativeSkillUsagePolicy(
+    f.plugins,
+    () => ({
+      usage: "chat",
+      assertCurrent() {}
+    }),
+    undefined,
+    {}
+  )
+  expect(discovered!.allowsSkill(join(f.root, "skills/legacy/SKILL.md"))).toBe(false)
+  expect(() => discovered!.assertCurrent()).not.toThrow()
 })

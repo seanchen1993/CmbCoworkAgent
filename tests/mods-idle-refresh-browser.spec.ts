@@ -17,31 +17,49 @@ async function main() {
       import {PlatformWorkspace} from ${JSON.stringify(resolve("src/renderer/src/components/platform/PlatformWorkspace.tsx"))};
       import {FunctionPanes} from ${JSON.stringify(resolve("src/renderer/src/components/chat/FunctionPanes.tsx"))};
       import {ModsChatScope} from ${JSON.stringify(resolve("src/renderer/src/lib/mods-chat-scope.tsx"))};
+      import {useModsGlobalEnabled} from ${JSON.stringify(resolve("src/renderer/src/lib/mods-global-enabled.ts"))};
       const cards=new Set(),platform=new Set(),config=new Set();
       let lists=0,behaviors=0,reads=0,active=0,maximum=0,prepares=0,discoveries=0;
+      let globalReads=0,enabled=false,degraded=false;
       const wait=ms=>new Promise(done=>setTimeout(done,ms));
+      window.api.mods.globalEnabled=async()=>{globalReads++;return enabled};
       window.api.mods.onCardsChanged=fn=>{cards.add(fn);return()=>cards.delete(fn)};
       window.api.mods.onPlatformChanged=fn=>{platform.add(fn);return()=>platform.delete(fn)};
       window.api.mods.onConfigurationChanged=fn=>{config.add(fn);return()=>config.delete(fn)};
       window.api.mods.panes=async()=>{reads++;maximum=Math.max(maximum,++active);try{await wait(15);return []}finally{active--}};
-      window.api.mods.platformSurfaceList=async(_thread,options)=>{lists++;if(!options?.residentOnly)discoveries++;return{revision:0,entries:[],errors:[],canPrepare:true}};
-      window.api.mods.platformBehaviorList=async()=>{behaviors++;return{revision:0,bindings:[],active:[],errors:[]}};
+      window.api.mods.platformSurfaceList=async(_thread,options)=>{lists++;if(degraded)throw Error('No handler registered');if(!options?.residentOnly)discoveries++;return{revision:0,entries:[],errors:[],canPrepare:true}};
+      window.api.mods.platformBehaviorList=async()=>{behaviors++;if(degraded)throw Error('No handler registered');return{revision:0,bindings:[],active:[],errors:[]}};
       window.api.mods.platformSurfacePrepare=async()=>{prepares++};
-      function Fixture(){const[id,setId]=useState('idle');return <><textarea aria-label='Chat draft' defaultValue='keep'/>
+      function Fixture(){const[id,setId]=useState('idle');const permitted=useModsGlobalEnabled();return <><textarea aria-label='Chat draft' defaultValue='keep'/>
         <button onClick={()=>setId(value=>value==='idle'?'other':'idle')}>Switch conversation</button>
-        <ModsChatScope.Provider value={{threadId:id,enabled:true,ready:true}}>
+        <ModsChatScope.Provider value={{threadId:id,enabled:permitted,ready:true}}>
           <FunctionPanes threadId={id} revealInSidebar={false}/>
-        </ModsChatScope.Provider><PlatformWorkspace key={id} threadId={id} active/>
+        </ModsChatScope.Provider>{permitted&&<PlatformWorkspace key={id} threadId={id} active/>}
       </>}
       host.render(<Fixture/>);
-      window.refreshProbe={stats:()=>({lists,behaviors,reads,active,maximum,prepares,discoveries}),
+      window.refreshProbe={stats:()=>({lists,behaviors,reads,active,maximum,prepares,discoveries,globalReads}),
         reset:()=>{lists=behaviors=reads=maximum=discoveries=0},
+        settings:(value,broken)=>{enabled=value;degraded=broken;for(const fn of config)fn()},
         burst:async(scope,spaced=false)=>{for(let n=0;n<40;n++){
           for(const fn of cards)fn({threadId:'idle',scope});if(spaced)await wait(1)}await wait(120)},
         platform:async()=>{for(const fn of platform)fn({threadId:'idle'});await wait(80)}};
     `, [browserWorkerPlugin()])
     await page.getByLabel("Chat draft").waitFor()
-    await page.waitForFunction("window.refreshProbe.stats().lists>0 && window.refreshProbe.stats().active===0")
+    await page.waitForFunction("window.refreshProbe.stats().globalReads===1")
+    const switchConversation = page.getByRole("button", { name: "Switch conversation", exact: true })
+    await switchConversation.click()
+    await switchConversation.click()
+    assert.equal(await page.evaluate("window.refreshProbe.stats().globalReads"), 1)
+    assert.equal(await page.evaluate("window.refreshProbe.stats().lists"), 0)
+    await page.evaluate("window.refreshProbe.settings(false,true)")
+    await page.waitForFunction("window.refreshProbe.stats().globalReads===2")
+    await switchConversation.click()
+    await switchConversation.click()
+    assert.equal(await page.evaluate("window.refreshProbe.stats().lists"), 0)
+    assert.equal(await page.evaluate("window.refreshProbe.stats().behaviors"), 0)
+    assert.equal(await page.getByRole("alert").count(), 0)
+    await page.evaluate("window.refreshProbe.settings(true,false)")
+    await page.waitForFunction("window.refreshProbe.stats().lists>0 && window.refreshProbe.stats().reads>0 && window.refreshProbe.stats().active===0")
     assert.equal(await page.evaluate("window.refreshProbe.stats().discoveries"), 0)
     const extraButton = await page.getByRole("button", { name: "查找可用插件界面", exact: true }).count()
     await page.evaluate("window.refreshProbe.reset()")
@@ -57,7 +75,7 @@ async function main() {
     const switchTimes: number[] = []
     for (let index = 0; index < 8; index++) {
       const start = performance.now()
-      await page.getByRole("button", { name: "Switch conversation", exact: true }).click()
+      await switchConversation.click()
       await page.waitForFunction("window.refreshProbe.stats().active===0")
       switchTimes.push(performance.now() - start)
     }
@@ -76,6 +94,7 @@ async function main() {
     assert.equal(configuration.lists, 1, "Real platform changes still refresh discovery")
     assert.equal(configuration.prepares, 0, "Reading a catalogue must never activate sources")
     assert.equal(configuration.discoveries, 0, "Chat refresh must not inspect installed source files")
+    assert.equal(await page.evaluate("window.refreshProbe.stats().globalReads"), 3)
     assert.deepEqual(errors, [])
     console.log("PASS idle extension traffic stays bounded across typing and conversation changes")
   } finally { await browser.close() }

@@ -604,7 +604,8 @@ async function activateExplicitSkillFromMessage({
       : await readNativeSkillUsagePolicy(
           getPlugins(),
           () => captureNativeCapabilityContext(sessionId, workspacePath),
-          signal
+          signal,
+          { explicitSkillPath: parsed.skillPath }
         )
     if (nativeSkillUsage?.allowsSkill(parsed.skillPath) === false)
       throw Error(`CLAW_SKILL_USAGE_UNAVAILABLE: ${parsed.skillName}`)
@@ -620,6 +621,7 @@ async function activateExplicitSkillFromMessage({
     )
     clawSkillPolicy?.assertSkillReference({ name: parsed.skillName, path: parsed.skillPath })
   } catch (error) {
+    signal?.throwIfAborted()
     return { parsed, blocked: true, reason: error instanceof Error ? error.message : String(error) }
   }
 

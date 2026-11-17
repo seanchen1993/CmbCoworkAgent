@@ -1,6 +1,8 @@
 /** Creation reviews should identify the failing input without exposing raw IPC diagnostics. */
 export function projectUseReviewError(error: unknown): string {
   const message = error instanceof Error ? error.message : typeof error === "string" ? error : ""
+  if (message.includes("已有原生需求的项目不能更换插件绑定"))
+    return "项目已有原生需求，不能更换插件。"
   if (/\bPROJECT_INVALID_INPUT\b/.test(message))
     return "项目目录信息不符合规则，请重新选择文件夹。文件夹名支持中文、英文字母、数字、-、_。"
   if (/\b(?:ENOENT|ENOTDIR|EACCES|EPERM)\b/.test(message))
@@ -34,10 +36,12 @@ export function projectCheckKindLabel(kind: string | undefined): string {
 
 /** Shared recovery wording for both project entry points; technical details remain expandable. */
 export function projectRuntimeRecoveryMessage(error: string): string | undefined {
+  if (error.includes("PROJECT_KNOWLEDGE_DEPLOY_UNITS_MISMATCH"))
+    return "已选发布单元与当前系统约束知识库不匹配。请在编辑特性配置中重新选择后重试。"
   if (/PROJECT_USE_(?:REVIEW_CHANGED|REVIEW_REQUIRED|SOURCE_CHANGED)/.test(error))
     return "插件版本、目录或开关已变化，原权限核对已失效。请重新核对插件权限后提交；若插件已更新，请取消后重新选择。系统不会自动重新授权。"
   if (/PROJECT_USE_AUTHORIZATION_(?:INVALID|UNAVAILABLE)/.test(error))
-    return "项目授权暂时无法核实。请在“编辑项目 → 插件配置”中核对当前插件并保存后重试。"
+    return "项目授权暂时无法核实。请在“编辑项目 → 项目开发配置”中核对当前插件并保存后重试。"
   if (/PROJECT_TEMPLATE_(PLUGIN|RESPONSE)_LIMIT/.test(error))
     return "已安装插件或模板列表超过当前读取上限。请移除不再使用的插件，或由维护者调整模板范围后更新列表；反复启用插件不会解决此限制。"
   if (error.includes("HOST_PROJECT_NAVIGATION_CHANGED"))

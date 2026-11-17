@@ -10,15 +10,14 @@ import { readScopedContextContent } from "../../harness-board/project-runtime/pa
 import {
   nativeProjectContext,
   nativeProjectContextAccessScope,
-  consumeNativeProjectContextBudget
+  consumeNativeProjectContextBudget,
+  isSensitiveProjectMaterialName
 } from "./project-context-scope"
 import type {
   NativePlatformCallContext,
   NativePlatformCapabilityProvider
 } from "./platform-capabilities-types"
 
-const sensitive =
-  /^(?:\..*|(?:credentials?|secrets?|tokens?|passwords?|authorized_keys|known_hosts)(?:\..*)?|id_(?:rsa|dsa|ecdsa|ed25519)(?:\..*)?|.*\.(?:pem|key|p12|pfx|keystore))$/i
 const input = z
   .object({
     rootId: z.string().min(1).max(64),
@@ -32,7 +31,7 @@ const fileInput = z
   .strict()
 function safePath(path: string): string {
   runtimeRelativePath(path)
-  if (path.split("/").some((part) => sensitive.test(part)))
+  if (path.split("/").some(isSensitiveProjectMaterialName))
     throw Error("PROJECT_CONTEXT_PATH_DENIED")
   return path
 }
@@ -47,7 +46,18 @@ function rootFor(context: NativePlatformCallContext, id: string) {
       .some((part) => /^(?:\.ssh|\.aws|\.azure|\.gnupg|\.git|credentials?|secrets?)$/i.test(part))
   )
     throw Error("PROJECT_CONTEXT_ROOT_DENIED")
+  assertBoundRoot(root)
   return root
+}
+
+function assertBoundRoot(root: { identity?: string; path: string }): void {
+  if (!root.identity) return
+  try {
+    if (runtimeDirectoryIdentity(root.path) === root.identity) return
+  } catch {
+    // The bound directory is no longer accessible.
+  }
+  throw Error("PROJECT_CONTEXT_ROOT_CHANGED")
 }
 
 /** Read-only view of the exact material roots bound by the current Host context action. */
@@ -106,98 +116,119 @@ export function createNativeProjectContextPlatformProvider(): NativePlatformCapa
       const scope = nativeProjectContext(context)
       const result = {
         stageId: scope.stageId,
-        roots: scope.roots.map(({ id, label }) => ({ id, ...(label ? { label } : {}) })),
-        configuration: structuredClone(scope.configuration)
+        roots: scope.roots.map(({ id, label, source }) => ({
+          id,
+          ...(label ? { label } : {}),
+          ...(scope.featureInputs && source ? { source } : {})
+        })),
+        configuration: structuredClone(scope.configuration),
+        ...(scope.featureInputs ? { featureInputs: structuredClone(scope.featureInputs) } : {})
       }
       consumeNativeProjectContextBudget(context, Buffer.byteLength(JSON.stringify(result)))
       return result
     },
     async act(context, action, raw) {
-      if (action === "read") {
-        const request = fileInput.parse(raw),
-          root = rootFor(context, request.rootId)
-        const path = safePath(request.path)
-        const file = readScopedContextContent(root.path, path, 8000, root.source === "package")
-        if (!file.present || !file.bytes || !file.content) throw Error("PROJECT_CONTEXT_FILE_MISSING")
-        const text = new TextDecoder("utf-8", { fatal: true }).decode(file.content)
-        if (text.includes("\0")) throw Error("PROJECT_CONTEXT_TEXT_INVALID")
-        const result = {
-          rootId: root.id,
-          path,
-          text,
-          bytes: file.content.length,
-          digest: runtimeDigest(file.bytes)
-        }
-        if (Buffer.byteLength(JSON.stringify(result)) > 12_000)
-          throw Error("PROJECT_CONTEXT_FILE_LIMIT")
-        consumeNativeProjectContextBudget(context, file.content.length)
-        return result
-      }
-      if (action !== "list") throw Error("PROJECT_CONTEXT_ACTION_UNKNOWN")
-      const request = input.parse(raw),
-        root = rootFor(context, request.rootId)
-      const path = request.path ? safePath(request.path) : ""
-      const parents = [root.path]
-      for (const part of path ? path.split("/") : [])
-        parents.push(join(parents[parents.length - 1], part))
-      const identities = parents.map(runtimeDirectoryIdentity)
-      const directory = parents[parents.length - 1]
-      const before = lstatSync(directory, { bigint: true })
-      const handle = opendirSync(directory)
-      const entries: Array<{
-        name: string
-        path: string
-        kind: "file" | "directory"
-        bytes?: number
-      }> = []
-      let count = 0
       try {
-        for (let entry = handle.readSync(); entry; entry = handle.readSync()) {
-          if (++count > 512) throw Error("PROJECT_CONTEXT_DIRECTORY_LIMIT")
-          if (sensitive.test(entry.name)) continue
-          const relative = path ? path + "/" + entry.name : entry.name
-          safePath(relative)
-          const full = join(directory, entry.name),
-            stat = lstatSync(full)
-          if (
-            stat.isSymbolicLink() ||
-            (!stat.isDirectory() && (!stat.isFile() || stat.nlink !== 1))
-          )
-            continue
-          if (stat.isDirectory()) runtimeDirectoryIdentity(full)
-          entries.push({
-            name: entry.name,
-            path: relative,
-            kind: stat.isDirectory() ? "directory" : "file",
-            ...(stat.isFile() ? { bytes: stat.size } : {})
-          })
-        }
-      } finally {
-        handle.closeSync()
+        return actOnBoundMaterial(context, action, raw)
+      } catch (error) {
+        if (typeof (error as NodeJS.ErrnoException | undefined)?.path === "string")
+          throw Error("PROJECT_CONTEXT_MATERIAL_UNAVAILABLE")
+        throw error
       }
-      const after = lstatSync(directory, { bigint: true })
-      if (
-        before.dev !== after.dev ||
-        before.ino !== after.ino ||
-        before.mtimeNs !== after.mtimeNs ||
-        before.ctimeNs !== after.ctimeNs ||
-        parents.some((parent, i) => runtimeDirectoryIdentity(parent) !== identities[i])
-      )
-        throw Error("PROJECT_CONTEXT_DIRECTORY_CHANGED")
-      entries.sort((a, b) => a.path.localeCompare(b.path, "en"))
-      const offset = request.offset ?? 0,
-        end = offset + (request.limit ?? 32)
-      const page = entries.slice(offset, end)
-      while (Buffer.byteLength(JSON.stringify(page)) > 11_000) page.pop()
-      const next = offset + page.length
-      const result = {
-        rootId: root.id,
-        path,
-        entries: page,
-        nextOffset: next < entries.length ? next : null
-      }
-      consumeNativeProjectContextBudget(context, Buffer.byteLength(JSON.stringify(result)))
-      return result
     }
   }
+}
+
+function actOnBoundMaterial(
+  context: NativePlatformCallContext,
+  action: string,
+  raw: unknown
+) {
+  if (action === "read") {
+    const request = fileInput.parse(raw),
+      root = rootFor(context, request.rootId)
+    const path = safePath(request.path)
+    const file = readScopedContextContent(root.path, path, 8000, root.source === "package")
+    assertBoundRoot(root)
+    if (!file.present || !file.bytes || !file.content) throw Error("PROJECT_CONTEXT_FILE_MISSING")
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(file.content)
+    if (text.includes("\0")) throw Error("PROJECT_CONTEXT_TEXT_INVALID")
+    const result = {
+      rootId: root.id,
+      path,
+      text,
+      bytes: file.content.length,
+      digest: runtimeDigest(file.bytes)
+    }
+    if (Buffer.byteLength(JSON.stringify(result)) > 12_000)
+      throw Error("PROJECT_CONTEXT_FILE_LIMIT")
+    consumeNativeProjectContextBudget(context, file.content.length)
+    return result
+  }
+  if (action !== "list") throw Error("PROJECT_CONTEXT_ACTION_UNKNOWN")
+  const request = input.parse(raw),
+    root = rootFor(context, request.rootId)
+  const path = request.path ? safePath(request.path) : ""
+  const parents = [root.path]
+  for (const part of path ? path.split("/") : [])
+    parents.push(join(parents[parents.length - 1], part))
+  const identities = parents.map(runtimeDirectoryIdentity)
+  const directory = parents[parents.length - 1]
+  const before = lstatSync(directory, { bigint: true })
+  const handle = opendirSync(directory)
+  const entries: Array<{
+    name: string
+    path: string
+    kind: "file" | "directory"
+    bytes?: number
+  }> = []
+  let count = 0
+  try {
+    for (let entry = handle.readSync(); entry; entry = handle.readSync()) {
+      if (++count > 512) throw Error("PROJECT_CONTEXT_DIRECTORY_LIMIT")
+      if (isSensitiveProjectMaterialName(entry.name)) continue
+      const relative = path ? path + "/" + entry.name : entry.name
+      safePath(relative)
+      const full = join(directory, entry.name),
+        stat = lstatSync(full)
+      if (
+        stat.isSymbolicLink() ||
+        (!stat.isDirectory() && (!stat.isFile() || stat.nlink !== 1))
+      )
+        continue
+      if (stat.isDirectory()) runtimeDirectoryIdentity(full)
+      entries.push({
+        name: entry.name,
+        path: relative,
+        kind: stat.isDirectory() ? "directory" : "file",
+        ...(stat.isFile() ? { bytes: stat.size } : {})
+      })
+    }
+  } finally {
+    handle.closeSync()
+  }
+  const after = lstatSync(directory, { bigint: true })
+  if (
+    before.dev !== after.dev ||
+    before.ino !== after.ino ||
+    before.mtimeNs !== after.mtimeNs ||
+    before.ctimeNs !== after.ctimeNs ||
+    parents.some((parent, i) => runtimeDirectoryIdentity(parent) !== identities[i])
+  )
+    throw Error("PROJECT_CONTEXT_DIRECTORY_CHANGED")
+  assertBoundRoot(root)
+  entries.sort((a, b) => a.path.localeCompare(b.path, "en"))
+  const offset = request.offset ?? 0,
+    end = offset + (request.limit ?? 32)
+  const page = entries.slice(offset, end)
+  while (Buffer.byteLength(JSON.stringify(page)) > 11_000) page.pop()
+  const next = offset + page.length
+  const result = {
+    rootId: root.id,
+    path,
+    entries: page,
+    nextOffset: next < entries.length ? next : null
+  }
+  consumeNativeProjectContextBudget(context, Buffer.byteLength(JSON.stringify(result)))
+  return result
 }

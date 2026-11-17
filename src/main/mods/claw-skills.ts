@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs"
+import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { dirname, join, relative, resolve } from "node:path"
 import type {
   ClawSourceEntry,
@@ -20,9 +20,26 @@ export interface ClawSkillCatalogAccess {
 interface RegisteredSkill {
   entry: ClawSourceEntry
   source: SkillLifecycleSource
+  sourceId: string
   root: string
   realRoot: string
   document: string
+  localDocumentFingerprint?: string
+}
+
+interface DisabledSkillRoot {
+  lexical: string
+  physical: string
+}
+
+interface LiveSkillSources {
+  current: ReadonlyMap<string, SkillLifecycleSource>
+  disabled: readonly DisabledSkillRoot[]
+}
+
+interface SkillPathFilterBatch {
+  live: LiveSkillSources
+  roots: Array<{ root: string; maxDepth: number }>
 }
 
 const key = (value: string): string => {
@@ -61,6 +78,15 @@ function documentDigest(id: string, document: string, realRoot: string): string 
   return hash(JSON.stringify([id, realRoot, realKey(document), readFileSync(document, "utf8")]))
 }
 
+function regularDocumentFingerprint(document: string): string | undefined {
+  const stat = lstatSync(document, { bigint: true })
+  if (!stat.isFile() || stat.ino === 0n || stat.mtimeNs <= 0n || stat.ctimeNs <= 0n)
+    return undefined
+  return [stat.dev, stat.ino, stat.mode, stat.nlink, stat.size, stat.mtimeNs, stat.ctimeNs].join(
+    ":"
+  )
+}
+
 async function hostAccess(): Promise<ClawSkillCatalogAccess> {
   const storage = await import("../storage")
   return {
@@ -76,34 +102,71 @@ async function hostAccess(): Promise<ClawSkillCatalogAccess> {
   }
 }
 
-function disabled(skill: RegisteredSkill, access: ClawSkillCatalogAccess): boolean {
-  return access
-    .disabledDirs()
-    .some((root) => within(key(skill.root), key(root)) || within(skill.realRoot, realKey(root)))
+function readDisabledRoots(access: ClawSkillCatalogAccess): DisabledSkillRoot[] {
+  return access.disabledDirs().map((root) => ({ lexical: key(root), physical: realKey(root) }))
 }
 
-async function catalog(access: ClawSkillCatalogAccess): Promise<RegisteredSkill[]> {
+function disabled(skill: RegisteredSkill, roots: readonly DisabledSkillRoot[]): boolean {
+  return roots.some(
+    (root) => within(skill.root, root.lexical) || within(skill.realRoot, root.physical)
+  )
+}
+
+function readLiveSources(access: ClawSkillCatalogAccess): LiveSkillSources {
+  const disabled = readDisabledRoots(access)
+  const current = new Map<string, SkillLifecycleSource>()
+  for (const source of access.currentSources()) {
+    const id = sourceIdentity(source)
+    if (!current.has(id)) current.set(id, source)
+  }
+  return { current, disabled }
+}
+
+function* physicalSkillRoots(sources: Iterable<SkillLifecycleSource>) {
+  for (const source of sources) {
+    yield {
+      root: realKey(source.sourceDir),
+      maxDepth: source.maxDepth ?? MAX_SKILL_DISCOVERY_DEPTH
+    }
+  }
+}
+
+async function catalog(
+  access: ClawSkillCatalogAccess,
+  observeLocalDocuments = false
+): Promise<RegisteredSkill[]> {
   const found = new Map<string, RegisteredSkill>()
   const sources = await access.sources()
   // Keep owner metadata when a host root and a plugin source overlap.
   sources.sort((left, right) => Number(Boolean(right.pluginId)) - Number(Boolean(left.pluginId)))
   for (const source of sources) {
+    const sourceId = sourceIdentity(source)
     for (const skill of await discoverSkills(source.sourceDir, source.maxDepth)) {
       const realRoot = realKey(skill.rootDir)
       if (found.has(realRoot)) continue
-      const id = `skill:${hash(JSON.stringify([sourceIdentity(source), skill.relativePath]))}`
+      const id = `skill:${hash(JSON.stringify([sourceId, skill.relativePath]))}`
       try {
+        const document = skill.skillMdPath
+        const before =
+          observeLocalDocuments && !source.pluginId
+            ? regularDocumentFingerprint(document)
+            : undefined
+        const digest = documentDigest(id, document, realRoot)
+        const localDocumentFingerprint =
+          before && regularDocumentFingerprint(document) === before ? before : undefined
         found.set(realRoot, {
           entry: {
             id,
             name: skill.name,
-            digest: documentDigest(id, skill.skillMdPath, realRoot),
+            digest,
             ...(source.pluginName ? { owner: source.pluginName } : {})
           },
           source,
+          sourceId,
           root: key(skill.rootDir),
           realRoot,
-          document: skill.skillMdPath
+          document,
+          localDocumentFingerprint
         })
       } catch {
         // An unreadable or moving source is unavailable, never an empty authorized skill.
@@ -121,7 +184,9 @@ export async function listClawSkillSources(
   access?: ClawSkillCatalogAccess
 ): Promise<ClawSourceEntry[]> {
   const host = access ?? (await hostAccess())
-  return (await catalog(host)).filter((skill) => !disabled(skill, host)).map(({ entry }) => entry)
+  const skills = await catalog(host)
+  const disabledRoots = skills.length ? readDisabledRoots(host) : []
+  return skills.filter((skill) => !disabled(skill, disabledRoots)).map(({ entry }) => entry)
 }
 
 export class ClawSkillPolicy {
@@ -139,11 +204,13 @@ export class ClawSkillPolicy {
     private readonly usagePolicy?: NativeSkillUsagePolicy
   ) {
     this.selected = new Set(selection.items.map(({ id }) => id))
+    const registeredById = new Map(registered.map((skill) => [skill.entry.id, skill]))
+    const live = selection.items.length ? readLiveSources(access) : undefined
     const allowed = selection.items.map((reference) => {
-      const skill = registered.find(({ entry }) => entry.id === reference.id)
+      const skill = registeredById.get(reference.id)
       if (!skill || skill.entry.digest !== reference.digest || skill.entry.name !== reference.name)
         throw Error(`CLAW_SKILL_SOURCE_CHANGED: ${reference.name}`)
-      this.assertCurrent(skill)
+      this.assertCurrent(skill, live, true)
       return skill
     })
     this.allowed = allowed
@@ -160,26 +227,39 @@ export class ClawSkillPolicy {
   /** Model boundaries validate selected identities without rescanning the whole registry per file. */
   assertAllCurrent(): void {
     this.usagePolicy?.assertCurrent()
-    for (const skill of this.allowed) this.assertCurrent(skill)
+    if (!this.allowed.length) return
+    const live = readLiveSources(this.access)
+    for (const skill of this.allowed) this.assertCurrent(skill, live, true)
   }
 
-  private assertCurrent(skill: RegisteredSkill): void {
+  private assertCurrent(
+    skill: RegisteredSkill,
+    live: LiveSkillSources | undefined = undefined,
+    allowFreshLocalDocument = false
+  ): void {
     if (this.usagePolicy?.allowsSkill(skill.document) === false)
       throw Error(`CLAW_SKILL_USAGE_UNAVAILABLE: ${skill.entry.name}`)
     if (!this.selected.has(skill.entry.id))
       throw Error(`CLAW_SKILL_NOT_SELECTED: ${skill.entry.name}`)
-    if (disabled(skill, this.access)) throw Error(`CLAW_SKILL_DISABLED: ${skill.entry.name}`)
-    const currentSource = this.access
-      .currentSources()
-      .find((source) => sourceIdentity(source) === sourceIdentity(skill.source))
+    if (disabled(skill, live?.disabled ?? readDisabledRoots(this.access)))
+      throw Error(`CLAW_SKILL_DISABLED: ${skill.entry.name}`)
+    const currentSource = live
+      ? live.current.get(skill.sourceId)
+      : this.access.currentSources().find((source) => sourceIdentity(source) === skill.sourceId)
     if (!currentSource || this.sourceVisible?.(currentSource) === false)
       throw Error(`CLAW_SKILL_SOURCE_UNAVAILABLE: ${skill.entry.name}`)
     try {
       const root = realKey(skill.root)
+      if (root !== skill.realRoot) throw Error("changed")
+      // Only automatic standalone discovery can use an unchanged regular-file generation.
+      // Explicit references, selected Claws, plugin documents and link targets retain full reads.
       if (
-        root !== skill.realRoot ||
-        documentDigest(skill.entry.id, skill.document, root) !== skill.entry.digest
+        allowFreshLocalDocument &&
+        skill.localDocumentFingerprint &&
+        regularDocumentFingerprint(skill.document) === skill.localDocumentFingerprint
       )
+        return
+      if (documentDigest(skill.entry.id, skill.document, root) !== skill.entry.digest)
         throw Error("changed")
     } catch {
       throw Error(`CLAW_SKILL_SOURCE_CHANGED: ${skill.entry.name}`)
@@ -203,6 +283,33 @@ export class ClawSkillPolicy {
 
   /** Applies only to registered skill roots, not to arbitrary workspace files or shell commands. */
   isPathHidden(filePath: string, options: { traverse?: boolean } = {}): boolean {
+    return this.isPathHiddenCurrent(filePath, options.traverse === true)
+  }
+
+  /** Observe registered sources once for a synchronous tool result list. */
+  filterVisiblePaths<T>(
+    items: T[],
+    pathOf: (item: T) => string,
+    options: { traverse?: boolean } = {}
+  ): T[] {
+    let batch: SkillPathFilterBatch | undefined
+    const readBatch = (): SkillPathFilterBatch => {
+      if (!batch) {
+        const live = readLiveSources(this.access)
+        batch = { live, roots: Array.from(physicalSkillRoots(live.current.values())) }
+      }
+      return batch
+    }
+    return items.filter((item) =>
+      !this.isPathHiddenCurrent(pathOf(item), options.traverse === true, readBatch)
+    )
+  }
+
+  private isPathHiddenCurrent(
+    filePath: string,
+    traverse: boolean,
+    readBatch?: () => SkillPathFilterBatch
+  ): boolean {
     for (const candidate of new Set([key(filePath), realKey(filePath)])) {
       const matches = this.registered
         .filter((skill) => within(candidate, skill.root) || within(candidate, skill.realRoot))
@@ -214,7 +321,7 @@ export class ClawSkillPolicy {
       const match = matches[0]
       if (match) {
         if (
-          options.traverse &&
+          traverse &&
           this.registered.some(
             (skill) =>
               this.selected.has(skill.entry.id) &&
@@ -224,14 +331,14 @@ export class ClawSkillPolicy {
         )
           continue
         try {
-          this.assertCurrent(match)
+          this.assertCurrent(match, readBatch?.().live)
         } catch {
           return true
         }
       }
       // Newly registered descendants during this runtime are never implicitly selected.
-      for (const source of this.access.currentSources()) {
-        const root = realKey(source.sourceDir)
+      const roots = readBatch?.().roots ?? physicalSkillRoots(this.access.currentSources())
+      for (const { root, maxDepth } of roots) {
         if (!within(candidate, root)) continue
         let ancestor = candidate
         try {
@@ -241,10 +348,7 @@ export class ClawSkillPolicy {
         }
         while (within(ancestor, root)) {
           const depth = relative(root, ancestor).split(/[\\/]/).filter(Boolean).length
-          if (
-            depth <= (source.maxDepth ?? MAX_SKILL_DISCOVERY_DEPTH) &&
-            existsSync(join(ancestor, "SKILL.md"))
-          ) {
+          if (depth <= maxDepth && existsSync(join(ancestor, "SKILL.md"))) {
             const canonicalAncestor = realKey(ancestor)
             const known = this.registered.find((skill) => skill.realRoot === canonicalAncestor)
             if (!known) return true
@@ -267,21 +371,22 @@ export async function createClawSkillPolicy(
 ): Promise<ClawSkillPolicy | undefined> {
   if ((!selection || selection.mode === "all") && !usagePolicy) return undefined
   const host = access ?? (await hostAccess())
-  const registered = await catalog(host)
-  const effective =
-    selection?.mode === "selected"
-      ? selection
-      : {
-          mode: "selected" as const,
-          items: registered
-            .filter(
-              (skill) =>
-                !disabled(skill, host) &&
-                usagePolicy?.allowsSkill(skill.document) !== false &&
-                sourceVisible?.(skill.source) !== false
-            )
-            .map((skill) => skill.entry)
-        }
+  const pinsDocuments = selection?.mode === "selected"
+  const registered = await catalog(host, !pinsDocuments && usagePolicy?.usage === "chat")
+  const disabledRoots = !pinsDocuments && registered.length ? readDisabledRoots(host) : []
+  const effective = pinsDocuments
+    ? selection
+    : {
+        mode: "selected" as const,
+        items: registered
+          .filter(
+            (skill) =>
+              !disabled(skill, disabledRoots) &&
+              usagePolicy?.allowsSkill(skill.document) !== false &&
+              sourceVisible?.(skill.source) !== false
+          )
+          .map((skill) => skill.entry)
+      }
   return new ClawSkillPolicy(registered, effective, host, sourceVisible, usagePolicy)
 }
 

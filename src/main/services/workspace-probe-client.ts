@@ -25,10 +25,20 @@ interface OwnedProbe {
   stop(): void
 }
 
-/** Only physical worker exit releases admission. A timed-out native call can remain owned. */
+function requestWorkerTermination(worker: Worker): void {
+  try {
+    void worker.terminate().catch(() => undefined)
+  } catch {
+    /* The exit listener still owns the physical worker. */
+  }
+}
+
+/** An unconfirmed request owns its worker until physical exit. */
 export class WorkspaceProbeClient {
   private readonly admission: BoundedWorkerAdmission
   private readonly owned = new Set<OwnedProbe>()
+  private readonly workers = new Set<Worker>()
+  private readonly idleWorkers = new Set<Worker>()
   private nextId = 0
   private closed = false
 
@@ -89,19 +99,21 @@ export class WorkspaceProbeClient {
       }
       const terminate = () => {
         stopRequested = true
-        // A pending/rejected termination is not physical exit and must retain its slot.
-        if (worker) {
-          try {
-            void worker.terminate().catch(() => undefined)
-          } catch {
-            /* The exit listener still owns the physical slot. */
-          }
-        }
+        if (worker) requestWorkerTermination(worker)
       }
       const fail = (error: unknown) => {
         finish(error)
         controller.abort()
         terminate()
+      }
+      const complete = (reusable: boolean, error?: unknown, canonical?: string) => {
+        if (reusable && worker && this.workers.has(worker)) {
+          worker.removeListener("exit", onWorkerExit)
+          worker.removeListener("error", onWorkerError)
+          this.idleWorkers.add(worker)
+          release()
+        }
+        finish(error, canonical)
       }
       const accept = (value: unknown) => {
         if (settled) return
@@ -120,6 +132,7 @@ export class WorkspaceProbeClient {
           response.workspace !== workspace ||
           typeof response.completedAt !== "bigint" ||
           response.completedAt < startedAt ||
+          (response.reusable !== undefined && response.reusable !== true) ||
           !response.result ||
           typeof response.result !== "object"
         ) {
@@ -130,12 +143,14 @@ export class WorkspaceProbeClient {
           typeof response.result.canonical === "string" &&
           isAbsolute(response.result.canonical)
         )
-          finish(undefined, response.result.canonical)
+          complete(response.reusable === true, undefined, response.result.canonical)
         else if (
           "error" in response.result &&
-          ["timeout", "not-directory", "unavailable"].includes(response.result.error)
+          ["not-directory", "unavailable"].includes(response.result.error)
         )
-          finish(new WorkspaceProbeError(response.result.error))
+          complete(response.reusable === true, new WorkspaceProbeError(response.result.error))
+        else if ("error" in response.result && response.result.error === "timeout")
+          fail(new WorkspaceProbeError("timeout"))
         else fail(new WorkspaceProbeError("unavailable"))
       }
       const drain = () => {
@@ -143,6 +158,12 @@ export class WorkspaceProbeClient {
         const packet = receiveMessageOnPort(port)
         if (packet) accept(packet.message)
       }
+      const onWorkerExit = () => {
+        drain()
+        if (!settled) finish(new WorkspaceProbeError("unavailable"))
+        release()
+      }
+      const onWorkerError = () => fail(new WorkspaceProbeError("unavailable"))
       const abort = () => fail(this.abortError(signal))
       const owner: OwnedProbe = { stop: () => fail(new WorkspaceProbeError("unavailable")) }
       this.owned.add(owner)
@@ -171,18 +192,30 @@ export class WorkspaceProbeClient {
           deadline,
           port: channel.port2
         }
-        const attach = (created: Worker) => {
+        const attach = (created: Worker, fresh = true) => {
           worker = created
-          worker.once("exit", () => {
-            drain()
-            if (!settled) finish(new WorkspaceProbeError("unavailable"))
-            release()
-          })
-          worker.on("error", () => fail(new WorkspaceProbeError("unavailable")))
-          worker.unref()
+          if (fresh) {
+            this.workers.add(worker)
+            worker.once("exit", () => {
+              this.idleWorkers.delete(created)
+              this.workers.delete(created)
+            })
+            // Idle worker failures are retired by their original exit listener.
+            worker.on("error", () => {})
+            worker.unref()
+          }
+          worker.once("exit", onWorkerExit)
+          worker.once("error", onWorkerError)
           if (stopRequested || settled || this.closed || signal?.aborted) terminate()
         }
         try {
+          const available = this.idleWorkers.values().next().value
+          if (available) {
+            this.idleWorkers.delete(available)
+            attach(available, false)
+            available.postMessage(request, [channel.port2])
+            return
+          }
           const created = this.factory(
             {
               name: "workspace-access-probe",
@@ -206,7 +239,7 @@ export class WorkspaceProbeClient {
         } catch {
           channel.port2.close()
           fail(new WorkspaceProbeError("unavailable"))
-          release()
+          if (!worker) release()
         }
       }
       // The original admission synchronously reserves an available slot. Start immediately:
@@ -238,10 +271,12 @@ export class WorkspaceProbeClient {
   async close(waitMs = 100): Promise<void> {
     this.closed = true
     for (const owner of this.owned) owner.stop()
+    for (const worker of this.idleWorkers) requestWorkerTermination(worker)
     const until = Date.now() + waitMs
-    while (this.owned.size && Date.now() < until)
+    while ((this.owned.size || this.workers.size) && Date.now() < until)
       await new Promise((resolve) => setTimeout(resolve, 5))
-    if (this.owned.size) throw new Error("Workspace probe cleanup remains unconfirmed")
+    if (this.owned.size || this.workers.size)
+      throw new Error("Workspace probe cleanup remains unconfirmed")
   }
 }
 

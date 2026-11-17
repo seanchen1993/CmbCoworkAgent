@@ -235,6 +235,7 @@ it.each(["invalidate", "configuration"] as const)(
       expect(invalidated).toBe(false)
       expect(f.service.peekTools?.()).toBeNull()
       expect(() => process.kill(heldPid, 0)).not.toThrow()
+      await expect(f.connect(owner)).rejects.toThrow("MODS_MCP_CLEANUP_UNCONFIRMED")
     } else await f.configure(owner, "replacement")
     await writeFile(held.gate, "release")
     await expect(result).rejects.toThrow("MODS_MCP_CONTEXT_EXPIRED")

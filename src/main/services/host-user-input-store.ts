@@ -141,15 +141,24 @@ export class HostUserInputStore {
     if (!isAbsolute(path)) throw Error("HOST_USER_INPUT_PATH_INVALID")
     mkdirSync(dirname(path), { recursive: true })
     this.db = new DatabaseSync(path, { timeout: 1000 })
-    this.db.exec(`
-      PRAGMA journal_mode=WAL;
-      PRAGMA synchronous=FULL;
-      CREATE TABLE IF NOT EXISTS host_user_inputs (
-        id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL
-      );
-      CREATE UNIQUE INDEX IF NOT EXISTS host_one_waiting_user_input
-        ON host_user_inputs(thread_id) WHERE status='waiting';
-    `)
+    try {
+      this.db.exec(`
+        PRAGMA journal_mode=WAL;
+        PRAGMA synchronous=FULL;
+        CREATE TABLE IF NOT EXISTS host_user_inputs (
+          id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS host_one_waiting_user_input
+          ON host_user_inputs(thread_id) WHERE status='waiting';
+        CREATE INDEX IF NOT EXISTS host_unconsumed_user_input_by_operation
+          ON host_user_inputs(json_extract(data,'$.binding.operationId'))
+          WHERE status IN ('waiting','answered')
+          AND json_extract(data,'$.continuation.protocol')='host-user-input-interrupt/v1';
+      `)
+    } catch (error) {
+      this.db.close()
+      throw error
+    }
   }
 
   close(): void {

@@ -886,6 +886,7 @@ export interface HarnessProjectDetailViewModel {
     systemName: string
     workspacePath: string
     projectRootPath: string
+    managedRunFirstStartedAt?: string
   }
   adapterSnapshot: {
     mode: "project"
@@ -1140,6 +1141,7 @@ export interface HarnessRunDetailViewModel {
 export interface HarnessNativeProjectBinding {
   engine: "host"
   installedPluginId: string
+  supportsDeployUnits?: true
 }
 
 export interface HarnessNativeFeatureBinding extends HarnessNativeProjectBinding {
@@ -1179,9 +1181,11 @@ export function readHarnessNativeProjectBinding(value: unknown): HarnessNativePr
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw Error("HARNESS_NATIVE_BINDING_INVALID")
   const raw = value as Record<string, unknown>
-  if (Object.keys(raw).sort().join(",") !== "engine,installedPluginId" ||
+  if (Object.keys(raw).some(key => !["engine", "installedPluginId", "supportsDeployUnits"].includes(key)) ||
+    (raw.supportsDeployUnits !== undefined && raw.supportsDeployUnits !== true) ||
     raw.engine !== "host" || typeof raw.installedPluginId !== "string" ||
     !raw.installedPluginId || raw.installedPluginId.length > 512)
     throw Error("HARNESS_NATIVE_BINDING_INVALID")
-  return { engine: "host", installedPluginId: raw.installedPluginId }
+  return { engine: "host", installedPluginId: raw.installedPluginId,
+    ...(raw.supportsDeployUnits === true ? { supportsDeployUnits: true } : {}) }
 }

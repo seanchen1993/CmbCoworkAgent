@@ -12,7 +12,7 @@ import {
 import { HostProjectStore } from "./host-store"
 import { HostPackageSnapshots } from "./package-snapshots"
 import { hostProjectFixture } from "./host-fixtures.test-helper"
-import { runtimeDigest } from "./safe-files"
+import { runtimeDigest, runtimeDirectoryIdentity } from "./safe-files"
 
 const cleanup: Array<() => void> = []
 afterEach(async () => {
@@ -24,7 +24,8 @@ afterEach(async () => {
 async function fixture(
   overrides: Partial<HostProjectServiceDependencies> = {},
   finishSource = true,
-  preservePrefix: boolean | "revise-prefix" = false
+  preservePrefix: boolean | "revise-prefix" = false,
+  boundFeature = false
 ) {
   const root = mkdtempSync(join(tmpdir(), "host-stage-branch-"))
   const workspace = join(root, "original")
@@ -91,13 +92,30 @@ async function fixture(
   }
   const snapshots = new HostPackageSnapshots(join(root, "packages"))
   const service = new HostProjectService(store, snapshots, dependencies)
-  await service.localCreate({
+  const creation = {
     projectId: "original-project",
     name: "Original",
     workspace,
     installedPluginId: "original-installation",
     goal: "Original task"
-  })
+  }
+  if (boundFeature) {
+    const snapshot = snapshots.capture(sourceRoot)
+    const knowledgePath = join(root, "project-knowledge")
+    mkdirSync(knowledgePath)
+    store.create({
+      ...creation,
+      packageId: "docs",
+      packageVersion: "1.0.0",
+      pluginDigest: snapshot.digest,
+      manifest: snapshot.manifest,
+      harnessFeatureInputs: {
+        selectedDeployUnits: ["orders-api"],
+        knowledgeRoots: [{ id: "project-knowledge", path: knowledgePath,
+          identity: runtimeDirectoryIdentity(knowledgePath) }]
+      }
+    })
+  } else await service.localCreate(creation)
   const operation = service.prepare({
     projectId: "original-project",
     expectedVersion: 1,
@@ -155,6 +173,17 @@ async function fixture(
 }
 
 describe("native host stage branch admission", () => {
+  it("preserves the feature-bound material inputs in a persisted stage branch", async () => {
+    const setup = await fixture({}, false, false, true)
+    const branch = await setup.service.createBranchAtStage(setup.input)
+    expect(branch.harnessFeatureInputs).toEqual(setup.source.harnessFeatureInputs)
+    expect(setup.store.get(branch.projectId)?.harnessFeatureInputs).toEqual({
+      selectedDeployUnits: ["orders-api"],
+      knowledgeRoots: [{ id: "project-knowledge", path: join(setup.root, "project-knowledge"),
+        identity: runtimeDirectoryIdentity(join(setup.root, "project-knowledge")) }]
+    })
+  })
+
   it("branches an already settled failed middle stage without completing the original flow", async () => {
     const setup = await fixture({}, false)
     expect(setup.source).toMatchObject({ stageIndex: 1, status: "active", version: 2 })

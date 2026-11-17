@@ -10,7 +10,7 @@ import {
 } from "../storage"
 import { resolveMcpConnectorKind } from "../mcp/connector-kind"
 import type { McpConnectorConfig, McpConnectorUpsert } from "../types"
-import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
+import { invalidateMutableMcpCapabilityServices } from "../mcp/capability-service"
 import {
   buildMcpImportOperations,
   parseMcpImportConfig,
@@ -184,7 +184,7 @@ export function registerMcpHandlers(ipcMain: IpcMain): void {
       }
 
       if (changed) {
-        await invalidateGlobalMcpCapabilityService("mcp:importConfig")
+        await invalidateMutableMcpCapabilityServices("mcp:importConfig")
       }
 
       return result
@@ -196,7 +196,7 @@ export function registerMcpHandlers(ipcMain: IpcMain): void {
     async (_event, config: McpConnectorUpsert): Promise<{ id: string }> => {
       validateMcpConnectorInput(config)
       const id = upsertMcpConnector(config)
-      await invalidateGlobalMcpCapabilityService("mcp:create")
+      await invalidateMutableMcpCapabilityServices("mcp:create")
       return { id }
     }
   )
@@ -206,21 +206,21 @@ export function registerMcpHandlers(ipcMain: IpcMain): void {
     async (_event, config: McpConnectorUpsert & { id: string }): Promise<{ id: string }> => {
       validateMcpConnectorInput(config)
       const id = upsertMcpConnector(config)
-      await invalidateGlobalMcpCapabilityService("mcp:update")
+      await invalidateMutableMcpCapabilityServices("mcp:update")
       return { id }
     }
   )
 
   ipcMain.handle("mcp:delete", async (_event, id: string): Promise<void> => {
     deleteMcpConnector(id)
-    await invalidateGlobalMcpCapabilityService("mcp:delete")
+    await invalidateMutableMcpCapabilityServices("mcp:delete")
   })
 
   ipcMain.handle(
     "mcp:setEnabled",
     async (_event, { id, enabled }: { id: string; enabled: boolean }): Promise<void> => {
       setMcpConnectorEnabled(id, enabled)
-      await invalidateGlobalMcpCapabilityService("mcp:setEnabled")
+      await invalidateMutableMcpCapabilityServices("mcp:setEnabled")
     }
   )
 

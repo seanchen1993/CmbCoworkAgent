@@ -21,8 +21,8 @@
 这里不使用可能过期的文件名索引。结果明确记录覆盖子根，以及子根外仅检查祖先指令的限制。
 共享产品知识若在其他目录，作者必须显式加入该目录；缺失所选部署单元资料会报错，不能声称完整检索。
 
-本包仍使用 Host 解析的 `selectedDeployUnits` 与知识目录权限，并沿用部署单元、知识类型和
-最近 AGENTS 的选择规则。`package` 材料根仍需提供 `method.md`。
+项目模式由 Host 提供特性选中的发布单元和项目绑定的知识库。提供器使用材料根标识读取所选知识库，沿用发布单元、知识类型和最近 AGENTS 的选择规则。独立试跑仍可使用原知识目录和发布单元参数。
+`package` 材料根仍需提供 `method.md`。
 
 创造者通过 `catalog(project-dependencies)` 找到本包的真实 `sourceId`，再调用
 `dependency_prepare(sourceId)`。目录 ID 由 Host 生成，不是安装 ID 或文件路径。准备操作保留

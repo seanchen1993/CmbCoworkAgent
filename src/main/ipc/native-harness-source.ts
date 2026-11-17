@@ -8,7 +8,11 @@ import { capturePackageMetadataGuard } from "../harness-board/project-runtime/pa
 import { projectRuntimeFunctionSource } from "../harness-board/project-runtime-function-source"
 import { projectRuntimeDependencies } from "../harness-board/project-runtime-dependencies"
 import { registerNativeProjectSourceHandlers } from "./native-project-source"
-import { projectUseOwnsFeature, admitProjectUseFeature } from "../harness-board/project-use-authorization"
+import {
+  projectUseOwnsFeature,
+  admitProjectUseFeature,
+  captureProjectUseFeaturePreflight
+} from "../harness-board/project-use-authorization"
 
 /** Configuration identity exists before execution. It is never a manufactured Host state. */
 export function registerNativeHarnessSourceHandlers(ipc: IpcMain, deps: {
@@ -18,13 +22,17 @@ export function registerNativeHarnessSourceHandlers(ipc: IpcMain, deps: {
   readBinding(hostRunId: string): HarnessNativeFeatureBinding | undefined
   assertBinding(binding: HarnessNativeFeatureBinding): void
 }) {
-  return registerNativeProjectSourceHandlers(ipc, "harness-native-feature", async (event, ownerKey) => {
+  return registerNativeProjectSourceHandlers(ipc, "harness-native-feature", async (event, ownerKey, preflight) => {
     const owner = deps.trusted(event)
     if (typeof ownerKey !== "string" || !ownerKey || ownerKey.length > 256)
       throw Error("PROJECT_INVALID_INPUT")
     const binding = deps.readBinding(ownerKey)
     if (!binding || binding.hostRunId !== ownerKey) throw Error("HARNESS_NATIVE_FEATURE_MISSING")
-    admitProjectUseFeature(binding)
+    preflight?.assertCurrent()
+    const projectUsePreflight = preflight
+      ? captureProjectUseFeaturePreflight(binding, preflight.workspace)
+      : undefined
+    if (!preflight) admitProjectUseFeature(binding)
     const originalBinding = JSON.stringify(binding)
     const api = deps.platform()
     const existing = api.get(ownerKey)
@@ -33,6 +41,8 @@ export function registerNativeHarnessSourceHandlers(ipc: IpcMain, deps: {
     const installedIdentity = JSON.stringify(installed && [installed.id, installed.path,
       installed.name, installed.version, installed.enabled])
     const authorityGuard = () => {
+      preflight?.assertCurrent()
+      projectUsePreflight?.assertCurrent()
       if (deps.trusted(event) !== owner ||
         JSON.stringify(deps.readBinding(ownerKey)) !== originalBinding ||
         JSON.stringify(api.get(ownerKey)) !== originalRun)
@@ -47,6 +57,7 @@ export function registerNativeHarnessSourceHandlers(ipc: IpcMain, deps: {
         throw Error("PROJECT_OPERATION_UNSETTLED")
     }
     authorityGuard()
+    if (preflight && existing) throw Error("HARNESS_NATIVE_RUN_IDENTITY_CHANGED")
     if (existing && (existing.installedPluginId !== binding.installedPluginId ||
       existing.workspace !== binding.workspace || existing.pluginDigest !== binding.packageDigest))
       throw Error("HARNESS_NATIVE_RUN_IDENTITY_CHANGED")
@@ -65,6 +76,7 @@ export function registerNativeHarnessSourceHandlers(ipc: IpcMain, deps: {
       throw Error("PROJECT_PACKAGE_IDENTITY_MISMATCH")
     const guard = () => { authorityGuard(); sourceGuard(); pending?.assertCurrent(); authorityGuard() }
     const executionGuard = () => {
+      preflight?.assertCurrent()
       if (deps.trusted(event) !== owner ||
         JSON.stringify(deps.readBinding(ownerKey)) !== originalBinding)
         throw Error("PROJECT_INPUT_CHANGED")
@@ -76,13 +88,14 @@ export function registerNativeHarnessSourceHandlers(ipc: IpcMain, deps: {
       sourceGuard()
     }
     const source = projectRuntimeFunctionSource({ projectId: ownerKey,
-      workspace: binding.workspace, pluginDigest: packageDigest,
+      workspace: preflight?.workspace ?? binding.workspace, pluginDigest: packageDigest,
       installedPluginId: binding.installedPluginId, packageId: binding.expectedPlugin.name }, root)
     const dependencies = projectRuntimeDependencies({ root, workspace: source.input.workspace,
       manager: source.manager, plugins: getPlugins, assertCurrent: guard, scope: source.input.scope })
     // Version zero is a pending configuration scope; real execution versions start at one.
     return { ...(projectUseOwnsFeature(ownerKey) ? { approvalAtProject: true as const } : {}),
       project: { projectId: ownerKey, version: existing?.version ?? 0, pluginDigest: packageDigest },
-      root, guard, authorityGuard, executionGuard, ...source, dependencies }
+      root, guard, authorityGuard, executionGuard, ...source, dependencies,
+      ...(projectUsePreflight ? { projectUsePreflight } : {}) }
   })
 }

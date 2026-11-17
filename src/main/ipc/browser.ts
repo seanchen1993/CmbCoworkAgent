@@ -46,7 +46,7 @@ import {
   stopScriptRecording,
   updateScriptRecordingDraft
 } from "../browser/record/script-record/script-recording-service"
-import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
+import { invalidateMutableMcpCapabilityServices } from "../mcp/capability-service"
 import { getBrowserCdpConfigAsync, saveBrowserCdpConfigAsync } from "../storage"
 
 const BROWSER_SERVICE_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[BrowserService]`
@@ -240,7 +240,7 @@ function registerBrowserCdpIpc({ ipcMain }: Pick<BrowserIpcContext, "ipcMain">):
       const saved = await saveBrowserCdpConfigAsync(sanitizeBrowserCdpConfigUpdates(updates))
       const { invalidateCapabilities } = await syncPlaywrightMcpConnectorForBrowserCdpConfig(saved)
       if (invalidateCapabilities) {
-        await invalidateGlobalMcpCapabilityService("browser:saveCdpConfig")
+        await invalidateMutableMcpCapabilityServices("browser:saveCdpConfig")
       }
       return saved
     }

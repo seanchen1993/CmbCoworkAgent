@@ -287,6 +287,30 @@ it("uses fresh full source proofs at every public read, without rescanning priva
   expect(full).toHaveBeenCalledTimes(4)
 })
 
+it("revalidates cached content once before returning a synchronous lookup", async () => {
+  const database = {}
+  const projection = new FunctionNativeDisplayProjection({
+    capture: () => ({
+      database, workspace: "C:/workspace", threadId: "thread",
+      incarnation: { token: "one", legacyCreatedAt: 1 },
+      assertCurrent: () => {}
+    }),
+    publish: async (_workspace, value) => value
+  })
+  cleanup.push(() => projection.close())
+  const read = projection.prepareRead(
+    "C:/workspace", "thread", "AssistantMessage", { text: "safe", isFirstOfReply: true }, "row"
+  )
+  const full = vi.fn()
+  const admission = { version: "one", assertIdentity: vi.fn(), assertCurrent: full }
+  const snapshot = await projection.readPrepared("C:/workspace", "AssistantMessage", read, admission)
+  full.mockClear()
+  expect(projection.lookup(read, admission)).toEqual(snapshot)
+  expect(full).toHaveBeenCalledTimes(1)
+  full.mockImplementation(() => { throw Error("SOURCE_CHANGED") })
+  expect(() => projection.lookup(read, admission)).toThrow("SOURCE_CHANGED")
+})
+
 it("retires both a stale in-flight A and B instead of coalescing a later A with the old read", async () => {
   const database = {}
   let release!: () => void

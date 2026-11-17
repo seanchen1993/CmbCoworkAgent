@@ -5,11 +5,10 @@ import { prepareProjectUseCreation, prepareProjectUseUpdate,
   revokeProjectUseAuthorization } from "./project-use-authorization"
 import {
   nativeHarnessPlugin, initializeNativeHarnessProject, createNativeHarnessFeature,
-  readNativeHarnessFeature, nativeHarnessProjectDetail, nativeHarnessRunDetail,
+  observeDurableNativeHarnessProject, readNativeHarnessFeature, nativeHarnessProjectDetail, nativeHarnessRunDetail,
   assertNativeHarnessProjectMutable, assertNativeHarnessFeatureCurrent,
   assertNativeHarnessFeatureBinding, readNativeHarnessFeatureStage,
-  nativeHarnessFeatureConfiguration, updateNativeHarnessFeatureConfiguration,
-  assertNativeFeatureConfiguration
+  nativeHarnessFeatureConfiguration, updateNativeHarnessFeatureConfiguration
 } from "./native-harness"
 import { readHarnessNativeProjectBinding } from "../../shared/harness-board-types"
 import { makeAutobizWatchRefs as makeWatchRefs } from "./adapters/autobiz-watch-refs"
@@ -126,6 +125,7 @@ import type {
   HarnessProjectContextConfigSnapshot
 } from "./catalog-protocol"
 import { HARNESS_PROJECT_CONTEXT_MAX_PROJECTS } from "./catalog-protocol"
+import { readProjectKnowledgeDeployUnits } from "./knowledge-deploy-units"
 import {
   readHarnessJsonFileBounded,
   withHarnessStoreMutation,
@@ -1943,6 +1943,7 @@ const capabilityProjectWorkspacesById = new Map<string, readonly string[]>()
 const capabilityFeatureWorkspacesByKey = new Map<string, string>()
 const nativeProjectAuthorityById = new Map<string, HarnessProjectMetadata>()
 let nativeProjectAuthorityFingerprint: string | undefined
+let projectStoreWriting = false
 
 function projectStoreFingerprint(): string | undefined {
   try {
@@ -2001,17 +2002,21 @@ async function readProjectStore(): Promise<HarnessProjectStoreFile> {
   )
   const store = parsed === null ? emptyProjectStore() : normalizeProjectStore(parsed)
   const after = projectStoreFingerprint()
-  refreshManagedRunProjectDirectoryCache(store, before && before === after ? after : "")
+  // A delayed read can finish after a save has already published a newer directory index.
+  if (before === after && (before !== undefined || parsed === null))
+    refreshManagedRunProjectDirectoryCache(store, before ?? "")
   return store
 }
 
-/** Current native owner facts. Hot authorization checks probe identities, never parse the store. */
+/** Validate the previously loaded parent against its exact durable record. */
 export function readHarnessProjectUseParent(projectId: string) {
-  if (!nativeProjectAuthorityFingerprint ||
-    projectStoreFingerprint() !== nativeProjectAuthorityFingerprint) return undefined
   const project = nativeProjectAuthorityById.get(projectId)
-  if (!project?.nativeBinding) return undefined
+  if (!project?.nativeBinding || !nativeProjectAuthorityFingerprint) return undefined
   try {
+    const { fingerprint, project: durable } = observeDurableNativeHarnessProject(projectId)
+    if (fingerprint !== nativeProjectAuthorityFingerprint && !projectStoreWriting) return undefined
+    const current = normalizeProject(durable)
+    if (JSON.stringify(current) !== JSON.stringify(project)) return undefined
     const workspace = projectDirectoryPath(project)
     const directoryIdentity = runtimeDirectoryIdentity(workspace)
     return {
@@ -2025,6 +2030,14 @@ export function readHarnessProjectUseParent(projectId: string) {
   } catch {
     return undefined
   }
+}
+
+/** The explicit edit review can load the durable parent before any feature has been opened. */
+export async function prepareHarnessProjectUseParent(projectId: string) {
+  const current = readHarnessProjectUseParent(projectId)
+  if (current) return current
+  await readProjectStore()
+  return readHarnessProjectUseParent(projectId)
 }
 
 /** Exact child ownership; callers cannot authorize a parent directory or another Feature. */
@@ -2075,13 +2088,19 @@ async function mutateProjectStore<T>(
       throw new Error(`项目数量超过 ${HARNESS_PROJECT_STORE_MAX_PROJECTS} 条上限`)
     }
     for (const project of store.projects) normalizeProject(project)
-    await writeHarnessJsonFileAtomic(
-      HARNESS_BOARD_FILE,
-      store,
-      HARNESS_PROJECT_STORE_MAX_BYTES,
-      "Harness project store"
-    )
-    refreshManagedRunProjectDirectoryCache(store)
+    // The worker replaces the file before the reply refreshes this process's index.
+    projectStoreWriting = true
+    try {
+      await writeHarnessJsonFileAtomic(
+        HARNESS_BOARD_FILE,
+        store,
+        HARNESS_PROJECT_STORE_MAX_BYTES,
+        "Harness project store"
+      )
+      refreshManagedRunProjectDirectoryCache(store)
+    } finally {
+      projectStoreWriting = false
+    }
     return result
   })
 }
@@ -3108,9 +3127,12 @@ async function readHarnessFeatureSessionContextAgentPrompt(
   } = {}
 ): Promise<HarnessSessionContextInjectResult> {
   options.signal?.throwIfAborted()
+  const selectedIds = options.selectedDeployUnits?.map(item => item.deployUnitId) ?? []
+  const reportRequired = isInternalHarnessProjectId(project.projectId) ||
+    Number(context.configSnapshot?.value?.apiVersion) === EXTENSION_BOARD_API_VERSION
   if (!hasConfiguredHarnessInvocationInContext(context, "sessionContext")) {
-    if (options.selectedDeployUnits?.length)
-      throw new HarnessRequiredContextError(options.selectedDeployUnits.map(item => item.deployUnitId))
+    if (reportRequired && selectedIds.length)
+      throw new HarnessRequiredContextError(selectedIds)
     const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS.sessionContext
     const detail = `插件未配置 inspectCommands.${process.platform}.${configKey}`
     console.warn(
@@ -3157,17 +3179,16 @@ async function readHarnessFeatureSessionContextAgentPrompt(
     const result = await runHarnessJsonInvocation(configured, "sessionContext", options.signal)
     const message = normalizeText(result.message).trim()
     const agentmdLoadStatus = normalizeHarnessAgentmdLoadStatus(result.agentmdLoadStatus)
-    if (result.agentmdLoadStatus != null &&
+    const reported = result.agentmdLoadStatus != null
+    if (reported &&
       (!Array.isArray(result.agentmdLoadStatus) ||
         result.agentmdLoadStatus.length !== agentmdLoadStatus.length))
       throw new HarnessRequiredContextError(["(unreported)"])
-    requireLoadedHarnessContext(
-      agentmdLoadStatus,
-      options.selectedDeployUnits?.map(item => item.deployUnitId)
-    )
+    const requiredSelection = reportRequired || reported ? selectedIds : []
+    requireLoadedHarnessContext(agentmdLoadStatus, requiredSelection)
     if (!isHarnessSessionContextOk(result.ok)) {
-      if (options.selectedDeployUnits?.length)
-        throw new HarnessRequiredContextError(options.selectedDeployUnits.map(item => item.deployUnitId))
+      if (requiredSelection.length)
+        throw new HarnessRequiredContextError(requiredSelection)
       console.warn(
         "[HarnessBoard] session_context_inject returned not ok, fallback to CMBDevClaw AGENTS.md:",
         {
@@ -3183,11 +3204,9 @@ async function readHarnessFeatureSessionContextAgentPrompt(
     )
     const agentConfig = normalizeHarnessAgentConfig(result.agentConfig)
     if (!sessionContext) {
-      if (options.selectedDeployUnits?.length || agentmdLoadStatus.some(item => item.required !== false))
-        throw new HarnessRequiredContextError(
-          options.selectedDeployUnits?.map(item => item.deployUnitId) ??
-            agentmdLoadStatus.filter(item => item.required !== false).map(item => item.deployUnitId)
-        )
+      const requiredIds = requiredSelection.length ? requiredSelection :
+        agentmdLoadStatus.filter(item => item.required !== false).map(item => item.deployUnitId)
+      if (requiredIds.length) throw new HarnessRequiredContextError(requiredIds)
       return {
         agentmdLoadStatus,
         ...(knowledgeWarning ? { warning: knowledgeWarning } : {}),
@@ -3205,8 +3224,8 @@ async function readHarnessFeatureSessionContextAgentPrompt(
     if (findHookProcessCleanupError(error)) throw error
     if (error instanceof HarnessSessionContextLimitError || error instanceof HarnessRequiredContextError)
       throw error
-    if (options.selectedDeployUnits?.length)
-      throw new HarnessRequiredContextError(options.selectedDeployUnits.map(item => item.deployUnitId))
+    if (reportRequired && selectedIds.length)
+      throw new HarnessRequiredContextError(selectedIds)
     const detail = error instanceof Error ? error.message : String(error)
     console.error(
       "[HarnessBoard] session_context_inject failed, fallback to CMBDevClaw AGENTS.md:",
@@ -3593,61 +3612,41 @@ export async function getHarnessProjectPublicAgentmdDeployUnits(
 ): Promise<string[]> {
   const context = await readProjectContextInWorker(projectId, "harness-public-agentmd")
   if (!context) throw new Error("Project not found")
-  const configContext = projectConfigContextFromWorker(context)
-  if (!configContext.plugin || configContext.configSnapshot?.error) return []
-  const boardCompatibility = evaluateBoardPluginCompatibility(
-    configContext.plugin,
-    context.project["harness-adapter"].name || context.project["harness-adapter"].id,
-    configContext.configSnapshot
-  )
-  if (!boardCompatibility.compatible) return []
-  const command = readBoardConfigPlatformTextFromValue(
-    configContext.configSnapshot?.value ?? null,
-    "session_context_inject"
-  )
-  if (!command?.includes("${knowledgePath}")) {
-    const workspace = featureId
-      ? await requireHarnessFeatureWorkspace(projectId, featureId)
-      : context.project.workspacePath
-    const projection = await readExtensionContextProjection({
-      sourceRoot: configContext.plugin.path,
-      workspace,
-      dataRoot: join(getOpenworkDir(), "plugin-data"),
-      projectId
-    })
-    return projection?.supportedDeployUnits ??
-      (command ? uniqueStringsInOrder(configContext.configSnapshot?.value?.supported_deploy_units) : [])
+  if (context.project.nativeBinding) {
+    const binding = featureId
+      ? readNativeHarnessFeature(projectId, featureId)
+      : context.project.nativeBinding
+    if (!binding?.supportsDeployUnits) return []
+  } else {
+    const configContext = projectConfigContextFromWorker(context)
+    if (!configContext.plugin || configContext.configSnapshot?.error) return []
+    const boardCompatibility = evaluateBoardPluginCompatibility(
+      configContext.plugin,
+      context.project["harness-adapter"].name || context.project["harness-adapter"].id,
+      configContext.configSnapshot
+    )
+    if (!boardCompatibility.compatible) return []
+    const command = readBoardConfigPlatformTextFromValue(
+      configContext.configSnapshot?.value ?? null,
+      "session_context_inject"
+    )
+    if (!command?.includes("${knowledgePath}")) {
+      const workspace = featureId
+        ? await requireHarnessFeatureWorkspace(projectId, featureId)
+        : context.project.workspacePath
+      const projection = await readExtensionContextProjection({
+        sourceRoot: configContext.plugin.path,
+        workspace,
+        dataRoot: join(getOpenworkDir(), "plugin-data"),
+        projectId
+      })
+      return projection?.supportedDeployUnits ??
+        (command ? uniqueStringsInOrder(configContext.configSnapshot?.value?.supported_deploy_units) : [])
+    }
   }
 
   const knowledgeBases = await resolveProjectKnowledgeBases(context.project.knowledgeBaseIds ?? [])
-  const deployUnitIds: string[] = []
-  for (const knowledgeBase of knowledgeBases) {
-    const manifestPath = join(knowledgeBase.path, "agents.manifest.json")
-    try {
-      const manifest = await readHarnessJsonFileBounded(
-        manifestPath, HARNESS_BOARD_CONFIG_MAX_BYTES, "系统约束清单"
-      )
-      if (!isObject(manifest) || !Array.isArray(manifest.systems)) {
-        throw new Error("系统约束清单缺少 systems 数组")
-      }
-      const ids: string[] = []
-      for (const system of manifest.systems) {
-        if (!isObject(system) || !Array.isArray(system.deployUnits)) {
-          throw new Error("系统约束清单缺少 deployUnits 数组")
-        }
-        for (const unit of system.deployUnits) {
-          if (!isObject(unit) || typeof unit.deployUnitId !== "string") {
-            throw new Error("系统约束清单的 deployUnitId 必须是字符串")
-          }
-          ids.push(unit.deployUnitId)
-        }
-      }
-      deployUnitIds.push(...ids)
-    } catch (error) {
-      console.warn("[HarnessBoard] 读取公共系统约束清单失败：", { manifestPath, error })
-    }
-  }
-  return uniqueStringsInOrder(deployUnitIds)
+  return readProjectKnowledgeDeployUnits(knowledgeBases.map((knowledgeBase) => knowledgeBase.path))
 }
 
 export async function getHarnessLocalAgentmdDeployUnitMappings(
@@ -3746,7 +3745,8 @@ export async function createHarnessProject(
   sourceBinding?.guard()
   const knowledgeBaseIds = await assertSelectableKnowledgeBaseIds(input.knowledgeBaseIds)
   const project: HarnessProjectMetadata = {
-    ...(native ? { nativeBinding: { engine: "host" as const, installedPluginId: native.plugin.id } } : {}),
+    ...(native ? { nativeBinding: { engine: "host" as const, installedPluginId: native.plugin.id,
+      ...(native.featureInputs ? { supportsDeployUnits: true as const } : {}) } } : {}),
     projectId: sourceBinding?.projectId ?? projectUse?.projectId ?? uuid(),
     name: input.name.trim(),
     description: input.description.trim(),
@@ -3804,7 +3804,6 @@ export async function createHarnessFeature(
   const project = await requireProject(input.projectId)
   const feature = input.feature.trim()
   if (project.nativeBinding) {
-    assertNativeFeatureConfiguration(input.sessionWorkspace, input.selectedDeployUnits)
     const selectedDeployUnits = await resolveFeatureSelectedDeployUnits(input.selectedDeployUnits, { allowEmpty: true })
     const repositoryWorkspace = await validateFeatureWorkspace(input.sessionWorkspace, selectedDeployUnits)
     const identity = JSON.stringify(project)
@@ -3909,9 +3908,6 @@ export async function updateHarnessFeatureDeployUnits(
   }
   validateHarnessName(featureId, "特性名称")
   await requireProject(projectId)
-  if (readNativeHarnessFeature(projectId, featureId))
-    assertNativeFeatureConfiguration(input.sessionWorkspace, input.selectedDeployUnits)
-
   const selectedDeployUnits = await resolveFeatureSelectedDeployUnits(input.selectedDeployUnits, {
     allowEmpty: true
   })
@@ -4145,14 +4141,22 @@ export async function updateHarnessProjectMetadata(
             existing.knowledgeBaseIds ?? []
           )
     const existingAdapter = existing["harness-adapter"]
-    if (!existing.nativeBinding && await nativeHarnessPlugin(input.adapterId.trim()))
+    const adapterChanged = input.adapterId.trim() !== existingAdapter.id
+    const keepsNativeBinding = Boolean(existing.nativeBinding) && !projectUse && !adapterChanged &&
+      existingAdapter.type === input.adapterType
+    const native = keepsNativeBinding ? undefined : await nativeHarnessPlugin(input.adapterId.trim())
+    if (!existing.nativeBinding && adapterChanged && native)
       throw Error("旧项目不能直接改为原生执行，请新建项目保留原需求记录")
-    if (existing.nativeBinding && input.adapterId.trim() !== existingAdapter.id)
+    if (existing.nativeBinding && adapterChanged && !native)
+      throw Error("原生项目不能直接改用旧版执行插件，请新建项目")
+    if (existing.nativeBinding && adapterChanged)
       assertNativeHarnessProjectMutable(projectId, true)
     const harnessAdapter =
-      existingAdapter.type === input.adapterType && existingAdapter.id === input.adapterId.trim()
-        ? await resolveHarnessAdapterSnapshot(existingAdapter)
-        : await resolveHarnessAdapter(input.adapterId, input.adapterType)
+      adapterChanged || existingAdapter.type !== input.adapterType
+        ? await resolveHarnessAdapter(input.adapterId, input.adapterType)
+        : keepsNativeBinding || Boolean(native) !== Boolean(existing.nativeBinding)
+          ? existingAdapter
+          : await resolveHarnessAdapterSnapshot(existingAdapter)
     if (harnessAdapter.id !== existingAdapter.id &&
       (isDerivedPlugin(harnessAdapter.id) || isDerivedPlugin(existingAdapter.id)))
       throw new Error("衍生插件必须新建独立项目，不能更换已有项目的插件绑定")
@@ -4178,10 +4182,14 @@ export async function updateHarnessProjectMetadata(
       "harness-adapter": harnessAdapter,
       lifecycle: { ...existing.lifecycle, updateAt: formatGmt8Timestamp() }
     }
-    const native = await nativeHarnessPlugin(harnessAdapter.id)
-    if (native) updated.nativeBinding = { engine: "host", installedPluginId: native.plugin.id }
-    else delete updated.nativeBinding
-    if (projectUse && !native) throw Error("PROJECT_USE_AUTHORIZATION_INVALID")
+    if (existing.nativeBinding && native) {
+      updated.nativeBinding = {
+        engine: "host",
+        installedPluginId: native.plugin.id,
+        ...(native.featureInputs ? { supportsDeployUnits: true } : {})
+      }
+    }
+    if (projectUse && !updated.nativeBinding) throw Error("PROJECT_USE_AUTHORIZATION_INVALID")
     projectUse?.commit()
     if (!projectUse && existing.nativeBinding?.installedPluginId !== updated.nativeBinding?.installedPluginId)
       revokeProjectUseAuthorization(projectId)
@@ -4283,7 +4291,8 @@ async function resolveHarnessKnowledgeWorkspace(plugin: PluginMetadata,
 
 /** Native preview authority contains only a host-resolved directory, never executable settings. */
 export async function getHarnessKnowledgePreviewBinding(adapterId: string,
-  target?: HarnessKnowledgeTarget) {
+  target: HarnessKnowledgeTarget) {
+  if (!target?.projectId && !target?.threadId) throw Error("HARNESS_KNOWLEDGE_TARGET_INVALID")
   const { plugin } = await findCompatibleKnowledgePlugin(adapterId)
   const workspace = await resolveHarnessKnowledgeWorkspace(plugin, target)
   const projection = await readExtensionContextProjection({ sourceRoot: plugin.path, workspace,
@@ -4518,6 +4527,21 @@ export async function getHarnessProjectDetails(
   }
 }
 
+const nativeProjectDetailFailures = new Map([
+  ["HARNESS_NATIVE_EXECUTION_MISSING", {
+    label: "运行记录缺失",
+    error: "此项目的 Host 运行记录缺失，请恢复原运行数据后重试。"
+  }],
+  ["HARNESS_NATIVE_EXECUTION_UNREADABLE", {
+    label: "Host 运行记录不可读",
+    error: "此项目的 Host 运行记录不可读，请恢复原运行数据后重试。"
+  }],
+  ["HARNESS_NATIVE_FEATURE_INDEX_UNREADABLE", {
+    label: "Host 特性索引不可读",
+    error: "此项目的 Host 特性索引不可读，请恢复原索引后重试。"
+  }]
+])
+
 async function loadHarnessProjectDetails(
   projectIds: string[],
   scope: string,
@@ -4560,12 +4584,35 @@ async function loadHarnessProjectDetails(
         result[project.projectId] = await nativeHarnessProjectDetail(project)
       } catch (error) {
         throwIfHarnessDetailCancelled(signal)
-        if (!(error instanceof Error) || error.message !== "PROJECT_PLUGIN_UNAVAILABLE") throw error
-        result[project.projectId] = await makeProjectErrorDetail(
-          project,
-          "项目插件不可用",
-          "此项目绑定的插件已不可用，请恢复原插件安装后重试。"
-        )
+        if (!(error instanceof Error)) throw error
+        const nativeFailure = nativeProjectDetailFailures.get(error.message)
+        if (error.message === "HARNESS_NATIVE_PROJECT_DIRECTORY_MISSING") {
+          result[project.projectId] = project.lifecycle.status === "archived"
+            ? await makeArchivedProjectDetail(project)
+            : await makeProjectErrorDetail(
+                project, "项目目录不存在", projectDirectoryMissingMessage(project)
+              )
+        } else if (nativeFailure) {
+          const archived = project.lifecycle.status === "archived"
+          result[project.projectId] = await makeProjectDetailViewModel(project, {
+            workflow: normalizeWorkflow(null),
+            runs: [],
+            watchRefs: archived ? [] : makeWatchRefs(),
+            projectState: {
+              label: archived ? `已归档 · ${nativeFailure.label}` : nativeFailure.label,
+              uiKind: archived ? "archived" : "warning"
+            },
+            error: nativeFailure.error
+          })
+        } else if (error.message === "PROJECT_PLUGIN_UNAVAILABLE") {
+          result[project.projectId] = await makeProjectErrorDetail(
+            project,
+            "项目插件不可用",
+            "此项目绑定的插件已不可用，请恢复原插件安装后重试。"
+          )
+        } else {
+          throw error
+        }
       }
       continue
     }

@@ -14,6 +14,7 @@ export const ModsChatScope = createContext<{
   error?: string
   retry?: () => void
   isCurrent?: () => boolean
+  canShowUnboundHistory?: () => boolean
   presentationCache?: FunctionSitePresentationCache | null
 } | null>(null)
 
@@ -27,10 +28,13 @@ export function useModsChatEnabled(
 export function useModsChatState(
   threadId: string,
   workspace: string | null | undefined,
-  directoryScope?: ThreadDirectoryScope
+  directoryScope?: ThreadDirectoryScope,
+  unboundHistoryIncarnation?: string
 ): { enabled: boolean; ready: boolean; error?: string; retry: () => void; isCurrent: () => boolean
+  canShowUnboundHistory?: () => boolean
   presentationCache?: FunctionSitePresentationCache | null } {
-  const key = JSON.stringify([threadId, workspace, directoryScope?.incarnation])
+  const requestedWorkspace = workspace?.trim() ? workspace : unboundHistoryIncarnation ? null : undefined
+  const key = JSON.stringify([threadId, workspace, directoryScope?.incarnation, unboundHistoryIncarnation])
   const [identity, setIdentity] = useState({ key, directoryScope })
   const [scopeLifetime] = useState(() => new FunctionSiteLifetime())
   const [snapshot, setSnapshot] = useState<{
@@ -50,7 +54,7 @@ export function useModsChatState(
   const retryRef = useRef<() => void>(() => {})
   const retry = useCallback(() => retryRef.current(), [])
   useEffect(() => {
-    if (!workspace?.trim()) {
+    if (requestedWorkspace === undefined) {
       setSnapshot(undefined)
       return
     }
@@ -71,12 +75,16 @@ export function useModsChatState(
         (!retained || retained.current())
       requestRef.current = { identity, current }
       setSnapshot(undefined)
-      void (async () => window.api.mods.chatDisplayCapability(threadId, workspace))().then(
+      void (async () => window.api.mods.chatDisplayCapability(threadId, requestedWorkspace))().then(
         (enabled) => {
           if (!current()) return
+          if (requestedWorkspace === null) {
+            if (enabled === false) setSnapshot({ identity, enabled, current })
+            return
+          }
           // A remounted view still awaits this fresh host decision. Only passive drawings,
           // kept under continuous invalidation subscriptions, can survive the previous view.
-          if (enabled === true) retained = acquireRetainedFunctionSiteCache(threadId, workspace, identity.directoryScope)
+          if (enabled === true) retained = acquireRetainedFunctionSiteCache(threadId, requestedWorkspace, identity.directoryScope)
           else discardRetainedFunctionSiteCache(threadId)
           retainedCache.current = retained
           const cache = retained?.cache ??
@@ -97,7 +105,7 @@ export function useModsChatState(
       // Form fields changed, not the current display authorization.
       if (event?.scope !== "schema") refresh()
     })
-    const stopPresentations = window.api.mods.onCardsChanged?.((event) => {
+    const stopPresentations = requestedWorkspace !== null && window.api.mods.onCardsChanged?.((event) => {
       if (retained) return // The shared cache also observes invalidations while this view is absent.
       if (event.threadId !== threadId) return
       if (event.scope?.startsWith("site-projection:"))
@@ -122,7 +130,7 @@ export function useModsChatState(
       if (requestRef.current?.identity === identity) requestRef.current = null
       retryRef.current = () => {}
       stop()
-      stopPresentations?.()
+      if (stopPresentations) stopPresentations()
       stopAccount?.()
       stopThreads?.()
       if (retained) retained.release()
@@ -131,7 +139,7 @@ export function useModsChatState(
       presentationCache.current = null
       window.removeEventListener("mods:configuration-changed", refresh)
     }
-  }, [identity, scopeLifetime, threadId, workspace])
+  }, [identity, scopeLifetime, threadId, requestedWorkspace])
   // An abandoned concurrent scope render may revoke a ticket without committing its identity.
   // A later commit must obtain a fresh decision, never revive the revoked snapshot.
   useEffect(() => {
@@ -142,6 +150,9 @@ export function useModsChatState(
   const isCurrent = useCallback(() => Boolean(workspace?.trim() && snapshot?.identity === identity &&
     identity.key === key && snapshot.current() && typeof snapshot.enabled === "boolean"),
   [workspace, snapshot, identity, key])
+  const canShowUnboundHistory = useCallback(() => requestedWorkspace === null &&
+    snapshot?.identity === identity && identity.key === key && snapshot.enabled === false &&
+    snapshot.current(), [requestedWorkspace, snapshot, identity, key])
   const enabled = Boolean(workspace?.trim() && current && snapshot?.enabled)
   const ready = Boolean(workspace?.trim() && current && typeof snapshot?.enabled === "boolean")
   const error = !workspace?.trim() ? "请先选择工作目录，再开始对话或创作。"
@@ -156,13 +167,15 @@ export function useModsChatState(
     error,
     retry,
     isCurrent,
+    canShowUnboundHistory,
     presentationCache: cache
-  }), [enabled, ready, error, retry, isCurrent, cache])
+  }), [enabled, ready, error, retry, isCurrent, canShowUnboundHistory, cache])
 }
 
-export function useModsChatReady(threadId: string): boolean {
+export function useModsChatReady(threadId: string, allowUnboundHistory?: boolean): boolean {
   const scope = useContext(ModsChatScope)
-  return !scope || scope.threadId !== threadId || scope.ready !== false
+  return !scope || scope.threadId !== threadId || scope.ready !== false ||
+    Boolean(allowUnboundHistory && scope.canShowUnboundHistory?.())
 }
 
 export function useModsChatScope(threadId: string): boolean {
@@ -192,8 +205,10 @@ export function useModsChatLoadError(threadId: string):
 }
 
 /** The captured decision can be revoked before React commits its replacement. */
-export function useModsChatCurrent(threadId: string): () => boolean {
+export function useModsChatCurrent(threadId: string, allowUnboundHistory?: boolean): () => boolean {
   const scope = useContext(ModsChatScope)
-  return scope?.threadId === threadId ? scope.isCurrent ?? (() => scope.ready !== false)
-    : () => true
+  if (scope?.threadId !== threadId) return () => true
+  if (allowUnboundHistory && scope.ready === false && scope.canShowUnboundHistory)
+    return scope.canShowUnboundHistory
+  return scope.isCurrent ?? (() => scope.ready !== false)
 }

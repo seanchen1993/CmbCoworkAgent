@@ -28,7 +28,10 @@ function fixture() {
   const path = join(root, "settings.json")
   const write = (enabled: unknown) => writeFileSync(path, JSON.stringify({ enabled }))
   write(false)
-  const load = vi.fn(() => JSON.parse(readFileSync(path, "utf8")).enabled === true)
+  const load = vi.fn(() => {
+    const value: unknown = JSON.parse(readFileSync(path, "utf8")).enabled
+    return typeof value === "boolean" ? value : undefined
+  })
   const reader = createDisabledSwitchReader(path, load)
   return { path, write, load, reader }
 }
@@ -99,21 +102,26 @@ it("fails closed on corrupt or missing settings and recovers after replacement",
   write(true)
   expect(reader.read()).toBe(true)
   writeFileSync(path, "invalid json")
+  expect(reader.readState()).toBeUndefined()
+  expect(reader.read()).toBe(false)
+  write("false")
+  expect(reader.readState()).toBeUndefined()
   expect(reader.read()).toBe(false)
   unlinkSync(path)
+  expect(reader.readState()).toBeUndefined()
   expect(reader.read()).toBe(false)
-  write(true)
-  expect(reader.read()).toBe(true)
+  write(false)
+  expect(reader.readState()).toBe(false)
 })
 
-it("does not publish an enabled read when the settings changed during that read", () => {
+it("keeps the switch unconfirmed when settings changed during the read", () => {
   const { path, write } = fixture()
   write(true)
   const reader = createDisabledSwitchReader(path, () => {
     write(false)
     return true
   })
-  expect(reader.read()).toBe(false)
+  expect(reader.readState()).toBeUndefined()
 })
 
 it("does not cache a failed read or a non-regular settings path", () => {

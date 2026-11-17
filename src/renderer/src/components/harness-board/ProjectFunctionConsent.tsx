@@ -1,5 +1,5 @@
 import { FunctionUserConfig } from "../customize/FunctionUserConfig"
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { openPluginSettings } from "../../lib/plugin-settings-intent"
 import type {
   ProjectFunctionSourceReview,
@@ -14,7 +14,11 @@ interface Props {
   onReady(ready: boolean): void
   api?: ProjectFunctionSourceApi
   approvalLabel?: string
+  title?: string
+  useFeatureInputs?: boolean
 }
+
+const harnessFeatureInputFields = ["knowledgeRoot", "selectedDeployUnits"] as const
 
 type Source = NonNullable<ProjectFunctionSourceReview["source"]> | ProjectFunctionDependencyReview
 const needsExecution = (review: ProjectFunctionSourceReview) =>
@@ -52,7 +56,9 @@ function ProjectFunctionConsentScope({
   version,
   onReady,
   api: providedApi,
-  approvalLabel = "允许本包在当前目录运行"
+  approvalLabel = "允许本包在当前目录运行",
+  title = "项目设置",
+  useFeatureInputs = false
 }: Props) {
   const api = providedApi ?? window.api.harnessBoard.localProjects.mods
   const [review, setReview] = useState<ProjectFunctionSourceReview>()
@@ -89,7 +95,7 @@ function ProjectFunctionConsentScope({
     onReady(ready(next))
   }
   const refresh = async () => {
-    if (pending.current) return
+    if (!mounted.current || pending.current) return
     const token = ++generation.current
     setError("")
     setChecking(true)
@@ -105,7 +111,7 @@ function ProjectFunctionConsentScope({
       if (token === generation.current && mounted.current) setChecking(false)
     }
   }
-  useEffect(() => {
+  useLayoutEffect(() => {
     mounted.current = true
     void refresh()
     // Parameters or switches may be changed in the plugin settings while this panel stays mounted.
@@ -161,7 +167,7 @@ function ProjectFunctionConsentScope({
     }
   }
 
-  if (!review && !error) return <p role="status">正在读取项目设置…</p>
+  if (!review && !error) return <p role="status">正在核对插件参数与执行权限…</p>
   if (review && !review.source && !review.dependencies?.length && !error) return null
   const sources: Array<{ source: Source; dependency: boolean }> = [
     ...(review?.source ? [{ source: review.source, dependency: false }] : []),
@@ -187,7 +193,7 @@ function ProjectFunctionConsentScope({
         onToggle={(event) => setExpanded(event.currentTarget.open)}
       >
         <summary className="cursor-pointer text-sm font-medium">
-          项目设置 ·{" "}
+          {title} ·{" "}
           {checking
             ? "核对中"
             : error
@@ -204,7 +210,7 @@ function ProjectFunctionConsentScope({
                 ? `请先处理插件状态：${unavailableSources.map(({ source }) => source.name).join("、")}。`
                 : review.approvalAtProject && needsConsent
                   ? pendingSources.length > 0
-                    ? "项目授权已失效或尚未完成。请在项目的“编辑项目 → 插件配置”中重新核对并保存。"
+                    ? "项目授权已失效或尚未完成。请在项目的“编辑项目 → 项目开发配置”中重新核对并保存。"
                     : "项目授权可沿用，当前目录的插件功能已关闭。请在插件设置中恢复后重新核对。"
                   : needsConsent
                     ? "参数已齐备，请确认下方所列权限后开始项目。"
@@ -301,6 +307,7 @@ function ProjectFunctionConsentScope({
                       initiallyOpen={source.configurationReady === false}
                       api={api.config}
                       hideRuntimeControls
+                      hiddenOptionalFields={useFeatureInputs && !dependency ? harnessFeatureInputFields : undefined}
                       onSaved={() => void refresh()}
                     />
                   </>

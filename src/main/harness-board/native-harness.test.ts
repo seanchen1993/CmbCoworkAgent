@@ -137,8 +137,10 @@ beforeEach(() => {
         operations: host.operations(input.projectId, 100)
       }
     },
-    view: (id) =>
-      host.get(id) ? { project: host.get(id)!, operations: host.operations(id, 100) } : undefined
+    view: (id, projection) =>
+      host.get(id)
+        ? { project: host.get(id)!, operations: host.operations(id, 20, projection === undefined) }
+        : undefined
   })
 })
 afterEach(async () => {
@@ -169,6 +171,22 @@ async function feature(id: string) {
   return value
 }
 
+it("rejects a damaged native index without retaining failed connections", async () => {
+  const path = join(state.root, "harness-native-features.sqlite")
+  writeFileSync(path, "invalid SQLite feature index".repeat(128))
+  const close = vi.spyOn(DatabaseSync.prototype, "close")
+  try {
+    for (let attempt = 0; attempt < 2; attempt++)
+      expect(() => readNativeHarnessFeature(project.projectId, "existing")).toThrow(/not a database/i)
+    expect(close).toHaveBeenCalledTimes(2)
+  } finally {
+    close.mockRestore()
+  }
+  rmSync(path)
+  const repaired = await feature("repaired")
+  expect(readNativeHarnessFeature(project.projectId, "repaired")).toEqual(repaired)
+})
+
 it("persists separate Feature executions on the selected directory and projects original Host facts", async () => {
   const a = await feature("first")
   const b = await feature("second")
@@ -180,7 +198,9 @@ it("persists separate Feature executions on the selected directory and projects 
   expect(a.repositoryWorkspace).toBe(realpathSync(repository))
   expect(nativeHarnessRunDetail(project, "first").nativeProject).toBeUndefined()
   expect(nativeHarnessRunDetail(project, "first").workflow.nodes[0].userGuide).toBe("请准备文档目标，完成后查看成果。")
-  expect((await nativeHarnessProjectDetail(project)).runs.map((run) => run.featureStatus)).toEqual([
+  const pending = await nativeHarnessProjectDetail(project)
+  expect(pending.project.managedRunFirstStartedAt).toBeUndefined()
+  expect(pending.runs.map((run) => run.featureStatus)).toEqual([
     "not_started",
     "not_started"
   ])
@@ -199,6 +219,8 @@ it("persists separate Feature executions on the selected directory and projects 
   const binding = readNativeHarnessFeature(project.projectId, "first")!
   closeNativeHarnessFeatureStore()
   expect(readNativeHarnessFeature(project.projectId, "first")).toEqual(binding)
+  const firstStartedAt = new Date(view.project.createdAt).toISOString()
+  expect((await nativeHarnessProjectDetail(project)).project.managedRunFirstStartedAt).toBe(firstStartedAt)
   expect(nativeHarnessFeatureConfiguration(project.projectId, "first")?.sessionWorkspace).toEqual({
     source: "directory",
     path: repository
@@ -221,7 +243,9 @@ it("persists separate Feature executions on the selected directory and projects 
   await ensureNativeHarnessFeatureRun(project.projectId, "second", "Actual request B")
   expect((await host.continue(b.hostRunId)).reason).toBe("approval_required")
   await finish(b.hostRunId)
-  expect((await nativeHarnessProjectDetail(project)).runs.map((run) => run.featureStatus)).toEqual([
+  const completed = await nativeHarnessProjectDetail(project)
+  expect(completed.project.managedRunFirstStartedAt).toBe(firstStartedAt)
+  expect(completed.runs.map((run) => run.featureStatus)).toEqual([
     "done",
     "done"
   ])
@@ -242,6 +266,44 @@ it("persists separate Feature executions on the selected directory and projects 
   hostStore = new HostProjectStore(join(state.root, "host.sqlite"))
   expect(hostStore.get(a.hostRunId)?.status).toBe("completed")
   expect(hostStore.get(b.hostRunId)?.status).toBe("completed")
+})
+
+it("keeps completed stages visible after later retries push their operations out of history", async () => {
+  const { hostRunId } = await feature("long-history")
+  await ensureNativeHarnessFeatureRun(project.projectId, "long-history", "Write and review")
+  expect((await host.continue(hostRunId)).reason).toBe("approval_required")
+  const initialReview = host.operations(hostRunId, 1)[0]
+  expect(initialReview.stageId).toBe("review")
+  host.cancel(initialReview.operationId)
+  for (let index = 0; index < 20; index++) {
+    const retry = host.prepare({
+      projectId: hostRunId,
+      expectedVersion: initialReview.expectedVersion,
+      idempotencyKey: `review-retry-${index}`
+    })
+    host.cancel(retry.operationId)
+  }
+
+  const active = nativeHarnessRunDetail(project, "long-history")
+  expect(active.nativeProject?.operations.map((operation) => operation.stageId))
+    .toEqual(Array(20).fill("review"))
+  expect(active.run.nodes.map((node) => node.nodeStatus)).toEqual(["done", "blocked"])
+
+  const review = host.prepare({
+    projectId: hostRunId,
+    expectedVersion: initialReview.expectedVersion,
+    idempotencyKey: "approved-review"
+  })
+  host.approve(review.operationId, {
+    expectedVersion: review.expectedVersion,
+    inputFingerprint: review.inputFingerprint,
+    decision: "approved",
+    actorId: "test-user"
+  })
+  expect((await host.continue(hostRunId)).reason).toBe("completed")
+  const completed = nativeHarnessRunDetail(project, "long-history")
+  expect(completed.run.featureStatus).toBe("done")
+  expect(completed.run.nodes.map((node) => node.nodeStatus)).toEqual(["done", "done"])
 })
 
 it("keeps authorization, exact source identity, parent lifecycle and duplicate creation fences", async () => {

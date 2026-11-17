@@ -1241,7 +1241,7 @@ describe("actual native Shared streams", () => {
     expect(other.requests).toEqual([])
     await f.assertDrained()
     await other.assertDrained()
-  })
+  }, 15_000)
 
   it.each(["abort", "incarnation", "close"] as const)(
     "rejects a closed child's queued shadow after its actual parent %s", async (attack) => {

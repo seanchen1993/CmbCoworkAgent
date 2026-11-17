@@ -5820,17 +5820,34 @@ const nativeBindingOriginalMethods = [
 ] as const
 
 let manager: ModsManager | undefined
-let unavailable: string | undefined
+let unavailable: {
+  code: string
+  optional: boolean
+  globalEnabled?: () => boolean | undefined
+} | undefined
+
 export function setModsManager(value: ModsManager | undefined): void {
   manager = value
   unavailable = undefined
 }
-export function setModsUnavailable(code: string): void {
+
+export function setModsUnavailable(
+  code: string,
+  deployment?: ManagedModDeployment,
+  globalEnabled?: () => boolean | undefined
+): void {
   manager = undefined
-  unavailable = code
+  unavailable = { code, optional: deployment?.required === false, globalEnabled }
 }
+
 export function getModsManager(): ModsManager | undefined {
-  if (unavailable) throw new ModError(unavailable)
+  if (unavailable && !(unavailable.optional && unavailable.globalEnabled?.() === false))
+    throw new ModError(unavailable.code)
+  return manager
+}
+
+/** Shutdown only drains a live manager. There is nothing to drain after an initialization failure. */
+export function getResidentModsManager(): ModsManager | undefined {
   return manager
 }
 

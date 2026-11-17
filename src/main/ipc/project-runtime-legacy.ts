@@ -49,20 +49,22 @@ export function registerLegacyProjectRuntimeHandlers(
       incarnation: JSON.stringify(captureThreadIncarnation(thread))
     }
   }
+  let store: LegacyOperationStore | undefined
   let service: LegacyProjectRuntimeService
   try {
     mkdirSync(root, { recursive: true })
-    service = new LegacyProjectRuntimeService(
-      new LegacyOperationStore(
+    store = new LegacyOperationStore(
+      join(root, "operations.sqlite"),
+      undefined,
+      new ProjectWorkspaceModeGuard(
+        join(getOpenworkDir(), "local-projects", "state.sqlite"),
         join(root, "operations.sqlite"),
-        undefined,
-        new ProjectWorkspaceModeGuard(
-          join(getOpenworkDir(), "local-projects", "state.sqlite"),
-          join(root, "operations.sqlite"),
-          join(getOpenworkDir(), "project-workspace-mode.sqlite")
-        ),
-        compositionGuard
+        join(getOpenworkDir(), "project-workspace-mode.sqlite")
       ),
+      compositionGuard
+    )
+    service = new LegacyProjectRuntimeService(
+      store,
       new HostPackageSnapshots(join(root, "packages")),
       {
         resolveThread: readThread,
@@ -104,6 +106,7 @@ export function registerLegacyProjectRuntimeHandlers(
     service.recoverInterrupted()
     service.register()
   } catch {
+    store?.close()
     registerUnavailableLegacyRuntime((threadId) => Boolean(readThread(threadId)))
     for (const channel of ["legacy-view", "legacy-enable", "legacy-disable"]) {
       ipc.handle(`project-runtime:${channel}`, (event) => {

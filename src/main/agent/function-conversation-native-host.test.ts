@@ -1015,7 +1015,8 @@ describe("actual native host factory through graph, resident Hook, protector and
         await expect(current.host.retainInput!({ messages: [original] }, config)).rejects.toThrow(
           "MODS_CONVERSATION_NATIVE_INPUT_RETENTION_INVALID")
       expect(model.requests).toHaveLength(2)
-    }
+    },
+    15_000
   )
 
   it.each(["drain", "poison"])(

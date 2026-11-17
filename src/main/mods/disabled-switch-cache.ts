@@ -7,26 +7,29 @@ function fingerprint(path: string): string {
 }
 
 /** Recheck file identity on every admission; reuse parsing only for exactly unchanged facts. */
-export function createDisabledSwitchReader(path: string, load: () => boolean) {
+export function createDisabledSwitchReader(path: string, load: () => boolean | undefined) {
   let parsed: { fingerprint: string; enabled: boolean } | undefined
+  function readState(): boolean | undefined {
+    try {
+      const before = fingerprint(path)
+      if (parsed?.fingerprint === before) return parsed.enabled
+      parsed = undefined
+      const enabled = load()
+      if (enabled === undefined || fingerprint(path) !== before) return undefined
+      parsed = { fingerprint: before, enabled }
+      return enabled
+    } catch {
+      parsed = undefined
+      return undefined
+    }
+  }
   return {
     invalidate() {
       parsed = undefined
     },
+    readState,
     read(): boolean {
-      try {
-        const before = fingerprint(path)
-        if (parsed?.fingerprint === before) return parsed.enabled
-        parsed = undefined
-        const enabled = load() === true
-        // A concurrent settings write must not authorize work using the previous value.
-        if (fingerprint(path) !== before) return false
-        parsed = { fingerprint: before, enabled }
-        return enabled
-      } catch {
-        parsed = undefined
-        return false
-      }
+      return readState() === true
     }
   }
 }

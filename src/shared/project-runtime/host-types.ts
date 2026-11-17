@@ -44,6 +44,12 @@ export interface HostLegacyImportReceipt {
   historicalSuccess: "untrusted-source-only"
 }
 
+export interface HarnessHostFeatureInputs {
+  selectedDeployUnits: string[]
+  /** Main-owned read roots from the project knowledge binding. */
+  knowledgeRoots: Array<{ id: string; path: string; identity: string }>
+}
+
 export interface HostProjectCreateInput {
   projectId: string
   name: string
@@ -56,6 +62,8 @@ export interface HostProjectCreateInput {
   /** Complete retained package snapshot digest, never merely the manifest file digest. */
   pluginDigest: string
   manifest: ProjectRuntimeManifest
+  /** Present only when the main process created a bound Harness feature run. */
+  harnessFeatureInputs?: HarnessHostFeatureInputs
 }
 
 export interface HostProjectState extends HostProjectCreateInput {

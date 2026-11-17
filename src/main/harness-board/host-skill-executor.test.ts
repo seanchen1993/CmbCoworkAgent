@@ -171,6 +171,43 @@ afterEach(() => {
 })
 
 describe("original agent run bridge", () => {
+  it.each([false, true])("settles retained runtime with a damaged Host question ledger (admission rejected=%s)", async rejected => {
+    let assertAbortListenerRemoved: () => void = () => { throw Error("Host input scope was not reached") }
+    const f = await fixture(false, false, false, { executeSkill: context => {
+      const abortListeners = vi.spyOn(context.signal, "addEventListener")
+      const removedListeners = vi.spyOn(context.signal, "removeEventListener")
+      assertAbortListenerRemoved = () => {
+        const listener = abortListeners.mock.calls.find(([event, handler]) =>
+          event === "abort" && typeof handler === "function" && handler.name === "cancelOwnedWorkflows")?.[1]
+        expect(listener).toBeDefined()
+        expect(removedListeners).toHaveBeenCalledWith("abort", listener)
+      }
+      return executeHostProjectSkill(context, owner)
+    } })
+    const ledger = join(f.root, "broken-questions.sqlite")
+    writeFileSync(ledger, "invalid SQLite contents".repeat(128))
+    configureHostUserInputPersistence({ store: () => new HostUserInputStore(ledger), isCurrent: () => false })
+    if (rejected) {
+      const start = vi.spyOn(agentRunService, "startAgentRun").mockRejectedValueOnce(Error("admission rejected"))
+      cleanup.push(() => start.mockRestore())
+    } else registerAgentRunImplementation(async (_request, _delivery, context) => {
+      writeFileSync(join(f.workspace, "document.md"), "Actual completed artifact")
+      context.onRunTerminated?.({ outcome: "success", code: "normal" })
+    })
+    const operation = f.service.prepare({ projectId: "local-docs", expectedVersion: 1,
+      idempotencyKey: "damaged-question-ledger" })
+    const result = await f.service.start(operation.operationId)
+    expect(mock.closeMcp).toHaveBeenCalledOnce()
+    assertAbortListenerRemoved()
+    expect(result.status).toBe("unknown")
+    expect(result.execution?.terminal?.code).toBe("host_user_input_cleanup_unconfirmed")
+    expect(hasHostUserInputScope(result.execution?.threadId)).toBe(false)
+    const managed = mock.sent.mock.calls.find(([channel]) => channel === AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL)?.[1]
+    expect(managed).toBeDefined()
+    expect(mock.sent).toHaveBeenCalledWith(resolveAgentStreamRequestChannel(
+      `agent:stream:${managed.threadId}`, managed.streamRequestId), expect.objectContaining({ type: "error" }))
+  })
+
   it.each([false, true])("preserves main-issued Feature ownership through real Host settlement (changed=%s)", async changed => {
     const binding = { projectId: "container", slug: "feature-a", source: "host" as const,
       repositoryWorkspace: "C:/selected-repository" }

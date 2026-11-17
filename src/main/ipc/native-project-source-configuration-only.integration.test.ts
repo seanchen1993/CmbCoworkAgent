@@ -24,9 +24,11 @@ it("preserves the real metadata-only source review through native IPC without gu
   const root = await mkdtemp(join(tmpdir(), "native-config-review-"))
   cleanup.push(() => rm(root, { recursive: true, force: true }))
   const sourceRoot = join(root, "source"),
-    workspace = join(root, "workspace")
+    workspace = join(root, "workspace"),
+    candidate = join(root, "candidate")
   await mkdir(sourceRoot)
   await mkdir(workspace)
+  await mkdir(candidate)
   await writeFile(
     join(sourceRoot, "plugin.json"),
     JSON.stringify({
@@ -74,6 +76,7 @@ it("preserves the real metadata-only source review through native IPC without gu
     scope: { projectId: "native-project", packageDigest: "a".repeat(64) }
   }
   let current = true
+  let editWorkspace = workspace
   const guard = () => {
     if (!current) throw Error("NATIVE_OWNER_CHANGED")
   }
@@ -85,12 +88,17 @@ it("preserves the real metadata-only source review through native IPC without gu
       }
     } as unknown as IpcMain,
     "test-native-config",
-    (_event, id) => {
+    (_event, id, preflight) => {
       if (id !== "native-project") throw Error("NATIVE_PROJECT_CHANGED")
       guard()
       return {
         manager,
-        input,
+        input: { ...input, workspace: preflight?.workspace ?? editWorkspace },
+        ...(preflight ? { projectUsePreflight: {
+          assertCurrent: preflight.assertCurrent,
+          enabled: () => false,
+          approved: () => false
+        } } : {}),
         workspaceControl: controls,
         project: { projectId: id, version: 1, pluginDigest: input.scope.packageDigest },
         guard,
@@ -140,6 +148,28 @@ it("preserves the real metadata-only source review through native IPC without gu
   const ready = await executionReady(event, "native-project")
   expect(ready.ready).toBe(true)
   if (ready.ready) expect(() => ready.assertExecutionReady()).not.toThrow()
+
+  const prospective = { workspace: candidate, assertCurrent: guard }
+  expect((await executionReady(event, "native-project", prospective)).ready).toBe(false)
+  editWorkspace = candidate
+  const candidateView = await invoke<FunctionUserConfigView>("user-config", {
+    threadId: "native-project", pluginId: input.plugin.id, expectedWorkspace: candidate
+  })
+  await invoke("user-config-save", {
+    threadId: "native-project",
+    pluginId: input.plugin.id,
+    digest: candidateView.digest,
+    workspace: candidateView.workspace,
+    key: "audience",
+    value: "Candidate readers",
+    revision: candidateView.savedRevision
+  })
+  editWorkspace = workspace
+  const prospectiveReady = await executionReady(event, "native-project", prospective)
+  expect(prospectiveReady.ready).toBe(true)
+  if (prospectiveReady.ready) expect(() => prospectiveReady.assertCurrent()).not.toThrow()
+  expect(store.getGrant(candidate, "function:native-metadata")).toBeNull()
+
   const approval = {
     projectId: "native-project",
     projectVersion: 1,

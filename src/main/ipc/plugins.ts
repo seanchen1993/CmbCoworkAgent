@@ -45,7 +45,7 @@ import type {
   PluginMcpServerDetail,
   PluginMcpServerConfig
 } from "../types"
-import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
+import { invalidateMutableMcpCapabilityServices } from "../mcp/capability-service"
 import { notifyHooksChanged } from "../hooks/notifications"
 import { getModsManager } from "../mods/manager"
 import { discoverSkills } from "../skills/discovery"
@@ -659,7 +659,7 @@ async function installPluginFromDirLocked(
 
     upsertPlugin(meta)
     invalidateEnabledSkillsCache()
-    await invalidateGlobalMcpCapabilityService("plugin:update")
+    await invalidateMutableMcpCapabilityServices("plugin:update")
     notifyHooksChanged("plugin-installed")
     getModsManager()?.pluginsChanged()
 
@@ -1157,7 +1157,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
             if (removed.length) {
               getModsManager()?.pluginsChanged(removed)
               invalidateEnabledSkillsCache()
-              await invalidateGlobalMcpCapabilityService("plugin:delete")
+              await invalidateMutableMcpCapabilityServices("plugin:delete")
               notifyHooksChanged("plugin-deleted")
             }
           }
@@ -1183,7 +1183,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
         setPluginEnabled(id, enabled)
         getModsManager()?.pluginsChanged([id])
         invalidateEnabledSkillsCache()
-        await invalidateGlobalMcpCapabilityService("plugin:setEnabled")
+        await invalidateMutableMcpCapabilityServices("plugin:setEnabled")
         notifyHooksChanged("plugin-enabled-changed")
         return { success: true }
       } catch (e) {

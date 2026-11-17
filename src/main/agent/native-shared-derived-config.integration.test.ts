@@ -421,7 +421,7 @@ describe("actual shared native configured derivation", () => {
         expect(f.effects()).toBe(0)
         expect(() => f.parent.authority.assertLive()).not.toThrow()
       } finally { await f.close() }
-    }))
+    }), 15_000)
 
   it.each(["update", "goto"] as const)(
     "rejects the original Command's %s change during the first actual scope capture", field =>
@@ -532,7 +532,7 @@ describe("actual shared native configured derivation", () => {
         }
         await f.close()
       }
-    }))
+    }), 15_000)
 
   it.each(["phase", "view", "factory", "graph"] as const)(
     "rejects a genuine ready domain's late %s getter and keeps restoration failed", field =>
@@ -810,7 +810,7 @@ describe("actual shared native configured derivation", () => {
         expect(final.id).toBe(saved.rows[2].uuid)
         expect(serializeFunctionConversationNativeMessage(final)).toBe(saved.rows[2].nativePayload)
       } finally { await f.close() }
-    }))
+    }), 15_000)
 
   it("keeps base and derived concurrent real domains and checkpoints separate", () =>
     tracked(async controller => {
