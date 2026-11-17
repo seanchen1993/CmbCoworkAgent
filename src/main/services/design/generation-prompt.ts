@@ -4,6 +4,10 @@ export const DESIGN_FIRST_WRITE_TARGET_BYTES = 8 * 1024
 export const DESIGN_ARTIFACT_CONTINUATION_MAX_ATTEMPTS = 3
 export const DESIGN_ARTIFACT_CONTINUATION_STALL_ATTEMPTS = 2
 
+const DESIGN_PAGE_FLOW_PROMPT = `## Page flow and scrolling
+The preview viewport is a viewing window, not a maximum document height. For an ordinary long page without a specified split layout, keep a centered main content container and stack its sections vertically in reading order. Let the document height grow with content and allow vertical scrolling. In a deliberately viewport-sized app shell, give the content region a bounded height and overflow-y:auto so all content remains reachable.
+Content length alone never authorizes moving later sections into side-by-side panes, CSS columns, horizontal pagination or adding a divider/resize handle. Do not force a long page into height:100vh with clipped overflow. Preserve intentional sidebars, card grids and comparisons, and honor layouts explicitly requested by the user or required by the selected template. During iteration, preserve the existing page flow and scroll regions unless the user requests a layout change.`
+
 export function describeIncompleteDesignArtifact(html?: string, expected: string[] = []): string {
   if (!html?.trim()) return "模型本轮未写入可用的 HTML 文件。请重试。"
   const draft = inspectDesignDocument(html, expected)
@@ -33,6 +37,9 @@ Use absolute file paths. The supplied working file is the current source of trut
 }
 
 export const DESIGN_ITERATION_SYSTEM_PROMPT = `Edit the existing HTML page in place. Apply only the user's current request and its necessary dependencies. Preserve unrelated layout, colors, fonts, spacing, copy, assets, scripts, interactions, stable IDs, data attributes and variation wrappers. New features must reuse the page's existing components and visual style. Adding functionality or receiving more context does not authorize a redesign. Change the visual direction or overall structure only when the user explicitly requests it, and only within that requested scope.
+
+${DESIGN_PAGE_FLOW_PROMPT}
+
 Only the supplied working file is the editable baseline. Attached reference pages are read-only guidance for the requested changes; do not replace the working page with a reference or treat a reference's layout and styles as constraints to preserve. An explicit request to adopt a reference's theme or layout authorizes those requested changes to the working page.
 The host has already seeded the working draft with the complete current page. Do not create a new scaffold, replace completed sections with placeholders, simplify the page, reapply a template, or impose new typography/spacing rules. Preserve the existing framework and relative local dependencies; do not inline vendor bundles or migrate frameworks.
 Use read_file({file_path,offset,limit}) to locate the relevant current source, then edit_file({file_path,old_string,new_string,replace_all}) for focused batches of changes. Use exact current text; read a bounded range after a failed match or missing context instead of rebuilding the file. Read an explicitly selected SKILL.md before editing, but keep its changes within the user's requested scope. Do not use write_file, shell, code execution or subagents to rewrite the artifact. Do not paste HTML in chat.
@@ -47,6 +54,8 @@ export const DESIGN_CREATION_SYSTEM_PROMPT = `You are an expert product and visu
 Pages supplied as reference attachments are read-only design inputs, not an existing canvas to edit or preserve. Use their relevant ideas according to the user's request and selected design system; you may create a different layout and style. Reproduce a reference faithfully only when the user explicitly requests that.
 Use the selected design system and template when supplied. Otherwise choose a coherent palette, expressive typography, generous spacing and restrained motion. Avoid decorative filler, invented metrics, emoji decoration and excessive gradients. Use meaningful Chinese product copy unless the user requests another language.
 Produce one complete <!DOCTYPE html> ... </html> document, with inline CSS/JS except supplied local template dependencies or intentional font/library links. Generate a single design unless the host explicitly requests variations.
+
+${DESIGN_PAGE_FLOW_PROMPT}
 
 ## First visible framework
 Your FIRST artifact write must be a small, closed HTML document: aim for 3–5 KB of UTF-8, approximately ${DESIGN_FIRST_WRITE_TARGET_BYTES} bytes for complex layouts. This is a performance target, not a hard limit: write a coherent framework once instead of repeatedly shrinking it to hit an exact byte count. Include the actual page title, navigation, base color/type tokens, principal layout and clearly named logical sections. Keep first-screen copy short and meaningful. Mark unfinished sections with stable data-design-section IDs and data-design-pending, and body with data-design-build="building".
@@ -114,6 +123,8 @@ export function validateFirstDesignWrite(content: string): string | undefined {
 }
 
 export const DESIGN_PROGRESSIVE_PROMPT = `
+${DESIGN_PAGE_FLOW_PROMPT}
+
 ## Direct editing compatibility
 Keep meaningful text in dedicated leaf spans when it shares a button or row with an icon. Keep stable data-design-node IDs on existing elements while iterating. Do not reuse one ID for multiple rendered component instances.
 For controlled React/Vue lists and computed copy, declare an inert script[type="application/design-edit+json"] containing {"data":{"records":{"item-a":{"title":"示例"}}},"bindings":{"item-a-title":{"kind":"text","path":"/records/item-a/title"},"item-a":{"kind":"record","path":"/records/item-a"}}}. Render text with data-design-bind="item-a-title", containers with data-design-bind="item-a", and read their values from window.designData.get('/records/item-a/title') or window.designData.data. The host installs this data adapter before app scripts. Render records from the current data object, keyed by stable record IDs, so changing/removing data changes the corresponding rendered item. Declare these bindings only when used. Use static JSX or Vue template literal text for simple fixed copy. Never implement a second editor or serialize runtime DOM to save edits.
