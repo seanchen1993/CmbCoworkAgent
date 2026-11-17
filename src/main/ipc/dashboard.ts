@@ -150,6 +150,7 @@ import {
 } from "./dashboard-knowledge-commit-rate"
 import type { DashboardKnowledgeCommitRate } from "../../shared/dashboard-knowledge-commit-rate"
 import { fetchKnowledgeActiveList } from "./dashboard-knowledge-active-details"
+import { fetchKnowledgeUserDetailList } from "./dashboard-knowledge-user-details"
 import {
   fetchKnowledgeFileReaders,
   normalizeKnowledgeReadFileRef,
@@ -170,7 +171,8 @@ import type {
   KnowledgeProjectStats,
   KnowledgeReadDetails,
   KnowledgeReadFileRef,
-  KnowledgeRecentConstraintFiles
+  KnowledgeRecentConstraintFiles,
+  KnowledgeUserDetails
 } from "../../shared/dashboard-knowledge-overview"
 import {
   fetchRecentConstraintFileDetails,
@@ -14822,6 +14824,34 @@ async function fetchKnowledgeActiveDetails(
   return { items: await fetchKnowledgeActiveList(url, scope.orgIds, getDashboardRequestSignal()) }
 }
 
+async function fetchKnowledgeUserDetails(
+  opts: OrgFilterOptions | undefined
+): Promise<KnowledgeUserDetails> {
+  const scope = resolveKnowledgeRequestScope(opts)
+  if (scope.unavailableReason) return { items: [], unavailableReason: scope.unavailableReason }
+  if (import.meta.env.DEV) {
+    const rooms = normalizeUpperOrgLv1List(opts?.upperOrgLv1)
+    const mockRooms = rooms.length ? rooms : ["演示开发一室", "演示开发二室", "演示开发三室"]
+    return {
+      items: mockRooms.flatMap((roomName, roomIndex) =>
+        Array.from({ length: 12 }, (_, i) => ({
+          userName: `演示用户${roomIndex * 12 + i + 1}`,
+          roomName,
+          totalNum: 420 - (roomIndex % 3) * 40 - i * 11,
+          abandonedNum: (i + roomIndex) % 5,
+          recentNum: 216 - (roomIndex % 3) * 20 - i * 9,
+          updateActiveNum: Math.max(0, 96 - (roomIndex % 3) * 10 - i * 7),
+          readActiveNum: i % 3 === 0 ? 0 : 60 - i * 4
+        }))
+      )
+    }
+  }
+  const url = (import.meta.env.VITE_KNOWLEDGE_OVERVIEW_BASE_URL as string | undefined)?.trim() ?? ""
+  return {
+    items: await fetchKnowledgeUserDetailList(url, scope.orgIds, getDashboardRequestSignal())
+  }
+}
+
 async function fetchKnowledgeOverviewAccumulation(
   opts: OrgFilterOptions | undefined
 ): Promise<KnowledgeAccumulationData> {
@@ -16305,6 +16335,19 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchKnowledgeOverviewAccumulation(opts) }
       } catch (e) {
         logDashboardRequestError("knowledgeAccumulation", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:knowledgeUserDetails",
+    async (_, opts: OrgFilterOptions | undefined) => {
+      try {
+        return { success: true, data: await fetchKnowledgeUserDetails(opts) }
+      } catch (e) {
+        logDashboardRequestError("knowledgeUserDetails", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

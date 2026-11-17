@@ -30,7 +30,8 @@ import type {
   KnowledgeProjectStats,
   KnowledgeReadDetails,
   KnowledgeReadFileRef,
-  KnowledgeRecentConstraintFiles
+  KnowledgeRecentConstraintFiles,
+  KnowledgeUserDetails
 } from "../shared/dashboard-knowledge-overview"
 import type { ProjectAttentionSortKey } from "../shared/project-attention"
 import type { ProjectCodeTraceRequest, ProjectCodeTracePage } from "../shared/project-code-trace"
@@ -2713,6 +2714,12 @@ interface CustomAPI {
     knowledgeAccumulation: (opts?: { upperOrgLv1?: string | string[] | null }) => Promise<{
       success: boolean
       data?: KnowledgeAccumulationData
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeUserDetails: (opts?: { upperOrgLv1?: string | string[] | null }) => Promise<{
+      success: boolean
+      data?: KnowledgeUserDetails
       error?: string
       cancelled?: boolean
     }>

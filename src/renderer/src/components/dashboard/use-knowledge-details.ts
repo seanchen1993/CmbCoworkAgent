@@ -11,10 +11,11 @@ export function useKnowledgeDetails<T>(
   open: boolean,
   rooms: string[],
   family: string,
-  request: (rooms: string[]) => Promise<DetailResult<T>>
+  request: (rooms: string[]) => Promise<DetailResult<T>>,
+  refreshKey = 0
 ) {
   const [retryKey, setRetryKey] = useState(0)
-  const key = JSON.stringify([rooms, retryKey])
+  const key = JSON.stringify([rooms, retryKey, refreshKey])
   const [state, setState] = useState<{ key: string; data: T | null; error: string | null } | null>(
     null
   )

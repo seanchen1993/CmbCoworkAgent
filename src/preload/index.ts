@@ -30,7 +30,8 @@ import type {
   KnowledgeProjectStats,
   KnowledgeReadDetails,
   KnowledgeReadFileRef,
-  KnowledgeRecentConstraintFiles
+  KnowledgeRecentConstraintFiles,
+  KnowledgeUserDetails
 } from "../shared/dashboard-knowledge-overview"
 import type { EfficiencyPluginFilter } from "../shared/dashboard-efficiency-compute"
 import type { ProjectCodeTraceRequest } from "../shared/project-code-trace"
@@ -4027,6 +4028,14 @@ const api = {
       error?: string
       cancelled?: boolean
     }> => ipcRenderer.invoke("dashboard:knowledgeAccumulation", opts),
+    knowledgeUserDetails: (opts?: {
+      upperOrgLv1?: string | string[] | null
+    }): Promise<{
+      success: boolean
+      data?: KnowledgeUserDetails
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeUserDetails", opts),
     knowledgeActiveDetails: (opts?: {
       upperOrgLv1?: string | string[] | null
     }): Promise<{

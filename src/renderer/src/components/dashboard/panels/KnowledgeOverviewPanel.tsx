@@ -26,6 +26,7 @@ import type {
 import { Button } from "@/components/ui/button"
 import { InfoHint } from "./dashboard-shared"
 import { KnowledgeActiveDetailsDialog } from "../KnowledgeActiveDetailsDialog"
+import { KnowledgeUserDetailsTable } from "../KnowledgeUserDetailsTable"
 
 const COLORS = ["#3b82f6", "#14b8a6", "#8b5cf6", "#f59e0b", "#f97316", "#94a3b8"]
 const distributionColor = (index: number): string =>
@@ -444,6 +445,11 @@ export function KnowledgeOverviewPanel({
           />
         </div>
       </section>
+      <KnowledgeUserDetailsTable
+        key={JSON.stringify(rooms)}
+        rooms={rooms}
+        refreshKey={refreshKey}
+      />
       {detailsOpen && (
         <KnowledgeActiveDetailsDialog
           key={JSON.stringify([rooms, refreshKey])}
