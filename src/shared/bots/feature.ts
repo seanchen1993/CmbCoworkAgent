@@ -77,6 +77,13 @@ export interface BotFeatureTarget {
   unavailable?: "archived" | "revoked"
 }
 
+export interface BotFeaturePage {
+  items: BotFeatureTask[]
+  priority: BotFeatureTask[]
+  refreshed: BotFeatureTask[]
+  nextCursor: string | null
+}
+export interface BotFeaturePageInput { cursor?: string; query?: string; refreshIds?: string[] }
 export interface BotFeatureClient {
   targets(feature?: Pick<BotFeatureFollow, "projectId" | "slug">): Promise<BotFeatureTarget[]>
   projects(botId: string, groupId?: string): Promise<{ id: string; name: string }[]>
@@ -84,7 +91,7 @@ export interface BotFeatureClient {
     botId: string,
     projectId: string,
     groupId?: string
-  ): Promise<{ slug: string; title: string }[]>
+  ): Promise<{ slug: string; title: string; linked?: boolean }[]>
   follow(
     botId: string,
     projectId: string,
@@ -92,6 +99,7 @@ export interface BotFeatureClient {
     groupId?: string
   ): Promise<BotFeatureFollow>
   list(botId: string, groupId?: string): Promise<BotFeatureTask[]>
+  page?(botId: string, groupId?: string, input?: BotFeaturePageInput): Promise<BotFeaturePage>
   lifecycle(
     botId: string,
     id: string,

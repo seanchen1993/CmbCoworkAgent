@@ -1341,23 +1341,26 @@ describe("private-to-group messages on the existing room queue", () => {
     f.store.nextQueued([])
     const queueSql = prepare.mock.calls
       .map(([sql]) => sql)
-      .find((sql) => sql.includes("SELECT t.* FROM bot_tasks t JOIN bots b"))!
+      .find((sql) => sql.startsWith("SELECT t.* FROM bot_tasks t ") && sql.includes("WHERE t.state='queued'"))!
     const seedSql = prepare.mock.calls
       .map(([sql]) => sql)
       .find((sql) =>
         sql.startsWith("SELECT * FROM bot_tasks WHERE state='queued' AND request_id LIKE")
       )!
+    expect(queueSql).toBeDefined()
+    expect(seedSql).toBeDefined()
     for (const sql of [queueSql, seedSql]) {
       const plan = f.db
         .exec(`EXPLAIN QUERY PLAN ${sql}`)[0]
         .values.map((row) => String(row[3]))
         .join("\n")
-      expect(plan).toContain("bot_tasks_queue")
       expect(plan).not.toContain("MATERIALIZE")
       if (sql === queueSql) {
+        expect(plan).toContain("bot_tasks_admission")
+        expect(plan).not.toContain("TEMP B-TREE")
         expect(plan).toContain("SEARCH turn USING INDEX bot_tasks_queue")
         expect(plan).not.toContain("SCAN turn")
-      }
+      } else expect(plan).toContain("bot_tasks_queue")
     }
     const statement = f.db.prepare(
       "EXPLAIN QUERY PLAN SELECT bot_id,origin_json,request_id FROM bot_tasks WHERE bot_id=? AND request_id=?"

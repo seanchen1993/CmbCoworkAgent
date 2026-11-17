@@ -1,3 +1,4 @@
+import { BotWorkInvalidations } from "./work-invalidation"
 import { pageBotWorkInputs, type BotWorkInput } from "./work-input"
 import { parseSkillUseBlock } from "../agent/skill-lifecycle/marker"
 import type { SkillUseBlockMetadata } from "../../shared/skill-use-block"
@@ -118,6 +119,12 @@ import {
 const ACTIVE_STATES = ["running", "waiting_user"] as const
 const STOPPED_REPLY_SOURCES = ["cancelled", "interrupted", "superseded"]
 const DAY = 24 * 60 * 60 * 1000
+// The queued-only index and dispatch query must share the exact priority expressions.
+function queuedTaskOrder(prefix = ""): string {
+  return `CASE WHEN ${prefix}work_id IS NULL AND json_extract(${prefix}origin_json,'$.rootWorkId') IS NULL THEN 0 ELSE 1 END,
+    CASE COALESCE(json_extract(${prefix}origin_json,'$.kind'),'user')
+      WHEN 'user' THEN 0 WHEN 'group' THEN 1 WHEN 'bot' THEN 2 ELSE 3 END,${prefix}created_at`
+}
 interface ReactionScope {
   kind: "thread" | "group"
   id: string
@@ -173,6 +180,7 @@ export class BotStore {
   external(source?: BotMockSource): BotMockChannelStore {
     return source?.transport === "im" ? this.im : this.mock
   }
+  readonly workInvalidations: BotWorkInvalidations
   private transactionSerial = 0
   constructor(
     private readonly db: NativeSqliteAdapter,
@@ -364,6 +372,8 @@ export class BotStore {
         db.run("ALTER TABLE bot_commands ADD COLUMN pending_notification TEXT")
       db.run(`CREATE INDEX IF NOT EXISTS bot_commands_pending_notification ON bot_commands(updated_at,id)
         WHERE pending_notification IS NOT NULL AND suppressed=0`)
+      db.run(`CREATE INDEX IF NOT EXISTS bot_commands_busy_source ON bot_commands(source_task_id)
+        WHERE state='accepted' OR (pending_notification IS NOT NULL AND suppressed=0)`)
       // Repair partially applied older migrations without changing valid group/private ownership.
       db.run(
         "UPDATE bot_tasks SET thread_id=(SELECT thread_id FROM bots WHERE bots.id=bot_tasks.bot_id) WHERE thread_id IS NULL"
@@ -412,6 +422,12 @@ export class BotStore {
       )
       db.run("CREATE INDEX IF NOT EXISTS bot_tasks_updated ON bot_tasks(updated_at,id)")
       upgradeWorkConversationSchema(db)
+      db.run(`CREATE INDEX IF NOT EXISTS bot_tasks_admission ON bot_tasks(${queuedTaskOrder()}) WHERE state='queued'`)
+      db.run(`CREATE INDEX IF NOT EXISTS bot_work_directory ON bot_work_items(bot_id,ordinal) WHERE detached=0;
+        CREATE INDEX IF NOT EXISTS bot_tasks_work_active ON bot_tasks(work_id,state) WHERE state IN ('queued','running','waiting_user');
+        CREATE INDEX IF NOT EXISTS bot_tasks_work_order ON bot_tasks(work_id,created_at) WHERE work_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS bot_tasks_work_outcome ON bot_tasks(work_id,created_at) WHERE work_id IS NOT NULL AND injected_into IS NULL;
+        CREATE INDEX IF NOT EXISTS bot_workflow_refs_live ON bot_workflow_refs(source_task_id) WHERE retired_at IS NULL;`)
       // The main Bot reads a tiny recent-link notice every turn, even when most works
       // are unlinked/generated. Avoid scanning that entire Bot's task directory.
       db.run(`CREATE INDEX IF NOT EXISTS bot_work_association_notice
@@ -501,6 +517,7 @@ export class BotStore {
     this.im.setAllOffline()
     this.restoreImConversationActivities()
     this.telemetry = new BotTelemetryStore(db, telemetryContext)
+    this.workInvalidations = new BotWorkInvalidations(db, sql => this.rows(sql))
   }
 
   imConversationHistory(botId: string, id: string, before?: string) {
@@ -904,20 +921,28 @@ export class BotStore {
       (SELECT seen_version FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS seen_version,
       (SELECT updated_at FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS activity_at,
       (SELECT preview FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS activity_preview,
-      (SELECT t.state FROM bot_tasks t WHERE t.work_id=w.id OR
-        (json_extract(t.origin_json,'$.rootWorkId')=+w.id AND t.state IN ('queued','running','waiting_user'))
-      ORDER BY CASE t.state WHEN 'waiting_user' THEN 0 WHEN 'running' THEN 1 WHEN 'queued' THEN 2 ELSE 3 END,
-      t.created_at DESC,t.rowid DESC LIMIT 1) AS execution_state,
+      COALESCE((SELECT t.state FROM bot_tasks t WHERE t.state IN ('queued','running','waiting_user')
+        AND (t.work_id=w.id OR json_extract(t.origin_json,'$.rootWorkId')=+w.id)
+        ORDER BY CASE t.state WHEN 'waiting_user' THEN 0 WHEN 'running' THEN 1 ELSE 2 END LIMIT 1),
+        (SELECT t.state FROM bot_tasks t INDEXED BY bot_tasks_work_order WHERE t.work_id=w.id
+          ORDER BY t.created_at DESC,t.rowid DESC LIMIT 1)) AS execution_state,
       (SELECT json_object('taskId',t.id,'state',t.state,'updatedAt',t.updated_at,'error',substr(t.error,1,1000))
-        FROM bot_tasks t INDEXED BY bot_tasks_work_history WHERE t.work_id=w.id AND t.injected_into IS NULL
+        FROM bot_tasks t INDEXED BY bot_tasks_work_outcome WHERE t.work_id=w.id AND t.injected_into IS NULL
         ORDER BY t.created_at DESC,t.rowid DESC LIMIT 1) AS last_execution,
       (SELECT COUNT(*) FROM bot_tasks p WHERE json_extract(p.origin_json,'$.rootWorkId')=+w.id
         AND p.work_id IS NULL AND p.state IN ('queued','running','waiting_user')) AS pending_peers,
-      (EXISTS(SELECT 1 FROM bot_commands c LEFT JOIN bot_tasks p ON p.id=c.source_task_id
-        WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)) AND (c.thread_id=w.thread_id OR json_extract(p.origin_json,'$.rootWorkId')=w.id))
-       OR EXISTS(SELECT 1 FROM bot_workflow_refs r WHERE r.retired_at IS NULL AND r.source_task_id IN (
-         SELECT wf_owner.id FROM bot_tasks wf_owner WHERE wf_owner.work_id=w.id OR json_extract(wf_owner.origin_json,'$.rootWorkId')=+w.id
-       ))) AS background_busy`
+      (EXISTS(SELECT 1 FROM bot_commands c WHERE c.thread_id=w.thread_id
+          AND (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)))
+       OR w.id IN (SELECT json_extract(p.origin_json,'$.rootWorkId') FROM bot_commands c
+          CROSS JOIN bot_tasks p ON p.id=c.source_task_id
+          WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0))
+          AND json_extract(p.origin_json,'$.rootWorkId') IS NOT NULL)
+       OR w.id IN (
+         SELECT wf_owner.work_id FROM bot_workflow_refs r CROSS JOIN bot_tasks wf_owner ON wf_owner.id=r.source_task_id
+           WHERE r.retired_at IS NULL AND wf_owner.work_id IS NOT NULL
+         UNION SELECT json_extract(wf_owner.origin_json,'$.rootWorkId') FROM bot_workflow_refs r CROSS JOIN bot_tasks wf_owner ON wf_owner.id=r.source_task_id
+           WHERE r.retired_at IS NULL AND json_extract(wf_owner.origin_json,'$.rootWorkId') IS NOT NULL
+       )) AS background_busy`
   }
   getWork(botId: string, workId: string): BotWorkItem {
     this.getBot(botId)
@@ -1011,8 +1036,8 @@ export class BotStore {
     const rows = this.rows(
       `SELECT w.ordinal,w.id,w.bot_id,w.thread_id,w.parent_thread_id,w.title,w.state,w.version,w.created_at,w.updated_at,w.source_json,w.conversation_json,w.workspace_json,
       ${this.workActivityProjection()}
-      FROM bot_work_items w WHERE w.detached=0 AND w.bot_id=? AND (? IS NULL OR w.audience_key=?) AND w.ordinal<? AND (?='' OR instr(lower(w.title),lower(?))>0) ORDER BY w.ordinal DESC LIMIT ?`,
-      [botId, audience ?? null, audience ?? null, before, query, query, pageSize + 1]
+      FROM bot_work_items w WHERE w.detached=0 AND w.bot_id=? ${audience === undefined ? "" : "AND w.audience_key=?"} AND w.ordinal<? AND (?='' OR instr(lower(w.title),lower(?))>0) ORDER BY w.ordinal DESC LIMIT ?`,
+      [botId, ...(audience === undefined ? [] : [audience]), before, query, query, pageSize + 1]
     )
     // Command-first CROSS JOINs below prevent SQLite from scanning all task/work
     // history to enumerate command owners. Keep every active/pending receipt;
@@ -1021,7 +1046,7 @@ export class BotStore {
       items: rows.slice(0, pageSize).map((row) => this.workSummary(row)),
       priority: this.rows(
         `SELECT w.id,w.bot_id,w.thread_id,w.parent_thread_id,w.title,w.state,w.version,w.created_at,w.updated_at,w.source_json,w.conversation_json,w.workspace_json,
-        ${this.workActivityProjection()} FROM bot_work_items w WHERE w.detached=0 AND w.bot_id=? AND (? IS NULL OR w.audience_key=?) AND w.state='active'
+        ${this.workActivityProjection()} FROM bot_work_items w WHERE w.detached=0 AND w.bot_id=? ${audience === undefined ? "" : "AND w.audience_key=?"} AND w.state='active'
         AND (?='' OR instr(lower(w.title),lower(?))>0) AND w.id IN (
           SELECT work_id FROM bot_tasks WHERE work_id IS NOT NULL AND state IN ('queued','running','waiting_user')
           UNION SELECT json_extract(origin_json,'$.rootWorkId') FROM bot_tasks WHERE state IN ('queued','running','waiting_user') AND json_extract(origin_json,'$.rootWorkId') IS NOT NULL
@@ -1029,7 +1054,7 @@ export class BotStore {
           UNION SELECT x.id FROM bot_commands c CROSS JOIN bot_work_items x ON x.thread_id=c.thread_id WHERE x.detached=0 AND (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0))
           UNION SELECT json_extract(t.origin_json,'$.rootWorkId') FROM bot_commands c CROSS JOIN bot_tasks t ON t.id=c.source_task_id WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)))
         ORDER BY CASE execution_state WHEN 'waiting_user' THEN 0 WHEN 'running' THEN 1 ELSE 2 END,w.updated_at DESC,w.ordinal DESC LIMIT 6`,
-        [botId, audience ?? null, audience ?? null, query, query]
+        [botId, ...(audience === undefined ? [] : [audience]), query, query]
       ).map((row) => this.workSummary(row)),
       nextCursor:
         rows.length > pageSize
@@ -3238,7 +3263,7 @@ export class BotStore {
       ? `AND t.thread_id NOT IN (${excludedThreads.map(() => "?").join(",")})`
       : ""
     const row = this.rows(
-      `SELECT t.* FROM bot_tasks t JOIN bots b ON b.id=t.bot_id
+      `SELECT t.* FROM bot_tasks t INDEXED BY bot_tasks_admission JOIN bots b ON b.id=t.bot_id
       WHERE t.state='queued' AND b.archived=0 AND b.deleting=0 ${exclusion}
       AND json_extract(t.origin_json,'$.feedbackForTaskId') IS NULL
       AND ${this.mock.runnableSql("t")} AND ${this.im.runnableSql("t")}
@@ -3278,9 +3303,7 @@ export class BotStore {
           AND m.group_id=json_extract(t.origin_json,'$.groupId') AND m.author_bot_id IS NOT NULL)
         AND NOT EXISTS (SELECT 1 FROM bot_group_discussions d WHERE d.group_id=json_extract(t.origin_json,'$.groupId')
           AND json_extract(d.payload,'$.messageId')=json_extract(t.origin_json,'$.messageId')))
-      ORDER BY CASE WHEN t.work_id IS NULL AND json_extract(t.origin_json,'$.rootWorkId') IS NULL THEN 0 ELSE 1 END, CASE COALESCE(json_extract(t.origin_json,'$.kind'),'user')
-        WHEN 'user' THEN 0 WHEN 'group' THEN 1 WHEN 'bot' THEN 2 ELSE 3 END,
-      t.created_at, t.rowid LIMIT 1`,
+      ORDER BY ${queuedTaskOrder("t.")},t.rowid LIMIT 1`,
       [...excludedThreads]
     )[0]
     if (!row) return null

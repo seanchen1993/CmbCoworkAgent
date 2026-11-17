@@ -1,0 +1,76 @@
+
+ RUN  v3.2.4 <repo>
+
+(node:70890) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:70889) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/main/bots/work-projection.test.ts (5 tests | 1 failed) 3339ms
+   × work activity projection query boundaries > seeks the existing family index for list, detail and summaries despite unrelated private history 2571ms
+     → expected false to be true // Object.is equality
+   ✓ work activity projection query boundaries > keeps direct and peer command work in priority without admitting unrelated private commands  381ms
+   ✓ work activity projection query boundaries > preserves family state, owner and audience isolation as peers finish 187ms
+   ✓ work activity projection query boundaries > paginates smaller prompt snapshots without omissions or extra database requests 170ms
+   ✓ work activity projection query boundaries > retains the newest primary outcome for same-millisecond turns without reading result bodies 28ms
+(node:70993) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+langsmith/experimental/sandbox is in alpha. This feature is experimental, and breaking changes are expected.
+
+ ✓ src/main/bots/feature-follow.test.ts (31 tests) 1265ms
+ ✓ src/main/bots/memory.test.ts (15 tests) 93ms
+ ✓ src/main/bots/prompt.test.ts (36 tests) 19ms
+stdout | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] Custom model: o07-test-model baseUrl: https://o07.invalid/v1
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 1/5 after 1000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 2/5 after 2000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 3/5 after 4000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 4/5 after 8000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 5/5 after 16000ms
+
+stdout | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch headers in 0ms: status=200, stream requested=false, content-type=application/json, request-id=unknown
+
+ ✓ src/main/bots/host.test.ts (175 tests) 14106ms
+   ✓ stops the whole group including completed peer owners (worker first: false)  357ms
+   ✓ Bot control state > cleans the notification's own service when cancelled, preserving the original task's service  306ms
+   ✓ Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host  2107ms
+   ✓ stops a work's running peer chain of depth 1 without reviving its completed dispatcher  738ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/main/bots/work-projection.test.ts > work activity projection query boundaries > seeks the existing family index for list, detail and summaries despite unrelated private history
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ src/main/bots/work-projection.test.ts:108:103
+    106|       // Workflow ownership also seeks exact source IDs; it must not s…
+    107|       expect(plan.some(detail => detail.startsWith("SCAN wf_owner"))).…
+    108|       expect(plan.some(detail => detail.startsWith("SEARCH r USING IND…
+       |                                                                                                       ^
+    109|       expect(plan.some(detail => detail.startsWith("SEARCH t USING IND…
+    110|       expect(plan.some(detail => detail.startsWith("SCAN t"))).toBe(fa…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 4 passed (5)
+      Tests  1 failed | 261 passed (262)
+   Start at  21:22:01
+   Duration  14.97s (transform 2.19s, setup 0ms, collect 2.67s, tests 18.82s, environment 0ms, prepare 171ms)
+

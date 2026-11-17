@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react"
+import { useBotRefresh } from "./use-bot-refresh"
+import { useCallback, useEffect, useRef, useState } from "react"
 import "./bot-features.css"
 import { ArrowUpRight, ChevronDown, ChevronRight } from "lucide-react"
 import { useAppStore } from "@/lib/store"
@@ -40,14 +41,17 @@ export function FollowPicker({
   done: () => void
 }) {
   const [projects, setProjects] = useState<{ id: string; name: string }[]>()
-  const [features, setFeatures] = useState<{ slug: string; title: string }[]>()
+  const [features, setFeatures] = useState<{ slug: string; title: string; linked?: boolean }[]>()
   const [project, setProject] = useState(""),
     [slug, setSlug] = useState(""),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false)
-  const linkedSlugs = new Set(followed?.filter((f) => f.projectId === project).map((f) => f.slug))
+  const linkedSlugs = new Set([
+    ...(followed?.filter((f) => f.projectId === project).map((f) => f.slug) ?? []),
+    ...(features?.filter((f) => f.linked).map((f) => f.slug) ?? [])
+  ])
   const canFollow = Boolean(
-    followed && features?.some((f) => f.slug === slug) && !linkedSlugs.has(slug)
+    (api.page || followed) && features?.some((f) => f.slug === slug) && !linkedSlugs.has(slug)
   )
   useEffect(() => {
     let current = true
@@ -171,35 +175,30 @@ export function FeatureRow({
     [detail, setDetail] = useState<BotFeatureDetail>(),
     [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
+  const detailRead = useBotRefresh(
+    JSON.stringify([botId, groupId, feature.id, open]),
+    () => (open ? api.detail(botId, feature.id, groupId) : Promise.resolve(undefined)),
+    (value) => {
+      if (value) {
+        setDetail(value)
+        setError("")
+      }
+    },
+    (cause) => setError(botErrorMessage(cause))
+  )
+  useEffect(() => {
+    setDetail(undefined)
+  }, [botId, groupId, feature.id])
+  useEffect(() => {
+    if (open) void detailRead.refresh()
+  }, [open, revision, api, botId, groupId, feature.id, detailRead.refresh])
   useEffect(() => {
     if (!open) return
-    let current = true
-    let pending = false
-    const refresh = async () => {
-      if (pending) return
-      pending = true
-      try {
-        const value = await api.detail(botId, feature.id, groupId)
-        if (current) {
-          setDetail(value)
-          setError("")
-        }
-      } catch (e) {
-        if (current) setError(botErrorMessage(e))
-      } finally {
-        pending = false
-      }
-    }
-    void refresh()
-    // Wait registries can change independently of a Bot turn, e.g. an approval from the desktop.
     const timer = setInterval(() => {
-      if (document.visibilityState === "visible") void refresh()
+      if (document.visibilityState === "visible") void detailRead.refresh()
     }, 5000)
-    return () => {
-      current = false
-      clearInterval(timer)
-    }
-  }, [api, feature.id, botId, groupId, open, revision])
+    return () => clearInterval(timer)
+  }, [open, detailRead.refresh])
   const current = open && detail ? detail : feature
   return (
     <div className="bot-feature-row">
@@ -280,50 +279,155 @@ export function FeatureRow({
     </div>
   )
 }
-export function useBotFeatureTasks({ client, botId, groupId }: Props) {
+export function useBotFeatureTasks({
+  client,
+  botId,
+  groupId,
+  query = ""
+}: Props & { query?: string }) {
   const [items, setItems] = useState<BotFeatureTask[]>([]),
+    [priority, setPriority] = useState<BotFeatureTask[]>([]),
+    [cursor, setCursor] = useState<string | null>(null),
     [error, setError] = useState(""),
-    [loading, setLoading] = useState(Boolean(client.features)),
     [revision, setRevision] = useState(0)
   const api = client.features
-  const refresh = useCallback(() => setRevision((x) => x + 1), [])
+  const key = JSON.stringify([client.hostId, botId, groupId, query])
+  const [loadedKey, setLoadedKey] = useState("")
+  const displayed = useRef(items),
+    expanded = useRef(false),
+    nextPage = useRef<string | undefined>(undefined)
+  const changedIds = useRef(new Set<string>()),
+    restart = useRef(true)
+  displayed.current = items
+  const reader = useBotRefresh(
+    key,
+    async () => {
+      const after = nextPage.current
+      nextPage.current = undefined
+      const reset = restart.current
+      restart.current = false
+      const ids = [...changedIds.current]
+      changedIds.current.clear()
+      if (!api)
+        return {
+          page: { items: [], priority: [], refreshed: [], nextCursor: null },
+          after,
+          reset,
+          ids
+        }
+      if (!api.page)
+        return {
+          page: {
+            items: await api.list(botId, groupId),
+            priority: [],
+            refreshed: [],
+            nextCursor: null
+          },
+          after,
+          reset: true,
+          ids
+        }
+      // A single target change normally refreshes at most one older row. Larger scoped
+      // invalidations restart paging instead of fetching an unbounded loaded directory.
+      const page = await api.page(botId, groupId, {
+        cursor: after,
+        query,
+        refreshIds: ids.slice(0, 40)
+      })
+      return { page, after, reset: reset || ids.length > 40, ids }
+    },
+    ({ page, after, reset, ids }) => {
+      if (reset) expanded.current = false
+      if (after) expanded.current = true
+      const head = new Set(page.items.map((item) => item.id))
+      const updates = new Map(page.refreshed.map((item) => [item.id, item]))
+      const requested = new Set(ids)
+      const matches = (item: BotFeatureTask) =>
+        (item.title + " " + item.projectName + " " + item.slug)
+          .toLowerCase()
+          .includes(query.trim().toLowerCase())
+      setItems((old) => {
+        const remaining = reset
+          ? []
+          : old
+              .filter((item) => !requested.has(item.id) || updates.has(item.id))
+              .map((item) => updates.get(item.id) ?? item)
+              .filter(matches)
+        if (after) {
+          const known = new Set(remaining.map((item) => item.id))
+          return [...remaining, ...page.items.filter((item) => !known.has(item.id))]
+        }
+        const merged = new Map(page.items.map((item) => [item.id, item]))
+        if (expanded.current)
+          for (const item of remaining) if (!head.has(item.id)) merged.set(item.id, item)
+        for (const item of page.refreshed) if (matches(item)) merged.set(item.id, item)
+        return [...merged.values()]
+      })
+      setPriority(page.priority)
+      if (after || !expanded.current) setCursor(page.nextCursor)
+      setLoadedKey(key)
+      setError("")
+    },
+    (cause) => {
+      restart.current = true
+      setLoadedKey(key)
+      setError(botErrorMessage(cause))
+    }
+  )
+  const refresh = useCallback(() => {
+    restart.current = true
+    nextPage.current = undefined
+    setRevision((value) => value + 1)
+    void reader.refresh()
+  }, [reader.refresh])
+  useEffect(() => {
+    setItems([])
+    setPriority([])
+    setCursor(null)
+    setError("")
+    changedIds.current.clear()
+    expanded.current = false
+    refresh()
+  }, [api, key, refresh])
   useEffect(() => {
     if (!api) return
     let timer: ReturnType<typeof setTimeout> | undefined
     const audience = groupId ? `im:${groupId}` : "desktop"
     const stop = client.subscribe((event) => {
-      if (event.featureScope?.botId !== botId || event.featureScope.audience !== audience) return
+      const target = event.featureScope
+      if (target?.botId !== botId || target.audience !== audience) return
+      if (target.followId) changedIds.current.add(target.followId)
+      else if (!target.projectId || !target.slug) restart.current = true
+      else
+        for (const item of displayed.current)
+          if (item.projectId === target.projectId && item.slug === target.slug)
+            changedIds.current.add(item.id)
       if (!timer)
         timer = setTimeout(() => {
           timer = undefined
-          refresh()
+          nextPage.current = undefined
+          setRevision((value) => value + 1)
+          void reader.refresh()
         }, 150)
     })
     return () => {
       stop()
       clearTimeout(timer)
     }
-  }, [api, client, refresh, botId, groupId])
-  useEffect(() => {
-    if (!api) return
-    let current = true
-    api
-      .list(botId, groupId)
-      .then((rows) => {
-        if (current) {
-          setItems(rows)
-          setError("")
-        }
-      })
-      .catch((e) => {
-        if (current) setError(botErrorMessage(e))
-      })
-      .finally(() => {
-        if (current) setLoading(false)
-      })
-    return () => {
-      current = false
-    }
-  }, [api, botId, groupId, revision])
-  return { items, revision, refresh, error, loading }
+  }, [api, client, reader.refresh, botId, groupId])
+  const more = () => {
+    if (!cursor || reader.loading) return
+    nextPage.current = cursor
+    void reader.refresh()
+  }
+  return {
+    items: loadedKey === key ? items : [],
+    priority: loadedKey === key ? priority : [],
+    cursor: loadedKey === key ? cursor : null,
+    revision,
+    refresh,
+    more,
+    error,
+    loading: reader.loading || (Boolean(api) && loadedKey !== key)
+  }
 }

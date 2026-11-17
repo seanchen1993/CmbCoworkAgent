@@ -1,0 +1,91 @@
+{
+  "kind": "production React hooks; simulated metadata IPC",
+  "recordedAt": "2026-11-17T12:38:57.091Z",
+  "cases": [
+    {
+      "name": "100 simultaneous unrelated changes",
+      "loaded": 40,
+      "latencyMs": 10,
+      "counts": {
+        "snapshot": 2,
+        "list": 1
+      },
+      "peak": 2,
+      "maxBatch": 0,
+      "requestSpanMs": 25.3,
+      "elapsedIncludingQuietPeriodMs": 76.8,
+      "domWorkRows": 6
+    },
+    {
+      "name": "unrelated change with 400 loaded works",
+      "loaded": 400,
+      "latencyMs": 10,
+      "counts": {
+        "snapshot": 1,
+        "list": 1,
+        "summaries": 9
+      },
+      "peak": 1,
+      "maxBatch": 40,
+      "requestSpanMs": 129.4,
+      "elapsedIncludingQuietPeriodMs": 183.6,
+      "domWorkRows": 6
+    },
+    {
+      "name": "10 spaced unrelated changes with 400 loaded works",
+      "loaded": 400,
+      "latencyMs": 10,
+      "counts": {
+        "snapshot": 10,
+        "list": 10,
+        "summaries": 19
+      },
+      "peak": 2,
+      "maxBatch": 40,
+      "requestSpanMs": 342.7,
+      "elapsedIncludingQuietPeriodMs": 398.2,
+      "domWorkRows": 6
+    },
+    {
+      "name": "unrelated change with 2000 loaded works",
+      "loaded": 2000,
+      "latencyMs": 10,
+      "counts": {
+        "snapshot": 1,
+        "list": 1,
+        "summaries": 49
+      },
+      "peak": 1,
+      "maxBatch": 40,
+      "requestSpanMs": 696.2,
+      "elapsedIncludingQuietPeriodMs": 750.2,
+      "domWorkRows": 6
+    },
+    {
+      "name": "10 spaced unrelated changes with 2000 loaded works",
+      "loaded": 2000,
+      "latencyMs": 10,
+      "counts": {
+        "snapshot": 10,
+        "list": 10,
+        "summaries": 56
+      },
+      "peak": 2,
+      "maxBatch": 40,
+      "requestSpanMs": 891.4,
+      "elapsedIncludingQuietPeriodMs": 948.4,
+      "domWorkRows": 6
+    },
+    {
+      "name": "10 Feature changes while list/detail takes 600ms",
+      "counts": {
+        "feature_detail": 10,
+        "feature_list": 10
+      },
+      "peak": 8,
+      "latencyMs": 600,
+      "requestSpanMs": 2390.1
+    }
+  ],
+  "status": "passed correctness; timing observations require review"
+}

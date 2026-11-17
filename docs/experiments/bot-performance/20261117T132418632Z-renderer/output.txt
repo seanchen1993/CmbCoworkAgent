@@ -1,0 +1,8 @@
+PERF_CASE {"name":"100 simultaneous unrelated changes","loaded":40,"latencyMs":10,"counts":{"snapshot":2},"peak":1,"maxBatch":0,"requestSpanMs":23.6,"elapsedIncludingQuietPeriodMs":229.2,"domWorkRows":6}
+PERF_CASE {"name":"unrelated change with 400 loaded works","loaded":400,"latencyMs":10,"counts":{"snapshot":1},"peak":1,"maxBatch":0,"requestSpanMs":12.3,"elapsedIncludingQuietPeriodMs":233.7,"domWorkRows":6}
+PERF_CASE {"name":"10 spaced unrelated changes with 400 loaded works","loaded":400,"latencyMs":10,"counts":{"snapshot":10},"peak":1,"maxBatch":0,"requestSpanMs":210.2,"elapsedIncludingQuietPeriodMs":428.9,"domWorkRows":6}
+PERF_CASE {"name":"unrelated change with 2000 loaded works","loaded":2000,"latencyMs":10,"counts":{"snapshot":1},"peak":1,"maxBatch":0,"requestSpanMs":13.9,"elapsedIncludingQuietPeriodMs":217.8,"domWorkRows":6}
+PERF_CASE {"name":"10 spaced unrelated changes with 2000 loaded works","loaded":2000,"latencyMs":10,"counts":{"snapshot":10},"peak":1,"maxBatch":0,"requestSpanMs":210.6,"elapsedIncludingQuietPeriodMs":428.4,"domWorkRows":6}
+PERF_CASE {"name":"one changed task outside first page with 2000 loaded works","loaded":2000,"latencyMs":10,"counts":{"snapshot":1,"list":1,"summaries":1},"peak":1,"maxBatch":1,"requestSpanMs":128.2,"elapsedIncludingQuietPeriodMs":345.3,"domWorkRows":6}
+PERF_CASE {"name":"removed loaded task","loaded":1999,"latencyMs":10,"counts":{"snapshot":1,"list":1},"peak":1,"maxBatch":0,"requestSpanMs":116.8,"elapsedIncludingQuietPeriodMs":324.5,"domWorkRows":6}
+PERF_CASE {"name":"10 Feature changes while list/detail takes 600ms","counts":{"feature_list":4,"feature_detail":4},"peak":2,"latencyMs":600,"requestSpanMs":2564.5}

@@ -38,7 +38,7 @@ export function useBots(client: BotClient) {
     }
     const unsubscribe = client.subscribe((event) => {
       // Memory owns its scoped reader; these writes do not change the control snapshot.
-      if (!event.memoryBotId) void refresh()
+      if (!event.memoryBotId || event.workChanges?.length) void refresh()
     })
     const onFocus = () => {
       void refresh()

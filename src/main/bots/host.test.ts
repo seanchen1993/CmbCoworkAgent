@@ -704,7 +704,7 @@ describe("Bot control state", () => {
     const unsubscribe = host.subscribe(listener)
     host.memoryChanged(bot.id)
     expect(listener.mock.calls).toEqual([
-      [{ hostId: "local", revision: before.revision, memoryBotId: bot.id }]
+      [{ hostId: "local", revision: before.revision, memoryBotId: bot.id, workChanges: [] }]
     ])
     expect(host.snapshot()).toEqual(before)
     unsubscribe()

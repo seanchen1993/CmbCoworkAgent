@@ -39,7 +39,7 @@ export function BotWorkPanel({
     [limit, setLimit] = useState(6)
   const [searching, setSearching] = useState(false)
   const [completedOpen, setCompletedOpen] = useState(false)
-  const features = useBotFeatureTasks({ client, botId, groupId })
+  const features = useBotFeatureTasks({ client, botId, groupId, query: controller.query })
   const [createKind, setCreateKind] = useState<"work" | "feature">("work")
   const canAdd = !disabled && !readOnlyGroup
   const isCurrentAudience = () =>
@@ -94,14 +94,21 @@ export function BotWorkPanel({
       priority: priority.has(work.id),
       updatedAt: work.updatedAt
     })),
-    ...features.items
+    ...[
+      ...features.priority,
+      ...features.items.filter(
+        (item) => !features.priority.some((priority) => priority.id === item.id)
+      )
+    ]
       .filter((f) =>
         (f.title + " " + f.projectName + " " + f.slug).toLocaleLowerCase().includes(needle)
       )
       .map((feature) => ({
         kind: "feature" as const,
         feature,
-        priority: Boolean(feature.attentionThreadId),
+        priority:
+          Boolean(feature.attentionThreadId) ||
+          features.priority.some((item) => item.id === feature.id),
         updatedAt: feature.updatedAt
       }))
   ].sort((a, b) => {
@@ -285,7 +292,7 @@ export function BotWorkPanel({
           onClick={() => setCompletedOpen(!completedOpen)}
         >
           <ChevronDown size={13} className={completedOpen ? "rotate-180" : ""} />
-          已完成{controller.cursor ? "" : ` · ${completed.length}`}
+          已完成{controller.cursor || features.cursor ? "" : ` · ${completed.length}`}
         </button>
       )}
       {!directory.length &&
@@ -301,13 +308,14 @@ export function BotWorkPanel({
                 : "在聊天中交办一项工作，或点击 + 创建。"}
           </p>
         )}
-      {(visible.length > limit || controller.cursor) && (
+      {(visible.length > limit || controller.cursor || features.cursor) && (
         <button
-          disabled={controller.loading}
+          disabled={controller.loading || features.loading}
           onClick={() => {
             if (limit < visible.length) setLimit(Math.min(visible.length, limit + 40))
             else {
               if (controller.cursor) void controller.more()
+              if (features.cursor) features.more()
               setLimit((v) => v + 40)
             }
           }}

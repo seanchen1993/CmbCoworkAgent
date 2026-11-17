@@ -25,6 +25,7 @@ const rows = Array.from({ length: 45 }, (_, i) => ({
 const state: any = { rows, maxBatch: 0, calls: 0, inFlight: 0, maxInFlight: 0, hold: null }
 const client = {
   hostId: "local",
+  subscribe: () => () => {},
   works: {
     async list(botId: string, cursor?: string, query = "") {
       state.calls++

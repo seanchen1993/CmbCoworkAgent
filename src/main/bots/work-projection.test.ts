@@ -105,16 +105,33 @@ describe("work activity projection query boundaries", () => {
       ).toBe(false)
       // Workflow ownership also seeks exact source IDs; it must not scan unrelated task history.
       expect(plan.some(detail => detail.startsWith("SCAN wf_owner"))).toBe(false)
-      expect(plan.some(detail => detail.startsWith("SEARCH r USING INDEX bot_workflow_refs_source"))).toBe(true)
-      expect(plan.some(detail => detail.startsWith("SEARCH t USING INDEX bot_tasks_work_history") && detail.includes("work_id=?"))).toBe(true)
+      expect(plan.some(detail => detail.includes("bot_workflow_refs_live"))).toBe(true)
+      expect(plan.some(detail => detail.startsWith("SEARCH t USING INDEX bot_tasks_work_order") && detail.includes("work_id=?"))).toBe(true)
       expect(plan.some(detail => detail.startsWith("SCAN t"))).toBe(false)
       expect(plan.some(detail => detail.startsWith("SCAN x"))).toBe(false)
       expect(plan.some(detail => detail.startsWith("SEARCH t USING INDEX bot_tasks_injected"))).toBe(false)
       // Compare every projected field against the prior SQL, not only peer counts.
-      const priorSql = sql.replaceAll("=+w.id", "=w.id")
-        .replaceAll("CROSS JOIN", "JOIN")
-        .replaceAll(" INDEXED BY bot_tasks_work_history", "")
-        .replace("WHERE x.detached=0 AND ", "WHERE ")
+      const priorProjection = `(SELECT version FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS activity_version,
+      (SELECT attention_version FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS attention_version,
+      (SELECT seen_version FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS seen_version,
+      (SELECT updated_at FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS activity_at,
+      (SELECT preview FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS activity_preview,
+      (SELECT t.state FROM bot_tasks t WHERE t.work_id=w.id OR
+        (json_extract(t.origin_json,'$.rootWorkId')=+w.id AND t.state IN ('queued','running','waiting_user'))
+      ORDER BY CASE t.state WHEN 'waiting_user' THEN 0 WHEN 'running' THEN 1 WHEN 'queued' THEN 2 ELSE 3 END,
+      t.created_at DESC,t.rowid DESC LIMIT 1) AS execution_state,
+      (SELECT json_object('taskId',t.id,'state',t.state,'updatedAt',t.updated_at,'error',substr(t.error,1,1000))
+        FROM bot_tasks t INDEXED BY bot_tasks_work_history WHERE t.work_id=w.id AND t.injected_into IS NULL
+        ORDER BY t.created_at DESC,t.rowid DESC LIMIT 1) AS last_execution,
+      (SELECT COUNT(*) FROM bot_tasks p WHERE json_extract(p.origin_json,'$.rootWorkId')=+w.id
+        AND p.work_id IS NULL AND p.state IN ('queued','running','waiting_user')) AS pending_peers,
+      (EXISTS(SELECT 1 FROM bot_commands c LEFT JOIN bot_tasks p ON p.id=c.source_task_id
+        WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)) AND (c.thread_id=w.thread_id OR json_extract(p.origin_json,'$.rootWorkId')=w.id))
+       OR EXISTS(SELECT 1 FROM bot_workflow_refs r WHERE r.retired_at IS NULL AND r.source_task_id IN (
+         SELECT wf_owner.id FROM bot_tasks wf_owner WHERE wf_owner.work_id=w.id OR json_extract(wf_owner.origin_json,'$.rootWorkId')=+w.id
+       ))) AS background_busy`
+      const priorSql = sql.replace((f.store as any).workActivityProjection(), priorProjection)
+      expect(priorSql).not.toBe(sql)
       expect(f.db.exec(sql, bindings)).toEqual(f.db.exec(priorSql, bindings))
     }
     expect(

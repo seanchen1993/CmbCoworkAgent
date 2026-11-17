@@ -1,0 +1,80 @@
+
+ RUN  v3.2.4 <repo>
+
+(node:65829) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:65828) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+langsmith/experimental/sandbox is in alpha. This feature is experimental, and breaking changes are expected.
+
+stdout | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] Custom model: o07-test-model baseUrl: https://o07.invalid/v1
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 1/5 after 1000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 2/5 after 2000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 3/5 after 4000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 4/5 after 8000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 5/5 after 16000ms
+
+stdout | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch headers in 0ms: status=200, stream requested=false, content-type=application/json, request-id=unknown
+
+ ✓ src/main/bots/command-capacity.test.ts (31 tests) 6987ms
+   ✓ refills capacity when delayed user-message injection frees a slot during a long run  331ms
+   ✓ pending outcomes survive receipt pruning and drain in bounded batches without losing early failures  365ms
+   ✓ distinguishes active-turn shutdown from explicit Stop (shutdown=false, admitted=true)  321ms
+(node:65850) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/work-projection.test.ts (5 tests) 2402ms
+   ✓ work activity projection query boundaries > seeks the existing family index for list, detail and summaries despite unrelated private history  1969ms
+(node:65853) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/host.test.ts (175 tests) 13059ms
+   ✓ stops the whole group including completed peer owners (worker first: false)  300ms
+   ✓ Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host  2708ms
+ ✓ src/main/bots/steering.test.ts (27 tests) 3045ms
+(node:65879) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/services/im/bot-file-delivery.test.ts (10 tests) 895ms
+   ✓ bounds a slow transport to four chunks in flight and verifies every acknowledgement  544ms
+(node:65883) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/history-retention.test.ts (12 tests) 1545ms
+(node:65885) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/feature-follow.test.ts (31 tests) 1189ms
+(node:65887) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/browser.test.ts (118 tests) 1153ms
+(node:65890) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | src/main/bots/telemetry.test.ts > Bot event delivery > sends the existing HTTP envelope and retries an ambiguous response with the same eventId
+[EventReporter] Upload failed: 503 Service Unavailable
+
+ ✓ src/main/bots/telemetry.test.ts (21 tests) 521ms
+ ✓ src/main/agent/bot-turn-context.test.ts (4 tests) 53ms
+ ✓ src/main/bots/work-result.test.ts (15 tests) 489ms
+ ✓ src/main/agent/file-operation-lock.test.ts (29 tests) 32ms
+stdout | src/main/agent/bot-dispatch-feedback.test.ts > Bot dispatch feedback > delivers a steer injected during dispatch instead of ending on the previous receipt
+[Runtime] Injected 1 queued current-run message(s) in beforeModel for thread feedback-steer
+
+ ✓ src/main/agent/bot-dispatch-feedback.test.ts (8 tests) 47ms
+ ✓ src/main/bots/memory-maintainer.test.ts (3 tests) 4ms
+ ✓ src/main/bots/feature-steering.test.ts (9 tests) 7ms
+ ✓ src/main/ipc/dashboard-bot-metrics.test.ts (8 tests) 6ms
+
+ Test Files  16 passed (16)
+      Tests  506 passed (506)
+   Start at  20:26:59
+   Duration  19.08s (transform 2.24s, setup 0ms, collect 4.43s, tests 31.43s, environment 1ms, prepare 486ms)
+

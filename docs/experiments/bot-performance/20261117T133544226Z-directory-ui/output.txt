@@ -1,0 +1,2 @@
+PASS: 45 Work metadata pagination/expanded refresh; 7 without cursor; late/failing selection; batch<=40 { calls: 9, maxBatch: 5, maxInFlight: 1 }
+cleanup: owned metadata fixture Electron/profile removed

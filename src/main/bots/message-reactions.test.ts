@@ -241,6 +241,7 @@ describe("persisted local user message reactions", () => {
     expect(listener.mock.calls[0][0]).toEqual({
       hostId: "local",
       revision: f.store.revision(),
+      workChanges: [],
       reactionTarget: f.target
     })
     const tasks = f.store.recentTasks()

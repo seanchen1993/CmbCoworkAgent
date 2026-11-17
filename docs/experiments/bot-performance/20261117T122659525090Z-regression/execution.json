@@ -1,0 +1,36 @@
+{
+  "startedAt": "2026-11-17T12:26:59.525426+00:00",
+  "case": "regression",
+  "args": [
+    "node_modules/vitest/vitest.mjs",
+    "run",
+    "src/main/bots/work-projection.test.ts",
+    "src/main/bots/command-capacity.test.ts",
+    "src/main/bots/host.test.ts",
+    "src/main/bots/work-result.test.ts",
+    "src/main/bots/steering.test.ts",
+    "src/main/bots/history-retention.test.ts",
+    "src/main/bots/memory-maintainer.test.ts",
+    "src/main/bots/telemetry.test.ts",
+    "src/main/bots/browser.test.ts",
+    "src/main/bots/feature-follow.test.ts",
+    "src/main/bots/feature-steering.test.ts",
+    "src/main/services/im/bot-file-delivery.test.ts",
+    "src/main/services/im/bot-channel-service.test.ts",
+    "src/main/agent/file-operation-lock.test.ts",
+    "src/main/ipc/dashboard-bot-metrics.test.ts",
+    "src/main/agent/bot-turn-context.test.ts",
+    "src/main/agent/bot-dispatch-feedback.test.ts",
+    "--maxWorkers=2"
+  ],
+  "head": "f91771b435c57c6548bb3292566161b3d7d52ef4",
+  "branch": "codex/merge-uat-into-bot-beta",
+  "kind": "local synthetic or regression; no production load",
+  "platform": "Darwin",
+  "sourceHashes": {
+    "tests/bot-performance-review.spec.ts": "1ca27f5a3f1bbda68963f5a956c702bdf64972f61ba74f53e24e6e282323386e"
+  },
+  "exitCode": 0,
+  "seconds": 19.511,
+  "finishedAt": "2026-11-17T12:27:19.052114+00:00"
+}

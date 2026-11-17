@@ -11,6 +11,7 @@ export const localBotsApi: BotClient = {
       ipcRenderer.invoke("bots:feature:catalog", LOCAL_BOT_HOST_ID, botId, projectId, groupId),
     follow: (botId, projectId, slug, groupId) =>
       ipcRenderer.invoke("bots:feature:follow", LOCAL_BOT_HOST_ID, botId, projectId, slug, groupId),
+    page: (botId, groupId, input) => ipcRenderer.invoke("bots:feature:page", LOCAL_BOT_HOST_ID, botId, groupId, input),
     list: (botId, groupId) =>
       ipcRenderer.invoke("bots:feature:list", LOCAL_BOT_HOST_ID, botId, groupId),
     lifecycle: (botId, id, action, version, groupId) =>

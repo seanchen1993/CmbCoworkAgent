@@ -1,0 +1,6 @@
+cleanup: owned metadata fixture Electron/profile removed
+page.waitForFunction: Timeout 30000ms exceeded.
+    at main (<repo>/tests/bots-work-directory-browser.spec.ts:47:16) {
+  log: [],
+  name: 'TimeoutError'
+}

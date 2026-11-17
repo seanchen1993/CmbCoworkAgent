@@ -24,6 +24,14 @@ import {
 } from "../../shared/bots/memory-scope"
 
 const MAX_FILE_BYTES = 48_000
+const MAX_CACHED_BYTES = 24 * 1024 * 1024
+interface CachedMemory {
+  botId: string
+  identity: string
+  modified: number
+  bytes: number
+  entry: BotMemory
+}
 const digest = (text: string) => createHash("sha256").update(text).digest("hex")
 
 /** Reuses the existing memory index; file identities stay relative to this Bot. */
@@ -33,6 +41,8 @@ export class BotMemoryService {
   private stopping = false
   private readonly retiredBots = new Set<string>()
   private readonly edits = new Map<string, number>()
+  private readonly files = new Map<string, CachedMemory>()
+  private cachedBytes = 0
   constructor(
     private readonly root: string,
     private readonly onChanged: (botId: string) => void = () => {}
@@ -60,14 +70,47 @@ export class BotMemoryService {
       throw new BotError("INVALID_INPUT", "记忆文件格式或大小不受支持")
     return readFileSync(path, "utf8")
   }
-  list(botId: string, context?: BotMemoryContext): BotMemory[] {
+  private forgetFile(path: string): void {
+    const prior = this.files.get(path)
+    if (prior) this.cachedBytes -= prior.bytes
+    this.files.delete(path)
+  }
+  private readDirectory(botId: string): CachedMemory[] {
     const directory = this.directory(botId)
     const files = readdirSync(directory).filter((name) => name.endsWith(".md"))
     if (files.length > 201) throw new BotError("CONFLICT", "记忆数量已达上限，请先整理")
-    // The reused index scans every Markdown file, including the manifest.
+    const paths = new Set(files.map(name => join(directory, name)))
+    for (const [path, entry] of this.files)
+      if (entry.botId === botId && !paths.has(path)) this.forgetFile(path)
+    const entries: CachedMemory[] = []
+    // Revalidate names and file identity on every read, including the manifest.
+    // Cache content, never visibility: each caller applies its own conversation scope.
     for (const name of files) {
       if (!/^[a-zA-Z0-9_-]+\.md$/.test(name)) throw new BotError("INVALID_INPUT", "记忆文件名无效")
-      this.readFile(join(directory, name))
+      const path = join(directory, name)
+      const info = lstatSync(path, { bigint: true })
+      if (!info.isFile() || info.isSymbolicLink() || info.size > BigInt(MAX_FILE_BYTES)) {
+        this.forgetFile(path)
+        throw new BotError("INVALID_INPUT", "记忆文件格式或大小不受支持")
+      }
+      if (name === "MEMORY.md") continue
+      const identity = `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`
+      let cached = this.files.get(path)
+      this.forgetFile(path)
+      if (cached?.identity !== identity) {
+        const text = readFileSync(path, "utf8")
+        const parsed = parseFrontmatter(text)
+        cached = {
+          botId, identity, modified: Number(info.mtimeNs),
+          bytes: 1024 + text.length * 2,
+          entry: { id: name.slice(0, -3), name: parsed.frontmatter.name ?? name,
+            content: parsed.body, version: digest(text), scope: this.scopeFromFile(parsed.frontmatter) }
+        }
+      }
+      this.files.set(path, cached)
+      this.cachedBytes += cached.bytes
+      while (this.cachedBytes > MAX_CACHED_BYTES) this.forgetFile(this.files.keys().next().value!)
+      entries.push(cached)
     }
     const index = join(directory, "index.sqlite")
     if (
@@ -75,32 +118,23 @@ export class BotMemoryService {
       (lstatSync(index).isSymbolicLink() || lstatSync(index).size > 32 * 1024 * 1024)
     )
       throw new BotError("INVALID_INPUT", "记忆索引无效")
-    return files
-      .filter((name) => name !== "MEMORY.md")
-      .map((name) => {
-        const text = this.readFile(join(directory, name)),
-          parsed = parseFrontmatter(text)
-        return {
-          id: name.slice(0, -3),
-          name: parsed.frontmatter.name ?? name,
-          content: parsed.body,
-          version: digest(text),
-          scope: this.scopeFromFile(parsed.frontmatter)
-        }
-      })
-      .filter((entry) => !context || botMemoryVisible(entry, context))
+    return entries
+  }
+  list(botId: string, context?: BotMemoryContext): BotMemory[] {
+    return this.readDirectory(botId)
+      .filter(({ entry }) => !context || botMemoryVisible(entry, context))
+      .map(({ entry }) => ({ ...entry, scope: entry.scope && { ...entry.scope } }))
   }
   private scopeFromFile(header: Record<string, string>): BotMemoryScope {
     if (!header.bot_scope) return { kind: "private" }
     return parseBotMemoryScope({ kind: header.bot_scope, groupId: header.bot_group_id })
   }
-  /** Fresh per-run snapshot, newest first like the original memory manifest. No second cache. */
+  /** Fresh identities and visibility per run; unchanged content is reused within a byte budget. */
   forPrompt(botId: string, context: BotMemoryContext = {}): BotMemory[] {
-    const directory = this.directory(botId)
-    return this.list(botId, context)
-      .map((entry) => ({ entry, modified: lstatSync(join(directory, `${entry.id}.md`)).mtimeMs }))
+    return this.readDirectory(botId)
+      .filter(({ entry }) => botMemoryVisible(entry, context))
       .sort((a, b) => b.modified - a.modified || a.entry.id.localeCompare(b.entry.id))
-      .map(({ entry }) => entry)
+      .map(({ entry }) => ({ ...entry, scope: entry.scope && { ...entry.scope } }))
   }
   write(botId: string, input: WriteBotMemoryInput): BotMemory {
     const result = this.persist(botId, input)
@@ -309,6 +343,7 @@ export class BotMemoryService {
     // Resolve the host-owned path before retirement, including on a cleanup retry.
     const directory = botDirectory(this.root, "memories", botId)
     this.retiredBots.add(botId)
+    for (const [path, entry] of this.files) if (entry.botId === botId) this.forgetFile(path)
     this.edits.set(botId, this.editVersion(botId) + 1)
     const index = this.indexes.get(botId)
     if (index) {
@@ -324,5 +359,7 @@ export class BotMemoryService {
     this.indexes.clear()
     this.users.clear()
     this.edits.clear()
+    this.files.clear()
+    this.cachedBytes = 0
   }
 }

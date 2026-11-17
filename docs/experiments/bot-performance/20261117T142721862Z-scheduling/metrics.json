@@ -1,0 +1,103 @@
+{
+  "kind": "local-synthetic-performance",
+  "model": null,
+  "network": "simulated RTT only",
+  "recordedAt": "2026-11-17T14:27:22.813Z",
+  "environment": {
+    "node": "v22.23.5",
+    "platform": "darwin",
+    "arch": "arm64",
+    "cpu": "Apple M2"
+  },
+  "cases": [
+    {
+      "name": "host_concurrency",
+      "works": 8,
+      "backgroundActive": 8,
+      "configuredExecutionLimit": null,
+      "queued": 0,
+      "completed": 8,
+      "peak": 9,
+      "admissionMs": 7.877,
+      "mainSchedulingMs": 1.801,
+      "duringAdmission": {
+        "mainArrivedWith": 8,
+        "mainStartedWith": 8,
+        "timerArrivalMs": 6.47,
+        "mainSchedulingMs": 2.156,
+        "timerToMainStartMs": 8.626,
+        "eventLoopTicks": 0,
+        "maxTickGapMs": 0
+      },
+      "completionAndResultDrainMs": 27.317,
+      "model": "fake held leases, then release every work and drain results; no LLM requests"
+    },
+    {
+      "name": "host_concurrency",
+      "works": 32,
+      "backgroundActive": 32,
+      "configuredExecutionLimit": null,
+      "queued": 0,
+      "completed": 32,
+      "peak": 33,
+      "admissionMs": 29.691,
+      "mainSchedulingMs": 1.264,
+      "duringAdmission": {
+        "mainArrivedWith": 22,
+        "mainStartedWith": 32,
+        "timerArrivalMs": 16.574,
+        "mainSchedulingMs": 12.037,
+        "timerToMainStartMs": 28.611,
+        "eventLoopTicks": 1,
+        "maxTickGapMs": 17.62
+      },
+      "completionAndResultDrainMs": 106.595,
+      "model": "fake held leases, then release every work and drain results; no LLM requests"
+    },
+    {
+      "name": "host_concurrency",
+      "works": 100,
+      "backgroundActive": 100,
+      "configuredExecutionLimit": null,
+      "queued": 0,
+      "completed": 100,
+      "peak": 101,
+      "admissionMs": 97.593,
+      "mainSchedulingMs": 1.604,
+      "duringAdmission": {
+        "mainArrivedWith": 20,
+        "mainStartedWith": 29,
+        "timerArrivalMs": 16.685,
+        "mainSchedulingMs": 8.761,
+        "timerToMainStartMs": 25.446,
+        "eventLoopTicks": 8,
+        "maxTickGapMs": 18.882
+      },
+      "completionAndResultDrainMs": 334.903,
+      "model": "fake held leases, then release every work and drain results; no LLM requests"
+    },
+    {
+      "name": "host_concurrency",
+      "works": 500,
+      "backgroundActive": 500,
+      "configuredExecutionLimit": null,
+      "queued": 0,
+      "completed": 500,
+      "peak": 501,
+      "admissionMs": 689.262,
+      "mainSchedulingMs": 1.778,
+      "duringAdmission": {
+        "mainArrivedWith": 12,
+        "mainStartedWith": 17,
+        "timerArrivalMs": 17.263,
+        "mainSchedulingMs": 9.275,
+        "timerToMainStartMs": 26.537,
+        "eventLoopTicks": 69,
+        "maxTickGapMs": 44.104
+      },
+      "completionAndResultDrainMs": 1792.952,
+      "model": "fake held leases, then release every work and drain results; no LLM requests"
+    }
+  ],
+  "status": "passed"
+}

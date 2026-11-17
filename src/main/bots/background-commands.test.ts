@@ -259,6 +259,9 @@ describe("Bot native command receipts", () => {
   it("migrates old command rows without inventing their original user request", () => {
     const { db, store, task, command, result } = fixture()
     store.acceptCommand(task.id, command)
+    // Reconstruct the old schema, which had neither this index nor connection-local observers.
+    db.run("DROP INDEX bot_commands_busy_source")
+    for (const action of ["INSERT", "UPDATE", "DELETE"]) db.run(`DROP TRIGGER bot_commands_invalidate_${action}`)
     db.run("ALTER TABLE bot_commands DROP COLUMN source_task_id")
     const reopened = new BotStore(db)
     reopened.transition(task.id, "completed")

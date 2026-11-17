@@ -11,6 +11,9 @@ export interface FeatureTaskQuery {
   before?: number
   limit?: number
   followId?: string
+  followIds?: string[]
+  attentionOnly?: boolean
+  liveIds?: string[]
 }
 export interface FeatureOwner extends FeatureScope, BotFeatureFollow {}
 export type FeatureOperation = "session" | "continue" | "manage" | "stop" | "interrupt"
@@ -73,6 +76,15 @@ export class BotFeatureStore {
       decision_thread: "TEXT",
       terminal_phase: "TEXT"
     })
+    db.run(`CREATE INDEX IF NOT EXISTS bot_feature_directory ON bot_feature_follows(bot_id,audience);
+      CREATE INDEX IF NOT EXISTS bot_feature_ops_history ON bot_feature_ops(follow_id) WHERE action IN ('manage','session','continue');
+      CREATE INDEX IF NOT EXISTS bot_feature_ops_active ON bot_feature_ops(follow_id) WHERE action IN ('manage','session','continue') AND state IN ('starting','active');
+      CREATE INDEX IF NOT EXISTS bot_feature_ops_decision ON bot_feature_ops(follow_id) WHERE action IN ('manage','session','continue') AND decision_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS bot_feature_ops_active_decision ON bot_feature_ops(follow_id) WHERE action IN ('manage','session','continue') AND decision_id IS NOT NULL AND state IN ('starting','active');`)
+  }
+  linkedSlugs(scope: FeatureScope, projectId: string): Set<string> {
+    return new Set(this.rows("SELECT slug FROM bot_feature_follows WHERE bot_id=? AND audience=? AND project_id=?",
+      [scope.botId, scope.audience, projectId]).map(row => String(row.slug)))
   }
   follow(scope: FeatureScope, feature: Omit<BotFeatureFollow, "id">): FeatureOwner {
     this.db.run(
@@ -151,7 +163,7 @@ export class BotFeatureStore {
   /** Only small indexed Bot records: listing tasks never reads project files, messages or run logs. */
   taskRows(
     scope: FeatureScope,
-    { query = "", before = Number.MAX_SAFE_INTEGER, limit = -1, followId }: FeatureTaskQuery = {}
+    { query = "", before = Number.MAX_SAFE_INTEGER, limit = -1, followId, followIds, attentionOnly, liveIds = [] }: FeatureTaskQuery = {}
   ) {
     return this.rows(
       `SELECT f.rowid AS ordinal,f.id,f.project_id AS projectId,f.slug,f.project_name AS projectName,f.title,
@@ -161,12 +173,20 @@ export class BotFeatureStore {
         WHEN o.terminal_phase IS NOT NULL THEN o.terminal_phase WHEN o.state='failed' THEN 'failed'
         WHEN o.state='finished' THEN 'replied' WHEN EXISTS(SELECT 1 FROM bot_feature_sessions s WHERE s.follow_id=f.id) THEN 'linked'
         ELSE 'following' END AS phase
-      FROM bot_feature_follows f LEFT JOIN bot_feature_ops o ON o.id=(
-        SELECT id FROM bot_feature_ops WHERE follow_id=f.id AND action IN ('manage','session','continue')
-        ORDER BY (decision_id IS NOT NULL) DESC,(state IN ('starting','active')) DESC,rowid DESC LIMIT 1)
-      WHERE f.bot_id=? AND f.audience=? ${followId ? "AND f.id=?" : ""} AND f.rowid<? AND (?='' OR instr(lower(f.title||' '||f.project_name||' '||f.slug),lower(?))>0)
+      FROM bot_feature_follows f LEFT JOIN bot_feature_ops o ON o.id=COALESCE(
+        (SELECT id FROM bot_feature_ops WHERE follow_id=f.id AND action IN ('manage','session','continue') AND decision_id IS NOT NULL AND state IN ('starting','active') ORDER BY rowid DESC LIMIT 1),
+        (SELECT id FROM bot_feature_ops WHERE follow_id=f.id AND action IN ('manage','session','continue') AND decision_id IS NOT NULL ORDER BY rowid DESC LIMIT 1),
+        (SELECT id FROM bot_feature_ops WHERE follow_id=f.id AND action IN ('manage','session','continue') AND state IN ('starting','active') ORDER BY rowid DESC LIMIT 1),
+        (SELECT id FROM bot_feature_ops WHERE follow_id=f.id AND action IN ('manage','session','continue') ORDER BY rowid DESC LIMIT 1))
+      WHERE f.bot_id=? AND f.audience=? ${followId ? "AND f.id=?" : ""}
+      ${followIds ? `AND f.id IN (${followIds.map(() => "?").join(",")})` : ""}
+      ${attentionOnly ? `AND f.state='active' AND f.id IN (
+        SELECT follow_id FROM bot_feature_ops WHERE action IN ('manage','session','continue') AND state IN ('starting','active')
+        UNION SELECT follow_id FROM bot_feature_ops WHERE action IN ('manage','session','continue') AND decision_id IS NOT NULL
+        ${liveIds.length ? `UNION SELECT id FROM bot_feature_follows WHERE id IN (${liveIds.map(() => "?").join(",")})` : ""})` : ""}
+      AND f.rowid<? AND (?='' OR instr(lower(f.title||' '||f.project_name||' '||f.slug),lower(?))>0)
       ORDER BY f.rowid DESC LIMIT ?`,
-      [scope.botId, scope.audience, ...(followId ? [followId] : []), before, query, query, limit]
+      [scope.botId, scope.audience, ...(followId ? [followId] : []), ...(followIds ?? []), ...(attentionOnly ? liveIds : []), before, query, query, limit]
     ) as unknown as (Omit<BotFeatureTask, "kind"> & { ordinal: number })[]
   }
   private touch(id: string) {

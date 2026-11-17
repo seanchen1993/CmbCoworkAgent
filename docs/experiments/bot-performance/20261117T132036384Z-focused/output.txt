@@ -1,0 +1,448 @@
+
+ RUN  v3.2.4 <repo>
+
+(node:70218) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:70217) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/main/bots/work-projection.test.ts (5 tests | 5 failed) 145ms
+   × work activity projection query boundaries > seeks the existing family index for list, detail and summaries despite unrelated private history 47ms
+     → UNIQUE constraint failed: bot_work_changes.id
+   × work activity projection query boundaries > keeps direct and peer command work in priority without admitting unrelated private commands 26ms
+     → UNIQUE constraint failed: bot_work_changes.id
+   × work activity projection query boundaries > preserves family state, owner and audience isolation as peers finish 24ms
+     → UNIQUE constraint failed: bot_work_changes.id
+   × work activity projection query boundaries > paginates smaller prompt snapshots without omissions or extra database requests 23ms
+     → UNIQUE constraint failed: bot_work_changes.id
+   × work activity projection query boundaries > retains the newest primary outcome for same-millisecond turns without reading result bodies 23ms
+     → UNIQUE constraint failed: bot_work_changes.id
+ ✓ src/main/bots/memory.test.ts (15 tests) 105ms
+ ✓ src/main/bots/prompt.test.ts (36 tests) 40ms
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+langsmith/experimental/sandbox is in alpha. This feature is experimental, and breaking changes are expected.
+
+stdout | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] Custom model: o07-test-model baseUrl: https://o07.invalid/v1
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 1/5 after 1000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 2/5 after 2000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 3/5 after 4000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 4/5 after 8000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 5/5 after 16000ms
+
+stdout | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch headers in 0ms: status=200, stream requested=false, content-type=application/json, request-id=unknown
+
+ ❯ src/main/bots/host.test.ts (175 tests | 8 failed) 30317ms
+   ✓ stops the whole group including completed peer owners (worker first: false)  304ms
+   ✓ stops the whole group including completed peer owners (worker first: true) 295ms
+   ✓ Bot control state > persists portable skill choices, preserves old-client updates, and defaults legacy rows to all 32ms
+   ✓ Bot control state > retains a file sender while its private reply is queued in another Bot's inbox 30ms
+   ✓ Bot control state > retains a file sender while its private reply is running in another Bot's inbox 25ms
+   ✓ Bot control state > retains a file sender while its private reply is waiting_user in another Bot's inbox 27ms
+   ✓ Bot control state > does not block deleting a sender for a text reply without a live private file dependency 26ms
+   ✓ Bot control state > does not block deleting a sender for a cancelled reply without a live private file dependency 29ms
+   ✓ Bot control state > does not block deleting a sender for a group reply without a live private file dependency 24ms
+   ✓ Bot control state > restarts private queued peers only when the parent completed (false) 129ms
+   × Bot control state > restarts work queued peers only when the parent completed (false) 101ms
+     → expected 'running' to be 'interrupted' // Object.is equality
+   ✓ Bot control state > restarts group queued peers only when the parent completed (false) 137ms
+   ✓ Bot control state > restarts private queued peers only when the parent completed (true) 143ms
+   × Bot control state > restarts work queued peers only when the parent completed (true) 1045ms
+     → expected 'running' to be 'completed' // Object.is equality
+   ✓ Bot control state > restarts group queued peers only when the parent completed (true) 131ms
+   × Bot control state > fences archive against the owning Bot's existing Team work until recovery and delivery finish 10039ms
+     → UNIQUE constraint failed: bot_work_changes.id
+     → Hook timed out in 10000ms.
+If this is a long-running hook, pass a timeout value as the last argument or configure it globally with "hookTimeout".
+   ✓ Bot control state > upgrades old Bots to inherited memory and preserves explicit overrides across older-client edits and reopening 45ms
+   ✓ Bot control state > reports browser member cleanup reject without reverting durable membership 87ms
+   ✓ Bot control state > reports browser member cleanup throw without reverting durable membership 45ms
+   ✓ Bot control state > retains public file history after author removal and deletion, while rejecting new member operations 52ms
+   ✓ Bot control state > resolves only a current member's private group reference with public Bot-member identities 32ms
+   ✓ Bot control state > starts an independent Bot run in the host context after the waking tool's scope expires  1885ms
+   ✓ Bot control state > retains verified peer outputs across a private turn and sends one original reply 53ms
+   ✓ Bot control state > rejects malformed continuation files and never relabels an exact user receipt as background work 48ms
+   ✓ Bot control state > settles a deferred group peer reply after restart without replay or a second receipt 58ms
+   ✓ Bot control state > closes a deferred private peer task once after recovery without replaying its files 37ms
+   ✓ Bot control state > cancels a deferred group task once without consuming its queued private message 45ms
+   ✓ Bot control state > resumes a deferred group independently of private input and settles one group result 37ms
+   ✓ Bot control state > does not replay a yielded group checkpoint after process recovery 37ms
+   ✓ Bot control state > reports only actual profile field changes without changing the stored definition shape 46ms
+   × Bot control state > invalidates a memory view without changing control state or broadcasting private content 36ms
+     → expected [ [ { hostId: 'local', …(3) } ] ] to deeply equal [ [ { hostId: 'local', …(2) } ] ]
+   ✓ Bot control state > merges a requested teammate profile without changing identity or touching a busy target 56ms
+   ✓ Bot control state > limits teammate changes to group members and denies peer or routine reconfiguration 98ms
+   ✓ Bot control state > creates a persistent teammate from direct work once, without starting work or copying private state 54ms
+   ✓ Bot control state > allows addressed group creation without adding members and denies peer/routine authority 40ms
+   ✓ Bot control state > prioritizes direct user work, then group work, then peer work ahead of background triggers 32ms
+   ✓ Bot control state > keeps terminal enum values out of user-facing empty-result activity summaries 33ms
+   ✓ Bot control state > stops accepted private work missing from a renderer snapshot without cancelling group or peer work 40ms
+   ✓ Bot control state > cleans only the failed direct Bot task's silent service 87ms
+   ✓ Bot control state > cleans the notification's own service when failed, preserving the original task's service 93ms
+   ✓ Bot control state > cleans the notification's own service when cancelled, preserving the original task's service 140ms
+   ✓ Bot control state > cleans a failed peer's jobs and services before returning failure, preserving another task's command 142ms
+   ✓ Bot control state > withdraws only a paused source's command after its real stop receipt (notify=true) 144ms
+   ✓ Bot control state > withdraws only a paused source's command after its real stop receipt (notify=false) 170ms
+   ✓ Bot control state > stops detached work even after its launching inbox task completed 33ms
+   ✓ Bot control state > stops only the chosen group conversation and rejects non-member targets 27ms
+   ✓ Bot control state > keeps private file references in the durable reply, bounded and idempotent (completed) 31ms
+   ✓ Bot control state > keeps private file references in the durable reply, bounded and idempotent (cancelled) 34ms
+   ✓ Bot control state > returns verified internal group files to the caller without publishing or importing them 31ms
+   ✓ Bot control state > persists idempotent group file delivery and rejects private, terminal or removed-member publication 32ms
+   ✓ Bot control state > persists a group summary and files atomically under the original idempotent delivery ID 30ms
+   ✓ Bot control state > records a no-change routine completion without making the Bot unread 24ms
+   ✓ Bot control state > keeps delivered routine files visible in activity even with a terminal silence marker 24ms
+   ✓ Bot control state > keeps a no-news command receipt quiet (group: false), but retains news and files 32ms
+   ✓ Bot control state > keeps a no-news command receipt quiet (group: true), but retains news and files 36ms
+   ✓ Bot control state > still alerts for a command notification that actually needs user confirmation 23ms
+   ✓ Bot control state > pages bidirectional exchange history at equal timestamps without leaking another pair or group 189ms
+   ✓ Bot control state > reads full dispatches and queued/delivered receipts without exposing private or group conversations 36ms
+   ✓ Bot control state > keeps a manual unread boundary ahead of stale read acknowledgements without replacing activity 25ms
+   ✓ Bot control state > migrates display labels without changing identity and preserves labels from older callers 49ms
+   ✓ Bot control state > allows only existing group or Bot browser owners 34ms
+   ✓ Bot control state > persists actual schedule triggers and resets the receipt only when execution changes 36ms
+   ✓ Bot control state > persists bounded result previews and preserves new unread activity across stale acknowledgements 35ms
+   ✓ Bot control state > keeps group summaries and unread state separate from members' private conversations 26ms
+   ✓ Bot control state > keeps a new empty group in recent conversations without unread or a greeting task 42ms
+   ✓ Bot control state > allows a group to rename while retaining an existing archived member 29ms
+   ✓ Bot control state > allows a group to add while retaining an existing archived member 36ms
+   ✓ Bot control state > allows a group to remove while retaining an existing archived member 24ms
+   ✓ Bot control state > rejects newly added archived members, including rejoining a previous group 26ms
+   ✓ Bot control state > provides current room members without inferring them from a title or expanding recipients 25ms
+   ✓ Bot control state > editing a routine cancels only its obsolete queued trigger and keeps running work explicit 28ms
+   ✓ Bot control state > updates only the running user's own profile without replacing identity or granting peer authority 56ms
+   ✓ Bot control state > accepts own-profile changes from an addressed group user and rejects relays, stale membership and foreign messages 49ms
+   ✓ Bot control state > rolls back a failed schema upgrade and repairs unfinished legacy task ownership 58ms
+   ✓ Bot control state > migrates stored avatar shapes, preserves them on legacy updates, and validates input 32ms
+   ✓ Bot control state > fences deletion durably, cancels pending work, removes membership and permits cleanup retries 32ms
+   ✓ Bot control state > does not revive a deleted Bot's future routine after Store and Host reopen 38ms
+   ✓ Bot control state > does not resurrect a deleted sender on a late receipt from a finished collaborator 27ms
+   ✓ Bot control state > queues a notification once in its owning thread and cannot revive it after Stop 26ms
+   ✓ Bot control state > isolates simultaneous private, group and routine background receipts in one host 138ms
+   ✓ Bot control state > deduplicates a workflow instance but accepts a resumed instance with the same run id 30ms
+   ✓ Bot control state > does not revive a stopped legacy receipt when instance identities are introduced 31ms
+   ✓ Bot control state > publishes completion only after durable settlement and does not poison the queue if notification fails 129ms
+   ✓ Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host  5974ms
+   ✓ Bot control state > deletes group execution history without deleting members' private conversations 29ms
+   ✓ Bot control state > recovers existing thread notifications without holding startup and aborts recovery before closing 28ms
+   ✓ Bot control state > prioritizes direct user work over pending Bot messages without preempting an active run 25ms
+   ✓ Bot control state > deduplicates submissions but rejects cross-bot and changed-body retries 27ms
+   ✓ Bot control state > preserves insertion order even when tasks share a timestamp 31ms
+   ✓ Bot control state > refuses edits during execution and optimistic-version conflicts 31ms
+   ✓ Bot control state > does not automatically replay interrupted external work 33ms
+   ✓ Bot control state > recovers one interruption receipt to a completed collaboration parent without replaying the child 30ms
+   ✓ Bot control state > does not wake a running parent on crash recovery 32ms
+   ✓ Bot control state > does not wake a cancelled parent on crash recovery 24ms
+   ✓ Bot control state > keeps a recovered group collaboration receipt in the same group 33ms
+   ✓ Bot control state > archive atomically cancels pending work and rejects new tasks 27ms
+   ✓ Bot control state > returns one cancellation receipt when an archived recipient has queued work (group=false) 28ms
+   ✓ Bot control state > returns one cancellation receipt when an archived recipient has queued work (group=true) 29ms
+   ✓ Bot control state > does not wake a cancelled parent when its queued recipient is archived 25ms
+   ✓ Bot control state > uses a readable completed receipt while retaining the actual state and exchange body 31ms
+   ✓ Bot control state > uses a readable failed receipt while retaining the actual state and exchange body 26ms
+   ✓ Bot control state > uses a readable cancelled receipt while retaining the actual state and exchange body 26ms
+   ✓ Bot control state > uses a readable interrupted receipt while retaining the actual state and exchange body 26ms
+   ✓ Bot control state > uses a readable outcome_unknown receipt while retaining the actual state and exchange body 32ms
+   ✓ Bot control state > validates untrusted input before filesystem or database use 0ms
+   ✓ Bot control state > persists explicit output requirements and rejects changed outputs on an idempotent dispatch 26ms
+   ✓ Bot control state > delivers peer work and replies durably without recursive automatic replies 27ms
+   ✓ Bot control state > does not wake a stopped root task with a late peer reply 29ms
+   ✓ Bot host scheduling > resumes a peer once per new receipt while retaining its pending command and final reply 135ms
+   ✓ Bot host scheduling > dispatches a withdrawn continuation's receipt while the independent private turn remains waiting 187ms
+   ✓ Bot host scheduling > still yields within the same conversation when the newest queued private message is cancelled 90ms
+   ✓ Bot host scheduling > yields bot at a model boundary, runs private input, then resumes the same task after lease release 149ms
+   ✓ Bot host scheduling > yields schedule at a model boundary, runs private input, then resumes the same task after lease release 133ms
+   ✓ Bot host scheduling > yields command at a model boundary, runs private input, then resumes the same task after lease release 132ms
+   ✓ Bot host scheduling > yields reaction at a model boundary, runs private input, then resumes the same task after lease release 131ms
+   ✓ Bot host scheduling > keeps peer handoffs and their receipts inside the group, including deduplication and member removal 32ms
+   ✓ Bot host scheduling > discards an undelivered peer receipt when its root was stopped before the outbox flushed 27ms
+   ✓ Bot host scheduling > returns one cancellation when a queued collaborator leaves, without exposing its late output 29ms
+   ✓ Bot host scheduling > returns one cancellation when a running collaborator leaves, without exposing its late output 26ms
+   ✓ Bot host scheduling > does not revive a stopped caller on member-removal receipt 28ms
+   ✓ Bot host scheduling > does not revive a removed caller on member-removal receipt 29ms
+   ✓ Bot host scheduling > bounds recursive handoffs and fan-out even when peers keep asking each other 38ms
+   ✓ Bot host scheduling > keeps group member threads separate from private chats and settles each result once 25ms
+   ✓ Bot host scheduling > persists bound mentions through rename and rejects altered retry identities and inconsistent recipients 25ms
+   ✓ Bot host scheduling > resolves reply context from the same group's stored message and preserves its retry identity 26ms
+   ✓ Bot host scheduling > sends only the explicitly mentioned member through the Host while retaining the other author's quote 38ms
+   ✓ Bot host scheduling > validates selected mentions without adding the persisted reply author as a direct recipient 29ms
+   ✓ Bot host scheduling > sends each member new group references without repeating the current request or other conversation data 35ms
+   ✓ Bot host scheduling > does not lose group references behind a queued turn 31ms
+   ✓ Bot host scheduling > does not lose group references behind a running turn 25ms
+   ✓ Bot host scheduling > does not lose group references behind a waiting_user turn 39ms
+   ✓ Bot host scheduling > does not lose group references behind a cancelled turn 25ms
+   ✓ Bot host scheduling > does not lose group references behind a failed turn 27ms
+   ✓ Bot host scheduling > does not lose group references behind a outcome_unknown turn 26ms
+   ✓ Bot host scheduling > bounds initial shared history and explicitly marks omitted references 63ms
+   ✓ Bot host scheduling > rejects absent or foreign group reply targets without recording or dispatching anything 27ms
+   ✓ Bot host scheduling > migrates legacy group history and keeps mention IDs across store reopen 41ms
+   ✓ Bot host scheduling > rejects nonmember dispatch and cancels queued work for removed members 24ms
+   ✓ Bot host scheduling > coalesces overdue schedules and does not duplicate a still-pending routine 25ms
+   ✓ Bot host scheduling > coalesces repeated resume after Store and Host reopen around an overdue pending routine 83ms
+   ✓ Bot host scheduling > disables the global cap with positive infinity while retaining same-conversation serialization 193ms
+   ✓ Bot host scheduling > does not yield another group's run when private input arrives for the same Bot 186ms
+   ✓ Bot host scheduling > holds only the cancelled command's conversation during physical cleanup 132ms
+   ✓ Bot host scheduling > keeps a group approval pending while the same Bot's private conversation and another member run 239ms
+   ✓ Bot host scheduling > runs initial room members concurrently while preserving same-thread cancellation cleanup 191ms
+   ✓ Bot host scheduling > runs independent bots concurrently, serializes each conversation, and releases after cancellation cleanup 182ms
+   ✓ Bot host scheduling > waits for runtime availability without polling and preserves unstarted tasks on shutdown 78ms
+   ✓ cancels an orphan group-post seed after author deletion without faulting other Bots 135ms
+   ✓ stops a root and its queued delegation without stopping unrelated recipient work 235ms
+   ✓ stops a root and its running delegation without stopping unrelated recipient work 131ms
+   ✓ does not dispatch a persisted peer of a cancelled root after host restart 88ms
+   ✓ stops outstanding peers of a completed dispatch and blocks late replies without changing finished unrelated history 186ms
+   × stops a work's queued peer chain of depth 1 without reviving its completed dispatcher 26ms
+     → UNIQUE constraint failed: bot_work_changes.id
+   × stops a work's queued peer chain of depth 2 without reviving its completed dispatcher 27ms
+     → UNIQUE constraint failed: bot_work_changes.id
+   × stops a work's running peer chain of depth 1 without reviving its completed dispatcher 25ms
+     → UNIQUE constraint failed: bot_work_changes.id
+   × stops a work's running peer chain of depth 2 without reviving its completed dispatcher 29ms
+     → UNIQUE constraint failed: bot_work_changes.id
+   ✓ stops only a completed peer service belonging to the stopped conversation (task stop=false) 189ms
+   ✓ stops only a completed peer service belonging to the stopped conversation (task stop=true) 184ms
+   ✓ stops only the queued descendants of an intermediate collaborator (dispatch complete: false, task stop: false) 196ms
+   ✓ stops only the running descendants of an intermediate collaborator (dispatch complete: false, task stop: false) 147ms
+   ✓ stops only the running descendants of an intermediate collaborator (dispatch complete: true, task stop: false) 135ms
+   ✓ stops only the queued descendants of an intermediate collaborator (dispatch complete: false, task stop: true) 187ms
+   ✓ stops only the running descendants of an intermediate collaborator (dispatch complete: false, task stop: true) 132ms
+   ✓ stops only the running descendants of an intermediate collaborator (dispatch complete: true, task stop: true) 136ms
+   ✓ keeps a completed dispatch stoppable outside recent history and rejects cancelled-ancestor dispatch on restart 212ms
+   ✓ stop fences the actual group collaborator and its child while preserving an independent branch 131ms
+   ✓ remove fences the actual group collaborator and its child while preserving an independent branch 133ms
+   ✓ reports one withdrawn queued collaboration to its live caller (group=false) 26ms
+   ✓ reports one withdrawn queued collaboration to its live caller (group=true) 26ms
+   ✓ rejects deleting a dispatcher with queued collaboration before changing ownership 23ms
+   ✓ rejects deleting a dispatcher with running collaboration before changing ownership 23ms
+   ✓ rejects deleting a dispatcher with service collaboration before changing ownership 26ms
+   ✓ does not revive a stopped root when withdrawing its queued collaboration 24ms
+   ✓ requires queued handoff cancellation to reach the caller before deleting its recipient (group=false) 27ms
+   ✓ requires queued handoff cancellation to reach the caller before deleting its recipient (group=true) 28ms
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 13 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/main/bots/host.test.ts > Bot control state > restarts work queued peers only when the parent completed (false)
+AssertionError: expected 'running' to be 'interrupted' // Object.is equality
+
+Expected: "interrupted"
+Received: "running"
+
+ ❯ src/main/bots/host.test.ts:233:38
+    231|     })
+    232|     await original.stop()
+    233|     expect(db.getTask(rootId).state).toBe(completed ? "completed" : "i…
+       |                                      ^
+    234|     const acquired: string[] = []
+    235|     const restarted = new LocalBotHost(db, {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/14]⎯
+
+ FAIL  src/main/bots/host.test.ts > Bot control state > restarts work queued peers only when the parent completed (true)
+AssertionError: expected 'running' to be 'completed' // Object.is equality
+
+Expected: "completed"
+Received: "running"
+
+ ❯ src/main/bots/host.test.ts:230:55
+    228|       expect(childId).not.toBe("")
+    229|       expect(db.getTask(childId).state).toBe("queued")
+    230|       if (completed) expect(db.getTask(rootId).state).toBe("completed")
+       |                                                       ^
+    231|     })
+    232|     await original.stop()
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/14]⎯
+
+ FAIL  src/main/bots/host.test.ts > Bot control state > fences archive against the owning Bot's existing Team work until recovery and delivery finish
+Error: UNIQUE constraint failed: bot_work_changes.id
+ ❯ runStatement src/main/db/native-sqlite-adapter.ts:94:15
+     92| ): void {
+     93|   if (Array.isArray(bindings)) {
+     94|     statement.run(...bindings)
+       |               ^
+     95|   } else {
+     96|     statement.run(bindings)
+ ❯ NativeSqliteAdapter.run src/main/db/native-sqlite-adapter.ts:177:7
+ ❯ BotStore.noteWorkActivity src/main/bots/store.ts:707:13
+ ❯ src/main/bots/store.ts:4371:14
+ ❯ BotStore.transaction src/main/bots/store.ts:644:22
+ ❯ BotStore.settle src/main/bots/store.ts:4275:10
+ ❯ src/main/bots/host.test.ts:269:8
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/14]⎯
+
+ FAIL  src/main/bots/host.test.ts > Bot control state > fences archive against the owning Bot's existing Team work until recovery and delivery finish
+Error: Hook timed out in 10000ms.
+If this is a long-running hook, pass a timeout value as the last argument or configure it globally with "hookTimeout".
+ ❯ src/main/bots/host.test.ts:81:1
+     79|   return new BotStore(db, () => 1000)
+     80| }
+     81| afterEach(async () => {
+       | ^
+     82|   await Promise.all(hosts.splice(0).map((host) => host.stop()))
+     83|   databases.splice(0).forEach((db) => db.close())
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/14]⎯
+
+ FAIL  src/main/bots/host.test.ts > Bot control state > invalidates a memory view without changing control state or broadcasting private content
+AssertionError: expected [ [ { hostId: 'local', …(3) } ] ] to deeply equal [ [ { hostId: 'local', …(2) } ] ]
+
+- Expected
++ Received
+
+@@ -2,8 +2,9 @@
+    [
+      {
+        "hostId": "local",
+        "memoryBotId": "be841cf2-6452-4f86-90e2-ea4b8403ecaa",
+        "revision": 1,
++       "workChanges": [],
+      },
+    ],
+  ]
+
+ ❯ src/main/bots/host.test.ts:706:33
+    704|     const unsubscribe = host.subscribe(listener)
+    705|     host.memoryChanged(bot.id)
+    706|     expect(listener.mock.calls).toEqual([
+       |                                 ^
+    707|       [{ hostId: "local", revision: before.revision, memoryBotId: bot.…
+    708|     ])
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/14]⎯
+
+ FAIL  src/main/bots/host.test.ts > stops a work's queued peer chain of depth 1 without reviving its completed dispatcher
+ FAIL  src/main/bots/host.test.ts > stops a work's queued peer chain of depth 2 without reviving its completed dispatcher
+ FAIL  src/main/bots/host.test.ts > stops a work's running peer chain of depth 1 without reviving its completed dispatcher
+ FAIL  src/main/bots/host.test.ts > stops a work's running peer chain of depth 2 without reviving its completed dispatcher
+Error: UNIQUE constraint failed: bot_work_changes.id
+ ❯ runStatement src/main/db/native-sqlite-adapter.ts:94:15
+     92| ): void {
+     93|   if (Array.isArray(bindings)) {
+     94|     statement.run(...bindings)
+       |               ^
+     95|   } else {
+     96|     statement.run(bindings)
+ ❯ NativeSqliteAdapter.run src/main/db/native-sqlite-adapter.ts:177:7
+ ❯ BotStore.noteWorkActivity src/main/bots/store.ts:707:13
+ ❯ src/main/bots/store.ts:4371:14
+ ❯ BotStore.transaction src/main/bots/store.ts:644:22
+ ❯ BotStore.settle src/main/bots/store.ts:4275:10
+ ❯ src/main/bots/host.test.ts:4278:6
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/14]⎯
+
+ FAIL  src/main/bots/work-projection.test.ts > work activity projection query boundaries > seeks the existing family index for list, detail and summaries despite unrelated private history
+Error: UNIQUE constraint failed: bot_work_changes.id
+ ❯ runStatement src/main/db/native-sqlite-adapter.ts:94:15
+     92| ): void {
+     93|   if (Array.isArray(bindings)) {
+     94|     statement.run(...bindings)
+       |               ^
+     95|   } else {
+     96|     statement.run(bindings)
+ ❯ NativeSqliteAdapter.run src/main/db/native-sqlite-adapter.ts:177:7
+ ❯ BotStore.noteWorkActivity src/main/bots/store.ts:707:13
+ ❯ src/main/bots/store.ts:4371:14
+ ❯ BotStore.transaction src/main/bots/store.ts:644:22
+ ❯ BotStore.settle src/main/bots/store.ts:4275:10
+ ❯ src/main/bots/work-projection.test.ts:25:11
+ ❯ fixture src/main/bots/work-projection.test.ts:17:23
+ ❯ src/main/bots/work-projection.test.ts:60:15
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/14]⎯
+
+ FAIL  src/main/bots/work-projection.test.ts > work activity projection query boundaries > keeps direct and peer command work in priority without admitting unrelated private commands
+Error: UNIQUE constraint failed: bot_work_changes.id
+ ❯ runStatement src/main/db/native-sqlite-adapter.ts:94:15
+     92| ): void {
+     93|   if (Array.isArray(bindings)) {
+     94|     statement.run(...bindings)
+       |               ^
+     95|   } else {
+     96|     statement.run(bindings)
+ ❯ NativeSqliteAdapter.run src/main/db/native-sqlite-adapter.ts:177:7
+ ❯ BotStore.noteWorkActivity src/main/bots/store.ts:707:13
+ ❯ src/main/bots/store.ts:4371:14
+ ❯ BotStore.transaction src/main/bots/store.ts:644:22
+ ❯ BotStore.settle src/main/bots/store.ts:4275:10
+ ❯ src/main/bots/work-projection.test.ts:25:11
+ ❯ fixture src/main/bots/work-projection.test.ts:17:23
+ ❯ src/main/bots/work-projection.test.ts:127:15
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/14]⎯
+
+ FAIL  src/main/bots/work-projection.test.ts > work activity projection query boundaries > preserves family state, owner and audience isolation as peers finish
+Error: UNIQUE constraint failed: bot_work_changes.id
+ ❯ runStatement src/main/db/native-sqlite-adapter.ts:94:15
+     92| ): void {
+     93|   if (Array.isArray(bindings)) {
+     94|     statement.run(...bindings)
+       |               ^
+     95|   } else {
+     96|     statement.run(bindings)
+ ❯ NativeSqliteAdapter.run src/main/db/native-sqlite-adapter.ts:177:7
+ ❯ BotStore.noteWorkActivity src/main/bots/store.ts:707:13
+ ❯ src/main/bots/store.ts:4371:14
+ ❯ BotStore.transaction src/main/bots/store.ts:644:22
+ ❯ BotStore.settle src/main/bots/store.ts:4275:10
+ ❯ src/main/bots/work-projection.test.ts:25:11
+ ❯ fixture src/main/bots/work-projection.test.ts:17:23
+ ❯ src/main/bots/work-projection.test.ts:155:15
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[9/14]⎯
+
+ FAIL  src/main/bots/work-projection.test.ts > work activity projection query boundaries > paginates smaller prompt snapshots without omissions or extra database requests
+Error: UNIQUE constraint failed: bot_work_changes.id
+ ❯ runStatement src/main/db/native-sqlite-adapter.ts:94:15
+     92| ): void {
+     93|   if (Array.isArray(bindings)) {
+     94|     statement.run(...bindings)
+       |               ^
+     95|   } else {
+     96|     statement.run(bindings)
+ ❯ NativeSqliteAdapter.run src/main/db/native-sqlite-adapter.ts:177:7
+ ❯ BotStore.noteWorkActivity src/main/bots/store.ts:707:13
+ ❯ src/main/bots/store.ts:4371:14
+ ❯ BotStore.transaction src/main/bots/store.ts:644:22
+ ❯ BotStore.settle src/main/bots/store.ts:4275:10
+ ❯ src/main/bots/work-projection.test.ts:25:11
+ ❯ fixture src/main/bots/work-projection.test.ts:17:23
+ ❯ src/main/bots/work-projection.test.ts:184:15
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[10/14]⎯
+
+ FAIL  src/main/bots/work-projection.test.ts > work activity projection query boundaries > retains the newest primary outcome for same-millisecond turns without reading result bodies
+Error: UNIQUE constraint failed: bot_work_changes.id
+ ❯ runStatement src/main/db/native-sqlite-adapter.ts:94:15
+     92| ): void {
+     93|   if (Array.isArray(bindings)) {
+     94|     statement.run(...bindings)
+       |               ^
+     95|   } else {
+     96|     statement.run(bindings)
+ ❯ NativeSqliteAdapter.run src/main/db/native-sqlite-adapter.ts:177:7
+ ❯ BotStore.noteWorkActivity src/main/bots/store.ts:707:13
+ ❯ src/main/bots/store.ts:4371:14
+ ❯ BotStore.transaction src/main/bots/store.ts:644:22
+ ❯ BotStore.settle src/main/bots/store.ts:4275:10
+ ❯ src/main/bots/work-projection.test.ts:204:11
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[11/14]⎯
+
+
+ Test Files  2 failed | 2 passed (4)
+      Tests  13 failed | 218 passed (231)
+   Start at  21:20:36
+   Duration  31.32s (transform 3.13s, setup 0ms, collect 1.64s, tests 30.61s, environment 0ms, prepare 147ms)
+

@@ -153,8 +153,11 @@ export function registerBotHandlers(
     return (await featureCatalog(groupId)).listRemoteProjects()
   })
   ipcMain.handle("bots:feature:catalog", async (event, hostId, botId, projectId, groupId) => {
-    featureScope(desktopHost(event, hostId), botId, groupId)
-    return (await featureCatalog(groupId)).listRemoteFeatures(featureText(projectId))
+    const host = desktopHost(event, hostId)
+    const scope = featureScope(host, botId, groupId)
+    const id = featureText(projectId)
+    const linked = host.featureStore.linkedSlugs(scope, id)
+    return (await (await featureCatalog(groupId)).listRemoteFeatures(id)).map(feature => ({ ...feature, linked: linked.has(feature.slug) }))
   })
   ipcMain.handle("bots:feature:follow", async (event, hostId, botId, projectId, slug, groupId) => {
     const host = desktopHost(event, hostId)
@@ -188,6 +191,15 @@ export function registerBotHandlers(
         return owner
       }
     )
+  })
+  ipcMain.handle("bots:feature:page", (event, hostId, botId, groupId, input) => {
+    const host = desktopHost(event, hostId)
+    if (input !== undefined && (!input || typeof input !== "object" || Array.isArray(input)))
+      throw new BotError("INVALID_INPUT", "Feature 查询无效")
+    const page = host.featureTaskPage(featureScope(host, botId, groupId), input)
+    const tasks = [...page.items, ...page.priority, ...page.refreshed]
+    if (tasks.length) void refreshBotFeatureProjects([...new Set(tasks.map(task => task.projectId))])
+    return page
   })
   ipcMain.handle("bots:feature:list", (event, hostId, botId, groupId) => {
     const host = desktopHost(event, hostId)

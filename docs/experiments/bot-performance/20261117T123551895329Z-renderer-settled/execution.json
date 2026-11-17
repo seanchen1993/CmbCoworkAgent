@@ -1,0 +1,21 @@
+{
+  "startedAt": "2026-11-17T12:35:51.895775+00:00",
+  "case": "renderer-settled",
+  "args": [
+    "--import",
+    "tsx",
+    "tests/bot-performance-browser.spec.ts"
+  ],
+  "head": "f91771b435c57c6548bb3292566161b3d7d52ef4",
+  "branch": "codex/merge-uat-into-bot-beta",
+  "kind": "local synthetic or regression; no production load",
+  "platform": "Darwin",
+  "sourceHashes": {
+    "tests/bot-performance-review.spec.ts": "2be49f580fb7bc406652352914f0976ac41f7e7654520777dfd32005881edbd7",
+    "tests/bot-performance-browser.spec.ts": "531acfe104a74b1980b38d025d5b202d4cd7263f042b6a090335ca338ecd8776",
+    "tests/support/bot-performance-browser-fixture.tsx": "f0d506a5e0074dba0ceb63e9e91ee07fb658d27f3ef630c8b359e2d8f2925294"
+  },
+  "exitCode": 0,
+  "seconds": 4.512,
+  "finishedAt": "2026-11-17T12:35:56.423978+00:00"
+}

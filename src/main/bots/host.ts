@@ -160,13 +160,24 @@ export class LocalBotHost {
   private stopping = false
   private faulted = false
   private scheduled = false
+  private yieldBeforePump = false
+  private admissionExcluded: Set<string> | undefined
   private mockDelivering: Promise<void> | null = null
   private scheduleTimer: ReturnType<typeof setTimeout> | undefined
   private lastHistoryMaintenance = -Infinity
   // A tool may wake this queue, but its expiring call scope must not own a new Bot run.
   private readonly pumpInHostContext = AsyncResource.bind(() => {
+    if (this.stopping || this.faulted) {
+      this.scheduled = false
+      return
+    }
+    // A wake already queued by a receipt/listener must not bypass a requested yield.
+    if (this.yieldBeforePump) {
+      this.yieldBeforePump = false
+      setImmediate(this.pumpInHostContext)
+      return
+    }
     this.scheduled = false
-    if (this.stopping || this.faulted) return
     try {
       this.pump()
     } catch (error) {
@@ -183,14 +194,14 @@ export class LocalBotHost {
     private readonly nextSchedule?: (input: BotScheduleInput, from: Date) => string | null,
     private readonly mockTransport: BotMockTransport = { send: async () => "sent" }
   ) {
-    // Positive infinity explicitly disables only the Host-wide admission cap.
+    // Production disables only the Host-wide cap; thread/resource ownership still applies.
     if (
       concurrency !== Number.POSITIVE_INFINITY &&
       (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16)
     )
       throw new Error("Invalid Bot concurrency")
     store.recover()
-    this.unsubscribe = runtime.onAvailable(() => this.wake())
+    this.unsubscribe = runtime.onAvailable(() => { this.admissionExcluded = undefined; this.wake() })
     this.wake()
     this.armSchedules()
     if (runtime.recover) {
@@ -345,6 +356,7 @@ export class LocalBotHost {
     const event = {
       hostId: LOCAL_BOT_HOST_ID,
       revision: this.store.revision(),
+      workChanges: this.store.workInvalidations.take(),
       ...detail
     }
     for (const listener of this.listeners) {
@@ -507,6 +519,29 @@ export class LocalBotHost {
       return { task, ordinal }
     })
   }
+  featureTaskPage(scope: FeatureScope, input: import("../../shared/bots/feature").BotFeaturePageInput = {}) {
+    const query = input.query ?? ""
+    const ids = input.refreshIds ?? []
+    if (typeof query !== "string" || query.length > 200 || !Array.isArray(ids) || ids.length > 40 ||
+      ids.some(id => typeof id !== "string" || id.length > 160) || new Set(ids).size !== ids.length)
+      throw new BotError("INVALID_INPUT", "Feature 查询无效")
+    let before = Number.MAX_SAFE_INTEGER
+    if (input.cursor !== undefined) {
+      try {
+        if (typeof input.cursor !== "string" || input.cursor.length > 2048) throw new Error()
+        const [botId, audience, search, ordinal] = JSON.parse(Buffer.from(input.cursor, "base64url").toString())
+        if (botId !== scope.botId || audience !== scope.audience || search !== query || !Number.isSafeInteger(ordinal) || ordinal <= 0) throw new Error()
+        before = ordinal
+      } catch { throw new BotError("INVALID_INPUT", "Feature 游标无效") }
+    }
+    const rows = this.featureTasks(scope, { query, before, limit: 41 })
+    return {
+      items: rows.slice(0, 40).map(row => row.task),
+      priority: this.featureTasks(scope, { query, attentionOnly: true, liveIds: this.featureTurns.activeFollowIds(), limit: 6 }).map(row => row.task),
+      refreshed: ids.length ? this.featureTasks(scope, { followIds: ids, limit: 40 }).map(row => row.task) : [],
+      nextCursor: rows.length > 40 ? Buffer.from(JSON.stringify([scope.botId, scope.audience, query, rows[39].ordinal])).toString("base64url") : null
+    }
+  }
   taskDirectory(taskId: string, cursor?: string, query = "") {
     const source = this.workToolSource(taskId)
     if (source.workId || (source.mockSource && source.mockSource.transport !== "im"))
@@ -666,13 +701,14 @@ export class LocalBotHost {
       throw new BotError("CONFLICT", "请从 Bot 主对话或已绑定的招乎群交办项目工作")
     return task
   }
-  featureChanged(scope: FeatureScope, followed?: { projectId: string; slug: string }) {
+  featureChanged(scope: FeatureScope & { id?: string; projectId?: string; slug?: string }, followed?: { id?: string; projectId: string; slug: string }) {
+    if (!followed && scope.projectId && scope.slug) followed = { id: scope.id, projectId: scope.projectId, slug: scope.slug }
     if (!this.stopping)
       this.changed({
         featureScope: {
           botId: scope.botId,
           audience: scope.audience,
-          ...(followed ? { projectId: followed.projectId, slug: followed.slug } : {})
+          ...(followed ? { projectId: followed.projectId, slug: followed.slug, ...(followed.id ? { followId: followed.id } : {}) } : {})
         }
       })
   }
@@ -746,7 +782,12 @@ export class LocalBotHost {
       if (active) run.browserHelp = help
       else if (run.browserHelp?.generation === help.generation) run.browserHelp = undefined
     }
-    this.updateImState(() => this.store.im.browserHelpNotice(this.store.getTask(taskId), help, active))
+    const task = this.store.getTask(taskId)
+    const workId = botTaskWorkFamily(task)
+    if (workId) this.store.workInvalidations.mark(workId)
+    this.updateImState(() => this.store.im.browserHelpNotice(task, help, active))
+    // Local browser help can change without an IM outbox write.
+    if (workId) this.changed()
   }
   imFileStatuses(botId: string, threadId: string, callId: string) {
     return this.store.im.fileStatuses(botId, threadId, callId)
@@ -1968,8 +2009,10 @@ export class LocalBotHost {
     this.mockRecoveryTimer.unref?.()
   }
 
-  private wake(): void {
-    if (this.stopping || this.faulted || this.scheduled) return
+  private wake(yieldToLoop = false): void {
+    if (this.stopping || this.faulted) return
+    this.yieldBeforePump ||= yieldToLoop
+    if (this.scheduled) return
     this.scheduled = true
     queueMicrotask(this.pumpInHostContext)
   }
@@ -1994,17 +2037,30 @@ export class LocalBotHost {
     // Retiring stale group posts can free capacity without dispatching a task.
     if (this.store.hasPendingCommandNotifications() && this.store.flushReplies()) this.wake()
     this.pumpMockDelivery()
+    const unavailable = this.admissionExcluded ?? new Set<string>()
     const excluded = new Set([
+      ...unavailable,
       ...[...this.active.values()].map((run) => run.task.threadId),
       ...[...this.commandCancellations.values()].map((run) => run.threadId)
     ])
+    this.admissionExcluded = undefined
+    const startedAt = performance.now()
+    let inspected = 0
     while (!this.stopping && this.active.size < this.concurrency) {
+      // Bound synchronous scheduling time, never the number of concurrent tasks.
+      // Count unsuccessful lease attempts too; unavailable threads must not spin.
+      if (inspected > 0 && performance.now() - startedAt >= 8) {
+        // Only failed acquisitions survive a yield. A running thread can finish
+        // before the next slice; retaining it here would strand its queued results.
+        this.admissionExcluded = unavailable
+        this.wake(true)
+        return
+      }
+      inspected++
       const task = this.store.nextQueued(
         [...excluded],
-        // The finite-slot policy reserves capacity for main conversations. With
-        // admission uncapped, unrelated work threads need no global reservation.
         this.concurrency === Number.POSITIVE_INFINITY ||
-          ![...this.active.values()].some((run) => !!botTaskWorkFamily(run.task))
+          ![...this.active.values()].some(run => !!botTaskWorkFamily(run.task))
       )
       if (!task) return
       if (this.store.taskRootCancelled(task)) {
@@ -2018,7 +2074,10 @@ export class LocalBotHost {
         task,
         task.workId ? this.store.getWork(task.botId, task.workId) : undefined
       )
-      if (!lease) continue
+      if (!lease) {
+        unavailable.add(task.threadId)
+        continue
+      }
       try {
         this.store.transition(task.id, "running", null, task.groupSnapshotOrdinal)
       } catch (error) {

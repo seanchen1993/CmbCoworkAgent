@@ -409,10 +409,21 @@ export interface BotConversationActivity {
   unread: boolean
 }
 
+export interface BotWorkChange {
+  botId: string
+  audience: string
+  workIds: string[]
+  removedIds: string[]
+  /** A large transaction invalidates this scope; never silently drops IDs. */
+  reset?: true
+}
+
 export interface BotChangeEvent {
+  /** Present even when empty on scoped hosts; absent on legacy clients. */
+  workChanges?: BotWorkChange[]
   /** Group routes available to the project's association picker have changed. */
   featureTargetsChanged?: true
-  featureScope?: { botId: string; audience: string; projectId?: string; slug?: string }
+  featureScope?: { botId: string; audience: string; projectId?: string; slug?: string; followId?: string }
   hostId: string
   revision: number
   /** Invalidate only this reaction view; no transcript or emoji payload travels in the event. */

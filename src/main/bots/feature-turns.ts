@@ -44,6 +44,9 @@ export class BotFeatureTurns {
     const turn = this.turns.get(threadId)
     if (turn?.operationId === operationId) turn.phase = phase
   }
+  activeFollowIds() {
+    return [...new Set([...this.turns.values()].map(turn => turn.followId))]
+  }
   activity(followId: string) {
     let primary: { phase: "running" | "question" | "approval"; threadId: string } | undefined
     for (const [threadId, turn] of this.turns) {

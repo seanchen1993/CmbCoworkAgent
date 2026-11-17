@@ -71,6 +71,9 @@ export function buildBotMemoryPrompt(memories: readonly BotMemory[]): string {
   const shown: string[] = []
   let remaining = MEMORY_PROMPT_CHAR_BUDGET - 2 // JSON array delimiters
   for (const memory of memories) {
+    // JSON encoding cannot shorten content. Avoid serializing an entire large
+    // memory just to discover it cannot fit; smaller later facts still qualify.
+    if (memory.content.length > remaining) continue
     const entry = JSON.stringify({
       id: memory.id,
       name: memory.name,
