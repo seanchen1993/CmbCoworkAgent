@@ -1,0 +1,4 @@
+[2026-11-17T08:52:55.738Z] [INFO] [Orchestrator] execute: "echo '24 rows; 3 duplicates'" cwd=<temp>/bot-group-app-NIZbQR/agent-profile/bots/workspaces/mock-im-c12eb12299694307d0ca5da2e52296ef259404bf51e41fd9941cfa694fd5003a sandbox=none yolo=false
+[2026-11-17T08:52:55.738Z] [INFO] [Orchestrator] needs_approval → requesting user approval...
+[2026-11-17T08:52:55.740Z] [INFO] [Orchestrator] sending approval request on channel: approval:request:bot-im-99c4429a-2d01-4db5-be31-c16a92f6ccaa, reqId=45bfcd05-fdbb-4672-a804-f98d29b6eab8, runtimeThreadId=bot-im-99c4429a-2d01-4db5-be31-c16a92f6ccaa, command=echo '24 rows; 3 duplicates'
+[2026-11-17T08:53:55.949Z] [WARN] [Orchestrator] approval request abort: reqId=45bfcd05-fdbb-4672-a804-f98d29b6eab8

@@ -1,0 +1,10 @@
+
+ RUN  v3.2.4 <checkout>
+
+ ✓ src/main/agent/foreground-work-budget.test.ts (7 tests) 5ms
+
+ Test Files  1 passed (1)
+      Tests  7 passed (7)
+   Start at  17:24:00
+   Duration  655ms (transform 77ms, setup 0ms, collect 367ms, tests 5ms, environment 0ms, prepare 38ms)
+

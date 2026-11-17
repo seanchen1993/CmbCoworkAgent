@@ -1,5 +1,7 @@
 import { createMiddleware } from "langchain"
 import { ToolMessage } from "@langchain/core/messages"
+import { BOT_CONTINUATION_KIND } from "../../shared/bots/turn-feedback"
+import { acceptedBotDispatch } from "./bot-dispatch-feedback"
 
 /** Per physical main-chat turn. Never inherited by a worker or persisted as a user preference. */
 export interface ForegroundWorkBudget {
@@ -14,6 +16,7 @@ const COORDINATION = new Set([
   "bot_request_browser_help",
   "write_todos",
   "bot_work_create",
+  "bot_skill_dispatch",
   "bot_work_send",
   "bot_work_continue",
   "bot_work_complete",
@@ -25,8 +28,7 @@ const COORDINATION = new Set([
   "bot_feature_read",
   "bot_feature_update",
   "bot_send_message",
-  "bot_group_list",
-  "bot_group_send_message",
+  "bot_list_groups",
   "bot_memory_search",
   "bot_memory_list",
   "bot_memory_get",
@@ -40,9 +42,8 @@ const COORDINATION = new Set([
   "bot_list_peers",
   "bot_delegate"
 ])
-const HANDOFF = new Set(["bot_work_create", "bot_work_send", "bot_feature_update"])
 const NOTICE =
-  "Foreground execution budget reached. This tool has NOT run. Keep the main chat available: hand the remaining assignment to bot_work_create, or continue its existing task/Feature. Include the user's goal and constraints, selected workspace, completed findings and exact command receipts; do not repeat completed actions or restart an accepted background command. Then briefly tell the user where the work continues. Do not poll or work around this boundary with another tool."
+  "Foreground execution budget reached. This tool has NOT run. Keep the main chat available: hand the remaining assignment to bot_work_create, or continue its existing task/Feature. Include the user's goal and constraints, selected workspace, completed findings and exact command receipts; do not repeat completed actions or restart an accepted background command. Use finishTurn: true on the final dispatch batch. Keep the same assistant voice; do not mention budgets, internal errors or handing the user to another agent. If already acknowledged, do not add another acknowledgement. Do not poll or work around this boundary with another tool."
 
 export function createForegroundWorkBudget(options: {
   yieldCommand(): void
@@ -80,25 +81,7 @@ export function createForegroundWorkBudget(options: {
       return undefined
     },
     afterTool(name, result, args) {
-      if (!handoffRequired || !HANDOFF.has(name)) return
-      if (
-        name === "bot_feature_update" &&
-        !["session", "continue", "manage"].includes(
-          (args as { action?: string } | undefined)?.action ?? ""
-        )
-      )
-        return
-      const message = result as { status?: string; content?: unknown } | null
-      if (message?.status === "error") return
-      try {
-        const value = JSON.parse(
-          typeof result === "string" ? result : String(message?.content ?? "")
-        )
-        if (value?.kind === "bot-work-receipt" && value.operation === name && value.receipt)
-          handedOff = true
-      } catch {
-        /* An unverified or failed receipt never completes handoff. */
-      }
+      if (handoffRequired && acceptedBotDispatch(name, args, result)) handedOff = true
     },
     checkFinal: () => (handoffRequired && !handedOff ? NOTICE : undefined),
     yieldCommand: options.yieldCommand
@@ -116,8 +99,11 @@ export function createForegroundWorkBudgetMiddleware(budget: ForegroundWorkBudge
         return new ToolMessage({
           name: call.name,
           tool_call_id: call.id!,
-          status: "error",
-          content: notice
+          status: "success",
+          content: JSON.stringify({
+            kind: BOT_CONTINUATION_KIND, version: 1, reason: "foreground_budget",
+            executed: false, instruction: notice
+          })
         })
       // Transfer the very same process through the sandbox's durable command
       // lifecycle. This neither kills it nor launches a replacement command.

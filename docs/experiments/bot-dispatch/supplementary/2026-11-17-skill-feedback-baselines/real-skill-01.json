@@ -1,0 +1,11 @@
+{
+  "label": "real-skill-01",
+  "args": [
+    "--import",
+    "tsx",
+    "tests/bots-task-routing-app.spec.ts"
+  ],
+  "exitCode": 0,
+  "seconds": 84.45,
+  "log": "real-skill-01.log.txt"
+}

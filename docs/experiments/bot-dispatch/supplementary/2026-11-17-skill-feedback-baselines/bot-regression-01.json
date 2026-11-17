@@ -1,0 +1,17 @@
+{
+  "label": "bot-regression-01",
+  "args": [
+    "node_modules/vitest/vitest.mjs",
+    "run",
+    "src/main/bots",
+    "src/shared/bots",
+    "src/main/agent/bot-dispatch-feedback.test.ts",
+    "src/main/agent/bot-skill-dispatch.test.ts",
+    "src/main/agent/standard-thread-turn.test.ts",
+    "src/renderer/src/lib/electron-stream.test.ts",
+    "--maxWorkers=2"
+  ],
+  "exitCode": 0,
+  "seconds": 100.47,
+  "log": "bot-regression-01.log.txt"
+}

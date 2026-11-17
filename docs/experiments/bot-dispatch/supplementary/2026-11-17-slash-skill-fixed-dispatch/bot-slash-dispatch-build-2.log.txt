@@ -1,0 +1,403 @@
+vite v7.3.1 building ssr environment for production...
+transforming...
+✓ 913 modules transformed.
+rendering chunks...
+[plugin vite:reporter] 
+(!) <repository>/src/main/db/index.ts is dynamically imported by <repository>/src/main/bots/feature-command.ts, <repository>/src/main/ipc/models.ts, <repository>/src/main/ipc/models.ts, <repository>/src/main/ipc/models.ts, <repository>/src/main/ipc/models.ts, <repository>/src/main/ipc/models.ts, <repository>/src/main/ipc/models.ts, <repository>/src/main/ipc/models.ts, <repository>/src/main/ipc/models.ts, <repository>/src/main/ipc/models.ts, <repository>/src/main/ipc/models.ts, <repository>/src/main/ipc/sandbox.ts, <repository>/src/main/services/agent-auto-commit.ts, <repository>/src/main/services/agent-auto-commit.ts but also statically imported by <repository>/src/main/agent/goals/goal-store.ts, <repository>/src/main/agent/pending-notification-scheduler.ts, <repository>/src/main/agent/runtime.ts, <repository>/src/main/agent/standard-turn-stream.ts, <repository>/src/main/bots/conversation-link-service.ts, <repository>/src/main/bots/feature-service.ts, <repository>/src/main/bots/local-service.ts, <repository>/src/main/bots/runtime-adapter.ts, <repository>/src/main/bots/work-history.ts, <repository>/src/main/harness-board/auto-mode-action-executor.ts, <repository>/src/main/harness-board/auto-mode-controller.ts, <repository>/src/main/harness-board/managed-run-existing-session.ts, <repository>/src/main/harness-board/managed-run-model.ts, <repository>/src/main/harness-board/managed-run-scheduler.ts, <repository>/src/main/harness-board/project-deletion-gate.ts, <repository>/src/main/hooks/thread-scope-persistence.ts, <repository>/src/main/index.ts, <repository>/src/main/ipc/agent.ts, <repository>/src/main/ipc/bot-files.ts, <repository>/src/main/ipc/bots.ts, <repository>/src/main/ipc/git-panel.ts, <repository>/src/main/ipc/models.ts, <repository>/src/main/ipc/thread-run-mutation-lock.ts, <repository>/src/main/ipc/thread-runtime-tail.ts, <repository>/src/main/ipc/threads.ts, <repository>/src/main/ipc/workflows.ts, <repository>/src/main/legacy-subagent-migration/coordinator.ts, <repository>/src/main/routing/index.ts, <repository>/src/main/services/app-notifications.ts, <repository>/src/main/services/heartbeat-session.ts, <repository>/src/main/services/heartbeat.ts, <repository>/src/main/services/im/biz-retry-adapter.ts, <repository>/src/main/services/im/capability-guard.ts, <repository>/src/main/services/im/card-publisher.ts, <repository>/src/main/services/im/command-router.ts, <repository>/src/main/services/im/conversation-state.ts, <repository>/src/main/services/im/event-store.ts, <repository>/src/main/services/im/human-gate-adapter.ts, <repository>/src/main/services/im/inbox-service.ts, <repository>/src/main/services/im/remote-access-service.ts, <repository>/src/main/services/im/remote-approval-audit-store.ts, <repository>/src/main/services/im/remote-approval-service.ts, <repository>/src/main/services/im/remote-grant-store.ts, <repository>/src/main/services/im/remote-mode-notification-pump.ts, <repository>/src/main/services/im/remote-runner.ts, <repository>/src/main/services/im/remote-user-input-service.ts, <repository>/src/main/services/im/selection-context.ts, <repository>/src/main/services/im/skill-command.ts, <repository>/src/main/services/knowledge-base-manager.ts, <repository>/src/main/services/scheduled-transcript.ts, <repository>/src/main/services/scheduler.ts, <repository>/src/main/services/thread-conversation-presence.ts, <repository>/src/main/services/thread-metadata.ts, <repository>/src/main/services/thread-service.ts, <repository>/src/main/services/trusted-tool-file-preview.ts, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) <repository>/src/main/agent/local-sandbox.ts is dynamically imported by <repository>/src/main/ipc/sandbox.ts but also statically imported by <repository>/src/main/agent/runtime.ts, <repository>/src/main/agent/tool-orchestrator.ts, <repository>/src/main/bots/runtime-adapter.ts, <repository>/src/main/index.ts, <repository>/src/main/ipc/agent.ts, <repository>/src/main/ipc/models.ts, <repository>/src/main/services/thread-external-run-busy.ts, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) <repository>/src/main/harness-board/catalog-client.ts is dynamically imported by <repository>/src/main/bots/workspace.ts but also statically imported by <repository>/src/main/harness-board/enterprise-projects.ts, <repository>/src/main/harness-board/service.ts, <repository>/src/main/index.ts, <repository>/src/main/ipc/harness-board.ts, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) <repository>/src/main/harness-board/service.ts is dynamically imported by <repository>/src/main/bots/feature-command.ts, <repository>/src/main/bots/local-service.ts, <repository>/src/main/services/harness-stage-attribution.ts but also statically imported by <repository>/src/main/agent/standard-thread-turn.ts, <repository>/src/main/agent/trace/collector.ts, <repository>/src/main/bots/feature-service.ts, <repository>/src/main/harness-board/auto-mode-action-executor.ts, <repository>/src/main/harness-board/auto-mode-controller.ts, <repository>/src/main/harness-board/human-gate-service.ts, <repository>/src/main/harness-board/managed-feature-status.ts, <repository>/src/main/harness-board/managed-run-existing-session.ts, <repository>/src/main/harness-board/managed-run-model.ts, <repository>/src/main/harness-board/project-deletion-gate.ts, <repository>/src/main/index.ts, <repository>/src/main/ipc/agent.ts, <repository>/src/main/ipc/harness-board.ts, <repository>/src/main/services/harness-status-reporter.ts, <repository>/src/main/services/im/feature-binding-service.ts, <repository>/src/main/services/im/feature-thread-grant.ts, <repository>/src/main/services/im/project-reply-context.ts, <repository>/src/main/services/thread-service.ts, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) <repository>/src/main/agent/standard-thread-turn.ts is dynamically imported by <repository>/src/main/bots/work-tools.ts but also statically imported by <repository>/src/main/agent/pending-notification-scheduler.ts, <repository>/src/main/ipc/agent.ts, <repository>/src/main/services/im/capability-guard.ts, <repository>/src/main/services/im/command-router.ts, <repository>/src/main/services/im/project-reply-context.ts, <repository>/src/main/services/im/remote-access-service.ts, <repository>/src/main/services/im/remote-approval-service.ts, <repository>/src/main/services/im/remote-runner.ts, <repository>/src/main/services/im/remote-user-input-service.ts, <repository>/src/main/services/im/skill-command.ts, <repository>/src/main/services/im/thread-activity.ts, <repository>/src/main/services/im/thread-alias.ts, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) <repository>/src/main/services/im/feature-binding-service.ts is dynamically imported by <repository>/src/main/ipc/bots.ts but also statically imported by <repository>/src/main/bots/feature-command.ts, <repository>/src/main/bots/feature-service.ts, <repository>/src/main/services/im/capability-guard.ts, <repository>/src/main/services/im/manager.ts, <repository>/src/main/services/im/remote-access-service.ts, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) <repository>/src/main/browser/core/browser-service-registry.ts is dynamically imported by <repository>/src/main/bots/browser-profile.ts but also statically imported by <repository>/src/main/agent/tools/in-app-browser-tools.ts, <repository>/src/main/browser/builtin-browser-lifecycle.ts, <repository>/src/main/browser/cdp/playwright-mcp-bridge.ts, <repository>/src/main/browser/record/common/browser-script-execution-service.ts, <repository>/src/main/ipc/browser.ts, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) <repository>/src/main/agent/runtime.ts is dynamically imported by <repository>/src/main/agent/coordinator-notification-delivery.ts, <repository>/src/main/bots/runtime-adapter.ts, <repository>/src/main/bots/runtime-adapter.ts, <repository>/src/main/bots/runtime-adapter.ts but also statically imported by <repository>/src/main/agent/skill-evolution/session-state.ts, <repository>/src/main/agent/standard-thread-turn.ts, <repository>/src/main/agent/tools/scheduler-tool.ts, <repository>/src/main/bots/conversation-link-service.ts, <repository>/src/main/bots/feature-service.ts, <repository>/src/main/bots/runtime-adapter.ts, <repository>/src/main/index.ts, <repository>/src/main/ipc/agent.ts, <repository>/src/main/ipc/sandbox.ts, <repository>/src/main/ipc/thread-runtime-tail.ts, <repository>/src/main/ipc/threads.ts, <repository>/src/main/services/heartbeat-session.ts, <repository>/src/main/services/heartbeat.ts, <repository>/src/main/services/im/capability-guard.ts, <repository>/src/main/services/im/remote-access-service.ts, <repository>/src/main/services/im/remote-runner.ts, <repository>/src/main/services/im/thread-activity.ts, <repository>/src/main/services/scheduler.ts, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) <repository>/src/main/services/thread-service.ts is dynamically imported by <repository>/src/main/services/im/feature-binding-service.ts but also statically imported by <repository>/src/main/bots/feature-command.ts, <repository>/src/main/harness-board/auto-mode-action-executor.ts, <repository>/src/main/ipc/threads.ts, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) <repository>/src/main/bots/local-service.ts is dynamically imported by <repository>/src/main/ipc/file-preview.ts, <repository>/src/main/ipc/threads.ts, <repository>/src/main/ipc/threads.ts, <repository>/src/main/ipc/threads.ts but also statically imported by <repository>/src/main/bots/feature-service.ts, <repository>/src/main/index.ts, <repository>/src/main/ipc/bots.ts, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) <repository>/src/main/ipc/browser-profile-import.ts is dynamically imported by <repository>/src/main/bots/browser-profile.ts but also statically imported by <repository>/src/main/browser/builtin-browser-lifecycle.ts, <repository>/src/main/ipc/browser.ts, dynamic import will not move module into another chunk.
+
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/index.js                                              0.15 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/protocol-CwI0Rlzp.js                                  0.19 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/wal-checkpoint-worker-g3CKewCy.js                     0.30 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/client-CE2K0Jg7.js                                    0.33 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/client-DVOel2Sk.js                                    0.33 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/watch-ref-protocol-nVUzhycF.js                        0.34 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/client-Z7F_U10q.js                                    0.35 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/client-CAv20n2L.js                                    0.35 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/client-BOdVXC_c.js                                    0.35 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/client-CWiINXRM.js                                    0.35 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/client-Cyp8UL-H.js                                    0.35 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/file-attachment-Q-ASj-Ub.js                           0.35 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/catalog-client-Dcl2UCTu.js                            0.35 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/client-DIu_FHE1.js                                    0.36 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/client-D9Q1FXCI.js                                    0.36 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/client-DVa6HhZo.js                                    0.36 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/watch-ref-client-C_LUxSFK.js                          0.36 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/wal-checkpoint-COvOi24l.js                            0.36 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/dashboard-es-client-m75l62aG.js                       0.37 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/parser-client-CYnusdbj.js                             0.37 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/protocol-DMfW4kyk.js                                  0.37 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/adapter-detail-client-C_iY_dsx.js                     0.37 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/shell-edit-diff-client-BhztRTJn.js                    0.37 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/knowledge-preview-client-BpbXnMGS.js                  0.38 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/runtime-projection-client-CJ2kzm0L.js                 0.39 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/browser-profile-import-worker-client-Bvtomp69.js      0.41 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/protocol-c9HoJVPL.js                                  0.45 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/browser-native-host.js                                0.57 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/protocol-EMND-ygi.js                                  0.58 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/browser-types-D4KkaInl.js                             0.66 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/enterprise-projection-protocol-B6WeUV_Y.js            0.71 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/shell-edit-diff-worker-C4f11L4F.js                    0.72 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/knowledge-preview-protocol-FuW6-hfh.js                0.90 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/protocol-C1V9sgLz.js                                  1.26 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/protocol-Be7xBy1h.js                                  1.65 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/thread-message-hydration-worker-ePkNIQJ0.js           1.71 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/browser-extension-cookie-importer-zBrf9z1j.js         1.94 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/worker-CeDqvlUf.js                                    2.09 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/bot-browser-toolbar-preload.js                        2.52 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/wps-document-DAjEjBe-.js                              2.88 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/bot-interaction-command-DHq-iZRR.js                   3.58 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/market-source-access-DpfIxZ9N.js                      3.69 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/workspace-watcher-worker-csUsANrk.js                  3.80 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/protocol-BAzv2C9S.js                                  3.82 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/adoption-lines-DKCDQpfO.js                            3.86 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/skill-identifiers-sVizJXp1.js                         4.19 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/browser-profile-import-worker-client-CjAaOSUc.js      4.23 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/subagent-transcript-storage-BUPhuRr7.js               4.30 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/protocol-BXZdUd9U.js                                  5.25 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/parser-client-CIx6F8NS.js                             5.76 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/browser-native-host-installer-trYmHZ0H.js             5.77 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/catalog-protocol-8yoLleJV.js                          6.58 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/office-preview-kxV1JlZ4.js                            6.74 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/code-exec-helper.js                                   7.08 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/knowledge-preview-worker-DPpn_iNv.js                  7.16 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/watch-ref-worker-BHQqAbKP.js                          7.95 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/file-parser-D7H1zysl.js                               9.15 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/protocol-Bi33I5qf.js                                  9.20 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/workspace-file-preview-Dsc9RZ0M.js                    9.23 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/enterprise-projection-worker-BMATUDs3.js              9.63 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/market-content-CDn_FZ8k.js                            9.69 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/dashboard-es-worker-Ba2Wyeor.js                      10.38 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/browser-native-messaging-host-CNsVRwMf.js            10.53 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/ids-B5uRT-p9.js                                      11.30 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/workspace-file-preview-worker-Bha9qeHx.js            11.46 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/feature-command-iL7lmBc4.js                          11.68 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/browser-cookie-bridge-server-Ba9G3Ggs.js             12.16 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/workspace-file-scan-worker-BT4mB09c.js               13.47 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/pty-host.js                                          13.71 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/adapter-detail-normalizer-B7gqX_j_.js                16.42 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/bot-browser-host.js                                  16.57 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/worker-4fVpLfb1.js                                   16.59 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/adapter-detail-worker-QnHuAHyw.js                    17.91 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/legacy-subagent-migration-worker-Br8uXBDY.js         19.36 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/memory-catalog-worker-BGzrDiBs.js                    20.70 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/result-utils-Bw_1zCVr.js                             21.92 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/context-compaction-messages-BSyAkBQt.js              24.50 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/browser-profile-import-worker-DX-UIuaE.js            24.68 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/feature-service-BzXXrN47.js                          26.67 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/thread-metadata-hydration-worker-G414cW9R.js         27.11 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/page-reader-zjAboHwj.js                              31.32 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/dashboard-view-model-projection-OMhHZZ7U.js          37.04 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/skill-plugin-catalog-worker-BT7TRyCE.js              40.68 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/catalog-worker-D7wC4Rh9.js                           40.83 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/hook-catalog-worker-falbcOQU.js                      47.21 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/checkpoint-transcript-mapmD_qE.js                    79.20 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/runtime-projection-worker-xYPeTRop.js                94.44 kB
+../../../../../..<temp>/bot-integration-build-hp3IWA/main/application.js                                    8,446.18 kB
+✓ built in 5.08s
+vite v7.3.1 building ssr environment for production...
+transforming...
+✓ 10 modules transformed.
+rendering chunks...
+../../../../../..<temp>/bot-integration-build-hp3IWA/preload/index.js  105.91 kB
+✓ built in 54ms
+vite v7.3.1 building client environment for production...
+transforming...
+✓ 5725 modules transformed.
+rendering chunks...
+[plugin vite:reporter] 
+(!) <repository>/src/renderer/src/components/tabs/FileViewer.tsx is dynamically imported by <repository>/src/renderer/src/components/harness-board/KnowledgePreviewPanel.tsx, <repository>/src/renderer/src/components/panels/RightPanel.tsx, <repository>/src/renderer/src/components/tabs/TabbedPanel.tsx but also statically imported by <repository>/src/renderer/src/components/bots/BotMessageFilePreview.tsx, <repository>/src/renderer/src/components/tabs/index.ts, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) <repository>/src/renderer/src/components/bots/BotAvatar.tsx is dynamically imported by <repository>/src/renderer/src/components/sidebar/ThreadSidebar.tsx but also statically imported by <repository>/src/renderer/src/components/bots/BotActivity.tsx, <repository>/src/renderer/src/components/bots/BotAppearancePicker.tsx, <repository>/src/renderer/src/components/bots/BotChatRecipientPicker.tsx, <repository>/src/renderer/src/components/bots/BotEditor.tsx, <repository>/src/renderer/src/components/bots/BotExchangePanel.tsx, <repository>/src/renderer/src/components/bots/BotGroupAvatar.tsx, <repository>/src/renderer/src/components/bots/BotGroupConversation.tsx, <repository>/src/renderer/src/components/bots/BotGroupEditor.tsx, <repository>/src/renderer/src/components/bots/BotGroupMembers.tsx, <repository>/src/renderer/src/components/bots/BotGroupMentionInput.tsx, <repository>/src/renderer/src/components/bots/BotGroupQuestion.tsx, <repository>/src/renderer/src/components/bots/BotImConversation.tsx, <repository>/src/renderer/src/components/bots/BotMentionLabel.tsx, <repository>/src/renderer/src/components/bots/BotNewChat.tsx, <repository>/src/renderer/src/components/bots/BotRuntimeAvatar.tsx, <repository>/src/renderer/src/components/bots/BotsWorkspace.tsx, <repository>/src/renderer/src/components/bots/ConversationTaskControls.tsx, <repository>/src/renderer/src/components/harness-board/FeatureBotTargetList.tsx, dynamic import will not move module into another chunk.
+
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/index.html                                               0.32 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/triangle-YZ5M6BwZ.svg                             4.34 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Size3-Regular-CTq5MqoE.woff                 4.42 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/circle-CZVVJqP_.svg                               4.52 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/hexagon-GfdmbuiZ.svg                              4.67 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/drop-CZpegMVw.svg                                 4.80 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/bot-json-preview.worker-Barc-Ig-.js               4.82 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/bot-workspace-mark-CvCez8rh.svg                   4.91 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Size4-Regular-Dl5lxZxV.woff2                4.93 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-vietnamese-400-normal-DMkecbls.woff2        4.97 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-vietnamese-600-normal-Cc8MFFhd.woff2        5.10 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-vietnamese-700-normal-DlLaEgI2.woff2        5.10 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/house-BYYjjUnT.svg                                5.10 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-vietnamese-500-normal-DOriooB6.woff2        5.11 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/star-PKVG0Zyt.svg                                 5.20 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Size2-Regular-Dy4dx90m.woff2                5.21 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-greek-ext-400-normal-DGGRlc-M.woff2         5.26 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/flower-BZy6-B8K.svg                               5.39 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-greek-ext-500-normal-C4iEst2y.woff2         5.43 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-greek-ext-600-normal-DRtmH8MT.woff2         5.43 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-greek-ext-700-normal-qfdV9bQt.woff2         5.44 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Size1-Regular-mCD8mA8B.woff2                5.47 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/squircle-D2IWgz-l.svg                             5.74 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Size4-Regular-BF-4gkZK.woff                 5.98 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Size2-Regular-oD1tc_U0.woff                 6.19 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Size1-Regular-C195tn64.woff                 6.50 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-vietnamese-400-normal-Bbgyi5SW.woff         6.50 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-vietnamese-500-normal-mJboJaSs.woff         6.60 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-vietnamese-700-normal-BZaoP0fm.woff         6.63 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-vietnamese-600-normal-BuLX-rYi.woff         6.64 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Caligraphic-Regular-Di6jR-x-.woff2          6.91 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Caligraphic-Bold-Dq_IR9rO.woff2             6.91 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-greek-ext-400-normal-KugGGMne.woff          7.06 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-greek-ext-500-normal-2j5mBUwD.woff          7.19 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-greek-ext-600-normal-B8X0CLgF.woff          7.21 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-greek-ext-700-normal-BoQ6DsYi.woff          7.22 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/clover-BtqjWLUq.svg                               7.32 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Size3-Regular-DgpXs0kz.ttf                  7.59 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Caligraphic-Regular-CTRA-rTL.woff           7.66 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-cyrillic-400-normal-obahsSVq.woff2          7.71 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Caligraphic-Bold-BEiXGLvX.woff              7.72 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-greek-400-normal-B4URO6DV.woff2             7.78 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-cyrillic-500-normal-BasfLYem.woff2          7.90 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-cyrillic-700-normal-CjBOestx.woff2          7.90 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-greek-500-normal-BIZE56-Y.woff2             7.92 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-greek-700-normal-C3JjAnD8.woff2             7.92 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-greek-600-normal-plRanbMR.woff2             7.94 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-cyrillic-600-normal-CWCymEST.woff2          7.97 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/spark-NLFFIZYF.svg                                8.34 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Script-Regular-D3wIWfF6.woff2               9.64 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-cyrillic-400-normal-HOLc17fK.woff           9.78 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-cyrillic-700-normal-DrXBdSj3.woff           9.91 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-greek-400-normal-q2sYcFCs.woff              9.92 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-cyrillic-600-normal-4D_pXhcN.woff           9.94 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-cyrillic-500-normal-CxZf_p3X.woff           9.94 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-greek-500-normal-Xzm54t5V.woff              9.98 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-greek-700-normal-BUv2fZ6O.woff              9.98 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-greek-600-normal-BZpKdvQh.woff             10.03 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-cyrillic-ext-400-normal-BQZuk6qB.woff2     10.23 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_SansSerif-Regular-DDBCnlJ7.woff2           10.34 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Size4-Regular-DWFBv043.ttf                 10.36 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-cyrillic-ext-500-normal-B0yAr1jD.woff2     10.43 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-cyrillic-ext-600-normal-Dfes3d0z.woff2     10.48 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-cyrillic-ext-700-normal-BjwYoWNd.woff2     10.50 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Script-Regular-D5yQViql.woff               10.59 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/heart-DO-Zx81H.svg                               11.01 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/cloud-DHAIzicW.svg                               11.03 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Fraktur-Regular-CTYiF6lA.woff2             11.32 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Fraktur-Bold-CL6g_b3V.woff2                11.35 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Size2-Regular-B7gKUWhC.ttf                 11.51 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_SansSerif-Italic-C3H0VqGB.woff2            12.03 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_SansSerif-Bold-D1sUS0GD.woff2              12.22 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Size1-Regular-Dbsnue_I.ttf                 12.23 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_SansSerif-Regular-CS6fqUqJ.woff            12.32 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Caligraphic-Regular-wX97UBjC.ttf           12.34 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Caligraphic-Bold-ATXxdsX0.ttf              12.37 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Fraktur-Regular-Dxdc4cR9.woff              13.21 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Fraktur-Bold-BsDP51OF.woff                 13.30 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-cyrillic-ext-400-normal-DQukG94-.woff      13.34 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-cyrillic-ext-700-normal-LO58E6JB.woff      13.41 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-cyrillic-ext-500-normal-BmqWE9Dz.woff      13.45 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-cyrillic-ext-600-normal-Bcila6Z-.woff      13.46 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Typewriter-Regular-CO6r4hn1.woff2          13.57 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_SansSerif-Italic-DN2j7dab.woff             14.11 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_SansSerif-Bold-DbIhKOiC.woff               14.41 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Typewriter-Regular-C0xS9mPB.woff           16.03 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Math-BoldItalic-CZnvNsCZ.woff2             16.40 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Math-Italic-t53AETM-.woff2                 16.44 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Script-Regular-C5JkGWo-.ttf                16.65 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Main-BoldItalic-DxDJ3AOS.woff2             16.78 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Main-Italic-NWA7e6Wa.woff2                 16.99 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Math-BoldItalic-iY-2wyZ7.woff              18.67 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Math-Italic-DA0__PXp.woff                  18.75 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Main-BoldItalic-SpSLRI95.woff              19.41 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_SansSerif-Regular-BNo7hRIc.ttf             19.44 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Fraktur-Regular-CB_wures.ttf               19.57 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Fraktur-Bold-BdnERNNW.ttf                  19.58 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Main-Italic-BMLOBm91.woff                  19.68 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/cmbdevclaw-logo-transparent-128-xAcxBU-w.png     22.30 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_SansSerif-Italic-YYjJ1zSn.ttf              22.36 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-latin-400-normal-C38fXH4l.woff2            23.66 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-latin-500-normal-Cerq10X2.woff2            24.27 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-latin-700-normal-Yt3aPRUw.woff2            24.36 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-latin-600-normal-LgqL8muc.woff2            24.45 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_SansSerif-Bold-CFMepnvq.ttf                24.50 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Main-Bold-Cx986IdX.woff2                   25.32 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Main-Regular-B22Nviop.woff2                26.27 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Typewriter-Regular-D3Ib7_Hf.ttf            27.56 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_AMS-Regular-BQhdFMY1.woff2                 28.08 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Main-Bold-Jm3AIy58.woff                    29.91 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-latin-400-normal-CyCys3Eg.woff             30.70 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Main-Regular-Dr94JaBh.woff                 30.77 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Math-BoldItalic-B3XSjfu4.ttf               31.20 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-latin-600-normal-CiBQ2DWP.woff             31.26 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-latin-500-normal-BL9OpVg8.woff             31.28 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Math-Italic-flOr_0UB.ttf                   31.31 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-latin-700-normal-BLAVimhd.woff             31.32 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/chat-search.worker-hGs9qCR6.js                   32.53 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Main-BoldItalic-DzxPMmG6.ttf               32.97 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_AMS-Regular-DMm9YOAa.woff                  33.52 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Main-Italic-3WenGoN9.ttf                   33.58 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-latin-ext-400-normal-C1nco2VV.woff2        35.00 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-latin-ext-500-normal-CV4jyFjo.woff2        36.02 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-latin-ext-700-normal-Ca8adRJv.woff2        36.24 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-latin-ext-600-normal-D2bJ5OIk.woff2        36.26 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-latin-ext-400-normal-77YHD8bZ.woff         47.56 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-latin-ext-500-normal-BxGbmqWO.woff         48.49 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-latin-ext-700-normal-TidjK2hL.woff         48.63 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/inter-latin-ext-600-normal-CIVaiw4L.woff         48.67 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Main-Bold-waoOVXN0.ttf                     51.34 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_Main-Regular-ypZvNtVU.ttf                  53.58 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/KaTeX_AMS-Regular-DRggAlZN.ttf                   63.63 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/code-efficiency-model-Dv4AO2tM.png              468.37 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/code-highlight-worker-CZzBsbch.js             1,380.73 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/feature-create-guide-v5-c0DUPCqi.png          1,669.93 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/ClaudeCodePanel-GVL3fBIr.css                      7.11 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/BotsWorkspace-D9Amyj1r.css                       21.48 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/DashboardView-DEhjUBV7.css                       28.92 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/index-CvV8vJtv.css                              450.70 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/minus-rC8r4_c-.js                                 0.17 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/channel-CwE1vfMe.js                               0.20 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/arrow-right-CI6wDU8l.js                           0.24 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/gauge-Da18tWXA.js                                 0.25 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/user-B19IKf_a.js                                  0.27 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/pause-CJlXO5Dv.js                                 0.30 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/activity-DTAhnEJA.js                              0.33 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/archive-3EggONqD.js                               0.34 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/users-round-CJGU09lb.js                           0.34 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/square-arrow-out-up-right-CQPNl2jr.js             0.37 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/chunk-4BX2VUAB-8eX8r8Ip.js                        0.37 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/chunk-QZHKN3VN-BMK7Lhg3.js                        0.38 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/file-code-2-CZBn4hoc.js                           0.39 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/refresh-ccw-CYEQWjV3.js                           0.42 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/save-BemjdKIb.js                                  0.43 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/chunk-FMBD7UC4-Bvu2r_Vi.js                        0.43 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/shield-alert-BXJyXNiX.js                          0.47 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/folder-kanban-DU1mXw7a.js                         0.48 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/hammer-C-Fi88f2.js                                0.48 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/chunk-55IACEB6-g2TleJuY.js                        0.48 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/market-source-access-BpG6MAJE.js                  0.61 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/cpu-BVsdrhwp.js                                   0.65 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/wand-sparkles-CUhhebxj.js                         0.68 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/stateDiagram-v2-BHNVJYJU-R83UKeQU.js              0.70 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/init-CTO7spbL.js                                  0.72 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/classDiagram-4FO5ZUOK-9sGKp3Go.js                 0.78 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/classDiagram-v2-Q7XG4LA2-9sGKp3Go.js              0.78 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/bug-1_Gs1W41.js                                   0.84 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/infoDiagram-5YYISTIA-O0gbT_jm.js                  1.02 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/chunk-2J33WTMH-Bbbk6CNI.js                        1.07 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/separator-BLKdO1Pp.js                             2.20 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/ordinal-BD3Y6v77.js                               2.21 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/market-plugin-update-DcJJTQfD.js                  2.69 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/band-zXq5o_Ib.js                                  2.85 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/chunk-ND2GUHAM-d4x8J1e8.js                        3.75 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/MarketPublishDialog-BsA4ov4y.js                   4.06 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/UserInfoPanel-CIYAe8A5.js                         5.38 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/with-selector-BxxuqacU.js                         5.45 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/diagram-5GNKFQAL-BwpYBkg6.js                      5.49 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/create-Db4h2RW1.js                                6.68 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/arc-B4s8Wswb.js                                   6.93 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/diagram-LMA3HP47-QZGhSyjr.js                      7.38 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/messages-CvBeau-M.js                              7.56 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/defaultLocale-B2RvLBDe.js                         9.37 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/pieDiagram-4H26LBE5-Bph6zVKm.js                   9.85 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/diagram-2AECGRRQ-YzsSoObQ.js                     10.90 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/BotEmojiPicker-LuUDQFfn.js                       10.99 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/linear-DuNWhNwM.js                               11.63 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/HeartbeatPanel-C0OVIjHc.js                       13.60 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/index-Fx3U1_H6.js                                13.74 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/AppearancePanel-Bd1IBhJX.js                      14.04 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/CustomizeView-DYP9mAod.js                        16.01 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/BotOfficeFilePreview-Bq-mGJkh.js                 16.69 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/MCPConnectorDetail-CV3iqqhO.js                   18.55 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/stateDiagram-AJRCARHV-iq66lk-s.js                19.07 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/PetPanel-BxdRN2aq.js                             19.07 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/diagram-KO2AKTUF-B-7bZkT6.js                     21.60 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/dagre-BM42HDAG-B0Fj9F4d.js                       22.94 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/DiffDisplay-DEoVDdO8.js                          25.08 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/diagram-OG6HWLK6-KkI1FD62.js                     31.91 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/string-pu7UDpbw.js                               31.99 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/time-DsbTrMAX.js                                 32.63 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/BuiltinRobotPanel-aLoLjHMR.js                    33.76 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/GeneralPanel-DgsU_0B1.js                         34.33 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/SandboxPanel-77H2Zgxg.js                         34.61 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/ishikawaDiagram-YF4QCWOH-DOS3SCnd.js             35.11 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/ExpertTeamPanel-XET-fXMA.js                      36.34 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/ScheduledPanel-COGMAcKD.js                       37.22 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/kanban-definition-UN3LZRKU-N9sIARiy.js           38.14 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/TraceConversation-C9fEDJ-P.js                    39.07 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/TaskMmdPanel-KpqN1Y9R.js                         39.18 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/MemoryPanel-CAybUzoL.js                          40.52 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/CodeExecToolsPanel-OUZOSnKM.js                   42.17 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/mindmap-definition-RKZ34NQL-7pTSMcwH.js          43.72 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/wardleyDiagram-YWT4CUSO-DSz-P9B7.js              44.54 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/journeyDiagram-JHISSGLW-BmaT2D4C.js              45.31 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/sankeyDiagram-5OEKKPKP-CgKDb_eQ.js               46.17 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/erDiagram-TEJ5UH35-DqlzMnPo.js                   48.45 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/McpPanel-Db2xaqtU.js                             49.03 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/requirementDiagram-4Y6WPE33-C6rfOKeS.js          52.59 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/iamcal-ChizhkrJ.js                               55.77 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/gitGraphDiagram-PVQCEYII-NwuFHf9M.js             57.50 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/timeline-definition-PNZ67QCA-DhHHq0LW.js         60.52 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/quadrantDiagram-W4KKPZXB-BN1AMj5d.js             61.68 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/graph-CENmft2O.js                                66.30 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/UniversalUploadDialog-BlHCaXR2.js                67.76 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/TraceHistoryDialog-BLOOYT97.js                   68.71 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/chunk-AQP2D5EJ-CRkCiecr.js                       71.31 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/xychartDiagram-2RQKCTM6-CUqExHps.js              72.93 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/PluginsPanel-TJKNOTKW.js                         77.22 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/layout-BsIkhalu.js                               79.97 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/chunk-727SXJPM-BYtoNrdp.js                       84.02 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/vennDiagram-CIIHVFJN-DxxMOsoN.js                 87.67 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/ganttDiagram-6RSMTGT7-vIQ5fWsN.js               101.48 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/flowDiagram-I6XJVG4X-OXP4hQFJ.js                102.08 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/c4Diagram-AAUBKEIU-BvsFvanJ.js                  118.51 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/blockDiagram-GPEHLZMM-BZnTdgVb.js               140.10 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/jszip.min-BIG81_k1.js                           150.84 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/SkillsPanel-CBB8PGKE.js                         160.26 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/GitPanelView-gBuZo6Mx.js                        167.37 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/index-XnvMb01b.js                               170.22 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/emojibase-Bc1mD1VN.js                           187.50 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/EvolutionPanel-CY1eGOlg.js                      189.86 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/sequenceDiagram-3UESZ5HK-DK9BrDms.js            201.53 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/cose-bilkent-S5V4N54A-BKMbG_X-.js               214.67 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/HooksPanel-BQIlbXh5.js                          248.54 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/index-CMJxx0yt.js                               285.69 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/BrowserPanel-CawGMNb7.js                        395.40 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/architectureDiagram-3BPJPVTR-BQyEPgvW.js        418.76 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/katex-BYf2-dfF.js                               481.06 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/BotsWorkspace-W7XTD7HG.js                       485.19 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/compact-BfBdsM89.js                             571.53 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/ClaudeCodePanel-DaVVzCxA.js                     601.76 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/HarnessBoardView-Co9DAwnc.js                    668.01 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/BotGroupMentionInput-TN3xz13E.js                701.09 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/cytoscape.esm-jzkGlPKe.js                       956.71 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/mermaid.core-BEhBA4VP.js                      1,012.30 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/wardley-L42UT6IY-B3Ov68TD.js                  1,209.09 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/DashboardView-CdT5f7IX.js                     1,673.87 kB
+../../../../../../../..<temp>/bot-integration-build-hp3IWA/renderer/assets/index-B2CSjOba.js                             5,997.32 kB
+✓ built in 29.60s
+Isolated Bot test build: <temp>/bot-integration-build-hp3IWA

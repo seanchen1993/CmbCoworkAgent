@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { BotDefinition, BotMemory, BotTask } from "../../shared/bots/contracts"
-import { buildBotMemoryPrompt, buildBotPrompt, buildBotStoppedTaskPrompt, buildBotWorkStatusPrompt } from "./prompt"
+import { buildBotMemoryPrompt, buildBotPrompt, buildBotTurnContext, buildBotStoppedTaskPrompt, buildBotWorkStatusPrompt } from "./prompt"
 
 const fact = (id: string, content: string): BotMemory => ({
   id,
@@ -68,6 +68,7 @@ describe("Bot asynchronous assignment guidance", () => {
 
   it.each([
     ["App private", task],
+    ["onboarding", { ...task, origin: { kind: "introduction" } }],
     ["IM group", imTurn],
     ["IM private", { ...imTurn, mockSource: { ...imSource, personal: true as const } }]
   ] as const)("guides %s user assignments without forcing a split", (_name, source) => {
@@ -75,6 +76,8 @@ describe("Bot asynchronous assignment guidance", () => {
     expect(prompt).toContain("persistent Bot")
     expect(prompt).toContain("The host passes the original current request")
     expect(prompt).toContain("Keep the goal short")
+    expect(prompt).toContain("Browser operations belong to independent tasks")
+    expect(prompt).not.toContain("available browser-help tool")
     expect(prompt).toContain("businessState=active does not mean running")
     expect(prompt).toContain("revisions use bot_work_send")
     expect(prompt).toContain("bot_work_continue first")
@@ -89,17 +92,15 @@ describe("Bot asynchronous assignment guidance", () => {
     executionTaskId: "execution",
     executionState: "completed"
   }
-  it.each([task, imTurn])("keeps automatic reports focused on supplied evidence", (source) => {
-    const prompt = buildBotPrompt(bot, { ...source, origin: report }, "/workspace")
-    expect(prompt).toContain("tools are unavailable")
-    expect(prompt).toContain("Do not reopen files")
-    expect(prompt).toContain("Attribute checks to the task's report")
-    expect(prompt).toContain("not the user's confirmation")
-    expect(prompt).not.toContain("bot_work_send")
-    expect(prompt).not.toContain("shell, browser")
+  it.each([task, imTurn])("keeps the same main prefix for communication and returned results", (source) => {
+    const returned = { ...source, origin: report }
+    expect(buildBotPrompt(bot, returned, "/workspace")).toBe(buildBotPrompt(bot, source, "/workspace"))
+    const event = buildBotTurnContext(returned, [], new Date("2026-11-17T01:00:00Z"))
+    expect(event).toContain("Event: task_result")
+    expect(event).toContain("Tools are disabled for this event")
+    expect(event).toContain("2026-11-17T01:00:00.000Z")
   })
   const noDispatch: Array<[string, BotTask]> = [
-    ["onboarding", { ...task, origin: { kind: "introduction" } }],
     ["report", { ...task, origin: report }],
     ["IM report", { ...imTurn, origin: report }],
     [
@@ -201,13 +202,13 @@ describe("Bot first conversation", () => {
     }
   )
   it("greets before an actual choice, adapts to the answer, and yields to concrete user work", () => {
-    const prompt = buildBotPrompt(bot, { ...task, origin: { kind: "introduction" } }, "/private")
+    const prompt = buildBotTurnContext({ ...task, origin: { kind: "introduction" } })
     expect(prompt).toContain("first conversation after the user created you")
     expect(prompt).toContain("first send a short, warm greeting")
     expect(prompt).toContain("call request_user_input")
     expect(prompt).toContain("3-5 concrete choices")
     expect(prompt).toContain("adapt to the actual answer")
-    expect(prompt).toContain("begin that assignment")
+    expect(prompt).toContain("route that assignment")
     expect(prompt).toContain("prioritize it immediately and stop the introduction")
     expect(prompt).not.toContain("Do not call tools merely to introduce yourself")
     expect(prompt).not.toContain("SendMessage")
@@ -364,7 +365,7 @@ describe("Bot private memory context", () => {
       memories
     )
     expect(payload(group).map((entry) => entry.id)).toEqual(["shared", "own"])
-    const privatePrompt = buildBotPrompt(bot, task, "/private", memories)
+    const privatePrompt = buildBotTurnContext(task, memories)
     expect(payload(privatePrompt).map((entry) => entry.id)).toEqual(["private", "shared"])
   })
   it("keeps profile changes on the dedicated tools without a shell or database fallback", () => {
@@ -390,12 +391,7 @@ describe("Bot private memory context", () => {
   })
   it("uses the latest request's scope without promoting a remembered project rule to a user request", () => {
     const scoped = fact("scoped", "Only project A alert titles use its saved prefix.")
-    const prompt = buildBotPrompt(
-      bot,
-      { ...task, message: "Write an alert title for project B." },
-      "/private",
-      [scoped]
-    )
+    const prompt = buildBotTurnContext({ ...task, message: "Write an alert title for project B." }, [scoped])
     expect(payload(prompt)).toEqual([
       { id: scoped.id, name: scoped.name, scope: { kind: "private" }, content: scoped.content }
     ])
@@ -433,7 +429,7 @@ describe("Bot private memory context", () => {
       expect(prompt).not.toContain("PRIVATE_MARKER")
       expect(prompt).not.toContain("Private Bot memory reference")
     }
-    expect(buildBotPrompt(bot, task, "/private", [fact("a", "PRIVATE_MARKER")])).toContain(
+    expect(buildBotTurnContext(task, [fact("a", "PRIVATE_MARKER")])).toContain(
       "PRIVATE_MARKER"
     )
   })

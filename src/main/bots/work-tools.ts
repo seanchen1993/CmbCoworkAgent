@@ -6,6 +6,7 @@ import type { LocalBotHost } from "./host"
 import { MAIN_TURN_ONLY_TOOL_METADATA_KEY } from "../agent/runtime-tool-catalog"
 import { getHookAgentIdFromRequest } from "../hooks/execution-context"
 import type { BotTask } from "../../shared/bots/contracts"
+import { BOT_SKILL_DISPATCH_TOOL, selectedMainBotSkill } from "../agent/bot-skill-dispatch"
 
 /** Extends the ordinary beta Runtime. Final assistant replies remain normal chat. */
 export function createBotWorkTools(
@@ -16,6 +17,15 @@ export function createBotWorkTools(
   const taskId = task.id
   const key = z.string().trim().min(1).max(160)
   const id = z.string().trim().min(1).max(160)
+  const workspaceSelection = z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("directory"),
+      path: z.string().trim().min(1).max(4096)
+        .describe("Existing absolute or ~/ working directory, not an input attachment path.")
+    }).strict(),
+    z.object({ kind: z.literal("project"), projectId: z.string().trim().min(1).max(512) }).strict()
+  ]).optional()
+  const finishTurn = z.boolean().optional().describe("Set true when this batch contains all requested dispatches and no immediate answer or decision remains. The host verifies every receipt, keeps the initial acknowledgement and ends the main turn without another announcement. Omit when further planning is needed.")
   const invoke = async (
     name: string,
     config: { toolCall?: { id?: string } },
@@ -104,7 +114,7 @@ export function createBotWorkTools(
             }
           ),
           tool(
-            async (input, config) =>
+            async ({ finishTurn: _finishTurn, ...input }, config) =>
               invoke("bot_feature_update", config, async (host) =>
                 (await import("./feature-command")).runBotFeatureCommand(host, taskId, input)
               ),
@@ -115,6 +125,7 @@ export function createBotWorkTools(
                 "Work on an existing project-mode Feature. follow tracks only; session opens a native project conversation for message; continue sends a correction to the existing threadId from bot_feature_read: it joins this conversation's owned running turn at a safe boundary, or starts the next turn when idle. manage starts native automated Feature stages ONLY when requested, optionally from an available idle project thread. stop(runId) stops automatic progression; interrupt(threadId) stops the current turn. Pick the unambiguous session or ask. Reuse requestKey for retries.",
               schema: z.object({
                 action: z.enum(["follow", "session", "continue", "manage", "stop", "interrupt", "complete", "reopen"]),
+                finishTurn,
                 expectedVersion: z.number().int().positive().optional().describe("For complete/reopen, use version from bot_work_list and an explicit user instruction."),
                 projectId: id,
                 slug: id,
@@ -192,6 +203,57 @@ export function createBotWorkTools(
         })
       }
     ),
+    ...(!task.workId ? [tool(
+      async ({ workId, workQuery, title, goal, workspace, projectQuery, contextMessageIds }, config) =>
+        invoke(BOT_SKILL_DISPATCH_TOOL, config, async host => {
+          const source = host.workToolSource(taskId)
+          const selected = selectedMainBotSkill(source)
+          if (!selected) throw new Error("当前主对话没有通过 / 选择技能")
+          const { validateExplicitSkillReference } = await import("../agent/standard-thread-turn")
+          const problem = await validateExplicitSkillReference(selected, undefined,
+            host.getBot(source.botId).allowedSkillNames ?? undefined)
+          if (problem) throw new Error(problem)
+          signal.throwIfAborted()
+          host.workToolSource(taskId)
+          const command = { taskId, callId: config.toolCall!.id!, key: `skill:${source.requestId}` }
+          if (workId && workQuery) throw new Error("请只指定任务 ID 或任务名称")
+          if (workQuery) {
+            const page = host.workTargets(taskId, undefined, workQuery)
+            if (page.items.length !== 1 || page.nextCursor)
+              throw new Error("无法唯一确定要继续的任务，请确认任务名称；尚未新建任务。")
+            workId = page.items[0].id
+          }
+          if (workId) {
+            if (workspace || projectQuery) throw new Error("继续已有任务会沿用原工作目录，请勿重新指定目录")
+            return host.continueSkillWork(command, workId, goal || "按本次原始请求和所选技能继续处理。")
+          }
+          if (!title) throw new Error("新任务缺少名称，尚未启动")
+          if (projectQuery) {
+            if (workspace) throw new Error("请只指定项目名称或工作目录")
+            const page = await host.workProjects(taskId, projectQuery)
+            if (page.items.length !== 1 || page.nextCursor != null)
+              throw new Error("无法唯一确定工作项目，请确认项目名称；尚未启动任务。")
+            workspace = { kind: "project", projectId: page.items[0].projectId }
+          }
+          signal.throwIfAborted()
+          return host.createWork({ botId: source.botId, operationId: command.callId,
+            title, goal: goal || title, contextMessageIds, workspace }, command)
+        }),
+      {
+        name: BOT_SKILL_DISPATCH_TOOL,
+        metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
+        description: "Reserved for a host-confirmed / skill selection in the main Bot. Dispatch immediately, without reading inputs or the skill. For a revision/continuation use the existing workId (or workQuery if its ID is unavailable); the host reopens completed work and retains its workspace. For new work give a short title and the user's explicit workspace, or omit for the default; use projectQuery for a named project without a known ID. Do not infer paths. The host forwards original input and activates the skill, then acknowledges acceptance once. This call ends the main turn. Other turns must use the ordinary task tools.",
+        schema: z.object({
+          workId: id.optional(),
+          workQuery: z.string().trim().min(1).max(160).optional(),
+          title: z.string().trim().min(1).max(160).optional(),
+          goal: z.string().trim().min(1).max(2000).optional().describe("Only necessary earlier facts or routing notes; original request and selected skill are supplied by the host."),
+          workspace: workspaceSelection,
+          projectQuery: z.string().trim().min(1).max(160).optional(),
+          contextMessageIds: z.array(id).max(12).default([])
+        })
+      }
+    )] : []),
     tool(
       async ({ requestKey, title, goal, contextMessageIds, workspace }, config) =>
         invoke("bot_work_create", config, (host) => {
@@ -212,9 +274,10 @@ export function createBotWorkTools(
         name: "bot_work_create",
         metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
         description:
-          "Start substantive work asynchronously so you can keep talking with the user. Choose based on the whole outcome, not the first tool: use BEFORE reading inputs for multi-file reconciliation, code fixes with tests, investigation or a checked deliverable; simple questions and bounded short actions can stay inline. Returns immediately after acceptance; results and questions return automatically. The host supplies the original current request, applied corrections and selected source messages. Provide a short goal or necessary routing facts, not a detailed plan or rewritten request. Use one task per outcome; revisions go to bot_work_send, followed Features use project tools. Honor the designated directory/project from bot_work_projects or omit workspace for the default. After acceptance, acknowledge and end this turn; do not poll or redo the work. Reuse requestKey after a lost reply.",
+          "Start substantive work asynchronously so you can keep talking with the user. Choose based on the whole outcome, not the first tool: use BEFORE reading inputs for multi-file reconciliation, code fixes with tests, investigation or a checked deliverable; simple questions and bounded short actions can stay inline. Returns immediately after acceptance; results and questions return automatically. The host supplies the original current request, applied corrections and selected source messages. Provide a short goal or necessary routing facts, not a detailed plan or rewritten request. Use one task per outcome; revisions go to bot_work_send, followed Features use project tools. Honor the designated directory/project from bot_work_projects or omit workspace for the default. Give one short acknowledgement with the dispatch, then set finishTurn: true for the final dispatch batch; do not poll, repeat the acknowledgement or redo the work. Reuse requestKey after a lost reply.",
         schema: z.object({
           requestKey: key,
+          finishTurn,
           title: z.string().trim().min(1).max(160),
           goal: z
             .string()
@@ -231,29 +294,7 @@ export function createBotWorkTools(
             .describe(
               "Optional relevant message IDs from this conversation. The host verifies their scope and supplies their text as reference, without forwarding unrelated history."
             ),
-          workspace: z
-            .discriminatedUnion("kind", [
-              z
-                .object({
-                  kind: z.literal("directory"),
-                  path: z
-                    .string()
-                    .trim()
-                    .min(1)
-                    .max(4096)
-                    .describe(
-                      "Existing absolute or ~/ working directory, not an input attachment path."
-                    )
-                })
-                .strict(),
-              z
-                .object({
-                  kind: z.literal("project"),
-                  projectId: z.string().trim().min(1).max(512)
-                })
-                .strict()
-            ])
-            .optional()
+          workspace: workspaceSelection
         })
       }
     ),
@@ -269,6 +310,7 @@ export function createBotWorkTools(
           "Continue an existing task asynchronously, including small corrections to its output files. Use this instead of editing the files in the main chat, so task history and status stay accurate. Use the exact same-audience task ID from a receipt or list; retain its workspace. Give a short correction; the host also supplies the original current request and applied user corrections. Resolve references without rewriting the assignment. Clarify ambiguous targets. Active work needs only this tool. A request to revise completed work authorizes reopening that same task first, then sending the revision. Inside the task itself, execute directly. A queued receipt is not success; results return automatically.",
         schema: z.object({
           requestKey: key,
+          finishTurn,
           workId: id,
           message: z
             .string()

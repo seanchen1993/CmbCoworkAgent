@@ -149,6 +149,24 @@ async function main() {
             }
           }
         else reply = "已交办到招乎群，后续结果留在该群。"
+      } else if (user.includes("LIVE_FINDING")) {
+        if (!used.length) call = { name: "execute", args: { command: "echo rows24_duplicates3" } }
+        else if (!used.includes("bot_work_create")) call = { name: "bot_work_create", args: {
+          requestKey: "finding-work", finishTurn: true, title: "重复行检查", goal: "继续核对数据并回复结果。", contextMessageIds: []
+        } }
+        else throw Error("A dispatch with findings must not need another confirmation model call")
+      } else if (user.includes("LIVE_BUDGET")) {
+        const continuation = messages.slice(index + 1).some((m: any) => m.role === "tool" && text(m.content).includes('"kind":"bot-foreground-continuation"'))
+        if (used.includes("bot_work_create")) throw Error("Budget continuation must not repeat acknowledgement")
+        call = continuation ? { name: "bot_work_create", args: {
+          requestKey: "budget-work", finishTurn: true, title: "数据核对", goal: "核对数据，只回复结果。", contextMessageIds: []
+        } } : { name: "execute", args: { command: `echo feedback_probe_${used.length}` } }
+      } else if (user.includes("LIVE_DISPATCH_FAIL")) {
+        if (!used.includes("bot_work_create")) call = { name: "bot_work_create", args: {
+          requestKey: "failed-work", finishTurn: true, title: "失败场景", goal: "检查目录。", contextMessageIds: [],
+          workspace: { kind: "directory", path: join(dir, "missing-directory") }
+        } }
+        else reply = "指定目录不存在，任务未创建。请提供可用目录。"
       } else if (user.includes("LIVE_IM_BRIEF")) {
         assert.ok(!all.includes("PRIVATE_SECRET"), "group must not inherit private history")
         assert.ok(all.includes("原群讨论"), "handoff must reuse target group's existing history")
@@ -157,12 +175,13 @@ async function main() {
             name: "bot_work_create",
             args: {
               requestKey: "local-group-work",
+              finishTurn: true,
               title: "群内需求清单",
               goal: "LIVE_WORK_GOAL 整理群内需求清单，只回复正文。",
               contextMessageIds: []
             }
           }
-        else reply = "群内需求清单任务已开始。"
+        else throw Error("Accepted dispatch must not make a second model call")
       } else if (user.includes("LIVE_TO_APP")) {
         if (!used.includes("bot_send_message"))
           call = {
@@ -192,6 +211,10 @@ async function main() {
       // separate assistant messages on each side of the injected user boundary.
       const responseId = user.includes("STEER_") ? "reused-steer-provider-id" : `local-${requests.length}`
       if (call) assert.ok(tools.includes(call.name), "fixture may call only advertised tools")
+      let opening = call && used.length === 0 &&
+        (user.includes("LIVE_IM_BRIEF") || user.includes("LIVE_BUDGET") || user.includes("LIVE_DISPATCH_FAIL") || user.includes("LIVE_FINDING"))
+        ? "我来核对数据，整理好后发给你。" : undefined
+      if (call?.name === "bot_work_create" && user.includes("LIVE_FINDING")) opening = "输入有 24 行，其中 3 行重复。"
       const fn = call
         ? {
             id: `call-${requests.length}`,
@@ -205,7 +228,7 @@ async function main() {
           res.write(
             `data: ${JSON.stringify({ id: responseId, object: "chat.completion.chunk", choices: [{ index: 0, delta, finish_reason }] })}\n\n`
           )
-        frame(fn ? { tool_calls: [{ index: 0, ...fn }] } : { content: reply }, null)
+        frame(fn ? { ...(opening ? { content: opening } : {}), tool_calls: [{ index: 0, ...fn }] } : { content: reply }, null)
         frame({}, fn ? "tool_calls" : "stop")
         res.end("data: [DONE]\n\n")
       } else {
@@ -217,7 +240,7 @@ async function main() {
                 index: 0,
                 message: {
                   role: "assistant",
-                  content: fn ? null : reply,
+                  content: fn ? opening ?? null : reply,
                   ...(fn ? { tool_calls: [fn] } : {})
                 },
                 finish_reason: fn ? "tool_calls" : "stop"
@@ -510,6 +533,69 @@ async function main() {
     console.log(
       "stage: selected Zhaohu group -> real Runtime -> WS delivery -> work -> return group/private"
     )
+    // The same App/IPC/Runtime/WS path now covers initial, budget and failure feedback.
+    assert.equal(requests.filter(r => r.user.includes("LIVE_IM_BRIEF") && r.tools.includes("bot_work_create")).length, 1)
+    assert.equal(replies.filter(r => r.message.content === "我来核对数据，整理好后发给你。").length, 1)
+    const inject = (id: string, text: string, sequence: number) => sendFrame(socket!, "BOT_EVENT", {
+      event: { schemaVersion: 1, eventId: id, platformMessageId: id, principalId: "local-owner",
+        conversationKey: binding.conversationKey, conversationSeq: sequence, message: { type: "text", text },
+        occurredAt: new Date().toISOString(), lease: { id: `${id}-lease`, expiresAt: new Date(Date.now() + 90000).toISOString() }, redelivered: false },
+      route: { bindingId: binding.id, botId: bots.service.id, kind: "group", label: binding.label, version: 1, senderId: "local-owner" }
+    })
+    const beforeBudget = replies.length
+    inject("budget-event", "LIVE_BUDGET 核对数据并整理结果。", 2)
+    await wait(() => replies.slice(beforeBudget).some(r => r.message.content.includes("群任务检查完成")), "budget work result")
+    await idle()
+    const budgetReplies = replies.slice(beforeBudget)
+    assert.equal(budgetReplies.filter(r => r.message.content === "我来核对数据，整理好后发给你。").length, 1)
+    assert.ok(!JSON.stringify(budgetReplies).includes("Foreground execution budget"))
+    assert.ok(!JSON.stringify(budgetReplies).includes("bot-foreground-continuation"))
+    assert.equal(requests.filter(r => r.user.includes("LIVE_BUDGET") && r.tools.includes("bot_work_create")).length, 6)
+    await page.getByRole("button", { name: "已交办到招乎群 · 产品协作群", exact: true }).click()
+    const visible = await page.locator(".bots-conversation").innerText()
+    assert.ok(!visible.includes("执行遇到问题"), "budget handoff is not a user-facing error")
+    assert.ok(!visible.includes("Foreground execution budget"))
+    await page.screenshot({ path: join(out, "artifacts/feedback-budget.png") })
+    const beforeFailure = replies.length
+    inject("failed-event", "LIVE_DISPATCH_FAIL 请在指定目录处理。", 3)
+    await wait(() => replies.slice(beforeFailure).some(r => r.message.content.includes("指定目录不存在")), "genuine error remains delivered")
+    await idle()
+    await page.locator(".bots-conversation").getByText("指定目录不存在，任务未创建。请提供可用目录。", { exact: true }).waitFor()
+    const nativeMessages = await page.evaluate(async (id) => {
+      const conversation = (await (window as any).api.bots.snapshot()).imConversations.find((c: any) => c.id === id)
+      return (window as any).api.threads.getMessages(conversation.threadId)
+    }, groupId)
+    assert.ok(nativeMessages.some((m: any) => m.role === "tool" && m.name === "bot_work_create" && m.is_error), "genuine native tool error is preserved")
+    const budgetControl = nativeMessages.find((m: any) => m.role === "tool" && typeof m.content === "string" && m.content.includes('"kind":"bot-foreground-continuation"'))
+    assert.ok(budgetControl && !budgetControl.is_error)
+    assert.equal(JSON.parse(budgetControl.content).executed, false)
+    await page.getByRole("button", { name: "查看执行过程", exact: true }).click()
+    await page.locator("[data-bot-continuation]").waitFor()
+    await page.locator("[data-bot-continuation]").scrollIntoViewIfNeeded()
+    assert.match(await page.locator("[data-bot-continuation]").innerText(), /本次工具未执行/)
+    await page.screenshot({ path: join(out, "artifacts/feedback-execution-details.png") })
+    await page.getByRole("button", { name: "收起执行过程", exact: true }).click()
+    await page.screenshot({ path: join(out, "artifacts/feedback-real-error.png") })
+    const beforeFinding = replies.length
+    inject("finding-event", "LIVE_FINDING 核对数据，继续处理发现的问题。", 4)
+    await wait(() => replies.slice(beforeFinding).some(r => r.message.content.includes("群任务检查完成")), "findings work result")
+    await idle()
+    const findingReplies = replies.slice(beforeFinding)
+    assert.equal(findingReplies.filter(r => r.message.content === "我来核对数据，整理好后发给你。").length, 1)
+    assert.equal(findingReplies.filter(r => r.message.content === "输入有 24 行，其中 3 行重复。").length, 1)
+    assert.equal(requests.filter(r => r.user.includes("LIVE_FINDING") && r.tools.includes("bot_work_create")).length, 2)
+    await page.locator(".bots-conversation").getByText("输入有 24 行，其中 3 行重复。", { exact: true }).waitFor()
+    await page.screenshot({ path: join(out, "artifacts/feedback-findings.png") })
+    console.log("PASS: unified App/IM acknowledgement; 4 executed probes, 1 nonexecuted continuation; accepted receipt skips post-dispatch model; real failure and new findings stay visible")
+    await writeFile(join(out, "artifacts/feedback-validation.json"), JSON.stringify({
+      mode: "controlled-model-real-electron-local-ws", normalDispatchModelCalls: 1,
+      budgetMainModelCalls: 6, openingDeliveries: budgetReplies.filter(r => r.message.content === "我来核对数据，整理好后发给你。").length,
+      resultDeliveries: budgetReplies.filter(r => r.message.content.includes("群任务检查完成")).length,
+      realFailureDelivered: true, laterFindingDelivered: true, errors
+    }, null, 2))
+    if (process.env.BOT_FEEDBACK_ONLY === "1") { assert.deepEqual(errors, []); passed = true; return }
+    await page.getByRole("button", { name: "前往私人主对话", exact: true }).click()
+    await page.getByText("私人助手", { exact: true }).first().click()
     await selectGroup("App 群聊", "LIVE_TO_APP 请交办到这个 App 群。")
     await send()
     await idle()

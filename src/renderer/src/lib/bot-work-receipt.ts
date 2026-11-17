@@ -20,7 +20,7 @@ export function parseBotWorkReceipt(
     result.is_error ||
     typeof result.content !== "string" ||
     result.content.length > 100000 ||
-    !["bot_work_create", "bot_work_send", "bot_work_complete", "bot_work_continue"].includes(
+    !["bot_skill_dispatch", "bot_work_create", "bot_work_send", "bot_work_complete", "bot_work_continue"].includes(
       tool.name
     )
   )
@@ -29,7 +29,8 @@ export function parseBotWorkReceipt(
     const value = JSON.parse(result.content)
     if (value?.kind !== "bot-work-receipt" || value.operation !== tool.name || !value.receipt)
       return null
-    const work = tool.name === "bot_work_create" ? value.receipt.work : value.receipt
+    const createsAssignment = tool.name === "bot_work_create" || tool.name === "bot_skill_dispatch"
+    const work = createsAssignment ? value.receipt.work : value.receipt
     const id = tool.name === "bot_work_send" ? work.workId : work.id
     if (
       typeof work.botId !== "string" ||
@@ -39,7 +40,7 @@ export function parseBotWorkReceipt(
     )
       return null
     if (
-      tool.name === "bot_work_create" &&
+      createsAssignment &&
       (value.receipt.task?.workId !== id || value.receipt.task.threadId !== work.threadId)
     )
       return null
@@ -48,8 +49,9 @@ export function parseBotWorkReceipt(
       id,
       title: typeof work.title === "string" ? work.title : "查看任务会话",
       label: {
-        bot_work_create: "已交办任务",
-        bot_work_send: "已接纳任务补充",
+        bot_skill_dispatch: "任务",
+        bot_work_create: "任务",
+        bot_work_send: "任务补充已收到",
         bot_work_complete: "任务已完成",
         bot_work_continue: "已继续原任务"
       }[tool.name]!

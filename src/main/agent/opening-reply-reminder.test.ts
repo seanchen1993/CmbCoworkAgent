@@ -9,6 +9,7 @@ import { TURN_COMPLETION_GATE_MARKER_PREFIX } from "../../shared/checkpoint-tran
 import { HOOK_AGENT_OWNER_METADATA_KEY } from "../hooks/execution-context"
 import {
   createOpeningReplyReminderMiddleware,
+  ACKNOWLEDGED_REPLY_REMINDER,
   OPENING_REPLY_REMINDER
 } from "./opening-reply-reminder"
 
@@ -42,7 +43,7 @@ function call(id: string, content: AIMessage["content"] = ""): AIMessage {
 const receipt = (id: string) => new ToolMessage({ content: "file contents", tool_call_id: id })
 const hasReminder = (messages: BaseMessage[]) =>
   messages.some(
-    (m) => m.type === "system" && JSON.stringify(m.content).includes(OPENING_REPLY_REMINDER)
+    (m) => m.type === "human" && JSON.stringify(m.content).includes(OPENING_REPLY_REMINDER)
   )
 
 async function run(
@@ -80,7 +81,7 @@ describe("Bot main-turn opening reply reminder", () => {
     expect(messages.some((m) => JSON.stringify(m.content).includes(OPENING_REPLY_REMINDER))).toBe(
       false
     )
-    expect(JSON.stringify(model.calls[2][0].content)).toContain("Existing system instructions")
+    for (const messages of model.calls) expect(messages[0].content).toEqual(model.calls[0][0].content)
   })
 
   it("accepts a visible first reply alongside tools without extra acknowledgements", async () => {
@@ -89,6 +90,7 @@ describe("Bot main-turn opening reply reminder", () => {
       [call("one", "我先检查文件。"), call("two"), call("three"), new AIMessage("结果")]
     )
     expect(model.calls.map(hasReminder)).toEqual([false, false, false, false])
+    expect(model.calls.slice(1).every(messages => JSON.stringify(messages.at(-1)?.content).includes(ACKNOWLEDGED_REPLY_REMINDER))).toBe(true)
   })
 
   it("lets a simple answer finish immediately", async () => {

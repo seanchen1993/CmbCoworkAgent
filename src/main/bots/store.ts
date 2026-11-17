@@ -898,6 +898,7 @@ export class BotStore {
   /** Bounded metadata projection; no transcript or command output enters the directory. */
   private workActivityProjection(): string {
     // Unary + removes TEXT affinity without converting the ID, enabling the existing family index.
+    // The last outcome must seek work_id, not injected_into=NULL (almost all historical turns).
     return `(SELECT version FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS activity_version,
       (SELECT attention_version FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS attention_version,
       (SELECT seen_version FROM bot_activity a WHERE a.kind='work' AND a.id=w.id) AS seen_version,
@@ -908,7 +909,7 @@ export class BotStore {
       ORDER BY CASE t.state WHEN 'waiting_user' THEN 0 WHEN 'running' THEN 1 WHEN 'queued' THEN 2 ELSE 3 END,
       t.created_at DESC,t.rowid DESC LIMIT 1) AS execution_state,
       (SELECT json_object('taskId',t.id,'state',t.state,'updatedAt',t.updated_at,'error',substr(t.error,1,1000))
-        FROM bot_tasks t WHERE t.work_id=w.id AND t.injected_into IS NULL
+        FROM bot_tasks t INDEXED BY bot_tasks_work_history WHERE t.work_id=w.id AND t.injected_into IS NULL
         ORDER BY t.created_at DESC,t.rowid DESC LIMIT 1) AS last_execution,
       (SELECT COUNT(*) FROM bot_tasks p WHERE json_extract(p.origin_json,'$.rootWorkId')=+w.id
         AND p.work_id IS NULL AND p.state IN ('queued','running','waiting_user')) AS pending_peers,
@@ -1013,6 +1014,9 @@ export class BotStore {
       FROM bot_work_items w WHERE w.detached=0 AND w.bot_id=? AND (? IS NULL OR w.audience_key=?) AND w.ordinal<? AND (?='' OR instr(lower(w.title),lower(?))>0) ORDER BY w.ordinal DESC LIMIT ?`,
       [botId, audience ?? null, audience ?? null, before, query, query, pageSize + 1]
     )
+    // Command-first CROSS JOINs below prevent SQLite from scanning all task/work
+    // history to enumerate command owners. Keep every active/pending receipt;
+    // x.detached=0 also matches the outer filter and enables the live-thread index.
     return {
       items: rows.slice(0, pageSize).map((row) => this.workSummary(row)),
       priority: this.rows(
@@ -1022,8 +1026,8 @@ export class BotStore {
           SELECT work_id FROM bot_tasks WHERE work_id IS NOT NULL AND state IN ('queued','running','waiting_user')
           UNION SELECT json_extract(origin_json,'$.rootWorkId') FROM bot_tasks WHERE state IN ('queued','running','waiting_user') AND json_extract(origin_json,'$.rootWorkId') IS NOT NULL
           UNION SELECT a.id FROM bot_activity a WHERE a.kind='work' AND a.attention_version>a.seen_version
-          UNION SELECT x.id FROM bot_commands c JOIN bot_work_items x ON x.thread_id=c.thread_id WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0))
-          UNION SELECT json_extract(t.origin_json,'$.rootWorkId') FROM bot_commands c JOIN bot_tasks t ON t.id=c.source_task_id WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)))
+          UNION SELECT x.id FROM bot_commands c CROSS JOIN bot_work_items x ON x.thread_id=c.thread_id WHERE x.detached=0 AND (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0))
+          UNION SELECT json_extract(t.origin_json,'$.rootWorkId') FROM bot_commands c CROSS JOIN bot_tasks t ON t.id=c.source_task_id WHERE (c.state='accepted' OR (c.pending_notification IS NOT NULL AND c.suppressed=0)))
         ORDER BY CASE execution_state WHEN 'waiting_user' THEN 0 WHEN 'running' THEN 1 ELSE 2 END,w.updated_at DESC,w.ordinal DESC LIMIT 6`,
         [botId, audience ?? null, audience ?? null, query, query]
       ).map((row) => this.workSummary(row)),
@@ -1258,6 +1262,24 @@ export class BotStore {
           ),
         source
       )
+    })
+  }
+  /** Reopen + enqueue atomically. A rejected assignment must not reopen completed work. */
+  continueSkillWork(source: { taskId: string; callId: string; key: string }, workId: string, message: string) {
+    return this.transaction(() => {
+      const task = this.getTask(source.taskId)
+      this.assertWorkAudience(task, workId)
+      const fingerprint = createHash("sha256").update(JSON.stringify([workId, message])).digest("hex")
+      return this.workCommand(`skill-route:${source.taskId}:${source.callId}`, fingerprint, () => {
+        const callSuffix = createHash("sha256").update(source.callId).digest("hex")
+        const work = this.getWork(task.botId, workId)
+        if (work.state === "completed") {
+          const reopen = { ...source, callId: `skill-reopen-${callSuffix}`, key: `${source.key}:reopen` }
+          this.changeWork(task.botId, workId, work.version, reopen.callId, "continue", reopen)
+        }
+        const accepted = this.sendWork({ ...source, callId: `skill-send-${callSuffix}`, key: `${source.key}:send` }, workId, message)
+        return { work: this.getWork(task.botId, workId), task: accepted }
+      }, source)
     })
   }
   changeWork(
@@ -4195,7 +4217,8 @@ export class BotStore {
     result?: string,
     files?: BotDeliveredFile[],
     explicitGroupMessages = false,
-    notificationTerminal?: AgentRunTerminal
+    notificationTerminal?: AgentRunTerminal,
+    dispatchAcknowledged = false
   ): void {
     this.transaction(() => {
       const source = this.getTask(id)
@@ -4214,7 +4237,7 @@ export class BotStore {
         else this.settle(childId, state, error)
       }
       // Preserve the actual final result as the sidebar preview, not a child's generic status.
-      this.settle(id, state, error, result, files, explicitGroupMessages)
+      this.settle(id, state, error, result, files, explicitGroupMessages, dispatchAcknowledged)
       if (notificationTerminal) this.recordNotificationTerminal(id, notificationTerminal)
     })
   }
@@ -4225,7 +4248,8 @@ export class BotStore {
     error: string | null,
     result?: string,
     files?: BotDeliveredFile[],
-    explicitGroupMessages = false
+    explicitGroupMessages = false,
+    dispatchAcknowledged = false
   ): void {
     this.transaction(() => {
       const priorTask = this.getTask(id)
@@ -4269,7 +4293,8 @@ export class BotStore {
           task,
           state,
           visibleResult || error || botTaskStateLabel(state),
-          files
+          files,
+          dispatchAcknowledged
         )
       const silentDiscussion =
         task.origin.kind === "discussion" &&

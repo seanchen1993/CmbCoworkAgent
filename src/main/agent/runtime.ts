@@ -1,3 +1,6 @@
+import { createBotSkillDispatchMiddleware } from "./bot-skill-dispatch"
+import { createBotDispatchFeedbackMiddleware } from "./bot-dispatch-feedback"
+import type { BotDispatchFeedback } from "../../shared/bots/turn-feedback"
 import { BOT_COMMUNICATION_PROMPT } from "./bot-communication-prompt"
 import { createForegroundWorkBudgetMiddleware, type ForegroundWorkBudget } from "./foreground-work-budget"
 import {
@@ -144,6 +147,7 @@ import {
   tool as lcTool
 } from "langchain"
 import { HumanMessage, ToolMessage } from "@langchain/core/messages"
+import { createBotResultReportMiddleware } from "./bot-turn-context"
 import { Runnable } from "@langchain/core/runnables"
 import { Command, isGraphBubbleUp } from "@langchain/langgraph"
 import { z } from "zod"
@@ -585,12 +589,13 @@ function createRuntimePromptToolPolicy(input: {
   isHarnessProjectSession?: boolean
   agentMode: AgentMode
   memoryEnabled: boolean
+  botCommunication?: boolean
 }): RuntimePromptToolPolicy {
   const isProjectMode = Boolean(input.featureId) || input.isHarnessProjectSession === true
   return {
     isProjectMode,
-    includeCurrentTime: !isProjectMode,
-    includeTimestampRule: !isProjectMode,
+    includeCurrentTime: !isProjectMode && input.botCommunication !== true,
+    includeTimestampRule: !isProjectMode && input.botCommunication !== true,
     includeMemory: input.memoryEnabled && isMemoryAllowedForProjectMode(input.featureId),
     includeCodeExecRoute: !isProjectMode && input.agentMode !== "coordinator",
     includeSavedCodeExecTools: true,
@@ -2235,6 +2240,8 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     currentRunMessageQueueOwnerToken,
     onPrimaryModelRequestState,
     foregroundWorkBudget,
+    botResultReport = false,
+    botSkillDispatch = false,
     soloTaskTraceManager,
     actionStationarityTurnId,
     // PR-12 — optional callback fired-and-forgotten by toolErrorMiddleware
@@ -2247,6 +2254,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     onTurnCompletionRecovery,
     checkFinalDelivery,
     openingReplyReminder = false,
+    onBotDispatchFeedback,
     turnCompletionTodoGateEnabled = true,
     outputStyle,
     toolStrategy = "standard",
@@ -2263,7 +2271,10 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     onFailureFuseNotice?: FailureFuseNoticeCallback
     onTurnCompletionRecovery?: TurnCompletionRecoveryCallback
     checkFinalDelivery?: TurnFinalDeliveryCheck
+    onBotDispatchFeedback?: (feedback: BotDispatchFeedback | undefined) => void
     openingReplyReminder?: boolean
+    botResultReport?: boolean
+    botSkillDispatch?: boolean
     turnCompletionTodoGateEnabled?: boolean
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     [k: string]: any
@@ -3093,6 +3104,8 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       // task-mmd must not observe a tool that never runs. Mirrors Claude Code's
       // validate-before-permissions order.
       createMalformedToolCallGuardMiddleware(),
+      ...(botResultReport ? [createBotResultReportMiddleware()] : []),
+      ...(botSkillDispatch ? [createBotSkillDispatchMiddleware()] : []),
       ...(loopGuardsEnabled
         ? [
             // Grok-style action-stationarity guard: observe the complete normalized
@@ -3160,6 +3173,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
         currentRunMessageQueueOwnerToken,
         onPrimaryModelRequestState
       ),
+      ...(onBotDispatchFeedback ? [createBotDispatchFeedbackMiddleware(onBotDispatchFeedback)] : []),
       createCmbSummarizationMiddleware(mainSummarizationOptions),
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
       // Recover from malformed/truncated tool-call JSON (deepseek et al.): promote
@@ -3375,7 +3389,7 @@ export function getSystemPrompt(
 
   const timeContext = getRuntimeTimeContext()
   const timeContextLines = renderRuntimeTimeContextLines(timeContext, {
-    includeCurrentTime: options.includeCurrentTime
+    includeCurrentTime: options.botCommunication ? false : options.includeCurrentTime
   })
   const workingDirSection = `
 ### System Environment
@@ -4404,7 +4418,7 @@ async function runWorkerStopHooksWithRevision({
   return false
 }
 
-type ModelInstancePurpose = "agent" | "context-compaction"
+type ModelInstancePurpose = "agent" | "context-compaction" | "bot-skill-dispatch"
 
 function localCompactionTokenCount(content: unknown): number {
   let text: string
@@ -4502,6 +4516,7 @@ export function getModelInstance(
     // Keep the established agent protocol unchanged. Context compaction uses a
     // separate model instance because its invoke() must consume SSE internally.
     ...(purpose === "context-compaction" ? { streaming: true } : {}),
+    ...(purpose === "bot-skill-dispatch" ? { disableStreaming: true } : {}),
     maxTokens: maxOutputTokens,
     ...samplingFields(resolvedModel, { temperature, topP }),
     // SDK-level retry AND timeout disabled — unified retry + per-attempt
@@ -4510,7 +4525,7 @@ export function getModelInstance(
     // subsequent retry attempts at the fetch layer.
     maxRetries: 0,
     modelKwargs: {
-      parallel_tool_calls: true,
+      parallel_tool_calls: purpose !== "bot-skill-dispatch",
       ...topKModelKwargs(resolvedModel, topK),
       chat_template_kwargs: {
         enable_thinking: enableThinking,
@@ -4624,6 +4639,7 @@ export interface CreateAgentRuntimeOptions {
   /** Trusted main-turn delivery only; not forwarded to leaf agents. */
   checkFinalDelivery?: TurnFinalDeliveryCheck
   /** Host opt-in for a user-facing main turn; never inherited by workers or subagents. */
+  onBotDispatchFeedback?: (feedback: BotDispatchFeedback | undefined) => void
   openingReplyReminder?: boolean
   /** Ordinary-path todo completion gate. Defaults to enabled. */
   turnCompletionTodoGateEnabled?: boolean
@@ -4649,6 +4665,9 @@ export interface CreateAgentRuntimeOptions {
   extraSystemPrompt?: string
   /** Trusted host main-Bot role; never inherited by independent/project executors. */
   botCommunication?: boolean
+  /** Host-only result event gate; preserves the main Bot's model-visible tool definitions. */
+  botResultReport?: boolean
+  botSkillDispatch?: boolean
   /** Plugin-provided runtime context for skill artifact paths and feature bindings. */
   pluginPromptInject?: string
   /** Optional plugin output directory exposed to hook commands as PLUGIN_OUTPUT_DIR. */
@@ -4983,7 +5002,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     featureId,
     isHarnessProjectSession,
     agentMode,
-    memoryEnabled: memoryEnabledForThread
+    memoryEnabled: memoryEnabledForThread,
+    botCommunication: options.botCommunication
   })
   const skillVisibility: ProjectModeSkillScope = {
     projectMode: runtimePolicy.isProjectMode,
@@ -5039,7 +5059,11 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     throw new Error("Custom model not configured. Please configure a model in Settings.")
   }
 
-  const model = getModelInstance(customConfig, retryHooks, maxRetryAttempts, "agent", threadId)
+  // This short, host-forced routing call fills destination arguments only.
+  // DeepSeek thinking mode rejects named tool_choice; workers keep their configured thinking.
+  const modelPurpose = options.botCommunication && options.botSkillDispatch && !options.botResultReport
+    ? "bot-skill-dispatch" : "agent"
+  const model = getModelInstance(customConfig, retryHooks, maxRetryAttempts, modelPurpose, threadId)
   const contextCompactionModel = getModelInstance(
     customConfig,
     retryHooks,
@@ -7223,9 +7247,12 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     currentRunMessageQueueOwnerToken: options.currentRunMessageQueueOwnerToken,
     onPrimaryModelRequestState: options.onPrimaryModelRequestState,
     foregroundWorkBudget: options.foregroundWorkBudget,
+    botResultReport: options.botCommunication === true && options.botResultReport === true,
+    botSkillDispatch: options.botCommunication === true && options.botSkillDispatch === true && !options.botResultReport,
     onTurnCompletionRecovery: options.onTurnCompletionRecovery,
     checkFinalDelivery: options.checkFinalDelivery,
     openingReplyReminder: options.openingReplyReminder,
+    onBotDispatchFeedback: options.onBotDispatchFeedback,
     turnCompletionTodoGateEnabled: options.turnCompletionTodoGateEnabled,
     soloTaskTraceManager,
     actionStationarityTurnId,

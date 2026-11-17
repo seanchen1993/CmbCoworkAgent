@@ -1,0 +1,1 @@
+{"label": "typecheck-node-02", "args": ["node_modules/typescript/bin/tsc", "--noEmit", "-p", "tsconfig.node.json", "--composite", "false"], "exitCode": 0, "seconds": 32.69, "log": "typecheck-node-02.log.txt"}

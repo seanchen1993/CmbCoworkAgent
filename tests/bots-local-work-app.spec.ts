@@ -19,6 +19,7 @@ async function main() {
   let workIdForRevision = ""
   const chosenDirectory = join(dir, "指定工作目录")
   await mkdir(chosenDirectory)
+  let hostSourceChecked = false
   const calls: Array<{ tools: string[]; lastUser: string }> = [],
     errors: string[] = []
   const server = createServer(async (req, res) => {
@@ -32,20 +33,21 @@ async function main() {
         .map((m: any) => Array.isArray(m.content) ? m.content.map((part: any) => part.text ?? "").join("\n") : text(m.content)).join("\n")
       let lastUser = -1
       messages.forEach((m: any, i: number) => {
-        if (m.role === "user") lastUser = i
+        if (m.role === "user" && !text(m.content).startsWith("<bot_reply_reminder>")) lastUser = i
       })
       const user = text(messages[lastUser]?.content ?? ""),
         turn = messages.slice(lastUser + 1)
       const all = JSON.stringify(messages)
       const inWork = all.includes("You are ALREADY inside independent task")
       if (inWork) {
+        if (!hostSourceChecked) {
+          assert.ok(systemText.includes("M05_CREATE_WORK"),
+            "host-linked original request must reach the initial executor through its system context")
+          hostSourceChecked = true
+        }
         assert.ok(
-          !all.includes("M05_CREATE_WORK"),
-          "raw parent request must remain only in its source conversation"
-        )
-        assert.ok(
-          !all.includes("M05_PARENT_EDIT"),
-          "raw parent revision must not enter task history"
+          !user.includes("M05_PARENT_EDIT"),
+          "raw parent revision is host context, not a duplicate user message in task history"
         )
         assert.ok(
           !all.includes("M05_PRIVATE_MAIN"),
@@ -66,16 +68,13 @@ async function main() {
       calls.push({ tools: used, lastUser: user.slice(0, 200) })
       let reply = "本机专家可以持续讨论并修改文字或文件。",
         call: { name: string; args: Record<string, unknown> } | undefined
-      const reporting = messages.some(
-        (m: any) =>
-          m.role === "system" &&
-          text(m.content).includes("An independent task returned a host-recorded result")
-      )
+      const reporting = user.includes('<bot_runtime_context event="task_result">')
       if (reporting) {
-        assert.equal((body.tools ?? []).length, 0, "a result report may not execute the task again")
-        assert.ok(systemText.includes('"phase":"idle"'), "the automatic report must know the task runtime is idle")
-        assert.ok(systemText.includes('"businessState":"active"'), "a finished runtime is not business completion")
-        const result = JSON.parse(user)
+        assert.equal(body.tool_choice, "none", "a result report may not execute the task again")
+        assert.ok((body.tools ?? []).some((t: any) => t.function?.name === "bot_work_create"), "reporting retains stable tool schemas")
+        assert.ok(user.includes('"phase":"idle"'), "the automatic report must know the task runtime is idle")
+        assert.ok(user.includes('"businessState":"active"'), "a finished runtime is not business completion")
+        const result = JSON.parse(user.split("\n\n<bot_runtime_context")[0])
         assert.equal(result.files[0].name, "report.md")
         const requests = result.requestContext.messages.map((entry: any) => entry.text).join("\n")
         assert.ok(
@@ -96,18 +95,20 @@ async function main() {
             name: "bot_work_send",
             args: {
               requestKey: "revise-draft",
+              finishTurn: true,
               workId: workIdForRevision,
               message:
                 "M05_EDIT_WORK：将 report.md 中的第一版安排改为第二版安排，其他内容保持不变，交付修改后的文件。"
             }
           }
-        } else reply = "已将修改要求交办给原任务。"
+        } else throw Error("Accepted revision must not ask the model for a second acknowledgement")
       } else if (!inWork && user.includes("M05_CREATE_WORK")) {
         if (!used.includes("bot_work_create"))
           call = {
             name: "bot_work_create",
             args: {
               requestKey: "draft-work",
+              finishTurn: true,
               title: "季度安排草稿",
               goal: "M05_WORK_GOAL：请写一份季度安排到 report.md 并交付文件。",
               contextMessageIds: [],
@@ -116,7 +117,7 @@ async function main() {
                 : {})
             }
           }
-        else reply = "已交办「季度安排草稿」，可从工作入口打开。"
+        else throw Error("Accepted creation must not ask the model for a second acknowledgement")
       } else if ((inWork && all.includes("M05_WORK_GOAL")) || user.includes("M05_EDIT_WORK")) {
         const edit = user.includes("M05_EDIT_WORK")
         if (!used.includes(edit ? "edit_file" : "write_file"))
@@ -138,8 +139,8 @@ async function main() {
             : "已写好**第一版安排**，可继续讨论和修改。\n\n- 分析材料\n- 起草建议\n\n| 阶段 | 内容 |\n| --- | --- |\n| 一 | 讨论 |\n| 二 | 修改 |"
       } else if (user.includes("M05_MAIN_PING")) {
         const expected = user.includes("等待时") ? "waiting_approval" : "idle"
-        if (!systemText.includes(`"phase":"${expected}"`)) await writeFile(join(dir, "unexpected-status-prompt.txt"), systemText)
-        assert.ok(systemText.includes(`"phase":"${expected}"`), `main prompt must expose actual ${expected} runtime state`)
+        if (!user.includes(`"phase":"${expected}"`)) await writeFile(join(dir, "unexpected-status-prompt.txt"), user)
+        assert.ok(user.includes(`"phase":"${expected}"`), `current event must expose actual ${expected} runtime state`)
         if (!used.includes("bot_work_read")) call = { name: "bot_work_read", args: { workId: workIdForRevision } }
         else {
           const receipt = turn.filter((m: any) => m.role === "tool").map((m: any) => JSON.parse(text(m.content))).find((r: any) => r.operation === "bot_work_read")
@@ -518,15 +519,62 @@ async function main() {
         bot.threadId
       )
       assert.ok(report, "the completed report must be persisted in main history")
+      const visibleHistory = await page.evaluate(
+        async (threadId) => (window as any).api.threads.getMessages(threadId),
+        bot.threadId
+      )
+      assert.ok(
+        !JSON.stringify(visibleHistory).includes("bot_runtime_context"),
+        "host snapshots must not leak into the visible transcript"
+      )
+      const resultTasks = await page.evaluate(
+        async ({ botId, workId }) =>
+          (await (window as any).api.bots.snapshot()).tasks.filter(
+            (t: any) => t.botId === botId && t.origin.kind === "work_result" && t.origin.workId === workId
+          ),
+        { botId: bot.id, workId: work.id }
+      )
+      await writeFile(
+        join(out, "artifacts", `bot-result-navigation-${count}.json`),
+        JSON.stringify(
+          {
+            tasks: resultTasks.map((t: any) => ({ id: t.id, requestId: t.requestId })),
+            messages: visibleHistory.map((m: any) => ({
+              id: m.id,
+              role: m.role,
+              content: typeof m.content === "string" ? m.content.slice(0, 200) : []
+            }))
+          },
+          null,
+          2
+        )
+      )
+      for (const resultTask of resultTasks) {
+        assert.ok(
+          visibleHistory.some((m: any) => m.id === resultTask.requestId),
+          "each result must retain its own navigation boundary after revisions"
+        )
+      }
       const summary = page.locator(
         `[data-chat-thread-id="${bot.threadId}"] [data-chat-message-id="${report.id}"]`
       )
       await summary.waitFor()
       await summary.scrollIntoViewIfNeeded()
       assert.ok((await summary.innerText()).includes(count === 1 ? "第一版" : "第二版"))
-      const card = page
-        .getByRole("button", { name: "任务有新结果：季度安排草稿", exact: true })
-        .last()
+      const cards = page.getByRole("button", { name: "任务有新结果：季度安排草稿", exact: true })
+      if ((await cards.count()) !== count) {
+        const before = await page
+          .locator("[data-chat-message-id]")
+          .evaluateAll((nodes) =>
+            nodes.map((n) => ({ id: n.getAttribute("data-chat-message-id"), text: n.textContent }))
+          )
+        await writeFile(
+          join(out, "artifacts", "bot-result-navigation-dom.json"),
+          JSON.stringify({ before }, null, 2)
+        )
+      }
+      assert.equal(await cards.count(), count, "each returned result needs its own task link")
+      const card = cards.last()
       await card.waitFor()
       await page.screenshot({
         path: join(out, "artifacts", `bot-work-result-${count}.png`),
@@ -559,7 +607,7 @@ async function main() {
       await fillComposer("M05_PARENT_EDIT：把刚才那份改成第二版，继续原任务。")
       await send()
       await page
-        .getByText("已将修改要求交办给原任务。", { exact: true })
+        .getByRole("button", { name: /任务补充已收到/ })
         .last()
         .waitFor({ timeout: 90000 })
       await page.locator(`[data-work-id="${work.id}"]`).click()
@@ -583,6 +631,11 @@ async function main() {
     assert.ok(!secondReport.content.includes("第一版安排"))
     await page.getByText("第二版安排", { exact: false }).last().waitFor({ timeout: 90000 })
     await checkReturned(2)
+    if (process.env.BOT_FEEDBACK_ONLY === "1") {
+      assert.deepEqual(errors, [])
+      console.log("PASS: silent dispatch emits one fallback; creation and same-work revision skip post-dispatch model calls; both files and results return")
+      return
+    }
     await page.getByRole("button", { name: "完成任务", exact: true }).click()
     await page.getByRole("button", { name: "继续处理", exact: true }).waitFor()
     assert.equal(
@@ -656,7 +709,7 @@ async function main() {
     })
     await page
       .locator(".bots-conversation")
-      .getByRole("button", { name: /已交办任务.*季度安排草稿/ })
+      .getByRole("button", { name: "任务 · 季度安排草稿", exact: true })
       .click()
     await page.getByText("正在读取任务会话，资源面板暂不可用…", { exact: true }).waitFor()
     assert.equal(await page.getByRole("button", { name: "接管电脑", exact: true }).count(), 0)

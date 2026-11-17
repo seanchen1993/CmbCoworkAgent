@@ -1,0 +1,13 @@
+stage: launch real App <temp>/bot-group-app-cje5w4
+stage: selected Zhaohu group -> real Runtime -> WS delivery -> work -> return group/private
+Failure diagnostics: <temp>/bot-group-app-cje5w4
+locator.waitFor: Timeout 15000ms exceeded.
+Call log:
+  - waiting for locator('.bots-conversation').getByText('执行遇到问题', { exact: true }) to be visible
+
+    at main (<repository>/tests/bots-private-group-app.spec.ts:556:83) {
+  log: [
+    "  - waiting for locator('.bots-conversation').getByText('执行遇到问题', { exact: true }) to be visible"
+  ],
+  name: 'TimeoutError'
+}

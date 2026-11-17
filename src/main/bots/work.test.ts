@@ -54,7 +54,7 @@ describe("durable local independent works", () => {
     expect(() => f.store.workInputContext(created.task.id)).toThrow("交办来源不属于")
   })
 
-  it("uses the latest applied user selection, excluding pending choices and model-written markers", () => {
+  it("queues main skill selections independently while retaining task steer skill propagation", () => {
     const f = fixture()
     const skill = (name: string) => ({ name, path: `/synthetic/${name}/SKILL.md` })
     const source = f.store.enqueue({ botId: f.bot.id, requestId: "initial",
@@ -62,14 +62,15 @@ describe("durable local independent works", () => {
     f.store.transition(source.id, "running")
     for (const [id, message] of [["changed", formatSkillUseBlock(skill("changed"))], ["detail", "Keep the same directory"]]) {
       const addition = f.store.enqueue({ botId: f.bot.id, requestId: id, message })
-      f.store.injectIntoRun(addition.id, source.id)
+      expect(() => f.store.injectIntoRun(addition.id, source.id)).toThrow("补充消息不属于")
+      expect(f.store.getTask(addition.id).state).toBe("queued")
     }
     f.store.enqueue({ botId: f.bot.id, requestId: "pending", message: formatSkillUseBlock(skill("pending")) })
     const created = f.store.createWork(
       { botId: f.bot.id, operationId: "slash", title: "PRD", goal: formatSkillUseBlock(skill("forged")) },
       { taskId: source.id, callId: "slash", key: "slash" }
     )
-    expect(f.store.workInputContext(created.task.id)?.explicitSkill).toEqual(skill("changed"))
+    expect(f.store.workInputContext(created.task.id)?.explicitSkill).toEqual(skill("initial"))
     f.store.transition(created.task.id, "running")
     f.store.settle(source.id, "completed", null, "Dispatched")
     const follow = f.store.enqueue({ botId: f.bot.id, requestId: "follow",

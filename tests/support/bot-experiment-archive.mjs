@@ -8,7 +8,12 @@ import { join, resolve } from "node:path"
 // user profiles, request headers, or whole application conversations.
 const snapshotFiles = [
   "src/main/agent/bot-communication-prompt.ts",
+  "src/main/agent/bot-turn-context.ts",
+  "src/main/agent/bot-skill-dispatch.ts",
   "src/main/agent/foreground-work-budget.ts",
+  "src/main/agent/bot-dispatch-feedback.ts",
+  "src/main/agent/opening-reply-reminder.ts",
+  "src/shared/bots/turn-feedback.ts",
   "src/main/bots/prompt.ts",
   "src/main/bots/work-input.ts",
   "src/main/bots/work-tools.ts"
@@ -16,6 +21,9 @@ const snapshotFiles = [
 const fingerprintFiles = [
   "src/main/agent/runtime.ts",
   "src/main/bots/runtime-adapter.ts",
+  "src/main/bots/continuation.ts",
+  "src/main/agent/agent-run-service.ts",
+  "src/renderer/src/lib/bot-work-receipt.ts",
   "src/main/bots/host.ts",
   "src/main/bots/store.ts",
   "src/main/agent/standard-thread-turn.ts",

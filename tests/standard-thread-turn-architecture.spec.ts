@@ -149,10 +149,20 @@ assertIncludes(
   'throw new Error("Harness feature binding store has an invalid bindings field")',
   "invalid feature bindings cannot silently remove Harness repository context"
 )
-assert(
-  count(desktop, "parseStandardThreadMetadata(") === 10,
-  "all ten desktop Thread metadata reads use the shared parser, including the managed conversation guard"
-)
+// Check the execution boundaries rather than a global call count: adding a
+// read-only guard or metadata lookup must not invalidate this contract.
+const entryMarkers = [
+  "// Handle agent invocation with streaming",
+  "// Handle agent resume (after interrupt approval/rejection via useStream)",
+  "// Handle HITL interrupt response",
+  "// Handle cancellation"
+]
+for (let index = 0; index < entryMarkers.length - 1; index++) {
+  const start = desktop.indexOf(entryMarkers[index])
+  const end = desktop.indexOf(entryMarkers[index + 1], start + 1)
+  assert(start >= 0 && end > start, `desktop entry boundary ${entryMarkers[index]}`)
+  assertIncludes(desktop.slice(start, end), "parseStandardThreadMetadata(thread?.metadata", entryMarkers[index])
+}
 const managedEntryGuard = desktop.slice(
   desktop.indexOf("function rejectDesktopRunForForeignOwner("),
   desktop.indexOf(

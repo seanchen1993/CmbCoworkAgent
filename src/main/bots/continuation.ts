@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto"
 import { botTaskAcceptsUserInput, type BotTask } from "../../shared/bots/contracts"
+import { selectedMainBotSkill } from "../agent/bot-skill-dispatch"
 
 export type BotStoppedTaskContext =
   | {
@@ -19,6 +20,10 @@ export type BotStoppedTaskContext =
 
 /** Direct or host-forwarded user input may join only its own conversation Runtime. */
 export function canSteerBotTask(source: BotTask, incoming: BotTask): boolean {
+  // Selected skills need their own destination decision. Do not inject them into
+  // an old inline run, or inject unrelated input into the short dispatch turn.
+  // Independent task corrections still use the existing safe-boundary queue.
+  if (selectedMainBotSkill(source) || selectedMainBotSkill(incoming)) return false
   if (
     source.botId !== incoming.botId ||
     // Sharing a transcript does not let remote input join a locally privileged run.

@@ -28,7 +28,7 @@ export function createBotMcpScope(base: McpCapabilityService): McpCapabilityServ
       // Resolve again at invocation: old discovery snapshots and aliases confer no authority.
       const tool = await base.getTool(id)
       if (!tool || !allowed(tool))
-        throw new Error("Bot 无权操作工作台的共享电脑目标，请使用 Bot 浏览器工具")
+        throw new Error("Bot 无权操作工作台的共享电脑目标，请在对应任务的浏览器中处理")
       return base.invoke(tool.capabilityId, args)
     },
     invalidate: (reason) => base.invalidate(reason),

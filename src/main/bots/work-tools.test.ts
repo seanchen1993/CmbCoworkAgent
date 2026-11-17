@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
 import { LocalBotHost, type BotRunPort } from "./host"
@@ -7,13 +7,18 @@ import { createBotWorkTools } from "./work-tools"
 import type { BotTaskOrigin } from "../../shared/bots/contracts"
 import { filterTaskSubagentTools } from "../agent/runtime-tool-catalog"
 
+const validation = vi.hoisted(() => ({ check: vi.fn(async () => null as string | null) }))
+vi.mock("../agent/standard-thread-turn", () => ({ validateExplicitSkillReference: validation.check }))
+import { formatSkillUseBlock } from "../agent/skill-lifecycle/marker"
+const selection = formatSkillUseBlock({ name: "fixture", path: "/skills/fixture/SKILL.md" })
 const hosts: LocalBotHost[] = [],
   dbs: NativeSqliteAdapter[] = []
 afterEach(async () => {
   await Promise.all(hosts.splice(0).map((h) => h.stop()))
   dbs.splice(0).forEach((d) => d.close())
 })
-function fixture(history?: BotRunPort["workHistory"]) {
+function fixture(history?: BotRunPort["workHistory"], message = "Please create a draft work") {
+  validation.check.mockResolvedValue(null)
   const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
   dbs.push(db)
   const store = new BotStore(db),
@@ -38,7 +43,7 @@ function fixture(history?: BotRunPort["workHistory"]) {
   const source = host.send({
     botId: bot.id,
     requestId: "source",
-    message: "Please create a draft work"
+    message
   })
   return { host, store, bot, source }
 }
@@ -58,6 +63,7 @@ describe("work Runtime tools", () => {
         slug: "feature",
         requestKey: "child"
       },
+      bot_skill_dispatch: { title: "Draft" },
       bot_work_projects: { query: "Project" },
       bot_work_list: {},
       bot_work_search: { workId: "missing", query: "history" },
@@ -77,6 +83,66 @@ describe("work Runtime tools", () => {
     }
     expect(f.store.listWorks(f.bot.id).items).toEqual([])
     expect(f.store.recentTasks()).toHaveLength(1)
+  })
+  it("dispatches a selected skill once, preserving original input for activation only in its worker", async () => {
+    const f = fixture(undefined, "生成文档\n" + selection)
+    await tick()
+    const dispatch = createBotWorkTools(f.source, () => f.host, new AbortController().signal)
+      .find(t => t.name === "bot_skill_dispatch")!
+    const call = (id: string) => dispatch.invoke({ type: "tool_call", id, name: dispatch.name, args: { title: "文档" } })
+    const first = JSON.parse(String((await call("first") as any).content)).receipt
+    const replay = JSON.parse(String((await call("replay") as any).content)).receipt
+    expect(replay.work.id).toBe(first.work.id)
+    expect(first.task.origin).toMatchObject({ kind: "work", dispatch: "create" })
+    expect(replay.task.origin).toEqual(first.task.origin)
+    expect(f.store.listWorks(f.bot.id).items).toHaveLength(1)
+    expect(f.store.workInputContext(first.task.id)?.explicitSkill).toEqual({ name: "fixture", path: "/skills/fixture/SKILL.md" })
+    expect(createBotWorkTools(first.task, () => f.host, new AbortController().signal).map(t => t.name)).not.toContain("bot_skill_dispatch")
+  })
+  it("reuses and reopens the same work atomically, and keeps replay and audience protection", async () => {
+    const f = fixture(undefined, "继续原任务\n" + selection)
+    await tick()
+    const existing = f.store.createWork({ botId: f.bot.id, operationId: "old", title: "旧任务", goal: "整理" })
+    f.store.transition(existing.task.id, "running")
+    f.store.settle(existing.task.id, "completed", null, "已回复")
+    f.store.changeWork(f.bot.id, existing.work.id, f.store.getWork(f.bot.id, existing.work.id).version, "done", "complete")
+    expect(() => f.host.continueSkillWork({ taskId: f.source.id, callId: "invalid", key: "invalid" }, existing.work.id, "")).toThrow()
+    expect(f.store.getWork(f.bot.id, existing.work.id).state).toBe("completed")
+    const dispatch = createBotWorkTools(f.source, () => f.host, new AbortController().signal)
+      .find(t => t.name === "bot_skill_dispatch")!
+    const call = (id: string, workId = existing.work.id) => dispatch.invoke({ type: "tool_call", id, name: dispatch.name, args: { workId, goal: "更新文档" } })
+    const firstResult = await call("follow") as any
+    expect(firstResult.status, String(firstResult.content)).not.toBe("error")
+    const first = JSON.parse(String(firstResult.content)).receipt
+    const replayResult = await call("replay") as any
+    expect(replayResult.status, String(replayResult.content)).not.toBe("error")
+    const replay = JSON.parse(String(replayResult.content)).receipt
+    expect(first.work).toMatchObject({ id: existing.work.id, threadId: existing.work.threadId, state: "active" })
+    expect(first.work.workspace).toEqual(existing.work.workspace)
+    expect(replay.task.id).toBe(first.task.id)
+    expect(first.task.origin).toMatchObject({ kind: "work", dispatch: "follow_up" })
+    expect(replay.task.origin).toEqual(first.task.origin)
+    expect(f.store.workInputContext(first.task.id)?.explicitSkill?.name).toBe("fixture")
+    if (f.store.getTask(first.task.id).state === "queued") f.store.transition(first.task.id, "running")
+    f.store.settle(first.task.id, "completed", null, "已回复")
+    f.store.changeWork(f.bot.id, first.work.id, f.store.getWork(f.bot.id, first.work.id).version, "done-again", "complete")
+    const lateReplay = JSON.parse(String((await call("late-replay") as any).content)).receipt
+    expect(lateReplay.task.id).toBe(first.task.id)
+    expect(f.store.getWork(f.bot.id, existing.work.id).state).toBe("completed")
+    const other = f.store.create({ name: "Other", instructions: "", color: "#168bea", modelRef: null })
+    const privateWork = f.store.createWork({ botId: other.id, operationId: "other", title: "Other", goal: "Private" })
+    expect((await call("other", privateWork.work.id) as any).status).toBe("error")
+    expect(f.store.listWorks(f.bot.id).items).toHaveLength(1)
+  })
+  it("rejects an invalid skill or missing selection before creating work", async () => {
+    for (const message of ["普通请求", "生成文档\n" + selection]) {
+      const f = fixture(undefined, message)
+      validation.check.mockResolvedValue("技能已禁用")
+      await tick()
+      const dispatch = createBotWorkTools(f.source, () => f.host, new AbortController().signal).find(t => t.name === "bot_skill_dispatch")!
+      expect((await dispatch.invoke({ type: "tool_call", id: "invalid", name: dispatch.name, args: { title: "文档" } }) as any).status).toBe("error")
+      expect(f.store.listWorks(f.bot.id).items).toHaveLength(0)
+    }
   })
   it("offers original inputs only to their independent assignment under its live lease", async () => {
     const f = fixture()

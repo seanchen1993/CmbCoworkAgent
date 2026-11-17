@@ -49,7 +49,7 @@ async function main() {
       for await (const chunk of req) raw += chunk
       const body = JSON.parse(raw) as ModelRequest
       const messages = body.messages ?? []
-      const userIndex = messages.findLastIndex((m) => m.role === "user")
+      const userIndex = messages.findLastIndex((m) => m.role === "user" && !String(m.content).startsWith("<bot_reply_reminder>"))
       const user = String(messages[userIndex]?.content ?? "")
       const turn = messages.slice(userIndex + 1)
       const tools = (body.tools ?? []).map((t) => t.function?.name)
@@ -60,7 +60,7 @@ async function main() {
         const hasReply = turn.some((m) => m.role === "assistant" && Boolean(m.content))
         assert.equal(
           messages.some(
-            (m) => m.role === "system" && JSON.stringify(m.content).includes(OPENING_REPLY_REMINDER)
+            (m) => m.role === "user" && String(m.content).startsWith("<bot_reply_reminder>") && String(m.content).includes(OPENING_REPLY_REMINDER)
           ),
           used.length >= 2 && !hasReply,
           "only the current silent user turn should receive an ephemeral reminder"

@@ -1,0 +1,1639 @@
+
+ RUN  v3.2.4 <repository>
+
+(node:56937) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:56935) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:56936) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:56934) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/agent/bot-skill-dispatch.test.ts (5 tests) 126ms
+stdout | src/main/agent/bot-dispatch-feedback.test.ts > Bot dispatch feedback > delivers a steer injected during dispatch instead of ending on the previous receipt
+[Runtime] Injected 1 queued current-run message(s) in beforeModel for thread feedback-steer
+
+ ✓ src/main/agent/bot-turn-context.test.ts (4 tests) 132ms
+ ✓ src/main/agent/bot-dispatch-feedback.test.ts (8 tests) 120ms
+ ✓ src/renderer/src/lib/bot-execution-visibility.test.ts (61 tests) 24ms
+ ✓ src/main/bots/workspace-host.test.ts (6 tests) 348ms
+ ✓ src/main/bots/skill-policy.test.ts (5 tests) 3ms
+ ✓ src/main/agent/foreground-work-budget.test.ts (7 tests) 10ms
+stderr | src/main/agent/bot-skill-dispatch-model.test.ts
+langsmith/experimental/sandbox is in alpha. This feature is experimental, and breaking changes are expected.
+
+(node:56951) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/main/bots/work-tools.test.ts (12 tests | 1 failed) 1214ms
+   ✓ work Runtime tools > keeps durable work tools on the parent turn and rejects direct temporary-agent calls 90ms
+   ✓ work Runtime tools > dispatches a selected skill once, preserving original input for activation only in its worker 119ms
+   × work Runtime tools > reuses and reopens the same work atomically, and keeps replay and audience protection 110ms
+     → Cannot read properties of undefined (reading 'work')
+   ✓ work Runtime tools > rejects an invalid skill or missing selection before creating work 138ms
+   ✓ work Runtime tools > offers original inputs only to their independent assignment under its live lease 103ms
+   ✓ work Runtime tools > reads only owned tasks under the live source lease, without enqueueing work 96ms
+   ✓ work Runtime tools > forwards a live main user's instruction once, including a lost tool reply replay 83ms
+   ✓ work Runtime tools > rejects forwarding from autonomous 'notification' turns before durable acceptance 99ms
+   ✓ work Runtime tools > rejects forwarding from autonomous 'schedule' turns before durable acceptance 101ms
+   ✓ work Runtime tools > rejects forwarding from autonomous 'bot' turns before durable acceptance 92ms
+   ✓ work Runtime tools > uses a live lease plus actual call ID, deduplicates both call and request key, and keeps normal replies unconstrained 54ms
+   ✓ work Runtime tools > does not permit recursive visible work creation inside a work, or completing its own running source 127ms
+(node:56950) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/work.test.ts (28 tests) 2191ms
+stderr | src/main/agent/standard-thread-turn.test.ts
+langsmith/experimental/sandbox is in alpha. This feature is experimental, and breaking changes are expected.
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-3f22dcb1-1d69-46fa-a61d-74c2c48bb9e8',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-38a1b4003425933d0bb375076be24efda540f19cfeabb5d3b81bd96d1d773979',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:2c1079655d95',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:2c1079655d95',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:2c1079655d95',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-59ca0b457b7304a695467bbebf7a00ad01c55761dcb46913239b60525ef85cd7',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:67f9e147bb56',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:67f9e147bb56',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:67f9e147bb56',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-76e902bb67c49ecfddf4214e0f00477fe7fb5164657f2e850123851529dfe478',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:c4f1b35572b3',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:c4f1b35572b3',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:c4f1b35572b3',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-9940a7cc58984891d58e7a5c88f1b8c463c563b31b576fb3c1ed7b58921da64d',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:1ffec5498706',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:1ffec5498706',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:1ffec5498706',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-b3af42b4ea3710a86098bdc34305c5ec128f8f4bdbf3fee945c9c134dc2d4640',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:82659bd50e6d',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:82659bd50e6d',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:82659bd50e6d',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-c559387191d62903e0d2258bcd672da21718e267e8df46c8397e92e18c52d787',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:11a8bb9861f2',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:11a8bb9861f2',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:11a8bb9861f2',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-e1b31ce26441670774f3451a696ca0986c1c37a85d46d2ab68c4d45ed4027401',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:5fc5f8cb37d7',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:5fc5f8cb37d7',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:5fc5f8cb37d7',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-f51f1e94e677fc415000437b5a7ced0165fa5ca0ae2b75b26744cf399fcc2e71',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:5d922ce3a9c9',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:5d922ce3a9c9',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:5d922ce3a9c9',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-002a764cc493b743091046f2fdbfeb1074b63ad76fbcceec1506e79c071a6af4',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:436a4689b818',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:436a4689b818',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:436a4689b818',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-05dc4cf63e3e7f46c5038d950375be65ee9f88679a314d5261eb01df8d15f284',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:cfeca5e443cd',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:cfeca5e443cd',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:cfeca5e443cd',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-591f4a2cfc50f0f7dbad25be9261fa178071b637dcebe5f3836b9f0452a5a7b1',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:ac46a2c6dbb8',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:ac46a2c6dbb8',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:ac46a2c6dbb8',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-92f85cd3dd7c03a8590f8c323d81795a034706c5de8176e7917cf7ade5a58608',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:bfa07afc7cc7',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:bfa07afc7cc7',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:bfa07afc7cc7',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-a768ce15634493fbb8285a557b7e5fb1b408488ae5682fcec3c875dd4e3ceec6',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:609a491c3d86',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:609a491c3d86',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:609a491c3d86',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-f82837e99caeadcfaf9e70c63b193d9f38d200b61016f4e479b3efb9eee85563',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:c862754e62f2',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:c862754e62f2',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:c862754e62f2',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-bd506d63364c95492afb732c260b4cde5a3464917e60a0172030362e030f4d94',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:78e388aec59f',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:78e388aec59f',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:78e388aec59f',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-e18f651221ae81b47b28578fefe975f7aef8b921f9f23d0e2a2825f752ac6068',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:bc529e6db6fb',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:bc529e6db6fb',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:bc529e6db6fb',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/agent/bot-skill-dispatch-model.test.ts > uses non-thinking single-tool routing without changing executor or ordinary model settings
+[Runtime] Custom model: deepseek-fixture baseUrl: https://example.test/v1
+
+stdout | src/main/agent/bot-skill-dispatch-model.test.ts > uses non-thinking single-tool routing without changing executor or ordinary model settings
+[Runtime] fetch headers in 1ms: status=200, stream requested=false, content-type=application/json, request-id=unknown
+
+stdout | src/main/agent/bot-skill-dispatch-model.test.ts > uses non-thinking single-tool routing without changing executor or ordinary model settings
+[Runtime] Custom model: deepseek-fixture baseUrl: https://example.test/v1
+
+stdout | src/main/agent/bot-skill-dispatch-model.test.ts > uses non-thinking single-tool routing without changing executor or ordinary model settings
+[Runtime] fetch headers in 1ms: status=200, stream requested=false, content-type=application/json, request-id=unknown
+
+ ✓ src/main/agent/bot-skill-dispatch-model.test.ts (1 test) 13ms
+ ✓ src/main/agent/standard-thread-turn.test.ts (21 tests) 31ms
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-816a028a-a012-4473-8871-c3ca5448bbcc',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-07ccbf360d86d80f570ee7a3ec4b5655293176e3a3e8b052ba9004d09e44e426',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:e70460bd44ca',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:e70460bd44ca',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:e70460bd44ca',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-08107c468d895a380a03ad521bce7d0b1f65fe4970d7baf24ccfb11a2e0ca8b8',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:e444f2613ff0',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:e444f2613ff0',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:e444f2613ff0',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-0deb8810387127d342fe164ba5ecfa91545e08a96a50aa7222cdfb209abca239',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:a51e3734b2d9',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:a51e3734b2d9',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:a51e3734b2d9',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-448db80d52962b018d2d6add8ea64a9fbda09f2f974739822b674ea9126b62df',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:fb1f80047d4d',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:fb1f80047d4d',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:fb1f80047d4d',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-8cb212bd5d255f809dc898f4e91e509b10d16fa6519320da9089fa848728bb19',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:15cbcb93878c',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:15cbcb93878c',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:15cbcb93878c',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-ae3bf61561d18d027b4ea1c6ea4d0745e7ae14d0a753ecc1b221a6d7ee992c52',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:d682d7a0344a',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:d682d7a0344a',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:d682d7a0344a',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-b017e10f092391dd365b4e9792efd5bb4fe457c86bd86bab13f100ab145bf108',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:bc7d91cd5356',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:bc7d91cd5356',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:bc7d91cd5356',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-bbf65b56ac4756b6cc63c5d5564cb07c4789a73bb4b9c4630875376b43ae4c24',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:4bc82fbc9681',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:4bc82fbc9681',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:4bc82fbc9681',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-16f5f33d9fb2305136fd806a1572596fe8d6d9cc461e610f6b0f22835891dbd1',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:ff250ccba372',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:ff250ccba372',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:ff250ccba372',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-2dc7818902f0338b69e27637beafba3eb961f43869d498d25d1d6af12174d605',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:3b60ef5e806d',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:3b60ef5e806d',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:3b60ef5e806d',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-3e3fcf126e5156fa89bac009fcd7ab2ade9054c86ec9768c5c209d25bddea222',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:1e8883745998',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:1e8883745998',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:1e8883745998',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-418ce076627bf3b443da6ba27892e8269533f23d244cd9a35bd0468cb64904b6',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:4d1ceb57aa9b',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:4d1ceb57aa9b',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:4d1ceb57aa9b',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-59dc4e701bfe987698617f1042e923d7e2525e6722f18e7b72c85e4cf6c440c6',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:cbf8fc16c568',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:cbf8fc16c568',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:cbf8fc16c568',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-6ec1c2ac665e968e7bb365fc01c05b1d2386d753301ed2b34ce647f18505bd68',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:d16221557589',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:d16221557589',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:d16221557589',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-d2b0c799600e5800ecc798dda466a7154c52160ee93246deda8dad083c142362',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:29b38e65859c',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:29b38e65859c',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:29b38e65859c',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-ebffb49176e660dab82a0abfa9eae87cae60f9364995e957ddc0908fe26d832a',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:2090a497afee',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:2090a497afee',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:2090a497afee',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-personal-ef6eabd1-7046-4f16-9910-750e99405c39',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-2d17942cdbf1651a6a07399098df51aee6f6c15a73267fded725e80a134e08d5',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:5bc624efffc7',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:5bc624efffc7',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:5bc624efffc7',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-826b6ec41a3f704b1e8955beff839af109a4cf9e31d964f2a24c1338863b7ac1',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:d3f860ac8c41',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:d3f860ac8c41',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:d3f860ac8c41',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-899adaf35f964c4f69524974579a76a27452b3ddfba66c12ae88ac087de487a4',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:2813b6d0d465',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:2813b6d0d465',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:2813b6d0d465',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-8d7d52a6997be4358601279129ccc633c4f002ec5aca22d7dceb947191326936',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:f0525e15cf71',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:f0525e15cf71',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:f0525e15cf71',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-9b7cd6047069bb1406dcda3275c33562b76841c952f3580018540763e6028619',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:4112581b32a6',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:4112581b32a6',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:4112581b32a6',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-ab06967dde7a04c27d4753a069d641bc75a266a88bbebe5a9ea5b5fe9eebfdc8',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:5c6d670ec5c2',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:5c6d670ec5c2',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:5c6d670ec5c2',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-dc66c236add6ac0879750a891ef42afccab51945e971ac39f3fcecb5e9d54c9c',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:b68627758574',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:b68627758574',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:b68627758574',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-df28c8e3d00e48358c5acf75c648308c78e64a72faa34f2eec81778d26eec8c4',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:594a0b1de39d',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:594a0b1de39d',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:594a0b1de39d',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-0ee6e046a4b7a2e9de1fdb0c0c24a391b16cc1dbc913364c53f568e414a06b25',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:5a71cab5e6a1',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:5a71cab5e6a1',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:5a71cab5e6a1',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-2a2dbcdca5a3a53a7fc01df00669149760fb22deeaeb30b80c787414d56ff45f',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:f45777c2d442',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:f45777c2d442',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:f45777c2d442',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-3497ad33a52fee887c484a864ddbe8a0dba373db656e3a6a18d14836c990723f',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:514d29059023',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:514d29059023',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:514d29059023',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-598f5564e171771833fcad1c7fd36a8d0cfcc1888439e5f2e626d19cf2325fbb',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:7f70bf245b4b',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:7f70bf245b4b',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:7f70bf245b4b',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-5d704e5848f1f3cdf750ff4d873564dabd9a8285b0994b3d0b6db829db8f2314',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:69ceb634081c',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:69ceb634081c',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:69ceb634081c',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-788f32839430bd15ed489736d453d31abe21dd9fbf320a4e466de8ba6c12882a',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:d38d72151ebd',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:d38d72151ebd',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:d38d72151ebd',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-8fe3af3a17b4792af7a1f53c73e620dad7b85b5b0c978ea8448402d2049f96b2',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:700709cabb57',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:700709cabb57',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:700709cabb57',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-e5e746cf152bc1c6b6ba52e177b6c3f92bc18fb5a9c75ea6f305ee32392d2478',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:e8c7df10e7f4',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:e8c7df10e7f4',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:e8c7df10e7f4',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+ ✓ src/main/bots/runtime-adapter.test.ts (338 tests) 10805ms
+   ✓ Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once  2492ms
+   ✓ Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once  2274ms
+   ✓ Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once  2248ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/main/bots/work-tools.test.ts > work Runtime tools > reuses and reopens the same work atomically, and keeps replay and audience protection
+TypeError: Cannot read properties of undefined (reading 'work')
+ ❯ src/main/bots/work-tools.test.ts:114:18
+    112|     const first = JSON.parse(String((await call("follow") as any).cont…
+    113|     const replay = JSON.parse(String((await call("replay") as any).con…
+    114|     expect(first.work).toMatchObject({ id: existing.work.id, threadId:…
+       |                  ^
+    115|     expect(first.work.workspace).toEqual(existing.work.workspace)
+    116|     expect(replay.task.id).toBe(first.task.id)
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 11 passed (12)
+      Tests  1 failed | 495 passed (496)
+   Start at  19:27:05
+   Duration  15.10s (transform 6.50s, setup 0ms, collect 26.16s, tests 15.02s, environment 5ms, prepare 1.78s)
+

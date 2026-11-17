@@ -50,11 +50,24 @@ export function slashSkillRequest(directory: string, explicitTask = true) {
   }).message
 }
 
+export function slashSkillRevisionRequest(directory: string) {
+  return getQueuedBotMessageInput({ id: "fixture-reselect", created_at: new Date(), updated_at: new Date(),
+    text: "继续刚才那份 PRD，借期改为28天，其他规则不变。按我选择的技能更新原文件、校验并交给我。",
+    skillName: name, skillBlock: formatSkillUseBlock({ name, path: join(skillDirectory(dirname(directory)), "SKILL.md") })
+  }).message
+}
+
 export async function verifySlashSkillResult(directory: string, result: any, data: any, requireIndependent = true) {
   if (requireIndependent)
     assert.equal(result.actual, "independent", "the explicit assignment must create a worker")
-  // Natural requests observe routing rather than forcing a worker in the harness.
-  assert.ok(["inline", "independent"].includes(result.actual))
+  assert.equal(result.actual, "independent", "a main-Bot slash selection deterministically dispatches")
+  assert.deepEqual(result.mainTools, ["bot_skill_dispatch"], "no main skill/file read or shell before dispatch")
+  assert.equal(result.mainModelRequests, 1, "no second main-model acknowledgement")
+  assert.deepEqual(result.mainToolChoices, [{ type: "function", function: { name: "bot_skill_dispatch" } }])
+  assert.equal(result.mainAcknowledgements.length, 1)
+  assert.equal(result.mainAcknowledgements[0].text, "已新建任务，我会按所选技能处理，结果发回这里。")
+  assert.equal(result.mainAcknowledgements[0].afterDispatch, true)
+  assert.equal(result.budgetHandoff, false)
   assert.equal(data.works.length, result.actual === "independent" ? 1 : 0)
   const work = data.works[0]
   if (work) assert.equal(await realpath(work.workspace.path), await realpath(directory))
@@ -71,6 +84,7 @@ export async function verifySlashSkillResult(directory: string, result: any, dat
     .trim().split("\n").map(line => JSON.parse(line))
   const executorThreadId = work?.threadId ?? data.tasks.find((task: any) => task.origin.kind === "user")?.threadId
   assert.ok(executorThreadId)
+  assert.ok(!lifecycle.some(entry => data.tasks.some((task: any) => !task.workId && task.threadId === entry.sessionId)), "main dispatch and report must not activate the skill")
   const executorHooks = lifecycle.filter(entry => entry.sessionId === executorThreadId)
   result.skillRoutingObservation = {
     explicitTaskRequested: requireIndependent,
@@ -90,16 +104,21 @@ export async function verifySlashSkillResult(directory: string, result: any, dat
     deliveryVerified: true, resultReported: work ? result.reportCount > 0 : null }
 }
 
-export async function verifySlashSkillRevision(directory: string, result: any, workId: string) {
+export async function verifySlashSkillRevision(directory: string, result: any, workId: string, selectedAgain = false) {
   assert.equal(result.actual, "continue")
   assert.deepEqual(result.workIds, [workId])
+  if (selectedAgain) {
+    assert.equal(result.mainModelRequests, 1, "continuing a skill task needs no second acknowledgement call")
+    assert.deepEqual(result.mainAcknowledgements.map((item: any) => item.text), ["我会在原任务中继续处理，结果发回这里。"])
+    assert.equal(result.mainAcknowledgements[0].afterDispatch, true)
+  }
   const text = await readFile(join(directory, "prd.md"), "utf8")
-  assert.match(text, /21/)
+  assert.match(text, selectedAgain ? /28/ : /21/)
   assert.match(text, /SKILL_PRD_OK/)
   const receipt = JSON.parse(await readFile(join(directory, ".skill-receipt.json"), "utf8"))
   assert.equal(receipt.sha256, createHash("sha256").update(text).digest("hex"), "the skill's script must verify the updated artifact")
   assert.equal(await realpath(receipt.cwd), await realpath(directory))
   assert.ok(result.reportCount > 0)
-  result.skillValidation = { selectedAgain: false, sameWork: true, sameWorkspace: true,
+  result.skillValidation = { selectedAgain, sameWork: true, sameWorkspace: true,
     scriptVerified: true, artifact: "prd.md", sha256: receipt.sha256, resultReported: true }
 }

@@ -1,0 +1,2 @@
+{"label": "typecheck-node-01", "args": ["node_modules/typescript/bin/tsc", "--noEmit", "-p", "tsconfig.node.json", "--composite", "false"], "exitCode": 2, "seconds": 20.84, "log": "typecheck-node-01.log.txt"}
+src/main/agent/bot-dispatch-feedback.ts(12,62): error TS7030: Not all code paths return a value.

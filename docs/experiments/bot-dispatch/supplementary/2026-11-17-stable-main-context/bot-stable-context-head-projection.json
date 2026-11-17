@@ -1,0 +1,36 @@
+{
+  "originalSha256": "4e60c633f59bda29f0bc279db5024481fa949bacc12ad2b414d7869b27aaff3f",
+  "transformation": "Vitest suite totals and per-file summaries; all failed assertions retained; paths redacted",
+  "startTime": 1794911465759,
+  "success": false,
+  "numTotalTests": 4,
+  "numPassedTests": 3,
+  "numFailedTests": 1,
+  "numPendingTests": 0,
+  "files": [
+    {
+      "name": "../../../../../..<temp>/bot-stable-context-head-3k18cpfn/src/main/bots/work-projection.test.ts",
+      "status": "failed",
+      "startTime": 1794911466423,
+      "endTime": 1794911468624.9038,
+      "total": 4,
+      "passed": 3,
+      "failed": [
+        {
+          "ancestorTitles": [
+            "work activity projection query boundaries"
+          ],
+          "fullName": "work activity projection query boundaries seeks the existing family index for list, detail and summaries despite unrelated private history",
+          "status": "failed",
+          "title": "seeks the existing family index for list, detail and summaries despite unrelated private history",
+          "duration": 1916.693875,
+          "failureMessages": [
+            "AssertionError: expected true to be false // Object.is equality\n    at <temp>/bot-stable-context-head-3k18cpfn/src/main/bots/work-projection.test.ts:110:64\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:155:11\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:752:26\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:1897:20\n    at new Promise (<anonymous>)\n    at runWithTimeout (file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:1863:10)\n    at runTest (file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:1574:12)\n    at processTicksAndRejections (node:internal/process/task_queues:103:5)\n    at runSuite (file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)\n    at runSuite (file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)"
+          ],
+          "meta": {}
+        }
+      ],
+      "message": ""
+    }
+  ]
+}

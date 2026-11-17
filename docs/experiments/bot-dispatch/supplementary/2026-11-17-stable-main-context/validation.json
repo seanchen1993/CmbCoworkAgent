@@ -1,0 +1,82 @@
+{
+  "recordedAt": "2026-11-17T10:48:42.879Z",
+  "scope": "Bot main communication and queued task-result events only; no IM gateway changes",
+  "tests": {
+    "coreUnit": {
+      "passed": 507,
+      "total": 507
+    },
+    "botUnitCollection": {
+      "passed": 1938,
+      "total": 1939,
+      "knownBaselineFailures": 1
+    },
+    "finalTypecheck": {
+      "exitCode": 0
+    },
+    "finalIsolatedBuild": {
+      "exitCode": 0
+    },
+    "finalLocalApp": {
+      "attempt": 8,
+      "exitCode": 0,
+      "fixtureModelCalls": 16,
+      "resultLinks": 2
+    },
+    "botSteerApp": {
+      "exitCode": 0,
+      "mainSamples": 71,
+      "workSamples": 88,
+      "duplicateBubbles": 0
+    },
+    "memoryApp": {
+      "exitCode": 0
+    },
+    "legacyModuleBoundary": {
+      "exitCode": 0
+    },
+    "desktopBaselines": {
+      "passed": 5,
+      "total": 7
+    },
+    "streamBaselines": {
+      "passed": 2,
+      "total": 3
+    }
+  },
+  "knownBaselineFailures": [
+    "work-projection.test.ts:110 query plan",
+    "desktop-agent-invoke-characterization: shared Feature Harness source marker",
+    "standard-thread-turn-architecture: metadata parser count",
+    "stream-message-ids: pre-boundary partial text"
+  ],
+  "baselineComparison": "All four reproduced in a read-only original HEAD snapshot; no ordinary/project behavior changed to satisfy stale baselines.",
+  "realRuns": [
+    {
+      "id": "20261117T102811Z-983da2a8",
+      "exitCode": 0,
+      "initialCases": 2,
+      "followups": 3,
+      "matchingReportPrefixes": 3
+    },
+    {
+      "id": "20261117T103530Z-c618a26c",
+      "exitCode": 0,
+      "initialCases": 2,
+      "followups": 0,
+      "matchingReportPrefixes": 1,
+      "skillBudgetFallback": true
+    }
+  ],
+  "cacheMeasurements": {
+    "serverCacheHitTokens": null,
+    "serverCacheMissTokens": null,
+    "controlledCostComparison": null
+  },
+  "limitations": [
+    "Real model trials preceded the last transcript-projection fix; model request text, system and tools were unchanged by that fix. Final App fixture verified it.",
+    "No Windows package, production IM or production KV-cache measurements.",
+    "Skill-selected natural request used budget fallback; do not count it as proactive delegation."
+  ],
+  "vcs": "Uncommitted; no push"
+}

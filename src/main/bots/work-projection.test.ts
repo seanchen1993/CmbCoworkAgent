@@ -108,14 +108,47 @@ describe("work activity projection query boundaries", () => {
       expect(plan.some(detail => detail.startsWith("SEARCH r USING INDEX bot_workflow_refs_source"))).toBe(true)
       expect(plan.some(detail => detail.startsWith("SEARCH t USING INDEX bot_tasks_work_history") && detail.includes("work_id=?"))).toBe(true)
       expect(plan.some(detail => detail.startsWith("SCAN t"))).toBe(false)
+      expect(plan.some(detail => detail.startsWith("SCAN x"))).toBe(false)
+      expect(plan.some(detail => detail.startsWith("SEARCH t USING INDEX bot_tasks_injected"))).toBe(false)
       // Compare every projected field against the prior SQL, not only peer counts.
       const priorSql = sql.replaceAll("=+w.id", "=w.id")
+        .replaceAll("CROSS JOIN", "JOIN")
+        .replaceAll(" INDEXED BY bot_tasks_work_history", "")
+        .replace("WHERE x.detached=0 AND ", "WHERE ")
       expect(f.db.exec(sql, bindings)).toEqual(f.db.exec(priorSql, bindings))
     }
     expect(
       f.db.exec("SELECT typeof(+id),+id,id FROM bot_work_items WHERE id=?", [f.works[0].work.id])[0]
         .values[0]
     ).toEqual(["text", f.works[0].work.id, f.works[0].work.id])
+  })
+
+  it("keeps direct and peer command work in priority without admitting unrelated private commands", () => {
+    const f = fixture()
+    const direct = f.store.enqueue({ botId: f.owner.id, workId: f.works[4].work.id, requestId: "direct", message: "Run" })
+    const unrelated = f.store.enqueue({ botId: f.other.id, requestId: "private", message: "Run privately" })
+    for (const task of [direct, unrelated, f.peers[1]]) {
+      if (task.state === "queued") f.store.transition(task.id, "running")
+      f.store.acceptCommand(task.id, { id: `command-${task.id}`, threadId: task.threadId,
+        command: "fixture", cwd: "/fixture", startedAt: 1 })
+      f.store.settle(task.id, "completed", null, "Command running")
+    }
+    // Retire the other two peers so only background commands make these works active.
+    for (const task of [f.peers[0], f.peers[2]]) {
+      if (task.state === "queued") f.store.transition(task.id, "running")
+      f.store.settle(task.id, "completed", null, "Done")
+    }
+    for (const work of f.works) f.db.run("UPDATE bot_activity SET seen_version=attention_version WHERE kind='work' AND id=?", [work.work.id])
+    const page = f.store.listWorks(f.owner.id, undefined, "", "desktop")
+    expect(new Set(page.priority.map(work => work.id))).toEqual(new Set([f.works[1].work.id, f.works[4].work.id]))
+    expect(page.priority.every(work => work.backgroundBusy)).toBe(true)
+    expect(f.store.listWorks(f.owner.id, undefined, "", "another-audience").priority).toEqual([])
+    expect(f.store.listWorks(f.other.id).priority).toEqual([])
+    // A completed command with an undelivered notification must still attract attention.
+    f.db.run("UPDATE bot_commands SET state='completed',pending_notification='pending' WHERE id=?", [`command-${f.peers[1].id}`])
+    expect(f.store.listWorks(f.owner.id).priority.map(work => work.id)).toContain(f.works[1].work.id)
+    f.db.run("UPDATE bot_commands SET suppressed=1 WHERE id=?", [`command-${f.peers[1].id}`])
+    expect(f.store.listWorks(f.owner.id).priority.map(work => work.id)).not.toContain(f.works[1].work.id)
   })
 
   it("preserves family state, owner and audience isolation as peers finish", () => {

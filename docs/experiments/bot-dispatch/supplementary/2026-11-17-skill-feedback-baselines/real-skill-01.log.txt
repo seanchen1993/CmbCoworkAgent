@@ -1,0 +1,7 @@
+{"label": "real-skill-01", "args": ["--import", "tsx", "tests/bots-task-routing-app.spec.ts"], "exitCode": 0, "seconds": 84.45, "log": "real-skill-01.log.txt"}
+Persistent experiment record: <repo>/docs/experiments/bot-dispatch/runs/20261117T120837Z-4750e7d1/record.json
+{"case":"slash-skill-natural","actual":"independent","preferred":"independent","seconds":27.6,"mainSeconds":6.7,"dispatchSeconds":6.7,"mainModelRequests":1,"finishesDispatchBatch":true,"budgetHandoff":false,"tools":["bot_skill_dispatch"]}
+{"case":"slash-skill","actual":"independent","preferred":"independent","seconds":22.7,"mainSeconds":2.1,"dispatchSeconds":2.1,"mainModelRequests":1,"finishesDispatchBatch":true,"budgetHandoff":false,"tools":["bot_skill_dispatch"]}
+{"case":"slash-skill-revision","actual":"continue","preferred":"continue","seconds":14.2,"mainSeconds":2.4,"mainModelRequests":1,"finishesDispatchBatch":true,"budgetHandoff":false,"tools":["bot_work_send"]}
+{"case":"slash-skill-reselect","actual":"continue","preferred":"continue","seconds":15.5,"mainSeconds":1.7,"mainModelRequests":1,"finishesDispatchBatch":true,"budgetHandoff":false,"tools":["bot_skill_dispatch"]}
+Routing evaluation report: <temp>

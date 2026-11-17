@@ -24,7 +24,7 @@ import type { BotMemoryService } from "./memory"
 import type { BotMemoryMaintainer } from "./memory-maintainer"
 import type { BotBrowserService } from "./browser"
 import type { BotDeliveredFile } from "../../shared/bots/file-delivery"
-import type { BotWorkItem } from "../../shared/bots/work"
+import { botWorkBrowserScope, type BotWorkItem } from "../../shared/bots/work"
 import type { BotMockExecution } from "../../shared/bots/mock-channel"
 import type { BotImBinding } from "../../shared/bots/im-channel"
 import type { BotImGatewayClient } from "../services/im/bot-channel-service"
@@ -826,6 +826,12 @@ describe("Bot Runtime integration", () => {
     })
     const lease = port().acquire(emptyRole, { ...task, origin: { kind: "introduction" } })!
     fixture.start.mockImplementationOnce(async (_request, _delivery, context) => {
+      expect(context.botCommunication).toBe(true)
+      expect(context.foregroundWorkBudget).toBeDefined()
+      expect(context.additionalTools).not.toContain("owned-browser")
+      expect(fixture.browserTools).not.toHaveBeenCalled()
+      expect(context.remotePolicy?.blockedToolNames).toContain("bot_browser")
+      expect(context.remotePolicy?.blockedToolNames).toContain("bot_request_browser_help")
       context.onModelRequestState?.(() => true)
       expect(
         await lease.steer!({ ...task, id: "real-task", requestId: "real-user" }, () => true)
@@ -939,6 +945,12 @@ describe("Bot Runtime integration", () => {
     expect(buildPersonalIdentityPrompt(context.remotePolicy, readIdentity)).toBe("")
     expect(readIdentity).not.toHaveBeenCalled()
     expect(context.additionalTools).toContain("owned-browser")
+    const browserHelp = fixture.browserTools.mock.calls.at(-1)![6] as (active: boolean, help: { generation: number; instruction: string }) => void
+    const help = { generation: 3, instruction: "请确认登录" }
+    browserHelp(true, help)
+    browserHelp(false, help)
+    expect(fixture.browserHelpNotice.mock.calls).toEqual([[incoming.id, help, true], [incoming.id, help, false]])
+    expect(fixture.browserTools.mock.calls.at(-1)![4]).toBe(botWorkBrowserScope(work.id, bot.id))
     expect(context.extraSystemPrompt).not.toContain("No files, shell")
     expect(
       context.verifyResolvedThread({ metadata: updated, workspacePath: work.workspace!.path })
@@ -1016,7 +1028,7 @@ describe("Bot Runtime integration", () => {
     expect(context.remotePolicy).toEqual({
       disableScheduler: true,
       disableSubagents: true,
-      blockedToolNames: ["workflow", "task"],
+      blockedToolNames: ["workflow", "task", "bot_browser", "bot_request_browser_help"],
       allowedSkillNames: ["review"],
       disableSkillEvolution: true
     })
@@ -1026,8 +1038,7 @@ describe("Bot Runtime integration", () => {
       "delivery",
       "collaboration",
       "routine",
-      "own-profile",
-      "owned-browser"
+      "own-profile"
     ])
     expect(
       context.verifyResolvedThread({
@@ -1036,7 +1047,7 @@ describe("Bot Runtime integration", () => {
       })
     ).toBeNull()
     expect(fixture.memorySnapshot).toHaveBeenCalledWith(bot.id, {})
-    expect(fixture.browserTools.mock.calls[0][4]).toBe(bot.id)
+    expect(fixture.browserTools).not.toHaveBeenCalled()
     expect(fixture.create).not.toHaveBeenCalled()
     expect(JSON.parse(fixture.update.mock.calls[0][1].metadata)).toMatchObject(metadata())
     expect(JSON.parse(fixture.update.mock.calls[0][1].metadata).botMockBindingId).toBeUndefined()
@@ -1046,9 +1057,9 @@ describe("Bot Runtime integration", () => {
         .execute(new AbortController().signal, vi.fn())
     ).resolves.toMatchObject({ state: "completed" })
     const desktop = fixture.start.mock.calls[1][2]
-    expect(desktop.remotePolicy).toEqual({ disableScheduler: true, disableSubagents: true, blockedToolNames: ["workflow", "task"] })
+    expect(desktop.remotePolicy).toEqual({ disableScheduler: true, disableSubagents: true, blockedToolNames: ["workflow", "task", "bot_browser", "bot_request_browser_help"] })
     expect(fixture.memorySnapshot).toHaveBeenCalled()
-    expect(fixture.browserTools).toHaveBeenCalled()
+    expect(fixture.browserTools).not.toHaveBeenCalled()
   })
 
   it("exposes the existing question tool only with a negotiated, live Bot route", async () => {
@@ -1090,13 +1101,9 @@ describe("Bot Runtime integration", () => {
     try {
       await lease.execute(new AbortController().signal, vi.fn())
       const context = fixture.start.mock.calls[0][2]
-      expect(context.remotePolicy).toEqual({ disableScheduler: true, disableSubagents: true, blockedToolNames: ["workflow", "task"] })
-      expect(context.additionalTools).toContain("owned-browser")
-      const browserHelp = fixture.browserTools.mock.calls.at(-1)![6] as (active: boolean, help: { generation: number; instruction: string }) => void
-      const help = { generation: 3, instruction: "请确认登录" }
-      browserHelp(true, help)
-      browserHelp(false, help)
-      expect(fixture.browserHelpNotice.mock.calls).toEqual([[incoming.id, help, true], [incoming.id, help, false]])
+      expect(context.remotePolicy).toEqual({ disableScheduler: true, disableSubagents: true, blockedToolNames: ["workflow", "task", "bot_browser", "bot_request_browser_help"] })
+      expect(context.additionalTools).not.toContain("owned-browser")
+      expect(fixture.browserTools).not.toHaveBeenCalled()
       expect(botInteractionRoutes.get(task.threadId)).toMatchObject({
         conversationKey: "bot-dm",
         botEventId: "wire-event"
@@ -1241,27 +1248,27 @@ describe("Bot Runtime integration", () => {
     const [request, , context] = fixture.start.mock.calls[0]
     expect(request).toMatchObject({
       threadId: bot.threadId,
-      agentMode: "normal",
+      agentMode: "workflow",
       message: returned.message
     })
-    expect(context.additionalTools).toEqual([])
+    expect(context.additionalTools).toEqual(expect.arrayContaining(["works", "delivery", "own-profile"]))
     expect(context.remotePolicy).toMatchObject({
-      allowedToolNames: [],
-      allowedSkillNames: [],
+      allowedSkillNames: ["review"],
       disableHooks: true,
       disableSubagents: true,
-      disableMcpTools: true
+      blockedToolNames: ["workflow", "task", "bot_browser", "bot_request_browser_help"]
     })
-    expect(context.extraSystemPrompt).toContain(
-      "An independent task returned a host-recorded result"
-    )
-    expect(context.extraSystemPrompt).toContain("not the user's confirmation")
-    expect(context.extraSystemPrompt).toContain("tools are unavailable")
+    expect(context.remotePolicy?.allowedToolNames).toBeUndefined()
+    expect(context.remotePolicy?.disableMcpTools).not.toBe(true)
+    expect(context.botCommunication).toBe(true)
+    expect(context.botTurnContext?.event).toBe("task_result")
+    expect(context.botTurnContext?.text).toContain("An independent task returned a host-recorded result")
+    expect(context.extraSystemPrompt).not.toContain("An independent task returned")
     expect(context.extraSystemPrompt).not.toContain("Independent task execution snapshot")
-    expect(context.extraSystemPrompt).not.toContain("bot_work_send")
-    expect(fixture.memorySnapshot).not.toHaveBeenCalled()
-    expect(fixture.deliveryTools).not.toHaveBeenCalled()
-    expect(fixture.workTools).not.toHaveBeenCalled()
+    expect(context.extraSystemPrompt).toContain("bot_work_send")
+    expect(fixture.memorySnapshot).toHaveBeenCalledOnce()
+    expect(fixture.deliveryTools).toHaveBeenCalledOnce()
+    expect(fixture.workTools).toHaveBeenCalledOnce()
     expect(fixture.announce).toHaveBeenCalledWith(bot.threadId, {
       id: task.requestId,
       content: "任务有新结果 · 读书会"
@@ -2743,7 +2750,6 @@ describe("Bot Runtime integration", () => {
       "group-other-group-a"
     ])
     expect(fixture.browserTools.mock.calls.map((args) => args[4] ?? bot.id)).toEqual([
-      bot.id,
       "group-g--a",
       "group-other-group--a"
     ])
@@ -3187,14 +3193,15 @@ describe("Bot Runtime integration", () => {
     fixture.memorySnapshot.mockReturnValue([saved])
     await port().acquire(bot, task)!.execute(new AbortController().signal, vi.fn())
     expect(fixture.memorySnapshot.mock.calls).toEqual([[bot.id, {}]])
-    expect(fixture.start.mock.calls[0][2].extraSystemPrompt).toContain('"content":"Three sections"')
+    expect(fixture.start.mock.calls[0][2].botTurnContext?.text).toContain('"content":"Three sections"')
     fixture.memorySnapshot.mockReturnValue([{ ...saved, content: "Four sections", version: "v2" }])
     await port().acquire(bot, task)!.execute(new AbortController().signal, vi.fn())
     expect(fixture.memorySnapshot.mock.calls).toEqual([
       [bot.id, {}],
       [bot.id, {}]
     ])
-    const prompt = fixture.start.mock.calls[1][2].extraSystemPrompt
+    expect(fixture.start.mock.calls[1][2].extraSystemPrompt).toBe(fixture.start.mock.calls[0][2].extraSystemPrompt)
+    const prompt = fixture.start.mock.calls[1][2].botTurnContext?.text
     expect(prompt).toContain('"content":"Four sections"')
     expect(prompt).not.toContain("Three sections")
     expect(JSON.parse(fixture.update.mock.calls.at(-1)![1].metadata).memoryEnabled).toBe(false)
@@ -3232,7 +3239,7 @@ describe("Bot Runtime integration", () => {
           expect.objectContaining({ botId: bot.id, botVersion: bot.version })
         )
       const context = fixture.start.mock.calls[0][2]
-      expect(context.extraSystemPrompt.includes("Scoped Bot memory reference")).toBe(enabled)
+      expect(context.botTurnContext?.text.includes("Scoped Bot memory reference")).toBe(enabled)
       // The override must not enable the ordinary conversation's separate memory store.
       expect(JSON.parse(fixture.update.mock.calls.at(-1)![1].metadata).memoryEnabled).toBe(false)
     }
@@ -3726,10 +3733,12 @@ describe("Bot Runtime integration", () => {
       await port().acquire(bot, task)!.execute(new AbortController().signal, vi.fn())
       const context = fixture.start.mock.calls[0][2]
       expect(context.workflowEnabled).toBeUndefined()
-      expect(context.remotePolicy.blockedToolNames).toEqual(["workflow", "task"])
+      expect(context.remotePolicy.blockedToolNames).toEqual(["workflow", "task", "bot_browser", "bot_request_browser_help"])
       expect(context.remotePolicy.disableSubagents).toBe(true)
       expect(context.remotePolicy.allowedToolNames).toBeUndefined()
       expect(context.additionalTools).toContain("collaboration")
+      expect(context.additionalTools).not.toContain("owned-browser")
+      expect(fixture.browserTools).not.toHaveBeenCalled()
       expect(context.backgroundCommandLifecycle).toHaveProperty("settled")
       expect(context.workflowInternalNotification).toBe(false)
       expect(JSON.parse(fixture.update.mock.calls.at(-1)![1].metadata).agentMode).toBe(mode)
@@ -3746,7 +3755,7 @@ describe("Bot Runtime integration", () => {
       expect(fixture.start.mock.calls.at(-1)![2].workflowInternalNotification).toBe(
         origin.kind === "notification"
       )
-      expect(fixture.start.mock.calls.at(-1)![2].remotePolicy.blockedToolNames).toEqual(origin.kind === "user" ? ["workflow", "task"] : ["workflow"])
+      expect(fixture.start.mock.calls.at(-1)![2].remotePolicy.blockedToolNames).toEqual(origin.kind === "user" ? ["workflow", "task", "bot_browser", "bot_request_browser_help"] : ["workflow"])
     }
   })
   it("does not invent a model when no configured model is available", () => {
@@ -4014,7 +4023,7 @@ describe("Bot Runtime integration", () => {
   )
   it.each<[BotTask["origin"], string]>([
     [{ kind: "introduction" }, "first conversation after the user created you"],
-    [{ kind: "user" }, "direct user request in your private conversation"],
+    [{ kind: "user" }, "Event: user_request"],
     [{ kind: "work", sourceTaskId: "source" }, "work transferred by this Bot"],
     [{ kind: "group", groupId: "g", messageId: "m" }, "direct user request in a group"],
     [{ kind: "discussion", groupId: "g", messageId: "m", round: 1 }, "optional continuation"],
@@ -4051,7 +4060,7 @@ describe("Bot Runtime integration", () => {
     await port()
       .acquire(bot, { ...task, origin, ...(origin.kind === "work" ? { workId: "work" } : {}) })!
       .execute(new AbortController().signal, vi.fn())
-    const prompt = fixture.start.mock.calls[0][2].extraSystemPrompt as string
+    const prompt = (fixture.start.mock.calls[0][2].extraSystemPrompt ?? "") + (fixture.start.mock.calls[0][2].botTurnContext?.text ?? "")
     expect(fixture.start.mock.calls[0][2].openingReplyReminder).toBe(origin.kind === "user")
     if (["user", "group", "work"].includes(origin.kind)) {
       expect(fixture.stoppedTasks).toHaveBeenCalledWith(task.id)
@@ -4082,7 +4091,7 @@ describe("Bot Runtime integration", () => {
       expect(prompt).toContain("Use bot_send_message")
       expect(prompt).not.toContain("Use normal assistant replies")
     } else expect(prompt).toContain("Use normal assistant replies")
-    if (origin.kind !== "user") {
+    if (origin.kind !== "user" && origin.kind !== "introduction") {
     expect(prompt).toContain("Match the depth the user requested")
     expect(prompt).toContain("check each requested acceptance criterion")
     expect(prompt).toContain("without a test wrapper changing its arguments")
@@ -4130,8 +4139,9 @@ describe("Bot Runtime integration", () => {
     if (inGroup) expect(prompt).not.toContain("Memory tools, when enabled")
     if (origin.kind === "schedule") expect(prompt).toContain("reply exactly BOT_ROUTINE_SILENT")
     else expect(prompt).not.toContain("reply exactly BOT_ROUTINE_SILENT")
-    if (origin.kind === "user") {
-      expect(prompt).toContain("browser-help tool")
+    if (origin.kind === "user" || origin.kind === "introduction") {
+      expect(prompt).toContain("Browser operations belong to independent tasks")
+      expect(prompt).not.toContain("browser-help tool")
       expect(prompt).toContain("queued uploads are not confirmed delivery")
       expect(prompt).toContain("Do not ask for passwords")
       return // execution instructions are tested on executor turns below
@@ -4437,7 +4447,6 @@ describe("Bot Runtime integration", () => {
         "delivery",
         "own-profile",
         "scoped-memory",
-        "owned-browser",
         "collaboration",
         "routine"
       ]
@@ -5517,12 +5526,12 @@ describe("private Bot selected identity context", () => {
     await port().acquire(bot, input)!.execute(new AbortController().signal, vi.fn())
     const [request, , context] = fixture.start.mock.calls[0]
     expect(request.message).toBe(input.message)
-    expect(context.extraSystemPrompt).toContain(JSON.stringify({ kind: "group", ...reference }))
-    expect(context.extraSystemPrompt).toContain("Bot members only")
-    expect(context.extraSystemPrompt).toContain(
+    expect(context.botTurnContext?.text).toContain(JSON.stringify({ kind: "group", ...reference }))
+    expect(context.botTurnContext?.text).toContain("Bot members only")
+    expect(context.botTurnContext?.text).toContain(
       "You can reach these Bots with bot_delegate using their IDs"
     )
-    expect(context.extraSystemPrompt).toContain("asks not to contact it")
+    expect(context.botTurnContext?.text).toContain("asks not to contact it")
     expect(fixture.groupReference).toHaveBeenCalledWith("stable-group", bot.id)
     fixture.steer.mockResolvedValue({ queued: true })
     expect(await port().acquire(bot, task)!.steer!(input, () => true)).toBe(true)
@@ -5545,7 +5554,7 @@ describe("private Bot selected identity context", () => {
       }
     }
     await port().acquire(bot, input)!.execute(new AbortController().signal, vi.fn())
-    expect(fixture.start.mock.calls[0][2].extraSystemPrompt).toContain(
+    expect(fixture.start.mock.calls[0][2].botTurnContext?.text).toContain(
       JSON.stringify({ kind: "group", id: "stable-group", available: false })
     )
     expect(fixture.groupMessages).not.toHaveBeenCalled()
@@ -5576,15 +5585,15 @@ describe("private Bot selected identity context", () => {
       id: input.requestId,
       content: input.message
     })
-    expect(context.extraSystemPrompt).toContain(
+    expect(context.botTurnContext?.text).toContain(
       JSON.stringify({ id: "stable-peer", currentName: "Renamed", description: "Public role" })
     )
-    expect(context.extraSystemPrompt).not.toContain("PRIVATE_PEER_INSTRUCTIONS")
-    expect(context.extraSystemPrompt).toContain(
+    expect(context.botTurnContext?.text).not.toContain("PRIVATE_PEER_INSTRUCTIONS")
+    expect(context.botTurnContext?.text).toContain(
       "You can reach these Bots with bot_delegate using their IDs"
     )
-    expect(context.extraSystemPrompt).toContain("asks not to contact it")
-    expect(context.extraSystemPrompt).toContain(
+    expect(context.botTurnContext?.text).toContain("asks not to contact it")
+    expect(context.botTurnContext?.text).toContain(
       "never replace an unavailable Bot with a same-name Bot"
     )
   })
@@ -5595,7 +5604,7 @@ describe("private Bot selected identity context", () => {
         : { ...bot, id, name: "Old" }
     )
     await port().acquire(bot, selectedTask())!.execute(new AbortController().signal, vi.fn())
-    expect(fixture.start.mock.calls[0][2].extraSystemPrompt).toContain(
+    expect(fixture.start.mock.calls[0][2].botTurnContext?.text).toContain(
       JSON.stringify({ id: "stable-peer", available: false })
     )
   })
@@ -6377,7 +6386,7 @@ it("isolates authenticated IM peer browser owners while retaining their binding 
       lease.release()
       outputs.push({
         thread: t.threadId,
-        scope: fixture.browserTools.mock.calls.at(-1)![4]
+        scope: fixture.browserTools.mock.calls.at(-1)?.[4]
       })
     }
 
@@ -6394,12 +6403,12 @@ it("isolates authenticated IM peer browser owners while retaining their binding 
 
     expect(new Set(outputs.map((x) => x.thread)).size).toBe(5)
     expect(new Set(outputs.map((x) => x.scope)).size).toBe(5)
-    expect(outputs[0].scope).toBe(`im-${binding.id}--${a.id}`)
+    expect(outputs[0].scope).toBeUndefined() // Main communication has no browser tools.
     expect(outputs[1].scope).toBe(`im-${binding.id}--${a.id}--${b.id}--${peers[0].threadId}`)
     expect(outputs[2].scope).toBe(`im-${binding.id}--${a.id}--${c.id}--${peers[1].threadId}`)
     expect(outputs[3].scope).toBe(`im-${binding.id}--${a.id}--${b.id}--${sameBot.threadId}`)
     expect(outputs[4].scope).toBe(`im-${binding.id}--${a.id}--${a.id}--${backToOwner.threadId}`)
-    for (const out of outputs) expect(host.browserScope(String(out.scope))).toBe(out.scope)
+    for (const out of outputs.filter(item => item.scope)) expect(host.browserScope(String(out.scope))).toBe(out.scope)
     expect(() => host.browserScope(`im-${binding.id}--${b.id}--${c.id}`)).toThrow()
     expect(() => host.browserScope(`im-${binding.id}--${a.id}--missing`)).toThrow()
   } finally {

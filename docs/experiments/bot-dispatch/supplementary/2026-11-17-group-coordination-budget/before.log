@@ -1,0 +1,40 @@
+
+ RUN  v3.2.4 <checkout>
+
+ ❯ src/main/agent/foreground-work-budget.test.ts (7 tests | 1 failed) 8ms
+   ✓ main Bot foreground allowance > allows short work and free coordination, then blocks BEFORE another effect 2ms
+   ✓ main Bot foreground allowance > does not reuse an earlier unrelated dispatch to satisfy a later exhausted assignment 0ms
+   × main Bot foreground allowance > keeps group discovery and delivery outside the execution allowance 3ms
+     → expected 'Foreground execution budget reached. …' to be undefined
+   ✓ main Bot foreground allowance > bounds cumulative execution time, but keeps user interaction and task control available 0ms
+   ✓ main Bot foreground allowance > redirects an awaited task before it launches 0ms
+   ✓ main Bot foreground allowance > redirects an awaited workflow before it launches 0ms
+   ✓ main Bot foreground allowance > retries same-process yield after a human wait and clears the timer after tool settlement 1ms
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 6 passed (7)
+   Start at  17:22:49
+   Duration  683ms (transform 102ms, setup 0ms, collect 397ms, tests 8ms, environment 0ms, prepare 42ms)
+
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/main/agent/foreground-work-budget.test.ts > main Bot foreground allowance > keeps group discovery and delivery outside the execution allowance
+AssertionError: expected 'Foreground execution budget reached. …' to be undefined
+
+- Expected: 
+undefined
+
++ Received: 
+"Foreground execution budget reached. This tool has NOT run. Keep the main chat available: hand the remaining assignment to bot_work_create, or continue its existing task/Feature. Include the user's goal and constraints, selected workspace, completed findings and exact command receipts; do not repeat completed actions or restart an accepted background command. Use finishTurn: true on the final dispatch batch. Keep the same assistant voice; do not mention budgets, internal errors or handing the user to another agent. If already acknowledged, do not add another acknowledgement. Do not poll or work around this boundary with another tool."
+
+ ❯ src/main/agent/foreground-work-budget.test.ts:66:48
+     64|     expect(budget.beforeTool("bot_send_message", {})).toBeUndefined()
+     65|     // Group coordination must neither spend an operation nor start th…
+     66|     expect(budget.beforeTool("read_file", {})).toBeUndefined()
+       |                                                ^
+     67|     expect(budget.beforeTool("edit_file", {})).toBeDefined()
+     68|     // Coordination stays available after execution needs to be handed…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+

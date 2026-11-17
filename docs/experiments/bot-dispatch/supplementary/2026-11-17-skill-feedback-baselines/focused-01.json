@@ -1,0 +1,15 @@
+{
+  "label": "focused-01",
+  "args": [
+    "node_modules/vitest/vitest.mjs",
+    "run",
+    "src/main/bots/work-projection.test.ts",
+    "src/main/bots/work-tools.test.ts",
+    "src/main/agent/bot-dispatch-feedback.test.ts",
+    "src/main/agent/bot-skill-dispatch.test.ts",
+    "--maxWorkers=2"
+  ],
+  "exitCode": 0,
+  "seconds": 3.73,
+  "log": "focused-01.log.txt"
+}

@@ -1,0 +1,13 @@
+{
+  "kind": "unit-test",
+  "startedAt": "2026-11-17T09:24:00.008695+00:00",
+  "exitCode": 0,
+  "node": "v22.23.5",
+  "command": "node node_modules/vitest/vitest.mjs run src/main/agent/foreground-work-budget.test.ts",
+  "branch": "codex/merge-uat-into-bot-beta",
+  "head": "0f13fc512b6bfe4a7a37399882c8e2704c473d8d",
+  "sourceSha256": {
+    "src/main/agent/foreground-work-budget.ts": "4c6b2683f543d36e55905e33c9fbd1d9e906c3b20e0b5fb5ebd26d9a5607338f",
+    "src/main/agent/foreground-work-budget.test.ts": "a73c540e5d362139d075e01370e958a160122f9ec2ea2a7413f20c3be95e6c9b"
+  }
+}

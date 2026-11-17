@@ -190,7 +190,7 @@ function testPromptSkillHookAndHarnessPreparation(): void {
   )
   assertSourceOrder(
     sharedFeatureBinding,
-    ["readHarnessFeatureMetadata(metadata)", "resolveHarnessFeatureCurrentStage("],
+    ["readHarnessFeatureMetadata(metadata)", "resolveHarnessExecutionStage(binding.projectId, binding.slug)"],
     "shared Feature Harness preparation"
   )
   assertSourceOrder(

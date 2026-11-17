@@ -9,7 +9,7 @@ afterEach(() => vi.useRealTimers())
 const receipt = (operation: string) =>
   new ToolMessage({
     tool_call_id: "dispatch",
-    content: JSON.stringify({ kind: "bot-work-receipt", operation, receipt: { id: "accepted" } })
+    content: JSON.stringify({ kind: "bot-work-receipt", operation, receipt: operation === "bot_work_create" ? { work: { id: "work", botId: "bot", threadId: "thread" }, task: { id: "accepted", botId: "bot", workId: "work", threadId: "thread", state: "queued" } } : { operation: { id: "operation", action: "continue", state: "active", threadId: "thread" } } })
   })
 
 describe("main Bot foreground allowance", () => {
@@ -25,7 +25,8 @@ describe("main Bot foreground allowance", () => {
     await run("edit_file")
     const blocked = await run("execute")
     expect(handler).toHaveBeenCalledTimes(4)
-    expect(blocked.status).toBe("error")
+    expect(blocked.status).toBe("success")
+    expect(JSON.parse(blocked.content)).toMatchObject({ kind: "bot-foreground-continuation", executed: false, reason: "foreground_budget" })
     expect(blocked.content).toContain("has NOT run")
     expect(budget.checkFinal()).toContain("remaining assignment")
     // Rejected/invalid dispatches cannot masquerade as a background handoff.
@@ -48,6 +49,26 @@ describe("main Bot foreground allowance", () => {
     expect(budget.checkFinal()).toBeDefined()
     budget.afterTool("bot_feature_update", receipt("bot_feature_update"), { action: "continue" })
     expect(budget.checkFinal()).toBeUndefined()
+  })
+
+  it("keeps group discovery and delivery outside the execution allowance", () => {
+    let clock = 0
+    const budget = createForegroundWorkBudget({
+      yieldCommand: vi.fn(),
+      now: () => clock,
+      maxOperations: 1,
+      maxDurationMs: 30
+    })
+    expect(budget.beforeTool("bot_list_groups", {})).toBeUndefined()
+    clock += 31
+    expect(budget.beforeTool("bot_send_message", {})).toBeUndefined()
+    // Group coordination must neither spend an operation nor start the execution timer.
+    expect(budget.beforeTool("read_file", {})).toBeUndefined()
+    expect(budget.beforeTool("edit_file", {})).toBeDefined()
+    // Coordination stays available after execution needs to be handed off.
+    expect(budget.beforeTool("bot_list_groups", {})).toBeUndefined()
+    expect(budget.beforeTool("bot_send_message", {})).toBeUndefined()
+    expect(budget.checkFinal()).toBeDefined()
   })
 
   it("bounds cumulative execution time, but keeps user interaction and task control available", () => {

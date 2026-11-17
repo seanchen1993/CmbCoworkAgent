@@ -1,0 +1,97 @@
+{"name":"desktop-agent-invoke-characterization","exitCode":1}
+PASS testForegroundHandlerInventory
+PASS testTurnCompletionGateCoversEveryEntryPoint
+PASS testInvokeReplacementOwnershipOrder
+PASS testFreshTurnGoalAndTranscriptSemantics
+
+<repo>/tests/desktop-agent-invoke-characterization.spec.ts:24
+  if (!condition) throw new Error(message)
+                        ^
+
+Error: shared Feature Harness preparation: missing "resolveHarnessFeatureCurrentStage("
+    at assert (<repo>/tests/desktop-agent-invoke-characterization.spec.ts:24:25)
+    at assertSourceOrder (<repo>/tests/desktop-agent-invoke-characterization.spec.ts:44:5)
+    at testPromptSkillHookAndHarnessPreparation (<repo>/tests/desktop-agent-invoke-characterization.spec.ts:191:3)
+    at <anonymous> (<repo>/tests/desktop-agent-invoke-characterization.spec.ts:522:3)
+    at Object.<anonymous> (<repo>/tests/desktop-agent-invoke-characterization.spec.ts:526:84)
+    at Module._compile (node:internal/modules/cjs/loader:1781:14)
+    at Object.transformer (<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/tsx/dist/register-OY9cqBEN.cjs:9:3619)
+    at Module.load (node:internal/modules/cjs/loader:1505:32)
+    at Function._load (node:internal/modules/cjs/loader:1309:12)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:254:19)
+
+Node.js v22.23.5
+
+{"name":"desktop-agent-runtime-entrypoints","exitCode":0}
+desktop-agent-runtime-entrypoints.spec.ts passed
+
+
+{"name":"standard-thread-turn-architecture","exitCode":1}
+
+<repo>/tests/standard-thread-turn-architecture.spec.ts:16
+  if (!condition) throw new Error(message)
+                        ^
+
+Error: all ten desktop Thread metadata reads use the shared parser, including the managed conversation guard
+    at assert (<repo>/tests/standard-thread-turn-architecture.spec.ts:16:25)
+    at <anonymous> (<repo>/tests/standard-thread-turn-architecture.spec.ts:152:1)
+    at Object.<anonymous> (<repo>/tests/standard-thread-turn-architecture.spec.ts:206:63)
+    at Module._compile (node:internal/modules/cjs/loader:1781:14)
+    at Object.transformer (<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/tsx/dist/register-OY9cqBEN.cjs:9:3619)
+    at Module.load (node:internal/modules/cjs/loader:1505:32)
+    at Function._load (node:internal/modules/cjs/loader:1309:12)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:254:19)
+    at loadCJSModuleWithModuleLoad (node:internal/modules/esm/translators:335:3)
+    at ModuleWrap.<anonymous> (node:internal/modules/esm/translators:235:7)
+
+Node.js v22.23.5
+
+{"name":"local-thread-run-lease","exitCode":0}
+PASS testForeignOwnerCannotSteal
+PASS testSameOwnerHandoffRequiresExactRunId
+PASS testLateReleaseIsIdentityFenced
+PASS testIdempotentClaimPreservesTimestampAndSnapshotIsolation
+PASS testReleaseNotificationIsIdentityFencedAndUnsubscribable
+PASS testRuntimeEntryPointArchitecture
+local-thread-run-lease.spec.ts passed
+
+
+{"name":"agent-window-surface","exitCode":0}
+PASS testAgentWindowSurfaceStaysShimSafe
+PASS testManagedDeliveryDeclaresExactlyThatSurface
+PASS testOnlyDesktopRunsCanOpenAModal
+PASS testManagedTransportsNeverFallBackToNoDelivery
+agent-window-surface.spec.ts passed
+
+
+{"name":"managed-transport-delivery","exitCode":0}
+PASS testRunIsNeverGatedOnAWindow
+PASS testStreamFramesReachTheChannelTheRendererListensOn
+PASS testLifecycleAndCustomEventsSurviveTranslation
+PASS testErrorDetailsBelongToTheirOwnManagedRun
+PASS testRetryResetNormalizesCheckpointAndClearsFailedToolArguments
+PASS testOnlyTheThreadWideChannelIsTranslated
+PASS testTheCoordinatorInternalChannelReachesTheThreadStream
+PASS testWindowShimRoutesThroughTheSameTranslation
+PASS testSyntheticIdCannotCollideWithARealWindow
+PASS testAnUnsupportedWindowMemberExplainsItself
+PASS testProbingTheShimStaysSafe
+PASS testAManagedTurnCanShowItsUserMessageImmediately
+PASS testAnEmptyUserMessageIsNotAnnounced
+PASS testEverySettledRunClosesItsRendererStream
+PASS testRuntimeSteerEventsFollowTheirOwnRunDelivery
+PASS testGoalRunSurvivesWithNoDesktopWindow
+managed-transport-delivery.spec.ts passed
+
+(node:48034) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+{"name":"auto-commit-headless-confirm","exitCode":0}
+PASS testHeadlessSkipIsNotReportedAsAUserCancellation
+PASS testBothAskBranchesSeparateTheTwoCases
+PASS testTheTwoReasonsStayDistinct
+auto-commit-headless-confirm.spec.ts passed
+
+(node:48036) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+

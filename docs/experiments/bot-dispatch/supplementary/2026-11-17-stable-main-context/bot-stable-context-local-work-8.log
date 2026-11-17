@@ -1,0 +1,13 @@
+stage: launching isolated App <temp>/m05-local-work-app-QHNxot
+stage: profile-model-bot-created
+stage: main-created-work-without-switch
+stage: real-work-runtime-file-delivery
+stage: delayed/failed Work target never opens main files/browser
+PASS: real beta App, ChatContainer and Runtime: main delegation → right Work → file delivery → edit → complete/continue same thread → separate drafts/main reply {
+  calls: 16,
+  screenshots: [
+    '<temp>/bot-integration-build-eryxGb/artifacts/m05-local-work-app.png',
+    '<temp>/bot-integration-build-eryxGb/artifacts/m05-local-work-app-dark.png'
+  ]
+}
+cleanup: owned Electron and localhost fixture stopped; isolated profiles removed <temp>/m05-local-work-app-QHNxot

@@ -1,3 +1,4 @@
+import { isBotContinuationReceipt } from "../../../../shared/bots/turn-feedback"
 import { botGroupReceipt } from "@/lib/bot-group-receipt"
 import { BotHistorySources } from "./BotHistorySources"
 import { toast } from "sonner"
@@ -307,6 +308,12 @@ export function BotConversationTools({
           />
         )
       }
+      if (isBotContinuationReceipt(result))
+        return showExecutionDetails ? (
+          <div className="bot-profile-event" role="note" data-bot-continuation>
+            已转入后台续办流程；本次工具未执行。
+          </div>
+        ) : null
       const browserHelpHistory = !showExecutionDetails ? botBrowserHelpHistory(tool, result) : null
       if (browserHelpHistory)
         return (

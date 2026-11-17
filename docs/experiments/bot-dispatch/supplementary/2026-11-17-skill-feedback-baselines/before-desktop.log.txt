@@ -1,0 +1,22 @@
+{"name": "desktop", "args": ["--import", "tsx", "tests/desktop-agent-invoke-characterization.spec.ts"], "exitCode": 1, "seconds": 0.2, "log": "before-desktop.log.txt"}
+PASS testForegroundHandlerInventory
+PASS testTurnCompletionGateCoversEveryEntryPoint
+PASS testInvokeReplacementOwnershipOrder
+PASS testFreshTurnGoalAndTranscriptSemantics
+<home>/.codex/worktrees/bot-only-beta/agent-channel-integration-research-7ff0d6/tests/desktop-agent-invoke-characterization.spec.ts:24
+  if (!condition) throw new Error(message)
+                        ^
+
+Error: shared Feature Harness preparation: missing "resolveHarnessFeatureCurrentStage("
+    at assert (<home>/.codex/worktrees/bot-only-beta/agent-channel-integration-research-7ff0d6/tests/desktop-agent-invoke-characterization.spec.ts:24:25)
+    at assertSourceOrder (<home>/.codex/worktrees/bot-only-beta/agent-channel-integration-research-7ff0d6/tests/desktop-agent-invoke-characterization.spec.ts:44:5)
+    at testPromptSkillHookAndHarnessPreparation (<home>/.codex/worktrees/bot-only-beta/agent-channel-integration-research-7ff0d6/tests/desktop-agent-invoke-characterization.spec.ts:191:3)
+    at <anonymous> (<home>/.codex/worktrees/bot-only-beta/agent-channel-integration-research-7ff0d6/tests/desktop-agent-invoke-characterization.spec.ts:522:3)
+    at Object.<anonymous> (<home>/.codex/worktrees/bot-only-beta/agent-channel-integration-research-7ff0d6/tests/desktop-agent-invoke-characterization.spec.ts:526:84)
+    at Module._compile (node:internal/modules/cjs/loader:1781:14)
+    at Object.transformer (<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/tsx/dist/register-OY9cqBEN.cjs:9:3619)
+    at Module.load (node:internal/modules/cjs/loader:1505:32)
+    at Function._load (node:internal/modules/cjs/loader:1309:12)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:254:19)
+
+Node.js v22.23.5

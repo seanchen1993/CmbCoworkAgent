@@ -703,6 +703,36 @@ describe("authenticated IM on the existing Bot host", () => {
       ).toHaveLength(2)
     }
   )
+  it.each(["dm", "group"] as const)("uses one durable acknowledgement for accepted dispatch in %s", async kind => {
+    const f = fixture(async (task, host) => {
+      host.imChannel.openingReply(task.id, "我来核对数据，整理好后发给你。")
+      host.imChannel.openingReply(task.id, "Repeated snapshot")
+      return { state: "completed", result: "我来核对数据，整理好后发给你。", dispatchAcknowledged: true }
+    })
+    const binding = await f.binding(kind)
+    await f.service.receive(f.event(binding, "dispatch-once"))
+    await eventually(() => f.calls.length === 1 && f.store.getTask(f.calls[0].id).state === "completed")
+    await eventually(() => f.client.submitReply.mock.calls.length === 1)
+    const task = f.store.getTask(f.calls[0].id)
+    f.host.imChannel.settle(task, "completed", "Repeated receipt", undefined, true)
+    expect(f.service.history(f.bot.id, binding.id).items.filter(x => x.kind === "bot")).toHaveLength(1)
+    expect(f.client.submitReply.mock.calls[0][0].message.content).toBe("我来核对数据，整理好后发给你。")
+  })
+  it("delivers the fallback when dispatch had no opening and preserves genuine failure", async () => {
+    const f = fixture(async (task, host) => {
+      if (task.message.includes("failed")) {
+        host.imChannel.openingReply(task.id, "我来处理。")
+        return { state: "failed", error: "目录不存在，任务未创建。", dispatchAcknowledged: true }
+      }
+      return { state: "completed", result: "我会继续处理，结果会发回这里。", dispatchAcknowledged: true }
+    })
+    const binding = await f.binding()
+    await f.service.receive(f.event(binding, "silent-dispatch"))
+    await eventually(() => f.client.submitReply.mock.calls.length === 1)
+    expect(f.client.submitReply.mock.calls[0][0].message.content).toBe("我会继续处理，结果会发回这里。")
+    await f.service.receive(f.event(binding, "failed", "failed"))
+    await eventually(() => f.client.submitReply.mock.calls.some(([r]) => r.message.content.includes("目录不存在")))
+  })
   it("migrates existing reply receipts and preserves separate opening/final idempotency", async () => {
     const f = fixture()
     const binding = await f.binding()

@@ -1,0 +1,50 @@
+{"args":["--import","tsx","tests/desktop-agent-invoke-characterization.spec.ts"],"exitCode":1}
+PASS testForegroundHandlerInventory
+PASS testTurnCompletionGateCoversEveryEntryPoint
+PASS testInvokeReplacementOwnershipOrder
+PASS testFreshTurnGoalAndTranscriptSemantics
+
+<temp>/bot-stable-context-head-3k18cpfn/tests/desktop-agent-invoke-characterization.spec.ts:24
+  if (!condition) throw new Error(message)
+                        ^
+
+Error: shared Feature Harness preparation: missing "resolveHarnessFeatureCurrentStage("
+    at assert (<temp>/bot-stable-context-head-3k18cpfn/tests/desktop-agent-invoke-characterization.spec.ts:24:25)
+    at assertSourceOrder (<temp>/bot-stable-context-head-3k18cpfn/tests/desktop-agent-invoke-characterization.spec.ts:44:5)
+    at testPromptSkillHookAndHarnessPreparation (<temp>/bot-stable-context-head-3k18cpfn/tests/desktop-agent-invoke-characterization.spec.ts:191:3)
+    at <anonymous> (<temp>/bot-stable-context-head-3k18cpfn/tests/desktop-agent-invoke-characterization.spec.ts:522:3)
+    at Object.<anonymous> (<temp>/bot-stable-context-head-3k18cpfn/tests/desktop-agent-invoke-characterization.spec.ts:526:84)
+    at Module._compile (node:internal/modules/cjs/loader:1781:14)
+    at Object.transformer (<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/tsx/dist/register-OY9cqBEN.cjs:9:3619)
+    at Module.load (node:internal/modules/cjs/loader:1505:32)
+    at Function._load (node:internal/modules/cjs/loader:1309:12)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:254:19)
+
+Node.js v22.23.5
+
+{"args":["--import","tsx","tests/standard-thread-turn-architecture.spec.ts"],"exitCode":1}
+
+<temp>/bot-stable-context-head-3k18cpfn/tests/standard-thread-turn-architecture.spec.ts:16
+  if (!condition) throw new Error(message)
+                        ^
+
+Error: all ten desktop Thread metadata reads use the shared parser, including the managed conversation guard
+    at assert (<temp>/bot-stable-context-head-3k18cpfn/tests/standard-thread-turn-architecture.spec.ts:16:25)
+    at <anonymous> (<temp>/bot-stable-context-head-3k18cpfn/tests/standard-thread-turn-architecture.spec.ts:152:1)
+    at Object.<anonymous> (<temp>/bot-stable-context-head-3k18cpfn/tests/standard-thread-turn-architecture.spec.ts:206:63)
+    at Module._compile (node:internal/modules/cjs/loader:1781:14)
+    at Object.transformer (<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/tsx/dist/register-OY9cqBEN.cjs:9:3619)
+    at Module.load (node:internal/modules/cjs/loader:1505:32)
+    at Function._load (node:internal/modules/cjs/loader:1309:12)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:254:19)
+    at loadCJSModuleWithModuleLoad (node:internal/modules/esm/translators:335:3)
+    at ModuleWrap.<anonymous> (node:internal/modules/esm/translators:235:7)
+
+Node.js v22.23.5
+
+{"args":["node_modules/vitest/vitest.mjs","run","src/main/bots/work-projection.test.ts","--reporter=json","--outputFile=/tmp/bot-stable-context-head-projection.json"],"exitCode":1}
+JSON report written to /tmp/bot-stable-context-head-projection.json
+
+(node:48511) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+

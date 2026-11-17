@@ -1,0 +1,33 @@
+
+ RUN  v3.2.4 <repository>
+
+ ❯ src/main/agent/bot-dispatch-feedback.test.ts (7 tests | 1 failed) 51ms
+   ✓ Bot dispatch feedback > uses the current request's acknowledgement and verified receipt 1ms
+   ✓ Bot dispatch feedback > does not infer completion from historical receipts, a new steer, an unfinished plan or mixed batch 0ms
+   ✓ Bot dispatch feedback > requires all parallel dispatch receipts, preserving partial failures 0ms
+   ✓ Bot dispatch feedback > rejects forged, mismatched, failed and merely reopened/starting receipts 0ms
+   ✓ Bot dispatch feedback > ends the actual graph after receipt without another model call (opening=true) 35ms
+   ✓ Bot dispatch feedback > ends the actual graph after receipt without another model call (opening=false) 11ms
+   × Bot dispatch feedback > delivers a steer injected during dispatch instead of ending on the previous receipt 2ms
+     → (0 , registerCurrentRunMessageQueueOwner) is not a function
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/main/agent/bot-dispatch-feedback.test.ts > Bot dispatch feedback > delivers a steer injected during dispatch instead of ending on the previous receipt
+TypeError: (0 , registerCurrentRunMessageQueueOwner) is not a function
+ ❯ src/main/agent/bot-dispatch-feedback.test.ts:77:5
+     75|   it("delivers a steer injected during dispatch instead of ending on t…
+     76|     const thread = "feedback-steer", run = "feedback-steer-run"
+     77|     registerCurrentRunMessageQueueOwner(thread, run)
+       |     ^
+     78|     try {
+     79|       const model = new Model([dispatch(), new AIMessage({ content: "收…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 6 passed (7)
+   Start at  16:17:05
+   Duration  874ms (transform 128ms, setup 0ms, collect 545ms, tests 51ms, environment 0ms, prepare 58ms)
+

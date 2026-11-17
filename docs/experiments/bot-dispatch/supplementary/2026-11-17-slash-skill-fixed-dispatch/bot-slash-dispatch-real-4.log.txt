@@ -1,0 +1,4 @@
+Persistent experiment record: <repository>/docs/experiments/bot-dispatch/runs/20261117T113159Z-074498fe/record.json
+{"case":"slash-skill-natural","stage":"main-idle","seconds":3.4,"workCreated":true}
+{"case":"slash-skill-natural","actual":"independent","preferred":"independent","seconds":22.3,"mainSeconds":3.3,"dispatchSeconds":3.3,"mainModelRequests":1,"finishesDispatchBatch":true,"budgetHandoff":false,"tools":["bot_skill_dispatch"]}
+Routing evaluation report: <temp>/bot-integration-build-XQS0CM/artifacts/routing-1794915119889.json

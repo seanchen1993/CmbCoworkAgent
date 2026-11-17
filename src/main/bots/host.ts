@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto"
+import { selectedMainBotSkill } from "../agent/bot-skill-dispatch"
 import type { AgentRunTerminal } from "../agent/agent-run-service"
 import type {
   BotWorkHistoryInput,
@@ -73,6 +74,8 @@ export interface BotRunLease {
         state: "completed" | "failed" | "outcome_unknown" | "superseded"
         error?: string
         result?: string
+        /** This communication turn ended on verified asynchronous dispatch receipts. */
+        dispatchAcknowledged?: boolean
         files?: BotDeliveredFile[]
         /** Successful group text was delivered explicitly, not through the final scratch reply. */
         explicitGroupMessages?: boolean
@@ -419,6 +422,16 @@ export class LocalBotHost {
     this.getBot(botId)
     const work = this.store.getWork(botId, workId)
     return { ...work, execution: this.workExecutionStatus(work) }
+  }
+  /** One accepted assignment, retaining the existing task's workspace and source/audience checks. */
+  continueSkillWork(source: { taskId: string; callId: string; key: string }, workId: string, message: string) {
+    const task = this.workToolSource(source.taskId)
+    if (!selectedMainBotSkill(task)) throw new BotError("CONFLICT", "当前主对话没有通过 / 选择技能")
+    const receipt = this.store.continueSkillWork(source, workId, message)
+    this.changed()
+    this.steerUserMessage(receipt.task)
+    this.wake()
+    return receipt
   }
   /** Available only while remove() owns the deleting fence; never exposed through renderer reads. */
   getWorkForDeletion(botId: string, workId: string) {
@@ -1591,6 +1604,9 @@ export class LocalBotHost {
   }
 
   private steerUserMessage(task: BotTask): void {
+    // Automatic results wait for the conversation lease. Never inject or yield
+    // the active user turn, even when its runtime is ready to accept steer.
+    if (task.origin.kind === "work_result") return
     const peerFeedback = task.origin.kind === "bot" && Boolean(task.origin.feedbackForTaskId)
     if (
       task.state !== "queued" ||
@@ -2065,6 +2081,7 @@ export class LocalBotHost {
     let reason: string | null = null
     let finalText: string | undefined
     let files: BotDeliveredFile[] | undefined
+    let dispatchAcknowledged = false
     let explicitGroupMessages = false
     let publicContribution = false
     let waitingCount = 0
@@ -2087,6 +2104,7 @@ export class LocalBotHost {
         state = result.state
         reason = result.error ?? null
         finalText = result.result
+        dispatchAcknowledged = result.dispatchAcknowledged === true
         files = result.files
         explicitGroupMessages = result.explicitGroupMessages === true
         publicContribution = result.publicContribution === true
@@ -2141,7 +2159,8 @@ export class LocalBotHost {
                     outcome: state === "completed" ? "success" : "error",
                     code: state === "completed" ? "normal" : controller.signal.aborted ? "cancelled" : "setup_error"
                   })
-              : undefined
+              : undefined,
+            dispatchAcknowledged
           )
         this.changed()
         try {

@@ -1,0 +1,19 @@
+Persistent experiment record: <repository>/docs/experiments/bot-dispatch/runs/20261117T112148Z-36291000/record.json
+{"case":"slash-skill-natural","actual":"inline","preferred":"independent","seconds":1.6,"mainSeconds":1.5,"mainModelRequests":1,"finishesDispatchBatch":false,"budgetHandoff":false,"tools":[]}
+FAIL slash-skill-natural main request must finish
++ actual - expected
+
++ 'failed'
+- 'completed'
+
+{"case":"slash-skill","actual":"inline","preferred":"independent","seconds":1.3,"mainSeconds":1.2,"mainModelRequests":1,"finishesDispatchBatch":false,"budgetHandoff":false,"tools":[]}
+FAIL slash-skill main request must finish
++ actual - expected
+
++ 'failed'
+- 'completed'
+
+{"case":"greeting","actual":"inline","preferred":"inline","seconds":2.6,"mainSeconds":2.6,"mainModelRequests":1,"finishesDispatchBatch":false,"budgetHandoff":false,"tools":[]}
+{"case":"short-shell","actual":"inline","preferred":"inline","seconds":3.9,"mainSeconds":3.8,"mainModelRequests":2,"finishesDispatchBatch":false,"budgetHandoff":false,"tools":["execute"]}
+Routing evaluation report: <temp>/bot-integration-build-dmFdAn/artifacts/routing-1794914508818.json
+case failures; inspect JSON report

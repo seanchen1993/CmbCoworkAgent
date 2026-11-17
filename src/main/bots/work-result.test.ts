@@ -298,11 +298,17 @@ describe("independent work result return", () => {
     })
     let release!: () => void
     const executed: BotTask[] = []
+    const steer = vi.fn(async (_task: BotTask) => false)
+    const yieldToUser = vi.fn()
+    const interrupted = vi.fn()
     const host = new LocalBotHost(f.store, {
       onAvailable: () => () => {},
       acquire: (_bot, task) => ({
         release() {},
+        steer,
+        yieldToUser,
         async execute(signal) {
+          signal.addEventListener("abort", interrupted, { once: true })
           executed.push(task)
           if (task.id === main.id)
             await new Promise<void>((resolve) => {
@@ -314,11 +320,23 @@ describe("independent work result return", () => {
       })
     })
     hosts.push(host)
+    await vi.waitFor(() => expect(executed.some(task => task.id === main.id)).toBe(true))
+    host.onSteeringReady(main.id)
     await vi.waitFor(() => expect(notices(f.store)).toHaveLength(1))
+    host.onSteeringReady(main.id)
     expect(executed.some((task) => task.origin.kind === "work_result")).toBe(false)
+    expect(steer).not.toHaveBeenCalled()
+    expect(yieldToUser).not.toHaveBeenCalled()
+    expect(interrupted).not.toHaveBeenCalled()
+    const next = host.send({ botId: f.bot.id, requestId: "next-user", message: "先回答这一个问题" })
     release()
     await vi.waitFor(() =>
       expect(executed.filter((task) => task.origin.kind === "work_result")).toHaveLength(1)
     )
+    expect(executed.findIndex(task => task.id === next.id)).toBeLessThan(
+      executed.findIndex(task => task.origin.kind === "work_result")
+    )
+    expect(steer.mock.calls.every(args => (args[0] as BotTask)?.origin.kind !== "work_result")).toBe(true)
+    expect(interrupted).not.toHaveBeenCalled()
   })
 })

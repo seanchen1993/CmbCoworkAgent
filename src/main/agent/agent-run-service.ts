@@ -1,3 +1,4 @@
+import type { BotSkillDispatch } from "./bot-skill-dispatch"
 import type { BrowserWindow } from "electron"
 import { AsyncLocalStorage } from "node:async_hooks"
 import { resolveAgentStreamRequestChannel } from "../../shared/agent-stream-channel"
@@ -162,6 +163,8 @@ export interface AgentRunExecutionContext {
     metadata: Record<string, unknown>
   }) => string | null
   allowForeignOwnerGoalControl?: boolean
+  /** Host-confirmed / selection, routed before activation on the main Bot only. */
+  botSkillDispatch?: BotSkillDispatch
   trustedExplicitSkill?: SkillUseBlockMetadata
   allowTrustedTransportSkillMarker?: boolean
   remotePolicy?: RemoteTurnPolicy
@@ -183,6 +186,8 @@ export interface AgentRunExecutionContext {
   botIntroduction?: boolean
   extraSystemPrompt?: string
   botCommunication?: CreateAgentRuntimeOptions["botCommunication"]
+  /** Local Bot event context, appended to the new message rather than the system prefix. */
+  botTurnContext?: import("./bot-turn-context").BotTurnContext
   /** Trusted host adapters can add identity-bound tools; never populated from renderer input. */
   additionalTools?: CreateAgentRuntimeOptions["additionalTools"]
   foregroundWorkBudget?: CreateAgentRuntimeOptions["foregroundWorkBudget"]
@@ -190,6 +195,7 @@ export interface AgentRunExecutionContext {
   checkFinalDelivery?: CreateAgentRuntimeOptions["checkFinalDelivery"]
   /** Bot main-private-chat only; not a renderer setting or a leaf-agent option. */
   openingReplyReminder?: CreateAgentRuntimeOptions["openingReplyReminder"]
+  onBotDispatchFeedback?: CreateAgentRuntimeOptions["onBotDispatchFeedback"]
   toolConcurrencyQueueId?: string
   userInputWithoutToolLock?: CreateAgentRuntimeOptions["userInputWithoutToolLock"]
   botBrowserToolsOwnFileLock?: CreateAgentRuntimeOptions["botBrowserToolsOwnFileLock"]

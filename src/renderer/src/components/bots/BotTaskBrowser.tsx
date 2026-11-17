@@ -28,26 +28,31 @@ export function BotTaskBrowser({
   selectedWork?: BotWorkSummary | null
   onWork(id: string): void
 }) {
-  const [chosen, setChosen] = useState("main")
-  const work = selectedWork ?? works.find((item) => item.id === chosen)
+  const [chosen, setChosen] = useState<string | null>(null)
+  const available = works.filter((item) => !item.source || item.source.transport === "im")
+  const suggested = available.find((item) =>
+    item.execution?.waitingFor.some((wait) => wait.kind === "browser")
+  ) ?? available[0]
+  const work = selectedWork ?? (chosen === "other"
+    ? undefined
+    : available.find((item) => item.id === chosen) ?? suggested)
   const scope = work ? botWorkBrowserScope(work.id, botId) : mainScope
   return (
     <>
-      {!selectedWork && works.length > 0 && (
+      {!selectedWork && (
         <div className="px-5 pt-4">
-          <Select value={work?.id ?? "main"} onValueChange={setChosen}>
+          <Select value={work?.id ?? "other"} onValueChange={setChosen}>
             <SelectTrigger aria-label="查看任务浏览器" className="rounded-xl shadow-none">
               <SelectValue />
             </SelectTrigger>
             <SelectContent data-bot-popup className="bot-workspace-select rounded-xl">
-              <SelectItem value="main">主对话的浏览器</SelectItem>
-              {works
-                .filter((item) => !item.source || item.source.transport === "im")
+              {available
                 .map((item) => (
                   <SelectItem key={item.id} value={item.id}>
                     {item.title}
                   </SelectItem>
                 ))}
+              <SelectItem value="other">例行与后台工作</SelectItem>
             </SelectContent>
           </Select>
           {work && (

@@ -1,0 +1,258 @@
+{
+  "createdAt": "2026-11-17T10:44:33.424Z",
+  "note": "Logs retained from every attempt. Local-work attempt 4 is in app-final and bots-local-work-app-final. Failed diagnostics are not counted as successes. Source snapshot includes pre-existing uncommitted work.",
+  "evidence": [
+    {
+      "file": "bot-stable-context-app-final.log",
+      "originalSha256": "e0387f27b9487d4c3187fe57a07c3a41cf7909f55c02b3aaa73bcb1ded0131b0",
+      "redactedSha256": "214723a80f4c5f78fde075a8b01ba3c987b2cb1469fd8182b774c94f3fa52c3b",
+      "originalModifiedAt": "2026-11-17T10:35:48.194Z"
+    },
+    {
+      "file": "bot-stable-context-bots-local-work-app-final.log",
+      "originalSha256": "ace83fde07f9b5acac709f72253b47c073706d80048f89febdad7404a63d52fb",
+      "redactedSha256": "7aeb7c0bb1b027397946f6c10dfc4e5c0e0baa196ffa35a7d26a9a5a1d4a59dc",
+      "originalModifiedAt": "2026-11-17T10:35:39.809Z"
+    },
+    {
+      "file": "bot-stable-context-bots-steer-stream-app-final.log",
+      "originalSha256": "979fcafc3c822b7070529cd0c828ce6af7d09e8a214295b3f51d68aa4492ed54",
+      "redactedSha256": "82e4406477b3c6732aad63abab4c3b1637e2e6477791d2e64cc827204dba6965",
+      "originalModifiedAt": "2026-11-17T10:35:48.193Z"
+    },
+    {
+      "file": "bot-stable-context-build-1.log",
+      "originalSha256": "48e9570009a4767f9003262c9601ceadf2527c79f9f79426c968ae2e10f57ce1",
+      "redactedSha256": "00aec0518dc4b1caf020f84b78833f4ec98e860a6446edbc7e801208f3d24b24",
+      "originalModifiedAt": "2026-11-17T10:20:56.923Z"
+    },
+    {
+      "file": "bot-stable-context-build-2.log",
+      "originalSha256": "bf6b5b5d64e494b336c9d07bba2ac12caf3900861edf03aa6c37a454e6762f43",
+      "redactedSha256": "a0f0119b9878364de27e78a9d8805b2c143ace439173c88d0932d386955358c5",
+      "originalModifiedAt": "2026-11-17T10:27:38.172Z"
+    },
+    {
+      "file": "bot-stable-context-build-3.log",
+      "originalSha256": "5680979d858fc7b0cb5fe72b94d08919a0616607f2c0d0f8972c91b1fa10a964",
+      "redactedSha256": "fdd6125d857332fca3017a5df566d001be2d4643aff5858e18e2f88fd7790abd",
+      "originalModifiedAt": "2026-11-17T10:30:23.121Z"
+    },
+    {
+      "file": "bot-stable-context-build-4.log",
+      "originalSha256": "26be37e95403f5c83d8459f6c5cafcdac8ea0c988bb5ee06966cbb31eb49f8df",
+      "redactedSha256": "9b5f421b75f01a92151c758ed1db6149bbf5b84edd563cf67a27797eb86ae5ac",
+      "originalModifiedAt": "2026-11-17T10:33:03.626Z"
+    },
+    {
+      "file": "bot-stable-context-build-5.log",
+      "originalSha256": "cabef7d8fd00ccbacf90d35c19cb5ee645a7275e557c13c572f7be26eb0529a8",
+      "redactedSha256": "49db72a388ffa2d4d6d928d71c0ab67c379b0266c5b9bce0eff0750f19bc8a73",
+      "originalModifiedAt": "2026-11-17T10:34:42.113Z"
+    },
+    {
+      "file": "bot-stable-context-build-6.log",
+      "originalSha256": "fea000e489f6e0c42af9d52fa5d72c084d757374bd92fa359af5d2cc4d906175",
+      "redactedSha256": "7a1f9e71ff9d2f9f61e355bb39a54ee31e4718d575933c02c60fed1021e69b2e",
+      "originalModifiedAt": "2026-11-17T10:42:25.277Z"
+    },
+    {
+      "file": "bot-stable-context-desktop-baseline.log",
+      "originalSha256": "c259eac1c13a14d24b87de99253afa77340bfda7f93245e65677ae70f95fb2c2",
+      "redactedSha256": "c2df77c2224b3ee57127f4882141b8f735b7e293eb15a3c65755bdc3c969631c",
+      "originalModifiedAt": "2026-11-17T10:28:56.346Z"
+    },
+    {
+      "file": "bot-stable-context-head-baseline.log",
+      "originalSha256": "a42896c15a989e010d59a88860d5f71f4c194a87a7014dfd1dda7fb7867367f3",
+      "redactedSha256": "55d9d03f6fef5bfd337d1d3107f5126dbc1844d3060ed3997cc984942d4e0dd8",
+      "originalModifiedAt": "2026-11-17T10:31:08.719Z"
+    },
+    {
+      "file": "bot-stable-context-head-projection.json",
+      "originalSha256": "4e60c633f59bda29f0bc279db5024481fa949bacc12ad2b414d7869b27aaff3f",
+      "redactedSha256": "c17711197d0d63214ab176f2b17f29bad88d62f1ddde0fa95c87901aadd07538",
+      "originalModifiedAt": "2026-11-17T10:31:08.638Z"
+    },
+    {
+      "file": "bot-stable-context-head-stream-baseline.log",
+      "originalSha256": "660bf635f4b89608acd689b1eeac9ad751d29060a4813b4bf0ba28f6d0b70a9b",
+      "redactedSha256": "dea31c5346c4ac084fd41d9db69bac9fe0021eaf8a7686744753fcd043d817e3",
+      "originalModifiedAt": "2026-11-17T10:43:24.613Z"
+    },
+    {
+      "file": "bot-stable-context-legacy-boundary.log",
+      "originalSha256": "0a5022cf627b226f38adfa040719754db78e00aeea3895e82fe099d04ff45abe",
+      "redactedSha256": "0a5022cf627b226f38adfa040719754db78e00aeea3895e82fe099d04ff45abe",
+      "originalModifiedAt": "2026-11-17T10:26:35.123Z"
+    },
+    {
+      "file": "bot-stable-context-local-work-1.log",
+      "originalSha256": "02d935bd7e2a43126a0e6a7c9760ee0ece3eb5571e4c5e285c973f5462933281",
+      "redactedSha256": "0d1dba20bea0e13b3a24d007ec5e9a1963cfb0133c03d5892e7077e09648e371",
+      "originalModifiedAt": "2026-11-17T10:27:48.262Z"
+    },
+    {
+      "file": "bot-stable-context-local-work-2.log",
+      "originalSha256": "70615cba89fb05951998422ebacc61505126f1951cbf687375a65eb7a34f336b",
+      "redactedSha256": "30e729c1f1e02f7cc2f70e996f43c871ee5e84a581a84eed8a11767fb46fa54b",
+      "originalModifiedAt": "2026-11-17T10:28:47.508Z"
+    },
+    {
+      "file": "bot-stable-context-local-work-3.log",
+      "originalSha256": "dd79521bc74e7b4158bdbb5132eb4b8006294e7ad94760481ff83ddd40b992c2",
+      "redactedSha256": "2abdf24c7a7a0dfe6465a5350145fd9c095be0c3bccc77ffa8f9eebd18cdf98e",
+      "originalModifiedAt": "2026-11-17T10:32:05.001Z"
+    },
+    {
+      "file": "bot-stable-context-local-work-5.log",
+      "originalSha256": "3df6df2b475482eecc65a68aafebb5f071788681142f53deb68ea193829b0589",
+      "redactedSha256": "e01660494d99c05d2c606b4ec42b98116b2ba7e2a540963d19226cb4fca45719",
+      "originalModifiedAt": "2026-11-17T10:37:06.855Z"
+    },
+    {
+      "file": "bot-stable-context-local-work-6.log",
+      "originalSha256": "3c2ea3bf25295cd296d13f6e0fa4a6003201aed507c9552b73d7890558771f21",
+      "redactedSha256": "7145f9e80b1313ae9da09f6d4f5c01b02ed80c1545490e7d1359a92457a5cff7",
+      "originalModifiedAt": "2026-11-17T10:40:10.577Z"
+    },
+    {
+      "file": "bot-stable-context-local-work-7.log",
+      "originalSha256": "02b6cb60f15f37057c4f52b151e708124787d6fb99c714f8b48dedec005b7974",
+      "redactedSha256": "aba7ece9c3f537e99dbee3869f62496b406841908f89cb3cdd62f1076d46d945",
+      "originalModifiedAt": "2026-11-17T10:42:09.470Z"
+    },
+    {
+      "file": "bot-stable-context-local-work-8.log",
+      "originalSha256": "73507e4886dff7438e5d653177f899820924b5562f293414d2a510ba4b064c5e",
+      "redactedSha256": "39a99d9dc5fb10c8ba244510135748c6e76c4f146e101e708837bc4c10c53b85",
+      "originalModifiedAt": "2026-11-17T10:43:10.847Z"
+    },
+    {
+      "file": "bot-stable-context-memory.log",
+      "originalSha256": "cc7d89ff48fb9be14fccd9e7d24f57b447a92e5ab78384e49b3aa2786aa3a899",
+      "redactedSha256": "0e0b3b77aac70679fc7cc6cc6b0864868589a5f2130f1462568833c7d49b9506",
+      "originalModifiedAt": "2026-11-17T10:31:34.891Z"
+    },
+    {
+      "file": "bot-stable-context-real-1.log",
+      "originalSha256": "5074dbd99f8ed5ad9aaa7e64da0b1bda9e2b73531922c2181e067e7ea91b62bb",
+      "redactedSha256": "2c4c112d17d9c3b51314155c211dc5b9139efad4360eb41874df47a46a424ad3",
+      "originalModifiedAt": "2026-11-17T10:29:42.917Z"
+    },
+    {
+      "file": "bot-stable-context-real-2.log",
+      "originalSha256": "4e262aab34559cf662c94034715f4228aff57eb1aad9f5eb5a6d2045f703e442",
+      "redactedSha256": "7fbf2d3a653ccb1cee210df9633b45673030bbb0786af48c542026ce244566c0",
+      "originalModifiedAt": "2026-11-17T10:36:09.850Z"
+    },
+    {
+      "file": "bot-stable-context-stream-baseline.log",
+      "originalSha256": "c01939840c7a8aad98afdb763c8ef6c63ff78c81db812cd4ab1bd3ffed8012aa",
+      "redactedSha256": "fed94b368d016baca5fa6fac8eeedf96d37cd588cde1a44dac338a249ee35ea8",
+      "originalModifiedAt": "2026-11-17T10:43:02.129Z"
+    },
+    {
+      "file": "bot-stable-context-typecheck-2.log",
+      "originalSha256": "79c12646513b161704f627a17cd205015763a938f5693d1eb55c888fbf419459",
+      "redactedSha256": "79c12646513b161704f627a17cd205015763a938f5693d1eb55c888fbf419459",
+      "originalModifiedAt": "2026-11-17T10:19:34.986Z"
+    },
+    {
+      "file": "bot-stable-context-typecheck-3.log",
+      "originalSha256": "28889151c2b0b2c9b044524afb09ae22c53965d22cfaf623abc80a5f0599b7c7",
+      "redactedSha256": "6b1281a9b114125106fbcbf914170408abfe5268996fa3013b15f88a4353dc24",
+      "originalModifiedAt": "2026-11-17T10:24:32.905Z"
+    },
+    {
+      "file": "bot-stable-context-typecheck-4.log",
+      "originalSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "redactedSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "originalModifiedAt": "2026-11-17T10:26:11.164Z"
+    },
+    {
+      "file": "bot-stable-context-typecheck-5.log",
+      "originalSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "redactedSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "originalModifiedAt": "2026-11-17T10:31:30.984Z"
+    },
+    {
+      "file": "bot-stable-context-typecheck-6.log",
+      "originalSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "redactedSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "originalModifiedAt": "2026-11-17T10:35:31.824Z"
+    },
+    {
+      "file": "bot-stable-context-typecheck-final.log",
+      "originalSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "redactedSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "originalModifiedAt": "2026-11-17T10:43:02.160Z"
+    },
+    {
+      "file": "bot-stable-context-typecheck.log",
+      "originalSha256": "440f778d98fadf45dc8ea400aad9e4080f4280222d7339345cddbf7403facf52",
+      "redactedSha256": "440f778d98fadf45dc8ea400aad9e4080f4280222d7339345cddbf7403facf52",
+      "originalModifiedAt": "2026-11-17T10:14:32.077Z"
+    },
+    {
+      "file": "bot-stable-context-unit-1.json",
+      "originalSha256": "089f1d2a408ee2dd4ab46ecb27ca68d76ed2be6f93d145f56b7b5d6795eb45d0",
+      "redactedSha256": "5b344d79dd96e7c2e5654a080715f571af592cbbf7ba53d046638d766715dcca",
+      "originalModifiedAt": "2026-11-17T10:18:08.686Z"
+    },
+    {
+      "file": "bot-stable-context-unit-1.log",
+      "originalSha256": "259ad9c966b95110b6bc249aca916476a90e7b4a5772cc2f6530448ae3941d6e",
+      "redactedSha256": "259ad9c966b95110b6bc249aca916476a90e7b4a5772cc2f6530448ae3941d6e",
+      "originalModifiedAt": "2026-11-17T10:18:08.687Z"
+    },
+    {
+      "file": "bot-stable-context-unit-2.json",
+      "originalSha256": "b98438927c4a8e0f52f3a9774e8a7ae653111e4f48890c27e2fa86b09c7a9b65",
+      "redactedSha256": "b3993777cc5f0545943afbdb21e9b99395ff031f9335fca8f46959f43e84c13e",
+      "originalModifiedAt": "2026-11-17T10:19:22.136Z"
+    },
+    {
+      "file": "bot-stable-context-unit-2.log",
+      "originalSha256": "e0571d63b12ff582762b4a92724999eadd7e800dd99d56d02e007566b9baebcb",
+      "redactedSha256": "e0571d63b12ff582762b4a92724999eadd7e800dd99d56d02e007566b9baebcb",
+      "originalModifiedAt": "2026-11-17T10:19:22.136Z"
+    },
+    {
+      "file": "bot-stable-context-unit-3.json",
+      "originalSha256": "f29fa5f8b378013944353fd3aef79c9f125a24d824a172f261af071546fb4ee3",
+      "redactedSha256": "b0ac1f04c8c0dfe62d6e82b8726ac0babb8e90f7104d5d7e6d4aded7301ff84a",
+      "originalModifiedAt": "2026-11-17T10:24:33.360Z"
+    },
+    {
+      "file": "bot-stable-context-unit-3.log",
+      "originalSha256": "d050eb2bac251057cec259a445db7010c3208531350cd6627297fcc3abb5f5f8",
+      "redactedSha256": "d050eb2bac251057cec259a445db7010c3208531350cd6627297fcc3abb5f5f8",
+      "originalModifiedAt": "2026-11-17T10:24:33.360Z"
+    },
+    {
+      "file": "bot-stable-context-unit-4.json",
+      "originalSha256": "3095ec29973f23ef5d8b0682fe936b83aaf62eb3083cc36d6f921dfe0f90fa63",
+      "redactedSha256": "6dba267317cfddfaace1e43ea52eab6e494941c39c313eb58b9d7b5550995c79",
+      "originalModifiedAt": "2026-11-17T10:27:33.514Z"
+    },
+    {
+      "file": "bot-stable-context-unit-4.log",
+      "originalSha256": "df52f52fc07c1c2eb007162e88b5a31b0b3dd0c0a11784c31ed038c44c54fc9a",
+      "redactedSha256": "df52f52fc07c1c2eb007162e88b5a31b0b3dd0c0a11784c31ed038c44c54fc9a",
+      "originalModifiedAt": "2026-11-17T10:27:33.514Z"
+    },
+    {
+      "file": "bot-stable-context-unit-5.json",
+      "originalSha256": "96d4681bf1aa5ee5862059936da2a1cfde09a9717fb1b15cd3e35725d5b78ba2",
+      "redactedSha256": "352fdb913816b1abd440bbb78107c993dd34fe173774c72459e4f63ee4f18fe4",
+      "originalModifiedAt": "2026-11-17T10:29:09.079Z"
+    },
+    {
+      "file": "bot-stable-context-unit-5.log",
+      "originalSha256": "a660cacaadd0a171975743a6deb8dfd25671cf24b01c1fd6ea39c8b2f1e56ed9",
+      "redactedSha256": "a660cacaadd0a171975743a6deb8dfd25671cf24b01c1fd6ea39c8b2f1e56ed9",
+      "originalModifiedAt": "2026-11-17T10:29:09.079Z"
+    }
+  ]
+}

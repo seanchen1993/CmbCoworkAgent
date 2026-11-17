@@ -1,0 +1,37 @@
+{"label": "focused-01", "args": ["node_modules/vitest/vitest.mjs", "run", "src/main/bots/work-projection.test.ts", "src/main/bots/work-tools.test.ts", "src/main/agent/bot-dispatch-feedback.test.ts", "src/main/agent/bot-skill-dispatch.test.ts", "--maxWorkers=2"], "exitCode": 0, "seconds": 3.73, "log": "focused-01.log.txt"}
+
+ RUN  v3.2.4 <repo>
+
+(node:61212) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:61213) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | src/main/bots/work-tools.test.ts > work Runtime tools > reuses and reopens the same work atomically, and keeps replay and audience protection
+BotError: 任务状态已改变：completed
+    at <repo>/src/main/bots/store.ts:3333:15
+    at BotStore.transaction (<repo>/src/main/bots/store.ts:633:22)
+    at BotStore.transition (<repo>/src/main/bots/store.ts:3326:17)
+    at <repo>/src/main/bots/store.ts:4275:25
+    at BotStore.transaction (<repo>/src/main/bots/store.ts:633:22)
+    at BotStore.settle (<repo>/src/main/bots/store.ts:4250:10)
+    at <repo>/src/main/bots/store.ts:4236:12
+    at BotStore.transaction (<repo>/src/main/bots/store.ts:633:22)
+    at BotStore.settleRun (<repo>/src/main/bots/store.ts:4219:10)
+    at LocalBotHost.execute (<repo>/src/main/bots/host.ts:2148:22) {
+  code: 'CONFLICT'
+}
+
+ ✓ src/main/bots/work-tools.test.ts (12 tests) 828ms
+ ✓ src/main/agent/bot-skill-dispatch.test.ts (7 tests) 52ms
+stdout | src/main/agent/bot-dispatch-feedback.test.ts > Bot dispatch feedback > delivers a steer injected during dispatch instead of ending on the previous receipt
+[Runtime] Injected 1 queued current-run message(s) in beforeModel for thread feedback-steer
+
+ ✓ src/main/agent/bot-dispatch-feedback.test.ts (8 tests) 50ms
+ ✓ src/main/bots/work-projection.test.ts (4 tests) 2497ms
+   ✓ work activity projection query boundaries > seeks the existing family index for list, detail and summaries despite unrelated private history  2198ms
+
+ Test Files  4 passed (4)
+      Tests  31 passed (31)
+   Start at  20:02:24
+   Duration  3.30s (transform 377ms, setup 0ms, collect 1.66s, tests 3.43s, environment 0ms, prepare 151ms)
+

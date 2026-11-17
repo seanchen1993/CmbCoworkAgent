@@ -1,0 +1,65 @@
+stage: launching isolated App <temp>/m05-local-work-app-3mStZx
+stage: profile-model-bot-created
+stage: main-created-work-without-switch
+Local model fixture failed: AssertionError [ERR_ASSERTION]: raw parent request must remain only in its source conversation
+    at Server.<anonymous> (<repository>/tests/bots-local-work-app.spec.ts:42:16)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+Local model fixture failed: AssertionError [ERR_ASSERTION]: raw parent request must remain only in its source conversation
+    at Server.<anonymous> (<repository>/tests/bots-local-work-app.spec.ts:42:16)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+Local model fixture failed: AssertionError [ERR_ASSERTION]: raw parent request must remain only in its source conversation
+    at Server.<anonymous> (<repository>/tests/bots-local-work-app.spec.ts:42:16)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+Local model fixture failed: AssertionError [ERR_ASSERTION]: raw parent request must remain only in its source conversation
+    at Server.<anonymous> (<repository>/tests/bots-local-work-app.spec.ts:42:16)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+Local model fixture failed: AssertionError [ERR_ASSERTION]: raw parent request must remain only in its source conversation
+    at Server.<anonymous> (<repository>/tests/bots-local-work-app.spec.ts:42:16)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+artifact-directory <temp>/m05-local-work-app-3mStZx last model phases [[],[],[]]
+cleanup: owned Electron and localhost fixture stopped; isolated profiles removed <temp>/m05-local-work-app-3mStZx
+locator.waitFor: Timeout 30000ms exceeded.
+Call log:
+  - waiting for getByRole('button', { name: /^(允许|运行|全部批准并执行)$/ }).first() to be visible
+
+    at main (<repository>/tests/bots-local-work-app.spec.ts:391:8) {
+  log: [
+    "  - waiting for getByRole('button', { name: /^(允许|运行|全部批准并执行)$/ }).first() to be visible"
+  ],
+  name: 'TimeoutError'
+}

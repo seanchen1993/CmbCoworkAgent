@@ -779,7 +779,7 @@ export class BotMockChannelStore {
     )
     if (this.db.getRowsModified()) this.changed()
   }
-  settle(task: BotTask, state: BotTaskState, text: string, files?: BotDeliveredFile[]): void {
+  settle(task: BotTask, state: BotTaskState, text: string, files?: BotDeliveredFile[], dispatchAcknowledged = false): void {
     if (!task.mockSource) return
     this.run("UPDATE bot_mock_outbox SET state='blocked' WHERE source_task_id=? AND delivery_kind LIKE 'browser_help:%' AND state IN ('pending','sending')", [task.id])
     const owner = this.continuationOwner(task)
@@ -800,6 +800,15 @@ export class BotMockChannelStore {
         "UPDATE bot_mock_outbox SET state='blocked' WHERE source_task_id=? AND delivery_kind='opening' AND state='pending'",
         [task.id]
       )
+    // The runtime ended on verified dispatch receipts, not on another model reply.
+    // Keep the existing durable opening delivery (including retries/unknown receipt),
+    // rather than enqueueing a synonymous final message. Ordinary results and failures
+    // always use the final outbox; a missing/failed opening gets the final fallback.
+    if (dispatchAcknowledged && state === "completed" && !task.workId && !files?.length &&
+        this.rows("SELECT id FROM bot_mock_outbox WHERE id=? AND delivery_kind='opening' AND state IN ('pending','sending','sent','accepted','unknown')", [`im-opening-${task.id}`]).length) {
+      this.changed()
+      return
+    }
     // Personal work reports once through the existing main-conversation result notification.
     if (source.personal && task.workId && !files?.length) return
     const binding = this.get(owner, source.bindingId)

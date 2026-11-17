@@ -1,0 +1,76 @@
+
+ RUN  v3.2.4 <repository>
+
+(node:55328) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:55330) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:55327) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/renderer/src/lib/bot-execution-visibility.test.ts (60 tests) 22ms
+ ✓ src/main/agent/bot-turn-context.test.ts (4 tests) 122ms
+ ✓ src/main/agent/bot-skill-dispatch.test.ts (5 tests) 113ms
+ ✓ src/main/bots/skill-policy.test.ts (5 tests) 2ms
+ ✓ src/main/agent/foreground-work-budget.test.ts (7 tests) 7ms
+(node:55332) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/workspace-host.test.ts (6 tests) 350ms
+ ✓ src/main/bots/work-tools.test.ts (12 tests) 948ms
+stderr | src/main/agent/standard-thread-turn.test.ts
+langsmith/experimental/sandbox is in alpha. This feature is experimental, and breaking changes are expected.
+
+ ❯ src/main/bots/work.test.ts (28 tests | 1 failed) 1881ms
+   ✓ durable local independent works > carries a composer skill beyond the input page limit and resolves it again after restart 68ms
+   × durable local independent works > uses the latest applied user selection, excluding pending choices and model-written markers 55ms
+     → 补充消息不属于当前执行轮次
+   ✓ durable local independent works > does not activate a historical user reference or a routing note 54ms
+   ✓ durable local independent works > does not activate a historical assistant reference or a routing note 34ms
+   ✓ durable local independent works > keeps the visible brief and supplies exact original and applied user inputs 78ms
+   ✓ durable local independent works > forwards introduction supplements but not the greeting 41ms
+   ✓ durable local independent works > keeps long source messages and selected context as references, without inflating the assignment 39ms
+   ✓ durable local independent works > rejects unavailable context references atomically 32ms
+   ✓ durable local independent works > pages a long applied correction under its own assignment, without reading queued or unrelated work 37ms
+   ✓ durable local independent works > rejects an oversized work follow-up without a receipt or task/version/activity change 37ms
+   ✓ durable local independent works > persists the actual Bot instructions and their provenance through creation, revision and reload 35ms
+   ✓ durable local independent works > keeps beta question receipts and batched work context as separate constructor ports 28ms
+   ✓ durable local independent works > keeps beta workflow instance deduplication within the exact independent work 37ms
+   ✓ durable local independent works > runs private chat and separate work alongside the same Bot's group conversation 31ms
+   ✓ durable local independent works > rejects mixed group/work stop targets before changing either conversation 33ms
+   ✓ durable local independent works > reopens the original receipt and rolls back native write refusal without creating another work 57ms
+   ✓ durable local independent works > creates one fixed conversation and initial execution, scopes replay and receipts, and keeps lifecycle explicit 36ms
+   ✓ durable local independent works > aggregates activity ahead of newer queued supplements and gates completion on async collaborators/outbox 38ms
+   ✓ durable local independent works > retains late closed-route results while delivering unrelated outbox items 39ms
+   ✓ durable local independent works > keeps work-family waits visible and fences archive/deletion without orphaning peer execution 40ms
+   ✓ durable local independent works > keeps paginated metadata and thread discovery after execution pruning 101ms
+   ✓ durable local independent works > surfaces an old active work ahead of 40 newer completed works and batches expanded metadata 200ms
+   ✓ durable local independent works > acknowledges only the displayed main/work boundary and preserves newer activity against late bulk reads 44ms
+   ✓ durable local independent works > blocks completion on original background managers and skips late notifications for a closed work 33ms
+   ✓ durable local independent works > does not claim a historical peer's later background work, and stops only source-bound peer commands 46ms
+   ✓ durable local independent works > unlimited admission isolates independent works (same Bot: false) 248ms
+   ✓ durable local independent works > unlimited admission isolates independent works (same Bot: true) 253ms
+   ✓ durable local independent works > reserves one graph for main while a work or its peer waits; additional work stays queued 106ms
+ ✓ src/main/agent/standard-thread-turn.test.ts (21 tests) 32ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/main/bots/work.test.ts > durable local independent works > uses the latest applied user selection, excluding pending choices and model-written markers
+BotError: 补充消息不属于当前执行轮次
+ ❯ src/main/bots/store.ts:4197:15
+    4195|         child.state !== "queued"
+    4196|       )
+    4197|         throw new BotError("CONFLICT", "补充消息不属于当前执行轮次")
+       |               ^
+    4198|       this.db.run(
+    4199|         "UPDATE bot_tasks SET state='running', injected_into=?, update…
+ ❯ BotStore.transaction src/main/bots/store.ts:633:22
+ ❯ BotStore.injectIntoRun src/main/bots/store.ts:4174:17
+ ❯ src/main/bots/work.test.ts:65:15
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 8 passed (9)
+      Tests  1 failed | 147 passed (148)
+   Start at  19:21:37
+   Duration  5.11s (transform 3.76s, setup 0ms, collect 10.46s, tests 3.48s, environment 1ms, prepare 860ms)
+

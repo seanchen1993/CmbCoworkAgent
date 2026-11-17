@@ -1,0 +1,40 @@
+{"name": "projection", "args": ["node_modules/vitest/vitest.mjs", "run", "src/main/bots/work-projection.test.ts", "--maxWorkers=1"], "exitCode": 1, "seconds": 3.71, "log": "before-projection.log.txt"}
+
+ RUN  v3.2.4 <home>/.codex/worktrees/bot-only-beta/agent-channel-integration-research-7ff0d6
+
+(node:60714) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/main/bots/work-projection.test.ts (4 tests | 1 failed) 2440ms
+   × work activity projection query boundaries > seeks the existing family index for list, detail and summaries despite unrelated private history 2144ms
+     → expected true to be false // Object.is equality
+   ✓ work activity projection query boundaries > preserves family state, owner and audience isolation as peers finish 140ms
+   ✓ work activity projection query boundaries > paginates smaller prompt snapshots without omissions or extra database requests 132ms
+   ✓ work activity projection query boundaries > retains the newest primary outcome for same-millisecond turns without reading result bodies 23ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/main/bots/work-projection.test.ts > work activity projection query boundaries > seeks the existing family index for list, detail and summaries despite unrelated private history
+AssertionError: expected true to be false // Object.is equality
+
+- Expected
++ Received
+
+- false
++ true
+
+ ❯ src/main/bots/work-projection.test.ts:110:64
+    108|       expect(plan.some(detail => detail.startsWith("SEARCH r USING IND…
+    109|       expect(plan.some(detail => detail.startsWith("SEARCH t USING IND…
+    110|       expect(plan.some(detail => detail.startsWith("SCAN t"))).toBe(fa…
+       |                                                                ^
+    111|       // Compare every projected field against the prior SQL, not only…
+    112|       const priorSql = sql.replaceAll("=+w.id", "=w.id")
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 3 passed (4)
+   Start at  19:57:40
+   Duration  3.26s (transform 281ms, setup 0ms, collect 617ms, tests 2.44s, environment 0ms, prepare 46ms)
+

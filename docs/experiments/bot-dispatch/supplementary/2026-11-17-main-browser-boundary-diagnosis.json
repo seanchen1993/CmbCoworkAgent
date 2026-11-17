@@ -1,0 +1,123 @@
+{
+  "purpose": "定位主 Bot 在主对话中先操作浏览器、之后达到前台预算才交办独立任务的原因；预算提示与交办措辞体验不在本轮修改范围。",
+  "sourceCommit": "0f13fc512b6bfe4a7a37399882c8e2704c473d8d",
+  "branch": "codex/merge-uat-into-bot-beta",
+  "kind": "source inspection and deterministic middleware probe",
+  "hypothesis": "主 Bot 已切换沟通提示词，但仍暴露完整浏览器工具；浏览器被计入通用短操作额度，只有后续调用才被预算拒绝。",
+  "sourceFileSha256": {
+    "src/main/bots/runtime-adapter.ts": "7b276b406eb0a668888e31dd4fa701bfb97b02cb8b2ac5699ed59da864b1b0f6",
+    "src/main/bots/prompt.ts": "6efcfa58ee75e545d2828659623fcbee0e0bb945482a8251b5e75e418d471d64",
+    "src/main/bots/tools.ts": "81e1a25aeada67785b68a20c7e144bc3100c94ec521366346b28e16d08adac05",
+    "src/main/agent/foreground-work-budget.ts": "8b1c950b198024398e6bacd5361eab4b5b5497596babc6e61d0e8111345a551a",
+    "src/main/agent/bot-communication-prompt.ts": "20b982b64dd51b3e185d81238b019f34027e72a5a0701245c6c95fe932f6f7d6",
+    "src/main/agent/runtime.ts": "881326806edc71301418b1d1cda5b69ff0c8c8111eb0c0fff72ba29ea449901a"
+  },
+  "findings": [
+    {
+      "file": "src/main/bots/runtime-adapter.ts",
+      "lines": [
+        1399,
+        1498,
+        1527
+      ],
+      "finding": "真实 IM 和私聊主对话继续注入 createBotBrowserTools；主用户轮仅屏蔽同步 workflow/task，未屏蔽 bot_browser。"
+    },
+    {
+      "file": "src/main/agent/foreground-work-budget.ts",
+      "lines": [
+        59,
+        71,
+        72
+      ],
+      "finding": "普通执行调用最多先放行 4 次；从首个调用起超过 30 秒后阻止下一个调用。不是浏览器能力禁用，也不强行终止已开始的浏览器操作。"
+    },
+    {
+      "file": "src/main/agent/bot-communication-prompt.ts",
+      "lines": [
+        5,
+        6
+      ],
+      "finding": "提示词要求复杂工作优先交办，同时允许短查询和小操作；没有按浏览器能力限制工具列表。"
+    },
+    {
+      "file": "src/main/agent/foreground-work-budget.ts",
+      "lines": [
+        14,
+        63
+      ],
+      "finding": "浏览器人工接管工具和 bot_browser request_help 被列为预算豁免。"
+    }
+  ],
+  "mergeComparison": {
+    "command": "git diff 0f13fc512^1 0f13fc512 -- src/main/bots/runtime-adapter.ts src/main/bots/prompt.ts src/main/bots/tools.ts src/main/agent/foreground-work-budget.ts src/main/agent/bot-communication-prompt.ts",
+    "diffEmpty": true,
+    "conclusion": "相关逻辑在 UAT 合并前已存在，本次 UAT 合并没有改变这些工具注册或预算规则。"
+  },
+  "environment": {
+    "platform": "macOS arm64",
+    "node": "22.23.5",
+    "model": "none",
+    "browser": "none"
+  },
+  "execution": {
+    "startedAt": "2026-11-17T07:10:08.098836+00:00",
+    "durationSeconds": 0.673,
+    "exitCode": 0,
+    "stdoutSha256": "0ef498b4044ba1786fa9bb9bd62bf7f2946b89620032cfa909d0d0c71a0085ca",
+    "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "probeSource": "import assert from \"node:assert/strict\"\nimport { createForegroundWorkBudget, createForegroundWorkBudgetMiddleware } from \"./src/main/agent/foreground-work-budget.ts\"\nlet actualInvocations = 0\nconst budget = createForegroundWorkBudget({ yieldCommand() {}, now: () => 0 })\nconst middleware = createForegroundWorkBudgetMiddleware(budget)\nconst observations = []\nfor (const [index, action] of [\"observe\", \"navigate\", \"observe\", \"click\", \"observe\"].entries()) {\n  const before = actualInvocations\n  const result = await middleware.wrapToolCall(\n    { toolCall: { name: \"bot_browser\", id: `probe-${index}`, args: { action } } },\n    async () => { actualInvocations++; return \"synthetic browser receipt\" }\n  )\n  observations.push({ call: index + 1, tool: \"bot_browser\", action, reachedHandler: actualInvocations > before, status: result?.status ?? \"allowed\" })\n}\nassert.equal(actualInvocations, 4)\nassert.equal(observations[4].status, \"error\")\nassert.ok(budget.checkFinal()?.includes(\"Foreground execution budget reached\"))\nlet clock = 0\nconst timed = createForegroundWorkBudget({ yieldCommand() {}, now: () => clock })\nassert.equal(timed.beforeTool(\"bot_browser\", { action: \"navigate\" }), undefined)\nclock = 30_001\nassert.ok(timed.beforeTool(\"bot_browser\", { action: \"observe\" }))\nassert.equal(timed.beforeTool(\"bot_request_browser_help\", {}), undefined)\nconsole.log(JSON.stringify({ kind: \"deterministic-middleware-probe\", realBrowserUsed: false, realModelUsed: false, observations, ordinaryCallsExecuted: actualInvocations, nextCallBlockedAfter30Seconds: true, browserHelpExemptFromBudget: true, passed: true }, null, 2))\n",
+  "observed": {
+    "kind": "deterministic-middleware-probe",
+    "realBrowserUsed": false,
+    "realModelUsed": false,
+    "observations": [
+      {
+        "call": 1,
+        "tool": "bot_browser",
+        "action": "observe",
+        "reachedHandler": true,
+        "status": "allowed"
+      },
+      {
+        "call": 2,
+        "tool": "bot_browser",
+        "action": "navigate",
+        "reachedHandler": true,
+        "status": "allowed"
+      },
+      {
+        "call": 3,
+        "tool": "bot_browser",
+        "action": "observe",
+        "reachedHandler": true,
+        "status": "allowed"
+      },
+      {
+        "call": 4,
+        "tool": "bot_browser",
+        "action": "click",
+        "reachedHandler": true,
+        "status": "allowed"
+      },
+      {
+        "call": 5,
+        "tool": "bot_browser",
+        "action": "observe",
+        "reachedHandler": false,
+        "status": "error"
+      }
+    ],
+    "ordinaryCallsExecuted": 4,
+    "nextCallBlockedAfter30Seconds": true,
+    "browserHelpExemptFromBudget": true,
+    "passed": true
+  },
+  "acceptance": "用真实预算中间件与计数型模拟 handler 验证普通浏览器调用前 4 次执行，第 5 次未执行且返回 error；用可控时钟验证 30 秒后拒绝新调用，人工接管仍豁免。",
+  "conclusion": "假设成立。截图表现符合当前工具注册与预算逻辑；仅更换沟通提示词没有收窄浏览器执行能力。",
+  "limitations": [
+    "本次没有连接内网、真实模型或真实浏览器，不推断用户那一轮的完整工具序列或具体耗时。",
+    "未修改产品代码，也未开始预算提示/UI 措辞的第二项设计；仅记录诊断证据。",
+    "不计入真实模型主动委派成功率或性能样本。"
+  ]
+}

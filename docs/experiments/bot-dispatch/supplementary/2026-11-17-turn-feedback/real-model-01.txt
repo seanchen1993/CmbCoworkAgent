@@ -1,0 +1,6 @@
+Persistent experiment record: <repository>/docs/experiments/bot-dispatch/runs/20261117T083040Z-741c3d3a/record.json
+{"case":"browser-lookup","stage":"main-idle","seconds":3.6,"workCreated":true}
+{"case":"browser-lookup","actual":"independent","preferred":"independent","seconds":11,"mainSeconds":3.4,"dispatchSeconds":3.3,"mainModelRequests":1,"finishesDispatchBatch":true,"budgetHandoff":false,"tools":["bot_work_create"]}
+{"case":"slash-skill-natural","actual":"independent","preferred":"independent","seconds":25.3,"mainSeconds":5.8,"dispatchSeconds":5.8,"mainModelRequests":2,"finishesDispatchBatch":true,"budgetHandoff":false,"tools":["read_file","ls","bot_work_create"]}
+{"case":"greeting","actual":"inline","preferred":"inline","seconds":1.6,"mainSeconds":1.4,"mainModelRequests":1,"finishesDispatchBatch":false,"budgetHandoff":false,"tools":[]}
+Routing evaluation report: <temp>/bot-integration-build-eEgB57/artifacts/routing-1794904240437.json

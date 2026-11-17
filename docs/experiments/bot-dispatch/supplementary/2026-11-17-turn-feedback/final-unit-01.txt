@@ -1,0 +1,49 @@
+
+ RUN  v3.2.4 <repository>
+
+stderr | src/main/agent/turn-completion-graph.test.ts > turn completion gate inside the real agent graph > recovers a leaked DSML tail and executes only the subsequent structured tool call
+[TurnCompletionGate] graph-thread retry 1/2: textual_tool_call — 回复正文里出现了工具调用格式，但没有结构化 tool call
+
+stderr | src/main/agent/turn-completion-graph.test.ts > turn completion gate inside the real agent graph > records persistent DSML leakage as incomplete after two recovery attempts
+[TurnCompletionGate] graph-thread retry 1/2: textual_tool_call — 回复正文里出现了工具调用格式，但没有结构化 tool call
+
+stderr | src/main/agent/turn-completion-graph.test.ts > turn completion gate inside the real agent graph > records persistent DSML leakage as incomplete after two recovery attempts
+[TurnCompletionGate] graph-thread retry 2/2: textual_tool_call — 回复正文里出现了工具调用格式，但没有结构化 tool call
+
+stderr | src/main/agent/turn-completion-graph.test.ts > turn completion gate inside the real agent graph > records persistent DSML leakage as incomplete after two recovery attempts
+[TurnCompletionGate] graph-thread exhausted 2 retries: textual_tool_call — 回复正文里出现了工具调用格式，但没有结构化 tool call
+
+stderr | src/main/agent/turn-completion-graph.test.ts > turn completion gate inside the real agent graph > does not end the turn on an empty reply after a tool result
+[TurnCompletionGate] graph-thread retry 1/2: empty_response — 模型返回空回复（finish_reason=stop）
+
+stderr | src/main/agent/turn-completion-graph.test.ts > turn completion gate inside the real agent graph > gives up after the retry budget and leaves the defect on record
+[TurnCompletionGate] graph-thread retry 1/2: empty_response — 模型返回空回复（finish_reason=stop）
+
+stderr | src/main/agent/turn-completion-graph.test.ts > turn completion gate inside the real agent graph > gives up after the retry budget and leaves the defect on record
+[TurnCompletionGate] graph-thread retry 2/2: empty_response — 模型返回空回复（finish_reason=stop）
+
+stderr | src/main/agent/turn-completion-graph.test.ts > turn completion gate inside the real agent graph > gives up after the retry budget and leaves the defect on record
+[TurnCompletionGate] graph-thread exhausted 2 retries: empty_response — 模型返回空回复（finish_reason=stop）
+
+stderr | src/main/agent/turn-completion-graph.test.ts > turn completion gate inside the real agent graph > still recovers when another afterModel middleware sits ahead of it
+[TurnCompletionGate] graph-thread retry 1/2: empty_response — 模型返回空回复（finish_reason=stop）
+
+stdout | src/main/agent/bot-dispatch-feedback.test.ts > Bot dispatch feedback > delivers a steer injected during dispatch instead of ending on the previous receipt
+[Runtime] Injected 1 queued current-run message(s) in beforeModel for thread feedback-steer
+
+ ✓ src/main/agent/turn-completion-graph.test.ts (6 tests) 74ms
+ ✓ src/main/agent/bot-dispatch-feedback.test.ts (7 tests) 62ms
+ ✓ src/renderer/src/lib/bot-execution-visibility.test.ts (60 tests) 14ms
+ ✓ src/main/agent/foreground-work-budget.test.ts (6 tests) 28ms
+stderr | src/main/agent/bot-communication-tools.test.ts
+langsmith/experimental/sandbox is in alpha. This feature is experimental, and breaking changes are expected.
+
+(node:36160) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/agent/bot-communication-tools.test.ts (1 test) 5ms
+
+ Test Files  5 passed (5)
+      Tests  80 passed (80)
+   Start at  16:25:32
+   Duration  9.43s (transform 4.91s, setup 0ms, collect 9.46s, tests 182ms, environment 1ms, prepare 355ms)
+

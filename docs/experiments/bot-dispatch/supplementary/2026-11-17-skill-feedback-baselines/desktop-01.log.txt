@@ -1,0 +1,12 @@
+{"label": "desktop-01", "args": ["--import", "tsx", "tests/desktop-agent-invoke-characterization.spec.ts"], "exitCode": 0, "seconds": 0.22, "log": "desktop-01.log.txt"}
+PASS testForegroundHandlerInventory
+PASS testTurnCompletionGateCoversEveryEntryPoint
+PASS testInvokeReplacementOwnershipOrder
+PASS testFreshTurnGoalAndTranscriptSemantics
+PASS testPromptSkillHookAndHarnessPreparation
+PASS testRoutingRuntimeCheckpointAndAutoCommit
+PASS testResumeAndInterruptContinueTheSameLogicalTurn
+PASS testIdentityFencedCleanupAndCancellation
+PASS testApprovalAndStructuredInputRemainDesktopManaged
+PASS testAdvancedDesktopModesStayInsideTheExistingHandler
+desktop-agent-invoke-characterization.spec.ts: 10 passed

@@ -1,3 +1,4 @@
+import { botSkillDispatchInput } from "../agent/bot-skill-dispatch"
 import {
   COORDINATOR_NOTIFICATION_RECEIPTS_KEY,
   coordinatorNotificationReceipt,
@@ -5,6 +6,7 @@ import {
   readCommittedCoordinatorNotifications
 } from "../agent/coordinator-notification-delivery"
 import { assertWorkConversationEntry } from "../bots/conversation-link-authority"
+import { appendBotTurnContext } from "../agent/bot-turn-context"
 import { isPersonalMemoryEnabled } from "../agent/personal-context"
 import { foregroundToolPolicy } from "../agent/foreground-tool-policy"
 import { isModelAvailable } from "../../shared/model-catalog"
@@ -6032,10 +6034,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         initialInvokeMetadata
       )
       const isBotCheckpointResumeInvoke = resumeCheckpointId !== undefined
+      const botTurnContext = runExecutionContext.source === "bot" &&
+        runExecutionContext.botCommunication === true &&
+        initialInvokeMetadata.botHostId === "local" &&
+        typeof initialInvokeMetadata.botId === "string"
+        ? runExecutionContext.botTurnContext : undefined
+      const isBotResultReportInvoke = botTurnContext?.event === "task_result"
+      const botSkillDispatch = botTurnContext?.event === "user_request"
+        ? runExecutionContext.botSkillDispatch : undefined
       const isBotInternalTurnInvoke =
         runExecutionContext.source === "bot" &&
         (runExecutionContext.commandInternalNotification === true ||
           runExecutionContext.botIntroduction === true ||
+          isBotResultReportInvoke ||
           isBotCheckpointResumeInvoke ||
           continueBotTaskCheckpointId !== undefined) &&
         initialInvokeMetadata.botHostId === "local" &&
@@ -6712,7 +6723,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
         if (
           !isTrustedCoordinatorNotificationInvoke &&
-          (!isBotInternalTurnInvoke || isBotCommandNotificationInvoke) &&
+          (!isBotInternalTurnInvoke || isBotCommandNotificationInvoke || isBotResultReportInvoke) &&
           !shouldDeferUserTranscriptPersistence &&
           !shouldDeferUserTranscriptForModeCommit
         ) {
@@ -7469,13 +7480,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           ): Promise<PreparedUserPrompt> =>
             prepareStandardUserPrompt({
               rawMessage,
-              initialModelInput,
+              initialModelInput: botSkillDispatch ? botSkillDispatchInput(initialModelInput, botSkillDispatch) : initialModelInput,
               allowedSkillNames: runExecutionContext.remotePolicy?.allowedSkillNames,
-              trustedExplicitSkill: messageControlsEnabled
+              trustedExplicitSkill: messageControlsEnabled && !botSkillDispatch
                 ? runExecutionContext.trustedExplicitSkill
                 : undefined,
               allowExplicitSkillFromMessage:
-                messageControlsEnabled &&
+                !botSkillDispatch && messageControlsEnabled &&
                 (runExecutionContext.source === "desktop" ||
                   runExecutionContext.allowTrustedTransportSkillMarker === true),
               threadId,
@@ -8198,18 +8209,20 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           const userHumanMessage = isCoordinatorNotificationTurn || isBotCheckpointResumeInvoke
             ? undefined
-            : continueBotTaskCheckpointId || isBotCommandNotificationInvoke
+            : continueBotTaskCheckpointId || isBotCommandNotificationInvoke || isBotResultReportInvoke
               ? new HumanMessage({
                   id: userMessageId,
                   content: effectiveMessage,
                   // Keep a durable source boundary after newer private turns. The standard
-                  // notification flag removes it from storage, losing routine/peer attribution.
+                  // notification flag removes it from storage, losing routine/peer attribution
+                  // and the Bot result's navigation card. Preserve its existing event payload;
+                  // the Bot presenter renders a link, while appended host context stays hidden.
                   // Reuse the original visible-text projection; Bots hides this Host-only ID.
                   additional_kwargs: {
                     [COORDINATOR_AUGMENTED_USER_MESSAGE_KEY]: true,
-                    [COORDINATOR_VISIBLE_USER_MESSAGE_KEY]: continueBotTaskCheckpointId
-                      ? "续办后台任务"
-                      : "后台命令结果"
+                    [COORDINATOR_VISIBLE_USER_MESSAGE_KEY]: isBotResultReportInvoke
+                      ? message
+                      : continueBotTaskCheckpointId ? "续办后台任务" : "后台命令结果"
                   }
                 })
             : isBotInternalTurnInvoke
@@ -8251,7 +8264,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   }
                 })
               : undefined,
-            userHumanMessage
+            appendBotTurnContext(userHumanMessage, botTurnContext)
           ].filter((message): message is BaseMessage => message !== undefined)
           let currentTurnUserMessageForEvidence =
             coordinatorNotificationHumanMessage ?? effectiveMessage
@@ -8338,6 +8351,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               foregroundCommandLifecycle: runExecutionContext.foregroundCommandLifecycle,
               extraSystemPrompt: runExecutionContext.extraSystemPrompt,
               botCommunication: runExecutionContext.source === "bot" && runExecutionContext.botCommunication,
+              botResultReport: isBotResultReportInvoke,
+              botSkillDispatch: !!botSkillDispatch,
               additionalTools: runExecutionContext.additionalTools,
               foregroundWorkBudget: runExecutionContext.foregroundWorkBudget,
               toolConcurrencyQueueId: runExecutionContext.toolConcurrencyQueueId,
@@ -8395,6 +8410,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 runExecutionContext.source === "bot"
                   ? runExecutionContext.checkFinalDelivery
                   : undefined,
+              onBotDispatchFeedback: runExecutionContext.source === "bot"
+                ? runExecutionContext.onBotDispatchFeedback : undefined,
               openingReplyReminder:
                 runExecutionContext.source === "bot" && runExecutionContext.openingReplyReminder
             }),

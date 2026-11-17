@@ -1,0 +1,86 @@
+{
+  "originalSha256": "f29fa5f8b378013944353fd3aef79c9f125a24d824a172f261af071546fb4ee3",
+  "transformation": "Vitest suite totals and per-file summaries; all failed assertions retained; paths redacted",
+  "startTime": 1794911060338,
+  "success": false,
+  "numTotalTests": 407,
+  "numPassedTests": 406,
+  "numFailedTests": 1,
+  "numPendingTests": 0,
+  "files": [
+    {
+      "name": "src/main/agent/bot-communication-prompt.test.ts",
+      "status": "passed",
+      "startTime": 1794911064800,
+      "endTime": 1794911064805.77,
+      "total": 2,
+      "passed": 2,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/agent/bot-turn-context.test.ts",
+      "status": "passed",
+      "startTime": 1794911061545,
+      "endTime": 1794911061634.4412,
+      "total": 4,
+      "passed": 4,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/agent/opening-reply-reminder.test.ts",
+      "status": "passed",
+      "startTime": 1794911061585,
+      "endTime": 1794911061662.8438,
+      "total": 12,
+      "passed": 12,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/prompt.test.ts",
+      "status": "passed",
+      "startTime": 1794911061438,
+      "endTime": 1794911061471.148,
+      "total": 36,
+      "passed": 36,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/runtime-adapter.test.ts",
+      "status": "failed",
+      "startTime": 1794911062516,
+      "endTime": 1794911073341.9822,
+      "total": 338,
+      "passed": 337,
+      "failed": [
+        {
+          "ancestorTitles": [
+            "Bot Runtime integration"
+          ],
+          "fullName": "Bot Runtime integration injects accurate environment and authority for 'user' turns",
+          "status": "failed",
+          "title": "injects accurate environment and authority for 'user' turns",
+          "duration": 21.603124999999636,
+          "failureMessages": [
+            "AssertionError: expected 'You are \"A\", the user\\'s persistent B…' to contain 'direct user request in your private c…'\n    at <repo>/src/main/bots/runtime-adapter.test.ts:4076:20\n    at file://<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/@vitest/runner/dist/chunk-hooks.js:752:20"
+          ],
+          "meta": {}
+        }
+      ],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/work-result.test.ts",
+      "status": "passed",
+      "startTime": 1794911061841,
+      "endTime": 1794911062460.8687,
+      "total": 15,
+      "passed": 15,
+      "failed": [],
+      "message": ""
+    }
+  ]
+}

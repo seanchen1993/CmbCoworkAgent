@@ -94,7 +94,7 @@ const alternateClient={...client};const root=createRoot(document.getElementById(
 state.target=(botId,alternate=false)=>root.render(<BotBrowserPanel botId={botId} client={alternate?alternateClient:client}/>);
 state.unmount=()=>root.render(null);
 state.prepareResources=()=>{state.pages=[{id:'resource',url:'https://resource.example.test/',title:'资源回归页'}];state.images={resource:image('orange')};state.selected='resource';state.control='bot';state.helpInstruction=undefined;state.maxPreviewInFlight=0;state.target('resource-bot')};
-const works=[{id:'task-a',botId:'test-bot',title:'整理资料',state:'active',executionState:'running'}, {id:'task-b',botId:'test-bot',title:'核对报表',state:'active',executionState:'waiting_user'}, {id:'mock-text',botId:'test-bot',title:'不支持电脑的任务',state:'active',source:{transport:'mock'}}];
+const works=[{id:'task-a',botId:'test-bot',title:'整理资料',state:'active',executionState:'running'}, {id:'task-b',botId:'test-bot',title:'核对报表',state:'active',executionState:'waiting_user',execution:{phase:'waiting_browser',waitingFor:[{kind:'browser',instruction:'请确认登录'}]}}, {id:'mock-text',botId:'test-bot',title:'不支持电脑的任务',state:'active',source:{transport:'mock'}}];
 state.tasks=selected=>root.render(<BotTaskBrowser client={client} botId='test-bot' mainScope='group-scope' works={works} selectedWork={works.find(w=>w.id===selected)} onWork={id=>state.openedTasks.push(id)}/>);
 state.attention=()=>helpRoot.render(<BotWorkAttention client={client} works={[{...works[1],execution:{phase:'waiting_browser',waitingFor:[{kind:'browser',instruction:'请在报表页面确认登录'}]}}]} onWork={id=>state.openedTasks.push(id)}/>);
 state.target('test-bot');`
@@ -855,9 +855,13 @@ state.target('test-bot');`
       state.previewScopes = []
       state.tasks()
     })
-    await page.waitForFunction(() => window.browserPanelFixture.previewScopes.includes("group-scope"))
+    await page.waitForFunction(scope => window.browserPanelFixture.previewScopes.includes(scope), botWorkBrowserScope("task-b", "test-bot"))
+    assert.equal(await page.evaluate(() => window.browserPanelFixture.previewScopes.includes("group-scope")), false,
+      "main communication defaults to the task waiting for browser help")
     const taskPicker = page.getByRole("combobox", { name: "查看任务浏览器" })
     await taskPicker.click()
+    assert.equal(await page.getByRole("option", { name: "主对话的浏览器" }).count(), 0)
+    assert.equal(await page.getByRole("option", { name: "例行与后台工作", exact: true }).count(), 1)
     assert.equal(await page.getByRole("option", { name: "不支持电脑的任务" }).count(), 0)
     await page.getByRole("option", { name: "整理资料", exact: true }).click()
     const taskScope = botWorkBrowserScope("task-a", "test-bot")

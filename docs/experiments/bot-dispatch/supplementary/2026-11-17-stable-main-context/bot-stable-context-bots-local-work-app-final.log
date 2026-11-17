@@ -1,0 +1,18 @@
+stage: launching isolated App <temp>/m05-local-work-app-VhmPQc
+stage: profile-model-bot-created
+stage: main-created-work-without-switch
+stage: real-work-runtime-file-delivery
+cleanup: owned Electron and localhost fixture stopped; isolated profiles removed <temp>/m05-local-work-app-VhmPQc
+artifact-directory <temp>/m05-local-work-app-VhmPQc last model phases [[],[],[],[],[],["bot_work_read"],["write_file"],["write_file","bot_deliver_files"],[],[],[],["edit_file"],["edit_file","bot_deliver_files"],[],[],["bot_work_read"]]
+locator.click: Error: strict mode violation: locator('.bots-conversation').getByRole('button', { name: /任务.*季度安排草稿/ }) resolved to 2 elements:
+    1) <button type="button" class="bot-exchange-link">…</button> aka getByRole('button', { name: '任务 · 季度安排草稿' })
+    2) <button type="button" class="bot-exchange-link" aria-label="任务有新结果：季度安排草稿">…</button> aka getByRole('button', { name: '任务有新结果：季度安排草稿' })
+
+Call log:
+  - waiting for locator('.bots-conversation').getByRole('button', { name: /任务.*季度安排草稿/ })
+
+    at main (<repo>/tests/bots-local-work-app.spec.ts:668:8) {
+  log: [
+    "  - waiting for locator('.bots-conversation').getByRole('button', { name: /任务.*季度安排草稿/ })"
+  ]
+}

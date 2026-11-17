@@ -1,0 +1,404 @@
+{"label": "build-01", "args": ["--import", "tsx", "scripts/run-bot-integration-e2e.mjs", "--build-only"], "exitCode": 0, "seconds": 21.03, "log": "build-01.log.txt"}
+vite v7.3.1 building ssr environment for production...
+transforming...
+✓ 913 modules transformed.
+rendering chunks...
+[plugin vite:reporter] 
+(!) <repo>/src/main/db/index.ts is dynamically imported by <repo>/src/main/bots/feature-command.ts, <repo>/src/main/ipc/models.ts, <repo>/src/main/ipc/models.ts, <repo>/src/main/ipc/models.ts, <repo>/src/main/ipc/models.ts, <repo>/src/main/ipc/models.ts, <repo>/src/main/ipc/models.ts, <repo>/src/main/ipc/models.ts, <repo>/src/main/ipc/models.ts, <repo>/src/main/ipc/models.ts, <repo>/src/main/ipc/models.ts, <repo>/src/main/ipc/sandbox.ts, <repo>/src/main/services/agent-auto-commit.ts, <repo>/src/main/services/agent-auto-commit.ts but also statically imported by <repo>/src/main/agent/goals/goal-store.ts, <repo>/src/main/agent/pending-notification-scheduler.ts, <repo>/src/main/agent/runtime.ts, <repo>/src/main/agent/standard-turn-stream.ts, <repo>/src/main/bots/conversation-link-service.ts, <repo>/src/main/bots/feature-service.ts, <repo>/src/main/bots/local-service.ts, <repo>/src/main/bots/runtime-adapter.ts, <repo>/src/main/bots/work-history.ts, <repo>/src/main/harness-board/auto-mode-action-executor.ts, <repo>/src/main/harness-board/auto-mode-controller.ts, <repo>/src/main/harness-board/managed-run-existing-session.ts, <repo>/src/main/harness-board/managed-run-model.ts, <repo>/src/main/harness-board/managed-run-scheduler.ts, <repo>/src/main/harness-board/project-deletion-gate.ts, <repo>/src/main/hooks/thread-scope-persistence.ts, <repo>/src/main/index.ts, <repo>/src/main/ipc/agent.ts, <repo>/src/main/ipc/bot-files.ts, <repo>/src/main/ipc/bots.ts, <repo>/src/main/ipc/git-panel.ts, <repo>/src/main/ipc/models.ts, <repo>/src/main/ipc/thread-run-mutation-lock.ts, <repo>/src/main/ipc/thread-runtime-tail.ts, <repo>/src/main/ipc/threads.ts, <repo>/src/main/ipc/workflows.ts, <repo>/src/main/legacy-subagent-migration/coordinator.ts, <repo>/src/main/routing/index.ts, <repo>/src/main/services/app-notifications.ts, <repo>/src/main/services/heartbeat-session.ts, <repo>/src/main/services/heartbeat.ts, <repo>/src/main/services/im/biz-retry-adapter.ts, <repo>/src/main/services/im/capability-guard.ts, <repo>/src/main/services/im/card-publisher.ts, <repo>/src/main/services/im/command-router.ts, <repo>/src/main/services/im/conversation-state.ts, <repo>/src/main/services/im/event-store.ts, <repo>/src/main/services/im/human-gate-adapter.ts, <repo>/src/main/services/im/inbox-service.ts, <repo>/src/main/services/im/remote-access-service.ts, <repo>/src/main/services/im/remote-approval-audit-store.ts, <repo>/src/main/services/im/remote-approval-service.ts, <repo>/src/main/services/im/remote-grant-store.ts, <repo>/src/main/services/im/remote-mode-notification-pump.ts, <repo>/src/main/services/im/remote-runner.ts, <repo>/src/main/services/im/remote-user-input-service.ts, <repo>/src/main/services/im/selection-context.ts, <repo>/src/main/services/im/skill-command.ts, <repo>/src/main/services/knowledge-base-manager.ts, <repo>/src/main/services/scheduled-transcript.ts, <repo>/src/main/services/scheduler.ts, <repo>/src/main/services/thread-conversation-presence.ts, <repo>/src/main/services/thread-metadata.ts, <repo>/src/main/services/thread-service.ts, <repo>/src/main/services/trusted-tool-file-preview.ts, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) <repo>/src/main/agent/local-sandbox.ts is dynamically imported by <repo>/src/main/ipc/sandbox.ts but also statically imported by <repo>/src/main/agent/runtime.ts, <repo>/src/main/agent/tool-orchestrator.ts, <repo>/src/main/bots/runtime-adapter.ts, <repo>/src/main/index.ts, <repo>/src/main/ipc/agent.ts, <repo>/src/main/ipc/models.ts, <repo>/src/main/services/thread-external-run-busy.ts, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) <repo>/src/main/harness-board/catalog-client.ts is dynamically imported by <repo>/src/main/bots/workspace.ts but also statically imported by <repo>/src/main/harness-board/enterprise-projects.ts, <repo>/src/main/harness-board/service.ts, <repo>/src/main/index.ts, <repo>/src/main/ipc/harness-board.ts, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) <repo>/src/main/harness-board/service.ts is dynamically imported by <repo>/src/main/bots/feature-command.ts, <repo>/src/main/bots/local-service.ts, <repo>/src/main/services/harness-stage-attribution.ts but also statically imported by <repo>/src/main/agent/standard-thread-turn.ts, <repo>/src/main/agent/trace/collector.ts, <repo>/src/main/bots/feature-service.ts, <repo>/src/main/harness-board/auto-mode-action-executor.ts, <repo>/src/main/harness-board/auto-mode-controller.ts, <repo>/src/main/harness-board/human-gate-service.ts, <repo>/src/main/harness-board/managed-feature-status.ts, <repo>/src/main/harness-board/managed-run-existing-session.ts, <repo>/src/main/harness-board/managed-run-model.ts, <repo>/src/main/harness-board/project-deletion-gate.ts, <repo>/src/main/index.ts, <repo>/src/main/ipc/agent.ts, <repo>/src/main/ipc/harness-board.ts, <repo>/src/main/services/harness-status-reporter.ts, <repo>/src/main/services/im/feature-binding-service.ts, <repo>/src/main/services/im/feature-thread-grant.ts, <repo>/src/main/services/im/project-reply-context.ts, <repo>/src/main/services/thread-service.ts, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) <repo>/src/main/agent/standard-thread-turn.ts is dynamically imported by <repo>/src/main/bots/work-tools.ts but also statically imported by <repo>/src/main/agent/pending-notification-scheduler.ts, <repo>/src/main/ipc/agent.ts, <repo>/src/main/services/im/capability-guard.ts, <repo>/src/main/services/im/command-router.ts, <repo>/src/main/services/im/project-reply-context.ts, <repo>/src/main/services/im/remote-access-service.ts, <repo>/src/main/services/im/remote-approval-service.ts, <repo>/src/main/services/im/remote-runner.ts, <repo>/src/main/services/im/remote-user-input-service.ts, <repo>/src/main/services/im/skill-command.ts, <repo>/src/main/services/im/thread-activity.ts, <repo>/src/main/services/im/thread-alias.ts, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) <repo>/src/main/services/im/feature-binding-service.ts is dynamically imported by <repo>/src/main/ipc/bots.ts but also statically imported by <repo>/src/main/bots/feature-command.ts, <repo>/src/main/bots/feature-service.ts, <repo>/src/main/services/im/capability-guard.ts, <repo>/src/main/services/im/manager.ts, <repo>/src/main/services/im/remote-access-service.ts, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) <repo>/src/main/browser/core/browser-service-registry.ts is dynamically imported by <repo>/src/main/bots/browser-profile.ts but also statically imported by <repo>/src/main/agent/tools/in-app-browser-tools.ts, <repo>/src/main/browser/builtin-browser-lifecycle.ts, <repo>/src/main/browser/cdp/playwright-mcp-bridge.ts, <repo>/src/main/browser/record/common/browser-script-execution-service.ts, <repo>/src/main/ipc/browser.ts, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) <repo>/src/main/agent/runtime.ts is dynamically imported by <repo>/src/main/agent/coordinator-notification-delivery.ts, <repo>/src/main/bots/runtime-adapter.ts, <repo>/src/main/bots/runtime-adapter.ts, <repo>/src/main/bots/runtime-adapter.ts but also statically imported by <repo>/src/main/agent/skill-evolution/session-state.ts, <repo>/src/main/agent/standard-thread-turn.ts, <repo>/src/main/agent/tools/scheduler-tool.ts, <repo>/src/main/bots/conversation-link-service.ts, <repo>/src/main/bots/feature-service.ts, <repo>/src/main/bots/runtime-adapter.ts, <repo>/src/main/index.ts, <repo>/src/main/ipc/agent.ts, <repo>/src/main/ipc/sandbox.ts, <repo>/src/main/ipc/thread-runtime-tail.ts, <repo>/src/main/ipc/threads.ts, <repo>/src/main/services/heartbeat-session.ts, <repo>/src/main/services/heartbeat.ts, <repo>/src/main/services/im/capability-guard.ts, <repo>/src/main/services/im/remote-access-service.ts, <repo>/src/main/services/im/remote-runner.ts, <repo>/src/main/services/im/thread-activity.ts, <repo>/src/main/services/scheduler.ts, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) <repo>/src/main/services/thread-service.ts is dynamically imported by <repo>/src/main/services/im/feature-binding-service.ts but also statically imported by <repo>/src/main/bots/feature-command.ts, <repo>/src/main/harness-board/auto-mode-action-executor.ts, <repo>/src/main/ipc/threads.ts, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) <repo>/src/main/bots/local-service.ts is dynamically imported by <repo>/src/main/ipc/file-preview.ts, <repo>/src/main/ipc/threads.ts, <repo>/src/main/ipc/threads.ts, <repo>/src/main/ipc/threads.ts but also statically imported by <repo>/src/main/bots/feature-service.ts, <repo>/src/main/index.ts, <repo>/src/main/ipc/bots.ts, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) <repo>/src/main/ipc/browser-profile-import.ts is dynamically imported by <repo>/src/main/bots/browser-profile.ts but also statically imported by <repo>/src/main/browser/builtin-browser-lifecycle.ts, <repo>/src/main/ipc/browser.ts, dynamic import will not move module into another chunk.
+
+../../../../../..<temp>                                              0.15 kB
+../../../../../..<temp>                                  0.19 kB
+../../../../../..<temp>                     0.30 kB
+../../../../../..<temp>                                    0.33 kB
+../../../../../..<temp>                                    0.33 kB
+../../../../../..<temp>                        0.34 kB
+../../../../../..<temp>                                    0.35 kB
+../../../../../..<temp>                                    0.35 kB
+../../../../../..<temp>                                    0.35 kB
+../../../../../..<temp>                                    0.35 kB
+../../../../../..<temp>                                    0.35 kB
+../../../../../..<temp>                           0.35 kB
+../../../../../..<temp>                            0.35 kB
+../../../../../..<temp>                                    0.36 kB
+../../../../../..<temp>                                    0.36 kB
+../../../../../..<temp>                                    0.36 kB
+../../../../../..<temp>                          0.36 kB
+../../../../../..<temp>                            0.36 kB
+../../../../../..<temp>                       0.37 kB
+../../../../../..<temp>                             0.37 kB
+../../../../../..<temp>                                  0.37 kB
+../../../../../..<temp>                     0.37 kB
+../../../../../..<temp>                    0.37 kB
+../../../../../..<temp>                  0.38 kB
+../../../../../..<temp>                 0.39 kB
+../../../../../..<temp>      0.41 kB
+../../../../../..<temp>                                  0.45 kB
+../../../../../..<temp>                                0.57 kB
+../../../../../..<temp>                                  0.58 kB
+../../../../../..<temp>                             0.66 kB
+../../../../../..<temp>            0.71 kB
+../../../../../..<temp>                    0.72 kB
+../../../../../..<temp>                0.90 kB
+../../../../../..<temp>                                  1.26 kB
+../../../../../..<temp>                                  1.65 kB
+../../../../../..<temp>           1.71 kB
+../../../../../..<temp>         1.94 kB
+../../../../../..<temp>                                    2.09 kB
+../../../../../..<temp>                        2.52 kB
+../../../../../..<temp>                              2.88 kB
+../../../../../..<temp>                   3.58 kB
+../../../../../..<temp>                      3.69 kB
+../../../../../..<temp>                  3.80 kB
+../../../../../..<temp>                                  3.82 kB
+../../../../../..<temp>                            3.86 kB
+../../../../../..<temp>                         4.19 kB
+../../../../../..<temp>      4.23 kB
+../../../../../..<temp>               4.30 kB
+../../../../../..<temp>                                  5.25 kB
+../../../../../..<temp>                             5.76 kB
+../../../../../..<temp>             5.77 kB
+../../../../../..<temp>                          6.58 kB
+../../../../../..<temp>                            6.74 kB
+../../../../../..<temp>                                   7.08 kB
+../../../../../..<temp>                  7.16 kB
+../../../../../..<temp>                          7.95 kB
+../../../../../..<temp>                               9.15 kB
+../../../../../..<temp>                                  9.20 kB
+../../../../../..<temp>                    9.23 kB
+../../../../../..<temp>              9.63 kB
+../../../../../..<temp>                            9.69 kB
+../../../../../..<temp>                      10.38 kB
+../../../../../..<temp>            10.53 kB
+../../../../../..<temp>                                      11.30 kB
+../../../../../..<temp>            11.46 kB
+../../../../../..<temp>                          11.68 kB
+../../../../../..<temp>             12.16 kB
+../../../../../..<temp>               13.47 kB
+../../../../../..<temp>                                          13.71 kB
+../../../../../..<temp>                16.42 kB
+../../../../../..<temp>                                  16.57 kB
+../../../../../..<temp>                                   16.59 kB
+../../../../../..<temp>                    17.91 kB
+../../../../../..<temp>         19.36 kB
+../../../../../..<temp>                    20.70 kB
+../../../../../..<temp>                             21.92 kB
+../../../../../..<temp>              24.50 kB
+../../../../../..<temp>            24.68 kB
+../../../../../..<temp>                          26.67 kB
+../../../../../..<temp>         27.11 kB
+../../../../../..<temp>                              31.32 kB
+../../../../../..<temp>          37.04 kB
+../../../../../..<temp>              40.68 kB
+../../../../../..<temp>                           40.83 kB
+../../../../../..<temp>                      47.21 kB
+../../../../../..<temp>                    79.20 kB
+../../../../../..<temp>                94.44 kB
+../../../../../..<temp>                                    8,447.22 kB
+✓ built in 5.25s
+vite v7.3.1 building ssr environment for production...
+transforming...
+✓ 10 modules transformed.
+rendering chunks...
+../../../../../..<temp>  105.91 kB
+✓ built in 69ms
+vite v7.3.1 building client environment for production...
+transforming...
+✓ 5725 modules transformed.
+rendering chunks...
+[plugin vite:reporter] 
+(!) <repo>/src/renderer/src/components/tabs/FileViewer.tsx is dynamically imported by <repo>/src/renderer/src/components/harness-board/KnowledgePreviewPanel.tsx, <repo>/src/renderer/src/components/panels/RightPanel.tsx, <repo>/src/renderer/src/components/tabs/TabbedPanel.tsx but also statically imported by <repo>/src/renderer/src/components/bots/BotMessageFilePreview.tsx, <repo>/src/renderer/src/components/tabs/index.ts, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) <repo>/src/renderer/src/components/bots/BotAvatar.tsx is dynamically imported by <repo>/src/renderer/src/components/sidebar/ThreadSidebar.tsx but also statically imported by <repo>/src/renderer/src/components/bots/BotActivity.tsx, <repo>/src/renderer/src/components/bots/BotAppearancePicker.tsx, <repo>/src/renderer/src/components/bots/BotChatRecipientPicker.tsx, <repo>/src/renderer/src/components/bots/BotEditor.tsx, <repo>/src/renderer/src/components/bots/BotExchangePanel.tsx, <repo>/src/renderer/src/components/bots/BotGroupAvatar.tsx, <repo>/src/renderer/src/components/bots/BotGroupConversation.tsx, <repo>/src/renderer/src/components/bots/BotGroupEditor.tsx, <repo>/src/renderer/src/components/bots/BotGroupMembers.tsx, <repo>/src/renderer/src/components/bots/BotGroupMentionInput.tsx, <repo>/src/renderer/src/components/bots/BotGroupQuestion.tsx, <repo>/src/renderer/src/components/bots/BotImConversation.tsx, <repo>/src/renderer/src/components/bots/BotMentionLabel.tsx, <repo>/src/renderer/src/components/bots/BotNewChat.tsx, <repo>/src/renderer/src/components/bots/BotRuntimeAvatar.tsx, <repo>/src/renderer/src/components/bots/BotsWorkspace.tsx, <repo>/src/renderer/src/components/bots/ConversationTaskControls.tsx, <repo>/src/renderer/src/components/harness-board/FeatureBotTargetList.tsx, dynamic import will not move module into another chunk.
+
+../../../../../../../..<temp>                                               0.32 kB
+../../../../../../../..<temp>                             4.34 kB
+../../../../../../../..<temp>                 4.42 kB
+../../../../../../../..<temp>                               4.52 kB
+../../../../../../../..<temp>                              4.67 kB
+../../../../../../../..<temp>                                 4.80 kB
+../../../../../../../..<temp>               4.82 kB
+../../../../../../../..<temp>                   4.91 kB
+../../../../../../../..<temp>                4.93 kB
+../../../../../../../..<temp>        4.97 kB
+../../../../../../../..<temp>        5.10 kB
+../../../../../../../..<temp>        5.10 kB
+../../../../../../../..<temp>                                5.10 kB
+../../../../../../../..<temp>        5.11 kB
+../../../../../../../..<temp>                                 5.20 kB
+../../../../../../../..<temp>                5.21 kB
+../../../../../../../..<temp>         5.26 kB
+../../../../../../../..<temp>                               5.39 kB
+../../../../../../../..<temp>         5.43 kB
+../../../../../../../..<temp>         5.43 kB
+../../../../../../../..<temp>         5.44 kB
+../../../../../../../..<temp>                5.47 kB
+../../../../../../../..<temp>                             5.74 kB
+../../../../../../../..<temp>                 5.98 kB
+../../../../../../../..<temp>                 6.19 kB
+../../../../../../../..<temp>                 6.50 kB
+../../../../../../../..<temp>         6.50 kB
+../../../../../../../..<temp>         6.60 kB
+../../../../../../../..<temp>         6.63 kB
+../../../../../../../..<temp>         6.64 kB
+../../../../../../../..<temp>          6.91 kB
+../../../../../../../..<temp>             6.91 kB
+../../../../../../../..<temp>          7.06 kB
+../../../../../../../..<temp>          7.19 kB
+../../../../../../../..<temp>          7.21 kB
+../../../../../../../..<temp>          7.22 kB
+../../../../../../../..<temp>                               7.32 kB
+../../../../../../../..<temp>                  7.59 kB
+../../../../../../../..<temp>           7.66 kB
+../../../../../../../..<temp>          7.71 kB
+../../../../../../../..<temp>              7.72 kB
+../../../../../../../..<temp>             7.78 kB
+../../../../../../../..<temp>          7.90 kB
+../../../../../../../..<temp>          7.90 kB
+../../../../../../../..<temp>             7.92 kB
+../../../../../../../..<temp>             7.92 kB
+../../../../../../../..<temp>             7.94 kB
+../../../../../../../..<temp>          7.97 kB
+../../../../../../../..<temp>                                8.34 kB
+../../../../../../../..<temp>               9.64 kB
+../../../../../../../..<temp>           9.78 kB
+../../../../../../../..<temp>           9.91 kB
+../../../../../../../..<temp>              9.92 kB
+../../../../../../../..<temp>           9.94 kB
+../../../../../../../..<temp>           9.94 kB
+../../../../../../../..<temp>              9.98 kB
+../../../../../../../..<temp>              9.98 kB
+../../../../../../../..<temp>             10.03 kB
+../../../../../../../..<temp>     10.23 kB
+../../../../../../../..<temp>           10.34 kB
+../../../../../../../..<temp>                 10.36 kB
+../../../../../../../..<temp>     10.43 kB
+../../../../../../../..<temp>     10.48 kB
+../../../../../../../..<temp>     10.50 kB
+../../../../../../../..<temp>               10.59 kB
+../../../../../../../..<temp>                               11.01 kB
+../../../../../../../..<temp>                               11.03 kB
+../../../../../../../..<temp>             11.32 kB
+../../../../../../../..<temp>                11.35 kB
+../../../../../../../..<temp>                 11.51 kB
+../../../../../../../..<temp>            12.03 kB
+../../../../../../../..<temp>              12.22 kB
+../../../../../../../..<temp>                 12.23 kB
+../../../../../../../..<temp>            12.32 kB
+../../../../../../../..<temp>           12.34 kB
+../../../../../../../..<temp>              12.37 kB
+../../../../../../../..<temp>              13.21 kB
+../../../../../../../..<temp>                 13.30 kB
+../../../../../../../..<temp>      13.34 kB
+../../../../../../../..<temp>      13.41 kB
+../../../../../../../..<temp>      13.45 kB
+../../../../../../../..<temp>      13.46 kB
+../../../../../../../..<temp>          13.57 kB
+../../../../../../../..<temp>             14.11 kB
+../../../../../../../..<temp>               14.41 kB
+../../../../../../../..<temp>           16.03 kB
+../../../../../../../..<temp>             16.40 kB
+../../../../../../../..<temp>                 16.44 kB
+../../../../../../../..<temp>                16.65 kB
+../../../../../../../..<temp>             16.78 kB
+../../../../../../../..<temp>                 16.99 kB
+../../../../../../../..<temp>              18.67 kB
+../../../../../../../..<temp>                  18.75 kB
+../../../../../../../..<temp>              19.41 kB
+../../../../../../../..<temp>             19.44 kB
+../../../../../../../..<temp>               19.57 kB
+../../../../../../../..<temp>                  19.58 kB
+../../../../../../../..<temp>                  19.68 kB
+../../../../../../../..<temp>     22.30 kB
+../../../../../../../..<temp>              22.36 kB
+../../../../../../../..<temp>            23.66 kB
+../../../../../../../..<temp>            24.27 kB
+../../../../../../../..<temp>            24.36 kB
+../../../../../../../..<temp>            24.45 kB
+../../../../../../../..<temp>                24.50 kB
+../../../../../../../..<temp>                   25.32 kB
+../../../../../../../..<temp>                26.27 kB
+../../../../../../../..<temp>            27.56 kB
+../../../../../../../..<temp>                 28.08 kB
+../../../../../../../..<temp>                    29.91 kB
+../../../../../../../..<temp>             30.70 kB
+../../../../../../../..<temp>                 30.77 kB
+../../../../../../../..<temp>               31.20 kB
+../../../../../../../..<temp>             31.26 kB
+../../../../../../../..<temp>             31.28 kB
+../../../../../../../..<temp>                   31.31 kB
+../../../../../../../..<temp>             31.32 kB
+../../../../../../../..<temp>                   32.53 kB
+../../../../../../../..<temp>               32.97 kB
+../../../../../../../..<temp>                  33.52 kB
+../../../../../../../..<temp>                   33.58 kB
+../../../../../../../..<temp>        35.00 kB
+../../../../../../../..<temp>        36.02 kB
+../../../../../../../..<temp>        36.24 kB
+../../../../../../../..<temp>        36.26 kB
+../../../../../../../..<temp>         47.56 kB
+../../../../../../../..<temp>         48.49 kB
+../../../../../../../..<temp>         48.63 kB
+../../../../../../../..<temp>         48.67 kB
+../../../../../../../..<temp>                     51.34 kB
+../../../../../../../..<temp>                  53.58 kB
+../../../../../../../..<temp>                   63.63 kB
+../../../../../../../..<temp>              468.37 kB
+../../../../../../../..<temp>             1,380.73 kB
+../../../../../../../..<temp>          1,669.93 kB
+../../../../../../../..<temp>                      7.11 kB
+../../../../../../../..<temp>                       21.48 kB
+../../../../../../../..<temp>                       28.92 kB
+../../../../../../../..<temp>                              450.70 kB
+../../../../../../../..<temp>                                 0.17 kB
+../../../../../../../..<temp>                               0.20 kB
+../../../../../../../..<temp>                           0.24 kB
+../../../../../../../..<temp>                                 0.25 kB
+../../../../../../../..<temp>                                  0.27 kB
+../../../../../../../..<temp>                                 0.30 kB
+../../../../../../../..<temp>                              0.33 kB
+../../../../../../../..<temp>                               0.34 kB
+../../../../../../../..<temp>                           0.34 kB
+../../../../../../../..<temp>             0.37 kB
+../../../../../../../..<temp>                        0.37 kB
+../../../../../../../..<temp>                        0.38 kB
+../../../../../../../..<temp>                           0.39 kB
+../../../../../../../..<temp>                           0.42 kB
+../../../../../../../..<temp>                                  0.43 kB
+../../../../../../../..<temp>                        0.43 kB
+../../../../../../../..<temp>                          0.47 kB
+../../../../../../../..<temp>                         0.48 kB
+../../../../../../../..<temp>                                0.48 kB
+../../../../../../../..<temp>                        0.48 kB
+../../../../../../../..<temp>                  0.61 kB
+../../../../../../../..<temp>                                   0.65 kB
+../../../../../../../..<temp>                         0.68 kB
+../../../../../../../..<temp>              0.70 kB
+../../../../../../../..<temp>                                  0.72 kB
+../../../../../../../..<temp>                 0.78 kB
+../../../../../../../..<temp>              0.78 kB
+../../../../../../../..<temp>                                   0.84 kB
+../../../../../../../..<temp>                  1.02 kB
+../../../../../../../..<temp>                        1.07 kB
+../../../../../../../..<temp>                             2.20 kB
+../../../../../../../..<temp>                               2.21 kB
+../../../../../../../..<temp>                  2.69 kB
+../../../../../../../..<temp>                                  2.85 kB
+../../../../../../../..<temp>                        3.75 kB
+../../../../../../../..<temp>                   4.06 kB
+../../../../../../../..<temp>                         5.38 kB
+../../../../../../../..<temp>                         5.45 kB
+../../../../../../../..<temp>                      5.49 kB
+../../../../../../../..<temp>                                6.68 kB
+../../../../../../../..<temp>                                   6.93 kB
+../../../../../../../..<temp>                      7.38 kB
+../../../../../../../..<temp>                              7.56 kB
+../../../../../../../..<temp>                         9.37 kB
+../../../../../../../..<temp>                   9.85 kB
+../../../../../../../..<temp>                     10.90 kB
+../../../../../../../..<temp>                       10.99 kB
+../../../../../../../..<temp>                               11.63 kB
+../../../../../../../..<temp>                       13.60 kB
+../../../../../../../..<temp>                                13.74 kB
+../../../../../../../..<temp>                      14.04 kB
+../../../../../../../..<temp>                        16.01 kB
+../../../../../../../..<temp>                 16.69 kB
+../../../../../../../..<temp>                   18.55 kB
+../../../../../../../..<temp>                19.07 kB
+../../../../../../../..<temp>                             19.07 kB
+../../../../../../../..<temp>                     21.60 kB
+../../../../../../../..<temp>                       22.94 kB
+../../../../../../../..<temp>                          25.08 kB
+../../../../../../../..<temp>                     31.91 kB
+../../../../../../../..<temp>                               31.99 kB
+../../../../../../../..<temp>                                 32.63 kB
+../../../../../../../..<temp>                    33.76 kB
+../../../../../../../..<temp>                         34.33 kB
+../../../../../../../..<temp>                         34.61 kB
+../../../../../../../..<temp>             35.11 kB
+../../../../../../../..<temp>                      36.34 kB
+../../../../../../../..<temp>                       37.22 kB
+../../../../../../../..<temp>           38.14 kB
+../../../../../../../..<temp>                    39.07 kB
+../../../../../../../..<temp>                         39.18 kB
+../../../../../../../..<temp>                          40.52 kB
+../../../../../../../..<temp>                   42.17 kB
+../../../../../../../..<temp>          43.72 kB
+../../../../../../../..<temp>              44.54 kB
+../../../../../../../..<temp>              45.31 kB
+../../../../../../../..<temp>               46.17 kB
+../../../../../../../..<temp>                   48.45 kB
+../../../../../../../..<temp>                             49.03 kB
+../../../../../../../..<temp>          52.59 kB
+../../../../../../../..<temp>                               55.77 kB
+../../../../../../../..<temp>             57.50 kB
+../../../../../../../..<temp>         60.52 kB
+../../../../../../../..<temp>             61.68 kB
+../../../../../../../..<temp>                                66.30 kB
+../../../../../../../..<temp>                67.76 kB
+../../../../../../../..<temp>                   68.71 kB
+../../../../../../../..<temp>                       71.31 kB
+../../../../../../../..<temp>              72.93 kB
+../../../../../../../..<temp>                         77.22 kB
+../../../../../../../..<temp>                               79.97 kB
+../../../../../../../..<temp>                       84.02 kB
+../../../../../../../..<temp>                 87.67 kB
+../../../../../../../..<temp>               101.48 kB
+../../../../../../../..<temp>                102.08 kB
+../../../../../../../..<temp>                  118.51 kB
+../../../../../../../..<temp>               140.10 kB
+../../../../../../../..<temp>                           150.84 kB
+../../../../../../../..<temp>                         160.26 kB
+../../../../../../../..<temp>                        167.37 kB
+../../../../../../../..<temp>                               170.22 kB
+../../../../../../../..<temp>                           187.50 kB
+../../../../../../../..<temp>                      189.86 kB
+../../../../../../../..<temp>            201.53 kB
+../../../../../../../..<temp>               214.67 kB
+../../../../../../../..<temp>                          248.54 kB
+../../../../../../../..<temp>                               285.69 kB
+../../../../../../../..<temp>                        395.40 kB
+../../../../../../../..<temp>        418.76 kB
+../../../../../../../..<temp>                               481.06 kB
+../../../../../../../..<temp>                       485.19 kB
+../../../../../../../..<temp>                             571.53 kB
+../../../../../../../..<temp>                     601.76 kB
+../../../../../../../..<temp>                    668.01 kB
+../../../../../../../..<temp>                701.09 kB
+../../../../../../../..<temp>                       956.71 kB
+../../../../../../../..<temp>                      1,012.30 kB
+../../../../../../../..<temp>                  1,209.09 kB
+../../../../../../../..<temp>                     1,673.87 kB
+../../../../../../../..<temp>                             5,997.32 kB
+✓ built in 14.56s
+Isolated Bot test build: <temp>
