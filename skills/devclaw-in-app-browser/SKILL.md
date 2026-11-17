@@ -1,5 +1,5 @@
 ---
-name: in-app-browser
+name: devclaw-in-app-browser
 description: Use CMBDevClaw's in-app browser for browser and web-page operations. Trigger whenever the user mentions “浏览器”, “内置浏览器”, browser, in-app browser, opening or operating a website, or interacting with a web page. Prefer usable inAppBrowser page-control tools; otherwise guide enablement or troubleshoot availability before considering another browser skill.
 ---
 

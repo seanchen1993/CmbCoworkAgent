@@ -48,7 +48,7 @@ export const BUILTIN_BROWSER_COMMAND = {
   title: "内置浏览器",
   command: "/browser",
   usage: "/browser <浏览器任务>",
-  description: "使用 in-app-browser 技能执行安全的网页操作",
+  description: "使用 devclaw-in-app-browser 技能执行安全的网页操作",
   insertText: "",
   keywords: ["browser", "内置浏览器", "浏览器", "网页操作"]
 }
