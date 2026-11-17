@@ -15,7 +15,10 @@ import {
 } from "@langchain/core/messages"
 import { ChatOpenAI } from "@langchain/openai"
 import { z } from "zod"
-import { ToolCallAwareChatOpenAICompletions } from "../agent/interleaved-thinking-completions"
+import {
+  DeepSeekChatOpenAICompletions,
+  ReasoningDisplayChatOpenAICompletions
+} from "../agent/interleaved-thinking-completions"
 import { getModelClientOptions } from "../models/connection"
 import { getDefaultModelConfig, getModelConfigByRef } from "../models/registry"
 import { samplingFields } from "../models/sampling-params"
@@ -30,7 +33,13 @@ import {
   toolResultPreview
 } from "./project-analysis/run-progress"
 import type { ProjectAnalysisModel } from "./project-analysis/model-stream"
-import { ProjectModelRequestError, projectModelStatus } from "./project-analysis/model-stream"
+import {
+  ProjectModelOutputError,
+  ProjectModelRequestError,
+  projectModelStatus,
+  projectToolCallIssue
+} from "./project-analysis/model-stream"
+import { ProjectStreamIdleError } from "./project-analysis/stream-guard"
 import type { ProjectAgentRunListener } from "../../shared/project-agent-run"
 export type { ProjectAnalysisModel } from "./project-analysis/model-stream"
 import { reviewAllData } from "./project-analysis/full-data-review"
@@ -173,7 +182,7 @@ export function createProjectAnalysisModel(
   if (!config?.apiKey || !config.model.trim())
     throw new Error("请先配置可用的模型，再使用项目分析 Agent")
   const budget = projectContextBudget(config)
-  const fields = {
+  const baseFields = {
     model: config.model,
     apiKey: config.apiKey,
     maxTokens: budget.outputTokens,
@@ -183,17 +192,42 @@ export function createProjectAnalysisModel(
     ...samplingFields(config.model, { temperature: config.temperature, topP: config.topP }),
     ...getModelClientOptions(config)
   }
-  const model = new ChatOpenAI({
-    ...fields,
-    completions: new ToolCallAwareChatOpenAICompletions(fields)
-  })
+  const isDeepSeek = /deepseek/i.test(config.model)
+  const makeModel = (enableThinking: boolean) => {
+    const effort =
+      enableThinking && config.enableThinkingEffort
+        ? { reasoning_effort: config.thinkingEffort }
+        : {}
+    const fields = {
+      ...baseFields,
+      modelKwargs: {
+        chat_template_kwargs: { enable_thinking: enableThinking, ...effort },
+        ...(isDeepSeek
+          ? { thinking: { type: enableThinking ? "enabled" : "disabled" }, ...effort }
+          : enableThinking
+            ? { thinking: { type: "enabled" } }
+            : {})
+      }
+    }
+    return new ChatOpenAI({
+      ...fields,
+      completions:
+        isDeepSeek && enableThinking
+          ? new DeepSeekChatOpenAICompletions(fields)
+          : new ReasoningDisplayChatOpenAICompletions(fields)
+    })
+  }
+  const model = makeModel(config.enableThinking === true)
+  // Review/compaction needs final text. Match the main runtime's explicit non-thinking
+  // protocol while retaining the selected model and its context/output limits.
+  const reviewer = config.enableThinking ? makeModel(false) : model
   return {
     name: config.model,
     selectionLabel: selected ? "所选" : "默认",
     budget,
     agent: model.bindTools(tools),
     final: model,
-    reviewer: model
+    reviewer
   }
 }
 
@@ -231,6 +265,15 @@ export function projectAnalysisError(error: unknown): string {
   const status = projectModelStatus(error)
   const retried =
     error instanceof ProjectModelRequestError ? `，已自动重试${error.retries}次仍失败` : ""
+  const outputError =
+    error instanceof ProjectModelOutputError || error instanceof ProjectStreamIdleError
+      ? error
+      : error instanceof ProjectModelRequestError &&
+          (error.cause instanceof ProjectModelOutputError ||
+            error.cause instanceof ProjectStreamIdleError)
+        ? error.cause
+        : undefined
+  if (outputError) return `${outputError.message}${retried}；请重试，或手动选择其他模型`
   if (status === 401 || status === 403) return "当前模型认证或访问失败，请检查模型配置与账号权限"
   if (status === 429) return `当前模型请求受限${retried}，请稍后重试`
   if (status === 433) return `当前模型输出 Token 数限流（HTTP 433）${retried}，请稍后重试`
@@ -244,8 +287,7 @@ export async function runProjectAnalysisAgent(
   deps: ProjectAnalysisDependencies
 ): Promise<ProjectAnalysisAgentResult> {
   const input = parseProjectAnalysisInput(raw)
-  const timeout = AbortSignal.timeout(840_000)
-  const signal = deps.signal ? AbortSignal.any([deps.signal, timeout]) : timeout
+  const signal = deps.signal ?? new AbortController().signal
   signal.throwIfAborted()
   const progress = createProjectRunReporter(deps.onEvent)
   const readStep = progress.begin("data", "读取项目分析数据", "核对当前权限、项目与筛选范围")
@@ -409,12 +451,9 @@ export async function runProjectAnalysisAgent(
       }
       signal.throwIfAborted()
       const calls = response.tool_calls ?? []
-      if (response.invalid_tool_calls?.length || calls.length > 12 - toolCalls.length) {
-        messages.push(
-          new HumanMessage(
-            "工具参数必须符合定义，每次仅查询必要数据且总查询次数不能超过 12 次。请修正后重试，或依据已有证据回答。"
-          )
-        )
+      const issue = projectToolCallIssue(response, 12 - toolCalls.length)
+      if (issue) {
+        messages.push(new HumanMessage(issue))
         continue
       }
       for (const [index, call] of calls.entries()) call.id ??= `query-${round}-${index}`
@@ -479,7 +518,6 @@ export async function runProjectAnalysisAgent(
     return finish(content)
   } catch (error) {
     if (error instanceof ProjectContextError || deps.signal?.aborted) throw error
-    if (timeout.aborted) throw new Error("全量审阅或分析超时，已停止；请缩小筛选范围后重试")
     if (
       error instanceof Error &&
       /完整审阅|全量数据审阅|完整快照|数据量|未截断/.test(error.message)

@@ -34,6 +34,9 @@ export function estimateProjectMessages(messages: BaseMessage[]): number {
       estimateProjectTokens(
         JSON.stringify({
           content: message.content,
+          // Thinking-enabled providers resend this alongside prior assistant/tool turns.
+          reasoning:
+            message.additional_kwargs?.reasoning ?? message.additional_kwargs?.reasoning_content,
           ...("tool_calls" in message ? { tool_calls: message.tool_calls } : {}),
           ...("tool_call_id" in message ? { tool_call_id: message.tool_call_id } : {})
         })

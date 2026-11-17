@@ -8,7 +8,8 @@ export function ProjectAgentModelReplies({ state }: { state: ProjectAgentRunStat
   const viewport = useRef<HTMLPreElement>(null)
   const follow = useRef(true)
   const steps = state.steps.filter((step) => Object.hasOwn(state.replies, step.id))
-  const step = steps.find((item) => item.id === selected) ?? steps.at(-1)
+  const selectedStep = steps.find((item) => item.id === selected)
+  const step = selectedStep ?? steps.at(-1)
   const reply = step ? state.replies[step.id] : ""
   useEffect(() => {
     const el = viewport.current
@@ -24,14 +25,14 @@ export function ProjectAgentModelReplies({ state }: { state: ProjectAgentRunStat
         className="flex items-center gap-1 text-primary hover:underline"
       >
         {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
-        模型回复 · {steps.length} 轮
+        {state.historyTruncated ? "最近模型回复" : "模型回复"} · {steps.length} 轮
         {state.outcome === "running" && <span className="text-muted-foreground">· 实时更新</span>}
       </button>
       {open && (
         <div className="mt-2 min-w-0 space-y-1.5">
           <select
             aria-label="查看模型回复轮次"
-            value={selected}
+            value={selectedStep ? selected : "latest"}
             onChange={(event) => {
               follow.current = true
               setSelected(event.target.value)

@@ -154,13 +154,14 @@ describe("project analysis agent", () => {
     expect(payload.nextOffset).toBe(payload.rows.length === 16 ? null : 20 + payload.rows.length)
     expect(result.evidence).toHaveLength(1 + payload.rows.length)
   })
-  it("falls back to verified facts when a provider rejects tools or returns empty text", async () => {
+  it("falls back when tools are unsupported and retries an empty reply using the same model", async () => {
     const h = harness([Object.assign(new Error("unsupported tools"), { status: 400 })])
     expect((await runProjectAnalysisAgent(input, h.deps)).content).toContain("[E1]")
     expect(h.final).toHaveBeenCalledTimes(1)
     const empty = harness([new AIMessage("")])
     await runProjectAnalysisAgent(input, empty.deps)
-    expect(empty.final).toHaveBeenCalledTimes(1)
+    expect(empty.invoke).toHaveBeenCalledTimes(2)
+    expect(empty.final).not.toHaveBeenCalled()
   })
   it("repairs malformed tool calls without putting invalid calls into subsequent messages", async () => {
     const bad = new AIMessage({
@@ -195,7 +196,9 @@ describe("project analysis agent", () => {
   })
   it("discards text returned after cancellation, including the fallback response", async () => {
     for (const fallback of [false, true]) {
-      const h = harness(fallback ? [new AIMessage("")] : [])
+      const h = harness(
+        fallback ? [Object.assign(new Error("unsupported tools"), { status: 400 })] : []
+      )
       const controller = new AbortController()
       h.deps.signal = controller.signal
       const cancelledAnswer = async () => {

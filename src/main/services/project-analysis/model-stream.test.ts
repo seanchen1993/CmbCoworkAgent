@@ -8,6 +8,50 @@ import { streamProjectModel } from "./model-stream"
 import { createProjectRunReporter } from "./run-progress"
 
 describe("project Agent streaming transport", () => {
+  it.each(["eof", "length"])(
+    "recovers real SSE %s without accepting a partial answer",
+    async (failure) => {
+      const bodies: Array<{ messages: Array<{ content: string }>; stream: boolean }> = []
+      const server = createServer(async (request, response) => {
+        let raw = ""
+        for await (const chunk of request) raw += chunk.toString()
+        bodies.push(JSON.parse(raw))
+        response.writeHead(200, { "Content-Type": "text/event-stream" })
+        const first = bodies.length === 1
+        response.write(
+          `data: ${JSON.stringify({ id: "test", object: "chat.completion.chunk", model: "test-model", choices: [{ index: 0, delta: { role: "assistant", content: first ? "半份报告" : "完整结果" }, finish_reason: first ? (failure === "length" ? "length" : null) : "stop" }] })}\n\n`
+        )
+        response.end(first && failure === "eof" ? "" : "data: [DONE]\n\n")
+      })
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+      try {
+        const model = new ChatOpenAI({
+          model: "test-model",
+          apiKey: "local-test",
+          maxRetries: 0,
+          streamUsage: false,
+          configuration: {
+            baseURL: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`
+          }
+        })
+        const result = await streamProjectModel(
+          model,
+          [new HumanMessage("完整报告")],
+          new AbortController().signal,
+          createProjectRunReporter(),
+          "生成报告"
+        )
+        expect(result.content).toBe("完整结果")
+        expect(bodies).toHaveLength(2)
+        expect(bodies.every((body) => body.stream)).toBe(true)
+        if (failure === "length") expect(bodies[1].messages.at(-1)?.content).toContain("精简")
+      } finally {
+        server.closeAllConnections()
+        await new Promise<void>((resolve) => server.close(() => resolve()))
+      }
+    },
+    10000
+  )
   it.each([true, false])(
     "streams replies before completion for analysis and report calls (answer: %s)",
     async (answer) => {
@@ -148,6 +192,7 @@ describe("project Agent streaming transport", () => {
             })
             yield new AIMessageChunk({
               content: "",
+              response_metadata: { finish_reason: "tool_calls" },
               tool_call_chunks: [{ args: '"overview"}', index: 0, type: "tool_call_chunk" }]
             })
           })()

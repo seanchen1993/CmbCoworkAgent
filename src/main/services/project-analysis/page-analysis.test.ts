@@ -11,6 +11,8 @@ import { diagnoseProjects } from "./project-diagnostics"
 import { reviewAllData } from "./full-data-review"
 import { loadCompleteProjectList, pageDatasets, projectListPageData } from "./page-data"
 
+vi.mock("node:timers/promises", () => ({ setTimeout: async () => undefined }))
+
 const range = { from: "2026-10-01T00:00:00Z", to: "2026-10-31T23:59:59Z" }
 const signal = () => new AbortController().signal
 describe("page-based full data and diagnosis", () => {
@@ -142,7 +144,9 @@ describe("page-based full data and diagnosis", () => {
   })
   it("passes the last row as well as the first row in small complete datasets", async () => {
     const model = {
-      invoke: vi.fn(async (_messages: BaseMessage[]) => new AIMessage("已完整审阅全部人员"))
+      invoke: vi.fn<(messages: BaseMessage[]) => Promise<AIMessage>>(
+        async () => new AIMessage("已完整审阅全部人员")
+      )
     }
     const result = await reviewAllData(
       [
@@ -213,17 +217,16 @@ describe("page-based full data and diagnosis", () => {
       )
     ).rejects.toThrow()
     expect(model.invoke).toHaveBeenCalledTimes(1)
+    const empty = vi.fn(async () => new AIMessage(""))
     await expect(
       reviewAllData(
         [{ name: "项目分析", basis: "累计", rows }],
         "诊断",
-        mockStreamingModel({ invoke: async () => new AIMessage("") }),
+        mockStreamingModel({ invoke: empty }),
         signal(),
-        ...reviewTestContext(
-          mockStreamingModel({ invoke: async () => new AIMessage("") }),
-          signal()
-        )
+        ...reviewTestContext(mockStreamingModel({ invoke: empty }), signal())
       )
-    ).rejects.toThrow("审阅未完成")
+    ).rejects.toThrow("没有返回正文")
+    expect(empty).toHaveBeenCalledTimes(7)
   })
 })

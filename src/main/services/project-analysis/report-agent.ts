@@ -40,6 +40,7 @@ import {
 import { pageDatasets } from "./page-data"
 import { diagnoseProjects } from "./project-diagnostics"
 import type { ProjectModelCheckpoint } from "./model-checkpoint"
+import { projectToolCallIssue } from "./model-stream"
 
 const selection = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("week"), anchorDate: z.string().max(10) }).strict(),
@@ -131,9 +132,8 @@ const contentText = (message: AIMessage) =>
 export async function generateProjectReport(
   options: ReportAgentOptions
 ): Promise<{ source: string; html: string; modelName: string; reviewNote?: string }> {
-  // Full-room review can take several ten-minute streamed batches on the intranet model.
-  const timeout = AbortSignal.timeout(3_600_000)
-  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout
+  // Report tasks have no overall deadline; caller cancellation still stops every step.
+  const signal = options.signal ?? new AbortController().signal
   signal.throwIfAborted()
   const progress = options.progress ?? createProjectRunReporter()
   const contextManager = new ProjectContext(progress, signal, options.checkpoint)
@@ -326,12 +326,10 @@ export async function generateProjectReport(
           throw error
         }
         signal.throwIfAborted()
-        if (
-          response.invalid_tool_calls?.length ||
-          (response.tool_calls?.length ?? 0) > 10 - calls
-        ) {
-          toolRounds = 5
-          break
+        const issue = projectToolCallIssue(response, 10 - calls)
+        if (issue) {
+          messages.push(new HumanMessage(issue))
+          continue
         }
         if (!response.tool_calls?.length) return response
         for (const [i, call] of response.tool_calls.entries()) call.id ??= `report-${round}-${i}`
@@ -427,7 +425,6 @@ export async function generateProjectReport(
     return { ...output, modelName: model.name, reviewNote: reviewed.note }
   } catch (error) {
     if (error instanceof ProjectContextError || options.signal?.aborted) throw error
-    if (timeout.aborted) throw new Error("本轮报告运行超时；已完成步骤及原版本保留，可继续运行")
     if (
       error instanceof Error &&
       /完整审阅|全量数据审阅|完整快照|数据量|未截断/.test(error.message)

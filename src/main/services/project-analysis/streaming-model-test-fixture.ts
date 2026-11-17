@@ -21,6 +21,13 @@ export function mockStreamingModel<T extends { invoke: MockModelInvoke }>(
           content: message.content,
           additional_kwargs: message.additional_kwargs,
           usage_metadata: message.usage_metadata,
+          response_metadata: {
+            finish_reason:
+              message.tool_calls?.length || message.invalid_tool_calls?.length
+                ? "tool_calls"
+                : "stop",
+            ...message.response_metadata
+          },
           tool_call_chunks: [
             ...(message.tool_calls ?? []).map((call, index) => ({
               name: call.name,

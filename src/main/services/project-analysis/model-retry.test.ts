@@ -3,10 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { ProjectAgentRunEvent } from "../../../shared/project-agent-run"
 import {
   ProjectModelRequestError,
+  ProjectModelOutputError,
   streamProjectModel,
   type ProjectAnalysisModel
 } from "./model-stream"
 import { createProjectRunReporter } from "./run-progress"
+import { ProjectModelCheckpoint, type ProjectModelCheckpointState } from "./model-checkpoint"
 
 const pause = vi.hoisted(() => vi.fn())
 vi.mock("node:timers/promises", () => ({ setTimeout: pause }))
@@ -19,12 +21,166 @@ const httpError = (status: number, headers?: Headers) =>
   Object.assign(new Error(`HTTP ${status}`), { status, headers })
 const successfulStream: ProjectAnalysisModel["stream"] = async () =>
   (async function* () {
-    yield new AIMessageChunk("完整结果")
+    yield new AIMessageChunk({ content: "完整结果", response_metadata: { finish_reason: "stop" } })
   })()
 const run = (stream: typeof successfulStream, signal = new AbortController().signal) =>
   streamProjectModel({ stream }, [], signal, createProjectRunReporter(), "模型调用")
 
 describe("isolated project model retries", () => {
+  it.each([undefined, "length", "error"])(
+    "does not accept a partial response (finish reason: %s)",
+    async (reason) => {
+      const stream = vi.fn(successfulStream).mockImplementationOnce(async () =>
+        (async function* () {
+          yield new AIMessageChunk({
+            content: "半份报告",
+            response_metadata: { finish_reason: reason }
+          })
+        })()
+      )
+      const messages = [new HumanMessage("原始数据与要求")]
+      const result = await streamProjectModel(
+        { stream },
+        messages,
+        new AbortController().signal,
+        createProjectRunReporter(),
+        "报告"
+      )
+      expect(result.content).toBe("完整结果")
+      expect(messages).toHaveLength(1)
+      expect(stream).toHaveBeenCalledTimes(2)
+      if (reason === "length") {
+        expect(stream.mock.calls[1][0]).toHaveLength(2)
+        expect(String(stream.mock.calls[1][0][1].content)).toContain("精简")
+      }
+    }
+  )
+  it("retains completed review steps while excluding truncated replies from continuation checkpoints", async () => {
+    let state: ProjectModelCheckpointState = { completed: {} }
+    let persisted = ""
+    const reporter = createProjectRunReporter()
+    const signal = new AbortController().signal
+    const firstMessages = [new HumanMessage("第一批")]
+    const secondMessages = [new HumanMessage("第二批")]
+    const first = vi.fn(() => run(successfulStream))
+    const broken = vi.fn(async () =>
+      (async function* () {
+        yield new AIMessageChunk({
+          content: "未完成审阅",
+          response_metadata: { finish_reason: "length" }
+        })
+      })()
+    )
+    const checkpoint = new ProjectModelCheckpoint(state, () => {
+      persisted = JSON.stringify(state)
+    })
+    await checkpoint.run("model", firstMessages, "第一批", signal, reporter, first)
+    await expect(
+      checkpoint.run("model", secondMessages, "第二批", signal, reporter, () => run(broken))
+    ).rejects.toBeInstanceOf(ProjectModelRequestError)
+    expect(broken).toHaveBeenCalledTimes(7)
+    state = JSON.parse(persisted)
+    expect(Object.keys(state.completed)).toHaveLength(1)
+    expect(state.pendingStep).toBe("第二批")
+    expect(persisted).not.toContain("未完成审阅")
+    const resumed = new ProjectModelCheckpoint(state, () => undefined)
+    await resumed.run("model", firstMessages, "第一批", signal, reporter, first)
+    await resumed.run("model", secondMessages, "第二批", signal, reporter, () =>
+      run(successfulStream)
+    )
+    expect(first).toHaveBeenCalledTimes(1)
+    expect(Object.keys(state.completed)).toHaveLength(2)
+    expect(state.pendingStep).toBeUndefined()
+  })
+  it("retries malformed SSE JSON and never accepts filtered partial text", async () => {
+    const stream = vi
+      .fn(successfulStream)
+      .mockRejectedValueOnce(new SyntaxError("Unexpected end of JSON input"))
+    expect((await run(stream)).content).toBe("完整结果")
+    stream.mockClear().mockImplementation(async () =>
+      (async function* () {
+        yield new AIMessageChunk({
+          content: "半段正文",
+          response_metadata: { finish_reason: "content_filter" }
+        })
+      })()
+    )
+    await expect(run(stream)).rejects.toThrow("服务端过滤")
+    expect(stream).toHaveBeenCalledTimes(1)
+  })
+  it.each(["reasoning-only", "no-chunks", "whitespace"])(
+    "retries %s responses without marking the empty stream complete",
+    async (kind) => {
+      const stream = vi.fn(successfulStream).mockImplementationOnce(async () =>
+        (async function* () {
+          if (kind === "reasoning-only")
+            yield new AIMessageChunk({
+              content: "",
+              additional_kwargs: { reasoning_content: "private-reasoning" },
+              response_metadata: { finish_reason: "length" },
+              usage_metadata: {
+                input_tokens: 50,
+                output_tokens: 32000,
+                total_tokens: 32050,
+                output_token_details: { reasoning: 32000 }
+              }
+            })
+          if (kind === "whitespace") yield new AIMessageChunk("   ")
+        })()
+      )
+      const events: ProjectAgentRunEvent[] = []
+      expect(
+        (
+          await streamProjectModel(
+            { stream },
+            [],
+            new AbortController().signal,
+            createProjectRunReporter((event) => events.push(event)),
+            "数据审阅"
+          )
+        ).content
+      ).toBe("完整结果")
+      expect(stream).toHaveBeenCalledTimes(2)
+      const finished = events.filter(
+        (event) =>
+          event.type === "step" && event.step.kind === "model" && event.step.elapsedMs !== undefined
+      )
+      expect(finished.map((event) => event.type === "step" && event.step.status)).toEqual([
+        "failed",
+        "completed"
+      ])
+      expect(JSON.stringify(events)).not.toContain("private-reasoning")
+      if (kind === "reasoning-only") {
+        expect(JSON.stringify(events)).toContain("达到输出上限（length）")
+        expect(JSON.stringify(events)).toContain("思考 32000 token")
+      }
+    }
+  )
+  it("keeps the empty-response diagnosis after the six-retry budget is exhausted", async () => {
+    const stream = vi.fn(async () =>
+      (async function* () {
+        yield new AIMessageChunk({ content: "", response_metadata: { finish_reason: "stop" } })
+      })()
+    )
+    const error = await run(stream).catch((error) => error)
+    expect(error).toBeInstanceOf(ProjectModelRequestError)
+    expect(error.retries).toBe(6)
+    expect(error.cause).toBeInstanceOf(ProjectModelOutputError)
+    expect(error.message).toContain("没有返回正文")
+    expect(stream).toHaveBeenCalledTimes(7)
+  })
+  it("does not retry a service-side content filter as a transient empty response", async () => {
+    const stream = vi.fn(async () =>
+      (async function* () {
+        yield new AIMessageChunk({
+          content: "",
+          response_metadata: { finish_reason: "content_filter" }
+        })
+      })()
+    )
+    await expect(run(stream)).rejects.toThrow("服务端内容过滤")
+    expect(stream).toHaveBeenCalledTimes(1)
+  })
   it("retries HTTP 433 over streaming only and reports each retry", async () => {
     const events: ProjectAgentRunEvent[] = []
     const stream = vi

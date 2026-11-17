@@ -35,6 +35,21 @@ function setup(window = 32_768, output = 4096) {
 }
 
 describe("project Agent context management", () => {
+  it("accounts for replayed reasoning when compacting tool conversations", async () => {
+    const { context, budget, reviewInputs } = setup(16_384, 2048)
+    const instruction = new HumanMessage("保留完整证据")
+    const thought = new AIMessage({
+      content: "查询成员",
+      additional_kwargs: { reasoning: "思考片段".repeat(6000) }
+    })
+    const messages = [instruction, thought]
+    context.pin([instruction])
+    expect(estimateProjectMessages(messages)).toBeGreaterThan(budget.inputTokens)
+    await context.prepare(messages)
+    expect(estimateProjectMessages(messages)).toBeLessThan(budget.inputTokens)
+    expect(reviewInputs).not.toHaveLength(0)
+    expect(messages).toContain(instruction)
+  })
   it("uses configured context/output budgets instead of the old 90,000 character limit", async () => {
     const { context, budget, reviewInputs } = setup(128_000, 12_000)
     expect(budget).toEqual({ contextTokens: 128_000, outputTokens: 12_000, inputTokens: 115_000 })

@@ -146,9 +146,7 @@ export function registerProjectReportHandlers(deps: ProjectReportDependencies): 
     "projectReportGenerate",
     async (store, access, event, raw, check, runId) => {
       const request = parseReportGeneration(raw)
-      const timeout = AbortSignal.timeout(3_600_000)
-      const parent = deps.signal()
-      const signal = parent ? AbortSignal.any([parent, timeout]) : timeout
+      const signal = deps.signal() ?? new AbortController().signal
       const progress = createProjectRunReporter(projectAgentProgress(event, runId, signal))
       let run: SavedReportRun | undefined
       let acquired = false
@@ -294,7 +292,7 @@ export function registerProjectReportHandlers(deps: ProjectReportDependencies): 
         saveStep.finish(`已保存 v${document.version.version}，可预览和导出 HTML`)
         return document
       } catch (error) {
-        if (parent?.aborted) {
+        if (signal.aborted) {
           // Stopping a request pauses this private task. Keep complete model calls and
           // fetched details; an incomplete stream is never a completed checkpoint.
           check(false)
@@ -302,18 +300,15 @@ export function registerProjectReportHandlers(deps: ProjectReportDependencies): 
           throw error
         }
         check()
-        const failure = timeout.aborted
-          ? new Error("本轮报告查询或生成超时，已完成步骤及原版本保留")
-          : error
         if (run && acquired) {
           // Persist any detail pages fetched since the last successful model step as well.
           store.saveRun(run)
           throw new ReportRunFailed(
-            failure instanceof Error ? failure.message : "报告生成失败",
+            error instanceof Error ? error.message : "报告生成失败",
             store.runSummary(run)
           )
         }
-        throw failure
+        throw error
       } finally {
         if (run && acquired) activeRuns.delete(run.id)
       }

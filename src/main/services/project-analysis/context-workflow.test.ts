@@ -13,6 +13,7 @@ import { projectListPageData } from "./page-data"
 import { createProjectRunReporter } from "./run-progress"
 import { createProjectAnalysisModel, runProjectAnalysisAgent } from "../project-analysis-agent"
 import { recommendedReportTemplate } from "./report-builtin-template"
+import { streamProjectModel } from "./model-stream"
 
 const settings = vi.hoisted(() => ({
   config: {
@@ -20,7 +21,8 @@ const settings = vi.hoisted(() => ({
     apiKey: "local-sse-test",
     baseUrl: "",
     maxTokens: 0,
-    maxOutputTokens: 0
+    maxOutputTokens: 0,
+    enableThinking: false
   },
   alternate: {
     model: "configured-alternate-model",
@@ -56,6 +58,87 @@ const html = (heading: string) =>
   `<!doctype html><html><head><style>body{font:16px sans-serif}</style></head><body><h1>${heading}</h1><p data-report-value="summary.projectCount"></p><p data-report-value="knowledge.window"></p><table><tbody><tr data-report-repeat="members"><td data-report-value="name"></td><td data-report-value="generatedLines"></td></tr></tbody></table><p data-report-insight>请核实待关注项目。</p></body></html>`
 
 describe("project Agent workflows with configured models over real SSE", () => {
+  it.each([false, true])(
+    "explicitly disables DeepSeek review thinking and recovers a reasoning-only SSE response (agent thinking: %s)",
+    async (enableThinking) => {
+      const previous = { ...settings.config }
+      const bodies: Array<Record<string, unknown>> = []
+      const server = createServer(async (request, response) => {
+        let input = ""
+        for await (const part of request) input += part.toString()
+        bodies.push(JSON.parse(input))
+        const empty = bodies.length === 1
+        response.writeHead(200, { "Content-Type": "text/event-stream" })
+        response.write(
+          `data: ${JSON.stringify({
+            id: "review",
+            object: "chat.completion.chunk",
+            created: 1,
+            model: settings.config.model,
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  role: "assistant",
+                  reasoning_content: "private-model-thought",
+                  content: empty ? "" : "有效审阅正文"
+                },
+                finish_reason: empty ? "length" : "stop"
+              }
+            ],
+            usage: {
+              prompt_tokens: 50,
+              completion_tokens: empty ? 32000 : 20,
+              total_tokens: empty ? 32050 : 70,
+              completion_tokens_details: { reasoning_tokens: empty ? 32000 : 10 }
+            }
+          })}\n\n`
+        )
+        response.end("data: [DONE]\n\n")
+      })
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+      const events: ProjectAgentRunEvent[] = []
+      try {
+        Object.assign(settings.config, {
+          model: "deepseek-v4-flash-284b-a13b-w8a8",
+          enableThinking,
+          maxTokens: 1_000_000,
+          maxOutputTokens: 32000,
+          baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`
+        })
+        const model = createProjectAnalysisModel([])
+        const progress = createProjectRunReporter((event) => events.push(event))
+        const signal = new AbortController().signal
+        const result = await streamProjectModel(model.reviewer, [], signal, progress, "数据审阅")
+        expect(result.content).toBe("有效审阅正文")
+        await streamProjectModel(model.final, [], signal, progress, "报告生成")
+        expect(bodies).toHaveLength(3)
+        for (const body of bodies)
+          expect(body).toMatchObject({
+            model: settings.config.model,
+            stream: true,
+            max_tokens: 32000
+          })
+        for (const body of bodies.slice(0, 2))
+          expect(body).toMatchObject({
+            thinking: { type: "disabled" },
+            chat_template_kwargs: { enable_thinking: false }
+          })
+        expect(bodies[2]).toMatchObject({
+          thinking: { type: enableThinking ? "enabled" : "disabled" },
+          chat_template_kwargs: { enable_thinking: enableThinking }
+        })
+        expect(model.budget.contextTokens).toBe(1_000_000)
+        expect(JSON.stringify(events)).toContain("达到输出上限（length）")
+        expect(JSON.stringify(events)).not.toContain("private-model-thought")
+      } finally {
+        Object.assign(settings.config, previous)
+        server.closeAllConnections()
+        await new Promise<void>((resolve) => server.close(() => resolve()))
+      }
+    },
+    10000
+  )
   it("rejects unavailable or deleted selected models instead of silently falling back", () => {
     expect(() => createProjectAnalysisModel([], "provider/missing")).toThrow("重新选择模型")
     expect(() => createProjectAnalysisModel([], "provider/unavailable")).toThrow("不在服务时段")

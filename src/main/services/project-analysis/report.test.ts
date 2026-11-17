@@ -284,6 +284,52 @@ describe("private report storage", () => {
 })
 
 describe("bounded report Agent", () => {
+  it("feeds incomplete tool JSON back to the same conversation before querying and generating", async () => {
+    const conversations: BaseMessage[][] = []
+    const responses = [
+      new AIMessage({
+        content: "",
+        invalid_tool_calls: [
+          {
+            name: "report_data",
+            args: '{"section":"members"',
+            id: "broken",
+            type: "invalid_tool_call"
+          }
+        ]
+      }),
+      new AIMessage({
+        content: "",
+        tool_calls: [{ name: "report_data", args: { section: "members" }, id: "fixed" }]
+      }),
+      new AIMessage(source)
+    ]
+    const invoke = vi.fn(async (messages: BaseMessage[]) => {
+      conversations.push([...messages])
+      return responses.shift()!
+    })
+    const agent = mockStreamingModel({ invoke })
+    const result = await generateProjectReport({
+      snapshot: snapshot(),
+      instruction: "核实成员贡献",
+      createModel: () => ({
+        name: "test",
+        budget: TEST_PROJECT_BUDGET,
+        reviewer: testReviewer(),
+        agent,
+        final: agent
+      })
+    })
+    expect(result.html).toContain("综合报告")
+    expect(invoke).toHaveBeenCalledTimes(3)
+    expect(conversations[1].at(-1)?.content).toContain("上次工具调用未执行")
+    expect(conversations[1].some((message) => message instanceof ToolMessage)).toBe(false)
+    expect(
+      conversations[2]
+        .filter((message) => message instanceof ToolMessage)
+        .map((message) => message.tool_call_id)
+    ).toEqual(["fixed"])
+  })
   function model(agentResponses: Array<AIMessage | Error>, finalResponses: AIMessage[] = []) {
     const agent = {
       invoke: vi.fn(async () => {

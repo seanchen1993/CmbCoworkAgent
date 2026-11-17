@@ -55,7 +55,8 @@ export function ProjectAgentRunProgress({
       <ProjectAgentModelReplies key={state.startedAt} state={state} />
       <details className="mt-2 min-w-0">
         <summary className="cursor-pointer text-muted-foreground">
-          运行明细 · {models} 次模型调用 · {queries} 次工具查询
+          {state.historyTruncated ? "最近运行明细" : "运行明细"} · {models} 次模型调用 · {queries}{" "}
+          次工具查询
         </summary>
         <ol className="mt-2 max-h-24 space-y-2 overflow-y-auto sm:max-h-48 overscroll-contain pr-1">
           {!state.steps.length && <li className="text-muted-foreground">等待后端返回运行进度…</li>}
