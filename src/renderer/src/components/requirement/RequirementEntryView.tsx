@@ -162,7 +162,6 @@ function fromRequirementSpaceItem(
         status: "published",
         description: "",
         file: "",
-        currentStep: 5,
         needDesign: "",
         htmlFile: "",
         htmlId: ""

@@ -15,7 +15,6 @@ export type RequirementPrdManifest = {
     description: string
     file: string
     prDetailUrl?: string
-    currentStep: number
     needDesign: NeedDesignChoice
     htmlFile: string
     htmlId: string
@@ -171,19 +170,7 @@ export function getRequirementPrototypeFunctionKey(functionInfo: {
 
 export function isRequirementGenerated(requirement: RequirementRecord): boolean {
   const status = requirement.prdManifest.prd.status.trim().toLowerCase()
-  return (
-    status === "generated" || status === "published" || requirement.prdManifest.prd.currentStep >= 3
-  )
-}
-
-export function getRequirementCompletedSteps(requirement: RequirementRecord): number {
-  const currentStep = requirement.prdManifest.prd.currentStep
-  const status = requirement.prdManifest.prd.status.trim().toLowerCase()
-  if (Number.isFinite(currentStep)) {
-    const maximumStep = status === "published" ? 5 : 4
-    return Math.max(1, Math.min(maximumStep, Math.trunc(currentStep)))
-  }
-  return status === "published" ? 5 : status === "generated" ? 3 : status === "draft" ? 2 : 1
+  return status === "generated" || status === "published"
 }
 
 function getRequirementUpdatedAtTimestamp(requirement: RequirementRecord): number {

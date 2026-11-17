@@ -7,7 +7,6 @@ import {
   Eye,
   FileCheck2,
   FileText,
-  Info,
   KeyRound,
   Loader2,
   PanelRightClose,
@@ -54,6 +53,7 @@ import { RequirementStatusTags } from "./RequirementStatusTags"
 import { RequirementDevelopmentActions } from "./RequirementDevelopmentActions"
 import { REQUIREMENT_ACTION_HINTS, RequirementActionButton } from "./RequirementActionButton"
 import { REQUIREMENT_SPACE_LIST_EVENT } from "./requirement-navigation"
+import { BatchPrototypeDesignDialog } from "./BatchPrototypeDesignDialog"
 
 export type RequirementPreviewTab = "expert-process" | "source" | "prd"
 export type RequirementPrototypeStatus = {
@@ -106,7 +106,8 @@ type RequirementDetailsPanelProps = {
   onRequestPrototypeDesign: (functionInfo: RequirementPrdManifest["functions"][number]) => void
   onStartBatchPrototypeDesign: (
     functionInfos: RequirementPrdManifest["functions"],
-    mode: "functions" | "full-prd"
+    mode: "functions" | "grouped" | "full-prd",
+    groupedFunctionGroups?: string[][]
   ) => void | Promise<void>
   onClearPrototypeDesign: () => void | Promise<void>
   onClearPrototypeFunction: (
@@ -330,8 +331,6 @@ export function RequirementDetailsPanel({
       ? "in-progress"
       : "not-started"
   const [batchDialogOpen, setBatchDialogOpen] = useState(false)
-  const [batchSelection, setBatchSelection] = useState<Set<string>>(() => new Set())
-  const [batchDesignMode, setBatchDesignMode] = useState<"functions" | "full-prd">("functions")
   const [batchStarting, setBatchStarting] = useState(false)
   const [clearDialogOpen, setClearDialogOpen] = useState(false)
   const [clearTargetFunction, setClearTargetFunction] = useState<
@@ -377,13 +376,14 @@ export function RequirementDetailsPanel({
   )
   const runBatchPrototypeDesign = async (
     functionInfos: RequirementPrdManifest["functions"],
-    mode: "functions" | "full-prd"
+    mode: "functions" | "grouped" | "full-prd",
+    groupedFunctionGroups?: string[][]
   ): Promise<boolean> => {
     if (batchStartingRef.current) return false
     batchStartingRef.current = true
     setBatchStarting(true)
     try {
-      await startBatchPrototypeDesign(functionInfos, mode)
+      await startBatchPrototypeDesign(functionInfos, mode, groupedFunctionGroups)
       return true
     } catch (error) {
       console.error("[RequirementDetailsPanel] Failed to start batch design:", error)
@@ -681,7 +681,7 @@ export function RequirementDetailsPanel({
                 </div>
                 <div className="text-sm font-semibold text-foreground">暂无专家执行记录</div>
                 <div className="mt-1.5 text-xs leading-5 text-muted-foreground">
-                  Agent分析启动后，执行过程会显示在这里
+                  Agent 分析启动后，执行过程会显示在这里；简单需求可能直接完成，不产生专家思考记录
                 </div>
               </div>
             </div>
@@ -927,7 +927,6 @@ export function RequirementDetailsPanel({
                             )
                             return
                           }
-                          setBatchSelection(new Set())
                           setBatchDialogOpen(true)
                         }}
                       >
@@ -950,8 +949,6 @@ export function RequirementDetailsPanel({
                           className="h-7 px-2 text-[11px]"
                           disabled={batchStarting}
                           onClick={() => {
-                            setBatchDesignMode("functions")
-                            setBatchSelection(new Set())
                             setBatchDialogOpen(true)
                           }}
                         >
@@ -1220,188 +1217,12 @@ export function RequirementDetailsPanel({
           )}
         </TabsContent>
       </Tabs>
-      <Dialog
+      <BatchPrototypeDesignDialog
         open={batchDialogOpen}
-        onOpenChange={(open) => {
-          if (!batchStarting) setBatchDialogOpen(open)
-        }}
-      >
-        <DialogContent className="max-h-[calc(100vh-2rem)] gap-0 overflow-hidden rounded-2xl border-0 p-0 shadow-2xl sm:max-w-[660px]">
-          <div className="overflow-y-auto px-7 pb-5 pt-6">
-            <DialogHeader className="space-y-0 pr-8">
-              <DialogTitle className="text-xl font-bold leading-7 tracking-tight">
-                打包设计原型
-              </DialogTitle>
-              <div className="mt-3 rounded-lg border border-border/70 bg-slate-50/80 px-3.5 py-3">
-                <div className="text-sm font-semibold text-foreground">{requirement.title}</div>
-                <DialogDescription className="mt-1.5 line-clamp-2 text-xs leading-5 text-muted-foreground">
-                  {requirementSpaceManifest?.prd.description?.trim() ||
-                    requirement.initialDescription?.trim() ||
-                    "暂无需求描述"}
-                </DialogDescription>
-              </div>
-            </DialogHeader>
-
-            <div className="mt-5">
-              <h3 className="text-sm font-semibold text-foreground">选择设计模式</h3>
-              <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                <button
-                  type="button"
-                  aria-pressed={batchDesignMode === "functions"}
-                  onClick={() => setBatchDesignMode("functions")}
-                  className={cn(
-                    "rounded-lg border px-3.5 py-3 text-left transition-colors",
-                    batchDesignMode === "functions"
-                      ? "border-primary bg-primary/[0.06]"
-                      : "border-border hover:bg-slate-50"
-                  )}
-                >
-                  <span className="block text-sm font-semibold">按功能分别设计</span>
-                  <span className="mt-1 block text-xs leading-5 text-muted-foreground">
-                    选择 function，并为每项创建独立会话
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  aria-pressed={batchDesignMode === "full-prd"}
-                  onClick={() => setBatchDesignMode("full-prd")}
-                  className={cn(
-                    "rounded-lg border px-3.5 py-3 text-left transition-colors",
-                    batchDesignMode === "full-prd"
-                      ? "border-primary bg-primary/[0.06]"
-                      : "border-border hover:bg-slate-50"
-                  )}
-                >
-                  <span className="block text-sm font-semibold">基于完整 PRD 设计</span>
-                  <span className="mt-1 block text-xs leading-5 text-muted-foreground">
-                    无需选择 function，仅创建一个设计会话
-                  </span>
-                </button>
-              </div>
-            </div>
-
-            {batchDesignMode === "functions" ? (
-              <div className="mt-5">
-                <h3 className="text-sm font-semibold text-foreground">选择需要设计原型的功能</h3>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  默认无需设计；打开开关即需设计原型并创建独立设计会话
-                </p>
-              </div>
-            ) : null}
-
-            {batchDesignMode === "functions" ? (
-              <div className="mt-3 max-h-[260px] space-y-2 overflow-y-auto pr-1">
-                {prototypeStatuses.map(({ functionInfo }) => {
-                  const functionKey = getRequirementPrototypeFunctionKey(functionInfo)
-                  const checked = batchSelection.has(functionKey)
-                  const functionLabel = [functionInfo.fr, functionInfo.name]
-                    .filter(Boolean)
-                    .join(" ")
-                  return (
-                    <div
-                      key={functionKey}
-                      className={cn(
-                        "flex min-h-12 items-center gap-3 rounded-lg bg-slate-50 px-3.5 py-2.5 transition-colors hover:bg-slate-100/90",
-                        !checked && "text-muted-foreground"
-                      )}
-                    >
-                      <button
-                        type="button"
-                        role="switch"
-                        aria-checked={checked}
-                        aria-label={`${checked ? "取消" : "选择"}${functionLabel}进行原型设计`}
-                        onClick={() => {
-                          setBatchSelection((current) => {
-                            const next = new Set(current)
-                            if (next.has(functionKey)) next.delete(functionKey)
-                            else next.add(functionKey)
-                            return next
-                          })
-                        }}
-                        className={cn(
-                          "relative inline-flex h-6 w-10 shrink-0 items-center rounded-full transition-colors",
-                          checked ? "bg-primary" : "bg-slate-200"
-                        )}
-                      >
-                        <span
-                          className={cn(
-                            "absolute left-1 size-4 rounded-full bg-white shadow-sm transition-transform",
-                            checked && "translate-x-4"
-                          )}
-                        />
-                      </button>
-                      <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                        {functionLabel}
-                        {functionInfo.description?.trim() ? (
-                          <span className="font-normal"> · {functionInfo.description.trim()}</span>
-                        ) : null}
-                      </span>
-                      {!checked ? (
-                        <span className="shrink-0 text-xs font-normal text-muted-foreground">
-                          无需设计
-                        </span>
-                      ) : null}
-                    </div>
-                  )
-                })}
-              </div>
-            ) : null}
-
-            <div className="mt-3 rounded-lg bg-primary/[0.09] px-3.5 py-2.5 text-xs font-medium text-primary">
-              {batchDesignMode === "full-prd"
-                ? "将传入完整 PRD，并创建 1 个设计会话"
-                : `已选 ${batchSelection.size} 个功能 · 确认后将创建 ${batchSelection.size} 个设计会话${batchSelection.size > 0 ? "，默认激活第 1 个" : ""}`}
-            </div>
-            <div className="mt-3 flex gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs leading-5 text-amber-900">
-              <Info className="mt-0.5 size-3.5 shrink-0" />
-              <span>
-                温馨提示：如有与设计原型相关的文件（例如模板、参考图或 URL
-                链接），可在跳转到设计会话后再手动上传。
-              </span>
-            </div>
-          </div>
-          <DialogFooter className="items-center border-t border-border/70 px-7 py-4 sm:justify-between sm:space-x-4">
-            <p className="text-xs text-muted-foreground">
-              确认后直接跳转设计模式；再次点击不再弹窗
-            </p>
-            <div className="flex shrink-0 items-center gap-3">
-              <Button
-                type="button"
-                variant="secondary"
-                className="h-9 px-4 text-sm font-medium"
-                disabled={batchStarting}
-                onClick={() => setBatchDialogOpen(false)}
-              >
-                取消
-              </Button>
-              <Button
-                type="button"
-                className="h-9 px-5 text-sm font-semibold"
-                disabled={batchStarting}
-                onClick={() => {
-                  const selectedFunctions = prototypeStatuses
-                    .filter((item) =>
-                      batchSelection.has(getRequirementPrototypeFunctionKey(item.functionInfo))
-                    )
-                    .map((item) => item.functionInfo)
-                  void runBatchPrototypeDesign(selectedFunctions, batchDesignMode).then(
-                    (started) => {
-                      if (started) setBatchDialogOpen(false)
-                    }
-                  )
-                }}
-              >
-                {batchStarting ? <Loader2 className="size-3.5 animate-spin" /> : null}
-                {batchDesignMode === "full-prd"
-                  ? "基于完整 PRD 开始设计"
-                  : batchSelection.size > 0
-                    ? `开始设计 · ${batchSelection.size} 个会话`
-                    : "确认均无需设计"}
-              </Button>
-            </div>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        onOpenChange={setBatchDialogOpen}
+        prototypeStatuses={prototypeStatuses}
+        onStart={startBatchPrototypeDesign}
+      />
       <Dialog
         open={clearDialogOpen}
         onOpenChange={(open) => {

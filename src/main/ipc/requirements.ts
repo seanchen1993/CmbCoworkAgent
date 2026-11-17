@@ -37,7 +37,6 @@ export type IndexedPrdManifest = {
     description: string
     file: string
     prDetailUrl?: string
-    currentStep: number
     needDesign: NeedDesignChoice
     htmlFile: string
     htmlId: string
@@ -304,7 +303,6 @@ async function readRequirementIndex(): Promise<RequirementIndexItem[]> {
   const normalized = list.map((rawItem) => {
     const { threadId: _legacyThreadId, ...item } = rawItem as typeof rawItem & {
       threadId?: unknown
-      crrentStep?: unknown
       status?: unknown
       prdGenerated?: unknown
     }
@@ -318,7 +316,6 @@ async function readRequirementIndex(): Promise<RequirementIndexItem[]> {
     delete item.prdManifestSynced
     delete item.status
     delete item.prdGenerated
-    delete item.crrentStep
     const rawSourceType = (item.source as { type?: unknown } | undefined)?.type
     const sourceType: RequirementSourceType =
       rawSourceType === "file" || rawSourceType === "link" || rawSourceType === "text"
@@ -359,6 +356,7 @@ type RequirementFunctionHtmlPayload = {
   reqId?: string
   workspacePath: string
   requirementFilePath: string
+  requirementFilePaths?: string[]
   htmlFile?: string
   htmlId?: string
   fullPrd?: boolean
@@ -479,16 +477,21 @@ async function updateRequirementFunctionHtml(
     await commit(updatedRaw)
     return { htmlFile, htmlId }
   }
-  const match = resolveRequirementFunction(
-    manifestResult.manifest,
-    payload.workspacePath,
-    payload.requirementFilePath
+  const requirementFilePaths = [
+    ...new Set(
+      (payload.requirementFilePaths?.length
+        ? payload.requirementFilePaths
+        : [payload.requirementFilePath]
+      ).filter(Boolean)
+    )
+  ]
+  if (requirementFilePaths.length === 0) throw new Error("需求文件不能为空")
+  const matches = requirementFilePaths.map((requirementFilePath) =>
+    resolveRequirementFunction(manifestResult.manifest, payload.workspacePath, requirementFilePath)
   )
+  const matchIndexes = new Set(matches.map((match) => match.index))
   const rawFunctions = manifestResult.raw.functions as unknown[]
-  const rawFunction: Record<string, unknown> = isRecord(rawFunctions[match.index])
-    ? (rawFunctions[match.index] as Record<string, unknown>)
-    : {}
-  const existingHtmlFile = manifestResult.manifest.functions[match.index].htmlFile
+  const existingHtmlFile = manifestResult.manifest.functions[matches[0].index].htmlFile
   const htmlFile = payload.htmlFile?.trim() ? path.resolve(payload.htmlFile) : existingHtmlFile
   if (payload.htmlFile?.trim()) {
     try {
@@ -500,9 +503,11 @@ async function updateRequirementFunctionHtml(
   }
   const updatedRaw = {
     ...manifestResult.raw,
-    functions: rawFunctions.map((entry, entryIndex) =>
-      entryIndex === match.index ? { ...rawFunction, htmlFile, htmlId, needDesign: "1" } : entry
-    )
+    functions: rawFunctions.map((entry, entryIndex) => {
+      if (!matchIndexes.has(entryIndex)) return entry
+      const rawFunction = isRecord(entry) ? entry : {}
+      return { ...rawFunction, htmlFile, htmlId, needDesign: "1" }
+    })
   }
   await commit(updatedRaw)
   return { htmlFile, htmlId }
@@ -605,7 +610,6 @@ function createEmptyPrdManifest(): IndexedPrdManifest {
       status: "",
       description: "",
       file: "",
-      currentStep: 1,
       needDesign: "",
       htmlFile: "",
       htmlId: ""
@@ -633,23 +637,11 @@ function normalizePrdManifest(value: unknown): IndexedPrdManifest {
     status === "init" || status === "draft" || status === "generated" || status === "published"
       ? status
       : ""
-  const fallbackStep =
-    normalizedStatus === "published"
-      ? 5
-      : normalizedStatus === "generated"
-        ? 3
-        : normalizedStatus === "init" || normalizedStatus === "draft"
-          ? 2
-          : 1
   normalized.prd = {
     name: readManifestString(prd, "name"),
     status: normalizedStatus,
     description: readManifestString(prd, "description"),
     file: readManifestString(prd, "file"),
-    currentStep:
-      typeof prd.currentStep === "number" && Number.isFinite(prd.currentStep)
-        ? Math.max(1, Math.min(5, Math.trunc(prd.currentStep)))
-        : fallbackStep,
     needDesign: normalizeNeedDesign(prd.needDesign),
     htmlFile: readManifestString(prd, "htmlFile"),
     htmlId: readManifestString(prd, "htmlId"),
@@ -719,7 +711,6 @@ function mergeManifestState(
   raw: Record<string, unknown>,
   state: {
     needDesign: NeedDesignChoice
-    currentStep: number
     functions: Array<{ fr: string; file: string; htmlFile: string; needDesign: NeedDesignChoice }>
   }
 ): Record<string, unknown> {
@@ -727,7 +718,7 @@ function mergeManifestState(
   const rawFunctions = Array.isArray(raw.functions) ? raw.functions : []
   return {
     ...raw,
-    prd: { ...rawPrd, currentStep: state.currentStep, needDesign: state.needDesign },
+    prd: { ...rawPrd, needDesign: state.needDesign },
     functions: rawFunctions.map((entry) => {
       const functionInfo = isRecord(entry) ? entry : {}
       const saved = state.functions.find(
@@ -1001,11 +992,10 @@ async function renameRequirement(reqId: string, title: string): Promise<Requirem
   return toRuntimeRequirement(next)
 }
 
-async function saveRequirementStepState(
+async function saveRequirementDesignState(
   reqId: string,
   state: {
     needDesign: NeedDesignChoice
-    currentStep: number
     functions: Array<{ fr: string; file: string; htmlFile: string; needDesign: NeedDesignChoice }>
   }
 ): Promise<{
@@ -1015,29 +1005,18 @@ async function saveRequirementStepState(
   manifestError?: string
 }> {
   const normalizedReqId = reqId?.trim()
-  if (!normalizedReqId || !state) throw new Error("需求编号和步骤状态不能为空")
-  if (!Number.isFinite(state.currentStep) || !Array.isArray(state.functions)) {
-    throw new Error("步骤状态格式无效")
-  }
+  if (!normalizedReqId || !state) throw new Error("需求编号和原型选择不能为空")
+  if (!Array.isArray(state.functions)) throw new Error("原型选择格式无效")
   const list = await readRequirementIndex()
   const index = list.findIndex((item) => item.reqId === normalizedReqId)
   if (index < 0) throw new Error(`需求不存在：${normalizedReqId}`)
-  const requestedStep = Math.max(1, Math.min(5, Math.trunc(state.currentStep)))
   const workspaceManifest = await readWorkspaceManifest(list[index])
-  const reachedStep = Math.max(
-    requestedStep,
-    normalizePrdManifest(list[index].prdManifest).prd.currentStep,
-    workspaceManifest.status === "ok" ? workspaceManifest.manifest.prd.currentStep : 1
-  )
   let indexedManifest = normalizePrdManifest(list[index].prdManifest)
   let manifestStatus: "updated" | "missing" | "invalid" =
     workspaceManifest.status === "ok" ? "updated" : workspaceManifest.status
   let manifestError: string | undefined
   if (workspaceManifest.status === "ok") {
-    const mergedRaw = mergeManifestState(workspaceManifest.raw, {
-      ...state,
-      currentStep: reachedStep
-    })
+    const mergedRaw = mergeManifestState(workspaceManifest.raw, state)
     await writeJsonAtomic(getRequirementPrdPath(list[index]), mergedRaw)
     indexedManifest = normalizePrdManifest(mergedRaw)
     manifestStatus = "updated"
@@ -1045,7 +1024,7 @@ async function saveRequirementStepState(
     manifestError = workspaceManifest.error
     indexedManifest = {
       ...indexedManifest,
-      prd: { ...indexedManifest.prd, currentStep: reachedStep, needDesign: state.needDesign },
+      prd: { ...indexedManifest.prd, needDesign: state.needDesign },
       functions: indexedManifest.functions.map((functionInfo) => {
         const saved = state.functions.find(
           (item) => item.fr === functionInfo.fr && item.file === functionInfo.file
@@ -1058,7 +1037,7 @@ async function saveRequirementStepState(
   } else {
     indexedManifest = {
       ...indexedManifest,
-      prd: { ...indexedManifest.prd, currentStep: reachedStep, needDesign: state.needDesign },
+      prd: { ...indexedManifest.prd, needDesign: state.needDesign },
       functions: indexedManifest.functions.map((functionInfo) => {
         const saved = state.functions.find(
           (item) => item.fr === functionInfo.fr && item.file === functionInfo.file
@@ -1087,7 +1066,7 @@ async function saveRequirementStepState(
 
 async function clearRequirementDesign(
   reqId: string,
-  targetFunction?: { fr: string; file: string }
+  targetFunctions?: Array<{ fr: string; file: string }>
 ): Promise<{
   requirement: RequirementRuntimeItem
   manifest: IndexedPrdManifest
@@ -1102,22 +1081,23 @@ async function clearRequirementDesign(
   if (workspaceManifest.status !== "ok") throw new Error("无法读取需求文件，请刷新后重试")
   const rawPrd = isRecord(workspaceManifest.raw.prd) ? workspaceManifest.raw.prd : {}
   const rawFunctions = workspaceManifest.raw.functions as unknown[]
-  let targetFound = !targetFunction
+  const targets = targetFunctions?.length ? targetFunctions : undefined
+  const targetKeys = targets
+    ? new Set(targets.map((target) => `${target.fr}\u0000${target.file}`))
+    : undefined
+  const foundTargetKeys = new Set<string>()
   const functions = rawFunctions.map((entry) => {
     const rawFunction = isRecord(entry) ? entry : {}
-    const selected =
-      !targetFunction ||
-      (readManifestString(rawFunction, "fr") === targetFunction.fr &&
-        readManifestString(rawFunction, "file") === targetFunction.file)
-    if (selected) targetFound = true
+    const key = `${readManifestString(rawFunction, "fr")}\u0000${readManifestString(rawFunction, "file")}`
+    const selected = !targetKeys || targetKeys.has(key)
+    if (selected && targetKeys) foundTargetKeys.add(key)
     return selected ? { ...rawFunction, htmlFile: "", htmlId: "", needDesign: "" } : rawFunction
   })
-  if (!targetFound) throw new Error("未找到需要重置的功能")
+  if (targetKeys && foundTargetKeys.size !== targetKeys.size)
+    throw new Error("未找到需要重置的功能")
   const updatedRaw = {
     ...workspaceManifest.raw,
-    prd: targetFunction
-      ? rawPrd
-      : { ...rawPrd, currentStep: 3, needDesign: "", htmlFile: "", htmlId: "" },
+    prd: targets ? rawPrd : { ...rawPrd, needDesign: "", htmlFile: "", htmlId: "" },
     functions
   }
   const manifest = normalizePrdManifest(updatedRaw)
@@ -1125,7 +1105,7 @@ async function clearRequirementDesign(
   const next: RequirementIndexItem = {
     ...item,
     updatedAt: new Date().toISOString(),
-    needDesign: targetFunction ? item.needDesign : "",
+    needDesign: targets ? item.needDesign : "",
     prdManifest: manifest
   }
   list[index] = next
@@ -1167,7 +1147,6 @@ async function saveRequirementPrd(payload: SavePrdPayload): Promise<RequirementR
       status: "generated",
       description: "",
       file: modules[0]?.filePath ?? "",
-      currentStep: 3,
       needDesign: "",
       htmlFile: "",
       htmlId: ""
@@ -1496,13 +1475,12 @@ export function registerRequirementHandlers(ipcMain: IpcMain): void {
     }
   )
   ipcMain.handle(
-    "requirements:save-step-state",
+    "requirements:save-design-state",
     async (
       _event,
       payload: {
         reqId: string
         needDesign: NeedDesignChoice
-        currentStep: number
         functions: Array<{
           fr: string
           file: string
@@ -1513,7 +1491,7 @@ export function registerRequirementHandlers(ipcMain: IpcMain): void {
     ) => {
       try {
         const saved = await enqueueManifestOperation(payload.reqId, () =>
-          saveRequirementStepState(payload.reqId, payload)
+          saveRequirementDesignState(payload.reqId, payload)
         )
         return {
           success: true,
@@ -1529,12 +1507,26 @@ export function registerRequirementHandlers(ipcMain: IpcMain): void {
   )
   ipcMain.handle(
     "requirements:clear-design",
-    async (_event, payload: { reqId: string; function?: { fr: string; file: string } }) => {
+    async (
+      _event,
+      payload: {
+        reqId: string
+        function?: { fr: string; file: string }
+        functions?: Array<{ fr: string; file: string }>
+      }
+    ) => {
       try {
         return {
           success: true,
           ...(await enqueueManifestOperation(payload.reqId, () =>
-            clearRequirementDesign(payload.reqId, payload.function)
+            clearRequirementDesign(
+              payload.reqId,
+              payload.functions?.length
+                ? payload.functions
+                : payload.function
+                  ? [payload.function]
+                  : undefined
+            )
           ))
         }
       } catch (error) {

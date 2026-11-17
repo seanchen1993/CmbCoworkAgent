@@ -2,6 +2,7 @@ import { useEffect } from "react"
 
 import {
   REQUIREMENT_DESIGN_ENTRY_KEY,
+  getRequirementDesignFilePaths,
   storeRequirementDesignEntries,
   type RequirementDesignEntry,
   type RequirementDesignEntryPayload
@@ -112,16 +113,18 @@ export function useRequirementDesignEntry({
             }
           }
           if (!reuseExisting) {
-            const requirementAttachment =
+            const requirementAttachments =
               entry.source === "space"
-                ? createSpaceRequirementAttachment(entry)
-                : await readRequirementAttachment(entry.requirementFilePath)
+                ? [createSpaceRequirementAttachment(entry)]
+                : await Promise.all(
+                    getRequirementDesignFilePaths(entry).map(readRequirementAttachment)
+                  )
             const sessionId = createSession(
               { title: entry.functionName?.trim() || "需求原型" },
               {
                 designSystemId: entry.designSystemId ?? null,
                 initialInputValue: entry.prompt,
-                initialAttachedFiles: [requirementAttachment],
+                initialAttachedFiles: requirementAttachments,
                 // 空字符串用于阻止 DesignView 回退到其他会话或全局工作区。
                 workspacePath: entry.workspacePath || ""
               }
@@ -129,10 +132,12 @@ export function useRequirementDesignEntry({
             await client.waitUntilReady(sessionId)
             readyEntry = { ...entry, htmlId: sessionId, bindingReady: true }
             if (entry.source !== "space") {
+              const requirementFilePaths = getRequirementDesignFilePaths(entry)
               const updated = await window.api.requirements.updateFunctionHtml({
                 reqId: entry.requirementId,
                 workspacePath: entry.workspacePath!,
-                requirementFilePath: entry.requirementFilePath,
+                requirementFilePath: requirementFilePaths[0],
+                requirementFilePaths,
                 htmlId: sessionId,
                 fullPrd: entry.scope === "full-prd"
               })

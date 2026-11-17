@@ -3,6 +3,7 @@ import { ArrowLeft, ChevronLeft, ChevronRight, FileText, Loader2, RefreshCw } fr
 
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type { ActiveRequirementDesignEntry } from "./use-requirement-design-entry"
+import { getRequirementDesignFilePaths } from "@/lib/requirement-design-entry"
 import {
   listRequirementDesignEntries,
   returnToRequirementConversation
@@ -114,10 +115,12 @@ export function RequirementDesignContextBar({
       await getDesignSessionClient().patch(htmlId, { artifactPath: htmlFile })
       const sessionWorkspacePath = getDesignSessionClient().get(htmlId)?.workspacePath || undefined
       if (entry.source !== "space") {
+        const requirementFilePaths = getRequirementDesignFilePaths(entry)
         const synced = await window.api.requirements.updateFunctionHtml({
           reqId: entry.requirementId,
           workspacePath: entry.workspacePath!,
-          requirementFilePath: entry.requirementFilePath,
+          requirementFilePath: requirementFilePaths[0],
+          requirementFilePaths,
           htmlFile,
           htmlId,
           fullPrd: entry.scope === "full-prd"

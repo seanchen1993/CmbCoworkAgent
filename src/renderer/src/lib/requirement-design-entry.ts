@@ -15,6 +15,7 @@ export type RequirementDesignEntry = {
   previewThreadId?: string
   requirementOverviewFilePath?: string
   requirementFilePath: string
+  requirementFiles?: Array<{ name: string; filePath: string }>
   requirementContent?: string
   designSystemId?: string
   prompt: string
@@ -22,11 +23,18 @@ export type RequirementDesignEntry = {
   htmlFile?: string
 }
 
+export function getRequirementDesignFilePaths(entry: RequirementDesignEntry): string[] {
+  return [
+    entry.requirementFilePath,
+    ...(entry.requirementFiles ?? []).map((item) => item.filePath)
+  ].filter((filePath, index, paths) => Boolean(filePath) && paths.indexOf(filePath) === index)
+}
+
 export type RequirementDesignEntryPayload =
   | RequirementDesignEntry
   | { entries: RequirementDesignEntry[] }
 
-export function isRequirementPrototypeStepComplete({
+export function isRequirementPrototypeComplete({
   skipped,
   allFunctionsComplete,
   fullPrdHtmlFile,
@@ -47,24 +55,25 @@ export function buildRequirementDesignPrompt(
   const target = functionName.trim() || "当前功能"
   const coreRequirementFile = requirementFile.trim() || "当前功能需求文档"
   return [
-    `请根据已附加的需求文件「${coreRequirementFile}」，为「${target}」设计高保真交互原型。`,
-    "",
-    "需求文件是业务范围、流程和规则的主要依据；其他资料仅作补充，冲突时以需求文件为准。请覆盖核心流程及必要的空状态、异常状态，输出可独立运行、主要流程可交互的单页 HTML。关键信息缺失时先提问确认。"
+    `请根据已附加的需求文件「${coreRequirementFile}」，为「${target}」设计高保真交互原型。`
   ].join("\n")
 }
 
 export function buildFullPrdDesignPrompt(requirementFile: string): string {
   const prdFile = requirementFile.trim() || "完整 PRD 文档"
+  return [`请根据已附加的需求PRD 文档「${prdFile}」，设计高保真 UI 交互原型。`].join("\n")
+}
+
+export function buildGroupedRequirementDesignPrompt(functionNames: string[]): string {
+  const targets = functionNames.map((name) => name.trim()).filter(Boolean)
   return [
-    `请根据已附加的需求PRD 文档「${prdFile}」，设计高保真 UI 交互原型。`
+    `请将「${targets.join("、") || "所选功能"}」作为一个完整体验，设计成同一个高保真交互原型。`
   ].join("\n")
 }
 
 export function buildSpaceRequirementDesignPrompt(requirementName: string): string {
   const target = requirementName.trim() || "当前需求"
-  return [
-    `请根据已附加的需求文档，为「${target}」生成高保真交互原型。`
-  ].join("\n")
+  return [`请根据已附加的需求文档，为「${target}」生成高保真交互原型。`].join("\n")
 }
 
 export function openRequirementDesign(entry: RequirementDesignEntry): void {
@@ -163,16 +172,22 @@ export function listRequirementDesignEntries(
   const entriesByFunction = new Map<string, RequirementDesignEntry>()
   for (const entry of Object.values(readRequirementDesignAssociations(storage))) {
     if (entry.requirementId !== requirementId) continue
-    const existing = entriesByFunction.get(entry.requirementFilePath)
-    if (
-      !existing ||
-      entry.htmlId === preferredSessionId ||
-      existing.htmlId !== preferredSessionId
-    ) {
-      entriesByFunction.set(entry.requirementFilePath, entry)
+    for (const filePath of getRequirementDesignFilePaths(entry)) {
+      const existing = entriesByFunction.get(filePath)
+      if (
+        !existing ||
+        entry.htmlId === preferredSessionId ||
+        existing.htmlId !== preferredSessionId
+      ) {
+        entriesByFunction.set(filePath, entry)
+      }
     }
   }
-  return [...entriesByFunction.values()]
+  return [
+    ...new Map(
+      [...entriesByFunction.values()].map((entry) => [entry.htmlId, entry] as const)
+    ).values()
+  ]
 }
 
 export function listAllRequirementDesignEntries(

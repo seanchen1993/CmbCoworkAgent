@@ -8,7 +8,7 @@ import {
   findRequirementDesignEntry,
   listRequirementDesignEntries,
   loadActiveRequirementDesignEntry,
-  isRequirementPrototypeStepComplete,
+  isRequirementPrototypeComplete,
   removeRequirementDesignAssociations,
   removeRequirementDesignSessions,
   storeActiveRequirementDesignEntry,
@@ -18,7 +18,7 @@ import {
 
 const entry: RequirementDesignEntry = {
   requirementId: "req-1",
-  requirementName: "step3-todo需求",
+  requirementName: "todo需求",
   functionName: "FR1 待办管理",
   workspacePath: "/workspace",
   requirementFilePath: "/workspace/requirements/FR1.md",
@@ -89,6 +89,21 @@ describe("active requirement design entry", () => {
 
     expect(loadActiveRequirementDesignEntry(entry.htmlId, storage)).toEqual(entry)
     expect(loadActiveRequirementDesignEntry(second.htmlId, storage)).toEqual(second)
+  })
+
+  it("maps every function in a merged design group to the same session", () => {
+    const groupedEntry: RequirementDesignEntry = {
+      ...entry,
+      requirementFiles: [
+        { name: "FR1 待办管理", filePath: "/workspace/requirements/FR1.md" },
+        { name: "FR3 待办统计", filePath: "/workspace/requirements/FR3.md" }
+      ]
+    }
+    storeActiveRequirementDesignEntry(groupedEntry, groupedEntry.htmlId, storage)
+
+    const entries = listRequirementDesignEntries(groupedEntry.requirementId, storage)
+    expect(entries.filter((item) => item.htmlId === groupedEntry.htmlId)).toHaveLength(1)
+    expect(entries.every((item) => item.htmlId === groupedEntry.htmlId)).toBe(true)
   })
 
   it("stores a requirement-space association without persisting document content", () => {
@@ -180,9 +195,9 @@ describe("requirement design prompt", () => {
 })
 
 describe("requirement prototype completion", () => {
-  it("completes the step when the full PRD prototype has been saved", () => {
+  it("reports completion when the full PRD prototype has been saved", () => {
     expect(
-      isRequirementPrototypeStepComplete({
+      isRequirementPrototypeComplete({
         skipped: false,
         allFunctionsComplete: false,
         fullPrdHtmlFile: "/workspace/full-prd.html",
@@ -191,9 +206,9 @@ describe("requirement prototype completion", () => {
     ).toBe(true)
   })
 
-  it("keeps the step incomplete while a full PRD session has no saved prototype", () => {
+  it("reports incomplete while a full PRD session has no saved prototype", () => {
     expect(
-      isRequirementPrototypeStepComplete({
+      isRequirementPrototypeComplete({
         skipped: false,
         allFunctionsComplete: false,
         fullPrdHtmlFile: "",

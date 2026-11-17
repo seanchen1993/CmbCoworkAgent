@@ -207,7 +207,6 @@ describe("requirement source preview", () => {
         description: "提供基础待办管理与提醒能力",
         file: "pr-doc.md",
         prDetailUrl: "https://www.baidu.com",
-        currentStep: 5,
         needDesign: "",
         htmlFile: "",
         htmlId: ""
@@ -458,16 +457,16 @@ describe("requirement source preview", () => {
     await remove!(null, created.requirement.reqId)
   })
 
-  it("merges prototype state updates and protects missing or invalid manifests", async () => {
-    const workDir = join(tempHome, "step-state-workspace")
+  it("merges prototype design updates and protects missing or invalid manifests", async () => {
+    const workDir = join(tempHome, "design-state-workspace")
     mkdirSync(workDir)
     const create = handlers.get("requirements:create")!
-    const saveStepState = handlers.get("requirements:save-step-state")!
+    const saveDesignState = handlers.get("requirements:save-design-state")!
     const syncManifest = handlers.get("requirements:sync-manifest")!
     const remove = handlers.get("requirements:delete")!
     const created = (await create(null, {
-      systemId: "system-step",
-      title: "步骤状态",
+      systemId: "system-design",
+      title: "原型选择",
       workDir,
       source: { type: "text", fileName: "" }
     })) as { success: boolean; requirement: { reqId: string; requirementPath: string } }
@@ -477,9 +476,8 @@ describe("requirement source preview", () => {
       manifestPath,
       JSON.stringify({
         prd: {
-          name: "步骤状态",
+          name: "原型选择",
           status: "generated",
-          currentStep: 3,
           needDesign: "",
           custom: "preserved"
         },
@@ -491,10 +489,9 @@ describe("requirement source preview", () => {
       "utf-8"
     )
 
-    const updated = (await saveStepState(null, {
+    const updated = (await saveDesignState(null, {
       reqId: created.requirement.reqId,
       needDesign: "1",
-      currentStep: 4,
       functions: [
         {
           fr: "FR1",
@@ -506,13 +503,13 @@ describe("requirement source preview", () => {
     })) as {
       success: boolean
       manifestStatus: string
-      manifest: { prd: { currentStep: number } }
+      manifest: { prd: { needDesign: "" | "0" | "1" } }
     }
     expect(updated).toMatchObject({ success: true, manifestStatus: "updated" })
-    expect(updated.manifest.prd.currentStep).toBe(4)
+    expect(updated.manifest.prd.needDesign).toBe("1")
     expect(existsSync(join(created.requirement.requirementPath, "prd", "原型设计"))).toBe(false)
     expect(JSON.parse(readFileSync(manifestPath, "utf-8"))).toMatchObject({
-      prd: { currentStep: 4, needDesign: "1", custom: "preserved" },
+      prd: { needDesign: "1", custom: "preserved" },
       functions: [
         {
           fr: "FR1",
@@ -524,10 +521,9 @@ describe("requirement source preview", () => {
       ]
     })
 
-    await saveStepState(null, {
+    await saveDesignState(null, {
       reqId: created.requirement.reqId,
       needDesign: "1",
-      currentStep: 4,
       functions: [
         {
           fr: "FR2",
@@ -549,10 +545,10 @@ describe("requirement source preview", () => {
       manifest: queriedManifest
     })) as {
       success: boolean
-      manifest: { prd: { currentStep: number; needDesign: "" | "0" | "1" } }
+      manifest: { prd: { needDesign: "" | "0" | "1" } }
     }
     expect(resynced.success).toBe(true)
-    expect(resynced.manifest.prd).toMatchObject({ currentStep: 4, needDesign: "1" })
+    expect(resynced.manifest.prd).toMatchObject({ needDesign: "1" })
     expect(readFileSync(manifestPath, "utf-8")).toBe(manifestBeforeQuery)
 
     const writeFileSpy = vi.spyOn(fsPromises, "writeFile")
@@ -563,10 +559,9 @@ describe("requirement source preview", () => {
     expect(writeFileSpy).not.toHaveBeenCalled()
     writeFileSpy.mockRestore()
 
-    await saveStepState(null, {
+    await saveDesignState(null, {
       reqId: created.requirement.reqId,
       needDesign: "1",
-      currentStep: 4,
       functions: [
         {
           fr: "FR1",
@@ -600,20 +595,18 @@ describe("requirement source preview", () => {
     })
 
     writeFileSync(manifestPath, "{ invalid", "utf-8")
-    const invalid = (await saveStepState(null, {
+    const invalid = (await saveDesignState(null, {
       reqId: created.requirement.reqId,
       needDesign: "0",
-      currentStep: 5,
       functions: []
     })) as { success: boolean; manifestStatus: string }
     expect(invalid).toMatchObject({ success: true, manifestStatus: "invalid" })
     expect(readFileSync(manifestPath, "utf-8")).toBe("{ invalid")
 
     rmSync(manifestPath)
-    const missing = (await saveStepState(null, {
+    const missing = (await saveDesignState(null, {
       reqId: created.requirement.reqId,
       needDesign: "0",
-      currentStep: 5,
       functions: []
     })) as { success: boolean; manifestStatus: string }
     expect(missing).toMatchObject({ success: true, manifestStatus: "missing" })
@@ -641,7 +634,6 @@ describe("requirement source preview", () => {
         prd: {
           name: "重置设计",
           status: "generated",
-          currentStep: 4,
           needDesign: "1",
           htmlFile: "full.html",
           htmlId: "full-session"
@@ -672,19 +664,32 @@ describe("requirement source preview", () => {
     })) as { success: boolean }
     expect(single.success).toBe(true)
     expect(JSON.parse(readFileSync(manifestPath, "utf-8"))).toMatchObject({
-      prd: { currentStep: 4, needDesign: "1", htmlFile: "full.html", htmlId: "full-session" },
+      prd: { needDesign: "1", htmlFile: "full.html", htmlId: "full-session" },
       functions: [
         { fr: "FR1", htmlFile: "", htmlId: "", needDesign: "" },
         { fr: "FR2", htmlFile: "fr-2.html", htmlId: "session-2", needDesign: "1" }
       ]
     })
 
+    const batch = (await clearDesign(null, {
+      reqId: created.requirement.reqId,
+      functions: [
+        { fr: "FR1", file: "fr-1.md" },
+        { fr: "FR2", file: "fr-2.md" }
+      ]
+    })) as { success: boolean }
+    expect(batch.success).toBe(true)
+    expect(JSON.parse(readFileSync(manifestPath, "utf-8")).functions).toMatchObject([
+      { fr: "FR1", htmlFile: "", htmlId: "", needDesign: "" },
+      { fr: "FR2", htmlFile: "", htmlId: "", needDesign: "" }
+    ])
+
     const all = (await clearDesign(null, { reqId: created.requirement.reqId })) as {
       success: boolean
     }
     expect(all.success).toBe(true)
     expect(JSON.parse(readFileSync(manifestPath, "utf-8"))).toMatchObject({
-      prd: { currentStep: 3, needDesign: "", htmlFile: "", htmlId: "" },
+      prd: { needDesign: "", htmlFile: "", htmlId: "" },
       functions: [
         { htmlFile: "", htmlId: "", needDesign: "" },
         { htmlFile: "", htmlId: "", needDesign: "" }
@@ -718,7 +723,7 @@ describe("requirement source preview", () => {
     writeFileSync(
       manifestPath,
       JSON.stringify({
-        prd: { name: "功能原型绑定", status: "generated", currentStep: 4, needDesign: "1" },
+        prd: { name: "功能原型绑定", status: "generated", needDesign: "1" },
         functions: [
           { fr: "FR1", file: "prd/需求3.0文件/fr-1-doc.md", htmlFile: "", needDesign: "1" },
           { fr: "FR2", file: "prd/其他/fr-1-doc.md", htmlFile: "", needDesign: "1" }
@@ -771,6 +776,23 @@ describe("requirement source preview", () => {
       needDesign: "1"
     })
 
+    const grouped = (await updateFunctionHtml(null, {
+      reqId: created.requirement.reqId,
+      workspacePath,
+      requirementFilePath,
+      requirementFilePaths: [
+        requirementFilePath,
+        join(workspacePath, "prd", "其他", "fr-1-doc.md")
+      ],
+      htmlFile,
+      htmlId: "ds_grouped1234"
+    })) as { success: boolean; error?: string }
+    expect(grouped.success, grouped.error).toBe(true)
+    expect(JSON.parse(readFileSync(manifestPath, "utf-8")).functions).toMatchObject([
+      { htmlFile, htmlId: "ds_grouped1234", needDesign: "1" },
+      { htmlFile, htmlId: "ds_grouped1234", needDesign: "1" }
+    ])
+
     const fullPrdUpdated = (await updateFunctionHtml(null, {
       reqId: created.requirement.reqId,
       workspacePath,
@@ -790,7 +812,7 @@ describe("requirement source preview", () => {
       htmlFile: string
       htmlId: string
     }
-    expect(binding).toMatchObject({ success: true, htmlFile, htmlId: "ds_abcd1234" })
+    expect(binding).toMatchObject({ success: true, htmlFile, htmlId: "ds_grouped1234" })
     const current = (await list(null)) as Array<{
       reqId: string
       prdManifest: { functions: Array<{ htmlId: string }> }
@@ -798,7 +820,7 @@ describe("requirement source preview", () => {
     expect(
       current.find((item) => item.reqId === created.requirement.reqId)?.prdManifest.functions[0]
         .htmlId
-    ).toBe("ds_abcd1234")
+    ).toBe("ds_grouped1234")
     await remove(null, created.requirement.reqId)
   })
 
@@ -882,7 +904,6 @@ describe("requirement source preview", () => {
             title: "旧格式需求",
             source: { type: "text", fileName: "" },
             prdManifest: { prd: { status: "generated" }, functions: [] },
-            crrentStep: 5,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
           },
@@ -903,23 +924,23 @@ describe("requirement source preview", () => {
     const current = (await list!(null)) as Array<{
       reqId: string
       threadIds: string[]
-      prdManifest: { prd: { currentStep: number } }
+      prdManifest: { prd: { status: string } }
     }>
     expect(current.find((item) => item.reqId === legacyReqId)?.threadIds).toEqual(["legacy-thread"])
     expect(current.find((item) => item.reqId === "req-missing-thread-ids")?.threadIds).toEqual([])
-    expect(current.find((item) => item.reqId === legacyReqId)?.prdManifest.prd.currentStep).toBe(3)
+    expect(current.find((item) => item.reqId === legacyReqId)?.prdManifest.prd.status).toBe(
+      "generated"
+    )
 
     const persisted = JSON.parse(readFileSync(indexPath, "utf-8")) as {
       list: Array<{
         reqId: string
         threadIds: string[]
         threadId?: unknown
-        crrentStep?: unknown
       }>
     }
     expect(persisted.list[0]).toMatchObject({ reqId: legacyReqId, threadIds: ["legacy-thread"] })
     expect(persisted.list[0]).not.toHaveProperty("threadId")
-    expect(persisted.list[0]).not.toHaveProperty("crrentStep")
     expect(persisted.list[1].threadIds).toEqual([])
 
     await remove!(null, legacyReqId)

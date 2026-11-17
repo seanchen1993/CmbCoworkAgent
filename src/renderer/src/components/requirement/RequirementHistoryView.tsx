@@ -7,10 +7,7 @@ import { cn } from "@/lib/utils"
 import { RequirementHistoryList } from "./RequirementHistoryList"
 import type { RequirementRecord, RequirementUser } from "./requirement-data"
 import { useRequirementStore } from "./requirement-store"
-import {
-  filterRequirements,
-  type RequirementSourceFilter
-} from "./requirement-history-filter"
+import { filterRequirements, type RequirementSourceFilter } from "./requirement-history-filter"
 import { REQUIREMENT_SPACE_LIST_QUERY_KEY } from "./requirement-navigation"
 
 const sourceFilters: Array<{ value: RequirementSourceFilter; label: string }> = [
@@ -186,15 +183,22 @@ export function RequirementHistoryView({
                 </span>
               </form>
               <div className="ml-auto flex items-center gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  onClick={onNew}
-                  className="h-9 rounded-lg px-3.5 text-xs"
-                >
-                  <Plus className="size-4" />
-                  新建需求
-                </Button>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={onNew}
+                      className="h-9 rounded-lg px-3.5 text-xs"
+                    >
+                      <Plus className="size-4" />
+                      新增需求
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">
+                    新增/导入需求，快速分析、澄清并拆解。
+                  </TooltipContent>
+                </Tooltip>
               </div>
             </header>
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden">

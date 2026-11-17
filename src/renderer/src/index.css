@@ -1207,6 +1207,23 @@
   }
 }
 
+@keyframes requirement-dot-pulse {
+  0%,
+  100% {
+    transform: scale(0.8);
+    opacity: 0.45;
+  }
+  50% {
+    transform: scale(1.35);
+    opacity: 1;
+  }
+}
+
+.requirement-pulsating-dot {
+  animation: requirement-dot-pulse 1s ease-in-out infinite;
+  transform-origin: center;
+}
+
 @keyframes harness-phase-flow {
   from {
     transform: translateX(-140%);
@@ -1264,6 +1281,10 @@
   }
   .market-update-bounce {
     animation: none;
+  }
+  .requirement-pulsating-dot {
+    animation: none;
+    opacity: 0.8;
   }
 }
 

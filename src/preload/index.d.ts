@@ -2546,10 +2546,9 @@ interface CustomAPI {
       requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]
       error?: string
     }>
-    saveStepState: (payload: {
+    saveDesignState: (payload: {
       reqId: string
       needDesign: "" | "0" | "1"
-      currentStep: number
       functions: Array<{
         fr: string
         file: string
@@ -2566,7 +2565,11 @@ interface CustomAPI {
       manifestError?: string
       error?: string
     }>
-    clearDesign: (payload: { reqId: string; function?: { fr: string; file: string } }) => Promise<{
+    clearDesign: (payload: {
+      reqId: string
+      function?: { fr: string; file: string }
+      functions?: Array<{ fr: string; file: string }>
+    }) => Promise<{
       success: boolean
       requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]
       manifest?: Awaited<
@@ -2603,6 +2606,7 @@ interface CustomAPI {
       reqId: string
       workspacePath: string
       requirementFilePath: string
+      requirementFilePaths?: string[]
       htmlFile?: string
       htmlId: string
       fullPrd?: boolean

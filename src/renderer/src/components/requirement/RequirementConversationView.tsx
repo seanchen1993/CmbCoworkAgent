@@ -8,6 +8,7 @@ import {
 } from "@/components/sidebar/RequirementThreadSidebar"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { PulsatingDots } from "@/components/ui/pulsating-loader"
 import { useAppStore } from "@/lib/store"
 import { readRequirementWorkspaceTextFile } from "@/lib/requirement-workspace-text"
 import { useAllThreadStates, useThreadState, useThreadStream } from "@/lib/thread-context"
@@ -28,11 +29,13 @@ import {
   type RequirementRecord
 } from "./requirement-data"
 import {
+  buildGroupedRequirementDesignPrompt,
   buildRequirementDesignPrompt,
   buildFullPrdDesignPrompt,
+  getRequirementDesignFilePaths,
   listAllRequirementDesignEntries,
   listRequirementDesignEntries,
-  isRequirementPrototypeStepComplete,
+  isRequirementPrototypeComplete,
   openRequirementDesign,
   openRequirementDesignBatch,
   removeRequirementDesignAssociations,
@@ -63,12 +66,6 @@ const REQUIREMENT_CONTINUATION_MESSAGE = "基于该需求已有资料和历史�
 type PreviewTab = "expert-process" | "source" | "prd"
 type PrototypeRoute = "design" | "skip" | null
 
-function getPreviewTabForStep(currentStep: number): PreviewTab {
-  if (currentStep >= 3) return "prd"
-  if (currentStep >= 2) return "expert-process"
-  return "source"
-}
-
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -96,24 +93,12 @@ function normalizeRequirementSpaceManifest(value: unknown): RequirementPrdManife
   const prd = asRecord(parsed.prd) ?? {}
   const functions = Array.isArray(parsed.functions) ? parsed.functions : []
   const status = normalizePrdStatus(prd.status)
-  const fallbackStep =
-    status === "published"
-      ? 5
-      : status === "generated"
-        ? 3
-        : status === "init" || status === "draft"
-          ? 2
-          : 1
   return {
     prd: {
       name: asText(prd.name),
       status,
       description: asText(prd.description),
       file: asText(prd.file),
-      currentStep:
-        typeof prd.currentStep === "number" && Number.isFinite(prd.currentStep)
-          ? Math.max(1, Math.min(5, Math.trunc(prd.currentStep)))
-          : fallbackStep,
       needDesign: normalizeNeedDesign(prd.needDesign),
       htmlFile: asText(prd.htmlFile),
       htmlId: asText(prd.htmlId),
@@ -146,9 +131,7 @@ function isRequirementPrdGenerationCompleted(
 ): boolean {
   const status = manifest?.prd.status.trim().toLowerCase()
   return (
-    status === "generated" ||
-    status === "published" ||
-    Boolean(manifest?.prd.prDetailUrl?.trim())
+    status === "generated" || status === "published" || Boolean(manifest?.prd.prDetailUrl?.trim())
   )
 }
 
@@ -226,6 +209,7 @@ function RequirementConversationSession({
   const observedSubagentStatesRef = useRef(new Map<string, string>())
   // ChatContainer treats this stream state as the source of truth for an active turn.
   const streamLoading = useThreadStream(threadId ?? "").isLoading
+  const conversationLoading = streamLoading || threadState?.scheduledTaskLoading === true
   const autoQueuedPrdGenerationThreadIdsRef = useRef(new Set<string>())
   const continuationMessageThreadIdsRef = useRef(new Set<string>())
   const conversationLoadingObservedRef = useRef(false)
@@ -383,7 +367,9 @@ function RequirementConversationSession({
   )
   const manifestBelongsToCurrentThread = manifestThreadId === threadId
   const prdGenerationCompleted =
-    manifestBelongsToCurrentThread && isRequirementPrdGenerationCompleted(requirementSpaceManifest)
+    !conversationLoading &&
+    manifestBelongsToCurrentThread &&
+    isRequirementPrdGenerationCompleted(requirementSpaceManifest)
   const requirementSpacePublished =
     manifestBelongsToCurrentThread && isRequirementSpacePublished(requirementSpaceManifest)
   const prototypeFunctions = useMemo(
@@ -434,23 +420,20 @@ function RequirementConversationSession({
       htmlFile: prd.htmlFile || undefined
     }
   }, [requirement, requirementSpaceManifest?.prd, threadId, threadState?.workspacePath])
-  const prototypeStepCompleted = isRequirementPrototypeStepComplete({
+  const prototypeCompleted = isRequirementPrototypeComplete({
     skipped: prototypeRoute === "skip",
     allFunctionsComplete: allPrototypeFunctionsCompleted,
     fullPrdHtmlFile: fullPrdDesignEntry?.htmlFile,
     published: requirementSpacePublished
   })
-  const conversationLoading = streamLoading || threadState?.scheduledTaskLoading === true
   const persistPrototypeState = useCallback(
     async (
       route: PrototypeRoute,
-      reachedStep: number,
       changedChoice?: { functionKey: string; needDesign: NeedDesignChoice }
     ): Promise<void> => {
-      const result = await window.api.requirements.saveStepState({
+      const result = await window.api.requirements.saveDesignState({
         reqId: requirement.id,
         needDesign: route === null ? "" : route === "design" ? "1" : "0",
-        currentStep: Math.max(requirementSpaceManifest?.prd.currentStep ?? 1, reachedStep),
         functions: prototypeFunctions.flatMap((functionInfo) => {
           if (
             changedChoice &&
@@ -475,7 +458,7 @@ function RequirementConversationSession({
         throw new Error(result.error || "保存原型流程状态失败")
       }
       if (result.manifestStatus === "missing") {
-        toast.warning("未找到 prd/prd-manifest.json，步骤状态仅保存到需求索引")
+        toast.warning("未找到 prd/prd-manifest.json，原型选择仅保存到需求索引")
       } else if (result.manifestStatus === "invalid") {
         toast.warning("prd-manifest.json 格式异常，已保留原文件且仅更新需求索引")
       }
@@ -484,18 +467,12 @@ function RequirementConversationSession({
       }
       onRequirementUpdated(fromPersistedRequirement(result.requirement, requirement.system))
     },
-    [
-      onRequirementUpdated,
-      prototypeFunctions,
-      requirement.id,
-      requirement.system,
-      requirementSpaceManifest?.prd.currentStep
-    ]
+    [onRequirementUpdated, prototypeFunctions, requirement.id, requirement.system]
   )
   const updatePrototypeFunctionDesign = useCallback(
     (functionInfo: { fr: string; file: string }, needDesign: NeedDesignChoice): void => {
       const functionKey = getRequirementPrototypeFunctionKey(functionInfo)
-      void persistPrototypeState("design", 4, {
+      void persistPrototypeState("design", {
         functionKey,
         needDesign
       }).catch((error) => {
@@ -560,36 +537,71 @@ function RequirementConversationSession({
       htmlFile?: string
     }): void => {
       const designEntry = buildPrototypeDesignEntry(functionInfo)
-      const existingEntry = listRequirementDesignEntries(requirement.id).find(
-        (entry) => entry.requirementFilePath === designEntry.requirementFilePath
+      const existingEntry = listRequirementDesignEntries(requirement.id).find((entry) =>
+        getRequirementDesignFilePaths(entry).includes(designEntry.requirementFilePath)
       )
-      openRequirementDesign({
-        ...designEntry,
-        htmlId: designEntry.htmlId || existingEntry?.htmlId || ""
-      })
+      openRequirementDesign(existingEntry ?? designEntry)
     },
     [buildPrototypeDesignEntry, requirement.id]
   )
   const startBatchPrototypeDesign = useCallback(
     async (
       functionInfos: RequirementPrdManifest["functions"],
-      mode: "functions" | "full-prd"
+      mode: "functions" | "grouped" | "full-prd",
+      groupedFunctionGroups: string[][] = []
     ): Promise<void> => {
       const existingEntries = new Map(
-        listRequirementDesignEntries(requirement.id).map((entry) => [
-          entry.requirementFilePath,
-          entry
-        ])
+        listRequirementDesignEntries(requirement.id).flatMap((entry) =>
+          getRequirementDesignFilePaths(entry).map((filePath) => [filePath, entry] as const)
+        )
       )
       let fullPrdEntry: RequirementDesignEntry | undefined
+      let plannedFunctionEntries: RequirementDesignEntry[] = []
+      const groupedKeys = new Set(groupedFunctionGroups.flat())
+      const buildGroupedEntry = (groupKeys: string[]): RequirementDesignEntry => {
+        const keys = new Set(groupKeys)
+        const groupedFunctions = functionInfos.filter((functionInfo) =>
+          keys.has(getRequirementPrototypeFunctionKey(functionInfo))
+        )
+        const entries = groupedFunctions.map(buildPrototypeDesignEntry)
+        const firstEntry = entries[0]
+        if (!firstEntry || entries.length < 2) {
+          throw new Error("请至少选择两个需要合并设计的功能")
+        }
+        const filePaths = entries.map((entry) => entry.requirementFilePath)
+        const existingGroup = entries
+          .map((entry) => existingEntries.get(entry.requirementFilePath))
+          .find(
+            (entry) =>
+              entry?.requirementFiles &&
+              entry.requirementFiles.length === filePaths.length &&
+              filePaths.every((filePath) =>
+                entry.requirementFiles?.some((file) => file.filePath === filePath)
+              )
+          )
+        const functionNames = groupedFunctions.map(
+          (functionInfo) => functionInfo.name || functionInfo.fr
+        )
+        return {
+          ...firstEntry,
+          functionName: functionNames.join(" + "),
+          requirementFiles: entries.map((entry, index) => ({
+            name: functionNames[index],
+            filePath: entry.requirementFilePath
+          })),
+          prompt: buildGroupedRequirementDesignPrompt(functionNames),
+          htmlId: existingGroup?.htmlId || "",
+          htmlFile: existingGroup?.htmlFile
+        }
+      }
+      const groupedEntries = groupedFunctionGroups.map(buildGroupedEntry)
       if (mode === "full-prd") {
         const workspacePath = threadState?.workspacePath ?? requirement.requirementPath
         const workspaceRoot = workspacePath.replace(/[\\/]+$/, "")
         if (!requirementSpaceManifest?.prd.file?.trim()) throw new Error("未找到完整 PRD 文档")
-        const relativePrdFile = normalizeRequirementPrdFilePath(requirementSpaceManifest.prd.file).replace(
-          /^\/+/,
-          ""
-        )
+        const relativePrdFile = normalizeRequirementPrdFilePath(
+          requirementSpaceManifest.prd.file
+        ).replace(/^\/+/, "")
         const separator = workspacePath.includes("\\") ? "\\" : "/"
         const requirementFilePath = `${workspaceRoot}${separator}${relativePrdFile.replace(/\//g, separator)}`
         const existingEntry = existingEntries.get(requirementFilePath)
@@ -613,26 +625,30 @@ function RequirementConversationSession({
           return
         }
       } else if (functionInfos.length > 0) {
-        const continuationEntries = functionInfos.map((functionInfo) => {
-          const designEntry = buildPrototypeDesignEntry(functionInfo)
-          return {
-            ...designEntry,
-            htmlId:
-              designEntry.htmlId ||
-              existingEntries.get(designEntry.requirementFilePath)?.htmlId ||
-              ""
-          }
-        })
-        if (continuationEntries.every((entry) => entry.htmlId)) {
-          openRequirementDesignBatch(continuationEntries)
+        plannedFunctionEntries = [
+          ...(mode === "grouped" ? groupedEntries : []),
+          ...functionInfos
+            .filter(
+              (functionInfo) => !groupedKeys.has(getRequirementPrototypeFunctionKey(functionInfo))
+            )
+            .map((functionInfo) => {
+              const designEntry = buildPrototypeDesignEntry(functionInfo)
+              return existingEntries.get(designEntry.requirementFilePath) ?? designEntry
+            })
+        ].filter(
+          (entry, index, entries) =>
+            !entry.htmlId ||
+            entries.findIndex((candidate) => candidate.htmlId === entry.htmlId) === index
+        )
+        if (plannedFunctionEntries.every((entry) => entry.htmlId)) {
+          openRequirementDesignBatch(plannedFunctionEntries)
           return
         }
       }
       const selectedKeys = new Set(functionInfos.map(getRequirementPrototypeFunctionKey))
-      const result = await window.api.requirements.saveStepState({
+      const result = await window.api.requirements.saveDesignState({
         reqId: requirement.id,
         needDesign: "1",
-        currentStep: Math.max(requirementSpaceManifest?.prd.currentStep ?? 1, 4),
         functions: prototypeFunctions.map((functionInfo) => ({
           fr: functionInfo.fr,
           file: functionInfo.file,
@@ -658,18 +674,7 @@ function RequirementConversationSession({
         return
       }
       if (functionInfos.length > 0) {
-        openRequirementDesignBatch(
-          functionInfos.map((functionInfo) => {
-            const designEntry = buildPrototypeDesignEntry(functionInfo)
-            return {
-              ...designEntry,
-              htmlId:
-                designEntry.htmlId ||
-                existingEntries.get(designEntry.requirementFilePath)?.htmlId ||
-                ""
-            }
-          })
-        )
+        openRequirementDesignBatch(plannedFunctionEntries)
       }
     },
     [
@@ -681,7 +686,6 @@ function RequirementConversationSession({
       requirement.systemId,
       requirement.title,
       requirement.requirementPath,
-      requirementSpaceManifest?.prd.currentStep,
       requirementSpaceManifest?.prd.file,
       requirementSpaceManifest?.prd.htmlFile,
       requirementSpaceManifest?.prd.htmlId,
@@ -716,26 +720,39 @@ function RequirementConversationSession({
   const clearPrototypeFunction = useCallback(
     async (functionInfo: RequirementPrdManifest["functions"][number]): Promise<void> => {
       const designEntry = buildPrototypeDesignEntry(functionInfo)
-      const mappedEntries = listAllRequirementDesignEntries(requirement.id).filter(
-        (entry) => entry.requirementFilePath === designEntry.requirementFilePath
+      const mappedEntries = listAllRequirementDesignEntries(requirement.id).filter((entry) =>
+        getRequirementDesignFilePaths(entry).includes(designEntry.requirementFilePath)
       )
       const sessionIds = new Set([
         functionInfo.htmlId,
         ...mappedEntries.map((entry) => entry.htmlId)
       ])
       sessionIds.delete("")
+      const groupedFilePaths = new Set(mappedEntries.flatMap(getRequirementDesignFilePaths))
+      const functionsToClear =
+        groupedFilePaths.size > 1
+          ? prototypeFunctions.filter((candidate) =>
+              groupedFilePaths.has(buildPrototypeDesignEntry(candidate).requirementFilePath)
+            )
+          : [functionInfo]
       const result = await window.api.requirements.clearDesign({
         reqId: requirement.id,
-        function: { fr: functionInfo.fr, file: functionInfo.file }
+        functions: functionsToClear.map((candidate) => ({ fr: candidate.fr, file: candidate.file }))
       })
-      if (!result.success || !result.requirement || !result.manifest) {
-        throw new Error(result.error || "重置功能设计失败")
+      if (!result || !result.success || !result.requirement || !result.manifest) {
+        throw new Error(result?.error || "重置功能设计失败")
       }
       setRequirementSpaceManifest(normalizeRequirementSpaceManifest(result.manifest))
       onRequirementUpdated(fromPersistedRequirement(result.requirement, requirement.system))
       removeRequirementDesignAssociations(sessionIds)
     },
-    [buildPrototypeDesignEntry, onRequirementUpdated, requirement.id, requirement.system]
+    [
+      buildPrototypeDesignEntry,
+      onRequirementUpdated,
+      prototypeFunctions,
+      requirement.id,
+      requirement.system
+    ]
   )
   const revealRequirementFile = useCallback(
     (filePath: string): void => {
@@ -787,23 +804,25 @@ function RequirementConversationSession({
     if (!manifestBelongsToCurrentThread || !requirementSpaceManifest) return
     if (restoredManifestThreadRef.current === manifestThreadId) return
     restoredManifestThreadRef.current = manifestThreadId
-    const currentStep = requirementSpaceManifest.prd.currentStep
     const route: PrototypeRoute =
-      currentStep >= 4
-        ? requirementSpaceManifest.prd.needDesign === "1"
-          ? "design"
-          : requirementSpaceManifest.prd.needDesign === "0"
-            ? "skip"
-            : null
-        : null
+      requirementSpaceManifest.prd.needDesign === "1"
+        ? "design"
+        : requirementSpaceManifest.prd.needDesign === "0"
+          ? "skip"
+          : null
     setPrototypeRoute(route)
-    const restoredTab = getPreviewTabForStep(currentStep)
-    if (restoredTab !== "prd" || !conversationLoading) setPreviewTab(restoredTab)
+    const restoredTab: PreviewTab = prdGenerationCompleted
+      ? "prd"
+      : subagents.length > 0
+        ? "expert-process"
+        : "source"
+    setPreviewTab(restoredTab)
   }, [
-    conversationLoading,
     manifestBelongsToCurrentThread,
     manifestThreadId,
-    requirementSpaceManifest
+    prdGenerationCompleted,
+    requirementSpaceManifest,
+    subagents.length
   ])
 
   useEffect(() => {
@@ -1050,11 +1069,9 @@ function RequirementConversationSession({
         })
         if (!beginResult.success) throw new Error(beginResult.error || "开始读取需求空间数据失败")
 
-        const result = await readRequirementWorkspaceTextFile(
-          threadId,
-          "/prd/prd-manifest.json",
-          { lanePrefix: "requirement-manifest" }
-        )
+        const result = await readRequirementWorkspaceTextFile(threadId, "/prd/prd-manifest.json", {
+          lanePrefix: "requirement-manifest"
+        })
         if (!result.success && !result.notFound) {
           throw new Error(result.error || "读取 prd-manifest.json 失败")
         }
@@ -1289,8 +1306,8 @@ function RequirementConversationSession({
       // active conversation has been handled. This effect can be cleaned up by
       // ordinary thread-state updates while the manifest read is in flight; if
       // we clear the marker before awaiting, that cancelled read is never
-      // retried and the UI can remain on step 2 even though the manifest has
-      // already advanced to generated/currentStep 3.
+      // retried and the UI can remain stale even though the manifest has
+      // already advanced to generated.
       conversationLoadingObservedRef.current = false
       const refreshesWorkspaceOnTabChange =
         isRequirementPrdGenerationCompleted(manifest) && previewTab !== "prd"
@@ -1359,8 +1376,18 @@ function RequirementConversationSession({
                   <Bot className="size-3.5" />
                 </span>
                 <span className="truncate">{requirement.title}</span>
-                <span className="inline-flex shrink-0 items-center rounded-full border border-status-info/20 bg-status-info/10 px-1.5 py-0.5 text-[10px] font-medium leading-none text-status-info">
-                  需求工作台
+                <span
+                  className="inline-flex shrink-0 items-center gap-1 rounded-full border border-status-info/20 bg-status-info/10 px-1.5 py-0.5 text-[10px] font-medium leading-none text-status-info"
+                  aria-live="polite"
+                >
+                  {conversationLoading ? (
+                    <>
+                      需求规范中
+                      <PulsatingDots />
+                    </>
+                  ) : (
+                    "需求工作台"
+                  )}
                 </span>
               </div>
               {rightPanelCollapsed ? (
@@ -1415,7 +1442,7 @@ function RequirementConversationSession({
             hasStoredToken={hasStoredToken}
             publishRequestQueued={publishRequestQueued}
             prdGenerationCompleted={prdGenerationCompleted}
-            prototypeCompleted={prototypeStepCompleted}
+            prototypeCompleted={prototypeCompleted}
             fullPrdDesignEntry={fullPrdDesignEntry}
             requirementSpacePublished={requirementSpacePublished}
             allPrototypeFunctionsCompleted={allPrototypeFunctionsCompleted}

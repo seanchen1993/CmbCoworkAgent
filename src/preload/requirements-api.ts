@@ -84,10 +84,9 @@ export const requirementsApi = {
       requirement?: RequirementRuntimeItem
       error?: string
     }>,
-  saveStepState: (payload: {
+  saveDesignState: (payload: {
     reqId: string
     needDesign: "" | "0" | "1"
-    currentStep: number
     functions: Array<{
       fr: string
       file: string
@@ -95,7 +94,7 @@ export const requirementsApi = {
       needDesign: "" | "0" | "1"
     }>
   }) =>
-    ipcRenderer.invoke("requirements:save-step-state", payload) as Promise<{
+    ipcRenderer.invoke("requirements:save-design-state", payload) as Promise<{
       success: boolean
       requirement?: RequirementRuntimeItem
       manifestStatus?: "updated" | "missing" | "invalid"
@@ -103,7 +102,11 @@ export const requirementsApi = {
       manifestError?: string
       error?: string
     }>,
-  clearDesign: (payload: { reqId: string; function?: { fr: string; file: string } }) =>
+  clearDesign: (payload: {
+    reqId: string
+    function?: { fr: string; file: string }
+    functions?: Array<{ fr: string; file: string }>
+  }) =>
     ipcRenderer.invoke("requirements:clear-design", payload) as Promise<{
       success: boolean
       requirement?: RequirementRuntimeItem
@@ -142,6 +145,7 @@ export const requirementsApi = {
     reqId: string
     workspacePath: string
     requirementFilePath: string
+    requirementFilePaths?: string[]
     htmlFile?: string
     htmlId: string
     fullPrd?: boolean
