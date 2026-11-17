@@ -37,14 +37,14 @@ export const PROJECT_METRIC_INDICATORS: ProjectMetricIndicator[] = [
     unit: "工作日",
     sample: "approvalDevelopment",
     formula:
-      "按项目计算后求均值：最早关联特性审批日期至 ST 发起时间，没有 ST 才取 UAT 发起时间，不比较两者早晚。"
+      "在项目维度，取关联特性中最早审批完成的日期到开发完成日期。开发完成日期定义：首次 ST 发起日期；没有 ST、但有 UAT 流程时，取首次 UAT 发起日期。"
   },
   {
     key: "avgApprovalCreationDays",
     label: "特性审批完成到立项完成耗时",
     unit: "工作日",
     sample: "approvalCreation",
-    formula: "按项目计算后求均值：最早关联特性审批日期至项目立项时间。一个项目只算一次。"
+    formula: "在项目维度，取关联特性中最早审批完成的日期到立项完成日期。"
   },
   {
     key: "avgBugCount",

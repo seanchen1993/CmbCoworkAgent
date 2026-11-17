@@ -92,7 +92,11 @@ function formatSourceDateTime(value: string | null): string {
   return value ? value.replace("T", " ").replace(/\.\d+$/, "") : "—"
 }
 
-function TimeScopeTip(): React.JSX.Element {
+function TimeScopeTip({
+  dateBasis
+}: {
+  dateBasis: "developmentCompleted" | "created"
+}): React.JSX.Element {
   return (
     <TooltipProvider delayDuration={150}>
       <Tooltip>
@@ -100,15 +104,16 @@ function TimeScopeTip(): React.JSX.Element {
           <button
             type="button"
             className="inline-flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground"
-            aria-label="查看项目指标时间口径"
+            aria-label="查看日期筛选说明"
           >
             <Info className="size-3.5" />
-            口径说明
+            日期筛选
           </button>
         </TooltipTrigger>
         <TooltipContent className="max-w-[420px] text-xs leading-relaxed">
-          开发完成取首次 ST 发起时间，缺失时取 UAT。吞吐率按首次上线日期统计；代码和 Token
-          为所选项目的累计数据。
+          {dateBasis === "created"
+            ? "项目立项日期落在所选周期内。"
+            : "开发完成日期落在所选周期内。开发完成日期定义：首次 ST 发起日期；没有 ST、但有 UAT 流程时，取首次 UAT 发起日期。"}
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
@@ -316,7 +321,10 @@ function SummaryComparison({
     ...PROJECT_METRIC_INDICATORS.slice(0, 4).map(
       (metric): SummaryMetricRow => ({
         label: metric.label,
-        hint: `${metric.formula} ${metric.online ? "按首次上线日期选样本，不叠加立项或开发完成日期条件。" : "按所选项目日期口径选样本。"}`,
+        hint:
+          metric.unit === "工作日"
+            ? metric.formula
+            : `${metric.formula} ${metric.online ? "按首次上线日期选样本，不叠加立项或开发完成日期条件。" : "按所选项目日期口径选样本。"}`,
         read: (group) => group[metric.key],
         sample: metric.sample,
         formatter:
@@ -708,7 +716,7 @@ function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Ele
           label="发起 ST 耗时"
           dates={[
             { label: "ST 发起时间", value: item.firstStStartDate },
-            { label: "立项时间", value: item.createDate }
+            { label: "立项日期", value: item.createDate }
           ]}
         />
       </td>
@@ -718,7 +726,7 @@ function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Ele
           label="发起 UAT 耗时"
           dates={[
             { label: "UAT 发起时间", value: item.firstUatStartDate },
-            { label: "立项时间", value: item.createDate }
+            { label: "立项日期", value: item.createDate }
           ]}
         />
       </td>
@@ -945,7 +953,7 @@ export function ProjectMetricsSection({
       if (!result.success || !result.data) throw new Error(result.error || "获取指标导出数据失败")
       const saved = await window.api.dashboard.exportExcel(
         projectMetricIndicatorSheets(result.data, exportFilters),
-        { fileName: "研发效能看板-项目质量与交付指标" }
+        { fileName: "研发效能看板-研发智能化应用广度与先进性指标" }
       )
       if (!saved.success && !saved.canceled) throw new Error(saved.error || "导出指标失败")
     } catch (error) {
@@ -976,7 +984,7 @@ export function ProjectMetricsSection({
           <h2 className="text-sm font-semibold text-foreground">研发智能化应用广度与先进性</h2>
         </div>
         <div className="flex items-center gap-3">
-          <TimeScopeTip />
+          <TimeScopeTip dateBasis={dateBasis} />
           <Select
             value={dateBasis}
             onValueChange={(value: "developmentCompleted" | "created") => {
@@ -995,13 +1003,13 @@ export function ProjectMetricsSection({
                 value="developmentCompleted"
                 className="cursor-pointer rounded py-1.5 text-xs focus:bg-muted focus:text-foreground"
               >
-                开发完成
+                开发完成日期
               </SelectItem>
               <SelectItem
                 value="created"
                 className="cursor-pointer rounded py-1.5 text-xs focus:bg-muted focus:text-foreground"
               >
-                立项时间
+                立项日期
               </SelectItem>
             </SelectContent>
           </Select>

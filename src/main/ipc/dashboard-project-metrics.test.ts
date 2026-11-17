@@ -453,7 +453,7 @@ describe("特性覆盖、月度占比和导出", () => {
     expect(complete.monthly?.cumulative).toEqual({ pushedLines: 350, rate: 0.35, missing: false })
     const exported = await fetchProjectMetricIndicatorExport(october, deps)
     const cumulativeRow = projectMetricIndicatorSheets(exported, october)[0].rows.find(
-      (r) => r[0] === "AI 代码入库占比－累计 AI 入库代码"
+      (r) => r[0] === "代码入库情况－累计 AI 入库代码占比（硅碳比）"
     )
     expect(cumulativeRow?.slice(3, 5)).toEqual([35, "%"])
     const missing = fixture({ monthly: [{ ...row, devagentCloudPushedLines: null }] })
@@ -549,16 +549,14 @@ describe("特性覆盖、月度占比和导出", () => {
     )
     const rate = sheets[0].rows.find((r) => r[0] === "AI代码入库率")
     expect(rate?.slice(3, 5)).toEqual([50, "%"])
-    expect(sheets[0].rows.filter((r) => String(r[0]).startsWith("AI 代码入库占比－"))).toHaveLength(
-      5
-    )
+    expect(sheets[0].rows.filter((r) => String(r[0]).startsWith("代码入库情况－"))).toHaveLength(5)
     const nonMonthly = await fetchProjectMetricIndicatorExport(
       { range: { from: "2026-10-02", to: "2026-10-31" } },
       deps
     )
     expect(
       projectMetricIndicatorSheets(nonMonthly, october)[0].rows.some((r) =>
-        String(r[0]).startsWith("AI 代码入库占比－")
+        String(r[0]).startsWith("代码入库情况－")
       )
     ).toBe(false)
   })

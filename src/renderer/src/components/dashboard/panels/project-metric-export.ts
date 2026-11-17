@@ -6,7 +6,7 @@ const HEADER = [
   "CMBDevClaw 插件",
   "室",
   "组",
-  "立项时间",
+  "立项日期",
   "ST 发起时间",
   "ST 结束时间",
   "UAT 发起时间",

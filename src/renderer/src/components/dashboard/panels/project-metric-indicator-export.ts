@@ -20,7 +20,7 @@ const SOURCE_NAMES = {
   "devagent-cloud": "devagent-cloud",
   "devagent-cli": "devagent-cli",
   devclaw: "CMBDevClaw",
-  cumulative: "累计 AI 入库代码"
+  cumulative: "累计 AI 入库代码占比（硅碳比）"
 }
 const numeric = (value: number | null | undefined): number | string =>
   value == null || !Number.isFinite(value) ? "—" : value
@@ -30,7 +30,7 @@ function indicatorRows(
   filters: ProjectMetricFilters
 ): (number | string)[][] {
   const dateLabel =
-    filters.dateBasis === "created" ? "项目立项时间" : "开发完成（ST发起优先，无ST取UAT发起）"
+    filters.dateBasis === "created" ? "项目立项日期" : "开发完成日期（ST发起优先，无ST取UAT发起）"
   const smart = summary.groups.find((g) => g.developmentMode === "devclaw")
   const regular = summary.groups.find((g) => g.developmentMode === "non_devclaw")
   const rows: (number | string)[][] = [
@@ -106,13 +106,13 @@ function indicatorRows(
       ...overview.monthly.sources
     ])
       rows.push([
-        `AI 代码入库占比－${SOURCE_NAMES[source.source]}`,
+        `代码入库情况－${SOURCE_NAMES[source.source]}`,
         "—",
         "—",
         numeric(source.rate === null ? null : source.rate * 100),
         "%",
         `自然月 ${overview.monthly.month}`,
-        `${PROJECT_MONTHLY_TIP} 来源 ${numeric(source.pushedLines)} 行；组织总量 ${numeric(overview.monthly.totalPushedLines)} 行。${source.missing ? "数据未完整填报或查询不可用。" : overview.monthly.totalPushedLines === 0 ? "分母为零，比例不可用。" : ""}`
+        `${PROJECT_MONTHLY_TIP} 来源 ${numeric(source.pushedLines)} 行；组织累计入库 ${numeric(overview.monthly.totalPushedLines)} 行。${source.missing ? "数据未完整填报或查询不可用。" : overview.monthly.totalPushedLines === 0 ? "分母为零，比例不可用。" : ""}`
       ])
   return rows
 }
@@ -131,7 +131,7 @@ export function projectMetricIndicatorSheets(
     ["统计结束", formatProjectDate(projectDateMillis(filters.range.to)!)],
     [
       "项目日期口径",
-      filters.dateBasis === "created" ? "立项时间" : "开发完成（ST发起优先，无ST取UAT发起）"
+      filters.dateBasis === "created" ? "立项日期" : "开发完成日期（ST发起优先，无ST取UAT发起）"
     ],
     ["项目阶段", filters.phaseStatuses?.join("、") || "全部"],
     ["功能点区间", `${filters.functionPointMin ?? "不限"}～${filters.functionPointMax ?? "不限"}`],

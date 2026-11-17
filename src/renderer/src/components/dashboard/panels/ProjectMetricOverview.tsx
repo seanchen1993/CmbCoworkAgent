@@ -146,9 +146,9 @@ export function ProjectMetricOverview({
       {data?.monthly ? (
         <div className="rounded-lg border border-border bg-background p-4">
           <div className="flex items-center gap-2 text-xs font-medium">
-            AI 代码入库占比
+            代码入库情况
             <span className="font-normal text-muted-foreground">
-              累计入库代码：{count(data.monthly.totalPushedLines)} 行
+              组织累计入库：{count(data.monthly.totalPushedLines)} 行
             </span>
           </div>
           <div className="mt-3 space-y-3">
@@ -162,7 +162,7 @@ export function ProjectMetricOverview({
               >
                 <span>
                   {source.source === "cumulative"
-                    ? "累计 AI 入库代码"
+                    ? "累计 AI 入库代码占比（硅碳比）"
                     : source.source === "devagent-ide"
                       ? "devagent-ide"
                       : source.source === "devclaw"
