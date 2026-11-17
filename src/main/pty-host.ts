@@ -13,11 +13,23 @@
  * - process.on("disconnect") 必须保留并兜底调 handleDisposeAll，因为 terminal.ts 的 500ms kill
  *   fallback 在 will-quit 之后不保证执行。删掉 disconnect handler 会出孤儿子进程。
  */
-import { spawn as ptySpawn, IPty } from "node-pty"
+import type { IPty } from "node-pty"
+import { createRequire } from "node:module"
 import { platform, homedir } from "os"
 import { existsSync } from "fs"
 import { join, basename } from "path"
 import { execSync } from "child_process"
+
+const appRoot = join(__dirname, "..", "..")
+// node-pty replaces `app.asar` with `app.asar.unpacked` for its macOS helper.
+// Resolve from the archive when this host is forked from app.asar.unpacked,
+// otherwise the resulting helper path contains `.unpacked` twice.
+const requirePty = createRequire(
+  platform() === "darwin" && basename(appRoot) === "app.asar.unpacked"
+    ? join(appRoot, "..", "app.asar", "package.json")
+    : __filename
+)
+const { spawn: ptySpawn } = requirePty("node-pty") as typeof import("node-pty")
 
 const activePtys = new Map<string, IPty>()
 

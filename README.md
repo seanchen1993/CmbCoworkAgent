@@ -138,6 +138,9 @@ npm run build
 npm run dist
 ```
 
+Apple Silicon Mac（ARM64，macOS 13+）使用 `npm run dist:mac` 生成 DMG 和应用 ZIP。
+离线测试使用 `npm run dist:mac:smoke`；CI、签名及验证步骤见 [macOS 打包说明](docs/macos-packaging.md)。
+
 ## 常用脚本
 
 | 命令 | 说明 |
@@ -145,6 +148,9 @@ npm run dist
 | `npm run dev` | 启动开发环境（electron-vite） |
 | `npm run build` | 构建 main/preload/renderer |
 | `npm run dist` | 构建并使用 electron-builder 打包 |
+| `npm run dist:mac` | 构建 ARM64 macOS DMG 和应用 ZIP（ad-hoc 签名） |
+| `npm run dist:mac:smoke` | 构建不加载 `.env*` 的 ARM64 macOS 离线测试包 |
+| `npm run test:mac-package -- /path/to/App.app` | 验证 macOS 包并启动窗口、终端 IPC |
 | `npm run lint` | ESLint 检查 |
 | `npm run typecheck` | TS 类型检查（node + web） |
 | `npm run format` | Prettier 格式化 |

@@ -69,7 +69,9 @@ function optionalMmjModule() {
     resolveId(source: string, importer?: string) {
       const normalizedSource = source.replace(/\\/g, "/")
       const normalizedImporter = (importer || "").replace(/\\/g, "/")
-      const isMmjFromUtils = normalizedSource === "./mmj.js" && normalizedImporter.endsWith("/src/renderer/js/mmjUtils.ts")
+      const isMmjFromUtils =
+        normalizedSource === "./mmj.js" &&
+        normalizedImporter.endsWith("/src/renderer/js/mmjUtils.ts")
       const isDirectMmjPath = normalizedSource.endsWith("/src/renderer/js/mmj.js")
       if ((isMmjFromUtils || isDirectMmjPath) && !existsSync(mmjPath)) {
         return virtualId
@@ -85,8 +87,9 @@ function optionalMmjModule() {
   }
 }
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   main: {
+    envDir: mode === "smoke" ? false : undefined,
     // Bundle all dependencies into the main process
     build: {
       lib: {
@@ -99,7 +102,9 @@ export default defineConfig({
           "function-mod-host": "src/main/mods/v2/host-entry.ts",
           "mods-cli": "src/main/mods/devtools/cli-entry.ts",
           // Test-only exports share the production module instances. Absent in normal builds.
-          ...(process.env.CMB_MODS_E2E === "1" ? { "mods-e2e": "tests/support/mods-e2e-entry.ts" } : {})
+          ...(process.env.CMB_MODS_E2E === "1"
+            ? { "mods-e2e": "tests/support/mods-e2e-entry.ts" }
+            : {})
         },
         formats: ["cjs"]
       },
@@ -109,8 +114,9 @@ export default defineConfig({
       }
     }
   },
-  preload: {},
+  preload: { envDir: mode === "smoke" ? false : undefined },
   renderer: {
+    envDir: mode === "smoke" ? false : undefined,
     cacheDir: resolve("node_modules/.vite/renderer"),
     define: {
       __APP_VERSION__: JSON.stringify(pkg.version)
@@ -136,8 +142,7 @@ export default defineConfig({
           "**/src/renderer/.vite/**"
         ]
       },
-      proxy: {
-      }
+      proxy: {}
     }
   }
-})
+}))

@@ -80,13 +80,18 @@
     "dev": "electron-vite dev",
     "dev:mock-task-cards": "node -e \"const { spawnSync } = require('child_process'); process.env.CMB_TASK_CARDS_MOCK = '1'; const result = spawnSync('electron-vite', ['dev'], { stdio: 'inherit', shell: true, env: process.env }); process.exit(result.status ?? 1)\"",
     "build": "electron-vite build",
+    "build:smoke": "electron-vite build --mode smoke",
     "clean:win-code-exe": "node -e \"require('fs').rmSync('resources/bin/win32/codex.exe', { force: true })\"",
     "predist": "npm run clean:win-code-exe",
     "predist:win": "npm run clean:win-code-exe",
     "predist:mac": "npm run clean:win-code-exe",
     "dist": "npm run build && electron-builder",
     "dist:win": "npm run build && electron-builder --win",
-    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:mac": "npm run build && npm run package:mac",
+    "dist:mac:smoke": "npm run build:smoke && npm run package:mac",
+    "package:mac": "electron-builder --mac --arm64 --publish=never --config.mac.identity=- --config.mac.notarize=false",
+    "test:packaging": "node --test scripts/after-pack.test.mjs",
+    "test:mac-package": "node scripts/smoke-macos-package.mjs",
     "dist:linux": "npm run build && electron-builder --linux --x64 --publish=never",
     "server:cache": "node scripts/server-cache.js",
     "postinstall": "electron-rebuild -f -w node-pty",
@@ -122,7 +127,22 @@
       "node_modules/node-pty/**"
     ],
     "mac": {
-      "target": "dmg"
+      "minimumSystemVersion": "13.0",
+      "artifactName": "${productName}-${version}-macos-${arch}.${ext}",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ]
     },
     "win": {
       "target": "nsis",

@@ -1,12 +1,47 @@
-/* eslint-disable @typescript-eslint/no-require-imports, @typescript-eslint/explicit-function-return-type */
+/* eslint-disable @typescript-eslint/no-require-imports */
 const fs = require("fs")
 const path = require("path")
 
 module.exports = async function (context) {
+  if (context?.electronPlatformName === "darwin") {
+    const { Arch } = require("electron-builder")
+    const arch = Arch[context.arch]
+    const productName = context.packager.appInfo.productFilename
+    const resources = path.join(context.appOutDir, `${productName}.app`, "Contents", "Resources")
+    const ptyRoot = path.join(resources, "app.asar.unpacked", "node_modules", "node-pty")
+    // Match node-pty's native module lookup order. The helper must be next to
+    // the module actually loaded, rather than merely existing elsewhere.
+    const nativeDirectories = [
+      path.join(ptyRoot, "build", "Release"),
+      path.join(ptyRoot, "build", "Debug"),
+      path.join(ptyRoot, "prebuilds", `darwin-${arch}`)
+    ]
+    const selected = nativeDirectories.find((directory) =>
+      fs.existsSync(path.join(directory, "pty.node"))
+    )
+    if (!selected || !fs.existsSync(path.join(selected, "spawn-helper"))) {
+      throw new Error(
+        `after-pack: macOS spawn-helper missing beside active pty.node in ${ptyRoot} (${arch})`
+      )
+    }
+    // The npm prebuild's helper is not executable. Repair before signing;
+    // changing the bundle after signing would invalidate the signature.
+    for (const directory of nativeDirectories) {
+      const helper = path.join(directory, "spawn-helper")
+      if (fs.existsSync(helper)) fs.chmodSync(helper, 0o755)
+    }
+    fs.chmodSync(path.join(resources, "bin", "darwin", "rg"), 0o755)
+    return
+  }
+
   try {
-    const isLinux = process.platform === "linux" || process.env.FORCE_AFTER_PACK_LINUX === "1"
+    const isLinux =
+      (context?.electronPlatformName || process.platform) === "linux" ||
+      process.env.FORCE_AFTER_PACK_LINUX === "1"
     if (!isLinux) {
-      console.log(`after-pack: not running because platform is ${process.platform} (only runs on 'linux')`)
+      console.log(
+        `after-pack: not running because platform is ${process.platform} (only runs on 'linux')`
+      )
       return
     }
 
@@ -16,8 +51,15 @@ module.exports = async function (context) {
       return
     }
 
-    const productName = (context && context.packager && context.packager.appInfo && context.packager.appInfo.productFilename) || "CMBDevClaw"
-    const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, "../package.json"), "utf-8"))
+    const productName =
+      (context &&
+        context.packager &&
+        context.packager.appInfo &&
+        context.packager.appInfo.productFilename) ||
+      "CMBDevClaw"
+    const packageJson = JSON.parse(
+      fs.readFileSync(path.join(__dirname, "../package.json"), "utf-8")
+    )
     const packageName = packageJson.name
     const launcherPath = path.join(appOutDir, productName)
     const packageBinPath = path.join(appOutDir, packageName)
@@ -28,11 +70,13 @@ module.exports = async function (context) {
         try {
           const magic = Buffer.alloc(4)
           const bytesRead = fs.readSync(fd, magic, 0, 4, 0)
-          return bytesRead === 4 &&
+          return (
+            bytesRead === 4 &&
             magic[0] === 0x7f &&
             magic[1] === 0x45 &&
             magic[2] === 0x4c &&
             magic[3] === 0x46
+          )
         } finally {
           fs.closeSync(fd)
         }
@@ -57,7 +101,9 @@ module.exports = async function (context) {
         fs.renameSync(launcherPath, packageBinPath)
         console.log(`after-pack: renamed ${productName} -> ${packageName}`)
       } else {
-        console.log("after-pack: no ELF binary found to rename; leaving existing launcher untouched")
+        console.log(
+          "after-pack: no ELF binary found to rename; leaving existing launcher untouched"
+        )
       }
     }
     if (fs.existsSync(packageBinPath)) {
@@ -80,7 +126,6 @@ exit 1
     fs.writeFileSync(launcherPath, wrapperContent, { mode: 0o755 })
     fs.chmodSync(launcherPath, 0o755)
     console.log(`after-pack: created no-sandbox wrapper as ${productName}`)
-
   } catch (e) {
     console.warn("after-pack: unexpected error", e && e.stack)
   }
