@@ -173,6 +173,13 @@ async function run(
   return events
 }
 
+async function executeRealPatch(options: PatchExecutorOptions) {
+  const actual = await vi.importActual<typeof import("../services/design/patch-executor")>(
+    "../services/design/patch-executor"
+  )
+  return actual.executeDesignPatch(options)
+}
+
 describe("existing page generation", () => {
   it("shows the model's candidate summary before local patch validation", async () => {
     mocks.patch.mockImplementationOnce(async (options: PatchExecutorOptions) => {
@@ -232,6 +239,58 @@ describe("existing page generation", () => {
     expect(events.some((event) => event.patchStatus?.phase === "expanding")).toBe(true)
     expect(turns[0].options.extraSystemPrompt).toBe(DESIGN_ITERATION_SYSTEM_PROMPT)
     expect(events.some((event) => event.type === "done")).toBe(true)
+  })
+
+  it("falls back to full editing for runtime-only annotation targets while retaining the notes", async () => {
+    mocks.patch.mockImplementationOnce(executeRealPatch)
+    const html = baseline.replace(
+      "window.originalBehavior=true",
+      `window.originalBehavior=true;document.querySelector("main").insertAdjacentHTML("beforeend", '<button class="example-question">联动代发是什么？</button>')`
+    )
+    const prompt = "用户通过 Comment 模式标注：[1] 元素 button.example-question（联动代发是什么？；坐标 x:1250,y:700）：示例问改成 popup"
+    onTurn = async (turn) => {
+      expect(turn.message).toContain(prompt)
+      expect(fs.readFileSync(turn.draft, "utf8")).toBe(html)
+      await edit(turn, "导出</button>", "导出报表</button>")
+    }
+    const events = await run({
+      kind: "patch",
+      prompt,
+      patch: {
+        targets: [{ artifactRevision: 0, selector: "button.example-question", tagName: "button", text: "联动代发是什么？", instruction: "示例问改成 popup" }],
+        variationId: null,
+        artifactRevision: 0
+      }
+    }, html)
+    expect(turns).toHaveLength(1)
+    expect(events.some((event) => event.patchStatus?.phase === "expanding")).toBe(true)
+    expect(events.find((event) => event.type === "patch_metrics")?.patchMetrics).toMatchObject({ modelCalls: 0 })
+    expect(events.some((event) => event.type === "error")).toBe(false)
+    expect(events.find((event) => event.type === "done")?.html).toBe(
+      html.replace("导出</button>", "导出报表</button>")
+    )
+  })
+
+  it.each<{
+    name: string
+    patch: NonNullable<DesignRunRequest["patch"]>
+    html?: string
+    message: string
+  }>([
+    { name: "stale requests", patch: { artifactRevision: 1, variationId: null, targets: [] }, message: "设计版本已更新" },
+    { name: "stale annotations", patch: { artifactRevision: 0, variationId: null, targets: [{ artifactRevision: 1, selector: "#export" }] }, message: "标记属于旧版本" },
+    { name: "wrong variations", patch: { artifactRevision: 0, variationId: "a", targets: [{ selector: "#export" }] }, message: "目标" },
+    { name: "ambiguous targets", patch: { artifactRevision: 0, variationId: null, targets: [{ tagName: "button", text: "导出" }] }, html: baseline.replace("</main>", "<button>导出</button></main>"), message: "目标不唯一" },
+    { name: "missing anchors", patch: { artifactRevision: 0, variationId: null, targets: [{}] }, message: "无法定位该标记" }
+  ])("does not fall back to full editing for $name", async ({ patch, html, message }) => {
+    mocks.patch.mockImplementationOnce(executeRealPatch)
+    await expect(run({ kind: "patch", patch }, html)).rejects.toThrow(message)
+    mocks.patch.mockImplementationOnce(executeRealPatch)
+    await expect(run({
+      kind: "patch",
+      patch: { ...patch, targets: [{ tagName: "button", text: "运行时示例问" }, ...patch.targets] }
+    }, html)).rejects.toThrow(message)
+    expect(mocks.runtime).not.toHaveBeenCalled()
   })
 
   it("continues exhausted layout repairs with the original feature request and responsive guidance", async () => {

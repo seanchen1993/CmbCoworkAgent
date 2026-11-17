@@ -60,16 +60,16 @@ export interface PreparedPatchContext {
   variationId: string | null
 }
 export class DesignPatchScopeError extends Error {}
+/** Invalid anchors must be reselected rather than expanded into a full-page edit. */
+export class DesignPatchTargetError extends DesignPatchScopeError {}
 const MAX_CONTEXT = 48_000
 
 function resolveTarget(
   index: DesignDocumentIndex,
   target: DesignPatchTarget,
   variationId: string | null
-): DesignSourceNode {
-  let candidates = [...index.nodes.values()].filter(
-    (n) => !variationId || n.variationId === variationId
-  )
+): DesignSourceNode | null {
+  let candidates = [...index.nodes.values()]
   if (target.nodeId) candidates = candidates.filter((n) => n.id === target.nodeId)
   else if (target.sectionId)
     candidates = candidates.filter(
@@ -83,14 +83,14 @@ function resolveTarget(
       candidates = candidates.filter(
         (n) => nodeText(n) === target.text!.replace(/\s+/g, " ").trim()
       )
-    else throw new DesignPatchScopeError("无法定位该标记，请重新点击目标元素")
+    else throw new DesignPatchTargetError("无法定位该标记，请重新点击目标元素")
   }
+  if (!candidates.length) return null
+  candidates = candidates.filter((n) => !variationId || n.variationId === variationId)
+  if (!candidates.length)
+    throw new DesignPatchTargetError("目标不在当前方案，请重新点击目标元素")
   if (candidates.length !== 1)
-    throw new DesignPatchScopeError(
-      candidates.length
-        ? "目标不唯一，请重新点击需要修改的元素"
-        : "目标已变化或由脚本生成，请重新选择目标"
-    )
+    throw new DesignPatchTargetError("目标不唯一，请重新点击需要修改的元素")
   return candidates[0]
 }
 
@@ -102,20 +102,23 @@ export function preparePatchContext(
   tweaks: DesignTweaksState | null
 ): PreparedPatchContext {
   if (request.artifactRevision !== artifactRevision)
-    throw new DesignPatchScopeError("设计版本已更新，请重新提交修改")
+    throw new DesignPatchTargetError("设计版本已更新，请重新提交修改")
   if (
     request.targets.some(
       (t) => t.artifactRevision !== undefined && t.artifactRevision !== artifactRevision
     )
   )
-    throw new DesignPatchScopeError("标记属于旧版本，请重新点击目标")
+    throw new DesignPatchTargetError("标记属于旧版本，请重新点击目标")
   const scope = [...index.nodes.values()].filter(
     (n) => !request.variationId || n.variationId === request.variationId
   )
-  const requested = request.targets.map((t) => ({
-    node: resolveTarget(index, t, request.variationId),
-    instruction: t.instruction
-  }))
+  // Validate every anchor before allowing unavailable runtime nodes to expand the scope.
+  const requested = request.targets.flatMap((t) => {
+    const node = resolveTarget(index, t, request.variationId)
+    return node ? [{ node, instruction: t.instruction }] : []
+  })
+  if (requested.length !== request.targets.length)
+    throw new DesignPatchScopeError("标记元素无法对应源码，需结合完整页面定位")
   const roots = requested
     .map((r) => r.node)
     .filter(

@@ -35,7 +35,7 @@ import {
   buildDesignDraftResumeArtifactInstruction, DESIGN_DRAFT_RESUME_SYSTEM_PROMPT
 } from "../services/design/draft-resume"
 import { executeDesignPatch, DesignPatchLayoutScopeError, DESIGN_PATCH_TOOLS, normalizeDesignPatchReply, readDesignPatchStream } from "../services/design/patch-executor"
-import { DesignPatchScopeError } from "../services/design/patch-context"
+import { DesignPatchScopeError, DesignPatchTargetError } from "../services/design/patch-context"
 import { decorateDesignNodes } from "../../shared/design-node-ids"
 import { installDesignEditDataRuntime } from "../../shared/design-edit-data"
 import type { DesignPatchMetrics } from "../../shared/design-patch"
@@ -2755,7 +2755,7 @@ export function registerDesignHandlers(): void {
           return
         } catch (error) {
           if (controller.signal.aborted) { emit({ type: "cancelled" }); return }
-          if (!(error instanceof DesignPatchScopeError) || /目标|版本|标记/.test(error.message)) throw error
+          if (!(error instanceof DesignPatchScopeError) || error instanceof DesignPatchTargetError) throw error
           if (error instanceof DesignPatchLayoutScopeError)
             request = { ...request, prompt: `${request.prompt}\n\n布局适配要求：保留本次新增功能及所有内容，仅调整相关模块及必要的父容器布局。在当前预览宽度和 390px 下，空间不足时自动换行、扩大可用宽度并让高度随内容增长；不要隐藏内容或缩放整页。以下为未应用候选的校验信息，请基于当前页面完成原始需求和布局适配：\n${error.layoutIssues.join("\n")}` }
           emit({ type: "patch_status", patchStatus: { phase: "expanding", message: `扩大为完整改稿：${error.message}` } })
