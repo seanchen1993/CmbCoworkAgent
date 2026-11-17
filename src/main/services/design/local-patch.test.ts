@@ -11,7 +11,7 @@ import {
   effectiveTweaks
 } from "../../../shared/design-tweaks"
 import { indexDesignDocument, sourceHash, verifyDesignPatchDependencies } from "./document-index"
-import { preparePatchContext, DesignPatchScopeError } from "./patch-context"
+import { preparePatchContext, DesignPatchScopeError, DesignPatchTargetError } from "./patch-context"
 import { applyDesignPatch } from "./patch-applier"
 import {
   executeDesignPatch,
@@ -292,6 +292,32 @@ describe("local design patches", () => {
     expect(shouldUseDesignPatch("把按钮变红")).toBe(true)
     expect(shouldUseDesignPatch("调整这个布局", true)).toBe(true)
   })
+  it.each([
+    "点击关联技能，会弹窗，弹窗里面去关联",
+    "点击需要弹窗配置",
+    "点击关联技能，会弹窗，你现在还是没有弹窗",
+    "点击「关联技能」后打开配置对话框",
+    "新增弹窗功能",
+    "新增一个弹窗",
+    "新增表单联动交互",
+    "Click Associate to open a dialog",
+    "把提示文案改成点击后弹窗，同时让点击关联技能后弹窗"
+  ])("routes behavior changes to the full executor even with selected targets: %s", (prompt) => {
+    expect(shouldUseDesignPatch(prompt)).toBe(false)
+    expect(shouldUseDesignPatch(prompt, true)).toBe(false)
+  })
+  it.each([
+    "把提示文案改成点击后弹窗",
+    "把提示文案改为“点击关联技能，会弹窗”",
+    "把提示文案改成新增弹窗功能",
+    '把提示文案改为"点击后打开 dialog"',
+    "把弹窗标题改成关联技能",
+    "把弹窗按钮变红",
+    "修改弹窗宽度为600px"
+  ])("keeps popup copy and appearance edits on the local path: %s", (prompt) => {
+    expect(shouldUseDesignPatch(prompt)).toBe(true)
+    expect(shouldUseDesignPatch(prompt, true)).toBe(true)
+  })
   it("compares visual boundaries while allowing natural downstream vertical movement", () => {
     const before = {
       horizontalOverflow: [],
@@ -395,6 +421,29 @@ describe("bounded patch model executor", () => {
     signal: new AbortController().signal,
     status: vi.fn(),
     validate: vi.fn(async () => [] as string[])
+  })
+  it.each([false, true])("expands persisted behavior requests before calling the patch model (targets: %s)", async (hasTargets) => {
+    const base = options()
+    const complete = vi.fn()
+    await expect(executeDesignPatch({
+      ...base,
+      instruction: "点击关联技能，会弹窗，弹窗里面去关联",
+      request: { ...base.request, targets: hasTargets ? base.request.targets : [] },
+      complete
+    })).rejects.toBeInstanceOf(DesignPatchScopeError)
+    expect(complete).not.toHaveBeenCalled()
+    expect(base.validate).not.toHaveBeenCalled()
+  })
+  it("still rejects stale anchors before expanding a behavior request", async () => {
+    const base = options()
+    const complete = vi.fn()
+    await expect(executeDesignPatch({
+      ...base,
+      instruction: "点击关联技能，会弹窗",
+      request: { ...base.request, artifactRevision: 1 },
+      complete
+    })).rejects.toBeInstanceOf(DesignPatchTargetError)
+    expect(complete).not.toHaveBeenCalled()
   })
   it("submits only local context, repairs bounded failures, and reports token usage", async () => {
     const seen: string[] = []

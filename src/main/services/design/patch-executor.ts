@@ -3,6 +3,7 @@ import type {
   DesignPatchRequest,
   DesignPatchStatus
 } from "../../../shared/design-patch"
+import { shouldUseDesignPatch } from "../../../shared/design-patch"
 import type { DesignTweaksState } from "../../../shared/design-tweaks"
 import { indexDesignDocument } from "./document-index"
 import { applyDesignPatch, type AppliedDesignCandidate } from "./patch-applier"
@@ -220,6 +221,7 @@ export async function executeDesignPatch(
   const abort = () => {
     if (options.signal.aborted) throw new Error("局部修改已取消")
   }
+  abort()
   options.status({ phase: "locating", message: "正在定位目标并提取样式依赖" })
   const index = indexDesignDocument(options.html, options.artifactPath, options.workspacePath)
   let prepared = preparePatchContext(
@@ -229,6 +231,8 @@ export async function executeDesignPatch(
     options.artifactRevision,
     options.tweaks
   )
+  if (!shouldUseDesignPatch(options.instruction, !!options.request.targets.length))
+    throw new DesignPatchScopeError("该修改需要完整设计执行，以更新交互或全局设计")
   let feedback = ""
   let repairingOverflow = false
   try {

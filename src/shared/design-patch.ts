@@ -121,10 +121,21 @@ export function parseDesignPatch(value: unknown): DesignPatchProposal {
   return value as unknown as DesignPatchProposal
 }
 
-/** Broad changes retain the full design executor. Targeted requests enter the bounded executor. */
+/** Behavior changes need the full executor even when their DOM targets are already known. */
 export function shouldUseDesignPatch(prompt: string, hasTargets = false): boolean {
+  // Replacement copy may describe an interaction without requesting that behavior.
+  const instruction = prompt.replace(
+    /(?:文案|文字|文本|提示语|标题|标签|title|aria-label)\s*(?:改成|改为|修改为|替换为|调整为|设置为|为)\s*(?:“[^”]*”|‘[^’]*’|「[^」]*」|『[^』]*』|"[^"\n]*"|'[^'\n]*'|[^，,。；;\n]+)/gi,
+    ""
+  )
+  if (
+    /new interaction|(?:新增|添加).{0,8}(?:交互|功能)/i.test(instruction) ||
+    /(?:点击|单击|双击|点按|click)[^。！？!?\n]{0,80}(?:弹窗|弹出|对话框|模态框|\b(?:popup|modal|dialog)\b)/i.test(instruction) ||
+    /(?:新增|添加|实现|补上|补齐|支持|需要)[^，,。；;\n]{0,24}(?:弹窗|对话框|模态框|\b(?:popup|modal|dialog)\b)/i.test(instruction)
+  )
+    return false
   if (hasTargets) return true
-  return !/(全[页站局部]|整体|整[页体站]|重新设计|重做|换.{0,4}(风格|主题)|global|redesign|new interaction|新增.{0,8}(交互|功能)|添加.{0,8}(交互|功能))/i.test(
-    prompt
+  return !/(全[页站局部]|整体|整[页体站]|重新设计|重做|换.{0,4}(风格|主题)|global|redesign)/i.test(
+    instruction
   )
 }
