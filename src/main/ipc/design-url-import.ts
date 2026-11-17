@@ -2,7 +2,7 @@ import { ipcMain, type WebContents } from "electron"
 import { randomUUID } from "node:crypto"
 import { getGlobalBrowserService } from "../browser/core/browser-service-registry"
 import { DesignUrlImportService } from "../services/design/url-import-service"
-import { controlDesignInteractionRecording } from "../services/design/interaction-recording"
+import { controlDesignFrameInteractionRecording } from "../services/design/interaction-recording"
 import {
   DESIGN_IMPORT_PROGRESS_CHANNEL,
   type DesignImportRequest
@@ -15,10 +15,8 @@ export function registerDesignUrlImportHandlers(getWorkspace: () => string): voi
   const clearRecording = (owner: number) => {
     if (recordingOwner !== owner) return
     recordingOwner = undefined
-    void getGlobalBrowserService()
-      ?.getWebContents()
-      ?.executeJavaScript(`(${controlDesignInteractionRecording.toString()})("clear")`)
-      .catch(() => {})
+    const contents = getGlobalBrowserService()?.getWebContents()
+    if (contents) void controlDesignFrameInteractionRecording(contents, "clear").catch(() => {})
   }
   const watch = (sender: WebContents) => {
     if (owners.has(sender.id)) return
@@ -72,8 +70,9 @@ export function registerDesignUrlImportHandlers(getWorkspace: () => string): voi
     }
     if (action === "start") recordingOwner = event.sender.id
     if (action === "clear") recordingOwner = undefined
-    return contents.executeJavaScript(
-      `(${controlDesignInteractionRecording.toString()})(${JSON.stringify(action)})`
+    return controlDesignFrameInteractionRecording(
+      contents,
+      action as "start" | "stop" | "clear" | "status"
     )
   })
   ipcMain.handle("design:finish-url-import", (event, requestId: string, keep: boolean) =>

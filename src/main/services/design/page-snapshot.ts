@@ -82,6 +82,9 @@ export async function extractDesignPageSnapshot(options?: { bridgeKey: string; a
         sheet.href || document.baseURI
       )
       const style = document.createElement("style")
+      for (const attr of [...target.attributes])
+        if (target.tagName === "STYLE" || attr.name === "data-design-recorded-node")
+          style.setAttribute(attr.name, attr.value)
       style.textContent = css.replace(/<\/style/gi, "\\3c /style")
       if (sheet.media.mediaText) style.media = sheet.media.mediaText
       if (sheet.disabled) style.media = "not all"
@@ -218,6 +221,8 @@ export async function extractDesignPageSnapshot(options?: { bridgeKey: string; a
     const template = document.createElement("template")
     template.setAttribute("data-design-interaction", "click")
     template.setAttribute("data-trigger", step.trigger)
+    for (const field of ["event", "key", "value", "beforeValue"] as const)
+      if (step[field] !== undefined) template.setAttribute(`data-${field.toLowerCase()}`, step[field]!)
     for (const state of ["before", "after"] as const) {
       const value = document.createElement("template")
       value.setAttribute("data-state", state)
@@ -228,7 +233,7 @@ export async function extractDesignPageSnapshot(options?: { bridgeKey: string; a
   }
   const recordingStatus = recording?.status()
   if (recordingStatus?.message) warn("interaction_recording", recordingStatus.message)
-  if (recordingStatus?.count) warn("recorded_interactions", `已保留 ${recordingStatus.count} 次点击变化，可在预览中操作。`)
+  if (recordingStatus?.count) warn("recorded_interactions", `已保留 ${recordingStatus.count} 次操作变化，可在预览中操作。`)
 
   // Include template content in sanitization, even though it is currently inert.
   const clean = (root: ParentNode) => {
@@ -287,8 +292,9 @@ export async function extractDesignPageSnapshot(options?: { bridgeKey: string; a
   encoding.setAttribute("charset", "utf-8")
   head.prepend(encoding)
   const freeze = document.createElement("style")
+  // Finish entrance animations; pausing at their first frame hides recorded layers.
   freeze.textContent =
-    "*,*::before,*::after{animation-play-state:paused!important;transition:none!important;caret-color:transparent!important}"
+    "*,*::before,*::after{animation-duration:0s!important;animation-delay:0s!important;animation-iteration-count:1!important;animation-play-state:running!important;transition:none!important;caret-color:transparent!important}"
   head.append(freeze)
   return {
     html: "<!DOCTYPE html>\n" + clone.outerHTML,

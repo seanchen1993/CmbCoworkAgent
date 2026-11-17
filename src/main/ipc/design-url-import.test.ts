@@ -4,7 +4,11 @@ const mocks = vi.hoisted(() => ({
   handlers: new Map<string, (...args: unknown[]) => unknown>(),
   prepareForEditing: vi.fn(),
   cancelOwner: vi.fn(),
-  contents: { getURL: vi.fn(), executeJavaScript: vi.fn() },
+  contents: {
+    getURL: vi.fn(),
+    executeJavaScript: vi.fn(),
+    mainFrame: { framesInSubtree: [] as unknown[] }
+  },
   browser: {
     prepareTarget: vi.fn(),
     requestPanel: vi.fn(),
@@ -38,6 +42,7 @@ describe("design browser opening", () => {
     mocks.browser.getWebContents.mockReturnValue(mocks.contents)
     mocks.contents.getURL.mockReturnValue("https://example.com/page")
     mocks.contents.executeJavaScript.mockResolvedValue({ recording: true, count: 0 })
+    mocks.contents.mainFrame.framesInSubtree = []
   })
 
   it("starts recording in the current browser and clears it when the owning renderer closes", async () => {
@@ -58,6 +63,34 @@ describe("design browser opening", () => {
     await control({ sender: sender(18) }, "start")
     expect(await control({ sender: sender(17) }, "clear")).toEqual({ recording: false, count: 0 })
     expect(mocks.contents.executeJavaScript).toHaveBeenCalledTimes(2)
+  })
+
+  it("records child frames, combines their status and clears them with the owner", async () => {
+    const executeJavaScript = vi.fn().mockResolvedValue({ recording: true, count: 2 })
+    mocks.contents.mainFrame.framesInSubtree = [{ parent: { parent: null }, executeJavaScript }]
+    mocks.contents.executeJavaScript.mockResolvedValue({ recording: true, count: 1 })
+    const sender = { id: 17, once: vi.fn(), on: vi.fn() }
+    const control = mocks.handlers.get("design:control-import-interactions")!
+    expect(await control({ sender }, "start")).toMatchObject({ recording: true, count: 3 })
+    expect(executeJavaScript.mock.calls[0][0]).toContain(')("start")')
+    await control({ sender }, "stop")
+    expect(executeJavaScript.mock.calls.at(-1)![0]).toContain(')("stop")')
+    const destroyed = sender.once.mock.calls.find(([event]) => event === "destroyed")![1]
+    destroyed()
+    expect(executeJavaScript.mock.calls.at(-1)![0]).toContain(')("clear")')
+  })
+
+  it("reports an unavailable child without discarding the main recording", async () => {
+    mocks.contents.mainFrame.framesInSubtree = [
+      {
+        parent: { parent: null },
+        executeJavaScript: vi.fn().mockRejectedValue(new Error("detached"))
+      }
+    ]
+    const sender = { id: 17, once: vi.fn(), on: vi.fn() }
+    expect(
+      await mocks.handlers.get("design:control-import-interactions")!({ sender }, "start")
+    ).toMatchObject({ recording: true, count: 0, message: expect.stringContaining("嵌入页面") })
   })
 
   it("requires an HTTP page to start recording", async () => {

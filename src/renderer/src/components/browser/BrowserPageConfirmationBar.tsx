@@ -69,8 +69,8 @@ export function BrowserPageConfirmationBar({ loading, url }: { loading: boolean;
       )}
       {(recording.recording || recording.count > 0 || recording.message) && (
         <p role="status" className="mt-2 text-muted-foreground">
-          {recording.recording ? "录制中：依次点击需要保留的控件，每次等待变化完成后再继续。" : ""}
-          {`已记录 ${recording.count} 次点击变化。`}
+          {recording.recording ? "录制中：依次操作需要保留的控件，每次等待变化完成后再继续。" : ""}
+          {`已记录 ${recording.count} 次操作变化。`}
           {recording.message}
         </p>
       )}

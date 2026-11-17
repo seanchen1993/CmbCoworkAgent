@@ -41,6 +41,10 @@ export function installDesignClickPlayback(): void {
   ]
     .map((template) => ({
       trigger: template.getAttribute("data-trigger"),
+      event: template.getAttribute("data-event") ?? "click",
+      key: template.getAttribute("data-key"),
+      value: template.getAttribute("data-value"),
+      beforeValue: template.getAttribute("data-beforevalue"),
       before: template.content.querySelector<HTMLTemplateElement>('template[data-state="before"]')
         ?.content.firstElementChild,
       after: template.content.querySelector<HTMLTemplateElement>('template[data-state="after"]')
@@ -91,7 +95,13 @@ export function installDesignClickPlayback(): void {
   }
 
   // Compare/apply only differences between recorded states, preserving editor nodes and edits elsewhere.
-  const patch = (before: Element, after: Element, live: Element, apply: boolean): boolean => {
+  const patch = (
+    before: Element,
+    after: Element,
+    live: Element,
+    apply: boolean,
+    form = false
+  ): boolean => {
     if (before.isEqualNode(after)) return true
     for (const name of new Set(
       [...before.attributes, ...after.attributes].map((item) => item.name)
@@ -99,10 +109,18 @@ export function installDesignClickPlayback(): void {
       const oldValue = before.getAttribute(name),
         value = after.getAttribute(name)
       if (oldValue === value || name === attr) continue
-      if (!apply && live.getAttribute(name) !== oldValue) return false
+      if (
+        !apply &&
+        live.getAttribute(name) !== oldValue &&
+        !(form && ["value", "checked", "selected"].includes(name) && live.matches("input,option"))
+      )
+        return false
       if (apply) {
         if (value === null) live.removeAttribute(name)
         else live.setAttribute(name, value)
+        if (live instanceof HTMLInputElement && name === "value") live.value = value ?? ""
+        if (live instanceof HTMLInputElement && name === "checked") live.checked = value !== null
+        if (live instanceof HTMLOptionElement && name === "selected") live.selected = value !== null
       }
     }
     const oldChildren = [...before.children],
@@ -120,7 +138,7 @@ export function installDesignClickPlayback(): void {
       const node = find(key(child))
       if (old) {
         if (old.isEqualNode(child)) continue
-        if (!node || !patch(old, child, node, apply)) return false
+        if (!node || !patch(old, child, node, apply, form)) return false
       } else {
         if (!apply && node) return false
         if (apply) {
@@ -172,26 +190,73 @@ export function installDesignClickPlayback(): void {
               following instanceof Element ? find(key(following)) : null
             )
           }
+        if (live instanceof HTMLTextAreaElement) live.value = after.textContent ?? ""
       }
     }
     return true
   }
-  document.addEventListener("click", (event) => {
+  const valueOf = (node: Element): string => {
+    if (node instanceof HTMLSelectElement)
+      return JSON.stringify([...node.selectedOptions].map((option) => option.value))
+    if (node instanceof HTMLInputElement)
+      return JSON.stringify(["checkbox", "radio"].includes(node.type) ? node.checked : node.value)
+    if (node instanceof HTMLTextAreaElement) return JSON.stringify(node.value)
+    return JSON.stringify(node.textContent)
+  }
+  const replay = (event: Event) => {
     if (document.querySelector("[data-design-editor-mode]")) return
     const path = event.composedPath().filter((node): node is Element => node instanceof Element)
-    if (path[0]?.closest("input,select,textarea")) return
+    const control = path[0]?.closest("input,select,textarea,[contenteditable]")
+    if (
+      control instanceof HTMLInputElement &&
+      ["password", "hidden", "file"].includes(control.type)
+    )
+      return
+    const form = ["input", "change"].includes(event.type)
+    const value = form && control ? valueOf(control) : null
+    const eventKey =
+      event instanceof KeyboardEvent
+        ? JSON.stringify([event.key, event.ctrlKey, event.metaKey, event.altKey, event.shiftKey])
+        : null
     for (const target of path) {
-      if (target.matches('[role="tab"]') && selectTab(target)) {
+      if (
+        event instanceof MouseEvent &&
+        ["pointerover", "pointerout"].includes(event.type) &&
+        event.relatedTarget instanceof Node &&
+        target.contains(event.relatedTarget)
+      )
+        continue
+      if (event.type === "click" && target.matches('[role="tab"]') && selectTab(target)) {
         event.preventDefault()
         break
       }
-      const step = steps.find(
-        (item) =>
-          item.trigger === key(target) && patch(item.before!, item.after!, document.body, false)
-      )
+      let reverse = false
+      const step = steps.find((item) => {
+        if (
+          item.trigger !== key(target) ||
+          item.event !== event.type ||
+          (event.type === "keydown" && item.key !== eventKey)
+        )
+          return false
+        reverse = form && value === item.beforeValue && value !== item.value
+        if (form && value !== item.value && !reverse) return false
+        return patch(
+          reverse ? item.after! : item.before!,
+          reverse ? item.before! : item.after!,
+          document.body,
+          false,
+          form
+        )
+      })
       if (!step) continue
-      event.preventDefault()
-      patch(step.before!, step.after!, document.body, true)
+      if (!(event instanceof KeyboardEvent && event.key === "Tab")) event.preventDefault()
+      patch(
+        reverse ? step.after! : step.before!,
+        reverse ? step.before! : step.after!,
+        document.body,
+        true,
+        form
+      )
       document
         .querySelectorAll<HTMLDialogElement>("dialog[data-design-capture-modal]")
         .forEach((dialog) => {
@@ -210,10 +275,21 @@ export function installDesignClickPlayback(): void {
       })
       break
     }
-  })
+  }
+  for (const event of [
+    "click",
+    "dblclick",
+    "contextmenu",
+    "keydown",
+    "input",
+    "change",
+    "pointerover",
+    "pointerout"
+  ])
+    document.addEventListener(event, replay)
 }
 
-const runtimeVersion = "/* design-interaction-runtime-v2 */"
+const runtimeVersion = "/* design-interaction-runtime-v4 */"
 
 export function installDesignSnapshotRuntime(html: string): string {
   const playback = html.includes('data-design-interaction="click"')

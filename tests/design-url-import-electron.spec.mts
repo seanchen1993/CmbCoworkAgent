@@ -25,7 +25,16 @@ const listen = async (server: Server) => {
 }
 const assets = createServer(async (request, response) => {
   const url = request.url || ""
-  if (url === "/frame-cross") {
+  if (url === "/interactive") {
+    response.setHeader("content-type", "text/html; charset=utf-8")
+    response.end(`<html><body><input id="frame-combo" type="text" value="Dropdown"><div id="frame-menu" hidden>Frame options</div>
+      <button id="frame-open">Open modal</button><dialog id="frame-modal">Frame modal<button id="frame-close">Close</button></dialog>
+      <script>
+        document.getElementById('frame-combo').onmousedown=()=>{document.getElementById('frame-menu').hidden=!document.getElementById('frame-menu').hidden};
+        document.getElementById('frame-open').onclick=()=>document.getElementById('frame-modal').showModal();
+        document.getElementById('frame-close').onclick=()=>document.getElementById('frame-modal').close();
+      </script></body></html>`)
+  } else if (url === "/frame-cross") {
     response.setHeader("content-type", "text/html; charset=utf-8")
     response.end(`<html><body><h2>CROSS_FRAME</h2><img src="/pixel.svg"><img id="frame-blob"><script>document.getElementById('frame-blob').src=URL.createObjectURL(new Blob(['<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>'],{type:'image/svg+xml'}));</script></body></html>`)
   } else if (url === "/styles/main.css") {
@@ -58,7 +67,7 @@ const website = createServer((request, response) => {
   const pathname = new URL(request.url || "/", "http://site.test").pathname
   response.setHeader("content-type", "text/html; charset=utf-8")
   if (pathname === "/interactive") {
-    response.end(`<html><body><button id="toggle" aria-expanded="false">Dropdown</button><div id="menu" hidden>Options</div><script>
+    response.end(`<html><body><button id="toggle" aria-expanded="false">Dropdown</button><div id="menu" hidden>Options</div><iframe id="interactive-frame" src="${assetsOrigin}/interactive"></iframe><script>
       document.getElementById('toggle').onclick=()=>{const menu=document.getElementById('menu');menu.hidden=!menu.hidden;document.getElementById('toggle').setAttribute('aria-expanded',String(!menu.hidden))};
       </script></body></html>`)
     return
@@ -136,7 +145,7 @@ try {
       contents: `
     import { app, BrowserWindow, session } from 'electron';
     import { DesignUrlImportService, validateCapturedArtifact } from './src/main/services/design/url-import-service';
-    import { controlDesignInteractionRecording } from './src/main/services/design/interaction-recording';
+    import { controlDesignFrameInteractionRecording } from './src/main/services/design/interaction-recording';
     import { getBuiltinBrowserSession } from './src/main/browser/core/browser-profile-session';
     import { setGlobalBrowserService } from './src/main/browser/core/browser-service-registry';
     app.setPath('userData', process.env.DESIGN_URL_TEST_PROFILE);
@@ -144,7 +153,7 @@ try {
       const current = new BrowserWindow({show:false,webPreferences:{session:getBuiltinBrowserSession(),backgroundThrottling:false,contextIsolation:true,nodeIntegration:false,sandbox:true}});
       current.loadURL('about:blank');
       setGlobalBrowserService({getWebContents:()=>current.webContents});
-      globalThis.captureTest={service:new DesignUrlImportService(),validate:validateCapturedArtifact,record:controlDesignInteractionRecording,current,profile:getBuiltinBrowserSession(),defaultSession:session.defaultSession,progress:[]};
+      globalThis.captureTest={service:new DesignUrlImportService(),validate:validateCapturedArtifact,record:controlDesignFrameInteractionRecording,current,profile:getBuiltinBrowserSession(),defaultSession:session.defaultSession,progress:[]};
     });
   `
     },
@@ -291,13 +300,22 @@ try {
   await application.evaluate(async (_electron, url) => {
     const test = (globalThis as any).captureTest
     await test.current.loadURL(url)
-    await test.current.webContents.executeJavaScript(`(${test.record.toString()})("start")`)
+    await test.record(test.current.webContents, "start")
   }, origin + "/interactive")
   const interactivePage = await application.firstWindow()
   await interactivePage.click("#toggle")
   await interactivePage.waitForTimeout(400)
+  for (const selector of ["#frame-combo", "#frame-combo", "#frame-open", "#frame-close"]) {
+    await interactivePage.frameLocator("#interactive-frame").locator(selector).click()
+    await interactivePage.waitForTimeout(400)
+  }
   await interactivePage.click("#toggle")
   await interactivePage.waitForTimeout(400)
+  const recordingStatus = await application.evaluate(async () => {
+    const test = (globalThis as any).captureTest
+    return test.record(test.current.webContents, "status")
+  })
+  assert.equal(recordingStatus.count, 6)
   const interactive = await run("recorded-clicks", { source: "current-browser" })
   assert.equal(interactive.success, true, JSON.stringify(interactive))
   assert.ok(interactive.warnings.some(warning => warning.code === "recorded_interactions"))
@@ -308,11 +326,18 @@ try {
       return await preview.webContents.executeJavaScript(`(() => {
         const button=document.getElementById('toggle'),menu=document.getElementById('menu');
         button.click(); const opened=!menu.hidden; button.click();
-        return {opened,closed:menu.hidden,sourceHandlers:button.hasAttribute('onclick')};
+        const frame=document.getElementById('interactive-frame').contentDocument;
+        const combo=frame.getElementById('frame-combo'),frameMenu=frame.getElementById('frame-menu');
+        combo.click(); const frameOpened=!frameMenu.hidden; combo.click();
+        frame.getElementById('frame-open').click(); const modal=frame.getElementById('frame-modal').matches(':modal');
+        frame.getElementById('frame-close').click();
+        return {opened,closed:menu.hidden,sourceHandlers:button.hasAttribute('onclick'),
+          frameOpened,frameClosed:frameMenu.hidden,modal,modalClosed:!frame.getElementById('frame-modal').open};
       })()`)
     } finally { preview.destroy() }
   }, interactive.artifactPath!)
-  assert.deepEqual(replayed, { opened: true, closed: true, sourceHandlers: false })
+  assert.deepEqual(replayed, { opened: true, closed: true, sourceHandlers: false,
+    frameOpened: true, frameClosed: true, modal: true, modalClosed: true })
   await finish("recorded-clicks", false)
   console.log("PASS current-browser interaction recording survives capture, asset localization, validation and offline replay")
 
