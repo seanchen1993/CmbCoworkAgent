@@ -20,6 +20,13 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from "@/components/ui/select"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import {
   DropdownMenu,
@@ -50,7 +57,7 @@ import {
 import { RequirementSpaceStatusTag } from "./RequirementSpaceStatusTag"
 import { systemTagToneClass } from "@/lib/requirement-system-tag-tone"
 
-const PAGE_SIZE = 15
+const PAGE_SIZE_OPTIONS = [15, 30, 50, 100, 200] as const
 export type { RequirementSourceFilter } from "./requirement-history-filter"
 
 function initials(value: string): string {
@@ -181,6 +188,9 @@ export function RequirementHistoryList({
   serverTotal,
   serverPage,
   onServerPageChange,
+  pageSize,
+  onPageSizeChange,
+  activeRequirementId,
   mineOnly,
   systemId,
   onCreate,
@@ -195,6 +205,9 @@ export function RequirementHistoryList({
   serverTotal?: number
   serverPage?: number
   onServerPageChange?: (page: number) => void
+  pageSize: number
+  onPageSizeChange: (size: number) => void
+  activeRequirementId?: string | null
   mineOnly: boolean
   systemId: string | null
   onCreate: () => void
@@ -231,14 +244,13 @@ export function RequirementHistoryList({
   const totalPages = Math.max(
     1,
     Math.ceil(
-      (usesServerPagination ? (serverTotal ?? visibleItems.length) : visibleItems.length) /
-        PAGE_SIZE
+      (usesServerPagination ? (serverTotal ?? visibleItems.length) : visibleItems.length) / pageSize
     )
   )
   const currentPage = usesServerPagination ? serverPage + 1 : Math.min(page, totalPages)
   const pageItems = usesServerPagination
     ? visibleItems
-    : visibleItems.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE)
+    : visibleItems.slice((currentPage - 1) * pageSize, currentPage * pageSize)
   const localListIsEmpty =
     sourceFilter === "local" &&
     !query.trim() &&
@@ -258,6 +270,12 @@ export function RequirementHistoryList({
     } finally {
       setIsDeleting(false)
     }
+  }
+  const changePageSize = (value: string): void => {
+    const size = Number(value)
+    if (!Number.isFinite(size) || size === pageSize) return
+    setPageState({ filterKey, page: 1 })
+    onPageSizeChange(size)
   }
 
   return (
@@ -291,7 +309,8 @@ export function RequirementHistoryList({
                     role="button"
                     tabIndex={0}
                     className={cn(
-                      "group relative flex min-h-[152px] cursor-pointer flex-col rounded-xl border border-border bg-background-elevated px-5 py-3 ring-primary/20 transition-[border-color,box-shadow] duration-200 hover:border-primary/70 hover:ring-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      "group relative flex min-h-[152px] cursor-pointer flex-col rounded-xl border border-border bg-background-elevated px-5 py-3 ring-primary/20 transition-[border-color,box-shadow] duration-200 hover:border-primary/70 hover:ring-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                      item.id === activeRequirementId && "border-primary/70 ring-1"
                     )}
                     onClick={(event) => {
                       if ((event.target as HTMLElement).closest("button, a, input")) return
@@ -548,9 +567,21 @@ export function RequirementHistoryList({
           >
             <ChevronRight className="size-4" />
           </button>
-          <span className="ml-1 rounded-lg border border-border bg-background-elevated px-3 py-2">
-            15 条/页
-          </span>
+          <Select value={String(pageSize)} onValueChange={changePageSize}>
+            <SelectTrigger
+              className="ml-1 h-8 w-[104px] rounded-lg text-xs"
+              aria-label="每页条数"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {PAGE_SIZE_OPTIONS.map((size) => (
+                <SelectItem key={size} value={String(size)}>
+                  {size} 条/页
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
       </section>
 

@@ -206,7 +206,7 @@ export const leanstarRequirementsApi = {
 
   listDeliveryRequirements(
     implementGroupDevopsOrgId: string,
-    page = 0,
+    page = 1,
     size = 15
   ): Promise<PageResponse<ProductRequirement>> {
     return request<DeliveryRequirementsResponse>("/api/delivery/requirements", {
@@ -226,7 +226,7 @@ export const leanstarRequirementsApi = {
       return {
         ...resultPage,
         content:
-          REQUIREMENT_SPACE_MOCK_ENABLED && page === 0
+          REQUIREMENT_SPACE_MOCK_ENABLED && page === 1
             ? [REQUIREMENT_SPACE_MOCK, ...(resultPage.content ?? [])]
             : resultPage.content,
         total: total + (REQUIREMENT_SPACE_MOCK_ENABLED ? 1 : 0)

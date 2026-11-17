@@ -30,6 +30,9 @@ export function RequirementHistoryView({
   requirementSpaceLoading,
   requirementSpaceTotal,
   requirementSpacePage,
+  activeRequirementId,
+  pageSize,
+  onPageSizeChange,
   onRequirementSpacePageChange,
   onSourceFilterChange,
   onNew,
@@ -42,6 +45,9 @@ export function RequirementHistoryView({
   requirementSpaceLoading: boolean
   requirementSpaceTotal: number
   requirementSpacePage: number
+  activeRequirementId?: string | null
+  pageSize: number
+  onPageSizeChange: (size: number) => void
   onRequirementSpacePageChange: (page: number) => void
   onSourceFilterChange: (filter: RequirementSourceFilter) => void
   onNew: () => void
@@ -214,6 +220,9 @@ export function RequirementHistoryView({
                     : undefined
                 }
                 serverPage={sourceFilter === "space" ? requirementSpacePage : undefined}
+                activeRequirementId={sourceFilter === "space" ? activeRequirementId : null}
+                pageSize={pageSize}
+                onPageSizeChange={onPageSizeChange}
                 onServerPageChange={
                   sourceFilter === "space" ? onRequirementSpacePageChange : undefined
                 }

@@ -215,6 +215,41 @@ export function RequirementSpaceDetailView({
   const content =
     renderedContent || normalizeLeanstarMarkdown(document?.documentTextContent?.trim() || "")
   const ownerName = requirement.owner?.name.trim()
+  const hasPrototypePreview = Boolean(prototypeHtml && designBinding?.htmlFile)
+  const prototypeActions = (
+    <>
+      {designBinding?.htmlId ? (
+        <RequirementActionButton
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-7 gap-1 px-2 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
+          hint={REQUIREMENT_ACTION_HINTS.resetDesign}
+          onClick={() => setDesignResetOpen(true)}
+        >
+          <Trash2 className="size-3" />
+          重置原型
+        </RequirementActionButton>
+      ) : null}
+      <RequirementActionButton
+        type="button"
+        size="sm"
+        className="h-7 text-xs"
+        hint={
+          permissionDenied
+            ? "暂无该需求文件的查看权限，无法开始或继续设计。"
+            : designBinding?.htmlId
+              ? REQUIREMENT_ACTION_HINTS.continueDesign
+              : REQUIREMENT_ACTION_HINTS.startDesign
+        }
+        onClick={() => void onDesignRequirement(requirement, content)}
+        disabled={permissionDenied}
+      >
+        <PenTool className="mr-1.5 size-3.5" />
+        {designBinding?.htmlId ? "继续设计" : "去设计"}
+      </RequirementActionButton>
+    </>
+  )
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-[#f7f8fa] dark:bg-background">
@@ -365,38 +400,9 @@ export function RequirementSpaceDetailView({
             <div className="flex h-8 shrink-0 items-center gap-2 border-b border-border px-4 ">
               <PenTool className="size-4 text-primary" />
               <h3 className="text-sm font-semibold">原型预览</h3>
-              <div className="ml-auto flex items-center gap-2">
-                {designBinding?.htmlId ? (
-                  <RequirementActionButton
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="h-7 gap-1 px-2 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
-                    hint={REQUIREMENT_ACTION_HINTS.resetDesign}
-                    onClick={() => setDesignResetOpen(true)}
-                  >
-                    <Trash2 className="size-3" />
-                    重置原型
-                  </RequirementActionButton>
-                ) : null}
-                <RequirementActionButton
-                  type="button"
-                  size="sm"
-                  className="h-7 text-xs"
-                  hint={
-                    permissionDenied
-                      ? "暂无该需求文件的查看权限，无法开始或继续设计。"
-                      : designBinding?.htmlId
-                        ? REQUIREMENT_ACTION_HINTS.continueDesign
-                        : REQUIREMENT_ACTION_HINTS.startDesign
-                  }
-                  onClick={() => void onDesignRequirement(requirement, content)}
-                  disabled={permissionDenied}
-                >
-                  <PenTool className="mr-1.5 size-3.5" />
-                  {designBinding?.htmlId ? "继续设计" : "去设计"}
-                </RequirementActionButton>
-              </div>
+              {hasPrototypePreview ? (
+                <div className="ml-auto flex items-center gap-2">{prototypeActions}</div>
+              ) : null}
             </div>
             {prototypeHtml && designBinding?.htmlFile ? (
               <HtmlThumbnailPreview
@@ -412,12 +418,15 @@ export function RequirementSpaceDetailView({
                 <div className="flex size-14 items-center justify-center rounded-2xl bg-primary/10 text-primary">
                   <PenTool className="size-6" />
                 </div>
-                <h4 className="mt-4 text-sm font-semibold">暂无原型</h4>
+                <h4 className="mt-4 text-sm font-semibold">暂无可预览的原型</h4>
                 <p className="mt-1.5 max-w-sm text-xs leading-5 text-muted-foreground">
-                  {isRequirementDevelopmentUnavailable()
-                    ? "你可以基于当前需求创建并持续完善原型设计。"
-                    : "原型设计并非开发的必需步骤。你可以直接点击页面上方的“去开发”，前往项目模式开始开发；也可以先完善原型，再进入开发。"}
+                  {designBinding?.htmlId
+                    ? "原型正在设计中，完成后即可在此预览效果。"
+                    : isRequirementDevelopmentUnavailable()
+                      ? "你可以基于当前需求创建并持续完善原型设计，完成后即可在此预览效果。"
+                      : "原型设计并非开发的必需步骤。你可以直接点击页面上方的“去开发”，前往项目模式开始开发；也可以先完善原型，再进入开发。"}
                 </p>
+                <div className="mt-4 flex items-center gap-2">{prototypeActions}</div>
               </div>
             )}
           </section>

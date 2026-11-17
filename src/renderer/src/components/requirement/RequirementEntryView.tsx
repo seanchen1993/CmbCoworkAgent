@@ -196,6 +196,7 @@ export function RequirementEntryView({
   const [requirementSpaceLoading, setRequirementSpaceLoading] = useState(false)
   const [requirementSpaceTotal, setRequirementSpaceTotal] = useState(0)
   const [requirementSpacePage, setRequirementSpacePage] = useState(0)
+  const [requirementSpacePageSize, setRequirementSpacePageSize] = useState(15)
   const [sourceFilter, setSourceFilter] = useState<RequirementSourceFilter>("local")
   const [tokenDialogOpen, setTokenDialogOpen] = useState(false)
   const [tokenDraft, setTokenDraft] = useState("")
@@ -363,7 +364,11 @@ export function RequirementEntryView({
     }
     setRequirementSpaceLoading(true)
     void leanstarRequirementsApi
-      .listDeliveryRequirements(implementGroupDevopsOrgId, requirementSpacePage)
+      .listDeliveryRequirements(
+        implementGroupDevopsOrgId,
+        requirementSpacePage + 1,
+        requirementSpacePageSize
+      )
       .then((page) => {
         setRequirementSpaceTotal(page.total ?? page.content?.length ?? 0)
         return (page.content ?? []).map((item) =>
@@ -402,6 +407,7 @@ export function RequirementEntryView({
     currentUserOriginOrgId,
     requirementSpaceRetryToken,
     requirementSpacePage,
+    requirementSpacePageSize,
     requirementsLoaded,
     screen,
     sourceFilter
@@ -804,6 +810,14 @@ export function RequirementEntryView({
           requirementSpaceLoading={requirementSpaceLoading}
           requirementSpaceTotal={requirementSpaceTotal}
           requirementSpacePage={requirementSpacePage}
+          activeRequirementId={selectedRequirement?.id ?? null}
+          pageSize={requirementSpacePageSize}
+          onPageSizeChange={(size) => {
+            if (size === requirementSpacePageSize) return
+            requirementSpaceLoadedRef.current = false
+            setRequirementSpacePage(0)
+            setRequirementSpacePageSize(size)
+          }}
           onRequirementSpacePageChange={(page) => {
             requirementSpaceLoadedRef.current = false
             setRequirementSpacePage(page)
