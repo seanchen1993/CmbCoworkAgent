@@ -37,7 +37,7 @@ const declarations = new Set([
   "SHARED_TOOL_NAMES",
   "MAX_PARALLEL_TASK_SUBAGENTS",
   "BOT_BROWSER_ACTIONS",
-  "BOT_WORK_OBSERVATION_TOOLS",
+  "BOT_WORK_COORDINATION_TOOLS",
   "isRecord",
   "executeCommandFromToolArgs",
   "classifyToolConcurrency",
@@ -146,7 +146,7 @@ const humanWaits = [
 ]
 
 describe("shared Bot workspaces", () => {
-  it.each(["write_file", "code_exec"])("keeps Bot status/history readable during a pending %s approval without unlocking mutations", async (tool) => {
+  it.each(["write_file", "code_exec"])("keeps Bot coordination responsive during a pending %s approval without unlocking workspace tools", async (tool) => {
     const gate = createGate(true)
     const entered = deferred(), finish = deferred()
     const owner = gate.wrapToolCall(request(tool), async () => {
@@ -164,7 +164,7 @@ describe("shared Bot workspaces", () => {
         expect(observe).toHaveBeenCalledOnce()
         expect(await read).toBe("waiting_approval")
       }
-      expect(mutation).not.toHaveBeenCalled()
+      expect(mutation).toHaveBeenCalledOnce()
     } finally {
       finish.resolve()
       await Promise.all([owner, queued])

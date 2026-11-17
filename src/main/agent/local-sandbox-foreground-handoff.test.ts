@@ -213,6 +213,9 @@ describe("Bot foreground command handoff", () => {
     const response = await running
     expect(response.exitCode).toBeNull()
     expect(response.output).toContain("was not restarted")
+    // Budget-triggered transfer uses this same path without any new user input.
+    expect(response.output).toContain("The foreground wait has ended")
+    expect(response.output).not.toContain("new message")
     const id = f.accepted.mock.calls[0][0].id
     expect(f.sandbox.getTaskOutput(id)?.partialOutput).toBe("partial")
     f.controller.abort() // the completed model turn no longer owns the transferred process

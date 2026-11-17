@@ -16,16 +16,23 @@ async function main() {
       entryPoints: [resolve("tests/support/bots-work-directory-fixture.tsx")],
       bundle: true,
       write: false,
+      outdir: dir,
       platform: "browser",
       format: "iife",
       jsx: "automatic",
       alias: { "@": resolve("src/renderer/src") },
-      define: { "process.env.NODE_ENV": '"production"' }
+      define: { "process.env.NODE_ENV": '"production"' },
+      plugins: [{ name: "directory-store-boundary", setup(plugin) {
+        plugin.onResolve({ filter: /^@\/lib\/store$/ }, () => ({ path: "store", namespace: "directory" }))
+        plugin.onLoad({ filter: /.*/, namespace: "directory" }, () => ({ contents: "export const useAppStore = Object.assign(() => ({}), { getState: () => ({}) });" }))
+      } }]
     })
     await writeFile(
       join(dir, "index.html"),
-      '<meta charset="utf-8"><div id="root"></div><script>' +
-        bundle.outputFiles[0].text +
+      '<meta charset="utf-8"><style>' +
+        bundle.outputFiles.filter(file => file.path.endsWith('.css')).map(file => file.text).join('\n') +
+        '</style><div id="root"></div><script>' +
+        bundle.outputFiles.find(file => file.path.endsWith('.js'))!.text +
         "</script>"
     )
     await writeFile(
@@ -54,6 +61,7 @@ async function main() {
       const s = (window as any).m05Directory
       s.rows.slice(0, 7).forEach((r: any) => (r.title = "Seven " + r.id))
     })
+    await page.getByRole("button", { name: "搜索任务", exact: true }).click()
     await page.getByRole("textbox", { name: "搜索任务", exact: true }).fill("Seven")
     await page.waitForFunction(() => document.querySelectorAll(".bot-work-row").length === 6)
     await page.getByRole("button", { name: "更多任务", exact: true }).click()

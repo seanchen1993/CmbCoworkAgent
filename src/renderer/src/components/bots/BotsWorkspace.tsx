@@ -114,6 +114,9 @@ import { localBotClient } from "./client"
 import { botWorkClient } from "@/lib/bot-work-client"
 import { useBotWorks } from "./use-bot-works"
 import { BotWorkPanel } from "./BotWorkPanel"
+import { BotWorkHeader } from "./BotWorkHeader"
+import { BotTaskBrowser } from "./BotTaskBrowser"
+import { BotWorkAttention } from "./BotWorkAttention"
 import { BotImChannelDialog } from "./BotImChannelDialog"
 import { BotImConversation, BotImConversationDetails } from "./BotImConversation"
 import { BotImConversationRows, SidebarTime } from "./BotImConversationRows"
@@ -2354,6 +2357,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
             />
           ) : selectedIm && selected && !activeWorkId ? (
             <BotImConversation
+              works={[...works.priority, ...works.items.filter(item => !works.priority.some(p => p.id === item.id))]}
               tasks={snapshot?.tasks ?? []}
               backgroundThreads={snapshot?.backgroundThreads ?? []}
               collaborationPending={Boolean(
@@ -2435,32 +2439,22 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                       " · 当前离线，待重新连接后同步"}
                   </div>
                 )}
-              {activeWorkId && (
-                <div className="bot-work-breadcrumb">
-                  <button
-                    onClick={() => {
-                      const group = snapshot?.imConversations?.find(
-                        (item) => item.id === selectedWork?.source?.bindingId
-                      )
-                      if (selectedIm) selectWork(null)
-                      else if (group) openImConversation(group.id)
-                      else selectWork(null)
-                    }}
-                  >
-                    ←{" "}
-                    {snapshot?.imConversations?.find(
-                      (item) => item.id === selectedWork?.source?.bindingId
-                    )?.title ?? `${selected.name} 主对话`}
-                  </button>
-                  <span>{selectedWork?.state === "completed" ? "已完成" : "独立任务"}</span>
-                </div>
-              )}
-              {selectedWork?.source && (
-                <div className="bot-work-source" role="note">
-                  {selectedWork.source.transport === "im"
-                    ? "来自招乎群聊 · 回复和结果会回到原群，使用 Bot 共享与本群记忆。"
-                    : "模拟渠道任务 · 此处文字与结果将回到原接入会话。可使用 Bot 共享与本群记忆，不提供本机文件和电脑。"}
-                </div>
+              {!activeWorkId && <BotWorkAttention client={client} works={[...works.priority, ...works.items.filter(item => !works.priority.some(p => p.id === item.id))]} onWork={id => selectWork(id)} />}
+              {selectedWork && (
+                <BotWorkHeader
+                  key={selectedWork.id}
+                  client={client}
+                  work={selectedWork}
+                  controller={works}
+                  disabled={Boolean(selected.archived || selected.deleting)}
+                  backLabel={selectedWork.source && !selectedWork.source.personal ? "返回群主对话" : "返回主对话"}
+                  onBack={() => {
+                    const group = snapshot?.imConversations?.find(item => item.id === selectedWork.source?.bindingId)
+                    if (selectedIm) selectWork(null)
+                    else if (group) openImConversation(group.id)
+                    else selectWork(null)
+                  }}
+                />
               )}
               {activeWorkId && !selectedWork ? (
                 <div className="bot-empty" role="status">
@@ -2849,10 +2843,14 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                       refreshKey={botFileRefreshKey(tasks)}
                     />
                   ) : detailTab === "computer" ? (
-                    <BotBrowserPanel
-                      key={selectedThreadId}
+                    <BotTaskBrowser
+                      key={selected.id}
                       botId={selected.id}
-                      client={conversationClient}
+                      mainScope={selected.id}
+                      client={client}
+                      works={[...works.priority, ...works.items.filter(item => !works.priority.some(p => p.id === item.id))]}
+                      selectedWork={selectedWork}
+                      onWork={id => selectWork(id)}
                     />
                   ) : detailTab === "memory" ? (
                     <BotMemoryPanel

@@ -7305,7 +7305,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         delete subagentTranscriptPersistRetryCountRef.current[threadId]
       }
       initializedThreadsRef.current.add(threadId)
-      const threadActions = getThreadActions(threadId)
       const listenerEpoch = {}
       threadListenerEpochRef.current[threadId] = listenerEpoch
       const isCurrentListenerEpoch = (): boolean =>
@@ -7502,55 +7501,26 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         cleanupCancel
       ]
 
-      // When the main process injects steered messages into the running turn,
-      // drop them from the draft queue and surface them as committed user turns
-      // (the model already received them; the transcript should match).
+      // Queue acknowledgements can overtake the async stream iterator. They only
+      // settle drafts and user-turn effects; the ordered stream boundary publishes
+      // the completed assistant and injected users. Inactive views hydrate the
+      // same durable transcript. Appending here corrupts both order and later saves.
       queueListenerCleanups.current[threadId] = window.api.agent.onQueuedMessagesInjected(
         threadId,
-        ({ messages, assistantIdAlias }) => {
+        ({ messages }) => {
           if (!isCurrentListenerEpoch()) return
           if (!Array.isArray(messages) || messages.length === 0) return
           const injectedIds = new Set(messages.map((message) => message.id))
-          const existingMessageIds = new Set(
-            threadStatesRef.current[threadId]?.messages.map((message) => message.id) ?? []
-          )
           updateThreadState(threadId, (state) => {
             const next = removeQueuedMessagesById(state.queuedMessages, injectedIds)
-            const sourceId = assistantIdAlias?.sourceId
-            const canonicalId = assistantIdAlias?.id
-            const sourceIndex =
-              sourceId && canonicalId
-                ? state.messages.findIndex((message) => message.id === sourceId)
-                : -1
-            const canonicalAlreadyPresent =
-              !!canonicalId && state.messages.some((message) => message.id === canonicalId)
-            const nextMessages =
-              sourceIndex < 0 || !canonicalId
-                ? state.messages
-                : canonicalAlreadyPresent
-                  ? state.messages.filter((message) => message.id !== sourceId)
-                  : state.messages.map((message, index) =>
-                      index === sourceIndex ? { ...message, id: canonicalId } : message
-                    )
-            if (next === state.queuedMessages && nextMessages === state.messages) return {}
-            if (next !== state.queuedMessages) persistQueuedMessages(threadId, next)
-            return {
-              ...(next !== state.queuedMessages ? { queuedMessages: next } : {}),
-              ...(nextMessages !== state.messages ? { messages: nextMessages } : {})
-            }
+            if (next === state.queuedMessages) return {}
+            persistQueuedMessages(threadId, next)
+            return { queuedMessages: next }
           })
-          for (const message of messages) {
-            if (!message.id || existingMessageIds.has(message.id)) continue
-            // Reuse appendMessage so an injected turn has the same hook-log,
-            // coordinator-notification, and interruption-reset effects as a
-            // normal user submission.
-            threadActions.appendMessage({
-              id: message.id,
-              role: "user",
-              content: message.content,
-              created_at: new Date()
-            })
-          }
+          void window.api.workflows.suppressPendingNotification(threadId, false).catch(() => undefined)
+          const pending = pendingHookLogBucketOpensRef.current[threadId] ?? new Set<string>()
+          for (const id of injectedIds) pending.add(id)
+          pendingHookLogBucketOpensRef.current[threadId] = pending
         }
       )
 

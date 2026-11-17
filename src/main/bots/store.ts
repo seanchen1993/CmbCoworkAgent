@@ -1,3 +1,4 @@
+import { pageBotWorkInputs, type BotWorkInput } from "./work-input"
 import type { AgentRunTerminal } from "../agent/agent-run-service"
 import { BotImGatewayStore } from "./im-gateway-store"
 import { BotTelemetryStore, type BotTelemetryContext } from "./telemetry-store"
@@ -1190,7 +1191,8 @@ export class BotStore {
                   kind: "work",
                   sourceTaskId: source.taskId,
                   dispatch: "create",
-                  sourceMessageIds: this.workSourceMessageIds(this.getTask(source.taskId), ids)
+                  sourceMessageIds: this.workSourceMessageIds(this.getTask(source.taskId), ids),
+                  sourceContext: { version: 1, references: context }
                 }
               : { kind: "user" },
             mockSource
@@ -1236,7 +1238,8 @@ export class BotStore {
               kind: "work",
               sourceTaskId: task.id,
               dispatch: "follow_up",
-              sourceMessageIds: this.workSourceMessageIds(task)
+              sourceMessageIds: this.workSourceMessageIds(task),
+              sourceContext: { version: 1, references: [] }
             },
             task.mockSource
           ),
@@ -1524,7 +1527,7 @@ export class BotStore {
     return task.origin.kind === "introduction" && this.injectedUserRequestId(task) !== null
   }
 
-  /** Keep provenance without exposing the main conversation to the independent task. */
+  /** Capture exactly the original request, applied supplements and selected references. */
   private workSourceMessageIds(task: BotTask, contextIds: string[] = []): string[] {
     const ids = task.origin.kind === "introduction" ? [] : [task.requestId]
     for (const row of this.rows(
@@ -1535,6 +1538,46 @@ export class BotStore {
     ))
       ids.push(String(row.request_id))
     return [...new Set([...ids, ...contextIds])]
+  }
+
+  /** Resolve only captured source IDs; never infer context from the newest chat messages. */
+  workInputContext(taskId: string, messageIndex = 0, offset = 0, assignmentId = taskId) {
+    const owner = this.getTask(taskId)
+    const task = assignmentId === taskId ? owner : this.getTask(assignmentId)
+    if (task.id !== owner.id && (!owner.workId || task.workId !== owner.workId ||
+        task.botId !== owner.botId || task.threadId !== owner.threadId || task.injectedInto !== owner.id))
+      throw new BotError("CONFLICT", "该交办尚未应用到当前任务运行")
+    if (task.origin.kind !== "work" || !task.origin.sourceContext) return undefined
+    if (!task.workId) throw new BotError("CONFLICT", "交办来源缺少任务归属")
+    const work = this.assertWorkAudience(task, task.workId)
+    const source = this.getTask(task.origin.sourceTaskId)
+    if (source.workId) this.assertWorkAudience(source, source.workId)
+    if (source.botId !== task.botId || (!source.workId && source.threadId !== work.parentThreadId) ||
+        (source.mockSource?.audienceKey ?? "desktop") !== work.audienceKey)
+      throw new BotError("CONFLICT", "交办来源不属于当前任务会话")
+    const ids = task.origin.sourceMessageIds ?? []
+    const originals = new Map<string, BotWorkInput>()
+    // Batch by captured IDs, rather than scanning or copying the source transcript.
+    for (let i = 0; i < ids.length; i += 64) {
+      const batch = ids.slice(i, i + 64)
+      for (const row of this.rows(
+        `SELECT request_id,message FROM bot_tasks WHERE bot_id=? AND thread_id=?
+         AND (id=? OR injected_into=?) AND request_id IN (${batch.map(() => "?").join(",")})`,
+        [task.botId, source.threadId, source.id, source.id, ...batch]
+      )) originals.set(String(row.request_id), {
+        id: String(row.request_id), role: "user", text: String(row.message),
+        kind: String(row.request_id) === source.requestId ? "request" : "correction"
+      })
+    }
+    const references = new Map(task.origin.sourceContext.references.map(item => [item.id, item]))
+    const inputs = ids.map(id => {
+      const input = originals.get(id) ?? references.get(id)
+      if (!input) throw new BotError("NOT_FOUND", "交办来源消息已不可用，请在原任务中补充")
+      return { id: input.id, role: input.role, text: input.text,
+        kind: originals.get(id)?.kind ?? "reference" as const }
+    })
+    if (!inputs.length) throw new BotError("CONFLICT", "交办来源为空")
+    return { ...pageBotWorkInputs(inputs, messageIndex, offset), assignmentId: task.id }
   }
 
   hasWorkUserRequest(taskId: string): boolean {

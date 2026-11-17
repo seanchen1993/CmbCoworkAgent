@@ -4,6 +4,7 @@ import { cp, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+import { captureBotExperimentSource } from "../tests/support/bot-experiment-archive.mjs"
 
 const root = await realpath(resolve(dirname(fileURLToPath(import.meta.url)), ".."))
 const out = await mkdtemp(join(tmpdir(), "bot-integration-build-"))
@@ -32,6 +33,7 @@ async function run(args, extraEnv = {}) {
   if (code) throw new Error(`Bot integration check failed (exit ${code}): ${args.at(-1)}`)
 }
 try {
+  const sourceAtBuild = await captureBotExperimentSource(root)
   await writeFile(
     configPath,
     `
@@ -60,7 +62,7 @@ export default Object.fromEntries(["main","preload","renderer"].map((name) => [
   await symlink(join(root, "node_modules"), join(out, "node_modules"), "junction")
   await writeFile(
     join(out, "bot-test-build.json"),
-    JSON.stringify({ repository: root, builtAt: new Date().toISOString() })
+    JSON.stringify({ repository: root, builtAt: new Date().toISOString(), sourceAtBuild })
   )
   console.log("Isolated Bot test build:", out)
   if (process.argv.includes("--handoff") && !process.argv.includes("--build-only")) {

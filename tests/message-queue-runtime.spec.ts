@@ -923,7 +923,10 @@ async function testAfterModelInjectsOnFinalReply(): Promise<void> {
   const state = { messages: [new AIMessage({ content: "all done" })] }
   const result = await runAfterModel(state, rt(T1))
   assert(result && Array.isArray(result.messages), "afterModel injects on final reply")
-  assertEqual(result.messages.length, 1, "one injected message")
+  assertEqual(result.messages.length, 2, "completed reply snapshot and one injected message")
+  assert(result.messages[0] !== state.messages[0], "checkpoint prefix reuse sees a new assistant object")
+  assertEqual(result.messages[0].id, state.messages[0].id, "snapshot replaces the original reply identity")
+  assertEqual(result.messages[1].content, "steer me", "correction follows the completed reply")
   assertEqual(result.jumpTo, "model", "jumps back to model so the steer is answered")
   assertEqual(peekCurrentRunMessageQueue(T1).length, 0, "queue drained")
 }
@@ -1348,6 +1351,8 @@ async function testHostReceiptFailurePreventsModelInjection(): Promise<void> {
 
 async function main(): Promise<void> {
   const tests = [
+    testSettlementFollowsDurableConsumption,
+    testCancelledAndFencedReceiptsSettleOnce,
     testHostReceiptPrecedesTranscriptAndCancelledMessageIsNotInjected,
     testHostReceiptFailurePreventsModelInjection,
     testIncrementalContentBlockTranscriptMerge,
@@ -1396,6 +1401,36 @@ async function main(): Promise<void> {
     console.log(`✓ ${test.name}`)
   }
   console.log(`\n${tests.length} passed`)
+}
+
+async function testSettlementFollowsDurableConsumption(): Promise<void> {
+  reset()
+  const events: string[] = []
+  queueCurrentRunMessage(T1, { id: "durable-receipt", content: "change the result",
+    onInjected: () => events.push("consumed"), onDiscarded: () => events.push("discarded") })
+  setCurrentRunInjectionNotifier(() => { throw new Error("disk unavailable") })
+  try { await runBeforeModel({ messages: [] }, rt(T1)) } catch { /* expected */ }
+  assertEqual(events.length, 0, "failed persistence must not claim consumption or discard a retryable input")
+  setCurrentRunInjectionNotifier(() => { events.push("persisted") })
+  await runBeforeModel({ messages: [] }, rt(T1))
+  clearCurrentRunMessageQueue(T1, RUN1)
+  assertEqual(events.join(","), "persisted,consumed", "a consumed input is not discarded at run cleanup")
+}
+
+async function testCancelledAndFencedReceiptsSettleOnce(): Promise<void> {
+  reset()
+  const discarded: string[] = []
+  const entry = (id: string): CurrentRunQueuedMessage => ({ id, content: id,
+    onDiscarded: () => discarded.push(id), onInjected: () => { throw new Error("must not be consumed") } })
+  queueCurrentRunMessage(T1, entry("withdrawn"))
+  deleteCurrentRunQueuedMessage(T1, "withdrawn")
+  queueCurrentRunMessage(T1, { ...entry("invalid"), beforeInject: () => false })
+  queueCurrentRunMessage(T1, { ...entry("broken"), beforeInject: () => { throw new Error("owner removed") } })
+  try { await runBeforeModel({ messages: [] }, rt(T1)) } catch { /* expected */ }
+  clearCurrentRunMessageQueue(T1, RUN2)
+  assertEqual(discarded.join(","), "withdrawn,invalid", "obsolete run cleanup cannot discard current inputs")
+  clearCurrentRunMessageQueue(T1, RUN1)
+  assertEqual(discarded.join(","), "withdrawn,invalid,broken", "a failed guard retains its receipt until cleanup")
 }
 
 main().catch((error) => {

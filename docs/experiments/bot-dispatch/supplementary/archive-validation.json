@@ -1,0 +1,45 @@
+{
+  "date": "2026-11-17",
+  "kind": "offline-archive-validation-not-a-model-experiment",
+  "checks": [
+    {
+      "command": "node --import tsx tests/bot-experiment-archive.spec.ts",
+      "result": "passed",
+      "coverage": [
+        "checkpoints",
+        "failure retention",
+        "unique attempts",
+        "credential/path redaction",
+        "build/source distinction"
+      ]
+    },
+    {
+      "command": "esbuild transform of routing harness; node --check of build runner",
+      "result": "passed",
+      "scope": "syntax only; no model calls"
+    },
+    {
+      "check": "historical archive integrity",
+      "result": "passed",
+      "runs": 23,
+      "recordedTurns": 140,
+      "brokenDocumentLinks": 0,
+      "pathOrCredentialPatternFindings": 0
+    }
+  ],
+  "earlierFailure": "First offline test script used top-level await under CJS and failed before executing assertions. Wrapped it in async main and reran successfully; no product code change.",
+  "fingerprints": [
+    {
+      "path": "tests/support/bot-experiment-archive.mjs",
+      "sha256": "6fd8c15ea5b8d12efde21d5a446c50cd95bcc9e67be6b88ef367884c3b03ecd2"
+    },
+    {
+      "path": "tests/bot-experiment-archive.spec.ts",
+      "sha256": "e4f9e5c23f3771128fa47a09579018324ecf1d4dce5ec6da6f4a333cf4504046"
+    },
+    {
+      "path": "tests/bots-task-routing-app.spec.ts",
+      "sha256": "21cc6e2f24a43d6206307f77ffcd6f95cd9f46e8a1e44b1763c3b34137c9552c"
+    }
+  ]
+}

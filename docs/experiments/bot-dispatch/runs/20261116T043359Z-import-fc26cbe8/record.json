@@ -1,0 +1,437 @@
+{
+  "schemaVersion": 1,
+  "runId": "20261116T043359Z-import-fc26cbe8",
+  "kind": "historical-real-model-electron",
+  "startedAt": "2026-11-16T04:33:59.859Z",
+  "displayTimezone": "Asia/Shanghai",
+  "archivedOn": "2026-11-17",
+  "status": "no-failure-recorded",
+  "exitCode": null,
+  "selectedCases": null,
+  "provenance": {
+    "sourceArtifact": "bot-integration-build-vua0NP/artifacts/routing-1794803639859.json",
+    "originalReportSha256": "fc26cbe8bdd62a7f0459f87789121fa23456c6e1f5baddd86a9f9e4b4f0426c7",
+    "originalExitCodeUnavailable": true,
+    "originalCaseSelectionUnavailable": true,
+    "note": "历史回收。保留缺失字段；未见 error 不等于证实进程成功。未使用当前源码回填历史版本。"
+  },
+  "build": {
+    "builtAt": "2026-11-16T04:32:16.421Z",
+    "mainSha256": "eb885d085129afaafdbb5ba260864ba0a5464e9c7c3117faaab273b7bc8d8896",
+    "sourceAtBuild": null
+  },
+  "notes": "历史单轮记录，完整输入、处理路线及回复见 report；缺失的指标不推算。",
+  "report": {
+    "model": "deepseek-v4-flash",
+    "fixtureApprovalMode": "yolo (disposable profile only)",
+    "wire": {
+      "main": 58,
+      "guided": 58,
+      "worker": 1,
+      "workerCreate": 0
+    },
+    "results": [
+      {
+        "id": "greeting",
+        "label": "日常问答",
+        "preferred": "inline",
+        "message": "你好，用一句话说说你能帮我做什么。",
+        "actual": "inline",
+        "followsPreference": true,
+        "seconds": 3.4,
+        "tools": [],
+        "mainTools": [],
+        "reply": "我可以帮你处理日常工作任务，例如编写和修改代码、整理资料、撰写文档，以及查询信息、进行数据分析并生成报告等。",
+        "workIds": [],
+        "workspaces": [],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 0
+      },
+      {
+        "id": "rewrite",
+        "label": "短文改写",
+        "preferred": "inline",
+        "message": "把这句话改得更礼貌，只给一句：明天下午三点来参加读书会，记得带书。",
+        "actual": "inline",
+        "followsPreference": true,
+        "seconds": 1.8,
+        "tools": [],
+        "mainTools": [],
+        "reply": "明天下午三点欢迎您来参加读书会，也请您记得带上书。",
+        "workIds": [],
+        "workspaces": [],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 0
+      },
+      {
+        "id": "lookup",
+        "label": "读取一个文件查事实",
+        "preferred": "inline",
+        "files": {
+          "场地.md": "阅览室最多容纳24人，免费，周一闭馆。\n"
+        },
+        "message": "看一下 <test-workspace>/lookup/场地.md，告诉我阅览室最多能坐多少人。一句话即可。",
+        "actual": "inline",
+        "followsPreference": true,
+        "seconds": 3.4,
+        "tools": [
+          "read_file"
+        ],
+        "mainTools": [
+          "read_file"
+        ],
+        "reply": "\n阅览室最多能坐 24 人，并且在阅览室内活动是免费的；不过周一闭馆。",
+        "workIds": [],
+        "workspaces": [],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 0
+      },
+      {
+        "id": "small-edit",
+        "label": "文件中修改一个时间",
+        "preferred": "inline",
+        "files": {
+          "notice.txt": "读书会本周日下午三点开始，地点社区阅览室。\n"
+        },
+        "message": "把 <test-workspace>/small-edit/notice.txt 中的下午三点改成下午四点，其他内容不变。",
+        "actual": "inline",
+        "followsPreference": true,
+        "seconds": 6.7,
+        "tools": [
+          "read_file",
+          "edit_file"
+        ],
+        "mainTools": [
+          "read_file",
+          "edit_file",
+          "read_file"
+        ],
+        "reply": "\n\n\n已改好，现在是：读书会本周日下午四点开始，地点社区阅览室。其他内容未动。",
+        "workIds": [],
+        "workspaces": [],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 0
+      },
+      {
+        "id": "event-plan",
+        "label": "多材料筹备方案及交付",
+        "preferred": "independent",
+        "files": {
+          "活动约束.md": "虚构读书会：周日下午三点开始，共90分钟，20人，各带一本书。必须有签到、分组讨论和分享。预算1000元。\n",
+          "场地说明.md": "社区阅览室免费，可容纳24人，室内不受天气影响。小公园免费、容量40人，下雨不可用。活动中心收费300元、容量30人，有投影。\n",
+          "费用.csv": "项目,单价,数量\n饮用水,5,20\n材料,120,1\n备用金,100,1\n"
+        },
+        "message": "请帮我做好周日读书会筹备方案。工作目录 <test-workspace>/event-plan。读取活动约束.md、场地说明.md、费用.csv，核算费用，比较三个场地的容量、预算和天气风险，推荐一个；制定90分钟流程、分工清单和两条应急安排。写入 plan.md，检查总时长和预算后交给我。后面我会调整时间。资料均为虚构，不用浏览器，也不联系任何人。",
+        "actual": "inline",
+        "followsPreference": false,
+        "seconds": 41.5,
+        "tools": [
+          "ls",
+          "read_file",
+          "write_file",
+          "execute",
+          "edit_file",
+          "bot_deliver_files"
+        ],
+        "mainTools": [
+          "ls",
+          "read_file",
+          "read_file",
+          "read_file",
+          "write_file",
+          "execute",
+          "edit_file",
+          "execute",
+          "bot_deliver_files",
+          "execute",
+          "bot_deliver_files"
+        ],
+        "reply": "\n\n三份资料已读完：约束为90分钟、20人、预算1000元；场地三选一；费用.csv 仅含饮用水 100 元、材料 120 元、备用金 100 元，共 320 元。下面把方案写入 plan.md，再用脚本核算时长与预算。\n\n时长逐段校验全部吻合（合计 90 分钟），预算 320/620 元均达标。一号预案里\"顺延 10 分钟仍 16:30 结束\"的算法对不上，修正为可落实的 80 分钟重排：\n\n\n\n\n方案已写入 [plan.md](<test-workspace>/event-plan/plan.md)，同内容作为附件交付。\n\n**推荐社区阅览室**：室内无天气风险、免费、容量 24 人比 20 人多 4 位。小公园容量最大但雨天直接失效，活动中心（300 元、30 人、有投影）本次流程用不上投影，留作替补。\n\n**费用**：饮用水 100 + 材料 120 + 备用金 100 = 320 元，场地 0 元，结余 680 元；改活动中心为 620 元，仍在 1000 元内。\n\n**流程**（15:00–16:30）：开场 10 + 破冰荐书 15（20 人×45 秒）+ 分组讨论 30（4 组×5 人）+ 茶歇换组 10 + 小组分享 20（每组 5 分钟）+ 收尾 5 = **90 分钟**；签到 14:45 起，不占正式流程。\n\n**应急两条**：①场地不可用或到场超 24 人 → 转活动中心，流程压成 76 分钟，16:26 结束；②讨论超时 → 茶歇压 5 分钟、分享每组 4 分钟，共 81 分钟。\n\n**校验结果**：脚本解析各时间区间，六段时长与标注逐条吻合、合计 90 分钟；预算 320/620 元均 ≤1000。改动时间时只需按比例缩放第三节各环节，并保讨论与分享合计不低于 50 分钟。",
+        "workIds": [],
+        "workspaces": [],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 0
+      },
+      {
+        "id": "reconcile",
+        "label": "跨文件核对数据并输出报告",
+        "preferred": "independent",
+        "files": {
+          "orders.csv": "id,amount\nA,120\nB,80\nC,250\nD,50\n",
+          "payments.csv": "id,paid\nA,120\nB,80\nC,200\nX,30\n"
+        },
+        "message": "工作目录 <test-workspace>/reconcile 有 orders.csv 和 payments.csv。帮我核对每个订单的实收与应收，找出少付、未付和无对应订单的记录，验证合计能对上，生成 reconciliation.md 报告给我。数据是虚构的，不访问其他目录或网络。",
+        "actual": "inline",
+        "followsPreference": false,
+        "seconds": 16.9,
+        "tools": [
+          "execute",
+          "read_file",
+          "write_file",
+          "bot_deliver_files"
+        ],
+        "mainTools": [
+          "execute",
+          "read_file",
+          "read_file",
+          "execute",
+          "write_file",
+          "bot_deliver_files"
+        ],
+        "reply": "我先检查这两个文件的结构和规模。\n\n\n数据核对完成，合计可以完全对上；现在生成报告。\n\n核对完成，报告已生成在数据目录内：[reconciliation.md](<test-workspace>/reconcile/reconciliation.md)\n\n- 应收合计 500.00，实收合计 430.00，差额 70.00\n- 少付：订单 C（250 应付，200 实收，差 50）\n- 未付：订单 D（50 全额未收）\n- 无对应订单的收款：X（30.00）\n- 验证：50 + 50 − 30 = 70，与总额差一致，已对上\n\n注：该目录在我的工作区之外，附件形式无法投递，请直接打开上面的路径；如果你希望我把报告复制到工作区再作为附件发给你，告诉我一声即可。",
+        "workIds": [],
+        "workspaces": [],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 0
+      },
+      {
+        "id": "code-fix",
+        "label": "修复代码并运行验证",
+        "preferred": "independent",
+        "files": {
+          "discount.mjs": "export function payable(cents, percent) { return cents * (1 - percent); }\n",
+          "discount.test.mjs": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { payable } from './discount.mjs';\ntest('20% off', () => assert.equal(payable(1000, 20), 800));\ntest('round cents', () => assert.equal(payable(999, 15), 849));\ntest('zero', () => assert.equal(payable(0, 20), 0));\n"
+        },
+        "message": "帮我修复 <test-workspace>/code-fix 这个示例项目的折扣计算。payable 的第一个参数是整数分，第二个是0到100的折扣百分数，结果四舍五入到整数分。先复现失败，再修代码、补100%折扣的边界用例，用 node --test discount.test.mjs 验证。最后给出改动和测试结果，不提交Git，不装依赖。",
+        "actual": "inline",
+        "followsPreference": false,
+        "seconds": 14.7,
+        "tools": [
+          "ls",
+          "read_file",
+          "execute",
+          "write_file",
+          "edit_file"
+        ],
+        "mainTools": [
+          "ls",
+          "read_file",
+          "read_file",
+          "execute",
+          "write_file",
+          "edit_file",
+          "edit_file",
+          "execute"
+        ],
+        "reply": "我先检查项目结构和当前测试状态。\n\n\n失败已复现：`payable` 直接用 `cents * (1 - percent)`，既没有把百分数除以 100，也没有四舍五入到整数分；当结果为 0 时还会返回 `-0`。现在开始修复并补充边界用例。\n\n\n已修复并通过验证。\n\n**改动**\n- [discount.mjs](<test-workspace>/code-fix/discount.mjs)：`payable` 改为 `Math.round((cents * (100 - percent)) / 100)`，即先把百分数按百分比换算，再把结果四舍五入到整数分；同时把 `-0` 统一成 `0`。\n- [discount.test.mjs](<test-workspace>/code-fix/discount.test.mjs)：新增 5 个用例，包括 0% 折扣、`.5` 分向上取整、100% 折扣（正数、`-0` 检查、零分）。\n\n**测试结果**\n修复前 3 个用例全部失败（`999, 15` 实际得到 `-13986`；`0, 20` 得到 `-0`）。修复后执行 `node --test discount.test.mjs`：8 个用例全部通过，0 失败。按你要求未安装依赖、未提交 Git。",
+        "workIds": [],
+        "workspaces": [],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 0
+      },
+      {
+        "id": "reconciliation-cli",
+        "label": "从零实现可复用的对账工具",
+        "preferred": "independent",
+        "files": {
+          "README.md": "# CSV 对账工具\n待实现。所有样本为虚构数据。\n",
+          "orders.csv": "id,amount,note\nA,120.00,book\nB,80.00,book\nC,250.00,\"card,blue\"\nD,50.00,book\n",
+          "payments.csv": "id,paid\nA,100.00\nA,20.00\nB,80.00\nC,200.00\nX,30.00\n"
+        },
+        "message": "帮我把 <test-workspace>/reconciliation-cli 做成一个能重复使用的 CSV 对账小项目。实现 reconcile.mjs 命令行：node reconcile.mjs orders.csv payments.csv report.json。按订单汇总多笔支付，找出少付、未付、超付和无订单的支付；以整数分计算金额，支持带引号和逗号的CSV字段、CRLF、中文备注，拒绝非法金额和重复订单ID。report.json 中至少包含 orderTotalCents、paymentTotalCents 和 discrepancies，每个差异有 id 和 deltaCents（实收减应收）。用 Node 自带测试框架补至少8个用例，覆盖正常数据与这些边界，真正跑过测试及示例命令。完善 README 的用法和限制，交付代码、测试及样本报告。只用标准库，不装依赖、不提交Git、不访问网络或其他目录。",
+        "actual": "inline",
+        "followsPreference": false,
+        "seconds": 126.6,
+        "tools": [
+          "ls",
+          "read_file",
+          "execute",
+          "write_file",
+          "edit_file",
+          "bot_deliver_files"
+        ],
+        "mainTools": [
+          "ls",
+          "read_file",
+          "read_file",
+          "read_file",
+          "execute",
+          "write_file",
+          "execute",
+          "write_file",
+          "execute",
+          "edit_file",
+          "edit_file",
+          "execute",
+          "write_file",
+          "read_file",
+          "write_file",
+          "edit_file",
+          "edit_file",
+          "execute",
+          "execute",
+          "execute",
+          "bot_deliver_files",
+          "execute",
+          "bot_deliver_files"
+        ],
+        "reply": "我会先查看项目目录的现状，然后实现 CLI、测试、README，并实际运行验证。\n\n\nNode v25 可用，`node:test` 内置，无需依赖。现在实现 CLI 与 CSV/金额解析核心。\n\n核心已跑通示例。现在编写 `node:test` 测试用例。\n\n测试暴露了两处测试期望写错（不是实现缺陷）：C 记录起始行号应为 4；payments 允许 `amount` 作为实收列别名。修正断言。\n\n17/17 通过。现在补 README（用法、格式、规则、限制）并做最终验收检查。\n\n\n\n\n现在做最终验收：运行文档中的命令、BOM+中文列名场景、重复订单与文件缺失的失败路径，并清理临时文件。\n\n\n\n\n\n已完成并实测通过。项目位于你指定的目录，交付物如下：\n\n- [reconcile.mjs](<<test-workspace>/reconciliation-cli/reconcile.mjs>)：CLI + 可复用导出（`parseCsvRecords`、`parseAmountToCents`、`loadOrders`、`loadPayments`、`reconcile`、`main`）\n- [test/reconcile.test.mjs](<<test-workspace>/reconciliation-cli/test/reconcile.test.mjs>)：17 个 `node:test` 用例\n- [README.md](<<test-workspace>/reconciliation-cli/README.md>)：用法、列名别名、金额规则、报告字段、限制\n- [report.json](<<test-workspace>/reconciliation-cli/report.json>)：样本运行产物\n\n验证结果：\n- `node --test` → **17 passed / 0 failed**，覆盖正常数据、多笔支付汇总、少付/未付/超付/无订单支付、引号逗号、CRLF、中文备注、字段内换行、BOM+中文列名、非法金额（负数/千分位/三位小数/指数等）、重复订单 ID、缺列/空文件、CLI 端到端与失败退出码。\n- 文档命令 `node reconcile.mjs orders.csv payments.csv report.json` 实际执行成功，输出：应收 50000 分、实收 43000 分、差异 3 项（C 少付 −5000、D 未付 −5000、X 无订单支付 +3000）。\n- 失败路径实测：重复订单 ID → 退出码 1，提示“第 3 行: 订单号 A 重复（首次出现于第 2 行）”；文件不存在 → 退出码 1；参数错误 → 退出码 2；失败时不写报告。\n- 金额用 BigInt 校验后转整数分，测试验证 100 × 0.01 恰为 100 分、无浮点漂移；无 `package.json`/`node_modules`、未联网、未提交 Git。\n\n限制已在 README 写明：单币种全量对账、不支持负数/退款、UTF-8 CSV、整文件读入内存。",
+        "workIds": [],
+        "workspaces": [],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 0
+      },
+      {
+        "id": "explicit-inline",
+        "label": "多步分析但用户指定主对话",
+        "preferred": "inline",
+        "files": {
+          "活动约束.md": "虚构读书会：周日下午三点开始，共90分钟，20人，各带一本书。必须有签到、分组讨论和分享。预算1000元。\n",
+          "场地说明.md": "社区阅览室免费，可容纳24人，室内不受天气影响。小公园免费、容量40人，下雨不可用。活动中心收费300元、容量30人，有投影。\n",
+          "费用.csv": "项目,单价,数量\n饮用水,5,20\n材料,120,1\n备用金,100,1\n"
+        },
+        "message": "就在主对话完成，不要创建独立任务。读取 <test-workspace>/explicit-inline 的活动约束.md、场地说明.md、费用.csv，核算总费用，比较三个场地并推荐一个，回复一个90分钟的读书会流程。只需简短文字，不写文件。",
+        "actual": "inline",
+        "followsPreference": true,
+        "seconds": 6,
+        "tools": [
+          "read_file"
+        ],
+        "mainTools": [
+          "read_file",
+          "read_file",
+          "read_file"
+        ],
+        "reply": "\n**费用核算**：饮用水 5×20=100 + 材料 120 + 备用金 100 = **320 元**\n\n| 场地 | 场地费 | 合计 | 容量 | 制约条件 |\n|---|---|---|---|---|\n| 社区阅览室 | 0 | **320 元** | 24 人 | 室内，天气影响小 |\n| 小公园 | 0 | 320 元 | 40 人 | 下雨就不可用，无遮挡 |\n| 活动中心 | 300 | 620 元 | 30 人 | 有投影，超出需求 |\n\n**推荐：社区阅览室**——场地免费，24 座可容纳 20 人；室内不受天气影响，总费用为 320 元，比使用活动中心少花 300 元，并且仍在预算内。唯一需要注意的是，场地没有投影，分享环节用手写白板或打印提纲代替。\n\n**90 分钟流程（15:00—16:30）**\n- 15:00—15:10 签到、领取名牌、交书，并将书摆上展示桌\n- 15:10—15:20 主持人说明规则和本次主题\n- 15:20—15:50 分组讨论：分成 4 组、每组 5 人；组内每人用 3 分钟介绍自己带来的书，并推选 1 位代表\n- 15:50—16:20 集中分享：4 组代表各用 5 分钟发言，另留 10 分钟自由提问\n- 16:20—16:30 主持人收尾、约定下一期书目，并合影\n\n预留 100 元备用金：如果当天人数略超，可用于临时加座或购买饮品。",
+        "workIds": [],
+        "workspaces": [],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 0
+      },
+      {
+        "id": "explicit-task",
+        "label": "简单工作但用户要求独立任务",
+        "preferred": "independent",
+        "message": "请单独创建一个任务，写一条40字以内的读书会通知：周日三点、社区阅览室、每人带一本书。只需要文字，之后我会在那个任务里修改。",
+        "actual": "independent",
+        "followsPreference": true,
+        "seconds": 8.6,
+        "tools": [
+          "bot_work_create"
+        ],
+        "mainTools": [
+          "bot_work_create"
+        ],
+        "reply": "我现在单独建一个任务来写这条通知。\n已单独创建任务「读书会通知文案」，内容要求是：周日下午三点、社区阅览室、每人带一本书，纯文字、40字以内。之后你可以直接在那个任务里让我改。\n「读书会通知文案」这条任务已经跑完，最终稿是“周日下午3点社区阅览室开读书会，每人带一本书。”全文23字（含标点），共三个要素都已交代，也没有生成任何文件。想调整措辞或语气的话，可以直接去那个任务里继续改。",
+        "workIds": [
+          "339e81c5-81fd-4f8f-bb2f-e7eb90ec0e98"
+        ],
+        "workspaces": [
+          {
+            "kind": "default",
+            "path": "/private<test-workspace>/profile/bots/workspaces/26beaffc-a520-438e-902a-83f01a91947a"
+          }
+        ],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          },
+          {
+            "kind": "work",
+            "state": "completed",
+            "workId": "339e81c5-81fd-4f8f-bb2f-e7eb90ec0e98",
+            "error": null
+          },
+          {
+            "kind": "work_result",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 1
+      },
+      {
+        "id": "background-command",
+        "label": "单条耗时命令",
+        "preferred": "background",
+        "files": {
+          "slow-check.mjs": "setTimeout(() => console.log('CHECK_OK'), 12000)\n"
+        },
+        "message": "运行 node <test-workspace>/background-command/slow-check.mjs 这个本地检查脚本，预计十几秒，返回 CHECK_OK 就告诉我。只运行这条命令，不修改脚本或其他文件。",
+        "actual": "inline",
+        "followsPreference": false,
+        "seconds": 15.8,
+        "tools": [
+          "execute"
+        ],
+        "mainTools": [
+          "execute"
+        ],
+        "reply": "\n输出结果为 **CHECK_OK**，退出码 0。脚本没有报错，我也没有改动任何文件。",
+        "workIds": [],
+        "workspaces": [],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 0
+      }
+    ]
+  },
+  "logs": [
+    {
+      "name": "bot-routing-v5-matrix.log",
+      "text": "{\"case\":\"greeting\",\"actual\":\"inline\",\"preferred\":\"inline\",\"seconds\":3.4,\"tools\":[]}\n{\"case\":\"rewrite\",\"actual\":\"inline\",\"preferred\":\"inline\",\"seconds\":1.8,\"tools\":[]}\n{\"case\":\"lookup\",\"actual\":\"inline\",\"preferred\":\"inline\",\"seconds\":3.4,\"tools\":[\"read_file\"]}\n{\"case\":\"small-edit\",\"actual\":\"inline\",\"preferred\":\"inline\",\"seconds\":6.7,\"tools\":[\"read_file\",\"edit_file\",\"read_file\"]}\n{\"case\":\"event-plan\",\"actual\":\"inline\",\"preferred\":\"independent\",\"seconds\":41.5,\"tools\":[\"ls\",\"read_file\",\"read_file\",\"read_file\",\"write_file\",\"execute\",\"edit_file\",\"execute\",\"bot_deliver_files\",\"execute\",\"bot_deliver_files\"]}\n{\"case\":\"reconcile\",\"actual\":\"inline\",\"preferred\":\"independent\",\"seconds\":16.9,\"tools\":[\"execute\",\"read_file\",\"read_file\",\"execute\",\"write_file\",\"bot_deliver_files\"]}\n{\"case\":\"code-fix\",\"actual\":\"inline\",\"preferred\":\"independent\",\"seconds\":14.7,\"tools\":[\"ls\",\"read_file\",\"read_file\",\"execute\",\"write_file\",\"edit_file\",\"edit_file\",\"execute\"]}\n{\"case\":\"reconciliation-cli\",\"actual\":\"inline\",\"preferred\":\"independent\",\"seconds\":126.6,\"tools\":[\"ls\",\"read_file\",\"read_file\",\"read_file\",\"execute\",\"write_file\",\"execute\",\"write_file\",\"execute\",\"edit_file\",\"edit_file\",\"execute\",\"write_file\",\"read_file\",\"write_file\",\"edit_file\",\"edit_file\",\"execute\",\"execute\",\"execute\",\"bot_deliver_files\",\"execute\",\"bot_deliver_files\"]}\n{\"case\":\"explicit-inline\",\"actual\":\"inline\",\"preferred\":\"inline\",\"seconds\":6,\"tools\":[\"read_file\",\"read_file\",\"read_file\"]}\n{\"case\":\"explicit-task\",\"actual\":\"independent\",\"preferred\":\"independent\",\"seconds\":8.6,\"tools\":[\"bot_work_create\"]}\n{\"case\":\"background-command\",\"actual\":\"inline\",\"preferred\":\"background\",\"seconds\":15.8,\"tools\":[\"execute\"]}\nRouting evaluation report: <temp>/bot-integration-build-vua0NP/artifacts/routing-1794803639859.json\n",
+      "sha256": "88e05fac6623fa3d2a5c61f7f9e540a51c699f0eb711b223450f03303211be69"
+    }
+  ]
+}

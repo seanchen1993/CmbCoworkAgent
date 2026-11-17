@@ -78,6 +78,40 @@ describe("work Runtime tools", () => {
     expect(f.store.listWorks(f.bot.id).items).toEqual([])
     expect(f.store.recentTasks()).toHaveLength(1)
   })
+  it("offers original inputs only to their independent assignment under its live lease", async () => {
+    const f = fixture()
+    await tick()
+    const mainTools = createBotWorkTools(f.source, () => f.host, new AbortController().signal)
+    expect(mainTools.some(t => t.name === "bot_work_input")).toBe(false)
+    // A short routing note is enough; the original instruction is host supplied.
+    const create = mainTools.find(t => t.name === "bot_work_create")!
+    const response = await create.invoke({ type: "tool_call", id: "dispatch", name: create.name,
+      args: { requestKey: "dispatch", title: "Draft" } }) as { content: string }
+    const receipt = JSON.parse(response.content).receipt
+    expect(receipt.task.message).toBe("Draft")
+    await tick()
+    const input = createBotWorkTools(receipt.task, () => f.host, new AbortController().signal)
+      .find(t => t.name === "bot_work_input")!
+    expect(input).toBeDefined()
+    const call = { type: "tool_call" as const, id: "read-source", name: input.name, args: {} }
+    const result = await input.invoke(call) as { content: string }
+    expect(JSON.parse(result.content).receipt.messages[0].text).toBe(f.source.message)
+    const correction = f.store.enqueue({ botId: f.bot.id, requestId: "long-correction", message: "X".repeat(5000) + "Keep originals." })
+    f.store.injectIntoRun(correction.id, f.source.id)
+    const follow = f.store.sendWork(
+      { taskId: f.source.id, callId: "follow", key: "follow" }, receipt.work.id, "Apply correction"
+    )
+    const followCall = { ...call, id: "read-correction", args: { assignmentId: follow.id, messageIndex: 1, offset: 4000 } }
+    expect((await input.invoke(followCall) as { status: string }).status).toBe("error")
+    f.store.injectIntoRun(follow.id, receipt.task.id)
+    const applied = await input.invoke(followCall) as { content: string }
+    expect(JSON.parse(applied.content).receipt.messages[0].text).toBe(correction.message.slice(4000))
+    const child = await input.invoke(call, { configurable: { cmb_subagent_owner_tool_call_id: "temporary" } }) as { status: string }
+    expect(child.status).toBe("error")
+    await f.host.stop()
+    const stale = await input.invoke(call) as { status: string }
+    expect(stale.status).toBe("error")
+  })
   it("reads only owned tasks under the live source lease, without enqueueing work", async () => {
     let queries = 0
     const f = fixture({

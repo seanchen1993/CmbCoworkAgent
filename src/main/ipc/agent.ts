@@ -5509,6 +5509,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           {
             id: messageId,
             beforeInject: message.beforeInject,
+            onInjected: message.onInjected,
+            onDiscarded: message.onDiscarded,
             content: prepared.content,
             ...(peerFeedback
               ? { peerFeedback }
@@ -8313,7 +8315,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               backgroundCommandLifecycle: runExecutionContext.backgroundCommandLifecycle,
               foregroundCommandLifecycle: runExecutionContext.foregroundCommandLifecycle,
               extraSystemPrompt: runExecutionContext.extraSystemPrompt,
+              botCommunication: runExecutionContext.source === "bot" && runExecutionContext.botCommunication,
               additionalTools: runExecutionContext.additionalTools,
+              foregroundWorkBudget: runExecutionContext.foregroundWorkBudget,
               toolConcurrencyQueueId: runExecutionContext.toolConcurrencyQueueId,
               userInputWithoutToolLock:
                 runExecutionContext.source === "bot" && runExecutionContext.userInputWithoutToolLock,

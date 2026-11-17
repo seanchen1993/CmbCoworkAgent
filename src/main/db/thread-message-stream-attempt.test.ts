@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import * as db from "./index"
 import type { Message } from "../types"
@@ -34,6 +35,42 @@ const message = (id: string, content: string, extra: Partial<Message> = {}): Mes
 })
 
 describe("durable stream attempt rollback", () => {
+  it("reserves the writer before capturing stream preimages while another connection writes", () => {
+    const id = "concurrent-stream"
+    db.createThread(id)
+    db.upsertThreadMessages(id, [message("reply", "before")])
+    const contender = new DatabaseSync(storage.path, { timeout: 0 })
+    const attempt = new db.ThreadMessageStreamAttempt(id)
+    const capture = attempt.capture.bind(attempt)
+    let contested = false
+    const spy = vi.spyOn(attempt, "capture").mockImplementation((...args) => {
+      capture(...args)
+      // A worker can commit to an unrelated row between our preimage SELECT
+      // and transcript UPDATE. A deferred transaction then fails to upgrade
+      // its WAL snapshot regardless of busy_timeout.
+      if (!contested) {
+        contested = true
+        try {
+          contender.prepare("UPDATE threads SET updated_at=updated_at+1 WHERE thread_id=?").run(id)
+        } catch (error) {
+          expect(String(error)).toContain("database is locked")
+        }
+      }
+    })
+    try {
+      expect(() => db.upsertThreadMessages(id, [{ ...message("reply", "after"), content_mode: "snapshot" }], {
+        preserveExistingOrder: true, streamAttempt: attempt
+      })).not.toThrow()
+      expect(contested).toBe(true)
+      expect(db.getThreadMessages(id)[0].content).toBe("after")
+      attempt.rollback()
+      expect(db.getThreadMessages(id)[0].content).toBe("before")
+    } finally {
+      spy.mockRestore()
+      contender.close()
+    }
+  })
+
   it("keeps another thread and a committed earlier attempt intact across repeated failures", () => {
     for (const id of ["attempts", "other-thread"]) db.createThread(id)
     const first = message("same", "completed", {

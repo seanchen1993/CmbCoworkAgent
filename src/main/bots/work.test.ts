@@ -33,7 +33,7 @@ function finish(store: BotStore, id: string) {
 }
 
 describe("durable local independent works", () => {
-  it("executes the Bot brief and retains only source IDs for applied user supplements", () => {
+  it("keeps the visible brief and supplies exact original and applied user inputs", () => {
     const f = fixture()
     const source = f.store.enqueue({
       botId: f.bot.id,
@@ -100,6 +100,9 @@ describe("durable local independent works", () => {
       { taskId: source.id, callId: "create", key: "create" }
     )
     const expected = [source.requestId, first.requestId, second.requestId]
+    expect(f.store.workInputContext(created.task.id)?.messages.map(m => m.text)).toEqual([
+      source.message, first.message, second.message
+    ])
     expect(created.task.message).toBe("Model summary")
     expect(created.task.origin).toMatchObject({ dispatch: "create", sourceMessageIds: expected })
     finish(f.store, created.task.id)
@@ -108,12 +111,15 @@ describe("durable local independent works", () => {
       created.work.id,
       "Different model summary"
     )
+    expect(f.store.workInputContext(sent.id)?.messages.map(m => m.text)).toEqual([
+      source.message, first.message, second.message
+    ])
     expect(sent.message).toBe("Different model summary")
     expect(sent.origin).toMatchObject({ dispatch: "follow_up", sourceMessageIds: expected })
     expect(f.store.getTask(first.id).message).toBe(first.message)
   })
 
-  it("retains introduction supplement references without forwarding the greeting or raw requests", () => {
+  it("forwards introduction supplements but not the greeting", () => {
     const f = fixture(),
       source = f.store.introduce(f.bot.id)!
     f.store.transition(source.id, "running")
@@ -132,6 +138,7 @@ describe("durable local independent works", () => {
       { botId: f.bot.id, operationId: "intro-work", title: "Review", goal: "Summary" },
       { taskId: source.id, callId: "create", key: "create" }
     )
+    expect(f.store.workInputContext(created.task.id)?.messages.map(m => m.text)).toEqual(messages)
     expect(created.task.message).toBe("Summary")
     expect(created.task.origin).toMatchObject({ sourceMessageIds: ["intro-0", "intro-1"] })
     expect(created.task.message).not.toContain(source.message)
@@ -173,6 +180,15 @@ describe("durable local independent works", () => {
     expect(created.task.origin).toMatchObject({
       sourceMessageIds: [source.requestId, child.requestId, "context"]
     })
+    const firstPage = f.store.workInputContext(created.task.id)!
+    expect(firstPage.messages.map(m => m.kind)).toEqual(["request", "correction", "reference"])
+    expect(firstPage.messages.map(m => m.text.length)).toEqual([4000, 4000, 4000])
+    expect(firstPage.messages.every(m => m.nextOffset === 4000)).toBe(true)
+    expect(f.store.workInputContext(created.task.id, 2, 4000)?.messages[0].text).toBe("C".repeat(4000))
+    // Later source edits cannot expand the captured request or cross conversation scopes.
+    f.db.run("UPDATE bot_tasks SET thread_id='unrelated' WHERE id=?", [source.id])
+    expect(() => f.store.workInputContext(created.task.id)).toThrow("交办来源不属于")
+    f.db.run("UPDATE bot_tasks SET thread_id=? WHERE id=?", [created.work.parentThreadId, source.id])
     expect(f.store.createWork(input, authority)).toEqual(created)
     expect(f.store.listWorks(f.bot.id).items).toHaveLength(1)
     expect(f.store.getTask(source.id).message).toBe(source.message)
@@ -197,6 +213,31 @@ describe("durable local independent works", () => {
     ).toThrow("所选相关消息不可用")
     expect(f.store.recentTasks()).toEqual(before)
     expect(f.store.listWorks(f.bot.id).items).toHaveLength(0)
+  })
+
+  it("pages a long applied correction under its own assignment, without reading queued or unrelated work", () => {
+    const f = fixture()
+    const source = f.store.enqueue({ botId: f.bot.id, requestId: "initial", message: "Initial request" })
+    f.store.transition(source.id, "running")
+    const created = f.store.createWork(
+      { botId: f.bot.id, operationId: "initial", title: "Review", goal: "Review" },
+      { taskId: source.id, callId: "create", key: "create" }
+    )
+    f.store.transition(created.task.id, "running")
+    f.store.settle(source.id, "completed", null, "Dispatched")
+    const correction = f.store.enqueue({ botId: f.bot.id, requestId: "correction", message: "X".repeat(6000) + "Do not modify source files." })
+    f.store.transition(correction.id, "running")
+    const sent = f.store.sendWork(
+      { taskId: correction.id, callId: "send", key: "send" }, created.work.id, "Apply the correction"
+    )
+    expect(() => f.store.workInputContext(created.task.id, 0, 4000, sent.id)).toThrow("尚未应用")
+    expect(f.store.injectIntoRun(sent.id, created.task.id)).toBe(true)
+    const page = f.store.workInputContext(created.task.id, 0, 4000, sent.id)!
+    expect(page.assignmentId).toBe(sent.id)
+    expect(page.messages[0].text).toBe(correction.message.slice(4000))
+    expect(f.store.workInputContext(created.task.id)?.messages[0].text).toBe(source.message)
+    const unrelated = f.create("other-work")
+    expect(() => f.store.workInputContext(created.task.id, 0, 0, unrelated.task.id)).toThrow("尚未应用")
   })
 
   it("rejects an oversized work follow-up without a receipt or task/version/activity change", () => {

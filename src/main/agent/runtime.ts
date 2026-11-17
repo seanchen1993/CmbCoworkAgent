@@ -1,3 +1,5 @@
+import { BOT_COMMUNICATION_PROMPT } from "./bot-communication-prompt"
+import { createForegroundWorkBudgetMiddleware, type ForegroundWorkBudget } from "./foreground-work-budget"
 import {
   withCoordinatorNotificationDelivery,
   type CoordinatorNotificationDelivery
@@ -652,9 +654,13 @@ function shouldFastRejectActiveWorkflow(
 const toolConcurrencyLocks = new Map<string, AsyncRWLock>()
 const taskConcurrencyLimiters = new Map<string, AsyncSemaphore>()
 
-// These bounded Host/SQLite observations never access workspace files. They must remain
-// callable while another Bot conversation owns the workspace gate and awaits approval.
-const BOT_WORK_OBSERVATION_TOOLS = new Set(["bot_work_list", "bot_work_read", "bot_work_search"])
+// Host coordination must not wait for an executor that holds a workspace gate
+// (possibly awaiting human approval). Executors retain their own file/browser locks.
+const BOT_WORK_COORDINATION_TOOLS = new Set([
+  "bot_work_list", "bot_work_read", "bot_work_search", "bot_work_projects",
+  "bot_work_create", "bot_work_send", "bot_work_continue", "bot_work_complete",
+  "bot_feature_list", "bot_feature_read", "bot_feature_update"
+])
 
 function getToolConcurrencyLock(queueId: string): AsyncRWLock {
   let lock = toolConcurrencyLocks.get(queueId)
@@ -726,7 +732,7 @@ function createGradedToolConcurrencyMiddleware(
       if (
         (userInputWithoutToolLock &&
           (toolCall?.name === "bot_send_message" ||
-            (toolCall?.name !== undefined && BOT_WORK_OBSERVATION_TOOLS.has(toolCall.name)) ||
+            (toolCall?.name !== undefined && BOT_WORK_COORDINATION_TOOLS.has(toolCall.name)) ||
             toolCall?.name === "request_user_input" ||
             toolCall?.name === "bot_request_browser_help" ||
             (toolCall?.name === "bot_browser" &&
@@ -2202,6 +2208,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     onTaskSubagentPromptsResolved,
     currentRunMessageQueueOwnerToken,
     onPrimaryModelRequestState,
+    foregroundWorkBudget,
     soloTaskTraceManager,
     actionStationarityTurnId,
     // PR-12 — optional callback fired-and-forgotten by toolErrorMiddleware
@@ -3068,6 +3075,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ...mainToolDenylistMiddleware,
       ...(threadId ? [createTaskMmdMiddleware({ threadId, scope: "main" })] : []),
       createSkillHookContextMiddleware(filesystemBackend),
+      ...(foregroundWorkBudget ? [createForegroundWorkBudgetMiddleware(foregroundWorkBudget)] : []),
       gradedToolConcurrencyMiddleware,
       // Parent-only: observe rejected/recovered task results, and gate the next model
       // after task results are checkpointed. Never share this queue with children.
@@ -3282,6 +3290,7 @@ export function getSystemPrompt(
   workspacePath: string,
   windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated",
   options: {
+    botCommunication?: boolean
     includeBackgroundExec?: boolean
     managedForegroundExec?: boolean
     notifiedBackgroundCommands?: boolean
@@ -3423,13 +3432,14 @@ ${options.silentBackgroundServices ? "For a server/daemon needed during this tas
 
   const memorySection = options.includeMemory !== false ? MEMORY_SYSTEM_PROMPT : ""
   return (
+    (options.botCommunication ? BOT_COMMUNICATION_PROMPT + "\n\n" : "") +
     workingDirSection +
     backgroundExecSection +
     sandboxSection +
-    renderBaseSystemPrompt({
+    (options.botCommunication ? "" : renderBaseSystemPrompt({
       includeSubagents: options.includeSubagents,
       toolStrategy: effectiveToolStrategy
-    }) +
+    })) +
     memorySection
   )
 }
@@ -4600,6 +4610,8 @@ export interface CreateAgentRuntimeOptions {
   worktreeIsolation?: WorkflowWorktreeIsolationBoundary
   /** Extra content appended to the system prompt (e.g. HEARTBEAT.md context) */
   extraSystemPrompt?: string
+  /** Trusted host main-Bot role; never inherited by independent/project executors. */
+  botCommunication?: boolean
   /** Plugin-provided runtime context for skill artifact paths and feature bindings. */
   pluginPromptInject?: string
   /** Optional plugin output directory exposed to hook commands as PLUGIN_OUTPUT_DIR. */
@@ -4767,6 +4779,8 @@ export interface CreateAgentRuntimeOptions {
   onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
   /** Extra tools appended to the runtime tool list (e.g. a workflow subagent's structured_output). */
   additionalTools?: DynamicStructuredTool[]
+  /** Main-chat-only foreground admission; never inherited by child runtimes. */
+  foregroundWorkBudget?: ForegroundWorkBudget
   /** Host-scoped discovery and invocation, inherited by nested runtimes. */
   capabilityService?: McpCapabilityService
   /**
@@ -5401,6 +5415,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // agent would be told the host workspace is its root and write outside its
   // worktree (the sandbox would refuse, so it would just fail confusingly).
   let systemPrompt = getSystemPrompt(fileRoot, windowsSandbox, {
+    botCommunication: options.botCommunication,
     toolStrategy: windowsSandbox === "readonly" ? "standard" : toolStrategy,
     filesystemAccess: options.filesystemAccess,
     blockedToolNames: runtimeBlockedToolNames,
@@ -5425,7 +5440,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const normalizedHarnessAgentmdLoadStatus = Array.isArray(agentmdLoadStatus)
     ? agentmdLoadStatus
     : []
-  const shouldLoadWorkspaceAgentsPrompt = enableAgentsPrompt && !normalizedHarnessAgentsPrompt
+  const shouldLoadWorkspaceAgentsPrompt = enableAgentsPrompt && !normalizedHarnessAgentsPrompt && !options.botCommunication
   let agentsPromptLoader: AgentsPromptLoader | undefined
   let agentsPromptLoadStatusItems: HarnessAgentmdLoadStatusItem[] = []
   if (shouldLoadWorkspaceAgentsPrompt) {
@@ -5481,7 +5496,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     console.log("[Runtime] Loaded Harness AGENTS.md prompt")
   }
   const rawCombinedAgentsPrompt =
-    [agentsPrompt.prompt, normalizedHarnessAgentsPrompt].filter(Boolean).join("\n\n") || undefined
+    [agentsPrompt.prompt, options.botCommunication ? undefined : normalizedHarnessAgentsPrompt].filter(Boolean).join("\n\n") || undefined
   const renderedPluginPromptInject = renderPluginPromptInject(pluginPromptInject)
   const combinedAgentsPrompt = rawCombinedAgentsPrompt
     ? renderAgentsInstructionsPrompt(rawCombinedAgentsPrompt)
@@ -7081,6 +7096,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     subagentExtraSystemPrompt: taskSubagentExtraSystemPrompt,
     subagentExtraSystemPromptForRestrictedRoles: projectModeTaskSubagentsInheritFullContext,
     mainTodosEnabled:
+      !options.botCommunication &&
       !isCoordinatorMode &&
       (options.allowedToolNames === undefined || options.allowedToolNames.includes("write_todos")),
     mainFilesystemEnabled:
@@ -7145,6 +7161,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     threadId: options.threadId,
     currentRunMessageQueueOwnerToken: options.currentRunMessageQueueOwnerToken,
     onPrimaryModelRequestState: options.onPrimaryModelRequestState,
+    foregroundWorkBudget: options.foregroundWorkBudget,
     onTurnCompletionRecovery: options.onTurnCompletionRecovery,
     checkFinalDelivery: options.checkFinalDelivery,
     openingReplyReminder: options.openingReplyReminder,

@@ -1070,22 +1070,10 @@ const liveSubmitPreparingThreads = new Set<string>()
 // is active. This short-lived guard atomically claims the current composer
 // payload while @file attachments are being resolved.
 const queuedDraftPreparingThreads = new Set<string>()
-/**
- * Temporarily hide the current-run "引导" action from the queue UI.
- *
- * The underlying main-process queue, durable acknowledgement, reconciliation,
- * and IPC plumbing are intentionally retained so the implementation can be
- * repaired without rebuilding the feature. The action remains disabled because
- * a guided message can currently produce incorrect live transcript boundaries
- * in Team/Coordinator mode (for example, duplicating or attaching assistant
- * output to the wrong visible turn). Ordinary FIFO queueing and automatic
- * post-run draining do not depend on this control and remain available.
- *
- * Re-enable only after the guided user turn and its following assistant turn are
- * rendered as separate, non-duplicated messages in Solo, Team, and Workflow,
- * including persistence/reload verification for the same transcript.
- */
-const CURRENT_RUN_GUIDE_UI_ENABLED = false
+/** Same-run corrections are acknowledged durably and rendered through the ordered
+ * stream boundary. Solo/Team/Workflow live + reload coverage lives in
+ * tests/bots-private-group-app.spec.ts. Stop remains an explicit separate action. */
+const CURRENT_RUN_GUIDE_UI_ENABLED = true
 const QUEUE_MODEL_REQUIRED_ERROR = "请先在下方选择模型后再发送消息。"
 const QUEUE_MODEL_MISSING_ERROR = "当前线程模型不存在，请重新选择模型。"
 const QUEUE_MODEL_UNAVAILABLE_ERROR = "当前模型不可用，请先在模型配置中设置 API 密钥。"

@@ -103,12 +103,12 @@ function testMiddlewareBeforeSummarizationAndHITL(): void {
   // context management): the queue middleware immediately precedes it in the array.
   assertMatches(
     after,
-    /createCurrentRunMessageQueueMiddleware\(\s*currentRunMessageQueueOwnerToken,\s*onPrimaryModelRequestState\s*\),\s*\n\s*mainSummarizationController\.middleware/,
+    /createCurrentRunMessageQueueMiddleware\(\s*currentRunMessageQueueOwnerToken,\s*onPrimaryModelRequestState\s*\),\s*\n\s*createCmbSummarizationMiddleware\(mainSummarizationOptions\)/,
     "queue middleware immediately precedes summarization on the main stack"
   )
   assertIncludes(
     runtime,
-    "const mainSummarizationController = createCmbContextController(mainSummarizationOptions)",
+    "createCmbSummarizationMiddleware(mainSummarizationOptions)",
     "the shared context controller owns the main-agent summarization policy"
   )
   // afterModel must sit before HITL in the array so an approval interrupt preempts
@@ -1088,13 +1088,13 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   )
   assertSourceOrder(
     transcriptFlushBody,
-    "appendThreadMessageTextDelta(threadId, messages[0])",
-    "upsertThreadMessages(threadId, messages, { preserveExistingOrder })",
+    "appendThreadMessageTextDelta(threadId, messages[0], streamAttempt)",
+    "upsertThreadMessages(threadId, messages, {\n        preserveExistingOrder,\n        streamAttempt\n      })",
     "content-only batches append fragments before the structural fallback"
   )
   assertSourceOrder(
     transcriptFlushBody,
-    "upsertThreadMessages(threadId, messages, { preserveExistingOrder })",
+    "upsertThreadMessages(threadId, messages, {\n        preserveExistingOrder,\n        streamAttempt\n      })",
     "} catch (error) {",
     "both incremental persistence paths run inside the buffer-restoration boundary"
   )
@@ -1789,13 +1789,13 @@ function testInjectedMessagesUseNormalUserTurnEffects(): void {
   const listenerBody = threadContext.slice(listenerStart, listenerStart + 2200)
   assertIncludes(
     listenerBody,
-    "threadActions.appendMessage({",
-    "injected user messages use appendMessage rather than mutating messages directly"
+    "pendingHookLogBucketOpensRef",
+    "injected user messages retain hook-log effects without racing the stream"
   )
   assertNotIncludes(
     listenerBody,
-    "messages: [...state.messages, ...injectedUserMessages]",
-    "injection listener does not bypass user-turn side effects with a direct append"
+    "threadActions.appendMessage({",
+    "queue acknowledgement cannot append user turns ahead of ordered stream events"
   )
 }
 

@@ -117,6 +117,7 @@ const fixture = vi.hoisted(() => ({
   groupCheckpoint: vi.fn<() => string | undefined>(() => undefined),
   continuationFiles: vi.fn<() => BotDeliveredFile[]>(() => []),
   commandResults: vi.fn<() => Record<string, unknown>[]>(() => []),
+  workInputContext: vi.fn(() => ({ messages: [{ index: 0, id: "original", role: "user", text: "Only inspect; never modify files.", offset: 0, length: 33 }], totalMessages: 1 })),
   stoppedTasks: vi.fn<() => BotStoppedTaskContext[]>(() => []),
   checkpointTuple: vi.fn(),
   workTools: vi.fn<(...args: unknown[]) => string[]>(() => ["works"]),
@@ -381,6 +382,7 @@ function port(
         stoppedTaskContext: fixture.stoppedTasks,
         associatedWorks: () => ({ items: [], hasMore: false }),
         workStatusContext: () => ({ items: [], hasMore: false }),
+        workInputContext: fixture.workInputContext,
         publishImFiles: vi.fn(),
         publishGroupFiles: fixture.publishFiles,
         publishGroupMessage: fixture.publishMessage,
@@ -579,7 +581,7 @@ describe("Bot Runtime integration", () => {
           name: react!.name,
           args: { emoji: "👍", present: true }
         })
-        expect(context.checkFinalDelivery).toBeUndefined()
+        expect(context.checkFinalDelivery?.([])).toBeUndefined()
         context.onFinalAssistant?.({ messageId: "normal-final", finalText: "Reaction added." })
         context.onRunTerminated?.({ outcome: "success", code: "done" })
         return { completion: Promise.resolve() }
@@ -765,18 +767,24 @@ describe("Bot Runtime integration", () => {
       .acquire(emptyRole, { ...task, message: "开始聊天", origin: { kind: "introduction" } })!
       .execute(controller.signal, vi.fn())
   })
-  it("does not enforce setup after the real user supersedes the introduction", async () => {
+  it("does not enforce setup after the real user steers the introduction", async () => {
     const emptyRole = { ...bot, instructions: "" }
     fixture.getBot.mockReturnValue(emptyRole)
+    fixture.steer.mockImplementation(async (request) => {
+      request.message.beforeInject()
+      fixture.hasDirectUserRequest.mockReturnValue(true)
+      return { queued: true }
+    })
     const lease = port().acquire(emptyRole, { ...task, origin: { kind: "introduction" } })!
     fixture.start.mockImplementationOnce(async (_request, _delivery, context) => {
       context.onModelRequestState?.(() => true)
       expect(
         await lease.steer!({ ...task, id: "real-task", requestId: "real-user" }, () => true)
-      ).toBe(false)
+      ).toBe(true)
       expect(
         context.checkFinalDelivery!([
           new HumanMessage({ id: task.requestId, content: "开始聊天" }),
+          new HumanMessage({ id: "real-user", content: "处理实际任务" }),
           new AIMessage("处理你的实际任务。")
         ])
       ).toBeUndefined()
@@ -784,7 +792,7 @@ describe("Bot Runtime integration", () => {
       return { completion: Promise.resolve() }
     })
     expect(await lease.execute(new AbortController().signal, vi.fn())).toEqual({
-      state: "superseded"
+      state: "completed", result: undefined
     })
   })
   it.each(["user", "configured-introduction"])(
@@ -797,7 +805,7 @@ describe("Bot Runtime integration", () => {
           origin: { kind: kind === "user" ? "user" : "introduction" }
         })!
         .execute(new AbortController().signal, vi.fn())
-      expect(fixture.start.mock.calls[0][2].checkFinalDelivery).toBeUndefined()
+      expect(fixture.start.mock.calls[0][2].checkFinalDelivery?.([])).toBeUndefined()
     }
   )
   it.each([false, true])("keeps IM task capabilities and directory across both UI entries (linked=%s)", async (linked) => {
@@ -926,7 +934,7 @@ describe("Bot Runtime integration", () => {
     const [request, , context] = fixture.start.mock.calls[0]
     expect(request).toMatchObject({ threadId: bot.threadId, agentMode: "workflow" })
     expect(context.openingReplyReminder).toBe(true)
-    expect(context.extraSystemPrompt).toContain("Reply first in normal assistant text")
+    expect(context.botCommunication).toBe(true)
     const mirror = (
       fixture.managedDelivery.mock.calls[0][0] as { mirror(threadId: string, event: unknown): void }
     ).mirror
@@ -955,7 +963,7 @@ describe("Bot Runtime integration", () => {
       ]
     })
     expect(fixture.imOpening).not.toHaveBeenCalled()
-    expect(context.remotePolicy).toEqual({ disableScheduler: true, blockedToolNames: ["workflow"] })
+    expect(context.remotePolicy).toEqual({ disableScheduler: true, disableSubagents: true, blockedToolNames: ["workflow", "task"] })
     expect(context.additionalTools).toEqual([
       "works",
       "scoped-memory",
@@ -982,7 +990,7 @@ describe("Bot Runtime integration", () => {
         .execute(new AbortController().signal, vi.fn())
     ).resolves.toMatchObject({ state: "completed" })
     const desktop = fixture.start.mock.calls[1][2]
-    expect(desktop.remotePolicy).toEqual({ disableScheduler: true, blockedToolNames: ["workflow"] })
+    expect(desktop.remotePolicy).toEqual({ disableScheduler: true, disableSubagents: true, blockedToolNames: ["workflow", "task"] })
     expect(fixture.memorySnapshot).toHaveBeenCalled()
     expect(fixture.browserTools).toHaveBeenCalled()
   })
@@ -1026,7 +1034,7 @@ describe("Bot Runtime integration", () => {
     try {
       await lease.execute(new AbortController().signal, vi.fn())
       const context = fixture.start.mock.calls[0][2]
-      expect(context.remotePolicy).toEqual({ disableScheduler: true, blockedToolNames: ["workflow"] })
+      expect(context.remotePolicy).toEqual({ disableScheduler: true, disableSubagents: true, blockedToolNames: ["workflow", "task"] })
       expect(context.additionalTools).toContain("owned-browser")
       const browserHelp = fixture.browserTools.mock.calls.at(-1)![6] as (active: boolean, help: { generation: number; instruction: string }) => void
       const help = { generation: 3, instruction: "请确认登录" }
@@ -1192,6 +1200,9 @@ describe("Bot Runtime integration", () => {
       "An independent task returned a host-recorded result"
     )
     expect(context.extraSystemPrompt).toContain("not the user's confirmation")
+    expect(context.extraSystemPrompt).toContain("tools are unavailable")
+    expect(context.extraSystemPrompt).not.toContain("Independent task execution snapshot")
+    expect(context.extraSystemPrompt).not.toContain("bot_work_send")
     expect(fixture.memorySnapshot).not.toHaveBeenCalled()
     expect(fixture.deliveryTools).not.toHaveBeenCalled()
     expect(fixture.workTools).not.toHaveBeenCalled()
@@ -3651,7 +3662,7 @@ describe("Bot Runtime integration", () => {
     expect(JSON.parse(fixture.update.mock.calls.at(-1)![1].metadata).model).toBe("test-model")
   })
   it.each([undefined, "normal", "workflow"])(
-    "blocks new workflows without disabling subagents or changing persisted mode (%s)",
+    "routes main Bot work asynchronously without changing persisted mode (%s)",
     async (mode) => {
       fixture.thread.mockReturnValue({
         metadata: JSON.stringify({ ...metadata(), agentMode: mode })
@@ -3659,8 +3670,8 @@ describe("Bot Runtime integration", () => {
       await port().acquire(bot, task)!.execute(new AbortController().signal, vi.fn())
       const context = fixture.start.mock.calls[0][2]
       expect(context.workflowEnabled).toBeUndefined()
-      expect(context.remotePolicy.blockedToolNames).toEqual(["workflow"])
-      expect(context.remotePolicy.disableSubagents).toBeUndefined()
+      expect(context.remotePolicy.blockedToolNames).toEqual(["workflow", "task"])
+      expect(context.remotePolicy.disableSubagents).toBe(true)
       expect(context.remotePolicy.allowedToolNames).toBeUndefined()
       expect(context.additionalTools).toContain("collaboration")
       expect(context.backgroundCommandLifecycle).toHaveProperty("settled")
@@ -3679,7 +3690,7 @@ describe("Bot Runtime integration", () => {
       expect(fixture.start.mock.calls.at(-1)![2].workflowInternalNotification).toBe(
         origin.kind === "notification"
       )
-      expect(fixture.start.mock.calls.at(-1)![2].remotePolicy.blockedToolNames).toEqual(["workflow"])
+      expect(fixture.start.mock.calls.at(-1)![2].remotePolicy.blockedToolNames).toEqual(origin.kind === "user" ? ["workflow", "task"] : ["workflow"])
     }
   })
   it("does not invent a model when no configured model is available", () => {
@@ -4015,6 +4026,7 @@ describe("Bot Runtime integration", () => {
       expect(prompt).toContain("Use bot_send_message")
       expect(prompt).not.toContain("Use normal assistant replies")
     } else expect(prompt).toContain("Use normal assistant replies")
+    if (origin.kind !== "user") {
     expect(prompt).toContain("Match the depth the user requested")
     expect(prompt).toContain("check each requested acceptance criterion")
     expect(prompt).toContain("without a test wrapper changing its arguments")
@@ -4027,6 +4039,10 @@ describe("Bot Runtime integration", () => {
     expect(prompt).not.toContain("always give a short answer")
     expect(prompt).not.toContain("self-tests prove completion")
     expect(prompt).toContain(inGroup ? "shared group workspace" : "private Bot workspace")
+    } else {
+      expect(fixture.start.mock.calls[0][2].botCommunication).toBe(true)
+      expect(prompt).toContain("Working directory for short local actions")
+    }
     expect(fixture.memoryTools).toHaveBeenCalledWith(
       bot,
       expect.anything(),
@@ -4058,6 +4074,12 @@ describe("Bot Runtime integration", () => {
     if (inGroup) expect(prompt).not.toContain("Memory tools, when enabled")
     if (origin.kind === "schedule") expect(prompt).toContain("reply exactly BOT_ROUTINE_SILENT")
     else expect(prompt).not.toContain("reply exactly BOT_ROUTINE_SILENT")
+    if (origin.kind === "user") {
+      expect(prompt).toContain("browser-help tool")
+      expect(prompt).toContain("queued uploads are not confirmed delivery")
+      expect(prompt).toContain("Do not ask for passwords")
+      return // execution instructions are tested on executor turns below
+    }
     expect(prompt).toContain("call bot_request_browser_help")
     expect(prompt).toContain("Use bot_deliver_files")
     if (origin.kind === "discussion") {
@@ -4074,9 +4096,7 @@ describe("Bot Runtime integration", () => {
     expect(prompt).toContain("never simulate an action or predict its result")
     expect(prompt).toContain("calculations that need no external action can be answered directly")
     expect(prompt).toContain("Never ask for passwords")
-    if (origin.kind === "user")
-      expect(prompt).toContain("Before tools for substantive work")
-    else expect(prompt).not.toContain("Before tools for substantive work")
+    expect(prompt).not.toContain("Before tools for substantive work")
   })
   it.each(["completed", "failed", "outcome_unknown"] as const)(
     "notifies user-facing peer integrations (%s), not private nested handoffs",
@@ -4345,7 +4365,7 @@ describe("Bot Runtime integration", () => {
     })
     const [request, , context] = fixture.start.mock.calls[0]
     expect(request).toMatchObject({ threadId: "t", agentMode: "workflow", modelId: "test-model" })
-    expect(context.checkFinalDelivery).toBeUndefined()
+    expect(context.checkFinalDelivery?.([])).toBeUndefined()
     expect(context).toMatchObject({
       source: "bot",
       allowTrustedTransportSkillMarker: true,
@@ -4766,7 +4786,7 @@ describe("Bot steering uses the original runtime", () => {
     expect((await running).state).toBe("completed")
     lease.release()
   })
-  it("accepts same-room user input only while that group's actual question waits", async () => {
+  it("accepts same-room corrections at a safe boundary and keeps approvals separate", async () => {
     const groupTask: BotTask = {
       ...task,
       threadId: "group-g-a",
@@ -4804,11 +4824,11 @@ describe("Bot steering uses the original runtime", () => {
       }
     }
     const inject = vi.fn(() => true)
-    expect(await lease.steer!(next, inject)).toBe(false)
+    expect(await lease.steer!(next, inject)).toBe(true)
     const wait = { id: "question", kind: "user_input" as const, threadId: groupTask.threadId }
     await context.interactionWaitHooks!.onWaitStart(wait)
     // A pending approval alone is not a question and cannot be dismissed by chat.
-    expect(await lease.steer!(next, inject)).toBe(false)
+    expect(await lease.steer!(next, inject)).toBe(true)
     fixture.pendingQuestion.mockReturnValue({ ...question, threadId: groupTask.threadId })
     for (const foreign of [
       { ...next, botId: "other" },
@@ -4829,7 +4849,7 @@ describe("Bot steering uses the original runtime", () => {
     expect(fixture.cancelCommands).not.toHaveBeenCalled()
     expect(fixture.cancelWorkers).not.toHaveBeenCalled()
     await context.interactionWaitHooks!.onWaitEnd(wait)
-    expect(await lease.steer!(next, inject)).toBe(false)
+    expect(await lease.steer!(next, inject)).toBe(true)
     context.onRunTerminated?.({ outcome: "success", code: "done" })
     finish()
     expect((await pending).state).toBe("completed")
@@ -4894,13 +4914,14 @@ describe("Bot steering uses the original runtime", () => {
     expect(interrupt).not.toHaveBeenCalled()
     expect(fixture.answerQuestion).not.toHaveBeenCalled()
     await context.interactionWaitHooks!.onWaitEnd(event)
-    expect(await lease.steer!(task, () => true)).toBe(false)
-    expect(interrupt).toHaveBeenCalledOnce()
+    expect(await lease.steer!(task, () => true)).toBe(true)
+    expect(interrupt).not.toHaveBeenCalled()
+    context.onRunTerminated?.({ outcome: "success", code: "done" })
     finish()
-    expect((await pending).state).toBe("superseded")
+    expect((await pending).state).toBe("completed")
   })
   it.each(["user", "work"] as const)(
-    "leaves a new message queued while interrupting only its own %s model round",
+    "queues consecutive corrections in its own %s run without cancelling it",
     async (kind) => {
       const source =
         kind === "work" ? { ...task, workId: "work", origin: { kind, sourceTaskId: "main" } } : task
@@ -4915,6 +4936,7 @@ describe("Bot steering uses the original runtime", () => {
           })
         }
       })
+      fixture.steer.mockResolvedValue({ queued: true })
       const lease = port().acquire(bot, source)!
       const pending = lease.execute(new AbortController().signal, vi.fn())
       await vi.waitFor(() => expect(context).toBeDefined())
@@ -4930,17 +4952,16 @@ describe("Bot steering uses the original runtime", () => {
       expect(interrupt).not.toHaveBeenCalled()
       expect(
         await lease.steer!({ ...input, id: "new", requestId: "new", message: "Correction" }, inject)
-      ).toBe(false)
-      expect(interrupt).toHaveBeenCalledOnce()
+      ).toBe(true)
+      expect(interrupt).not.toHaveBeenCalled()
       expect(inject).not.toHaveBeenCalled()
-      expect(fixture.steer).not.toHaveBeenCalled()
-      // A second arrival remains queued too, rather than entering the dying graph.
-      expect(await lease.steer!({ ...input, id: "next", requestId: "next" }, inject)).toBe(false)
-      expect(interrupt).toHaveBeenCalledOnce()
-      context.onRunTerminated?.({ outcome: "error", code: "cancelled" })
+      expect(fixture.steer).toHaveBeenCalledOnce()
+      // Both messages remain pending until the same physical run consumes them.
+      expect(await lease.steer!({ ...input, id: "next", requestId: "next" }, inject)).toBe(true)
+      expect(interrupt).not.toHaveBeenCalled()
+      context.onRunTerminated?.({ outcome: "success", code: "done" })
       finish()
-      expect(await pending).toEqual({ state: "superseded" })
-      expect(fixture.summary).not.toHaveBeenCalled()
+      expect((await pending).state).toBe("completed")
       expect(fixture.cancelCommands).not.toHaveBeenCalled()
       expect(fixture.cancelWorkers).not.toHaveBeenCalled()
     }
@@ -4964,10 +4985,10 @@ describe("Bot steering uses the original runtime", () => {
     context.onModelRequestState!(interrupt)
     const inject = vi.fn(() => true)
     expect(await lease.steer!({ ...task, id: "new", requestId: "new" }, inject)).toBe(true)
-    expect(interrupt).toHaveBeenCalledOnce()
+    expect(interrupt).not.toHaveBeenCalled()
     context.onModelRequestState!(undefined)
     expect(await lease.steer!({ ...task, id: "next", requestId: "next" }, inject)).toBe(true)
-    expect(interrupt).toHaveBeenCalledOnce()
+    expect(interrupt).not.toHaveBeenCalled()
     expect(fixture.steer).toHaveBeenCalledTimes(2)
     context.onRunTerminated?.({ outcome: "success", code: "done" })
     finish()
@@ -5368,6 +5389,17 @@ describe("Bot steering uses the original runtime", () => {
     expect(beforeInject).not.toHaveBeenCalled()
     expect(fixture.steer.mock.calls[0][0].message.beforeInject()).toBe(true)
     expect(beforeInject).toHaveBeenCalledOnce()
+  })
+  it("injects host-linked corrections without exposing hidden context as chat text", async () => {
+    fixture.steer.mockResolvedValue({ queued: true })
+    const running: BotTask = { ...task, workId: "work", origin: { kind: "work", sourceTaskId: "main" } }
+    const addition: BotTask = { ...running, id: "revision", requestId: "revision-message", message: "Inspect src",
+      origin: { kind: "work", sourceTaskId: "main", dispatch: "follow_up", sourceContext: { version: 1, references: [] } } }
+    await port().acquire(bot, running)!.steer!(addition, () => true)
+    const message = fixture.steer.mock.calls[0][0].message
+    expect(fixture.workInputContext).toHaveBeenCalledWith("revision")
+    expect(message.content).toContain("Only inspect; never modify files.")
+    expect(message.displayContent).toBe("Inspect src")
   })
   it("does not inject private user messages into peers, routines or another conversation", async () => {
     fixture.pendingQuestion.mockReturnValue(question)

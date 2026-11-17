@@ -1,10 +1,13 @@
 import { waitForBotAppState } from "./support/bot-app-state"
 /** Opt-in real-model App journey. Only synthetic text tasks in a disposable local profile. */
 import assert from "node:assert/strict"
-import { chmod, mkdir, mkdtemp, realpath, rm } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { createRequire } from "node:module"
+import { createServer } from "node:http"
+import { Readable } from "node:stream"
+import { pipeline } from "node:stream/promises"
 import { _electron } from "playwright"
 import { botTestAppOutput } from "./support/bot-test-app"
 import { selectedBotRoutingModel } from "./support/bot-routing-model"
@@ -16,6 +19,41 @@ async function main() {
   await chmod(root, 0o700)
   const workspace = join(root, "活动计划")
   await mkdir(workspace)
+  const autonomous = process.env.BOT_TEST_AUTONOMOUS_ASSIGNMENT === "1"
+  if (autonomous) {
+    await writeFile(join(workspace, "活动约束.md"), "虚构读书会：周日下午三点开始，共90分钟，20人，各带一本书。必须包含签到、分组讨论和分享。预算1000元。\n")
+    await writeFile(join(workspace, "场地说明.md"), "社区阅览室免费，可容纳24人，室内不受天气影响。小公园免费、容量40人，下雨时不可使用。活动中心收费300元、容量30人，有投影。\n")
+    await writeFile(join(workspace, "费用.csv"), "项目,单价,数量\n饮用水,5,20\n材料,120,1\n备用金,100,1\n")
+  }
+  // Observe the real request without replacing model decisions or logging credentials.
+  const wire: Array<{ delegationGuidance: boolean; canCreate: boolean }> = []
+  const relay = createServer(async (req, res) => {
+    try {
+      let raw = ""
+      for await (const chunk of req) raw += chunk
+      const body = JSON.parse(raw)
+      wire.push({
+        delegationGuidance: (body.messages ?? []).some((m: any) =>
+          m.role === "system" && JSON.stringify(m.content).includes("prefer bot_work_create when available")),
+        canCreate: (body.tools ?? []).some((t: any) => t.function?.name === "bot_work_create")
+      })
+      const response = await fetch(config.baseUrl.replace(/\/+$/, "") + "/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + config.apiKey },
+        body: raw,
+        signal: AbortSignal.timeout(120000)
+      })
+      assert.ok(response.body)
+      res.writeHead(response.status, { "content-type": response.headers.get("content-type") ?? "application/json" })
+      await pipeline(Readable.fromWeb(response.body as any), res)
+    } catch {
+      if (!res.headersSent) res.writeHead(502)
+      res.end("real-model relay failed")
+    }
+  })
+  await new Promise<void>((resolve) => relay.listen(0, "127.0.0.1", resolve))
+  const address = relay.address()
+  assert.ok(address && typeof address !== "string")
   const env: Record<string, string> = {}
   for (const name of ["PATH", "HOME", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT"])
     if (process.env[name]) env[name] = process.env[name]!
@@ -36,6 +74,8 @@ async function main() {
       env,
       timeout: 60000
     })
+    app.process().stdout?.resume()
+    app.process().stderr?.resume()
     await app.evaluate(({ BrowserWindow }) => {
       for (const w of BrowserWindow.getAllWindows()) w.webContents.setBackgroundThrottling(false)
     })
@@ -55,13 +95,16 @@ async function main() {
         color: "#168bea",
         modelRef: null
       })
-    }, config)
+    }, { ...config, baseUrl: `http://127.0.0.1:${address.port}/v1`, apiKey: "local-relay-only" })
     // Sending a real user message ends/steers onboarding through beta's ordinary path.
     await page.getByText("Bots", { exact: true }).first().click()
     await page.getByText("自然交办验收", { exact: true }).first().click()
-    const composer = () => page.locator(".bots-conversation [data-bot-composer] textarea").first()
+    const composer = () => page.locator(".bots-conversation").locator('textarea, [role="textbox"][contenteditable="true"]').last()
     const send = async (message: string) => {
-      await composer().fill(message)
+      await composer().click()
+      await composer().press(process.platform === "darwin" ? "Meta+a" : "Control+a")
+      await composer().press("Backspace")
+      await page.keyboard.insertText(message)
       await page.evaluate(
         () =>
           new Promise<void>((resolve) =>
@@ -69,7 +112,7 @@ async function main() {
           )
       )
       await page
-        .locator('.bots-conversation [data-bot-composer] button[type="submit"]')
+        .locator('.bots-conversation button[type="submit"]')
         .last()
         .click()
     }
@@ -89,16 +132,42 @@ async function main() {
         { timeout: 180000 }
       )
     }
-    await send(
-      "请为周日读书会单独建一个任务，后续在任务里继续修改。工作目录用 " +
+    if (autonomous) {
+      await send("先帮我口算2+3，只回复答案。")
+      await waitForBotAppState(page, async (botId) => {
+        const tasks = (await (window as any).api.bots.snapshot()).tasks.filter((t: any) => t.botId === botId)
+        return tasks.some((t: any) => t.message.includes("口算2+3") && t.state === "completed") &&
+          !tasks.some((t: any) => ["queued", "running", "waiting_user"].includes(t.state))
+      }, bot.id, { timeout: 180000 })
+      assert.equal((await page.evaluate(async (id) => (await (window as any).api.bots.works.list(id)).items, bot.id)).length, 0,
+        "a trivial question must remain inline")
+      console.log("PASS real model: simple question answered without creating work")
+    }
+    await send(autonomous
+      ? `请帮我做好周日读书会筹备方案。工作目录是 ${workspace}，先读取活动约束.md、场地说明.md、费用.csv，核对人数和费用；比较三个场地的容量、预算和天气风险，推荐一个，再给出90分钟流程、分工清单和两条应急安排。所有资料均为虚构，只需在回复中给出方案，不写文件、不用浏览器，也不联系任何人。后续我还会调整时间。你处理这些材料期间，我还需要继续跟你聊别的事情。`
+      : "请为周日读书会单独建一个任务，后续在任务里继续修改。工作目录用 " +
         workspace +
         " 目录写一份周日读书会的简短计划。下午三点，社区阅览室，各带一本书。这些信息都是虚构的，只需要文字，不需要文件、浏览器或外部操作。"
     )
+    let autonomouslyCreated = false
+    if (autonomous) {
+      await idle(0)
+      autonomouslyCreated = (await page.evaluate(async (id) =>
+        (await (window as any).api.bots.works.list(id)).items, bot.id)).length > 0
+      // Model discretion is part of the product contract. Record inline handling
+      // honestly, then explicitly request a task so the lifecycle is still tested.
+      if (!autonomouslyCreated) {
+        console.log("OBSERVED real model: chose inline handling; now testing an explicitly requested task")
+        await send("请把刚才的读书会筹备方案放到一个独立任务中，沿用刚才的工作目录。先复核下午三点开始的90分钟计划，再交付简短方案，后面我会继续修改。只回复文字，不写文件。")
+      }
+    }
     await idle(1)
+    assert.ok(wire.some((call) => call.delegationGuidance && call.canCreate),
+      "the real main-chat model request must include both delegation guidance and the work tool")
     const list = () =>
       page.evaluate(async (id) => (await (window as any).api.bots.works.list(id)).items, bot.id)
     const first = await list()
-    assert.equal(first.length, 1, "explicit independent-task request must create exactly one work")
+    assert.equal(first.length, 1, "the assignment should use one independent task")
     const work = first[0]
     const checkReturned = async (count: number, time: RegExp) => {
       const data = await page.evaluate(
@@ -130,7 +199,9 @@ async function main() {
     assert.equal(work.workspace.kind, "directory")
     assert.equal(work.workspace.path, await realpath(workspace))
     assert.equal(work.state, "active", "agent reply must not mark business completion")
-    console.log("PASS App: requested independent task created in the selected directory")
+    console.log(autonomouslyCreated
+      ? "PASS real model: nontrivial natural request delegated without asking for an independent task"
+      : "PASS App: requested independent task created in the selected directory")
     await send("把刚才的计划改到下午四点，增加十分钟的签到，只回复简短计划。")
     await idle(2)
     await checkReturned(2, /四点|4[:：]00|16[:：]00|下午\s*4/)
@@ -237,6 +308,8 @@ async function main() {
     throw error
   } finally {
     await app?.close()
+    relay.closeAllConnections()
+    await new Promise<void>((resolve) => relay.close(() => resolve()))
     await rm(root, { recursive: true, force: true })
     console.log("Cleaned isolated real-model profile and synthetic tasks")
   }

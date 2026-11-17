@@ -1904,36 +1904,41 @@ export class ElectronIPCTransport implements UseStreamTransport {
                 }
               })
             }
-            if (
-              data.completedAssistantProviderIdless === true &&
-              completedAssistantContent
-            ) {
-              this.rememberMainAssistantProviderIdentity(messageIndex, {
-                providerSourceId: completedAssistantId,
-                providerOccurrence: 1
-              })
-              this.pendingIdlessCompletedAssistantRoute = {
-                stableId: completedAssistantId,
-                messageIndex,
-                content: completedAssistantContent
+            if (completedAssistantContent !== undefined) {
+              if (data.completedAssistantProviderIdless === true) {
+                this.rememberMainAssistantProviderIdentity(messageIndex, {
+                  providerSourceId: completedAssistantId,
+                  providerOccurrence: 1
+                })
+                this.pendingIdlessCompletedAssistantRoute = {
+                  stableId: completedAssistantId,
+                  messageIndex,
+                  content: completedAssistantContent
+                }
               }
+              const identity = this.mainAssistantProviderIdentityByIndex.get(messageIndex)
               this.mainAssistantTextByMessageId.set(
                 completedAssistantId,
                 completedAssistantContent
               )
               this.rememberEmittedMessage(completedAssistantId)
+              // The durable boundary can precede the provider's final stream chunk.
+              // Seed an authoritative snapshot (never a text delta) before users,
+              // including providers that reuse one id across several completions.
               events.push({
-                event: "messages",
-                data: [
-                  {
+                event: "custom",
+                data: {
+                  type: "coordinator_ai_snapshot_message",
+                  assistantMessage: {
                     id: completedAssistantId,
                     type: "ai",
                     content: completedAssistantContent,
-                    provider_source_id: completedAssistantId,
-                    provider_occurrence: 1
-                  },
-                  { langgraph_node: "agent" }
-                ]
+                    ...(identity ? {
+                      provider_source_id: identity.providerSourceId,
+                      provider_occurrence: identity.providerOccurrence
+                    } : {})
+                  }
+                }
               })
             }
           }

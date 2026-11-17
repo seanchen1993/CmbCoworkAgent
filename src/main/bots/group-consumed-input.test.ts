@@ -22,6 +22,7 @@ function room() {
 // Ordinary group answers join a live run. The production adapter does not
 // defer this owner, so this fixture never manufactures a queued checkpoint.
 async function runningGroupInput() {
+  let holdSupplement = false
   const f = room()
   let finish!: () => void
   const pending = new Promise<void>(resolve => { finish = resolve })
@@ -43,7 +44,7 @@ async function runningGroupInput() {
     onAvailable: () => () => {},
     acquire: (_bot, task) => task.id === ownerId ? {
       execute,
-      steer: async (_input, consume) => { const accepted = consume(); if (accepted) waiting(false); return accepted },
+      steer: async (_input, consume) => { if (holdSupplement) return false; const accepted = consume(); if (accepted) waiting(false); return accepted },
       release
     } : null
   })
@@ -58,7 +59,7 @@ async function runningGroupInput() {
   await vi.waitFor(() => expect(f.store.getTask(input.id).injectedInto).toBe(owner.id))
   expect(f.store.getTask(owner.id).state).toBe("running")
   const other = f.store.enqueue({ botId: f.b.id, requestId: "unrelated", message: "Independent task" })
-  return { ...f, host, owner, input, other, execute, finish, release }
+  return { ...f, host, owner, input, other, execute, finish, release, holdSupplement: () => { holdSupplement = true } }
 }
 
 it.each(["selected", "stale-receipt"] as const)("stops the live execution after consuming a group answer (%s)", async mode => {
@@ -87,6 +88,7 @@ it("settles the consumed answer with the live owner without another execution or
 
 it("does not stop the live owner when cancelling an unconsumed later message", async () => {
   const f = await runningGroupInput()
+  f.holdSupplement()
   f.host.sendGroup({ groupId: f.group.id, requestId: "later", text: "Separate follow-up", targetBotIds: [f.owner.botId] })
   const later = f.store.recentTasks().find(t => t.origin.kind === "group" && t.origin.messageId === "later")!
   expect(later.state).toBe("queued")

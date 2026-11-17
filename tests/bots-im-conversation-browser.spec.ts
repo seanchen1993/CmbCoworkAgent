@@ -104,6 +104,10 @@ async function main() {
                     "./BotConversationList",
                     "./BotPanelDivider",
                     "./BotWorkPanel",
+                    "./BotWorkHeader",
+                    "./BotWorkAttention",
+                    "./BotTaskBrowser",
+                    "./BotBrowserHelpCard",
                     "./BotFeaturePanel",
                     "./BotMemoryPanel",
                     "./BotExecutionDetailsToggle",
@@ -434,9 +438,11 @@ async function main() {
     )
     const details = page.getByLabel("招乎群详情", { exact: true })
     await details.getByRole("heading", { name: "群内任务" }).waitFor()
-    await details.getByRole("button", { name: "返回群聊", exact: true }).waitFor()
+    const taskHeader = page.locator(".bot-task-toolbar")
+    await taskHeader.getByRole("button", { name: "返回群主对话", exact: true }).waitFor()
     assert.equal(await details.getByText("返回主对话", { exact: true }).count(), 0)
-    await details.getByRole("button", { name: "在对话模式打开", exact: true }).click()
+    await taskHeader.getByRole("button", { name: "任务更多操作", exact: true }).click()
+    await page.getByRole("button", { name: "在对话模式打开", exact: true }).click()
     const ordinary = page.getByTestId("ordinary-workbench")
     await ordinary.waitFor()
     await ordinary.getByText("招乎T · 产品协作群", { exact: true }).waitFor()
@@ -449,10 +455,10 @@ async function main() {
     await page.screenshot({ animations: "disabled", path: join(artifacts, "bot-im-task-ordinary-workbench.png") })
     await ordinary.getByRole("button", { name: "返回群内任务", exact: true }).click()
     await page.getByTestId("private-conversation").getByText("任务对话：演示准备清单").waitFor()
-    await details.getByRole("button", { name: "返回群聊", exact: true }).waitFor()
+    await taskHeader.getByRole("button", { name: "返回群主对话", exact: true }).waitFor()
     assert.equal(await page.locator('[data-bot-row-key="im:group-a"]').getAttribute("data-selected"), "true")
-    await details.getByRole("button", { name: "完成任务", exact: true }).click()
-    await details.getByRole("button", { name: "继续处理", exact: true }).waitFor()
+    await taskHeader.getByRole("button", { name: "完成任务", exact: true }).click()
+    await taskHeader.getByRole("button", { name: "继续处理", exact: true }).waitFor()
     await page.screenshot({
       animations: "disabled",
       path: join(artifacts, "bot-im-task-scope.png")
@@ -464,9 +470,9 @@ async function main() {
       )
     )
     await details.getByRole("button", { name: "电脑", exact: true }).click()
-    await details.getByRole("button", { name: "继续处理", exact: true }).click()
-    await details.getByRole("button", { name: "完成任务", exact: true }).waitFor()
-    await page.getByRole("button", { name: "← 产品协作群", exact: true }).click()
+    await taskHeader.getByRole("button", { name: "继续处理", exact: true }).click()
+    await taskHeader.getByRole("button", { name: "完成任务", exact: true }).waitFor()
+    await taskHeader.getByRole("button", { name: "返回群主对话", exact: true }).click()
     await page.getByLabel("产品协作群消息记录").waitFor()
     await unread("group-a").waitFor({ state: "detached" })
     await page.evaluate(() => {
@@ -948,7 +954,7 @@ async function main() {
     await page.getByText("接入已解除，历史消息仍可查看", { exact: true }).waitFor()
     await page.getByRole("button", { name: "查看独立任务", exact: true }).first().click()
     await page.getByTestId("private-conversation").getByText("任务对话：演示准备清单").waitFor()
-    await details.getByRole("button", { name: "返回群聊", exact: true }).click()
+    await page.locator(".bot-task-toolbar").getByRole("button", { name: "返回群主对话", exact: true }).click()
     await page.getByLabel("产品协作群消息记录").waitFor()
     assert.equal(
       await page.locator('[data-bot-row-key="im:group-a"]').getAttribute("data-selected"),
@@ -1140,7 +1146,7 @@ async function main() {
     )
     await page.getByTestId("private-conversation").getByText("任务对话：演示准备清单").waitFor()
     assert.equal(await deletedRow.count(), 0)
-    await details.getByRole("button", { name: "返回群聊", exact: true }).click()
+    await page.locator(".bot-task-toolbar").getByRole("button", { name: "返回群主对话", exact: true }).click()
     await page
       .getByLabel("产品协作群消息记录")
       .getByText("已整理好本周的项目进展。", { exact: true })

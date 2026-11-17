@@ -7,23 +7,25 @@ import { buildAttachmentMessageParts } from "../../../shared/attachment-message-
 
 const group = { id: "review", memberIds: ["a", "b"] } as BotGroup
 const key = groupDraftKey("local", group.id)
-beforeEach(() => useBotGroupDrafts.setState({ drafts: {} }))
+let values: Map<string, string>
+beforeEach(() => {
+  useBotGroupDrafts.setState({ drafts: {} })
+  values = new Map()
+  // Both draft persistence and composer lifecycle require browser storage;
+  // Node's optional localStorage is not a usable browser fixture.
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+    removeItem: (key: string) => values.delete(key),
+    key: (index: number) => [...values.keys()][index] ?? null,
+    get length() {
+      return values.size
+    }
+  })
+})
 afterEach(() => vi.unstubAllGlobals())
 
 describe("durable group drafts", () => {
-  let values: Map<string, string>
-  beforeEach(() => {
-    values = new Map()
-    vi.stubGlobal("localStorage", {
-      getItem: (key: string) => values.get(key) ?? null,
-      setItem: (key: string, value: string) => values.set(key, value),
-      removeItem: (key: string) => values.delete(key),
-      key: (index: number) => [...values.keys()][index] ?? null,
-      get length() {
-        return values.size
-      }
-    })
-  })
   const file: FileAttachment = {
     filename: "source.csv",
     filePath: "/group/shared/source.csv",

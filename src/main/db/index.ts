@@ -4842,20 +4842,22 @@ export function upsertThreadMessages(
   if (normalizedMessages.length === 0) return 0
 
   let changed = 0
-  const { bucket: messageBucket, create: createMessageBucket } = getOrRepairThreadMessageBucket(
-    database,
-    threadId
-  )
-  let messageCount = Math.max(0, Number(messageBucket.message_count) || 0)
-  let nextOrdinal = Math.max(0, Number(messageBucket.next_ordinal) || 0)
-  const existingRows = getThreadMessageRows(
-    database,
-    threadId,
-    normalizedMessages.map((message) => message.id)
-  )
-
-  database.run("BEGIN")
+  // Stream-attempt capture reads preimages before writing. Reserve this short
+  // transaction's writer first: a worker commit must not invalidate a deferred
+  // WAL read snapshot and abort a successfully executing agent's transcript.
+  database.run("BEGIN IMMEDIATE")
   try {
+    const { bucket: messageBucket, create: createMessageBucket } = getOrRepairThreadMessageBucket(
+      database,
+      threadId
+    )
+    let messageCount = Math.max(0, Number(messageBucket.message_count) || 0)
+    let nextOrdinal = Math.max(0, Number(messageBucket.next_ordinal) || 0)
+    const existingRows = getThreadMessageRows(
+      database,
+      threadId,
+      normalizedMessages.map((message) => message.id)
+    )
     if (createMessageBucket) {
       database.run(
         `INSERT INTO thread_message_buckets (

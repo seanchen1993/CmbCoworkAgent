@@ -46,6 +46,9 @@ export interface CurrentRunQueuedMessage {
   /** Trusted host receipt, called synchronously before durable transcript/model injection.
    * False withdraws a cancelled inbox message. Throws fail the turn before model side effects. */
   beforeInject?: () => boolean
+  /** Trusted host callbacks; never accepted from renderer input. */
+  onInjected?: () => void
+  onDiscarded?: () => void
 }
 
 /** Final assistant reply immediately preceding an afterModel steer. The outer
@@ -404,6 +407,12 @@ export function queueCurrentRunMessage(
   return true
 }
 
+function notifyQueueSettlement(notify: (() => void) | undefined): void {
+  try { notify?.() } catch (error) {
+    console.warn("[Runtime] Current-run receipt settlement failed", error)
+  }
+}
+
 /** Remove a steered message before it is injected (user deleted/un-steered it). */
 export function deleteCurrentRunQueuedMessage(threadId: string, messageId: string): void {
   const withdrawn = withdrawnMessageIds.get(threadId) ?? new Set<string>()
@@ -411,6 +420,9 @@ export function deleteCurrentRunQueuedMessage(threadId: string, messageId: strin
   withdrawnMessageIds.set(threadId, withdrawn)
   const existing = currentRunMessageQueues.get(threadId)
   if (!existing) return
+  for (const message of existing) {
+    if (message.id === messageId) notifyQueueSettlement(message.onDiscarded)
+  }
   const next = existing.filter((message) => message.id !== messageId)
   if (next.length > 0) currentRunMessageQueues.set(threadId, next)
   else currentRunMessageQueues.delete(threadId)
@@ -425,7 +437,9 @@ export function clearCurrentRunMessageQueue(threadId: string, runToken?: string)
     }
     return
   }
+  const pending = currentRunMessageQueues.get(threadId) ?? []
   currentRunMessageQueues.delete(threadId)
+  for (const message of pending) notifyQueueSettlement(message.onDiscarded)
   currentRunMessageQueueOwners.delete(threadId)
   injectedMessageIds.delete(threadId)
   withdrawnMessageIds.delete(threadId)
@@ -470,9 +484,27 @@ async function drainCurrentRunMessagesForInjection(
     }
   | undefined
 > {
-  const queued = drainCurrentRunMessageQueue(threadId, runToken).filter(
-    (message) => message.content.trim() && (message.beforeInject?.() ?? true)
-  )
+  const restoreOrDiscard = (messages: CurrentRunQueuedMessage[]) => {
+    if (isCurrentRunMessageQueueOwner(threadId, runToken)) {
+      const arrivals = currentRunMessageQueues.get(threadId) ?? []
+      currentRunMessageQueues.set(threadId, [...messages, ...arrivals])
+    } else {
+      for (const message of messages) notifyQueueSettlement(message.onDiscarded)
+    }
+  }
+  const pending = drainCurrentRunMessageQueue(threadId, runToken)
+  const queued: CurrentRunQueuedMessage[] = []
+  for (let index = 0; index < pending.length; index++) {
+    const message = pending[index]
+    try {
+      const accepted = Boolean(message.content.trim()) && (message.beforeInject?.() ?? true)
+      if (accepted) queued.push(message)
+      else notifyQueueSettlement(message.onDiscarded)
+    } catch (error) {
+      restoreOrDiscard([...queued, ...pending.slice(index)])
+      throw error
+    }
+  }
   if (queued.length === 0) return undefined
 
   // The notifier durably persists these user turns before acknowledging them to
@@ -486,15 +518,15 @@ async function drainCurrentRunMessagesForInjection(
   } catch (error) {
     // The run can be replaced while durable persistence is in flight. Never
     // restore an old owner's messages into the replacement run's shared queue.
-    if (isCurrentRunMessageQueueOwner(threadId, runToken)) {
-      const arrivalsDuringNotification = currentRunMessageQueues.get(threadId) ?? []
-      currentRunMessageQueues.set(threadId, [...queued, ...arrivalsDuringNotification])
-    }
+    restoreOrDiscard(queued)
     throw error
   }
 
   const injected = injectedMessageIds.get(threadId) ?? new Set<string>()
-  for (const message of queued) injected.add(message.id)
+  for (const message of queued) {
+    injected.add(message.id)
+    notifyQueueSettlement(message.onInjected)
+  }
   injectedMessageIds.set(threadId, injected)
   console.log(
     `[Runtime] Injected ${queued.length} queued current-run message(s) in ${phase} for thread ${threadId}`
@@ -668,7 +700,17 @@ export function createCurrentRunMessageQueueMiddleware(
             }
           }
         }
-        return injection ? { messages: injection.messages, jumpTo: "model" as const } : undefined
+        if (!injection) return undefined
+        // Persist a new object for the renamed reply. The checkpoint saver uses
+        // immutable message-prefix reuse; mutating its previous object alone
+        // keeps the old provider ID on disk and duplicates the reply on reload.
+        const completedSnapshot = completedAssistantMessage
+          ? new AIMessage({ ...lastMessage, content: lastMessage.content, id: lastMessage.id })
+          : undefined
+        return {
+          messages: completedSnapshot ? [completedSnapshot, ...injection.messages] : injection.messages,
+          jumpTo: "model" as const
+        }
       }
     }
   })

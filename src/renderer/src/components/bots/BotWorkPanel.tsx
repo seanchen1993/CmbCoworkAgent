@@ -1,26 +1,12 @@
 import { useRef, useState } from "react"
-import { useAppStore } from "@/lib/store"
-import { Plus, ArrowLeft, ArrowUpRight, Check, RotateCcw } from "lucide-react"
+import { Plus, Search, ChevronDown } from "lucide-react"
+import { botWorkStatus as status } from "@/lib/bot-work-status"
 import type { BotClient } from "../../../../shared/bots/contracts"
-import type { BotWorkItem, BotWorkSummary } from "../../../../shared/bots/work"
+import type { BotWorkItem } from "../../../../shared/bots/work"
 import { FeatureRow, FollowPicker, useBotFeatureTasks } from "./BotFeaturePanel"
 import type { useBotWorks } from "./use-bot-works"
 import { botErrorMessage } from "@/lib/bot-error-message"
 
-function status(work: BotWorkSummary): string {
-  if (work.state === "completed") return "已完成"
-  if (work.executionState === "waiting_user") return "等待你处理"
-  if (work.executionState === "running") return "正在处理"
-  if (work.pendingPeers) return "协作中"
-  if (work.backgroundBusy) return "后台处理中"
-  if (work.executionState === "queued") return "等待执行"
-  if (work.executionState === "completed") return "已回复"
-  if (work.executionState === "failed") return "执行失败"
-  if (work.executionState === "cancelled") return "已停止"
-  if (work.executionState === "outcome_unknown" || work.executionState === "interrupted")
-    return "需要核对结果"
-  return "进行中"
-}
 export function BotWorkPanel({
   client,
   botId,
@@ -30,9 +16,7 @@ export function BotWorkPanel({
   disabled,
   groupId,
   readOnlyGroup = false,
-  heading = "任务",
-  backLabel = "返回主对话",
-  onBack
+  heading = "任务"
 }: {
   client: BotClient
   botId: string
@@ -53,6 +37,8 @@ export function BotWorkPanel({
   const [saving, setSaving] = useState(false),
     [error, setError] = useState<string | null>(null),
     [limit, setLimit] = useState(6)
+  const [searching, setSearching] = useState(false)
+  const [completedOpen, setCompletedOpen] = useState(false)
   const features = useBotFeatureTasks({ client, botId, groupId })
   const [createKind, setCreateKind] = useState<"work" | "feature">("work")
   const canAdd = !disabled && !readOnlyGroup
@@ -60,26 +46,6 @@ export function BotWorkPanel({
     controller.current.current.botId === botId &&
     controller.current.current.audience === (groupId ?? "desktop")
   const operation = useRef<{ fingerprint: string; id: string } | null>(null)
-  const openConversation = async () => {
-    if (!selected || !client.conversations) return
-    const id = selected.id
-    setSaving(true)
-    setError(null)
-    try {
-      const work = await client.conversations.expose(botId, id)
-      await useAppStore.getState().loadThreads()
-      if (
-        !isCurrentAudience() ||
-        controller.current.current.selectedId !== id
-      )
-        return
-      await useAppStore.getState().selectThread(work.threadId)
-    } catch (cause) {
-      if (isCurrentAudience()) setError(botErrorMessage(cause))
-    } finally {
-      setSaving(false)
-    }
-  }
   const command = (fingerprint: string) => {
     if (operation.current?.fingerprint !== fingerprint)
       operation.current = { fingerprint, id: crypto.randomUUID() }
@@ -114,33 +80,6 @@ export function BotWorkPanel({
       setSaving(false)
     }
   }
-  const lifecycle = async () => {
-    if (!client.works || !selected || saving) return
-    const workId = selected.id,
-      action = selected.state === "completed" ? "continue" : "complete"
-    setSaving(true)
-    setError(null)
-    try {
-      await client.works.lifecycle({
-        botId,
-        workId,
-        expectedVersion: selected.version,
-        operationId: command(JSON.stringify([botId, workId, selected.version, action])),
-        action
-      })
-      if (
-        !isCurrentAudience() ||
-        controller.current.current.selectedId !== workId
-      )
-        return
-      operation.current = null
-      void controller.refresh()
-    } catch (cause) {
-      if (isCurrentAudience()) setError(botErrorMessage(cause))
-    } finally {
-      setSaving(false)
-    }
-  }
   if (!client.works) return null
   const priority = new Set(controller.priority.map((item) => item.id))
   const needle = controller.query.trim().toLocaleLowerCase()
@@ -165,63 +104,51 @@ export function BotWorkPanel({
         priority: Boolean(feature.attentionThreadId),
         updatedAt: feature.updatedAt
       }))
-  ].sort((a, b) => Number(b.priority) - Number(a.priority) || b.updatedAt - a.updatedAt)
-  const sourceLabel = selected?.source
-    ? selected.source.transport === "im"
-      ? selected.source.desktopWorkId ? "群内手动交办" : "IM 渠道交办"
-      : "模拟渠道交办"
-    : selected?.conversation?.origin === "existing"
-      ? selected.conversation.ref.kind === "project_session"
-        ? "已有项目会话关联"
-        : selected.conversation.ref.kind === "cloud_session"
-          ? "已有云端会话关联"
-          : "已有会话关联"
-      : "Bot 内新建"
+  ].sort((a, b) => {
+    const done = (entry: typeof a) =>
+      (entry.kind === "work" ? entry.work : entry.feature).state === "completed"
+    return (
+      Number(done(a)) - Number(done(b)) ||
+      Number(b.priority) - Number(a.priority) ||
+      b.updatedAt - a.updatedAt
+    )
+  })
+  const completed = directory.filter(
+    (entry) => (entry.kind === "work" ? entry.work : entry.feature).state === "completed"
+  )
+  const visible = directory.filter(
+    (entry) =>
+      needle ||
+      completedOpen ||
+      (entry.kind === "work" ? entry.work : entry.feature).state !== "completed" ||
+      (entry.kind === "work" && entry.work.id === selected?.id)
+  )
   return (
     <section className="bot-detail-section bot-works" aria-label={heading}>
       <div className="bot-works-heading">
         <h3>{heading}</h3>
-        {!readOnlyGroup && (
+        <div className="bot-task-list-actions">
           <button
-            disabled={!canAdd || saving}
-            onClick={() => setEditing(!editing)}
-            aria-label="添加任务"
-            title="添加任务"
-            aria-expanded={editing}
+            onClick={() => setSearching(!searching)}
+            aria-label="搜索任务"
+            aria-expanded={searching}
+            title="搜索任务"
           >
-            <Plus size={16} />
+            <Search size={15} />
           </button>
-        )}
-      </div>
-      {selected && (
-        <div className="bot-work-current">
-          <span>{status(selected)}</span>
-          <div>
-            <button onClick={() => (onBack ? onBack() : onSelect(null))}>
-              <ArrowLeft size={13} />
-              {backLabel}
+          {!readOnlyGroup && (
+            <button
+              disabled={!canAdd || saving}
+              onClick={() => setEditing(!editing)}
+              aria-label="添加任务"
+              title="添加任务"
+              aria-expanded={editing}
+            >
+              <Plus size={16} />
             </button>
-            {selected.conversation?.state !== "detached" && (
-              <button disabled={disabled || saving} onClick={() => void lifecycle()}>
-                {selected.state === "completed" ? <RotateCcw size={13} /> : <Check size={13} />}{" "}
-                {selected.state === "completed" ? "继续处理" : "完成任务"}
-              </button>
-            )}
-          </div>
-          <div className="bot-work-origin" aria-label="任务来源">
-            <span>来源 · {sourceLabel}</span>
-            {(!selected.source || selected.source.transport === "im") && client.conversations && (
-              <button disabled={saving} onClick={() => void openConversation()}>
-                {selected.conversation?.origin === "existing" ||
-                selected.conversation?.state === "detached"
-                  ? "打开原会话"
-                  : "在对话模式打开"}
-                <ArrowUpRight size={13} aria-hidden="true" />
-              </button>
-            )}
-          </div>
+          )}
         </div>
-      )}
+      </div>
       {editing && canAdd && client.features && (
         <div className="bot-task-picker" role="group" aria-label="任务类型">
           <button aria-pressed={createKind === "work"} onClick={() => setCreateKind("work")}>
@@ -290,16 +217,19 @@ export function BotWorkPanel({
           </div>
         </form>
       )}
-      <input
-        className="bot-work-search"
-        aria-label="搜索任务"
-        placeholder="搜索任务…"
-        value={controller.query}
-        onChange={(e) => {
-          setLimit(6)
-          controller.setQuery(e.target.value)
-        }}
-      />
+      {(searching || controller.query) && (
+        <input
+          autoFocus
+          className="bot-work-search"
+          aria-label="搜索任务"
+          placeholder="搜索任务…"
+          value={controller.query}
+          onChange={(e) => {
+            setLimit(6)
+            controller.setQuery(e.target.value)
+          }}
+        />
+      )}
       {(error || controller.error || features.error) && (
         <p role="alert">
           {error || controller.error || features.error}
@@ -314,7 +244,7 @@ export function BotWorkPanel({
         </p>
       )}
       <div className="bot-work-list" aria-label="全部任务">
-        {directory.slice(0, limit).map((entry) => {
+        {visible.slice(0, limit).map((entry) => {
           if (entry.kind === "feature")
             return (
               client.features && (
@@ -343,25 +273,35 @@ export function BotWorkPanel({
                 {work.activity?.unread ? "● " : ""}
                 {work.title}
               </span>
-              <small>
-                {work.source ? (work.source.transport === "im" ? "IM · " : "模拟渠道 · ") : ""}
-                {status(work)}
-              </small>
+              <small>{status(work)}</small>
             </button>
           )
         })}
       </div>
+      {completed.length > 0 && !needle && (
+        <button
+          className="bot-tasks-completed"
+          aria-expanded={completedOpen}
+          onClick={() => setCompletedOpen(!completedOpen)}
+        >
+          <ChevronDown size={13} className={completedOpen ? "rotate-180" : ""} />
+          已完成{controller.cursor ? "" : ` · ${completed.length}`}
+        </button>
+      )}
       {!directory.length &&
         !controller.loading &&
         !features.loading &&
         !controller.error &&
         !features.error && <p>{needle ? "没有找到匹配的任务。" : "此对话的任务会显示在这里。"}</p>}
-      {(directory.length > limit || controller.cursor) && (
+      {(visible.length > limit || controller.cursor) && (
         <button
           disabled={controller.loading}
           onClick={() => {
-            if (controller.cursor && limit + 40 >= ordinary.length) void controller.more()
-            setLimit((v) => v + 40)
+            if (limit < visible.length) setLimit(Math.min(visible.length, limit + 40))
+            else {
+              if (controller.cursor) void controller.more()
+              setLimit((v) => v + 40)
+            }
           }}
         >
           更多任务

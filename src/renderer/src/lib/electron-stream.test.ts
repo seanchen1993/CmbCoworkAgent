@@ -56,6 +56,37 @@ async function run(events: Event[]) {
 }
 
 describe("Electron stream snapshot regression", () => {
+  it.each(["normal", "coordinator", "workflow"])(
+    "publishes the completed assistant before two corrections even before provider chunks in %s",
+    async (mode) => {
+      const transport = new ElectronIPCTransport() as unknown as {
+        convertToSDKEvents(event: unknown, threadId: string, agentMode: string): Event[]
+      }
+      const convert = (data: unknown) => transport.convertToSDKEvents({ type: "custom", data }, "test", mode)
+      const events = [
+        ...convert({ type: "message_id_alias", fromId: "provider", toId: "stable-first",
+          role: "assistant", currentRunCompleted: true, providerSourceId: "provider", providerOccurrence: 1 }),
+        ...convert({ type: "current_run_user_injected", completedAssistantId: "stable-first",
+          completedAssistantContent: "before", completedAssistantProviderIdless: false,
+          messages: [{ id: "u1", content: "first correction" }, { id: "u2", content: "second correction" }] }),
+        ...convert({ type: "coordinator_ai_snapshot_message", assistantMessage: {
+          id: "stable-first", type: "ai", content: "before", provider_source_id: "provider", provider_occurrence: 1
+        } }),
+        ...convert({ type: "coordinator_ai_snapshot_message", assistantMessage: {
+          id: "provider::cmb-same-role-duplicate:assistant:2", type: "ai", content: "after",
+          provider_source_id: "provider", provider_occurrence: 2
+        } })
+      ]
+      const { stream, frames } = await run(events)
+      expect(stream.messages.map(message => message.content)).toEqual([
+        "before", "first correction", "second correction", "after"
+      ])
+      for (const frame of frames) {
+        const firstUser = frame.findIndex(message => message.id === "u1")
+        if (firstUser >= 0) expect(frame[0].content).toBe("before")
+      }
+    }
+  )
   it.each(["normal", "coordinator"])(
     "keeps mixed plain values identities in %s mode",
     async (mode) => {

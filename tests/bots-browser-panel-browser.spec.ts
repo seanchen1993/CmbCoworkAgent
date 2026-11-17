@@ -8,10 +8,15 @@ import { build } from "esbuild"
 import { _electron } from "playwright"
 import { compile } from "@tailwindcss/node"
 import { Scanner } from "@tailwindcss/oxide"
+import { botWorkBrowserScope } from "../src/shared/bots/work"
 
 declare global {
   interface Window {
     browserPanelFixture: {
+      tasks(selected?: string): void
+      attention(): void
+      openedTasks: string[]
+      previewScopes: string[]
       mode: "refused" | "timeout" | null
       previewFailure: boolean
       controlFailure: boolean
@@ -68,7 +73,7 @@ async function main() {
         resolveDir: resolve("."),
         loader: "tsx",
         contents: `
-import React from 'react';import {createRoot} from 'react-dom/client';import {BotBrowserPanel} from './src/renderer/src/components/bots/BotBrowserPanel';import {BotBrowserHelpCard} from './src/renderer/src/components/bots/BotBrowserHelpCard';
+import React from 'react';import {createRoot} from 'react-dom/client';import {BotBrowserPanel} from './src/renderer/src/components/bots/BotBrowserPanel';import {BotBrowserHelpCard} from './src/renderer/src/components/bots/BotBrowserHelpCard';import {BotTaskBrowser} from './src/renderer/src/components/bots/BotTaskBrowser';import {BotWorkAttention} from './src/renderer/src/components/bots/BotWorkAttention';
 const image=color=>'data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="80" height="60"><rect width="80" height="60" fill="'+color+'"/></svg>');
 const observers=new Set(),visibilityListeners=new Set();let hidden=false;
 const addListener=document.addEventListener.bind(document),removeListener=document.removeEventListener.bind(document);
@@ -83,12 +88,15 @@ const client={hostId:'local',browserPreview:(botId,pageId)=>{state.previewCalls.
 navigateBrowser:async(botId,pageId,url)=>{state.navigationCalls.push({pageId,url});const page=state.pages.find(p=>p.id===pageId);if(state.mode==='refused'){if(state.staleAfterFailure){state.staleAfterFailure=false;state.staleReply={pages:state.pages.map(p=>({...p})),pageId,image:state.images[pageId],control:'human',generation:1}}page.url='chrome-error://chromewebdata/';page.title='故障页 A';if(state.raceRelease){state.raceRelease=false;queueMicrotask(()=>state.releasePreview?.())}throw new Error('page.goto: net::ERR_CONNECTION_REFUSED at '+url+'\\nCall log:\\n  - navigating to "'+url+'", waiting until "load"')}page.url=url;page.title=pageId==='a'?'表单 A 已恢复':'预览 B';if(state.mode==='timeout')throw new Error('page.goto: Timeout 15000ms exceeded.\\nCall log:\\n - navigating to "'+url+'"')},
 giveBackBrowser:async(botId,generation,outcome)=>{state.giveBackCalls++;state.giveBackOutcomes.push({botId,generation,outcome});if(state.controlFailure)throw new Error('浏览器控制权已变化，请重新读取');state.control='bot';state.helpInstruction=undefined;state.generation++},takeOverBrowser:async(botId,pageId)=>{state.takeOverCalls.push({botId,pageId});if(state.holdNextTakeOver){state.holdNextTakeOver=false;await new Promise(resolve=>state.releaseTakeOver=()=>{state.releaseTakeOver=null;resolve()})}if(state.takeOverFailure)throw new Error('旧scope选页失败');if(state.control!=='human')state.generation++;state.control='human';if(pageId)state.selected=pageId},
 operateBrowser:async(botId,action,generation)=>{state.operationCalls.push({botId,action:{...action},generation});if(state.operateFailure)throw new Error(state.operateFailure);if(state.control!=='human'||generation!==state.generation)throw new Error('浏览器控制权已变化，请刷新后重试');if(action.action==='new'){if(action.pageId)throw new Error('新建不能指定旧页面');const id='new-'+(++state.newPages);state.pages.push({id,url:'about:blank',title:'新标签页',canGoBack:false,canGoForward:false});state.images[id]=image('purple');return state.selected=id}const page=state.pages.find(p=>p.id===action.pageId);if(!page)throw new Error('页面已关闭');if(action.action==='close'){state.pages=state.pages.filter(p=>p.id!==page.id);delete state.images[page.id];state.selected=state.pages[0]?.id??null;if(!state.selected){state.control='bot';state.generation++}return state.selected}if(action.action==='back'){page.url='https://a.example.test/previous';page.canGoBack=false;page.canGoForward=true}if(action.action==='forward'){page.url='https://a.example.test/form';page.canGoBack=true;page.canGoForward=false}return page.id}};
-state.previewInFlight=0;state.maxPreviewInFlight=0;Object.defineProperties(state,{observerCount:{get:()=>observers.size},visibilityListenerCount:{get:()=>visibilityListeners.size}});
-const previewTransport=client.browserPreview;client.browserPreview=(...args)=>{state.previewInFlight++;state.maxPreviewInFlight=Math.max(state.maxPreviewInFlight,state.previewInFlight);return previewTransport(...args).finally(()=>state.previewInFlight--)};
+state.previewInFlight=0;state.maxPreviewInFlight=0;state.previewScopes=[];state.openedTasks=[];Object.defineProperties(state,{observerCount:{get:()=>observers.size},visibilityListenerCount:{get:()=>visibilityListeners.size}});
+const previewTransport=client.browserPreview;client.browserPreview=(...args)=>{state.previewScopes.push(args[0]);state.previewInFlight++;state.maxPreviewInFlight=Math.max(state.maxPreviewInFlight,state.previewInFlight);return previewTransport(...args).finally(()=>state.previewInFlight--)};
 const alternateClient={...client};const root=createRoot(document.getElementById('root'));const helpRoot=createRoot(document.getElementById('help'));state.showHelp=value=>helpRoot.render(value?<BotBrowserHelpCard client={client} scopeId='test-bot' instruction='同一请求首条说明'/>:null);
 state.target=(botId,alternate=false)=>root.render(<BotBrowserPanel botId={botId} client={alternate?alternateClient:client}/>);
 state.unmount=()=>root.render(null);
 state.prepareResources=()=>{state.pages=[{id:'resource',url:'https://resource.example.test/',title:'资源回归页'}];state.images={resource:image('orange')};state.selected='resource';state.control='bot';state.helpInstruction=undefined;state.maxPreviewInFlight=0;state.target('resource-bot')};
+const works=[{id:'task-a',botId:'test-bot',title:'整理资料',state:'active',executionState:'running'}, {id:'task-b',botId:'test-bot',title:'核对报表',state:'active',executionState:'waiting_user'}, {id:'mock-text',botId:'test-bot',title:'不支持电脑的任务',state:'active',source:{transport:'mock'}}];
+state.tasks=selected=>root.render(<BotTaskBrowser client={client} botId='test-bot' mainScope='group-scope' works={works} selectedWork={works.find(w=>w.id===selected)} onWork={id=>state.openedTasks.push(id)}/>);
+state.attention=()=>helpRoot.render(<BotWorkAttention client={client} works={[{...works[1],execution:{phase:'waiting_browser',waitingFor:[{kind:'browser',instruction:'请在报表页面确认登录'}]}}]} onWork={id=>state.openedTasks.push(id)}/>);
 state.target('test-bot');`
       },
       bundle: true,
@@ -110,6 +118,8 @@ state.target('test-bot');`
             [
               "src/renderer/src/components/bots/BotBrowserPanel.tsx",
               "src/renderer/src/components/bots/BotBrowserHelpCard.tsx",
+              "src/renderer/src/components/bots/BotTaskBrowser.tsx",
+              "src/renderer/src/components/bots/BotWorkAttention.tsx",
               "src/renderer/src/components/ui/button.tsx",
               "src/renderer/src/components/ui/dialog.tsx",
               "src/renderer/src/components/ui/select.tsx"
@@ -839,6 +849,51 @@ state.target('test-bot');`
     console.log(
       "PASS resources: 50 real viewer/mount/unmount cycles; one capture in flight; observers/listeners released; late capture cannot restart after unmount"
     )
+    // Main Bot proxies a selected task's exact browser owner; no second polling panel.
+    await page.evaluate(() => {
+      const state = window.browserPanelFixture
+      state.previewScopes = []
+      state.tasks()
+    })
+    await page.waitForFunction(() => window.browserPanelFixture.previewScopes.includes("group-scope"))
+    const taskPicker = page.getByRole("combobox", { name: "查看任务浏览器" })
+    await taskPicker.click()
+    assert.equal(await page.getByRole("option", { name: "不支持电脑的任务" }).count(), 0)
+    await page.getByRole("option", { name: "整理资料", exact: true }).click()
+    const taskScope = botWorkBrowserScope("task-a", "test-bot")
+    await page.waitForFunction(scope => window.browserPanelFixture.previewScopes.at(-1) === scope, taskScope)
+    assert.equal(await page.locator(".bot-browser-panel").count(), 1)
+    assert.equal(await page.evaluate(() => window.browserPanelFixture.observerCount), 1)
+    await page.evaluate(() => { window.browserPanelFixture.previewScopes = []; window.browserPanelFixture.visible(true) })
+    await page.waitForFunction(() => window.browserPanelFixture.previewScopes.length > 0)
+    assert.deepEqual(await page.evaluate(() => [...new Set(window.browserPanelFixture.previewScopes)]), [taskScope])
+    await page.getByRole("button", { name: /打开任务/ }).click()
+    assert.equal(await page.evaluate(() => window.browserPanelFixture.openedTasks.at(-1)), "task-a")
+    await page.getByRole("button", { name: "接管浏览器", exact: true }).click()
+    assert.equal(await page.evaluate(() => window.browserPanelFixture.takeOverCalls.at(-1)?.botId), taskScope)
+    await page.getByRole("button", { name: "归还 Bot", exact: true }).click()
+    assert.equal(await page.evaluate(() => window.browserPanelFixture.giveBackOutcomes.at(-1)?.botId), taskScope)
+
+    await page.evaluate(() => window.browserPanelFixture.tasks("task-b"))
+    await page.waitForFunction(scope => window.browserPanelFixture.previewScopes.at(-1) === scope, botWorkBrowserScope("task-b", "test-bot"))
+    assert.equal(await taskPicker.count(), 0, "inside a task, page ownership is fixed")
+    await page.evaluate(() => {
+      const state = window.browserPanelFixture
+      state.unmount()
+      state.control = "human"
+      state.generation = 41
+      state.helpInstruction = "请在报表页面确认登录"
+      state.attention()
+    })
+    await helpCard.getByRole("button", { name: "打开浏览器", exact: true }).click()
+    assert.equal(await page.evaluate(() => window.browserPanelFixture.takeOverCalls.at(-1)?.botId), botWorkBrowserScope("task-b", "test-bot"))
+    await helpCard.getByRole("button", { name: "归还并继续", exact: true }).click()
+    assert.deepEqual(await page.evaluate(() => window.browserPanelFixture.giveBackOutcomes.at(-1)), {
+      botId: botWorkBrowserScope("task-b", "test-bot"), generation: 41, outcome: undefined
+    })
+    assert.equal(await page.evaluate(() => window.browserPanelFixture.observerCount), 0,
+      "main conversation attention card does not start screenshot polling")
+    console.log("PASS task browser: one selected owner/poller, fixed task scope, proxied handoff/return on original lease")
     assert.deepEqual(errors, [])
     console.log(
       "PASS: browser preview recovery, current control metadata, exact-page navigation/new/close, stale leases, frame isolation and hidden capture lifecycle"

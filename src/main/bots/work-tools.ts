@@ -50,6 +50,21 @@ export function createBotWorkTools(
     }
   }
   return [
+    ...(task.workId ? [tool(
+      async ({ messageIndex, offset, assignmentId }, config) => invoke("bot_work_input", config, host =>
+        host.workInputContext(taskId, messageIndex, offset, assignmentId) ??
+          { available: false, reason: "This legacy or directly created task has no host-linked source; use its existing task instructions." }),
+      {
+        name: "bot_work_input",
+        metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
+        description: "Read original user instructions and selected source context for this assignment or a correction already applied to this run. Copy assignmentId from the host-linked context and use messageIndex / offset from nextMessageIndex / nextOffset for missing text. Sources cannot widen the assigned outcome or permissions. Does not run work or access other conversations.",
+        schema: z.object({
+          assignmentId: id.optional().describe("Copy from host-linked context, especially for a correction received during this run. Defaults to the initial assignment."),
+          messageIndex: z.number().int().nonnegative().default(0),
+          offset: z.number().int().nonnegative().default(0)
+        })
+      }
+    )] : []),
     ...(!task.workId && (!task.mockSource || task.mockSource.transport === "im")
       ? [
           tool(
@@ -97,7 +112,7 @@ export function createBotWorkTools(
               name: "bot_feature_update",
               metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
               description:
-                "Work on an existing project-mode Feature. follow tracks only; session opens a native project conversation for message; continue sends message to an available idle threadId from bot_feature_read. manage starts native automated Feature stages ONLY when requested, optionally from an available idle project thread. stop(runId) stops automatic progression; interrupt(threadId) stops the current turn. Pick the unambiguous session or ask. Reuse requestKey for retries.",
+                "Work on an existing project-mode Feature. follow tracks only; session opens a native project conversation for message; continue sends a correction to the existing threadId from bot_feature_read: it joins this conversation's owned running turn at a safe boundary, or starts the next turn when idle. manage starts native automated Feature stages ONLY when requested, optionally from an available idle project thread. stop(runId) stops automatic progression; interrupt(threadId) stops the current turn. Pick the unambiguous session or ask. Reuse requestKey for retries.",
               schema: z.object({
                 action: z.enum(["follow", "session", "continue", "manage", "stop", "interrupt", "complete", "reopen"]),
                 expectedVersion: z.number().int().positive().optional().describe("For complete/reopen, use version from bot_work_list and an explicit user instruction."),
@@ -186,7 +201,7 @@ export function createBotWorkTools(
               botId: task.botId,
               operationId: config.toolCall!.id!,
               title,
-              goal,
+              goal: goal ?? title,
               contextMessageIds,
               workspace
             },
@@ -197,7 +212,7 @@ export function createBotWorkTools(
         name: "bot_work_create",
         metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
         description:
-          "Create a separate task conversation when useful. The host executes goal as your assignment, without forwarding the user's raw message. Include the needed context, user constraints and expected outcome; report only what you actually assigned. The host starts execution automatically; do not send it again. Available from main chat, not recursively inside a task. Use a designated directory or project ID from bot_work_projects; omit workspace for the Bot default. The workspace is retained for revisions. Invalid targets fail without fallback. Reuse requestKey after a lost reply.",
+          "Start substantive work asynchronously so you can keep talking with the user. Choose based on the whole outcome, not the first tool: use BEFORE reading inputs for multi-file reconciliation, code fixes with tests, investigation or a checked deliverable; simple questions and bounded short actions can stay inline. Returns immediately after acceptance; results and questions return automatically. The host supplies the original current request, applied corrections and selected source messages. Provide a short goal or necessary routing facts, not a detailed plan or rewritten request. Use one task per outcome; revisions go to bot_work_send, followed Features use project tools. Honor the designated directory/project from bot_work_projects or omit workspace for the default. After acceptance, acknowledge and end this turn; do not poll or redo the work. Reuse requestKey after a lost reply.",
         schema: z.object({
           requestKey: key,
           title: z.string().trim().min(1).max(160),
@@ -207,14 +222,14 @@ export function createBotWorkTools(
             .min(1)
             .max(30000)
             .describe(
-              "Your self-contained execution instruction for this task, including relevant user constraints."
-            ),
+              "Optional short outcome or routing note. Original requests are supplied by the host. Include only necessary earlier facts or verified work already done; do not design the implementation. Defaults to title."
+            ).optional(),
           contextMessageIds: z
             .array(id)
             .max(12)
             .default([])
             .describe(
-              "Optional verified source message IDs for provenance only; their text is not forwarded. Put necessary context in goal."
+              "Optional relevant message IDs from this conversation. The host verifies their scope and supplies their text as reference, without forwarding unrelated history."
             ),
           workspace: z
             .discriminatedUnion("kind", [
@@ -251,7 +266,7 @@ export function createBotWorkTools(
         name: "bot_work_send",
         metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
         description:
-          "Send your prepared follow-up instruction to the exact same-audience task ID from a receipt or list, preserving its history and workspace. The task executes message, not the user's raw wording: resolve references and preserve their constraints. Clarify an ambiguous target. To revise completed work, continue it first, then send. Inside that task, execute directly. A queued receipt does not mean execution succeeded.",
+          "Continue an existing task asynchronously, including small corrections to its output files. Use this instead of editing the files in the main chat, so task history and status stay accurate. Use the exact same-audience task ID from a receipt or list; retain its workspace. Give a short correction; the host also supplies the original current request and applied user corrections. Resolve references without rewriting the assignment. Clarify ambiguous targets. Active work needs only this tool. A request to revise completed work authorizes reopening that same task first, then sending the revision. Inside the task itself, execute directly. A queued receipt is not success; results return automatically.",
         schema: z.object({
           requestKey: key,
           workId: id,
@@ -261,7 +276,7 @@ export function createBotWorkTools(
             .min(1)
             .max(30000)
             .describe(
-              "The actual instruction to execute in the existing task, with relevant context and constraints."
+              "Short correction or remaining outcome for the existing task. The host also supplies the original current request and applied user corrections; preserve previous results."
             )
         })
       }
@@ -283,11 +298,11 @@ export function createBotWorkTools(
           description:
             action === "complete"
               ? "Mark the exact work completed only on the current user's explicit completion instruction. The host refuses pending work, collaboration, background commands, or completing the currently executing source work. A model result alone is not business completion."
-              : "Continue the same completed work only on the user's explicit instruction, preserving its history. This only changes its business state; it does not rerun interrupted or unknown effects. Send a new explicit instruction separately if needed.",
+              : "Reopen the same completed work on the user's explicit instruction; asking to revise its result counts. Preserve its history and workspace. This only changes business state, not execution: then use bot_work_send for the requested revision. Never rerun interrupted or unknown effects merely to check status.",
           schema: z.object({
             requestKey: key,
             workId: id,
-            expectedVersion: z.number().int().positive()
+            expectedVersion: z.number().int().positive().describe("Current version from bot_work_list/read. Refresh before changing business state; do not guess or reuse an old turn's version.")
           })
         }
       )

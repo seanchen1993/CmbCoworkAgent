@@ -1,0 +1,243 @@
+{
+  "schemaVersion": 1,
+  "runId": "20261116T043245Z-import-ddfcac5f",
+  "kind": "historical-real-model-electron",
+  "startedAt": "2026-11-16T04:32:45.134Z",
+  "displayTimezone": "Asia/Shanghai",
+  "archivedOn": "2026-11-17",
+  "status": "failure-recorded",
+  "exitCode": null,
+  "selectedCases": null,
+  "provenance": {
+    "sourceArtifact": "bot-integration-build-vua0NP/artifacts/routing-1794803565134.json",
+    "originalReportSha256": "ddfcac5fa7ac0d396cf8fed7a1e3a1ec940cb030962d31b84d84cf7d8e625fac",
+    "originalExitCodeUnavailable": true,
+    "originalCaseSelectionUnavailable": true,
+    "note": "历史回收。保留缺失字段；未见 error 不等于证实进程成功。未使用当前源码回填历史版本。"
+  },
+  "build": {
+    "builtAt": "2026-11-16T04:32:16.421Z",
+    "mainSha256": "eb885d085129afaafdbb5ba260864ba0a5464e9c7c3117faaab273b7bc8d8896",
+    "sourceAtBuild": null
+  },
+  "notes": "完成后继续的状态断言失败，保留当次 completed 与预期 active 的差异。",
+  "report": {
+    "model": "deepseek-v4-flash",
+    "fixtureApprovalMode": "yolo (disposable profile only)",
+    "wire": {
+      "main": 26,
+      "guided": 26,
+      "worker": 7,
+      "workerCreate": 0
+    },
+    "results": [
+      {
+        "id": "background-plan",
+        "label": "自然要求后台推进方案",
+        "preferred": "independent",
+        "files": {
+          "活动约束.md": "虚构读书会：周日下午三点开始，共90分钟，20人，各带一本书。必须有签到、分组讨论和分享。预算1000元。\n",
+          "场地说明.md": "社区阅览室免费，可容纳24人，室内不受天气影响。小公园免费、容量40人，下雨不可用。活动中心收费300元、容量30人，有投影。\n",
+          "费用.csv": "项目,单价,数量\n饮用水,5,20\n材料,120,1\n备用金,100,1\n"
+        },
+        "message": "帮我把周日读书会的筹备方案做好，先放后台推进，做好了告诉我，我这边还要继续聊别的事情。工作目录 <test-workspace>/background-plan，资料是活动约束.md、场地说明.md、费用.csv。比较三个场地并推荐一个，核算费用，制定90分钟流程、分工清单和两条应急安排，写入 plan.md，检查总时长和预算后交给我。后面我会调整时间。均为虚构资料，不访问网络或联系别人。",
+        "actual": "independent",
+        "followsPreference": true,
+        "seconds": 51.1,
+        "tools": [
+          "ls",
+          "read_file",
+          "bot_work_create",
+          "write_file",
+          "execute",
+          "bot_deliver_files"
+        ],
+        "mainTools": [
+          "ls",
+          "read_file",
+          "read_file",
+          "read_file",
+          "bot_work_create"
+        ],
+        "reply": "我先确认目录和资料文件，然后把方案交给后台任务执行。\n\n\n读书会方案已交给后台任务执行，正在推进：三个场地对比与推荐、费用核算（预算 1000 元）、90 分钟流程（15:00–16:30）、分工清单、两条应急安排，写好后会按流程时长与预算自检，再交给你。\n\n开始时间已设为唯一待确认项，后面你调整时间只需整体平移时间表，总时长仍 90 分钟。你先聊别的，好了我叫你。\n5\n\n\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"read_file\">\n<｜｜DSML｜｜ parameter name=\"file_path\" string=\"true\">/private<test-workspace>/background-plan/plan.md</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>",
+        "workIds": [
+          "26c80c4b-a26c-470b-89d5-d535022ade84"
+        ],
+        "workspaces": [
+          {
+            "kind": "directory",
+            "path": "/private<test-workspace>/background-plan"
+          }
+        ],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          },
+          {
+            "kind": "work",
+            "state": "completed",
+            "workId": "26c80c4b-a26c-470b-89d5-d535022ade84",
+            "error": null
+          },
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          },
+          {
+            "kind": "work_result",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 1,
+        "responsiveness": {
+          "overlapObserved": true,
+          "reply": "5",
+          "seconds": 1.9
+        }
+      },
+      {
+        "id": "revision",
+        "label": "修改既有方案",
+        "preferred": "continue",
+        "actual": "inline",
+        "followsPreference": false,
+        "seconds": 31.5,
+        "message": "刚才的读书会改成下午四点，仍是90分钟，请更新原来的 plan.md 并交给我。",
+        "tools": [
+          "read_file",
+          "edit_file",
+          "execute",
+          "grep",
+          "bot_deliver_files",
+          "ls",
+          "write_file"
+        ],
+        "mainTools": [
+          "read_file",
+          "edit_file",
+          "edit_file",
+          "edit_file",
+          "edit_file",
+          "execute",
+          "grep",
+          "execute",
+          "bot_deliver_files"
+        ],
+        "reply": "\n\n\n\n\n\n\n\n\n我已按下午四点更新原来的 [plan.md](/private<test-workspace>/background-plan/plan.md)，并把它交付给你（附件为同一份文件的副本，内容逐字节一致）。\n\n时间表整体后移一小时：16:00–16:10 签到、16:10–16:20 开场分组、16:20–16:55 分组讨论、16:55–17:00 换场、17:00–17:20 分享、17:20–17:30 收尾，合计 90 分钟，结束时间为 17:30。应急第 2 条中的超时判断时点和“剩余 5 分钟”提醒也已同步改为 17:15 和 17:30。\n\n脚本校验结果：6 段时间合计 90 分钟，起止时间 16:00–17:30，跨度也是 90 分钟，各段首尾连续且无重叠；场地仍为社区阅览室（免费），费用合计 320 元，结余 680 元，没有超支。",
+        "workIds": [
+          "26c80c4b-a26c-470b-89d5-d535022ade84"
+        ],
+        "workspaces": [
+          {
+            "kind": "directory",
+            "path": "/private<test-workspace>/background-plan"
+          }
+        ],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 0
+      },
+      {
+        "id": "status",
+        "label": "查进度不重启执行",
+        "preferred": "inline",
+        "actual": "inline",
+        "followsPreference": true,
+        "seconds": 4.9,
+        "message": "这份方案现在还在运行吗？只查看实际状态告诉我，不用继续改。",
+        "tools": [
+          "bot_work_list",
+          "ls",
+          "read_file",
+          "write_file",
+          "execute",
+          "bot_deliver_files"
+        ],
+        "mainTools": [
+          "bot_work_list"
+        ],
+        "reply": "\n这份方案现在不在运行。\n\n实际状态：该任务最近一次执行已经完成（完成时间为 12:33 左右），当前既没有轮次在执行中，也没有运行中的命令、子任务或待回答的问题；业务状态只是“未归档”，并不表示任务仍在运行。plan.md 的更新是我上一轮直接对文件逐字改的，改完后也没有再触发任务执行。",
+        "workIds": [
+          "26c80c4b-a26c-470b-89d5-d535022ade84"
+        ],
+        "workspaces": [
+          {
+            "kind": "directory",
+            "path": "/private<test-workspace>/background-plan"
+          }
+        ],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 0
+      },
+      {
+        "id": "reopen",
+        "label": "已完成任务再次修改",
+        "preferred": "continue",
+        "actual": "inline",
+        "followsPreference": false,
+        "seconds": 25.7,
+        "message": "刚才已完成的读书会方案还要改一下：改成下午五点，更新同一份 plan.md，其他条件不变。",
+        "tools": [
+          "edit_file",
+          "execute",
+          "grep",
+          "bot_deliver_files",
+          "ls",
+          "read_file",
+          "write_file"
+        ],
+        "mainTools": [
+          "edit_file",
+          "edit_file",
+          "edit_file",
+          "edit_file",
+          "execute",
+          "grep",
+          "execute",
+          "bot_deliver_files"
+        ],
+        "reply": "\n\n\n\n\n\n\n\n已改为下午五点，同一份 [plan.md](/private<test-workspace>/background-plan/plan.md) 已更新并交付（附件内容与该文件逐字节一致）。\n\n新时间表：17:00–17:10 签到、17:10–17:20 开场分组、17:20–17:55 分组讨论、17:55–18:00 换场、18:00–18:20 分享、18:20–18:30 收尾。应急第 2 条的超时判断时点与“剩余 5 分钟”提醒同步改为 18:00、17:55、18:15。\n\n脚本校验：6 段合计 90 分钟，起止 17:00–18:30 且跨度 90 分钟，各段首尾连续无重叠；场地与费用未变（社区阅览室免费，合计 320 元，结余 680 元）。",
+        "workIds": [
+          "26c80c4b-a26c-470b-89d5-d535022ade84"
+        ],
+        "workspaces": [
+          {
+            "kind": "directory",
+            "path": "/private<test-workspace>/background-plan"
+          }
+        ],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 0,
+        "error": "Expected values to be strictly equal:\n+ actual - expected\n\n+ 'completed'\n- 'active'\n"
+      }
+    ]
+  },
+  "logs": [
+    {
+      "name": "bot-routing-v5-background.log",
+      "text": "{\"case\":\"background-plan\",\"actual\":\"independent\",\"preferred\":\"independent\",\"seconds\":51.1,\"tools\":[\"ls\",\"read_file\",\"read_file\",\"read_file\",\"bot_work_create\"]}\n{\"case\":\"revision\",\"actual\":\"inline\",\"preferred\":\"continue\",\"seconds\":31.5,\"tools\":[\"read_file\",\"edit_file\",\"edit_file\",\"edit_file\",\"edit_file\",\"execute\",\"grep\",\"execute\",\"bot_deliver_files\"]}\n{\"case\":\"status\",\"actual\":\"inline\",\"preferred\":\"inline\",\"seconds\":4.9,\"tools\":[\"bot_work_list\"]}\n{\"case\":\"reopen\",\"actual\":\"inline\",\"preferred\":\"continue\",\"seconds\":25.7,\"tools\":[\"edit_file\",\"edit_file\",\"edit_file\",\"edit_file\",\"execute\",\"grep\",\"execute\",\"bot_deliver_files\"]}\nFAIL background-plan Expected values to be strictly equal:\n+ actual - expected\n\n+ 'completed'\n- 'active'\n\nRouting evaluation report: <temp>/bot-integration-build-vua0NP/artifacts/routing-1794803565134.json\ncase failures; inspect JSON report\n",
+      "sha256": "891c5525a391c9673adde270bf1d0234cf390fc369e16bf6fced756e01da3985"
+    }
+  ]
+}

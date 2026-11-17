@@ -166,8 +166,10 @@ export interface AgentRunExecutionContext {
   /** First conversation cue issued only by the Bot host; never a renderer-authored message. */
   botIntroduction?: boolean
   extraSystemPrompt?: string
+  botCommunication?: CreateAgentRuntimeOptions["botCommunication"]
   /** Trusted host adapters can add identity-bound tools; never populated from renderer input. */
   additionalTools?: CreateAgentRuntimeOptions["additionalTools"]
+  foregroundWorkBudget?: CreateAgentRuntimeOptions["foregroundWorkBudget"]
   /** Trusted Bot delivery check; renderer input cannot supply this callback. */
   checkFinalDelivery?: CreateAgentRuntimeOptions["checkFinalDelivery"]
   /** Bot main-private-chat only; not a renderer setting or a leaf-agent option. */

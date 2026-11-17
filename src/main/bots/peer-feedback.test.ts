@@ -626,7 +626,7 @@ describe("peer feedback with checkpoint-only predecessors", () => {
         { messages: phase === "afterModel" ? [tool(), reply] : [tool()] } as never,
         { configurable: { thread_id: thread } } as never
       ) as { messages: HumanMessage[]; jumpTo?: string }
-      expect(update.messages[0].additional_kwargs.cmb_internal_bot_feedback).toBe(true)
+      expect(update.messages.at(-1)!.additional_kwargs.cmb_internal_bot_feedback).toBe(true)
       if (phase === "afterModel") {
         expect(update.jumpTo).toBe("model")
         expect(reply.id).toMatch(/^current-run-assistant:/)

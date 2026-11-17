@@ -337,7 +337,7 @@ async function main() {
     }
     await composer().waitFor()
     await fillComposer("M05_PRIVATE_MAIN：先讨论其他话题，不要建工作。")
-    await composer().press("Enter")
+    await send()
     await waitForBotAppState(
       page,
       async () => {
@@ -693,6 +693,7 @@ async function main() {
     await page.getByRole("option", { name: "深色", exact: true }).click()
     await page.keyboard.press("Escape")
     await page.waitForFunction(() => document.documentElement.dataset.colorScheme === "dark")
+    await page.getByRole("button", { name: "搜索任务", exact: true }).click()
     const searchColors = await page.locator(".bot-work-search").evaluate((input) => {
       const style = getComputedStyle(input),
         probe = document.createElement("span")

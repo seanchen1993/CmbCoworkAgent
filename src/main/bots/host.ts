@@ -306,7 +306,7 @@ export class LocalBotHost {
     return this.store.imConversationHistory(botId, id, before)
   }
   imConversationWorks(botId: string, id: string, cursor?: string, query?: string) {
-    return this.store.imConversationWorks(botId, id, cursor, query)
+    return this.withWorkExecution(this.store.imConversationWorks(botId, id, cursor, query))
   }
 
   memoryContext(
@@ -415,9 +415,10 @@ export class LocalBotHost {
     this.wake()
     return result
   }
-  getWork(botId: string, workId: string) {
+  getWork(botId: string, workId: string): BotWorkItem {
     this.getBot(botId)
-    return this.store.getWork(botId, workId)
+    const work = this.store.getWork(botId, workId)
+    return { ...work, execution: this.workExecutionStatus(work) }
   }
   /** Available only while remove() owns the deleting fence; never exposed through renderer reads. */
   getWorkForDeletion(botId: string, workId: string) {
@@ -433,11 +434,11 @@ export class LocalBotHost {
   }
   workSummaries(botId: string, workIds: string[]) {
     this.getBot(botId)
-    return this.store.workSummaries(botId, workIds)
+    return this.store.workSummaries(botId, workIds).map(work => ({ ...work, execution: this.workExecutionStatus(work) }))
   }
   listWorks(botId: string, cursor?: string, query?: string) {
     this.getBot(botId)
-    return this.store.listWorks(botId, cursor, query, "desktop")
+    return this.withWorkExecution(this.store.listWorks(botId, cursor, query, "desktop"))
   }
   workTargets(taskId: string, cursor?: string, query?: string) {
     const task = this.workToolSource(taskId)
@@ -447,6 +448,9 @@ export class LocalBotHost {
       query,
       task.mockSource?.audienceKey ?? "desktop"
     )
+    return this.withWorkExecution(page)
+  }
+  private withWorkExecution(page: import("../../shared/bots/work").BotWorkPage) {
     const snapshots = new Map<string, ReturnType<LocalBotHost["workExecutionStatus"]>>()
     const enrich = (work: BotWorkSummary) => {
       let execution = snapshots.get(work.id)
@@ -570,6 +574,7 @@ export class LocalBotHost {
       items: [...works.values()].slice(0, 8).map((work) => ({
         workId: work.id,
         title: work.title,
+        version: work.version,
         execution: this.workExecutionStatus(work)
       })),
       ...(projects.length
@@ -804,6 +809,11 @@ export class LocalBotHost {
   initializeMockThread(task: BotTask) {
     if (task.mockSource) this.store.external(task.mockSource).initialize(task.mockSource, task)
   }
+  workInputContext(taskId: string, messageIndex = 0, offset = 0, assignmentId?: string) {
+    this.requireRunning()
+    return this.store.workInputContext(taskId, messageIndex, offset, assignmentId)
+  }
+
   async createWork(
     input: CreateBotWorkInput,
     source?: { taskId: string; callId: string; key: string }
@@ -1594,6 +1604,7 @@ export class LocalBotHost {
         candidate.botId === task.botId &&
         candidate.task.threadId === task.threadId &&
         canDeferBotTask(candidate.task) &&
+        !canSteerBotTask(candidate.task, task) &&
         (task.origin.kind !== "group" ||
           (candidate.task.origin.kind === "bot" &&
             candidate.task.origin.groupId === groupId &&
@@ -1618,7 +1629,6 @@ export class LocalBotHost {
     if (
       !run?.lease.steer ||
       !run.steeringReady ||
-      (task.origin.kind === "group" && this.store.getTask(run.task.id).state !== "waiting_user") ||
       run.controller.signal.aborted ||
       run.preparingSteers.has(task.id)
     )

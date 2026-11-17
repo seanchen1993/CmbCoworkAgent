@@ -7329,7 +7329,7 @@ export class LocalSandbox
       ownerSignal.removeEventListener("abort", abortWithOwner)
       LocalSandbox.foregroundHandoffs.get(ownerSignal)?.delete(handoff)
       resolveHandoff({
-        output: `The user sent a new message. The existing command continues in the background (id: ${task.id}); it was not restarted. Read and respond to the new message now. Completion will be delivered automatically; do not poll or repeat the command. This ID is not a process PID.`,
+        output: `The foreground wait has ended. The existing command continues in the background (id: ${task.id}); it was not restarted. Keep the conversation available instead of waiting here. Completion will be delivered automatically; do not poll or repeat the command. This ID is not a process PID.`,
         exitCode: null,
         truncated: false
       })

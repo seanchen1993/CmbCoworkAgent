@@ -70,6 +70,7 @@ describe("Bot observes its task through real Host transitions and input registry
     const status = (await f.read()).work.execution
     expect(status).toMatchObject({ phase: "waiting_user_input", waitingFor: [{ kind: "user_input", count: 1, questions: ["确认初稿内容？"] }] })
     const context = f.host.workStatusContext(f.source.id)
+    expect(context.items[0].version).toBe(f.host.getWork(f.created.work.botId, f.created.work.id).version)
     expect(context.items[0].execution).toMatchObject({ phase: "waiting_user_input" })
     const request = getPendingUserInputForThread(f.created.work.threadId)!
     expect(submitUserInputResponse({ requestId: request.requestId, answers: { confirm: { type: "option", questionId: "confirm", optionIndex: 0, label: "确认", description: "继续" } } })).toBe(true)

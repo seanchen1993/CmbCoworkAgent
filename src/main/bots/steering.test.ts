@@ -582,11 +582,11 @@ describe("group input during an existing question", () => {
     expect(f.store.getTask(direct.id).state).toBe("queued")
   })
 
-  it("keeps ordinary group work queued and makes cancelled answers inert", async () => {
+  it("queues ordinary group corrections for safe injection and makes cancelled answers inert", async () => {
     const f = await groupQuestion()
     f.wait(false)
     const queued = f.send("ordinary-follow-up")
-    expect(f.steer).not.toHaveBeenCalled()
+    expect(f.steer).toHaveBeenCalledOnce()
     f.wait(true)
     const child = f.send("withdraw-answer")
     f.host.cancel(child.id)

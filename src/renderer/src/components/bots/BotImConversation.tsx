@@ -33,9 +33,9 @@ import { useBotReadState } from "./use-bot-read-state"
 import type { useBotWorks } from "./use-bot-works"
 import type { BotWorkItem } from "../../../../shared/bots/work"
 import { BotWorkPanel } from "./BotWorkPanel"
-import { BotBrowserPanel } from "./BotBrowserPanel"
+import { BotTaskBrowser } from "./BotTaskBrowser"
+import { BotWorkAttention } from "./BotWorkAttention"
 import { botImBrowserScope } from "../../../../shared/bots/im-channel"
-import { botWorkBrowserScope } from "../../../../shared/bots/work"
 import { BotSchedulePanel } from "./BotSchedulePanel"
 import { BotMemoryPanel } from "./BotMemoryPanel"
 import { ChatContainer } from "@/components/chat/ChatContainer"
@@ -75,6 +75,7 @@ export function BotImConversation({
   bot,
   client,
   revision,
+  works = [],
   tasks = [],
   backgroundThreads = [],
   collaborationPending = false,
@@ -88,6 +89,7 @@ export function BotImConversation({
   bot: BotDefinition
   client: BotClient
   revision: number
+  works?: import("../../../../shared/bots/work").BotWorkSummary[]
   tasks?: BotTask[]
   backgroundThreads?: string[]
   collaborationPending?: boolean
@@ -317,6 +319,7 @@ export function BotImConversation({
           {controlError}
         </div>
       )}
+      <BotWorkAttention client={client} works={works} onWork={onWork} />
       {executionThreadId && (
         <div className="bot-conversation-content">
           <BotMessageFilePreview
@@ -642,14 +645,14 @@ export function BotImConversationDetails({
               电脑 <ChevronRight size={14} />
             </button>
             {computerOpen && (
-              <BotBrowserPanel
-                key={selectedWork?.id ?? conversation.id}
+              <BotTaskBrowser
+                key={conversation.id}
                 client={client}
-                botId={
-                  selectedWork
-                    ? botWorkBrowserScope(selectedWork.id, bot.id)
-                    : botImBrowserScope(conversation.id, bot.id)
-                }
+                botId={bot.id}
+                mainScope={botImBrowserScope(conversation.id, bot.id)}
+                works={[...controller.priority, ...controller.items.filter(item => !controller.priority.some(p => p.id === item.id))]}
+                selectedWork={selectedWork}
+                onWork={onWork}
               />
             )}
           </div>

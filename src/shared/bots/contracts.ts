@@ -183,8 +183,10 @@ export type BotTaskOrigin =
       sourceTaskId: string
       /** Present on new dispatches; their message is the actual Bot-authored instruction. */
       dispatch?: "create" | "follow_up"
-      /** Host-captured source references, never copied into the task's model input. */
+      /** Host-captured source references, scoped to the original conversation. */
       sourceMessageIds?: string[]
+      /** New dispatches opt in to original-input delivery. Older tasks keep their original contract. */
+      sourceContext?: { version: 1; references: BotMessageReply[] }
       /** Legacy forwarded turns kept the Bot's brief separate from the user message. */
       instructionSummary?: string
     }

@@ -125,7 +125,7 @@ async function main() {
         .flatMap((m: any) => (m.tool_calls ?? []).map((c: any) => c.function?.name))
       const tools = (body.tools ?? []).map((t: any) => t.function?.name)
       requests.push({ user, used, tools })
-      if (user.includes("LIVE_ORDINARY_HOLD")) {
+      if (!all.includes("An independent task returned a host-recorded result") && (user.includes("LIVE_ORDINARY_HOLD") || user.includes("STEER_HOLD_"))) {
         await new Promise<void>((done) => {
           releaseOrdinaryTurn = done
         })
@@ -182,6 +182,15 @@ async function main() {
       else if (user.includes("PRIVATE_SECRET")) reply = "私聊内容仅保留在本会话。"
       else if (user.includes("LIVE_RETRY") || user.includes("LIVE_LOST"))
         reply = "发送已接收，仅执行一轮。"
+      if (!all.includes("An independent task returned a host-recorded result") && user.includes("STEER_HOLD_")) reply = "STEER_BEFORE_BOUNDARY"
+      else if (!all.includes("An independent task returned a host-recorded result") && user.includes("STEER_SECOND_")) {
+        assert.ok(all.includes("STEER_FIRST_"), "both corrections enter the same model history")
+        assert.ok(all.includes("STEER_BEFORE_BOUNDARY"), "the interrupted-looking reply is actually retained")
+        reply = "STEER_AFTER_BOUNDARY"
+      }
+      // A real provider may reuse an ID across calls; steering must still create
+      // separate assistant messages on each side of the injected user boundary.
+      const responseId = user.includes("STEER_") ? "reused-steer-provider-id" : `local-${requests.length}`
       if (call) assert.ok(tools.includes(call.name), "fixture may call only advertised tools")
       const fn = call
         ? {
@@ -194,7 +203,7 @@ async function main() {
         res.writeHead(200, { "content-type": "text/event-stream" })
         const frame = (delta: unknown, finish_reason: string | null) =>
           res.write(
-            `data: ${JSON.stringify({ id: `local-${requests.length}`, object: "chat.completion.chunk", choices: [{ index: 0, delta, finish_reason }] })}\n\n`
+            `data: ${JSON.stringify({ id: responseId, object: "chat.completion.chunk", choices: [{ index: 0, delta, finish_reason }] })}\n\n`
           )
         frame(fn ? { tool_calls: [{ index: 0, ...fn }] } : { content: reply }, null)
         frame({}, fn ? "tool_calls" : "stop")
@@ -202,7 +211,7 @@ async function main() {
       } else {
         res.writeHead(200, { "content-type": "application/json" }).end(
           JSON.stringify({
-            id: `local-${requests.length}`,
+            id: responseId,
             choices: [
               {
                 index: 0,
@@ -489,13 +498,13 @@ async function main() {
     await idle()
     await page.getByRole("button", { name: "已交办到招乎群 · 产品协作群", exact: true }).click()
     await page.getByRole("button").filter({ hasText: "群内需求清单" }).last().click()
-    await page.getByRole("button", { name: "返回群聊", exact: true }).waitFor()
+    await page.locator(".bot-task-toolbar").getByRole("button", { name: "返回群主对话", exact: true }).waitFor()
     await page
       .locator(".bots-conversation")
       .getByText("群任务检查完成：需求清单已整理。", { exact: true })
       .waitFor()
     await page.screenshot({ path: join(out, "artifacts/group-app-work.png") })
-    await page.getByRole("button", { name: "返回群聊", exact: true }).click()
+    await page.locator(".bot-task-toolbar").getByRole("button", { name: "返回群主对话", exact: true }).click()
     await page.getByRole("button", { name: "前往私人主对话", exact: true }).click()
     await page.getByText("私人助手", { exact: true }).first().click()
     console.log(
@@ -657,6 +666,102 @@ async function main() {
     await ordinaryChat.getByText("排队中 1 条", { exact: true }).waitFor({ state: "hidden" })
     releaseOrdinaryTurn!()
     console.log("stage: ordinary conversation queue menu/edit/delete preserved")
+    for (const agentMode of ["normal", "coordinator", "workflow"]) {
+      releaseOrdinaryTurn = undefined
+      const title = `运行中补充-${agentMode}`
+      const thread = await page.evaluate(async ({ title, workspacePath, agentMode }) =>
+        (window as any).api.threads.create({ title, workspacePath, agentMode, model: "custom:local-test" }),
+      { title, workspacePath, agentMode })
+      await page.reload()
+      await page.getByText(title, { exact: true }).first().click()
+      const chat = page.locator(`[data-chat-thread-id="${thread.thread_id}"]`)
+      const input = chat.locator('textarea, [role="textbox"][contenteditable="true"]').last()
+      await input.fill(`STEER_HOLD_${agentMode}`)
+      await settle()
+      await chat.locator('button[type="submit"]').last().click()
+      await wait(() => !!releaseOrdinaryTurn, `${agentMode} model is in flight`)
+      for (const marker of ["STEER_FIRST_", "STEER_SECOND_"]) {
+        await input.fill(`${marker}${agentMode}`)
+        await settle()
+        await input.press("Enter")
+        await chat.getByRole("button", { name: "引导", exact: true }).last().click()
+      }
+      assert.equal(requests.filter(item => item.user.includes(`STEER_HOLD_${agentMode}`)).length, 1,
+        "steering does not cancel or restart an in-flight model call")
+      releaseOrdinaryTurn!()
+      await chat.getByText("STEER_AFTER_BOUNDARY", { exact: true }).waitFor({ timeout: 90000 })
+      const expected = [`STEER_HOLD_${agentMode}`, "STEER_BEFORE_BOUNDARY",
+        `STEER_FIRST_${agentMode}`, `STEER_SECOND_${agentMode}`, "STEER_AFTER_BOUNDARY"]
+      const verifyVisible = async () => {
+        for (const value of expected)
+          assert.equal(await chat.getByText(value, { exact: true }).count(), 1, `${agentMode} renders ${value} exactly once`)
+        const visible = await chat.innerText()
+        for (let index = 1; index < expected.length; index++)
+          assert.ok(visible.indexOf(expected[index - 1]) < visible.indexOf(expected[index]), `${agentMode} visible transcript order`)
+      }
+      await verifyVisible()
+      await waitForBotAppState(page, async ({ id, expected }) => {
+        const rows = await (window as any).api.threads.getMessages(id)
+        const values = rows.map((row: any) => row.content)
+        return expected.every(value => values.filter((item: any) => item === value).length === 1) &&
+          expected.every((value, i) => !i || values.indexOf(expected[i - 1]) < values.indexOf(value))
+      }, { id: thread.thread_id, expected }, { timeout: 30000 })
+      await page.screenshot({ path: join(out, `artifacts/steer-${agentMode}.png`) })
+      await page.reload()
+      await page.getByText(title, { exact: true }).first().click()
+      await chat.getByText("STEER_AFTER_BOUNDARY", { exact: true }).waitFor()
+      await verifyVisible()
+      console.log(`stage: ${agentMode} two safe-boundary corrections, live and reloaded transcript verified`)
+    }
+    await page.getByText("Bots", { exact: true }).first().click()
+    for (const kind of ["bot-main", "bot-work"]) {
+      releaseOrdinaryTurn = undefined
+      const bot = await page.evaluate(async name => (window as any).api.bots.create({
+        name, instructions: "按要求处理并保留运行中的补充。", color: "#168e87", modelRef: "custom:local-test"
+      }), `补充验收-${kind}`)
+      await idle()
+      await page.getByText(bot.name, { exact: true }).first().click()
+      let threadId = bot.threadId
+      if (kind === "bot-work") {
+        const result = await page.evaluate(async botId => (window as any).api.bots.works.create({
+          botId, operationId: crypto.randomUUID(), title: "运行中补充验收任务", goal: "STEER_HOLD_bot-work"
+        }), bot.id)
+        threadId = result.work.threadId
+        await page.locator(".bot-work-row").filter({ hasText: "运行中补充验收任务" }).click()
+      } else {
+        await fill(`STEER_HOLD_${kind}`)
+        await send()
+      }
+      await wait(() => !!releaseOrdinaryTurn, `${kind} model in flight`)
+      for (const marker of ["STEER_FIRST_", "STEER_SECOND_"]) {
+        await fill(`${marker}${kind}`)
+        await composer().press("Enter")
+      }
+      await waitForBotAppState(page, async () => (await (window as any).api.bots.snapshot()).tasks
+        .filter((t: any) => t.message.startsWith("STEER_FIRST_") || t.message.startsWith("STEER_SECOND_"))
+        .filter((t: any) => t.state === "queued").length === 2)
+      assert.equal(requests.filter(item => item.user.includes(`STEER_HOLD_${kind}`)).length, 1)
+      releaseOrdinaryTurn!()
+      const chat = page.locator(`[data-chat-thread-id="${threadId}"]`)
+      await chat.getByText("STEER_AFTER_BOUNDARY", { exact: true }).waitFor({ timeout: 90000 })
+      await idle()
+      const expected = ["STEER_BEFORE_BOUNDARY", `STEER_FIRST_${kind}`, `STEER_SECOND_${kind}`, "STEER_AFTER_BOUNDARY"]
+      await waitForBotAppState(page, async ({ threadId, expected }) => {
+        const rows = await (window as any).api.threads.getMessages(threadId)
+        const values = rows.map((r: any) => r.content)
+        return expected.every(value => values.filter((v: any) => v === value).length === 1) &&
+          expected.every((value, i) => !i || values.indexOf(expected[i - 1]) < values.indexOf(value))
+      }, { threadId, expected })
+      for (const value of expected) assert.equal(await chat.getByText(value, { exact: true }).count(), 1)
+      await page.screenshot({ path: join(out, `artifacts/steer-${kind}.png`) })
+      await page.reload()
+      await page.getByText("Bots", { exact: true }).first().click()
+      await page.getByText(bot.name, { exact: true }).first().click()
+      if (kind === "bot-work") await page.locator(".bot-work-row").filter({ hasText: "运行中补充验收任务" }).click()
+      await chat.getByText("STEER_AFTER_BOUNDARY", { exact: true }).waitFor()
+      for (const value of expected) assert.equal(await chat.getByText(value, { exact: true }).count(), 1)
+      console.log(`stage: ${kind} two corrections retained in the same run/thread, UI and reload verified`)
+    }
     assert.deepEqual(await app.evaluate(() => (globalThis as any).__handoffApp.failures), [])
     assert.deepEqual(errors, [])
     console.log(

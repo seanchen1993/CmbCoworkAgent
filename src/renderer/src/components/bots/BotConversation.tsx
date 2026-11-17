@@ -255,7 +255,7 @@ export function BotConversation({
       )}
       {queued.length > 0 && (
         <div className="bot-queue" aria-live="polite">
-          <span>{queued.length} 条待办</span>
+          <span>{queued.length} 条{running ? "补充待接收" : "待办"}</span>
           <span className="truncate">{botTaskPreview(queued[0])}</span>
           <button
             onClick={() =>

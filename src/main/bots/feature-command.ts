@@ -1,3 +1,4 @@
+import { steerFeatureTurn } from "./feature-steering"
 import { randomUUID } from "node:crypto"
 import { withCurrentHarnessFeature } from "../harness-board/feature-catalog-lifecycle"
 import { HARNESS_SOURCE } from "../../shared/harness-board-types"
@@ -202,6 +203,12 @@ export async function runBotFeatureCommand(
       const message = input.message?.trim()
       if (!message) throw new Error("请提供要交给项目会话的内容")
       if (input.action === "continue" && !input.threadId) throw new Error("请选择要继续的项目会话")
+      if (input.action === "continue" && input.threadId && await steerFeatureTurn({
+        host, owner, threadId: input.threadId, operationId: receipt.id, message, verify: verifySelected
+      })) {
+        host.featureChanged(owner)
+        return { operation: store.receipt(receipt.id), accepted: "current_run", feature: await readDetail(owner) }
+      }
       await withIdleManagedFeature(projectId, featureId, async () => {
         authorize()
         verifySelected()

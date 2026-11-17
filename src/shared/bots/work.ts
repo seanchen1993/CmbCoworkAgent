@@ -30,6 +30,8 @@ export interface BotWorkSummary {
   createdAt: number
   updatedAt: number
   executionState: BotTaskState | null
+  /** Live read-only projection shared by the Bot and UI, not model-generated progress. */
+  execution?: import("./work-status").BotWorkExecutionStatus
   /** Latest primary turn, excluding input injected into another live turn. */
   lastExecution?: import("./work-status").BotWorkExecutionStatus["lastExecution"]
   pendingPeers: number
@@ -58,7 +60,7 @@ export interface CreateBotWorkInput {
   operationId: string
   title: string
   goal: string
-  /** Verified source references. Bot dispatches retain IDs only; necessary context belongs in goal. */
+  /** Verified source references. The host supplies selected text and original current requests to the executor. */
   contextMessageIds?: string[]
   workspace?: BotWorkWorkspaceRequest
 }

@@ -427,7 +427,7 @@ it("opens detached historical results without rebinding or creating tasks, and r
   const before = x.store.getWork(x.bot.id, linked.id)
   f.update.mockClear()
   const opened = await exposeWorkConversation(x.host, x.bot.id, linked.id)
-  expect(opened).toEqual(before)
+  expect(opened).toEqual({ ...before, execution: expect.objectContaining({ businessState: "completed", phase: "unavailable" }) })
   expect(opened.conversation?.state).toBe("detached")
   expect(f.update).not.toHaveBeenCalled()
   expect(x.store.recentTasks()).toHaveLength(0)
@@ -549,7 +549,9 @@ describe("IM work in the ordinary workbench", () => {
     expect(savedMetadata).toMatchObject({ ...upgraded, botMockTransport: "im", botLocalConversation: true })
     expect(savedMetadata.allowedSkills).toBeUndefined()
     expect(savedMetadata.disableAgentsPrompt).toBeUndefined()
-    expect(await resolveWorkConversation(x.host, x.receipt.work.threadId)).toEqual(opened)
+    expect(await resolveWorkConversation(x.host, x.receipt.work.threadId)).toEqual({
+      ...opened, work: { ...opened!.work, execution: { ...opened!.work.execution, observedAt: expect.any(Number) } }
+    })
     expect(x.store.recentTasks()).toHaveLength(2) // opening does not execute or copy
     expect(x.host.listWorks(x.bot.id).items).toHaveLength(0) // absent from private Bot
     await expect(unlinkWorkConversation(x.host, x.bot.id, opened!.work.id, opened!.work.version))

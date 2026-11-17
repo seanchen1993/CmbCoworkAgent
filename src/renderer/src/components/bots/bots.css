@@ -3676,3 +3676,21 @@ button.bot-inline-mention:focus-visible {
 .bot-mention-option-copy > small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bot-mention-options button > small { flex-shrink: 0; }
 .bot-mention-source { font-size: 10px; font-weight: 400; color: var(--bot-muted); opacity: .9; }
+
+/* Task navigation is kept with its conversation; the directory stays quiet. */
+.bot-task-toolbar { padding: 4px 24px 12px; color: var(--bot-muted); }
+.bot-task-toolbar-row { display: flex; align-items: center; gap: 12px; min-height: 32px; }
+.bot-task-back { display: flex; align-items: center; gap: 6px; min-width: 0; margin-right: auto; font-size: 12px; }
+.bot-task-back span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-task-status { font-size: 11px; white-space: nowrap; }
+.bot-task-finish { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--bot-text); padding: 5px 9px; border: 1px solid var(--bot-line); border-radius: 16px; white-space: nowrap; }
+.bot-task-finish:disabled { opacity: .45; }
+.bot-task-list-actions { display: flex; align-items: center; gap: 12px; }
+.bot-tasks-completed { display: flex; align-items: center; gap: 6px; padding: 12px 6px; color: var(--bot-muted); font-size: 11px; }
+@media (max-width: 760px) { .bot-task-toolbar { padding-inline: 14px; } .bot-task-toolbar-row { gap: 8px; } }
+
+.bot-task-attention { margin: 6px 20px 12px; padding: 10px 12px; border: 1px solid var(--bot-line); border-radius: 12px; background: var(--bot-hover); }
+.bot-task-attention-title { display: flex; align-items: center; gap: 8px; width: 100%; padding: 4px 0; text-align: left; }
+.bot-task-attention-title > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.bot-task-attention-title > small { color: var(--bot-muted); white-space: nowrap; font-size: 11px; }
+.bot-task-attention .bot-browser-help { margin: 8px 0 0; }

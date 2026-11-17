@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { BotDefinition, BotMemory, BotTask } from "../../shared/bots/contracts"
-import { buildBotMemoryPrompt, buildBotPrompt, buildBotStoppedTaskPrompt } from "./prompt"
+import { buildBotMemoryPrompt, buildBotPrompt, buildBotStoppedTaskPrompt, buildBotWorkStatusPrompt } from "./prompt"
 
 const fact = (id: string, content: string): BotMemory => ({
   id,
@@ -36,6 +36,107 @@ const task: BotTask = {
 }
 const payload = (prompt: string): Array<{ id: string; content: string }> =>
   JSON.parse(prompt.split("\n").find((line) => line.startsWith("["))!)
+
+describe("Bot asynchronous assignment guidance", () => {
+  it("keeps Feature snapshots on the project tool path", () => {
+    const prompt = buildBotWorkStatusPrompt({
+      items: [],
+      projectTasks: [{ followId: "feature", title: "PRD", phase: "running", state: "active" }],
+      hasMore: false
+    })
+    expect(prompt).toContain("bot_feature_read")
+    expect(prompt).not.toContain("bot_work_send")
+    expect(prompt).not.toContain("bot_work_continue")
+  })
+
+  const imSource: NonNullable<BotTask["mockSource"]> = {
+    transport: "im",
+    bindingId: "binding",
+    grantVersion: 1,
+    conversationId: "group-chat",
+    audienceKey: "group-audience",
+    eventId: "event",
+    messageId: "message",
+    senderId: "member"
+  }
+  const imTurn: BotTask = {
+    ...task,
+    origin: { kind: "mock", bindingId: "binding", eventId: "event" },
+    mockSource: imSource
+  }
+  const preference = "prefer bot_work_create when available"
+
+  it.each([
+    ["App private", task],
+    ["IM group", imTurn],
+    ["IM private", { ...imTurn, mockSource: { ...imSource, personal: true as const } }]
+  ] as const)("guides %s user assignments without forcing a split", (_name, source) => {
+    const prompt = buildBotPrompt(bot, source, "/workspace")
+    expect(prompt).toContain("persistent Bot")
+    expect(prompt).toContain("The host passes the original current request")
+    expect(prompt).toContain("Keep the goal short")
+    expect(prompt).toContain("businessState=active does not mean running")
+    expect(prompt).toContain("revisions use bot_work_send")
+    expect(prompt).toContain("bot_work_continue first")
+    expect(prompt).not.toContain("check each requested acceptance criterion")
+  })
+
+  const report: BotTask["origin"] = {
+    kind: "work_result",
+    workId: "w",
+    workTitle: "Draft",
+    workThreadId: "wt",
+    executionTaskId: "execution",
+    executionState: "completed"
+  }
+  it.each([task, imTurn])("keeps automatic reports focused on supplied evidence", (source) => {
+    const prompt = buildBotPrompt(bot, { ...source, origin: report }, "/workspace")
+    expect(prompt).toContain("tools are unavailable")
+    expect(prompt).toContain("Do not reopen files")
+    expect(prompt).toContain("Attribute checks to the task's report")
+    expect(prompt).toContain("not the user's confirmation")
+    expect(prompt).not.toContain("bot_work_send")
+    expect(prompt).not.toContain("shell, browser")
+  })
+  const noDispatch: Array<[string, BotTask]> = [
+    ["onboarding", { ...task, origin: { kind: "introduction" } }],
+    ["report", { ...task, origin: report }],
+    ["IM report", { ...imTurn, origin: report }],
+    [
+      "background receipt",
+      { ...task, origin: { kind: "notification", notificationKind: "command", key: "command" } }
+    ],
+    ["routine", { ...task, origin: { kind: "schedule", scheduleId: "schedule" } }],
+    [
+      "peer delegation",
+      {
+        ...task,
+        origin: { kind: "bot", fromBotId: "b", rootTaskId: "root", depth: 1, expectsReply: true }
+      }
+    ],
+    [
+      "App group without work tools",
+      { ...task, origin: { kind: "group", groupId: "g", messageId: "m" } }
+    ],
+    ["legacy simulation", { ...imTurn, mockSource: { ...imSource, transport: undefined } }]
+  ]
+  it.each(noDispatch)("does not invite new delegation in %s", (_name, source) => {
+    expect(buildBotPrompt(bot, source, "/workspace")).not.toContain(preference)
+  })
+
+  it.each([task, imTurn])("keeps creation and follow-ups inside the existing task", (source) => {
+    for (const origin of [
+      { kind: "work", sourceTaskId: "main", dispatch: "create" },
+      { kind: "work", sourceTaskId: "main", dispatch: "follow_up" },
+      { kind: "user" }
+    ] as BotTask["origin"][]) {
+      const prompt = buildBotPrompt(bot, { ...source, workId: "work", origin }, "/selected")
+      expect(prompt).not.toContain(preference)
+      expect(prompt).toContain("ALREADY inside independent task")
+      expect(prompt).toContain("carry out the current assignment and revisions here")
+    }
+  })
+})
 
 describe("Bot first conversation", () => {
   it("treats reaction feedback as optional context without a new assignment", () => {
