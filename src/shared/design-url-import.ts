@@ -45,7 +45,16 @@ export interface DesignImportResult {
   error?: string
 }
 
+export interface DesignInteractionRecordingStatus {
+  recording: boolean
+  count: number
+  message?: string
+}
+
 export interface DesignUrlImportApi {
+  controlImportInteractions: (
+    action: "start" | "stop" | "clear" | "status"
+  ) => Promise<DesignInteractionRecordingStatus>
   importFromUrl: (request: DesignImportRequest | string) => Promise<DesignImportResult>
   cancelUrlImport: (requestId: string) => Promise<boolean>
   finishUrlImport: (requestId: string, keep: boolean) => Promise<boolean>

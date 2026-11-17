@@ -1,4 +1,5 @@
 import type { DesignPreviewResources } from "./design-preview-resources"
+import { refreshDesignSnapshotRuntime } from "../../../shared/design-capture-runtime"
 import { applyHtmlSourceEdits } from "../../../shared/design-html-mutations"
 import { parse, type Node } from "acorn"
 
@@ -375,6 +376,7 @@ export async function buildDesignHtmlPreviewDocument({
   rootHtmlPath = htmlPath,
   ancestors = []
 }: DesignHtmlPreviewDocumentOptions): Promise<string> {
+  html = refreshDesignSnapshotRuntime(html)
   if (!htmlPath || (!readTextFile && !readDataUrlFile)) return html
 
   resources?.checkDocument(html)
@@ -382,24 +384,28 @@ export async function buildDesignHtmlPreviewDocument({
   const parser = new DOMParser()
   const doc = parser.parseFromString(html, "text/html")
   if (resources) doc.documentElement.dataset.designResourceOwner = resources.id
+  const roots: ParentNode[] = [doc]
+  for (let i = 0; i < roots.length; i++)
+    roots.push(...[...roots[i].querySelectorAll<HTMLTemplateElement>("template[data-design-interaction],template[data-state]")].map(template => template.content))
+  const queryAll = <T extends Element>(selector: string): T[] => roots.flatMap(root => [...root.querySelectorAll<T>(selector)])
   const stylesheetLinks = Array.from(
-    doc.querySelectorAll<HTMLLinkElement>('link[rel~="stylesheet"][href]')
+    queryAll<HTMLLinkElement>('link[rel~="stylesheet"][href]')
   )
-  const scriptTags = Array.from(doc.querySelectorAll<HTMLScriptElement>("script[src]"))
-  const inlineScriptTags = Array.from(doc.querySelectorAll<HTMLScriptElement>("script:not([src])"))
-  const styleTags = Array.from(doc.querySelectorAll<HTMLStyleElement>("style"))
-  const styledElements = Array.from(doc.querySelectorAll<HTMLElement>("[style]"))
+  const scriptTags = queryAll<HTMLScriptElement>("script[src]")
+  const inlineScriptTags = queryAll<HTMLScriptElement>("script:not([src])")
+  const styleTags = queryAll<HTMLStyleElement>("style")
+  const styledElements = queryAll<HTMLElement>("[style]")
   const srcElements = Array.from(
-    doc.querySelectorAll<HTMLElement>(
+    queryAll<HTMLElement>(
       "img[src], source[src], video[src], audio[src], track[src], input[src]"
     )
   )
-  const posterElements = Array.from(doc.querySelectorAll<HTMLElement>("video[poster]"))
+  const posterElements = queryAll<HTMLElement>("video[poster]")
   const srcsetElements = Array.from(
-    doc.querySelectorAll<HTMLElement>("img[srcset], source[srcset]")
+    queryAll<HTMLElement>("img[srcset], source[srcset]")
   )
   const svgImageElements = Array.from(
-    doc.querySelectorAll<SVGElement>("image[href], image[xlink\\:href], use[href], use[xlink\\:href], feImage[href], feImage[xlink\\:href]")
+    queryAll<SVGElement>("image[href], image[xlink\\:href], use[href], use[xlink\\:href], feImage[href], feImage[xlink\\:href]")
   )
 
   const readCache = new Map<string, Promise<string | null>>()

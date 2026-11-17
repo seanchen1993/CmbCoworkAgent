@@ -57,6 +57,12 @@ const assetsOrigin = await listen(assets)
 const website = createServer((request, response) => {
   const pathname = new URL(request.url || "/", "http://site.test").pathname
   response.setHeader("content-type", "text/html; charset=utf-8")
+  if (pathname === "/interactive") {
+    response.end(`<html><body><button id="toggle" aria-expanded="false">Dropdown</button><div id="menu" hidden>Options</div><script>
+      document.getElementById('toggle').onclick=()=>{const menu=document.getElementById('menu');menu.hidden=!menu.hidden;document.getElementById('toggle').setAttribute('aria-expanded',String(!menu.hidden))};
+      </script></body></html>`)
+    return
+  }
   if (pathname === "/frames") {
     response.end(`<html><head><title>FRAME_TREE</title></head><body>
       <iframe src="/same" onload="this.contentDocument.querySelector('h2').textContent='FIRST_INSTANCE'"></iframe>
@@ -129,7 +135,8 @@ try {
       resolveDir: root,
       contents: `
     import { app, BrowserWindow, session } from 'electron';
-    import { DesignUrlImportService } from './src/main/services/design/url-import-service';
+    import { DesignUrlImportService, validateCapturedArtifact } from './src/main/services/design/url-import-service';
+    import { controlDesignInteractionRecording } from './src/main/services/design/interaction-recording';
     import { getBuiltinBrowserSession } from './src/main/browser/core/browser-profile-session';
     import { setGlobalBrowserService } from './src/main/browser/core/browser-service-registry';
     app.setPath('userData', process.env.DESIGN_URL_TEST_PROFILE);
@@ -137,7 +144,7 @@ try {
       const current = new BrowserWindow({show:false,webPreferences:{session:getBuiltinBrowserSession(),backgroundThrottling:false,contextIsolation:true,nodeIntegration:false,sandbox:true}});
       current.loadURL('about:blank');
       setGlobalBrowserService({getWebContents:()=>current.webContents});
-      globalThis.captureTest={service:new DesignUrlImportService(),current,profile:getBuiltinBrowserSession(),defaultSession:session.defaultSession,progress:[]};
+      globalThis.captureTest={service:new DesignUrlImportService(),validate:validateCapturedArtifact,record:controlDesignInteractionRecording,current,profile:getBuiltinBrowserSession(),defaultSession:session.defaultSession,progress:[]};
     });
   `
     },
@@ -188,6 +195,31 @@ try {
         (globalThis as any).captureTest.service.finish(11, data.requestId, data.keep),
       { requestId, keep }
     )
+
+  const validationDirectory = path.join(temporary, "validation")
+  await fs.mkdir(validationDirectory)
+  await fs.writeFile(path.join(validationDirectory, "empty.html"), "<html><body></body></html>")
+  await fs.writeFile(path.join(validationDirectory, "valid.html"), "<html><body>FRAME_CONTENT</body></html>")
+  await fs.writeFile(path.join(validationDirectory, "broken.html"), '<html><body><img src="missing.png"></body></html>')
+  for (const [name, parentStyle, frameStyle, source, valid] of [
+    ["hidden", "", "visibility:hidden", "empty.html", true],
+    ["inherited-hidden", "visibility:hidden", "", "empty.html", true],
+    ["collapsed", "", "visibility:collapse", "empty.html", true],
+    ["display-none", "", "display:none", "empty.html", true],
+    ["visible-empty", "", "", "empty.html", false],
+    ["visible-override", "visibility:hidden", "visibility:visible", "empty.html", false],
+    ["visible-content", "", "", "valid.html", true],
+    ["visible-broken-image", "", "", "broken.html", false]
+  ] as const) {
+    const filePath = path.join(validationDirectory, `${name}.html`)
+    await fs.writeFile(filePath, `<html><body><p>MAIN_CONTENT</p><div style="${parentStyle}"><iframe
+      width="1" height="1" style="${frameStyle}" data-design-capture-frame="f_1" src="${source}"></iframe></div></body></html>`)
+    const validate = () => application!.evaluate(async (_electron, file) =>
+      (globalThis as any).captureTest.validate(file, new AbortController().signal), filePath)
+    if (valid) await validate()
+    else await assert.rejects(validate, /快照预览验证失败/)
+  }
+  console.log("PASS hidden helper frames do not fail validation; visible frames still require complete content")
 
   const login = await run("login-required")
   assert.equal(login.status, "needs_user_action")
@@ -255,6 +287,34 @@ try {
   })
   await finish("current-page", false)
   console.log("PASS current-page capture preserves tab storage, input state and open dialog/popover state")
+
+  await application.evaluate(async (_electron, url) => {
+    const test = (globalThis as any).captureTest
+    await test.current.loadURL(url)
+    await test.current.webContents.executeJavaScript(`(${test.record.toString()})("start")`)
+  }, origin + "/interactive")
+  const interactivePage = await application.firstWindow()
+  await interactivePage.click("#toggle")
+  await interactivePage.waitForTimeout(400)
+  await interactivePage.click("#toggle")
+  await interactivePage.waitForTimeout(400)
+  const interactive = await run("recorded-clicks", { source: "current-browser" })
+  assert.equal(interactive.success, true, JSON.stringify(interactive))
+  assert.ok(interactive.warnings.some(warning => warning.code === "recorded_interactions"))
+  const replayed = await application.evaluate(async ({ BrowserWindow }, file) => {
+    const preview = new BrowserWindow({ show: false, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } })
+    try {
+      await preview.loadFile(file)
+      return await preview.webContents.executeJavaScript(`(() => {
+        const button=document.getElementById('toggle'),menu=document.getElementById('menu');
+        button.click(); const opened=!menu.hidden; button.click();
+        return {opened,closed:menu.hidden,sourceHandlers:button.hasAttribute('onclick')};
+      })()`)
+    } finally { preview.destroy() }
+  }, interactive.artifactPath!)
+  assert.deepEqual(replayed, { opened: true, closed: true, sourceHandlers: false })
+  await finish("recorded-clicks", false)
+  console.log("PASS current-browser interaction recording survives capture, asset localization, validation and offline replay")
 
   const frameResult = await run("frame-tree", { url: origin + "/frames" })
   assert.equal(frameResult.success, true, JSON.stringify(frameResult))

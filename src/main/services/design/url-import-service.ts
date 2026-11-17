@@ -92,8 +92,12 @@ export async function validateCapturedArtifact(
         const body = doc.body;
         if (!body || body.getBoundingClientRect().height <= 0) return false;
         if (![...doc.images].every(image => !image.getAttribute('src') || (image.complete && image.naturalWidth > 0))) return false;
-        const frames = [...doc.querySelectorAll('iframe[data-design-capture-frame]')];
-        if (!frames.every(frame => !frame.getClientRects().length || (frame.contentDocument && validate(frame.contentDocument, depth + 1)))) return false;
+        const frames = [...doc.querySelectorAll('iframe[data-design-capture-frame]')].filter(frame => {
+          // Hidden helper frames (e.g. Cloudflare) can have layout boxes but no content.
+          const visibility = doc.defaultView.getComputedStyle(frame).visibility;
+          return frame.getClientRects().length > 0 && visibility !== 'hidden' && visibility !== 'collapse';
+        });
+        if (!frames.every(frame => frame.contentDocument && validate(frame.contentDocument, depth + 1))) return false;
         return !!body.innerText.trim() || !!body.querySelector('img,svg,canvas,video') || frames.length > 0;
       };
       return validate(document);

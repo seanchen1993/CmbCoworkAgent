@@ -4126,7 +4126,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       const opened = await window.api.design.openImportBrowser(url)
       updateBrowserPageConfirmation(id, opened.success ? {
         phase: "ready",
-        message: "请完成登录并进入目标页面。基于此页编辑会创建新设计；添加参考会保留当前设计，补充需求后再发送。"
+        message: "进入目标页面后，可先点“录制交互”，操作需要保留的下拉、折叠或弹窗，再抓取。录制限当前页面的点击变化，跳转后需重新录制。"
       } : {
         phase: "ready",
         message: "请在地址栏重新打开目标页面，或修改链接；确认后选择编辑或添加参考。",

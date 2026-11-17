@@ -3,10 +3,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 const mocks = vi.hoisted(() => ({
   handlers: new Map<string, (...args: unknown[]) => unknown>(),
   prepareForEditing: vi.fn(),
+  cancelOwner: vi.fn(),
+  contents: { getURL: vi.fn(), executeJavaScript: vi.fn() },
   browser: {
     prepareTarget: vi.fn(),
     requestPanel: vi.fn(),
-    navigate: vi.fn()
+    navigate: vi.fn(),
+    getWebContents: vi.fn()
   }
 }))
 vi.mock("electron", () => ({
@@ -21,6 +24,7 @@ vi.mock("../browser/core/browser-service-registry", () => ({
 vi.mock("../services/design/url-import-service", () => ({
   DesignUrlImportService: class {
     prepareForEditing = mocks.prepareForEditing
+    cancelOwner = mocks.cancelOwner
   }
 }))
 
@@ -31,6 +35,38 @@ describe("design browser opening", () => {
     vi.clearAllMocks()
     mocks.handlers.clear()
     registerDesignUrlImportHandlers(() => "/workspace")
+    mocks.browser.getWebContents.mockReturnValue(mocks.contents)
+    mocks.contents.getURL.mockReturnValue("https://example.com/page")
+    mocks.contents.executeJavaScript.mockResolvedValue({ recording: true, count: 0 })
+  })
+
+  it("starts recording in the current browser and clears it when the owning renderer closes", async () => {
+    const sender = { id: 17, once: vi.fn(), on: vi.fn() }
+    const control = mocks.handlers.get("design:control-import-interactions")!
+    expect(await control({ sender }, "start")).toEqual({ recording: true, count: 0 })
+    expect(mocks.contents.executeJavaScript.mock.calls[0][0]).toContain(')("start")')
+    const destroyed = sender.once.mock.calls.find(([event]) => event === "destroyed")![1]
+    destroyed()
+    expect(mocks.contents.executeJavaScript.mock.calls.at(-1)![0]).toContain(')("clear")')
+    expect(mocks.cancelOwner).toHaveBeenCalledWith(17)
+  })
+
+  it("does not let an old confirmation clear a newer renderer's recording", async () => {
+    const control = mocks.handlers.get("design:control-import-interactions")!
+    const sender = (id: number) => ({ id, once: vi.fn(), on: vi.fn() })
+    await control({ sender: sender(17) }, "start")
+    await control({ sender: sender(18) }, "start")
+    expect(await control({ sender: sender(17) }, "clear")).toEqual({ recording: false, count: 0 })
+    expect(mocks.contents.executeJavaScript).toHaveBeenCalledTimes(2)
+  })
+
+  it("requires an HTTP page to start recording", async () => {
+    mocks.contents.getURL.mockReturnValue("about:blank")
+    const sender = { id: 17, once: vi.fn(), on: vi.fn() }
+    await expect(
+      mocks.handlers.get("design:control-import-interactions")!({ sender }, "start")
+    ).rejects.toThrow("请先在内置浏览器打开目标页面")
+    expect(mocks.contents.executeJavaScript).not.toHaveBeenCalled()
   })
 
   it("prepares an editing copy owned by the requesting renderer", async () => {

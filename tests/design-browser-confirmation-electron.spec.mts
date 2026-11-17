@@ -98,8 +98,9 @@ try {
     preload,
     `
     const {contextBridge,ipcRenderer}=require('electron');
+    let recording=false;
     contextBridge.exposeInMainWorld('electron',{process:{platform:process.platform}});
-    contextBridge.exposeInMainWorld('api',{browser:{
+    contextBridge.exposeInMainWorld('api',{design:{controlImportInteractions:async action=>({recording:recording=action==='start'||(action==='status'&&recording),count:0})},browser:{
       attach:options=>ipcRenderer.invoke('fixture:attach',options),
       navigate:(url,options)=>ipcRenderer.invoke('fixture:navigate',url,options),
       setBounds:(bounds,visible)=>ipcRenderer.invoke('fixture:bounds',bounds,visible),

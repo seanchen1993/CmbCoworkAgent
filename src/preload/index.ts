@@ -4937,6 +4937,9 @@ const api = {
         "design:open-import-browser",
         url
       )) satisfies DesignUrlImportApi["openImportBrowser"],
+    controlImportInteractions: ((action) =>
+      ipcRenderer.invoke("design:control-import-interactions", action)
+    ) satisfies DesignUrlImportApi["controlImportInteractions"],
     onUrlImportProgress: ((callback) => {
       const listener = (_event: unknown, progress: Parameters<typeof callback>[0]) =>
         callback(progress)

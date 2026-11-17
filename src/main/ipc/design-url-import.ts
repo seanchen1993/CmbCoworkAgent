@@ -2,6 +2,7 @@ import { ipcMain, type WebContents } from "electron"
 import { randomUUID } from "node:crypto"
 import { getGlobalBrowserService } from "../browser/core/browser-service-registry"
 import { DesignUrlImportService } from "../services/design/url-import-service"
+import { controlDesignInteractionRecording } from "../services/design/interaction-recording"
 import {
   DESIGN_IMPORT_PROGRESS_CHANNEL,
   type DesignImportRequest
@@ -10,16 +11,32 @@ import {
 export function registerDesignUrlImportHandlers(getWorkspace: () => string): void {
   const service = new DesignUrlImportService()
   const owners = new Set<number>()
+  let recordingOwner: number | undefined
+  const clearRecording = (owner: number) => {
+    if (recordingOwner !== owner) return
+    recordingOwner = undefined
+    void getGlobalBrowserService()
+      ?.getWebContents()
+      ?.executeJavaScript(`(${controlDesignInteractionRecording.toString()})("clear")`)
+      .catch(() => {})
+  }
   const watch = (sender: WebContents) => {
     if (owners.has(sender.id)) return
     owners.add(sender.id)
     sender.once("destroyed", () => {
       service.cancelOwner(sender.id)
+      clearRecording(sender.id)
       owners.delete(sender.id)
     })
-    sender.on("render-process-gone", () => service.cancelOwner(sender.id))
+    sender.on("render-process-gone", () => {
+      service.cancelOwner(sender.id)
+      clearRecording(sender.id)
+    })
     sender.on("did-start-navigation", (_event, _url, _inPlace, main) => {
-      if (main) service.cancelOwner(sender.id)
+      if (main) {
+        service.cancelOwner(sender.id)
+        clearRecording(sender.id)
+      }
     })
   }
   ipcMain.handle("design:import-url", (event, input: Partial<DesignImportRequest> | string) => {
@@ -43,6 +60,22 @@ export function registerDesignUrlImportHandlers(getWorkspace: () => string): voi
   ipcMain.handle("design:cancel-url-import", (event, requestId: string) =>
     service.cancel(event.sender.id, requestId)
   )
+  ipcMain.handle("design:control-import-interactions", async (event, action: string) => {
+    if (!["start", "stop", "clear", "status"].includes(action)) throw new Error("交互录制操作无效")
+    watch(event.sender)
+    if ((action === "stop" || action === "clear") && recordingOwner !== event.sender.id)
+      return { recording: false, count: 0 }
+    const contents = getGlobalBrowserService()?.getWebContents()
+    if (!contents || !/^https?:\/\//i.test(contents.getURL())) {
+      if (action === "clear" || action === "status") return { recording: false, count: 0 }
+      throw new Error("请先在内置浏览器打开目标页面")
+    }
+    if (action === "start") recordingOwner = event.sender.id
+    if (action === "clear") recordingOwner = undefined
+    return contents.executeJavaScript(
+      `(${controlDesignInteractionRecording.toString()})(${JSON.stringify(action)})`
+    )
+  })
   ipcMain.handle("design:finish-url-import", (event, requestId: string, keep: boolean) =>
     service.finish(event.sender.id, requestId, keep === true)
   )

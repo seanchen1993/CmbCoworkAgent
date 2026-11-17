@@ -1,5 +1,6 @@
-import { insertDesignBodyScript } from "../../../shared/design-html-mutations"
+import { installDesignSnapshotRuntime } from "../../../shared/design-capture-runtime"
 import type { DesignImportWarning } from "../../../shared/design-url-import"
+import type { DesignClickRecording } from "./interaction-recording"
 
 export interface CapturedPageSnapshot {
   html: string
@@ -15,6 +16,8 @@ export interface CapturedPageSnapshot {
 
 /** Executed in an isolated world. All helpers must remain inside this function. */
 export async function extractDesignPageSnapshot(options?: { bridgeKey: string; allowedFrameIds: string[] }): Promise<CapturedPageSnapshot> {
+  const recording = (window as unknown as { __cmbDesignClickRecording?: DesignClickRecording }).__cmbDesignClickRecording
+  recording?.stop()
   const startUrl = location.href
   const yieldCapture = async () => {
     await new Promise(resolve => setTimeout(resolve, 0))
@@ -115,6 +118,8 @@ export async function extractDesignPageSnapshot(options?: { bridgeKey: string; a
     const source = sourceNodes[i],
       target = clonedNodes[i]
     captureOpenLayer(source, target)
+    const recordedId = recording?.ids.get(source)
+    if (recordedId) target.setAttribute("data-design-recorded-node", recordedId)
     if (source instanceof HTMLStyleElement || source instanceof HTMLLinkElement) {
       if (source.sheet) captureSheet(source.sheet as CSSStyleSheet, target)
     }
@@ -208,6 +213,23 @@ export async function extractDesignPageSnapshot(options?: { bridgeKey: string; a
     head.append(style)
   }
 
+  // Recorded states use the same sanitizer and asset localization as the visible page.
+  for (const step of recording?.steps ?? []) {
+    const template = document.createElement("template")
+    template.setAttribute("data-design-interaction", "click")
+    template.setAttribute("data-trigger", step.trigger)
+    for (const state of ["before", "after"] as const) {
+      const value = document.createElement("template")
+      value.setAttribute("data-state", state)
+      value.content.append(step[state].cloneNode(true))
+      template.content.append(value)
+    }
+    clone.querySelector("body")?.append(template)
+  }
+  const recordingStatus = recording?.status()
+  if (recordingStatus?.message) warn("interaction_recording", recordingStatus.message)
+  if (recordingStatus?.count) warn("recorded_interactions", `已保留 ${recordingStatus.count} 次点击变化，可在预览中操作。`)
+
   // Include template content in sanitization, even though it is currently inert.
   const clean = (root: ParentNode) => {
     root
@@ -280,36 +302,8 @@ export async function extractDesignPageSnapshot(options?: { bridgeKey: string; a
   }
 }
 
-/** Host-owned behavior only, installed after removing all source scripts. */
-export function designSnapshotRuntime(): void {
-  document
-    .querySelectorAll<HTMLDialogElement>("dialog[data-design-capture-modal]")
-    .forEach((dialog) => {
-      if (dialog.matches(":modal")) return
-      dialog.removeAttribute("open")
-      try {
-        dialog.showModal()
-      } catch {
-        dialog.setAttribute("open", "")
-      }
-    })
-  document.querySelectorAll<HTMLElement>("[data-design-capture-popover]").forEach((popover) => {
-    try {
-      popover.showPopover()
-    } catch {
-      // A removed/hidden ancestor may make a captured popover unavailable.
-    }
-  })
-  document.addEventListener("submit", (event) => event.preventDefault(), true)
-  document.addEventListener(
-    "click",
-    (event) => {
-      if ((event.target as Element | null)?.closest?.("a[href],area[href]")) event.preventDefault()
-    },
-    true
-  )
-}
+export { designSnapshotRuntime } from "../../../shared/design-capture-runtime"
 
 export function installSnapshotRuntime(html: string): string {
-  return insertDesignBodyScript(html, `(${designSnapshotRuntime.toString()})()`, "data-design-capture-runtime")
+  return installDesignSnapshotRuntime(html)
 }
