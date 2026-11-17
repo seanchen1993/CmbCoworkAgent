@@ -41,6 +41,8 @@ export interface CurrentRunQueuedMessage {
   id: string
   content: string
   displayContent?: string
+  /** Main-process effects prepared for this message's durable injection. */
+  onInjected?: () => void
 }
 
 /** Final assistant reply immediately preceding an afterModel steer. The outer
@@ -277,6 +279,8 @@ function currentRunInjectionAnchorForMessage(value: unknown): CurrentRunInjectio
 
 const currentRunMessageQueues = new Map<string, CurrentRunQueuedMessage[]>()
 const currentRunMessageQueueOwners = new Map<string, string>()
+// A drained id is temporarily unavailable for editing while its durable write is pending.
+const drainingMessageIds = new Map<string, Set<string>>()
 const completedAssistantMessagesByRun = new Map<string, CurrentRunCompletedAssistantMessage>()
 const VISIBLE_USER_MESSAGE_KEY = "cmb_visible_user_message"
 // A renderer can withdraw a handoff while its async UserPromptSubmit/skill hooks
@@ -377,6 +381,7 @@ export function queueCurrentRunMessage(
 ): boolean {
   if (!threadId || !message.id || !message.content.trim()) return false
   if (!isCurrentRunMessageQueueOwner(threadId, runToken)) return false
+  if (drainingMessageIds.get(threadId)?.has(message.id)) return false
   if (isCurrentRunMessageAlreadyInjected(threadId, message.id)) return false
   if (isCurrentRunMessageWithdrawn(threadId, message.id)) return false
   const existing = currentRunMessageQueues.get(threadId) ?? []
@@ -412,6 +417,7 @@ export function clearCurrentRunMessageQueue(threadId: string, runToken?: string)
   }
   currentRunMessageQueues.delete(threadId)
   currentRunMessageQueueOwners.delete(threadId)
+  drainingMessageIds.delete(threadId)
   injectedMessageIds.delete(threadId)
   withdrawnMessageIds.delete(threadId)
   completedAssistantRoutes.delete(threadId)
@@ -452,6 +458,7 @@ async function drainCurrentRunMessagesForInjection(
   | {
       messages: HumanMessage[]
       rawUserInput?: string
+      applyQueuedEffects: () => void
       completedAssistantIdentity?: CurrentRunCompletedAssistantIdentity
     }
   | undefined
@@ -460,6 +467,10 @@ async function drainCurrentRunMessagesForInjection(
     message.content.trim()
   )
   if (queued.length === 0) return undefined
+
+  const draining = drainingMessageIds.get(threadId) ?? new Set<string>()
+  for (const message of queued) draining.add(message.id)
+  drainingMessageIds.set(threadId, draining)
 
   // The notifier durably persists these user turns before acknowledging them to
   // the renderer. If persistence fails, restore the queue and let the graph fail
@@ -474,10 +485,21 @@ async function drainCurrentRunMessagesForInjection(
     // restore an old owner's messages into the replacement run's shared queue.
     if (isCurrentRunMessageQueueOwner(threadId, runToken)) {
       const arrivalsDuringNotification = currentRunMessageQueues.get(threadId) ?? []
-      currentRunMessageQueues.set(threadId, [...queued, ...arrivalsDuringNotification])
+      const restorable = queued.filter(
+        (message) => !isCurrentRunMessageWithdrawn(threadId, message.id)
+      )
+      if (restorable.length > 0) {
+        currentRunMessageQueues.set(threadId, [...restorable, ...arrivalsDuringNotification])
+      }
     }
     throw error
+  } finally {
+    for (const message of queued) draining.delete(message.id)
+    if (draining.size === 0 && drainingMessageIds.get(threadId) === draining) {
+      drainingMessageIds.delete(threadId)
+    }
   }
+  if (!isCurrentRunMessageQueueOwner(threadId, runToken)) return undefined
 
   const injected = injectedMessageIds.get(threadId) ?? new Set<string>()
   for (const message of queued) injected.add(message.id)
@@ -488,6 +510,17 @@ async function drainCurrentRunMessagesForInjection(
 
   return {
     rawUserInput: queued.at(-1)?.rawUserInput,
+    applyQueuedEffects() {
+      for (const message of queued) {
+        try {
+          message.onInjected?.()
+        } catch (error) {
+          // The message is durable. An effect must not prevent model injection
+          // or skip the effects for other messages in this batch.
+          console.warn("[Runtime] Failed to apply an injected message's effects:", error)
+        }
+      }
+    },
     messages: queued.map(
       (message) => {
         const visibleContent = message.displayContent || message.content
@@ -575,7 +608,7 @@ export function createCurrentRunMessageQueueMiddleware(
         typeof runtime.configurable?.thread_id === "string"
           ? runtime.configurable.thread_id
           : undefined
-      if (!threadId || !ownerRunToken) return undefined
+      if (!threadId || !ownerRunToken || runtime.signal?.aborted) return undefined
 
       const messages = Array.isArray(state.messages) ? state.messages : []
       const anchorMessage = currentRunInjectionAnchorForMessage(messages.at(-1))
@@ -585,10 +618,16 @@ export function createCurrentRunMessageQueueMiddleware(
         "beforeModel",
         { anchorMessage }
       )
-      if (injection && isCurrentRunMessageQueueOwner(threadId, ownerRunToken)) {
-        onRawUserInputInjected?.(injection.rawUserInput)
+      if (
+        !injection ||
+        runtime.signal?.aborted ||
+        !isCurrentRunMessageQueueOwner(threadId, ownerRunToken)
+      ) {
+        return undefined
       }
-      return injection ? { messages: injection.messages } : undefined
+      onRawUserInputInjected?.(injection.rawUserInput)
+      injection.applyQueuedEffects()
+      return { messages: injection.messages }
     },
     afterModel: {
       canJumpTo: ["model"],
@@ -597,7 +636,7 @@ export function createCurrentRunMessageQueueMiddleware(
           typeof runtime.configurable?.thread_id === "string"
             ? runtime.configurable.thread_id
             : undefined
-        if (!threadId || !ownerRunToken) return undefined
+        if (!threadId || !ownerRunToken || runtime.signal?.aborted) return undefined
 
         // Only inject when the model produced a FINAL reply (no tool calls). If it
         // requested tools, let them run — the steered message is drained on the
@@ -624,12 +663,19 @@ export function createCurrentRunMessageQueueMiddleware(
           "afterModel",
           { completedAssistantMessage, anchorMessage }
         )
+        if (
+          !injection ||
+          runtime.signal?.aborted ||
+          !isCurrentRunMessageQueueOwner(threadId, ownerRunToken)
+        ) {
+          return undefined
+        }
         // The preceding reply is persisted with a fresh id so providers that
         // reuse AI message ids cannot overwrite it with the guided reply. Keep
         // LangGraph state on that same id before the next values snapshot is
         // emitted; otherwise the renderer sees the provider id and the durable
         // id as two separate assistant messages after a reload.
-        if (injection && completedAssistantMessage) {
+        if (completedAssistantMessage) {
           if (lastMessage.id !== completedAssistantMessage.id) {
             lastMessage.id = completedAssistantMessage.id
           }
@@ -642,10 +688,9 @@ export function createCurrentRunMessageQueueMiddleware(
             }
           }
         }
-        if (injection && isCurrentRunMessageQueueOwner(threadId, ownerRunToken)) {
-          onRawUserInputInjected?.(injection.rawUserInput)
-        }
-        return injection ? { messages: injection.messages, jumpTo: "model" as const } : undefined
+        onRawUserInputInjected?.(injection.rawUserInput)
+        injection.applyQueuedEffects()
+        return { messages: injection.messages, jumpTo: "model" as const }
       }
     }
   })

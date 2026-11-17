@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>()
+  return { ...actual, spawn: vi.fn(actual.spawn) }
+})
 vi.mock("../services/event-reporter", () => ({ trackEvent: vi.fn() }))
 vi.mock("../harness-board/service", () => ({ resolveHarnessFeatureCurrentStage: vi.fn() }))
 vi.mock("../storage", async (importOriginal) => ({
@@ -10,6 +14,7 @@ vi.mock("../storage", async (importOriginal) => ({
   getHookLoggingConfig: vi.fn(() => ({ enabled: false, diagnostic: false }))
 }))
 
+import { spawn } from "node:child_process"
 import { runCompletionHooksWithRevision } from "../agent/skill-lifecycle/completion-hooks"
 import { getEnabledHooks, getHookLoggingConfig } from "../storage"
 import { runHooks, type HookContext, type HookResultCallback } from "./runner"
@@ -44,6 +49,7 @@ async function capture(context: HookContext) {
 afterEach(() => {
   vi.unstubAllEnvs()
   vi.unstubAllGlobals()
+  vi.mocked(spawn).mockClear()
   vi.mocked(getEnabledHooks).mockReset()
   vi.mocked(getHookLoggingConfig).mockClear()
 })
@@ -67,6 +73,42 @@ describe("RAW_USER_INPUT command hook environment", () => {
     expect(await capture({ userPrompt: "内部生成的提示词" })).toEqual({
       raw: null,
       prompt: "内部生成的提示词"
+    })
+  })
+
+  it("still runs the command when the text cannot be stored in an environment variable", async () => {
+    vi.stubEnv("RAW_USER_INPUT", "stale host value")
+    vi.stubEnv("USER_PROMPT", "stale prompt")
+    expect(await capture({ rawUserInput: "before\0after", userPrompt: "processed\0text" })).toEqual(
+      {
+        raw: null,
+        prompt: null
+      }
+    )
+  })
+
+  it("retries process startup without the raw value if the OS rejects the environment size", async () => {
+    const raw = "测".repeat(50_000)
+    vi.mocked(spawn).mockImplementationOnce(() => {
+      throw Object.assign(new Error("spawn E2BIG"), { code: "E2BIG" })
+    })
+    expect(await capture({ rawUserInput: raw, userPrompt: "processed text" })).toEqual({
+      raw: null,
+      prompt: "processed text"
+    })
+    expect(spawn).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(spawn).mock.calls[0][2]?.env?.RAW_USER_INPUT === raw).toBe(true)
+  })
+
+  it("omits unpaired surrogates and preserves valid Unicode pairs in command env", async () => {
+    const emoji = "  测试 🧪\n"
+    expect(await capture({ rawUserInput: "before\ud800after", userPrompt: emoji })).toEqual({
+      raw: null,
+      prompt: emoji
+    })
+    expect(await capture({ rawUserInput: emoji, userPrompt: "before\udc00after" })).toEqual({
+      raw: emoji,
+      prompt: null
     })
   })
 
@@ -139,6 +181,16 @@ describe("raw_user_input in the HTTP hook request body", () => {
       userPrompt: "技能调用块"
     })
     expect(body.raw_user_input).toBe("")
+  })
+
+  it.each([
+    ["an embedded NUL", "  before\0after\n"],
+    ["an unpaired surrogate", "  before\ud800after\n"]
+  ])("keeps %s in the HTTP JSON body", async (_label, raw) => {
+    expect(await captureHttpBody("PreToolUse", { rawUserInput: raw })).toHaveProperty(
+      "raw_user_input",
+      raw
+    )
   })
 
   it("omits the field when there is no original input in the invocation", async () => {

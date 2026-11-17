@@ -6056,7 +6056,11 @@ export function ChatContainer({
       )
       return
     }
-    const editedText = { text: nextText, rawUserInput: editingQueueText }
+    // The editor starts with processed text, which can include a generated attachment prompt.
+    const editedText = {
+      text: nextText,
+      rawUserInput: editingQueueText === message.text ? message.rawUserInput : editingQueueText
+    }
     const updatedMessage = { ...message, ...editedText }
     setEditingQueueId(null)
     setEditingQueueText("")

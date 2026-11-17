@@ -36,7 +36,13 @@ const CHARDET_CONFIDENCE_THRESHOLD = 0.8
 const CHARDET_SAMPLE_BYTES = 8_192
 const MAX_HOOK_ENV_JSON_CHARS = 4_096
 const ONCE_HOOK_KEY_SEPARATOR = "\u0000"
-const INVOCATION_CONTEXT_ENV_KEYS = new Set(["AGENT_ID", "WORKSPACE_PATH", "CLAUDE_PROJECT_DIR", "RAW_USER_INPUT"])
+const INVOCATION_CONTEXT_ENV_KEYS = new Set([
+  "AGENT_ID",
+  "WORKSPACE_PATH",
+  "CLAUDE_PROJECT_DIR",
+  "RAW_USER_INPUT",
+  "USER_PROMPT"
+])
 const DEFAULT_USER_CONTEXT_FIELDS = [
   "sap_id",
   "yst_id",
@@ -398,6 +404,11 @@ function clearInheritedInvocationContextEnv(
   }
 }
 
+function canRepresentHookEnvText(value: string): boolean {
+  // NUL terminates OS env strings, and Unicode mode detects unpaired surrogates.
+  return !value.includes("\0") && !/[\uD800-\uDFFF]/u.test(value)
+}
+
 function buildHookEnv(
   event: HookEvent,
   context: HookContext,
@@ -446,8 +457,12 @@ function buildHookEnv(
   if (context.projectDir) env.PROJECT_DIR = context.projectDir
   if (context.sessionId) env.SESSION_ID = context.sessionId
   if (context.systemId) env.SYSTEM_ID = context.systemId
-  if (context.userPrompt) env.USER_PROMPT = context.userPrompt
-  if (typeof context.rawUserInput === "string") env.RAW_USER_INPUT = context.rawUserInput
+  if (context.userPrompt && canRepresentHookEnvText(context.userPrompt)) {
+    env.USER_PROMPT = context.userPrompt
+  }
+  if (typeof context.rawUserInput === "string" && canRepresentHookEnvText(context.rawUserInput)) {
+    env.RAW_USER_INPUT = context.rawUserInput
+  }
   addHookUserContextEnv(env, hook)
   // PR-01: Claude Code-compatible env vars. Only set when context provides them
   // — keeps zero-context invocations byte-identical with prior versions.
@@ -724,13 +739,27 @@ function executeCommandHook(
       useShell = isWindows
     }
 
-    const child = spawn(cmd, args, {
-      env,
-      shell: useShell,
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout,
-      cwd
-    })
+    const spawnCommand = (commandEnv: Record<string, string>) =>
+      spawn(cmd, args, {
+        env: commandEnv,
+        shell: useShell,
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout,
+        cwd
+      })
+    let child: ReturnType<typeof spawnCommand>
+    try {
+      child = spawnCommand(env)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "E2BIG" || env.RAW_USER_INPUT === undefined) {
+        throw error
+      }
+      // The OS rejected startup before running the command. Preserve the hook's
+      // existing stdin and environment when the extra value exhausts the limit.
+      const fallbackEnv = { ...env }
+      delete fallbackEnv.RAW_USER_INPUT
+      child = spawnCommand(fallbackEnv)
+    }
 
     // Write the Claude Code JSON payload to stdin so hooks can parse structured input.
     // Wrapped in try/catch — child may already be dead if spawn failed.

@@ -72,79 +72,118 @@ function testGuidedReconciliationPrioritizesDurableState(): void {
   )
 }
 
-async function testGuidedEditFallbackKeepsRawInput(): Promise<void> {
-  // Execute the production callback with controlled reconciliation timing.
+async function executeQueuedEdit(
+  message: QueuedMessage,
+  editedText?: string,
+  runEndsDuringReplacement = false
+): Promise<{ draft: QueuedMessage; replacements: number }> {
+  // Execute the production callbacks with controlled reconciliation timing.
   const chat = readFileSync(
     resolve(__dirname, "../src/renderer/src/components/chat/ChatContainer.tsx"),
     "utf8"
   )
   const callback = chat.match(
-    /const saveEditingQueuedMessage = useCallback\b[\s\S]*?(?=const moveQueuedMessage =)/u
+    /const startEditingQueuedMessage = useCallback\b[\s\S]*?(?=const moveQueuedMessage =)/u
   )?.[0]
-  if (!callback) throw new Error("Queued edit callback was not found")
-  const code = ts.transpileModule(callback + "return saveEditingQueuedMessage", {
+  if (!callback) throw new Error("Queued edit callbacks were not found")
+  const code = ts.transpileModule(callback, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None }
   }).outputText
 
-  const editedText = "  updated draft\n "
-  for (const runEndsDuringReplacement of [false, true]) {
-    const message = qm({
-      text: "prior draft",
-      rawUserInput: "  prior draft\n",
-      handoffRequestedAt: new Date(1)
-    })
-    let draft = message
-    let reconciliations = 0
-    let replacements = 0
-    const unexpected = (): never => {
-      throw new Error("Guided edit failed or consumed the draft")
-    }
-    const bindings = {
-      useCallback: (fn: () => Promise<void>) => fn,
-      MAX_INPUT_CHARS: 24_000,
-      threadId: "thread-id",
-      threadMessages: [],
-      editingQueueId: message.id,
-      editingQueueText: editedText,
-      setEditingQueueId: () => {},
-      setEditingQueueText: () => {},
-      guidingQueuedMessageIdsRef: { current: new Set<string>() },
-      queuedEditRequestRef: { current: 0 },
-      getQueuedMessage: () => draft,
-      updateQueuedMessage: (_id: string, patch: Partial<QueuedMessage>) => {
-        draft = { ...draft, ...patch }
-      },
-      appendMessage: unexpected,
-      deleteQueuedMessage: unexpected,
-      toast: { message: unexpected, error: unexpected },
-      classifyGuidedMessage,
-      getQueuedModelContent,
-      getQueuedDisplayContent,
-      guardCoordinatorPlainText,
-      window: {
-        api: {
-          agent: {
-            reconcileCurrentRunQueuedMessages: async () => ({
-              pendingIds: runEndsDuringReplacement && ++reconciliations === 1 ? [message.id] : [],
-              injectedIds: [],
-              durableIds: []
-            }),
-            queueCurrentRunMessage: async () => {
-              replacements++
-              return { queued: false, reason: "no_active_run" }
-            }
+  let draft = message
+  let reconciliations = 0
+  let replacements = 0
+  const unexpected = (): never => {
+    throw new Error("Queued edit failed or consumed the draft")
+  }
+  const bindings = {
+    useCallback: (fn: () => Promise<void>) => fn,
+    MAX_INPUT_CHARS: 24_000,
+    threadId: "thread-id",
+    threadMessages: [],
+    originalDraft: message,
+    editedText,
+    guidingQueuedMessageIdsRef: { current: new Set<string>() },
+    queuedEditRequestRef: { current: 0 },
+    getQueuedMessage: () => draft,
+    updateQueuedMessage: (_id: string, patch: Partial<QueuedMessage>) => {
+      draft = { ...draft, ...patch }
+    },
+    appendMessage: unexpected,
+    deleteQueuedMessage: unexpected,
+    toast: { message: unexpected, error: unexpected },
+    classifyGuidedMessage,
+    getQueuedModelContent,
+    getQueuedDisplayContent,
+    guardCoordinatorPlainText,
+    window: {
+      api: {
+        agent: {
+          reconcileCurrentRunQueuedMessages: async () => ({
+            pendingIds: runEndsDuringReplacement && ++reconciliations === 1 ? [message.id] : [],
+            injectedIds: [],
+            durableIds: []
+          }),
+          queueCurrentRunMessage: async () => {
+            replacements++
+            return { queued: false, reason: "no_active_run" }
           }
         }
       }
     }
-    const saveEdit = new Function(...Object.keys(bindings), code)(...Object.values(bindings))
-    await saveEdit()
+  }
+  const editAndSave = new Function(
+    ...Object.keys(bindings),
+    `
+    let editingQueueId = null
+    let editingQueueText = ""
+    const setEditingQueueId = (id) => { editingQueueId = id }
+    const setEditingQueueText = (text) => { editingQueueText = text }
+    ${code}
+    startEditingQueuedMessage(originalDraft)
+    if (editedText !== undefined) setEditingQueueText(editedText)
+    return saveEditingQueuedMessage()
+    `
+  )
+  await editAndSave(...Object.values(bindings))
+  return { draft, replacements }
+}
 
+async function testGuidedEditFallbackKeepsRawInput(): Promise<void> {
+  const editedText = "  updated draft\n "
+  const message = qm({
+    text: "prior draft",
+    rawUserInput: "  prior draft\n",
+    handoffRequestedAt: new Date(1)
+  })
+  for (const runEndsDuringReplacement of [false, true]) {
+    const { draft, replacements } = await executeQueuedEdit(
+      message,
+      editedText,
+      runEndsDuringReplacement
+    )
     const timing = runEndsDuringReplacement ? "run ended during edit" : "run already ended"
     assertEqual(replacements, runEndsDuringReplacement ? 1 : 0, timing)
     assertEqual(draft.handoffRequestedAt, undefined, timing + " returns the draft to auto-drain")
     assertEqual(draft.text, editedText.trim(), timing + " retains the edited model text")
     assertEqual(draft.rawUserInput, editedText, timing + " retains the untrimmed edited input")
+  }
+}
+
+async function testUnchangedQueuedEditPreservesRawInput(): Promise<void> {
+  const messages = [
+    qm({ text: "original", rawUserInput: "  original\n " }),
+    qm({ text: "请分析以下文件内容。", attachmentModelBlocks: ATT, rawUserInput: "" }),
+    qm({ text: "legacy draft" })
+  ]
+  for (const message of messages) {
+    const { draft } = await executeQueuedEdit(message)
+    assertEqual(draft.text, message.text, "unchanged save preserves the model text")
+    assertEqual(
+      draft.rawUserInput,
+      message.rawUserInput,
+      `unchanged save preserves the raw input of ${JSON.stringify(message.text)}`
+    )
   }
 }
 
@@ -312,7 +351,8 @@ async function main(): Promise<void> {
     testGuardPrefixesCoordinatorMarker,
     testPumpClaimsOnlyUnchangedDraftVersion,
     testGuidedReconciliationPrioritizesDurableState,
-    testGuidedEditFallbackKeepsRawInput
+    testGuidedEditFallbackKeepsRawInput,
+    testUnchangedQueuedEditPreservesRawInput
   ]
   for (const test of tests) {
     await test()

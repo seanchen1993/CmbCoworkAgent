@@ -24,6 +24,7 @@ import {
 import { runHooksEnriched } from "../hooks/required-skill"
 import type { HookContext, HookResultCallback } from "../hooks/runner"
 import {
+  createInheritedHookScope,
   normalizePathKey,
   resolveEnabledHooksForRun,
   type HookScopeController,
@@ -37,7 +38,11 @@ import {
 import { buildOrderedChain } from "./failover"
 import { getManagedRunModelOverride } from "../harness-board/managed-run-model"
 import { IdleModelServiceHoursError } from "../../shared/idle-model-service-window"
-import { activateSkillLifecycle, formatSkillHookContext } from "./skill-lifecycle/activation"
+import {
+  activateSkillLifecycle,
+  formatSkillHookContext,
+  getSkillActivationKey
+} from "./skill-lifecycle/activation"
 import { parseSkillUseBlock, type ParsedSkillUseBlock } from "./skill-lifecycle/marker"
 import { SkillLifecycleRegistry, type SkillLifecycleMatch } from "./skill-lifecycle/registry"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
@@ -340,6 +345,7 @@ export type PreparedUserPrompt =
       accepted: true
       content: string
       explicitSkillHookContext?: string
+      onInjected?: () => void
     }
   | {
       accepted: false
@@ -394,6 +400,8 @@ export async function validateExplicitSkillReference(
     : null
 }
 
+const EXPLICIT_SKILL_TOOL_NAME = "skill_select"
+
 async function activateExplicitSkillFromMessage({
   message,
   workspacePath,
@@ -413,7 +421,6 @@ async function activateExplicitSkillFromMessage({
   turnId,
   hookScope,
   firedSkillKeys,
-  skillUseTracker,
   onHookResult,
   onHookSkippedFactory,
   skillVisibility
@@ -436,7 +443,6 @@ async function activateExplicitSkillFromMessage({
   turnId?: string
   hookScope: HookScopeController
   firedSkillKeys: Set<string>
-  skillUseTracker: SkillUseTracker
   onHookResult?: HookResultCallback
   onHookSkippedFactory?: (event: HookEvent) => ScopeSkipCallback | undefined
   skillVisibility?: ProjectModeSkillScope
@@ -461,7 +467,7 @@ async function activateExplicitSkillFromMessage({
   const result = await activateSkillLifecycle({
     skill,
     trigger: "explicit",
-    toolName: "skill_select",
+    toolName: EXPLICIT_SKILL_TOOL_NAME,
     toolArgs: {
       skillName: parsed.skillName,
       skillPath: parsed.skillPath
@@ -489,7 +495,6 @@ async function activateExplicitSkillFromMessage({
     turnId,
     hookScope,
     firedSkillKeys,
-    skillUseTracker,
     resolveHooks: (event: HookEvent, context: HookContext): HookConfig[] =>
       resolveEnabledHooksForRun(
         workspacePath,
@@ -549,11 +554,14 @@ export async function prepareStandardUserPrompt({
   onSystemMessage?: (message: string) => void
   isPreparationCurrent?: () => boolean
 }): Promise<PreparedUserPrompt> {
-  // Submission hooks see this candidate while running hooks keep the accepted input.
-  const promptHookScope: HookScopeController = {
-    ...turnState.hookScope,
-    rawUserInput: typeof rawUserInput === "string" ? rawUserInput : undefined
-  }
+  // A replacement may reset the shared turn state before an old hook settles.
+  const { hookScope: runHookScope, skillHookKeys, skillUseTracker, turnId } = turnState
+  const isCurrent = (): boolean =>
+    turnState.hookScope === runHookScope && (isPreparationCurrent?.() ?? true)
+  // Preflight can activate a skill for its own hooks. Keep the activation
+  // private until the prompt is accepted and, for steering, actually injected.
+  const promptHookScope = createInheritedHookScope(runHookScope)
+  promptHookScope.rawUserInput = typeof rawUserInput === "string" ? rawUserInput : undefined
   let preparedMessage = initialModelInput
   const trustedExplicitSkillBlock = trustedExplicitSkill
     ? formatTrustedSkillUseBlock(trustedExplicitSkill)
@@ -579,15 +587,14 @@ export async function prepareStandardUserPrompt({
     systemId: harnessAgentContext.systemId,
     ...getHarnessHookContext(harnessAgentContext),
     sessionId: threadId,
-    turnId: turnState.turnId,
+    turnId,
     hookScope: promptHookScope,
-    firedSkillKeys: turnState.skillHookKeys,
-    skillUseTracker: turnState.skillUseTracker,
+    firedSkillKeys: new Set(skillHookKeys),
     onHookResult,
     onHookSkippedFactory,
     skillVisibility
   })
-  if (isPreparationCurrent && !isPreparationCurrent()) {
+  if (!isCurrent()) {
     return {
       accepted: false,
       blockedBy: "run_not_ready",
@@ -610,7 +617,7 @@ export async function prepareStandardUserPrompt({
     userPrompt: hookVisibleMessage,
     workspacePath,
     sessionId: threadId,
-    turnId: turnState.turnId,
+    turnId,
     pluginOutputDir: harnessAgentContext.pluginOutputDir,
     systemId: harnessAgentContext.systemId,
     ...getHarnessHookContext(harnessAgentContext)
@@ -627,7 +634,7 @@ export async function prepareStandardUserPrompt({
     promptSubmitContext,
     onHookResult
   )
-  if (isPreparationCurrent && !isPreparationCurrent()) {
+  if (!isCurrent()) {
     return {
       accepted: false,
       blockedBy: "run_not_ready",
@@ -682,16 +689,35 @@ export async function prepareStandardUserPrompt({
   if (promptSubmitResult?.systemMessage) {
     onSystemMessage?.(promptSubmitResult.systemMessage)
   }
-  if (explicitSkillActivation?.skill) {
-    onExplicitSkillActivated?.(explicitSkillActivation.skill)
-  }
-  if (!deferRawUserInputCommit) {
-    turnState.hookScope.rawUserInput = promptHookScope.rawUserInput
+  const skill = explicitSkillActivation?.skill
+  let onInjected: (() => void) | undefined
+  if (!deferRawUserInputCommit) runHookScope.rawUserInput = promptHookScope.rawUserInput
+  if (skill) {
+    const persistentHookKeys = [...promptHookScope.persistentHookKeys].filter(
+      (key) => !runHookScope.persistentHookKeys.has(key)
+    )
+    let committed = false
+    const commitExplicitSkill = () => {
+      if (committed || turnState.hookScope !== runHookScope) return
+      committed = true
+      runHookScope.activateSkill(skill.name, skill.pluginId, skill.rootDir)
+      runHookScope.activatePersistentHookKeys(persistentHookKeys)
+      skillHookKeys.add(getSkillActivationKey(skill))
+      skillUseTracker.recordSkillUse(skill, {
+        trigger: "explicit",
+        triggerToolName: EXPLICIT_SKILL_TOOL_NAME
+      })
+      // Resume may take ownership of this queue while retaining the logical turn.
+      if (isCurrent()) onExplicitSkillActivated?.(skill)
+    }
+    if (deferRawUserInputCommit) onInjected = commitExplicitSkill
+    else commitExplicitSkill()
   }
   return {
     accepted: true,
     content: preparedMessage,
-    explicitSkillHookContext: explicitSkillActivation?.hookContext
+    explicitSkillHookContext: explicitSkillActivation?.hookContext,
+    ...(onInjected ? { onInjected } : {})
   }
 }
 

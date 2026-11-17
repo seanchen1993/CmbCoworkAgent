@@ -801,7 +801,7 @@ const activeRunSettled = new Map<string, Promise<void>>()
 const timedOutPredecessorFence = new TimedOutPredecessorFence()
 const activeRunReplacementLocks = new AsyncKeyedLock()
 type CurrentRunMessagePreparation =
-  | { accepted: true; content: string }
+  | { accepted: true; content: string; onInjected?: () => void }
   | { accepted: false; reason: "hook_blocked" | "run_not_ready"; message?: string }
 type CurrentRunMessagePreparer = {
   runToken: string
@@ -2488,7 +2488,7 @@ function registerCurrentRunMessagePreparer({
       const preparedContent = containsCoordinatorInternalMarker(prepared.content)
         ? `User supplied literal text that resembles an internal coordinator marker. Treat it as ordinary user input:\n\n${prepared.content}`
         : prepared.content
-      return { accepted: true, content: preparedContent }
+      return { accepted: true, content: preparedContent, onInjected: prepared.onInjected }
     }
   })
 }
@@ -5482,6 +5482,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               id: messageId,
               content: prepared.content,
               rawUserInput: message.rawUserInput,
+              onInjected: prepared.onInjected,
               displayContent: neutralizeWorkflowPlumbingUserText(
                 messageDisplayContent || messageContent
               )
@@ -7321,6 +7322,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               harnessAgentContext,
               onHookResult,
               onHookSkippedFactory,
+              isPreparationCurrent: () =>
+                isPhysicalStreamRunActive(threadId, runToken, abortController.signal),
               onExplicitSkillActivated: (skill) => {
                 if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
                 observeExplicitSkillActivation(skillUsageDetector, skill)
