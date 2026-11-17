@@ -72,7 +72,7 @@ After confirmation, if the current conversation still has no usable `inAppBrowse
 3. If none of the above explains the issue and command execution is available, run this diagnostic command, following any environment approval requirements:
 
    ```bash
-   npx -y --prefer-offline @playwright/mcp@0.0.85
+   npx -y --prefer-offline @playwright/mcp@0.0.82
    ```
 
    - Treat this as a diagnostic server process, not a completed browser task.
