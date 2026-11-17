@@ -166,7 +166,9 @@ PR-16 加入了 CC 的 `if` 字段，**当前实现一个子集**：
 
 ### 3.1 stdin JSON（权威，无大小限制）
 
-所有 command 钩子的 stdin 与 HTTP Hook 的请求体都会收到同一份完整 JSON。通用字段：
+command 钩子的 stdin 与 HTTP Hook 的请求体共用以下 JSON 基础字段。
+HTTP Hook 在调用上下文有原文时还会发送顶层字段 `raw_user_input`，保留首尾空白、换行和空字符串。
+缺少原文时省略字段，详见 [Hook 原始输入](./hook-raw-user-input.md)。
 
 ```jsonc
 {
@@ -923,7 +925,7 @@ Hook 配置（`hooks.json` 条目）：
 
 要点：
 
-- 请求体 = 该事件的 stdin JSON（含 `tool_name`、`tool_input` 等，字段同对应事件的 command Hook），固定带 `Content-Type: application/json`。**HTTP Hook 不下发任何环境变量**，上下文全在请求体里。
+- 请求体固定使用 `Content-Type: application/json`，包含对应事件的基础字段（如 `tool_name`、`tool_input`）。本轮有用户原文时可读取 `raw_user_input`。HTTP Hook 的调用上下文通过请求体传递。
 - `headers` 里的 `${POLICY_TOKEN}` 只有在 `allowedEnvVars` 白名单里才会被宿主环境变量替换，否则替换为空串（防止误把环境变量泄露到外部 URL）。
 - 响应：2xx + 含协议字段的 JSON object 按 `decision` / `reason` / `continue` / `updatedInput` 等字段处理；没有协议字段的业务 JSON 与纯文本都当普通输出。非 2xx / 网络错误 / 超时 / 响应体超过 1MB 都走 `fallback`（这里是放行，可设 `"block"`），不会透传半截响应。默认超时 30s（`async: true` 时上限 5 分钟）。
 - ⚠️ 无 SSRF 守卫，URL 与出网风险自负，别指向不可信地址。

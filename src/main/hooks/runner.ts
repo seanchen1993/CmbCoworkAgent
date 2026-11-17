@@ -458,10 +458,14 @@ function buildHookEnv(
 }
 
 /**
- * Build the structured JSON payload written to the hook's stdin (Claude Code protocol).
+ * Build the common input for command stdin and HTTP requests (Claude Code protocol).
  * Keys mirror Claude Code's documented hook input schema so existing community hooks work.
  */
-function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: HookConfig): string {
+function buildHookInputPayload(
+  event: HookEvent,
+  context: HookContext,
+  hook: HookConfig
+): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     hook_event_name: event,
     session_id: context.sessionId ?? "",
@@ -517,7 +521,7 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: Hoo
   if (context.skillTriggerToolName) payload.skill_trigger_tool_name = context.skillTriggerToolName
   if (context.subagent) payload.subagent = context.subagent
   if (context.stopContext) payload.stop_context = context.stopContext
-  return stringifyAsciiJson(payload)
+  return payload
 }
 
 /**
@@ -1311,15 +1315,19 @@ async function executeSyncHook(
     result = await executePromptHook(hook, context, event)
   } else if (hookType === "http") {
     await refreshStage()
-    const builtPayload = buildHookStdinPayload(event, context, hook)
-    if (diagnostic) stdinPayload = builtPayload
-    result = await executeHttpHook(hook, builtPayload, getEffectiveTimeout(hook))
+    const payload = buildHookInputPayload(event, context, hook)
+    // Capture diagnostics before adding the original text, which is for delivery only.
+    if (diagnostic) stdinPayload = stringifyAsciiJson(payload)
+    if (typeof context.rawUserInput === "string") {
+      payload.raw_user_input = context.rawUserInput
+    }
+    result = await executeHttpHook(hook, stringifyAsciiJson(payload), getEffectiveTimeout(hook))
   } else {
     const runCommand = async (): Promise<HookResult> => {
       // Resolve after workspace admission: a command ahead of this hook may
       // advance the workflow while the hook is queued.
       await refreshStage()
-      const builtPayload = buildHookStdinPayload(event, context, hook)
+      const builtPayload = stringifyAsciiJson(buildHookInputPayload(event, context, hook))
       if (diagnostic) stdinPayload = builtPayload
       const cwd = getCommandCwd(context)
       return executeCommandHook(hook, buildHookEnv(event, context, hook), builtPayload, cwd)

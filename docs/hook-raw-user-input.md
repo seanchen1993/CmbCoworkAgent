@@ -17,6 +17,20 @@ printf '%s' "$RAW_USER_INPUT"
 const text = process.env.RAW_USER_INPUT
 ```
 
+HTTP 类型 Hook 通过 POST 请求体中的顶层字段 `raw_user_input` 取得同一份原文。
+服务端解析 JSON 后直接读取该字段，无需配置请求头或 `allowedEnvVars`。
+
+```json
+{
+  "hook_event_name": "UserPromptSubmit",
+  "raw_user_input": "  帮我审查代码\n"
+}
+```
+
+字段可用于持有本轮原文的事件，例如 `UserPromptSubmit`、`PreToolUse` 和 `Stop`。
+用户只选择技能而未输入文字时，值为 `""`。调用上下文没有原文时省略字段。
+诊断日志中的请求体副本不包含新增字段。
+
 `USER_PROMPT` 保持原有语义，可能包含技能说明、附件等程序生成的内容。
 `RAW_USER_INPUT` 在聊天输入框提交时、trim 和附件解析及技能拼接之前采集，保留空白、
 换行和用户自己输入的协议标签。单纯选择技能且没有键入文字时，它可以是空字符串。

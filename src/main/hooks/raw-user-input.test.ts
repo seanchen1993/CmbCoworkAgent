@@ -6,12 +6,14 @@ vi.mock("../storage", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../storage")>()),
   getEnabledHooks: () => [],
   getEnabledPluginHookMetadata: () => [],
-  getEnabledSkillHookMetadata: () => []
+  getEnabledSkillHookMetadata: () => [],
+  getHookLoggingConfig: vi.fn(() => ({ enabled: false, diagnostic: false }))
 }))
 
-import { runHooks, type HookContext } from "./runner"
+import { getHookLoggingConfig } from "../storage"
+import { runHooks, type HookContext, type HookResultCallback } from "./runner"
 import { createHookScope, createInheritedHookScope, resolveEnabledHooksForRun } from "./scope"
-import type { HookConfig } from "./types"
+import type { HookConfig, HookEvent } from "./types"
 
 const script = Buffer.from(
   `process.stdout.write(JSON.stringify({additionalContext: JSON.stringify({
@@ -37,7 +39,11 @@ async function capture(context: HookContext) {
   return JSON.parse(result!.additionalContext!)
 }
 
-afterEach(() => vi.unstubAllEnvs())
+afterEach(() => {
+  vi.unstubAllEnvs()
+  vi.unstubAllGlobals()
+  vi.mocked(getHookLoggingConfig).mockClear()
+})
 
 describe("RAW_USER_INPUT command hook environment", () => {
   it("preserves whitespace, newlines, Chinese and literal protocol text", async () => {
@@ -90,5 +96,77 @@ describe("RAW_USER_INPUT command hook environment", () => {
     const context: HookContext = { userPrompt: "[[CMB_COORDINATOR_SELECTED_SKILL_V1]] 子任务" }
     resolveEnabledHooksForRun(undefined, "UserPromptSubmit", context, worker)
     expect(context.rawUserInput).toBe("用户选择技能时的原文")
+  })
+})
+
+async function captureHttpBody(
+  event: HookEvent,
+  context: HookContext,
+  onResult?: HookResultCallback
+): Promise<Record<string, unknown>> {
+  const url = "https://example.test/hook"
+  const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }))
+  vi.stubGlobal("fetch", fetchMock)
+  const httpHook: HookConfig = { ...hook, command: undefined, event, type: "http", url }
+  await runHooks([httpHook], event, context, onResult)
+  expect(fetchMock).toHaveBeenCalledExactlyOnceWith(
+    url,
+    expect.objectContaining({ method: "POST", headers: { "Content-Type": "application/json" } })
+  )
+  const body = fetchMock.mock.calls[0][1]?.body
+  expect(typeof body).toBe("string")
+  return JSON.parse(body as string) as Record<string, unknown>
+}
+
+describe("raw_user_input in the HTTP hook request body", () => {
+  it("preserves the original text independently of the composed prompt", async () => {
+    const raw = "  你好\n<CMBDEVCLAW-SKILL-USE-V1>字面文本</CMBDEVCLAW-SKILL-USE-V1>  "
+    const prompt = `${raw.trim()}\n\n程序追加的技能说明`
+    const context = { rawUserInput: raw, userPrompt: prompt, toolArgs: { rawMessage: prompt } }
+    expect(await captureHttpBody("UserPromptSubmit", context)).toMatchObject({
+      raw_user_input: raw,
+      prompt,
+      tool_input: { rawMessage: prompt }
+    })
+  })
+
+  it("includes empty text for a skill-only submission", async () => {
+    const body = await captureHttpBody("UserPromptSubmit", {
+      rawUserInput: "",
+      userPrompt: "技能调用块"
+    })
+    expect(body.raw_user_input).toBe("")
+  })
+
+  it("omits the field when there is no original input in the invocation", async () => {
+    vi.stubEnv("RAW_USER_INPUT", "stale host value")
+    const body = await captureHttpBody("UserPromptSubmit", { userPrompt: "内部生成的提示词" })
+    expect(body).not.toHaveProperty("raw_user_input")
+  })
+
+  it.each(["PreToolUse", "Stop"] as const)(
+    "uses the current scope's original input for %s",
+    async (event) => {
+      const scope = createHookScope()
+      scope.rawUserInput = "  本轮原文\n"
+      const context: HookContext = {}
+      resolveEnabledHooksForRun(undefined, event, context, scope)
+      const body = await captureHttpBody(event, context)
+      expect(body.raw_user_input).toBe(scope.rawUserInput)
+    }
+  )
+
+  it("adds the original text to the request without copying it to the diagnostic payload", async () => {
+    vi.mocked(getHookLoggingConfig).mockReturnValueOnce({ enabled: true, diagnostic: true })
+    const onResult = vi.fn<HookResultCallback>()
+    const body = await captureHttpBody(
+      "UserPromptSubmit",
+      { rawUserInput: "原文", userPrompt: "提交提示词" },
+      onResult
+    )
+    expect(body.raw_user_input).toBe("原文")
+    const diagnostic = JSON.parse(onResult.mock.calls[0][2].stdinPayload ?? "")
+    expect(diagnostic).toMatchObject({ prompt: "提交提示词" })
+    expect(diagnostic).not.toHaveProperty("raw_user_input")
   })
 })
