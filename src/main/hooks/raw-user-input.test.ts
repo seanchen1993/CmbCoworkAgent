@@ -4,15 +4,17 @@ vi.mock("../services/event-reporter", () => ({ trackEvent: vi.fn() }))
 vi.mock("../harness-board/service", () => ({ resolveHarnessFeatureCurrentStage: vi.fn() }))
 vi.mock("../storage", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../storage")>()),
-  getEnabledHooks: () => [],
+  getEnabledHooks: vi.fn(() => []),
   getEnabledPluginHookMetadata: () => [],
   getEnabledSkillHookMetadata: () => [],
   getHookLoggingConfig: vi.fn(() => ({ enabled: false, diagnostic: false }))
 }))
 
-import { getHookLoggingConfig } from "../storage"
+import { runCompletionHooksWithRevision } from "../agent/skill-lifecycle/completion-hooks"
+import { getEnabledHooks, getHookLoggingConfig } from "../storage"
 import { runHooks, type HookContext, type HookResultCallback } from "./runner"
 import { createHookScope, createInheritedHookScope, resolveEnabledHooksForRun } from "./scope"
+import { fireSessionEnd, fireSessionEndAll, fireSessionStartOnce } from "./session-lifecycle"
 import type { HookConfig, HookEvent } from "./types"
 
 const script = Buffer.from(
@@ -42,6 +44,7 @@ async function capture(context: HookContext) {
 afterEach(() => {
   vi.unstubAllEnvs()
   vi.unstubAllGlobals()
+  vi.mocked(getEnabledHooks).mockReset()
   vi.mocked(getHookLoggingConfig).mockClear()
 })
 
@@ -144,15 +147,81 @@ describe("raw_user_input in the HTTP hook request body", () => {
     expect(body).not.toHaveProperty("raw_user_input")
   })
 
-  it.each(["PreToolUse", "Stop"] as const)(
-    "uses the current scope's original input for %s",
-    async (event) => {
+  it("uses the current scope's original input for PreToolUse", async () => {
+    const scope = createHookScope()
+    scope.rawUserInput = "  本轮原文\n"
+    const context: HookContext = {}
+    resolveEnabledHooksForRun(undefined, "PreToolUse", context, scope)
+    const body = await captureHttpBody("PreToolUse", context)
+    expect(body.raw_user_input).toBe(scope.rawUserInput)
+  })
+
+  it("delivers the original input to Stop when normal turn completion runs the hook", async () => {
+    const threadId = "stop-raw-input"
+    const scope = createHookScope()
+    scope.rawUserInput = "  本轮用户原文\n"
+    const stopContext = { userMessage: "改写后的提示词", assistantResponse: "回复" }
+    const url = "https://example.test/stop"
+    vi.mocked(getEnabledHooks).mockReturnValue([
+      { ...hook, command: undefined, event: "Stop", type: "http", url }
+    ])
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }))
+    vi.stubGlobal("fetch", fetchMock)
+
+    await expect(
+      runCompletionHooksWithRevision({
+        threadId,
+        abortSignal: new AbortController().signal,
+        getStopContext: () => stopContext,
+        hookScope: scope,
+        runRevision: vi.fn(),
+        sendNotice: vi.fn(),
+        sendError: vi.fn(),
+        maxRevisionAttempts: 0,
+        revisionPromptPrefix: ""
+      })
+    ).resolves.toBe("passed")
+
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith(
+      url,
+      expect.objectContaining({ method: "POST" })
+    )
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body))
+    expect(body).toMatchObject({
+      hook_event_name: "Stop",
+      session_id: threadId,
+      stop_context: stopContext,
+      raw_user_input: scope.rawUserInput
+    })
+  })
+
+  it.each(["thread deletion", "app shutdown"] as const)(
+    "omits the previous turn's input from SessionEnd HTTP requests during %s",
+    async (ending) => {
+      const threadId = "session-end-raw-input"
       const scope = createHookScope()
-      scope.rawUserInput = "  本轮原文\n"
-      const context: HookContext = {}
-      resolveEnabledHooksForRun(undefined, event, context, scope)
-      const body = await captureHttpBody(event, context)
-      expect(body.raw_user_input).toBe(scope.rawUserInput)
+      scope.rawUserInput = "  已结束回合的私密输入\n"
+      const url = "https://example.test/session-end"
+      vi.mocked(getEnabledHooks).mockReturnValue([
+        { ...hook, command: undefined, event: "SessionEnd", type: "http", url }
+      ])
+      const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }))
+      vi.stubGlobal("fetch", fetchMock)
+
+      await fireSessionStartOnce(threadId, undefined, undefined, scope)
+      if (ending === "thread deletion") {
+        await fireSessionEnd(threadId)
+      } else {
+        await fireSessionEndAll(100)
+      }
+
+      expect(fetchMock).toHaveBeenCalledExactlyOnceWith(
+        url,
+        expect.objectContaining({ method: "POST" })
+      )
+      const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body))
+      expect(body).toMatchObject({ hook_event_name: "SessionEnd", session_id: threadId })
+      expect(body).not.toHaveProperty("raw_user_input")
     }
   )
 

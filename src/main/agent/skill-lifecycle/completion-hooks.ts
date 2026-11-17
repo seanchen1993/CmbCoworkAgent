@@ -370,57 +370,44 @@ export async function runCompletionHooksWithRevision({
     }
 
     onStopHooksFired?.()
-    const stopResult = await (runStopHooks
-      ? runStopHooks()
-      : runHooksEnriched(
-          resolveEnabledHooksForRun(
-            workspacePath,
-            "Stop",
-            {
-              workspacePath,
-              pluginOutputDir,
-              systemId,
-              pluginWorkspace,
-              featureId,
-              harnessProjectId,
-              harnessAdapterId,
-              harnessAdapterName,
-              harnessAdapterVersion,
-              harnessNodeName,
-              harnessNodeStatus,
-              projectCode,
-              projectDir,
-              sessionId: threadId,
-              turnId,
-              stopContext: getStopContext()
-            },
-            hookScope,
-            onHookSkippedFactory?.("Stop")
-          ),
+    let stopResult: HookResult | null
+    if (runStopHooks) {
+      stopResult = await runStopHooks()
+    } else {
+      const context: HookContext = {
+        workspacePath,
+        pluginOutputDir,
+        systemId,
+        pluginWorkspace,
+        featureId,
+        harnessProjectId,
+        harnessAdapterId,
+        harnessAdapterName,
+        harnessAdapterVersion,
+        harnessNodeName,
+        harnessNodeStatus,
+        projectCode,
+        projectDir,
+        sessionId: threadId,
+        turnId,
+        stopContext: getStopContext()
+      }
+      stopResult = await runHooksEnriched(
+        resolveEnabledHooksForRun(
+          workspacePath,
           "Stop",
-          {
-            workspacePath,
-            pluginOutputDir,
-            systemId,
-            pluginWorkspace,
-            featureId,
-            harnessProjectId,
-            harnessAdapterId,
-            harnessAdapterName,
-            harnessAdapterVersion,
-            harnessNodeName,
-            harnessNodeStatus,
-            projectCode,
-            projectDir,
-            sessionId: threadId,
-            turnId,
-            stopContext: getStopContext()
-          },
-          onHookResult
-        ).catch((e) => {
-          console.warn("[Hooks] Stop hook error:", e)
-          return null
-        }))
+          context,
+          hookScope,
+          onHookSkippedFactory?.("Stop")
+        ),
+        "Stop",
+        context,
+        onHookResult
+      ).catch((e) => {
+        console.warn("[Hooks] Stop hook error:", e)
+        return null
+      })
+    }
 
     if (stopResult && shouldPreventContinuation(stopResult)) {
       if (stopResult.systemMessage) sendNotice(stopResult.systemMessage)

@@ -441,7 +441,10 @@ export function resolveEnabledHooksForRun(
   scope?: HookScopeController,
   onSkipped?: ScopeSkipCallback
 ): HookConfig[] {
-  if (context.rawUserInput === undefined) context.rawUserInput = scope?.rawUserInput
+  // SessionEnd reuses the last scope for hook matching after the turn has ended.
+  if (event !== "SessionEnd" && context.rawUserInput === undefined) {
+    context.rawUserInput = scope?.rawUserInput
+  }
   return filterScopedHooks(
     {
       baseHooks: getEnabledHooks(workspacePath),

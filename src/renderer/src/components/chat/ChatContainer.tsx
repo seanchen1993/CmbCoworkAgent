@@ -5440,9 +5440,11 @@ export function ChatContainer({
     ]
   )
 
-  const handleSubmit = async (e: React.FormEvent, defaultText = ""): Promise<void> => {
+  const handleSubmit = async (e: React.FormEvent, apiText?: string): Promise<void> => {
     e.preventDefault()
-    const trimmedInput = defaultText || input.trim()
+    const isApiSubmit = apiText !== undefined
+    const rawUserInput = apiText ?? input
+    const trimmedInput = apiText ?? input.trim()
     const isGoalSlashInput = /^\/goal(?:\s|$)/i.test(trimmedInput)
     const shouldOpenGoalDetailsForStatus = /^\/goal(?:\s+status)?\s*$/i.test(trimmedInput)
     // Defense-in-depth: every current trigger already short-circuits while the
@@ -5450,7 +5452,9 @@ export function ChatContainer({
     // popover branch returns before reaching handleSubmit. Kept here so any
     // future invoker (hotkey, programmatic call) can't accidentally ship the
     // literal "/xxx" text as a message.
-    if (slash.mode.kind === "slash" && !isBareGoalSlashCommandInput(trimmedInput)) return
+    if (!isApiSubmit && slash.mode.kind === "slash" && !isBareGoalSlashCommandInput(trimmedInput)) {
+      return
+    }
     if (readOnly) return
     if (contextReminderPending) return
     // A plain (non-/goal) message submitted while the thread is busy — running,
@@ -5470,7 +5474,8 @@ export function ChatContainer({
       !isGoalSlashInput &&
       (isLoading || Boolean(pendingApproval) || approvalQueue.length > 0 || shouldQueueBehindSubmit)
     if (
-      (!trimmedInput && !hasPendingFilePayload && !selectedSkill && !selectedBuiltinBrowser) ||
+      (!trimmedInput &&
+        (isApiSubmit || (!hasPendingFilePayload && !selectedSkill && !selectedBuiltinBrowser))) ||
       historyLoading ||
       (isLoading && !allowSubmitWhileLoading && !willEnqueueWhileBusy) ||
       !stream
@@ -5486,6 +5491,7 @@ export function ChatContainer({
     }
 
     const goalControlWithPendingTransport =
+      !isApiSubmit &&
       hasPendingGoalTransportPayload &&
       isGoalSlashTransportSensitiveControlCommandInput(trimmedInput)
     if (goalControlWithPendingTransport) {
@@ -5512,7 +5518,7 @@ export function ChatContainer({
         if (threadError) {
           clearError()
         }
-        setInput("")
+        if (!isApiSubmit) setInput("")
         if (shouldOpenGoalDetailsForStatus) {
           setGoalDetailsOpen(true)
         }
@@ -5641,16 +5647,18 @@ export function ChatContainer({
       // Claim the current composer payload before @file IO. A second Enter sees
       // the preparation guard, while text typed during the await goes into a
       // fresh composer and is not cleared when this draft is enqueued.
-      const rawUserInput = input
-      const skill = selectedSkill
-      const browser = selectedBuiltinBrowser
-      const claimedAttachments = attachments
-      const claimedMentionedFiles = mentionedFiles
+      // API text is a separate submission and does not own the local draft.
+      const skill = isApiSubmit ? null : selectedSkill
+      const browser = !isApiSubmit && selectedBuiltinBrowser
+      const claimedAttachments = isApiSubmit ? [] : attachments
+      const claimedMentionedFiles = isApiSubmit ? [] : mentionedFiles
       let rawMessage = trimmedInput
-      setInput("")
-      setAttachments([])
-      setMentionedFiles([])
-      if (skill) setSelectedSkill(null)
+      if (!isApiSubmit) {
+        setInput("")
+        setAttachments([])
+        setMentionedFiles([])
+        if (skill) setSelectedSkill(null)
+      }
       // The original composer payload is now atomically claimed. Any later
       // Enter belongs to newly typed input and should queue behind this submit
       // while @file IO is still running, rather than being silently ignored.
@@ -6048,12 +6056,13 @@ export function ChatContainer({
       )
       return
     }
-    const updatedMessage = { ...message, text: nextText, rawUserInput: editingQueueText }
+    const editedText = { text: nextText, rawUserInput: editingQueueText }
+    const updatedMessage = { ...message, ...editedText }
     setEditingQueueId(null)
     setEditingQueueText("")
 
     if (!message.handoffRequestedAt) {
-      updateQueuedMessage(message.id, { text: nextText, rawUserInput: editingQueueText })
+      updateQueuedMessage(message.id, editedText)
       return
     }
 
@@ -6092,7 +6101,7 @@ export function ChatContainer({
       if (finishDurable(beforeEdit.durableIds)) return
 
       if (classifyGuidedMessage(message.id, beforeEdit) === "unconsumed") {
-        updateQueuedMessage(message.id, { text: nextText, handoffRequestedAt: undefined })
+        updateQueuedMessage(message.id, { ...editedText, handoffRequestedAt: undefined })
         return
       }
 
@@ -6104,7 +6113,7 @@ export function ChatContainer({
       })
       if (!isCurrentRequest() || !getUnchangedGuidedMessage()) return
       if (result.queued) {
-        updateQueuedMessage(message.id, { text: nextText, rawUserInput: editingQueueText })
+        updateQueuedMessage(message.id, editedText)
         return
       }
 
@@ -6115,7 +6124,7 @@ export function ChatContainer({
       if (!isCurrentRequest() || !getUnchangedGuidedMessage()) return
       if (finishDurable(afterRejection.durableIds)) return
       if (classifyGuidedMessage(message.id, afterRejection) === "unconsumed") {
-        updateQueuedMessage(message.id, { text: nextText, handoffRequestedAt: undefined })
+        updateQueuedMessage(message.id, { ...editedText, handoffRequestedAt: undefined })
       } else {
         toast.error("该引导消息正在提交，暂时无法编辑")
       }

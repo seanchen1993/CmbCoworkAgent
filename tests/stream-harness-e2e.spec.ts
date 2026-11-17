@@ -1,4 +1,4 @@
-/** Real preload/IPC/runtime/tool/Goal evaluation against localhost only.
+/** Real composer/preload/IPC/runtime/HTTP Hook/tool/Goal evaluation against localhost only.
  * Defaults to built out/. STREAM_HARNESS_PACKAGED_EXE selects an installed/ASAR
  * executable; STREAM_HARNESS_ARTIFACT_DIR selects the parent of isolated run artifacts.
  */
@@ -17,10 +17,15 @@ interface CapturedThread {
   messages: CapturedMessage[]
   history: unknown[]
 }
-interface CapturedStop {
+interface CapturedHook {
   hook_event_name: string
   session_id: string
   workspace_path: string
+  prompt?: string
+  raw_user_input?: string
+  tool_name?: string
+}
+interface CapturedStop extends CapturedHook {
   stop_context: { assistantResponse: string; toolCalls: string[] }
 }
 interface HarnessWindow {
@@ -57,6 +62,7 @@ interface HarnessWindow {
 import { createServer } from "node:http"
 import { mkdir, writeFile } from "node:fs/promises"
 import { createRequire } from "node:module"
+import { createServer as createTcpServer, type AddressInfo } from "node:net"
 import path from "node:path"
 import { _electron as electron, type Page } from "playwright"
 
@@ -71,14 +77,33 @@ const binary = require("electron") as string
 const packagedExecutable = process.env.STREAM_HARNESS_PACKAGED_EXE
   ? path.resolve(process.env.STREAM_HARNESS_PACKAGED_EXE)
   : undefined
+const skillName = "raw-input-fixture"
+const apiToken = "local-stream-harness-token"
+const uiRawInput =
+  "  UI_FIXTURE_741 Read evidence.txt twice.\n然后回复 hahaha done。不要修改文件。  "
+const apiRawInput = "  API_FIXTURE_741\n这段文字由接口提交。  "
+const unrelatedDraft = "Unrelated local draft that must stay in the composer."
 const requests: Record<string, unknown>[] = []
-const stopHooks: unknown[] = []
+const stopHooks: CapturedStop[] = []
+const inputHooks: CapturedHook[] = []
 const result: Record<string, unknown> = {
   output,
   stopHooks,
+  inputHooks,
   execution: packagedExecutable
     ? { kind: "packaged", executable: packagedExecutable }
     : { kind: "built-out", executable: binary }
+}
+
+async function getLocalGatewayPort(): Promise<number> {
+  const reservation = createTcpServer()
+  await new Promise<void>((resolve, reject) => {
+    reservation.once("error", reject)
+    reservation.listen(0, "127.0.0.1", resolve)
+  })
+  const { port } = reservation.address() as AddressInfo
+  await new Promise<void>((resolve) => reservation.close(() => resolve()))
+  return port
 }
 let actorCalls = 0
 let uiActorCalls = 0
@@ -95,9 +120,15 @@ async function main(): Promise<void> {
       for await (const chunk of req) text += chunk
       const body = text ? JSON.parse(text) : {}
       requests.push({ url: req.url, body })
-      if (req.url === "/stop-hook") {
-        result.stopHook ??= body
-        stopHooks.push(body)
+      if (req.url === "/stop-hook" || req.url === "/input-hook") {
+        assert.equal(req.method, "POST")
+        assert.match(req.headers["content-type"] ?? "", /^application\/json\b/)
+        if (req.url === "/stop-hook") {
+          result.stopHook ??= body
+          stopHooks.push(body)
+        } else {
+          inputHooks.push(body)
+        }
         res.writeHead(200, { "content-type": "application/json" })
         res.end(JSON.stringify({ continue: true }))
         return
@@ -107,6 +138,9 @@ async function main(): Promise<void> {
       const evaluator = all.includes("strict evaluator for an autonomous coding agent goal")
       const slow = all.includes("CANCEL_FIXTURE_741")
       const ui = all.includes("UI_FIXTURE_741")
+      const lastUser = JSON.stringify(
+        messages.findLast((message: CapturedMessage) => message.role === "user")?.content ?? ""
+      )
       if (!evaluator && !slow && injectedFailures === 0) {
         injectedFailures++
         res.writeHead(503, { "content-type": "application/json", "retry-after": "0" })
@@ -140,6 +174,13 @@ async function main(): Promise<void> {
         result.evaluatorRequest = body
       } else if (slow) {
         deltas = [{ role: "assistant", content: "partial" }, { content: "partial" }]
+      } else if (lastUser.includes("API_FIXTURE_741")) {
+        deltas = [{ role: "assistant", content: "API_ACK_741" }]
+      } else if (
+        lastUser.includes(`<name>${skillName}</name>`) &&
+        !lastUser.includes("UI_FIXTURE_741")
+      ) {
+        deltas = [{ role: "assistant", content: "SKILL_ONLY_ACK_741" }]
       } else if ((ui ? uiActorCalls : actorCalls) >= 2) {
         if (ui) uiActorCalls++
         else actorCalls++
@@ -217,6 +258,7 @@ async function main(): Promise<void> {
   })
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
   const address = server.address() as { port: number }
+  const apiPort = await getLocalGatewayPort()
   const env: Record<string, string> = {}
   for (const key of ["PATH", "Path", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT"])
     if (process.env[key]) env[key] = process.env[key]!
@@ -225,6 +267,10 @@ async function main(): Promise<void> {
     await mkdir(env[key], { recursive: true })
   }
   Object.assign(env, {
+    CMB_API_ENABLED: "1",
+    CMB_API_HOST: "127.0.0.1",
+    CMB_API_PORT: String(apiPort),
+    CMB_API_TOKEN: apiToken,
     CMB_COWORK_AGENT_HOME: path.join(output, "profile"),
     CMB_TASK_CARDS_MOCK: "1",
     CMB_E2E_DISABLE_GPU: "1",
@@ -235,6 +281,12 @@ async function main(): Promise<void> {
     NO_PROXY: "127.0.0.1,localhost",
     NODE_USE_ENV_PROXY: "1"
   })
+  const skillDir = path.join(env.CMB_COWORK_AGENT_HOME, "skills", skillName)
+  await mkdir(skillDir, { recursive: true })
+  await writeFile(
+    path.join(skillDir, "SKILL.md"),
+    `---\nname: ${skillName}\ndescription: Local HTTP Hook test fixture\n---\nReply to the user without modifying workspace files.\n`
+  )
   let app: Awaited<ReturnType<typeof electron.launch>> | undefined
   let page: Page | undefined
   try {
@@ -318,6 +370,14 @@ async function main(): Promise<void> {
           url: baseUrl.replace(/\/v1$/, "/stop-hook"),
           enabled: true
         })
+        for (const event of ["UserPromptSubmit", "PreToolUse"]) {
+          await api.hooks.create({
+            event,
+            type: "http",
+            url: baseUrl.replace(/\/v1$/, "/input-hook"),
+            enabled: true
+          })
+        }
         const thread = await api.threads.create({
           title: "Local harness goal",
           workspacePath: workspace,
@@ -372,6 +432,16 @@ async function main(): Promise<void> {
     ])
     assert.equal((result.stopHook as CapturedStop)?.session_id, (result.goal as CapturedThread).id)
     assert.equal((result.stopHook as CapturedStop)?.workspace_path, workspace)
+    const goalThread = (result.goal as CapturedThread).id
+    const goalInputs = inputHooks.filter((hook) => hook.session_id === goalThread)
+    assert.ok(goalInputs.some((hook) => hook.hook_event_name === "UserPromptSubmit"))
+    assert.ok(goalInputs.some((hook) => hook.hook_event_name === "PreToolUse"))
+    for (const hook of [
+      ...goalInputs,
+      ...stopHooks.filter((hook) => hook.session_id === goalThread)
+    ]) {
+      assert.ok(!Object.hasOwn(hook, "raw_user_input"), "legacy IPC has no original text field")
+    }
     assert.equal(injectedFailures, 1)
     assert.equal(actorCalls, 3, "transient retry must not repeat the tool cycle")
     // A separate real ChatContainer submission exercises ThreadProvider's live
@@ -403,10 +473,16 @@ async function main(): Promise<void> {
     // UAT mounts the stream holder after ancillary hydration, as in the
     // existing session-checkpoint-recovery E2E's first UI send.
     await page.waitForTimeout(1000)
-    await composer.fill(
-      "UI_FIXTURE_741 Read evidence.txt twice, then reply hahaha done. Do not modify files."
-    )
-    await composer.locator("xpath=ancestor::form").locator('button[type="submit"]').last().click()
+    const composerForm = composer.locator("xpath=ancestor::form")
+    const selectSkill = async (): Promise<void> => {
+      await composer.fill(`/${skillName}`)
+      await page.getByRole("option", { name: new RegExp(skillName) }).click()
+      assert.equal(await composer.inputValue(), "", "selecting the skill consumes the slash query")
+    }
+    const submit = () => composerForm.locator('button[type="submit"]').last().click()
+    await selectSkill()
+    await composer.fill(uiRawInput)
+    await submit()
     const captureRows = () =>
       page.locator('[data-chat-message-row][data-message-role="assistant"]').evaluateAll((rows) =>
         rows.map((row) => ({
@@ -434,10 +510,34 @@ async function main(): Promise<void> {
       }
       assert.equal(new Set(markedRows.map((row) => row.id)).size, markedRows.length)
     }
-    await page.waitForFunction(
-      () =>
-        !document.querySelector('button[aria-label="停止生成"]') &&
-        !document.querySelector<HTMLTextAreaElement>(".composer-textarea")?.disabled
+    const waitForComposerIdle = () =>
+      page.waitForFunction(
+        () =>
+          !document.querySelector('button[aria-label="停止生成"]') &&
+          !document.querySelector<HTMLTextAreaElement>(".composer-textarea")?.disabled
+      )
+    const uiInputHooks = (event: string): CapturedHook[] =>
+      inputHooks.filter((hook) => hook.session_id === uiThread && hook.hook_event_name === event)
+    const uiStopHooks = (): CapturedStop[] =>
+      stopHooks.filter((hook) => hook.session_id === uiThread)
+    await waitForComposerIdle()
+    const uiSubmit = uiInputHooks("UserPromptSubmit")
+    assert.equal(uiSubmit.length, 1)
+    assert.equal(uiSubmit[0].raw_user_input, uiRawInput)
+    assert.match(uiSubmit[0].prompt ?? "", /<name>raw-input-fixture<\/name>/)
+    const uiTools = uiInputHooks("PreToolUse")
+    for (const toolName of ["ls", "read_file"]) {
+      assert.ok(
+        uiTools.some((hook) => hook.tool_name === toolName),
+        `expected ${toolName} Hook`
+      )
+    }
+    for (const hook of uiTools) {
+      assert.equal(hook.raw_user_input, uiRawInput, "each tool invocation sees the composer input")
+    }
+    assert.deepEqual(
+      uiStopHooks().map((hook) => hook.raw_user_input),
+      [uiRawInput]
     )
     const assertUiRows = async (phase: string): Promise<void> => {
       const rows = await captureRows()
@@ -464,6 +564,42 @@ async function main(): Promise<void> {
       uiThread
     )
     await page.screenshot({ path: path.join(output, "ui-reloaded.png") })
+
+    await selectSkill()
+    await submit()
+    await page.getByText("SKILL_ONLY_ACK_741", { exact: true }).last().waitFor()
+    await waitForComposerIdle()
+    const skillOnlySubmit = uiInputHooks("UserPromptSubmit").at(-1)
+    assert.equal(skillOnlySubmit?.raw_user_input, "", "skill-only submit preserves empty text")
+    assert.match(skillOnlySubmit?.prompt ?? "", /<name>raw-input-fixture<\/name>/)
+    assert.equal(uiStopHooks().at(-1)?.raw_user_input, "")
+
+    await selectSkill()
+    await composer.fill(unrelatedDraft)
+    const apiResponse = await fetch(`http://127.0.0.1:${apiPort}/v1/threads/${uiThread}/messages`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${apiToken}`,
+        "content-type": "application/json",
+        accept: "text/event-stream"
+      },
+      body: JSON.stringify({ message: apiRawInput }),
+      signal: AbortSignal.timeout(60_000)
+    })
+    const apiStream = await apiResponse.text()
+    assert.equal(apiResponse.status, 200, apiStream)
+    assert.match(apiResponse.headers.get("content-type") ?? "", /^text\/event-stream\b/)
+    assert.match(apiStream, /\bAPI_ACK_741\b/)
+    assert.match(apiStream.trimEnd(), /data: \[DONE\]$/)
+    await page.getByText("API_ACK_741", { exact: true }).last().waitFor()
+    await waitForComposerIdle()
+    const apiSubmit = uiInputHooks("UserPromptSubmit").at(-1)
+    assert.equal(apiSubmit?.raw_user_input, apiRawInput, "API submit uses the incoming text")
+    assert.doesNotMatch(apiSubmit?.prompt ?? "", /CMBDEVCLAW-SKILL-USE-V1|Unrelated local draft/)
+    assert.equal(uiStopHooks().at(-1)?.raw_user_input, apiRawInput)
+    assert.equal(await composer.inputValue(), unrelatedDraft)
+    await composerForm.getByText(skillName, { exact: true }).waitFor()
+    await composerForm.getByRole("button", { name: "移除技能" }).waitFor()
     const persisted = (result.goal as CapturedThread).messages
     assert.deepEqual(
       persisted.map((message) => message.role),
