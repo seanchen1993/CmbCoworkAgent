@@ -449,6 +449,7 @@ import {
   type LocalThreadRunLease,
   type LocalThreadRunLeaseClaim
 } from "../agent/thread-run-lease"
+import { isKnowledgeDepositionBlocked } from "../services/knowledge-base-manager"
 import { emitAppAttention } from "../app-attention-events"
 import { finishTraceInBackground } from "../agent/trace/collector"
 import {
@@ -1169,7 +1170,15 @@ function rejectDesktopRunForRemoteReadOnlyThread(
   return true
 }
 
+function assertKnowledgeDepositionThreadCanStart(threadId: string): void {
+  const metadata = parseStandardThreadMetadata(getThreadCore(threadId)?.metadata).metadata
+  if (isKnowledgeDepositionBlocked(metadata)) {
+    throw new Error("知识库正在同步，请稍后再运行沉淀任务。")
+  }
+}
+
 function claimDesktopThreadRunLease(threadId: string, runId: string): LocalThreadRunLeaseClaim {
+  assertKnowledgeDepositionThreadCanStart(threadId)
   const current = getLocalThreadRunLease(threadId)
   return claimLocalThreadRunLease({
     threadId,
@@ -1186,6 +1195,7 @@ function claimAgentThreadRunLease(
 ): LocalThreadRunLeaseClaim {
   const managedLease = context.localRunLease
   if (managedLease) {
+    assertKnowledgeDepositionThreadCanStart(threadId)
     return claimLocalThreadRunLease({
       threadId,
       owner: managedLease.owner,

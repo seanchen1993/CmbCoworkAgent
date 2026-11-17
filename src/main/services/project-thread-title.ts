@@ -9,7 +9,10 @@ export async function generateProjectThreadTitle(
   if (binding && typeof binding === "object") {
     const { projectId, slug } = binding as Record<string, unknown>
     if (typeof projectId === "string" && typeof slug === "string") {
-      const title = [skillDescription?.trim(), skillName?.trim()].filter(Boolean).join("·")
+      const description = Array.from(skillDescription?.trim() ?? "")
+        .slice(0, 15)
+        .join("")
+      const title = [skillName?.trim(), description].filter(Boolean).join("·")
       if (title) return title
     }
   }

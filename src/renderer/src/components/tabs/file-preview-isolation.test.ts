@@ -11,10 +11,6 @@ const previewIpc = readFileSync(
   new URL("../../../../main/ipc/file-preview.ts", import.meta.url),
   "utf8"
 )
-const knowledgeGrants = readFileSync(
-  new URL("../../../../main/harness-board/knowledge-preview-grant.ts", import.meta.url),
-  "utf8"
-)
 const previewReader = readFileSync(
   new URL("../../../../main/workspace-file-preview/reader.ts", import.meta.url),
   "utf8"
@@ -163,10 +159,13 @@ describe("persisted active file preview isolation", () => {
     expect(fileViewer).toContain("externalPreviewGrant")
     expect(fileViewer).toContain("await resolveExternalPreviewGrant()")
     expect(fileViewer).not.toContain("requestExternalFileRead")
-    expect(harnessIpc).toContain("await readHarnessKnowledgePreviewInWorker(")
-    expect(harnessIpc).toContain("authorizeKnowledgePreview(preview, event.sender.id)")
-    expect(knowledgeGrants).toContain("preview.files.filter((file) => !file.is_dir)")
-    expect(knowledgeGrants).toContain("issueExternalFileReadGrant(")
+    const knowledgeHandler = harnessIpc.slice(
+      harnessIpc.indexOf('"harnessBoard:getKnowledgePreview"'),
+      harnessIpc.indexOf('"harnessBoard:cancelKnowledgePreviewRequests"')
+    )
+    expect(knowledgeHandler).toContain("return readKnowledgeBasePreviewInWorker(")
+    expect(knowledgeHandler).not.toContain("issueExternalFileReadGrant")
+    expect(knowledgeHandler).not.toContain("authorizeKnowledgePreview")
     expect(externalGrants).toContain("realpath(entry.rootPath)")
     expect(externalGrants).toContain("realpath(candidate)")
     expect(previewIpc).toContain('"workspace:authorizeToolFilePreview"')

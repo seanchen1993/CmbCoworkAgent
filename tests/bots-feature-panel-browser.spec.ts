@@ -64,10 +64,13 @@ window.scope("group-a");`
   })
   const browser = await chromium.launch({
     headless: true,
+    timeout: 15000,
     ...(existsSync(chromium.executablePath()) ? {} : { channel: "chrome" })
   })
   try {
     const page = await browser.newPage({ viewport: { width: 320, height: 730 } })
+    page.setDefaultTimeout(10000)
+    page.setDefaultNavigationTimeout(15000)
     const errors: string[] = []
     page.on("pageerror", (error) => errors.push(error.message))
     await page.route("http://localhost/bot-panel", (route) =>

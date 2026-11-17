@@ -1,5 +1,6 @@
 import path from "node:path"
 import { realpath } from "node:fs/promises"
+import { assertOriginalContent } from "../services/market-content"
 import {
   WORKSPACE_FILE_PREVIEW_CANCELLED,
   WORKSPACE_FILE_PREVIEW_MAX_TEXT_BYTES,
@@ -129,7 +130,17 @@ async function openPreviewFile(
   let candidate: string
   let trustedRootPath: string
 
-  if ("externalFullPath" in source) {
+  if ("knowledgeBaseRootPath" in source) {
+    const resolved = resolveWorkspacePreviewCandidate(
+      source.filePath,
+      source.knowledgeBaseRootPath,
+      "absolute"
+    )
+    candidate = resolved.candidate
+    trustedRootPath = resolved.root
+    // Knowledge files need no grants; protected plugin content keeps its own policy.
+    assertOriginalContent(candidate)
+  } else if ("externalFullPath" in source) {
     assertExternalPathAllowed(source.externalFullPath)
     assertExternalPathAllowed(source.trustedRootPath)
     candidate = path.resolve(source.externalFullPath)
@@ -161,6 +172,7 @@ async function openPreviewFile(
   const file = await openStableFileHandle(trustedRootPath, candidate)
   try {
     throwIfCancelled(cancellation)
+    if ("knowledgeBaseRootPath" in source) assertOriginalContent(file.filePath)
     if ("externalFullPath" in source) assertExternalPathAllowed(file.filePath)
     return file
   } catch (error) {

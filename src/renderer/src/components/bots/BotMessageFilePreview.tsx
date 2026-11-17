@@ -61,17 +61,17 @@ export function BotMessageFilePreview({
               client.filePreview.readFilePreview({
                 ...input,
                 source:
-                  input.source.externalGrant !== undefined
-                    ? input.source
-                    : { ...input.source, botGroupId: groupId }
+                  input.source.threadId !== undefined
+                    ? { ...input.source, botGroupId: groupId }
+                    : input.source
               }),
             openMediaPreview: (input: Parameters<typeof client.filePreview.openMediaPreview>[0]) =>
               client.filePreview.openMediaPreview({
                 ...input,
                 source:
-                  input.source.externalGrant !== undefined
-                    ? input.source
-                    : { ...input.source, botGroupId: groupId }
+                  input.source.threadId !== undefined
+                    ? { ...input.source, botGroupId: groupId }
+                    : input.source
               })
           }
         : client.filePreview,

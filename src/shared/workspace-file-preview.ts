@@ -47,12 +47,22 @@ export type WorkspaceFilePreviewSource =
       /** Bot group previews resolve the retained shared directory, not a member's thread. */
       botGroupId?: string
       externalGrant?: never
+      knowledgeBaseId?: never
     }
   | {
       externalGrant: string
+      knowledgeBaseId?: never
       filePath: string
       threadId?: never
       botGroupId?: never
+      workspacePathKind?: never
+    }
+  | {
+      knowledgeBaseId: string
+      filePath: string
+      threadId?: never
+      botGroupId?: never
+      externalGrant?: never
       workspacePathKind?: never
     }
 

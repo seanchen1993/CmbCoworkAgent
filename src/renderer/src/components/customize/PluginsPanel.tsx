@@ -1,3 +1,4 @@
+import { canReadPluginSource } from "../../../../shared/market-source-access"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { notifyMarketPublished } from "@/lib/market-change-events"
 import {
@@ -448,7 +449,7 @@ export function PluginsPanel(): React.JSX.Element {
 
   // Source access follows the origin persisted by the main process.
   const shouldHidePluginDetails = useCallback((plugin: PluginMetadata | null): boolean => {
-    return !!plugin && plugin.origin !== "local"
+    return !!plugin && !canReadPluginSource(plugin)
   }, [])
 
   // Clean up debounce timer on unmount
@@ -941,7 +942,9 @@ export function PluginsPanel(): React.JSX.Element {
         onToggleHookEnabled={handleToggleHookEnabled}
         onDelete={handleDeleteRequest}
         onPublish={
-          selectedPlugin?.origin === "local" && !shouldHideSelectedPluginDetails
+          selectedPlugin &&
+          (selectedPlugin.origin === "local" || selectedPlugin.sourceAccess === "owner") &&
+          !shouldHideSelectedPluginDetails
             ? () => openPublishDialog(selectedPlugin)
             : undefined
         }
@@ -957,7 +960,7 @@ export function PluginsPanel(): React.JSX.Element {
         }
         hideComponentDetails={shouldHideSelectedPluginDetails}
         onEditFiles={
-          selectedPlugin?.origin === "local" && !shouldHideSelectedPluginDetails
+          selectedPlugin && canReadPluginSource(selectedPlugin) && !shouldHideSelectedPluginDetails
             ? () => setFileEditorOpen(true)
             : undefined
         }
@@ -1045,7 +1048,7 @@ export function PluginDetailPanel(props: {
     isMarketPlugin = false,
     onEditFiles
   } = props
-  const hideComponentDetails = requestedHideComponentDetails || plugin?.origin !== "local"
+  const hideComponentDetails = requestedHideComponentDetails || !canReadPluginSource(plugin)
 
   if (!plugin) {
     return (
