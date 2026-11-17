@@ -844,7 +844,7 @@ async function archiveAndReadExistingHistory(
       .click()
     const main = page!.getByRole("main")
     await main.getByText("项目已归档，仅可查看历史记录。", { exact: true }).waitFor()
-    for (const name of ["托管运行当前特性", "查看特性配置", "新增会话"])
+    for (const name of ["托管运行当前特性", "编辑特性配置", "新增会话"])
       assert(
         await main.getByRole("button", { name, exact: true }).isDisabled(),
         `Archived history cannot use ${name}`
