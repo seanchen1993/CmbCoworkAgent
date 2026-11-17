@@ -15,6 +15,7 @@ import { preparePatchContext, DesignPatchScopeError } from "./patch-context"
 import { applyDesignPatch } from "./patch-applier"
 import {
   executeDesignPatch,
+  DesignPatchLayoutScopeError,
   normalizeDesignPatchReply,
   DESIGN_PATCH_TOOLS,
   readDesignPatchStream
@@ -431,13 +432,13 @@ describe("bounded patch model executor", () => {
       seen.every((s) => !s.includes("window.businessRuns") && !s.includes("<!doctype html>"))
     ).toBe(true)
   })
-  it("publishes each candidate before a failed validation without declaring it applied", async () => {
+  it("expands exhausted overflow repairs with measurements without applying rejected candidates", async () => {
     const onProposal = vi.fn()
     const validate = vi.fn(async () => {
       expect(onProposal).toHaveBeenCalledTimes(validate.mock.calls.length)
       return ["修改产生横向溢出：document（视口 390px）"]
     })
-    await expect(executeDesignPatch({
+    const pending = executeDesignPatch({
       ...options(),
       onProposal,
       validate,
@@ -445,7 +446,11 @@ describe("bounded patch model executor", () => {
         ...proposal(context(), [op("cta", { op: "set_style", declarations: { width: "1200px" } })]),
         contextId: JSON.parse(messages[1].content.split("\nHost validation feedback:")[0]).contextId
       }) })
-    })).rejects.toThrow("视口 390px")
+    })
+    await expect(pending).rejects.toBeInstanceOf(DesignPatchLayoutScopeError)
+    await expect(pending).rejects.toMatchObject({
+      layoutIssues: ["修改产生横向溢出：document（视口 390px）"]
+    })
     expect(onProposal).toHaveBeenCalledTimes(3)
     expect(validate).toHaveBeenCalledTimes(3)
   })
@@ -556,7 +561,9 @@ describe("bounded patch model executor", () => {
   })
   it("stops after two repair attempts and never submits a rejected candidate", async () => {
     const complete = vi.fn(async () => ({ content: "{}" }))
-    await expect(executeDesignPatch({ ...options(), complete })).rejects.toThrow()
+    const error = await executeDesignPatch({ ...options(), complete }).catch((error) => error)
+    expect(error).toBeInstanceOf(Error)
+    expect(error).not.toBeInstanceOf(DesignPatchScopeError)
     expect(complete).toHaveBeenCalledTimes(3)
   })
   it("requests full scope explicitly and honors cancellation", async () => {

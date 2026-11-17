@@ -157,9 +157,16 @@ export interface PatchExecutorOptions {
 }
 export const DESIGN_PATCH_RESPONSIVE_REPAIR = `Horizontal overflow is a repairable layout problem. Preserve the user's requested changes and all content while making the affected region fit the reported viewport and the current preview width.
 Adjust the affected container/element widths, max-width:100%, min-width:0 and box-sizing:border-box as appropriate. Allow flex-wrap:wrap, responsive grid columns, normal white-space and overflow-wrap:anywhere when content needs to wrap. Reduce excessive gaps/padding or use a media query at the failing width when needed. Preserve explicitly requested font sizes and dimensions where possible by adapting their containers.
+When adding features or controls, expand the affected module within the available page width and let its height grow with wrapped content instead of retaining an insufficient fixed size.
 Do not hide or delete content, add overflow:hidden/clip, shrink the entire page with zoom/transform, or make all text smaller just to pass validation. Keep existing intentional scroll regions.
 If a parent's flex/grid/width rules cause the overflow, request that listed parent with get_design_context / action:target, then fix only the related layout. Unrelated design and interactions must be preserved.
 The rejected candidate was NOT applied. Return a complete combined patch against the CURRENT contextId, base revision and hashes, including the original requested changes plus the responsive fix. Do not return only an incremental fix against the rejected candidate.`
+
+export class DesignPatchLayoutScopeError extends DesignPatchScopeError {
+  constructor(readonly layoutIssues: string[]) {
+    super("局部空间不足，继续调整模块大小与换行")
+  }
+}
 
 class DesignPatchValidationError extends Error {
   constructor(readonly issues: string[], readonly proposal: unknown) {
@@ -326,7 +333,11 @@ export async function executeDesignPatch(
         return { candidate, metrics }
       } catch (error) {
         if (error instanceof DesignPatchScopeError) throw error
-        if (metrics.repairs >= 2) throw error
+        if (metrics.repairs >= 2) {
+          if (error instanceof DesignPatchValidationError && error.horizontalOverflow)
+            throw new DesignPatchLayoutScopeError(error.issues)
+          throw error
+        }
         metrics.repairs++
         repairingOverflow = error instanceof DesignPatchValidationError && error.horizontalOverflow
         feedback = error instanceof DesignPatchValidationError

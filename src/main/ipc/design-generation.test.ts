@@ -13,7 +13,7 @@ import type {
 import type { createAgentRuntime } from "../agent/runtime"
 import { LocalSandbox } from "../agent/local-sandbox"
 import { DesignPatchScopeError } from "../services/design/patch-context"
-import type { PatchExecutorOptions } from "../services/design/patch-executor"
+import { DesignPatchLayoutScopeError, type PatchExecutorOptions } from "../services/design/patch-executor"
 import {
   DESIGN_CREATION_SYSTEM_PROMPT,
   DESIGN_ITERATION_SYSTEM_PROMPT
@@ -232,6 +232,30 @@ describe("existing page generation", () => {
     expect(events.some((event) => event.patchStatus?.phase === "expanding")).toBe(true)
     expect(turns[0].options.extraSystemPrompt).toBe(DESIGN_ITERATION_SYSTEM_PROMPT)
     expect(events.some((event) => event.type === "done")).toBe(true)
+  })
+
+  it("continues exhausted layout repairs with the original feature request and responsive guidance", async () => {
+    const issue = "修改产生横向溢出：parent:controls（视口 390px；父容器 module 宽 82px）"
+    mocks.patch.mockRejectedValue(new DesignPatchLayoutScopeError([issue]))
+    onTurn = async (turn) => {
+      expect(fs.readFileSync(turn.draft, "utf8")).toBe(baseline)
+      expect(turn.message).toContain("在原页面上新增导出功能，不要整体重构")
+      expect(turn.message).toContain(issue)
+      expect(turn.message).toContain("自动换行、扩大可用宽度并让高度随内容增长")
+      expect(turn.message).toContain("仅调整相关模块及必要的父容器布局")
+      await edit(turn, "导出</button>", "导出报表</button>")
+    }
+    const events = await run({
+      kind: "patch",
+      patch: { targets: [], variationId: null, artifactRevision: 0 }
+    })
+    expect(turns).toHaveLength(1)
+    expect(turns[0].options.extraSystemPrompt).toBe(DESIGN_ITERATION_SYSTEM_PROMPT)
+    expect(events.some((event) => event.patchStatus?.phase === "expanding")).toBe(true)
+    expect(events.some((event) => event.type === "error")).toBe(false)
+    expect(events.find((event) => event.type === "done")?.html).toBe(
+      baseline.replace("导出</button>", "导出报表</button>")
+    )
   })
 
   it("never accepts a seeded but unedited page and preserves the editing contract on recovery", async () => {
