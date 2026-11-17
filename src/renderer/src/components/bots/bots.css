@@ -845,6 +845,9 @@
 .bot-queue {
   color: var(--bot-muted);
 }
+.bot-composer-queue {
+  margin: 0;
+}
 .bot-queue > span:first-child,
 .bot-queue > button {
   flex-shrink: 0;

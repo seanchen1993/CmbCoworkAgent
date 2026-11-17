@@ -1,4 +1,6 @@
 import type { BrowserWindow } from "electron"
+import { AsyncLocalStorage } from "node:async_hooks"
+import { resolveAgentStreamRequestChannel } from "../../shared/agent-stream-channel"
 import type { BackgroundNotificationOwner } from "../../shared/internal-notification-turn"
 import type { SkillUseBlockMetadata } from "../../shared/skill-use-block"
 import type { AgentInvokeParams } from "../types"
@@ -41,6 +43,20 @@ export interface AgentRunDelivery {
   isAvailable(): boolean
   /** Close a managed renderer stream after runtime cleanup, including aborts and early returns. */
   finish?: (threadId: string) => void
+}
+
+const runDeliveryStorage = new AsyncLocalStorage<{
+  threadId: string
+  channel: string
+  delivery: AgentRunDelivery
+}>()
+
+/** Runtime boundary events must follow the run's stream, including background Bot runs. */
+export function sendCurrentAgentRunStreamEvent(threadId: string, payload: unknown): boolean {
+  const current = runDeliveryStorage.getStore()
+  if (!current || current.threadId !== threadId) return false
+  current.delivery.send(current.channel, payload)
+  return true
 }
 
 export interface AgentRunHandle {
@@ -310,9 +326,19 @@ export async function startAgentRun(
   if (!delivery.isAvailable()) {
     throw new Error("Agent run delivery is unavailable")
   }
-  const completion = agentRunImplementation(request, delivery, context).finally(() => {
-    delivery.finish?.(request.threadId)
-  })
+  const ambientChannel = `agent:stream:${request.threadId}${request.coordinatorInternalNotification ? ":coordinator-internal" : ""}`
+  const completion = runDeliveryStorage
+    .run(
+      {
+        threadId: request.threadId,
+        channel: resolveAgentStreamRequestChannel(ambientChannel, request.streamRequestId),
+        delivery
+      },
+      () => agentRunImplementation!(request, delivery, context)
+    )
+    .finally(() => {
+      delivery.finish?.(request.threadId)
+    })
   return {
     threadId: request.threadId,
     completion

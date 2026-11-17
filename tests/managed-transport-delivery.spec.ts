@@ -25,7 +25,7 @@ import {
 } from "../src/main/agent/managed-transport-delivery"
 import type { SchedulerRendererEvent } from "../src/main/agent/stream-converter"
 import { ImGoalRunBridge } from "../src/main/services/im/goal-runner"
-import { registerAgentRunImplementation, startAgentRun } from "../src/main/agent/agent-run-service"
+import { registerAgentRunImplementation, startAgentRun, sendCurrentAgentRunStreamEvent } from "../src/main/agent/agent-run-service"
 
 interface Mirrored {
   threadId: string
@@ -389,8 +389,50 @@ async function main(): Promise<void> {
   }
   await testGoalRunSurvivesWithNoDesktopWindow()
   await testEverySettledRunClosesItsRendererStream()
+  await testRuntimeSteerEventsFollowTheirOwnRunDelivery()
   console.log("PASS testGoalRunSurvivesWithNoDesktopWindow")
   console.log("managed-transport-delivery.spec.ts passed")
+}
+
+async function testRuntimeSteerEventsFollowTheirOwnRunDelivery(): Promise<void> {
+  const first = recorder(), second = recorder()
+  let resume!: () => void
+  const barrier = new Promise<void>(resolve => { resume = resolve })
+  registerAgentRunImplementation(async request => {
+    await barrier
+    assert.equal(sendCurrentAgentRunStreamEvent("unrelated", {}), false)
+    sendCurrentAgentRunStreamEvent(request.threadId, { type: "custom", data: {
+      type: "message_id_alias", fromId: "raw", toId: `stable-${request.threadId}`,
+      role: "assistant", currentRunCompleted: true, providerSourceId: "raw", providerOccurrence: 1
+    } })
+    sendCurrentAgentRunStreamEvent(request.threadId, { type: "custom", data: {
+      type: "current_run_user_injected", completedAssistantId: `stable-${request.threadId}`,
+      completedAssistantContent: "finished", providerSourceId: "raw", providerOccurrence: 1,
+      messages: [{ id: `user-${request.threadId}`, content: "补充" }]
+    } })
+  })
+  const handles = await Promise.all([
+    startAgentRun({ threadId: "first", message: "start" }, createManagedTransportAgentRunDelivery(first.deps)),
+    startAgentRun({ threadId: "second", message: "start", streamRequestId: "foreground-request" }, {
+      window: {} as any, isAvailable: () => true,
+      send: (channel, payload) => second.broadcasts.push({ channel, payload })
+    })
+  ])
+  resume()
+  await Promise.all(handles.map(handle => handle.completion))
+  assert.equal(sendCurrentAgentRunStreamEvent("first", {}), false, "delivery is run scoped")
+  assert.equal(first.broadcasts.length, 0, "background events must reach scheduler subscribers")
+  assert.ok(first.mirrored.every(entry => entry.threadId === "first"))
+  assert.deepEqual(first.mirrored.map(entry => {
+    const event = entry.event
+    return event.type === "custom" ? event.data.type : event.type
+  }), ["started", "message_id_alias", "coordinator_ai_snapshot_message", "turn-messages", "done"])
+  assert.deepEqual(first.mirrored[3].event, { type: "turn-messages", messages: [
+    { id: "user-first", role: "user", content: "补充" }
+  ] })
+  assert.ok(second.broadcasts.every(event => event.channel === "agent:stream:second:request:foreground-request"))
+  assert.equal(second.broadcasts.length, 2)
+  console.log("PASS testRuntimeSteerEventsFollowTheirOwnRunDelivery")
 }
 
 async function testEverySettledRunClosesItsRendererStream(): Promise<void> {

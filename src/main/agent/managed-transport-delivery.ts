@@ -94,6 +94,9 @@ function toRendererEvents(converter: StreamConverter, payload: unknown): Schedul
   }
   if (envelope.type === "custom") {
     const data = (envelope.data ?? {}) as Record<string, unknown>
+    if (data.type === "current_run_user_injected") {
+      return converter.processCurrentRunUserInjected(data)
+    }
     return [
       {
         type: "custom",

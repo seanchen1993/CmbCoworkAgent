@@ -250,21 +250,10 @@ export function BotConversation({
       {collaborationPending && !running && !backgroundBusy && (
         <div className="bot-queue">
           <span>协作任务仍在进行</span>
-          <button onClick={() => void cancel().catch((cause) => toast.error(botErrorMessage(cause)))}>
-            停止协作
-          </button>
-        </div>
-      )}
-      {queued.length > 0 && (
-        <div className="bot-queue" aria-live="polite">
-          <span>{queued.length} 条{running ? "补充待接收" : "待办"}</span>
-          <span className="truncate">{botTaskPreview(queued[0])}</span>
           <button
-            onClick={() =>
-              void client.cancel(queued[0].id).catch((cause) => toast.error(botErrorMessage(cause)))
-            }
+            onClick={() => void cancel().catch((cause) => toast.error(botErrorMessage(cause)))}
           >
-            撤回
+            停止协作
           </button>
         </div>
       )}
@@ -293,6 +282,28 @@ export function BotConversation({
             threadId={threadId}
             surface="bot"
             managedTurn={managedTurn}
+            composerNotice={
+              queued.length > 0 && (
+                <div className="bot-queue bot-composer-queue" role="status" aria-live="polite">
+                  <span>
+                    {queued.length} 条{running ? "补充待接收" : "待办"}
+                  </span>
+                  <span className="truncate" title={botTaskPreview(queued[0])}>
+                    {botTaskPreview(queued[0])}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void client
+                        .cancel(queued[0].id)
+                        .catch((cause) => toast.error(botErrorMessage(cause)))
+                    }
+                  >
+                    撤回
+                  </button>
+                </div>
+              )
+            }
             readOnlyReason={
               bot.archived
                 ? "Bot 已归档，恢复后可以继续对话。"

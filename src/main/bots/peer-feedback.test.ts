@@ -600,6 +600,7 @@ describe("peer feedback with checkpoint-only predecessors", () => {
       assertCurrentRunMessagesDurablyPersisted,
       moveThreadMessagesAfterAnchor: moveAfterAnchor, moveThreadMessagesAfterLastNonAssistant: moveAfterLast,
       flushStrict: strict, registerCurrentRunCompletedAssistantRoute,
+      sendCurrentAgentRunStreamEvent: () => false,
       BrowserWindow: { getAllWindows: () => [{ isDestroyed: () => false, webContents: { isDestroyed: () => false, send } }] }
     }
     new Function(...Object.keys(dependencies), callback)(...Object.values(dependencies))

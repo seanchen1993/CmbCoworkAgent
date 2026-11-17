@@ -1,0 +1,73 @@
+{
+  "capturedAt": "2026-11-17T04:08:04.532Z",
+  "commit": "98ef8cf3a04d287bff1aaca87d145ee144052e9e",
+  "branch": "codex/merge-uat-into-bot-beta",
+  "dirty": true,
+  "diffSha256": "79808f8b95150956252e0183794721df8fa0802207665362c243d03ffdc7f0f4",
+  "files": [
+    {
+      "path": "scripts/run-bot-integration-e2e.mjs",
+      "sha256": "5c3fa691ff18c8249e3711546517fa8717b23f27929ee1d0e693ca27b410d961"
+    },
+    {
+      "path": "src/main/agent/agent-run-service.ts",
+      "sha256": "9dc464ce3d8f801b56f3474c07a197c6d2e91b2d4e58b721ccd6959be95a220c"
+    },
+    {
+      "path": "src/main/agent/managed-transport-delivery.ts",
+      "sha256": "33334a238776691eabbaa2353da182bce9ce873ba58aa4f3d609004a8e771632"
+    },
+    {
+      "path": "src/main/agent/runtime.ts",
+      "sha256": "ce4f61511c3f39d52656726d47c6b32fc6c218d34b8fd5fea242c07e98ba5867"
+    },
+    {
+      "path": "src/main/agent/stream-converter.ts",
+      "sha256": "4c523c571b36f2694e2ac18f7ee6cf43a3e68eeef3de1ccfaf1cbdef645bc797"
+    },
+    {
+      "path": "src/main/bots/peer-feedback.test.ts",
+      "sha256": "89a6f3e2f953175428bfc5b98dec31b193afd6fcb71177b88a81130c1188ad63"
+    },
+    {
+      "path": "src/renderer/src/components/bots/BotConversation.tsx",
+      "sha256": "18a6bbb50853efe185260415ef3ee18475de945c0657242bf11e7448d451bb96"
+    },
+    {
+      "path": "src/renderer/src/components/bots/bots.css",
+      "sha256": "4d2f7e4de612cc001d9314b5d78cbff4a67de9ecc7f45e4ed908af2b8be7fec7"
+    },
+    {
+      "path": "src/renderer/src/components/chat/ChatContainer.tsx",
+      "sha256": "657adc3ac33e70b25748ef744baa8644337de4e3d597dd135e840c37de25e8d0"
+    },
+    {
+      "path": "src/renderer/src/lib/electron-stream.test.ts",
+      "sha256": "353581556572d9c6f52d5a948473f6f04319a5f15f7e1e025d64849abbe6b114"
+    },
+    {
+      "path": "src/renderer/src/lib/electron-stream.ts",
+      "sha256": "ce6f44c8db78abb3c307dc2a16e9c11f0849cd9b9dcea9c3ed081816a9c1a8be"
+    },
+    {
+      "path": "src/renderer/src/lib/scheduler-assistant-snapshot.test.ts",
+      "sha256": "66061c4dcafacb546d024e96de97bfd96abc4c27ec0b8f9fa508866a64f2d7ca"
+    },
+    {
+      "path": "src/renderer/src/lib/scheduler-assistant-snapshot.ts",
+      "sha256": "6b10a2aaa109a80311fd1422a8a6e8ebc88b468022d4e4079200e311b0921ce1"
+    },
+    {
+      "path": "src/renderer/src/lib/thread-context.tsx",
+      "sha256": "4fbcfeac1e43e72acf4fab5a1f5dca0f347b46da43894d82f89e5f89c70c3717"
+    },
+    {
+      "path": "tests/managed-transport-delivery.spec.ts",
+      "sha256": "472791faad34828eb62e060aa9a8c1130a6431541bc0c20e7bd22a2a08f17e06"
+    },
+    {
+      "path": "tests/bots-steer-stream-app.spec.ts",
+      "sha256": "b9913b7347c38fadb6dd7928260f7767c19f5eb8907adaa09d961b8886839ac1"
+    }
+  ]
+}

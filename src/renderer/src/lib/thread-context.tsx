@@ -4133,10 +4133,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         }
       }
 
-      // This source id was generated only by the renderer for an id-less chunk.
-      // It cannot exist in durable storage, while the stable afterModel row is
-      // already persisted. Apply the alias synchronously so the immediately
-      // following stable event cannot render as a second message.
+      // The host has already persisted completed steer replies. Do not wait for
+      // another DB round trip before the immediately following stable snapshot.
+      if (!rendererOnlyAlias && completedProviderSourceId && completedProviderOccurrence) {
+        commitLocalAlias()
+        return
+      }
+      // Id-less chunks only exist in the renderer; normalize any delayed frames too.
       if (rendererOnlyAlias) {
         const aliases =
           rendererOnlyMessageIdAliasesRef.current[threadId] ??
@@ -7075,6 +7078,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               id,
               role: "assistant",
               content: finalContent,
+              ...(typeof event.provider_source_id === "string" &&
+              typeof event.provider_occurrence === "number"
+                ? {
+                    provider_source_id: event.provider_source_id,
+                    provider_occurrence: event.provider_occurrence
+                  }
+                : {}),
               ...(finalReasoning && { reasoning: finalReasoning }),
               ...(toolCalls?.length && { tool_calls: toolCalls }),
               created_at: now

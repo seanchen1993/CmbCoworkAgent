@@ -34,6 +34,8 @@ export type SchedulerEvent =
       type: "message-delta"
       id: string
       content: string
+      provider_source_id?: string
+      provider_occurrence?: number
       reasoning?: string
       contentMode?: StreamMessageWireMode
       reasoningMode?: StreamMessageWireMode
@@ -491,6 +493,9 @@ export class StreamConverter {
       const reasoning = reasoningUpdate.reasoning ?? ""
       const msgId = kwargs.id as string | undefined
       if (!msgId) return events
+      const providerIdentity = getMessageProviderTupleFromMetadata(
+        kwargs.additional_kwargs as Record<string, unknown> | undefined
+      )
 
       const toolCalls = this.collectToolCallsForAssistantMessage(
         kwargs.tool_calls,
@@ -508,6 +513,7 @@ export class StreamConverter {
             assistantMessage: {
               id: msgId,
               type: "ai",
+              ...providerIdentity,
               ...(contentSnapshot ? { content } : {}),
               ...(reasoningSnapshot ? { reasoning } : {})
             }
@@ -521,6 +527,7 @@ export class StreamConverter {
           type: "message-delta",
           id: msgId,
           content: deltaContent,
+          ...providerIdentity,
           ...(deltaReasoning || (subagentId && reasoningSnapshot)
             ? { reasoning: deltaReasoning }
             : {}),
@@ -872,6 +879,40 @@ export class StreamConverter {
   }
 
   // -- values mode ----------------------------------------------------------
+
+  /** The runtime persisted this boundary before the next model call. Paint it
+   * in that order, rather than waiting for the run's final history reload. */
+  processCurrentRunUserInjected(data: Record<string, unknown>): SchedulerEvent[] {
+    const events: SchedulerEvent[] = []
+    if (typeof data.completedAssistantId === "string" && data.completedAssistantId) {
+      events.push({
+        type: "custom",
+        data: {
+          type: "coordinator_ai_snapshot_message",
+          assistantMessage: {
+            id: data.completedAssistantId,
+            type: "ai",
+            content: extractContent(data.completedAssistantContent),
+            ...(typeof data.providerSourceId === "string" &&
+            Number.isInteger(data.providerOccurrence) &&
+            Number(data.providerOccurrence) > 0
+              ? {
+                  provider_source_id: data.providerSourceId,
+                  provider_occurrence: data.providerOccurrence
+                }
+              : {})
+          }
+        }
+      })
+    }
+    const messages = (Array.isArray(data.messages) ? data.messages : []).flatMap((message) =>
+      message && typeof message.id === "string" && message.id && typeof message.content === "string"
+        ? [{ id: message.id, role: "user" as const, content: message.content }]
+        : []
+    )
+    if (messages.length) events.push({ type: "turn-messages", messages })
+    return events
+  }
 
   private processValues(data: unknown, options: StreamConverterChunkOptions): SchedulerEvent[] {
     const events: SchedulerEvent[] = []

@@ -156,6 +156,7 @@ import path from "path"
 import { join, resolve, delimiter } from "path"
 import fs from "fs/promises"
 import { app, BrowserWindow } from "electron"
+import { sendCurrentAgentRunStreamEvent } from "./agent-run-service"
 import {
   appendTaskCompletionAndRepetitionPrompt,
   getOutputStylePrompt,
@@ -995,44 +996,63 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
         }
       : {})
   }
+  const streamEvents: Array<{ type: "custom"; data: Record<string, unknown> }> = []
+  // The coordinator can have already streamed the provider id to the UI
+  // before afterModel assigns a stable id for the durable transcript. Reuse
+  // the normal stream alias event so the existing live bubble is renamed,
+  // rather than rendering the stable values snapshot as a second reply.
+  if (assistantIdAlias) {
+    streamEvents.push({
+      type: "custom",
+      data: {
+        type: "message_id_alias",
+        fromId: assistantIdAlias.sourceId,
+        toId: assistantIdAlias.id,
+        role: "assistant",
+        currentRunCompleted: true,
+        providerSourceId: completedAssistantIdentity?.providerSourceId,
+        providerOccurrence: completedAssistantIdentity?.providerOccurrence
+      }
+    })
+  }
+  // Guided input starts a new user/assistant boundary inside the same run.
+  // Reset the renderer's live assistant accumulator before the model is
+  // invoked again so coordinator output cannot append to the prior reply.
+  if (payload.messages.length)
+    streamEvents.push({
+      type: "custom",
+      data: {
+        type: "current_run_user_injected",
+        ...(completedAssistantMessage
+          ? {
+              completedAssistantId: completedAssistantMessage.id,
+              completedAssistantContent: completedAssistantMessage.content,
+              completedAssistantProviderIdless: !completedAssistantMessage.sourceId,
+              providerSourceId: completedAssistantIdentity?.providerSourceId,
+              providerOccurrence: completedAssistantIdentity?.providerOccurrence
+            }
+          : {}),
+        messages: payload.messages
+      }
+    })
+  // Use the same delivery as model chunks. A Bot run has no foreground
+  // agent:stream subscriber; its delivery converts events to scheduler:stream.
+  // Draft receipts still go to every window, but only after ordered transcript events.
+  try {
+    for (const event of streamEvents) {
+      if (sendCurrentAgentRunStreamEvent(threadId, event)) continue
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
+          win.webContents.send(`agent:stream:${threadId}`, event)
+        }
+      }
+    }
+  } catch (error) {
+    console.warn("[Runtime] Failed to notify run stream about injected messages:", error)
+  }
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.isDestroyed() || win.webContents.isDestroyed()) continue
     try {
-      // The coordinator can have already streamed the provider id to the UI
-      // before afterModel assigns a stable id for the durable transcript. Reuse
-      // the normal stream alias event so the existing live bubble is renamed,
-      // rather than rendering the stable values snapshot as a second reply.
-      if (assistantIdAlias) {
-        win.webContents.send(`agent:stream:${threadId}`, {
-          type: "custom",
-          data: {
-            type: "message_id_alias",
-            fromId: assistantIdAlias.sourceId,
-            toId: assistantIdAlias.id,
-            role: "assistant",
-            currentRunCompleted: true,
-            providerSourceId: completedAssistantIdentity?.providerSourceId,
-            providerOccurrence: completedAssistantIdentity?.providerOccurrence
-          }
-        })
-      }
-      // Guided input starts a new user/assistant boundary inside the same run.
-      // Reset the renderer's live assistant accumulator before the model is
-      // invoked again so coordinator output cannot append to the prior reply.
-      if (payload.messages.length) win.webContents.send(`agent:stream:${threadId}`, {
-        type: "custom",
-        data: {
-          type: "current_run_user_injected",
-          ...(completedAssistantMessage
-            ? {
-                completedAssistantId: completedAssistantMessage.id,
-                completedAssistantContent: completedAssistantMessage.content,
-                completedAssistantProviderIdless: !completedAssistantMessage.sourceId
-              }
-            : {}),
-          messages: payload.messages
-        }
-      })
       if (payload.messages.length) win.webContents.send(`agent:queueInjected:${threadId}`, payload)
     } catch (error) {
       // Persistence is the acknowledgement boundary. A renderer can disappear

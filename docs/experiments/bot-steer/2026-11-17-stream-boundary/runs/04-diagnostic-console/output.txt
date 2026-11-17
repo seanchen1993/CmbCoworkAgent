@@ -1,0 +1,13 @@
+Steer UI evidence: <temp>/bot-integration-build-uEhutF/artifacts/steer-stream-llg4Lx
+AssertionError [ERR_ASSERTION]: no transient duplicate before steer
+
+2 !== 1
+
+    at main (<repository>/tests/bots-steer-stream-app.spec.ts:160:14) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: 2,
+  expected: 1,
+  operator: 'strictEqual',
+  diff: 'simple'
+}

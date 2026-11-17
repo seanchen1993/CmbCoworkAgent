@@ -941,6 +941,8 @@ export interface ManagedChatTurn {
 
 interface ChatContainerProps {
   managedTurn?: ManagedChatTurn
+  /** Host-owned pending work, kept beside the composer rather than above history. */
+  composerNotice?: React.ReactNode
   threadId: string
   surface?: ChatSurface
   hideWelcomeSkillTabs?: boolean
@@ -1721,6 +1723,7 @@ function SystemPromptPreviewButton({
 }
 
 export function ChatContainer({
+  composerNotice,
   threadId,
   surface = "default",
   hideWelcomeSkillTabs = false,
@@ -8965,6 +8968,7 @@ export function ChatContainer({
                   onSelectFile={applyAtFileMention}
                 />
                 <div className="flex flex-col gap-2">
+                  {composerNotice}
                   {botReplyActions && draftBotReplyTo && (
                     <div className="bot-group-reply-draft">
                       <button

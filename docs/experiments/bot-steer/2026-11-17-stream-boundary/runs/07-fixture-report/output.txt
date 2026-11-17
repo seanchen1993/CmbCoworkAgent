@@ -1,0 +1,5 @@
+PASS bot-main { samples: 67, maxBefore: 1, maxAfter: 1, duplicates: [] }
+Steer UI evidence: <temp>/bot-integration-build-ANxBHw/artifacts/steer-stream-vcaCvs
+Error: Timed out awaiting the actual Bot App state
+    at waitForBotAppState (<repository>/tests/support/bot-app-state.ts:16:9)
+    at async main (<repository>/tests/bots-steer-stream-app.spec.ts:153:7)
