@@ -87,9 +87,8 @@ function optionalMmjModule() {
   }
 }
 
-export default defineConfig(({ mode }) => ({
+export default defineConfig({
   main: {
-    envDir: mode === "smoke" ? false : undefined,
     // Bundle all dependencies into the main process
     build: {
       lib: {
@@ -114,9 +113,8 @@ export default defineConfig(({ mode }) => ({
       }
     }
   },
-  preload: { envDir: mode === "smoke" ? false : undefined },
+  preload: {},
   renderer: {
-    envDir: mode === "smoke" ? false : undefined,
     cacheDir: resolve("node_modules/.vite/renderer"),
     define: {
       __APP_VERSION__: JSON.stringify(pkg.version)
@@ -145,4 +143,4 @@ export default defineConfig(({ mode }) => ({
       proxy: {}
     }
   }
-}))
+})

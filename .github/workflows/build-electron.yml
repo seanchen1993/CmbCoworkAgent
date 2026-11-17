@@ -7,26 +7,12 @@ on:
   workflow_dispatch:
     inputs:
       platform:
-        description: Installer to build
+        description: 打包平台
         type: choice
         options:
           - windows-and-linux
           - macos-arm64
         default: windows-and-linux
-      macos_configuration:
-        description: Configuration for the macOS installer
-        type: choice
-        options:
-          - uat
-          - smoke
-        default: uat
-      sign_macos:
-        description: Sign and notarize the macOS DMG and portable app
-        type: boolean
-        default: false
-      macos_recipient_certificate:
-        description: Optional PEM RSA public certificate for encrypted macOS delivery
-        type: string
 
 concurrency:
   group: build-electron-${{ github.ref }}-${{ inputs.platform || 'windows-and-linux' }}
@@ -610,7 +596,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Check macOS signing credentials
-        if: inputs.sign_macos
+        if: vars.MACOS_SIGN_AND_NOTARIZE == 'true'
         shell: bash
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
@@ -640,7 +626,6 @@ jobs:
           test "$(node -p "require('./package.json').build.electronVersion")" = "$(node -p "require('./node_modules/electron/package.json').version")"
 
       - name: Decrypt .env for build
-        if: inputs.macos_configuration == 'uat'
         run: node scripts/env-crypt.mjs decrypt-file .env
         env:
           ENV_ENCRYPTION_KEY: ${{ secrets.ENV_ENCRYPTION_KEY }}
@@ -649,22 +634,15 @@ jobs:
         run: npm run test:packaging
 
       - name: Build
-        env:
-          MACOS_CONFIGURATION: ${{ inputs.macos_configuration }}
-        run: |
-          if [[ "$MACOS_CONFIGURATION" == "smoke" ]]; then
-            npm run build:smoke
-          else
-            npm run build
-          fi
+        run: npm run build
 
       - name: Package DMG
         id: pkg
         shell: bash
         env:
-          SIGN_MACOS: ${{ inputs.sign_macos }}
-          CSC_LINK: ${{ inputs.sign_macos && secrets.CSC_LINK || '' }}
-          CSC_KEY_PASSWORD: ${{ inputs.sign_macos && secrets.CSC_KEY_PASSWORD || '' }}
+          SIGN_MACOS: ${{ vars.MACOS_SIGN_AND_NOTARIZE == 'true' }}
+          CSC_LINK: ${{ vars.MACOS_SIGN_AND_NOTARIZE == 'true' && secrets.CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ vars.MACOS_SIGN_AND_NOTARIZE == 'true' && secrets.CSC_KEY_PASSWORD || '' }}
         run: |
           set -euo pipefail
           args=(--mac dmg --arm64 --publish=never --config.mac.notarize=false)
@@ -685,30 +663,30 @@ jobs:
           echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
       - name: Verify the app in the DMG
-        id: smoke
+        id: verified_app
         shell: bash
         env:
           DMG_PATH: ${{ steps.pkg.outputs.dmg }}
         run: |
           set -euo pipefail
           hdiutil verify "$DMG_PATH"
-          smoke_dir="$(mktemp -d "${RUNNER_TEMP}/cmbdevclaw-macos.XXXXXX")"
-          mount_point="$smoke_dir/volume"
+          verify_dir="$(mktemp -d "${RUNNER_TEMP}/cmbdevclaw-macos.XXXXXX")"
+          mount_point="$verify_dir/volume"
           mkdir "$mount_point"
           hdiutil attach -readonly -nobrowse -mountpoint "$mount_point" "$DMG_PATH"
           trap 'hdiutil detach "$mount_point"' EXIT
-          app_path="$smoke_dir/CMBDevClaw.app"
+          app_path="$verify_dir/CMBDevClaw.app"
           ditto "$mount_point/CMBDevClaw.app" "$app_path"
           codesign --verify --deep --strict --verbose=2 "$app_path"
           node scripts/smoke-macos-package.mjs "$app_path" --bundle-only
           echo "app=$app_path" >> "$GITHUB_OUTPUT"
 
       - name: Notarize and staple the signed DMG and app
-        if: inputs.sign_macos
+        if: vars.MACOS_SIGN_AND_NOTARIZE == 'true'
         shell: bash
         env:
           DMG_PATH: ${{ steps.pkg.outputs.dmg }}
-          APP_PATH: ${{ steps.smoke.outputs.app }}
+          APP_PATH: ${{ steps.verified_app.outputs.app }}
           APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
@@ -751,9 +729,8 @@ jobs:
         shell: bash
         env:
           DMG_PATH: ${{ steps.pkg.outputs.dmg }}
-          APP_PATH: ${{ steps.smoke.outputs.app }}
-          MACOS_CONFIGURATION: ${{ inputs.macos_configuration }}
-          SIGN_MACOS: ${{ inputs.sign_macos }}
+          APP_PATH: ${{ steps.verified_app.outputs.app }}
+          SIGN_MACOS: ${{ vars.MACOS_SIGN_AND_NOTARIZE == 'true' }}
         run: |
           set -euo pipefail
           zip_path="${DMG_PATH%.dmg}-portable.zip"
@@ -767,11 +744,7 @@ jobs:
             xcrun stapler validate "$unzipped_app"
             syspolicy_check distribution "$unzipped_app"
           fi
-          if [[ "$MACOS_CONFIGURATION" == "uat" ]]; then
-            node scripts/smoke-macos-package.mjs "$unzipped_app" --bundle-only
-          else
-            node scripts/smoke-macos-package.mjs "$unzipped_app"
-          fi
+          node scripts/smoke-macos-package.mjs "$unzipped_app" --bundle-only
           echo "zip=$zip_path" >> "$GITHUB_OUTPUT"
 
       - name: Prepare macOS packages for delivery
@@ -781,39 +754,21 @@ jobs:
           DMG_PATH: ${{ steps.pkg.outputs.dmg }}
           ZIP_PATH: ${{ steps.portable.outputs.zip }}
           VERSION: ${{ steps.pkg.outputs.version }}
-          MACOS_CONFIGURATION: ${{ inputs.macos_configuration }}
-          SIGNING: ${{ inputs.sign_macos && 'notarized' || 'adhoc' }}
-          RECIPIENT_CERTIFICATE: ${{ inputs.macos_recipient_certificate }}
+          SIGNING: ${{ vars.MACOS_SIGN_AND_NOTARIZE == 'true' && 'notarized' || 'adhoc' }}
         run: |
           set -euo pipefail
-          prefix="dist/CMBDevClaw-${VERSION}-macos-arm64-${MACOS_CONFIGURATION}-${SIGNING}"
+          prefix="dist/CMBDevClaw-${VERSION}-macos-arm64-${SIGNING}"
           delivery_dmg="$prefix.dmg"
           delivery_zip="$prefix-portable.zip"
-          if [[ -n "$RECIPIENT_CERTIFICATE" ]]; then
-            openssl="$(brew --prefix openssl@3)/bin/openssl"
-            cert_path="$(mktemp "${RUNNER_TEMP}/cmbdevclaw-recipient.XXXXXX")"
-            trap 'rm -f "$cert_path"' EXIT
-            printf '%s\n' "$RECIPIENT_CERTIFICATE" > "$cert_path"
-            delivery_dmg="$delivery_dmg.cms"
-            delivery_zip="$delivery_zip.cms"
-            encrypt() {
-              "$openssl" cms -encrypt -binary -aes-256-gcm -outform DER \
-                -in "$1" -out "$2" -recip "$cert_path" \
-                -keyopt rsa_padding_mode:oaep -keyopt rsa_oaep_md:sha256
-            }
-            encrypt "$DMG_PATH" "$delivery_dmg"
-            encrypt "$ZIP_PATH" "$delivery_zip"
-          else
-            mv "$DMG_PATH" "$delivery_dmg"
-            mv "$ZIP_PATH" "$delivery_zip"
-          fi
+          mv "$DMG_PATH" "$delivery_dmg"
+          mv "$ZIP_PATH" "$delivery_zip"
           echo "dmg=$delivery_dmg" >> "$GITHUB_OUTPUT"
           echo "zip=$delivery_zip" >> "$GITHUB_OUTPUT"
 
       - name: Upload macOS DMG
         uses: actions/upload-artifact@v4
         with:
-          name: CMBDevClaw-macos-arm64-${{ steps.pkg.outputs.version }}-${{ inputs.macos_configuration }}-${{ inputs.sign_macos && 'notarized' || 'adhoc' }}-dmg
+          name: CMBDevClaw-macos-arm64-${{ steps.pkg.outputs.version }}-${{ vars.MACOS_SIGN_AND_NOTARIZE == 'true' && 'notarized' || 'adhoc' }}-dmg
           path: ${{ steps.delivery.outputs.dmg }}
           compression-level: 0
           if-no-files-found: error
@@ -821,7 +776,7 @@ jobs:
       - name: Upload macOS portable app ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: CMBDevClaw-macos-arm64-${{ steps.pkg.outputs.version }}-${{ inputs.macos_configuration }}-${{ inputs.sign_macos && 'notarized' || 'adhoc' }}-portable
+          name: CMBDevClaw-macos-arm64-${{ steps.pkg.outputs.version }}-${{ vars.MACOS_SIGN_AND_NOTARIZE == 'true' && 'notarized' || 'adhoc' }}-portable
           path: ${{ steps.delivery.outputs.zip }}
           compression-level: 0
           if-no-files-found: error
