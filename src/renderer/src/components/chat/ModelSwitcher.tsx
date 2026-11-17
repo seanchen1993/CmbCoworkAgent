@@ -1,15 +1,19 @@
-import { useState, useEffect, memo, useMemo, useRef, useSyncExternalStore } from "react"
+import {
+  useState,
+  useEffect,
+  memo,
+  useMemo,
+  useRef,
+  useSyncExternalStore,
+  type ReactNode
+} from "react"
 import { useShallow } from "zustand/react/shallow"
-import { ChevronDown, Check, Key, Zap, Info } from "lucide-react"
+import { ChevronDown, ChevronRight, Check, Key, Zap, Info } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Button } from "@/components/ui/button"
 import { ToggleThumb } from "@/components/ui/toggle-thumb"
 import { useAppStore } from "@/lib/store"
-import {
-  useThreadActions,
-  useThreadStateSelector,
-  type ThreadState
-} from "@/lib/thread-context"
+import { useThreadActions, useThreadStateSelector, type ThreadState } from "@/lib/thread-context"
 import { cn } from "@/lib/utils"
 import {
   resolveHydratedThreadModel,
@@ -34,6 +38,10 @@ function CustomIcon({ className }: { className?: string }): React.JSX.Element {
 
 interface ModelSwitcherProps {
   threadId: string
+  variant?: "composer" | "menu"
+  onSelect?(): void
+  /** Keep model hydration and the configuration dialog mounted outside a collapsible menu. */
+  children?(picker: ReactNode): ReactNode
 }
 
 const selectCurrentModel = (state: ThreadState): string => state.currentModel
@@ -42,7 +50,12 @@ const selectRoutingResult = (state: ThreadState): ThreadState["routingResult"] =
 
 export const ModelSwitcher = memo(ModelSwitcherImpl)
 
-function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element {
+function ModelSwitcherImpl({
+  threadId,
+  variant = "composer",
+  onSelect,
+  children
+}: ModelSwitcherProps): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const [customDialogOpen, setCustomDialogOpen] = useState(false)
   const [dialogModelId, setDialogModelId] = useState<string | undefined>(undefined)
@@ -84,7 +97,12 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
     ? (models.find((m) => m.id === routingResult.resolvedModelId)?.name ??
       routingResult.resolvedModelId.replace(/^(?:custom|builtin):/, ""))
     : null
-  const routedTierLabel = routingResult?.resolvedTier === "economy" ? "经济" : routingResult?.resolvedTier === "premium" ? "强力" : null
+  const routedTierLabel =
+    routingResult?.resolvedTier === "economy"
+      ? "经济"
+      : routingResult?.resolvedTier === "premium"
+        ? "强力"
+        : null
 
   const threadSummary = useMemo(
     () => threads.find((thread) => thread.thread_id === threadId) ?? null,
@@ -154,174 +172,198 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
   function handleModelSelect(modelId: string): void {
     setCurrentModel?.(modelId)
     setOpen(false)
+    onSelect?.()
   }
+
+  const menu = variant === "menu"
+  const modelLabel = routingMode === "auto" ? "智能路由" : (selectedModel?.name ?? "选择模型")
+  const picker = (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          className={
+            menu
+              ? "h-auto w-full justify-start gap-2 rounded-md px-2 py-2 text-sm font-normal hover:bg-muted"
+              : "h-8 gap-1.5 px-2 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+          }
+          aria-label={menu ? `切换模型：${modelLabel}` : undefined}
+        >
+          {menu ? (
+            <>
+              <CustomIcon className="size-3.5 shrink-0" />
+              <span className="shrink-0">切换模型</span>
+              <span
+                className="min-w-0 flex-1 truncate text-right text-xs text-muted-foreground"
+                title={modelLabel}
+              >
+                {modelLabel}
+              </span>
+              <ChevronRight className="size-3 shrink-0 text-muted-foreground" />
+            </>
+          ) : routingMode === "auto" ? (
+            <>
+              <Zap className="size-3.5 text-amber-500" />
+              <span className="text-amber-600 dark:text-amber-400">智能路由</span>
+              {routedModelName && routedTierLabel && (
+                <span className="text-muted-foreground">
+                  → {routedModelName}（{routedTierLabel}）
+                </span>
+              )}
+            </>
+          ) : selectedModel ? (
+            <>
+              <CustomIcon className="size-3.5" />
+              <span>{selectedModel.name}</span>
+            </>
+          ) : (
+            <span>选择模型</span>
+          )}
+          {!menu && <ChevronDown className="size-3" />}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        className={cn(
+          "w-[280px] max-w-[calc(100vw-32px)] p-2 bg-background border-border",
+          menu && "rounded-xl"
+        )}
+        align="start"
+        side={menu ? "left" : "bottom"}
+        sideOffset={8}
+      >
+        {/* Auto routing toggle */}
+        <div className="flex items-center justify-between px-2 py-1.5 mb-1 border-b border-border">
+          <div className="flex items-center gap-1.5">
+            <Zap
+              className={cn(
+                "size-3.5",
+                canEnableRouting ? "text-amber-500" : "text-muted-foreground/40"
+              )}
+            />
+            <span
+              className={cn("text-xs font-medium", !canEnableRouting && "text-muted-foreground/60")}
+            >
+              智能路由
+            </span>
+            <div className="group relative shrink-0">
+              <Info className="size-3.5 text-muted-foreground/40 hover:text-muted-foreground/70 cursor-default transition-colors" />
+              <div className="pointer-events-none absolute bottom-full left-0 mb-2 w-64 rounded-md border border-border bg-popover px-3 py-2 text-[11px] leading-5 text-muted-foreground shadow-md opacity-0 group-hover:opacity-100 transition-opacity z-50">
+                {canEnableRouting
+                  ? "开启后根据任务复杂度自动选择模型：强力档处理复杂任务（代码、分析），经济档处理简单任务（问答、翻译）"
+                  : "需要同时配置强力和经济两个档位的模型，才能开启智能路由。"}
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={!canEnableRouting || !routingModeLoaded}
+            onClick={() => {
+              if (!canEnableRouting || !routingModeLoaded) return
+              const next: ModelRoutingMode = routingMode === "auto" ? "pinned" : "auto"
+              updateCachedRoutingMode(next)
+              void window.api.routing.setMode(next)
+            }}
+            className={cn(
+              "relative inline-flex h-4 w-7 flex-shrink-0 rounded-full border-2 border-transparent transition-colors",
+              !canEnableRouting
+                ? "cursor-not-allowed bg-muted-foreground/20"
+                : routingMode === "auto"
+                  ? "cursor-pointer bg-amber-500"
+                  : "cursor-pointer bg-muted-foreground/30"
+            )}
+          >
+            <ToggleThumb
+              className={cn(
+                "inline-block h-3 w-3 transform shadow",
+                routingMode === "auto" ? "translate-x-3" : "translate-x-0"
+              )}
+            />
+          </button>
+        </div>
+
+        {models.length > 0 ? (
+          <div className={cn("space-y-0.5", menu && "max-h-[60vh] overflow-y-auto")}>
+            {models.map((model) => (
+              <button
+                key={model.id}
+                onClick={() => {
+                  if (model.selectable ?? model.available) handleModelSelect(model.id)
+                }}
+                disabled={!(model.selectable ?? model.available)}
+                title={
+                  model.unavailableReason ??
+                  (model.available ? model.notice : "请先在模型配置中填写 API 密钥")
+                }
+                className={cn(
+                  "w-full flex items-center gap-1.5 px-2 py-1.5 rounded-sm text-xs transition-colors text-left font-mono disabled:cursor-not-allowed disabled:opacity-50",
+                  currentModel === model.id
+                    ? "bg-muted text-foreground"
+                    : (model.selectable ?? model.available)
+                      ? "text-muted-foreground hover:text-foreground hover:bg-muted/50"
+                      : "text-muted-foreground"
+                )}
+              >
+                <CustomIcon className="size-3.5 shrink-0" />
+                <span className="flex-1 truncate">
+                  {model.name}
+                  {!model.available
+                    ? model.unavailableReason === IDLE_MODEL_OUTSIDE_HOURS_MESSAGE
+                      ? "（非服务时段）"
+                      : model.unavailableReason
+                        ? "（用户信息不完整）"
+                        : "（未配置密钥）"
+                    : ""}
+                </span>
+                <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[9px] text-muted-foreground">
+                  {model.source === "builtin" ? "内置" : "自定义"}
+                </span>
+                {currentModel === model.id && (
+                  <Check className="size-3.5 shrink-0 text-foreground" />
+                )}
+              </button>
+            ))}
+            {selectedModel?.notice && (
+              <p className="px-2 py-1.5 text-[11px] leading-5 text-muted-foreground">
+                {selectedModel.notice}
+              </p>
+            )}
+
+            <button
+              onClick={() => {
+                setOpen(false)
+                setDialogModelId(currentModel || undefined)
+                setCustomDialogOpen(true)
+              }}
+              className="w-full flex items-center gap-2 px-2 py-1.5 rounded-sm text-xs text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors mt-1 border-t border-border pt-2"
+            >
+              <Key className="size-3.5" />
+              <span>编辑模型配置</span>
+            </button>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center py-6 px-4 text-center">
+            <Key className="size-6 text-muted-foreground mb-2" />
+            <p className="text-xs text-muted-foreground mb-3">尚未配置模型</p>
+            <Button
+              size="sm"
+              onClick={() => {
+                setOpen(false)
+                setDialogModelId(undefined)
+                setCustomDialogOpen(true)
+              }}
+            >
+              去配置模型
+            </Button>
+          </div>
+        )}
+      </PopoverContent>
+    </Popover>
+  )
 
   return (
     <>
-      <Popover open={open} onOpenChange={setOpen}>
-        <PopoverTrigger asChild>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 gap-1.5 px-2 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground"
-          >
-            {routingMode === "auto" ? (
-              <>
-                <Zap className="size-3.5 text-amber-500" />
-                <span className="text-amber-600 dark:text-amber-400">智能路由</span>
-                {routedModelName && routedTierLabel && (
-                  <span className="text-muted-foreground">
-                    → {routedModelName}（{routedTierLabel}）
-                  </span>
-                )}
-              </>
-            ) : selectedModel ? (
-              <>
-                <CustomIcon className="size-3.5" />
-                <span>{selectedModel.name}</span>
-              </>
-            ) : (
-              <span>选择模型</span>
-            )}
-            <ChevronDown className="size-3" />
-          </Button>
-        </PopoverTrigger>
-        <PopoverContent
-          className="w-[280px] p-2 bg-background border-border"
-          align="start"
-          sideOffset={8}
-        >
-          {/* Auto routing toggle */}
-          <div className="flex items-center justify-between px-2 py-1.5 mb-1 border-b border-border">
-            <div className="flex items-center gap-1.5">
-              <Zap
-                className={cn(
-                  "size-3.5",
-                  canEnableRouting ? "text-amber-500" : "text-muted-foreground/40"
-                )}
-              />
-              <span
-                className={cn(
-                  "text-xs font-medium",
-                  !canEnableRouting && "text-muted-foreground/60"
-                )}
-              >
-                智能路由
-              </span>
-              <div className="group relative shrink-0">
-                <Info className="size-3.5 text-muted-foreground/40 hover:text-muted-foreground/70 cursor-default transition-colors" />
-                <div className="pointer-events-none absolute bottom-full left-0 mb-2 w-64 rounded-md border border-border bg-popover px-3 py-2 text-[11px] leading-5 text-muted-foreground shadow-md opacity-0 group-hover:opacity-100 transition-opacity z-50">
-                  {canEnableRouting
-                    ? "开启后根据任务复杂度自动选择模型：强力档处理复杂任务（代码、分析），经济档处理简单任务（问答、翻译）"
-                    : "需要同时配置强力和经济两个档位的模型，才能开启智能路由。"}
-                </div>
-              </div>
-            </div>
-            <button
-              type="button"
-              disabled={!canEnableRouting || !routingModeLoaded}
-              onClick={() => {
-                if (!canEnableRouting || !routingModeLoaded) return
-                const next: ModelRoutingMode = routingMode === "auto" ? "pinned" : "auto"
-                updateCachedRoutingMode(next)
-                void window.api.routing.setMode(next)
-              }}
-              className={cn(
-                "relative inline-flex h-4 w-7 flex-shrink-0 rounded-full border-2 border-transparent transition-colors",
-                !canEnableRouting
-                  ? "cursor-not-allowed bg-muted-foreground/20"
-                  : routingMode === "auto"
-                    ? "cursor-pointer bg-amber-500"
-                    : "cursor-pointer bg-muted-foreground/30"
-              )}
-            >
-              <ToggleThumb
-                className={cn(
-                  "inline-block h-3 w-3 transform shadow",
-                  routingMode === "auto" ? "translate-x-3" : "translate-x-0"
-                )}
-              />
-            </button>
-          </div>
-
-          {models.length > 0 ? (
-            <div className="space-y-0.5">
-              {models.map((model) => (
-                <button
-                  key={model.id}
-                  onClick={() => {
-                    if (model.selectable ?? model.available) handleModelSelect(model.id)
-                  }}
-                  disabled={!(model.selectable ?? model.available)}
-                  title={
-                    model.unavailableReason ??
-                    (model.available ? model.notice : "请先在模型配置中填写 API 密钥")
-                  }
-                  className={cn(
-                    "w-full flex items-center gap-1.5 px-2 py-1.5 rounded-sm text-xs transition-colors text-left font-mono disabled:cursor-not-allowed disabled:opacity-50",
-                    currentModel === model.id
-                      ? "bg-muted text-foreground"
-                      : (model.selectable ?? model.available)
-                        ? "text-muted-foreground hover:text-foreground hover:bg-muted/50"
-                        : "text-muted-foreground"
-                  )}
-                >
-                  <CustomIcon className="size-3.5 shrink-0" />
-                  <span className="flex-1 truncate">
-                    {model.name}
-                    {!model.available
-                      ? model.unavailableReason === IDLE_MODEL_OUTSIDE_HOURS_MESSAGE
-                        ? "（非服务时段）"
-                        : model.unavailableReason
-                          ? "（用户信息不完整）"
-                          : "（未配置密钥）"
-                      : ""}
-                  </span>
-                  <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[9px] text-muted-foreground">
-                    {model.source === "builtin" ? "内置" : "自定义"}
-                  </span>
-                  {currentModel === model.id && (
-                    <Check className="size-3.5 shrink-0 text-foreground" />
-                  )}
-                </button>
-              ))}
-              {selectedModel?.notice && (
-                <p className="px-2 py-1.5 text-[11px] leading-5 text-muted-foreground">
-                  {selectedModel.notice}
-                </p>
-              )}
-
-              <button
-                onClick={() => {
-                  setOpen(false)
-                  setDialogModelId(currentModel || undefined)
-                  setCustomDialogOpen(true)
-                }}
-                className="w-full flex items-center gap-2 px-2 py-1.5 rounded-sm text-xs text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors mt-1 border-t border-border pt-2"
-              >
-                <Key className="size-3.5" />
-                <span>编辑模型配置</span>
-              </button>
-            </div>
-          ) : (
-            <div className="flex flex-col items-center justify-center py-6 px-4 text-center">
-              <Key className="size-6 text-muted-foreground mb-2" />
-              <p className="text-xs text-muted-foreground mb-3">尚未配置模型</p>
-              <Button
-                size="sm"
-                onClick={() => {
-                  setOpen(false)
-                  setDialogModelId(undefined)
-                  setCustomDialogOpen(true)
-                }}
-              >
-                去配置模型
-              </Button>
-            </div>
-          )}
-        </PopoverContent>
-      </Popover>
-
+      {children ? children(picker) : picker}
       <CustomModelDialog
         open={customDialogOpen}
         selectedModelId={dialogModelId}

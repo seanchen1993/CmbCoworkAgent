@@ -909,7 +909,7 @@ export interface ManagedChatTurn {
   allowedSkillNames?: string[] | null
   /** Only local private Bot conversations supply a verified same-host roster. */
   mentionOptions?: { bots: BotDefinition[]; groups: readonly import("../../../../shared/bots/im-channel").BotGroupTarget[] }
-  /** Trusted local task: preserve the Thread's original model/mode controls. */
+  /** Trusted local task: preserve the Thread's configuration; its model control lives in the task header. */
   ownerConversation?: boolean
   /** A trusted external work stays text-only even when opened on the desktop. */
   textOnlyReason?: string
@@ -9649,10 +9649,10 @@ export function ChatContainer({
                           {surface !== "bot" && !managedTurn?.textOnlyReason && (
                             <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
                           )}
-                          {(!managedTurn || managedTurn.ownerConversation) && (
+                          {!managedTurn && (
                             <ModelSwitcher threadId={threadId} />
                           )}
-                          {(!managedTurn || managedTurn.ownerConversation) && (
+                          {!managedTurn && (
                             <AgentModeSwitcher
                               showWorkflow
                               mode={

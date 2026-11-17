@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-11-17T02:06:10.104946+00:00",
+  "kind": "renderer-ui-validation",
+  "hypothesis": "将独立任务的模型选择移至顶部更多菜单，去掉输入框中已锁定的执行模式展示；两个任务入口共用原有模型选择和保存逻辑。",
+  "branch": "codex/merge-uat-into-bot-beta",
+  "baseCommit": "234c46c19251b5c2bad07e477ca37570b88313e0",
+  "implementationDiffSha256": "3e3ae9f6105d166c666d5fef4b549f72e06752902e5e4451fe5b9476525c719f",
+  "changedFiles": [
+    "src/renderer/src/components/bots/BotWorkHeader.tsx",
+    "src/renderer/src/components/bots/ConversationTaskControls.tsx",
+    "src/renderer/src/components/chat/ChatContainer.tsx",
+    "src/renderer/src/components/chat/ModelSwitcher.tsx"
+  ],
+  "environment": {
+    "os": "darwin",
+    "arch": "arm64",
+    "node": "22.23.5",
+    "applicationVersion": "1.5.5"
+  },
+  "modelCalls": false,
+  "checks": [
+    {
+      "id": "renderer-typecheck",
+      "command": "npm run typecheck:web",
+      "result": "passed",
+      "exitCode": 0,
+      "evidence": {
+        "name": "bot-task-model-ui-types-20261117.log",
+        "sha256": "e22d83a1b3f75416254645f6f14cb9bd297d0ab3d78373750943a48f773cfc54"
+      }
+    },
+    {
+      "id": "model-switcher-regression",
+      "command": "node --import tsx tests/model-switcher-browser.spec.ts",
+      "result": "passed",
+      "exitCode": 0,
+      "scope": "真实 React 组件运行于隔离 Electron，模型目录、会话状态和 IPC 为模拟；验证模型恢复、旧 ID、手动选择、延迟元数据、智能路由和闲时模型。",
+      "evidence": {
+        "name": "bot-task-model-ui-switcher-20261117.log",
+        "sha256": "e5f7a1778afe4ba6ba4874226d1693382295b93bd2f2b1db3b3e2759ea8bcb03"
+      }
+    },
+    {
+      "id": "production-build",
+      "command": "npm run build",
+      "result": "passed",
+      "exitCode": 0,
+      "scope": [
+        "main",
+        "preload",
+        "renderer"
+      ],
+      "evidence": {
+        "name": "bot-task-model-ui-build-20261117.log",
+        "sha256": "b63e11340e1caba4c04a698f1369ec67dd1675b0a9efec185d278b12c5dd3ea7"
+      }
+    },
+    {
+      "id": "native-ui",
+      "result": "passed",
+      "method": "重建并启动当前分支应用，通过原生 UI 操作已有独立任务和普通会话；未发送消息或调用模型。",
+      "observations": [
+        "对话模式中的已关联任务，顶部更多菜单包含模型选择，输入框只保留附件与发送控件。",
+        "从 DeepSeek 临时切换至另一已配置模型后，菜单自动关闭；重新打开显示新选择。",
+        "返回 Bot 任务页后，顶部更多菜单显示相同的模型选择。",
+        "在 Bot 任务页恢复原 DeepSeek 模型，切换入口和重新打开后仍正确保留。",
+        "顶部模型菜单的编辑模型配置入口可打开真实配置弹窗；取消关闭正常，未编辑或保存配置。",
+        "普通未关联会话仍显示原模型和执行模式控件。",
+        "已检查两个任务入口的菜单布局，应用最终停留在 Bot 独立任务页供手动查看。"
+      ],
+      "notExercised": [
+        "未发送消息验证真实模型推理。",
+        "未修改任务的执行模式、完成状态、关联关系或凭据。"
+      ]
+    }
+  ],
+  "limitations": [
+    "本轮为 UI 与模型选择回归，不计入真实模型调度、委派或响应时延实验。",
+    "未测试 Windows 打包应用、真实招乎连接或完整 Bot 集成测试集。",
+    "原始日志保留在本机临时目录；仓库仅记录脱敏摘要和哈希，不包含个人路径或真实会话内容。",
+    "没有运行时调度、网关或 ES 查询改动。"
+  ]
+}

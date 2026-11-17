@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Copy, Folder, FolderOpen } from "lucide-react"
+import { Check, ChevronRight, Copy, Folder, FolderOpen } from "lucide-react"
 import { useState } from "react"
 import { toast } from "sonner"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -21,20 +21,22 @@ export function BotTaskWorkspaceButton({ link }: { link: BotWorkConversationReso
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           aria-label={`工作目录：${display.name}`}
         >
           <Folder size={14} className="shrink-0" aria-hidden="true" />
-          <span className="max-w-[220px] truncate">
-            {display.isDefault ? "默认工作区" : display.name}
+          <span className="shrink-0">工作目录</span>
+          <span className="min-w-0 flex-1 truncate text-right text-xs text-muted-foreground">
+            {display.isDefault ? "默认" : display.name}
           </span>
-          {!display.isDefault && (
-            <span className="shrink-0 text-[10px] opacity-70">{display.kindLabel}</span>
-          )}
-          <ChevronDown size={12} className="shrink-0 opacity-60" aria-hidden="true" />
+          <ChevronRight size={12} className="shrink-0 text-muted-foreground" aria-hidden="true" />
         </button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-80 max-w-[calc(100vw-32px)] p-4">
+      <PopoverContent
+        side="left"
+        align="start"
+        className="w-80 max-w-[calc(100vw-32px)] rounded-xl p-4"
+      >
         <p className="text-sm font-medium">{display.name}</p>
         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
           {display.isDefault

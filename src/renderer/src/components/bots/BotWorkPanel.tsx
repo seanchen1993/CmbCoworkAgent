@@ -292,7 +292,15 @@ export function BotWorkPanel({
         !controller.loading &&
         !features.loading &&
         !controller.error &&
-        !features.error && <p>{needle ? "没有找到匹配的任务。" : "此对话的任务会显示在这里。"}</p>}
+        !features.error && (
+          <p className="text-muted-foreground">
+            {needle
+              ? "没有找到匹配的任务。"
+              : readOnlyGroup
+                ? "在群聊中告诉 Bot 要完成什么。"
+                : "在聊天中交办一项工作，或点击 + 创建。"}
+          </p>
+        )}
       {(visible.length > limit || controller.cursor) && (
         <button
           disabled={controller.loading}

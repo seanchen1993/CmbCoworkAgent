@@ -1,4 +1,5 @@
-import { useEffect, useId, useRef, useState } from "react"
+import { ModelSwitcher } from "@/components/chat/ModelSwitcher"
+import { useEffect, useId, useRef, useState, type ReactNode } from "react"
 import { toast } from "sonner"
 import { useAppStore } from "@/lib/store"
 import { useThreadContext } from "@/lib/thread-context"
@@ -64,7 +65,8 @@ export function ConversationTaskControls({
     [title, setTitle] = useState(""),
     [goal, setGoal] = useState(""),
     [submitted, setSubmitted] = useState(false),
-    [saving, setSaving] = useState(false)
+    [saving, setSaving] = useState(false),
+    [menuOpen, setMenuOpen] = useState(false)
   const formId = useId()
   const formRef = useRef<HTMLFormElement>(null)
   const botError = submitted && !botId ? "请选择所属 Bot。" : null
@@ -75,6 +77,7 @@ export function ConversationTaskControls({
   const operation = useRef<{ fingerprint: string; id: string } | null>(null)
   useEffect(() => {
     setOpen(false)
+    setMenuOpen(false)
     setSubmitted(false)
     operation.current = null
   }, [threadId])
@@ -149,6 +152,7 @@ export function ConversationTaskControls({
     }
   }
   const unlink = async () => {
+    setMenuOpen(false)
     if (
       !link ||
       !window.confirm(
@@ -170,6 +174,7 @@ export function ConversationTaskControls({
   }
   const lifecycle = async () => {
     if (!link) return
+    setMenuOpen(false)
     setSaving(true)
     try {
       await window.api.bots.works!.lifecycle({
@@ -186,6 +191,48 @@ export function ConversationTaskControls({
       setSaving(false)
     }
   }
+  const renderMoreMenu = (modelPicker?: ReactNode) =>
+    link && (
+      <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+        <PopoverTrigger asChild>
+          <button
+            className="inline-flex size-7 shrink-0 items-center justify-center rounded-md hover:bg-muted hover:text-foreground"
+            aria-label="更多任务操作"
+            title="更多设置"
+          >
+            <MoreHorizontal size={16} />
+          </button>
+        </PopoverTrigger>
+        <PopoverContent align="end" className="w-64 rounded-xl p-1.5" aria-label="任务设置">
+          {modelPicker}
+          <BotExecutionDetailsToggle
+            hostId={link.bot.hostId}
+            menu
+            onToggle={() => setMenuOpen(false)}
+          />
+          <BotTaskWorkspaceButton key={threadId} link={link} />
+          <div className="my-1 border-t border-border" />
+          <button
+            className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-muted disabled:opacity-50"
+            disabled={saving || link.bot.archived}
+            onClick={() => void lifecycle()}
+          >
+            {link.work.state === "completed" ? <RotateCcw size={14} /> : <Check size={14} />}
+            {link.work.state === "completed" ? "继续处理" : "完成任务"}
+          </button>
+          {!link.work.source && (
+            <button
+              className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-muted disabled:opacity-50"
+              disabled={saving}
+              onClick={() => void unlink()}
+            >
+              <Unlink size={14} />
+              解除任务关联
+            </button>
+          )}
+        </PopoverContent>
+      </Popover>
+    )
   return (
     <>
       <div
@@ -193,77 +240,42 @@ export function ConversationTaskControls({
         data-bot-task-header={link ? "" : undefined}
       >
         {link ? (
-          <div className="space-y-2">
-            <div className="flex min-w-0 items-center gap-3">
-              <BotAvatar color={link.bot.color} shape={link.bot.shape} size={30} animated={false} />
-              <div className="min-w-0 flex-1">
-                <div className="flex min-w-0 items-center gap-2">
-                  <h2
-                    className="truncate text-sm font-medium text-foreground"
-                    title={link.work.title}
-                  >
-                    {link.work.title}
-                  </h2>
-                  <span className="shrink-0 text-[11px]">
-                    {link.work.state === "completed" ? "已完成" : "进行中"}
-                  </span>
-                </div>
-                <p
-                  className="mt-0.5 truncate text-[11px]"
-                  title={link.imConversation?.title ?? link.bot.name}
+          <div className="flex min-w-0 items-center gap-3">
+            <BotAvatar color={link.bot.color} shape={link.bot.shape} size={30} animated={false} />
+            <div className="min-w-0 flex-1">
+              <div className="flex min-w-0 items-center gap-2">
+                <h2
+                  className="truncate text-sm font-medium text-foreground"
+                  title={link.work.title}
                 >
-                  {link.bot.name} ·{" "}
-                  {link.imConversation?.title ?? (link.work.source ? "招乎任务" : "独立任务")}
-                </p>
+                  {link.work.title}
+                </h2>
+                <span className="shrink-0 text-[11px]">
+                  {link.work.state === "completed" ? "已完成" : "进行中"}
+                </span>
               </div>
-              <button
-                className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1.5 hover:bg-muted hover:text-foreground"
-                onClick={() => returnToBotTask(link)}
+              <p
+                className="mt-0.5 truncate text-[11px]"
+                title={link.imConversation?.title ?? link.bot.name}
               >
-                {link.work.source ? "返回群内任务" : "返回 Bot 任务"}{" "}
-                <ArrowUpRight size={14} aria-hidden="true" />
-              </button>
-              {!link.work.source && (
-                <Popover>
-                  <PopoverTrigger asChild>
-                    <button
-                      className="inline-flex size-7 shrink-0 items-center justify-center rounded-md hover:bg-muted hover:text-foreground"
-                      aria-label="更多任务操作"
-                    >
-                      <MoreHorizontal size={16} />
-                    </button>
-                  </PopoverTrigger>
-                  <PopoverContent align="end" className="w-64 p-2 text-xs">
-                    <p className="px-2 py-2 leading-relaxed text-muted-foreground">
-                      与 Bot 入口共享消息、模型和工作目录，无需来回复制。Goal、Mods
-                      控制可在解除关联后使用，原设置和历史保留。
-                    </p>
-                    <button
-                      className="mt-1 flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-muted disabled:opacity-50"
-                      disabled={saving}
-                      onClick={() => void unlink()}
-                    >
-                      <Unlink size={14} />
-                      解除任务关联
-                    </button>
-                  </PopoverContent>
-                </Popover>
-              )}
+                {link.bot.name} ·{" "}
+                {link.imConversation?.title ?? (link.work.source ? "招乎任务" : "独立任务")}
+              </p>
             </div>
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <BotTaskWorkspaceButton key={threadId} link={link} />
-              <div className="flex items-center gap-2">
-                <BotExecutionDetailsToggle hostId={link.bot.hostId} />
-                <button
-                  className="inline-flex items-center gap-1.5 rounded border px-2 py-1 text-foreground hover:bg-muted disabled:opacity-50"
-                  disabled={saving || link.bot.archived}
-                  onClick={() => void lifecycle()}
-                >
-                  {link.work.state === "completed" ? <RotateCcw size={13} /> : <Check size={13} />}
-                  {link.work.state === "completed" ? "继续处理" : "完成任务"}
-                </button>
-              </div>
-            </div>
+            <button
+              className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1.5 hover:bg-muted hover:text-foreground"
+              onClick={() => returnToBotTask(link)}
+            >
+              {link.work.source ? "返回群内任务" : "返回 Bot 任务"}{" "}
+              <ArrowUpRight size={14} aria-hidden="true" />
+            </button>
+            {link.work.conversation?.state === "bound" ? (
+              <ModelSwitcher threadId={threadId} variant="menu" onSelect={() => setMenuOpen(false)}>
+                {renderMoreMenu}
+              </ModelSwitcher>
+            ) : (
+              renderMoreMenu()
+            )}
           </div>
         ) : (
           <button className="rounded px-2 py-1 hover:bg-muted" onClick={() => void begin()}>

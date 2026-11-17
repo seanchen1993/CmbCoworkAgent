@@ -1,5 +1,6 @@
+import { ModelSwitcher } from "@/components/chat/ModelSwitcher"
 import { botWorkStatus } from "@/lib/bot-work-status"
-import { useRef, useState } from "react"
+import { useRef, useState, type ReactNode } from "react"
 import { ArrowLeft, ArrowUpRight, Check, MoreHorizontal, RotateCcw } from "lucide-react"
 import { useAppStore } from "@/lib/store"
 import { botErrorMessage } from "@/lib/bot-error-message"
@@ -71,6 +72,44 @@ export function BotWorkHeader({
     }
   }
   const canChange = !disabled && !saving && !busy && work.conversation?.state !== "detached"
+  const renderMoreMenu = (modelPicker?: ReactNode) => (
+    <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+      <PopoverTrigger asChild>
+        <button className="bot-icon-button" aria-label="任务更多操作">
+          <MoreHorizontal size={17} />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="end" data-bot-popup className="bot-workspace-menu rounded-xl">
+        {modelPicker}
+        {client.conversations && (!work.source || work.source.transport === "im") && (
+          <button
+            className="flex w-full items-center gap-2 rounded-md p-2 text-left text-sm hover:bg-accent disabled:opacity-40"
+            disabled={saving}
+            onClick={() => void apply(true)}
+          >
+            <ArrowUpRight size={14} />
+            在对话模式打开
+          </button>
+        )}
+        {work.state !== "completed" && work.executionState !== "completed" && (
+          <button
+            className="flex w-full items-center gap-2 rounded-md p-2 text-left text-sm hover:bg-accent disabled:opacity-40"
+            disabled={!canChange}
+            onClick={() => void apply(false)}
+          >
+            <Check size={14} />
+            完成任务
+          </button>
+        )}
+        <hr className="my-2 border-border" />
+        <p className="max-w-72 whitespace-normal text-xs font-normal text-muted-foreground">
+          {work.source && !work.source.personal
+            ? "回复和结果回到原群，沿用该群的记忆范围。"
+            : "补充要求会继续此任务，沿用原来的工作目录。"}
+        </p>
+      </PopoverContent>
+    </Popover>
+  )
   return (
     <div className="bot-task-toolbar">
       <div className="bot-task-toolbar-row">
@@ -101,41 +140,17 @@ export function BotWorkHeader({
             继续处理
           </button>
         )}
-        <Popover open={menuOpen} onOpenChange={setMenuOpen}>
-          <PopoverTrigger asChild>
-            <button className="bot-icon-button" aria-label="任务更多操作">
-              <MoreHorizontal size={17} />
-            </button>
-          </PopoverTrigger>
-          <PopoverContent align="end" data-bot-popup className="bot-workspace-menu rounded-xl">
-            {client.conversations && (!work.source || work.source.transport === "im") && (
-              <button
-                className="flex w-full items-center gap-2 rounded-md p-2 text-left text-sm hover:bg-accent disabled:opacity-40"
-                disabled={saving}
-                onClick={() => void apply(true)}
-              >
-                <ArrowUpRight size={14} />
-                在对话模式打开
-              </button>
-            )}
-            {work.state !== "completed" && work.executionState !== "completed" && (
-              <button
-                className="flex w-full items-center gap-2 rounded-md p-2 text-left text-sm hover:bg-accent disabled:opacity-40"
-                disabled={!canChange}
-                onClick={() => void apply(false)}
-              >
-                <Check size={14} />
-                完成任务
-              </button>
-            )}
-            <hr className="my-2 border-border" />
-            <p className="max-w-72 whitespace-normal text-xs font-normal text-muted-foreground">
-              {work.source && !work.source.personal
-                ? "回复和结果回到原群，沿用该群的记忆范围。"
-                : "补充要求会继续此任务，沿用原来的工作目录。"}
-            </p>
-          </PopoverContent>
-        </Popover>
+        {work.conversation?.state === "bound" ? (
+          <ModelSwitcher
+            threadId={work.threadId}
+            variant="menu"
+            onSelect={() => setMenuOpen(false)}
+          >
+            {renderMoreMenu}
+          </ModelSwitcher>
+        ) : (
+          renderMoreMenu()
+        )}
       </div>
       {error && (
         <p role="alert" className="text-xs text-destructive">
