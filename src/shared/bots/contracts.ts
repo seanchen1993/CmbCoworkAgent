@@ -69,6 +69,8 @@ export interface BotDefinition {
   modelRef: string | null
   /** Missing on older clients; explicit values override the global long-term memory setting. */
   memoryMode?: BotMemoryMode
+  /** null/omitted: all enabled skills; []: none; names are portable template references. */
+  allowedSkillNames?: string[] | null
   color: string
   shape?: BotAvatarShape
   /** User-facing profile label; never treated as runtime instructions. */
@@ -86,6 +88,8 @@ export interface CreateBotInput {
   instructions: string
   modelRef: string | null
   memoryMode?: BotMemoryMode
+  /** null/omitted: all enabled skills; []: none; names are portable template references. */
+  allowedSkillNames?: string[] | null
   color: string
   shape?: BotAvatarShape
   /** User-facing profile label; never treated as runtime instructions. */

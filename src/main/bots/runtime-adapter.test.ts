@@ -497,6 +497,42 @@ beforeEach(() => {
   )
 })
 describe("Bot Runtime integration", () => {
+  it.each([undefined, null, [], ["review", "template-skill"]])(
+    "passes Bot skill selection %j into the host-owned run policy",
+    async (allowedSkillNames) => {
+      await port()
+        .acquire({ ...bot, allowedSkillNames }, task)!
+        .execute(new AbortController().signal, vi.fn())
+      expect(fixture.start.mock.calls[0][2].remotePolicy?.allowedSkillNames).toEqual(
+        allowedSkillNames ?? undefined
+      )
+    }
+  )
+
+  it.each(["user", "introduction", "group", "bot", "schedule"] as const)(
+    "keeps skill selection on the %s task entrance",
+    async (kind) => {
+      const origin: BotTask["origin"] =
+        kind === "group"
+          ? { kind, groupId: "g", messageId: "m" }
+          : kind === "bot"
+            ? { kind, fromBotId: "b", rootTaskId: "root", depth: 1, expectsReply: false }
+            : kind === "schedule"
+              ? { kind, scheduleId: "schedule" }
+              : { kind }
+      fixture.thread.mockReturnValue({
+        metadata: JSON.stringify(metadata(kind === "group" ? "g" : undefined))
+      })
+      const lease = port().acquire({ ...bot, allowedSkillNames: ["review"] }, { ...task, origin })!
+      try {
+        await lease.execute(new AbortController().signal, vi.fn())
+        expect(fixture.start.mock.calls[0][2].remotePolicy?.allowedSkillNames).toEqual(["review"])
+      } finally {
+        lease.release()
+      }
+    }
+  )
+
   it.each(["(pass)", ""])("lets an unassigned public member stay silent with %j while retaining delivery checks", async (silent) => {
     fixture.thread.mockReturnValue({ metadata: JSON.stringify(metadata("g")) })
     fixture.start.mockImplementationOnce(async (request, _delivery, context) => {
@@ -926,12 +962,13 @@ describe("Bot Runtime integration", () => {
       threadInitialized: false,
       label: "本人"
     })
-    const lease = im.acquire(bot, incoming)!
+    const lease = im.acquire({ ...bot, allowedSkillNames: ["review"] }, incoming)!
     await expect(lease.execute(new AbortController().signal, vi.fn())).resolves.toMatchObject({
       state: "completed"
     })
     lease.release()
     const [request, , context] = fixture.start.mock.calls[0]
+    expect(context.remotePolicy?.allowedSkillNames).toEqual(["review"])
     expect(request).toMatchObject({ threadId: bot.threadId, agentMode: "workflow" })
     expect(context.openingReplyReminder).toBe(true)
     expect(context.botCommunication).toBe(true)
@@ -963,7 +1000,13 @@ describe("Bot Runtime integration", () => {
       ]
     })
     expect(fixture.imOpening).not.toHaveBeenCalled()
-    expect(context.remotePolicy).toEqual({ disableScheduler: true, disableSubagents: true, blockedToolNames: ["workflow", "task"] })
+    expect(context.remotePolicy).toEqual({
+      disableScheduler: true,
+      disableSubagents: true,
+      blockedToolNames: ["workflow", "task"],
+      allowedSkillNames: ["review"],
+      disableSkillEvolution: true
+    })
     expect(context.additionalTools).toEqual([
       "works",
       "scoped-memory",
@@ -1104,7 +1147,7 @@ describe("Bot Runtime integration", () => {
       threadInitialized: true,
       label: "本人"
     })
-    const lease = im.acquire(bot, incoming, work)!
+    const lease = im.acquire({ ...bot, allowedSkillNames: ["review"] }, incoming, work)!
     await expect(lease.execute(new AbortController().signal, vi.fn())).resolves.toMatchObject({
       state: "completed"
     })
@@ -1118,7 +1161,7 @@ describe("Bot Runtime integration", () => {
       "routine",
       "owned-browser"
     ])
-    expect(remote.remotePolicy).toEqual({ disableScheduler: true, blockedToolNames: ["workflow"] })
+    expect(remote.remotePolicy).toEqual({ disableScheduler: true, blockedToolNames: ["workflow"], allowedSkillNames: ["review"], disableSkillEvolution: true })
     expect(fixture.browserTools.mock.calls[0][4]).toBe(`work-${work.id}--${bot.id}`)
     expect(
       remote.verifyResolvedThread({ metadata: nativeMetadata, workspacePath: work.workspace!.path })
@@ -1180,7 +1223,7 @@ describe("Bot Runtime integration", () => {
       }
     }
     await expect(
-      port(linked).acquire(bot, returned)!.execute(new AbortController().signal, vi.fn())
+      port(linked).acquire({ ...bot, allowedSkillNames: ["review"] }, returned)!.execute(new AbortController().signal, vi.fn())
     ).resolves.toMatchObject({ state: "completed" })
     const [request, , context] = fixture.start.mock.calls[0]
     expect(request).toMatchObject({

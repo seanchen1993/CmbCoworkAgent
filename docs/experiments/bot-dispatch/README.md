@@ -12,6 +12,7 @@
 - [早期汇总](supplementary/early-summary.json)：由已有运行整理，不额外计入实验次数。
 - [早期任务时间戳](supplementary/task-timings.json)：补充 `routing-1794829096252` 的数据库计时证据，单独保留，没有回写原报告。
 - [回归验证摘要](supplementary/verification-summaries.json)：真实模型实验之外的单元、模拟模型及本地 App 检查，不能混算为模型效果样本。
+- [技能选择合并验收](supplementary/2026-11-17-skill-selection-merge-validation.json)：2026-11-17 的合并回归、界面检查和既有查询计划失败对照，保留失败与复测记录；未新增真实模型样本。
 - [实现设计与验收](../../plans/bot-responsive-runtime.md)：前台预算、补充消息、资源归属、通知和界面设计。
 
 ## 问题与设计假设

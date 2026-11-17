@@ -2425,7 +2425,8 @@ function registerCurrentRunMessagePreparer({
   onHookResult,
   onHookSkippedFactory,
   onExplicitSkillActivated,
-  messageControlsEnabled = true
+  messageControlsEnabled = true,
+  allowedSkillNames
 }: {
   threadId: string
   runToken: string
@@ -2439,6 +2440,7 @@ function registerCurrentRunMessagePreparer({
   onHookSkippedFactory: (event: HookEvent) => ScopeSkipCallback
   onExplicitSkillActivated?: (skill: SkillLifecycleMatch) => void
   messageControlsEnabled?: boolean
+  allowedSkillNames?: string[]
 }): void {
   // A new invoke resets TurnState in place. Capture this run's hook objects so
   // an async steer preparation can never mutate the replacement run's scope.
@@ -2459,6 +2461,7 @@ function registerCurrentRunMessagePreparer({
       const prepared = await prepareStandardUserPrompt({
         rawMessage: queuedMessage.content,
         allowExplicitSkillFromMessage: messageControlsEnabled,
+        allowedSkillNames,
         initialModelInput: initialQueuedModelInput,
         threadId,
         workspacePath,
@@ -7450,6 +7453,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             prepareStandardUserPrompt({
               rawMessage,
               initialModelInput,
+              allowedSkillNames: runExecutionContext.remotePolicy?.allowedSkillNames,
               trustedExplicitSkill: messageControlsEnabled
                 ? runExecutionContext.trustedExplicitSkill
                 : undefined,
@@ -7538,6 +7542,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // explicit-skill activation and UserPromptSubmit policy as a normal turn.
           registerCurrentRunMessagePreparer({
             messageControlsEnabled,
+            allowedSkillNames: runExecutionContext.remotePolicy?.allowedSkillNames,
             threadId,
             runToken,
             workspacePath,

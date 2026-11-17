@@ -1,0 +1,136 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-11-17T01:21:19.575Z",
+  "kind": "merge-regression-and-native-ui",
+  "hypothesis": "Bot 技能选择与独立沟通角色、异步任务和运行中补充策略可以同时保留。",
+  "branch": "codex/merge-uat-into-bot-beta",
+  "parents": [
+    "25c418c30089c396377b90d23b53ebc25661551f",
+    "afa6091484ec9d74ffb02086d48ddc1644dfadd6"
+  ],
+  "implementationTreeBeforeAddingThisRecord": "bbf36b0b407f4f8c2414f49614b07b24666bdb45",
+  "environment": {
+    "os": "darwin",
+    "arch": "arm64",
+    "nodeForInitialSkillsAndTypes": "25.5.0",
+    "nodeForCoreRuntimeBuildAndBaseline": "22.23.5",
+    "applicationVersion": "1.5.5"
+  },
+  "changes": [
+    "将 applyBotSkillSelection 包裹原有 remotePolicy，保留主用户轮禁用同步 task/workflow 的调度规则。",
+    "合并 adapter 测试期望：技能范围、disableSkillEvolution 与 botCommunication/disableSubagents 并存。",
+    "给已有新聊天组件测试增加三个新增任务组件的测试替身，不修改真实组件行为。"
+  ],
+  "checks": [
+    {
+      "id": "skill-selection",
+      "command": "npm run test:bot-skills",
+      "result": "passed",
+      "unitFiles": 4,
+      "unitPassed": 15,
+      "browserJourney": "创建、编辑、空列表/全部、重复名称、缺失或禁用技能、保存及目录加载失败",
+      "evidence": {
+        "name": "bot-skill-merge-skills.log",
+        "sha256": "edab6d51584d4b0f58f0d180bf0601ad5c4fd2afc9a64639b8aca366b4350e0d"
+      }
+    },
+    {
+      "id": "typecheck",
+      "command": "npm run typecheck",
+      "result": "passed",
+      "scope": [
+        "node",
+        "web"
+      ],
+      "evidence": {
+        "name": "bot-skill-merge-types.log",
+        "sha256": "f72b7f95ce81e4b47b9d1dcc233da4bf25471aa10120f8e8046f48f1433e32fb"
+      }
+    },
+    {
+      "id": "new-chat-before-fixture-fix",
+      "command": "node --import tsx tests/bots-new-chat-draft-browser.spec.ts",
+      "result": "failed",
+      "reason": "测试隔离模块未导出 BotWorkHeader、BotTaskBrowser、BotWorkAttention，组件 bundle 在执行用例前失败。",
+      "evidence": {
+        "name": "bot-skill-merge-draft.log",
+        "sha256": "b843f788d9649cdf2d7ebcd07e24a9919cf617fe66cc082ed490f88c5ad8381e"
+      }
+    },
+    {
+      "id": "new-chat-after-fixture-fix",
+      "command": "node --import tsx tests/bots-new-chat-draft-browser.spec.ts",
+      "result": "passed",
+      "scope": "真实 React 新建/编辑组件，模拟 transport、文件和缓存；保留草稿、失败重试、主机与异步结果隔离。",
+      "evidence": {
+        "name": "bot-skill-merge-draft-retest.log",
+        "sha256": "c05c22d52cede137d2778d9a827426805284216cbdd7e83e6f3caa71502a9a6a"
+      }
+    },
+    {
+      "id": "bot-core",
+      "command": "npm run test:bot-integration:core",
+      "result": "failed",
+      "filesPassed": 135,
+      "filesFailed": 1,
+      "testsPassed": 2597,
+      "testsFailed": 1,
+      "failure": "work-projection.test.ts:110:64: expected true to be false（EXPLAIN QUERY PLAN 出现 SCAN t）",
+      "evidence": {
+        "name": "bot-skill-merge-core.log",
+        "sha256": "4d311a23d66ce1ef876a92d6f83439d4a657aec48e717a9b9ffb2242050d371b"
+      }
+    },
+    {
+      "id": "pre-merge-projection-control",
+      "result": "same-failure-reproduced",
+      "testsPassed": 3,
+      "testsFailed": 1,
+      "method": "取第一父提交的 BotStore 与 work-projection 测试保存为临时相邻模块，改测试 import 指向该原版 Store，同 Node 22 环境运行；其余依赖仍为当前工作树。临时模块已删除。",
+      "failure": "相同查询计划断言，第 110 行",
+      "evidence": {
+        "name": "bot-skill-merge-baseline-projection.log",
+        "sha256": "6848b0ea991052ad73ed0642a184c525bc7fdc300b99c8372fd7f890b6e53d88"
+      }
+    },
+    {
+      "id": "runtime-persona-and-skills",
+      "command": "vitest run src/main/agent/bot-communication-prompt.test.ts src/main/agent/bot-skill-selection.test.ts --maxWorkers=2",
+      "result": "passed",
+      "filesPassed": 2,
+      "testsPassed": 8,
+      "note": "其中 7 项技能用例与技能专项重复，不能累计为独立样本。",
+      "evidence": {
+        "name": "bot-skill-merge-runtime.log",
+        "sha256": "a6ca18e799666c8c6e5a23be28977541deb169939f8f32834b4a20751a7e5c45"
+      }
+    },
+    {
+      "id": "production-build",
+      "command": "npm run build",
+      "result": "passed",
+      "scope": [
+        "main",
+        "preload",
+        "renderer"
+      ],
+      "evidence": {
+        "name": "bot-skill-merge-build.log",
+        "sha256": "09f3ae05b616359830243acc22ea2abd16fd7592d2d7debd8c7603ef8f0cab6b"
+      }
+    },
+    {
+      "id": "native-app-startup",
+      "result": "passed",
+      "method": "退出原 worktree 的旧进程，运行当前 worktree 的 electron-vite preview；通过原生 UI 看到当前 out/renderer/index.html、Bot 工作区、编辑 Bot 的可用技能（默认全部），关闭编辑弹窗后返回主对话。未保存或改动用户技能选择。",
+      "limitation": "一次 UI 工具调用超时，重新取得应用后确认关闭已成功、主对话正常。未将 UI 工具异常计为功能通过。"
+    }
+  ],
+  "conclusion": "技能选择与本轮调度实现已合并；专项、界面、类型与构建检查通过。核心回归存在一个合并前同样失败的 SQLite 查询计划断言，本轮未修改查询或放宽断言。",
+  "limitations": [
+    "本轮没有新增真实模型效果实验，不计入主动委派命中率或响应延迟样本。",
+    "未做 Windows 包与真实内网 IM 联调。",
+    "原始日志仅保存在本机临时目录，仓库记录摘要及原始日志哈希；不归档用户配置、启动全日志、用户聊天或凭据。",
+    "没有 ES 查询改动。"
+  ]
+}
