@@ -3,12 +3,13 @@ import type {
   RunAnalysisData,
   RunAnalysisFeature
 } from "./project-run-analysis"
-import { RUN_ANALYSIS_MEMBERSHIP_LABELS, RUN_ANALYSIS_NOTES } from "./project-run-analysis"
+import { RUN_ANALYSIS_MEMBERSHIP_LABELS } from "./project-run-analysis"
 
 export const NUMERIC_FILTERS = {
   idleDays: { label: "距最近执行", unit: "天", factor: 1 },
   spanDays: { label: "执行跨度", unit: "天", factor: 1 },
-  adoptionRate: { label: "采纳率", unit: "%", factor: 100 },
+  adoptionRate: { label: "提交采纳率", unit: "%", factor: 100 },
+  pushAdoptionRate: { label: "入库采纳率", unit: "%", factor: 100 },
   codeLines: { label: "有效生成行数", unit: "行", factor: 1 },
   vibeShare: { label: "Vibe采纳占比", unit: "%", factor: 100 },
   noSkill: { label: "未使用 Skill 主对话", unit: "轮", factor: 1 },
@@ -118,8 +119,8 @@ export const RUN_ANALYSIS_PRESETS = [
   },
   {
     key: "adoption",
-    label: "采纳率低",
-    description: "采纳率 ≤ 30% · 有效生成 ≥ 100 行",
+    label: "提交采纳率低",
+    description: "提交采纳率 ≤ 30% · 有效生成 ≥ 100 行",
     sort: "adoption",
     desc: false
   },
@@ -234,6 +235,8 @@ export function numericFilterValue(
       return row.executionSpanMs === null ? null : row.executionSpanMs / 86400000
     case "adoptionRate":
       return row.codeStats?.inclusiveAdoptionRate ?? null
+    case "pushAdoptionRate":
+      return row.codeStats?.inclusivePushedAdoptionRate ?? null
     case "codeLines":
       return row.codeStats?.inclusiveEffectiveGeneratedLines ?? null
     case "vibeShare":
@@ -282,15 +285,18 @@ export function attentionReasons(
   return reasons
 }
 
-export type RunAnalysisSort =
-  | "idle"
-  | "span"
-  | "duration"
-  | "adoption"
-  | "vibe"
-  | "noSkill"
-  | "tools"
-  | "models"
+export const RUN_ANALYSIS_SORT_LABELS = {
+  idle: "距最近执行",
+  span: "执行跨度",
+  duration: "累计耗时",
+  adoption: "提交采纳率",
+  pushAdoption: "入库采纳率",
+  vibe: "Vibe占比",
+  noSkill: "未用Skill主对话",
+  tools: "工具调用",
+  models: "模型调用"
+} as const
+export type RunAnalysisSort = keyof typeof RUN_ANALYSIS_SORT_LABELS
 export function runAnalysisSortValue(
   row: RunAnalysisFeature,
   key: RunAnalysisSort,
@@ -304,15 +310,17 @@ export function runAnalysisSortValue(
         ? row.totalDurationMs
         : key === "adoption"
           ? (row.codeStats?.inclusiveAdoptionRate ?? null)
-          : key === "vibe"
-            ? row.vibeAdoptedShare
-            : key === "noSkill"
-              ? row.conversationCount > 0
-                ? row.noSkillConversationCount
-                : null
-              : key === "tools"
-                ? row.toolCalls
-                : row.modelCalls
+          : key === "pushAdoption"
+            ? (row.codeStats?.inclusivePushedAdoptionRate ?? null)
+            : key === "vibe"
+              ? row.vibeAdoptedShare
+              : key === "noSkill"
+                ? row.conversationCount > 0
+                  ? row.noSkillConversationCount
+                  : null
+                : key === "tools"
+                  ? row.toolCalls
+                  : row.modelCalls
 }
 export function compareRunAnalysis(
   a: RunAnalysisFeature,
@@ -487,65 +495,65 @@ export function runAnalysisSummary(data: RunAnalysisData, matches: RunAnalysisMa
   for (const m of matches) for (const r of m.reasons) reasons.set(r, (reasons.get(r) ?? 0) + 1)
   return `项目分析：当前筛选匹配${projects}个项目、${matches.filter((m) => m.row.featureSlug !== null).length}个特性。${codes.length ? `项目编号：${codes.join("、")}。` : ""}名单范围：${RUN_ANALYSIS_MEMBERSHIP_LABELS[data.membership]}；${data.range.from} 至 ${data.range.to}。指标为累计口径，数据截至${data.dataAsOf}。${[...reasons].map(([r, n]) => `${r}：${n}个特性`).join("；")}`
 }
+const exportTimeFormatter = new Intl.DateTimeFormat("sv-SE", {
+  timeZone: "Asia/Shanghai",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hourCycle: "h23"
+})
+export function formatRunAnalysisExportTime(value: string | null): string | null {
+  if (!value) return null
+  const date = new Date(value)
+  return Number.isFinite(date.getTime()) ? exportTimeFormatter.format(date) : null
+}
+
 export function runAnalysisExportRows(
   data: RunAnalysisData,
   matches: RunAnalysisMatch[]
 ): Record<string, unknown>[] {
   return matches.map(({ row: r, reasons }) => ({
-    名单范围: data.membership,
-    范围开始: data.range.from,
-    范围结束: data.range.to,
-    查询开始: data.queryStartedAt,
-    数据截至: data.dataAsOf,
-    快照时间: r.snapshotAt,
-    项目ID: r.projectId,
-    项目: r.projectName,
+    项目名称: r.projectName,
     项目编号: r.projectCode ?? null,
     是否精益项目: r.projectFromLean === true ? "是" : r.projectFromLean === false ? "否" : "未记录",
-    系统: r.systemName,
-    插件: r.adapterName,
-    版本: r.adapterVersion,
+    系统名称: r.systemName,
+    插件名称: r.adapterName,
+    插件版本: r.adapterVersion,
     创建人: r.creator,
-    室: r.room,
-    项目创建时间: r.projectCreatedAt,
-    生命周期状态: r.lifecycleStatus,
-    当前快照特性数: r.snapshotFeatureCount,
-    特性Slug: r.featureSlug,
-    特性: r.featureTitle,
-    属于当前快照: r.inSnapshot,
+    所属室: r.room,
+    项目状态:
+      (
+        { active: "进行中", paused: "已暂停", archived: "已归档", completed: "已完成" } as Record<
+          string,
+          string
+        >
+      )[r.lifecycleStatus ?? ""] ?? "未记录",
+    特性名称: r.featureTitle,
     当前阶段: r.currentStage,
     当前状态: r.currentStatus,
-    特性状态: r.featureStatus,
-    首次执行: r.firstExecutedAt,
-    最近执行: r.lastExecutedAt,
-    最晚结束: r.lastEndedAt,
-    执行跨度小时: r.executionSpanMs === null ? null : r.executionSpanMs / 3600000,
-    累计执行小时: r.totalDurationMs === null ? null : r.totalDurationMs / 3600000,
-    距最近执行天: idleDays(r, data.dataAsOf),
-    主Agent对话: r.conversationCount,
-    未用Skill主Agent对话: r.noSkillConversationCount,
-    未用Skill主对话占比:
+    首次执行时间: formatRunAnalysisExportTime(r.firstExecutedAt),
+    最近执行时间: formatRunAnalysisExportTime(r.lastExecutedAt),
+    最晚结束时间: formatRunAnalysisExportTime(r.lastEndedAt),
+    "执行跨度（天）": r.executionSpanMs === null ? null : r.executionSpanMs / 86400000,
+    "累计执行耗时（小时）": r.totalDurationMs === null ? null : r.totalDurationMs / 3600000,
+    "距最近执行（天）": idleDays(r, data.dataAsOf),
+    "主Agent对话（轮）": r.conversationCount,
+    "未使用Skill主对话（轮）": r.noSkillConversationCount,
+    未使用Skill主对话占比:
       r.conversationCount > 0 ? r.noSkillConversationCount / r.conversationCount : null,
-    工具调用: r.toolCalls,
-    模型调用: r.modelCalls,
-    工具字段覆盖: `${r.toolReportedTraceCount}/${r.traceCount}`,
-    模型字段覆盖: `${r.modelReportedTraceCount}/${r.traceCount}`,
-    已识别子代理数: r.subagentCount,
-    子代理轮次: r.subagentTurns,
-    子代理类型轮次: JSON.stringify(r.subagentKinds),
-    已识别子代理记录: r.subagentIdentifiedTraceCount,
-    类型覆盖: `${r.subagentClassifiedTraceCount}/${r.traceCount}`,
-    生成行: r.codeStats?.generatedLines ?? null,
-    已测量有效生成行: r.codeStats?.effectiveGeneratedLines ?? null,
-    全量有效生成行: r.codeStats?.inclusiveEffectiveGeneratedLines ?? null,
-    未测量生成行: r.codeStats?.unmeasuredGeneratedLines ?? null,
-    提交采纳行: r.codeStats?.adoptedLines ?? null,
-    入库采纳行: r.codeStats?.pushedAdoptedLines ?? null,
-    全量采纳率: r.codeStats?.inclusiveAdoptionRate ?? null,
-    Harness采纳行: r.harnessAdoptedLines,
-    Vibe采纳行: r.vibeAdoptedLines,
-    Vibe采纳占比: r.vibeAdoptedShare,
-    关注原因: reasons.join("；"),
-    统计说明: Object.values(RUN_ANALYSIS_NOTES).join(" ")
+    "工具调用（次）": r.toolCalls,
+    "模型调用（次）": r.modelCalls,
+    "有效生成代码（行）": r.codeStats?.inclusiveEffectiveGeneratedLines ?? null,
+    "提交采纳代码（行）": r.codeStats?.adoptedLines ?? null,
+    提交采纳率: r.codeStats?.inclusiveAdoptionRate ?? null,
+    "入库采纳代码（行）": r.codeStats?.pushedAdoptedLines ?? null,
+    入库采纳率: r.codeStats?.inclusivePushedAdoptionRate ?? null,
+    "Harness采纳代码（行）": r.harnessAdoptedLines,
+    "VibeCoding采纳代码（行）": r.vibeAdoptedLines,
+    VibeCoding采纳占比: r.vibeAdoptedShare,
+    匹配条件: reasons.join("；")
   }))
 }

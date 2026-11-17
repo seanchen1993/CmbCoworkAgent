@@ -277,7 +277,7 @@ try {
     "custom"
   )
   assert.ok((await tableRows.count()) > 0)
-  for (const value of await tableRows.locator("td:nth-child(7)").allTextContents())
+  for (const value of await tableRows.locator("td:nth-child(8)").allTextContents())
     assert.match(value, /20轮共 30 轮主对话/)
   assert.equal(
     await page.evaluate(() => window.runQA.calls.filter((c) => c.type === "load").length),
@@ -330,16 +330,82 @@ try {
     2,
     "Quick filters, chips and search never requery ES"
   )
+  assert.equal(await page.getByRole("columnheader", { name: /子代理/ }).count(), 0)
+  assert.equal(await page.getByRole("columnheader", { name: /^提交采纳率/ }).count(), 1)
+  assert.equal(await page.getByRole("columnheader", { name: /^入库采纳率/ }).count(), 1)
+  await page.getByRole("combobox", { name: "分析排序", exact: true }).selectOption("pushAdoption")
+  const pushCells = tableRows.locator("td:nth-child(6) button")
+  const pushRates = (await pushCells.allTextContents())
+    .filter((v) => v.includes("%"))
+    .map(parseFloat)
+  assert.deepEqual(
+    pushRates,
+    [...pushRates].sort((a, b) => b - a)
+  )
+  await page.getByRole("button", { name: "切换排序方向", exact: true }).click()
+  const ascendingPushRates = (await pushCells.allTextContents())
+    .filter((v) => v.includes("%"))
+    .map(parseFloat)
+  assert.deepEqual(
+    ascendingPushRates,
+    [...ascendingPushRates].sort((a, b) => a - b)
+  )
+  await pushCells.filter({ hasText: "%" }).first().click()
+  assert.equal(await page.evaluate(() => window.runQA.opened.at(-1).pushed), true)
+  const moreFilters = page.getByRole("button", { name: "更多筛选", exact: true })
+  if ((await moreFilters.getAttribute("aria-expanded")) === "false") await moreFilters.click()
+  await page.getByRole("combobox", { name: "入库采纳率比较方式" }).selectOption("lt")
+  await page.getByRole("spinbutton", { name: "入库采纳率数值（%）" }).fill("15")
+  for (const text of await tableRows.locator("td:nth-child(6) button").allTextContents())
+    assert.ok(parseFloat(text) < 15)
+  await page.getByRole("button", { name: "清除全部筛选", exact: true }).click()
   const downloadPromise = page.waitForEvent("download")
   await page.getByRole("button", { name: "导出Excel", exact: true }).click()
   const download = await downloadPromise
-  const workbook = XLSX.readFile(await download.path())
+  const workbook = XLSX.readFile(await download.path(), { cellNF: true })
   const exported = XLSX.utils.sheet_to_json(workbook.Sheets["匹配特性"], { defval: null })
-  assert.equal(exported.find((row) => row.项目ID === "demo-1").项目编号, "LEAN-000002")
-  assert.equal(exported.find((row) => row.项目ID === "demo-1").是否精益项目, "否")
-  assert.equal(exported.find((row) => row.项目ID === "demo-2").是否精益项目, "是")
-  assert.equal(exported.find((row) => row.项目ID === "demo-0").项目编号, null)
-  assert.equal(exported.find((row) => row.项目ID === "demo-0").是否精益项目, "未记录")
+  assert.equal(exported.find((row) => row.项目编号 === "LEAN-000002").是否精益项目, "否")
+  assert.equal(exported.find((row) => row.项目编号 === "LEAN-000003").是否精益项目, "是")
+  assert.equal(exported.find((row) => row.项目名称.endsWith("客户经营平台 1")).项目编号, null)
+  assert.equal(
+    exported.find((row) => row.项目名称.endsWith("客户经营平台 1")).是否精益项目,
+    "未记录"
+  )
+  assert.doesNotMatch(
+    Object.keys(exported[0]).join(" "),
+    /子代理|覆盖|Slug|ID|快照|查询开始|统计说明/
+  )
+  for (const row of exported) {
+    if (row["有效生成代码（行）"] > 0) {
+      assert.ok(
+        Math.abs(row.提交采纳率 - row["提交采纳代码（行）"] / row["有效生成代码（行）"]) < 1e-12
+      )
+      assert.ok(
+        Math.abs(row.入库采纳率 - row["入库采纳代码（行）"] / row["有效生成代码（行）"]) < 1e-12
+      )
+    } else {
+      assert.equal(row.提交采纳率, null)
+      assert.equal(row.入库采纳率, null)
+    }
+    if (row.首次执行时间) assert.match(row.首次执行时间, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/)
+  }
+  const headers = Object.keys(exported[0])
+  for (const header of ["提交采纳率", "入库采纳率"]) {
+    const column = headers.indexOf(header)
+    for (let i = 0; i < exported.length; i++) {
+      const cell = workbook.Sheets["匹配特性"][XLSX.utils.encode_cell({ r: i + 1, c: column })]
+      if (cell?.t === "n") {
+        assert.equal(cell.z, "0.0%")
+        assert.match(cell.w, /%$/)
+      }
+    }
+  }
+  const notes = XLSX.utils.sheet_to_json(workbook.Sheets["统计口径"])
+  assert.match(notes.find((row) => row.项目 === "排序").说明, /入库采纳率/)
+  assert.doesNotMatch(
+    JSON.stringify(notes),
+    /"说明":"(?:idle|active|executed|all|created)"|子代理|numeric|traceCount/
+  )
   assert.equal(
     XLSX.utils.sheet_to_json(workbook.Sheets["匹配特性"]).length,
     36,
@@ -357,9 +423,18 @@ try {
     defval: null
   })
   assert.equal(exportedProjects.length, 12)
-  assert.equal(exportedProjects.find((row) => row.项目ID === "demo-2").项目编号, "LEAN-000003")
-  assert.equal(exportedProjects.find((row) => row.项目ID === "demo-2").是否精益项目, "是")
-  assert.equal(exportedProjects.find((row) => row.项目ID === "demo-0").是否精益项目, "未记录")
+  assert.equal(exportedProjects.find((row) => row.项目编号 === "LEAN-000003").是否精益项目, "是")
+  assert.equal(
+    exportedProjects.find((row) => row.项目名称.endsWith("客户经营平台 1")).是否精益项目,
+    "未记录"
+  )
+  for (const row of exportedProjects) {
+    assert.ok(
+      Math.abs(row.入库采纳率 - row["入库采纳代码（行）"] / row["有效生成代码（行）"]) < 1e-12
+    )
+    assert.equal("特性名称" in row, false)
+    assert.equal("当前阶段" in row, false)
+  }
   await tableRows.first().getByRole("button", { name: /^展开/ }).click()
   await page.getByText("匹配特性", { exact: true }).waitFor()
   await page.getByRole("button", { name: "按特性", exact: true }).click()
@@ -369,6 +444,17 @@ try {
     .getByRole("cell", { name: "design-方案设计", exact: true })
     .waitFor()
   assert.equal(await page.getByRole("dialog").locator("tbody > tr").count(), 3)
+  assert.equal(
+    await page
+      .getByRole("dialog")
+      .getByText(/子代理|可去重记录|分类覆盖/)
+      .count(),
+    0
+  )
+  await page
+    .getByRole("dialog")
+    .getByText(/^入库采纳率 /)
+    .waitFor()
   await page
     .getByRole("dialog")
     .locator("tbody > tr")
@@ -496,7 +582,7 @@ try {
   await page.getByRole("combobox", { name: "未使用 Skill 主对话比较方式" }).selectOption("lt")
   await page.getByRole("spinbutton", { name: "未使用 Skill 主对话数值（轮）" }).fill("19")
   assert.ok((await tableRows.count()) > 0)
-  for (const value of await tableRows.locator("td:nth-child(7)").allTextContents())
+  for (const value of await tableRows.locator("td:nth-child(8)").allTextContents())
     assert.doesNotMatch(value, /20轮/)
   await page.getByRole("combobox", { name: "有效生成行数比较方式" }).selectOption("between")
   await page.getByRole("spinbutton", { name: "有效生成行数下限（行）" }).fill("100")

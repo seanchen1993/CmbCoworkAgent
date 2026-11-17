@@ -47,10 +47,12 @@ import {
   type NumericCondition,
   type NumericOperator,
   RUN_ANALYSIS_PRESETS,
+  RUN_ANALYSIS_SORT_LABELS,
   filterRunAnalysis,
   groupRunAnalysis,
   idleDays,
   runAnalysisExportRows,
+  formatRunAnalysisExportTime,
   runAnalysisPreset,
   runAnalysisPresetCounts,
   runAnalysisFilterChips,
@@ -275,39 +277,85 @@ export function ProjectRunAnalysis({
     try {
       const XLSX = await import("xlsx")
       const book = XLSX.utils.book_new()
-      XLSX.utils.book_append_sheet(
-        book,
-        XLSX.utils.json_to_sheet(runAnalysisExportRows(data, matches)),
-        "匹配特性"
-      )
+      const appendRows = (name: string, rows: Record<string, unknown>[]) => {
+        const sheet = XLSX.utils.json_to_sheet(rows)
+        const headers = Object.keys(rows[0] ?? {})
+        headers.forEach((header, column) => {
+          const format =
+            header.endsWith("率") || header.endsWith("占比")
+              ? "0.0%"
+              : /（天）|（小时）/.test(header)
+                ? "0.0"
+                : null
+          if (!format) return
+          for (let row = 1; row <= rows.length; row++) {
+            const cell = sheet[XLSX.utils.encode_cell({ r: row, c: column })]
+            if (cell?.t === "n") cell.z = format
+          }
+        })
+        const textWidth = (value: unknown): number =>
+          Array.from(String(value ?? "")).reduce(
+            (width, char) => width + (char.charCodeAt(0) > 255 ? 2 : 1),
+            0
+          )
+        sheet["!cols"] = headers.map((header) => ({
+          wch: rows.reduce(
+            (width, row) => Math.min(48, Math.max(width, textWidth(row[header]) + 2)),
+            Math.min(48, Math.max(12, textWidth(header) + 2))
+          )
+        }))
+        XLSX.utils.book_append_sheet(book, sheet, name)
+      }
+      appendRows("匹配特性", runAnalysisExportRows(data, matches))
       if (mode === "project")
-        XLSX.utils.book_append_sheet(
-          book,
-          XLSX.utils.json_to_sheet(
-            groups.map((g) => ({
-              ...runAnalysisExportRows(data, [g])[0],
+        appendRows(
+          "项目汇总",
+          groups.map((g) => {
+            const row = runAnalysisExportRows(data, [g])[0]
+            // These columns describe a feature, not the whole project.
+            for (const key of ["特性名称", "当前阶段", "当前状态"]) delete row[key]
+            return {
+              ...row,
               名单内特性数: g.totalFeatures,
               匹配特性数: g.features.filter((f) => f.row.featureSlug !== null).length,
               匹配特性: g.features.map((f) => f.row.featureTitle).join("；")
-            }))
-          ),
-          "项目汇总"
+            }
+          })
         )
-      XLSX.utils.book_append_sheet(
-        book,
-        XLSX.utils.json_to_sheet([
-          {
-            筛选: JSON.stringify(filters),
-            排序: sort,
-            方向: desc ? "降序" : "升序",
-            名单范围: membership,
-            说明: Object.values(RUN_ANALYSIS_NOTES).join(" "),
-            查询开始: data.queryStartedAt,
-            数据截至: data.dataAsOf
-          }
-        ]),
-        "统计口径"
-      )
+      appendRows("统计口径", [
+        { 项目: "查看范围", 说明: RUN_ANALYSIS_MEMBERSHIP_LABELS[data.membership] },
+        ...(data.membership === "executed" || data.membership === "created"
+          ? [
+              {
+                项目: "名单日期",
+                说明: `${formatRunAnalysisExportTime(data.range.from)} 至 ${formatRunAnalysisExportTime(data.range.to)}`
+              }
+            ]
+          : []),
+        {
+          项目: "筛选条件",
+          说明:
+            runAnalysisFilterChips(filters)
+              .map((chip) => chip.label)
+              .join("；") || "无"
+        },
+        {
+          项目: "排序",
+          说明: `${RUN_ANALYSIS_SORT_LABELS[sort]} · ${desc ? "从高到低" : "从低到高"}`
+        },
+        { 项目: "数据截至（北京时间）", 说明: formatRunAnalysisExportTime(data.dataAsOf) },
+        {
+          项目: "指标范围",
+          说明: "匹配特性展示各特性的累计指标；项目汇总展示入选项目在名单范围内全部特性的累计指标，采纳率按总行数计算。"
+        },
+        { 项目: "执行跨度", 说明: RUN_ANALYSIS_NOTES.span },
+        { 项目: "采纳率", 说明: RUN_ANALYSIS_NOTES.adoption },
+        { 项目: "调用次数", 说明: RUN_ANALYSIS_NOTES.cost },
+        {
+          项目: "数值格式",
+          说明: "所有时间为北京时间；采纳率、占比为百分比。空白表示未记录或不适用，0表示统计值为零。"
+        }
+      ])
       XLSX.writeFile(book, `项目分析-${new Date(data.dataAsOf).toISOString().slice(0, 10)}.xlsx`)
       setNotice(`已导出全部${matches.length}条匹配记录`)
     } catch (e) {
@@ -459,6 +507,21 @@ export function ProjectRunAnalysis({
           </div>
         </td>
         <td className="px-3 py-3 whitespace-nowrap">
+          <AnalysisLink
+            disabled={group || !r.featureSlug || !r.codeStats || !onOpenFeatureCommits}
+            onClick={() => onOpenFeatureCommits?.(r, true)}
+          >
+            {percent(r.codeStats?.inclusivePushedAdoptionRate)}
+          </AnalysisLink>
+          <div
+            className="mt-1 text-[11px] text-muted-foreground"
+            title="已Push采纳行数 / 全量有效生成行数"
+          >
+            {count(r.codeStats?.pushedAdoptedLines)} /{" "}
+            {count(r.codeStats?.inclusiveEffectiveGeneratedLines)}行
+          </div>
+        </td>
+        <td className="px-3 py-3 whitespace-nowrap">
           <span title="Harness 采纳行数 / VibeCoding 采纳行数">
             {count(r.harnessAdoptedLines)} / {count(r.vibeAdoptedLines)}行
           </span>
@@ -482,15 +545,6 @@ export function ProjectRunAnalysis({
           title={`已上报工具调用的记录 ${r.toolReportedTraceCount}/${r.traceCount}；模型调用 ${r.modelReportedTraceCount}/${r.traceCount}`}
         >
           {count(r.toolCalls)} / {count(r.modelCalls)}
-        </td>
-        <td
-          className="px-3 py-3 whitespace-nowrap"
-          title={`分类覆盖 ${r.subagentClassifiedTraceCount}/${r.traceCount}；可去重记录 ${r.subagentIdentifiedTraceCount}/${r.subagentTurns}`}
-        >
-          {r.traceCount ? `${r.subagentCount}个` : "—"}
-          <div className="mt-1 text-[11px] text-muted-foreground">
-            {r.traceCount ? `执行 ${r.subagentTurns} 轮` : ""}
-          </div>
         </td>
         <td className="sticky right-0 bg-card px-3 py-3 whitespace-nowrap">
           {group ? (
@@ -806,16 +860,7 @@ export function ProjectRunAnalysis({
                   setPage(1)
                 }}
               >
-                {[
-                  ["idle", "距最近执行"],
-                  ["span", "执行跨度"],
-                  ["duration", "累计耗时"],
-                  ["adoption", "采纳率"],
-                  ["vibe", "Vibe占比"],
-                  ["noSkill", "未用Skill主对话"],
-                  ["tools", "工具调用"],
-                  ["models", "模型调用"]
-                ].map(([v, l]) => (
+                {Object.entries(RUN_ANALYSIS_SORT_LABELS).map(([v, l]) => (
                   <option key={v} value={v}>
                     {l}
                   </option>
@@ -854,11 +899,11 @@ export function ProjectRunAnalysis({
                       "最近执行",
                       "从最近一次执行开始时间到数据截至时间的间隔，鼠标悬停可查看完整时间。"
                     ],
-                    ["采纳率", RUN_ANALYSIS_NOTES.adoption],
+                    ["提交采纳率", RUN_ANALYSIS_NOTES.adoption],
+                    ["入库采纳率", RUN_ANALYSIS_NOTES.adoption],
                     ["Harness / Vibe采纳", RUN_ANALYSIS_NOTES.adoption],
                     ["未使用Skill主对话", RUN_ANALYSIS_NOTES.skill],
-                    ["工具 / 模型调用", RUN_ANALYSIS_NOTES.cost],
-                    ["子代理", RUN_ANALYSIS_NOTES.cost]
+                    ["工具 / 模型调用", RUN_ANALYSIS_NOTES.cost]
                   ].map(([label, note]) => (
                     <th key={label} className="px-3 py-2 font-medium">
                       {label}
@@ -1037,6 +1082,8 @@ function RunAnalysisDiagnosis({
             </div>
             <div>已测量有效生成 {count(row.codeStats?.effectiveGeneratedLines)}行</div>
             <div>未测量 {count(row.codeStats?.unmeasuredGeneratedLines)}行</div>
+            <div>提交采纳率 {percent(row.codeStats?.inclusiveAdoptionRate)}</div>
+            <div>入库采纳率 {percent(row.codeStats?.inclusivePushedAdoptionRate)}</div>
             <div>
               Harness / Vibe采纳 {count(row.harnessAdoptedLines)} / {count(row.vibeAdoptedLines)}行
             </div>
@@ -1049,23 +1096,13 @@ function RunAnalysisDiagnosis({
           </div>
           <div className="space-y-1">
             <div className="font-medium">
-              调用与代理 <Hint note={RUN_ANALYSIS_NOTES.cost} />
+              调用情况 <Hint note={RUN_ANALYSIS_NOTES.cost} />
             </div>
+            <div>工具调用 {count(row.toolCalls)} 次</div>
+            <div>模型调用 {count(row.modelCalls)} 次</div>
             <div>
               工具 / 模型字段覆盖 {row.toolReportedTraceCount}/{row.traceCount} ·{" "}
               {row.modelReportedTraceCount}/{row.traceCount}
-            </div>
-            <div>
-              子代理 {count(row.subagentCount)}个 / {count(row.subagentTurns)}轮
-            </div>
-            <div>
-              分类覆盖 {row.subagentClassifiedTraceCount}/{row.traceCount} · 可去重记录{" "}
-              {row.subagentIdentifiedTraceCount}/{row.subagentTurns}
-            </div>
-            <div>
-              {Object.entries(row.subagentKinds)
-                .map(([k, n]) => `${k}: ${n}轮`)
-                .join("；") || "类型未记录"}
             </div>
           </div>
         </div>

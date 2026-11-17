@@ -8,6 +8,7 @@ import {
   filterRunAnalysis,
   groupRunAnalysis,
   runAnalysisExportRows,
+  formatRunAnalysisExportTime,
   runAnalysisSummary,
   runAnalysisPreset,
   runAnalysisPresetCounts,
@@ -20,6 +21,71 @@ const range = { from: "2026-01-01T00:00:00.000Z", to: "2026-12-31T23:59:59.999Z"
 const data = makeMockRunAnalysis(range)
 
 describe("runtime analysis full-range presentation", () => {
+  it("filters and sorts Push adoption with unknown values last and aggregates by generated lines", () => {
+    const sample = structuredClone(data)
+    const known = sample.rows.filter((row) => row.codeStats)
+    known[0].codeStats!.pushedAdoptedLines = 0
+    known[0].codeStats!.inclusivePushedAdoptionRate = 0
+    for (const desc of [false, true]) {
+      const matches = filterRunAnalysis(sample, DEFAULT_RUN_ANALYSIS_FILTERS, "pushAdoption", desc)
+      const rates = matches.flatMap(({ row }) =>
+        row.codeStats?.inclusivePushedAdoptionRate == null
+          ? []
+          : [row.codeStats.inclusivePushedAdoptionRate]
+      )
+      expect(rates).toEqual([...rates].sort((a, b) => (desc ? -1 : 1) * (a - b)))
+      expect(matches.at(-1)?.row.codeStats).toBeNull()
+    }
+    const matches = filterRunAnalysis(
+      sample,
+      {
+        ...DEFAULT_RUN_ANALYSIS_FILTERS,
+        numeric: { pushAdoptionRate: { operator: "eq", value: 0 } }
+      },
+      "pushAdoption",
+      false
+    )
+    expect(matches.map((match) => match.row)).toEqual([known[0]])
+    expect(matches[0].reasons).toContain("入库采纳率 = 0 %")
+    const all = filterRunAnalysis(sample, DEFAULT_RUN_ANALYSIS_FILTERS, "pushAdoption", false)
+    for (const group of groupRunAnalysis(sample, all, "pushAdoption", false)) {
+      const source = sample.rows.filter((row) => row.projectId === group.row.projectId)
+      const pushed = source.reduce((n, r) => n + (r.codeStats?.pushedAdoptedLines ?? 0), 0)
+      const generated = source.reduce(
+        (n, r) => n + (r.codeStats?.inclusiveEffectiveGeneratedLines ?? 0),
+        0
+      )
+      expect(group.row.codeStats?.inclusivePushedAdoptionRate).toBeCloseTo(pushed / generated)
+    }
+  })
+  it("exports business metrics with explicit units and removes internal identifiers and child observability", () => {
+    const row = {
+      ...data.rows[1],
+      firstExecutedAt: "2026-11-17T01:02:03Z",
+      executionSpanMs: 2 * 86400000,
+      totalDurationMs: 3 * 3600000
+    }
+    const output = runAnalysisExportRows(data, [{ row, reasons: [] }])[0]
+    expect(output).toMatchObject({
+      项目名称: row.projectName,
+      项目状态: "进行中",
+      首次执行时间: "2026-11-17 09:02:03",
+      "执行跨度（天）": 2,
+      "累计执行耗时（小时）": 3,
+      提交采纳率: row.codeStats!.inclusiveAdoptionRate,
+      入库采纳率: row.codeStats!.inclusivePushedAdoptionRate
+    })
+    expect(Object.keys(output).join(" ")).not.toMatch(
+      /子代理|覆盖|Slug|ID|快照|查询开始|统计说明|未测量|已测量/
+    )
+    const missing = runAnalysisExportRows(data, [
+      { row: { ...row, codeStats: null }, reasons: [] }
+    ])[0]
+    expect(missing.提交采纳率).toBeNull()
+    expect(missing.入库采纳率).toBeNull()
+    expect(formatRunAnalysisExportTime(null)).toBeNull()
+    expect(formatRunAnalysisExportTime("invalid")).toBeNull()
+  })
   it("searches and exports project codes and Lean status without merging distinct projects sharing a code", () => {
     const sample = structuredClone(data)
     for (const row of sample.rows) {
@@ -41,16 +107,20 @@ describe("runtime analysis full-range presentation", () => {
       runAnalysisExportRows(sample, grouped)
     ]) {
       expect(rows.every((row) => row.项目编号 === "001234")).toBe(true)
-      expect(rows.find((row) => row.项目ID === "demo-0")?.是否精益项目).toBe("是")
-      expect(rows.find((row) => row.项目ID === "demo-1")?.是否精益项目).toBe("否")
+      expect(rows.find((row) => row.项目名称 === sample.rows[0].projectName)?.是否精益项目).toBe(
+        "是"
+      )
+      expect(rows.find((row) => row.项目名称 === sample.rows[3].projectName)?.是否精益项目).toBe(
+        "否"
+      )
     }
     const all = filterRunAnalysis(sample, DEFAULT_RUN_ANALYSIS_FILTERS, "idle", true)
-    expect(runAnalysisExportRows(sample, all).find((row) => row.项目ID === "demo-2")).toMatchObject(
-      {
-        项目编号: null,
-        是否精益项目: "未记录"
-      }
-    )
+    expect(
+      runAnalysisExportRows(sample, all).find((row) => row.项目名称 === sample.rows[6].projectName)
+    ).toMatchObject({
+      项目编号: null,
+      是否精益项目: "未记录"
+    })
     expect(runAnalysisSummary(sample, matches)).toContain("项目编号：001234。")
     expect(
       makeMockRunAnalysis(range, { fromLeanOnly: true }).rows.every(
@@ -93,10 +163,11 @@ describe("runtime analysis full-range presentation", () => {
     )
     expect(matches.every((m) => m.row.projectId === afterFirstPage.projectId)).toBe(true)
     expect(matches).toHaveLength(3)
-    for (const row of runAnalysisExportRows(data, matches)) {
-      expect(row["数据截至"]).toBe(data.dataAsOf)
-      expect(row["统计说明"]).toContain("累计")
-    }
+    expect(
+      runAnalysisExportRows(data, matches).every(
+        (row) => row.项目名称 === afterFirstPage.projectName
+      )
+    ).toBe(true)
   })
   it("always orders absent values last in either direction, without interpreting them as safe zero", () => {
     for (const desc of [true, false]) {
@@ -188,7 +259,7 @@ describe("runtime analysis full-range presentation", () => {
       }
     }
     const chips = runAnalysisFilterChips(filters)
-    expect(chips.find((c) => c.key === "adoptionRate")?.label).toBe("采纳率 < 12.5 %")
+    expect(chips.find((c) => c.key === "adoptionRate")?.label).toBe("提交采纳率 < 12.5 %")
     expect(chips.find((c) => c.key === "noSkill")?.label).toContain("= 0 轮")
     expect(chips.find((c) => c.key === "codeLines")?.label).toContain("≥ 500 行")
     expect(clearRunAnalysisFilter(filters, "adoptionRate").numeric).toEqual({
