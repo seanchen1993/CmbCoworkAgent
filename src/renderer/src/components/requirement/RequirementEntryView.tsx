@@ -43,7 +43,8 @@ import {
   findRequirementDesignEntry,
   listAllRequirementDesignEntries,
   removeRequirementDesignAssociations,
-  openRequirementDesign
+  openRequirementDesign,
+  storeUploadedRequirementHtml
 } from "@/lib/requirement-design-entry"
 import { createPromptDesignSession } from "@/components/design/session-client"
 import {
@@ -746,9 +747,13 @@ export function RequirementEntryView({
 
   const resetSpaceRequirementDesign = useCallback(
     async (requirement: RequirementRecord): Promise<void> => {
-      const sessionIds = listAllRequirementDesignEntries(requirement.id).map(
-        (entry) => entry.htmlId
-      )
+      const entries = listAllRequirementDesignEntries(requirement.id)
+      for (const entry of entries) {
+        if (entry.origin !== "uploaded" || !entry.htmlFile) continue
+        const deleted = await window.api.requirements.deleteImportedHtml(entry.htmlFile)
+        if (!deleted.success) throw new Error(deleted.error || "删除上传的 HTML 失败")
+      }
+      const sessionIds = entries.map((entry) => entry.htmlId)
       removeRequirementDesignAssociations(sessionIds)
     },
     []
@@ -854,6 +859,27 @@ export function RequirementEntryView({
           requirement={selectedRequirement}
           onDesignRequirement={designSpaceRequirement}
           onResetDesign={() => resetSpaceRequirementDesign(selectedRequirement)}
+          onUploadHtml={async () => {
+            const imported = await window.api.requirements.importHtml({
+              requirementId: selectedRequirement.id,
+              title: selectedRequirement.title
+            })
+            if (!imported.success) throw new Error(imported.error || "上传 HTML 失败")
+            if (imported.canceled || !imported.htmlFile) return false
+            storeUploadedRequirementHtml({
+              origin: "uploaded",
+              source: "space",
+              scope: "full-prd",
+              requirementId: selectedRequirement.id,
+              requirementName: selectedRequirement.title,
+              functionName: selectedRequirement.title,
+              requirementFilePath: `space://${selectedRequirement.sourceName.trim()}`,
+              prompt: "",
+              htmlId: `uploaded-html:${selectedRequirement.id}:${Date.now()}`,
+              htmlFile: imported.htmlFile
+            })
+            return true
+          }}
           onStartDevelopment={async () => {
             await startSpaceRequirementDevelopment(selectedRequirement)
           }}

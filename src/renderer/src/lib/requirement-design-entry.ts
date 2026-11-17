@@ -6,6 +6,7 @@ export const REQUIREMENT_CONVERSATION_ENTRY_KEY = "pending-requirement-conversat
 export const REQUIREMENT_CONVERSATION_NAVIGATE_EVENT = "requirement-conversation:navigate"
 
 export type RequirementDesignEntry = {
+  origin?: "design" | "uploaded"
   source?: "local" | "space"
   scope?: "function" | "full-prd"
   requirementId: string
@@ -21,6 +22,10 @@ export type RequirementDesignEntry = {
   prompt: string
   htmlId: string
   htmlFile?: string
+}
+
+export function storeUploadedRequirementHtml(entry: RequirementDesignEntry): void {
+  storeActiveRequirementDesignEntry({ ...entry, origin: "uploaded" }, entry.htmlId)
 }
 
 export function getRequirementDesignFilePaths(entry: RequirementDesignEntry): string[] {

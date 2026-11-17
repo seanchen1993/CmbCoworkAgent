@@ -7,6 +7,7 @@ import {
   PenTool,
   RefreshCw,
   Trash2,
+  Upload,
   UserPlus
 } from "lucide-react"
 import { toast } from "sonner"
@@ -94,6 +95,7 @@ export function RequirementSpaceDetailView({
   requirement,
   onDesignRequirement,
   onResetDesign,
+  onUploadHtml,
   onStartDevelopment,
   onContinueDevelopment,
   onResetDevelopment,
@@ -102,6 +104,7 @@ export function RequirementSpaceDetailView({
   requirement: RequirementRecord
   onDesignRequirement: (requirement: RequirementRecord, content?: string) => Promise<void>
   onResetDesign: () => void | Promise<void>
+  onUploadHtml: () => boolean | Promise<boolean>
   onStartDevelopment: () => void | Promise<void>
   onContinueDevelopment: (threadId: string) => void | Promise<void>
   onResetDevelopment: () => void | Promise<void>
@@ -118,7 +121,9 @@ export function RequirementSpaceDetailView({
   const [prototypeHtml, setPrototypeHtml] = useState("")
   const [designResetOpen, setDesignResetOpen] = useState(false)
   const [designResetting, setDesignResetting] = useState(false)
+  const [htmlUploading, setHtmlUploading] = useState(false)
   const designBinding = findRequirementDesignEntry(requirement.id)
+  const isUploadedHtml = designBinding?.origin === "uploaded"
 
   useEffect(() => {
     let cancelled = false
@@ -231,23 +236,56 @@ export function RequirementSpaceDetailView({
           重置原型
         </RequirementActionButton>
       ) : null}
-      <RequirementActionButton
-        type="button"
-        size="sm"
-        className="h-7 text-xs"
-        hint={
-          permissionDenied
-            ? "暂无该需求文件的查看权限，无法开始或继续设计。"
-            : designBinding?.htmlId
-              ? REQUIREMENT_ACTION_HINTS.continueDesign
-              : REQUIREMENT_ACTION_HINTS.startDesign
-        }
-        onClick={() => void onDesignRequirement(requirement, content)}
-        disabled={permissionDenied}
-      >
-        <PenTool className="mr-1.5 size-3.5" />
-        {designBinding?.htmlId ? "继续设计" : "去设计"}
-      </RequirementActionButton>
+      {!isUploadedHtml ? (
+        <RequirementActionButton
+          type="button"
+          size="sm"
+          className="h-7 text-xs"
+          hint={
+            permissionDenied
+              ? "暂无该需求文件的查看权限，无法开始或继续设计。"
+              : designBinding?.htmlId
+                ? REQUIREMENT_ACTION_HINTS.continueDesign
+                : REQUIREMENT_ACTION_HINTS.startDesign
+          }
+          onClick={() => void onDesignRequirement(requirement, content)}
+          disabled={permissionDenied}
+        >
+          <PenTool className="mr-1.5 size-3.5" />
+          {designBinding?.htmlId ? "继续设计" : "去设计"}
+        </RequirementActionButton>
+      ) : null}
+      {!designBinding?.htmlFile ? (
+        <RequirementActionButton
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-7 text-xs"
+          hint="上传本地 HTML 文件并在此预览。"
+          disabled={htmlUploading}
+          onClick={() => {
+            setHtmlUploading(true)
+            void Promise.resolve(onUploadHtml())
+              .then((uploaded) => {
+                if (uploaded) {
+                  setReloadToken((value) => value + 1)
+                  toast.success("HTML 原型已上传")
+                }
+              })
+              .catch((uploadError) => {
+                toast.error(uploadError instanceof Error ? uploadError.message : "上传 HTML 失败")
+              })
+              .finally(() => setHtmlUploading(false))
+          }}
+        >
+          {htmlUploading ? (
+            <Loader2 className="mr-1.5 size-3.5 animate-spin" />
+          ) : (
+            <Upload className="mr-1.5 size-3.5" />
+          )}
+          上传 HTML
+        </RequirementActionButton>
+      ) : null}
     </>
   )
 
@@ -420,11 +458,13 @@ export function RequirementSpaceDetailView({
                 </div>
                 <h4 className="mt-4 text-sm font-semibold">暂无可预览的原型</h4>
                 <p className="mt-1.5 max-w-sm text-xs leading-5 text-muted-foreground">
-                  {designBinding?.htmlId
-                    ? "原型正在设计中，完成后即可在此预览效果。"
-                    : isRequirementDevelopmentUnavailable()
-                      ? "你可以基于当前需求创建并持续完善原型设计，完成后即可在此预览效果。"
-                      : "原型设计并非开发的必需步骤。你可以直接点击页面上方的“去开发”，前往项目模式开始开发；也可以先完善原型，再进入开发。"}
+                  {isUploadedHtml
+                    ? "当前原型来自本地 HTML，可预览并带入开发；如需更换，请先重置。"
+                    : designBinding?.htmlId
+                      ? "原型正在设计中，完成后即可在此预览效果。"
+                      : isRequirementDevelopmentUnavailable()
+                        ? "你可以基于当前需求创建并持续完善原型设计，完成后即可在此预览效果。"
+                        : "原型设计并非开发的必需步骤。你可以直接点击页面上方的“去开发”，前往项目模式开始开发；也可以先完善原型，再进入开发。"}
                 </p>
                 <div className="mt-4 flex items-center gap-2">{prototypeActions}</div>
               </div>
@@ -440,9 +480,13 @@ export function RequirementSpaceDetailView({
       >
         <DialogContent className="rounded-2xl sm:max-w-[460px]">
           <DialogHeader>
-            <DialogTitle>确认重置原型设计？</DialogTitle>
+            <DialogTitle>
+              {isUploadedHtml ? "确认删除上传的 HTML？" : "确认重置原型设计？"}
+            </DialogTitle>
             <DialogDescription className="pt-2 leading-6">
-              重置后仅解除当前需求与设计会话的关联。设计会话及其历史记录仍会保留。
+              {isUploadedHtml
+                ? "重置后将删除应用内保存的 HTML 副本，并解除它与当前需求的关联。原始本地文件不会受影响。"
+                : "重置后仅解除当前需求与设计会话的关联。设计会话及其历史记录仍会保留。"}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

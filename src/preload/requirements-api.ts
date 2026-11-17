@@ -42,6 +42,18 @@ export const requirementsApi = {
       workspacePath?: string | null
       error?: string
     }>,
+  importHtml: (payload: { requirementId: string; title: string }) =>
+    ipcRenderer.invoke("requirements:import-html", payload) as Promise<{
+      success: boolean
+      canceled?: boolean
+      htmlFile?: string
+      error?: string
+    }>,
+  deleteImportedHtml: (htmlFile: string) =>
+    ipcRenderer.invoke("requirements:delete-imported-html", htmlFile) as Promise<{
+      success: boolean
+      error?: string
+    }>,
   selectWorkDir: (): Promise<{ success: boolean; workDir?: string | null; error?: string }> =>
     ipcRenderer.invoke("requirements:select-work-dir"),
   delete: (reqId: string): Promise<{ success: boolean; error?: string }> =>

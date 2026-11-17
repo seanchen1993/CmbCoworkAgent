@@ -2510,6 +2510,13 @@ interface CustomAPI {
       workspacePath?: string | null
       error?: string
     }>
+    importHtml: (payload: { requirementId: string; title: string }) => Promise<{
+      success: boolean
+      canceled?: boolean
+      htmlFile?: string
+      error?: string
+    }>
+    deleteImportedHtml: (htmlFile: string) => Promise<{ success: boolean; error?: string }>
     selectWorkDir: () => Promise<{ success: boolean; workDir?: string | null; error?: string }>
     delete: (reqId: string) => Promise<{ success: boolean; error?: string }>
     openWorkDir: (reqId: string) => Promise<{ success: boolean; error?: string }>

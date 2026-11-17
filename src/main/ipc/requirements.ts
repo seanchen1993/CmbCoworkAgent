@@ -131,6 +131,7 @@ const PRD_DIRNAME = "prd"
 const PRD_MANIFEST_FILENAME = "prd-manifest.json"
 const SOURCE_PREVIEW_FILENAME = "source-preview.md"
 const REQUIREMENT_SETTINGS_FILENAME = "settings.json"
+const IMPORTED_HTML_DIRNAME = "imported-html"
 
 type RequirementsIndexFile = {
   list?: Array<
@@ -1355,6 +1356,48 @@ export function registerRequirementHandlers(ipcMain: IpcMain): void {
     }
   })
   ipcMain.handle("requirements:get-work-dir", async () => getLastRequirementWorkDir())
+  ipcMain.handle(
+    "requirements:import-html",
+    async (_event, payload: { requirementId: string; title: string }) => {
+      try {
+        const picked = await dialog.showOpenDialog({
+          properties: ["openFile"],
+          title: "上传本地 HTML 原型",
+          filters: [{ name: "HTML", extensions: ["html", "htm"] }]
+        })
+        if (picked.canceled || !picked.filePaths[0]) return { success: true, canceled: true }
+        const source = picked.filePaths[0]
+        const stats = await fs.stat(source)
+        if (!stats.isFile()) throw new Error("所选 HTML 文件无效")
+        if (stats.size > MAX_TEXT_BYTES) throw new Error("HTML 文件超过 5MB 限制")
+        const targetDir = path.join(
+          getRequirementsRoot(),
+          IMPORTED_HTML_DIRNAME,
+          safeSegment(payload.requirementId, "requirement")
+        )
+        await fs.mkdir(targetDir, { recursive: true })
+        const target = path.join(
+          targetDir,
+          `${Date.now()}-${safeSegment(path.basename(source), "prototype.html")}`
+        )
+        await fs.copyFile(source, target)
+        return { success: true, htmlFile: target }
+      } catch (error) {
+        return { success: false, error: error instanceof Error ? error.message : "上传 HTML 失败" }
+      }
+    }
+  )
+  ipcMain.handle("requirements:delete-imported-html", async (_event, htmlFile: string) => {
+    try {
+      const importedRoot = path.join(getRequirementsRoot(), IMPORTED_HTML_DIRNAME)
+      const target = ensureWorkspaceChild(importedRoot, htmlFile)
+      if (target === path.resolve(importedRoot)) throw new Error("HTML 文件路径无效")
+      await fs.rm(target, { force: true })
+      return { success: true }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : "删除 HTML 失败" }
+    }
+  })
   ipcMain.handle(
     "requirements:create-design-workspace",
     async (_event, payload: { requirementId: string; title: string }) => {
