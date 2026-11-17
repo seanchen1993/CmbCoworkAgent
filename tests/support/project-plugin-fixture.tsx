@@ -5,6 +5,7 @@ import { KnowledgePreviewPanel } from "../../src/renderer/src/components/harness
 import { findInstalledPluginForMarketItem } from "../../src/renderer/src/lib/market-plugin-identity"
 import type { MarketItem } from "../../src/renderer/src/api/market"
 import type { PluginMetadata } from "../../src/renderer/src/types"
+import type { WorkspaceFilePreviewReadRequest } from "../../src/shared/workspace-file-preview"
 
 const item = {
   name: "项目模式示例",
@@ -23,29 +24,24 @@ const installed = {
   path: "C:/plugins/internal-project",
   marketplace: { name: item.name, id: item.id }
 } as PluginMetadata
+const knowledgeBaseId = "market-project-knowledge"
 const preview = {
-  adapterId: installed.id,
-  adapterName: item.name,
-  configured: true,
   exists: true,
   path: "C:/plugins/internal-project/knowledge",
-  previewGrant: "expired",
-  previewGrantExpiresAt: Date.now() - 1,
   files: [{ path: "/AGENTS.md", is_dir: false }]
 }
-const counters = { refresh: 0, reinstall: 0, reads: 0 }
+const counters = { reinstall: 0, reads: 0 }
 Object.assign(window, {
   projectPluginCounters: counters,
   api: {
-    harnessBoard: {
-      getKnowledgePreview: async () => {
-        counters.refresh++
-        return { ...preview, previewGrant: "renewed", previewGrantExpiresAt: Date.now() + 300_000 }
-      }
-    },
     workspace: {
-      readFilePreview: async (request: { source: { externalGrant?: string } }) => {
-        if (request.source.externalGrant !== "renewed") throw new Error("Missing renewed grant")
+      readFilePreview: async ({ source }: WorkspaceFilePreviewReadRequest) => {
+        if (
+          source.knowledgeBaseId !== knowledgeBaseId ||
+          source.filePath !== preview.path + preview.files[0].path
+        ) {
+          throw new Error("Expected a preview of the selected knowledge base file")
+        }
         counters.reads++
         return {
           success: true,
@@ -91,11 +87,11 @@ export function Fixture() {
         />
       </section>
       <KnowledgePreviewPanel
+        knowledgeBaseId={knowledgeBaseId}
         preview={preview}
         loading={false}
         selectedPath={selectedPath}
         onSelectPath={setSelectedPath}
-        onRefresh={() => undefined}
       />
     </main>
   )

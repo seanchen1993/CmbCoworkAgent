@@ -89,16 +89,15 @@ async function main(): Promise<void> {
       () =>
         (
           window as unknown as {
-            projectPluginCounters: { refresh: number; reads: number; reinstall: number }
+            projectPluginCounters: { reads: number; reinstall: number }
           }
         ).projectPluginCounters
     )
-    assert.equal(counters.refresh, 1)
     assert.equal(counters.reinstall, 1)
     assert(counters.reads > 0)
     assert.deepEqual(errors, [])
     console.log(
-      "PASS: installed/reinstall/uninstall actions, shared-IP ownership, renewed knowledge preview"
+      "PASS: installed/reinstall/uninstall actions, shared-IP ownership, knowledge-base preview"
     )
   } finally {
     await app.close()
