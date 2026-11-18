@@ -1158,11 +1158,7 @@ async function executeHook(
   // Setup owns workspace initialisation state, so its caller must observe the
   // real exit code before writing setup-state or starting SessionStart. Even
   // if a workspace/CC-imported config says async:true, run Setup synchronously.
-  if (
-    hook.async === true &&
-    event !== "Setup" &&
-    !(context.hookSourceType === "workspace" && context.forceSyncWorkspaceHooks)
-  ) {
+  if (hookRunsAsynchronously(hook, event, context)) {
     void executeSyncHook(hook, env, context, event)
       .then((late) => {
         const finalLate: HookResult = {
@@ -1193,6 +1189,20 @@ async function executeHook(
     }
   }
   return executeSyncHook(hook, env, context, event)
+}
+
+function hookRunsAsynchronously(hook: HookConfig, event: HookEvent, context: HookContext): boolean {
+  const source = context.hookSourceType ?? hook.hookSourceType
+  return (
+    hook.async === true &&
+    event !== "Setup" &&
+    !(source === "workspace" && context.forceSyncWorkspaceHooks)
+  )
+}
+
+export function postToolUseHookAffectsResult(hook: HookConfig, context: HookContext): boolean {
+  // Static overrides are applied even to an async hook's pending result.
+  return Boolean(hook.forcedOutcome) || !hookRunsAsynchronously(hook, "PostToolUse", context)
 }
 
 async function executeSyncHook(

@@ -293,6 +293,8 @@ export interface Message {
   worker_content_source?: "values" | "snapshot"
   /** This worker identity has appeared in a complete ordered values frame. */
   worker_snapshot_identity?: boolean
+  /** Absolute position in the producer's complete values frame. */
+  worker_snapshot_index?: number
   /** The worker identity supplied by the producer, before occurrence inference. */
   worker_provider_identity?: boolean
   role: "user" | "assistant" | "system" | "tool"

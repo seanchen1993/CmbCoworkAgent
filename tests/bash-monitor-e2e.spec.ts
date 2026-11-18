@@ -24,7 +24,6 @@ interface TestApi {
   workspace: { set(threadId: string, path: string): Promise<unknown> }
   agent: {
     invoke(id: string, prompt: string, callback: (event: AgentEvent) => void): () => void
-    cancel(id: string): Promise<void>
   }
 }
 
@@ -74,8 +73,7 @@ function planTool(body: ModelRequest) {
   const executeResult = toolsById.get("execute-" + scenario)
   if (!executeResult) {
     return toolCall("execute-" + scenario, "execute", {
-      command: "node shell-monitor-probe.cjs " + scenario,
-      ...(scenario === "DETACH" && { run_in_background: true })
+      command: "node shell-monitor-probe.cjs " + scenario
     })
   }
   if (scenario === "QUICK") return undefined
@@ -114,7 +112,7 @@ async function main(): Promise<void> {
       'appendFileSync(scenario + ".log", "started " + process.pid + "\\n")',
       'writeFileSync(scenario + ".pid", String(process.pid))',
       'console.log("probe-start " + process.pid)',
-      "const duration = { QUICK: 10, AUTO: 72000, DETACH: 45000 }[scenario]",
+      "const duration = { QUICK: 10, AUTO: 72000, DETACH: 120000 }[scenario]",
       "setTimeout(() => {",
       '  appendFileSync(scenario + ".log", "finished " + process.pid + "\\n")',
       '  console.log("probe-finish " + process.pid)',
@@ -268,8 +266,16 @@ async function main(): Promise<void> {
     assert.match(snapshot.partialOutput, /probe-start \d+/)
     console.log("PASS auto handoff, one process, live snapshot and final monitor result")
 
+    const openChat = async (): Promise<void> => {
+      await page.reload({ waitUntil: "domcontentloaded" })
+      await page.getByText("Bash monitor E2E", { exact: true }).first().click({ timeout: 60_000 })
+    }
+    const stopShell = page.getByRole("button", { name: "停止后台 Bash", exact: true })
+    await openChat()
+    await stopShell.waitFor({ state: "hidden" })
     await invoke("DETACH")
     assert.ok(detachedId)
+    await stopShell.waitFor({ state: "visible" })
     let detachedPid: number | undefined
     for (let i = 0; i < 50; i++) {
       try {
@@ -284,17 +290,18 @@ async function main(): Promise<void> {
       detachedPid && processAlive(detachedPid),
       "detached shell is alive after turn settles"
     )
-    await page.evaluate(
-      (id) => (window as unknown as { api: TestApi }).api.agent.cancel(id),
-      threadId
-    )
+    await openChat()
+    await stopShell.click({ timeout: 30_000 })
+    await stopShell.waitFor({ state: "hidden" })
     await invoke("CHECK")
     assert.match(toolsById.get("check-stop") ?? "", /exit code 130/)
     for (let i = 0; i < 50 && processAlive(detachedPid); i++) await setTimeout(100)
     assert.equal(processAlive(detachedPid), false, "Stop terminates the detached process tree")
     assert.deepEqual(modelErrors, [])
     assert.deepEqual(pageErrors, [])
-    console.log("PASS detached Stop and same-thread monitor from a new turn")
+    console.log(
+      "PASS idle Stop button survives renderer reload and cancels the auto-detached shell"
+    )
   } finally {
     await app?.close().catch(() => undefined)
     server.closeAllConnections()

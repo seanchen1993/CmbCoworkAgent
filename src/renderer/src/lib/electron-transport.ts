@@ -21,6 +21,7 @@ import { buildSubagentTaskInvocationIdentity } from "../../../shared/subagent-in
 import { extractVisibleReasoning } from "../../../shared/model-reasoning"
 import {
   advanceCompletedMessageContentRoute,
+  buildAvailableProviderOccurrenceId,
   buildMessageSameRoleDuplicateId,
   getMessageProviderOccurrence,
   getMessageProviderSourceId,
@@ -578,6 +579,24 @@ function isWorkerFallbackProviderSourceId(sourceId: string): boolean {
   )
 }
 
+function availableWorkerAssistantProviderId(
+  sourceId: string,
+  occurrence: number,
+  messages: readonly Message[] = []
+): string {
+  const candidate =
+    occurrence > 1 ? buildMessageSameRoleDuplicateId(sourceId, "assistant", occurrence) : sourceId
+  // A legacy occurrence can already occupy the ID derived from a new
+  // declaration. Use a separate accumulator if the wire supplied no match.
+  if (!messages.some((message) => message.id === candidate)) return candidate
+  return buildAvailableProviderOccurrenceId(
+    sourceId,
+    "assistant",
+    occurrence,
+    new Set(messages.map((message) => message.id))
+  )
+}
+
 function getWorkerSnapshotFallbackIndex(
   message: SerializedMessageChunk,
   fallbackIndex: number
@@ -1110,29 +1129,41 @@ export class ElectronIPCTransport implements UseStreamTransport {
       metadata?.[STREAM_MESSAGE_REASONING_MODE_KEY]
     )
     const explicitProviderSourceId = scopedProviderTuple?.provider_source_id
+    const observedMessageId = typeof kwargs.id === "string" ? scopeId(kwargs.id) : undefined
     const storedMessages = useAppStore.getState().workerFocusMessages
     const explicitMatch = scopedProviderTuple
       ? storedMessages.find(
           (message) =>
             message.role === "assistant" &&
+            message.worker_provider_identity &&
             getMessageProviderSourceId(message) === scopedProviderTuple.provider_source_id &&
-            (getMessageProviderOccurrence(message) ?? 1) === scopedProviderTuple.provider_occurrence
+            getMessageProviderOccurrence(message) === scopedProviderTuple.provider_occurrence
         )
       : undefined
+    const explicitLegacyMatch =
+      scopedProviderTuple && observedMessageId && !explicitMatch
+        ? storedMessages.find(
+            (message) =>
+              message.role === "assistant" &&
+              !message.worker_provider_identity &&
+              message.id === observedMessageId &&
+              (getMessageProviderOccurrence(message) ?? 1) ===
+                scopedProviderTuple.provider_occurrence
+          )
+        : undefined
     let messageId: string
-    if (typeof kwargs.id === "string" || explicitProviderSourceId) {
-      const providerSourceId = explicitProviderSourceId ?? scopeId(kwargs.id!)
+    if (observedMessageId || explicitProviderSourceId) {
+      const providerSourceId = explicitProviderSourceId ?? observedMessageId!
       const currentMessageId = this.staleWorkerCurrentMessageIdByTurn.get(staleTurnKey)
       if (scopedProviderTuple) {
         messageId =
           explicitMatch?.id ??
-          (scopedProviderTuple.provider_occurrence > 1
-            ? buildMessageSameRoleDuplicateId(
-                providerSourceId,
-                "assistant",
-                scopedProviderTuple.provider_occurrence
-              )
-            : providerSourceId)
+          explicitLegacyMatch?.id ??
+          availableWorkerAssistantProviderId(
+            providerSourceId,
+            scopedProviderTuple.provider_occurrence,
+            storedMessages
+          )
       } else if (
         currentMessageId &&
         this.staleWorkerCurrentProviderSourceIdByTurn.get(staleTurnKey) === providerSourceId
@@ -1158,8 +1189,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
       this.staleWorkerCurrentProviderSourceIdByTurn.delete(staleTurnKey)
     }
     this.staleWorkerAssistantBoundaryByTurn.delete(staleTurnKey)
-    const storedMessage =
-      explicitMatch ?? storedMessages.find((message) => message.id === messageId)
+    const storedMessage = scopedProviderTuple
+      ? (explicitMatch ?? explicitLegacyMatch)
+      : storedMessages.find((message) => message.id === messageId)
     const currentContent =
       typeof storedMessage?.content === "string"
         ? storedMessage.content
@@ -2240,6 +2272,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
           role: "user",
           content,
           ...providerTuple,
+          worker_snapshot_index: snapshotIndex,
           created_at: new Date()
         })
         continue
@@ -2251,6 +2284,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
           role: "assistant",
           content,
           ...providerTuple,
+          worker_snapshot_index: snapshotIndex,
           ...(reasoning && { reasoning }),
           ...(toolCalls.length && { tool_calls: toolCalls as Message["tool_calls"] }),
           created_at: new Date()
@@ -2265,6 +2299,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
           role: "tool",
           content: this.extractContent(kwargs.content),
           ...providerTuple,
+          worker_snapshot_index: snapshotIndex,
           tool_call_id: kwargs.tool_call_id,
           ...(kwargs.name && { name: kwargs.name }),
           ...(kwargs.status && { status: kwargs.status }),
@@ -4955,8 +4990,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
     const candidates = this.workerProviderReplayCandidates.get(workerThreadId)
     const sameOccurrence = (candidate: Message): boolean =>
       (getMessageProviderOccurrence(candidate) ?? 1) === providerOccurrence
+    const sourceCandidates = candidates?.get(providerSourceId)
     const prior =
-      candidates?.get(providerSourceId)?.findLast(sameOccurrence) ??
+      sourceCandidates?.findLast(
+        (candidate) => candidate.worker_provider_identity && sameOccurrence(candidate)
+      ) ??
       (observedMessageId
         ? candidates
             ?.get(observedMessageId)
@@ -4969,9 +5007,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
         : undefined)
     const id =
       prior?.id ??
-      (providerOccurrence > 1
-        ? buildMessageSameRoleDuplicateId(providerSourceId, "assistant", providerOccurrence)
-        : providerSourceId)
+      availableWorkerAssistantProviderId(providerSourceId, providerOccurrence, sourceCandidates)
     if (prior && this.workerCurrentMessageIds.get(workerThreadId) !== id) {
       this.seedFocusedWorkerAssistantAccumulator(prior, true)
     }

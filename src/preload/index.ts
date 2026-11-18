@@ -849,6 +849,23 @@ const api = {
           throw error
         })
     },
+    hasBackgroundShell: (threadId: string): Promise<boolean> =>
+      ipcRenderer.invoke("agent:has-background-shell", threadId) as Promise<boolean>,
+    onBackgroundShellChanged: (
+      threadId: string,
+      callback: (active: boolean) => void
+    ): (() => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        state: { threadId: string; active: boolean }
+      ): void => {
+        if (state.threadId === threadId) callback(state.active)
+      }
+      ipcRenderer.on("agent:background-shell-changed", listener)
+      return () => ipcRenderer.removeListener("agent:background-shell-changed", listener)
+    },
+    cancelBackgroundShell: (threadId: string): Promise<void> =>
+      ipcRenderer.invoke("agent:cancel-background-shell", threadId).then(() => undefined),
     // Steer a queued draft into the running turn on this thread. Resolves with
     // { queued:false, reason } when there is no active foreground run.
     queueCurrentRunMessage: (

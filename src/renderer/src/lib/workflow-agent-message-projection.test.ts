@@ -77,6 +77,51 @@ describe("workflow complete snapshot projection", () => {
     expect(new Set(snapshot.map(({ id }) => id)).size).toBe(snapshot.length)
   })
 
+  it("preserves two replies with the same explicit identity across a structured-output retry turn", () => {
+    const transport = new ElectronIPCTransport()
+    const prompt = new HumanMessage({ id: "initial-user", content: "Run the workflow" })
+    const retry = new HumanMessage({ id: "retry-user", content: "Please submit structured output" })
+    const assistant = (id: string, content: string) =>
+      new AIMessage({
+        id,
+        content,
+        additional_kwargs: {
+          cmb_internal_provider_source_id: "reused-provider-id",
+          cmb_internal_provider_occurrence: 1
+        }
+      })
+    const convert = (messages: BaseMessage[]) =>
+      transport.convertWorkflowAgentValuesSnapshot(
+        serializeWorkflowAgentSnapshotMessages({ messages }),
+        "parent/run/0"
+      )
+
+    const beforeRetry = convert([prompt, assistant("answer-original", "First reply")])
+    const afterRetry = convert([
+      prompt,
+      assistant("first-alias", "First reply"),
+      retry,
+      assistant("second-answer", "Second reply")
+    ])
+    expect(afterRetry.map((message) => message.content)).toEqual([
+      "Run the workflow",
+      "First reply",
+      "Please submit structured output",
+      "Second reply"
+    ])
+    expect(afterRetry[1].id).toBe(beforeRetry[1].id)
+    expect(new Set(afterRetry.map((message) => message.id)).size).toBe(4)
+
+    const replay = convert([
+      prompt,
+      assistant("replayed-first", "First reply"),
+      retry,
+      assistant("replayed-second", "Corrected second reply")
+    ])
+    expect(replay.map((message) => message.id)).toEqual(afterRetry.map((message) => message.id))
+    expect(replay.at(-1)?.content).toBe("Corrected second reply")
+  })
+
   it("applies corrections outside the last 32 messages without duplicating the tail", () => {
     const project = createWorkflowAgentMessageProjector()
     const before = Array.from({ length: 40 }, (_, index) => message(index))

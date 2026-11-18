@@ -11,7 +11,7 @@ import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { _electron, type ElectronApplication } from "playwright"
-import { AIMessage } from "@langchain/core/messages"
+import { AIMessage, HumanMessage } from "@langchain/core/messages"
 import { serializeWorkflowAgentSnapshotMessages } from "../src/main/agent/workflow/agent-snapshot"
 
 interface Fixture {
@@ -325,6 +325,26 @@ async function main(): Promise<void> {
       aliasId
     )
     results.push("live workflow aliases retain one row and stable identity when reordered")
+
+    const retryFrame = serializeWorkflowAgentSnapshotMessages({
+      messages: [
+        new HumanMessage({ id: "initial-prompt", content: "Start workflow" }),
+        providerMessage("turn-one", "First workflow reply"),
+        new HumanMessage({ id: "structured-retry", content: "Submit structured output" }),
+        providerMessage("turn-two", "Second workflow reply")
+      ]
+    })!
+    await send(retryFrame)
+    const firstReply = rows.filter({ hasText: "First workflow reply" })
+    const secondReply = rows.filter({ hasText: "Second workflow reply" })
+    await firstReply.waitFor()
+    await secondReply.waitFor()
+    assert.equal(await rows.count(), 4)
+    assert.notEqual(
+      await firstReply.getAttribute("data-workflow-agent-stream-message-id"),
+      await secondReply.getAttribute("data-workflow-agent-stream-message-id")
+    )
+    results.push("workflow replies with the same provider tuple remain distinct after a retry turn")
 
     const terminal = withAliases("sidecar-a", "sidecar-b", "Authoritative completed answer")
     writeFileSync(sidecars[0], JSON.stringify({ snapshotMessages: terminal }))

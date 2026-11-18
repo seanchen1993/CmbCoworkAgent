@@ -101,6 +101,7 @@ import {
   isWorkflowModeMetadata
 } from "@/lib/coordinator-mode-helpers"
 import { ModelSwitcher } from "./ModelSwitcher"
+import { BackgroundShellStopButton } from "./BackgroundShellStopButton"
 import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
 import { WorkflowRunPanel, WorkflowHistoryButton } from "./WorkflowRunPanel"
 import { SandboxModeSwitcher } from "./SandboxModeSwitcher"
@@ -9011,6 +9012,7 @@ export function ChatContainer({
                             </>
                           ) : (
                             <>
+                              <BackgroundShellStopButton key={threadId} threadId={threadId} />
                               {hasRunningCoordinatorWorker && (
                                 <TooltipProvider delayDuration={0}>
                                   <Tooltip>

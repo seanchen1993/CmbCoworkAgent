@@ -4,7 +4,11 @@ import ts from "typescript"
 import { describe, expect, it, vi } from "vitest"
 
 // Run the real IPC callbacks without initializing Electron or the agent runtime.
-function loadCancelCallback(path: string, channel: string, dependencies: Record<string, unknown>) {
+function loadCancelCallback<Input = Record<string, unknown>>(
+  path: string,
+  channel: string,
+  dependencies: Record<string, unknown>
+) {
   const file = ts.createSourceFile(
     path,
     readFileSync(resolve(path), "utf8"),
@@ -32,7 +36,25 @@ function loadCancelCallback(path: string, channel: string, dependencies: Record<
   }).outputText
   return new Function(...Object.keys(dependencies), `${code}\nreturn execute`)(
     ...Object.values(dependencies)
-  ) as (event: { sender: object }, input: Record<string, unknown>) => Promise<boolean> | boolean
+  ) as (event: { sender: object }, input: Input) => Promise<boolean> | boolean
+}
+
+function loadThreadDeletionHelper(cancelBackgroundTasksWithin: () => Promise<boolean>) {
+  const source = readFileSync(resolve("src/main/ipc/agent.ts"), "utf8")
+  const start = source.indexOf("async function cancelAndWaitForAgentThreadRun(")
+  const end = source.indexOf("async function waitForReplacedRunToSettle", start)
+  const code = ts.transpileModule(source.slice(start, end), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None }
+  }).outputText
+  return new Function(
+    "activeRuns",
+    "LocalSandbox",
+    "ACTIVE_RUN_REPLACEMENT_MAX_WAIT_MS",
+    `${code}
+return cancelAndWaitForAgentThreadRun`
+  )(new Map(), { cancelBackgroundTasksWithin }, 30_000) as (
+    threadId: string
+  ) => Promise<string>
 }
 
 function loadWorkerCancel(
@@ -108,6 +130,40 @@ describe("managed background cancellation IPC wiring", () => {
 
     expect(cancelWorkers).not.toHaveBeenCalled()
     expect(cancelManaged).not.toHaveBeenCalled()
+  })
+
+  it("queries and stops detached shell without touching the foreground or managed controllers", async () => {
+    const cancelDetachedBackgroundTasks = vi.fn(() => true)
+    const hasActiveBackgroundTasks = vi.fn(() => true)
+    const dependencies = { LocalSandbox: { cancelDetachedBackgroundTasks, hasActiveBackgroundTasks } }
+    const status = loadCancelCallback<unknown>(
+      "src/main/ipc/agent.ts",
+      "agent:has-background-shell",
+      dependencies
+    )
+    const stop = loadCancelCallback<unknown>(
+      "src/main/ipc/agent.ts",
+      "agent:cancel-background-shell",
+      dependencies
+    )
+    const event = { sender: {} }
+
+    expect(await status(event, "thread")).toBe(true)
+    expect(await stop(event, "thread")).toBe(true)
+    expect(await stop(event, { threadId: "thread" })).toBe(false)
+    expect(hasActiveBackgroundTasks).toHaveBeenCalledExactlyOnceWith("thread")
+    expect(cancelDetachedBackgroundTasks).toHaveBeenCalledExactlyOnceWith("thread")
+  })
+
+  it.each([
+    [true, "settled"],
+    [false, "shell_timed_out"]
+  ])("waits for idle thread shell cleanup before deletion (%s)", async (shellSettled, outcome) => {
+    const cancelShell = vi.fn(async () => shellSettled)
+    const closeThread = loadThreadDeletionHelper(cancelShell)
+
+    await expect(closeThread("idle-thread")).resolves.toBe(outcome)
+    expect(cancelShell).toHaveBeenCalledExactlyOnceWith("idle-thread", 30_000)
   })
 
   it.each([true, false])(

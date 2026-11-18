@@ -53,6 +53,7 @@ import {
 } from "./markdown-placeholders"
 import { replace } from "./replace"
 import { withFileOperation, withWorkspaceExecution } from "./file-operation-lock"
+import { AUTO_COMMIT_FEATURE_ENABLED, registerWorkspaceShell } from "./shell-auto-commit-lock"
 import type { OrchestratedExecuteOptions, ToolOrchestrator } from "./tool-orchestrator"
 import {
   ShellTaskMonitor,
@@ -85,7 +86,12 @@ import {
 import { getWindowsSandboxMode } from "../storage"
 import { homedir, userInfo } from "node:os"
 import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
-import type { HookContext, HookResultCallback } from "../hooks/runner"
+import {
+  hookMatchesRunCriteria,
+  postToolUseHookAffectsResult,
+  type HookContext,
+  type HookResultCallback
+} from "../hooks/runner"
 import { runHooksEnriched } from "../hooks/required-skill"
 import { detectToolFailure, hasFailureFired, markFailureFired } from "../hooks/tool-failure"
 import { isHookHaltError, throwIfHookHalt } from "../hooks/halt"
@@ -100,6 +106,7 @@ import {
   shouldSendFailureFuseNotice,
   throwIfFailureFuseHalt,
   type FailureFuseDecision,
+  type FailureFuseMode,
   type FailureFuseNoticeCallback
 } from "./failure-fuse"
 import type { HookScopeController } from "../hooks/scope"
@@ -481,6 +488,7 @@ interface ExecuteRawOptions {
   /** A command started with foreground semantics that may be handed off to its task. */
   handoff?: {
     onSpawn: () => (() => void) | undefined
+    isPromoted: () => boolean
   }
   /** Background teardown waits for residual descendants before releasing ownership. */
   waitForProcessTree?: boolean
@@ -523,11 +531,26 @@ interface BackgroundShellTask {
   termination?: Promise<void>
 }
 
+interface PendingBackgroundStart {
+  threadId: string
+  ownerId?: string
+  detached: boolean
+  abortController: AbortController
+  settled: Promise<void>
+}
+
 interface ShellHandoff {
   task: BackgroundShellTask
   process: NonNullable<ExecuteRawOptions["handoff"]>
   processSignal: AbortSignal
   onCommandResult: () => void
+}
+
+interface ExecutePostHookPolicy {
+  scopedHooks: HookConfig[]
+  matchedHooks: HookConfig[]
+  failureFuseMode: FailureFuseMode
+  requiresForeground: boolean
 }
 
 type ToolShellResult =
@@ -2904,8 +2927,8 @@ export class LocalSandbox
     return !isReadOnlyShellCommand(command, cwd, windowsShell)
   }
 
-  private async runHooks(event: HookEvent, context: HookContext): Promise<HookResult | null> {
-    const hookContext: HookContext = {
+  private prepareHookContext(context: HookContext): HookContext {
+    return {
       ...context,
       abortSignal: context.abortSignal ?? this.abortSignal,
       ...(this.pluginOutputDir && !context.pluginOutputDir
@@ -2943,9 +2966,38 @@ export class LocalSandbox
         : {}),
       turnId: context.turnId ?? this._hookTurnId
     }
+  }
 
-    const hooks = this.resolveHooks(event, hookContext)
-    let result = await runHooksEnriched(hooks, event, hookContext, this._onHookResult)
+  private captureExecutePostHookPolicy(context: HookContext): ExecutePostHookPolicy {
+    const hookContext = this.prepareHookContext(context)
+    const scopedHooks = this.resolveHooks("PostToolUse", hookContext).slice()
+    const matchedHooks = scopedHooks
+      .filter((hook) => hookMatchesRunCriteria(hook, "PostToolUse", hookContext))
+      .map((hook) => ({ ...hook }))
+    const failureFuseMode = getFailureFuseMode()
+    return {
+      scopedHooks,
+      matchedHooks,
+      failureFuseMode,
+      requiresForeground:
+        failureFuseMode === "debug" ||
+        matchedHooks.some((hook) => postToolUseHookAffectsResult(hook, hookContext))
+    }
+  }
+
+  private async runHooks(
+    event: HookEvent,
+    context: HookContext,
+    executePostPolicy?: ExecutePostHookPolicy
+  ): Promise<HookResult | null> {
+    const hookContext = this.prepareHookContext(context)
+    const hooks = executePostPolicy?.scopedHooks ?? this.resolveHooks(event, hookContext)
+    let result = await runHooksEnriched(
+      executePostPolicy?.matchedHooks ?? hooks,
+      event,
+      hookContext,
+      this._onHookResult
+    )
     const hasHarnessOwnedHook = hooks.some(
       (hook) =>
         hook.hookSourceType === "plugin" ||
@@ -2967,7 +3019,10 @@ export class LocalSandbox
     // a throw-path failure already caught by toolErrorMiddleware does not
     // re-trigger here.
     if (event === "PostToolUse" && context.toolResult) {
-      const failureFuseDecision = this.recordFailureFuseDecisionFromResult(hookContext)
+      const failureFuseDecision = this.recordFailureFuseDecisionFromResult(
+        hookContext,
+        executePostPolicy?.failureFuseMode
+      )
       if (shouldSendFailureFuseNotice(failureFuseDecision)) {
         this._onFailureFuseNotice?.(failureFuseDecision)
       }
@@ -2978,7 +3033,10 @@ export class LocalSandbox
     return result
   }
 
-  private recordFailureFuseDecisionFromResult(context: HookContext): FailureFuseDecision | null {
+  private recordFailureFuseDecisionFromResult(
+    context: HookContext,
+    failureFuseMode?: FailureFuseMode
+  ): FailureFuseDecision | null {
     if (!context.toolResult) return null
     const turnId = context.turnId ?? this._hookTurnId
     if (!turnId) return null
@@ -3003,7 +3061,7 @@ export class LocalSandbox
       toolCallId,
       toolArgs: context.toolArgs,
       signal,
-      mode: getFailureFuseMode()
+      mode: failureFuseMode ?? getFailureFuseMode()
     })
   }
 
@@ -3067,13 +3125,15 @@ export class LocalSandbox
 
   private async runPreToolUseHook(
     toolName: string,
-    toolArgs: Record<string, unknown>
+    toolArgs: Record<string, unknown>,
+    abortSignal?: AbortSignal
   ): Promise<HookResult | null> {
     const context: HookContext = {
       toolName,
       toolArgs,
       workspacePath: this.workingDir,
-      sessionId: this.runId
+      sessionId: this.runId,
+      ...(abortSignal && { abortSignal })
     }
     const preResult = await this.runHooks("PreToolUse", context)
     throwIfHookHalt("PreToolUse", preResult, `${toolName} was stopped by a PreToolUse hook`)
@@ -3082,9 +3142,10 @@ export class LocalSandbox
 
   async runPreToolUseHookForTool(
     toolName: string,
-    toolArgs: Record<string, unknown>
+    toolArgs: Record<string, unknown>,
+    abortSignal?: AbortSignal
   ): Promise<HookResult | null> {
-    return this.runPreToolUseHook(toolName, toolArgs)
+    return this.runPreToolUseHook(toolName, toolArgs, abortSignal)
   }
 
   async applyPostToolUseHookToText(
@@ -6724,41 +6785,97 @@ export class LocalSandbox
 
   /** Active background tasks (static — shared across instances so tasks survive re-creation). */
   private static backgroundTasks = new Map<string, BackgroundShellTask>()
-  private static readonly pendingBackgroundTaskStarts = new Set<{
-    abortController: AbortController
-    settled: Promise<void>
-  }>()
+  private static readonly pendingBackgroundTaskStarts = new Set<PendingBackgroundStart>()
+  private static readonly activeBackgroundThreads = new Set<string>()
+  private static readonly closingBackgroundThreads = new Set<string>()
+  private static readonly backgroundShellListeners = new Set<
+    (change: { threadId: string; active: boolean }) => void
+  >()
 
-  private static beginBackgroundTaskStart(): {
+  static onBackgroundShellChange(
+    listener: (change: { threadId: string; active: boolean }) => void
+  ): () => void {
+    LocalSandbox.backgroundShellListeners.add(listener)
+    return () => LocalSandbox.backgroundShellListeners.delete(listener)
+  }
+
+  private static notifyBackgroundShellChange(threadId: string): void {
+    const active = LocalSandbox.hasActiveBackgroundTasks(threadId)
+    if (active === LocalSandbox.activeBackgroundThreads.has(threadId)) return
+    if (active) LocalSandbox.activeBackgroundThreads.add(threadId)
+    else LocalSandbox.activeBackgroundThreads.delete(threadId)
+
+    for (const listener of LocalSandbox.backgroundShellListeners) {
+      try {
+        listener({ threadId, active })
+      } catch (error) {
+        console.warn("[LocalSandbox] Background shell listener failed:", error)
+      }
+    }
+  }
+
+  static blockNewBackgroundTasks(threadId: string): () => void {
+    LocalSandbox.closingBackgroundThreads.add(threadId)
+    return () => LocalSandbox.closingBackgroundThreads.delete(threadId)
+  }
+
+  private beginBackgroundTaskStart(
+    ownerId: string | undefined,
+    detached: boolean,
+    signal?: AbortSignal
+  ): {
     abortController: AbortController
+    blockedByAutoCommit?: Promise<void>
+    releaseWorkspace?: () => void
     finish: () => void
   } | null {
-    if (LocalSandbox.applicationShutdownStarted) return null
+    if (
+      LocalSandbox.applicationShutdownStarted ||
+      LocalSandbox.closingBackgroundThreads.has(this.runId) ||
+      signal?.aborted
+    ) {
+      return null
+    }
 
+    const workspaceShell = AUTO_COMMIT_FEATURE_ENABLED
+      ? registerWorkspaceShell(this.workingDir)
+      : undefined
     const abortController = new AbortController()
+    const onAbort = (): void => abortController.abort(signal?.reason)
+    signal?.addEventListener("abort", onAbort, { once: true })
     let resolveSettled!: () => void
-    const pending = {
+    const pending: PendingBackgroundStart = {
+      threadId: this.runId,
+      ownerId,
+      detached,
       abortController,
       settled: new Promise<void>((resolve) => {
         resolveSettled = resolve
       })
     }
     LocalSandbox.pendingBackgroundTaskStarts.add(pending)
+    if (detached) LocalSandbox.notifyBackgroundShellChange(this.runId)
 
     let finished = false
     return {
       abortController,
+      blockedByAutoCommit: workspaceShell?.blockedByAutoCommit,
+      releaseWorkspace: workspaceShell?.release,
       finish: () => {
         if (finished) return
         finished = true
+        signal?.removeEventListener("abort", onAbort)
         LocalSandbox.pendingBackgroundTaskStarts.delete(pending)
         resolveSettled()
+        if (detached) LocalSandbox.notifyBackgroundShellChange(this.runId)
       }
     }
   }
 
   private static backgroundStartCancelledMessage(): string {
-    return "Background task was not started because the application is shutting down."
+    return LocalSandbox.applicationShutdownStarted
+      ? "Background task was not started because the application is shutting down."
+      : "Background task was cancelled before it started."
   }
 
   private createBackgroundTask(
@@ -6818,6 +6935,7 @@ export class LocalSandbox
   private static async settleBackgroundTask(task: BackgroundShellTask): Promise<void> {
     await task.termination?.catch(() => undefined)
     task.settled = true
+    LocalSandbox.notifyBackgroundShellChange(task.threadId)
     // Keep result access after completion, and ownership until the process tree is idle.
     const expiryTimer = setTimeout(
       () => {
@@ -6878,18 +6996,39 @@ export class LocalSandbox
    * The command runs asynchronously with a long timeout.
    * Use `getTaskOutput(taskId)` to retrieve the result or check progress.
    */
-  async executeBackground(command: string, cwd?: string, ownerId?: string): Promise<string> {
-    const pendingStart = LocalSandbox.beginBackgroundTaskStart()
+  async executeBackground(
+    command: string,
+    cwd?: string,
+    ownerId?: string,
+    callerSignal = this.abortSignal
+  ): Promise<string> {
+    const pendingStart = this.beginBackgroundTaskStart(ownerId, true, callerSignal)
     if (!pendingStart) return LocalSandbox.backgroundStartCancelledMessage()
+    const { abortController, blockedByAutoCommit, releaseWorkspace, finish } = pendingStart
+    let registered = false
     try {
+      if (blockedByAutoCommit) {
+        await LocalSandbox.raceWithAbort(blockedByAutoCommit, abortController.signal)
+      }
       return await this.executeBackgroundAfterStart(
         command,
         cwd,
-        pendingStart.abortController,
-        ownerId
+        abortController,
+        ownerId,
+        (completion) => {
+          registered = true
+          if (releaseWorkspace) void completion.then(releaseWorkspace, releaseWorkspace)
+          finish()
+        }
       )
+    } catch (error) {
+      if (!registered && abortController.signal.aborted && LocalSandbox.isAbortError(error)) {
+        return LocalSandbox.backgroundStartCancelledMessage()
+      }
+      throw error
     } finally {
-      pendingStart.finish()
+      if (!registered) releaseWorkspace?.()
+      finish()
     }
   }
 
@@ -6897,18 +7036,26 @@ export class LocalSandbox
     command: string,
     cwd: string | undefined,
     taskAbortController: AbortController,
-    ownerId: string | undefined
+    ownerId: string | undefined,
+    register: (completion: Promise<void>) => void
   ): Promise<string> {
     const requestedCwd = this.resolveExecutionCwd(cwd)
     const toolArgs = { command, run_in_background: true as const, cwd: requestedCwd }
-    const preResult = await this.runPreToolUseHookForTool("execute", toolArgs)
+    const preResult = await this.runPreToolUseHookForTool(
+      "execute",
+      toolArgs,
+      taskAbortController.signal
+    )
     if (taskAbortController.signal.aborted) {
       return LocalSandbox.backgroundStartCancelledMessage()
     }
     if (preResult?.blocked || preResult?.decision === "block") {
       return `[Hook blocked] ${preResult.stdout || preResult.reason || "execute was blocked by a hook"}`
     }
-    const humanGateLease = await this.requestHumanGateForExecute(preResult)
+    const humanGateLease = await this.requestHumanGateForExecute(
+      preResult,
+      taskAbortController.signal
+    )
     let leaseTransferred = false
     try {
       return await this.executeBackgroundAfterPreToolUse(
@@ -6918,6 +7065,7 @@ export class LocalSandbox
         preResult,
         taskAbortController,
         ownerId,
+        register,
         (completion) => {
           leaseTransferred = true
           void completion.finally(humanGateLease?.release)
@@ -6935,6 +7083,7 @@ export class LocalSandbox
     preResult: HookResult | null,
     taskAbortController: AbortController,
     ownerId: string | undefined,
+    register: (completion: Promise<void>) => void,
     transferHumanGateLease: (completion: Promise<void>) => void
   ): Promise<string> {
     const updatedArgs = LocalSandbox.mergeUpdatedInput(toolArgs, preResult?.updatedInput)
@@ -7134,6 +7283,7 @@ export class LocalSandbox
     // Always retain completion. Ordinary (non-worktree) background commands
     // also need a deletion-safe ownership fence after cancellation.
     task.completion = completion
+    register(completion)
 
     const startedMessage = LocalSandbox.backgroundTaskStartedMessage(taskId)
     try {
@@ -7219,58 +7369,79 @@ export class LocalSandbox
     }
   }
 
-  /**
-   * Cancel all running background tasks for a given thread (conversation).
-   * Called when the user explicitly stops the current conversation.
-   */
+  /** Cancel registered tasks and pending starts owned by this thread. */
   static cancelBackgroundTasks(threadId: string): void {
-    LocalSandbox.cancelBackgroundTasksForThread(threadId)
+    LocalSandbox.cancelBackgroundTasksMatching({ threadId })
   }
 
-  /**
-   * Read-only ownership check for detached commands that outlive their foreground
-   * agent turn. A completed result may already be visible through task_output while
-   * its physical process tree is still settling, so only `settled` makes it idle.
-   */
+  /** The dedicated shell Stop control leaves the foreground invocation alone. */
+  static cancelDetachedBackgroundTasks(threadId: string): boolean {
+    if (!LocalSandbox.hasActiveBackgroundTasks(threadId)) return false
+    LocalSandbox.cancelBackgroundTasksMatching({ threadId, detachedPendingOnly: true })
+    return true
+  }
+
+  /** A visible result can precede physical process-tree settlement. */
   static hasActiveBackgroundTasks(threadId: string): boolean {
+    for (const pending of LocalSandbox.pendingBackgroundTaskStarts) {
+      if (pending.threadId === threadId && pending.detached) return true
+    }
     for (const task of LocalSandbox.backgroundTasks.values()) {
       if (task.threadId === threadId && !task.settled) return true
     }
     return false
   }
 
-  /** Workflow worktree teardown must not inspect/delete a checkout while one of
-   * its background commands is still unwinding. Ordinary callers may keep using
-   * the void wrapper above; lifecycle cleanup awaits this stronger variant. */
+  /** Isolated checkout teardown waits for both process ownership and pending starts. */
   static async cancelBackgroundTasksAndWait(threadId: string): Promise<void> {
-    const completions = LocalSandbox.cancelBackgroundTasksForThread(threadId)
-    await Promise.allSettled(completions)
+    await Promise.allSettled(LocalSandbox.cancelBackgroundTasksMatching({ threadId }))
+  }
+
+  static async cancelOwnedBackgroundTasksAndWait(threadId: string, ownerId: string): Promise<void> {
+    await Promise.allSettled(LocalSandbox.cancelBackgroundTasksMatching({ threadId, ownerId }))
+  }
+
+  static cancelBackgroundTasksWithin(threadId: string, timeoutMs: number): Promise<boolean> {
+    return LocalSandbox.waitForPromisesWithin(
+      LocalSandbox.cancelBackgroundTasksMatching({ threadId }),
+      timeoutMs
+    )
   }
 
   /** Prevent late background starts, cancel every detached task, and wait bounded. */
   static async cancelAllBackgroundTasksAndWait(timeoutMs = 5_000): Promise<boolean> {
     LocalSandbox.beginApplicationShutdown()
-    const pendingStarts = Array.from(LocalSandbox.pendingBackgroundTaskStarts)
-    for (const pending of pendingStarts) {
-      pending.abortController.abort()
-    }
-    const completions = LocalSandbox.cancelBackgroundTasksForThread()
-    const settled = await LocalSandbox.waitForPromisesWithin(
-      [...pendingStarts.map((pending) => pending.settled), ...completions],
-      timeoutMs
-    )
+    const completions = LocalSandbox.cancelBackgroundTasksMatching({})
+    const settled = await LocalSandbox.waitForPromisesWithin(completions, timeoutMs)
     if (!settled) {
       console.warn(
-        `[LocalSandbox] Timed out waiting for ${pendingStarts.length} pending start(s) and detached task cleanup during shutdown`
+        `[LocalSandbox] Timed out waiting for ${LocalSandbox.pendingBackgroundTaskStarts.size} pending start(s) and detached task cleanup during shutdown`
       )
     }
     return settled
   }
 
-  private static cancelBackgroundTasksForThread(threadId?: string): Promise<void>[] {
+  private static cancelBackgroundTasksMatching({
+    threadId,
+    ownerId,
+    detachedPendingOnly = false
+  }: {
+    threadId?: string
+    ownerId?: string
+    detachedPendingOnly?: boolean
+  }): Promise<void>[] {
+    const matches = (task: { threadId: string; ownerId?: string }): boolean =>
+      (threadId === undefined || threadId === task.threadId) &&
+      (ownerId === undefined || ownerId === task.ownerId)
+
     const completions: Promise<void>[] = []
+    for (const pending of LocalSandbox.pendingBackgroundTaskStarts) {
+      if (!matches(pending) || (detachedPendingOnly && !pending.detached)) continue
+      pending.abortController.abort()
+      completions.push(pending.settled)
+    }
     for (const [taskId, task] of LocalSandbox.backgroundTasks) {
-      if (threadId !== undefined && task.threadId !== threadId) continue
+      if (!matches(task) || task.settled) continue
       if (!task.completed) {
         console.log(
           `[LocalSandbox] cancelling background task ${taskId} (command: ${task.command}) for thread ${task.threadId}`
@@ -7308,11 +7479,11 @@ export class LocalSandbox
       signal?: AbortSignal
     }
   ): Promise<ToolShellResult> {
-    const pendingStart = LocalSandbox.beginBackgroundTaskStart()
+    const pendingStart = this.beginBackgroundTaskStart(ownerId, false, signal)
     if (!pendingStart) {
       return { status: "completed", result: LocalSandbox.createAbortedExecuteResponse() }
     }
-    const { abortController, finish } = pendingStart
+    const { abortController, blockedByAutoCommit, releaseWorkspace, finish } = pendingStart
     const task = this.createBackgroundTask(
       command,
       this.resolveExecutionCwd(cwd),
@@ -7322,9 +7493,7 @@ export class LocalSandbox
     const processController = new AbortController()
     const abortProcess = (): void => processController.abort(abortController.signal.reason)
     abortController.signal.addEventListener("abort", abortProcess, { once: true })
-    const abort = (): void => abortController.abort(signal?.reason)
-    if (signal?.aborted) abort()
-    else signal?.addEventListener("abort", abort, { once: true })
+    if (abortController.signal.aborted) abortProcess()
 
     let promoted = false
     let foregroundBudgetMs = backgroundAfterMs
@@ -7347,8 +7516,8 @@ export class LocalSandbox
       if (abortController.signal.aborted || LocalSandbox.applicationShutdownStarted) return
       promoted = true
       LocalSandbox.backgroundTasks.set(task.id, task)
-      signal?.removeEventListener("abort", abort)
       finish()
+      LocalSandbox.notifyBackgroundShellChange(task.threadId)
       returnHandoff({
         status: "background",
         taskId: task.id,
@@ -7373,12 +7542,18 @@ export class LocalSandbox
       }
     }
 
-    const execution = this.executeWithHooks(command, cwd, {
-      task,
-      process: { onSpawn },
-      processSignal: processController.signal,
-      onCommandResult
-    })
+    const run = (): Promise<ExecuteResponse> =>
+      this.executeWithHooks(command, cwd, {
+        task,
+        process: { onSpawn, isPromoted: () => promoted },
+        processSignal: processController.signal,
+        onCommandResult
+      })
+    const execution = blockedByAutoCommit
+      ? LocalSandbox.raceWithAbort(blockedByAutoCommit, processController.signal).then(run, () =>
+          LocalSandbox.createAbortedExecuteResponse()
+        )
+      : run()
     task.completion = execution
       .then(
         (result) => LocalSandbox.publishBackgroundResult(task, result),
@@ -7400,8 +7575,9 @@ export class LocalSandbox
       .finally(async () => {
         onCommandResult()
         abortController.signal.removeEventListener("abort", abortProcess)
-        signal?.removeEventListener("abort", abort)
         if (promoted) await LocalSandbox.settleBackgroundTask(task)
+        else if (task.termination) await task.termination.catch(() => undefined)
+        releaseWorkspace?.()
         finish()
       })
 
@@ -7432,7 +7608,7 @@ export class LocalSandbox
     if (signal?.aborted) return LocalSandbox.createAbortedExecuteResponse()
     const requestedCwd = this.resolveExecutionCwd(cwd)
     const requestedArgs = { command, cwd: requestedCwd }
-    const preResult = await this.runPreToolUseHook("execute", requestedArgs)
+    const preResult = await this.runPreToolUseHook("execute", requestedArgs, signal)
     if (signal?.aborted) return LocalSandbox.createAbortedExecuteResponse()
     if (preResult?.blocked || preResult?.decision === "block") {
       return {
@@ -7557,6 +7733,17 @@ export class LocalSandbox
           (isGitCommitCommand(effectiveCommand, outsideShellSyntax) ||
             isGitPushCommand(effectiveCommand, outsideShellSyntax))) ||
         (this.worktreeIsolation && containsGitAddCommand(effectiveCommand)))
+    const postHookContext: HookContext = {
+      toolName: "execute",
+      toolArgs: { command: effectiveCommand, cwd: effectiveCwd },
+      workspacePath: this.workingDir,
+      sessionId: this.runId,
+      ...(task && { abortSignal: task.abortController.signal })
+    }
+    // An execute that can hand off must keep the same hook policy through completion.
+    // A newly enabled synchronous hook applies starting with the next invocation.
+    const postHookPolicy =
+      task && !foregroundOnly ? this.captureExecutePostHookPolicy(postHookContext) : undefined
     let execution: OrchestratedExecuteOptions | undefined
     if (task && handoff && !foregroundOnly) {
       task.command = effectiveCommand
@@ -7566,7 +7753,7 @@ export class LocalSandbox
         rawExecute: (command, sandboxMode, cwd) =>
           this.executeRaw(command, sandboxMode, undefined, handoff.processSignal, {
             cwd,
-            handoff: handoff.process,
+            handoff: postHookPolicy?.requiresForeground ? undefined : handoff.process,
             waitForProcessTree: true,
             onData: (text) => this.appendBackgroundOutput(task, text),
             onTermination: (termination) => {
@@ -7612,14 +7799,11 @@ export class LocalSandbox
     }
     recordAdoptionShellFileOps(effectiveCommand, effectiveCwd, result.exitCode)
     this.recordShellReadTelemetry(effectiveCommand, effectiveCwd, result, shellSyntax)
-    const postResult = await this.runHooks("PostToolUse", {
-      toolName: "execute",
-      toolArgs: { command: effectiveCommand, cwd: effectiveCwd },
-      toolResult: LocalSandbox.formatExecuteResultForHook(result),
-      workspacePath: this.workingDir,
-      sessionId: this.runId,
-      ...(task && { abortSignal: task.abortController.signal })
-    })
+    const postResult = await this.runHooks(
+      "PostToolUse",
+      { ...postHookContext, toolResult: LocalSandbox.formatExecuteResultForHook(result) },
+      postHookPolicy
+    )
     return LocalSandbox.applyPostHookToExecResult(result, postResult)
   }
 
@@ -9039,7 +9223,7 @@ export class LocalSandbox
         )
         exited = true
         if (
-          options?.background === true &&
+          (options?.background === true || options?.handoff?.isPromoted()) &&
           this.worktreeIsolation &&
           !aborted &&
           !timedOut &&

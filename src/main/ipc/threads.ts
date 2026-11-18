@@ -75,6 +75,7 @@ import {
 } from "../storage"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import { workflowRunManager } from "../agent/workflow/run-manager"
+import { LocalSandbox } from "../agent/local-sandbox"
 import {
   commitWorkflowThreadDisposal,
   deleteWorkflowRunsForThread,
@@ -3592,13 +3593,12 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         console.warn("[Threads] Workflow cancel on delete failed:", error)
       }
       const window = BrowserWindow.fromWebContents(event.sender)
-      try {
-        const foregroundOutcome = await cancelAndWaitForAgentThreadRun(threadId, window)
-        if (foregroundOutcome === "timed_out") {
-          console.warn("[Threads] Timed out waiting for foreground run cleanup during delete")
-        }
-      } catch (error) {
-        console.warn("[Threads] Foreground run cancel on delete failed:", error)
+      const runOutcome = await cancelAndWaitForAgentThreadRun(threadId, window)
+      if (runOutcome === "shell_timed_out") {
+        throw new Error("Shell 任务仍在退出，已停止删除。请稍后重试。")
+      }
+      if (runOutcome === "timed_out") {
+        console.warn("[Threads] Timed out waiting for foreground run cleanup during delete")
       }
       // Drop the thread's tool-concurrency locks so the module-level map
       // doesn't keep one idle lock per deleted thread for the process lifetime.
@@ -3912,7 +3912,10 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         while (deletingThreads.has(threadId)) {
           await deletingThreads.get(threadId)?.catch(() => undefined)
         }
-        const deletion = performThreadDeletion(event, threadId, options?.groupGuard)
+        const releaseShellBlock = LocalSandbox.blockNewBackgroundTasks(threadId)
+        const deletion = performThreadDeletion(event, threadId, options?.groupGuard).finally(
+          releaseShellBlock
+        )
         deletingThreads.set(threadId, deletion)
         try {
           await deletion

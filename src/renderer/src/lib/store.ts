@@ -229,7 +229,14 @@ export function enrichWorkerProviderIdentities(
     incomingById.set(incoming.id, matches)
   }
   if (incomingById.size === 0) return [...existingMessages]
-  return existingMessages.map((existing) => {
+  const turnKeys = workerTurnKeys(existingMessages)
+  const declaredOccurrences = new Set<string>()
+  existingMessages.forEach((existing, index) => {
+    if (existing.worker_provider_identity) {
+      declaredOccurrences.add(workerOccurrenceKey(existing, turnKeys[index]))
+    }
+  })
+  return existingMessages.map((existing, index) => {
     if (existing.worker_provider_identity) return existing
     const existingProviderSourceId = existing.provider_source_id?.trim()
     const provisionalIdentity =
@@ -241,6 +248,8 @@ export function enrichWorkerProviderIdentities(
     const matches = (incomingById.get(existing.id) ?? []).filter(
       (incoming) =>
         sameWorkerRoleAndToolCall(existing, incoming) &&
+        (!incoming.worker_provider_identity ||
+          !declaredOccurrences.has(workerOccurrenceKey(incoming, turnKeys[index]))) &&
         (provisionalIdentity ||
           (incoming.worker_provider_identity &&
             getMessageProviderOccurrence(incoming) ===
@@ -254,13 +263,13 @@ export function enrichWorkerProviderIdentities(
     const providerOccurrence = matches
       .map((message) => getMessageProviderOccurrence(message))
       .find((occurrence) => occurrence !== undefined)
+    const declared = matches.find((message) => message.worker_provider_identity)
+    if (declared) declaredOccurrences.add(workerOccurrenceKey(declared, turnKeys[index]))
     return {
       ...existing,
       provider_source_id: providerSourceId,
       ...(providerOccurrence !== undefined ? { provider_occurrence: providerOccurrence } : {}),
-      ...(matches.some((message) => message.worker_provider_identity) && {
-        worker_provider_identity: true
-      })
+      ...(declared && { worker_provider_identity: true })
     }
   })
 }
@@ -284,6 +293,13 @@ function workerProviderOccurrencesCompatible(left: Message, right: Message): boo
 
 function workerOccurrenceKey(message: Message, turnKey: string): string {
   return `${workerTransportIdentityKey(message, turnKey)}\u001f${getMessageProviderOccurrence(message) ?? 1}\u001f${message.worker_provider_identity === true}`
+}
+
+function workerSnapshotSlotKey(message: Message, turnKey: string): string | undefined {
+  if (message.worker_snapshot_index === undefined) return undefined
+  const signature = workerFocusMessageSignature(message)
+  if (!signature) return undefined
+  return JSON.stringify([turnKey, message.worker_snapshot_index, signature])
 }
 
 function findExplicitWorkerUserOccurrenceIndex(
@@ -1803,7 +1819,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         ? normalizeCompleteMessageIds(
             normalizeMessageRoleCollisionIds(normalizedExistingMessages, messages)
           )
-        : normalizeAppendedMessageIds(normalizedExistingMessages, messages)
+        : normalizeAppendedMessageIds(normalizedExistingMessages, messages, {
+            preserveWorkerSnapshotIdentities: true
+          })
 
       const next = [...normalizedExistingMessages]
       const existingUserCount = normalizedExistingMessages.filter(
@@ -1867,6 +1885,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       // The transport has already reconciled aliases within a full snapshot.
       // Each remaining row must claim a separate slot even when text matches.
       const claimed = options?.orderedSnapshot ? new Set<number>() : undefined
+      const explicitSnapshotUpgrade =
+        options?.orderedSnapshot &&
+        normalizedMessages.some((message) => message.worker_provider_identity)
+      const incomingIds = explicitSnapshotUpgrade
+        ? new Set(normalizedMessages.map((message) => message.id))
+        : undefined
+      const legacySnapshotSlots = new Map<string, number | null>()
       const availableIndex = (index: number | undefined): number | undefined =>
         index !== undefined && !claimed?.has(index) ? index : undefined
       const indexById = new Map(next.map((item, index) => [item.id, index]))
@@ -1952,6 +1977,19 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
       next.forEach((item, index) => {
         indexOccurrence(item, nextTurnKeys[index], index)
+        if (
+          incomingIds &&
+          !incomingIds.has(item.id) &&
+          !item.worker_provider_identity &&
+          isWorkerSnapshotMessageId(item.id)
+        ) {
+          // A real row still present by its fallback ID owns that slot even
+          // if the incoming frame lists an identified row with equal prose first.
+          const slotKey = workerSnapshotSlotKey(item, nextTurnKeys[index])
+          if (slotKey) {
+            legacySnapshotSlots.set(slotKey, legacySnapshotSlots.has(slotKey) ? null : index)
+          }
+        }
         const signature = workerTurnSignatureKey(
           nextTurnKeys[index],
           workerFocusMessageSignature(item)
@@ -2005,11 +2043,19 @@ export const useAppStore = create<AppState>((set, get) => ({
             ? exactExistingIndex
             : undefined
         const signature = workerTurnSignatureKey(turnKey, workerFocusMessageSignature(message))
+        const legacySlotKey =
+          legacySnapshotSlots.size > 0 && message.worker_provider_identity
+            ? workerSnapshotSlotKey(message, turnKey)
+            : undefined
+        const legacySlotIndex = legacySlotKey
+          ? (legacySnapshotSlots.get(legacySlotKey) ?? undefined)
+          : undefined
         const existingIndex =
           incomingProviderOccurrence !== undefined
             ? (explicitOccurrenceExistingIndex ??
               reservedExistingIndex ??
-              compatibleExactExistingIndex)
+              compatibleExactExistingIndex ??
+              availableIndex(legacySlotIndex))
             : useRepeatedOccurrenceReservation
               ? (reservedExistingIndex ??
                 (!exactIndexIsReservedForAnotherIncoming ? exactExistingIndex : undefined))

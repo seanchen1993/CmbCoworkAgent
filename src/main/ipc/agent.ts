@@ -1174,16 +1174,15 @@ export async function waitForActiveAgentRunToSettle(
 export async function cancelAndWaitForAgentThreadRun(
   threadId: string,
   window?: BrowserWindow | null
-): Promise<"settled" | "timed_out"> {
+): Promise<"settled" | "timed_out" | "shell_timed_out"> {
+  const shellSettlement = LocalSandbox.cancelBackgroundTasksWithin(
+    threadId,
+    ACTIVE_RUN_REPLACEMENT_MAX_WAIT_MS
+  )
   const controller = activeRuns.get(threadId)
-  if (!controller) return "settled"
+  if (!controller) return (await shellSettlement) ? "settled" : "shell_timed_out"
   const channel = streamChannelByRunController.get(controller)
 
-  try {
-    LocalSandbox.cancelBackgroundTasks(threadId)
-  } catch (error) {
-    console.warn("[Agent] Failed to cancel foreground background tasks during delete:", error)
-  }
   try {
     flushPendingStreamTranscriptMessagesForThread(threadId)
   } catch (error) {
@@ -1191,7 +1190,11 @@ export async function cancelAndWaitForAgentThreadRun(
   }
   controller.abort()
   if (window && channel) safeSendToWindow(window, channel, { type: "done" })
-  return waitForReplacedRunToSettle(threadId)
+  const [foreground, shellSettled] = await Promise.all([
+    waitForReplacedRunToSettle(threadId),
+    shellSettlement
+  ])
+  return shellSettled ? foreground : "shell_timed_out"
 }
 
 async function waitForReplacedRunToSettle(threadId: string): Promise<"settled" | "timed_out"> {
@@ -5351,6 +5354,21 @@ async function autoProposeSKill(
 
 export function registerAgentHandlers(ipcMain: IpcMain): void {
   console.log("[Agent] Registering agent handlers...")
+  LocalSandbox.onBackgroundShellChange((change) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      safeSendToWindow(window, "agent:background-shell-changed", change)
+    }
+  })
+  ipcMain.handle(
+    "agent:has-background-shell",
+    (_event, threadId: unknown) =>
+      typeof threadId === "string" && LocalSandbox.hasActiveBackgroundTasks(threadId)
+  )
+  ipcMain.handle(
+    "agent:cancel-background-shell",
+    (_event, threadId: unknown) =>
+      typeof threadId === "string" && LocalSandbox.cancelDetachedBackgroundTasks(threadId)
+  )
   // Let the runtime's checkpointer LRU avoid evicting threads with a live run.
   setCheckpointerBusyGuard(hasActiveAgentRun)
 

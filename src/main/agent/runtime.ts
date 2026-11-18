@@ -55,7 +55,12 @@ import { withRawApiCallCapture } from "../services/llm-api-request-capture"
 import { runWithTrustedToolFilePreviewContext } from "../services/trusted-tool-file-preview"
 
 import { ChatOpenAI, ChatOpenAICompletions } from "@langchain/openai"
-import { DynamicStructuredTool, ToolInputParsingException, tool } from "@langchain/core/tools"
+import {
+  DynamicStructuredTool,
+  ToolInputParsingException,
+  tool,
+  type ToolRunnableConfig
+} from "@langchain/core/tools"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import { recoverMainCheckpointMessages } from "./checkpoint-message-recovery"
 import {
@@ -134,7 +139,12 @@ import {
   tool as lcTool
 } from "langchain"
 import { HumanMessage, ToolMessage } from "@langchain/core/messages"
-import { Runnable, type RunnableConfig } from "@langchain/core/runnables"
+import {
+  patchConfig,
+  raceWithSignal,
+  Runnable,
+  type RunnableConfig
+} from "@langchain/core/runnables"
 import { Command, isGraphBubbleUp } from "@langchain/langgraph"
 import { z } from "zod"
 
@@ -1966,13 +1976,23 @@ function taskInvocationOwnerId(config: { toolCall?: { id?: unknown }; toolCallId
 export function wrapTaskToolWithOwnerMetadata(
   taskTool: DynamicStructuredTool,
   soloTaskTraceManager?: SoloTaskTraceManager,
-  captureThreadId?: string
+  captureThreadId?: string,
+  cancelOwnedShellTasks?: (ownerId: string) => Promise<void>
 ): DynamicStructuredTool {
-  return tool(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    async (input: Record<string, unknown>, config: any) => {
+  // The tool() helper aborts before its callback settles. The Task invocation
+  // must keep its own cleanup fence before reporting success, failure or abort.
+  return new DynamicStructuredTool({
+    name: taskTool.name,
+    description: taskTool.description,
+    schema: taskTool.schema,
+    func: async (input, runManager, parentConfig) => {
+      const config = patchConfig(parentConfig, {
+        callbacks: runManager?.getChild()
+      }) as ToolRunnableConfig & { toolCallId?: unknown }
+      config.signal?.throwIfAborted()
       const invocationOwner = taskInvocationOwnerId(config)
       const ownerId = invocationOwner.explicit
+      const shellTaskOwnerId = randomUUID()
       const patchedConfig = {
         ...config,
         // Only a real tool-call id may be exposed as renderer attribution.
@@ -1989,16 +2009,13 @@ export function wrapTaskToolWithOwnerMetadata(
           : {}),
         configurable: {
           ...(config?.configurable ?? {}),
-          [SHELL_TASK_OWNER_CONFIG_KEY]: { id: randomUUID() },
+          [SHELL_TASK_OWNER_CONFIG_KEY]: { id: shellTaskOwnerId },
           [ACTION_STATIONARITY_OWNER_CONFIG_KEY]: invocationOwner.stationarity,
           [SUBAGENT_SUMMARIZATION_OWNER_CONFIG_KEY]: invocationOwner.stationarity,
           ...(ownerId ? { [SUBAGENT_OWNER_METADATA_KEY]: ownerId } : {})
         }
       }
-      const taskInput =
-        config?.toolCall?.args && typeof config.toolCall.args === "object"
-          ? (config.toolCall.args as Record<string, unknown>)
-          : input
+      const taskInput = (config.toolCall?.args ?? input) as Record<string, unknown>
       if (ownerId) {
         soloTaskTraceManager?.startTask({
           ownerId,
@@ -2016,13 +2033,18 @@ export function wrapTaskToolWithOwnerMetadata(
             ...patchedConfig,
             callbacks: subagentSessionCallbacks(patchedConfig.callbacks)
           })
-        const result = await (captureThreadId && ownerId
-          ? withSubagentSessionCapture(
-              { kind: "multi", threadId: captureThreadId, subagentId: ownerId },
-              typeof taskInput.description === "string" ? taskInput.description : "子代理",
-              invoke
-            )
-          : taskTool.invoke(config?.toolCall ?? input, patchedConfig))
+        const execution =
+          captureThreadId && ownerId
+            ? withSubagentSessionCapture(
+                { kind: "multi", threadId: captureThreadId, subagentId: ownerId },
+                typeof taskInput.description === "string" ? taskInput.description : "子代理",
+                invoke
+              )
+            : taskTool.invoke(config?.toolCall ?? input, patchedConfig)
+        const result = await raceWithSignal(execution, config.signal).finally(() =>
+          cancelOwnedShellTasks?.(shellTaskOwnerId)
+        )
+        config.signal?.throwIfAborted()
         const sanitizedResult = stripTaskSubagentSummarizationState(result)
         if (ownerId) soloTaskTraceManager?.finishTask(ownerId, "success", sanitizedResult)
         return sanitizedResult
@@ -2036,14 +2058,8 @@ export function wrapTaskToolWithOwnerMetadata(
         }
         throw error
       }
-    },
-    {
-      name: taskTool.name,
-      description: taskTool.description,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      schema: (taskTool as any).schema
     }
-  ) as unknown as DynamicStructuredTool
+  })
 }
 
 /**
@@ -2053,13 +2069,23 @@ export function wrapTaskToolWithOwnerMetadata(
 function stampSubagentOwnerMetadata<T>(
   middleware: T,
   soloTaskTraceManager?: SoloTaskTraceManager,
-  captureThreadId?: string
+  captureThreadId?: string,
+  shellSandbox?: LocalSandbox
 ): T {
   const mw = middleware as { tools?: DynamicStructuredTool[] }
   if (Array.isArray(mw.tools) && mw.tools.length > 0) {
+    const cancelOwnedShellTasks = shellSandbox
+      ? (ownerId: string) =>
+          LocalSandbox.cancelOwnedBackgroundTasksAndWait(shellSandbox.runId, ownerId)
+      : undefined
     mw.tools = mw.tools.map((t) =>
       t?.name === "task"
-        ? wrapTaskToolWithOwnerMetadata(t, soloTaskTraceManager, captureThreadId)
+        ? wrapTaskToolWithOwnerMetadata(
+            t,
+            soloTaskTraceManager,
+            captureThreadId,
+            cancelOwnedShellTasks
+          )
         : t
     )
   }
@@ -2302,7 +2328,9 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
   }
 
   const shellMonitors = new WeakSet<object>()
+  const shellTaskBackend = backend instanceof LocalSandbox ? backend : undefined
   const runtimeShellMonitorBlocked =
+    !shellTaskBackend ||
     mainBlockedToolNames.some(isShellTaskMonitorToolName) ||
     (filesystemAccess && blockedToolNamesForAccess(filesystemAccess).has("monitor"))
 
@@ -2363,9 +2391,8 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     }
 
     const sandbox = filesystemBackend as LocalSandbox
-    const executeIdx =
-      mw.tools?.findIndex((tool: { name: string }) => tool.name === "execute") ?? -1
-    if (executeIdx >= 0) {
+    const originalExecute = mw.tools?.find((tool) => tool.name === "execute")
+    if (originalExecute) {
       const formatExecuteResponse = (result: import("deepagents").ExecuteResponse): string => {
         const parts = [result.output]
         if (result.exitCode !== null) {
@@ -2388,15 +2415,27 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
         ) {
           return readOnlyExecuteBlockMessage(windowsShellKind)
         }
+        if (!shellTaskBackend) {
+          if (input.cwd?.trim() && typeof sandbox.execute === "function") {
+            return formatExecuteResponse(await sandbox.execute(input.command, input.cwd))
+          }
+          const result: unknown = await originalExecute.invoke({ command: input.command })
+          return typeof result === "string" ? result : (JSON.stringify(result) ?? String(result))
+        }
         const canMonitor = !runtimeShellMonitorBlocked && !shellMonitorDeniedContext.getStore()
         if (managedExecution || !canMonitor || input.run_in_background === false) {
-          return formatExecuteResponse(await sandbox.execute(input.command, input.cwd))
+          return formatExecuteResponse(await shellTaskBackend.execute(input.command, input.cwd))
         }
         const ownerId = getShellTaskOwnerId(config)
         if (input.run_in_background) {
-          return sandbox.executeBackground(input.command, input.cwd, ownerId)
+          return shellTaskBackend.executeBackground(
+            input.command,
+            input.cwd,
+            ownerId,
+            config?.signal
+          )
         }
-        const execution = await sandbox.executeForTool(input.command, input.cwd, {
+        const execution = await shellTaskBackend.executeForTool(input.command, input.cwd, {
           ownerId,
           backgroundAfterMs: SHELL_BACKGROUND_AFTER_MS,
           signal: config?.signal
@@ -2421,7 +2460,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
         },
         {
           name: "execute",
-          description: mw.tools![executeIdx].description,
+          description: originalExecute.description,
           schema: z.object({
             command: z.string().describe("The shell command to execute"),
             cwd: z
@@ -2443,12 +2482,12 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
           })
         }
       )
-      mw.tools = mw.tools!.map((tool, index) =>
-        index === executeIdx ? customExecute : tool
+      mw.tools = mw.tools!.map((tool) =>
+        tool === originalExecute ? customExecute : tool
       ) as typeof mw.tools
     }
 
-    const monitorTools = createShellTaskMonitorTools(sandbox)
+    const monitorTools = shellTaskBackend ? createShellTaskMonitorTools(shellTaskBackend) : []
     for (const monitorTool of monitorTools) shellMonitors.add(monitorTool)
     const guardedTools = applyCoordinatorWorkerFilesystemAccess(
       [...(mw.tools || []), ...monitorTools],
@@ -2882,7 +2921,8 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
                 systemPrompt: taskSystemPrompt
               } as Parameters<typeof createSubAgentMiddleware>[0]),
               soloTaskTraceManager,
-              threadId
+              threadId,
+              shellTaskBackend
             )
           ]
         : []),

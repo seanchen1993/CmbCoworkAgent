@@ -1087,6 +1087,9 @@ interface CustomAPI {
       }
     }>
     cancel: (threadId: string, options?: { cancelWorkers?: boolean }) => Promise<void>
+    hasBackgroundShell: (threadId: string) => Promise<boolean>
+    onBackgroundShellChanged: (threadId: string, callback: (active: boolean) => void) => () => void
+    cancelBackgroundShell: (threadId: string) => Promise<void>
     queueCurrentRunMessage: (
       threadId: string,
       message: { id: string; content: string; displayContent?: string }

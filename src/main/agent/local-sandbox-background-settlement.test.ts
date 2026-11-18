@@ -223,6 +223,234 @@ describe("LocalSandbox background-task settlement", () => {
     }
   )
 
+  it("cancels only the scoped owner's pending shell before registration", async () => {
+    const sandbox = new LocalSandbox({
+      rootDir: process.cwd(),
+      runId: "pending-shell-owner",
+      windowsSandbox: "none"
+    })
+    const hook = createDeferred<null>()
+    const signals = new Map<string, AbortSignal>()
+    vi.spyOn(sandbox, "runPreToolUseHookForTool").mockImplementation((_tool, args, signal) => {
+      signals.set(String(args.command), signal!)
+      return hook.promise
+    })
+    const raw = vi.spyOn(sandbox, "executeRaw").mockResolvedValue({
+      output: "finished",
+      exitCode: 0,
+      truncated: false
+    })
+
+    const own = sandbox.executeBackground("echo own", undefined, "owner-a")
+    const other = sandbox.executeBackground("echo other", undefined, "owner-b")
+    const cancelled = LocalSandbox.cancelOwnedBackgroundTasksAndWait(sandbox.runId, "owner-a")
+    expect(signals.get("echo own")?.aborted).toBe(true)
+    expect(signals.get("echo other")?.aborted).toBe(false)
+    hook.resolve(null)
+
+    await cancelled
+    await expect(own).resolves.toContain("cancelled before it started")
+    await expect(other).resolves.toContain("Background task started")
+    await vi.waitFor(() => expect(LocalSandbox.hasActiveBackgroundTasks(sandbox.runId)).toBe(false))
+    expect(raw).toHaveBeenCalledTimes(1)
+    expect(raw.mock.calls[0][0]).toBe("echo other")
+  })
+
+  it("keeps the foreground pending invocation alive when stopping detached shell", async () => {
+    const sandbox = new LocalSandbox({
+      rootDir: process.cwd(),
+      runId: "detached-shell-stop",
+      windowsSandbox: "none"
+    })
+    const hooks = createDeferred<null>()
+    const signals = new Map<string, AbortSignal>()
+    Reflect.set(
+      sandbox,
+      "runPreToolUseHook",
+      (_name: string, args: { command: string }, signal: AbortSignal) => {
+        signals.set(args.command, signal)
+        return hooks.promise
+      }
+    )
+    const raw = vi.spyOn(sandbox, "executeRaw").mockResolvedValue({
+      output: "foreground",
+      exitCode: 0,
+      truncated: false
+    })
+
+    const foreground = sandbox.executeForTool("echo foreground", undefined, {
+      backgroundAfterMs: 60_000
+    })
+    expect(LocalSandbox.hasActiveBackgroundTasks(sandbox.runId)).toBe(false)
+    const background = sandbox.executeBackground("echo background")
+    expect(LocalSandbox.cancelDetachedBackgroundTasks(sandbox.runId)).toBe(true)
+    expect(signals.get("echo background")?.aborted).toBe(true)
+    expect(signals.get("echo foreground")?.aborted).toBe(false)
+    hooks.resolve(null)
+
+    await expect(background).resolves.toContain("cancelled before it started")
+    await expect(foreground).resolves.toMatchObject({
+      status: "completed",
+      result: { exitCode: 0 }
+    })
+    expect(raw).toHaveBeenCalledTimes(1)
+    expect(raw.mock.calls[0][0]).toBe("echo foreground")
+  })
+
+  it("aborts before registration and disconnects the caller signal once registered", async () => {
+    const sandbox = new LocalSandbox({
+      rootDir: process.cwd(),
+      runId: "background-caller-signal",
+      windowsSandbox: "none"
+    })
+    const caller = new AbortController()
+    const hook = createDeferred<null>()
+    vi.spyOn(sandbox, "runPreToolUseHookForTool").mockReturnValueOnce(hook.promise)
+    const execution = createDeferred<{ output: string; exitCode: number; truncated: boolean }>()
+    const raw = vi.spyOn(sandbox, "executeRaw").mockReturnValue(execution.promise)
+    const changes = vi.fn()
+    const unsubscribe = LocalSandbox.onBackgroundShellChange(changes)
+
+    try {
+      const pending = sandbox.executeBackground("echo before", undefined, undefined, caller.signal)
+      caller.abort()
+      hook.resolve(null)
+      await expect(pending).resolves.toContain("cancelled before it started")
+      expect(raw).not.toHaveBeenCalled()
+      expect(changes.mock.calls).toEqual([
+        [{ threadId: sandbox.runId, active: true }],
+        [{ threadId: sandbox.runId, active: false }]
+      ])
+
+      changes.mockClear()
+      const owner = new AbortController()
+      await expect(
+        sandbox.executeBackground("echo after", undefined, undefined, owner.signal)
+      ).resolves.toContain("Background task started")
+      const [, , , processSignal, options] = raw.mock.calls[0]
+      owner.abort()
+      expect(processSignal?.aborted).toBe(false)
+      options?.onData?.("first")
+      options?.onData?.("second")
+      expect(changes.mock.calls).toEqual([[{ threadId: sandbox.runId, active: true }]])
+
+      execution.resolve({ output: "finished", exitCode: 0, truncated: false })
+      await vi.waitFor(() => expect(changes).toHaveBeenCalledTimes(2))
+      expect(changes).toHaveBeenLastCalledWith({ threadId: sandbox.runId, active: false })
+    } finally {
+      unsubscribe()
+      execution.resolve({ output: "finished", exitCode: 0, truncated: false })
+      await LocalSandbox.cancelBackgroundTasksAndWait(sandbox.runId)
+    }
+  })
+
+  it("bounds idle thread cleanup and blocks late starts during deletion", async () => {
+    const sandbox = new LocalSandbox({
+      rootDir: process.cwd(),
+      runId: "idle-shell-delete",
+      windowsSandbox: "none"
+    })
+    const hook = createDeferred<null>()
+    vi.spyOn(sandbox, "runPreToolUseHookForTool").mockReturnValueOnce(hook.promise)
+    const raw = vi.spyOn(sandbox, "executeRaw").mockResolvedValue({
+      output: "finished",
+      exitCode: 0,
+      truncated: false
+    })
+    const pending = sandbox.executeBackground("echo pending")
+    const release = LocalSandbox.blockNewBackgroundTasks(sandbox.runId)
+
+    try {
+      await expect(LocalSandbox.cancelBackgroundTasksWithin(sandbox.runId, 10)).resolves.toBe(false)
+      await expect(sandbox.executeBackground("echo late")).resolves.toContain("cancelled before")
+      expect(LocalSandbox.hasActiveBackgroundTasks(sandbox.runId)).toBe(true)
+      hook.resolve(null)
+      await expect(pending).resolves.toContain("cancelled before")
+      await expect(LocalSandbox.cancelBackgroundTasksWithin(sandbox.runId, 10)).resolves.toBe(true)
+      expect(raw).not.toHaveBeenCalled()
+    } finally {
+      release()
+      hook.resolve(null)
+    }
+    await expect(sandbox.executeBackground("echo retry")).resolves.toContain(
+      "Background task started"
+    )
+    await vi.waitFor(() => expect(LocalSandbox.hasActiveBackgroundTasks(sandbox.runId)).toBe(false))
+    expect(raw).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([true, false])(
+    "checks POSIX worktree descendants on a successful close only after promotion (%s)",
+    async (promoted) => {
+      const root = process.cwd()
+      const sandbox = new LocalSandbox({
+        rootDir: root,
+        runId: "posix-worktree-close",
+        windowsSandbox: "none",
+        worktreeIsolation: {
+          workspaceRoot: root,
+          worktreeRoot: root,
+          commonDir: join(root, ".git"),
+          branch: "test"
+        }
+      })
+      const child = Object.assign(createFakeChildProcess(), {
+        pid: 41,
+        stdout: new EventEmitter(),
+        stderr: new EventEmitter()
+      })
+      spawnMock.mockReturnValueOnce(child)
+      const termination = createDeferred<void>()
+      const lifecycle = LocalSandbox as unknown as {
+        terminateProcessTree: (
+          child: ChildProcess,
+          exited: () => boolean,
+          waitForProcessTree: boolean
+        ) => Promise<void>
+      }
+      const kill = vi.spyOn(lifecycle, "terminateProcessTree").mockReturnValue(termination.promise)
+      const execution = (
+        sandbox as unknown as {
+          executeOnce: (
+            command: string,
+            shell: string,
+            windows: boolean,
+            timeout: number,
+            signal: undefined,
+            cwd: string,
+            options: {
+              handoff: { onSpawn: () => undefined; isPromoted: () => boolean }
+              waitForProcessTree: boolean
+            }
+          ) => Promise<{ exitCode: number }>
+        }
+      ).executeOnce("echo example", "/bin/bash", false, 1_000, undefined, root, {
+        handoff: { onSpawn: () => undefined, isPromoted: () => promoted },
+        waitForProcessTree: true
+      })
+
+      try {
+        child.emit("spawn")
+        child.emit("close", 0, null)
+        if (promoted) {
+          expect(kill).toHaveBeenCalledExactlyOnceWith(child, expect.any(Function), true)
+          const completed = vi.fn()
+          void execution.then(completed)
+          await Promise.resolve()
+          expect(completed).not.toHaveBeenCalled()
+        } else {
+          expect(kill).not.toHaveBeenCalled()
+          await expect(execution).resolves.toMatchObject({ exitCode: 0 })
+        }
+        termination.resolve()
+        await expect(execution).resolves.toMatchObject({ exitCode: 0 })
+      } finally {
+        termination.resolve()
+        kill.mockRestore()
+      }
+    }
+  )
+
   it("tracks and cancels a background execute before it can reach process spawn", async () => {
     const preToolUse = createDeferred<undefined>()
     const sandbox = new LocalSandbox({

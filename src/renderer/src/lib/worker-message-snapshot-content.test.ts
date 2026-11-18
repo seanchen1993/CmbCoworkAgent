@@ -111,6 +111,148 @@ describe("Team worker authoritative content", () => {
     }
   })
 
+  it.each([false, true])(
+    "routes an explicit alias delta to its own row when the worker turn is stale: %s",
+    (stale) => {
+      const transport = new ElectronIPCTransport()
+      const legacy = wire("Legacy answer", "provider")
+      const explicit = providerWire("original-alias", "Explicit answer")
+      const snapshot = [
+        wire("First prompt", "first-user", "HumanMessage"),
+        ...(stale ? [legacy, explicit] : [explicit, legacy])
+      ]
+      if (stale) {
+        snapshot.push(
+          wire("Second prompt", "second-user", "HumanMessage"),
+          wire("Latest answer", "unrelated")
+        )
+      }
+      values(transport, snapshot, stale ? 2 : 1)
+      const before = useAppStore.getState().workerFocusMessages
+      const explicitRow = before.find((message) => message.worker_provider_identity)!
+
+      const updates = transport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          type: "stream",
+          mode: "messages",
+          workerTurn: 1,
+          data: [
+            providerWire("new-alias", " with continuation", "AIMessageChunk"),
+            { [STREAM_MESSAGE_CONTENT_MODE_KEY]: "delta" }
+          ]
+        },
+        parent
+      )
+      expect(updates).toMatchObject([
+        { id: explicitRow.id, content: "Explicit answer with continuation" }
+      ])
+      useAppStore.getState().appendWorkerFocusMessages(worker, updates)
+      const after = useAppStore.getState().workerFocusMessages
+      expect(after.map(({ id }) => id)).toEqual(before.map(({ id }) => id))
+      expect(after.map(({ content }) => content)).toEqual(
+        before.map((message) =>
+          message.id === explicitRow.id ? "Explicit answer with continuation" : message.content
+        )
+      )
+    }
+  )
+
+  it.each([false, true])(
+    "keeps an unobserved explicit occurrence separate from an occupied legacy ID (stale: %s)",
+    (stale) => {
+      const transport = new ElectronIPCTransport()
+      const snapshot = [
+        wire("First prompt", "first-user", "HumanMessage"),
+        wire("Legacy answer", "provider")
+      ]
+      if (stale) snapshot.push(wire("Second prompt", "second-user", "HumanMessage"))
+      values(transport, snapshot, stale ? 2 : 1)
+      const legacy = useAppStore.getState().workerFocusMessages[1]
+
+      const chunk = providerWire("unused", "Independent answer", "AIMessageChunk")
+      const newOccurrence = { ...chunk, kwargs: { ...chunk.kwargs, id: undefined } }
+      const updates = transport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          type: "stream",
+          mode: "messages",
+          workerTurn: 1,
+          data: [newOccurrence, { [STREAM_MESSAGE_CONTENT_MODE_KEY]: "delta" }]
+        },
+        parent
+      )
+      expect(updates[0].content).toBe("Independent answer")
+      expect(updates[0].id).not.toBe(legacy.id)
+      useAppStore.getState().appendWorkerFocusMessages(worker, updates)
+      const answers = useAppStore
+        .getState()
+        .workerFocusMessages.filter((message) => message.role === "assistant")
+      expect(answers.map(({ content }) => content)).toEqual(["Legacy answer", "Independent answer"])
+      expect(new Set(answers.map(({ id }) => id)).size).toBe(2)
+    }
+  )
+
+  it("does not assign an explicit tuple to a legacy exact row if that tuple already has a row", () => {
+    const transport = new ElectronIPCTransport()
+    values(transport, [
+      wire("First prompt", "first-user", "HumanMessage"),
+      wire("Legacy answer", "provider"),
+      providerWire("original-alias", "Explicit answer")
+    ])
+    const before = useAppStore.getState().workerFocusMessages
+    const legacy = before.find((message) => message.content === "Legacy answer")!
+    const explicit = before.find((message) => message.worker_provider_identity)!
+    useAppStore.getState().appendWorkerFocusMessages(worker, [
+      {
+        ...explicit,
+        id: legacy.id,
+        content: "Explicit correction",
+        worker_content_source: "snapshot"
+      }
+    ])
+    const after = useAppStore.getState().workerFocusMessages
+    expect(after.map(({ id, content }) => [id, content])).toEqual([
+      [before[0].id, "First prompt"],
+      [legacy.id, "Legacy answer"],
+      [explicit.id, "Explicit correction"]
+    ])
+  })
+
+  it("adopts an idless legacy snapshot row when a full frame supplies its explicit identity", () => {
+    const transport = new ElectronIPCTransport()
+    const user = wire("First prompt", "first-user", "HumanMessage")
+    values(transport, [user, wire("Same answer")])
+    const legacy = useAppStore.getState().workerFocusMessages[1]
+
+    values(transport, [user, providerWire("now-identified", "Same answer")])
+    expect(useAppStore.getState().workerFocusMessages.slice(1)).toMatchObject([
+      {
+        id: legacy.id,
+        content: "Same answer",
+        provider_occurrence: 1,
+        worker_provider_identity: true
+      }
+    ])
+  })
+
+  it("reserves a still-present idless snapshot row for its own slot before upgrading by prose", () => {
+    const transport = new ElectronIPCTransport()
+    const user = wire("First prompt", "first-user", "HumanMessage")
+    const legacy = wire("Same answer")
+    const unrelated = wire("Earlier answer", "other")
+    values(transport, [user, unrelated, legacy])
+    const originalId = useAppStore.getState().workerFocusMessages.at(-1)!.id
+
+    // The independent provider row comes first, but the legacy row is still
+    // present at its own exact snapshot position later in the same frame.
+    values(transport, [user, providerWire("independent", "Same answer"), legacy])
+    const rows = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.content === "Same answer")
+    expect(rows).toHaveLength(2)
+    expect(rows.find((row) => row.id === originalId)?.worker_provider_identity).toBeUndefined()
+    expect(rows.find((row) => row.worker_provider_identity)?.id).not.toBe(originalId)
+  })
+
   it("updates an identified live row when a later chunk has the same ID without metadata", () => {
     const transport = new ElectronIPCTransport()
     values(transport, [providerWire("provider", "Original answer")])

@@ -18,7 +18,16 @@ export function coalesceSnapshotMessageAliases(
 ): Message[] {
   const result: Message[] = []
   const indexByIdentity = new Map<string, number>()
+  const workflowUserOccurrences = new Map<string, number>()
+  let workflowTurn: [string, number] | undefined
   for (const message of messages) {
+    if (workflowScope !== undefined && message.role === "user") {
+      const occurrence = (workflowUserOccurrences.get(message.id) ?? 0) + 1
+      workflowUserOccurrences.set(message.id, occurrence)
+      // The initial prompt may roll out of the bounded history. Later prompts
+      // in the same run (for example a structured-output nudge) start a new turn.
+      workflowTurn = message.worker_snapshot_index === 0 ? undefined : [message.id, occurrence]
+    }
     if (!hasExplicitProviderTuple(message)) {
       result.push(message)
       continue
@@ -27,11 +36,17 @@ export function coalesceSnapshotMessageAliases(
       message.role,
       message.provider_source_id,
       message.provider_occurrence,
-      message.role === "tool" ? message.tool_call_id : undefined
+      message.role === "tool" ? message.tool_call_id : undefined,
+      workflowTurn
     ])
     const previousIndex = indexByIdentity.get(identity)
     if (previousIndex !== undefined) {
-      result[previousIndex] = { ...message, id: result[previousIndex].id }
+      const previous = result[previousIndex]
+      result[previousIndex] = {
+        ...message,
+        id: previous.id,
+        worker_snapshot_index: previous.worker_snapshot_index
+      }
       continue
     }
     indexByIdentity.set(identity, result.length)
