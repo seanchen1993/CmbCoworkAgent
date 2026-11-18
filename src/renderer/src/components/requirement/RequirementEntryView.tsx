@@ -68,6 +68,10 @@ import {
   REQUIREMENT_SPACE_LIST_EVENT,
   REQUIREMENT_SPACE_LIST_QUERY_KEY
 } from "./requirement-navigation"
+import {
+  readStoredRequirementPersona,
+  shouldAutoOpenRequirementQuickStart
+} from "./requirement-persona"
 
 type EntryScreen = "history" | "system" | "conversation" | "space-detail"
 
@@ -317,6 +321,15 @@ export function RequirementEntryView({
           setSelectedRequirementThreadId(threadId)
           if (threadId) void selectThread(threadId, { preserveView: true })
           setScreen("conversation")
+        }
+        if (
+          !returnRequirementId &&
+          shouldAutoOpenRequirementQuickStart(
+            nextRequirements.length,
+            readStoredRequirementPersona()
+          )
+        ) {
+          setQuickStartDialogOpen(true)
         }
         setRequirementsLoaded(true)
       })

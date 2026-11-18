@@ -9,6 +9,13 @@ export function readStoredRequirementPersona(): RequirementPersona | null {
   return stored === "business" || stored === "design" || stored === "development" ? stored : null
 }
 
+export function shouldAutoOpenRequirementQuickStart(
+  localRequirementCount: number,
+  persona: RequirementPersona | null
+): boolean {
+  return localRequirementCount === 0 && persona === null
+}
+
 export function isRequirementDevelopmentUnavailable(): boolean {
   const persona = readStoredRequirementPersona()
   return persona === "business" || persona === "design"
