@@ -192,6 +192,144 @@ describe("Team worker authoritative content", () => {
     }
   )
 
+  it.each(["messages", "values"] as const)(
+    "updates a declared result and its success status without resetting the reply (%s)",
+    (mode) => {
+      const publish = publishWorkerFrames()
+      const call = { id: "call", name: "read_file", args: { path: "probe.txt" } }
+      const result = (id: string, content: string, status?: "error" | "success") =>
+        new ToolMessage({
+          id,
+          content,
+          status,
+          tool_call_id: call.id,
+          additional_kwargs: providerWire(id, content).kwargs.additional_kwargs
+        })
+      const prompt = new HumanMessage({ id: "prompt", content: "Request" })
+      const assistant = new AIMessage({ id: "call-wire", content: "Calling", tool_calls: [call] })
+      const reply = new AIMessage({
+        id: "reply-wire",
+        content: "Done",
+        additional_kwargs: {
+          cmb_internal_provider_source_id: "reply",
+          cmb_internal_provider_occurrence: 1
+        }
+      })
+      const failedResult = result("result-a", "Read failed", "error")
+      publish("values", { messages: [prompt, assistant, failedResult, reply] })
+      const originalReplyId = useAppStore.getState().workerFocusMessages.at(-1)?.id
+
+      const corrected = result("result-b", "Read succeeded", "success")
+      if (mode === "values") {
+        publish(mode, { messages: [prompt, assistant, corrected, reply] })
+      } else {
+        publish(mode, [corrected, {}])
+        publish(mode, [failedResult, {}])
+      }
+      publish("messages", [
+        new AIMessageChunk({ id: "reply-wire", content: " now" }),
+        { [STREAM_MESSAGE_CONTENT_MODE_KEY]: "delta" }
+      ])
+      const rows = useAppStore.getState().workerFocusMessages
+      expect(rows.map(({ content }) => content)).toEqual(["Calling", "Read succeeded", "Done now"])
+      expect(rows.at(-1)?.id).toBe(originalReplyId)
+      expect([...buildToolResultAssociations(rows).values()]).toEqual([
+        { content: "Read succeeded", is_error: false }
+      ])
+    }
+  )
+
+  it("preserves the active old-turn reply after an earlier tool result replays", () => {
+    const publish = publishWorkerFrames()
+    const call = { id: "call", name: "read_file", args: { path: "probe.txt" } }
+    const result = new ToolMessage({
+      id: "result-wire",
+      content: "Read finished",
+      tool_call_id: call.id
+    })
+    const firstTurn = [
+      new HumanMessage({ id: "first-prompt", content: "First request" }),
+      new AIMessage({ id: "call-wire", content: "Calling", tool_calls: [call] }),
+      result,
+      new AIMessage({
+        id: "reply-wire",
+        content: "Done",
+        additional_kwargs: providerWire("reply-wire", "Done").kwargs.additional_kwargs
+      })
+    ]
+    publish("values", { messages: firstTurn })
+    publish(
+      "values",
+      {
+        messages: [
+          ...firstTurn,
+          new HumanMessage({ id: "second-prompt", content: "New request" }),
+          new AIMessage({ id: "reply-wire", content: "Second reply" })
+        ]
+      },
+      2
+    )
+    publish("messages", [
+      new AIMessageChunk({ id: "reply-wire", content: " once" }),
+      { [STREAM_MESSAGE_CONTENT_MODE_KEY]: "delta" }
+    ])
+    publish("messages", [result, {}])
+    publish("messages", [
+      new AIMessageChunk({ content: " more" }),
+      { [STREAM_MESSAGE_CONTENT_MODE_KEY]: "delta" }
+    ])
+    expect(useAppStore.getState().workerFocusMessages.map(({ content }) => content)).toEqual([
+      "Calling",
+      "Read finished",
+      "Done once more",
+      "Second reply"
+    ])
+  })
+
+  it.each(["full", "append", "tail", "messages"] as const)(
+    "replaces the tool list from a completed assistant update (%s)",
+    (kind) => {
+      const publish = publishWorkerFrames()
+      const call = { id: "call", name: "read_file", args: { path: "probe.txt" } }
+      const additional_kwargs = providerWire("call-wire", "Starting").kwargs.additional_kwargs
+      const prompt = new HumanMessage({ id: "prompt", content: "Request" })
+      const original = new AIMessage({
+        id: "call-wire",
+        content: "Starting",
+        additional_kwargs,
+        tool_calls: [call]
+      })
+      const replacement = new AIMessage({
+        id: kind === "tail" ? "call-wire" : "alias-wire",
+        content: "Starting revised",
+        additional_kwargs,
+        tool_calls: []
+      })
+      if (kind === "append" || kind === "tail") {
+        publish("values", { messages: [prompt, original] })
+      } else {
+        publish("messages", [new AIMessageChunk({ ...original }), {}])
+      }
+      // Empty calls on a partial stream chunk do not replace the known calls.
+      publish("messages", [
+        new AIMessageChunk({ id: "call-wire", content: "", additional_kwargs, tool_calls: [] }),
+        {}
+      ])
+      expect(useAppStore.getState().workerFocusMessages[0].tool_calls).toEqual([call])
+
+      if (kind === "messages") {
+        publish("messages", [replacement, {}])
+      } else {
+        const messages =
+          kind === "append" ? [prompt, original, replacement] : [prompt, replacement]
+        expect(publish("values", { messages })).toBe(kind)
+      }
+      expect(useAppStore.getState().workerFocusMessages).toMatchObject([
+        { content: "Starting revised", tool_calls: [] }
+      ])
+    }
+  )
+
   it("keeps a repeated result as a boundary when the active assistant requests that call again", () => {
     const publish = publishWorkerFrames()
     const call = { id: "call", name: "read_file", args: { path: "probe.txt" } }
@@ -216,6 +354,44 @@ describe("Team worker authoritative content", () => {
         .filter(({ role }) => role === "assistant")
         .map(({ content }) => content)
     ).toEqual(["First cycle", "Second cycle", "Done"])
+  })
+
+  it("keeps distinct tool executions when results reuse a wire ID and text", () => {
+    const publish = publishWorkerFrames()
+    const call = { id: "call", name: "read_file", args: { path: "probe.txt" } }
+    const request = (id: string) => new AIMessage({ id, content: id, tool_calls: [call] })
+    const result = (occurrence: number) =>
+      new ToolMessage({
+        id: "result-wire",
+        tool_call_id: call.id,
+        content: "Same result",
+        additional_kwargs: providerWire("result-wire", "", "ToolMessage", occurrence).kwargs
+          .additional_kwargs
+      })
+    publish("values", {
+      messages: [
+        new HumanMessage({ id: "first-prompt", content: "First request" }),
+        request("call-one"),
+        result(1),
+        request("call-two")
+      ]
+    })
+    publish("messages", [result(2), {}])
+    publish(
+      "values",
+      {
+        messages: [
+          new HumanMessage({ id: "second-prompt", content: "Second request" }),
+          request("call-one")
+        ]
+      },
+      2
+    )
+    publish("messages", [result(1), {}], 2)
+
+    const rows = useAppStore.getState().workerFocusMessages
+    expect(rows.filter(({ role }) => role === "tool")).toHaveLength(3)
+    expect([...buildToolResultAssociations(rows).values()]).toHaveLength(3)
   })
 
   it("keeps a declared tuple independent from an inferred occurrence in the same full frame", () => {

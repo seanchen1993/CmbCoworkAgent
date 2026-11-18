@@ -210,7 +210,8 @@ async function main() {
         frame("A"),
         toolFrame(),
         identifiedToolFrame(projectDisplayMessageId(longCallId, "tool-call")),
-        toolFrame(false, projectDisplayMessageId(longCallId, "tool-call"))
+        toolFrame(false, projectDisplayMessageId(longCallId, "tool-call")),
+        identifiedToolFrame("alias-read")
       ]
     )
     await page.waitForFunction(() =>
@@ -432,6 +433,8 @@ async function main() {
     assert.equal(await rows.count(), 3)
     results.push("long tool IDs keep checkpoint, append, and full live results on the same card")
 
+    await page.getByRole("button", { name: "返回", exact: true }).click()
+    await open(4)
     const [prompt, call, toolResult, answer] = identifiedToolFrame("alias-read", true)
     const sparseCall = {
       ...call,
@@ -470,6 +473,32 @@ async function main() {
     await page.getByText("Worker tool final continues", { exact: true }).waitFor()
     assert.equal(await rows.count(), 3)
     results.push("a replayed ToolMessage preserves the active reply across a subsequent delta")
+
+    await emit({
+      type: "stream",
+      mode: "messages",
+      workerTurn: 1,
+      data: [
+        {
+          ...toolResult,
+          kwargs: { ...toolResult.kwargs, id: "corrected-tool-result", content: "Corrected output" }
+        },
+        {}
+      ]
+    })
+    await sparseRow.getByText("Corrected output", { exact: true }).waitFor()
+    await emit({
+      type: "stream",
+      mode: "messages",
+      workerTurn: 1,
+      data: [
+        wire(" after correction", answer.kwargs.id, "AIMessageChunk"),
+        { [STREAM_MESSAGE_CONTENT_MODE_KEY]: "delta" }
+      ]
+    })
+    await page.getByText("Worker tool final continues after correction", { exact: true }).waitFor()
+    assert.equal(await rows.count(), 3)
+    results.push("a tool result correction updates the card while the same reply keeps streaming")
 
     await page.getByRole("button", { name: "返回", exact: true }).click()
     await open(3)

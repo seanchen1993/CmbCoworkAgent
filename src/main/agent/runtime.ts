@@ -2130,6 +2130,59 @@ function markFilesystemWriteToolAsUserInitiated(middleware: {
   ) as unknown as DynamicStructuredTool
 }
 
+interface RuntimeToolFailure {
+  toolName: string | undefined
+  toolCallId: string | undefined
+  toolArgs: unknown
+  signal: ToolFailureSignal
+}
+
+/** Dispatch tool exceptions using the owning runtime's hook scope and failure fuse. */
+export function createRuntimeToolFailureHandler(
+  baseContext: HookContext & { sessionId: string },
+  resolveHooks: (
+    event: HookEvent,
+    context: HookContext
+  ) => ReturnType<typeof resolveEnabledHooksForRun>,
+  onHookResult?: HookResultCallback
+): (input: RuntimeToolFailure) => FailureFuseDecision | undefined {
+  return ({ toolName, toolCallId, toolArgs, signal }) => {
+    const { sessionId: threadId, turnId } = baseContext
+    const decision = turnId
+      ? recordToolFailure({
+          threadId,
+          turnId,
+          toolName,
+          toolCallId,
+          toolArgs,
+          signal,
+          mode: getFailureFuseMode()
+        })
+      : undefined
+    const context: HookContext = {
+      ...baseContext,
+      toolName,
+      toolArgs:
+        toolArgs && typeof toolArgs === "object" && !Array.isArray(toolArgs)
+          ? (toolArgs as Record<string, unknown>)
+          : undefined,
+      toolResult: JSON.stringify({
+        error: signal.message,
+        error_type: signal.errorType,
+        failure_kind: signal.kind,
+        is_interrupt: signal.isInterrupt,
+        is_timeout: signal.isTimeout,
+        tool_use_id: toolCallId
+      })
+    }
+    const event = "PostToolUseFailure"
+    runHooks(resolveHooks(event, context), event, context, onHookResult).catch((error) =>
+      console.warn("[Hooks] PostToolUseFailure hook error:", error)
+    )
+    return decision
+  }
+}
+
 /**
  * Custom version of deepagents' createDeepAgent.
  *
@@ -2212,12 +2265,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
   }: {
     onFinalSystemPrompt?: (prompt: string) => void
     onTaskSubagentPromptsResolved?: (prompts: Array<{ name: string; systemPrompt: string }>) => void
-    onToolFailureSignal?: (input: {
-      toolName: string | undefined
-      toolCallId: string | undefined
-      toolArgs: unknown
-      signal: ToolFailureSignal
-    }) => FailureFuseDecision | void
+    onToolFailureSignal?: (input: RuntimeToolFailure) => FailureFuseDecision | void
     onFailureFuseNotice?: FailureFuseNoticeCallback
     onTurnCompletionRecovery?: TurnCompletionRecoveryCallback
     turnCompletionTodoGateEnabled?: boolean
@@ -2593,7 +2641,15 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
         // check on a recovered ToolMessage doesn't re-fire.
         let failureFuseDecision: FailureFuseDecision | void = undefined
         if (onToolFailureSignal && toolCallId && !hasFailureFired(toolCallId)) {
-          const signal = toolFailureSignalFromThrow(error, { aborted })
+          // ToolNode wraps schema errors with the requested tool name and a
+          // stack. Use the same validation error for both shell monitor aliases.
+          const failure =
+            isShellTaskMonitorToolName(toolName) &&
+            error instanceof ToolInvocationError &&
+            error.toolError instanceof ToolInputParsingException
+              ? error.toolError
+              : error
+          const signal = toolFailureSignalFromThrow(failure, { aborted })
           markFailureFired(toolCallId)
           failureFuseDecision = onToolFailureSignal({
             toolName,
@@ -6812,27 +6868,8 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     toolHookMiddleware,
     onFailureFuseNotice,
     onContextCompaction,
-    // PR-12 — closure captures threadId / workspacePath / hookScope so
-    // createDeepAgent's middleware can fire-and-forget the PostToolUseFailure
-    // hook chain without knowing per-thread context.
-    onToolFailureSignal: (input: {
-      toolName: string | undefined
-      toolCallId: string | undefined
-      toolArgs: unknown
-      signal: ToolFailureSignal
-    }): FailureFuseDecision | void => {
-      const failureFuseDecision = hookTurnId
-        ? recordToolFailure({
-            threadId,
-            turnId: hookTurnId,
-            toolName: input.toolName,
-            toolCallId: input.toolCallId,
-            toolArgs: input.toolArgs,
-            signal: input.signal,
-            mode: getFailureFuseMode()
-          })
-        : undefined
-      const context: HookContext = {
+    onToolFailureSignal: createRuntimeToolFailureHandler(
+      {
         workspacePath,
         sessionId: threadId,
         agentId,
@@ -6848,29 +6885,11 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         harnessNodeStatus,
         projectCode,
         projectDir,
-        ...isolatedWorkspaceHookContext,
-        toolName: input.toolName,
-        toolArgs:
-          input.toolArgs && typeof input.toolArgs === "object" && !Array.isArray(input.toolArgs)
-            ? (input.toolArgs as Record<string, unknown>)
-            : undefined,
-        toolResult: JSON.stringify({
-          error: input.signal.message,
-          error_type: input.signal.errorType,
-          failure_kind: input.signal.kind,
-          is_interrupt: input.signal.isInterrupt,
-          is_timeout: input.signal.isTimeout,
-          tool_use_id: input.toolCallId
-        })
-      }
-      runHooks(
-        resolveHooksForContext("PostToolUseFailure", context),
-        "PostToolUseFailure",
-        context,
-        onHookResult
-      ).catch((e) => console.warn("[Hooks] PostToolUseFailure hook error:", e))
-      return failureFuseDecision
-    }
+        ...isolatedWorkspaceHookContext
+      },
+      resolveHooksForContext,
+      onHookResult
+    )
   })
 
   console.log("[Runtime] Agent created with skills parameter:", mainSkillSources)

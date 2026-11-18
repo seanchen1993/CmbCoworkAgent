@@ -56,6 +56,7 @@ import {
   mergeWorkerProviderWireIds,
   normalizeWorkflowSnapshotMessageIds
 } from "./snapshot-message-aliases"
+import { readWorkerToolResultError, workerToolCallSnapshot } from "./worker-message-content"
 import {
   isLegacyTruncatedWorkflowIdentity,
   WORKFLOW_PRECEDING_PROMPT_INDEX_KEY
@@ -1016,7 +1017,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
                 parentThreadId,
                 checkpointNs: focused.workerThreadId,
                 className: this.getSerializedMessageClassName(message),
-                kwargs: message.kwargs
+                kwargs: message.kwargs,
+                valuesSnapshot: true
               })
                 .filter((sdkEvent) => sdkEvent.event === "custom")
                 .map((sdkEvent) => sdkEvent.data as { type?: unknown; workerMessage?: unknown })
@@ -1094,10 +1096,6 @@ export class ElectronIPCTransport implements UseStreamTransport {
     }
 
     if (className.includes("ToolMessage") && kwargs.tool_call_id) {
-      const isError = this.isToolMessageError(kwargs)
-      this.staleWorkerCurrentMessageIdByTurn.delete(staleTurnKey)
-      this.staleWorkerCurrentProviderSourceIdByTurn.delete(staleTurnKey)
-      this.staleWorkerAssistantBoundaryByTurn.add(staleTurnKey)
       const rawId =
         typeof kwargs.id === "string"
           ? kwargs.id
@@ -1107,19 +1105,41 @@ export class ElectronIPCTransport implements UseStreamTransport {
               toolCallId: kwargs.tool_call_id,
               toolName: kwargs.name
             })
-      return [
-        {
-          id: scopeId(rawId),
-          role: "tool",
-          content,
-          ...scopedProviderTuple,
-          tool_call_id: kwargs.tool_call_id,
-          ...(kwargs.name && { name: kwargs.name }),
-          ...(kwargs.status && { status: kwargs.status }),
-          ...(isError && { is_error: true }),
-          created_at: new Date()
-        }
-      ]
+      const toolMessage = this.createWorkerToolResult(
+        scopeId(rawId),
+        content,
+        kwargs,
+        scopedProviderTuple
+      )
+      const toolResultIdentity = this.focusedWorkerToolResultIdentity(toolMessage)
+      const messages = useAppStore.getState().workerFocusMessages
+      const priorResult = messages.findLast(
+        (message) =>
+          message.role === "tool" &&
+          this.focusedWorkerToolResultIdentity(message) === toolResultIdentity
+      )
+      const assistantId = this.staleWorkerCurrentMessageIdByTurn.get(staleTurnKey)
+      const assistant = !this.staleWorkerAssistantBoundaryByTurn.has(staleTurnKey)
+        ? messages.findLast((message) =>
+            assistantId ? message.id === assistantId : message.id.startsWith(scopeId(""))
+          )
+        : undefined
+      const requestsCall =
+        this.workerAssistantRequestsCall(assistant, kwargs.tool_call_id) ||
+        (assistantId !== undefined &&
+          this.staleWorkerToolCallsByMessageId.get(assistantId)?.has(kwargs.tool_call_id) === true)
+      const resultUpdate = this.classifyWorkerToolResult(
+        toolMessage,
+        this.focusedWorkerToolResultSignature(toolMessage),
+        priorResult ? new Set([this.focusedWorkerToolResultSignature(priorResult)]) : undefined
+      )
+      if (!requestsCall && resultUpdate !== undefined) {
+        return resultUpdate === "correction" ? [toolMessage] : []
+      }
+      this.staleWorkerCurrentMessageIdByTurn.delete(staleTurnKey)
+      this.staleWorkerCurrentProviderSourceIdByTurn.delete(staleTurnKey)
+      this.staleWorkerAssistantBoundaryByTurn.add(staleTurnKey)
+      return [toolMessage]
     }
 
     if (!this.isSerializedAIMessage(msgChunk)) return []
@@ -1254,10 +1274,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
     if (reasoning || reasoningWireMode === "snapshot") {
       this.staleWorkerAssistantReasoningByMessageId.set(messageId, reasoning)
     }
-    const toolCalls = this.accumulateStaleWorkerToolCalls(messageId, kwargs)
+    const toolCallsAreSnapshot = !isChunk && Array.isArray(kwargs.tool_calls)
+    const toolCalls = this.accumulateStaleWorkerToolCalls(messageId, kwargs, toolCallsAreSnapshot)
     if (
       !resolvedContent &&
       !reasoning &&
+      !toolCallsAreSnapshot &&
       toolCalls.length === 0 &&
       contentWireMode !== "snapshot" &&
       reasoningWireMode !== "snapshot"
@@ -1284,7 +1306,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
             worker_provider_wire_ids: [kwargs.id]
           }),
         ...((reasoning || reasoningWireMode === "snapshot") && { reasoning }),
-        ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
+        ...(toolCallsAreSnapshot
+          ? workerToolCallSnapshot(toolCalls)
+          : toolCalls.length > 0 && { tool_calls: toolCalls }),
         created_at: new Date()
       }
     ]
@@ -1346,12 +1370,19 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
   private accumulateStaleWorkerToolCalls(
     messageId: string,
-    kwargs: SerializedMessageChunk["kwargs"]
+    kwargs: SerializedMessageChunk["kwargs"],
+    toolCallsAreSnapshot: boolean
   ): NonNullable<Message["tool_calls"]> {
     let callsById = this.staleWorkerToolCallsByMessageId.get(messageId)
     if (!callsById) {
       callsById = new Map()
       this.staleWorkerToolCallsByMessageId.set(messageId, callsById)
+    }
+    if (toolCallsAreSnapshot) {
+      const declaredIds = new Set(kwargs?.tool_calls?.map((call) => call.id))
+      for (const id of callsById.keys()) {
+        if (!declaredIds.has(id)) callsById.delete(id)
+      }
     }
 
     if (Array.isArray(kwargs?.tool_calls)) {
@@ -2359,7 +2390,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
             }),
           worker_snapshot_index: snapshotIndex,
           ...(reasoning && { reasoning }),
-          ...(Array.isArray(kwargs.tool_calls) && { tool_calls: toolCalls as Message["tool_calls"] }),
+          ...(Array.isArray(kwargs.tool_calls) &&
+            workerToolCallSnapshot(toolCalls as NonNullable<Message["tool_calls"]>)),
           created_at: new Date()
         }
         converted.push(assistant)
@@ -2374,18 +2406,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
       }
 
       if (this.isSerializedToolMessage(message) && kwargs.tool_call_id) {
-        const isError = this.isToolMessageError(kwargs)
         converted.push({
-          id: rawId,
-          role: "tool",
-          content: this.extractContent(kwargs.content),
-          ...providerTuple,
-          worker_snapshot_index: snapshotIndex,
-          tool_call_id: kwargs.tool_call_id,
-          ...(kwargs.name && { name: kwargs.name }),
-          ...(kwargs.status && { status: kwargs.status }),
-          ...(isError && { is_error: true }),
-          created_at: new Date()
+          ...this.createWorkerToolResult(rawId, content, kwargs, providerTuple),
+          worker_snapshot_index: snapshotIndex
         })
       }
     }
@@ -4695,6 +4718,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     className: string
     kwargs: SerializedMessageChunk["kwargs"]
     metadata?: MessageMetadata
+    valuesSnapshot?: boolean
   }): StreamEvent[] {
     const focused = useAppStore.getState().workerFocusView
     if (
@@ -4771,6 +4795,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
     if (isAIMessage) {
       const isChunk = input.className.includes("Chunk")
+      const toolCallsAreSnapshot =
+        (!isChunk || input.valuesSnapshot === true) && Array.isArray(kwargs.tool_calls)
       const extractedContent = this.extractContent(kwargs.content)
       const extractedReasoning = extractVisibleReasoning(kwargs)
       const contentWireMode = readStreamMessageWireMode(
@@ -4914,6 +4940,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       }
 
       const toolCalls = this.hydrateToolCallsWithAccumulatedArgs(kwargs.tool_calls ?? [])
+      if (toolCallsAreSnapshot) this.completedToolCallsByMessageId.delete(msgId)
       if (toolCalls.length) {
         this.rememberCompletedToolCallsForMessage(msgId, toolCalls)
       }
@@ -4924,6 +4951,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
           reasoning ||
           contentWireMode === "snapshot" ||
           reasoningWireMode === "snapshot" ||
+          toolCallsAreSnapshot ||
           toolCalls.length > 0)
       ) {
         for (const deferredToolMessage of this.takeFocusedWorkerDeferredToolMessages(
@@ -4943,6 +4971,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
           reasoning ||
           contentWireMode === "snapshot" ||
           reasoningWireMode === "snapshot" ||
+          toolCallsAreSnapshot ||
           toolCalls.length) &&
         !resolvedProviderMessage?.provisional
       ) {
@@ -4962,7 +4991,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
             ...(typeof kwargs.id === "string" && { worker_provider_wire_ids: [kwargs.id] })
           }),
           ...((reasoning || reasoningWireMode === "snapshot") && { reasoning }),
-          ...(toolCalls.length && { tool_calls: toolCalls as Message["tool_calls"] }),
+          ...(toolCallsAreSnapshot
+            ? workerToolCallSnapshot(toolCalls as NonNullable<Message["tool_calls"]>)
+            : toolCalls.length > 0 && { tool_calls: toolCalls as Message["tool_calls"] }),
           created_at: new Date()
         }
         this.rememberFocusedWorkerReplayCandidate(
@@ -5032,7 +5063,6 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
     if (isToolMessage && kwargs.tool_call_id) {
       const content = this.extractContent(kwargs.content)
-      const isError = this.isToolMessageError(kwargs)
       const msgId =
         (typeof kwargs.id === "string"
           ? this.createFocusedWorkerTurnScopedMessageId(focused.workerThreadId, kwargs.id)
@@ -5046,65 +5076,55 @@ export class ElectronIPCTransport implements UseStreamTransport {
             toolName: kwargs.name
           })
         )
-      const toolResultSignature = this.focusedWorkerToolResultSignature({
-        content,
-        toolCallId: kwargs.tool_call_id,
-        name: kwargs.name,
-        status: kwargs.status,
-        isError
-      })
-      const toolMessage: Message = {
-        id: msgId,
-        role: "tool",
-        content,
-        ...scopedProviderTuple,
-        tool_call_id: kwargs.tool_call_id,
-        ...(kwargs.name && { name: kwargs.name }),
-        ...(kwargs.status && { status: kwargs.status }),
-        ...(isError && { is_error: true }),
-        created_at: new Date()
-      }
+      const toolMessage = this.createWorkerToolResult(msgId, content, kwargs, scopedProviderTuple)
+      const toolResultSignature = this.focusedWorkerToolResultSignature(toolMessage)
       const toolResultIdentity = this.focusedWorkerToolResultIdentity(toolMessage)
       const knownToolMessageSignatures =
         this.workerKnownToolMessageSignatures.get(focused.workerThreadId) ?? new Map()
       const knownSignaturesForId =
         knownToolMessageSignatures.get(toolResultIdentity) ?? new Set<string>()
-      const isKnownToolReplay = knownSignaturesForId.has(toolResultSignature)
       const knownToolResultCallIds =
         this.workerKnownToolResultCallIds.get(focused.workerThreadId) ?? new Set<string>()
       const callWasKnown = knownToolResultCallIds.has(kwargs.tool_call_id)
-      const isKnownToolResultGrowth = this.isFocusedWorkerToolResultGrowth(
-        knownSignaturesForId,
-        {
-          content,
-          toolCallId: kwargs.tool_call_id,
-          name: kwargs.name,
-          status: kwargs.status,
-          isError
-        }
+      const resultUpdate = this.classifyWorkerToolResult(
+        toolMessage,
+        toolResultSignature,
+        knownSignaturesForId
       )
-      const provesRepeatedToolExecution =
-        callWasKnown && !isKnownToolReplay && !isKnownToolResultGrowth
+      const provesRepeatedToolExecution = callWasKnown && resultUpdate === undefined
       const currentAmbiguousReplay = this.workerAmbiguousReplayPins.get(
         focused.workerThreadId
       )
       const deferredAmbiguousReplay = this.workerDeferredAmbiguousReplayPins.get(
         focused.workerThreadId
       )
-      const activeAssistant = isKnownToolReplay
-        ? this.currentFocusedWorkerAssistant(focused.workerThreadId)
-        : undefined
+      const activeAssistantId = this.workerCurrentMessageIds.get(focused.workerThreadId)
+      const activeAssistant = this.currentFocusedWorkerAssistant(focused.workerThreadId)
+      const requestsCall =
+        this.workerAssistantRequestsCall(activeAssistant, kwargs.tool_call_id) ||
+        (activeAssistantId !== undefined &&
+          (this.completedToolCallsByMessageId.get(activeAssistantId)?.has(kwargs.tool_call_id) ||
+            (this.currentChunkMessageId === activeAssistantId &&
+              this.accumulatedToolCalls.has(kwargs.tool_call_id))))
+      knownSignaturesForId.add(toolResultSignature)
+      pruneSetToLimit(knownSignaturesForId, MAX_TRACKED_TOOL_CALLS)
+      knownToolMessageSignatures.set(toolResultIdentity, knownSignaturesForId)
+      pruneMapToLimit(knownToolMessageSignatures, MAX_TRACKED_MESSAGE_TOOL_CALLS)
+      this.workerKnownToolMessageSignatures.set(focused.workerThreadId, knownToolMessageSignatures)
+      knownToolResultCallIds.add(kwargs.tool_call_id)
+      pruneSetToLimit(knownToolResultCallIds, MAX_TRACKED_TOOL_CALLS)
+      this.workerKnownToolResultCallIds.set(focused.workerThreadId, knownToolResultCallIds)
       if (
-        activeAssistant &&
-        !currentAmbiguousReplay &&
-        !deferredAmbiguousReplay &&
-        !activeAssistant.tool_calls?.some(({ id }) => id === kwargs.tool_call_id) &&
-        !this.completedToolCallsByMessageId.get(activeAssistant.id)?.has(kwargs.tool_call_id) &&
-        !(this.currentChunkMessageId === activeAssistant.id &&
-          this.accumulatedToolCalls.has(kwargs.tool_call_id))
+        resultUpdate !== undefined &&
+        !requestsCall &&
+        (toolMessage.worker_provider_identity ||
+          (!currentAmbiguousReplay && !deferredAmbiguousReplay))
       ) {
-        // The identical result already belongs to an earlier tool cycle. It
-        // supplies no new data and must not reset the current assistant stream.
+        if (resultUpdate === "correction") {
+          events.push(
+            this.createCoordinatorWorkerStreamMessageEvent(focused.workerThreadId, toolMessage)
+          )
+        }
         return events
       }
       this.currentChunkMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
@@ -5114,7 +5134,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
             (message) => message.tool_call_id === kwargs.tool_call_id
           )
         ) &&
-        (isKnownToolReplay || isKnownToolResultGrowth)
+        resultUpdate !== undefined
       const shouldDeferAmbiguousTool =
         (!callWasKnown && Boolean(currentAmbiguousReplay || deferredAmbiguousReplay)) ||
         repeatsDeferredPendingCall
@@ -5168,20 +5188,6 @@ export class ElectronIPCTransport implements UseStreamTransport {
           )
         )
       }
-      knownSignaturesForId.add(toolResultSignature)
-      pruneSetToLimit(knownSignaturesForId, MAX_TRACKED_TOOL_CALLS)
-      knownToolMessageSignatures.set(toolResultIdentity, knownSignaturesForId)
-      pruneMapToLimit(knownToolMessageSignatures, MAX_TRACKED_MESSAGE_TOOL_CALLS)
-      this.workerKnownToolMessageSignatures.set(
-        focused.workerThreadId,
-        knownToolMessageSignatures
-      )
-      knownToolResultCallIds.add(kwargs.tool_call_id)
-      pruneSetToLimit(knownToolResultCallIds, MAX_TRACKED_TOOL_CALLS)
-      this.workerKnownToolResultCallIds.set(
-        focused.workerThreadId,
-        knownToolResultCallIds
-      )
       this.workerCurrentMessageIds.delete(focused.workerThreadId)
       this.workerCurrentProviderSourceIds.delete(focused.workerThreadId)
       this.workerInitialTurnAdoptionPending.delete(focused.workerThreadId)
@@ -6072,73 +6078,74 @@ export class ElectronIPCTransport implements UseStreamTransport {
     }
   }
 
+  private createWorkerToolResult(
+    id: string,
+    content: string,
+    kwargs: NonNullable<SerializedMessageChunk["kwargs"]>,
+    providerTuple?: Pick<
+      Message,
+      "provider_source_id" | "provider_occurrence" | "worker_provider_identity"
+    >
+  ): Message {
+    const isError = readWorkerToolResultError(
+      kwargs.status,
+      kwargs.is_error,
+      kwargs.additional_kwargs?.is_error
+    )
+    return {
+      id,
+      role: "tool",
+      content,
+      ...providerTuple,
+      tool_call_id: kwargs.tool_call_id,
+      ...(kwargs.name && { name: kwargs.name }),
+      ...(kwargs.status && { status: kwargs.status }),
+      ...(isError !== undefined && { is_error: isError }),
+      created_at: new Date()
+    }
+  }
+
   private focusedWorkerToolResultIdentity(message: Message): string {
     return JSON.stringify(
       message.worker_provider_identity
-        ? [message.provider_source_id, message.provider_occurrence]
-        : [message.id]
+        ? ["provider", message.provider_source_id, message.provider_occurrence, message.tool_call_id]
+        : ["wire", message.id, message.tool_call_id]
     )
   }
 
-  private focusedWorkerToolResultSignature(input: {
-    content: unknown
-    toolCallId: string
-    name?: string
-    status?: string
-    isError: boolean
-  }): string {
+  private focusedWorkerToolResultSignature(message: Message): string {
     return JSON.stringify({
-      toolCallId: input.toolCallId,
-      name: input.name ?? "",
-      content: input.content,
-      status: input.status ?? "",
-      isError: input.isError
+      name: message.name ?? "",
+      content: message.content,
+      status: message.status ?? "",
+      isError: message.is_error
     })
   }
 
-  private isFocusedWorkerToolResultGrowth(
-    knownSignatures: ReadonlySet<string>,
-    input: {
-      content: unknown
-      toolCallId: string
-      name?: string
-      status?: string
-      isError: boolean
+  private classifyWorkerToolResult(
+    message: Message,
+    signature: string,
+    knownSignatures: ReadonlySet<string> | undefined
+  ): "replay" | "correction" | undefined {
+    if (!knownSignatures?.size) return undefined
+    if (knownSignatures.has(signature)) return "replay"
+    if (message.worker_provider_identity) return "correction"
+
+    // A reused wire ID can also belong to a new tool cycle. Without a declared
+    // occurrence, require compatible text to update the original result.
+    const content = message.content
+    if (typeof content !== "string") return undefined
+    for (const previousSignature of knownSignatures) {
+      const known = JSON.parse(previousSignature) as { name: string; content: unknown }
+      if (known.name && message.name && known.name !== message.name) continue
+      if (typeof known.content !== "string") continue
+      if (content.startsWith(known.content) || known.content.startsWith(content)) return "correction"
     }
-  ): boolean {
-    if (typeof input.content !== "string") return false
-    for (const signature of knownSignatures) {
-      try {
-        const known = JSON.parse(signature) as {
-          toolCallId?: unknown
-          name?: unknown
-          content?: unknown
-          status?: unknown
-          isError?: unknown
-        }
-        if (
-          known.toolCallId !== input.toolCallId ||
-          (typeof known.name === "string" &&
-            known.name &&
-            input.name &&
-            known.name !== input.name) ||
-          typeof known.content !== "string"
-        ) {
-          continue
-        }
-        if (
-          !known.content ||
-          !input.content ||
-          input.content.startsWith(known.content) ||
-          known.content.startsWith(input.content)
-        ) {
-          return true
-        }
-      } catch {
-        // Ignore malformed legacy signatures and require stronger repetition evidence.
-      }
-    }
-    return false
+    return undefined
+  }
+
+  private workerAssistantRequestsCall(message: Message | undefined, callId: string): boolean {
+    return message?.role === "assistant" && message.tool_calls?.some(({ id }) => id === callId) === true
   }
 
   private seedFocusedWorkerAssistantAccumulator(
@@ -6191,7 +6198,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
         ),
         content: message.content || existing.content,
         reasoning: message.reasoning || existing.reasoning,
-        tool_calls: message.tool_calls?.length ? message.tool_calls : existing.tool_calls
+        tool_calls: message.worker_tool_calls_source
+          ? message.tool_calls
+          : message.tool_calls?.length
+            ? message.tool_calls
+            : existing.tool_calls
       }
     } else {
       candidates.push(message)
@@ -6235,6 +6246,30 @@ export class ElectronIPCTransport implements UseStreamTransport {
     messages: readonly Message[],
     workerTurn: number | undefined
   ): void {
+    const activeMessageId = this.workerCurrentMessageIds.get(workerThreadId)
+    const prefix =
+      workerTurn === undefined ? undefined : `worker-turn-${workerThreadId}-${workerTurn}::`
+    const currentTurnMessages = prefix
+      ? messages.filter((message) => message.id.startsWith(prefix) || message.id === activeMessageId)
+      : messages
+    const knownToolMessageSignatures =
+      this.workerKnownToolMessageSignatures.get(workerThreadId) ?? new Map<string, Set<string>>()
+    const knownToolResultCallIds =
+      this.workerKnownToolResultCallIds.get(workerThreadId) ?? new Set<string>()
+    for (const message of currentTurnMessages) {
+      if (message.role !== "tool" || !message.tool_call_id) continue
+      const identity = this.focusedWorkerToolResultIdentity(message)
+      const signatures = knownToolMessageSignatures.get(identity) ?? new Set<string>()
+      signatures.add(this.focusedWorkerToolResultSignature(message))
+      pruneSetToLimit(signatures, MAX_TRACKED_TOOL_CALLS)
+      knownToolMessageSignatures.set(identity, signatures)
+      knownToolResultCallIds.add(message.tool_call_id)
+    }
+    pruneMapToLimit(knownToolMessageSignatures, MAX_TRACKED_MESSAGE_TOOL_CALLS)
+    pruneSetToLimit(knownToolResultCallIds, MAX_TRACKED_TOOL_CALLS)
+    this.workerKnownToolMessageSignatures.set(workerThreadId, knownToolMessageSignatures)
+    this.workerKnownToolResultCallIds.set(workerThreadId, knownToolResultCallIds)
+
     if (typeof workerTurn !== "number" || !Number.isFinite(workerTurn)) {
       const counts = new Map<string, number>()
       const seenProviderEvidence = new Set<string>()
@@ -6281,36 +6316,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
       return
     }
 
-    const prefix = `worker-turn-${workerThreadId}-${workerTurn}::`
-    const activeMessageId = this.workerCurrentMessageIds.get(workerThreadId)
-    const currentTurnMessages = messages.filter(
-      (message) => message.id.startsWith(prefix) || message.id === activeMessageId
-    )
     this.workerProvisionalMessageIds.delete(workerThreadId)
     this.workerReplayPinnedMessageIds.delete(workerThreadId)
     this.workerPendingPinnedReasoning.delete(workerThreadId)
     this.workerAmbiguousReplayPins.delete(workerThreadId)
     this.workerDeferredAmbiguousReplayPins.delete(workerThreadId)
-    const knownToolMessageSignatures = new Map<string, Set<string>>()
-    const knownToolResultCallIds = new Set<string>()
-    for (const message of currentTurnMessages) {
-      if (message.role !== "tool" || !message.tool_call_id) continue
-      const identity = this.focusedWorkerToolResultIdentity(message)
-      const signatures = knownToolMessageSignatures.get(identity) ?? new Set<string>()
-      signatures.add(
-        this.focusedWorkerToolResultSignature({
-          content: message.content,
-          toolCallId: message.tool_call_id,
-          name: message.name,
-          status: message.status,
-          isError: message.is_error === true || message.status === "error"
-        })
-      )
-      knownToolMessageSignatures.set(identity, signatures)
-      knownToolResultCallIds.add(message.tool_call_id)
-    }
-    this.workerKnownToolMessageSignatures.set(workerThreadId, knownToolMessageSignatures)
-    this.workerKnownToolResultCallIds.set(workerThreadId, knownToolResultCallIds)
     const counts = new Map<string, number>()
     const replayCandidates = new Map<string, Message[]>()
     for (const message of currentTurnMessages) {
@@ -6470,8 +6480,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
         workerThreadId,
         new Map(
           Array.from(knownToolMessageSignatures, ([identity, signatures]) => {
-            const [id, ...tuple] = JSON.parse(identity) as [string, ...number[]]
-            return [JSON.stringify([scopeProviderSourceId(id), ...tuple]), signatures]
+            const [kind, id, ...tuple] = JSON.parse(identity) as [string, string, ...unknown[]]
+            return [JSON.stringify([kind, scopeProviderSourceId(id), ...tuple]), signatures]
           })
         )
       )

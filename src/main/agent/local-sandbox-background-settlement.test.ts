@@ -298,7 +298,7 @@ describe("LocalSandbox background-task settlement", () => {
     expect(raw.mock.calls[0][0]).toBe("echo foreground")
   })
 
-  it("stops only desktop shells when another transport owns the same thread", async () => {
+  it.each(["dedicated", "foreground"] as const)("scopes %s Stop to desktop shells", async (stop) => {
     const threadId = "shared-shell-stop-ownership"
     const sandbox = new LocalSandbox({
       rootDir: process.cwd(),
@@ -319,7 +319,7 @@ describe("LocalSandbox background-task settlement", () => {
     )
     const changes = vi.fn()
     const unsubscribe = LocalSandbox.onBackgroundShellChange(changes)
-    const desktopOnly = { desktopOwnedOnly: true }
+    const desktopOnly = { threadRunOwner: "desktop" } as const
 
     try {
       expect(
@@ -334,7 +334,11 @@ describe("LocalSandbox background-task settlement", () => {
 
       const externalPending = sandbox.executeBackground("echo external")
       await vi.waitFor(() => expect(externalSignal).toBeDefined())
-      expect(LocalSandbox.cancelDetachedBackgroundTasks(threadId)).toBe(true)
+      if (stop === "dedicated") {
+        expect(LocalSandbox.cancelDetachedBackgroundTasks(threadId)).toBe(true)
+      } else {
+        LocalSandbox.cancelBackgroundTasks(threadId, desktopOnly)
+      }
       expect(sandbox.getTaskOutput(desktopTask!)).toMatchObject({ exitCode: 130 })
       expect(externalSignal?.aborted).toBe(false)
 
@@ -344,12 +348,18 @@ describe("LocalSandbox background-task settlement", () => {
       const externalStarted = await externalPending
       const externalTask = externalStarted.match(/id:\s*([a-f0-9]+)/i)?.[1]
       expect(externalTask).toBeTruthy()
+      expect(
+        claimLocalThreadRunLease({ threadId, owner: "desktop", runId: "one" }).acquired
+      ).toBe(true)
       desktopExecution.resolve({ output: "finished", exitCode: 0, truncated: false })
       await vi.waitFor(() =>
         expect(LocalSandbox.hasActiveBackgroundTasks(threadId, desktopOnly)).toBe(false)
       )
       expect(LocalSandbox.hasActiveBackgroundTasks(threadId)).toBe(true)
       expect(LocalSandbox.cancelDetachedBackgroundTasks(threadId)).toBe(false)
+      LocalSandbox.cancelBackgroundTasks(threadId, desktopOnly)
+      expect(externalSignal?.aborted).toBe(false)
+      expect(sandbox.getTaskOutput(externalTask!)).toMatchObject({ completed: false })
       externalExecution.resolve({ output: "finished", exitCode: 0, truncated: false })
       await expect(sandbox.waitForTaskOutput(externalTask!)).resolves.toMatchObject({
         status: "completed",

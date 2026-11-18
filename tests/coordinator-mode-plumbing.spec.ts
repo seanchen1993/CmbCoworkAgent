@@ -1619,8 +1619,8 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "LocalSandbox.cancelBackgroundTasks(threadId)",
-    "agent cancel still revokes foreground thread-scoped background tasks for full-turn cancellation"
+    'LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: "desktop" })',
+    "agent cancel revokes desktop-owned shell tasks for full-turn cancellation"
   )
   assertMatches(
     agentIpc,
@@ -3143,7 +3143,7 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   assertSourceOrder(
     threadsIpcForRollback,
     "while (deletingThreads.has(threadId))",
-    "const deletion = performThreadDeletion(event, threadId, options?.groupGuard)",
+    "const deletion = performThreadDeletion(event, threadId, metadata, options)",
     "a new deletion WAITS OUT any in-flight deletion of the same thread before starting"
   )
   assertMatches(

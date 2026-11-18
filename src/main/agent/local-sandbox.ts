@@ -57,8 +57,6 @@ import { withFileOperation, withWorkspaceExecution } from "./file-operation-lock
 import { AUTO_COMMIT_FEATURE_ENABLED, registerWorkspaceShell } from "./shell-auto-commit-lock"
 import type { OrchestratedExecuteOptions, ToolOrchestrator } from "./tool-orchestrator"
 import {
-  SHELL_TASK_MONITOR_TOOL_NAME,
-  SHELL_TASK_OUTPUT_TOOL_NAME,
   ShellTaskMonitor,
   type ShellTaskSnapshot,
   type ShellTaskWaitOptions,
@@ -2947,9 +2945,6 @@ export class LocalSandbox
   private prepareHookContext(context: HookContext): HookContext {
     return {
       ...context,
-      ...(context.toolName === SHELL_TASK_MONITOR_TOOL_NAME && {
-        fallbackToolName: SHELL_TASK_OUTPUT_TOOL_NAME
-      }),
       abortSignal: context.abortSignal ?? this.abortSignal,
       ...(this.pluginOutputDir && !context.pluginOutputDir
         ? { pluginOutputDir: this.pluginOutputDir }
@@ -3071,8 +3066,7 @@ export class LocalSandbox
     const turnId = context.turnId ?? this._hookTurnId
     if (!turnId) return null
 
-    // Both shell output tools share the existing FailureFuse counters.
-    const toolName = context.fallbackToolName ?? context.toolName
+    const toolName = context.toolName
     const threadId = context.sessionId ?? this.runId
     if (!signal) {
       recordToolSuccess({ threadId, turnId, toolName, toolArgs: context.toolArgs })
@@ -6846,7 +6840,7 @@ export class LocalSandbox
   }
 
   private static notifyBackgroundShellChange(threadId: string): void {
-    const active = LocalSandbox.hasActiveBackgroundTasks(threadId, { desktopOwnedOnly: true })
+    const active = LocalSandbox.hasActiveBackgroundTasks(threadId, { threadRunOwner: "desktop" })
     if (active === LocalSandbox.activeBackgroundThreads.has(threadId)) return
     if (active) LocalSandbox.activeBackgroundThreads.add(threadId)
     else LocalSandbox.activeBackgroundThreads.delete(threadId)
@@ -7457,19 +7451,22 @@ export class LocalSandbox
   }
 
   /** Cancel registered tasks and pending starts owned by this thread. */
-  static cancelBackgroundTasks(threadId: string): void {
-    LocalSandbox.cancelBackgroundTasksMatching({ threadId })
+  static cancelBackgroundTasks(
+    threadId: string,
+    { threadRunOwner }: { threadRunOwner?: LocalThreadRunOwner } = {}
+  ): void {
+    LocalSandbox.cancelBackgroundTasksMatching({ threadId, threadRunOwner })
   }
 
   /** The desktop shell Stop control only affects detached desktop commands. */
   static cancelDetachedBackgroundTasks(threadId: string): boolean {
-    if (!LocalSandbox.hasActiveBackgroundTasks(threadId, { desktopOwnedOnly: true })) return false
-    LocalSandbox.cancelBackgroundTasksMatching({
-      threadId,
-      detachedPendingOnly: true,
-      desktopOwnedOnly: true
-    })
-    return true
+    return (
+      LocalSandbox.cancelBackgroundTasksMatching({
+        threadId,
+        detachedPendingOnly: true,
+        threadRunOwner: "desktop"
+      }).length > 0
+    )
   }
 
   /** Deletion also considers child runtimes and tracked foreground shell invocations. */
@@ -7477,11 +7474,11 @@ export class LocalSandbox
     threadId: string,
     {
       includeChildRuns = false,
-      desktopOwnedOnly = false
-    }: { includeChildRuns?: boolean; desktopOwnedOnly?: boolean } = {}
+      threadRunOwner
+    }: { includeChildRuns?: boolean; threadRunOwner?: LocalThreadRunOwner } = {}
   ): boolean {
     const matches = (task: ShellTaskScope): boolean =>
-      (!desktopOwnedOnly || task.threadRunOwner === "desktop") &&
+      (threadRunOwner === undefined || task.threadRunOwner === threadRunOwner) &&
       LocalSandbox.shellBelongsToThread(task, threadId, includeChildRuns)
     for (const pending of LocalSandbox.pendingBackgroundTaskStarts) {
       if ((pending.detached || includeChildRuns) && matches(pending)) return true
@@ -7530,19 +7527,19 @@ export class LocalSandbox
     ownerId,
     includeChildRuns = false,
     detachedPendingOnly = false,
-    desktopOwnedOnly = false
+    threadRunOwner
   }: {
     threadId?: string
     ownerId?: string
     includeChildRuns?: boolean
     detachedPendingOnly?: boolean
-    desktopOwnedOnly?: boolean
+    threadRunOwner?: LocalThreadRunOwner
   }): Promise<void>[] {
     const matches = (task: ShellTaskScope): boolean =>
       (threadId === undefined ||
         LocalSandbox.shellBelongsToThread(task, threadId, includeChildRuns)) &&
       (ownerId === undefined || ownerId === task.ownerId) &&
-      (!desktopOwnedOnly || task.threadRunOwner === "desktop")
+      (threadRunOwner === undefined || task.threadRunOwner === threadRunOwner)
 
     const completions: Promise<void>[] = []
     for (const pending of LocalSandbox.pendingBackgroundTaskStarts) {

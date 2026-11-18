@@ -34,7 +34,7 @@ import {
 import { buildToolResultAssociations } from "@/lib/worker-tool-result-key"
 import {
   mergeWorkerProviderWireIds,
-  replaceSnapshotAliasToolCalls,
+  applyWorkerToolCallSnapshot,
   restoreSnapshotAliasCallsWithResults
 } from "@/lib/snapshot-message-aliases"
 import {
@@ -48,7 +48,7 @@ import {
   preserveWorkerHistoryMessageIdentities,
   MAX_WORKER_HISTORY_MESSAGES
 } from "@/lib/worker-checkpoint-history"
-import type { Message } from "@/types"
+import type { Message, ToolCall } from "@/types"
 import { cn } from "@/lib/utils"
 import {
   buildWorkerMessageWindow,
@@ -389,7 +389,7 @@ function mergeCheckpointAlignedWorkerMessage(
   historyMessage: Message,
   liveMessage: Message,
   id: string,
-  earlierAliasToolCalls: Map<Message, NonNullable<Message["tool_calls"]>>
+  earlierAliasToolCalls: Map<Message, readonly ToolCall[]>
 ): Message {
   const merged = {
     ...historyMessage,
@@ -407,7 +407,7 @@ function mergeCheckpointAlignedWorkerMessage(
     status: liveMessage.status ?? historyMessage.status,
     is_error: liveMessage.is_error ?? historyMessage.is_error
   }
-  return replaceSnapshotAliasToolCalls(historyMessage, liveMessage, merged, earlierAliasToolCalls)
+  return applyWorkerToolCallSnapshot(historyMessage, liveMessage, merged, earlierAliasToolCalls)
 }
 
 // eslint-disable-next-line react-refresh/only-export-components -- exercise the panel's merge with real stream data
@@ -416,7 +416,7 @@ export function mergeWorkerHistoryWithLiveMessages(
   liveMessages: Message[]
 ): Message[] {
   const baseMessages = enrichWorkerProviderIdentities(checkpoint, liveMessages)
-  const earlierAliasToolCalls = new Map<Message, NonNullable<Message["tool_calls"]>>()
+  const earlierAliasToolCalls = new Map<Message, readonly ToolCall[]>()
   if (isCompleteWorkerSnapshotCoveringHistory(baseMessages, liveMessages)) {
     const normalizedLiveMessages = normalizeCompleteMessageIds(liveMessages)
     const historyOffset = normalizedLiveMessages.length - baseMessages.length
@@ -598,7 +598,7 @@ export function mergeWorkerHistoryWithLiveMessages(
         ? live.is_error
         : (live.is_error ?? existing.is_error)
     }
-    merged[index] = replaceSnapshotAliasToolCalls(existing, live, updated, earlierAliasToolCalls)
+    merged[index] = applyWorkerToolCallSnapshot(existing, live, updated, earlierAliasToolCalls)
     if (live.worker_provider_identity && !existing.worker_provider_identity) {
       addExplicitIndex(merged[index], mergedTurnKeys[index], index)
     }

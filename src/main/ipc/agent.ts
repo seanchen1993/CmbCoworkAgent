@@ -434,7 +434,8 @@ import {
   getLocalThreadRunLease,
   releaseLocalThreadRunLease,
   type LocalThreadRunLease,
-  type LocalThreadRunLeaseClaim
+  type LocalThreadRunLeaseClaim,
+  type LocalThreadRunOwner
 } from "../agent/thread-run-lease"
 import { emitAppAttention } from "../app-attention-events"
 import { finishTraceInBackground } from "../agent/trace/collector"
@@ -1428,6 +1429,7 @@ function emitGoalNotice(
 
 function handleGoalNonStartingControlCommand(params: {
   threadId: string
+  runOwner: LocalThreadRunOwner
   command: ReturnType<typeof parseGoalSlashCommand>
   originalMessage?: string
   window: BrowserWindow | null | undefined
@@ -1437,6 +1439,7 @@ function handleGoalNonStartingControlCommand(params: {
 }): GoalControlResult {
   const {
     threadId,
+    runOwner,
     command,
     originalMessage,
     window,
@@ -1506,7 +1509,7 @@ function handleGoalNonStartingControlCommand(params: {
     }
 
     abortActiveRun(threadId)
-    LocalSandbox.cancelBackgroundTasks(threadId)
+    LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: runOwner })
     const goal = goalManager.pause(threadId, "user-paused")
     const pausedReason = displayGoalPausedReason(goal?.pausedReason) || "已手动暂停。"
     const notice = emitGoalNotice(
@@ -1532,7 +1535,7 @@ function handleGoalNonStartingControlCommand(params: {
     const terminatedCurrentRun = existingGoal.status === "active"
     if (existingGoal.status === "active") {
       abortActiveRun(threadId)
-      LocalSandbox.cancelBackgroundTasks(threadId)
+      LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: runOwner })
     }
     goalManager.clear(threadId)
     // Memory hygiene: drop any background-evidence batches parked for the
@@ -1569,6 +1572,14 @@ async function executeAgentGoalControl(
       // Possibly a managed transport's shim; see AgentRunDelivery.window.
       const window = delivery.window
       const activeController = activeRuns.get(threadId)
+      const controlledRunOwner =
+        context.allowForeignOwnerGoalControl && activeController
+          ? getLocalThreadRunLease(threadId)?.owner
+          : undefined
+      const runOwner =
+        controlledRunOwner ??
+        context.localRunLease?.owner ??
+        (context.source === "heartbeat" ? "scheduler" : context.source)
       const channel = activeController
         ? (streamChannelByRunController.get(activeController) ?? `agent:stream:${threadId}`)
         : `agent:stream:${threadId}`
@@ -1580,6 +1591,7 @@ async function executeAgentGoalControl(
       const goalCommand = parseGoalSlashCommand(message)
       const result = handleGoalNonStartingControlCommand({
         threadId,
+        runOwner,
         command: goalCommand,
         originalMessage: message,
         window,
@@ -1625,7 +1637,7 @@ function pauseActiveGoalAfterBoundary(
   }
   const paused = goalManager.pause(threadId, reason)
   if (paused?.status !== "paused") return
-  LocalSandbox.cancelBackgroundTasks(threadId)
+  LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: "desktop" })
   emitGoalNotice(
     window,
     channel,
@@ -5365,7 +5377,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     "agent:has-background-shell",
     (_event, threadId: unknown) =>
       typeof threadId === "string" &&
-      LocalSandbox.hasActiveBackgroundTasks(threadId, { desktopOwnedOnly: true })
+      LocalSandbox.hasActiveBackgroundTasks(threadId, { threadRunOwner: "desktop" })
   )
   ipcMain.handle(
     "agent:cancel-background-shell",
@@ -5837,7 +5849,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   registerActiveAgentRunCanceller((threadId) => {
     const controller = activeRuns.get(threadId)
     if (!controller) return false
-    LocalSandbox.cancelBackgroundTasks(threadId)
+    LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: "desktop" })
     const activeRunToken = turnStates.get(threadId)?.runToken
     if (activeRunToken) flushPendingStreamTranscriptMessages(threadId, activeRunToken)
     controller.abort()
@@ -5873,6 +5885,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         managedExecution,
         coordinatorInternalNotification
       }: AgentInvokeParams = request
+      const runOwner = runExecutionContext.localRunLease?.owner ?? "desktop"
       if (!managedExecution && managedBizRetryService.blocksThread(threadId)) {
         const error = "请在决策入口操作"
         delivery.send(
@@ -5984,6 +5997,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           try {
             const controlResult = handleGoalNonStartingControlCommand({
               threadId,
+              runOwner,
               command: goalCommand,
               originalMessage: message,
               window,
@@ -6199,7 +6213,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
               if (!ensureGoalEvaluatorConfigured()) return
 
-              LocalSandbox.cancelBackgroundTasks(threadId)
+              LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: runOwner })
               const goal = goalManager.set(threadId, validatedGoalText, {
                 context: goalCommand.context
               })
@@ -6234,7 +6248,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const currentGoal = goalManager.get(threadId)
           if (currentGoal?.status === "active") {
             goalManager.pause(threadId, "user message preempted active goal")
-            LocalSandbox.cancelBackgroundTasks(threadId)
+            LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: runOwner })
             emitGoalNotice(
               window,
               channel,
@@ -6723,7 +6737,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
 
         const cancelGoalBackgroundTasks = (): void => {
-          LocalSandbox.cancelBackgroundTasks(threadId)
+          LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: runOwner })
         }
 
         const isAbortLikeError = (error: unknown): boolean =>
@@ -12747,25 +12761,23 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               )
             })
         }
-        const detachedShellActive =
-          !cancelWorkers && !controller && LocalSandbox.hasActiveBackgroundTasks(threadId)
+        const detachedShellCancelled =
+          !cancelWorkers && !controller && LocalSandbox.cancelDetachedBackgroundTasks(threadId)
         if (controller && !cancelWorkers) {
           // Foreground cancellation should stop the active run and any thread-scoped
-          // background tasks it launched. "Stop background workers" uses the same IPC
+          // desktop shell tasks. "Stop background workers" uses the same IPC
           // entrypoint with cancelWorkers=true and must not abort the foreground turn.
-          LocalSandbox.cancelBackgroundTasks(threadId)
+          LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: "desktop" })
           if (activeRunToken) flushPendingStreamTranscriptMessages(threadId, activeRunToken)
           controller.abort()
           // Keep activeRuns populated until the run's finally block resolves activeRunSettled.
           // A user can cancel and immediately send another message; the next invoke must wait
           // for checkpoint/sandbox cleanup before opening a replacement stream.
           console.log(`[Agent] cancel: aborted controller for thread ${threadId}`)
-        } else if (detachedShellActive) {
-          LocalSandbox.cancelBackgroundTasks(threadId)
-        } else if (!controller && !cancelWorkers) {
+        } else if (!detachedShellCancelled && !controller && !cancelWorkers) {
           console.warn(`[Agent] cancel: no active run found for thread ${threadId}`)
         }
-        const cancelled = Boolean(controller && !cancelWorkers) || detachedShellActive
+        const cancelled = Boolean(controller && !cancelWorkers) || detachedShellCancelled
         if (cancelled) handleAutoModeAgentCancelled(threadId)
         else if (workers.length > 0) handleAutoModeAgentCancelled(threadId, "background")
         return cancelled

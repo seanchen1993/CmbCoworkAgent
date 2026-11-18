@@ -140,6 +140,27 @@ describe("failure fuse", () => {
     ).not.toThrow()
   })
 
+  it("resets a shell output failure when either monitor alias succeeds", () => {
+    const input = {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      toolArgs: { task_id: "task-id" },
+      signal: signal(),
+      mode: "warn" as const
+    }
+    expect(recordToolFailure({ ...input, toolName: "task_output" }).count).toBe(1)
+    expect(recordToolFailure({ ...input, toolName: "monitor" }).count).toBe(2)
+
+    recordToolSuccess({
+      threadId: input.threadId,
+      turnId: input.turnId,
+      toolArgs: input.toolArgs,
+      toolName: "monitor"
+    })
+
+    expect(recordToolFailure({ ...input, toolName: "task_output" }).count).toBe(1)
+  })
+
   it("warns on the second same failure and strongly warns on the third within a turn", () => {
     const input = {
       threadId: "thread-1",

@@ -7,7 +7,7 @@ import {
 } from "./worker-message-content"
 import {
   mergeWorkerProviderWireIds,
-  replaceSnapshotAliasToolCalls,
+  applyWorkerToolCallSnapshot,
   restoreSnapshotAliasCallsWithResults
 } from "./snapshot-message-aliases"
 import { create } from "zustand"
@@ -804,7 +804,9 @@ export function mergeWorkerFocusTailUpdate(
     ),
     content: resolveWorkerFocusContent(existing, incomingMessage),
     reasoning: incomingMessage.reasoning ?? existing.reasoning,
-    tool_calls: mergeWorkerToolCalls(existing.tool_calls, incomingMessage.tool_calls),
+    tool_calls: incomingMessage.worker_tool_calls_source
+      ? incomingMessage.tool_calls
+      : mergeWorkerToolCalls(existing.tool_calls, incomingMessage.tool_calls),
     tool_call_id: incomingMessage.tool_call_id ?? existing.tool_call_id,
     name: incomingMessage.name ?? existing.name,
     status: incomingMessage.status ?? existing.status,
@@ -2156,7 +2158,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             ? message.is_error
             : (message.is_error ?? existing.is_error)
         }
-        next[existingIndex] = replaceSnapshotAliasToolCalls(
+        next[existingIndex] = applyWorkerToolCallSnapshot(
           existing,
           message,
           merged,

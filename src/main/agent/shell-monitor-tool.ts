@@ -36,6 +36,7 @@ type ShellMonitorBackend = Pick<
 >
 
 const DEFAULT_TASK_OUTPUT_WAIT_MS = 30_000
+const MAX_TIMER_WAIT_MS = 2_147_483_647
 
 const monitorSchema = z.object({
   task_id: z.string().describe("The task ID returned by execute for a background command"),
@@ -82,6 +83,8 @@ export function createShellTaskMonitorTools(sandbox: ShellMonitorBackend) {
     const ownerId = getShellTaskOwnerId(config)
     const legacy = toolName === SHELL_TASK_OUTPUT_TOOL_NAME
     const defaultTimeout = legacy ? DEFAULT_TASK_OUTPUT_WAIT_MS : undefined
+    // Legacy hooks can request longer waits than the tool's input schema accepts.
+    const maximumTimeout = legacy ? MAX_TIMER_WAIT_MS : SHELL_TASK_MONITOR_MAX_WAIT_MS
     const abortMessage = legacy
       ? "Task polling aborted: conversation was cancelled by user."
       : "Task monitoring aborted: conversation was cancelled by user."
@@ -90,7 +93,8 @@ export function createShellTaskMonitorTools(sandbox: ShellMonitorBackend) {
     const startedAt = performance.now()
     const toolArgs: Record<string, unknown> = { ...input }
     let block = input.block !== false
-    let timeoutMs = block ? (input.timeout ?? defaultTimeout) : 0
+    const inputTimeout = input.timeout ?? defaultTimeout
+    let timeoutMs = block ? inputTimeout : 0
     const workspaceLockDeadline = () =>
       timeoutMs === undefined ? undefined : startedAt + timeoutMs
 
@@ -117,8 +121,8 @@ export function createShellTaskMonitorTools(sandbox: ShellMonitorBackend) {
       const timeout = effectiveArgs.timeout
       timeoutMs =
         typeof timeout === "number" && Number.isFinite(timeout)
-          ? Math.max(0, Math.min(timeout, SHELL_TASK_MONITOR_MAX_WAIT_MS))
-          : (input.timeout ?? defaultTimeout)
+          ? Math.max(0, Math.min(timeout, maximumTimeout))
+          : inputTimeout
       if (!block) timeoutMs = 0
       const deadline = workspaceLockDeadline()
 

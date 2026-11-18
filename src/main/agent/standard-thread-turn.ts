@@ -820,6 +820,8 @@ export function prepareStandardThreadRuntimeFactory(
         },
         input.remotePolicy
       ),
+      // Keep ordinary commands attached to the transport's cancellation and permit.
+      ...(input.runLease.owner !== "desktop" && { autoBackgroundHandoff: false }),
       modelId
     }
   }

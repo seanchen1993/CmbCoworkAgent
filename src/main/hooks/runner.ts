@@ -16,6 +16,7 @@ import { trackEvent } from "../services/event-reporter"
 import { getCurrentHookAgentId } from "./execution-context"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 import { withWorkspaceExecution } from "../agent/file-operation-lock"
+import { canonicalShellTaskMonitorToolName } from "../agent/shell-task-monitor"
 
 /**
  * Resolve the effective timeout (ms) for a hook by consulting the handler-type
@@ -61,8 +62,6 @@ const _regexCache = new Map<string, RegExp | null>()
 
 export interface HookContext {
   toolName?: string
-  /** Prefer this legacy tool name when it meets the hook's criteria. */
-  fallbackToolName?: string
   toolArgs?: Record<string, unknown>
   toolResult?: string
   workspacePath?: string
@@ -1379,8 +1378,14 @@ function matchingHookContext(
   if (!hook.enabled || hook.event !== event || shouldSkipOnceHook(hook, event, context)) {
     return undefined
   }
-  if (context.fallbackToolName) {
-    const legacyContext = { ...context, toolName: context.fallbackToolName }
+  const legacyToolName = canonicalShellTaskMonitorToolName(context.toolName)
+  if (
+    legacyToolName !== context.toolName &&
+    (event === "PreToolUse" || event === "PostToolUse" || event === "PostToolUseFailure")
+  ) {
+    // Preserve the name broad legacy hooks inspect in their payload, and
+    // allow monitor-specific matchers when the hook rejects the legacy name.
+    const legacyContext = { ...context, toolName: legacyToolName }
     if (
       matchesEventMatcher(hook.matcher, event, legacyContext) &&
       matchesIfCondition(hook.if, event, legacyContext)

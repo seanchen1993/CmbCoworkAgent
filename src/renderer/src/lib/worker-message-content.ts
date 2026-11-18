@@ -1,5 +1,20 @@
 import type { Message } from "../types"
 
+export function workerToolCallSnapshot(
+  calls: NonNullable<Message["tool_calls"]>
+): Pick<Message, "tool_calls" | "worker_tool_calls_source"> {
+  return { tool_calls: calls, worker_tool_calls_source: "snapshot" }
+}
+
+export function readWorkerToolResultError(
+  status: string | undefined,
+  ...flags: (boolean | undefined)[]
+): boolean | undefined {
+  if (status === "error" || flags.includes(true)) return true
+  if (status === "success" || flags.includes(false)) return false
+  return undefined
+}
+
 export function parseWorkerTurnScopedId(id: string): { rawId: string; turn: number } | undefined {
   const match = /^worker-turn-.*-(\d+)::(.+)$/.exec(id)
   return match ? { rawId: match[2], turn: Number(match[1]) } : undefined

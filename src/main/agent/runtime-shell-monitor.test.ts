@@ -9,15 +9,18 @@ import type { ChatResult } from "@langchain/core/outputs"
 import { tool } from "langchain"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { z } from "zod"
+import { hookMatchesRunCriteria } from "../hooks/runner"
 import type { HookConfig } from "../hooks/types"
 import type { ApprovalDecision, ApprovalRequest } from "../types"
 import { ApprovalStore } from "./approval-store"
+import { clearFailureFuseTurn } from "./failure-fuse"
 import { LocalSandbox, type LocalSandboxOptions } from "./local-sandbox"
 import { getShellTaskOwnerId, SHELL_TASK_OWNER_CONFIG_KEY } from "./shell-monitor-tool"
 import {
   cleanupChildRuntimeResources,
   createDeepAgent,
   createGradedToolConcurrencyMiddleware,
+  createRuntimeToolFailureHandler,
   createRuntimeToolDenylistMiddleware,
   wrapTaskToolWithOwnerMetadata
 } from "./runtime"
@@ -47,15 +50,15 @@ class ReplayModel extends BaseChatModel {
   }
 }
 
-function requestTool(name: string, args: Record<string, unknown>): AIMessage {
-  return requestTools([[name, args]])
+function requestTool(name: string, args: Record<string, unknown>, id?: string): AIMessage {
+  return requestTools([[name, args, id]])
 }
 
-function requestTools(calls: Array<[string, Record<string, unknown>]>): AIMessage {
+function requestTools(calls: Array<[string, Record<string, unknown>, string?]>): AIMessage {
   return new AIMessage({
     content: "",
-    tool_calls: calls.map(([name, args]) => ({
-      id: "call-" + name,
+    tool_calls: calls.map(([name, args, id]) => ({
+      id: id ?? "call-" + name,
       type: "tool_call",
       name,
       args
@@ -80,7 +83,7 @@ async function fixture(options: Partial<LocalSandboxOptions> = {}) {
     await LocalSandbox.cancelBackgroundTasksAndWait(sandbox.runId)
     await rm(root, { recursive: true, force: true, maxRetries: 5 })
   })
-  return { sandbox, physicalExit }
+  return { root, sandbox, physicalExit }
 }
 
 function watchTaskTermination(sandbox: LocalSandbox, physicalExit: Promise<void>) {
@@ -111,6 +114,171 @@ afterEach(async () => {
 })
 
 describe("shell monitor runtime dispatch", () => {
+  it.each(["schema", "exception"] as const)(
+    "dispatches %s failures once per matching Hook with shared alias counters",
+    async (failure) => {
+      vi.stubEnv("CMB_AGENT_FAILURE_FUSE_WARN", "1")
+      const { root, sandbox } = await fixture()
+      const turnId = "runtime-monitor-" + failure
+      const hooks: HookConfig[] = [
+        { id: "legacy", matcher: "^task_output$", if: "task_output(*)" },
+        { id: "monitor", matcher: "^monitor$", if: "monitor(*)" },
+        { id: "both", matcher: "^(monitor|task_output)$" },
+        { id: "broad", matcher: "*" }
+      ].map((hook) => ({
+        ...hook,
+        event: "PostToolUseFailure",
+        enabled: true,
+        type: "http",
+        url: "https://hooks.invalid/" + hook.id,
+        createdAt: "",
+        updatedAt: ""
+      }))
+      const hookCalls = vi.fn()
+      vi.stubGlobal("fetch", async (url: string, request: RequestInit) => {
+        hookCalls(new URL(url).pathname.slice(1), JSON.parse(String(request.body)))
+        return Response.json({})
+      })
+      const dispatch = vi.fn(
+        createRuntimeToolFailureHandler(
+          { sessionId: sandbox.runId, turnId, workspacePath: root },
+          (event, context) => hooks.filter((hook) => hookMatchesRunCriteria(hook, event, context))
+        )
+      )
+      const read = vi.spyOn(sandbox, "getTaskOutput").mockImplementation(() => {
+        throw new Error("Shell task store read failed")
+      })
+      const names = ["monitor", "task_output", "monitor"]
+      let index = 0
+      const args =
+        failure === "schema" ? { task_id: 42 } : { task_id: "probe", block: false }
+      const agent = createDeepAgent({
+        model: new ReplayModel(() => {
+          const name = names[index]
+          return name
+            ? requestTool(name, args, turnId + "-" + index++)
+            : new AIMessage({ content: "Finished", response_metadata: { finish_reason: "stop" } })
+        }),
+        backend: sandbox,
+        mainTodosEnabled: false,
+        mainSubagentsEnabled: false,
+        onToolFailureSignal: dispatch
+      })
+
+      try {
+        const result = await agent.invoke({ messages: [new HumanMessage("Check task output")] })
+        const outputs = result.messages.filter((message: BaseMessage) =>
+          ToolMessage.isInstance(message)
+        )
+        expect(outputs).toHaveLength(3)
+        expect(outputs.every((message: ToolMessage) => message.status === "error")).toBe(true)
+        expect(read).toHaveBeenCalledTimes(failure === "schema" ? 0 : 3)
+        expect(dispatch.mock.calls.map(([input]) => input.toolName)).toEqual(names)
+        const decisions = dispatch.mock.results.map(({ value }) => value)
+        expect(decisions.map((decision) => decision?.count)).toEqual([1, 2, 3])
+        expect(decisions.map((decision) => decision?.toolName)).toEqual(
+          Array(3).fill("task_output")
+        )
+        expect(new Set(decisions.map((decision) => decision?.fingerprint)).size).toBe(1)
+        const messages = dispatch.mock.calls.map(([input]) => input.signal.message)
+        expect(new Set(messages).size).toBe(1)
+        expect(messages[0]).toContain(
+          failure === "schema" ? "did not match expected schema" : "Shell task store read failed"
+        )
+        expect(hookCalls.mock.calls).toEqual(
+          names.flatMap((name, index) =>
+            hooks
+              .filter(({ id }) => name === "monitor" || id !== "monitor")
+              .map(({ id }) => [
+                id,
+                expect.objectContaining({
+                  tool_name: id === "monitor" ? "monitor" : "task_output",
+                  tool_response: expect.objectContaining({
+                    error: messages[0],
+                    is_interrupt: false,
+                    tool_use_id: turnId + "-" + index
+                  })
+                })
+              ])
+          )
+        )
+      } finally {
+        clearFailureFuseTurn(sandbox.runId, turnId)
+      }
+    }
+  )
+
+  it("dispatches an aborted monitor wait under the legacy Hook name without tripping the fuse", async () => {
+    vi.stubEnv("CMB_AGENT_FAIL_FAST", "1")
+    const { root, sandbox, physicalExit } = await fixture()
+    watchTaskTermination(sandbox, physicalExit.promise)
+    const started = await sandbox.executeBackground("echo probe")
+    const taskId = started.match(/\bid: (\w+)/)?.[1] ?? ""
+    expect(taskId).not.toBe("")
+    const hook: HookConfig = {
+      id: "interrupt",
+      event: "PostToolUseFailure",
+      matcher: "^task_output$",
+      enabled: true,
+      type: "http",
+      url: "https://hooks.invalid/interrupt",
+      createdAt: "",
+      updatedAt: ""
+    }
+    const onHookResult = vi.fn()
+    const fetchHook = vi.fn<(url: string, request: RequestInit) => Promise<Response>>(async () =>
+      Response.json({})
+    )
+    vi.stubGlobal("fetch", fetchHook)
+    const dispatch = vi.fn(
+      createRuntimeToolFailureHandler(
+        { sessionId: sandbox.runId, turnId: "monitor-interruption", workspacePath: root },
+        () => [hook],
+        onHookResult
+      )
+    )
+    const agent = createDeepAgent({
+      model: new ReplayModel(() =>
+        requestTool("monitor", { task_id: taskId }, "monitor-interrupted-call")
+      ),
+      backend: sandbox,
+      mainTodosEnabled: false,
+      mainSubagentsEnabled: false,
+      onToolFailureSignal: dispatch
+    })
+    const wait = vi.spyOn(sandbox, "waitForTaskOutput")
+    const abort = new AbortController()
+    const run = agent.invoke(
+      { messages: [new HumanMessage("Wait for the command")] },
+      { signal: abort.signal }
+    )
+    const rejected = expect(run).rejects.toThrow()
+    try {
+      await vi.waitFor(() => expect(wait).toHaveBeenCalledOnce())
+    } finally {
+      abort.abort()
+    }
+    await rejected
+    await vi.waitFor(() =>
+      expect(onHookResult).toHaveBeenCalledExactlyOnceWith(
+        "PostToolUseFailure",
+        hook,
+        expect.anything()
+      )
+    )
+    expect(dispatch.mock.results[0]?.value).toMatchObject({
+      action: "observe",
+      count: 0,
+      toolName: "task_output"
+    })
+    expect(fetchHook).toHaveBeenCalledOnce()
+    const [, { body }] = fetchHook.mock.calls[0]
+    expect(JSON.parse(String(body))).toMatchObject({
+      tool_name: "task_output",
+      tool_response: { failure_kind: "abort", is_interrupt: true, is_timeout: false }
+    })
+  })
+
   it("waits for a child's physical shell exit before releasing runtime resources", async () => {
     const { sandbox, physicalExit } = await fixture({ shellParentThreadId: "parent" })
     const cancelled = watchTaskTermination(sandbox, physicalExit.promise)

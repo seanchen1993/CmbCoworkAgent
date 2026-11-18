@@ -144,6 +144,41 @@ describe("Team panel history and live messages", () => {
     }
   )
 
+  it("shows success when a live result corrects an error from the checkpoint", () => {
+    const call = { id: "call", name: "read_file", args: { path: "probe.txt" } }
+    const prompt = new HumanMessage({ id: "prompt", content: "Prompt" })
+    const request = new AIMessage({ id: "call-wire", content: "Calling", tool_calls: [call] })
+    const result = (id: string, content: string, status: "error" | "success") =>
+      new ToolMessage({
+        id,
+        content,
+        status,
+        tool_call_id: call.id,
+        additional_kwargs: declaredAnswer(id, content).additional_kwargs
+      })
+    const history = buildWorkerCheckpointHistory(
+      [prompt, request, result("result-a", "Read failed", "error")],
+      worker
+    ).messages
+    const live = new ElectronIPCTransport().convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        type: "stream",
+        mode: "messages",
+        workerTurn: 1,
+        data: [result("result-b", "Read succeeded", "success").toJSON(), {}]
+      },
+      parent
+    )
+
+    const merged = mergeWorkerHistoryWithLiveMessages(history, live)
+    expect(merged.filter(({ role }) => role === "tool")).toMatchObject([
+      { content: "Read succeeded", status: "success", is_error: false }
+    ])
+    expect([...buildToolResultAssociations(merged).values()]).toEqual([
+      { content: "Read succeeded", is_error: false }
+    ])
+  })
+
   it("adopts live provider metadata for an earlier reply with the same wire ID", () => {
     const history = checkpointHistory(new AIMessage({ id: "first-wire-id", content: "Draft" }))
     const live = appendLiveAnswer("first-wire-id", "Updated answer", true)

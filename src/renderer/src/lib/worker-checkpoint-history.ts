@@ -7,7 +7,12 @@ import {
   normalizeCompleteMessageIds
 } from "../../../shared/message-role-collision"
 import { coalesceSnapshotMessageAliases } from "./snapshot-message-aliases"
-import { compatibleWorkerProviderIdentity, parseWorkerTurnScopedId } from "./worker-message-content"
+import {
+  compatibleWorkerProviderIdentity,
+  parseWorkerTurnScopedId,
+  readWorkerToolResultError,
+  workerToolCallSnapshot
+} from "./worker-message-content"
 
 export const MAX_WORKER_HISTORY_MESSAGES = 500
 
@@ -280,11 +285,12 @@ function messageFromCheckpoint(
   const toolCallId = message.tool_call_id ?? message.kwargs?.tool_call_id
   const toolName = message.name ?? message.kwargs?.name
   const toolStatus = message.status ?? message.kwargs?.status
-  const isToolError =
-    message.is_error === true ||
-    message.kwargs?.is_error === true ||
-    additionalKwargs?.is_error === true ||
-    toolStatus === "error"
+  const isToolError = readWorkerToolResultError(
+    toolStatus,
+    message.is_error,
+    message.kwargs?.is_error,
+    typeof additionalKwargs?.is_error === "boolean" ? additionalKwargs.is_error : undefined
+  )
   const wireId = message.kwargs?.id ?? (typeof message.id === "string" ? message.id : undefined)
   const rawMessageId = wireId ?? createWorkerSnapshotFallbackMessageId(index)
   const messageId =
@@ -313,11 +319,11 @@ function messageFromCheckpoint(
             )
           : providerTuple.provider_source_id
     }),
-    tool_calls: toolCalls,
+    ...(role === "assistant" && Array.isArray(toolCalls) && workerToolCallSnapshot(toolCalls)),
     ...(role === "tool" && toolCallId && { tool_call_id: toolCallId }),
     ...(role === "tool" && toolName && { name: toolName }),
     ...(role === "tool" && toolStatus && { status: toolStatus }),
-    ...(role === "tool" && isToolError && { is_error: true }),
+    ...(role === "tool" && isToolError !== undefined && { is_error: isToolError }),
     created_at: new Date()
   }
 }

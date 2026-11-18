@@ -1,5 +1,6 @@
 import { createHash } from "crypto"
 import type { ToolFailureSignal } from "../hooks/tool-failure"
+import { canonicalShellTaskMonitorToolName } from "./shell-task-monitor"
 
 export type FailureFuseAction = "observe" | "warn" | "strong_warn" | "halt"
 export type FailureFuseMode = "off" | "warn" | "debug"
@@ -234,7 +235,7 @@ function toolArgsKey(toolArgs: unknown): string {
 
 export function buildToolFailureFingerprint(input: FailureFuseInput): string {
   return [
-    input.toolName ?? "<unknown-tool>",
+    canonicalShellTaskMonitorToolName(input.toolName) ?? "<unknown-tool>",
     input.signal.kind,
     input.signal.errorType,
     normalizeMessage(input.signal.message),
@@ -246,7 +247,7 @@ export function buildToolFailureFingerprint(input: FailureFuseInput): string {
 
 function buildToolFailureObservationFingerprint(input: FailureFuseInput): string {
   return [
-    input.toolName ?? "<unknown-tool>",
+    canonicalShellTaskMonitorToolName(input.toolName) ?? "<unknown-tool>",
     input.signal.kind,
     input.signal.errorType,
     normalizeMessage(input.signal.message)
@@ -279,6 +280,7 @@ function decisionReason(
 
 export function recordToolFailure(input: FailureFuseInput): FailureFuseDecision {
   const threshold = input.mode === "debug" ? DEBUG_THRESHOLD : WARN_THRESHOLD
+  const toolName = canonicalShellTaskMonitorToolName(input.toolName)
 
   if (input.mode === "off") {
     const fingerprint = buildToolFailureObservationFingerprint(input)
@@ -288,7 +290,7 @@ export function recordToolFailure(input: FailureFuseInput): FailureFuseDecision 
       count: 0,
       threshold: 0,
       reason: "工具失败提醒未开启，未记录失败计数。",
-      toolName: input.toolName,
+      toolName,
       lastError: input.signal.message
     }
   }
@@ -301,7 +303,7 @@ export function recordToolFailure(input: FailureFuseInput): FailureFuseDecision 
       count: 0,
       threshold,
       reason: "用户取消或中断不计入工具错误熔断。",
-      toolName: input.toolName,
+      toolName,
       lastError: input.signal.message
     }
   }
@@ -316,7 +318,7 @@ export function recordToolFailure(input: FailureFuseInput): FailureFuseDecision 
   const state: FailureFuseState = existing ?? {
     threadId: input.threadId,
     turnId: input.turnId,
-    toolName: input.toolName,
+    toolName,
     toolArgsKey: argsKey,
     count: 0,
     firstSeenAt: now,
@@ -343,7 +345,7 @@ export function recordToolFailure(input: FailureFuseInput): FailureFuseDecision 
     count: state.count,
     threshold,
     reason: decisionReason(action, state.count, threshold, fingerprint),
-    toolName: input.toolName,
+    toolName,
     lastError: input.signal.message
   }
 }
@@ -356,12 +358,13 @@ export function recordToolSuccess(input: {
 }): void {
   if (states.size === 0) return
 
+  const toolName = canonicalShellTaskMonitorToolName(input.toolName)
   const candidateKeys: string[] = []
   for (const [key, state] of states) {
     if (
       state.threadId === input.threadId &&
       state.turnId === input.turnId &&
-      (!input.toolName || state.toolName === input.toolName)
+      (!toolName || state.toolName === toolName)
     ) {
       candidateKeys.push(key)
     }

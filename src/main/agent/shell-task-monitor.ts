@@ -12,6 +12,10 @@ export function isShellTaskMonitorToolName(
   return name === SHELL_TASK_MONITOR_TOOL_NAME || name === SHELL_TASK_OUTPUT_TOOL_NAME
 }
 
+export function canonicalShellTaskMonitorToolName(name: string | undefined): string | undefined {
+  return isShellTaskMonitorToolName(name) ? SHELL_TASK_OUTPUT_TOOL_NAME : name
+}
+
 export function expandShellTaskMonitorToolDenials(blocked: Set<string>): Set<string> {
   if (SHELL_TASK_MONITOR_TOOL_NAMES.some((name) => blocked.has(name))) {
     for (const name of SHELL_TASK_MONITOR_TOOL_NAMES) blocked.add(name)

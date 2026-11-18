@@ -152,6 +152,30 @@ describe("shell monitor tools", () => {
     }
   })
 
+  it("preserves hook-supplied legacy waits over ten minutes", async () => {
+    const backend = createBackend()
+    const [monitor, taskOutput] = createShellTaskMonitorTools(backend)
+    const updatedInput = { timeout: 1_200_000 }
+    const input = { task_id: "task", timeout: 10_000 }
+    backend.runPreToolUseHookForTool.mockResolvedValue({
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      blocked: false,
+      updatedInput
+    })
+
+    await expect(taskOutput.invoke({ ...input, ...updatedInput })).rejects.toThrow()
+    await expect(monitor.invoke(input)).resolves.toContain("exit code 0")
+    await expect(taskOutput.invoke(input)).resolves.toContain("exit code 0")
+    const [monitorTimeout, legacyTimeout] = backend.waitForTaskOutput.mock.calls.map(
+      ([, options]) => options?.timeoutMs
+    )
+    expect(monitorTimeout).toBeLessThanOrEqual(600_000)
+    expect(legacyTimeout).toBeGreaterThan(600_000)
+    expect(legacyTimeout).toBeLessThanOrEqual(updatedInput.timeout)
+  })
+
   it("prefers the internal child invocation owner over provider tool-call attribution", async () => {
     const backend = createBackend()
     const [monitor] = createShellTaskMonitorTools(backend)
