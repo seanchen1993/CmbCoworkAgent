@@ -120,9 +120,10 @@ function migrationState() {
 
 function pauseAtCommittedBatch(shouldPause: () => boolean): void {
   const cancellation = new SharedArrayBuffer(4)
+  const flag = new Int32Array(cancellation)
   const load = Atomics.load
   const spy = vi.spyOn(Atomics, "load").mockImplementation((target, index) => {
-    if (target.buffer === cancellation && shouldPause()) Atomics.store(target, index, 1)
+    if (target.buffer === cancellation && shouldPause()) Atomics.store(flag, 0, 1)
     return load(target, index)
   })
   try {
