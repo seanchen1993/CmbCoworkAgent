@@ -3,10 +3,12 @@ import { Bot, RefreshCw } from "lucide-react"
 import {
   BOT_CHANNELS,
   BOT_RUN_KINDS,
+  type BotActiveUsersPage,
   type BotOverviewData
 } from "../../../../../shared/bots/telemetry"
 import type { Granularity, TimeRange } from "../use-dashboard"
 import { InfoHint } from "./dashboard-shared"
+import { BotActiveUsersMetric } from "./BotActiveUsersMetric"
 
 const count = (n: number) => n.toLocaleString("zh-CN")
 const duration = (ms: number | null) =>
@@ -84,7 +86,7 @@ export function BotOverviewPanel({
                   间交办及结果回传触发的处理轮次，不是发送消息条数。群内普通发言和讨论归入对话处理。
                 </p>
                 <p>
-                  活跃 Bot 和使用账号采用 ES 去重估算；账号指 App 登录账号，不是招乎群成员人数。
+                  活跃 Bot 和活跃用户采用 ES 去重估算。活跃用户按 App 登录账号统计。
                 </p>
               </div>
             }
@@ -110,20 +112,46 @@ export function BotOverviewPanel({
           当前范围暂无 Bot 统计。升级后的使用记录上报后将在这里展示。
         </p>
       ) : (
-        <BotMetrics data={data} />
+        <BotMetrics
+          key={JSON.stringify([range.from, range.to, granularity, orgKey, refreshKey, retry])}
+          data={data}
+          loadActiveUsers={async (cursor) => {
+            const result = await window.api.dashboard.botActiveUsers(
+              range,
+              granularity,
+              { upperOrgLv1: JSON.parse(orgKey) },
+              cursor
+            )
+            if (!result.success || !result.data)
+              throw new Error(result.error ?? "Bot 用户列表暂时不可用")
+            return result.data
+          }}
+        />
       )}
     </section>
   )
 }
 
-export function BotMetrics({ data }: { data: BotOverviewData }) {
+function Metric({ label, value, hint }: { label: string; value: string; hint: string }) {
+  return (
+    <div>
+      <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
+        {label}
+        <InfoHint content={<p className="max-w-xs">{hint}</p>} />
+      </div>
+      <div className="mt-1 text-xl font-semibold tabular-nums">{value}</div>
+    </div>
+  )
+}
+
+export function BotMetrics({
+  data,
+  loadActiveUsers
+}: {
+  data: BotOverviewData
+  loadActiveUsers(cursor?: string): Promise<BotActiveUsersPage>
+}) {
   const metrics = [
-    ["活跃 Bot", count(data.activeBots), "本期开始处理的 Bot（去重估算）"],
-    [
-      "使用账号",
-      count(data.activeOwners),
-      "发生活跃执行的 App 登录账号（去重估算），不代表群成员人数"
-    ],
     ["处理轮次", count(data.started), "本期开始的逻辑处理轮次，暂停恢复不会重复计数"],
     [
       "正常结束率",
@@ -141,14 +169,14 @@ export function BotMetrics({ data }: { data: BotOverviewData }) {
   return (
     <div className="space-y-5">
       <div className="grid grid-cols-2 gap-x-5 gap-y-4 lg:grid-cols-3 xl:grid-cols-6">
+        <Metric
+          label="活跃 Bot"
+          value={count(data.activeBots)}
+          hint="本期开始处理的 Bot（去重估算）"
+        />
+        <BotActiveUsersMetric value={count(data.activeOwners)} loadPage={loadActiveUsers} />
         {metrics.map(([label, value, hint]) => (
-          <div key={label}>
-            <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
-              {label}
-              <InfoHint content={<p className="max-w-xs">{hint}</p>} />
-            </div>
-            <div className="mt-1 text-xl font-semibold tabular-nums">{value}</div>
-          </div>
+          <Metric key={label} label={label} value={value} hint={hint} />
         ))}
       </div>
       <div className="grid gap-6 border-t border-border pt-4 lg:grid-cols-2">

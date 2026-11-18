@@ -50,3 +50,18 @@ export interface BotOverviewData {
   channels: { key: keyof typeof BOT_CHANNELS; count: number }[]
   runKinds: { key: keyof typeof BOT_RUN_KINDS; count: number }[]
 }
+
+export interface BotActiveUsersPage {
+  items: {
+    sapId: string
+    userName?: string
+    organization?: string
+    activeBots: number
+    /** Successful Zhaohu group binding events observed during the selected period. */
+    zhaohuGroupBindings: number
+    assignedWorks: number
+    chatRuns: number
+    lastActiveAt?: string
+  }[]
+  nextCursor: string | null
+}

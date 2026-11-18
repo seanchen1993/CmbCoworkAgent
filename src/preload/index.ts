@@ -4163,6 +4163,16 @@ const api = {
       opts?: { upperOrgLv1?: string | string[] | null }
     ): Promise<{ success: boolean; data?: import("../shared/bots/telemetry").BotOverviewData; error?: string }> =>
       ipcRenderer.invoke("dashboard:botOverview", range, granularity, opts),
+    botActiveUsers: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | string[] | null },
+      cursor?: string
+    ): Promise<{
+      success: boolean
+      data?: import("../shared/bots/telemetry").BotActiveUsersPage
+      error?: string
+    }> => ipcRenderer.invoke("dashboard:botActiveUsers", range, granularity, opts, cursor),
     overview: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",

@@ -105,7 +105,16 @@ import {
   type DashboardSkillCodeAdoptionStats
 } from "./dashboard-code-stats"
 import { emptyOrgValueClauses, isMissingOrgValue, readOrgText } from "./dashboard-org-fields"
-import { buildBotMetricsQuery, makeMockBotOverview, parseBotMetrics } from "./dashboard-bot-metrics"
+import {
+  addBotActiveUserActivityCounts,
+  buildBotActiveUserActivityQuery,
+  buildBotActiveUsersQuery,
+  buildBotMetricsQuery,
+  makeMockBotActiveUsers,
+  makeMockBotOverview,
+  parseBotActiveUsers,
+  parseBotMetrics
+} from "./dashboard-bot-metrics"
 import {
   computeKnowledgeCommitRate,
   formatKnowledgeApiTime,
@@ -3305,6 +3314,32 @@ async function fetchOverview(
 }
 
 async function fetchBotOverview(range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) {
+  const filters = botOverviewFilters(range, granularity, opts)
+  return parseBotMetrics(
+    await esQuery(getEsIndex("event"), buildBotMetricsQuery(filters), {
+      outputByteLimit: 256 * 1024
+    })
+  )
+}
+
+async function fetchBotActiveUsers(
+  range: TimeRange,
+  granularity: Granularity,
+  opts?: OrgFilterOptions,
+  cursor?: string
+) {
+  const filters = botOverviewFilters(range, granularity, opts)
+  const index = getEsIndex("event")
+  const options = { outputByteLimit: 64 * 1024 }
+  const raw = await esQuery(index, buildBotActiveUsersQuery(filters, cursor), options)
+  const page = parseBotActiveUsers(raw, cursor)
+  if (!page.items.length) return { items: [], nextCursor: null }
+  const sapIds = page.items.map((user) => user.sapId)
+  const activity = await esQuery(index, buildBotActiveUserActivityQuery(filters, sapIds), options)
+  return addBotActiveUserActivityCounts(page, activity)
+}
+
+function botOverviewFilters(range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions) {
   const access = requireDashboardAccess()
   const duration = Date.parse(range?.to) - Date.parse(range?.from)
   if (
@@ -3315,11 +3350,7 @@ async function fetchBotOverview(range: TimeRange, granularity: Granularity, opts
   const filters = [timeRangeFilter("eventTime", range)]
   appendOptionalFilter(filters, buildTraceAccessFilter(access))
   appendOptionalFilter(filters, buildUpperOrgLv1ListFilter(normalizeUpperOrgLv1List(opts?.upperOrgLv1)))
-  return parseBotMetrics(
-    await esQuery(getEsIndex("event"), buildBotMetricsQuery(filters), {
-      outputByteLimit: 256 * 1024
-    })
-  )
+  return filters
 }
 
 async function fetchModelStats(
@@ -16372,6 +16403,31 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchBotOverview(range, granularity, opts) }
       } catch (e) {
         logDashboardRequestError("botOverview", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:botActiveUsers",
+    async (_, range: TimeRange, granularity: Granularity, opts?: OrgFilterOptions, cursor?: string) => {
+      try {
+        if (import.meta.env.DEV) {
+          const organizations = normalizeUpperOrgLv1List(opts?.upperOrgLv1)
+          const names = (organizations.length ? organizations : makeMockOrgOptions()).map(
+            (organization) =>
+              isUnclassifiedOrgToken(organization) ? DASHBOARD_UNCLASSIFIED_LABEL : organization
+          )
+          return {
+            success: true,
+            data: makeMockBotActiveUsers(range, getMockOrgScale(opts), cursor, names)
+          }
+        }
+        return { success: true, data: await fetchBotActiveUsers(range, granularity, opts, cursor) }
+      } catch (e) {
+        if (isDashboardRequestCancelled(e) || isDashboardEsRequestCancelled(e)) throw e
+        logDashboardRequestError("botActiveUsers", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

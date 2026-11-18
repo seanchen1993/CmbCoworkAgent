@@ -2857,6 +2857,16 @@ interface CustomAPI {
       granularity: "day" | "week" | "month" | "custom",
       opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{ success: boolean; data?: import("../shared/bots/telemetry").BotOverviewData; error?: string }>
+    botActiveUsers: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | string[] | null },
+      cursor?: string
+    ) => Promise<{
+      success: boolean
+      data?: import("../shared/bots/telemetry").BotActiveUsersPage
+      error?: string
+    }>
     overview: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
