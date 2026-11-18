@@ -208,6 +208,13 @@ export function RequirementFunctionCard({
   onPreviewFile?: (filePath: string) => void
   onOpenDetails?: () => void
 }): React.JSX.Element {
+  const seenKeywords = new Set<string>()
+  const uniqueKeywords = functionInfo.keywords.filter((keyword) => {
+    const normalized = keyword.trim().toLocaleLowerCase()
+    if (!normalized || seenKeywords.has(normalized)) return false
+    seenKeywords.add(normalized)
+    return true
+  })
   const card = (
     <article
       role={onOpenDetails ? "button" : undefined}
@@ -276,14 +283,14 @@ export function RequirementFunctionCard({
             <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-muted-foreground">
               {functionInfo.description || "暂无功能描述"}
             </p>
-            {functionInfo.keywords.length > 0 ? (
+            {uniqueKeywords.length > 0 ? (
               <div className="mt-2 flex flex-wrap gap-1.5">
-                {functionInfo.keywords.map((keyword, keywordIndex) => (
+                {uniqueKeywords.map((keyword) => (
                   <span
-                    key={`${functionInfo.fr || functionInfo.id}-${keyword}-${keywordIndex}`}
+                    key={`${functionInfo.fr || functionInfo.id}-${keyword.trim().toLocaleLowerCase()}`}
                     className="inline-flex rounded border border-border/70 bg-muted/30 px-1.5 py-0.5 text-[11px] text-muted-foreground"
                   >
-                    {keyword}
+                    {keyword.trim()}
                   </span>
                 ))}
               </div>
