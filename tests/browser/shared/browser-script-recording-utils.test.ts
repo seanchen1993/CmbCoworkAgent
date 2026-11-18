@@ -2,13 +2,36 @@ import { describe, expect, it } from "vitest"
 import {
   applyScriptRecordingVariableValues,
   buildScriptExecutableScript,
+  extractScriptRecordingPanelWidth,
   extractScriptRecordingVariables,
   generateScriptRecording,
   parseScriptRecordingScript,
-  stabilizeDynamicElementUiOverlayLocators
+  stabilizeDynamicElementUiOverlayLocators,
+  withScriptRecordingPanelWidth
 } from "../../../src/shared/browser-script-recording"
 
 describe("browser script recording", () => {
+  it("stores and reads the Browser panel width in generated scripts", () => {
+    const script = generateScriptRecording([], { source: "script", panelWidth: 864.4 })
+
+    expect(script).toContain("// cmb-browser-panel-width: 864")
+    expect(extractScriptRecordingPanelWidth(script)).toBe(864)
+  })
+
+  it("treats historical scripts without panel width metadata as unspecified", () => {
+    expect(
+      extractScriptRecordingPanelWidth('test("old recording", async () => {});')
+    ).toBeUndefined()
+  })
+
+  it("updates the recorded width after the Browser panel is dragged", () => {
+    const initial = generateScriptRecording([], { source: "script", panelWidth: 720 })
+    const updated = withScriptRecordingPanelWidth(initial, 936)
+
+    expect(extractScriptRecordingPanelWidth(updated)).toBe(936)
+    expect(updated.match(/cmb-browser-panel-width/g)).toHaveLength(1)
+  })
+
   it("preserves a contentFrame locator when its text target becomes a variable", () => {
     const script = `import { test } from "@playwright/test";
 

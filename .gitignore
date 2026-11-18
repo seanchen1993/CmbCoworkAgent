@@ -53,3 +53,5 @@ chrome-extension/
 chrome-extension.zip
 
 playwright-main/
+.workbuddy/
+docs/in-app-browser

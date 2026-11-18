@@ -36,11 +36,11 @@ import {
 interface BrowserScriptRecordingControlsProps {
   browserCreated: boolean
   currentUrl?: string | null
+  getPanelWidth?: () => number | undefined
   threadId?: string | null
   workspacePath?: string | null
 }
 
-const RECORDING_POLL_MS = 800
 const EMPTY_SCRIPT_RECORDING: BrowserRecordingSession = {
   source: "script",
   status: "idle",
@@ -86,6 +86,7 @@ function waitForBrowserPanelRender(): Promise<void> {
 export function BrowserScriptRecordingControls({
   browserCreated,
   currentUrl,
+  getPanelWidth,
   threadId,
   workspacePath
 }: BrowserScriptRecordingControlsProps): React.JSX.Element {
@@ -171,11 +172,12 @@ export function BrowserScriptRecordingControls({
 
       return generateScriptRecording(nextActions, {
         source: "script",
+        panelWidth: scriptRecording.panelWidth,
         variableActionIds: namedVariableActionIds,
         variableActionNames: nextVariableActionNames
       })
     },
-    [scriptRecording.actions]
+    [scriptRecording.actions, scriptRecording.panelWidth]
   )
 
   const refreshScriptRecording = useCallback(async () => {
@@ -260,14 +262,8 @@ export function BrowserScriptRecordingControls({
   }, [])
 
   useEffect(() => {
-    if (scriptRecording.status !== "recording" || !recordingDialogOpen) return
-    const interval = window.setInterval(() => {
-      void refreshScriptRecording()
-    }, RECORDING_POLL_MS)
-    return () => {
-      window.clearInterval(interval)
-    }
-  }, [recordingDialogOpen, scriptRecording.status, refreshScriptRecording])
+    return window.api.browser.onScriptRecordingState(setScriptRecording)
+  }, [])
 
   useEffect(() => {
     const nextSelectionSyncKey = [
@@ -289,6 +285,7 @@ export function BrowserScriptRecordingControls({
       scriptRecording.script ||
         generateScriptRecording(scriptRecording.actions, {
           source: "script",
+          panelWidth: scriptRecording.panelWidth,
           variableActionIds: nextVariableActionIds,
           variableActionNames: nextVariableActionNames
         })
@@ -350,6 +347,7 @@ export function BrowserScriptRecordingControls({
     try {
       const nextSession = await window.api.browser.startScriptRecording({
         currentUrl: currentUrl ?? undefined,
+        panelWidth: getPanelWidth?.(),
         threadId: threadId ?? undefined
       })
       setScriptRecording(nextSession)
@@ -364,12 +362,12 @@ export function BrowserScriptRecordingControls({
     } finally {
       setIsBusy(false)
     }
-  }, [currentUrl, threadId])
+  }, [currentUrl, getPanelWidth, threadId])
 
   const pauseScriptRecordingSession = useCallback(async () => {
     setIsBusy(true)
     try {
-      const nextSession = await window.api.browser.pauseScriptRecording()
+      const nextSession = await window.api.browser.pauseScriptRecording(getPanelWidth?.())
       setScriptRecording(nextSession)
       setRecordingDialogOpen(true)
       toast.success("操作录制已暂停")
@@ -381,7 +379,7 @@ export function BrowserScriptRecordingControls({
     } finally {
       setIsBusy(false)
     }
-  }, [])
+  }, [getPanelWidth])
 
   const resumeScriptRecordingSession = useCallback(async () => {
     setIsBusy(true)
@@ -404,7 +402,7 @@ export function BrowserScriptRecordingControls({
     setIsBusy(true)
     try {
       if (!(await persistActiveDraftIfNeeded())) return
-      const nextSession = await window.api.browser.stopScriptRecording()
+      const nextSession = await window.api.browser.stopScriptRecording(getPanelWidth?.())
       setScriptRecording(nextSession)
       setHasPendingUnsaved(true)
       setRecordingDialogOpen(true)
@@ -421,7 +419,7 @@ export function BrowserScriptRecordingControls({
     } finally {
       setIsBusy(false)
     }
-  }, [persistActiveDraftIfNeeded])
+  }, [getPanelWidth, persistActiveDraftIfNeeded])
 
   const loadScriptLibraryEntries = useCallback(async (): Promise<BrowserScriptLibraryEntry[]> => {
     setIsScriptLibraryLoading(true)
@@ -947,6 +945,7 @@ export function BrowserScriptRecordingControls({
       try {
         const nextSession = await window.api.browser.startScriptRecording({
           threadId: threadId ?? undefined,
+          panelWidth: getPanelWidth?.(),
           seedScript: script,
           libraryFileName: entry.fileName,
           libraryDisplayName: entry.displayName
@@ -969,7 +968,7 @@ export function BrowserScriptRecordingControls({
         setLoadingLibraryAction(null)
       }
     },
-    [scriptSessionIsActive, threadId]
+    [getPanelWidth, scriptSessionIsActive, threadId]
   )
 
   const markRecordingEdited = useCallback(() => {

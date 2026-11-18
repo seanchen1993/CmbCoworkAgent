@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react"
 import { RightPanel } from "@/components/panels/RightPanel"
 import { OverlayDrawer } from "@/components/panels/OverlayDrawer"
+import { BROWSER_PANEL_RESTORE_WIDTH_EVENT } from "@/components/panels/useRightPanelLayout"
 import { useBrowserViewLifecycle } from "@/components/browser/useBrowserViewLifecycle"
 import { useAppStore } from "@/lib/store"
 import { getBrowserPageConfirmation } from "@/lib/browser-page-confirmation"
@@ -148,6 +149,8 @@ export function ResourcePanelOverlay({
       open={open}
       title={mode === "git" ? "Git 面板" : mode === "browser" ? "内置浏览器" : "文件预览"}
       onClose={closeFromUser}
+      defaultWidth={mode === "browser" ? "55%" : 720}
+      widthRestoreEvent={mode === "browser" ? BROWSER_PANEL_RESTORE_WIDTH_EVENT : undefined}
     >
       <RightPanel
         threadId={overlayThreadId}

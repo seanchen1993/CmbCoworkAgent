@@ -12,6 +12,13 @@ export interface OverlayDrawerProps {
   ariaLabel?: string
   onClose: () => void
   children: ReactNode
+  defaultWidth?: number | `${number}%`
+  widthRestoreEvent?: string
+}
+
+function resolveDrawerWidth(width: number | `${number}%`): number {
+  if (typeof width === "number") return width
+  return (window.innerWidth * Number.parseFloat(width)) / 100
 }
 
 export function OverlayDrawer({
@@ -19,12 +26,15 @@ export function OverlayDrawer({
   title,
   ariaLabel,
   onClose,
-  children
+  children,
+  defaultWidth = DEFAULT_DRAWER_WIDTH,
+  widthRestoreEvent
 }: OverlayDrawerProps): React.JSX.Element | null {
   const [present, setPresent] = useState(open)
   const [leaving, setLeaving] = useState(false)
-  const [width, setWidth] = useState(DEFAULT_DRAWER_WIDTH)
+  const [width, setWidth] = useState(() => resolveDrawerWidth(defaultWidth))
   const dragStartRef = useRef<{ clientX: number; width: number } | null>(null)
+  const previousDefaultWidthRef = useRef(defaultWidth)
 
   const clampWidth = useCallback((nextWidth: number): number => {
     const viewportMax = Math.max(MIN_DRAWER_WIDTH, window.innerWidth * MAX_VIEWPORT_WIDTH_RATIO)
@@ -71,6 +81,28 @@ export function OverlayDrawer({
     },
     [clampWidth, width]
   )
+
+  useEffect(() => {
+    if (previousDefaultWidthRef.current === defaultWidth) return
+    previousDefaultWidthRef.current = defaultWidth
+    setWidth(clampWidth(resolveDrawerWidth(defaultWidth)))
+  }, [clampWidth, defaultWidth])
+
+  useEffect(() => {
+    if (!widthRestoreEvent) return
+    const restoreWidth = (event: Event): void => {
+      const requestedWidth = (event as CustomEvent<{ panelWidth?: number }>).detail?.panelWidth
+      setWidth(
+        clampWidth(
+          typeof requestedWidth === "number" && requestedWidth > 0
+            ? requestedWidth
+            : resolveDrawerWidth(defaultWidth)
+        )
+      )
+    }
+    window.addEventListener(widthRestoreEvent, restoreWidth)
+    return () => window.removeEventListener(widthRestoreEvent, restoreWidth)
+  }, [clampWidth, defaultWidth, widthRestoreEvent])
 
   useEffect(() => {
     if (open) {

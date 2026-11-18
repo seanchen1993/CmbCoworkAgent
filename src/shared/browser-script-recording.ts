@@ -50,6 +50,25 @@ export interface ScriptRecordingOptions {
   variableActionIds?: Iterable<string>
   variableActionNames?: Record<string, string>
   source?: BrowserRecordingSource
+  panelWidth?: number
+}
+
+const BROWSER_PANEL_WIDTH_METADATA_PATTERN = /^\s*\/\/\s*cmb-browser-panel-width:\s*(\d+)\s*$/imu
+
+export function extractScriptRecordingPanelWidth(script: string): number | undefined {
+  const value = Number(BROWSER_PANEL_WIDTH_METADATA_PATTERN.exec(script)?.[1])
+  return Number.isFinite(value) && value > 0 ? Math.round(value) : undefined
+}
+
+export function withScriptRecordingPanelWidth(script: string, panelWidth: number): string {
+  const metadata = `// cmb-browser-panel-width: ${Math.round(panelWidth)}`
+  if (BROWSER_PANEL_WIDTH_METADATA_PATTERN.test(script)) {
+    return script.replace(BROWSER_PANEL_WIDTH_METADATA_PATTERN, metadata)
+  }
+  const importEnd = script.indexOf("\n")
+  return importEnd >= 0
+    ? `${script.slice(0, importEnd + 1)}${metadata}\n${script.slice(importEnd + 1)}`
+    : `${metadata}\n${script}`
 }
 
 interface VariableDescriptor {
@@ -1462,7 +1481,14 @@ export function generateScriptRecording(
       : "  // No supported Playwright browser actions were recorded."
   const testName = source === "script" ? "recorded script flow" : "legacy recorded flow"
 
-  return `import { test } from "@playwright/test";
+  const panelWidthMetadata =
+    typeof options.panelWidth === "number" &&
+    Number.isFinite(options.panelWidth) &&
+    options.panelWidth > 0
+      ? `\n// cmb-browser-panel-width: ${Math.round(options.panelWidth)}`
+      : ""
+
+  return `import { test } from "@playwright/test";${panelWidthMetadata}
 
 ${variableDeclarations ? `${variableDeclarations}\n` : ""}
 

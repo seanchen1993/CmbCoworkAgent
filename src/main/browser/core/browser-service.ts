@@ -1,16 +1,20 @@
 import {
+  app,
   BrowserWindow,
+  shell,
   WebContentsView,
   type CookiesSetDetails,
   type Rectangle,
+  type Session,
   type WebContents
 } from "electron"
 import { existsSync } from "fs"
-import { posix, resolve, win32 } from "path"
+import { basename, extname, isAbsolute, join, posix, relative, resolve, win32 } from "path"
 import { pathToFileURL } from "url"
 import {
   BUILTIN_BROWSER_LOG_PREFIX,
   BROWSER_PANEL_REQUEST_CHANNEL,
+  BROWSER_DOWNLOADS_CHANGED_CHANNEL,
   BROWSER_SESSION_ID
 } from "../../../shared/browser-types"
 import {
@@ -26,6 +30,8 @@ import type {
   BrowserBounds,
   BrowserConsoleEntry,
   BrowserConsoleLevel,
+  BrowserDownloadRecord,
+  BrowserDownloadsChangedPayload,
   BrowserNavigateOptions,
   BrowserProfileImportSkipReason,
   BrowserProfileImportSkippedWebsite,
@@ -45,6 +51,72 @@ const MIN_BROWSER_ZOOM_FACTOR = 0.25
 const MAX_BROWSER_ZOOM_FACTOR = 5
 const BROWSER_SERVICE_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[BrowserService]`
 const MAX_EXTRACTED_IFRAME_LINKS = 100
+const configuredDownloadSessions = new WeakSet<Session>()
+
+function safeDownloadFileName(fileName: string): string {
+  const leafName = basename(win32.basename(fileName.trim()))
+  const sanitized = leafName.replace(/[<>:"/\\|?*\u0000-\u001f]/gu, "_").replace(/[ .]+$/gu, "")
+  if (!sanitized || sanitized === "." || sanitized === "..") return "download"
+
+  const extension = extname(sanitized)
+  const stem = extension ? sanitized.slice(0, -extension.length) : sanitized
+  return /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/iu.test(stem) ? `_${sanitized}` : sanitized
+}
+
+export function resolveAvailableBrowserDownloadPath(
+  downloadsDirectory: string,
+  fileName: string,
+  isPathTaken: (path: string) => boolean = existsSync
+): string {
+  const safeFileName = safeDownloadFileName(fileName)
+  const extension = extname(safeFileName)
+  const stem = extension ? safeFileName.slice(0, -extension.length) : safeFileName
+  let candidate = join(downloadsDirectory, safeFileName)
+  let suffix = 1
+  while (isPathTaken(candidate)) {
+    candidate = join(downloadsDirectory, `${stem} (${suffix})${extension}`)
+    suffix += 1
+  }
+  return candidate
+}
+
+function configureAutomaticBrowserDownloads(
+  browserSession: Session,
+  onDownloadChanged: (record: BrowserDownloadRecord, completed: boolean) => void
+): void {
+  if (configuredDownloadSessions.has(browserSession)) return
+  configuredDownloadSessions.add(browserSession)
+  const activePaths = new Set<string>()
+
+  browserSession.on("will-download", (_event, item) => {
+    const savePath = resolveAvailableBrowserDownloadPath(
+      app.getPath("downloads"),
+      item.getFilename(),
+      (candidate) => existsSync(candidate) || activePaths.has(candidate)
+    )
+    activePaths.add(savePath)
+    item.setSavePath(savePath)
+    const record: BrowserDownloadRecord = {
+      id: `browser-download-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      fileName: item.getFilename(),
+      savePath,
+      status: "progressing",
+      startedAt: new Date().toISOString()
+    }
+    onDownloadChanged(record, false)
+    item.once("done", (_doneEvent, state) => {
+      activePaths.delete(savePath)
+      record.status = state
+      record.endedAt = new Date().toISOString()
+      onDownloadChanged(record, state === "completed")
+      if (state === "completed") {
+        console.log(`${BROWSER_SERVICE_LOG_PREFIX} Download saved to ${savePath}.`)
+      } else {
+        console.warn(`${BROWSER_SERVICE_LOG_PREFIX} Download ${state}: ${savePath}.`)
+      }
+    })
+  })
+}
 
 function buildIframeExtractionScript(options: {
   textOffset: number
@@ -369,8 +441,87 @@ function getChannel(sessionId: string): string {
 
 export class BrowserService {
   private activeSession: BrowserSession | null = null
+  private readonly downloadRecords: BrowserDownloadRecord[] = []
+  private hasUnreadCompletedDownload = false
 
   constructor(private readonly getMainWindow: () => BrowserWindow | null) {}
+
+  getDownloads(): BrowserDownloadsChangedPayload {
+    return {
+      records: this.downloadRecords.map((record) => ({ ...record })),
+      hasUnreadCompleted: this.hasUnreadCompletedDownload
+    }
+  }
+
+  markDownloadsRead(): BrowserDownloadsChangedPayload {
+    this.hasUnreadCompletedDownload = false
+    return this.getDownloads()
+  }
+
+  restoreDownloads(snapshot: BrowserDownloadsChangedPayload): BrowserDownloadsChangedPayload {
+    const downloadsDirectory = resolve(this.getDownloadDirectory())
+    const restored = Array.isArray(snapshot.records)
+      ? snapshot.records.flatMap((candidate) => {
+          if (!candidate || typeof candidate !== "object") return []
+          const savePath = resolve(String(candidate.savePath ?? ""))
+          const relativePath = relative(downloadsDirectory, savePath)
+          if (!relativePath || relativePath.startsWith("..") || isAbsolute(relativePath)) return []
+          const status =
+            candidate.status === "completed" ||
+            candidate.status === "cancelled" ||
+            candidate.status === "interrupted"
+              ? candidate.status
+              : "interrupted"
+          return [
+            {
+              id: String(candidate.id || `browser-download-restored-${Date.now()}`),
+              fileName: safeDownloadFileName(String(candidate.fileName || basename(savePath))),
+              savePath,
+              status,
+              startedAt: String(candidate.startedAt || new Date().toISOString()),
+              endedAt: candidate.endedAt ? String(candidate.endedAt) : undefined
+            } satisfies BrowserDownloadRecord
+          ]
+        })
+      : []
+    const currentIds = new Set(this.downloadRecords.map((record) => record.id))
+    const merged = [
+      ...this.downloadRecords,
+      ...restored.filter((record) => !currentIds.has(record.id))
+    ].slice(0, 100)
+    this.downloadRecords.splice(0, this.downloadRecords.length, ...merged)
+    this.hasUnreadCompletedDownload ||= snapshot.hasUnreadCompleted === true
+    return this.getDownloads()
+  }
+
+  getDownloadDirectory(): string {
+    return app.getPath("downloads")
+  }
+
+  async openDownloadDirectory(): Promise<boolean> {
+    return (await shell.openPath(this.getDownloadDirectory())) === ""
+  }
+
+  showDownloadInFolder(downloadId: string): boolean {
+    const record = this.downloadRecords.find((candidate) => candidate.id === downloadId)
+    if (!record) return false
+    shell.showItemInFolder(record.savePath)
+    return true
+  }
+
+  private updateDownload(record: BrowserDownloadRecord, completed: boolean): void {
+    const index = this.downloadRecords.findIndex((candidate) => candidate.id === record.id)
+    if (index >= 0) this.downloadRecords[index] = { ...record }
+    else this.downloadRecords.unshift({ ...record })
+    if (this.downloadRecords.length > 100) this.downloadRecords.length = 100
+    if (completed) this.hasUnreadCompletedDownload = true
+    const window = this.getMainWindow()
+    if (!window || window.isDestroyed()) return
+    window.webContents.send(BROWSER_DOWNLOADS_CHANGED_CHANNEL, {
+      ...this.getDownloads(),
+      completedId: completed ? record.id : undefined
+    })
+  }
 
   appendConsoleEntry(input: {
     level: BrowserConsoleLevel
@@ -537,7 +688,16 @@ export class BrowserService {
       return this.getState()
     }
 
-    if (boundsChanged) session.view.setBounds(nextBounds)
+    if (boundsChanged) {
+      try {
+        session.view.setBounds(nextBounds)
+      } catch (error) {
+        console.warn(
+          `${BROWSER_SERVICE_LOG_PREFIX} Ignored bounds update for a disposed browser view: ${formatError(error)}.`
+        )
+        return this.getState()
+      }
+    }
     if (visibilityChanged) session.view.setVisible(nextVisible)
     if (nextVisible && (boundsChanged || visibilityChanged)) {
       this.invalidateSession(session)
@@ -704,9 +864,13 @@ export class BrowserService {
     }
   }
 
-  requestPanel(threadId?: string): void {
+  requestPanel(threadId?: string, panelWidth?: number, restoreDefaultPanelWidth = false): void {
     const window = this.getUsableWindow()
-    window.webContents.send(BROWSER_PANEL_REQUEST_CHANNEL, { threadId })
+    window.webContents.send(BROWSER_PANEL_REQUEST_CHANNEL, {
+      threadId,
+      panelWidth,
+      restoreDefaultPanelWidth
+    })
   }
 
   getState(): BrowserState {
@@ -779,6 +943,9 @@ export class BrowserService {
     })
     view.setBackgroundColor("#ffffff")
     view.setVisible(false)
+    configureAutomaticBrowserDownloads(view.webContents.session, (record, completed) =>
+      this.updateDownload(record, completed)
+    )
 
     const session: BrowserSession = {
       id: sessionId,

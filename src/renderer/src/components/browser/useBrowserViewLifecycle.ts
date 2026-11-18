@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from "react"
 import { BUILTIN_BROWSER_LOG_PREFIX, BROWSER_SESSION_ID } from "../../../../shared/browser-types"
 import { hasOpenModalDialog, MODAL_DIALOG_CHANGE_EVENT } from "@/lib/modal-dialog"
 import { useAppStore } from "@/lib/store"
+import { BROWSER_PANEL_RESTORE_WIDTH_EVENT } from "@/components/panels/useRightPanelLayout"
 
 const HIDDEN_BROWSER_BOUNDS = { x: 0, y: 0, width: 0, height: 0 }
 const BROWSER_APP_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[App]`
@@ -139,6 +140,13 @@ export function useBrowserViewLifecycle({
         mainView === "harness" ? harnessSessionThreadId : (currentThreadId ?? overlayThreadId)
       if (requestedThreadId && activeThreadId && requestedThreadId !== activeThreadId) return
       if (requestedThreadId && !activeThreadId) return
+      if (request.panelWidth !== undefined || request.restoreDefaultPanelWidth) {
+        window.dispatchEvent(
+          new CustomEvent(BROWSER_PANEL_RESTORE_WIDTH_EVENT, {
+            detail: { panelWidth: request.panelWidth }
+          })
+        )
+      }
       onRequestBrowserPanel()
     })
   }, [currentThreadId, harnessSessionThreadId, mainView, onRequestBrowserPanel, overlayThreadId])

@@ -4,7 +4,8 @@ import { getCurrentBrowserCdpPort } from "../../cdp/browser-cdp"
 import { getGlobalBrowserService } from "../../core/browser-service-registry"
 import {
   applyScriptRecordingVariableValues,
-  buildScriptExecutableScript
+  buildScriptExecutableScript,
+  extractScriptRecordingPanelWidth
 } from "../../../../shared/browser-script-recording"
 import type {
   BrowserScriptExecutionInput,
@@ -317,6 +318,7 @@ async function waitForBrowserPanelPage(
 async function connectInAppBrowser(options: {
   threadId?: string | null
   workspacePath?: string | null
+  panelWidth?: number
   isCancelled: () => boolean
 }): Promise<{
   browser: PlaywrightBrowser
@@ -333,7 +335,7 @@ async function connectInAppBrowser(options: {
     throw new Error("Browser CDP endpoint is not configured")
   }
 
-  browserService.requestPanel(options.threadId ?? undefined)
+  browserService.requestPanel(options.threadId ?? undefined, options.panelWidth, true)
   const targetState = await browserService.prepareTarget({
     workspacePath: options.workspacePath ?? undefined,
     visible: true
@@ -467,6 +469,7 @@ export async function executeRecordingScriptInBuiltinBrowser(
     const { browser, context, page } = await connectInAppBrowser({
       threadId: input.threadId,
       workspacePath: input.workspacePath,
+      panelWidth: extractScriptRecordingPanelWidth(script),
       isCancelled: () => executionController.cancelled
     })
     const wrapPlaybackValue = createUploadAwarePlaybackWrapper(input.workspacePath)

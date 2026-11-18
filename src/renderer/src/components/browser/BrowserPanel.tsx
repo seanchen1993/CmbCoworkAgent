@@ -262,6 +262,7 @@ export function BrowserPanel({
   reloadToken,
   onFullscreenChange
 }: BrowserPanelProps): React.JSX.Element {
+  const panelRef = useRef<HTMLDivElement>(null)
   const viewportRef = useRef<HTMLDivElement>(null)
   const lastBoundsRef = useRef<BrowserBounds | null>(null)
   const lastBrowserViewVisibleRef = useRef<boolean | null>(null)
@@ -836,7 +837,7 @@ export function BrowserPanel({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background">
+    <div ref={panelRef} className="flex h-full min-h-0 flex-col overflow-hidden bg-background">
       <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border bg-background-elevated px-2">
         <BrowserOptionsMenu
           browserCreated={state.created}
@@ -1005,6 +1006,10 @@ export function BrowserPanel({
           <BrowserScriptRecordingControls
             browserCreated={state.created}
             currentUrl={state.url}
+            getPanelWidth={() => {
+              const width = panelRef.current?.getBoundingClientRect().width
+              return width && width > 0 ? Math.round(width) : undefined
+            }}
             threadId={threadId}
             workspacePath={workspacePath}
           />

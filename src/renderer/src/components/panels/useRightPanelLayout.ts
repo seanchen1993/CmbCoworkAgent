@@ -6,7 +6,8 @@ const RIGHT_MIN = 250
 const RIGHT_MAX = 1600
 const RIGHT_DEFAULT = 300
 const RIGHT_PREVIEW_EXPAND_VW = 0.35
-const BROWSER_DEFAULT_WIDTH = "50%"
+const BROWSER_DEFAULT_WIDTH = "55%"
+export const BROWSER_PANEL_RESTORE_WIDTH_EVENT = "browser-panel-restore-width"
 const BROWSER_FULLSCREEN_RIGHT_DEFAULT_PERCENT = 66.67
 const BROWSER_FULLSCREEN_MIN_PANEL_PERCENT = 20
 const BROWSER_FULLSCREEN_MAX_PANEL_PERCENT = 80
@@ -174,6 +175,22 @@ export function useRightPanelLayout({ rightModule }: UseRightPanelLayoutOptions)
     }
     handlePreviewExpand()
   }, [applyNormalPanelWidth, handlePreviewCollapse, handlePreviewExpand, rightModule])
+
+  useEffect(() => {
+    const restoreBrowserPanelWidth = (event: Event): void => {
+      const requestedWidth = (event as CustomEvent<{ panelWidth?: number }>).detail?.panelWidth
+      const width =
+        typeof requestedWidth === "number" && Number.isFinite(requestedWidth) && requestedWidth > 0
+          ? Math.min(RIGHT_MAX, Math.max(RIGHT_MIN, requestedWidth))
+          : null
+      browserRightWidthRef.current = width
+      setBrowserRightWidth(width)
+      if (rightModule === "browser") applyNormalPanelWidth(width ?? BROWSER_DEFAULT_WIDTH)
+    }
+    window.addEventListener(BROWSER_PANEL_RESTORE_WIDTH_EVENT, restoreBrowserPanelWidth)
+    return () =>
+      window.removeEventListener(BROWSER_PANEL_RESTORE_WIDTH_EVENT, restoreBrowserPanelWidth)
+  }, [applyNormalPanelWidth, rightModule])
 
   useEffect(() => {
     const handleMouseUp = (): void => {

@@ -10,7 +10,8 @@ import type {
 } from "../../../../shared/browser-types"
 import {
   generateScriptRecording,
-  parseScriptRecordingScript
+  parseScriptRecordingScript,
+  withScriptRecordingPanelWidth
 } from "../../../../shared/browser-script-recording"
 import {
   buildPlaywrightScriptRecorderInjectionScript,
@@ -22,6 +23,7 @@ import {
 
 let activeSession: BrowserRecordingSession | null = null
 let lastSession: BrowserRecordingSession | null = null
+const recordingStateListeners = new Set<(session: BrowserRecordingSession) => void>()
 let nextSessionNumber = 0
 let nextActionNumber = 0
 let pendingExplicitNavigation: { expiresAt: number; url?: string } | null = null
@@ -505,6 +507,15 @@ function appendAction(session: BrowserRecordingSession, action: BrowserRecordedA
   session.actions.push(action)
 }
 
+function appendActionAndEmit(
+  session: BrowserRecordingSession,
+  action: BrowserRecordedAction
+): void {
+  appendAction(session, action)
+  const view = toView(session)
+  for (const listener of recordingStateListeners) listener(view)
+}
+
 function cloneAction(action: BrowserRecordedAction): BrowserRecordedAction {
   return {
     ...action,
@@ -541,6 +552,7 @@ function toView(session: BrowserRecordingSession | null): BrowserRecordingSessio
         ? session.scriptPrefix
         : generateScriptRecording(session.actions, {
             source: "script",
+            panelWidth: session.panelWidth,
             variableActionIds: session.variableActionIds,
             variableActionNames: session.variableActionNames
           })
@@ -757,6 +769,12 @@ export function startScriptRecording(
     scriptPrefixActionCount: seedScript ? seededRecording.actions.length : undefined,
     libraryFileName: readString(options.libraryFileName),
     libraryDisplayName: readString(options.libraryDisplayName),
+    panelWidth:
+      typeof options.panelWidth === "number" &&
+      Number.isFinite(options.panelWidth) &&
+      options.panelWidth > 0
+        ? Math.round(options.panelWidth)
+        : undefined,
     actions: seededRecording.actions,
     variableActionIds: seededRecording.variableActionIds,
     variableActionNames: seededRecording.variableActionNames,
@@ -768,7 +786,7 @@ export function startScriptRecording(
 
   const currentUrl = readString(options.currentUrl ?? undefined)
   if (!seedScript && currentUrl && currentUrl !== "about:blank") {
-    appendAction(activeSession, buildNavigationAction(currentUrl))
+    appendActionAndEmit(activeSession, buildNavigationAction(currentUrl))
   }
 
   pendingExplicitNavigation = null
@@ -776,9 +794,27 @@ export function startScriptRecording(
   return toView(activeSession)
 }
 
-export function pauseScriptRecording(): BrowserRecordingSession {
+function updateActiveSessionPanelWidth(panelWidth?: number): void {
+  if (
+    !activeSession ||
+    typeof panelWidth !== "number" ||
+    !Number.isFinite(panelWidth) ||
+    panelWidth <= 0
+  )
+    return
+  activeSession.panelWidth = Math.round(panelWidth)
+  if (activeSession.scriptPrefix) {
+    activeSession.scriptPrefix = withScriptRecordingPanelWidth(
+      activeSession.scriptPrefix,
+      activeSession.panelWidth
+    )
+  }
+}
+
+export function pauseScriptRecording(panelWidth?: number): BrowserRecordingSession {
   if (!activeSession || activeSession.status !== "recording")
     return toView(activeSession ?? lastSession)
+  updateActiveSessionPanelWidth(panelWidth)
   activeSession.status = "paused"
   pendingExplicitNavigation = null
   return toView(activeSession)
@@ -814,9 +850,10 @@ export function resumeScriptRecording(): BrowserRecordingSession {
   return toView(activeSession)
 }
 
-export function stopScriptRecording(): BrowserRecordingSession {
+export function stopScriptRecording(panelWidth?: number): BrowserRecordingSession {
   if (!activeSession) return toView(lastSession)
 
+  updateActiveSessionPanelWidth(panelWidth)
   activeSession.status = "completed"
   activeSession.stoppedAt = now()
   pendingExplicitNavigation = null
@@ -830,6 +867,13 @@ export function getScriptRecording(): BrowserRecordingSession {
   return toView(activeSession ?? lastSession)
 }
 
+export function onScriptRecordingChange(
+  listener: (session: BrowserRecordingSession) => void
+): () => void {
+  recordingStateListeners.add(listener)
+  return () => recordingStateListeners.delete(listener)
+}
+
 export function recordScriptNavigation(
   url: string,
   source: BrowserNavigationSource = "explicit"
@@ -839,7 +883,7 @@ export function recordScriptNavigation(
   if (!nextUrl || nextUrl === "about:blank") return
   if (source === "implicit" && !takePendingExplicitNavigation(nextUrl)) return
   if (source === "explicit") pendingExplicitNavigation = null
-  appendAction(activeSession, buildNavigationAction(nextUrl))
+  appendActionAndEmit(activeSession, buildNavigationAction(nextUrl))
 }
 
 export function markNextScriptNavigationExplicit(url?: string): void {
@@ -931,7 +975,7 @@ export function recordScriptRecorderConsoleMessage(frame: WebFrameMain, message:
   if (playwrightEvent) {
     const action = normalizeScriptEvent(playwrightEvent as ScriptRecorderEvent, framePath)
     if (action) {
-      appendAction(activeSession, action)
+      appendActionAndEmit(activeSession, action)
     }
     return
   }

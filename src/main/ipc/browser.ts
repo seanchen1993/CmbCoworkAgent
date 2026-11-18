@@ -1,10 +1,12 @@
 import type { BrowserWindow, IpcMain } from "electron"
 import {
   BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL,
+  BROWSER_SCRIPT_RECORDING_STATE_CHANNEL,
   BUILTIN_BROWSER_LOG_PREFIX,
   type BrowserAttachOptions,
   type BrowserBounds,
   type BrowserCdpConfig,
+  type BrowserDownloadsChangedPayload,
   type BrowserNavigateOptions,
   type BrowserRecordingDraftUpdateInput,
   type BrowserRecordingSession,
@@ -40,6 +42,7 @@ import {
 import {
   getScriptRecording,
   installScriptRecorderForSubtree,
+  onScriptRecordingChange,
   pauseScriptRecording,
   resumeScriptRecording,
   startScriptRecording,
@@ -64,6 +67,11 @@ function registerBrowserStateForwarding(getMainWindow: GetMainWindow): void {
     const window = getMainWindow()
     if (!window || window.isDestroyed()) return
     window.webContents.send(BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL, state)
+  })
+  onScriptRecordingChange((state) => {
+    const window = getMainWindow()
+    if (!window || window.isDestroyed()) return
+    window.webContents.send(BROWSER_SCRIPT_RECORDING_STATE_CHANNEL, state)
   })
 }
 
@@ -115,6 +123,16 @@ function registerBrowserControlIpc({ browserService, ipcMain }: BrowserIpcContex
   ipcMain.handle("browser:stop", () => browserService.stop())
   ipcMain.handle("browser:clearConsole", () => browserService.clearConsole())
   ipcMain.handle("browser:getState", () => browserService.getState())
+  ipcMain.handle("browser:getDownloads", () => browserService.getDownloads())
+  ipcMain.handle("browser:markDownloadsRead", () => browserService.markDownloadsRead())
+  ipcMain.handle("browser:restoreDownloads", (_event, snapshot: BrowserDownloadsChangedPayload) =>
+    browserService.restoreDownloads(snapshot)
+  )
+  ipcMain.handle("browser:getDownloadDirectory", () => browserService.getDownloadDirectory())
+  ipcMain.handle("browser:openDownloadDirectory", () => browserService.openDownloadDirectory())
+  ipcMain.handle("browser:showDownloadInFolder", (_event, downloadId: string) =>
+    browserService.showDownloadInFolder(downloadId)
+  )
 }
 
 async function installScriptRecorderOnActiveBrowser(browserService: BrowserService): Promise<void> {
@@ -135,7 +153,7 @@ function registerBrowserScriptRecordingIpc({ browserService, ipcMain }: BrowserI
 
   ipcMain.handle(
     "browser:pauseScriptRecording",
-    (): BrowserRecordingSession => pauseScriptRecording()
+    (_event, panelWidth?: number): BrowserRecordingSession => pauseScriptRecording(panelWidth)
   )
 
   ipcMain.handle(
@@ -152,7 +170,7 @@ function registerBrowserScriptRecordingIpc({ browserService, ipcMain }: BrowserI
 
   ipcMain.handle(
     "browser:stopScriptRecording",
-    (): BrowserRecordingSession => stopScriptRecording()
+    (_event, panelWidth?: number): BrowserRecordingSession => stopScriptRecording(panelWidth)
   )
 
   ipcMain.handle("browser:getScriptRecording", (): BrowserRecordingSession => getScriptRecording())
