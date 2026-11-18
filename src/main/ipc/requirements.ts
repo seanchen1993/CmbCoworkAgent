@@ -1358,7 +1358,7 @@ export function registerRequirementHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("requirements:get-work-dir", async () => getLastRequirementWorkDir())
   ipcMain.handle(
     "requirements:import-html",
-    async (_event, payload: { requirementId: string; title: string }) => {
+    async (_event, _payload: { requirementId: string; title: string }) => {
       try {
         const picked = await dialog.showOpenDialog({
           properties: ["openFile"],
@@ -1370,18 +1370,7 @@ export function registerRequirementHandlers(ipcMain: IpcMain): void {
         const stats = await fs.stat(source)
         if (!stats.isFile()) throw new Error("所选 HTML 文件无效")
         if (stats.size > MAX_TEXT_BYTES) throw new Error("HTML 文件超过 5MB 限制")
-        const targetDir = path.join(
-          getRequirementsRoot(),
-          IMPORTED_HTML_DIRNAME,
-          safeSegment(payload.requirementId, "requirement")
-        )
-        await fs.mkdir(targetDir, { recursive: true })
-        const target = path.join(
-          targetDir,
-          `${Date.now()}-${safeSegment(path.basename(source), "prototype.html")}`
-        )
-        await fs.copyFile(source, target)
-        return { success: true, htmlFile: target }
+        return { success: true, htmlFile: source }
       } catch (error) {
         return { success: false, error: error instanceof Error ? error.message : "上传 HTML 失败" }
       }

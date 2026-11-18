@@ -12,7 +12,8 @@ import { tmpdir } from "os"
 import { join, resolve } from "path"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 
-const { openPath } = vi.hoisted(() => ({
+const { openDialog, openPath } = vi.hoisted(() => ({
+  openDialog: vi.fn(async () => ({ canceled: true, filePaths: [] as string[] })),
   openPath: vi.fn(async () => "")
 }))
 
@@ -23,7 +24,7 @@ vi.mock("electron", () => ({
     getVersion: () => "0.0.0"
   },
   BrowserWindow: { getAllWindows: () => [] },
-  dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
+  dialog: { showOpenDialog: openDialog },
   shell: { openPath },
   ipcMain: { handle: () => undefined }
 }))
@@ -56,6 +57,25 @@ afterAll(() => {
 })
 
 describe("requirement source preview", () => {
+  it("keeps an uploaded HTML prototype at its original path", async () => {
+    const source = join(tempHome, "external-prototype.html")
+    writeFileSync(source, "<!doctype html><title>Prototype</title>", "utf-8")
+    openDialog.mockResolvedValueOnce({ canceled: false, filePaths: [source] })
+
+    const importHtml = handlers.get("requirements:import-html")!
+    const result = (await importHtml(null, {
+      requirementId: "req-external-html",
+      title: "外部 HTML"
+    })) as { success: boolean; htmlFile?: string }
+
+    expect(result).toEqual({ success: true, htmlFile: source })
+    expect(
+      existsSync(
+        join(tempHome, ".cmbcoworkagent", "requirements", "imported-html", "req-external-html")
+      )
+    ).toBe(false)
+  })
+
   it("extracts uploaded DOCX content and returns it from history", async () => {
     const sourcePath = resolve("node_modules/mammoth/test/test-data/simple-list.docx")
     const workDir = join(tempHome, "requirement-workspace")

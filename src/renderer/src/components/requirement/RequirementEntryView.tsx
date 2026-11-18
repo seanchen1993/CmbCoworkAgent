@@ -749,9 +749,12 @@ export function RequirementEntryView({
     async (requirement: RequirementRecord): Promise<void> => {
       const entries = listAllRequirementDesignEntries(requirement.id)
       for (const entry of entries) {
-        if (entry.origin !== "uploaded" || !entry.htmlFile) continue
-        const deleted = await window.api.requirements.deleteImportedHtml(entry.htmlFile)
-        if (!deleted.success) throw new Error(deleted.error || "删除上传的 HTML 失败")
+        if (entry.origin === "uploaded") continue
+        try {
+          await window.api.design.sessions.delete(entry.htmlId)
+        } catch (error) {
+          if (!(error instanceof Error) || !error.message.includes("设计会话不存在")) throw error
+        }
       }
       const sessionIds = entries.map((entry) => entry.htmlId)
       removeRequirementDesignAssociations(sessionIds)

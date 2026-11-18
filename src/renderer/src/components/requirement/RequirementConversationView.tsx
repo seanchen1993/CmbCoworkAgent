@@ -701,6 +701,13 @@ function RequirementConversationSession({
       ...prototypeFunctions.map((functionInfo) => functionInfo.htmlId)
     ])
     sessionIds.delete("")
+    for (const sessionId of sessionIds) {
+      try {
+        await window.api.design.sessions.delete(sessionId)
+      } catch (error) {
+        if (!(error instanceof Error) || !error.message.includes("设计会话不存在")) throw error
+      }
+    }
     const result = await window.api.requirements.clearDesign({ reqId: requirement.id })
     if (!result.success || !result.requirement || !result.manifest) {
       throw new Error(result.error || "重置设计失败")
@@ -728,6 +735,13 @@ function RequirementConversationSession({
         ...mappedEntries.map((entry) => entry.htmlId)
       ])
       sessionIds.delete("")
+      for (const sessionId of sessionIds) {
+        try {
+          await window.api.design.sessions.delete(sessionId)
+        } catch (error) {
+          if (!(error instanceof Error) || !error.message.includes("设计会话不存在")) throw error
+        }
+      }
       const groupedFilePaths = new Set(mappedEntries.flatMap(getRequirementDesignFilePaths))
       const functionsToClear =
         groupedFilePaths.size > 1

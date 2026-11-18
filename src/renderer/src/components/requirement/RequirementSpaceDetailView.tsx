@@ -229,7 +229,11 @@ export function RequirementSpaceDetailView({
           variant="outline"
           size="sm"
           className="h-7 gap-1 px-2 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
-          hint={REQUIREMENT_ACTION_HINTS.resetDesign}
+          hint={
+            isUploadedHtml
+              ? "仅解除所选 HTML 文件与当前需求的关联，不会删除原始文件。"
+              : REQUIREMENT_ACTION_HINTS.resetDesign
+          }
           onClick={() => setDesignResetOpen(true)}
         >
           <Trash2 className="size-3" />
@@ -485,8 +489,8 @@ export function RequirementSpaceDetailView({
             </DialogTitle>
             <DialogDescription className="pt-2 leading-6">
               {isUploadedHtml
-                ? "重置后将删除应用内保存的 HTML 副本，并解除它与当前需求的关联。原始本地文件不会受影响。"
-                : "重置后仅解除当前需求与设计会话的关联。设计会话及其历史记录仍会保留。"}
+                ? "重置后仅解除所选 HTML 文件与当前需求的关联，不会删除或修改原始本地文件。"
+                : "重置后将删除工作区中与该原型相关的文件和文件夹，同时删除关联的设计会话及全部历史记录。此操作不可恢复。"}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

@@ -2929,9 +2929,25 @@ export function registerDesignHandlers(): void {
     (_event, { id, requestId }: { id: string; requestId: string }) =>
       manager.retry(id, requestId),
   )
-  ipcMain.handle("design:session-delete", (_event, id: string) =>
-    manager.remove(id),
-  )
+  ipcMain.handle("design:session-delete", (_event, id: string) => {
+    const snapshot = manager.get(id)
+    const workspacePath = snapshot.workspacePath?.trim()
+    if (workspacePath) {
+      const workspaceRoot = path.resolve(workspacePath)
+      const artifactsRoot = path.resolve(workspaceRoot, DESIGN_ARTIFACTS_DIR)
+      const sessionDirectories = [
+        path.resolve(artifactsRoot, makeSafeDesignId(id)),
+        path.resolve(artifactsRoot, makeSafeDesignId(`${id}_design-main`)),
+      ]
+      for (const directory of sessionDirectories) {
+        if (!directory.startsWith(`${artifactsRoot}${path.sep}`)) {
+          throw new Error(`Design session directory escaped workspace: ${directory}`)
+        }
+        fs.rmSync(directory, { recursive: true, force: true })
+      }
+    }
+    manager.remove(id)
+  })
   ipcMain.handle(
     "design:session-read",
     (_event, { id, seq }: { id: string; seq: number }) =>

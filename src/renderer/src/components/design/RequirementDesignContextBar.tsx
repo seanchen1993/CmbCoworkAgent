@@ -3,7 +3,10 @@ import { ArrowLeft, ChevronLeft, ChevronRight, FileText, Loader2, RefreshCw } fr
 
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type { ActiveRequirementDesignEntry } from "./use-requirement-design-entry"
-import { getRequirementDesignFilePaths } from "@/lib/requirement-design-entry"
+import {
+  getRequirementDesignFilePaths,
+  type RequirementDesignEntry
+} from "@/lib/requirement-design-entry"
 import {
   listRequirementDesignEntries,
   returnToRequirementConversation
@@ -77,6 +80,29 @@ export function RequirementDesignContextBar({
       <FileText className="size-3" />
     </button>
   )
+
+  const requirementPreviewButtons = (
+    designEntry: RequirementDesignEntry
+  ): React.JSX.Element[] => {
+    const files = designEntry.requirementFiles?.length
+      ? designEntry.requirementFiles
+      : [
+          {
+            name: designEntry.scope === "full-prd" ? "完整 PRD" : "功能文件",
+            filePath: designEntry.requirementFilePath
+          }
+        ]
+    return files.map((file, index) => (
+      <span key={file.filePath} className="inline-flex items-center">
+        {previewButton(
+          file.filePath,
+          files.length > 1
+            ? `${file.name || `功能 ${index + 1}`}（${index + 1}/${files.length}）`
+            : file.name
+        )}
+      </span>
+    ))
+  }
 
   const save = async (): Promise<void> => {
     if (savingRef.current) return
@@ -235,7 +261,7 @@ export function RequirementDesignContextBar({
             return (
               <div
                 key={designEntry.htmlId}
-                className={`flex h-8 max-w-52 shrink-0 items-center rounded-md border bg-white shadow-sm transition-colors ${
+                className={`flex h-8 max-w-80 shrink-0 items-center rounded-md border bg-white shadow-sm transition-colors ${
                   active ? "border-orange-400" : "border-border"
                 }`}
               >
@@ -264,10 +290,7 @@ export function RequirementDesignContextBar({
                   </span>
                 </button>
                 <span className="ml-1.5 flex shrink-0 items-center gap-1 pr-2">
-                  {previewButton(
-                    designEntry.requirementFilePath,
-                    designEntry.scope === "full-prd" ? "完整 PRD" : "功能文件"
-                  )}
+                  {requirementPreviewButtons(designEntry)}
                   <span
                     className={`text-[10px] font-medium ${
                       completed

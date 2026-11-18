@@ -1236,8 +1236,8 @@ export function RequirementDetailsPanel({
             </DialogTitle>
             <DialogDescription className="pt-2 leading-6">
               {clearTargetFunction
-                ? "重置后仅解除这个功能与设计会话的关联；设计会话及其历史记录仍会保留。"
-                : "重置后仅解除当前需求与设计会话的关联；设计会话及其历史记录仍会保留。"}
+                ? "重置后将删除工作区中与这个功能原型相关的文件和文件夹，同时删除关联的设计会话及全部历史记录。此操作不可恢复。"
+                : "重置后将删除工作区中与当前需求原型相关的文件和文件夹，同时删除所有关联的设计会话及全部历史记录。此操作不可恢复。"}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

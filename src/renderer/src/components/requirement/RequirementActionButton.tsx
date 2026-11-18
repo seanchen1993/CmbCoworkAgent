@@ -89,5 +89,5 @@ export const REQUIREMENT_ACTION_HINTS = {
   startDesign: "基于当前需求创建设计会话，开始制作原型。",
   continueDesign: "返回已关联的设计会话，继续完善原型。",
   viewDesign: "打开已完成的原型设计及其关联会话。",
-  resetDesign: "仅解除当前需求与设计会话的关联；设计会话及其历史记录会保留。"
+  resetDesign: "删除关联的原型文件、文件夹和设计会话记录，并重置当前需求的原型状态。"
 } as const
