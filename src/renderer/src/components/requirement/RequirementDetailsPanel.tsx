@@ -980,7 +980,7 @@ export function RequirementDetailsPanel({
                     <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
                       {isRequirementSpacePublished(requirementSpaceManifest)
                         ? "需求已写入需求空间3.0，可进入详情页查看。"
-                        : "发布到之后，其他同事可在【需求空间3.0Tab】里选择到你的需求～"}
+                        : "发布之后，其他同事可在【需求空间3.0Tab】里选择到你的需求～"}
                     </p>
                   </div>
                   <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
