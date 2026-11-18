@@ -807,7 +807,8 @@ describe("fork summary state", () => {
       expect(prompt).toContain("Inherited decision")
       expect(prompt).not.toContain("COVERED_ONLY")
       if (prompt.includes("RECENT_EVIDENCE")) {
-        if (prompt.includes("continue this work")) {
+        if (prompt.includes("review evidence")) {
+          expect(prompt).toContain("continue this work")
           return new AIMessage(
             "Inherited decision and RECENT_EVIDENCE" + (wholeOverflow ? "界".repeat(1_600) : "")
           )
@@ -848,9 +849,14 @@ describe("fork summary state", () => {
     expect(write).toHaveBeenCalledOnce()
   })
 
-  it.each([1_200, 1_250])(
-    "reuses the accepted %s-character recovery budget when the fork's raw tail also overflows",
-    async (summaryLimit) => {
+  it.each([
+    { summaryLimit: 1_200, trailingTool: false, longLatest: false },
+    { summaryLimit: 1_250, trailingTool: false, longLatest: false },
+    { summaryLimit: 1_200, trailingTool: true, longLatest: false },
+    { summaryLimit: 1_200, trailingTool: true, longLatest: true }
+  ])(
+    "reuses a $summaryLimit-character budget (tool: $trailingTool, long request: $longLatest)",
+    async ({ summaryLimit, trailingTool, longLatest }) => {
       const raw = [new HumanMessage("original request"), new AIMessage("original answer")]
       const value = checkpoint(raw, raw.length)
       value.channel_values._summarizationEvent = {
@@ -859,17 +865,32 @@ describe("fork summary state", () => {
         summaryMessage: buildSummaryMessage("界".repeat(30_000), null, null)
       }
       await inheritForkSummarization({ checkpoint: value, persistedMessageCount: raw.length })
-      const messages = [
-        ...raw,
-        new HumanMessage("review evidence"),
-        new AIMessage("界".repeat(1_000)),
-        new HumanMessage("Continue")
-      ]
+      const requirement = "EXACT_CURRENT_TASK_REQUIREMENT_1234"
+      const tail = trailingTool
+        ? [
+            new HumanMessage(longLatest ? requirement + " " + "more details ".repeat(340) : requirement),
+            new AIMessage({
+              content: "",
+              tool_calls: [{ id: "read-1", name: "read", args: { file: "evidence.txt" } }]
+            }),
+            new ToolMessage({ content: "界".repeat(1_000), tool_call_id: "read-1" })
+          ]
+        : [
+            new HumanMessage("review evidence"),
+            new AIMessage("界".repeat(1_000)),
+            new HumanMessage("Continue")
+          ]
+      const messages = [...raw, ...tail]
       const systemMessage = new SystemMessage("界".repeat(15_400))
       const invoke = vi.fn(async (request: BaseMessage[]) => {
         const length = request.reduce((total, message) => total + String(message.content).length, 0)
         if (length > summaryLimit) throw new Error("maximum context length")
-        return new AIMessage("Earlier decision and next step")
+        const includesRequirement = request.some((message) =>
+          String(message.content).includes(requirement)
+        )
+        return new AIMessage(
+          "Earlier decision and next step" + (includesRequirement ? " " + requirement : "")
+        )
       })
       const middleware = createCmbSummarizationMiddleware({
         model: { invoke } as never,
@@ -892,11 +913,12 @@ describe("fork summary state", () => {
         }
         expect(messages).toHaveLength(1)
         expect(messages[0].content).toContain("Earlier decision and next step")
+        if (trailingTool) expect(messages[0].content).toContain(requirement)
         return new AIMessage("done")
       })
       expect(SummarizationEventSchema.parse(result.update._summarizationEvent).cutoffIndex)
         .toBe(messages.length)
-      expect(invoke).toHaveBeenCalledTimes(5)
+      expect(invoke).toHaveBeenCalledTimes(summaryLimit === 1_200 ? 5 : 4)
     }
   )
 

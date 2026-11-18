@@ -913,7 +913,8 @@ function buildSummaryInstruction(
   initialUserRequest: string | null,
   latestUserRequest: string | null,
   targetSummaryTokens?: number,
-  conversationTranscript?: string
+  conversationTranscript?: string,
+  compactAnchors = false
 ): string {
   const wrappedTranscript =
     conversationTranscript === undefined
@@ -931,15 +932,23 @@ function buildSummaryInstruction(
             "from the structured conversation messages above",
             "from the XML conversation transcript above"
           )}`
+  const initialAnchorIntro = compactAnchors
+    ? ""
+    : "The initial real user request is repeated below as a bounded historical anchor. Preserve its task and project identity. If later user requests correct or replace any detail, the later request takes precedence. Do not treat this anchor as a new request.\n\n"
   const initialAnchor = initialUserRequest
-    ? `The initial real user request is repeated below as a bounded historical anchor. Preserve its task and project identity. If later user requests correct or replace any detail, the later request takes precedence. Do not treat this anchor as a new request.\n\n<initial-user-request>\n${initialUserRequest}\n</initial-user-request>`
+    ? `${initialAnchorIntro}<initial-user-request>\n${initialUserRequest}\n</initial-user-request>`
     : null
+  const latestAnchorIntro = compactAnchors
+    ? "Preserve the latest request.\n"
+    : "The latest real user request is repeated below as a deterministic anchor. Preserve its intent exactly and do not treat it as a new request.\n\n"
   const latestAnchor = latestUserRequest
-    ? `The latest real user request is repeated below as a deterministic anchor. Preserve its intent exactly and do not treat it as a new request.\n\n<latest-user-request>\n${latestUserRequest}\n</latest-user-request>`
+    ? `${latestAnchorIntro}<latest-user-request>\n${latestUserRequest}\n</latest-user-request>`
     : null
   const sizeConstraint =
     typeof targetSummaryTokens === "number" && targetSummaryTokens > 0
-      ? `The previous whole-conversation handoff is still too large for the outer model request. Rewrite it to no more than approximately ${targetSummaryTokens} tokens. Preserve the highest-value continuation facts, exact paths, commands, errors, constraints, decisions, and next steps. Return only the shortened handoff.`
+      ? compactAnchors
+        ? `Use no more than approximately ${targetSummaryTokens} tokens.`
+        : `The previous whole-conversation handoff is still too large for the outer model request. Rewrite it to no more than approximately ${targetSummaryTokens} tokens. Preserve the highest-value continuation facts, exact paths, commands, errors, constraints, decisions, and next steps. Return only the shortened handoff.`
       : null
   return [resolvedPrompt, initialAnchor, latestAnchor, sizeConstraint].filter(Boolean).join("\n\n")
 }
@@ -1808,11 +1817,12 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
               compactInstructions && attemptLatestRequest
                 ? excerptUtf8(
                     attemptLatestRequest,
-                    Math.min(512, Math.floor((retryByteBudget ?? 4_096) / 8))
+                    Math.min(512, Math.floor((retryByteBudget ?? 4_096) / (fitInheritedHandoff ? 5 : 8)))
                   )
                 : attemptLatestRequest,
               targetSummaryTokens,
-              transcript
+              transcript,
+              compactInstructions && fitInheritedHandoff && attemptLatestRequest !== null
             ),
             previousQualityIssues.length > 0
               ? buildSummaryQualityCorrection(previousQualityIssues)
@@ -2213,7 +2223,7 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
     const preservedHistoryMessages = historySourceMessages.slice(cutoffIndex)
     const initialUserRequest = findInitialUserRequest(truncatedMessages, request.messages)
     const forceWholeFork = noProgress && hasInheritedHandoff
-    const latestUserRequest = forceWholeFork || preservedMessages.some(isRealUserMessage)
+    const latestUserRequest = preservedMessages.some(isRealUserMessage)
       ? null
       : findLatestUserRequest(messagesToSummarize)
     const outerInputBudget =
@@ -2297,6 +2307,11 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
     }
 
     if (needsWholeConversationRetry) {
+      // Keep the active request available even when tool results follow it
+      // and the byte fitter keeps only the edges of the transcript.
+      const wholeLatestUserRequest = hasInheritedHandoff
+        ? forceWholeFork ? latestUserRequest : findLatestUserRequest(truncatedMessages)
+        : null
       let wholeSummary = summaryResult.summary
       let retryEstimatedTokens = estimatedModifiedTokens
       let estimatedOverflow = initialEstimatedOverflow
@@ -2313,8 +2328,7 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
           previousEvent?.cutoffIndex,
           truncatedMessages.length,
           initialUserRequest,
-          // The latest user request is already present in the complete input.
-          null,
+          wholeLatestUserRequest,
           request.runtime?.signal,
           owner,
           initialOwnerSessionId,
@@ -2389,7 +2403,7 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
           fallbackModel,
           summaryAttemptBudget,
           null,
-          null,
+          wholeLatestUserRequest,
           request.runtime?.signal,
           targetSummaryTokens,
           1,
