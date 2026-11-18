@@ -1,6 +1,10 @@
 import path from "path"
 import type { CoordinatorWorkerWorkload } from "./coordinator-worker-manager"
 import { isCoordinatorPathOwnedBy } from "./coordinator-worker-paths"
+import {
+  expandShellTaskMonitorToolDenials,
+  SHELL_TASK_MONITOR_TOOL_NAMES
+} from "./shell-task-monitor"
 
 export interface CoordinatorWorkerFilesystemAccess {
   workload?: CoordinatorWorkerWorkload
@@ -11,7 +15,7 @@ export interface CoordinatorWorkerFilesystemAccess {
    * for tool cutting. Coordinator workers never set these, so their workload path
    * is untouched. */
   disallowedTools?: string[]
-  /** execute policy for registry agents: none = cut execute+task_output;
+  /** execute policy for registry agents: none = cut execute and task monitoring;
    * read_only = keep execute (commands gated elsewhere by isReadOnlyShellCommand);
    * full = keep execute. */
   shellAccess?: "none" | "read_only" | "full"
@@ -58,7 +62,7 @@ const deferredBridgeToolNames = new Set(["invoke_deferred_tool", "search_tool", 
 
 /**
  * Blocked tools for a registry agent: its own disallowedTools, plus ad-hoc code
- * execution + orchestration meta tools (always), plus execute/task_output when
+ * execution + orchestration meta tools (always), plus execute and task monitoring when
  * the shell is off, plus — for read-only/no-shell — the deferred-execution
  * bridge (invoke_deferred_tool + discovery). verify/write keep the bridge; eager
  * MCP is kept for all. Used by BOTH the workflow Level-1 path
@@ -75,7 +79,7 @@ export function registryAgentBlockedTools(
   ])
   if (shellAccess === "none") {
     blocked.add("execute")
-    blocked.add("task_output")
+    for (const name of SHELL_TASK_MONITOR_TOOL_NAMES) blocked.add(name)
   }
   if (shellAccess === "read_only" || shellAccess === "none") {
     // No shell / read-only → no deferred-execution bridge (side-effecting). A
@@ -83,7 +87,7 @@ export function registryAgentBlockedTools(
     // not the bridge; verify/write (full) keep the bridge.
     for (const t of deferredBridgeToolNames) blocked.add(t)
   }
-  return blocked
+  return expandShellTaskMonitorToolDenials(blocked)
 }
 
 /** Blocked tool names for an access (workload OR explicit registry mode). Public
@@ -105,7 +109,7 @@ export function blockedToolNamesForAccess(
   }
 
   if (access.workload === "read_only") {
-    // read-only workers KEEP execute (+ task_output for its results) but the
+    // read-only workers KEEP execute and task monitoring, but the
     // runtime's execute tool gates each command through isReadOnlyShellCommand
     // (which layers assessCommandSafety with read-only build-tool and Windows
     // PowerShell handling), so only commands that can be proven read-only (ls,
@@ -119,7 +123,7 @@ export function blockedToolNamesForAccess(
     return new Set([...directWriteToolNames, ...deferredToolNames])
   }
   if ((access.ownedFiles ?? []).length > 0) {
-    return new Set(["execute", "task_output", ...deferredToolNames])
+    return new Set(["execute", ...SHELL_TASK_MONITOR_TOOL_NAMES, ...deferredToolNames])
   }
   return new Set()
 }

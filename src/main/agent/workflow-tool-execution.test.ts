@@ -46,10 +46,9 @@ describe("workflow leaf tool execution", () => {
       )
     })
     const backend = new LocalSandbox({ rootDir: process.cwd(), windowsSandbox: "none" })
-    const execute = vi.spyOn(backend, "execute").mockResolvedValue({
-      output: "cleanup finished",
-      exitCode: 0,
-      truncated: false
+    const execute = vi.spyOn(backend, "executeForTool").mockResolvedValue({
+      status: "completed",
+      result: { output: "cleanup finished", exitCode: 0, truncated: false }
     })
     const model = getModelInstance(
       {
@@ -84,7 +83,11 @@ describe("workflow leaf tool execution", () => {
     }
 
     expect(execute).toHaveBeenCalledTimes(1)
-    expect(execute.mock.calls[0][0]).toBe("echo cleanup")
+    expect(execute).toHaveBeenCalledWith(
+      "echo cleanup",
+      undefined,
+      expect.objectContaining({ backgroundAfterMs: 60_000 })
+    )
     expect(
       messages.some(
         (message) =>

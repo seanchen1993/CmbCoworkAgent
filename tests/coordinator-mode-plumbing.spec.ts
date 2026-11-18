@@ -2620,7 +2620,12 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    'options.abortSignal?.addEventListener("abort", onAbort',
+    "signal = options.abortSignal",
+    "runtime uses the owning run signal by default and accepts a detached task signal"
+  )
+  assertIncludes(
+    runtime,
+    'signal?.addEventListener("abort", onAbort',
     "runtime rejects pending approvals when the owning run is aborted"
   )
   assertIncludes(
@@ -2902,7 +2907,7 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     workerAccess,
-    'new Set(["execute", "task_output", ...deferredToolNames])',
+    'new Set(["execute", ...SHELL_TASK_MONITOR_TOOL_NAMES, ...deferredToolNames])',
     "worker access policy removes shell execution and deferred execution from owned_files-scoped write workers"
   )
   assertIncludes(

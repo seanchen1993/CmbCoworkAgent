@@ -8,9 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }))
 
 vi.mock("node:child_process", async () => {
-  const actual = await vi.importActual<typeof import("node:child_process")>(
-    "node:child_process"
-  )
+  const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process")
   return { ...actual, spawn: spawnMock }
 })
 
@@ -165,6 +163,66 @@ describe("LocalSandbox background-task settlement", () => {
     }
   })
 
+  it.skipIf(process.platform !== "win32")(
+    "retains the physical run ACL until its handed-off process tree settles",
+    async () => {
+      const threadId = "handoff-acl-thread"
+      const aclOwnerId = "handoff-acl-physical-run"
+      const aclState = LocalSandbox as unknown as {
+        _runAclDirs: Map<string, Set<string>>
+        revokeSandboxWriteAcl: (dir: string, path: string) => Promise<void>
+      }
+      const execution = createDeferred<{ output: string; exitCode: number; truncated: boolean }>()
+      const termination = createDeferred<void>()
+      const sandbox = new LocalSandbox({
+        rootDir: process.cwd(),
+        runId: threadId,
+        aclOwnerId,
+        windowsSandbox: "none"
+      })
+      const revoke = vi.spyOn(aclState, "revokeSandboxWriteAcl").mockResolvedValue(undefined)
+      aclState._runAclDirs.set(aclOwnerId, new Set(["test-owned-dir"]))
+      aclState._runAclDirs.set("different-run", new Set(["other-dir"]))
+      const raw = vi
+        .spyOn(sandbox, "executeRaw")
+        .mockImplementation(async (_command, _mode, _timeout, signal, options) => {
+          options?.handoff?.onSpawn()
+          signal?.addEventListener("abort", () => options?.onTermination?.(termination.promise), {
+            once: true
+          })
+          return execution.promise
+        })
+
+      try {
+        const handedOff = await sandbox.executeForTool("node --version", undefined, {
+          backgroundAfterMs: 10
+        })
+        if (handedOff.status !== "background") throw new Error("expected shell handoff")
+        const release = LocalSandbox.revokeGrantedAclsForRun(aclOwnerId)
+        await LocalSandbox.revokeGrantedAclsForRun("different-run")
+        expect(revoke).toHaveBeenCalledExactlyOnceWith("other-dir", "other-dir")
+
+        LocalSandbox.cancelBackgroundTasks(threadId)
+        execution.resolve({ output: "cancelled", exitCode: 130, truncated: false })
+        await vi.waitFor(() => expect(sandbox.getTaskOutput(handedOff.taskId)?.exitCode).toBe(130))
+        expect(revoke).toHaveBeenCalledTimes(1)
+
+        termination.resolve()
+        await release
+        expect(revoke).toHaveBeenLastCalledWith("test-owned-dir", "test-owned-dir")
+        expect(LocalSandbox.hasActiveBackgroundTasks(threadId)).toBe(false)
+      } finally {
+        execution.resolve({ output: "cancelled", exitCode: 130, truncated: false })
+        termination.resolve()
+        await LocalSandbox.cancelBackgroundTasksAndWait(threadId)
+        raw.mockRestore()
+        revoke.mockRestore()
+        aclState._runAclDirs.delete(aclOwnerId)
+        aclState._runAclDirs.delete("different-run")
+      }
+    }
+  )
+
   it("tracks and cancels a background execute before it can reach process spawn", async () => {
     const preToolUse = createDeferred<undefined>()
     const sandbox = new LocalSandbox({
@@ -173,7 +231,11 @@ describe("LocalSandbox background-task settlement", () => {
       windowsSandbox: "none"
     })
     const executeRaw = vi.fn()
-    Reflect.set(sandbox, "runPreToolUseHookForTool", vi.fn(() => preToolUse.promise))
+    Reflect.set(
+      sandbox,
+      "runPreToolUseHookForTool",
+      vi.fn(() => preToolUse.promise)
+    )
     Reflect.set(sandbox, "executeRaw", executeRaw)
 
     const started = sandbox.executeBackground("echo must-not-spawn")
@@ -197,7 +259,11 @@ describe("LocalSandbox background-task settlement", () => {
       runId: `background-pre-spawn-timeout-${Date.now()}-${Math.random()}`,
       windowsSandbox: "none"
     })
-    Reflect.set(sandbox, "runPreToolUseHookForTool", vi.fn(() => preToolUse.promise))
+    Reflect.set(
+      sandbox,
+      "runPreToolUseHookForTool",
+      vi.fn(() => preToolUse.promise)
+    )
     Reflect.set(sandbox, "executeRaw", vi.fn())
 
     const started = sandbox.executeBackground("echo delayed-hook")

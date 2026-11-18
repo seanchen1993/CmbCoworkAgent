@@ -1,6 +1,11 @@
 import { createHash } from "crypto"
 import { AIMessage } from "@langchain/core/messages"
 import { createMiddleware } from "langchain"
+import {
+  isShellTaskMonitorToolName,
+  SHELL_TASK_MONITOR_MAX_WAIT_MS,
+  SHELL_TASK_OUTPUT_TOOL_NAME
+} from "./shell-task-monitor"
 
 export const ACTION_STATIONARITY_NUDGE_THRESHOLD = 8
 export const ACTION_STATIONARITY_HALT_THRESHOLD = 16
@@ -215,7 +220,7 @@ function toolCallArgs(call: unknown): unknown {
 }
 
 function isBlockingTaskOutputCall(call: unknown): boolean {
-  if (toolCallName(call) !== "task_output") return false
+  if (!isShellTaskMonitorToolName(toolCallName(call))) return false
   const args = toolCallArgs(call)
   if (!args || typeof args !== "object" || Array.isArray(args)) return false
   const record = args as Record<string, unknown>
@@ -226,7 +231,7 @@ function isBlockingTaskOutputCall(call: unknown): boolean {
     typeof record.timeout === "number" &&
     Number.isFinite(record.timeout) &&
     record.timeout >= MIN_BLOCKING_TASK_OUTPUT_TIMEOUT_MS &&
-    record.timeout <= 600_000
+    record.timeout <= SHELL_TASK_MONITOR_MAX_WAIT_MS
   )
 }
 
@@ -251,7 +256,8 @@ export function actionStationaritySignature(toolCalls: readonly unknown[]): {
     const name = toolCallName(call)
     if (names.length < MAX_DISPLAY_TOOL_NAMES) names.push(name)
     if (!updateHash(hash, `tool[${index}]:`, budget)) return null
-    if (!hashUnknown(hash, name, new WeakSet<object>(), budget)) return null
+    const identity = isShellTaskMonitorToolName(name) ? SHELL_TASK_OUTPUT_TOOL_NAME : name
+    if (!hashUnknown(hash, identity, new WeakSet<object>(), budget)) return null
     if (!updateHash(hash, "\u001fargs:", budget)) return null
     if (!hashUnknown(hash, toolCallArgs(call), new WeakSet<object>(), budget)) return null
     if (!updateHash(hash, "\u001e", budget)) return null
@@ -272,7 +278,7 @@ function stationarityNudge(toolName: string, count: number, blockingTaskOutput: 
     "## Repeated Tool Call Guard",
     `你已经使用完全相同的参数连续调用工具“${toolName}” ${count} 次。`,
     blockingTaskOutput
-      ? "这是阻塞式后台任务轮询。请确认任务仍在运行，并改用更长的 timeout 一次等待；若任务不存在、已经完成或无法继续，请结束本轮并明确说明。继续重复将在更高阈值自动停止当前 agent turn。"
+      ? "这是后台任务的阻塞监听。请确认任务状态，仍在运行时一次等待终态。若任务不存在、已经完成或无法继续，请结束本轮并明确说明。继续重复将在更高阈值自动停止当前 agent turn。"
       : "停止重复这一调用并重新判断当前状态。若在等待后台任务，请使用更长的阻塞超时后只检查一次；若无法继续，请结束本轮并明确说明阻塞原因。继续重复将自动停止当前 agent turn。"
   ].join("\n\n")
 }

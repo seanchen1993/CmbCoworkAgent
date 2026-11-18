@@ -12726,6 +12726,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               )
             })
         }
+        const detachedShellActive =
+          !cancelWorkers && !controller && LocalSandbox.hasActiveBackgroundTasks(threadId)
         if (controller && !cancelWorkers) {
           // Foreground cancellation should stop the active run and any thread-scoped
           // background tasks it launched. "Stop background workers" uses the same IPC
@@ -12737,10 +12739,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // A user can cancel and immediately send another message; the next invoke must wait
           // for checkpoint/sandbox cleanup before opening a replacement stream.
           console.log(`[Agent] cancel: aborted controller for thread ${threadId}`)
+        } else if (detachedShellActive) {
+          LocalSandbox.cancelBackgroundTasks(threadId)
         } else if (!controller && !cancelWorkers) {
           console.warn(`[Agent] cancel: no active run found for thread ${threadId}`)
         }
-        const cancelled = Boolean(controller && !cancelWorkers)
+        const cancelled = Boolean(controller && !cancelWorkers) || detachedShellActive
         if (cancelled) handleAutoModeAgentCancelled(threadId)
         else if (workers.length > 0) handleAutoModeAgentCancelled(threadId, "background")
         return cancelled

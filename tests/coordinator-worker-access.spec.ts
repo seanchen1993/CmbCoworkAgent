@@ -80,6 +80,7 @@ function allFilesystemTools(): FakeTool[] {
     fakeTool("edit_file"),
     fakeTool("execute"),
     fakeTool("task_output"),
+    fakeTool("monitor"),
     fakeTool("code_exec"),
     fakeTool("save_code_exec_tool"),
     fakeTool("invoke_deferred_tool"),
@@ -108,6 +109,7 @@ async function testReadOnlyWorkerToolSurface(): Promise<void> {
   // provably read-only by the runtime's isReadOnlyShellCommand check elsewhere).
   assertHasTool(tools, "execute", "read_only worker")
   assertHasTool(tools, "task_output", "read_only worker")
+  assertHasTool(tools, "monitor", "read_only worker")
   assertHasTool(tools, "read_file", "read_only worker")
   assertHasTool(tools, "grep", "read_only worker")
 }
@@ -126,6 +128,7 @@ async function testVerifyWorkerToolSurface(): Promise<void> {
   assertNoTool(tools, "invoke_deferred_tool", "verify worker")
   assertHasTool(tools, "execute", "verify worker")
   assertHasTool(tools, "task_output", "verify worker")
+  assertHasTool(tools, "monitor", "verify worker")
   assertHasTool(tools, "read_file", "verify worker")
 }
 
@@ -150,6 +153,7 @@ async function testScopedWriteWorkerToolSurfaceAndGuard(): Promise<void> {
         fakeTool("edit_file"),
         fakeTool("execute"),
         fakeTool("task_output"),
+        fakeTool("monitor"),
         fakeTool("save_code_exec_tool"),
         fakeTool("read_file")
       ],
@@ -162,6 +166,7 @@ async function testScopedWriteWorkerToolSurfaceAndGuard(): Promise<void> {
 
     assertNoTool(tools, "execute", "scoped write worker")
     assertNoTool(tools, "task_output", "scoped write worker")
+    assertNoTool(tools, "monitor", "scoped write worker")
     assertNoTool(tools, "save_code_exec_tool", "scoped write worker")
     assertHasTool(tools, "write_file", "scoped write worker")
     assertHasTool(tools, "edit_file", "scoped write worker")
@@ -363,6 +368,7 @@ async function testWholeWorkspaceWriteWorkerKeepsTools(): Promise<void> {
   assertHasTool(tools, "edit_file", "whole-workspace write worker")
   assertHasTool(tools, "execute", "whole-workspace write worker")
   assertHasTool(tools, "task_output", "whole-workspace write worker")
+  assertHasTool(tools, "monitor", "whole-workspace write worker")
 }
 
 async function testConstrainedWorkerFinalToolSurface(): Promise<void> {
