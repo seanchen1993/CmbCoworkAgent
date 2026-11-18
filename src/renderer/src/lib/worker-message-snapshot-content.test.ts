@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { AIMessage, AIMessageChunk, HumanMessage } from "@langchain/core/messages"
+import { AIMessage, AIMessageChunk, HumanMessage, ToolMessage } from "@langchain/core/messages"
 import {
   createStreamDataSerializer,
-  sanitizeStreamDataForRenderer
+  sanitizeCoordinatorWorkerStreamDataForRenderer
 } from "../../../main/ipc/stream-data-serialization"
 import { ElectronIPCTransport } from "./electron-transport"
 import { enrichWorkerProviderIdentities, useAppStore } from "./store"
@@ -57,6 +57,27 @@ function values(transport: ElectronIPCTransport, messages: unknown[], workerTurn
   )
   useAppStore.getState().appendWorkerFocusMessages(worker, result, { orderedSnapshot: true })
   return result
+}
+
+function publishWorkerFrames(transport = new ElectronIPCTransport()) {
+  const serialize = createStreamDataSerializer()
+  return (mode: "messages" | "values", payload: unknown, workerTurn = 1) => {
+    const { data, valuesMessageIndexOffset, valuesSnapshotKind } = serialize(mode, payload)
+    const rows = transport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        type: "stream",
+        mode,
+        data: sanitizeCoordinatorWorkerStreamDataForRenderer(mode, data, valuesMessageIndexOffset),
+        workerTurn,
+        valuesSnapshotKind
+      },
+      parent
+    )
+    useAppStore.getState().appendWorkerFocusMessages(worker, rows, {
+      orderedSnapshot: mode === "values" && valuesSnapshotKind === "full"
+    })
+    return valuesSnapshotKind
+  }
 }
 
 function chunk(
@@ -310,24 +331,7 @@ describe("Team worker authoritative content", () => {
   })
 
   it("continues the identified reply through the production wire when the next delta omits its tuple", () => {
-    const transport = new ElectronIPCTransport()
-    const serialize = createStreamDataSerializer()
-    const publish = (mode: "messages" | "values", payload: unknown, workerTurn = 1) => {
-      const { data, valuesMessageIndexOffset, valuesSnapshotKind } = serialize(mode, payload)
-      const rows = transport.convertFocusedCoordinatorWorkerIPCEvent(
-        {
-          type: "stream",
-          mode,
-          data: sanitizeStreamDataForRenderer(mode, data, valuesMessageIndexOffset),
-          workerTurn,
-          valuesSnapshotKind
-        },
-        parent
-      )
-      useAppStore.getState().appendWorkerFocusMessages(worker, rows, {
-        orderedSnapshot: mode === "values" && valuesSnapshotKind === "full"
-      })
-    }
+    const publish = publishWorkerFrames()
     const initial = {
       id: "wire-a",
       content: "First reply",
@@ -352,6 +356,121 @@ describe("Team worker authoritative content", () => {
       { id: original.id, content: "First reply continues later", worker_provider_identity: true },
       { content: "Second turn" }
     ])
+  })
+
+  it("remembers earlier aliases across complete frames, completed messages and a late delta", () => {
+    const publish = publishWorkerFrames()
+    const additional_kwargs = providerWire("wire-a", "draft").kwargs.additional_kwargs
+    const ai = (id: string, content: string) => new AIMessage({ id, content, additional_kwargs })
+    const user = new HumanMessage({ id: "request", content: "First request" })
+    const values = (message: AIMessage) => publish("values", { messages: [user, message] })
+    publish("messages", [new AIMessageChunk({ id: "wire-a", content: "draft", additional_kwargs }), {}])
+    const [original] = useAppStore.getState().workerFocusMessages
+    expect(values(ai("wire-b", "Fixed"))).toBe("full")
+    expect(values(ai("wire-c", "Final"))).toBe("full")
+    publish("messages", [new AIMessageChunk({ id: "wire-a", content: " answer" }), {}])
+    expect(useAppStore.getState().workerFocusMessages).toMatchObject([
+      { id: original.id, content: "Final answer", worker_provider_identity: true }
+    ])
+
+    publish("messages", [new AIMessage({ id: "wire-b", content: "Completed" }), {}])
+    expect(values(new AIMessage({ id: "wire-c", content: "Corrected" }))).toBe("full")
+    publish("messages", [new AIMessageChunk({ id: "wire-a", content: "Second reply" }), {}], 2)
+    publish("messages", [new AIMessageChunk({ id: "wire-a", content: " later" }), {}], 1)
+    expect(useAppStore.getState().workerFocusMessages).toMatchObject([
+      { id: original.id, content: "Corrected later", worker_provider_identity: true },
+      { content: "Second reply" }
+    ])
+  })
+
+  it("remembers every explicit alias reconciled within a complete frame", () => {
+    const publish = publishWorkerFrames()
+    const additional_kwargs = providerWire("old", "draft").kwargs.additional_kwargs
+    publish("values", {
+      messages: [
+        new AIMessage({ id: "old", content: "draft", additional_kwargs }),
+        new AIMessage({ id: "new", content: "Fixed", additional_kwargs })
+      ]
+    })
+    publish("messages", [new AIMessageChunk({ id: "old", content: " answer" }), {}])
+    expect(useAppStore.getState().workerFocusMessages).toMatchObject([{ content: "Fixed answer" }])
+  })
+
+  it("keeps an untagged row when its wire ID already belongs to a declared row in the frame", () => {
+    const publish = publishWorkerFrames()
+    const additional_kwargs = providerWire("reused", "draft").kwargs.additional_kwargs
+    const original = new AIMessage({ id: "reused", content: "Original", additional_kwargs })
+    publish("values", { messages: [original] })
+    publish("values", {
+      messages: [
+        new AIMessage({ id: "reused", content: "Corrected", additional_kwargs }),
+        new AIMessage({ id: "reused", content: "Independent" })
+      ]
+    })
+    expect(useAppStore.getState().workerFocusMessages).toMatchObject([
+      { content: "Corrected", worker_provider_identity: true },
+      { content: "Independent" }
+    ])
+    expect(useAppStore.getState().workerFocusMessages[1].worker_provider_identity).toBeUndefined()
+  })
+
+  it("keeps independent occurrences when an untagged chunk uses their shared wire ID", () => {
+    const publish = publishWorkerFrames()
+    const ai = (content: string, occurrence: number) =>
+      new AIMessage({
+        id: "reused",
+        content,
+        additional_kwargs: providerWire("reused", content, "AIMessage", occurrence).kwargs
+          .additional_kwargs
+      })
+    publish("values", { messages: [ai("First", 1), ai("Second", 2)] })
+    publish("messages", [new AIMessageChunk({ id: "reused", content: "Unattributed" }), {}])
+    expect(useAppStore.getState().workerFocusMessages).toMatchObject([
+      { content: "First", provider_occurrence: 1 },
+      { content: "Second", provider_occurrence: 2 },
+      { content: "Unattributed" }
+    ])
+  })
+
+  it.each([false, true])(
+    "does not use a declared render ID as wire evidence (stale: %s)",
+    (stale) => {
+      const publish = publishWorkerFrames()
+      const additional_kwargs = providerWire("observed", "original").kwargs.additional_kwargs
+      publish("messages", [
+        new AIMessageChunk({ id: "observed", content: "Original", additional_kwargs }),
+        {}
+      ])
+      if (stale) {
+        publish("messages", [new AIMessageChunk({ id: "other", content: "New turn" }), {}], 2)
+      }
+      publish("messages", [new AIMessageChunk({ id: "provider", content: "Independent" }), {}])
+      const rows = useAppStore.getState().workerFocusMessages
+      expect(rows.find((row) => row.worker_provider_identity)?.content).toBe("Original")
+      expect(rows.find((row) => row.content === "Independent")?.worker_provider_identity).toBeFalsy()
+      expect(rows).toHaveLength(stale ? 3 : 2)
+    }
+  )
+
+  it("keeps a reused alias in a new tool cycle separate from the earlier reply", () => {
+    const publish = publishWorkerFrames()
+    const first = new AIMessage({
+      id: "reused",
+      content: "First request",
+      additional_kwargs: providerWire("reused", "draft").kwargs.additional_kwargs,
+      tool_calls: [{ id: "call", name: "read_file", args: {} }]
+    })
+    const result = new ToolMessage({ id: "result", content: "Tool result", tool_call_id: "call" })
+    publish("values", { messages: [first] })
+    publish("values", {
+      messages: [first, result, new AIMessage({ id: "reused", content: "After tool" })]
+    })
+    expect(useAppStore.getState().workerFocusMessages).toMatchObject([
+      { content: "First request", worker_provider_identity: true },
+      { content: "Tool result" },
+      { content: "After tool" }
+    ])
+    expect(useAppStore.getState().workerFocusMessages[2].worker_provider_identity).toBeUndefined()
   })
 
   it("keeps explicit conflicts out of the legacy signature window without consuming their slots", () => {

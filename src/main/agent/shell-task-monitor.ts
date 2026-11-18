@@ -30,6 +30,7 @@ export interface ShellTaskSnapshot {
   partialTruncated?: boolean
   idleSeconds?: number
   capReached?: boolean
+  cancelled?: true
   truncated?: boolean
   stopReason?: string
 }

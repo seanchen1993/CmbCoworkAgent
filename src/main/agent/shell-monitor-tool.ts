@@ -2,6 +2,7 @@ import type { RunnableConfig } from "@langchain/core/runnables"
 import { tool } from "langchain"
 import { z } from "zod"
 import { getCurrentHookAgentId, getHookAgentIdFromRequest } from "../hooks/execution-context"
+import { toolFailureSignalFromAbort } from "../hooks/tool-failure"
 import { mergeUpdatedInput } from "../hooks/updated-input"
 import type { LocalSandbox } from "./local-sandbox"
 import {
@@ -101,26 +102,24 @@ export function createShellTaskMonitorTools(sandbox: ShellMonitorBackend) {
         ? Math.max(0, Math.min(timeout, SHELL_TASK_MONITOR_MAX_WAIT_MS))
         : (input.timeout ?? defaultTimeout)
 
-    let resultText: string
+    let snapshot: ShellTaskSnapshot | null
     if (block) {
       const wait = await sandbox.waitForTaskOutput(taskId, {
         ownerId,
         timeoutMs,
         signal: config?.signal
       })
-      if ("result" in wait) {
-        resultText = formatTaskSnapshot(wait.result, "timeout")
-      } else if (wait.status === "aborted") {
-        return abortMessage
-      } else {
-        resultText = notFound
-      }
+      if (wait.status === "aborted") return abortMessage
+      snapshot = "result" in wait ? wait.result : null
     } else {
-      const snapshot = sandbox.getTaskOutput(taskId, ownerId)
-      resultText = snapshot ? formatTaskSnapshot(snapshot, "not_ready") : notFound
+      snapshot = sandbox.getTaskOutput(taskId, ownerId)
     }
     if (config?.signal?.aborted) return abortMessage
-    return sandbox.applyPostToolUseHookToText(toolName, effectiveArgs, resultText)
+    const resultText = snapshot
+      ? formatTaskSnapshot(snapshot, block ? "timeout" : "not_ready")
+      : notFound
+    const failureSignal = snapshot?.cancelled ? toolFailureSignalFromAbort(resultText) : undefined
+    return sandbox.applyPostToolUseHookToText(toolName, effectiveArgs, resultText, failureSignal)
   }
 
   const [monitorName, taskOutputName] = SHELL_TASK_MONITOR_TOOL_NAMES

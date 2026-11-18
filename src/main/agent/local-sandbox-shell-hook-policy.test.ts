@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -75,7 +75,7 @@ async function fixture(options: Partial<LocalSandboxOptions> = {}, isolateWorktr
   })
   const execute = (command = "echo probe") =>
     sandbox.executeForTool(command, undefined, { backgroundAfterMs: 1 })
-  return { sandbox, raw, entered: entered.promise, execute, finish }
+  return { root, sandbox, raw, entered: entered.promise, execute, finish }
 }
 
 function respond(data: unknown): Response {
@@ -120,6 +120,91 @@ describe("shell monitor hook policy", () => {
       }
     })
   })
+
+  it("reports Stop Shell as an interruption to current and later turns in fail-fast mode", async () => {
+    vi.stubEnv("CMB_AGENT_FAIL_FAST", "1")
+    const hook = httpHook({ event: "PostToolUseFailure", matcher: "^(monitor|task_output)$" })
+    const fetchHook = vi.fn<(url: string, init: RequestInit) => Promise<Response>>(async () =>
+      respond({})
+    )
+    vi.stubGlobal("fetch", fetchHook)
+    const { root, sandbox, raw } = await fixture({ hooks: [hook] })
+    raw.mockRestore()
+    await writeFile(
+      path.join(root, "wait.cjs"),
+      'console.log("shell-ready")\nsetInterval(() => {}, 1000)\n'
+    )
+    const started = await sandbox.executeBackground("node wait.cjs")
+    const taskId = started.match(/\bid: (\w+)/)?.[1] ?? ""
+    expect(taskId).not.toBe("")
+    await vi.waitFor(
+      () => expect(sandbox.getTaskOutput(taskId)?.partialOutput).toContain("shell-ready"),
+      { timeout: 10_000 }
+    )
+
+    const [monitor] = createShellTaskMonitorTools(sandbox)
+    const waitForOutput = vi.spyOn(sandbox, "waitForTaskOutput")
+    const terminal = expect(monitor.invoke({ task_id: taskId })).resolves.toMatch(
+      /^Task cancelled by user\.\n\[Command failed with exit code 130, elapsed: \d+s\]$/
+    )
+    await vi.waitFor(() => expect(waitForOutput).toHaveBeenCalledOnce())
+    expect(LocalSandbox.cancelDetachedBackgroundTasks(sandbox.runId)).toBe(true)
+    await terminal
+
+    const laterTurn = new LocalSandbox({
+      rootDir: root,
+      runId: sandbox.runId,
+      hookTurnId: "later-turn",
+      windowsSandbox: "none",
+      hooks: [hook]
+    })
+    const [, taskOutput] = createShellTaskMonitorTools(laterTurn)
+    await expect(taskOutput.invoke({ task_id: taskId, block: false })).resolves.toContain(
+      "[Command failed with exit code 130,"
+    )
+
+    await vi.waitFor(() => expect(fetchHook).toHaveBeenCalledTimes(2))
+    const responses = fetchHook.mock.calls.map(([, { body }]) => JSON.parse(String(body)))
+    expect(responses).toMatchObject(
+      ["monitor", "task_output"].map((toolName) => ({
+        tool_name: toolName,
+        tool_response: { failure_kind: "abort", is_interrupt: true, is_timeout: false }
+      }))
+    )
+  }, 20_000)
+
+  it("still treats a natural exit 130 as a failure even with identical output", async () => {
+    vi.stubEnv("CMB_AGENT_FAIL_FAST", "1")
+    const hook = httpHook({ event: "PostToolUseFailure", matcher: "^monitor$" })
+    const fetchHook = vi.fn<(url: string, init: RequestInit) => Promise<Response>>(async () =>
+      respond({})
+    )
+    vi.stubGlobal("fetch", fetchHook)
+    const { root, sandbox, raw } = await fixture({ hooks: [hook] })
+    raw.mockRestore()
+    await writeFile(
+      path.join(root, "exit.cjs"),
+      'process.stdout.write("Task cancelled by user.")\nprocess.exitCode = 130\n'
+    )
+    const started = await sandbox.executeBackground("node exit.cjs")
+    const taskId = started.match(/\bid: (\w+)/)?.[1] ?? ""
+    expect(taskId).not.toBe("")
+
+    const [monitor] = createShellTaskMonitorTools(sandbox)
+    await expect(monitor.invoke({ task_id: taskId })).rejects.toBeInstanceOf(FailureFuseHaltError)
+    await vi.waitFor(() => expect(fetchHook).toHaveBeenCalledOnce())
+    const [, { body }] = fetchHook.mock.calls[0]
+    expect(JSON.parse(String(body))).toMatchObject({
+      tool_name: "monitor",
+      tool_response: {
+        failure_kind: "exit-nonzero",
+        error: expect.stringMatching(
+          /^Task cancelled by user\.\n\[Command failed with exit code 130,/
+        ),
+        is_interrupt: false
+      }
+    })
+  }, 20_000)
 
   it("matches each tool name in configured order and applies each hook exactly once", async () => {
     const hooks = (["PreToolUse", "PostToolUse"] as const).flatMap((event) =>

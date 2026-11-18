@@ -96,7 +96,12 @@ import {
   type HookResultCallback
 } from "../hooks/runner"
 import { runHooksEnriched } from "../hooks/required-skill"
-import { detectToolFailure, hasFailureFired, markFailureFired } from "../hooks/tool-failure"
+import {
+  detectToolFailure,
+  hasFailureFired,
+  markFailureFired,
+  type ToolFailureSignal
+} from "../hooks/tool-failure"
 import { isHookHaltError, throwIfHookHalt } from "../hooks/halt"
 import { mergeUpdatedInput } from "../hooks/updated-input"
 import {
@@ -512,7 +517,7 @@ interface ExecuteRawOptions {
  * because it hit BACKGROUND_ABSOLUTE_MAX_MS — distinct from a foreground
  * timeout so it does NOT trigger the sandbox-escape retry path.
  */
-type LocalExecuteResponse = ExecuteResponse & { capReached?: boolean }
+type LocalExecuteResponse = ExecuteResponse & { capReached?: boolean; cancelled?: true }
 
 interface BackgroundShellTask {
   id: string
@@ -2995,7 +3000,10 @@ export class LocalSandbox
   private async runHooks(
     event: HookEvent,
     context: HookContext,
-    executePostPolicy?: ExecutePostHookPolicy
+    {
+      executePostPolicy,
+      failureSignal
+    }: { executePostPolicy?: ExecutePostHookPolicy; failureSignal?: ToolFailureSignal } = {}
   ): Promise<HookResult | null> {
     const hookContext = this.prepareHookContext(context)
     const hooks = executePostPolicy?.scopedHooks ?? this.resolveHooks(event, hookContext)
@@ -3026,15 +3034,22 @@ export class LocalSandbox
     // a throw-path failure already caught by toolErrorMiddleware does not
     // re-trigger here.
     if (event === "PostToolUse" && context.toolResult) {
+      const signal =
+        failureSignal ??
+        detectToolFailure(
+          hookContext.toolName ?? "",
+          LocalSandbox.parseToolResultForFailure(context.toolResult)
+        )
       const failureFuseDecision = this.recordFailureFuseDecisionFromResult(
         hookContext,
+        signal,
         executePostPolicy?.failureFuseMode
       )
       if (shouldSendFailureFuseNotice(failureFuseDecision)) {
         this._onFailureFuseNotice?.(failureFuseDecision)
       }
       result = LocalSandbox.mergeFailureFuseWarning(result, failureFuseDecision)
-      this.maybeFirePostToolUseFailureFromResult(hookContext)
+      if (signal) this.maybeFirePostToolUseFailureFromResult(hookContext, signal)
       if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
     }
     return result
@@ -3042,16 +3057,14 @@ export class LocalSandbox
 
   private recordFailureFuseDecisionFromResult(
     context: HookContext,
+    signal: ToolFailureSignal | null,
     failureFuseMode?: FailureFuseMode
   ): FailureFuseDecision | null {
-    if (!context.toolResult) return null
     const turnId = context.turnId ?? this._hookTurnId
     if (!turnId) return null
 
     // Both shell output tools share the existing FailureFuse counters.
     const toolName = context.fallbackToolName ?? context.toolName
-    const parsed = LocalSandbox.parseToolResultForFailure(context.toolResult)
-    const signal = detectToolFailure(toolName ?? "", parsed)
     const threadId = context.sessionId ?? this.runId
     if (!signal) {
       recordToolSuccess({ threadId, turnId, toolName, toolArgs: context.toolArgs })
@@ -3073,10 +3086,10 @@ export class LocalSandbox
     })
   }
 
-  private maybeFirePostToolUseFailureFromResult(context: HookContext): void {
-    const parsed = LocalSandbox.parseToolResultForFailure(context.toolResult)
-    const signal = detectToolFailure(context.toolName ?? "", parsed)
-    if (!signal) return
+  private maybeFirePostToolUseFailureFromResult(
+    context: HookContext,
+    signal: ToolFailureSignal
+  ): void {
     const toolCallId = (context.toolArgs?.tool_call_id ??
       context.toolArgs?.tool_use_id ??
       "") as string
@@ -3159,15 +3172,14 @@ export class LocalSandbox
   async applyPostToolUseHookToText(
     toolName: string,
     toolArgs: Record<string, unknown>,
-    toolResult: string
+    toolResult: string,
+    failureSignal?: ToolFailureSignal
   ): Promise<string> {
-    const postResult = await this.runHooks("PostToolUse", {
-      toolName,
-      toolArgs,
-      toolResult,
-      workspacePath: this.workingDir,
-      sessionId: this.runId
-    })
+    const postResult = await this.runHooks(
+      "PostToolUse",
+      { toolName, toolArgs, toolResult, workspacePath: this.workingDir, sessionId: this.runId },
+      { failureSignal }
+    )
     throwIfHookHalt("PostToolUse", postResult, `${toolName} was stopped by a PostToolUse hook`)
     const feedback = LocalSandbox.formatPostHookTextFeedback(postResult)
     return feedback ? `${toolResult}\n\n${feedback}` : toolResult
@@ -7396,6 +7408,7 @@ export class LocalSandbox
       exitCode: task.result?.exitCode,
       elapsedSeconds,
       capReached: task.result?.capReached,
+      ...(task.result?.cancelled && { cancelled: task.result.cancelled }),
       truncated: task.result?.truncated,
       ...(task.halt && { stopReason: task.halt.error.message })
     }
@@ -7484,7 +7497,8 @@ export class LocalSandbox
         LocalSandbox.publishBackgroundResult(task, {
           output: "Task cancelled by user.",
           exitCode: 130,
-          truncated: false
+          truncated: false,
+          cancelled: true
         })
       }
       if (task.termination) completions.push(task.termination)
@@ -7846,7 +7860,7 @@ export class LocalSandbox
     const postResult = await this.runHooks(
       "PostToolUse",
       { ...postHookContext, toolResult: LocalSandbox.formatExecuteResultForHook(result) },
-      postHookPolicy
+      { executePostPolicy: postHookPolicy }
     )
     return LocalSandbox.applyPostHookToExecResult(result, postResult)
   }

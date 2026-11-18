@@ -2,6 +2,21 @@ import type { Message } from "../types"
 import { normalizeCompleteMessageIds } from "../../../shared/message-role-collision"
 
 const WORKFLOW_PROVIDER_ID_PREFIX = "workflow-provider:"
+const MAX_WORKER_PROVIDER_WIRE_IDS = 16
+
+export function mergeWorkerProviderWireIds(
+  previous: Message["worker_provider_wire_ids"],
+  incoming: Message["worker_provider_wire_ids"]
+): Message["worker_provider_wire_ids"] {
+  if (!previous || !incoming) return incoming ?? previous
+  if (incoming.length === 1 && previous.at(-1) === incoming[0]) return previous
+  const recent = new Set(previous)
+  for (const id of incoming) {
+    recent.delete(id)
+    recent.add(id)
+  }
+  return [...recent].slice(-MAX_WORKER_PROVIDER_WIRE_IDS)
+}
 
 function hasExplicitProviderTuple(message: Message): boolean {
   return !!message.provider_source_id && !!message.provider_occurrence
@@ -41,7 +56,13 @@ export function coalesceSnapshotMessageAliases(
       result[previousIndex] = {
         ...message,
         id: previous.id,
-        worker_snapshot_index: previous.worker_snapshot_index
+        worker_snapshot_index: previous.worker_snapshot_index,
+        ...(!workflow && {
+          worker_provider_wire_ids: mergeWorkerProviderWireIds(
+            previous.worker_provider_wire_ids,
+            message.worker_provider_wire_ids
+          )
+        })
       }
       continue
     }

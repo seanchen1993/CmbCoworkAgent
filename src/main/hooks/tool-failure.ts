@@ -99,6 +99,19 @@ export function detectToolFailure(toolName: string, toolResult: unknown): ToolFa
 }
 
 /**
+ * Build the signal for an interrupted tool using its observed message.
+ */
+export function toolFailureSignalFromAbort(message: string): ToolFailureSignal {
+  return {
+    kind: "abort",
+    message,
+    errorType: "unknown",
+    isInterrupt: true,
+    isTimeout: false
+  }
+}
+
+/**
  * Build the signal for a thrown JS error. Called from toolErrorMiddleware.
  */
 export function toolFailureSignalFromThrow(
@@ -106,14 +119,7 @@ export function toolFailureSignalFromThrow(
   opts: { aborted?: boolean } = {}
 ): ToolFailureSignal {
   if (opts.aborted) {
-    const msg = err instanceof Error ? err.message : String(err)
-    return {
-      kind: "abort",
-      message: msg,
-      errorType: "unknown",
-      isInterrupt: true,
-      isTimeout: false
-    }
+    return toolFailureSignalFromAbort(err instanceof Error ? err.message : String(err))
   }
   const isTimeout =
     err instanceof Error &&

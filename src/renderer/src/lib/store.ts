@@ -5,6 +5,7 @@ import {
   resolveWorkerSnapshotContent,
   sameWorkerRoleAndToolCall
 } from "./worker-message-content"
+import { mergeWorkerProviderWireIds } from "./snapshot-message-aliases"
 import { create } from "zustand"
 import type { EvolutionCandidate } from "@/api/evolution"
 import type {
@@ -792,6 +793,10 @@ export function mergeWorkerFocusTailUpdate(
     ...existing,
     ...incomingMessage,
     id: existing.id,
+    worker_provider_wire_ids: mergeWorkerProviderWireIds(
+      existing.worker_provider_wire_ids,
+      incomingMessage.worker_provider_wire_ids
+    ),
     content: resolveWorkerFocusContent(existing, incomingMessage),
     reasoning: incomingMessage.reasoning ?? existing.reasoning,
     tool_calls: mergeWorkerToolCalls(existing.tool_calls, incomingMessage.tool_calls),
@@ -2116,6 +2121,10 @@ export const useAppStore = create<AppState>((set, get) => ({
           ...existing,
           ...message,
           id,
+          worker_provider_wire_ids: mergeWorkerProviderWireIds(
+            existing.worker_provider_wire_ids,
+            message.worker_provider_wire_ids
+          ),
           content: resolveWorkerFocusContent(
             existing,
             message,
