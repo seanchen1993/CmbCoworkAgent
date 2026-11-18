@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest"
+import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages"
+import { serializeWorkflowAgentSnapshotMessages } from "../../../main/agent/workflow/agent-snapshot"
 import type { Message } from "../types"
 import { ElectronIPCTransport } from "./electron-transport"
 import { createWorkflowAgentMessageProjector } from "./workflow-agent-message-projection"
@@ -14,6 +16,67 @@ function message(index: number, overrides: Partial<Message> = {}): Message {
 }
 
 describe("workflow complete snapshot projection", () => {
+  it("projects explicit aliases with stable IDs through full snapshots and their sidecar form", () => {
+    const transport = new ElectronIPCTransport()
+    const additional_kwargs = {
+      cmb_internal_provider_source_id: "provider",
+      cmb_internal_provider_occurrence: 1
+    }
+    const ai = (id: string, content: string) => new AIMessage({ id, content, additional_kwargs })
+    const convert = (messages: BaseMessage[], scope = "parent/run/0") =>
+      transport.convertWorkflowAgentValuesSnapshot(
+        serializeWorkflowAgentSnapshotMessages({ messages }),
+        scope
+      )
+    const draft = ai("raw-a", "Long earlier text that was corrected")
+    const correction = ai("raw-b", "Shorter answer")
+    const [earlier] = convert([draft])
+    const legacyProviderId = new AIMessage({ id: "provider", content: "Legacy provider ID" })
+    for (const messages of [
+      [legacyProviderId, correction],
+      [correction, legacyProviderId]
+    ]) {
+      const rows = convert(messages)
+      expect(new Set(rows.map((item) => item.id)).size).toBe(2)
+      expect(rows.find((item) => item.content === "Shorter answer")?.id).toBe(earlier.id)
+      expect(rows.find((item) => item.content === "Legacy provider ID")?.id).toBe("provider")
+    }
+    const complete = convert([draft, correction])
+    expect(complete).toHaveLength(1)
+    expect(complete[0]).toMatchObject({ id: earlier.id, content: "Shorter answer" })
+    expect(convert([ai("reordered-alias", "Shorter answer"), correction])[0].id).toBe(earlier.id)
+    expect(convert([correction], "parent/run/1")[0].id).not.toBe(earlier.id)
+    const legacy = new AIMessage({ id: "raw-a", content: "Shorter answer" })
+    const differentOccurrence = new AIMessage({
+      id: "raw-a",
+      content: "Shorter answer",
+      additional_kwargs: { ...additional_kwargs, cmb_internal_provider_occurrence: 2 }
+    })
+    const differentRole = new HumanMessage({ id: "raw-a", content: "prompt", additional_kwargs })
+    const tool = (id: string, tool_call_id: string, content: string) =>
+      new ToolMessage({ id, content, tool_call_id, additional_kwargs })
+    const snapshot = convert([
+      differentRole,
+      correction,
+      legacy,
+      differentOccurrence,
+      tool("tool-wire-a", "call-a", "before"),
+      tool("tool-wire-b", "call-a", "corrected"),
+      tool("tool-wire-b", "call-b", "distinct")
+    ])
+    expect(
+      snapshot.map(({ role, content, tool_call_id }) => ({ role, content, tool_call_id }))
+    ).toEqual([
+      { role: "user", content: "prompt" },
+      { role: "assistant", content: "Shorter answer" },
+      { role: "assistant", content: "Shorter answer" },
+      { role: "assistant", content: "Shorter answer" },
+      { role: "tool", content: "corrected", tool_call_id: "call-a" },
+      { role: "tool", content: "distinct", tool_call_id: "call-b" }
+    ])
+    expect(new Set(snapshot.map(({ id }) => id)).size).toBe(snapshot.length)
+  })
+
   it("applies corrections outside the last 32 messages without duplicating the tail", () => {
     const project = createWorkflowAgentMessageProjector()
     const before = Array.from({ length: 40 }, (_, index) => message(index))
@@ -138,5 +201,31 @@ describe("workflow complete snapshot projection", () => {
       expect(project(incoming, "agent")).toBe(result)
     }
     expect(initial[399].content).toBe(before[399].content)
+  })
+
+  it("reuses full-window rows when only provider aliases change", () => {
+    const transport = new ElectronIPCTransport()
+    const project = createWorkflowAgentMessageProjector()
+    const scope = "parent/full/0"
+    const frame = (alias: string) =>
+      transport.convertWorkflowAgentValuesSnapshot(
+        Array.from({ length: 400 }, (_, index) => ({
+          id: ["langchain_core", "messages", "AIMessage"],
+          kwargs: {
+            id: `${alias}-${index}`,
+            content: `answer-${index}`,
+            additional_kwargs: {
+              cmb_internal_provider_source_id: `provider-${index}`,
+              cmb_internal_provider_occurrence: 1
+            }
+          }
+        })),
+        scope
+      )
+    const initial = project(frame("first"), scope)
+    expect(initial).toHaveLength(400)
+    for (let index = 0; index < 20; index += 1) {
+      expect(project(frame(`alias-${index}`), scope)).toBe(initial)
+    }
   })
 })

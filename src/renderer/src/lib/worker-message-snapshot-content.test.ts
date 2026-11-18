@@ -1,12 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { ElectronIPCTransport } from "./electron-transport"
-import { useAppStore } from "./store"
+import { enrichWorkerProviderIdentities, useAppStore } from "./store"
 import {
+  buildWorkerCheckpointHistory,
+  checkpointHistoryMessageMatchesSparseLive,
+  MAX_WORKER_HISTORY_MESSAGES,
   mergeWorkerCheckpointSparseContent,
   preserveWorkerHistoryMessageIdentities
 } from "./worker-checkpoint-history"
 import { normalizeAppendedMessageIds } from "../../../shared/message-role-collision"
-import { resolveWorkerSnapshotContent } from "./worker-message-content"
+import {
+  createWorkerSignatureMatches,
+  resolveWorkerSnapshotContent
+} from "./worker-message-content"
 import type { Message } from "../types"
 import { STREAM_MESSAGE_CONTENT_MODE_KEY } from "../../../shared/stream-message-wire-mode"
 
@@ -18,9 +24,30 @@ function wire(content: Message["content"], id?: string, type = "AIMessage") {
   return { id: ["langchain_core", "messages", type], kwargs: { id, content } }
 }
 
-function values(transport: ElectronIPCTransport, messages: unknown[]) {
+function providerWire(
+  id: string,
+  content: string,
+  type = "AIMessage",
+  occurrence = 1,
+  toolCallId?: string
+) {
+  const message = wire(content, id, type)
+  return {
+    ...message,
+    kwargs: {
+      ...message.kwargs,
+      tool_call_id: toolCallId,
+      additional_kwargs: {
+        cmb_internal_provider_source_id: "provider",
+        cmb_internal_provider_occurrence: occurrence
+      }
+    }
+  }
+}
+
+function values(transport: ElectronIPCTransport, messages: unknown[], workerTurn = 1) {
   const result = transport.convertFocusedCoordinatorWorkerIPCEvent(
-    { type: "stream", mode: "values", data: { messages }, workerTurn: 1 },
+    { type: "stream", mode: "values", data: { messages }, workerTurn },
     parent
   )
   useAppStore.getState().appendWorkerFocusMessages(worker, result, { orderedSnapshot: true })
@@ -59,6 +86,305 @@ beforeEach(() => {
 afterEach(() => useAppStore.getState().closeWorkerFocusView())
 
 describe("Team worker authoritative content", () => {
+  it("keeps a declared tuple independent from an inferred occurrence in the same full frame", () => {
+    const legacy = wire("Legacy answer", "provider")
+    const explicit = providerWire("named-explicit", "Explicit answer")
+    const user = wire("First prompt", "first-user", "HumanMessage")
+    for (const snapshot of [
+      [legacy, explicit],
+      [explicit, legacy]
+    ]) {
+      useAppStore.setState({ workerFocusMessages: [] })
+      values(new ElectronIPCTransport(), [user, ...snapshot])
+      const live = useAppStore.getState().workerFocusMessages.slice(1)
+      const checkpoint = buildWorkerCheckpointHistory([user, ...snapshot], worker).messages.slice(1)
+      for (const rows of [live, checkpoint]) {
+        expect(rows.map((message) => message.content)).toEqual(
+          snapshot.map((message) => message.kwargs.content)
+        )
+        expect(new Set(rows.map((message) => message.id)).size).toBe(2)
+      }
+      const declared = checkpoint.find((message) => message.worker_provider_identity)!
+      expect(
+        checkpointHistoryMessageMatchesSparseLive({ ...declared, provider_occurrence: 2 }, declared)
+      ).toBe(false)
+    }
+  })
+
+  it("updates an identified live row when a later chunk has the same ID without metadata", () => {
+    const transport = new ElectronIPCTransport()
+    values(transport, [providerWire("provider", "Original answer")])
+    const [original] = useAppStore.getState().workerFocusMessages
+    const update = transport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        type: "stream",
+        mode: "messages",
+        workerTurn: 1,
+        data: [
+          wire(" with continuation", "provider", "AIMessageChunk"),
+          { [STREAM_MESSAGE_CONTENT_MODE_KEY]: "delta" }
+        ]
+      },
+      parent
+    )
+    useAppStore.getState().appendWorkerFocusMessages(worker, update)
+    expect(useAppStore.getState().workerFocusMessages).toMatchObject([
+      { id: original.id, content: "Original answer with continuation" }
+    ])
+  })
+
+  it("keeps explicit conflicts out of the legacy signature window without consuming their slots", () => {
+    const conflict: Message = {
+      id: "worker-snapshot-0",
+      role: "assistant",
+      content: "Same answer",
+      created_at: new Date(),
+      provider_source_id: "source-a",
+      provider_occurrence: 1,
+      worker_provider_identity: true
+    }
+    const incoming = { ...conflict, id: "wire-b", provider_source_id: "source-b" }
+    const legacy = { ...conflict, id: "worker-snapshot-1", worker_provider_identity: false }
+    const matches = createWorkerSignatureMatches([conflict, legacy])
+    const counts = new Map([["signature", 2]])
+    matches.add("signature", 0)
+    matches.add("signature", 1)
+    expect(matches.take("signature", counts, incoming)).toBe(1)
+    expect(matches.take("signature", counts, incoming)).toBeUndefined()
+    expect(counts.get("signature")).toBe(1)
+    expect(matches.take("signature", counts, legacy)).toBe(0)
+  })
+
+  it("does not repeatedly inspect identified rows when an entire signature window has the same prose", () => {
+    let inspected = 0
+    const history = Array.from(
+      { length: 500 },
+      (_, index): Message => ({
+        id: `worker-snapshot-${index}`,
+        role: "assistant",
+        content: "Same answer",
+        created_at: new Date(),
+        provider_source_id: `source-${index}`,
+        provider_occurrence: 1,
+        get worker_provider_identity() {
+          inspected += 1
+          return true
+        }
+      })
+    )
+    const counts = new Map([["same", history.length]])
+    const matches = createWorkerSignatureMatches(history)
+    history.forEach((_, index) => matches.add("same", index))
+    const incoming = { ...history[0], id: "wire", provider_source_id: "different-source" }
+    inspected = 0
+    history.forEach(() => expect(matches.take("same", counts, incoming)).toBeUndefined())
+    expect(inspected).toBe(0)
+  })
+
+  it("updates the same live row when complete snapshots and later chunks change wire IDs", () => {
+    const transport = new ElectronIPCTransport()
+    const sendChunk = (id: string, content: string, mode: "snapshot" | "delta") => {
+      const result = transport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          type: "stream",
+          mode: "messages",
+          workerTurn: 1,
+          data: [
+            providerWire(id, content, "AIMessageChunk"),
+            { [STREAM_MESSAGE_CONTENT_MODE_KEY]: mode }
+          ]
+        },
+        parent
+      )
+      useAppStore.getState().appendWorkerFocusMessages(worker, result)
+    }
+    sendChunk("chunk", "initial live draft", "snapshot")
+    const [initial] = useAppStore.getState().workerFocusMessages
+    values(transport, [
+      providerWire("draft-alias", "long earlier draft"),
+      providerWire("answer-alias", "Corrected")
+    ])
+    sendChunk("new-chunk-alias", " reply", "delta")
+    expect(useAppStore.getState().workerFocusMessages).toMatchObject([
+      {
+        id: initial.id,
+        content: "Corrected reply",
+        provider_source_id: `worker-turn-${worker}-1::provider`,
+        provider_occurrence: 1
+      }
+    ])
+  })
+
+  it("preserves different turns, occurrences and tool calls in live and restored snapshots", () => {
+    const transport = new ElectronIPCTransport()
+    const snapshot = [
+      wire("First prompt", "user-one", "HumanMessage"),
+      providerWire("first-a", "old"),
+      providerWire("first-b", "first reply"),
+      providerWire("tool-a", "tool result A", "ToolMessage", 1, "call-a"),
+      providerWire("tool-a-alias", "corrected tool result A", "ToolMessage", 1, "call-a"),
+      providerWire("tool-b", "tool result B", "ToolMessage", 1, "call-b"),
+      providerWire("another-occurrence", "first reply", "AIMessage", 2),
+      wire("Second prompt", "user-two", "HumanMessage"),
+      providerWire("second", "second reply")
+    ]
+    values(transport, snapshot, 2)
+    const live = useAppStore.getState().workerFocusMessages
+    const restored = buildWorkerCheckpointHistory(snapshot, worker).messages
+    for (const result of [live, restored]) {
+      expect(result.map((message) => message.content)).toEqual([
+        "First prompt",
+        "first reply",
+        "corrected tool result A",
+        "tool result B",
+        "first reply",
+        "Second prompt",
+        "second reply"
+      ])
+      expect(new Set(result.map(({ id }) => id)).size).toBe(result.length)
+      expect(
+        result.filter((message) => message.role === "tool").map((item) => item.tool_call_id)
+      ).toEqual(["call-a", "call-b"])
+    }
+  })
+
+  it("keeps independent explicit identities when consecutive frames reuse a wire ID", () => {
+    const transport = new ElectronIPCTransport()
+    const one = providerWire("reused", "first")
+    const two = providerWire("reused", "second")
+    two.kwargs.additional_kwargs.cmb_internal_provider_source_id = "another-provider"
+    values(transport, [one])
+    values(transport, [two])
+    const rows = useAppStore.getState().workerFocusMessages
+    expect(rows.map((message) => message.content)).toEqual(["first", "second"])
+    expect(new Set(rows.map((message) => message.id)).size).toBe(2)
+    expect(rows.every((message) => message.id.startsWith(`worker-turn-${worker}-1::`))).toBe(true)
+  })
+
+  it("adopts explicit metadata when a tail snapshot arrives for a known wire ID", () => {
+    const transport = new ElectronIPCTransport()
+    values(transport, [wire("Legacy draft", "raw")])
+    const [initial] = useAppStore.getState().workerFocusMessages
+    const tail = transport.convertFocusedCoordinatorWorkerIPCEvent(
+      {
+        type: "stream",
+        mode: "values",
+        workerTurn: 1,
+        valuesSnapshotKind: "tail",
+        data: { messages: [providerWire("raw", "Tail correction")] }
+      },
+      parent
+    )
+    useAppStore.getState().appendWorkerFocusMessages(worker, tail)
+    expect(useAppStore.getState().workerFocusMessages).toMatchObject([
+      { id: initial.id, content: "Tail correction", provider_occurrence: 1 }
+    ])
+  })
+
+  it("reconciles a legacy checkpoint row with explicit metadata adopted by the live row", () => {
+    const raw = [wire("First prompt", "user", "HumanMessage"), wire("Previous answer", "raw")]
+    const checkpoint = buildWorkerCheckpointHistory(raw, worker).messages
+    const live = values(new ElectronIPCTransport(), raw)
+      .filter((message) => message.role === "assistant")
+      .map((message) => ({
+        ...message,
+        content: "Latest answer",
+        provider_source_id: `worker-turn-${worker}-1::provider`,
+        provider_occurrence: 1,
+        worker_provider_identity: true
+      }))
+    const prepared = enrichWorkerProviderIdentities(checkpoint, live)
+    expect(normalizeAppendedMessageIds(prepared, live)[0].id).toBe(checkpoint[1].id)
+    expect(checkpoint[1].provider_source_id).toBeUndefined()
+  })
+
+  it("restores the bounded raw checkpoint window while preserving legacy occurrence history", () => {
+    const history = buildWorkerCheckpointHistory(
+      [
+        wire("First prompt", "user", "HumanMessage"),
+        wire("Old reply outside the window", "reused"),
+        ...Array.from({ length: MAX_WORKER_HISTORY_MESSAGES - 1 }, (_, index) =>
+          wire(`Recent reply ${index}`, `recent-${index}`)
+        ),
+        wire("Recent reply with a reused ID", "reused")
+      ],
+      worker
+    )
+    expect(history.truncatedCount).toBe(2)
+    expect(history.messages).toHaveLength(MAX_WORKER_HISTORY_MESSAGES)
+    expect(history.messages[0].content).toBe("Recent reply 0")
+    expect(history.messages.at(-1)).toMatchObject({
+      content: "Recent reply with a reused ID",
+      provider_occurrence: 2
+    })
+  })
+
+  it("uses a newer complete snapshot to seed a subsequent previous-turn delta", () => {
+    const transport = new ElectronIPCTransport()
+    const full = (previous: string) => [
+      wire("First prompt", "user-one", "HumanMessage"),
+      providerWire("older-answer", previous),
+      wire("Second prompt", "user-two", "HumanMessage"),
+      providerWire("current-answer", "Current answer")
+    ]
+    const staleChunk = (content: string, mode: "snapshot" | "delta") => {
+      const result = transport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          type: "stream",
+          mode: "messages",
+          workerTurn: 1,
+          data: [
+            providerWire("earlier-wire-alias", content, "AIMessageChunk"),
+            { [STREAM_MESSAGE_CONTENT_MODE_KEY]: mode }
+          ]
+        },
+        parent
+      )
+      useAppStore.getState().appendWorkerFocusMessages(worker, result)
+    }
+    values(transport, full("Original"), 2)
+    staleChunk("Cached older correction", "snapshot")
+    values(transport, full("Latest complete answer"), 2)
+    staleChunk(" with a suffix", "delta")
+    const replies = useAppStore
+      .getState()
+      .workerFocusMessages.filter((message) => message.role === "assistant")
+    expect(replies.map((message) => message.content)).toEqual([
+      "Latest complete answer with a suffix",
+      "Current answer"
+    ])
+  })
+
+  it("indexes full-window provider aliases without scanning the history for every row", () => {
+    const transport = new ElectronIPCTransport()
+    const count = 500
+    const frame = (alias: string) =>
+      Array.from({ length: count }, (_, index) => {
+        const message = providerWire(`${alias}-${index}`, `answer-${index}`)
+        message.kwargs.additional_kwargs.cmb_internal_provider_source_id = `provider-${index}`
+        return message
+      })
+    values(transport, frame("before"))
+    const existing = useAppStore.getState().workerFocusMessages
+    const ids = existing.map((message) => message.id)
+    let historyReads = 0
+    for (const message of existing) {
+      for (const field of ["id", "provider_source_id"] as const) {
+        const value = message[field]
+        Object.defineProperty(message, field, {
+          get: () => {
+            historyReads += 1
+            return value
+          },
+          configurable: true
+        })
+      }
+    }
+    values(transport, frame("alias"))
+    expect(useAppStore.getState().workerFocusMessages.map((message) => message.id)).toEqual(ids)
+    expect(historyReads).toBeLessThan(count * 50)
+  })
+
   it.each(["messages", "tail"] as const)(
     "keeps a fresh %s cycle separate when focus opens after a tool",
     (mode) => {

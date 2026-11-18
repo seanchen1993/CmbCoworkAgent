@@ -2,9 +2,12 @@ import type { Message } from "@/types"
 import {
   getMessageProviderOccurrence,
   getMessageProviderSourceId,
+  getMessageProviderTupleFromMetadata,
   normalizeAppendedMessageIds,
   normalizeCompleteMessageIds
 } from "../../../shared/message-role-collision"
+import { coalesceSnapshotMessageAliases } from "./snapshot-message-aliases"
+import { compatibleWorkerProviderIdentity } from "./worker-message-content"
 
 export const MAX_WORKER_HISTORY_MESSAGES = 500
 
@@ -76,6 +79,7 @@ export function checkpointHistoryMessageMatchesSparseLive(
   liveMessage: Message
 ): boolean {
   if (historyMessage.role !== liveMessage.role) return false
+  if (!compatibleWorkerProviderIdentity(historyMessage, liveMessage)) return false
   if (getMessageProviderSourceId(historyMessage) !== getMessageProviderSourceId(liveMessage)) {
     return false
   }
@@ -270,11 +274,24 @@ function messageFromCheckpoint(
     workerThreadId && workerTurn
       ? createWorkerTurnScopedMessageId(workerThreadId, rawMessageId, workerTurn)
       : rawMessageId
+  const providerTuple = getMessageProviderTupleFromMetadata(additionalKwargs)
 
   return {
     id: messageId,
     role,
     content,
+    ...(providerTuple && {
+      ...providerTuple,
+      worker_provider_identity: true,
+      provider_source_id:
+        workerThreadId && workerTurn
+          ? createWorkerTurnScopedMessageId(
+              workerThreadId,
+              providerTuple.provider_source_id,
+              workerTurn
+            )
+          : providerTuple.provider_source_id
+    }),
     tool_calls: toolCalls,
     ...(role === "tool" && toolCallId && { tool_call_id: toolCallId }),
     ...(role === "tool" && toolName && { name: toolName }),
@@ -317,11 +334,12 @@ export function buildWorkerCheckpointHistory(
       return message ? { absoluteIndex, message } : null
     })
     .filter((entry): entry is { absoluteIndex: number; message: Message } => entry !== null)
-  const normalizedMessages = normalizeCompleteMessageIds(
-    indexedMessages.map((entry) => entry.message)
+  const prefixLength = indexedMessages.findIndex((entry) => entry.absoluteIndex >= startIndex)
+  if (prefixLength === -1) return { messages: [], truncatedCount: startIndex }
+  const prefix = indexedMessages.slice(0, prefixLength).map((entry) => entry.message)
+  const tail = coalesceSnapshotMessageAliases(
+    indexedMessages.slice(prefixLength).map((entry) => entry.message)
   )
-  const messages = normalizedMessages.filter(
-    (_, index) => indexedMessages[index].absoluteIndex >= startIndex
-  )
+  const messages = normalizeCompleteMessageIds([...prefix, ...tail]).slice(prefixLength)
   return { messages, truncatedCount: startIndex }
 }

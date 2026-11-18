@@ -1,4 +1,10 @@
-import { resolveWorkerSnapshotContent } from "@/lib/worker-message-content"
+import {
+  compatibleWorkerProviderIdentity,
+  createWorkerSignatureMatches,
+  parseWorkerTurnScopedId,
+  resolveWorkerSnapshotContent,
+  sameWorkerRoleAndToolCall
+} from "@/lib/worker-message-content"
 import {
   useCallback,
   useEffect,
@@ -15,7 +21,11 @@ import { HookLogChip, HookLogModal } from "./HookLogViews"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { useThreadContext, useThreadState, type HookLogBucket } from "@/lib/thread-context"
-import { applyWorkerFocusTailUpdateToMergedMessages, useAppStore } from "@/lib/store"
+import {
+  applyWorkerFocusTailUpdateToMergedMessages,
+  enrichWorkerProviderIdentities,
+  useAppStore
+} from "@/lib/store"
 import { buildMessageBubbleTimingMeta } from "@/lib/message-bubble-timing"
 import {
   buildVisibleMessageLayout,
@@ -40,6 +50,7 @@ import {
   WORKER_MESSAGE_WINDOW_SIZE
 } from "@/lib/worker-message-window"
 import {
+  getMessageProviderOccurrence,
   getMessageProviderSourceId,
   MESSAGE_SAME_ROLE_DUPLICATE_MARKER,
   normalizeAppendedMessageIds,
@@ -70,12 +81,6 @@ function isWorkerSnapshotMessageId(id: string): boolean {
   return unscopedId.startsWith("worker-snapshot-")
 }
 
-function parseWorkerTurnScopedId(id: string): { rawId: string; turn: number } | undefined {
-  const match = /^worker-turn-.*-(\d+)::(.+)$/.exec(id)
-  if (!match) return undefined
-  return { rawId: match[2], turn: Number(match[1]) }
-}
-
 function workerTransportSourceId(message: Message): string {
   const scoped = parseWorkerTurnScopedId(message.id)
   return getMessageProviderSourceId({
@@ -92,7 +97,13 @@ function workerTransportRenderId(message: Message): string {
 }
 
 function workerTransportIdentityKey(message: Message, turnKey: string): string {
-  return [turnKey, message.role, workerTransportSourceId(message)].join("\u001f")
+  return [turnKey, message.role, workerTransportSourceId(message), message.tool_call_id].join(
+    "\u001f"
+  )
+}
+
+function workerExplicitOccurrenceKey(message: Message, turnKey: string): string {
+  return `${workerTransportIdentityKey(message, turnKey)}\u001f${message.provider_occurrence ?? 1}`
 }
 
 function repeatedWorkerTransportIdentityKeys(
@@ -119,20 +130,26 @@ function findSameWorkerTransportIdentityIndex(
   turnKey: string
 ): number | undefined {
   const renderId = workerTransportRenderId(message)
+  const occurrence = getMessageProviderOccurrence(message)
   const exactIndex = messages.findIndex(
     (candidate, candidateIndex) =>
       turnKeys[candidateIndex] === turnKey &&
-      candidate.role === message.role &&
+      sameWorkerRoleAndToolCall(candidate, message) &&
+      compatibleWorkerProviderIdentity(candidate, message) &&
+      (occurrence === undefined || (getMessageProviderOccurrence(candidate) ?? 1) === occurrence) &&
       workerTransportRenderId(candidate) === renderId
   )
   if (exactIndex >= 0) return exactIndex
 
-  if (renderId.includes(MESSAGE_SAME_ROLE_DUPLICATE_MARKER)) return undefined
+  if (occurrence === undefined && renderId.includes(MESSAGE_SAME_ROLE_DUPLICATE_MARKER)) {
+    return undefined
+  }
 
   const sourceId = workerTransportSourceId(message)
   const providerMatches = messages.flatMap((candidate, candidateIndex) =>
     turnKeys[candidateIndex] === turnKey &&
-    candidate.role === message.role &&
+    sameWorkerRoleAndToolCall(candidate, message) &&
+    (occurrence === undefined || (getMessageProviderOccurrence(candidate) ?? 1) === occurrence) &&
     workerTransportSourceId(candidate) === sourceId &&
     (parseWorkerTurnScopedId(candidate.id) !== undefined ||
       parseWorkerTurnScopedId(message.id) !== undefined)
@@ -251,32 +268,27 @@ function isCompatibleWorkerToolResultReplay(a: Message, b: Message): boolean {
   return areWorkerContentsCompatible(a.content, b.content)
 }
 
-function findCompatibleWorkerReplayIndex(
+function findWorkerReplayIndex(
   messages: Message[],
   message: Message,
-  turnKeys?: readonly string[],
-  turnKey?: string
+  legacyIndexes: readonly number[],
+  turnKeys: readonly string[],
+  turnKey: string,
+  claimed: ReadonlySet<number>
 ): number | undefined {
-  const index = messages.findIndex(
-    (item, candidateIndex) =>
-      (turnKey === undefined || turnKeys?.[candidateIndex] === turnKey) &&
-      (isCompatibleWorkerAssistantToolReplay(item, message) ||
-        isCompatibleWorkerToolResultReplay(item, message))
-  )
-  return index >= 0 ? index : undefined
-}
-
-function findSameWorkerAssistantTextIndex(
-  messages: Message[],
-  message: Message,
-  turnKeys?: readonly string[],
-  turnKey?: string
-): number | undefined {
-  const index = messages.findIndex(
-    (item, candidateIndex) =>
-      (turnKey === undefined || turnKeys?.[candidateIndex] === turnKey) &&
-      isSameWorkerAssistantText(item, message)
-  )
+  const matches = (item: Message, candidateIndex: number): boolean =>
+    !claimed.has(candidateIndex) &&
+    turnKeys[candidateIndex] === turnKey &&
+    compatibleWorkerProviderIdentity(item, message) &&
+    (isCompatibleWorkerAssistantToolReplay(item, message) ||
+      isCompatibleWorkerToolResultReplay(item, message) ||
+      isSameWorkerAssistantText(item, message))
+  if (message.worker_provider_identity) {
+    return legacyIndexes.find(
+      (index) => !messages[index].worker_provider_identity && matches(messages[index], index)
+    )
+  }
+  const index = messages.findIndex(matches)
   return index >= 0 ? index : undefined
 }
 
@@ -320,24 +332,6 @@ function workerTurnSignatureKey(turnKey: string, signature: string | undefined):
 function incrementSignatureCount(map: Map<string, number>, signature: string | undefined): void {
   if (!signature) return
   map.set(signature, (map.get(signature) ?? 0) + 1)
-}
-
-function takeWindowedSignatureMatch(
-  indexes: number[] | undefined,
-  remainingBySignature: Map<string, number>,
-  signature: string | undefined
-): number | undefined {
-  if (!indexes?.length || !signature) return undefined
-  const remaining = remainingBySignature.get(signature) ?? 0
-  if (remaining <= 0) return indexes.shift()
-
-  // If the same text appears in multiple worker turns, live messages usually
-  // belong to the most recent slice. Match the last N compatible snapshots
-  // instead of blindly consuming the oldest one.
-  const matchPosition = Math.max(0, indexes.length - remaining)
-  const [index] = indexes.splice(matchPosition, 1)
-  remainingBySignature.set(signature, remaining - 1)
-  return index
 }
 
 const WORKER_THINKING_MESSAGES = [
@@ -395,7 +389,8 @@ function mergeCheckpointAlignedWorkerMessage(
   }
 }
 
-function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Message[] {
+function mergeMessages(checkpoint: Message[], liveMessages: Message[]): Message[] {
+  const baseMessages = enrichWorkerProviderIdentities(checkpoint, liveMessages)
   if (isCompleteWorkerSnapshotCoveringHistory(baseMessages, liveMessages)) {
     const normalizedLiveMessages = normalizeCompleteMessageIds(liveMessages)
     const historyOffset = normalizedLiveMessages.length - baseMessages.length
@@ -441,7 +436,7 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
         normalizeMessageRoleCollisionIds(normalizedBaseMessages, liveMessages)
       )
     ),
-    { splitAssistantAfterTool: true }
+    { splitAssistantAfterTool: true, preserveWorkerSnapshotIdentities: true }
   )
   if (normalizedBaseMessages.length === 0) return normalizedLiveMessages
   if (normalizedLiveMessages.length === 0) return normalizedBaseMessages
@@ -465,8 +460,15 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
         latestWorkerTurnKey(normalizedBaseMessages)
       )
   const indexById = new Map(merged.map((message, index) => [message.id, index]))
-  const snapshotIndexesBySignature = new Map<string, number[]>()
-  const liveIndexesBySignature = new Map<string, number[]>()
+  const claimed = new Set<number>()
+  const explicitIndexes = new Map<string, number | null>()
+  const legacyIndexes: number[] = []
+  const addExplicitIndex = (message: Message, turnKey: string, index: number): void => {
+    const key = workerExplicitOccurrenceKey(message, turnKey)
+    explicitIndexes.set(key, explicitIndexes.has(key) ? null : index)
+  }
+  const snapshotSignatureMatches = createWorkerSignatureMatches(merged)
+  const liveSignatureMatches = createWorkerSignatureMatches(merged)
   const incomingLiveCountsBySignature = new Map<string, number>()
   const incomingSnapshotCountsBySignature = new Map<string, number>()
   const repeatedLiveTransportIdentities = repeatedWorkerTransportIdentityKeys(
@@ -486,20 +488,20 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
     }
   })
   merged.forEach((message, index) => {
+    if (message.worker_provider_identity) {
+      addExplicitIndex(message, mergedTurnKeys[index], index)
+    } else {
+      legacyIndexes.push(index)
+    }
     const signature = workerTurnSignatureKey(
       mergedTurnKeys[index],
       workerFocusMessageSignature(message)
     )
-    if (signature && isWorkerSnapshotMessageId(message.id)) {
-      const indexes = snapshotIndexesBySignature.get(signature) ?? []
-      indexes.push(index)
-      snapshotIndexesBySignature.set(signature, indexes)
-    }
-    if (signature && isWorkerNonSnapshotMessageId(message.id)) {
-      const indexes = liveIndexesBySignature.get(signature) ?? []
-      indexes.push(index)
-      liveIndexesBySignature.set(signature, indexes)
-    }
+    if (!signature) return
+    const matches = isWorkerSnapshotMessageId(message.id)
+      ? snapshotSignatureMatches
+      : liveSignatureMatches
+    matches.add(signature, index)
   })
 
   normalizedLiveMessages.forEach((live, liveIndex) => {
@@ -508,43 +510,44 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
       turnKey,
       workerFocusMessageSignature(live)
     )
+    const existingIndex = indexById.get(live.id)
     const index =
-      indexById.get(live.id) ??
-      findSameWorkerTransportIdentityIndex(merged, live, mergedTurnKeys, turnKey) ??
+      (existingIndex !== undefined &&
+      sameWorkerRoleAndToolCall(merged[existingIndex], live) &&
+      compatibleWorkerProviderIdentity(merged[existingIndex], live)
+        ? existingIndex
+        : undefined) ??
+      (live.worker_provider_identity
+        ? explicitIndexes.get(workerExplicitOccurrenceKey(live, turnKey))
+        : findSameWorkerTransportIdentityIndex(merged, live, mergedTurnKeys, turnKey)) ??
       (signature && isWorkerNonSnapshotMessageId(live.id)
-        ? takeWindowedSignatureMatch(
-            snapshotIndexesBySignature.get(signature),
-            incomingLiveCountsBySignature,
-            signature
-          )
+        ? snapshotSignatureMatches.take(signature, incomingLiveCountsBySignature, live, claimed)
         : undefined) ??
       (signature && isWorkerSnapshotMessageId(live.id)
-        ? takeWindowedSignatureMatch(
-            liveIndexesBySignature.get(signature),
-            incomingSnapshotCountsBySignature,
-            signature
-          )
+        ? liveSignatureMatches.take(signature, incomingSnapshotCountsBySignature, live, claimed)
         : undefined) ??
-      findCompatibleWorkerReplayIndex(merged, live, mergedTurnKeys, turnKey) ??
-      findSameWorkerAssistantTextIndex(merged, live, mergedTurnKeys, turnKey)
+      findWorkerReplayIndex(merged, live, legacyIndexes, mergedTurnKeys, turnKey, claimed)
     if (index === undefined) {
       indexById.set(live.id, merged.length)
-      if (signature && isWorkerSnapshotMessageId(live.id)) {
-        const indexes = snapshotIndexesBySignature.get(signature) ?? []
-        indexes.push(merged.length)
-        snapshotIndexesBySignature.set(signature, indexes)
-      }
-      if (signature && isWorkerNonSnapshotMessageId(live.id)) {
-        const indexes = liveIndexesBySignature.get(signature) ?? []
-        indexes.push(merged.length)
-        liveIndexesBySignature.set(signature, indexes)
-      }
+      claimed.add(merged.length)
       merged.push(live)
       mergedTurnKeys.push(turnKey)
+      if (live.worker_provider_identity) {
+        addExplicitIndex(live, turnKey, merged.length - 1)
+      } else {
+        legacyIndexes.push(merged.length - 1)
+      }
+      if (signature) {
+        const matches = isWorkerSnapshotMessageId(live.id)
+          ? snapshotSignatureMatches
+          : liveSignatureMatches
+        matches.add(signature, merged.length - 1)
+      }
       return
     }
 
     const existing = merged[index]
+    claimed.add(index)
     const id = existing.id
     const incomingDefinesRepeatedOccurrence = repeatedLiveTransportIdentities.has(
       workerTransportIdentityKey(live, turnKey)
@@ -576,6 +579,9 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
       is_error: incomingDefinesRepeatedOccurrence
         ? live.is_error
         : (live.is_error ?? existing.is_error)
+    }
+    if (live.worker_provider_identity && !existing.worker_provider_identity) {
+      addExplicitIndex(merged[index], mergedTurnKeys[index], index)
     }
     indexById.set(id, index)
     indexById.set(live.id, index)

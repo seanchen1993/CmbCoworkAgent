@@ -10,7 +10,10 @@ import { join, resolve } from "node:path"
 import { _electron, type ElectronApplication } from "playwright"
 import type { WebContents } from "electron"
 import recorded from "./fixtures/reused-provider-live-stream.json"
-import { createStreamDataSerializer } from "../src/main/ipc/stream-data-serialization"
+import {
+  createStreamDataSerializer,
+  sanitizeStreamDataForRenderer
+} from "../src/main/ipc/stream-data-serialization"
 import { STREAM_MESSAGE_CONTENT_MODE_KEY } from "../src/shared/stream-message-wire-mode"
 
 interface Fixture {
@@ -39,8 +42,21 @@ const artifacts = resolve(root, process.env.TEAM_OUTPUT_ARTIFACT_DIR || "output/
 mkdirSync(artifacts, { recursive: true })
 const title = "Agent Team output regression"
 const draft = "Earlier draft moved to final answer. ".repeat(4).trim()
-function wire(content: string, id: string, kind = "AIMessage") {
+function wire(content: string, id: string | undefined, kind = "AIMessage") {
   return { id: ["langchain_core", "messages", kind], kwargs: { id, content } }
+}
+function providerWire(content: string, id: string | undefined, sourceId = "team-e2e-provider") {
+  const message = wire(content, id)
+  return {
+    ...message,
+    kwargs: {
+      ...message.kwargs,
+      additional_kwargs: {
+        cmb_internal_provider_source_id: sourceId,
+        cmb_internal_provider_occurrence: 1
+      }
+    }
+  }
 }
 function frame(prefix: string, count = 40) {
   return [
@@ -274,13 +290,18 @@ async function main() {
         )
       }, event)
     }
-    const send = async (messages: unknown[]) =>
-      emit({
+    const send = async (messages: unknown[]) => {
+      const { data, valuesMessageIndexOffset, valuesSnapshotKind } = serialize("values", {
+        messages
+      })
+      return emit({
         type: "stream",
         mode: "values",
         workerTurn: 1,
-        ...serialize("values", { messages })
+        valuesSnapshotKind,
+        data: sanitizeStreamDataForRenderer("values", data, valuesMessageIndexOffset)
       })
+    }
     await send(frame("A"))
     assert.equal(await rows.count(), 41)
     const corrected = frame("A")
@@ -299,10 +320,25 @@ async function main() {
     await send(corrected)
     await page.getByText("Tail fixed", { exact: true }).waitFor()
     results.push("tail values correction remains visible over longer checkpoint text")
+
+    const sharedPrefix = corrected.slice(0, -1)
+    await send([...sharedPrefix, providerWire("Team alias initial", "row-39")])
+    await page.getByText("Team alias initial", { exact: true }).waitFor()
+    const latestAlias = providerWire("Team alias corrected", "late-alias")
+    await send([...sharedPrefix, providerWire("Team alias initial", "early-alias"), latestAlias])
+    await page.getByText("Team alias corrected", { exact: true }).waitFor()
+    assert.equal(await rows.count(), 41)
+    assert.equal(await page.getByText("Team alias initial", { exact: true }).count(), 0)
+    results.push("worker aliases update one visible row across serialized live frames")
+    const saved = [
+      ...sharedPrefix,
+      providerWire("Team checkpoint alias draft", "checkpoint-a"),
+      providerWire("Team alias corrected", "checkpoint-b")
+    ]
     await app.evaluate((_electron, corrected) => {
       const state = (globalThis as unknown as MainGlobal).teamFixture
       state.history[0] = corrected
-    }, corrected)
+    }, saved)
     await page.getByRole("button", { name: "返回", exact: true }).click()
     await open(1)
     assert.equal(await rows.filter({ hasText: "Corrected" }).count(), 0)
@@ -380,8 +416,39 @@ async function main() {
       .nth(0)
       .click()
     await page.getByText("Corrected", { exact: true }).waitFor()
+    await page.getByText("Team alias corrected", { exact: true }).waitFor()
+    assert.equal(await page.getByText("Team checkpoint alias draft", { exact: true }).count(), 0)
     assert.equal(await rows.count(), 41)
     results.push("completed worker reload reads corrected checkpoint once")
+    const identicalProse = "Both independent worker messages share this answer"
+    await app.evaluate(
+      (_electron, checkpointMessage) => {
+        const state = (globalThis as unknown as MainGlobal).teamFixture
+        state.history[0].push(checkpointMessage)
+      },
+      providerWire(identicalProse, undefined, "saved-independent-message")
+    )
+    await page.getByRole("button", { name: "返回", exact: true }).click()
+    await page
+      .getByRole("button", { name: /打开工具流/ })
+      .nth(0)
+      .click()
+    await page.getByText(identicalProse, { exact: true }).waitFor()
+    await send([
+      providerWire(identicalProse, "live-independent-message", "live-independent-source")
+    ])
+    await until(
+      () =>
+        rows
+          .filter({ hasText: identicalProse })
+          .count()
+          .then((count) => count === 2),
+      "same prose from distinct explicit checkpoint and live identities"
+    )
+    assert.equal(await rows.count(), 43)
+    results.push(
+      "idless checkpoint and live rows with the same prose preserve both explicit identities"
+    )
     await page.screenshot({ path: join(artifacts, "team-worker-fixed.png") })
     assert.deepEqual(errors, [])
     const result = { results, errors, stressMs, packaged: Boolean(packaged) }

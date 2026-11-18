@@ -293,6 +293,8 @@ export interface Message {
   worker_content_source?: "values" | "snapshot"
   /** This worker identity has appeared in a complete ordered values frame. */
   worker_snapshot_identity?: boolean
+  /** The worker identity supplied by the producer, before occurrence inference. */
+  worker_provider_identity?: boolean
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
   content_priority?: number

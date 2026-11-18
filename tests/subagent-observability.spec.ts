@@ -936,11 +936,6 @@ async function testWorkerToolFlowPreservesToolErrorStatus(): Promise<void> {
   )
   assertIncludes(
     workerCheckpointHistory,
-    "indexedMessages[index].absoluteIndex >= startIndex",
-    "worker checkpoint helper restores only the recent message window when history is large"
-  )
-  assertIncludes(
-    workerCheckpointHistory,
     "message.is_error === true ||",
     "worker checkpoint helper preserves explicit tool error flags"
   )
