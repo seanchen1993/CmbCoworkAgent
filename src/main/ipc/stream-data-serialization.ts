@@ -5,7 +5,8 @@ import {
   readStreamMessageWireMode,
   type StreamMessageWireMode
 } from "../../shared/stream-message-wire-mode"
-import { projectDisplayToolCallId } from "../display-tool-call-id"
+import { MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY } from "../../shared/message-role-collision"
+import { projectDisplayMessageId } from "../display-message-identity"
 
 const WORKER_SNAPSHOT_INDEX_MESSAGE_KEY = "cmb_worker_snapshot_index"
 
@@ -792,7 +793,7 @@ function sanitizeValuesStreamDataForRenderer(
   return rest
 }
 
-function projectTeamMessageToolIds(message: unknown): unknown {
+function projectTeamMessageIds(message: unknown): unknown {
   const record = asRecord(message)
   const kwargs = asRecord(record?.kwargs)
   if (!kwargs) return message
@@ -800,7 +801,14 @@ function projectTeamMessageToolIds(message: unknown): unknown {
   let nextKwargs = projectToolIds(kwargs)
   const additionalKwargs = asRecord(kwargs.additional_kwargs)
   if (additionalKwargs) {
-    const projected = projectToolIds(additionalKwargs)
+    let projected = projectToolIds(additionalKwargs)
+    const sourceId = additionalKwargs[MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]
+    if (typeof sourceId === "string") {
+      const displayId = projectDisplayMessageId(sourceId, "provider-source")
+      if (displayId !== sourceId) {
+        projected = { ...projected, [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: displayId }
+      }
+    }
     if (projected !== additionalKwargs) {
       nextKwargs = { ...nextKwargs, additional_kwargs: projected }
     }
@@ -812,7 +820,7 @@ function projectToolIds(fields: Record<string, unknown>): Record<string, unknown
   let projected = fields
   const resultId = fields.tool_call_id
   if (typeof resultId === "string") {
-    const id = projectDisplayToolCallId(resultId)
+    const id = projectDisplayMessageId(resultId, "tool-call")
     if (resultId !== id) projected = { ...fields, tool_call_id: id }
   }
   for (const key of ["tool_calls", "tool_call_chunks"] as const) {
@@ -822,7 +830,7 @@ function projectToolIds(fields: Record<string, unknown>): Record<string, unknown
     for (const [index, rawCall] of calls.entries()) {
       const call = asRecord(rawCall)
       if (typeof call?.id !== "string") continue
-      const id = projectDisplayToolCallId(call.id)
+      const id = projectDisplayMessageId(call.id, "tool-call")
       if (id === call.id) continue
       nextCalls ??= calls.slice()
       nextCalls[index] = { ...call, id }
@@ -835,21 +843,21 @@ function projectToolIds(fields: Record<string, unknown>): Record<string, unknown
   return projected
 }
 
-/** Keep Team's renderer-only tool identities aligned with bounded checkpoint reads. */
+/** Keep Team's renderer-only identities aligned with bounded checkpoint reads. */
 export function sanitizeCoordinatorWorkerStreamDataForRenderer(
   mode: string,
   payload: unknown,
   valuesMessageIndexOffset: number
 ): unknown {
   if (mode === "messages" && Array.isArray(payload) && payload.length === 2) {
-    const message = projectTeamMessageToolIds(payload[0])
+    const message = projectTeamMessageIds(payload[0])
     return payload[0] === message ? payload : [message, payload[1]]
   }
   return mode === "values"
     ? sanitizeValuesStreamDataForRenderer(
         payload,
         valuesMessageIndexOffset,
-        projectTeamMessageToolIds
+        projectTeamMessageIds
       )
     : payload
 }

@@ -6,6 +6,7 @@ import {
 } from "../../../main/ipc/stream-data-serialization"
 import { ElectronIPCTransport } from "./electron-transport"
 import { enrichWorkerProviderIdentities, useAppStore } from "./store"
+import { buildToolResultAssociations, getWorkerToolUiKey } from "./worker-tool-result-key"
 import {
   buildWorkerCheckpointHistory,
   checkpointHistoryMessageMatchesSparseLive,
@@ -381,6 +382,89 @@ describe("Team worker authoritative content", () => {
       { id: original.id, content: "Corrected later", worker_provider_identity: true },
       { content: "Second reply" }
     ])
+  })
+
+  it.each([false, true])(
+    "updates a known Team reply through full values containing its own result (result streamed first: %s)",
+    (streamResultFirst) => {
+      const publish = publishWorkerFrames()
+      const additional_kwargs = providerWire("wire-a", "draft").kwargs.additional_kwargs
+      const prompt = new HumanMessage({ id: "request", content: "Request" })
+      const call = { id: "read-probe", name: "read_file", args: { path: "probe.txt" } }
+      const result = new ToolMessage({
+        id: "read-result",
+        content: "Tool finished",
+        tool_call_id: call.id
+      })
+      publish("messages", [
+        new AIMessageChunk({
+          id: "wire-a",
+          content: "Draft",
+          additional_kwargs,
+          tool_calls: [call]
+        }),
+        {}
+      ])
+      const [original] = useAppStore.getState().workerFocusMessages
+      if (streamResultFirst) publish("messages", [result, {}])
+      expect(
+        publish("values", {
+          messages: [
+            prompt,
+            new AIMessage({ id: "wire-a", content: "Corrected", tool_calls: [call] }),
+            result
+          ]
+        })
+      ).toBe("full")
+
+      const assertRows = (content: string): void => {
+        const rows = useAppStore.getState().workerFocusMessages
+        expect(rows.filter((row) => row.role === "assistant" && row.tool_calls?.length)).toMatchObject(
+          [{ id: original.id, content, worker_provider_identity: true }]
+        )
+        expect(rows.filter((row) => row.role === "assistant").map((row) => row.content)).not.toContain(
+          "Draft"
+        )
+        expect(buildToolResultAssociations(rows).get(getWorkerToolUiKey(original.id, call.id, 0)))
+          .toMatchObject({ content: "Tool finished" })
+      }
+      assertRows("Corrected")
+
+      // Later full frames can include the next reply after the same tool cycle.
+      expect(
+        publish("values", {
+          messages: [
+            prompt,
+            new AIMessage({ id: "wire-a", content: "Final correction", tool_calls: [call] }),
+            result,
+            new AIMessage({ id: "summary", content: "Summary" })
+          ]
+        })
+      ).toBe("full")
+      assertRows("Final correction")
+    }
+  )
+
+  it("keeps a Team reply separate when a known wire alias precedes an unrelated result", () => {
+    const publish = publishWorkerFrames()
+    const additional_kwargs = providerWire("wire-a", "draft").kwargs.additional_kwargs
+    const call = { id: "new-call", name: "read_file", args: { path: "probe.txt" } }
+    publish("messages", [
+      new AIMessageChunk({ id: "wire-a", content: "Draft", additional_kwargs }),
+      {}
+    ])
+    publish("values", {
+      messages: [
+        new AIMessage({ id: "wire-a", content: "Independent", tool_calls: [call] }),
+        new ToolMessage({ id: "old-result", content: "Older result", tool_call_id: "old-call" })
+      ]
+    })
+    expect(useAppStore.getState().workerFocusMessages).toMatchObject([
+      { content: "Draft", worker_provider_identity: true },
+      { content: "Independent" },
+      { content: "Older result" }
+    ])
+    expect(useAppStore.getState().workerFocusMessages[1].worker_provider_identity).toBeUndefined()
   })
 
   it("remembers every explicit alias reconciled within a complete frame", () => {

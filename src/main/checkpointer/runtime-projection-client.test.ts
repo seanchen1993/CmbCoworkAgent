@@ -861,12 +861,14 @@ describe("checkpoint runtime projection worker", () => {
   })
 
   it.each([false, true])(
-    "reconciles only lossless worker checkpoint identities (SQL fallback: %s)",
+    "reconciles lossless and projected worker checkpoint identities (SQL fallback: %s)",
     async (oversized) => {
       const threadId = "worker-identity-transfer"
       const ascii = "p".repeat(256)
       const supplementary = "😀".repeat(128)
-      const longSource = oversized ? "x".repeat(65_536) : ascii
+      const longSource =
+        "x".repeat(4095) + '😀"\\\u0000\ud840' + (oversized ? "x".repeat(65_536) : "")
+      const blankSource = " \n\u3000".repeat(800)
       const longToolId = "x".repeat(12_000) + '😀\u0000"\\\ud840'
       const toolIds = [supplementary, longToolId + "1", longToolId + "2"]
       const messages = [
@@ -874,12 +876,15 @@ describe("checkpoint runtime projection worker", () => {
         ...[
           ["exact-ascii", ascii],
           ["ascii-alias", ascii],
+          ["long-source-draft", longSource],
+          ["long-source-corrected", longSource],
           ["distinct-a", longSource + "a"],
           ["distinct-b", longSource + "b"],
           ["exact-supplementary", supplementary],
           ["too-many-code-units", supplementary + "!"],
           ["encoded-nul", "before\u0000after"],
-          ["encoded-surrogate", "\ud840"]
+          ["encoded-surrogate", "\ud840"],
+          ["blank-source", blankSource]
         ].map(([id, source]) => ({
           id: ["langchain_core", "messages", "AIMessage"],
           kwargs: {
@@ -925,12 +930,14 @@ describe("checkpoint runtime projection worker", () => {
       expect(projected.map((row) => row.content)).toEqual([
         "request",
         "ascii-alias",
+        "long-source-corrected",
         "distinct-a",
         "distinct-b",
         "exact-supplementary",
         "too-many-code-units",
         "encoded-nul",
         "encoded-surrogate",
+        "blank-source",
         "requests",
         "exact-call",
         "long-call-a",
@@ -938,9 +945,16 @@ describe("checkpoint runtime projection worker", () => {
       ])
       const byContent = new Map(projected.map((row) => [row.content, row]))
       const scope = `worker-turn-${threadId}-1::`
+      const hashedProvider = (source: string): string =>
+        "cmb-checkpoint-provider-id:sha256:" +
+        createHash("sha256").update(JSON.stringify(source)).digest("hex")
       for (const [content, source] of [
         ["ascii-alias", ascii],
+        ["long-source-corrected", hashedProvider(longSource)],
+        ["distinct-a", hashedProvider(longSource + "a")],
+        ["distinct-b", hashedProvider(longSource + "b")],
         ["exact-supplementary", supplementary],
+        ["too-many-code-units", hashedProvider(supplementary + "!")],
         ["encoded-nul", "before\u0000after"],
         ["encoded-surrogate", "\ud840"],
         ["exact-call", "tool-source"]
@@ -952,10 +966,7 @@ describe("checkpoint runtime projection worker", () => {
         })
       }
       expect(byContent.get("exact-call")?.tool_call_id).toBe(supplementary)
-      for (const content of ["distinct-a", "distinct-b", "too-many-code-units"]) {
-        expect(byContent.get(content)?.id).toBe(scope + content)
-        expect(byContent.get(content)?.worker_provider_identity).toBeUndefined()
-      }
+      expect(byContent.get("blank-source")?.worker_provider_identity).toBeUndefined()
       const expectedIds = toolIds.map((id, index) =>
         index === 0
           ? id
@@ -972,6 +983,13 @@ describe("checkpoint runtime projection worker", () => {
       const live = createStreamDataSerializer()("values", {
         messages: [
           new AIMessage({
+            content: "long-source-corrected",
+            additional_kwargs: {
+              cmb_internal_provider_source_id: longSource,
+              cmb_internal_provider_occurrence: 1
+            }
+          }),
+          new AIMessage({
             content: "requests",
             tool_calls: toolIds.map((id) => ({ id, name: "read_file", args: {} }))
           }),
@@ -986,6 +1004,14 @@ describe("checkpoint runtime projection worker", () => {
         )
       ).toMatchObject({
         messages: [
+          {
+            kwargs: {
+              additional_kwargs: {
+                cmb_internal_provider_source_id: hashedProvider(longSource),
+                cmb_internal_provider_occurrence: 1
+              }
+            }
+          },
           { kwargs: { tool_calls: expectedIds.map((id) => ({ id })) } },
           ...expectedIds.map((id) => ({ kwargs: { tool_call_id: id } }))
         ]

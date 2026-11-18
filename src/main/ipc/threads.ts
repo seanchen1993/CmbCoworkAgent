@@ -108,7 +108,10 @@ import { makeHookResultCallback } from "../hooks/result-callback"
 import { stopWatching } from "../services/workspace-watcher"
 import { assertThreadDeletionWorkspace, isThreadDeletionBusy } from "./thread-deletion-busy"
 import { checkpointWalInBackground } from "../db/wal-checkpoint"
-import { isExternallyManagedThreadRunBusy } from "../services/thread-external-run-busy"
+import {
+  hasExternalThreadRunOwner,
+  isExternallyManagedThreadRunBusy
+} from "../services/thread-external-run-busy"
 import { threadMetadataMatchesGroupSelector } from "../services/thread-group-selector"
 import type {
   ForkableCheckpoint,
@@ -3547,11 +3550,25 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
   const deletingThreads = new Map<string, Promise<void>>()
 
+  const assertNoExternalThreadRunOwner = (
+    threadId: string,
+    metadata: Record<string, unknown>,
+    requireIdle?: boolean
+  ): void => {
+    if (hasExternalThreadRunOwner(threadId, metadata)) {
+      throw new Error(
+        requireIdle ? "会话仍在运行，已跳过该会话。" : "会话仍在运行或有待处理结果，已停止删除。"
+      )
+    }
+  }
+
   const performThreadDeletion = async (
     event: IpcMainInvokeEvent,
     threadId: string,
-    groupGuard?: ThreadDeleteOptions["groupGuard"]
+    metadata: Record<string, unknown>,
+    options?: ThreadDeleteOptions
   ): Promise<void> => {
+    const { groupGuard, requireIdle } = options ?? {}
     console.log("[Threads] Deleting thread:", threadId)
 
     // ThreadId-keyed run-store tombstone FIRST, before any await: launches and
@@ -3593,6 +3610,8 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         console.warn("[Threads] Workflow cancel on delete failed:", error)
       }
       const window = BrowserWindow.fromWebContents(event.sender)
+      // An external owner can start while the workflow cancellation is settling.
+      assertNoExternalThreadRunOwner(threadId, metadata, requireIdle)
       const runOutcome = await cancelAndWaitForAgentThreadRun(threadId, window)
       if (runOutcome === "shell_timed_out") {
         throw new Error("Shell 任务仍在退出，已停止删除。请稍后重试。")
@@ -3915,8 +3934,9 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
             throw new Error("会话仍在运行，已跳过该会话。")
           }
         }
+        assertNoExternalThreadRunOwner(threadId, metadata, options?.requireIdle)
         const releaseShellBlock = LocalSandbox.blockNewBackgroundTasks(threadId)
-        const deletion = performThreadDeletion(event, threadId, options?.groupGuard).finally(
+        const deletion = performThreadDeletion(event, threadId, metadata, options).finally(
           releaseShellBlock
         )
         deletingThreads.set(threadId, deletion)

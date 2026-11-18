@@ -7,7 +7,7 @@ import {
   normalizeCompleteMessageIds
 } from "../../../shared/message-role-collision"
 import { coalesceSnapshotMessageAliases } from "./snapshot-message-aliases"
-import { compatibleWorkerProviderIdentity } from "./worker-message-content"
+import { compatibleWorkerProviderIdentity, parseWorkerTurnScopedId } from "./worker-message-content"
 
 export const MAX_WORKER_HISTORY_MESSAGES = 500
 
@@ -74,12 +74,30 @@ export function mergeWorkerCheckpointSparseContent(
   return liveMessage.content
 }
 
+export function canMatchWorkerCheckpointIdentity(left: Message, right: Message): boolean {
+  if (!compatibleWorkerProviderIdentity(left, right)) return false
+  if (Boolean(left.worker_provider_identity) === Boolean(right.worker_provider_identity))
+    return true
+  if (left.id === right.id) return true
+
+  // A declared source can equal an unrelated wire ID. Use recorded aliases within the same turn.
+  const leftRawId = parseWorkerTurnScopedId(left.id)?.rawId ?? left.id
+  const rightRawId = parseWorkerTurnScopedId(right.id)?.rawId ?? right.id
+  const leftScope = left.id.slice(0, left.id.length - leftRawId.length)
+  const rightScope = right.id.slice(0, right.id.length - rightRawId.length)
+  return (
+    leftScope === rightScope &&
+    (left.worker_provider_wire_ids?.includes(rightRawId) === true ||
+      right.worker_provider_wire_ids?.includes(leftRawId) === true)
+  )
+}
+
 export function checkpointHistoryMessageMatchesSparseLive(
   historyMessage: Message,
   liveMessage: Message
 ): boolean {
   if (historyMessage.role !== liveMessage.role) return false
-  if (!compatibleWorkerProviderIdentity(historyMessage, liveMessage)) return false
+  if (!canMatchWorkerCheckpointIdentity(historyMessage, liveMessage)) return false
   if (getMessageProviderSourceId(historyMessage) !== getMessageProviderSourceId(liveMessage)) {
     return false
   }
@@ -267,9 +285,8 @@ function messageFromCheckpoint(
     message.kwargs?.is_error === true ||
     additionalKwargs?.is_error === true ||
     toolStatus === "error"
-  const rawMessageId =
-    message.kwargs?.id ??
-    (typeof message.id === "string" ? message.id : createWorkerSnapshotFallbackMessageId(index))
+  const wireId = message.kwargs?.id ?? (typeof message.id === "string" ? message.id : undefined)
+  const rawMessageId = wireId ?? createWorkerSnapshotFallbackMessageId(index)
   const messageId =
     workerThreadId && workerTurn
       ? createWorkerTurnScopedMessageId(workerThreadId, rawMessageId, workerTurn)
@@ -283,6 +300,10 @@ function messageFromCheckpoint(
     ...(providerTuple && {
       ...providerTuple,
       worker_provider_identity: true,
+      ...(wireId &&
+        !wireId.startsWith("worker-snapshot-") && {
+          worker_provider_wire_ids: [parseWorkerTurnScopedId(wireId)?.rawId ?? wireId]
+        }),
       provider_source_id:
         workerThreadId && workerTurn
           ? createWorkerTurnScopedMessageId(

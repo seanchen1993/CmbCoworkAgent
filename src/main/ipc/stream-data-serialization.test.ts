@@ -7,7 +7,8 @@ import {
   sanitizeStreamDataForRenderer,
   serializeStreamData
 } from "./stream-data-serialization"
-import { projectDisplayToolCallId } from "../display-tool-call-id"
+import { createHash } from "node:crypto"
+import { projectDisplayMessageId } from "../display-message-identity"
 import {
   STREAM_MESSAGE_CONTENT_MODE_KEY,
   STREAM_MESSAGE_REASONING_MODE_KEY,
@@ -15,13 +16,22 @@ import {
 } from "../../shared/stream-message-wire-mode"
 
 describe("stream data serialization", () => {
-  it("projects long Team tool IDs without changing message identity, chunk tags or source payloads", () => {
-    const longId = "x".repeat(300) + "\ud840\u0000"
-    const id = projectDisplayToolCallId(longId)
+  it("projects long Team identities without changing wire IDs, chunk tags or source payloads", () => {
+    const longId = "x".repeat(4095) + '😀"\\\ud840\u0000'
+    const digest = createHash("sha256").update(JSON.stringify(longId)).digest("hex")
+    const id = projectDisplayMessageId(longId, "tool-call")
+    expect(id).toBe("cmb-checkpoint-tool-id:sha256:" + digest)
+    const providerId = "cmb-checkpoint-provider-id:sha256:" + digest
+    const provider = {
+      cmb_internal_provider_source_id: longId,
+      cmb_internal_provider_occurrence: 2
+    }
+    const projectedProvider = { ...provider, cmb_internal_provider_source_id: providerId }
     const serialize = createStreamDataSerializer()
     const chunk = new AIMessageChunk({
       id: "request",
       content: "",
+      additional_kwargs: provider,
       tool_call_chunks: [{ id: longId, index: 0, name: "read_file", args: '{"path":' }]
     })
     const rawChunk = serialize("messages", [chunk, { marker: "preserve" }]).data
@@ -29,6 +39,7 @@ describe("stream data serialization", () => {
       expect.objectContaining({
         kwargs: expect.objectContaining({
           id: "request",
+          additional_kwargs: projectedProvider,
           tool_call_chunks: [
             expect.objectContaining({
               id,
@@ -42,6 +53,7 @@ describe("stream data serialization", () => {
     ])
     expect(JSON.stringify(rawChunk)).toContain(JSON.stringify(longId))
     expect(chunk.tool_call_chunks?.[0].id).toBe(longId)
+    expect(chunk.additional_kwargs).toEqual(provider)
 
     const values = serialize("values", {
       messages: [
@@ -54,6 +66,7 @@ describe("stream data serialization", () => {
             { id: "short", name: "read_file", args: {} }
           ],
           additional_kwargs: {
+            ...provider,
             tool_calls: [
               { id: longId, type: "function", function: { name: "read_file", arguments: "{}" } }
             ]
@@ -74,7 +87,11 @@ describe("stream data serialization", () => {
           kwargs: {
             id: "request",
             tool_calls: [{ id, args: { path: "probe.txt" } }, { id: "short" }],
-            additional_kwargs: { tool_calls: [{ id }], cmb_worker_snapshot_index: 1 }
+            additional_kwargs: {
+              ...projectedProvider,
+              tool_calls: [{ id }],
+              cmb_worker_snapshot_index: 1
+            }
           }
         },
         { kwargs: { id: "result", tool_call_id: id } }

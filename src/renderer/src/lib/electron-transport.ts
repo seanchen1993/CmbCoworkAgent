@@ -2705,10 +2705,15 @@ export class ElectronIPCTransport implements UseStreamTransport {
     wireIds: ReadonlyMap<Message, string>
   ): Message[] {
     const active = this.currentExplicitWorkerAssistant(workerThreadId)
-    const latest = messages.at(-1)
-    const latestWireId = latest && wireIds.get(latest)
-    const activeIdentity = active && getMessageProviderOccurrenceIdentity(active)
-    const activeSnapshotIndex = active?.worker_snapshot_index ?? -1
+    const latestAssistantIndex = messages.findLastIndex((message) => message.role === "assistant")
+    const latestAssistant = messages[latestAssistantIndex]
+    const trailingRows = messages.slice(latestAssistantIndex + 1)
+    const latestCallIds = new Set(latestAssistant?.tool_calls?.map(({ id }) => id))
+    const isTerminalAssistantSequence = trailingRows.every(
+      (message) =>
+        message.role === "tool" &&
+        Boolean(message.tool_call_id && latestCallIds.has(message.tool_call_id))
+    )
     const owners =
       this.workerProviderWireOwners.get(workerThreadId) ?? new Map<string, string | null>()
     const frameOwners = new Map<string, string | null>()
@@ -2728,51 +2733,67 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.workerProviderWireOwners.set(workerThreadId, owners)
     pruneMapToLimit(owners, MAX_TRACKED_EMITTED_MESSAGES)
 
-    const canAdoptLatest =
-      active &&
-      latest &&
-      latestWireId &&
-      !latest.worker_provider_identity &&
-      owners.get(latestWireId) === activeIdentity &&
-      active.worker_provider_wire_ids?.includes(latestWireId) &&
-      (latest.worker_snapshot_index ?? -1) >= activeSnapshotIndex &&
-      !messages.some(
-        (message) =>
-          (message.role === "tool" && (message.worker_snapshot_index ?? 0) >= activeSnapshotIndex) ||
-          (message.worker_provider_identity &&
-            getMessageProviderOccurrenceIdentity(message) === activeIdentity)
-      )
     const priorByIdentity = new Map<string, Message>()
-    let latestRenderIdIsDeclared = false
+    const priorRenderIds = new Set<string>()
     const priorCandidates = this.workerProviderReplayCandidates.get(workerThreadId)
     for (const candidates of priorCandidates?.values() ?? []) {
       for (const candidate of candidates) {
         if (candidate.worker_provider_identity) {
-          if (candidate.id === latest?.id) latestRenderIdIsDeclared = true
+          priorRenderIds.add(candidate.id)
           priorByIdentity.set(getMessageProviderOccurrenceIdentity(candidate), candidate)
         }
       }
     }
-    let reconciled = messages
-    if (canAdoptLatest) {
-      reconciled = [
-        ...messages.slice(0, -1),
-        {
-          ...latest,
-          worker_provider_identity: true,
-          provider_source_id: active.provider_source_id,
-          provider_occurrence: active.provider_occurrence,
-          worker_provider_wire_ids: [latestWireId]
+    const frameIdentities = new Set(
+      messages.filter((message) => message.worker_provider_identity).map(
+        getMessageProviderOccurrenceIdentity
+      )
+    )
+    let lastToolIndex = -Infinity
+    const reconciled = messages.map((message) => {
+      const snapshotIndex = message.worker_snapshot_index ?? -1
+      if (message.role === "tool") lastToolIndex = snapshotIndex
+      const wireId = wireIds.get(message)
+      if (!wireId || message.worker_provider_identity) return message
+
+      const owner = owners.get(wireId)
+      const previous = owner ? priorByIdentity.get(owner) : undefined
+      const isTerminalAssistant = message === latestAssistant && isTerminalAssistantSequence
+      if (owner && previous?.worker_provider_wire_ids?.includes(wireId) && !frameIdentities.has(owner)) {
+        const previousIndex = previous.worker_snapshot_index ?? -1
+        const previousCallIds = new Set(previous.tool_calls?.map(({ id }) => id))
+        const isKnownToolSlot =
+          snapshotIndex === previous.worker_snapshot_index &&
+          message.tool_calls?.some(({ id }) => id && previousCallIds.has(id))
+        // A streamed tool result clears the active assistant before the full values frame.
+        // The known wire ID and its own matching trailing results can still identify that row.
+        const followsKnownReply =
+          isTerminalAssistant &&
+          lastToolIndex < previousIndex &&
+          snapshotIndex >= previousIndex &&
+          (previous === active ||
+            (trailingRows.length > 0 &&
+              trailingRows.every(
+                (tool) => tool.tool_call_id && previousCallIds.has(tool.tool_call_id)
+              )))
+        if (isKnownToolSlot || followsKnownReply) {
+          frameIdentities.add(owner)
+          return {
+            ...message,
+            worker_provider_identity: true,
+            provider_source_id: previous.provider_source_id,
+            provider_occurrence: previous.provider_occurrence,
+            worker_provider_wire_ids: [wireId]
+          }
         }
-      ]
-    } else if (latest && latestWireId && !latest.worker_provider_identity && latestRenderIdIsDeclared) {
-      // A raw wire ID may also be another reply's render ID. Keep an unconfirmed row separate.
-      const fallback = createWorkerSnapshotFallbackMessageId(latest.worker_snapshot_index ?? 0)
-      reconciled = [
-        ...messages.slice(0, -1),
-        { ...latest, id: this.createFocusedWorkerTurnScopedMessageId(workerThreadId, fallback) }
-      ]
-    }
+      }
+      if (isTerminalAssistant && priorRenderIds.has(message.id)) {
+        // A raw wire ID may also be another reply's render ID. Keep an unconfirmed row separate.
+        const fallback = createWorkerSnapshotFallbackMessageId(snapshotIndex)
+        return { ...message, id: this.createFocusedWorkerTurnScopedMessageId(workerThreadId, fallback) }
+      }
+      return message
+    })
     return coalesceSnapshotMessageAliases(reconciled).map((message) => {
       if (!message.worker_provider_identity || message.role !== "assistant") return message
       const previous = priorByIdentity.get(getMessageProviderOccurrenceIdentity(message))
