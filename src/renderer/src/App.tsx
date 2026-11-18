@@ -4,6 +4,7 @@ import { canUseChatWorkbench, effectiveChatRightModule } from "@/lib/chat-workbe
 import { ClawSidebarShell } from "@/components/panels/ClawSidebarHost"
 import { RightPanelDock } from "@/components/panels/RightPanelDock"
 import { editorNavigationScopeKey } from "../../shared/mods/v2/developer-editor"
+import { ProjectAgentWorkspaceHost } from "@/components/dashboard/ProjectAgentWorkspaceHost"
 import {
   useCallback,
   useDeferredValue,
@@ -1598,6 +1599,10 @@ function App(): React.JSX.Element {
       <ReleaseFeatureGuide active={!isAgentFocusActive} />
       <ModApprovalInbox key={accountRevision} />
       <PetStateBridge />
+      <ProjectAgentWorkspaceHost
+        accountRevision={accountRevision}
+        enabled={dashboardAllowed === true}
+      />
       <Toaster position="top-center" richColors duration={2200} theme={toastTheme} />
     </ThreadProvider>
   )

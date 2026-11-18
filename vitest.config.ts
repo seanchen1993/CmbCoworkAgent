@@ -20,6 +20,8 @@ export const VITEST_TEST_INCLUDE = [
   "src/renderer/src/lib/agent-git-commit-selection.test.ts",
   "src/renderer/src/components/dashboard/active-user-export.test.ts",
   "src/renderer/src/components/dashboard/project-mode-export.test.ts",
+  "src/renderer/src/components/dashboard/project-run-analysis-view.test.ts",
+  "src/renderer/src/components/dashboard/use-project-agent-run.test.ts",
   "src/renderer/src/components/dashboard/panels/project-mode-table-columns.test.ts",
   "src/renderer/src/components/dashboard/project-stage-analysis-view.test.ts",
   "src/renderer/src/components/dashboard/thread-traces-response.test.ts",

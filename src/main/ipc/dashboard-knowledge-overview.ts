@@ -10,6 +10,7 @@ import type {
   KnowledgeProjectStats,
   KnowledgeSection
 } from "../../shared/dashboard-knowledge-overview"
+import { assertProjectModeResultComplete } from "./project-mode-query-scope"
 import { DashboardRequestCancelledError } from "../services/dashboard-request-coordinator"
 
 export function resolveKnowledgeOverviewScope(
@@ -167,4 +168,79 @@ export function parseKnowledgeProjectStats(
     readProjectCount: count(record(r.projects).value),
     successfulReadCount: count(record(r.reads).value)
   }
+}
+
+/** Stream disjoint project ID pages; never load snapshots or trace bodies. */
+export async function fetchKnowledgeProjectAggregates(
+  query: (body: Record<string, unknown>) => Promise<unknown>,
+  snapshotFilters: Record<string, unknown>[],
+  readFilters: Record<string, unknown>[],
+  scopeReadsToProjects: boolean
+): Promise<KnowledgeProjectStats> {
+  const [snapshotQuery, readsQuery] = buildKnowledgeProjectQueries(snapshotFilters, readFilters)
+  const checkedQuery = async (body: Record<string, unknown>) => {
+    const raw = await query(body)
+    assertProjectModeResultComplete(raw)
+    return raw
+  }
+  if (!scopeReadsToProjects) {
+    const [snapshot, reads] = await Promise.all([
+      checkedQuery(snapshotQuery),
+      checkedQuery(readsQuery)
+    ])
+    return parseKnowledgeProjectStats(snapshot, reads)
+  }
+  const snapshot = await checkedQuery(snapshotQuery)
+  let reads = 0,
+    projects = 0
+  let after: Record<string, unknown> | undefined
+  const seen = new Set<string>()
+  while (true) {
+    const raw = await checkedQuery({
+      size: 0,
+      track_total_hits: false,
+      query: { bool: { filter: snapshotFilters } },
+      aggs: {
+        ids: {
+          composite: {
+            size: 500,
+            sources: [{ project: { terms: { field: "properties.projectId" } } }],
+            ...(after ? { after } : {})
+          }
+        }
+      }
+    })
+    const agg = record(record(record(raw).aggregations).ids)
+    if (!Array.isArray(agg.buckets)) throw new Error("项目范围未完整返回")
+    if (!agg.buckets.length) break
+    const ids = agg.buckets.map((b) => record(record(b).key).project)
+    if (ids.some((id) => typeof id !== "string" || !id)) throw new Error("项目范围包含无效标识")
+    const next = record(agg.after_key)
+    if (!Object.keys(next).length && ids.length >= 500)
+      throw new Error("项目范围缺少后续分页游标，无法保证完整统计")
+    if (
+      Object.keys(next).length &&
+      (Object.keys(next).length !== 1 || typeof next.project !== "string" || !next.project)
+    )
+      throw new Error("项目范围分页游标无效")
+    const cursor = JSON.stringify(Object.keys(next).length ? next : { project: ids.at(-1) })
+    if (seen.has(cursor)) throw new Error("项目范围分页游标重复，无法保证完整统计")
+    seen.add(cursor)
+    const stats = parseKnowledgeProjectStats(
+      snapshot,
+      await checkedQuery({
+        ...readsQuery,
+        query: {
+          bool: { filter: [...readFilters, { terms: { "properties.harnessProjectId": ids } }] }
+        }
+      })
+    )
+    reads += stats.successfulReadCount
+    projects += stats.readProjectCount
+    if (!Object.keys(next).length) break
+    after = next
+  }
+  return parseKnowledgeProjectStats(snapshot, {
+    aggregations: { projects: { value: projects }, reads: { value: reads } }
+  })
 }

@@ -1,3 +1,10 @@
+import type { DashboardTimeControl } from "../TimeControlBar"
+import type {
+  RunAnalysisFeature,
+  RunAnalysisOptions,
+  RunAnalysisRange
+} from "../../../../../shared/project-run-analysis"
+import { ProjectRunAnalysis } from "../ProjectRunAnalysis"
 import {
   createContext,
   useContext,
@@ -99,7 +106,11 @@ import type {
   DashboardStageBucketStat
 } from "../use-dashboard"
 import { formatTopUserOrgName } from "../use-dashboard"
-import { formatStageDuration } from "../project-stage-analysis-view"
+import {
+  formatStageDuration,
+  formatProjectElapsed,
+  PROJECT_ELAPSED_HINT
+} from "../project-stage-analysis-view"
 import { ProjectStageAnalysisDialog } from "../ProjectStageAnalysisDialog"
 import { ProjectCodeTraceDialog, type ProjectCodeTraceTarget } from "../ProjectCodeTraceDialog"
 import {
@@ -1734,6 +1745,9 @@ function ProjectRow({
         <td className="whitespace-nowrap px-3 py-2 text-right text-muted-foreground tabular-nums">
           {formatProjectCreatedAt(project.lastExecutedAt)}
         </td>
+        <td className="whitespace-nowrap px-3 py-2 text-right text-muted-foreground tabular-nums">
+          {formatProjectElapsed(project.elapsedMs)}
+        </td>
         <td className="whitespace-nowrap px-3 py-2 text-right">
           <div className="flex flex-col items-end gap-1">
             <button
@@ -1767,7 +1781,7 @@ function ProjectRow({
       </tr>
       {expanded && (
         <tr className="border-b border-border/50 bg-muted/20">
-          <td colSpan={showSuspectedTechnicalDetailMetric ? 21 : 20} className="px-3 py-3">
+          <td colSpan={showSuspectedTechnicalDetailMetric ? 22 : 21} className="px-3 py-3">
             <div className="w-full max-w-[1200px] min-w-0 space-y-3">
               {/* 常用技能（生成行数 / 采纳率已下沉到各特性行） */}
               <div className="flex flex-wrap items-center gap-1.5 text-xs">
@@ -2143,7 +2157,10 @@ function ProjectListSection({
     order: DashboardProjectModeProjectSortOrder
   } = { key: "createdAt", order: "desc" }
   const sortKeyApplicable = (key: DashboardProjectModeProjectSortKey): boolean =>
-    isProjectAttentionSortKey(key) || key === "featureCount" || key === "createdAt"
+    isProjectAttentionSortKey(key) ||
+    key === "featureCount" ||
+    key === "createdAt" ||
+    key === "elapsedMs"
       ? true
       : key === "archivedAt"
         ? tab === "archived"
@@ -2154,7 +2171,7 @@ function ProjectListSection({
   const pageData = projectPages[tab]
   const showSuspectedTechnicalDetailMetric = pageData?.showSuspectedTechnicalDetailMetric === true
   const attentionSort = isProjectAttentionSortKey(effectiveSortBy) ? effectiveSortBy : undefined
-  const tableColumnCount = showSuspectedTechnicalDetailMetric ? 21 : 20
+  const tableColumnCount = showSuspectedTechnicalDetailMetric ? 22 : 21
   const currentError = pageError[tab]
   const tabCount =
     tab === "archived" ? (projectCounts?.archived ?? 0) : (projectCounts?.active ?? 0)
@@ -2450,7 +2467,7 @@ function ProjectListSection({
         <table
           className={cn(
             "w-full table-fixed text-xs",
-            showSuspectedTechnicalDetailMetric ? "min-w-[3108px]" : "min-w-[2968px]"
+            showSuspectedTechnicalDetailMetric ? "min-w-[3268px]" : "min-w-[3128px]"
           )}
         >
           {/*
@@ -2487,6 +2504,7 @@ function ProjectListSection({
             <col className="w-[210px]" />
             <col className="w-[140px]" />
             <col className="w-[140px]" />
+            <col className="w-[160px]" />
             <col className="w-[94px]" />
           </colgroup>
           <thead>
@@ -2594,6 +2612,15 @@ function ProjectListSection({
               >
                 最新执行时间
               </th>
+              <SortableTh
+                label="项目历时"
+                sortKey="elapsedMs"
+                activeKey={effectiveSortBy}
+                order={effectiveSortOrder}
+                enabled
+                onSort={cycleSort}
+                hint={PROJECT_ELAPSED_HINT}
+              />
               <th className="px-3 py-2 text-right font-medium">操作</th>
             </tr>
           </thead>
@@ -3438,6 +3465,11 @@ function ProjectModePanelContent({
   codeStatsLoading,
   onCodeSourceChange,
   createdInRangeProjectsOnly,
+  runAnalysisAllowed = false,
+  runAnalysisRange,
+  runAnalysisTimeControl,
+  runAnalysisOptions,
+  runAnalysisRefreshKey,
   headerAction,
   projectPages,
   projectPageLoading,
@@ -3473,6 +3505,11 @@ function ProjectModePanelContent({
   /** 切换 source 下拉（null = 全部来源）。 */
   onCodeSourceChange: (source: string | null) => void
   createdInRangeProjectsOnly: boolean
+  runAnalysisAllowed?: boolean
+  runAnalysisRange: RunAnalysisRange
+  runAnalysisTimeControl: Omit<DashboardTimeControl, "range">
+  runAnalysisOptions: RunAnalysisOptions
+  runAnalysisRefreshKey?: number
   headerAction?: ReactNode
   projectPages: Partial<
     Record<DashboardProjectModeProjectStatus, DashboardProjectModeProjectPageData>
@@ -3520,6 +3557,40 @@ function ProjectModePanelContent({
   onSkillFunnelFirstStageClick?: () => void
   marketSkillKeys?: Set<string>
 }): React.JSX.Element {
+  const [selectedProjectView, setProjectView] = useState<"list" | "analysis">("list")
+  const projectView = runAnalysisAllowed ? selectedProjectView : "list"
+  const [analysisOpened, setAnalysisOpened] = useState(false)
+  const openCodeTrace = useContext(OpenProjectCodeTrace)
+  const analysisProject = (row: RunAnalysisFeature): DashboardProjectModeProject => ({
+    projectId: row.projectId,
+    name: row.projectName,
+    adapterName: row.adapterName ?? undefined,
+    lifecycleStatus: row.lifecycleStatus ?? undefined,
+    featureCount: row.snapshotFeatureCount,
+    managedRunCount: 0,
+    conversationCount: row.conversationCount,
+    devStageConversationCount: 0,
+    devAssociatedFeatureCount: 0,
+    hasError: false,
+    features: [],
+    topSkills: [],
+    codeStats: row.codeStats,
+    runCost: {
+      toolCalls: row.toolCalls ?? 0,
+      modelCalls: row.modelCalls ?? 0,
+      totalTokens: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      userInputRequests: 0,
+      userInputRequestDocs: 0
+    },
+    userInputRequestCountComplete: false,
+    stageBuckets: {
+      pluginConstrained: { conversationCount: 0, codeStats: null },
+      vibecoding: { conversationCount: 0, codeStats: null },
+      unattributed: { conversationCount: 0, codeStats: null }
+    }
+  })
   const adapters = useMemo(() => data?.adapters ?? [], [data?.adapters])
   const adapterOptions = useMemo(
     () =>
@@ -3529,7 +3600,8 @@ function ProjectModePanelContent({
     [adapters]
   )
 
-  if (loading && !data) {
+  // Shared date changes refresh the overview too; keep the analysis workspace mounted.
+  if (loading && !data && projectView !== "analysis") {
     return (
       <div className="flex h-64 items-center justify-center">
         <Loader2 className="size-6 animate-spin text-muted-foreground" />
@@ -3537,7 +3609,7 @@ function ProjectModePanelContent({
     )
   }
 
-  if (error) {
+  if (error && projectView !== "analysis") {
     return (
       <div className="flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/5 px-4 py-3 text-sm text-destructive">
         <AlertCircle className="size-4 shrink-0" />
@@ -3566,6 +3638,15 @@ function ProjectModePanelContent({
 
   return (
     <div className="space-y-6">
+      {error && (
+        <div
+          role="status"
+          className="flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/5 px-4 py-3 text-sm text-destructive"
+        >
+          <AlertCircle className="size-4 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
       {/* 概览卡片（左）+ 代码采纳漏斗（右），与平台运营概览一致 */}
       <section>
         <div className="mb-1 flex items-center justify-between gap-3">
@@ -3825,23 +3906,83 @@ function ProjectModePanelContent({
         </div>
       </section>
 
-      {/* Project list */}
-      <ProjectListSection
-        projectCounts={projectCounts}
-        projectPages={projectPages}
-        adapterOptions={adapterOptions}
-        pageLoading={projectPageLoading}
-        pageError={projectPageError}
-        loading={projectListLoading}
-        onPageChange={onProjectPageChange}
-        onOpenTraces={onOpenTraces}
-        onOpenFeatureCommits={onOpenFeatureCommits}
-        onOpenProjectCommits={onOpenProjectCommits}
-        loadFeatureNodes={loadFeatureNodes}
-        loadOperationalDetails={loadOperationalDetails}
-        loadStageAnalysis={loadStageAnalysis}
-        createdInRangeProjectsOnly={createdInRangeProjectsOnly}
-      />
+      {/* The inventory stays mounted; analysis loads only after the user opens it. */}
+      <div className="min-w-0 space-y-3">
+        <div
+          role="tablist"
+          aria-label="项目视图"
+          className="inline-flex rounded-md border border-border p-1 text-xs"
+        >
+          <button
+            role="tab"
+            aria-selected={projectView === "list"}
+            className={cn("rounded px-3 py-1.5", projectView === "list" && "bg-muted font-medium")}
+            onClick={() => setProjectView("list")}
+          >
+            项目列表
+          </button>
+          {runAnalysisAllowed && (
+            <button
+              role="tab"
+              aria-selected={projectView === "analysis"}
+              className={cn(
+                "rounded px-3 py-1.5",
+                projectView === "analysis" && "bg-muted font-medium"
+              )}
+              onClick={() => {
+                setAnalysisOpened(true)
+                setProjectView("analysis")
+              }}
+            >
+              项目分析
+            </button>
+          )}
+        </div>
+        {runAnalysisAllowed && analysisOpened && (
+          <div hidden={projectView !== "analysis"}>
+            <ProjectRunAnalysis
+              range={runAnalysisRange}
+              timeControl={runAnalysisTimeControl}
+              options={runAnalysisOptions}
+              active={projectView === "analysis"}
+              refreshKey={runAnalysisRefreshKey}
+              onOpenFeatureCommits={(row, pushed) => {
+                if (row.featureSlug)
+                  onOpenFeatureCommits(
+                    analysisProject(row),
+                    { slug: row.featureSlug, title: row.featureTitle, codeStats: row.codeStats },
+                    pushed
+                  )
+              }}
+              onOpenCodeTrace={(row) =>
+                openCodeTrace?.({
+                  projectId: row.projectId,
+                  name: row.projectName,
+                  bucket: "plugin_constrained"
+                })
+              }
+            />
+          </div>
+        )}
+        <div hidden={projectView !== "list"}>
+          <ProjectListSection
+            projectCounts={projectCounts}
+            projectPages={projectPages}
+            adapterOptions={adapterOptions}
+            pageLoading={projectPageLoading}
+            pageError={projectPageError}
+            loading={projectListLoading}
+            onPageChange={onProjectPageChange}
+            onOpenTraces={onOpenTraces}
+            onOpenFeatureCommits={onOpenFeatureCommits}
+            onOpenProjectCommits={onOpenProjectCommits}
+            loadFeatureNodes={loadFeatureNodes}
+            loadOperationalDetails={loadOperationalDetails}
+            loadStageAnalysis={loadStageAnalysis}
+            createdInRangeProjectsOnly={createdInRangeProjectsOnly}
+          />
+        </div>
+      </div>
 
       {/* Adapter (plugin) distribution — 紧随项目列表之后 */}
       <AdapterListSection

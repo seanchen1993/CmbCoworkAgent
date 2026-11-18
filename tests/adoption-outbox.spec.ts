@@ -496,6 +496,10 @@ async function testCodeGenUsesMutationTimeHarnessStage(): Promise<void> {
       setAdoptionContext(threadId, {
         harnessProjectId: "project-1",
         harnessFeatureSlug: "feature-1",
+        harnessDeployUnitSnapshot: Promise.resolve({
+          mappings: [{ deployUnitId: "unit-original", localRepoPath: repo }],
+          ids: ["unit-original"]
+        }),
         harnessNodeName: "Dev-旧节点",
         harnessNodeStatus: "进行中"
       })
@@ -529,6 +533,25 @@ async function testCodeGenUsesMutationTimeHarnessStage(): Promise<void> {
         row?.harness_node_name === "Test-新节点" && row.harness_node_status === "已完成",
         "the persisted baseline should carry the same stage into code_adopt"
       )
+      assert(
+        event.properties?.harnessDeployUnitId === "unit-original" &&
+          row?.harness_deploy_unit_id === "unit-original",
+        "generation should match the file to its configured unit and persist that attribution"
+      )
+      assert(!JSON.stringify(event).includes(repo), "cloud attribution must omit local repository paths")
+      setAdoptionContext(threadId, {
+        harnessDeployUnitSnapshot: Promise.resolve({ mappings: [], ids: ["unit-changed"] })
+      })
+      await git(repo, ["add", "."])
+      const snapshots = await captureStagedSnapshotsForCommit(repo)
+      await git(repo, ["commit", "-q", "-m", "generated"])
+      const sha = await git(repo, ["rev-parse", "HEAD"])
+      assert(await measureForCommit(snapshots, sha, Date.now(), repo), "commit measurement should persist")
+      await flushAdoptionEventOutbox()
+      assert(reporter.adoptionCalls.some(adopt =>
+        adopt.properties?.harnessDeployUnitId === "unit-original" &&
+        JSON.stringify(adopt.properties?.harnessDeployUnitIds) === '["unit-original"]'
+      ), "commit should keep generation-time attribution even after feature binding changes")
     })
   })
   console.log("PASS code_gen uses the mutation-time Harness stage snapshot")

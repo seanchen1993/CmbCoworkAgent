@@ -30,6 +30,21 @@ const options = (query = vi.fn(async () => page(["test-project"]))) => ({
 })
 
 describe("project overview test-project scope", () => {
+  it("applies test-project exclusion to period statistics in the selected room", () => {
+    expect(excludesTestProjects("dashboard:projectModePeriodMetrics", [])).toBe(true)
+    expect(testProjectLookupScope("dashboard:projectModePeriodMetrics", [
+      { upperOrgLv1: "room", period: { kind: "week", anchorDate: "2026-11-12" } }
+    ])).toEqual({ upperOrgLv1: "room" })
+  })
+  it("uses the analysis agent's nested room and target scope for test-project exclusion", () => {
+    expect(excludesTestProjects("dashboard:projectModeAnalysisAgent", [])).toBe(true)
+    expect(
+      testProjectLookupScope("dashboard:projectModeAnalysisAgent", [
+        { options: { upperOrgLv1: ["room"] }, target: { projectId: "p1", featureSlug: "f1" } }
+      ])
+    ).toEqual({ projectId: "p1", upperOrgLv1: ["room"] })
+    expect(testProjectLookupScope("dashboard:projectModeAnalysisAgent", [null])).toEqual({})
+  })
   it("narrows ID lookups by project and exact rooms, without treating department search text as an exact room", () => {
     expect(
       testProjectLookupScope("dashboard:projectModeFeatureNodes", [

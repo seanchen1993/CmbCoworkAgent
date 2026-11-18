@@ -79,6 +79,12 @@ import {
 } from "./event-reporter"
 import { getGitRootForPath } from "./git-repository-discovery"
 import {
+  loadHarnessDeployUnitSnapshot,
+  parseStoredDeployUnitIds,
+  resolveCodeDeployUnit,
+  type HarnessDeployUnitSnapshot
+} from "./harness-deploy-unit-attribution"
+import {
   attributeChangeKind,
   normalizeChangeKind,
   normalizeNewRatio
@@ -325,6 +331,10 @@ export interface AdoptionContext extends Partial<TraceObservabilityContext> {
   harnessNodeStatus?: string
   harnessAdapterName?: string
   harnessAdapterVersion?: string
+  /** Local-only per-turn promise; resolved before a generation is persisted. */
+  harnessDeployUnitSnapshot?: Promise<HarnessDeployUnitSnapshot | null>
+  harnessDeployUnitIds?: string[]
+  harnessDeployUnitId?: string
 }
 
 export interface RecordGenInput {
@@ -1390,6 +1400,8 @@ function buildCodeGenerationProperties(args: {
     harnessNodeStatus: ctx.harnessNodeStatus ?? null,
     harnessAdapterName: ctx.harnessAdapterName ?? null,
     harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
+    ...(ctx.harnessDeployUnitIds ? { harnessDeployUnitIds: ctx.harnessDeployUnitIds } : {}),
+    ...(ctx.harnessDeployUnitId ? { harnessDeployUnitId: ctx.harnessDeployUnitId } : {}),
     ...buildObservabilityEventProperties(ctx, input.threadId),
     ...(testMatchRule ? { testMatchRule } : {}),
     // note: filePath / content / fingerprint intentionally withheld
@@ -1435,11 +1447,18 @@ async function doRecordGen(
           harnessNodeName: input.harnessStage.nodeName ?? undefined,
           harnessNodeStatus: input.harnessStage.nodeStatus ?? undefined
         }
-      : turnContext
+      : { ...turnContext }
 
     const absPath = input.workspacePath
       ? resolvePath(input.workspacePath, input.filePath)
       : resolvePath(input.filePath)
+
+    if (ctx.harnessProjectId && ctx.harnessFeatureSlug) {
+      const snapshot = await (ctx.harnessDeployUnitSnapshot ??
+        loadHarnessDeployUnitSnapshot(ctx.harnessProjectId, ctx.harnessFeatureSlug))
+      ctx.harnessDeployUnitIds = snapshot?.ids
+      ctx.harnessDeployUnitId = resolveCodeDeployUnit(snapshot, absPath)
+    }
 
     // git-gate: only report generations that live inside a git work tree (see
     // isInsideGitWorkTree). Non-git files never reach a commit and are where
@@ -1598,6 +1617,10 @@ async function doRecordGen(
         harness_node_status: ctx.harnessNodeStatus ?? null,
         harness_adapter_name: ctx.harnessAdapterName ?? null,
         harness_adapter_version: ctx.harnessAdapterVersion ?? null,
+        harness_deploy_unit_id: ctx.harnessDeployUnitId ?? null,
+        harness_deploy_unit_ids: ctx.harnessDeployUnitIds
+          ? JSON.stringify(ctx.harnessDeployUnitIds)
+          : null,
         // Persisted so the commit-time `code_adopt` event can carry the bucket
         // without re-deriving it from a diff that has since moved on.
         new_ratio: changeAttribution.newRatio,
@@ -1713,6 +1736,8 @@ function emitSkippedLargeAtGen(args: {
     harnessNodeStatus: ctx.harnessNodeStatus ?? null,
     harnessAdapterName: ctx.harnessAdapterName ?? null,
     harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
+    ...(ctx.harnessDeployUnitIds ? { harnessDeployUnitIds: ctx.harnessDeployUnitIds } : {}),
+    ...(ctx.harnessDeployUnitId ? { harnessDeployUnitId: ctx.harnessDeployUnitId } : {}),
     netNewRatio: changeAttribution.newRatio,
     changeKind: changeAttribution.changeKind,
     ...observabilityProps
@@ -1939,6 +1964,8 @@ async function buildSupersededAdoptionWrite(
     harnessNodeStatus: pending.harness_node_status ?? null,
     harnessAdapterName: pending.harness_adapter_name ?? null,
     harnessAdapterVersion: pending.harness_adapter_version ?? null,
+    harnessDeployUnitIds: parseStoredDeployUnitIds(pending.harness_deploy_unit_ids),
+    harnessDeployUnitId: pending.harness_deploy_unit_id ?? undefined,
     ...observabilityProps
   })
 
@@ -2205,6 +2232,8 @@ async function buildMeasurementsForFile(
         harnessNodeStatus: pending.harness_node_status ?? null,
         harnessAdapterName: pending.harness_adapter_name ?? null,
         harnessAdapterVersion: pending.harness_adapter_version ?? null,
+        harnessDeployUnitIds: parseStoredDeployUnitIds(pending.harness_deploy_unit_ids),
+        harnessDeployUnitId: pending.harness_deploy_unit_id ?? undefined,
         // Carried over from gen time. The adopted/effective line counts live on
         // this event, so the bucket has to travel with them — otherwise slicing
         // adoption by 新增/存量 would need a join back to code_gen.

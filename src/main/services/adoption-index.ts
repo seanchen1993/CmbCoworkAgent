@@ -354,6 +354,10 @@ export interface GenIndexRow {
   /** Adapter plugin bound to the project at gen time, so adoption can be sliced by plugin version. */
   harness_adapter_name: string | null
   harness_adapter_version: string | null
+  /** Generation-time unit attribution; preserved through later commit/push measurement. */
+  harness_deploy_unit_id?: string | null
+  /** JSON array of feature-bound units, not a per-unit allocation. */
+  harness_deploy_unit_ids?: string | null
   observability_schema_version: number | null
   trace_kind: string | null
   execution_mode: string | null
@@ -584,6 +588,8 @@ export async function initializeAdoptionIndex(): Promise<boolean> {
         harness_node_status TEXT,
         harness_adapter_name TEXT,
         harness_adapter_version TEXT,
+        harness_deploy_unit_id TEXT,
+        harness_deploy_unit_ids TEXT,
         observability_schema_version INTEGER,
         trace_kind TEXT,
         execution_mode TEXT,
@@ -643,6 +649,8 @@ export async function initializeAdoptionIndex(): Promise<boolean> {
       "harness_node_status TEXT",
       "harness_adapter_name TEXT",
       "harness_adapter_version TEXT",
+      "harness_deploy_unit_id TEXT",
+      "harness_deploy_unit_ids TEXT",
       "observability_schema_version INTEGER",
       "trace_kind TEXT",
       "execution_mode TEXT",
@@ -867,13 +875,14 @@ export function insertGenEvent(row: GenIndexRow): boolean {
         generated_lines_blob, created_at, measured,
         used_skills, skill_source, thread_id, trace_id, model_id, model_name,
         harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version,
+        harness_deploy_unit_id, harness_deploy_unit_ids,
         observability_schema_version, trace_kind, execution_mode, root_trace_id, root_thread_id,
         parent_trace_id, parent_thread_id, parent_span_id, link_type, subagent_kind, subagent_run_id,
         subagent_thread_id, handoff_action, handoff_source_agent, handoff_target_agent,
         coordinator_worker_id, coordinator_worker_turn, coordinator_worker_role, coordinator_worker_workload,
         workflow_run_id, workflow_agent_index, workflow_phase, workflow_agent_label,
         new_ratio, change_kind)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.event_id,
         row.file_path,
@@ -898,6 +907,8 @@ export function insertGenEvent(row: GenIndexRow): boolean {
         row.harness_node_status,
         row.harness_adapter_name,
         row.harness_adapter_version,
+        row.harness_deploy_unit_id ?? null,
+        row.harness_deploy_unit_ids ?? null,
         row.observability_schema_version,
         row.trace_kind,
         row.execution_mode,
@@ -958,6 +969,7 @@ export function findPendingGensForFile(
             line_hashes, old_line_hashes, generated_lines_blob, created_at, measured,
             used_skills, skill_source, thread_id, trace_id, model_id, model_name,
             harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version,
+            harness_deploy_unit_id, harness_deploy_unit_ids,
             observability_schema_version, trace_kind, execution_mode, root_trace_id, root_thread_id,
             parent_trace_id, parent_thread_id, parent_span_id, link_type, subagent_kind, subagent_run_id,
             subagent_thread_id, handoff_action, handoff_source_agent, handoff_target_agent,
@@ -995,6 +1007,7 @@ export function getGenRowByEventId(eventId: string): GenIndexRow | null {
             line_hashes, old_line_hashes, generated_lines_blob, created_at, measured,
             used_skills, skill_source, thread_id, trace_id, model_id, model_name,
             harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version,
+            harness_deploy_unit_id, harness_deploy_unit_ids,
             observability_schema_version, trace_kind, execution_mode, root_trace_id, root_thread_id,
             parent_trace_id, parent_thread_id, parent_span_id, link_type, subagent_kind, subagent_run_id,
             subagent_thread_id, handoff_action, handoff_source_agent, handoff_target_agent,

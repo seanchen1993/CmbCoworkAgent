@@ -4,7 +4,8 @@ import {
   featureExecutionKey,
   fetchCompleteFeatureExecution,
   readFeatureExecution,
-  readLastExecution
+  readLastExecution,
+  calculateProjectElapsedMs
 } from "./project-mode-execution-metrics"
 
 type Json = Record<string, unknown>
@@ -135,4 +136,23 @@ it("rejects a full page without a continuation cursor", async () => {
   await expect(fetchCompleteFeatureExecution(["p"], [], execute)).rejects.toThrow(
     "缺少后续分页游标"
   )
+})
+
+it("computes calendar elapsed time from the latest end, preserving unknown and invalid dates", () => {
+  const end = readLastExecution(
+    {
+      last_execution: { value: 1700000000000 },
+      last_execution_end: { value: 1700000060000 }
+    },
+    "last_execution_end"
+  )
+  expect(calculateProjectElapsedMs("2023-11-13T22:13:20Z", end)).toBe(86_460_000)
+  expect(calculateProjectElapsedMs("2023-11-14T06:13:20+08:00", end)).toBe(86_460_000)
+  expect(calculateProjectElapsedMs(end, end)).toBe(0)
+  expect(calculateProjectElapsedMs("2024-01-01", end)).toBeNull()
+  expect(calculateProjectElapsedMs("invalid", end)).toBeNull()
+  expect(calculateProjectElapsedMs(undefined, end)).toBeNull()
+  expect(
+    calculateProjectElapsedMs("2023-11-13", readLastExecution({}, "last_execution_end"))
+  ).toBeNull()
 })

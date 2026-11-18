@@ -38,7 +38,7 @@ function isExternalHref(href: string | undefined): href is string {
 
 // Hoisted to module scope so prop identities stay stable across renders.
 // Wide tables must scroll horizontally instead of overflowing the preview
-// (same treatment as StreamingMarkdown / DashboardAnalysisMarkdown).
+// (same treatment as StreamingMarkdown).
 const MARKDOWN_COMPONENTS: Components = {
   // `node` is destructured out so it isn't spread onto the DOM element.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars

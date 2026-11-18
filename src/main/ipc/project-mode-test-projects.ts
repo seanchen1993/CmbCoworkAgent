@@ -61,7 +61,15 @@ export function testProjectLookupScope(
   if (singleProjectChannels.has(channel) && typeof args[0] === "string") {
     scope.projectId = args[0].trim() || undefined
   }
-  for (const arg of args) {
+  const agentInput = channel === "dashboard:projectModeAnalysisAgent" ? args[0] : undefined
+  const scopeArgs =
+    agentInput && typeof agentInput === "object" && !Array.isArray(agentInput)
+      ? [
+          (agentInput as Record<string, unknown>).options,
+          (agentInput as Record<string, unknown>).target
+        ]
+      : args
+  for (const arg of scopeArgs) {
     if (!arg || typeof arg !== "object" || Array.isArray(arg)) continue
     const value = arg as Record<string, unknown>
     if (typeof value.projectId === "string" && value.projectId.trim()) {

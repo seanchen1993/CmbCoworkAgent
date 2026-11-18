@@ -601,6 +601,9 @@ export interface AgentTrace extends Partial<TraceStageUsageSnapshot> {
   harnessProjectId?: string
   /** Harness Board feature slug this conversation belongs to (paired with harnessProjectId). */
   harnessFeatureSlug?: string
+  /** Feature binding captured at turn start; multi-unit scope is not an allocation. */
+  harnessDeployUnitIds?: string[]
+  harnessSessionDeployUnitId?: string
   /**
    * Harness Board workflow stage name (group-label, e.g. "Dev-代码实现") that was
    * current when this turn ran, resolved per-turn from the feature's run state.

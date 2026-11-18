@@ -134,6 +134,31 @@ describe("adoption-index harness_node_name column", () => {
     expect(fetched?.harness_feature_slug).toBe("feature-x")
   })
 
+  it("persists deploy-unit snapshots for commit measurement and leaves legacy rows unknown", () => {
+    const row = makeRow({
+      event_id: "g_deploy_unit",
+      file_path: "/repo/src/unit.ts",
+      harness_deploy_unit_id: "unit-a",
+      harness_deploy_unit_ids: '["unit-a","unit-b"]'
+    })
+    expect(insertGenEvent(row)).toBe(true)
+    for (const result of [
+      getGenRowByEventId(row.event_id),
+      ...findPendingGensForFile(row.file_path, 0)
+    ]) {
+      expect(result).toMatchObject({
+        harness_deploy_unit_id: "unit-a",
+        harness_deploy_unit_ids: '["unit-a","unit-b"]'
+      })
+    }
+    expect(findPendingGensForFile(row.file_path, 0)).toHaveLength(1)
+    expect(insertGenEvent(makeRow({ event_id: "g_legacy_unit" }))).toBe(true)
+    expect(getGenRowByEventId("g_legacy_unit")).toMatchObject({
+      harness_deploy_unit_id: null,
+      harness_deploy_unit_ids: null
+    })
+  })
+
   it("round-trips new_ratio / change_kind via getGenRowByEventId", () => {
     expect(
       insertGenEvent(makeRow({ event_id: "g_kind_1", new_ratio: 0.25, change_kind: "legacy" }))
