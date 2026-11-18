@@ -4239,7 +4239,7 @@ function readThreadMessageProviderOccurrencesBeforeUser(
        WHERE thread_id = ? AND provider_source_id IN (${placeholders}) AND ordinal < ?
        GROUP BY provider_source_id, role
        UNION ALL
-       SELECT message_id AS provider_source_id, role, 1 AS occurrence
+       SELECT message_id AS provider_source_id, role, COALESCE(provider_occurrence, 1) AS occurrence
        FROM thread_messages
        WHERE thread_id = ? AND message_id IN (${placeholders}) AND ordinal < ?
          AND provider_source_id IS NULL
@@ -4263,23 +4263,53 @@ function readThreadMessageProviderOccurrencesBeforeUser(
       stmt.free()
     }
   }
-  // Pre-provider-column databases can still contain our encoded duplicate IDs.
-  // PK prefix ranges keep those legacy lookups bounded to each requested identity.
-  for (const source of providers) {
-    for (const role of ["assistant", "tool", "user", "system"] as const) {
-      const prefix = buildMessageSameRoleDuplicateId(source, role, 2).slice(0, -1)
-      const stmt = database.prepare(
-        `SELECT MAX(CAST(SUBSTR(message_id, ?) AS INTEGER)) AS occurrence
-         FROM thread_messages WHERE thread_id = ? AND role = ? AND ordinal < ?
-           AND provider_source_id IS NULL AND message_id >= ? AND message_id < ?`
-      )
-      try {
-        stmt.bind([Array.from(prefix).length + 1, threadId, role, ordinal, prefix, `${prefix}\uffff`])
-        if (stmt.step()) remember(source, role, Number(stmt.getAsObject().occurrence))
-      } finally {
-        stmt.free()
+  if (providers.length === 0) return []
+  // Older rows sometimes carry their identity only in an encoded message ID.
+  // Keep both lookups on PK ranges and require the shared encoding's decimal suffix.
+  const legacy = database.prepare(
+    `SELECT MAX(occurrence) AS occurrence FROM (
+       SELECT MAX(COALESCE(provider_occurrence, CAST(SUBSTR(message_id, $duplicateStart) AS REAL)))
+         AS occurrence
+       FROM thread_messages
+       WHERE thread_id = $threadId AND role = $role AND ordinal < $ordinal
+         AND provider_source_id IS NULL
+         AND message_id >= $duplicateId AND message_id < $duplicateEnd
+         AND SUBSTR(message_id, $duplicateStart) NOT GLOB '*[^0-9]*'
+         AND CAST(SUBSTR(message_id, $duplicateStart) AS REAL) >= 2
+       UNION ALL
+       SELECT MAX(COALESCE(provider_occurrence, 1)) AS occurrence
+       FROM thread_messages
+       WHERE thread_id = $threadId AND role = $role AND ordinal < $ordinal
+         AND provider_source_id IS NULL
+         AND message_id >= $roleId AND message_id < $roleEnd
+         AND (message_id = $roleId OR (
+           SUBSTR(message_id, $roleSuffixStart - 1, 1) = ':'
+           AND SUBSTR(message_id, $roleSuffixStart) != ''
+           AND SUBSTR(message_id, $roleSuffixStart) NOT GLOB '*[^0-9]*'
+         ))
+     )`
+  )
+  try {
+    for (const source of providers) {
+      for (const role of ["assistant", "tool", "user", "system"] as const) {
+        const duplicateId = buildMessageSameRoleDuplicateId(source, role, 2).slice(0, -1)
+        const roleId = buildMessageRoleCollisionId(source, role)
+        legacy.bind({
+          threadId,
+          role,
+          ordinal,
+          duplicateId,
+          duplicateEnd: `${duplicateId}\uffff`,
+          duplicateStart: Array.from(duplicateId).length + 1,
+          roleId,
+          roleEnd: `${roleId}:\uffff`,
+          roleSuffixStart: Array.from(roleId).length + 2
+        })
+        if (legacy.step()) remember(source, role, Number(legacy.getAsObject().occurrence))
       }
     }
+  } finally {
+    legacy.free()
   }
   return [...results.values()]
 }

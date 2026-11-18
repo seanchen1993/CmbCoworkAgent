@@ -10,6 +10,7 @@ import {
   WORKFLOW_NOTIFICATION_MARKER_PREFIX
 } from "../../shared/checkpoint-transcript"
 import {
+  buildMessageRoleCollisionId,
   buildMessageSameRoleDuplicateId,
   MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY,
   MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY
@@ -306,9 +307,17 @@ it.each([
   }
 )
 
-it.each(["declared", "encoded", "raw"] as const)(
-  "keeps one live Goal occurrence and both tool results with a %s older checkpoint identity",
-  async (identity) => {
+it.each([
+  ["declared", false],
+  ["encoded", false],
+  ["raw", false],
+  ["encoded", true],
+  ["raw", true],
+  ["role collision", true],
+  ["role collision suffix", true]
+] as const)(
+  "keeps distinct Goal replies and both tool results with older %s identity (compacted: %s)",
+  async (identity, compacted) => {
     const directory = mkdtempSync(join(tmpdir(), "cmb-goal-recovery-occurrence-"))
     const checkpointPath = join(directory, "checkpoint.sqlite")
     storage.path = join(directory, "threads.sqlite")
@@ -316,7 +325,7 @@ it.each(["declared", "encoded", "raw"] as const)(
     const runToken = "physical-run"
     const signal = new AbortController().signal
     const providerId = "reused-provider"
-    const historyOccurrence = identity === "raw" ? 1 : 2
+    const historyOccurrence = identity === "declared" || identity === "encoded" ? 2 : 1
     const liveOccurrence = historyOccurrence + 1
     const sharedCallId = "reused-call-id"
     const toolCalls = [{ id: sharedCallId, name: "read", args: {} }]
@@ -329,11 +338,14 @@ it.each(["declared", "encoded", "raw"] as const)(
       db.createThread(threadId)
       const goal = goalManager.set(threadId, "Report the result")
       setCurrentRunMessageQueueOwner(threadId, runToken)
-      const user = new HumanMessage({ id: "user", content: "/goal Report the result" })
+      const user = new HumanMessage({
+        id: identity.startsWith("role collision") ? providerId : "user",
+        content: "/goal Report the result"
+      })
       const previous = new AIMessage({
-        id: identity === "raw" ? "different-provider" : providerId,
+        id: historyOccurrence === 1 ? "different-provider" : providerId,
         content: "Durable reply",
-        additional_kwargs: identity === "raw" ? {} : provider(1)
+        additional_kwargs: historyOccurrence === 1 ? {} : provider(1)
       })
       db.upsertThreadMessages(threadId, [
         { id: user.id!, role: "user", content: String(user.content), created_at: new Date() },
@@ -342,19 +354,21 @@ it.each(["declared", "encoded", "raw"] as const)(
           role: "assistant",
           content: String(previous.content),
           created_at: new Date(),
-          ...(identity !== "raw" && { provider_source_id: providerId, provider_occurrence: 1 })
+          ...(historyOccurrence > 1 && { provider_source_id: providerId, provider_occurrence: 1 })
         }
       ])
       const earlier = createPhysicalRunHiddenUserMessage(threadId, runToken, signal, goal, {
         content: "Earlier continuation"
       })
+      const checkpointMessageIds = {
+        declared: "checkpoint-only-reply",
+        encoded: buildMessageSameRoleDuplicateId(providerId, "assistant", historyOccurrence),
+        raw: providerId,
+        "role collision": buildMessageRoleCollisionId(providerId, "assistant"),
+        "role collision suffix": buildMessageRoleCollisionId(providerId, "assistant", 3)
+      }
       const missing = new AIMessage({
-        id:
-          identity === "declared"
-            ? "checkpoint-only-reply"
-            : identity === "encoded"
-              ? buildMessageSameRoleDuplicateId(providerId, "assistant", historyOccurrence)
-              : providerId,
+        id: checkpointMessageIds[identity],
         content: "Recovered reply",
         tool_calls: toolCalls,
         additional_kwargs: identity === "declared" ? provider(historyOccurrence) : {}
@@ -384,10 +398,36 @@ it.each(["declared", "encoded", "raw"] as const)(
         await saver.close()
       }
 
+      const bootstrap = () =>
+        bootstrapLegacyCheckpointTranscript(
+          checkpointPath,
+          storage.path,
+          threadId,
+          "",
+          new SharedArrayBuffer(4)
+        )
+      if (compacted) {
+        expect(bootstrap().stats.migratedMessages).toBe(2)
+        // A compacted model input cannot supply the older occurrence. SQLite
+        // must recover it even from rows without persisted provider metadata.
+        expect(db.getThreadMessageProviderOccurrencesBeforeUser(threadId, earlier.id!, [providerId]))
+          .not.toContainEqual(expect.objectContaining({
+            role: "assistant",
+            provider_occurrence: historyOccurrence
+          }))
+      }
       const current = createPhysicalRunHiddenUserMessage(threadId, runToken, signal, goal, {
         content: "Current continuation"
       })
-      const graph = addMessages(saved, [current])
+      if (compacted) {
+        expect(db.getThreadMessageProviderOccurrencesBeforeUser(threadId, current.id!, [providerId]))
+          .toContainEqual({
+            provider_source_id: providerId,
+            role: "assistant",
+            provider_occurrence: historyOccurrence
+          })
+      }
+      const graph = addMessages(compacted ? [user] : saved, [current])
       const serialize = createStreamDataSerializer({ projectMessageChunks: true })
       const values = createSerializedValuesMessageAccumulator()
       const forward = (mode: "values" | "messages", payload: unknown) => {
@@ -455,6 +495,7 @@ it.each(["declared", "encoded", "raw"] as const)(
       expect(db.getThreadMessages(threadId).map(({ content }) => content)).toEqual([
         user.content,
         previous.content,
+        ...(compacted ? [missing.content, earlierResult.content] : []),
         reply.content,
         currentResult.content
       ])
@@ -471,14 +512,7 @@ it.each(["declared", "encoded", "raw"] as const)(
         ])
       )
 
-      const restored = bootstrapLegacyCheckpointTranscript(
-        checkpointPath,
-        storage.path,
-        threadId,
-        "",
-        new SharedArrayBuffer(4)
-      )
-      expect(restored.stats.migratedMessages).toBe(2)
+      expect(bootstrap().stats.migratedMessages).toBe(compacted ? 0 : 2)
       const transcript = db.getThreadMessages(threadId)
       expect(
         transcript.map(({ content, ordinal, provider_occurrence }) => [
@@ -488,8 +522,8 @@ it.each(["declared", "encoded", "raw"] as const)(
         ])
       ).toEqual([
         [user.content, 0, undefined],
-        [previous.content, 1, identity === "raw" ? undefined : 1],
-        [missing.content, 3, identity === "raw" ? undefined : historyOccurrence],
+        [previous.content, 1, historyOccurrence === 1 ? undefined : 1],
+        [missing.content, 3, historyOccurrence === 1 ? undefined : historyOccurrence],
         [earlierResult.content, 4, undefined],
         [reply.content, 6, liveOccurrence],
         [currentResult.content, 7, 1]

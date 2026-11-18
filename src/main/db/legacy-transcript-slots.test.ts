@@ -6,6 +6,7 @@ import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
+  buildMessageRoleCollisionId,
   buildMessageSameRoleDuplicateId,
   MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY,
   MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY
@@ -526,4 +527,33 @@ it("reads the boundary and provider occurrences in a single WAL snapshot", async
   }
   expect(rebased).toBe(true)
   expect(getThreadTranscriptBoundaryOrdinal(threadId, "hidden")).toBe(3)
+})
+
+it("ignores malformed, wrong-role and newer legacy provider encodings", () => {
+  const source = "旧回复🚀"
+  const malformedSource = "malformed"
+  const validId = buildMessageSameRoleDuplicateId(source, "assistant", 2)
+  const legacyRows = [
+    validId,
+    `${buildMessageSameRoleDuplicateId(source, "assistant", 99)}tail`,
+    buildMessageSameRoleDuplicateId(source, "tool", 100),
+    `${buildMessageRoleCollisionId(malformedSource, "assistant")}:tail`,
+    `${buildMessageRoleCollisionId(malformedSource, "assistant")}:3tail`,
+    buildMessageRoleCollisionId(malformedSource, "tool", 3)
+  ]
+  // Simulate durable rows from before provider metadata was written.
+  const insert = observer.prepare(
+    `INSERT INTO thread_messages (thread_id, message_id, role, content_json, created_at, ordinal)
+     VALUES (?, ?, 'assistant', '"fixture"', 0, ?)`
+  )
+  legacyRows.forEach((id, ordinal) => insert.run(threadId, id, ordinal))
+  const boundary = reserveThreadGraphTranscriptBoundary(threadId, "hidden")
+  insert.run(
+    threadId,
+    buildMessageSameRoleDuplicateId(source, "assistant", 101),
+    boundary + 1
+  )
+  expect(
+    getThreadMessageProviderOccurrencesBeforeUser(threadId, "hidden", [source, malformedSource])
+  ).toEqual([{ provider_source_id: source, role: "assistant", provider_occurrence: 2 }])
 })
