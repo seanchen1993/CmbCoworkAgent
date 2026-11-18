@@ -35,6 +35,8 @@ export const BUILTIN_BROWSER_LOG_PREFIX = "[内置浏览器]"
 export const BROWSER_SESSION_ID = "app-browser"
 export const BROWSER_PANEL_REQUEST_CHANNEL = "browser:panel-request"
 export const BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL = "browser:script-execution-state"
+export const BROWSER_SCRIPT_RECORDING_STATE_CHANNEL = "browser:script-recording-state"
+export const BROWSER_DOWNLOADS_CHANGED_CHANNEL = "browser:downloads-changed"
 export const MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES = 50
 
 export interface BrowserLocatorMetadata {
@@ -85,6 +87,8 @@ interface BrowserRecordedActionBase {
 
 export interface BrowserPanelRequest {
   threadId?: string
+  panelWidth?: number
+  restoreDefaultPanelWidth?: boolean
 }
 
 export interface BrowserNavigateOptions {
@@ -100,6 +104,23 @@ export interface BrowserScreenshotResult {
   success: boolean
   dataUrl?: string
   error?: string
+}
+
+export type BrowserDownloadStatus = "progressing" | "completed" | "cancelled" | "interrupted"
+
+export interface BrowserDownloadRecord {
+  id: string
+  fileName: string
+  savePath: string
+  status: BrowserDownloadStatus
+  startedAt: string
+  endedAt?: string
+}
+
+export interface BrowserDownloadsChangedPayload {
+  records: BrowserDownloadRecord[]
+  hasUnreadCompleted: boolean
+  completedId?: string
 }
 
 export type BrowserRecordedAction =
@@ -148,6 +169,8 @@ export interface ScriptRecordingStartOptions {
   /** Continue recording from an existing browser script file. */
   libraryFileName?: string | null
   libraryDisplayName?: string | null
+  /** Browser panel width in CSS pixels at recording time. */
+  panelWidth?: number
 }
 
 export interface BrowserRecordingSession {
@@ -161,6 +184,7 @@ export interface BrowserRecordingSession {
   scriptPrefixActionCount?: number
   libraryFileName?: string
   libraryDisplayName?: string
+  panelWidth?: number
   variableActionIds?: string[]
   variableActionNames?: Record<string, string>
   actions: BrowserRecordedAction[]

@@ -111,14 +111,14 @@ describe("Chrome extension popup authorization flow", () => {
       userAgent: "Mozilla/5.0 Chrome/94.0.4606.81 Safari/537.36"
     })
 
-    expect(popup.status.textContent).toBe("已连接，等待 Chrome 站点访问授权")
-    expect(popup.authorize.textContent).toBe("查看授权步骤")
+    expect(popup.status.textContent).toBe("还需一步")
+    expect(popup.authorize.textContent).toBe("查看设置方法")
 
     popup.authorize.click()
 
     expect(popup.permissionRequest).not.toHaveBeenCalled()
-    expect(popup.status.textContent).toBe("请在扩展详情页授予站点访问")
-    expect(popup.authorize.textContent).toBe("我已完成，重新检查")
+    expect(popup.status.textContent).toBe("请打开网站访问权限")
+    expect(popup.authorize.textContent).toBe("我已设置好")
   })
 
   it("requests runtime permissions on modern Chrome", () => {
@@ -127,7 +127,7 @@ describe("Chrome extension popup authorization flow", () => {
       userAgent: "Mozilla/5.0 Chrome/120.0.0.0 Safari/537.36"
     })
 
-    expect(popup.status.textContent).toBe("已连接，等待 Cookie 授权")
+    expect(popup.status.textContent).toBe("还需一步")
 
     popup.authorize.click()
 

@@ -47,10 +47,11 @@ function loadServiceWorker() {
 
   const chrome = {
     alarms: {
-      clear: vi.fn(),
+      clear: vi.fn((_name: string, callback: (cleared: boolean) => void) => callback(true)),
       create: vi.fn((name: string, options: Record<string, number>) => {
         createdAlarms.push({ name, options })
       }),
+      get: vi.fn((_name: string, callback: (alarm?: { name: string }) => void) => callback()),
       onAlarm: alarms
     },
     cookies: {
@@ -124,8 +125,9 @@ function loadServiceWorker() {
 }
 
 describe("Chrome extension native host lifecycle", () => {
-  it("retries an initial connection failure and then falls back to a minute-level alarm", () => {
+  it("retries an initial connection failure and then falls back to a minute-level alarm", async () => {
     const worker = loadServiceWorker()
+    await Promise.resolve()
     expect(worker.chrome.runtime.connectNative).toHaveBeenCalledTimes(1)
 
     worker.ports[0].onDisconnect.emit()
@@ -148,13 +150,16 @@ describe("Chrome extension native host lifecycle", () => {
     expect(worker.chrome.runtime.connectNative).toHaveBeenCalledTimes(5)
   })
 
-  it("limits recovery after a successful connection to three attempts", () => {
+  it("falls back to minute-level retries after a successful connection is lost", async () => {
     const worker = loadServiceWorker()
+    await Promise.resolve()
     worker.ports[0].onMessage.emit({
       connected: true,
       protocolVersion: 1,
       type: "host-status"
     })
+    await Promise.resolve()
+    await Promise.resolve()
 
     worker.ports[0].onDisconnect.emit()
     worker.runTimer(1000)
@@ -166,10 +171,20 @@ describe("Chrome extension native host lifecycle", () => {
 
     expect(worker.chrome.runtime.connectNative).toHaveBeenCalledTimes(4)
     expect(worker.timers).toHaveLength(0)
+    expect(worker.createdAlarms).toEqual([
+      {
+        name: "cmb-native-host-reconnect",
+        options: { delayInMinutes: 1, periodInMinutes: 1 }
+      }
+    ])
+
+    worker.alarms.emit({ name: "cmb-native-host-reconnect" })
+    expect(worker.chrome.runtime.connectNative).toHaveBeenCalledTimes(5)
   })
 
-  it("restores the retry budget after a manual reconnect", () => {
+  it("restores the retry budget after a manual reconnect", async () => {
     const worker = loadServiceWorker()
+    await Promise.resolve()
     worker.ports[0].onMessage.emit({
       connected: true,
       protocolVersion: 1,

@@ -78,7 +78,7 @@ webPreferences: {
 启动时调用 `app.commandLine.appendSwitch("remote-debugging-port", port)` 开放 CDP endpoint。CDP 开启时，自动注册名为 `"In-app-browser"` 的 MCP 连接器：
 
 ```bash
-npx -y @playwright/mcp@latest --cdp-endpoint=http://127.0.0.1:38127
+npx -y @playwright/mcp@0.0.82 --cdp-endpoint=http://127.0.0.1:38127
 ```
 
 CDP 连接器名和默认端口定义在 `browser-cdp.ts` 中：

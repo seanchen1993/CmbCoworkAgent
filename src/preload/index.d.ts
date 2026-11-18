@@ -202,28 +202,7 @@ import type {
 } from "../shared/file-attachment"
 import type { ParsedAttachment } from "../main/file-parser"
 import type { SkillPreviewGrantRequest, SkillPreviewGrantResult } from "../shared/skill-preview"
-import type {
-  BrowserRecordingSession,
-  BrowserAttachOptions,
-  BrowserBounds,
-  BrowserCdpConfig,
-  BrowserScriptLibraryDeleteInput,
-  BrowserNavigateOptions,
-  BrowserPanelRequest,
-  BrowserProfileImportOptions,
-  BrowserProfileImportResult,
-  BrowserScriptExecutionInput,
-  BrowserScriptExecutionState,
-  BrowserRecordingDraftUpdateInput,
-  BrowserScreenshotResult,
-  ScriptRecordingStartOptions,
-  BrowserScriptLibraryEntry,
-  BrowserScriptLibraryListOptions,
-  BrowserScriptLibraryReadInput,
-  BrowserScriptLibrarySaveInput,
-  BrowserScriptLibraryUpdateInput,
-  BrowserState
-} from "../shared/browser-types"
+import type { BrowserApi } from "./browser"
 import type {
   CloseToTrayPromptAction,
   CloseToTrayPromptEvent,
@@ -2019,50 +1998,7 @@ interface CustomAPI {
   taskCards: {
     list: (query?: TaskCardsQuery) => Promise<TaskCardsListResult>
   }
-  browser: {
-    attach: (options?: BrowserAttachOptions) => Promise<BrowserState>
-    detach: () => Promise<BrowserState>
-    setBounds: (bounds: BrowserBounds, visible?: boolean) => Promise<BrowserState>
-    setZoomFactor: (zoomFactor: number) => Promise<BrowserState>
-    navigate: (url: string, options?: BrowserNavigateOptions) => Promise<BrowserState>
-    goBack: () => Promise<BrowserState>
-    goForward: () => Promise<BrowserState>
-    reload: () => Promise<BrowserState>
-    stop: () => Promise<BrowserState>
-    clearConsole: () => Promise<BrowserState>
-    getState: () => Promise<BrowserState>
-    startScriptRecording: (
-      options?: ScriptRecordingStartOptions
-    ) => Promise<BrowserRecordingSession>
-    pauseScriptRecording: () => Promise<BrowserRecordingSession>
-    updateScriptRecordingDraft: (
-      input: BrowserRecordingDraftUpdateInput
-    ) => Promise<BrowserRecordingSession>
-    resumeScriptRecording: () => Promise<BrowserRecordingSession>
-    stopScriptRecording: () => Promise<BrowserRecordingSession>
-    getScriptRecording: () => Promise<BrowserRecordingSession>
-    saveScriptLibraryEntry: (
-      input: BrowserScriptLibrarySaveInput
-    ) => Promise<BrowserScriptLibraryEntry>
-    listScriptLibraryEntries: (
-      options?: BrowserScriptLibraryListOptions
-    ) => Promise<BrowserScriptLibraryEntry[]>
-    readScriptLibraryScript: (input: BrowserScriptLibraryReadInput) => Promise<string>
-    updateScriptLibraryEntry: (input: BrowserScriptLibraryUpdateInput) => Promise<void>
-    deleteScriptLibraryEntry: (input: BrowserScriptLibraryDeleteInput) => Promise<void>
-    executeRecordingScript: (input: BrowserScriptExecutionInput) => Promise<void>
-    getScriptExecutionState: () => Promise<BrowserScriptExecutionState>
-    cancelRecordingScriptExecution: () => Promise<boolean>
-    getCdpConfig: () => Promise<BrowserCdpConfig>
-    isProfileImportRuntimeEnabled: () => Promise<boolean>
-    saveCdpConfig: (updates: Partial<BrowserCdpConfig>) => Promise<BrowserCdpConfig>
-    captureScreenshot: () => Promise<BrowserScreenshotResult>
-    importProfileData: (options: BrowserProfileImportOptions) => Promise<BrowserProfileImportResult>
-    disposeAllForRendererUnload: () => void
-    onState: (callback: (state: BrowserState) => void) => () => void
-    onPanelRequest: (callback: (request: BrowserPanelRequest) => void) => () => void
-    onScriptExecutionState: (callback: (state: BrowserScriptExecutionState) => void) => () => void
-  }
+  browser: BrowserApi
   lsp: {
     getConfig: () => Promise<LspConfig>
     saveConfig: (updates: Partial<LspConfig>) => Promise<void>

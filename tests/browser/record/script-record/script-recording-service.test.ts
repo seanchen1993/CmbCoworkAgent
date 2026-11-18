@@ -1164,9 +1164,11 @@ test("recorded script flow", async ({ page }) => {
       'document.addEventListener("mousemove", rememberHoveredActionSelector, true)'
     )
     const actionSelectorFallback = script.indexOf("function selectorForRecorderAction")
-    const actionSelectorUsage = script.indexOf("normalizeRecordedSelector(selectorForRecorderAction(action))")
+    const actionSelectorUsage = script.indexOf(
+      "normalizeRecordedSelector(selectorForRecorderAction(action))"
+    )
 
-    expect(script).toContain("let lastHoveredActionSelector = \"\"")
+    expect(script).toContain('let lastHoveredActionSelector = ""')
     expect(script).toContain("function rememberHoveredActionSelector(event)")
     expect(script).toContain("injectedScript.generateSelector(target")
     expect(script).toContain("isTransientActionSelector(selector)")
