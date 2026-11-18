@@ -3,6 +3,7 @@ import {
   ArrowRight,
   BadgeCheck,
   Building2,
+  Check,
   FileText,
   Link,
   Loader2,
@@ -43,7 +44,16 @@ import { RequirementWorkDirPicker } from "./RequirementWorkDirPicker"
 
 export type UploadSource = "file" | "text" | "link"
 
-async function ensureRequirementSkills(): Promise<void> {
+type RequirementSkillStatus =
+  | { phase: "absent" }
+  | { phase: "installed"; version: string }
+  | { phase: "installing" }
+  | { phase: "updating"; version: string }
+  | { phase: "failed"; action: "install" | "update" }
+
+async function ensureRequirementSkills(
+  onStatusChange: (skillId: string, status: RequirementSkillStatus) => void
+): Promise<void> {
   const boundSkills = REQUIREMENT_BOUND_SKILLS.map((skill) => ({
     ...skill,
     normalizedName: skill.id.trim().toLowerCase()
@@ -84,7 +94,20 @@ async function ensureRequirementSkills(): Promise<void> {
       !installedVersion ||
       (Boolean(marketVersion) && isMarketVersionDifferent(installedVersion, marketVersion))
 
-    if (!needsInstall) continue
+    if (!needsInstall) {
+      onStatusChange(boundSkill.id, {
+        phase: "installed",
+        version: installedVersion || existingSkill?.version || "v1.0.0"
+      })
+      continue
+    }
+
+    onStatusChange(
+      boundSkill.id,
+      existingSkill
+        ? { phase: "updating", version: installedVersion || existingSkill.version }
+        : { phase: "installing" }
+    )
 
     if (existingSkill) {
       const deleteResult = await window.api.skills.delete(existingSkill.path)
@@ -105,6 +128,10 @@ async function ensureRequirementSkills(): Promise<void> {
       throw new Error(installResult.error || `安装技能「${boundSkill.id}」失败`)
     }
     marketInstalledVersionStorage.setVersion(boundSkill.id, "skill", marketSkill.version)
+    onStatusChange(boundSkill.id, {
+      phase: "installed",
+      version: normalizeMarketVersion(marketSkill.version) || marketSkill.version || "v1.0.0"
+    })
   }
 }
 
@@ -150,6 +177,8 @@ export function NewRequirementDialog({
   const [workDir, setWorkDir] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [preparingSkill, setPreparingSkill] = useState(false)
+  const [enabledExperts, setEnabledExperts] = useState<Set<string>>(new Set())
+  const [skillStatuses, setSkillStatuses] = useState<Record<string, RequirementSkillStatus>>({})
   const inputRef = useRef<HTMLInputElement>(null)
   const lastAutoFilledTitleRef = useRef("")
 
@@ -167,6 +196,39 @@ export function NewRequirementDialog({
       cancelled = true
     }
   }, [])
+
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    void Promise.all([window.api.expertAgents.list(), window.api.skills.list()])
+      .then(([experts, skills]) => {
+        if (cancelled) return
+        setEnabledExperts(
+          new Set(experts.filter((expert) => expert.enabled).map((expert) => expert.name))
+        )
+        setSkillStatuses(
+          Object.fromEntries(
+            REQUIREMENT_BOUND_SKILLS.map((boundSkill) => {
+              const installed = skills.find(
+                (skill) => skill.name.trim().toLowerCase() === boundSkill.id.trim().toLowerCase()
+              )
+              return [
+                boundSkill.id,
+                installed ? { phase: "installed", version: installed.version } : { phase: "absent" }
+              ]
+            })
+          )
+        )
+      })
+      .catch((error) => console.warn("[Requirement] 读取本地专家/技能状态失败：", error))
+    return () => {
+      cancelled = true
+    }
+  }, [open])
+
+  const updateSkillStatus = (skillId: string, status: RequirementSkillStatus): void => {
+    setSkillStatuses((current) => ({ ...current, [skillId]: status }))
+  }
 
   const updateFile = (nextFile: File | null): void => {
     if (nextFile && !nextFile.name.toLocaleLowerCase().endsWith(".docx")) {
@@ -235,17 +297,13 @@ export function NewRequirementDialog({
     try {
       setPreparingSkill(true)
       const capabilities = getRequirementSessionCapabilities()
-      try {
-        await Promise.all([
-          ensureRequirementSkills(),
-          enableRequirementSessionExperts(capabilities.allowedExperts)
-        ])
-      } catch (prepareError) {
-        // 公共市场不可用或技能安装失败时，不应阻断需求归档；降级为记录日志后继续创建。
-        console.warn("[Requirement] 准备专家/技能失败，继续创建需求：", prepareError)
-      } finally {
-        setPreparingSkill(false)
-      }
+      await Promise.all([
+        ensureRequirementSkills(updateSkillStatus),
+        enableRequirementSessionExperts(capabilities.allowedExperts).then(() =>
+          setEnabledExperts(new Set(capabilities.allowedExperts))
+        )
+      ])
+      setPreparingSkill(false)
       const sourceBytes = source === "file" && file ? await file.arrayBuffer() : undefined
       const attachmentPayload = await Promise.all(
         attachments.map(async (attachment) => ({
@@ -294,6 +352,18 @@ export function NewRequirementDialog({
       await onStartConversation(requirement, { autoGeneratePrd: true, ...capabilities })
     } catch (error) {
       setPreparingSkill(false)
+      setSkillStatuses((current) =>
+        Object.fromEntries(
+          Object.entries(current).map(([skillId, status]) => [
+            skillId,
+            status.phase === "installing"
+              ? { phase: "failed", action: "install" }
+              : status.phase === "updating"
+                ? { phase: "failed", action: "update" }
+                : status
+          ])
+        )
+      )
       toast.error(error instanceof Error ? error.message : "保存需求草稿失败")
     } finally {
       setSaving(false)
@@ -301,7 +371,7 @@ export function NewRequirementDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(nextOpen) => !saving && onOpenChange(nextOpen)}>
       <DialogContent className="flex max-h-[calc(100vh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[680px]">
         <DialogHeader>
           <div className="px-6 pt-5">
@@ -558,6 +628,9 @@ export function NewRequirementDialog({
                       <Icon className="size-3.5" />
                     </span>
                     {expert.label}
+                    {enabledExperts.has(expert.id) ? (
+                      <Check className="size-4 shrink-0 text-emerald-600" aria-label="已启用" />
+                    ) : null}
                   </div>
                 )
               })}
@@ -572,6 +645,7 @@ export function NewRequirementDialog({
               </div>
               {REQUIREMENT_BOUND_SKILLS.map((skill) => {
                 const Icon = skill.icon
+                const status = skillStatuses[skill.id]
                 return (
                   <div
                     key={skill.id}
@@ -581,6 +655,21 @@ export function NewRequirementDialog({
                       <Icon className="size-3.5" />
                     </span>
                     {skill.label}
+                    {status?.phase === "installing" || status?.phase === "updating" ? (
+                      <span className="ml-1 inline-flex items-center gap-1 text-xs font-medium text-muted-foreground">
+                        <Loader2 className="size-3.5 animate-spin" />
+                        {status.phase === "installing" ? "安装中" : "更新中"}
+                      </span>
+                    ) : status?.phase === "installed" ? (
+                      <span className="ml-1 inline-flex items-center gap-1 text-xs font-medium text-emerald-600">
+                        <Check className="size-4" aria-hidden="true" />
+                        {status.version}
+                      </span>
+                    ) : status?.phase === "failed" ? (
+                      <span className="ml-1 text-xs font-medium text-destructive">
+                        {status.action === "install" ? "安装失败" : "更新失败"}
+                      </span>
+                    ) : null}
                   </div>
                 )
               })}
