@@ -61,8 +61,10 @@ import {
 
 const REQUIREMENT_SPACE_PUBLISH_MESSAGE = "发布到需求空间"
 const LEANSTAR_TOKEN_MESSAGE_PREFIX = "精益之星身份令牌-Token："
-const REQUIREMENT_CONTINUATION_MESSAGE = "基于该需求已有资料和历史结论继续沟通。"
-
+// RequirementConversationView is keyed by the selected thread and remounts when a
+// new conversation opens. Keep the one-shot draft outside the component so it
+// survives that remount, then delete it as soon as the target thread consumes it.
+const pendingNewConversationPrompts = new Map<string, string>()
 type PreviewTab = "expert-process" | "source" | "prd"
 type PrototypeRoute = "design" | "skip" | null
 
@@ -211,7 +213,6 @@ function RequirementConversationSession({
   const streamLoading = useThreadStream(threadId ?? "").isLoading
   const conversationLoading = streamLoading || threadState?.scheduledTaskLoading === true
   const autoQueuedPrdGenerationThreadIdsRef = useRef(new Set<string>())
-  const continuationMessageThreadIdsRef = useRef(new Set<string>())
   const conversationLoadingObservedRef = useRef(false)
   const restoredManifestThreadRef = useRef<string | null>(null)
   const manifestRequestRef = useRef(0)
@@ -237,7 +238,6 @@ function RequirementConversationSession({
   const [tokenDialogOpen, setTokenDialogOpen] = useState(false)
   const [tokenDraft, setTokenDraft] = useState("")
   const [tokenSaving, setTokenSaving] = useState(false)
-  const [hasStoredToken, setHasStoredToken] = useState(false)
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false)
   const [functionWorkspaceOpen, setFunctionWorkspaceOpen] = useState(false)
   const [statusRefreshing, setStatusRefreshing] = useState(false)
@@ -958,7 +958,7 @@ function RequirementConversationSession({
           await onSelectRequirement(item, nextThreadId)
         }
       },
-      onCreateConversation: async (item) => {
+      onCreateConversation: async (item, initialPrompt) => {
         const capabilities = getRequirementSessionCapabilities()
         await enableRequirementSessionExperts(capabilities.allowedExperts)
         const conversationNumber = String(item.threadIds.length + 1).padStart(3, "0")
@@ -977,7 +977,7 @@ function RequirementConversationSession({
           { preserveView: true }
         )
         const updated = await attachConversation(item, thread.thread_id)
-        continuationMessageThreadIdsRef.current.add(thread.thread_id)
+        pendingNewConversationPrompts.set(thread.thread_id, initialPrompt)
         setSelectedThreadId(thread.thread_id)
         await onSelectRequirement(updated, thread.thread_id)
       },
@@ -1028,21 +1028,6 @@ function RequirementConversationSession({
       requirement.system
     ]
   )
-  useEffect(() => {
-    let cancelled = false
-    void (async () => {
-      try {
-        const result = await window.api.requirements.getToken()
-        if (!cancelled) setHasStoredToken(result.success ? Boolean(result.token) : false)
-      } catch {
-        if (!cancelled) setHasStoredToken(false)
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
   const loadSourcePreview = useCallback(async (): Promise<void> => {
     setSourcePreviewLoading(true)
     setSourcePreviewError(null)
@@ -1145,6 +1130,31 @@ function RequirementConversationSession({
     void loadRequirementSpaceManifest()
   }, [loadRequirementSpaceManifest, threadId])
 
+  const queuePublishToRequirementSpace = useCallback(
+    (token: string): void => {
+      const normalizedToken = token.trim()
+      if (
+        !threadState ||
+        !normalizedToken ||
+        isRequirementSpacePublished(requirementSpaceManifest) ||
+        publishRequestQueuedRef.current
+      ) {
+        return
+      }
+
+      publishRequestQueuedRef.current = true
+      setPublishRequestQueued(true)
+      threadState.addQueuedMessage({
+        id: crypto.randomUUID(),
+        text: `${REQUIREMENT_SPACE_PUBLISH_MESSAGE}\n\n${LEANSTAR_TOKEN_MESSAGE_PREFIX}${normalizedToken}`,
+        created_at: new Date(),
+        updated_at: new Date()
+      })
+      toast.success("已向对话发送发布到需求空间请求")
+    },
+    [requirementSpaceManifest, threadState]
+  )
+
   const handlePublishToRequirementSpace = useCallback(async (): Promise<void> => {
     if (
       !threadState ||
@@ -1154,50 +1164,13 @@ function RequirementConversationSession({
       return
     }
 
-    publishRequestQueuedRef.current = true
-    setPublishRequestQueued(true)
-    let publishMessage = REQUIREMENT_SPACE_PUBLISH_MESSAGE
-    try {
-      const tokenResult = await window.api.requirements.getToken()
-      const token = tokenResult.success ? tokenResult.token.trim() : ""
-      if (token) {
-        publishMessage = `${publishMessage}\n\n${LEANSTAR_TOKEN_MESSAGE_PREFIX}${token}`
-      }
-    } catch {
-      // A token is optional; publish requests must still be deliverable without one.
-    }
-    threadState.addQueuedMessage({
-      id: crypto.randomUUID(),
-      text: publishMessage,
-      created_at: new Date(),
-      updated_at: new Date()
-    })
-    toast.success("已向对话发送发布到需求空间请求")
-  }, [requirementSpaceManifest, threadState])
-
-  const queueLeanstarToken = useCallback(
-    (token: string): void => {
-      const normalized = token.trim()
-      if (!threadState || !normalized) return
-      threadState.addQueuedMessage({
-        id: crypto.randomUUID(),
-        text: `${LEANSTAR_TOKEN_MESSAGE_PREFIX}${normalized}`,
-        created_at: new Date(),
-        updated_at: new Date()
-      })
-      toast.success("已向对话发送身份令牌")
-    },
-    [threadState]
-  )
-
-  const handleSendLeanstarToken = useCallback(async (): Promise<void> => {
-    if (!threadState) return
     setTokenSaving(true)
     try {
-      const result = await window.api.requirements.getToken()
-      if (!result.success) throw new Error(result.error || "读取 Token 失败")
-      if (result.token) {
-        queueLeanstarToken(result.token)
+      const tokenResult = await window.api.requirements.getToken()
+      if (!tokenResult.success) throw new Error(tokenResult.error || "读取 Token 失败")
+      const token = tokenResult.token.trim()
+      if (token) {
+        queuePublishToRequirementSpace(token)
         return
       }
       setTokenDraft("")
@@ -1207,7 +1180,7 @@ function RequirementConversationSession({
     } finally {
       setTokenSaving(false)
     }
-  }, [queueLeanstarToken, threadState])
+  }, [queuePublishToRequirementSpace, requirementSpaceManifest, threadState])
 
   const handleConfirmLeanstarToken = useCallback(async (): Promise<void> => {
     const token = tokenDraft.trim()
@@ -1219,15 +1192,14 @@ function RequirementConversationSession({
     try {
       const result = await window.api.requirements.saveToken(token)
       if (!result.success) throw new Error(result.error || "保存 Token 失败")
-      setHasStoredToken(true)
       setTokenDialogOpen(false)
-      queueLeanstarToken(token)
+      queuePublishToRequirementSpace(token)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "保存 Token 失败")
     } finally {
       setTokenSaving(false)
     }
-  }, [queueLeanstarToken, tokenDraft])
+  }, [queuePublishToRequirementSpace, tokenDraft])
 
   useEffect(() => {
     if ((previewTab !== "prd" && previewTab !== "source") || !threadId) return
@@ -1245,21 +1217,16 @@ function RequirementConversationSession({
   useEffect(() => {
     if (
       !threadId ||
-      !continuationMessageThreadIdsRef.current.has(threadId) ||
+      !pendingNewConversationPrompts.has(threadId) ||
       !threadState ||
       threadState.historyLoading
     ) {
       return
     }
 
-    continuationMessageThreadIdsRef.current.delete(threadId)
-    threadState.addQueuedMessage({
-      id: crypto.randomUUID(),
-      text: REQUIREMENT_CONTINUATION_MESSAGE,
-      contextLabel: "requirement-workbench",
-      created_at: new Date(),
-      updated_at: new Date()
-    })
+    const initialPrompt = pendingNewConversationPrompts.get(threadId)
+    pendingNewConversationPrompts.delete(threadId)
+    if (initialPrompt) threadState.setDraftInput(initialPrompt)
   }, [threadId, threadState, threadState?.historyLoading])
 
   useEffect(() => {
@@ -1453,7 +1420,6 @@ function RequirementConversationSession({
             statusRefreshing={statusRefreshing}
             conversationLoading={conversationLoading}
             tokenSaving={tokenSaving}
-            hasStoredToken={hasStoredToken}
             publishRequestQueued={publishRequestQueued}
             prdGenerationCompleted={prdGenerationCompleted}
             prototypeCompleted={prototypeCompleted}
@@ -1484,7 +1450,6 @@ function RequirementConversationSession({
             onClearPrototypeFunction={clearPrototypeFunction}
             onUpdatePrototypeFunctionDesign={updatePrototypeFunctionDesign}
             onPublishToRequirementSpace={handlePublishToRequirementSpace}
-            onSendLeanstarToken={handleSendLeanstarToken}
             onStartDevelopment={startRequirementDevelopment}
             onContinueDevelopment={continueRequirementDevelopment}
             onResetDevelopment={resetRequirementDevelopment}
@@ -1498,7 +1463,8 @@ function RequirementConversationSession({
         onValueChange={setTokenDraft}
         saving={tokenSaving}
         onConfirm={handleConfirmLeanstarToken}
-        description="填写 Token 后会保存到本地需求配置，并自动发送到当前会话。"
+        description="发布到需求空间3.0需要身份令牌。Token 将保存在本地，并用于本次发布。"
+        confirmLabel="保存并发布"
       />
     </div>
   )

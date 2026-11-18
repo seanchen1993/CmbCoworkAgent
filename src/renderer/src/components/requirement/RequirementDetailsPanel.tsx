@@ -7,7 +7,6 @@ import {
   Eye,
   FileCheck2,
   FileText,
-  KeyRound,
   Loader2,
   PanelRightClose,
   RotateCcw,
@@ -82,7 +81,6 @@ type RequirementDetailsPanelProps = {
   statusRefreshing: boolean
   conversationLoading: boolean
   tokenSaving: boolean
-  hasStoredToken: boolean
   publishRequestQueued: boolean
   prdGenerationCompleted: boolean
   prototypeCompleted: boolean
@@ -118,7 +116,6 @@ type RequirementDetailsPanelProps = {
     needDesign: NeedDesignChoice
   ) => void
   onPublishToRequirementSpace: () => void
-  onSendLeanstarToken: () => void | Promise<void>
   onStartDevelopment: () => void | Promise<void>
   onContinueDevelopment: (threadId: string) => void | Promise<void>
   onResetDevelopment: () => void | Promise<void>
@@ -289,7 +286,6 @@ export function RequirementDetailsPanel({
   statusRefreshing,
   conversationLoading,
   tokenSaving,
-  hasStoredToken,
   publishRequestQueued,
   prdGenerationCompleted,
   prototypeCompleted,
@@ -316,7 +312,6 @@ export function RequirementDetailsPanel({
   onClearPrototypeFunction: clearPrototypeFunction,
   onUpdatePrototypeFunctionDesign: updatePrototypeFunctionDesign,
   onPublishToRequirementSpace: handlePublishToRequirementSpace,
-  onSendLeanstarToken: handleSendLeanstarToken,
   onStartDevelopment,
   onContinueDevelopment,
   onResetDevelopment
@@ -1011,73 +1006,39 @@ export function RequirementDetailsPanel({
                       </TooltipProvider>
                     ) : null}
                     {!isRequirementSpacePublished(requirementSpaceManifest) ? (
-                      <>
-                        <TooltipProvider delayDuration={180}>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <span className="inline-flex">
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  variant="outline"
-                                  disabled={tokenSaving}
-                                  className="h-7 gap-1 rounded-md px-2 text-[11px]"
-                                  onClick={() => void handleSendLeanstarToken()}
-                                >
-                                  {tokenSaving ? (
-                                    <Loader2 className="size-3 animate-spin" />
-                                  ) : (
-                                    <KeyRound className="size-3" />
-                                  )}
-                                  {hasStoredToken ? "发送Token身份令牌" : "获取Token身份令牌"}
-                                </Button>
-                              </span>
-                            </TooltipTrigger>
-                            {tokenSaving ? (
-                              <TooltipContent
-                                side="top"
-                                className="max-w-56 text-xs leading-relaxed"
+                      <TooltipProvider delayDuration={180}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="inline-flex">
+                              <Button
+                                type="button"
+                                size="sm"
+                                disabled={tokenSaving || publishRequestQueued}
+                                className="h-7 gap-1 rounded-md px-2 text-[11px]"
+                                onClick={handlePublishToRequirementSpace}
                               >
+                                {tokenSaving || publishRequestQueued ? (
+                                  <Loader2 className="size-3 animate-spin" />
+                                ) : (
+                                  <Send className="size-3" />
+                                )}
                                 {tokenSaving
-                                  ? "身份验证正在处理中，请稍候。"
-                                  : "当前正在处理需求，请稍候再进行身份验证。"}
-                              </TooltipContent>
-                            ) : null}
-                          </Tooltip>
-                        </TooltipProvider>
-                        <TooltipProvider delayDuration={180}>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <span className="inline-flex">
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  disabled={publishRequestQueued}
-                                  className="h-7 gap-1 rounded-md px-2 text-[11px]"
-                                  onClick={handlePublishToRequirementSpace}
-                                >
-                                  {publishRequestQueued ? (
-                                    <Loader2 className="size-3 animate-spin" />
-                                  ) : (
-                                    <Send className="size-3" />
-                                  )}
-                                  {publishRequestQueued ? "发布请求已发送" : "发布到需求空间3.0"}
-                                </Button>
-                              </span>
-                            </TooltipTrigger>
-                            {publishRequestQueued ? (
-                              <TooltipContent
-                                side="top"
-                                className="max-w-56 text-xs leading-relaxed"
-                              >
-                                {publishRequestQueued
-                                  ? "发布请求已提交，请稍候。"
-                                  : "当前正在处理需求，请稍候再发布。"}
-                              </TooltipContent>
-                            ) : null}
-                          </Tooltip>
-                        </TooltipProvider>
-                      </>
+                                  ? "验证身份中"
+                                  : publishRequestQueued
+                                    ? "发布请求已发送"
+                                    : "发布到需求空间3.0"}
+                              </Button>
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent side="top" className="max-w-64 text-xs leading-relaxed">
+                            {tokenSaving
+                              ? "正在验证身份令牌，请稍候。"
+                              : publishRequestQueued
+                                ? "发布请求已提交到当前会话，请等待处理完成。"
+                                : "发布规范化 PRD 到需求空间3.0。已有身份令牌时直接发布，未配置时将先引导填写。"}
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
                     ) : null}
                     {requirementSpaceManifest.prd.prDetailUrl ? (
                       <RequirementActionButton

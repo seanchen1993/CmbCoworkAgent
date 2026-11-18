@@ -54,7 +54,7 @@ const ListChevronsDownUp = createLucideIcon("ListChevronsDownUp", [
 export type RequirementSidebarMode = {
   requirements: RequirementRecord[]
   onSelectRequirement: (requirement: RequirementRecord, threadId?: string) => Promise<void>
-  onCreateConversation: (requirement: RequirementRecord) => Promise<void>
+  onCreateConversation: (requirement: RequirementRecord, initialPrompt: string) => Promise<void>
   onAttachConversation: (
     requirement: RequirementRecord,
     threadId: string
@@ -67,6 +67,9 @@ export type RequirementSidebarMode = {
   onNewRequirement?: () => void
   onBackToHistory?: () => void
 }
+
+const NEW_REQUIREMENT_CONVERSATION_PROMPT =
+  "请基于当前需求规范的已有内容与完成进度，继续补充和完善需求规范。"
 
 type RequirementThreadSidebarProps = { mode: RequirementSidebarMode }
 
@@ -293,7 +296,7 @@ export function RequirementThreadSidebar({
 
   const createConversation = async (requirement: RequirementRecord): Promise<void> => {
     try {
-      await mode.onCreateConversation(requirement)
+      await mode.onCreateConversation(requirement, NEW_REQUIREMENT_CONVERSATION_PROMPT)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "新建会话失败")
     }
