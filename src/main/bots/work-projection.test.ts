@@ -132,7 +132,11 @@ describe("work activity projection query boundaries", () => {
        ))) AS background_busy`
       const priorSql = sql.replace((f.store as any).workActivityProjection(), priorProjection)
       expect(priorSql).not.toBe(sql)
-      expect(f.db.exec(sql, bindings)).toEqual(f.db.exec(priorSql, bindings))
+      const before = f.db.exec(priorSql, bindings)[0]
+      const after = f.db.exec(sql, bindings)[0]
+      const indices = before.columns.map(column => after.columns.indexOf(column))
+      expect(indices).not.toContain(-1)
+      expect(after.values.map(row => indices.map(index => row[index]))).toEqual(before.values)
     }
     expect(
       f.db.exec("SELECT typeof(+id),+id,id FROM bot_work_items WHERE id=?", [f.works[0].work.id])[0]

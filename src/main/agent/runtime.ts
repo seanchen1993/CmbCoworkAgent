@@ -87,6 +87,7 @@ import {
   readOnlyShellExecutionContext,
   type SkillHookContextProvider
 } from "./local-sandbox"
+import { foregroundCommandCall, foregroundCommandEvidence } from "./foreground-command-evidence"
 import { approvalMatchesRuntimeThread } from "./approval-thread-match"
 import { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
 import { combineSkillMiddlewareSources, createRefreshingSkillsMiddleware } from "./skill-sources"
@@ -764,6 +765,9 @@ function createGradedToolConcurrencyMiddleware(
       if (tier === "shared") {
         const runSharedTool = () =>
           lock.read(async () => {
+            // Cancellation may happen while queued. Do not invoke an already
+            // cancelled tool wrapper: it may never settle and retain this lock.
+            request.runtime?.signal?.throwIfAborted()
             const waited = Date.now() - waitStart
             if (waited > 50)
               console.log(`[Runtime] shared-lock acquired ${label} after ${waited}ms`)
@@ -774,6 +778,7 @@ function createGradedToolConcurrencyMiddleware(
         return runSharedTool()
       }
       return lock.write(async () => {
+        request.runtime?.signal?.throwIfAborted()
         const waited = Date.now() - waitStart
         if (waited > 50) console.log(`[Runtime] exclusive-lock acquired ${label} after ${waited}ms`)
         signal?.throwIfAborted()
@@ -2557,9 +2562,20 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
                 soloTaskTraceManager.getTraceContextForOwner(agentId)
               )
             : undefined
-          return traceContext
+          const invoke = () => traceContext
             ? executeTraceContext.run(traceContext, () => runExecute(input))
             : runExecute(input)
+          const owner = foregroundCommandEvidence.getStore()
+          const source = config as { toolCall?: { id?: string }; configurable?: Record<string, unknown> } | undefined
+          const callId = source?.toolCall?.id
+          if (!owner || owner.threadId !== threadId || !callId || input.run_in_background ||
+              source?.configurable?.[SUBAGENT_SUMMARIZATION_OWNER_CONFIG_KEY]) return invoke()
+          const record = owner.begin(callId)
+          if (!record) return invoke()
+          const call: NonNullable<ReturnType<typeof foregroundCommandCall.getStore>> = { threadId: owner.threadId }
+          const result = await foregroundCommandCall.run(call, invoke)
+          if (call.completed) record(call.completed)
+          return result
         },
         {
           name: "execute",

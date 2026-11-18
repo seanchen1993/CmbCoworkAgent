@@ -10,6 +10,7 @@ import {
   type SendBotMessageInput,
   type UpdateBotInput,
   type WriteBotMemoryInput,
+  type BotDesktopWorkScheduleBinding,
   type BotScheduleInput,
   type BotGroupInput,
   type BotGroupHistoryCursor,
@@ -17,6 +18,8 @@ import {
 } from "./contracts"
 import { isBotThreadMessageId } from "./message-reply"
 import { parseBotMessageMentions } from "./message-mentions"
+import { parseBotInputFileIds } from "./input-files"
+import { BOT_WORK_MONITOR_MODES, type BotFixedReminderInput, type BotWorkScheduleMonitorInput } from "./schedule-observation"
 
 function record(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
@@ -192,14 +195,32 @@ export function parseSendBotMessage(input: unknown): SendBotMessageInput {
   const message = boundedString(item.message, "消息", 64_000)
   const leading = (item.message as string).length - (item.message as string).trimStart().length
   const mentions = parseBotMessageMentions(message, item.mentions, leading)
+  const inputFileIds = parseBotInputFileIds(item.inputFileIds)
+  const explicitSkill = item.explicitSkill === undefined ? undefined : parseBotSkillSelection(item.explicitSkill)
+  if ((item.skillDraftFromMain !== undefined || item.skillDraftSourceThreadId !== undefined) &&
+      (item.skillDraftFromMain !== true || !explicitSkill || !item.workId ||
+        !isBotThreadMessageId(item.skillDraftSourceThreadId) || item.skillDraftSourceThreadId.length > 256))
+    throw new BotError("INVALID_INPUT", "技能草稿缺少明确任务目标")
   return {
     botId: botIdentifier(item.botId),
     requestId: botIdentifier(item.requestId),
+    ...(item.supplementRunId == null ? {} : { supplementRunId: botIdentifier(item.supplementRunId) }),
     message,
     ...(item.workId == null ? {} : { workId: botIdentifier(item.workId) }),
     ...(item.replyToId !== undefined ? { replyToId: item.replyToId as string } : {}),
-    ...(mentions.length ? { mentions } : {})
+    ...(mentions.length ? { mentions } : {}),
+    ...(explicitSkill ? { explicitSkill } : {}),
+    ...(item.skillDraftFromMain === true ? { skillDraftFromMain: true } : {}),
+    ...(item.skillDraftFromMain === true ? { skillDraftSourceThreadId: item.skillDraftSourceThreadId as string } : {}),
+    ...(inputFileIds.length ? { inputFileIds } : {})
   }
+}
+
+function parseBotSkillSelection(input: unknown): import("./skill-selection").BotSkillSelection {
+  const item = record(input)
+  if (Object.keys(item).some(key => key !== "name" && key !== "path"))
+    throw new BotError("INVALID_INPUT", "技能选择无效")
+  return { name: boundedString(item.name, "技能", 160), path: boundedString(item.path, "技能路径", 4096) }
 }
 
 export function parseBotRequestChecks(input: unknown): BotRequestCheck[] {
@@ -243,6 +264,42 @@ export function parseBotMemoryScope(input: unknown): import("./memory-scope").Bo
   if (scope.kind === "private" || scope.kind === "shared") return { kind: scope.kind }
   if (scope.kind === "group") return { kind: "group", groupId: botIdentifier(scope.groupId) }
   throw new BotError("INVALID_INPUT", "记忆范围无效")
+}
+
+export function parseBotDesktopWorkScheduleBinding(
+  input: unknown
+): BotDesktopWorkScheduleBinding | undefined {
+  if (input === undefined) return undefined
+  const item = record(input)
+  if (Object.keys(item).some((key) => key !== "workId" && key !== "operationId"))
+    throw new BotError("INVALID_INPUT", "工作例行参数无效")
+  return { workId: botIdentifier(item.workId), operationId: botIdentifier(item.operationId) }
+}
+
+export function parseBotWorkScheduleMonitor(input: unknown): BotWorkScheduleMonitorInput {
+  const item = record(input)
+  if (Object.keys(item).some((key) => !["workId", "mode", "expiresAt"].includes(key)) ||
+      !BOT_WORK_MONITOR_MODES.includes(item.mode as BotWorkScheduleMonitorInput["mode"]))
+    throw new BotError("INVALID_INPUT", "工作观察配置无效")
+  const expiresAt = scheduleExpiry(item.expiresAt)
+  return { workId: botIdentifier(item.workId), mode: item.mode as BotWorkScheduleMonitorInput["mode"],
+    ...(expiresAt ? { expiresAt } : {}) }
+}
+
+function scheduleExpiry(input: unknown): string | undefined {
+  if (input === undefined) return undefined
+  const value = boundedString(input, "失效时间", 64)
+  if (!/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(value) || !Number.isFinite(Date.parse(value)))
+    throw new BotError("INVALID_INPUT", "请指定含时区的失效时间")
+  return new Date(value).toISOString()
+}
+
+export function parseBotFixedReminder(input: unknown): BotFixedReminderInput {
+  const item = record(input)
+  if (item.kind !== "fixed_reminder" || Object.keys(item).some(key => key !== "kind" && key !== "expiresAt"))
+    throw new BotError("INVALID_INPUT", "固定提醒配置无效")
+  const expiresAt = scheduleExpiry(item.expiresAt)
+  return { kind: "fixed_reminder", ...(expiresAt ? { expiresAt } : {}) }
 }
 
 export function parseSchedule(input: unknown): BotScheduleInput {
@@ -298,12 +355,26 @@ export function parseExistingVersion(input: unknown): { id: string; version: num
   return { id: botIdentifier(item.id), version: Number(item.version) }
 }
 
+export function parseBotScheduleEdit(input: unknown): import("./contracts").BotScheduleEditInput | undefined {
+  const existing = parseExistingVersion(input)
+  if (!existing) return undefined
+  const item = record(input)
+  const expiresAt = scheduleExpiry(item.expiresAt)
+  const withdrawTaskId = item.withdrawTaskId === undefined ? undefined : botIdentifier(item.withdrawTaskId)
+  const workMonitor = item.workMonitor === undefined ? undefined : parseBotWorkScheduleMonitor(item.workMonitor)
+  if (workMonitor?.expiresAt) throw new BotError("INVALID_INPUT", "请单独设置失效时间")
+  if (withdrawTaskId && (expiresAt || workMonitor))
+    throw new BotError("INVALID_INPUT", "请分别编辑例行和撤回本次执行")
+  return { ...existing, ...(expiresAt ? { expiresAt } : {}), ...(workMonitor ? { workMonitor } : {}),
+    ...(withdrawTaskId ? { withdrawTaskId } : {}) }
+}
+
 export function parseCreateBotWork(input: unknown): import("./work").CreateBotWorkInput {
   const item = record(input)
   if (
     Object.keys(item).some(
       (key) =>
-        !["botId", "operationId", "title", "goal", "contextMessageIds", "workspace", "imConversationId"].includes(key)
+        !["botId", "operationId", "title", "goal", "contextMessageIds", "workspace", "inputFileIds", "explicitSkill", "mentions", "imConversationId"].includes(key)
     )
   )
     throw new BotError("INVALID_INPUT", "工作参数包含不支持字段")
@@ -313,13 +384,22 @@ export function parseCreateBotWork(input: unknown): import("./work").CreateBotWo
     (!Array.isArray(ids) || ids.length > 12 || new Set(ids).size !== ids.length)
   )
     throw new BotError("INVALID_INPUT", "工作上下文引用无效")
+  const goal = boundedString(item.goal, "工作目标", 30000)
+  const rawGoal = item.goal as string
+  const explicitSkill = item.explicitSkill === undefined ? undefined : parseBotSkillSelection(item.explicitSkill)
+  const mentions = parseBotMessageMentions(goal, item.mentions, rawGoal.length - rawGoal.trimStart().length)
+  if (mentions.length && !explicitSkill)
+    throw new BotError("INVALID_INPUT", "任务提及仅支持桌面技能草稿")
   return {
     botId: botIdentifier(item.botId),
     operationId: botIdentifier(item.operationId),
     title: boundedString(item.title, "工作标题", 160),
-    goal: boundedString(item.goal, "工作目标", 30000),
+    goal,
     ...(item.imConversationId === undefined ? {} : { imConversationId: botIdentifier(item.imConversationId) }),
     ...(Array.isArray(ids) ? { contextMessageIds: ids.map(botIdentifier) } : {}),
+    ...(item.inputFileIds === undefined ? {} : { inputFileIds: parseBotInputFileIds(item.inputFileIds) }),
+    ...(explicitSkill ? { explicitSkill } : {}),
+    ...(mentions.length ? { mentions } : {}),
     ...(item.workspace === undefined ? {} : { workspace: parseBotWorkWorkspace(item.workspace) })
   }
 }
@@ -333,6 +413,14 @@ export function parseBotWorkWorkspace(input: unknown): import("./work").BotWorkW
   if (item.kind === "project" && Object.keys(item).every((k) => ["kind", "projectId"].includes(k)))
     return { kind: "project", projectId: boundedString(item.projectId, "项目标识", 512) }
   throw new BotError("INVALID_INPUT", "请选择目录或已有项目作为工作区")
+}
+export function parseBotSkillWorkspaceTarget(input: unknown): import("./work").BotSkillWorkspaceTarget {
+  const item = record(input)
+  if (item.kind !== "work") return parseBotWorkWorkspace(item)
+  if (Object.keys(item).some(key => !["kind", "workId", "threadId"].includes(key)) ||
+      !isBotThreadMessageId(item.threadId) || item.threadId.length > 256)
+    throw new BotError("INVALID_INPUT", "技能任务目标无效")
+  return { kind: "work", workId: botIdentifier(item.workId), threadId: item.threadId }
 }
 export function parseBotWorkLifecycle(input: unknown) {
   const item = record(input)
@@ -351,5 +439,22 @@ export function parseBotWorkLifecycle(input: unknown) {
     operationId: botIdentifier(item.operationId),
     expectedVersion: Number(item.expectedVersion),
     action: item.action as "complete" | "continue"
+  }
+}
+export function parseBotWorkControl(input: unknown): import("./work").BotWorkControlInput {
+  const item = record(input)
+  if (Object.keys(item).some(key => !["botId", "workId", "expectedVersion", "operationId", "action", "confirmedTaskIds"].includes(key)) ||
+      !["take", "stop_and_take", "return"].includes(String(item.action)) ||
+      !Number.isSafeInteger(item.expectedVersion) || Number(item.expectedVersion) < 1)
+    throw new BotError("INVALID_INPUT", "控制权请求无效")
+  if (item.confirmedTaskIds !== undefined && (item.action !== "return" ||
+      !Array.isArray(item.confirmedTaskIds) || item.confirmedTaskIds.length > 500 ||
+      new Set(item.confirmedTaskIds).size !== item.confirmedTaskIds.length))
+    throw new BotError("INVALID_INPUT", "归还待办确认无效")
+  return {
+    botId: botIdentifier(item.botId), workId: botIdentifier(item.workId),
+    operationId: botIdentifier(item.operationId), expectedVersion: Number(item.expectedVersion),
+    action: item.action as "take" | "stop_and_take" | "return",
+    ...(item.confirmedTaskIds !== undefined ? { confirmedTaskIds: (item.confirmedTaskIds as unknown[]).map(botIdentifier) } : {})
   }
 }

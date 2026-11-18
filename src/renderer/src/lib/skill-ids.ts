@@ -1,4 +1,5 @@
 import type { SkillMetadata } from "@/types"
+import type { BotSkillSelection } from "../../../shared/bots/skill-selection"
 
 export function normalizeSkillId(value: string | undefined | null): string {
   return (value ?? "")
@@ -40,4 +41,15 @@ export function isSkillDisabled(
     }
   }
   return !!name && disabledSkillIds.has(name)
+}
+
+export function findEnabledSkillSelection(
+  selection: BotSkillSelection,
+  skills: readonly SkillMetadata[],
+  disabledSkillIds: ReadonlySet<string>
+): SkillMetadata | undefined {
+  const name = selection.name.trim()
+  const path = selection.path.trim()
+  const skill = skills.find(candidate => candidate.name.trim() === name && candidate.path.trim() === path)
+  return skill && !isSkillDisabled(skill, disabledSkillIds) ? skill : undefined
 }

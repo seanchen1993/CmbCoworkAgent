@@ -576,6 +576,61 @@ async function testDurableTailFeedsRuntimeContext(): Promise<void> {
     "runtime tail should preserve the assistant provider occurrence"
   )
 
+  const changed = await getDurableRuntimeTail(threadId, {
+    userInputProjections: (ids) => {
+      assertEqual(ids.join(","), "user-2", "only tail user identities are projected")
+      // A supplied non-user id cannot alter assistant or tool messages.
+      return new Map([["user-2", "Accepted replacement"], ["assistant-2", "MUST NOT REPLACE"]])
+    }
+  })
+  assertEqual(changed.messages[0].content, "Accepted replacement", "model uses accepted body")
+  assertEqual(changed.messages[0].id, "user-2", "projection preserves exact message identity")
+  assertEqual(changed.messages[0].additional_kwargs.cmb_visible_user_message,
+    "checkpoint 后的问题", "runtime replay preserves original user-visible text")
+  assertEqual(changed.messages[0].additional_kwargs.cmb_bot_prepared_user_request,
+    "Accepted replacement", "runtime replay anchors compaction only to the accepted body")
+  assertEqual(changed.messages[1].content, "checkpoint 后的回答", "assistant is unchanged")
+  for (const decision of [null, ""]) {
+    const blocked = await getDurableRuntimeTail(threadId, {
+      userInputProjections: () => new Map([["user-2", decision]])
+    })
+    assertEqual(blocked.messages.length, 1, "unaccepted/empty user input stays out of runtime")
+    assertEqual(blocked.persistedMessages.length, 1, "filtered input does not invent a recovery tail")
+    assertEqual(blocked.messages[0].id, "assistant-2", "normal tail remains in order")
+  }
+  assertEqual(db.getThreadMessagesByIds(threadId, ["user-2"])[0].content,
+    "checkpoint 后的问题", "projection never changes stored user history")
+  assertEqual((await getDurableRuntimeTail(threadId)).messages[0].content,
+    "checkpoint 后的问题", "ordinary callers without opt-in retain their original behavior")
+
+  const { BotStore } = await import("../src/main/bots/store.ts")
+  const { NativeSqliteAdapter } = await import("../src/main/db/native-sqlite-adapter.ts")
+  const { DatabaseSync } = await import("node:sqlite")
+  const { captureThreadIncarnation } = await import("../src/main/services/thread-incarnation.ts")
+  const { setBotHistoryInputSource, botHistoryInputProjection } = await import("../src/main/bots/history-input-projection.ts")
+  const controlDb = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+  try {
+    const control = new BotStore(controlDb)
+    const bot = control.create({ name: "Tail", instructions: "", color: "#123456", modelRef: null })
+    const row = db.getThreadCore(threadId)!
+    const ref = { kind: "local_thread" as const, threadId, incarnation: captureThreadIncarnation(row) }
+    const work = control.conversations.prepare({ botId: bot.id, operationId: "tail-link", conversation: ref,
+      title: "Tail", goal: "Continue" })
+    control.conversations.bound(bot.id, work.id, ref)
+    const task = control.enqueue({ botId: bot.id, workId: work.id, requestId: "user-2", message: "checkpoint 后的问题" })
+    control.transition(task.id, "running")
+    control.beginInputPreparation(task.id)
+    control.settle(task.id, "failed", "Hook refused")
+    control.conversations.beginDetach(bot.id, work.id, control.getWork(bot.id, work.id).version)
+    control.conversations.detached(bot.id, work.id)
+    setBotHistoryInputSource({ works: id => control.desktopDeliveryWorks(id), inputs: (botId, id, ids) => control.inputProjections(botId, id, ids) })
+    const afterUnlink = await getDurableRuntimeTail(threadId, { userInputProjections: botHistoryInputProjection(threadId, row) })
+    assertEqual(afterUnlink.messages.length, 1, "normal continuation after unlink excludes rejected Bot input")
+    assertEqual(afterUnlink.messages[0].id, "assistant-2", "ordinary assistant tail remains intact after unlink")
+    assertEqual(db.getThreadMessagesByIds(threadId, ["user-2"])[0].content,
+      "checkpoint 后的问题", "unlink never erases the visible rejected request")
+  } finally { setBotHistoryInputSource(undefined); controlDb.close() }
+
   await closeCheckpointer(threadId)
   deleteThreadCheckpoint(threadId)
   db.deleteThread(threadId)

@@ -10,7 +10,11 @@ import { botQuestionHistory } from "./bot-question-history"
 import { botBrowserHelpHistory } from "./bot-browser-help-history"
 import { delegatedTaskReceipt } from "./bot-exchange-view"
 import { parseBotWorkReceipt } from "./bot-work-receipt"
-import { parseBotFileDelivery } from "../../../shared/bots/file-delivery"
+import { parseBotFileDelivery, parseBotHistoryFileDelivery } from "../../../shared/bots/file-delivery"
+
+export function visibleBotDelivery(content: unknown, scope: Message["botHistoryDeliveryScope"], desktopWorkId?: string) {
+  return desktopWorkId ? parseBotHistoryFileDelivery(content, scope, desktopWorkId) : parseBotFileDelivery(content)
+}
 
 /** Default Bot chat shows product presentations, never a generic tool transcript. */
 export function isBotExecutionTool(
@@ -46,7 +50,8 @@ export function projectBotExecution(
   keepActiveTurn: boolean,
   cardCallIds: ReadonlySet<string> = new Set(),
   pendingQuestionCallId: string | null = null,
-  liveToolStates?: ReadonlyMap<string, Pick<ToolCallState, "status">>
+  liveToolStates?: ReadonlyMap<string, Pick<ToolCallState, "status">>,
+  desktopWorkId?: string
 ): { hiddenMessages: Set<string>; foldedTools: Set<string> } {
   const hidden = new Set<string>()
   const foldedTools = new Set<string>()
@@ -77,7 +82,9 @@ export function projectBotExecution(
       if (
         result &&
         !botToolResultStatus(tool, result) &&
-        (isBotExecutionTool(tool, result) || botScheduleReceipt(tool, result)?.action === "list")
+        (tool.name === "bot_deliver_files" && desktopWorkId
+          ? !visibleBotDelivery(result.content, message.botHistoryDeliveryScope, desktopWorkId)
+          : isBotExecutionTool(tool, result) || botScheduleReceipt(tool, result)?.action === "list")
       )
         foldedTools.add(key)
     }

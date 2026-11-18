@@ -15,7 +15,7 @@ const shifted = (start: Point, text: string): Point => {
 }
 
 /** Trim source-proven bare URL prose without changing the existing GFM parser. */
-export function remarkBotAutolinks() {
+export function remarkBotAutolinks(options?: { originInProseOnly?: boolean }) {
   return (tree: Root, file: VFile) => {
     const source = file.toString()
     const visit = (parent: Root | RootContent): void => {
@@ -41,7 +41,8 @@ export function remarkBotAutolinks() {
           child.position.end.offset !== undefined &&
           source.slice(child.position.start.offset, child.position.end.offset) === label
         ) {
-          let boundary = label.search(PROSE_BOUNDARY)
+          const proseBoundary = label.search(PROSE_BOUNDARY)
+          let boundary = proseBoundary
           if (boundary > 0) {
             const rawPrefix = label.slice(0, boundary)
             // Preserve existing Unicode paths/query/hash and Unicode hosts.
@@ -62,6 +63,21 @@ export function remarkBotAutolinks() {
             try {
               const parsed = new URL(destination)
               if (!/^https?:$/.test(parsed.protocol) || !parsed.hostname) continue
+              if (URL.canParse(child.url)) {
+                const full = new URL(child.url)
+                const prose = label.slice(proseBoundary)
+                // A valid path can contain Unicode punctuation. Keep real path
+                // segments, file suffixes and queries/fragments intact.
+                if (parsed.search || parsed.hash || /[/#?]/u.test(prose) ||
+                    /\.[a-z0-9]{1,10}$/i.test(full.pathname)) continue
+                if (options?.originInProseOnly) {
+                  // Bare addresses in reports are often filenames. A local
+                  // preview followed by sentence punctuation is the exception,
+                  // including when the address starts the line or list item.
+                  const local = /^(?:localhost|127(?:\.\d{1,3}){3}|\[::1\])$/i.test(parsed.hostname)
+                  if (!local || !/:[0-9]+(?:\/|$)/u.test(prefix) || !/^[，。！？；：（]/u.test(prose)) continue
+                }
+              }
             } catch {
               continue
             }

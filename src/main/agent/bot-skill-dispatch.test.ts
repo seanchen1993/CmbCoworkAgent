@@ -38,6 +38,9 @@ describe("main Bot explicit skill dispatch", () => {
     expect(selection.name).toBe("prd")
     expect(botSkillDispatchInput(source.message, selection)).not.toContain("请先使用 read_file")
     expect(source.message).toContain(block)
+    const structured = { ...source, message: "整理访谈要点", origin: { kind: "user" as const, explicitSkill: { name: selection.name, path: selection.path } } }
+    expect(selectedMainBotSkill(structured)).toEqual({ name: selection.name, path: selection.path, block: "" })
+    expect(botSkillDispatchInput(structured.message, selectedMainBotSkill(structured)!)).toContain(structured.message)
     expect(selectedMainBotSkill(main("帮我使用 prd 技能"))).toBeUndefined()
     expect(selectedMainBotSkill({ ...source, workId: "work" })).toBeUndefined()
     expect(selectedMainBotSkill({ ...source, origin: { kind: "introduction" } })).toBeUndefined()

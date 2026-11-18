@@ -8,6 +8,7 @@ import { isHarnessProjectModeThread } from "@/lib/thread-classification"
 import { cn } from "@/lib/utils"
 
 interface MemorySessionSwitcherProps {
+  threadId?: string
   onOpenSettings?: () => void
 }
 
@@ -22,8 +23,8 @@ function isSessionMemoryEnabled(metadata: unknown): boolean {
   )
 }
 
-function MemorySessionSwitcherImpl({ onOpenSettings }: MemorySessionSwitcherProps): JSX.Element {
-  const currentThreadId = useAppStore((state) => state.currentThreadId)
+function MemorySessionSwitcherImpl({ threadId, onOpenSettings }: MemorySessionSwitcherProps): JSX.Element {
+  const currentThreadId = useAppStore((state) => threadId ?? state.currentThreadId)
   const threads = useAppStore((state) => state.threads)
   const patchThreadMetadata = useAppStore((state) => state.patchThreadMetadata)
   const [open, setOpen] = useState(false)

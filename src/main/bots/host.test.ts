@@ -1190,7 +1190,8 @@ describe("Bot control state", () => {
       const files = Array.from({ length: 8 }, (_, index) => ({
         filePath: `/b/${"x".repeat(3000)}/${index}.md`,
         name: `${index}.md`,
-        size: index
+        size: index,
+        attachmentPath: `/b/.bot-deliveries/kept-version/${index}.md`
       }))
       db.settle(child.id, state, null, "Done", files)
       // The terminal reply is already durable before the queue is flushed.
@@ -1203,16 +1204,40 @@ describe("Bot control state", () => {
         .filter((item) => item.requestId === `reply-${child.id}`)
       expect(replies).toHaveLength(1)
       expect(replies[0].message).toContain("Done")
-      expect(replies[0].message.length).toBeLessThan(13_000)
+      expect(replies[0].message.length).toBeLessThan(80_000)
       expect(replies[0].message.includes(files[0].filePath)).toBe(state === "completed")
       if (state === "completed") {
         expect(replies[0].origin).toMatchObject({ replyFiles: files })
-        expect(replies[0].message).toContain("尚未复制")
-        expect(replies[0].message).not.toContain(files[7].filePath)
+        for (const file of files) {
+          expect(replies[0].message).toContain(file.filePath)
+          expect(replies[0].message).toContain(file.attachmentPath)
+        }
       } else expect(replies[0].origin).not.toHaveProperty("replyFiles")
       expect(replies[0].origin).toMatchObject({ fromBotId: b.id, expectsReply: false })
     }
   )
+  it("projects the current declared version alongside optional same-name receipts", () => {
+    const db = store(), a = db.create(input), b = db.create(input)
+    const root = db.enqueue({ botId: a.id, requestId: "versions", message: "Deliver the reviewed report" })
+    db.transition(root.id, "running")
+    const child = db.delegate(root.id, b.id, "Prepare report", "report", ["report.md"])
+    db.transition(child.id, "running")
+    const prior = { filePath: "/b/first/report.md", name: "report.md", size: 2, attachmentPath: "/b/.bot-deliveries/v1/report.md" }
+    const current = { filePath: "/b/final/report.md", name: "report.md", size: 3, attachmentPath: "/b/.bot-deliveries/v2/report.md" }
+    db.recordPeerDelivery(child.id, [prior], { "report.md": prior.filePath }, { "report.md": "prior-source" })
+    db.recordPeerDelivery(child.id, [current], { "report.md": current.filePath }, {})
+    const reopened = new BotStore(databases.at(-1)!, () => 1000)
+    expect(reopened.peerHandoff(child.id).forwardedOutputs).toBeUndefined()
+    reopened.settle(child.id, "completed", null, "Reviewed", reopened.peerHandoff(child.id).files)
+    reopened.flushReplies()
+    const reply = reopened.recentTasks().find(task => task.requestId === `reply-${child.id}`)!
+    expect(reply.origin).toMatchObject({ replyOutputBindings: { "report.md": current.filePath } })
+    const references = reply.message.split("\n").filter(line => line.startsWith('{"filePath":')).map(line => JSON.parse(line))
+    expect(references).toEqual([
+      { filePath: prior.filePath, attachmentPath: prior.attachmentPath },
+      { filePath: current.filePath, attachmentPath: current.attachmentPath, outputFiles: ["report.md"] }
+    ])
+  })
   it("returns verified internal group files to the caller without publishing or importing them", () => {
     const db = store(),
       a = db.create(input),
@@ -1579,8 +1604,10 @@ describe("Bot control state", () => {
       bot = db.create(input)
     db.markUnread("bot", bot.id)
     const first = db.activities()[0]
+    expect(db.hasUnread()).toBe(true)
     db.markRead("bot", bot.id, first.version)
     expect(db.activities()[0].unread).toBe(false)
+    expect(db.hasUnread()).toBe(false)
     db.markUnread("bot", bot.id)
     db.markRead("bot", bot.id, first.version)
     expect(db.activities()[0]).toMatchObject({
@@ -1595,6 +1622,7 @@ describe("Bot control state", () => {
     const group = db.saveGroup({ name: "Team", memberIds: [bot.id, db.create(input).id] })
     db.markUnread("group", group.id)
     expect(db.activities().find((item) => item.id === group.id)?.unread).toBe(true)
+    expect(db.hasUnread()).toBe(true)
   })
 
   it("migrates display labels without changing identity and preserves labels from older callers", () => {
@@ -1985,7 +2013,9 @@ describe("Bot control state", () => {
       id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, request_id TEXT NOT NULL UNIQUE,
       message TEXT NOT NULL, state TEXT NOT NULL, error TEXT, created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
-    ); INSERT INTO bot_tasks VALUES ('queued', 'old', 'request', 'Work', 'queued', NULL, 1, 1);`)
+    ); INSERT INTO bot_tasks VALUES
+      ('queued', 'old', 'request', 'Work', 'queued', NULL, 1, 1),
+      ('finished', 'old', 'old-request', 'Done', 'completed', NULL, 1, 1);`)
     const adapter = new NativeSqliteAdapter(raw)
     databases.push(adapter)
     const run = adapter.run.bind(adapter)
@@ -2001,8 +2031,24 @@ describe("Bot control state", () => {
         .some((row) => row.name === "thread_id")
     ).toBe(false)
     failUpgrade.mockRestore()
-    const migrated = new BotStore(adapter)
+    const now = 31 * 24 * 60 * 60_000
+    const oldMessage = { id: "old-request", role: "user" as const, ordinal: 1, text: "Done" }
+    const migrated = new BotStore(adapter, () => now, undefined, (threadId, id) =>
+      threadId === "old-thread" && id === oldMessage.id ? oldMessage : null)
     expect(migrated.getTask("queued").threadId).toBe("old-thread")
+    expect(migrated.inputProjections("old", "old-thread", ["old-request", "request"]))
+      .toEqual(new Map([["request", null]]))
+    const assertLegacyReply = () => {
+      expect(migrated.messageReply("old", oldMessage.id)).toEqual(oldMessage)
+      expect(migrated.messageOrigins("old", [oldMessage.id, "request"])).toEqual([])
+    }
+    assertLegacyReply()
+    adapter.run(`WITH RECURSIVE recent(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM recent WHERE n<100)
+      INSERT INTO bot_tasks (id,bot_id,request_id,message,state,created_at,updated_at,thread_id,origin_json)
+      SELECT 'recent-'||n,'old','recent-request-'||n,'Done','completed',?,?,'old-thread','{"kind":"user"}' FROM recent`,
+      [now, now])
+    expect(migrated.pruneTaskHistory()).toBe(1)
+    assertLegacyReply()
     raw.exec("UPDATE bot_tasks SET thread_id=NULL WHERE id='queued'")
     expect(new BotStore(adapter).getTask("queued").threadId).toBe("old-thread")
     raw.exec("UPDATE bot_tasks SET thread_id='group-team-old' WHERE id='queued'")

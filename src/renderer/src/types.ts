@@ -280,6 +280,9 @@ export type StreamEvent =
 
 export interface Message {
   id: string
+  /** Verified display/edit metadata from native history, not execution authority. */
+  botHistoryInputOrigin?: import("../../shared/bots/message-reply").BotHistoryInputOrigin
+  botHistoryDeliveryScope?: import("../../shared/bots/file-delivery").BotHistoryDeliveryScope
   /** Durable transcript order. Present on messages read from thread_messages pages. */
   ordinal?: number
   provider_source_id?: string
@@ -368,15 +371,23 @@ export interface QueuedMessage {
   /** Legacy queued Bot request identity; new composer drafts do not create this field. */
   botMentions?: import("../../shared/bots/contracts").BotMessageMention[]
   attachmentModelBlocks?: string
+  /** Main-issued Bot attachment receipts; kept separately from user-editable text. */
+  botInputFileIds?: string[]
   attachmentDisplayPrefix?: string
   skillBlock?: string
   skillName?: string
   skillDescription?: string
+  botExplicitSkill?: import("../../shared/bots/skill-selection").BotSkillSelection
+  botSkillTarget?:
+    | { kind: "main" }
+    | { kind: "work"; workId: string }
+    | { kind: "create"; title: string; path: string }
+    | { kind: "create"; title: string; projectId: string }
   builtinBrowser?: boolean
   modelId?: string
   /** Explicit link/unlink parks old drafts across remount/restart. */
   parkedForConversationLink?: boolean
-  botHandoffTarget?: { botId:string;workId:string }
+  botHandoffTarget?: { botId: string; workId: string; runId?: string }
   handoffRequestedAt?: Date
   created_at: Date
   updated_at: Date

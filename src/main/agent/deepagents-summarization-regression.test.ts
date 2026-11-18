@@ -22,6 +22,13 @@ import {
   isCmbContextOverflow,
   SUMMARIZATION_STATE_OWNER_KEY
 } from "./context-summarization-middleware"
+import { BOT_PREPARED_USER_REQUEST_KEY } from "./agent-run-service"
+import {
+  clearCurrentRunMessageQueue,
+  createCurrentRunMessageQueueMiddleware,
+  queueCurrentRunMessage,
+  setCurrentRunMessageQueueOwner
+} from "./current-run-message-queue"
 
 type SummaryRequest = {
   messages: BaseMessage[]
@@ -2811,4 +2818,69 @@ Continue with the latest explicit user request. Reuse the recorded file paths, s
     expect(initialAnchor).not.toContain("AUGMENTED_INITIAL_PROMPT_SENTINEL")
     expect(latestAnchor).not.toContain("AUGMENTED_LATEST_PROMPT_SENTINEL")
   })
+
+  it.each(["first submission", "in-flight supplement", "restored tail", "empty approved anchor"])(
+    "keeps the Bot %s's visible original out of both models during compaction",
+    async (source) => {
+      const visible = "UNAPPROVED_RAW_SENTINEL"
+      const approved = source === "empty approved anchor" ? "" : "APPROVED_BOT_SENTINEL"
+      const effective = source === "restored tail" ? approved : `Hook context\n${approved}`
+      const id = `compaction-${source}`
+      let message: BaseMessage
+      if (source === "in-flight supplement") {
+        const runToken = "compaction-steer"
+        setCurrentRunMessageQueueOwner(id, runToken)
+        try {
+          expect(queueCurrentRunMessage(id, {
+            id, content: effective, displayContent: visible, botPreparedUserRequest: approved
+          }, runToken)).toBe(true)
+          const beforeModel = createCurrentRunMessageQueueMiddleware(runToken).beforeModel as unknown as (
+            state: { messages: BaseMessage[] }, runtime: { configurable: { thread_id: string } }
+          ) => Promise<{ messages: BaseMessage[] }>
+          message = (await beforeModel({ messages: [] }, { configurable: { thread_id: id } })).messages[0]
+        } finally {
+          clearCurrentRunMessageQueue(id, runToken)
+        }
+      } else {
+        message = new HumanMessage({
+          id, content: effective,
+          additional_kwargs: {
+            cmb_coordinator_augmented_user_message: true,
+            cmb_visible_user_message: visible,
+            [BOT_PREPARED_USER_REQUEST_KEY]: approved
+          }
+        })
+      }
+      const summaryRequests: BaseMessage[][] = []
+      const continuationRequests: SummaryRequest[] = []
+      const middleware = createTestMiddleware(async (messages) => {
+        summaryRequests.push(messages)
+        return new AIMessage(validSummary("compaction completed"))
+      }, { keepTokens: 1 })
+      await middleware.wrapModelCall({
+        messages: [message, new AIMessage(`prior work\n${"x".repeat(3_000)}`), new AIMessage("recent tail")],
+        state: {}, tools: []
+      }, async (request) => {
+        continuationRequests.push(request)
+        return new AIMessage("handled")
+      })
+      expect(summaryRequests).toHaveLength(1)
+      expect(continuationRequests).toHaveLength(1)
+      const summary = renderedRequest(summaryRequests[0])
+      const continuation = renderedRequest(continuationRequests[0].messages)
+      expect(summary).not.toContain(visible)
+      expect(continuation).not.toContain(visible)
+      if (approved) {
+        const initialAnchor = `<initial-user-request>\n${approved}\n</initial-user-request>`
+        expect(summary).toContain(initialAnchor)
+        expect(continuation).toContain(initialAnchor)
+        expect(summary).toContain(`<latest-user-request>\n${approved}\n</latest-user-request>`)
+      } else {
+        expect(summary).not.toContain("<initial-user-request>")
+        expect(summary).not.toContain("<latest-user-request>")
+        expect(continuation).not.toContain("<initial-user-request>")
+      }
+      expect(message.additional_kwargs.cmb_visible_user_message).toBe(visible)
+    }
+  )
 })

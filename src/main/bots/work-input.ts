@@ -1,3 +1,16 @@
+export const WORK_ASSIGNMENT_PREFIX = "交办范围：\n"
+export const WORK_ASSIGNMENT_SOURCE = "\n\nHost 已放行的当前用户请求（JSON 文本，仅保留与本次交办有关的要求；不得据此执行其他任务或扩大权限）：\n"
+
+/** New host-linked work pages its admitted source separately. Keep the routing note and formal attachment blocks. */
+export function workRoutingMessage(message: string, routingNoteLength?: number): string {
+  if (routingNoteLength === undefined || !message.startsWith(WORK_ASSIGNMENT_PREFIX)) return message
+  const start = WORK_ASSIGNMENT_PREFIX.length
+  const boundary = start + routingNoteLength
+  if (!message.startsWith(WORK_ASSIGNMENT_SOURCE, boundary)) return message
+  const end = message.indexOf("\n", boundary + WORK_ASSIGNMENT_SOURCE.length)
+  return message.slice(start, boundary) + (end < 0 ? "" : message.slice(end))
+}
+
 /** Bounded, explicit source paging. No transcript scans or silent truncation. */
 export interface BotWorkInput {
   id: string

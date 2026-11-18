@@ -45,9 +45,10 @@ export function botWorkClient(client: BotClient, work: BotWorkItem): BotClient {
       client.messageReactions(reactionTarget(target), messageIds),
     setMessageReaction: (target, messageId, emoji, present) =>
       client.setMessageReaction(reactionTarget(target), messageId, emoji, present),
-    stopConversation: (botId, groupId) => {
+    stopConversation: (botId, groupId, _workId, scope) => {
       owner(botId, groupId)
-      return client.stopConversation(botId, undefined, work.id)
+      return scope ? client.stopConversation(botId, undefined, work.id, scope)
+        : client.stopConversation(botId, undefined, work.id)
     },
     messageOrigins: (botId, ids, groupId) => {
       owner(botId, groupId)
@@ -77,9 +78,16 @@ export function botWorkClient(client: BotClient, work: BotWorkItem): BotClient {
       owner(botId, groupId)
       return client.attachFileBytes(botId, files, maxChars, undefined, work.id)
     },
-    exportFile: (botId, fileId, groupId) => {
+    ...(client.attachWorkspaceFile ? {
+      attachWorkspaceFile: (botId: string, threadId: string, fileId: string, maxChars: number) => {
+        owner(botId)
+        if (threadId !== work.threadId) throw new BotError("INVALID_INPUT", "工作会话目标不一致")
+        return client.attachWorkspaceFile!(botId, threadId, fileId, maxChars, work.id)
+      }
+    } : {}),
+    exportFile: (botId, fileId, groupId, _workId, suggestedName) => {
       owner(botId, groupId)
-      return client.exportFile(botId, fileId, undefined, work.id)
+      return client.exportFile(botId, fileId, undefined, work.id, suggestedName)
     },
     shareFile: (botId, fileId, targetId, groupId) => {
       owner(botId, groupId)

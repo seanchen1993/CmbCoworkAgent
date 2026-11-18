@@ -874,6 +874,13 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
   }
 
   const threadMessageColumns = db.exec("PRAGMA table_info(thread_messages)")?.[0]?.values ?? []
+  if (!threadMessageColumns.some((row) => row[1] === "bot_input_projection")) {
+    // Private, sparse Fork metadata. Never accepted from renderer messages.
+    db.run("ALTER TABLE thread_messages ADD COLUMN bot_input_projection TEXT")
+  }
+  if (!threadMessageColumns.some((row) => row[1] === "bot_fork_reply_origin")) {
+    db.run("ALTER TABLE thread_messages ADD COLUMN bot_fork_reply_origin TEXT")
+  }
   const hasThreadMessageGoalId = threadMessageColumns.some((row) => row[1] === "goal_id")
   if (!hasThreadMessageGoalId) {
     db.run("ALTER TABLE thread_messages ADD COLUMN goal_id TEXT")
@@ -996,6 +1003,8 @@ export interface ThreadRow {
 export type ThreadSummaryRow = Omit<ThreadRow, "thread_values">
 
 interface ThreadMessageRow {
+  bot_input_projection?: string | null
+  bot_fork_reply_origin?: string | null
   thread_id: string
   message_id: string
   provider_source_id: string | null
@@ -1530,6 +1539,11 @@ export function isFirstThreadUserMessage(threadId: string, messageId?: string): 
   }
 }
 
+/** Exclusive durable ordinal boundary for an already copied transcript. */
+export function getThreadMessageOrdinalBoundary(threadId: string): number {
+  return getOrRepairThreadMessageBucket(getDb(), threadId).bucket.next_ordinal
+}
+
 /**
  * Read the resumable legacy-checkpoint copy state by its primary key. Unknown
  * status values fail closed as `migrating`; a corrupt marker must never make a
@@ -1979,7 +1993,8 @@ export function searchThreadMessages(
   options: ThreadMessageSearchOptions = {},
   resolveVerifiedReplies?: (
     messageIds: string[]
-  ) => ReadonlyMap<string, Pick<BotMessageReply, "id" | "ordinal" | "role">>
+  ) => ReadonlyMap<string, Pick<BotMessageReply, "id" | "ordinal" | "role">>,
+  resolveUserInputProjections?: (messageIds: readonly string[]) => ReadonlyMap<string, string | null>
 ): ThreadMessageSearchPage {
   const normalizedThreadId = typeof threadId === "string" ? threadId.trim() : ""
   const query = typeof rawQuery === "string" ? rawQuery.trim().toLowerCase() : ""
@@ -2200,6 +2215,9 @@ export function searchThreadMessages(
   const verifiedReplies = replyMessageIds.length
     ? resolveVerifiedReplies?.(replyMessageIds)
     : undefined
+  const userInputProjections = resolveUserInputProjections?.(
+    candidates.filter(candidate => candidate.role === "user").map(candidate => candidate.messageId)
+  )
   const headersById = new Map(
     selectedCandidates.map((candidate, index) => [candidate.messageId, { candidate, index }])
   )
@@ -2218,10 +2236,17 @@ export function searchThreadMessages(
     for (const candidate of candidates) {
       const header = headersById.get(candidate.messageId)
       if (!header) continue
+      const projectedInput = candidate.role === "user" ? userInputProjections?.get(candidate.messageId) : undefined
+      if (projectedInput === null || projectedInput === "") {
+        advancedCandidateCount = header.index + 1
+        lastAdvancedCandidate = header.candidate
+        continue
+      }
       const baseBytes =
         1024 +
         Buffer.byteLength(candidate.contentJson, "utf8") +
-        Buffer.byteLength(candidate.toolCallsJson ?? "", "utf8")
+        Buffer.byteLength(candidate.toolCallsJson ?? "", "utf8") +
+        (projectedInput === undefined ? 0 : Buffer.byteLength(projectedInput, "utf8"))
       if (candidate.toolCallsTruncated) truncatedRows = true
 
       if (baseBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET) {
@@ -2267,7 +2292,7 @@ export function searchThreadMessages(
           ? `${storedContent}${fragments.join("")}`
           : storedContent
       const hydratedContent =
-        fragments.length > 0 ? normalizeMessageContent(appendedContent) : storedContent
+        projectedInput ?? (fragments.length > 0 ? normalizeMessageContent(appendedContent) : storedContent)
       if (parsedContent.valid && !isVisibleTranscriptMessage(candidate.role, hydratedContent)) {
         // Search and targeted hydration must use the same transcript visibility boundary.
         // Otherwise an internal goal/workflow row can be returned as a match and then be
@@ -4100,7 +4125,7 @@ export function getThreadMessageProviderOccurrencesBeforeUser(
  * Capture their boundary before streaming so each final snapshot sees the same history.
  */
 export function captureThreadMessageProviderOccurrenceBoundary(threadId: string) {
-  const ordinal = getOrRepairThreadMessageBucket(getDb(), threadId).bucket.next_ordinal
+  const ordinal = getThreadMessageOrdinalBoundary(threadId)
   return (providerSourceIds: readonly string[]) =>
     getThreadMessageProviderOccurrencesBeforeOrdinal(threadId, ordinal, providerSourceIds)
 }
@@ -5533,7 +5558,9 @@ export function replaceThreadMessageId(
         `UPDATE thread_messages
          SET provider_source_id = ?, provider_occurrence = ?, role = ?, content_json = ?, reasoning = ?, tool_calls_json = ?, tool_call_id = ?, name = ?, status = ?,
              is_error = ?, content_priority = ?, goal_id = ?, active_window_id = ?, created_at = ?, start_at = ?,
-             end_at = ?, ordinal = ?, recovery_integrity = ?, stream_authority = ?
+             end_at = ?, ordinal = ?, recovery_integrity = ?, stream_authority = ?,
+             bot_input_projection = COALESCE(bot_input_projection, ?),
+             bot_fork_reply_origin = COALESCE(bot_fork_reply_origin, ?)
          WHERE thread_id = ? AND message_id = ?`,
         [
           mergedProviderSourceId,
@@ -5569,6 +5596,12 @@ export function replaceThreadMessageId(
             ? 1
             : 0,
           sourceAuthority | targetAuthority,
+          source.role === "user" && target.role === "user"
+            ? source.bot_input_projection ?? null
+            : null,
+          source.role === "user" && target.role === "user"
+            ? source.bot_fork_reply_origin ?? null
+            : null,
           threadId,
           toId
         ]

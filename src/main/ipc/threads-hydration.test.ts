@@ -5,7 +5,7 @@ const source = readFileSync(new URL("./threads.ts", import.meta.url), "utf8")
 
 function deletionHandlerSource(): string {
   const start = source.indexOf("const deleteThread: ThreadDeletionService = async")
-  const end = source.indexOf('ipcMain.handle("threads:delete", deleteThread)', start)
+  const end = source.indexOf("const deleteThreadFromRenderer = async", start)
   expect(start).toBeGreaterThanOrEqual(0)
   expect(end).toBeGreaterThan(start)
   return source.slice(start, end)
@@ -59,9 +59,12 @@ describe("threads:get hydration contract", () => {
     )
     expect(handler).toContain("if (options?.requireIdle)")
     expect(handler.indexOf("isThreadDeletionBusy(")).toBeLessThan(
-      handler.indexOf("performThreadDeletion(event, threadId, options?.groupGuard)")
+      handler.indexOf(
+        "performThreadDeletion(event, threadId, options?.groupGuard, assertOwnership)"
+      )
     )
-    expect(handler).toContain("isExternallyManagedThreadRunBusy(id, metadata)")
+    expect(handler).toContain("isThreadDeletionBusy(threadId, threadDeletionRuntime(metadata))")
+    expect(source).toContain("isExternallyManagedThreadRunBusy(id, metadata)")
     expect(handler).not.toContain("isThreadForkBusy(")
     expect(handler).not.toContain("restoreWorkersForThread")
     expect(handler).not.toContain("isBusyForThreadAsync")
@@ -78,31 +81,71 @@ describe("threads:get hydration contract", () => {
   it("binds grouped deletion to the confirmed incarnation and selector inside the mutation lock", () => {
     const handler = deletionHandlerSource()
     const lockIndex = handler.indexOf("withThreadMutationLeaseLock(lease")
-    const incarnationIndex = handler.indexOf("matchesThreadIncarnation(threadRow")
-    const membershipIndex = handler.indexOf("threadMetadataMatchesGroupSelector(")
+    const selectionIndex = handler.indexOf("assertThreadDeletionGroup(threadRow, metadata")
     const deletionIndex = handler.indexOf(
-      "performThreadDeletion(event, threadId, options?.groupGuard)"
+      "performThreadDeletion(event, threadId, options?.groupGuard, assertOwnership)"
+    )
+    const groupCheck = source.slice(
+      source.indexOf("function assertThreadDeletionGroup("),
+      source.indexOf("function threadDeletionRuntime(")
     )
 
     expect(handler).toContain("normalizeThreadDeleteOptions(rawOptions)")
     expect(lockIndex).toBeGreaterThanOrEqual(0)
-    expect(incarnationIndex).toBeGreaterThan(lockIndex)
-    expect(membershipIndex).toBeGreaterThan(incarnationIndex)
-    expect(deletionIndex).toBeGreaterThan(membershipIndex)
+    expect(selectionIndex).toBeGreaterThan(lockIndex)
+    expect(deletionIndex).toBeGreaterThan(selectionIndex)
+    expect(groupCheck).toContain("matchesThreadIncarnation(row, groupGuard.incarnation)")
+    expect(groupCheck).toContain(
+      "threadMetadataMatchesGroupSelector(metadata, groupGuard.selector)"
+    )
   })
 
   it("revalidates a grouped selection again at the synchronous database commit boundary", () => {
     const start = source.indexOf("const performThreadDeletion = async")
     const end = source.indexOf("const deleteThread: ThreadDeletionService", start)
     const deletion = source.slice(start, end)
-    const finalIncarnationCheck = deletion.lastIndexOf("matchesThreadIncarnation(")
-    const finalMembershipCheck = deletion.lastIndexOf("threadMetadataMatchesGroupSelector(")
+    const finalSelectionCheck = deletion.indexOf("assertThreadDeletionGroup(latestThread")
+    const finalOwnershipCheck = deletion.indexOf("assertOwnership(latestThread")
     const databaseCommit = deletion.indexOf("dbDeleteThread(threadId)")
 
-    expect(finalIncarnationCheck).toBeGreaterThanOrEqual(0)
-    expect(finalMembershipCheck).toBeGreaterThan(finalIncarnationCheck)
-    expect(finalMembershipCheck).toBeLessThan(databaseCommit)
-    expect(deletion.slice(finalMembershipCheck, databaseCommit)).not.toContain("await ")
+    expect(finalSelectionCheck).toBeGreaterThanOrEqual(0)
+    expect(finalOwnershipCheck).toBeGreaterThan(finalSelectionCheck)
+    expect(finalOwnershipCheck).toBeLessThan(databaseCommit)
+    expect(deletion.slice(finalSelectionCheck, databaseCommit)).not.toContain("await ")
+  })
+
+  it("routes an owned thread by durable work identity and skips busy bulk items before stopping them", () => {
+    const start = source.indexOf("const deleteThreadFromRenderer = async")
+    const handler = source.slice(start, source.indexOf('ipcMain.handle("threads:history"', start))
+    const owner = handler.indexOf("findBotWorkThreadOwner(threadId)")
+    const group = handler.indexOf("assertThreadDeletionGroup(row, metadata")
+    const busy = handler.indexOf('["queued", "running", "waiting_user"].includes')
+    const deletion = handler.indexOf("await removeBotWork(host, target")
+    expect(owner).toBeGreaterThan(0)
+    expect(group).toBeGreaterThan(owner)
+    expect(busy).toBeGreaterThan(group)
+    expect(deletion).toBeGreaterThan(busy)
+    expect(handler).toContain("deleteThread(event, id, { ...options, requireIdle: true })")
+    expect(handler).not.toContain("withThreadMutationLeaseLock")
+  })
+
+  it("takes work cleanup authority from the main-process scope, never a renderer delete option", () => {
+    const handler = deletionHandlerSource()
+    const ownershipCheck = handler.indexOf("assertScopedBotWorkThreadDeletion(threadId, threadRow")
+    expect(ownershipCheck).toBeGreaterThan(handler.indexOf("withThreadMutationLeaseLock(lease"))
+    expect(handler).toContain("if (scoped && (workOwner || hasBotWorkMetadata(metadata)) && !options?.requireIdle)")
+    expect(handler).toContain("host.getWorkForDeletion(botId, workId)")
+    expect(handler).toContain('work.conversation?.origin === "existing"')
+    expect(handler).toContain(
+      "findBotWorkThreadOwner(threadId) || hasBotWorkMetadata(latestMetadata)"
+    )
+    const start = source.indexOf("function normalizeThreadDeleteOptions")
+    const optionParser = source.slice(
+      start,
+      source.indexOf("export type ThreadDeletionService", start)
+    )
+    expect(optionParser).not.toContain("...source")
+    expect(optionParser).not.toMatch(/authoriz|scoped|confirmed/iu)
   })
 
   it("rechecks owner-managed runs at the synchronous database commit boundary", () => {

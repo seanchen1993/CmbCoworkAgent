@@ -4,6 +4,7 @@ import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { describe, expect, it, vi } from "vitest"
 import { StreamingMarkdown } from "../components/chat/StreamingMarkdown"
+import { MarkdownPreview } from "../components/ui/MarkdownPreview/MarkdownPreview"
 import { remarkBotAutolinks } from "./bot-autolink-remark"
 import { remarkBotMentions } from "./bot-mention-remark"
 import type { Root } from "mdast"
@@ -20,6 +21,57 @@ const render = (text: string, botTranscript = true, isStreaming = false) =>
 const hrefs = (html: string) => [...html.matchAll(/href="([^"]*)"/g)].map((match) => match[1])
 
 describe("Bot bare URLs within the existing Markdown parser", () => {
+  it("uses the same bare URL boundaries in delivered Markdown while preserving ordinary previews", () => {
+    const content = "预览入口为 http://127.0.0.1:18954/，健康页为 /health。\n\n[附件](https://example.com/中文，路径)"
+    const renderPreview = (botDelivery: boolean) =>
+      renderToStaticMarkup(createElement(MarkdownPreview, { content, botDelivery }))
+    const delivery = renderPreview(true)
+    const ordinary = renderPreview(false)
+
+    expect(hrefs(delivery)).toEqual([
+      "http://127.0.0.1:18954/",
+      "https://example.com/%E4%B8%AD%E6%96%87%EF%BC%8C%E8%B7%AF%E5%BE%84"
+    ])
+    expect(delivery).toContain("</a>，健康页为 /health。")
+    expect([...delivery.matchAll(/target="_blank" rel="noopener noreferrer"/g)]).toHaveLength(2)
+    expect(hrefs(ordinary)[0]).toBe("http://127.0.0.1:18954/%EF%BC%8C%E5%81%A5%E5%BA%B7%E9%A1%B5%E4%B8%BA")
+    expect(ordinary).not.toContain('target="_blank"')
+  })
+
+  it.each([
+    ["/reports/2026（终稿）.pdf", "/reports/2026%EF%BC%88%E7%BB%88%E7%A8%BF%EF%BC%89.pdf"],
+    ["/，最终版.pdf", "/%EF%BC%8C%E6%9C%80%E7%BB%88%E7%89%88.pdf"]
+  ])("preserves a bare Unicode filename %s in a delivered Markdown report", (file, encoded) => {
+    const content = `下载终稿：https://example.com${file}`
+    const delivery = renderToStaticMarkup(createElement(MarkdownPreview, { content, botDelivery: true }))
+    expect(hrefs(delivery)).toEqual([`https://example.com${encoded}`])
+    expect(delivery).toContain('target="_blank" rel="noopener noreferrer"')
+  })
+
+  it.each([
+    ["预览入口为 http://localhost:18954，入口见index.html", "http://localhost:18954"],
+    ["- http://localhost:18954，健康页为 /health。", "http://localhost:18954"],
+    ["http://127.0.0.1:18954，健康页为 /health。", "http://127.0.0.1:18954"],
+    ["- http://127.0.0.1:18954/，健康页为 /health。", "http://127.0.0.1:18954/"],
+    ["- http://127.0.0.1:18954/health，已就绪。", "http://127.0.0.1:18954/health"],
+    ["- http://localhost:18954（预览页面）", "http://localhost:18954"]
+  ])("recovers a valid preview origin from %s", (content, expected) => {
+    const delivery = renderToStaticMarkup(createElement(MarkdownPreview, { content, botDelivery: true }))
+    expect(hrefs(delivery)).toEqual([expected])
+    expect(delivery).toMatch(/<\/a>[，（]/u)
+  })
+
+  it.each([
+    "下载原件：https://example.com/reports/2026（终稿）.pdf",
+    "下载终稿：https://example.com/，发布版/README",
+    "https://example.com/?q=a，b#results"
+  ])("preserves the existing valid destination in both Bot views: %s", content => {
+    const ordinary = renderToStaticMarkup(createElement(MarkdownPreview, { content }))
+    expect(hrefs(ordinary)).toHaveLength(1)
+    expect(hrefs(render(content))).toEqual(hrefs(ordinary))
+    expect(hrefs(renderToStaticMarkup(createElement(MarkdownPreview, { content, botDelivery: true })))).toEqual(hrefs(ordinary))
+  })
+
   it.each([
     ["https://example.com（标题「Example", "https://example.com"],
     ["www.example.com（标题「Example", "https://www.example.com"]

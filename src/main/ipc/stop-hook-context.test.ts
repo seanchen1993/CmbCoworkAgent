@@ -220,6 +220,23 @@ describe("Stop context across authoritative stream updates", () => {
     })
   })
 
+  it.each(["approved request", ""])("uses the Bot's prepared Stop hook request (%j)", (prepared) => {
+    const serialize = createStreamDataSerializer()
+    const collector = new StopHookContextCollector("earlier request")
+    const message = new HumanMessage({
+      id: "u", content: "effective text with Hook context",
+      additional_kwargs: {
+        cmb_visible_user_message: "UNAPPROVED_RAW_SENTINEL",
+        cmb_bot_prepared_user_request: prepared
+      }
+    })
+    collector.processStreamChunk("messages", serialize("messages", [message, {}]).data)
+    expect(collector.snapshot().userMessage).toBe(prepared || undefined)
+    collector.processStreamChunk("values", serialize("values", { messages: [message] }).data)
+    expect(collector.snapshot().userMessage).toBe(prepared || undefined)
+    expect(message.additional_kwargs.cmb_visible_user_message).toBe("UNAPPROVED_RAW_SENTINEL")
+  })
+
   it("continues from corrected values instead of freezing the previous final", () => {
     const collector = new StopHookContextCollector()
     const serialize = createStreamDataSerializer()

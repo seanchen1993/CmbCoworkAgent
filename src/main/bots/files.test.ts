@@ -5,6 +5,7 @@ import {
   readFile,
   readdir,
   realpath,
+  rename,
   rm,
   stat,
   symlink,
@@ -34,6 +35,36 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 describe("Bot files", () => {
+  it("rejects an oversized parser input before creating a copy, while ordinary imports retain their cap", async () => {
+    const root = await fixture(), source = join(root, "input.txt"), target = join(root, "copy.txt")
+    const limit = 5 * 1024 * 1024
+    const handle = await open(source, "w")
+    await handle.truncate(limit + 1)
+    await handle.close()
+    await expect(copyBotFile(root, source, target, undefined, limit)).rejects.toThrow("5 MiB")
+    expect(await readdir(root)).toEqual(["input.txt"])
+    await copyBotFile(root, source, target)
+    expect((await stat(target)).size).toBe(limit + 1)
+    await rm(target)
+    const bounded = await open(source, "r+")
+    await bounded.truncate(limit)
+    await bounded.close()
+    await copyBotFile(root, source, target, undefined, limit)
+    expect((await stat(target)).size).toBe(limit)
+    expect(() => copyBotFile(root, source, target, undefined, 101 * 1024 * 1024)).toThrow("限制无效")
+  })
+  it("retains a canonical snapshot path after an ordinary case-only source rename", async () => {
+    const root = await fixture(), source = join(root, "report.md")
+    const signal = new AbortController().signal
+    await writeFile(source, "SENT VERSION")
+    const first = await snapshotBotDeliveryFile(root, source, signal)
+    const renamed = join(root, "Report.md")
+    await rename(source, renamed)
+    const second = await snapshotBotDeliveryFile(root, renamed, signal)
+    expect(second.attachmentPath).toBe(await realpath(second.attachmentPath))
+    expect(await readFile(first.attachmentPath, "utf8")).toBe("SENT VERSION")
+    expect(await readFile(second.attachmentPath, "utf8")).toBe("SENT VERSION")
+  })
   it("retains sent bytes and the original name across equal-size revisions without replacing an open snapshot", async () => {
     const root = await fixture(),
       source = join(root, "核验 报告.md")
@@ -206,6 +237,30 @@ describe("Bot files", () => {
     expect(basename(first.path)).toBe("核验 报告.md")
     expect(first.id).not.toBe(second.id)
     expect(basename((await botImportDestination(root, "CON.txt")).path)).toBe("_CON.txt")
+  })
+  it("accepts ordinary differently-cased shared directories and reuses verified peer destinations", async () => {
+    const root = await fixture()
+    await mkdir(join(root, "Shared"))
+    // macOS/Windows can resolve 'shared' to this ordinary 'Shared' directory;
+    // case-sensitive filesystems may create a distinct ordinary directory.
+    const upload = await botImportDestination(root, "input.txt")
+    await writeFile(upload.path, "input")
+    expect(await readFile(upload.path, "utf8")).toBe("input")
+    const first = await botImportDestination(root, "result.txt", "verified-peer-receipt")
+    await writeFile(first.path, "retained result")
+    const replay = await botImportDestination(root, "result.txt", "verified-peer-receipt")
+    expect(replay).toEqual(first)
+    expect(await readFile(replay.path, "utf8")).toBe("retained result")
+  })
+  it("rejects a symlink substituted for a retained peer directory", async () => {
+    const root = await fixture()
+    const target = await botImportDestination(root, "result.txt", "verified-peer-receipt")
+    await rm(dirname(target.path), { recursive: true })
+    const outside = await fixture()
+    await symlink(outside, dirname(target.path), process.platform === "win32" ? "junction" : "dir")
+    await expect(botImportDestination(root, "result.txt", "verified-peer-receipt"))
+      .rejects.toThrow("符号链接")
+    expect(await readdir(outside)).toEqual([])
   })
   it("copies an explicit shared file without retaining aliases to another Bot's workspace", async () => {
     const root = await fixture(),

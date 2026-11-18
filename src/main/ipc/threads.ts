@@ -1,5 +1,13 @@
 import { createBotThreadReplyResolver } from "../bots/thread-message-replies"
-import { verifyWorkConversationThread, verifyWorkThreadMetadata } from "../bots/conversation-link-authority"
+import { copyForkInputProjections, readForkReplyOrigins } from "../bots/fork-input-projection"
+import { BOT_PREPARED_USER_REQUEST_KEY } from "../agent/agent-run-service"
+import { BOT_FORK_DELIVERY_BOUNDARY, botHistoricalMessageReader, botHistoryHidesTitle, botLegacyHistoryRequests,
+  decorateBotHistoryPage, protectedBotHistoryTitle, renamedBotHistoryTitleMetadata } from "../bots/history-input-projection"
+import {
+  assertScopedBotWorkThreadDeletion,
+  findBotWorkThreadOwner,
+  verifyWorkConversationThread
+} from "../bots/conversation-link-authority"
 import { getCapturedSubagentSession, subagentExportKey } from "../services/subagent-session-capture"
 import type { SubagentExportTarget as ExportScope } from "../../shared/subagent-session-export"
 import { formatHookDateTime } from "../../shared/hook-time"
@@ -19,6 +27,7 @@ import {
   getThreadValuesJsonPage,
   getThreadMessages,
   getThreadMessageCount,
+  getThreadMessageOrdinalBoundary,
   getThreadMessageIdentityContext,
   getThreadMessagesAfterAnyId,
   getThreadMessagesByIds,
@@ -46,7 +55,8 @@ import {
   upsertThreadMessages,
   applyThreadMessageStreamAuthority,
   deleteThread as dbDeleteThread,
-  type ThreadRow
+  type ThreadRow,
+  type ThreadSummaryRow
 } from "../db"
 import {
   withCheckpointer,
@@ -119,6 +129,7 @@ import type {
   ThreadForkParams,
   ThreadForkResponse,
   ThreadDeleteOptions,
+  ThreadDeleteResult,
   ThreadGroupIdsOptions,
   ThreadGroupSelector,
   SubagentTranscriptBlobField,
@@ -168,6 +179,7 @@ import {
 } from "./thread-run-mutation-lock"
 import {
   applyThreadMetadataPatch,
+  assertBotWorkModelRoutingPatch,
   assertNoActiveAgentModeTransition,
   assertNoTranscriptAgentModeTransition,
   getThreadExecutionMode,
@@ -579,6 +591,7 @@ async function copyForkedThreadMessages(input: {
     provider_occurrence?: number
   }[]
   checkpointMessages?: CheckpointMessage[]
+  sourceRow: ThreadSummaryRow
 }): Promise<void> {
   if (input.visibleMessages.length === 0) return
   for (
@@ -633,6 +646,29 @@ async function copyForkedThreadMessages(input: {
         applyThreadMessageStreamAuthority(input.sourceThreadId, messages),
         { preserveExistingOrder: true }
       )
+      const inputs = visibleBatch.flatMap(message => {
+        if (normalizeIpcMessageRole(message.role) !== "user" || typeof message.rawIndex !== "number") return []
+        const checkpoint = input.checkpointMessages?.[message.rawIndex]
+        if (!checkpoint || getMessageRole(checkpoint) !== "user") return []
+        const kwargs = getCheckpointMessageAdditionalKwargs(checkpoint)
+        const prepared = kwargs?.[BOT_PREPARED_USER_REQUEST_KEY]
+        const visible = kwargs?.cmb_visible_user_message
+        // Old effective inputs can contain Hook-added context. Only exact Bot
+        // requests below can use the private omission decision.
+        if (typeof prepared !== "string" &&
+          (typeof visible !== "string" || !visible || visible === getCheckpointMessageContent(checkpoint))) return []
+        const text = typeof prepared === "string" ? prepared : null
+        return [{ ...message, id: message.renderId || message.id, role: "user" as const, text }]
+      })
+      const legacy = botLegacyHistoryRequests(input.sourceThreadId, input.sourceRow,
+        inputs.filter(message => message.text === null).map(message => message.id))
+      copyForkInputProjections({
+        sourceThreadId: input.sourceThreadId,
+        targetThreadId: input.targetThreadId,
+        messages,
+        persistedMessages,
+        prepared: inputs.filter(message => message.text !== null || legacy.has(message.id))
+      })
     }
     await yieldForkColdPath()
   }
@@ -1313,6 +1349,7 @@ async function getForkBoundaryMarkerContext(
 function buildForkMetadata(input: {
   sourceThreadId: string
   sourceTitle: string
+  sourceTitleHidden?: boolean
   sourceMetadata: Record<string, unknown>
   checkpointId: string
   messageId?: string
@@ -1358,6 +1395,8 @@ function buildForkMetadata(input: {
 
   const nextTitle = overrides?.title?.trim() || title?.trim() || sourceTitle || sourceThreadId
   next.title = nextTitle
+  if (input.sourceTitleHidden && !overrides?.title?.trim() && !title?.trim())
+    Object.assign(next, protectedBotHistoryTitle(nextTitle))
   next.forkedFromThreadId = sourceThreadId
   next.forkedFromCheckpointId = checkpointId
   next.forkedFromCheckpointNs = ""
@@ -1786,6 +1825,7 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
       const targetMetadata = buildForkMetadata({
         sourceThreadId,
         sourceTitle,
+        sourceTitleHidden: botHistoryHidesTitle(sourceThreadId, sourceRow),
         sourceMetadata,
         checkpointId,
         messageId: explicitMessageId,
@@ -1864,9 +1904,15 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
         await copyForkedThreadMessages({
           sourceThreadId,
           targetThreadId,
+          sourceRow,
           visibleMessages: transcriptIndex.visibleMessages,
           checkpointMessages: getCheckpointChannelMessages(forkCheckpoint)
         })
+        // Fork history is still visible, but legacy unmarked attachment receipts
+        // in the copied prefix cannot become deliveries of a later Bot owner.
+        targetMetadata[BOT_FORK_DELIVERY_BOUNDARY] = getThreadMessageOrdinalBoundary(targetThreadId)
+        const saved = dbUpdateThread(targetThreadId, { metadata: JSON.stringify(targetMetadata) })
+        if (!saved) throw new Error("Forked thread delivery boundary could not be persisted.")
         copyForkedGoalStateForCheckpoint({
           sourceThreadId,
           targetThreadId,
@@ -1875,7 +1921,7 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
         })
         await flushDbStrict()
         return {
-          thread: serializeThreadRow(row),
+          thread: serializeThreadRow({ ...row, metadata: saved.metadata, updated_at: saved.updated_at }),
           sourceThreadId,
           sourceCheckpointId: checkpointId,
           sourceCheckpointNs: ""
@@ -2880,7 +2926,53 @@ function normalizeThreadDeleteOptions(options: unknown): ThreadDeleteOptions | u
   }
 }
 
-export type ThreadDeletionService = (event: IpcMainInvokeEvent, threadId: string, options?: ThreadDeleteOptions) => Promise<void>
+export type ThreadDeletionService = (
+  event: IpcMainInvokeEvent,
+  threadId: string,
+  options?: ThreadDeleteOptions
+) => Promise<void>
+
+function threadDeletionMetadata(row: ThreadSummaryRow): Record<string, unknown> {
+  try {
+    const value: unknown = JSON.parse(row.metadata || "{}")
+    if (value && typeof value === "object" && !Array.isArray(value))
+      return value as Record<string, unknown>
+  } catch {
+    /* Malformed JSON and non-object metadata both block deletion. */
+  }
+  throw new Error("会话元数据异常，无法确认删除条件，请修复后重试。")
+}
+
+function assertThreadDeletionGroup(
+  row: ThreadSummaryRow,
+  metadata: Record<string, unknown>,
+  groupGuard: ThreadDeleteOptions["groupGuard"]
+): void {
+  if (
+    groupGuard &&
+    (!matchesThreadIncarnation(row, groupGuard.incarnation) ||
+      !threadMetadataMatchesGroupSelector(metadata, groupGuard.selector))
+  )
+    throw new Error("会话已变更或已移出分组，请重新确认。")
+}
+
+function threadDeletionRuntime(metadata: Record<string, unknown>) {
+  return {
+    hasActiveRun: hasActiveAgentRun,
+    isAborting: isActiveAgentRunAborting,
+    waitForSettlement: waitForActiveAgentRunToSettle,
+    hasExternalRun: (id: string) => isExternallyManagedThreadRunBusy(id, metadata),
+    hasWorkflowRun: (id: string) => workflowRunManager.isActive(id),
+    hasWorkerRun: (id: string) => coordinatorWorkerManager.hasRunningWorkersForThread(id)
+  }
+}
+
+function hasBotWorkMetadata(metadata: Record<string, unknown>): boolean {
+  return (
+    metadata.botLocalConversation === true ||
+    (metadata.botHostId === "local" && typeof metadata.botWorkId === "string")
+  )
+}
 
 export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService {
   // Read a bounded page of task summaries. The renderer incrementally builds the
@@ -2945,6 +3037,14 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
     }
   )
 
+  const desktopHistoryPage = async <T extends { messages: Message[] }>(event: IpcMainInvokeEvent, threadId: string, page: T): Promise<T> => {
+    if (!event.senderFrame || event.senderFrame !== event.sender.mainFrame || !BrowserWindow.fromWebContents(event.sender)) return page
+    try { return await decorateBotHistoryPage(threadId, page, () => getThreadCore(threadId), readForkReplyOrigins) }
+    catch (error) {
+      console.warn("[Bots] Failed to read optional history display metadata:", error)
+      return page
+    }
+  }
   ipcMain.handle("threads:messages", async (_event, threadId: string) => {
     return getThreadMessages(threadId)
   })
@@ -2955,8 +3055,9 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
       event,
       { threadId, options }: { threadId: string; options?: ThreadMessagesPageOptions }
     ) => {
+      let page
       try {
-        return await readThreadMessagesPageInWorker(threadId, options, event.sender.id)
+        page = await readThreadMessagesPageInWorker(threadId, options, event.sender.id)
       } catch (error) {
         if (!isThreadMessageHydrationWorkerUnavailable(error)) throw error
         console.warn("[ThreadHydrationWorker] unavailable; restarting the isolated reader", error)
@@ -2965,8 +3066,9 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
         // client drops a failed worker, so one retry starts a fresh isolated
         // reader; a second failure is surfaced for the renderer to retry.
         await new Promise<void>((resolve) => setImmediate(resolve))
-        return readThreadMessagesPageInWorker(threadId, options, event.sender.id)
+        page = await readThreadMessagesPageInWorker(threadId, options, event.sender.id)
       }
+      return desktopHistoryPage(event, threadId, page)
     }
   )
 
@@ -2983,6 +3085,8 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
       const normalizedThreadId = typeof threadId === "string" ? threadId.trim() : ""
       const row = normalizedThreadId ? getThreadCore(normalizedThreadId) : undefined
       const metadata = parseJsonObject(row?.metadata)
+      const forkReplies = typeof metadata?.forkedFromThreadId === "string" ? (ids: readonly string[]) =>
+        readForkReplyOrigins(normalizedThreadId, ids) : undefined
       if (
         row &&
         metadata?.botHostId === "local" &&
@@ -2996,9 +3100,16 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
           metadata,
           getLocalBotHost()
         )
-        return searchThreadMessages(threadId, query, options, replies)
+        return searchThreadMessages(threadId, query, options, forkReplies ? (ids) =>
+          new Map([...forkReplies(ids), ...replies?.(ids) ?? []]) : replies)
       }
-      return searchThreadMessages(threadId, query, options)
+      const read = botHistoricalMessageReader(normalizedThreadId, () => row)
+      const replies = read || forkReplies ? (ids: string[]) => {
+        const result = forkReplies?.(ids) ?? new Map()
+        for (const [id, origin] of read?.(ids) ?? []) if (origin.replyTo) result.set(id, origin.replyTo)
+        return result
+      } : undefined
+      return searchThreadMessages(threadId, query, options, replies)
     }
   )
 
@@ -3067,16 +3178,39 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
   )
 
   // Update a thread
-  ipcMain.handle("threads:update", async (_event, { threadId, updates }: ThreadUpdateParams) => {
+  ipcMain.handle("threads:update", async (event, { threadId, updates }: ThreadUpdateParams) => {
     if (updates.metadata !== undefined) {
       throw new Error("Renderer metadata replacement is not allowed; use threads:patchMetadata")
     }
     const lease = requireThreadMutationLease(threadId)
+    if (updates.title !== undefined && updates.status === undefined && updates.thread_values === undefined) {
+      const work = findBotWorkThreadOwner(threadId)
+      const link = work?.conversation
+      if (
+        work && !work.source && work.audienceKey === "desktop" && work.threadId === threadId &&
+        (!link || (link.state === "bound" && link.ref.kind === "local_thread" && link.ref.threadId === threadId))
+      ) {
+        if (typeof updates.title !== "string") throw new Error("任务名称无效。")
+        if (!event.senderFrame || event.senderFrame !== event.sender.mainFrame ||
+            !BrowserWindow.fromWebContents(event.sender))
+          throw new Error("任务改名仅支持本机桌面窗口。")
+        const { getLocalBotHost } = await import("../bots/local-service")
+        await getLocalBotHost().renameWorkFromDesktop(work, updates.title, lease)
+        const row = getThreadCore(threadId)
+        if (!row || !matchesThreadIncarnation(row, lease.incarnation))
+          throw new Error("原会话已变化，请重新打开。")
+        return serializeThreadRow({ ...row, thread_values: null })
+      }
+    }
     const mutate = (): Promise<Thread> =>
-      withThreadMutationLeaseLock(lease, async () => {
+      withThreadMutationLeaseLock(lease, async (current) => {
         const updateData: Parameters<typeof dbUpdateThread>[1] = {}
 
-        if (updates.title !== undefined) updateData.title = updates.title
+        if (updates.title !== undefined) {
+          updateData.title = updates.title
+          const metadata = renamedBotHistoryTitleMetadata(current, updates.title)
+          if (metadata !== undefined) updateData.metadata = metadata
+        }
         if (updates.status !== undefined) updateData.status = updates.status
         if (updates.thread_values !== undefined) {
           await ensureSubagentTranscriptRows(threadId)
@@ -3111,6 +3245,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
             throw new Error("Thread changed while updating metadata")
           }
           let guardedMetadata = parseThreadMetadata(guardedRow.metadata)
+          assertBotWorkModelRoutingPatch(guardedMetadata, patch)
           for (let attempt = 0; attempt < 4; attempt += 1) {
             const guardedCandidate = applyThreadMetadataPatch(guardedMetadata, patch)
             let guardedConversationPresence: "empty" | "nonempty" | "unknown" = "empty"
@@ -3135,6 +3270,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
               throw new Error("Thread changed while updating metadata")
             }
             const latestMetadata = parseThreadMetadata(latestRow.metadata)
+            assertBotWorkModelRoutingPatch(latestMetadata, patch)
             if (
               latestMetadata.workspacePath !== guardedMetadata.workspacePath ||
               getThreadExecutionMode(latestMetadata) !== getThreadExecutionMode(guardedMetadata)
@@ -3575,7 +3711,8 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
   const performThreadDeletion = async (
     event: IpcMainInvokeEvent,
     threadId: string,
-    groupGuard?: ThreadDeleteOptions["groupGuard"]
+    groupGuard: ThreadDeleteOptions["groupGuard"],
+    assertOwnership: (row: ThreadSummaryRow, metadata: Record<string, unknown>) => void
   ): Promise<void> => {
     console.log("[Threads] Deleting thread:", threadId)
 
@@ -3738,13 +3875,8 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
       } catch {
         throw new Error("会话元数据异常，无法确认删除条件，请重新打开后再试。")
       }
-      if (
-        groupGuard &&
-        (!matchesThreadIncarnation(latestThread, groupGuard.incarnation) ||
-          !threadMetadataMatchesGroupSelector(latestMetadata, groupGuard.selector))
-      ) {
-        throw new Error("会话已变更或已移出分组，请重新确认。")
-      }
+      assertThreadDeletionGroup(latestThread, latestMetadata, groupGuard)
+      assertOwnership(latestThread, latestMetadata)
       if (isExternallyManagedThreadRunBusy(threadId, latestMetadata)) {
         throw new Error("会话仍在运行或有待处理结果，已停止删除。")
       }
@@ -3907,76 +4039,69 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
     cancelSubagentTranscriptStartupRead(threadId)
     cancelLegacyCheckpointTranscriptBootstrap(threadId)
     return withThreadMutationLeaseLock(lease, async (threadRow) => {
-      let metadata: Record<string, unknown>
-      try {
-        const parsed = threadRow.metadata ? (JSON.parse(threadRow.metadata) as unknown) : {}
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-          throw new Error("Thread metadata is not an object")
-        }
-        metadata = parsed as Record<string, unknown>
-      } catch {
-        throw new Error("会话元数据异常，无法确认删除条件，请修复后重试。")
-      }
-      if (metadata.botLocalConversation === true ||
-          (metadata.botHostId === "local" && typeof metadata.botWorkId === "string" &&
-            (metadata.botAudienceKey === "desktop" ||
-              (typeof metadata.botAudienceKey === "string" && metadata.botAudienceKey.startsWith("im:"))))) {
-        // remove() owns a main-process deletion fence. Do not detach a created
-        // conversation first: a failed cleanup must retain ownership for retry.
-        let deletingCreated = false
-        try {
-          const { getLocalBotHost } = await import("../bots/local-service")
-          const work = getLocalBotHost().getWorkForDeletion(
-            String(metadata.botId),
-            String(metadata.botWorkId)
+      const metadata = threadDeletionMetadata(threadRow)
+      const scoped = assertScopedBotWorkThreadDeletion(threadId, threadRow, metadata)
+      const workOwner = findBotWorkThreadOwner(threadId)
+      if (scoped && (workOwner || hasBotWorkMetadata(metadata)) && !options?.requireIdle)
+        throw new Error("工作会话需等待原执行退出后删除。")
+      let checkWholeBotRemoval: typeof assertOwnership | undefined
+      if (!scoped && (workOwner || hasBotWorkMetadata(metadata))) {
+        // Whole-Bot removal already owns a separate Host fence. Only its native
+        // work threads can reach physical cleanup through this branch.
+        const { getLocalBotHost } = await import("../bots/local-service")
+        const host = getLocalBotHost()
+        const botId = workOwner?.botId ?? String(metadata.botId)
+        const workId = workOwner?.id ?? String(metadata.botWorkId)
+        checkWholeBotRemoval = (row, currentMetadata) => {
+          const work = host.getWorkForDeletion(botId, workId)
+          if (
+            work.threadId !== threadId ||
+            work.conversation?.origin === "existing" ||
+            work.conversation?.state === "detached"
           )
-          if (work.conversation) verifyWorkConversationThread(work, threadRow, metadata)
-          else verifyWorkThreadMetadata(work, metadata)
-          deletingCreated =
-            work.threadId === threadId &&
-            (!work.conversation ||
-              (work.conversation.origin === "created" && work.conversation.state === "bound"))
-        } catch {
-          /* General renderer delete has no remove() fence. */
+            throw new Error("原 Bot 任务归属已变化，无法删除。")
+          if (currentMetadata.botLocalConversation === true) {
+            if (work.conversation?.origin !== "created" || work.conversation.state !== "bound")
+              throw new Error("原 Bot 任务关联已变化，无法删除。")
+            verifyWorkConversationThread(work, row, currentMetadata)
+          } else if (
+            currentMetadata.botId !== botId ||
+            currentMetadata.botHostId !== "local" ||
+            (currentMetadata.botWorkId != null && currentMetadata.botWorkId !== workId)
+          ) {
+            throw new Error("原 Bot 任务归属已变化，无法删除。")
+          }
         }
-        if (!deletingCreated)
-          throw new Error(
-            metadata.botMockBindingId
-              ? "此会话属于招乎群内任务，请在所属群中管理，不能单独删除任务会话。"
-              : "此会话已关联 Bot 任务，请先在会话顶部解除任务关联，再删除普通会话；历史会保留到你明确删除。"
-          )
         if (!matchesThreadIncarnation(getThreadCore(threadId), lease.incarnation))
           throw new Error("会话在删除检查期间已变化。")
+        checkWholeBotRemoval(threadRow, metadata)
+      }
+      function assertOwnership(row: ThreadSummaryRow, latestMetadata: Record<string, unknown>) {
+        if (!matchesThreadIncarnation(row, lease.incarnation))
+          throw new Error("会话在删除检查期间已变化。")
+        if (scoped) {
+          if (!assertScopedBotWorkThreadDeletion(threadId, row, latestMetadata))
+            throw new Error("会话删除授权已结束。")
+        } else if (checkWholeBotRemoval) {
+          checkWholeBotRemoval(row, latestMetadata)
+        } else if (findBotWorkThreadOwner(threadId) || hasBotWorkMetadata(latestMetadata)) {
+          throw new Error("此会话的 Bot 任务归属已变化，请重新确认删除。")
+        }
       }
       // Check before teardown: without a workspace the durable worktree guards
       // below cannot prove that deleting a cold workflow/coordinator is safe.
       // Apply this to individual deletion too, so retry cannot bypass protection.
       assertThreadDeletionWorkspace(getAgentModeFromMetadata(metadata), metadata.workspacePath)
-      if (
-        options?.groupGuard &&
-        (!matchesThreadIncarnation(threadRow, options.groupGuard.incarnation) ||
-          !threadMetadataMatchesGroupSelector(metadata, options.groupGuard.selector))
-      ) {
-        throw new Error("会话已变更或已移出分组，请重新确认。")
-      }
+      assertThreadDeletionGroup(threadRow, metadata, options?.groupGuard)
       if (options?.requireIdle) {
-        if (
-          await isThreadDeletionBusy(threadId, {
-            hasActiveRun: hasActiveAgentRun,
-            isAborting: isActiveAgentRunAborting,
-            waitForSettlement: waitForActiveAgentRunToSettle,
-            hasExternalRun: (id) => isExternallyManagedThreadRunBusy(id, metadata),
-            hasWorkflowRun: (id) => workflowRunManager.isActive(id),
-            hasWorkerRun: (id) => coordinatorWorkerManager.hasRunningWorkersForThread(id)
-          })
-        ) {
+        if (await isThreadDeletionBusy(threadId, threadDeletionRuntime(metadata))) {
           throw new Error("会话仍在运行，已跳过该会话。")
         }
       }
       while (deletingThreads.has(threadId)) {
         await deletingThreads.get(threadId)?.catch(() => undefined)
       }
-      const deletion = performThreadDeletion(event, threadId, options?.groupGuard)
+      const deletion = performThreadDeletion(event, threadId, options?.groupGuard, assertOwnership)
       deletingThreads.set(threadId, deletion)
       try {
         await deletion
@@ -3985,7 +4110,78 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
       }
     })
   }
-  ipcMain.handle("threads:delete", deleteThread)
+  const deleteThreadFromRenderer = async (
+    event: IpcMainInvokeEvent,
+    threadId: string,
+    rawOptions?: ThreadDeleteOptions
+  ): Promise<ThreadDeleteResult> => {
+    if (typeof threadId !== "string" || !threadId) throw new Error("会话标识无效。")
+    const owner = findBotWorkThreadOwner(threadId)
+    if (!owner) return deleteThread(event, threadId, rawOptions)
+    const options = normalizeThreadDeleteOptions(rawOptions)
+    if (
+      !event.senderFrame ||
+      event.senderFrame !== event.sender.mainFrame ||
+      !BrowserWindow.fromWebContents(event.sender)
+    )
+      throw new Error("工作删除仅支持本机桌面窗口。")
+    const lease = requireThreadMutationLease(threadId)
+    const [{ getLocalBotHost }, { captureBotWorkDeletionTarget, removeBotWork }] =
+      await Promise.all([import("../bots/local-service"), import("../bots/work-deletion")])
+    const host = getLocalBotHost()
+    const verifySelection = () => {
+      const row = getThreadCore(threadId)
+      const work = findBotWorkThreadOwner(threadId)
+      if (
+        !row ||
+        !matchesThreadIncarnation(row, lease.incarnation) ||
+        work?.id !== owner.id ||
+        work.botId !== owner.botId
+      )
+        throw new Error("原 Bot 任务或会话已变化，请重新确认删除。")
+      const metadata = threadDeletionMetadata(row)
+      assertThreadDeletionWorkspace(getAgentModeFromMetadata(metadata), metadata.workspacePath)
+      assertThreadDeletionGroup(row, metadata, options?.groupGuard)
+      return { row, work, metadata }
+    }
+    const selected = verifySelection()
+    if (options?.requireIdle) {
+      if (await isThreadDeletionBusy(threadId, threadDeletionRuntime(selected.metadata)))
+        throw new Error("会话仍在运行，已跳过该会话。")
+    }
+    const { row, work, metadata } = verifySelection()
+    if (options?.requireIdle) {
+      const runtime = threadDeletionRuntime(metadata)
+      // A bulk deletion may skip a busy work, but must not stop it to make it idle.
+      if (
+        ["queued", "running", "waiting_user"].includes(work.executionState ?? "") ||
+        ["executing", "waiting", "checking"].includes(work.resultReviewState ?? "") ||
+        (work.userControl?.heldInputs ?? 0) > 0 ||
+        work.pendingPeers > 0 ||
+        work.backgroundBusy ||
+        host.hasPendingWorkDeletionResults(work.id) ||
+        runtime.hasActiveRun(threadId) ||
+        runtime.hasExternalRun(threadId) ||
+        runtime.hasWorkflowRun(threadId) ||
+        runtime.hasWorkerRun(threadId)
+      )
+        throw new Error("会话仍在运行或有待办，已跳过该会话。")
+    }
+    const target = captureBotWorkDeletionTarget(host, work.botId, work.id, owner.version)
+    if (!target.incarnation || !matchesThreadIncarnation(row, target.incarnation))
+      throw new Error("原 Bot 任务或会话已变化，请重新确认删除。")
+    const result = await removeBotWork(host, target, (id) =>
+      deleteThread(event, id, { ...options, requireIdle: true })
+    )
+    if (result.deletedThreadId !== threadId)
+      throw new Error(result.error ?? "原工作会话删除结果未确认。")
+    if (result.state === "cleanup_pending") {
+      console.warn("[Threads]", result.error)
+      return
+    }
+    return { deletedWork: { botId: result.botId, workId: result.workId } }
+  }
+  ipcMain.handle("threads:delete", deleteThreadFromRenderer)
 
   // Get thread history (checkpoints)
   ipcMain.handle("threads:history", async (_event, threadId: string) => {
@@ -4087,7 +4283,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
         }
         return {
           checkpoint: bootstrap.runtimeTuple,
-          page,
+          page: await desktopHistoryPage(event, normalizedThreadId, page),
           migration: bootstrap.stats
         }
       } catch (error) {

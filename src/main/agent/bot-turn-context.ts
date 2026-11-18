@@ -3,7 +3,7 @@ import { createMiddleware } from "langchain"
 
 /** Supplied only by the local Bot host, never inferred from user text or thread metadata. */
 export interface BotTurnContext {
-  event: "user_request" | "introduction" | "task_result"
+  event: "user_request" | "introduction" | "task_result" | "task_result_review"
   text: string
 }
 

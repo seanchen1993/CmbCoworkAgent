@@ -9,6 +9,8 @@ import { BotStore } from "./store"
 import { LocalBotHost, type BotRunPort } from "./host"
 import { botTaskWorkFamily } from "../../shared/bots/contracts"
 import { formatSkillUseBlock } from "../../shared/skill-use-block"
+import { buildAttachmentMessageParts } from "../../shared/attachment-message-parts"
+import { canonicalBotMessageInput } from "../../shared/bots/message-mentions"
 
 const databases: NativeSqliteAdapter[] = [],
   hosts: LocalBotHost[] = []
@@ -32,8 +34,245 @@ function finish(store: BotStore, id: string) {
   store.transition(id, "running")
   store.settle(id, "completed", null, "A draft")
 }
+function completedWorkFixture() {
+  const f = fixture()
+  const created = f.store.createWork(
+    { botId: f.bot.id, operationId: "original", title: "Draft", goal: "Prepare a draft" },
+    undefined,
+    { kind: "project", projectId: "project-1", projectName: "Project", path: "/fixture/project" }
+  )
+  finish(f.store, created.task.id)
+  const work = f.store.changeWork(
+    f.bot.id,
+    created.work.id,
+    f.store.getWork(f.bot.id, created.work.id).version,
+    "done",
+    "complete"
+  )
+  const source = f.store.enqueue({
+    botId: f.bot.id,
+    requestId: "revision-request",
+    message: "Revise the draft; retain its original directory."
+  })
+  f.store.transition(source.id, "running")
+  const command = { taskId: source.id, callId: "revise", key: "revise" }
+  return { ...f, work, source, command }
+}
 
 describe("durable local independent works", () => {
+  it("keeps a rewritten follow-up out of model activity previews while retaining the original desktop preview", () => {
+    const { store, bot, create } = fixture()
+    const { work, task } = create()
+    store.transition(task.id, "running")
+    store.recordPreparedInput(task.id, task.message)
+    store.settle(task.id, "completed", null, "Initial draft")
+
+    const raw = "Follow-up with material removed by the target Hook"
+    const approved = "Follow-up with approved material"
+    const followUp = store.enqueue({ botId: bot.id, workId: work.id, requestId: "follow-up", message: raw })
+    store.transition(followUp.id, "running")
+    store.beginInputPreparation(followUp.id)
+    store.recordPreparedInput(followUp.id, approved)
+
+    const desktopWork = store.getWork(bot.id, work.id)
+    expect(desktopWork.activity?.preview).toBe(raw)
+    expect(store.projectWorkForModel(desktopWork).activity?.preview).toBe("")
+    expect(store.listWorks(bot.id, undefined, "", "desktop", "model").items[0].activity?.preview).toBe("")
+    expect(store.inputProjections(bot.id, work.threadId, [followUp.requestId]).get(followUp.requestId)).toBe(approved)
+  })
+
+  it("binds an explicit desktop skill and its retained draft only to the selected work", () => {
+    const { store, bot, create } = fixture()
+    const existing = create().work
+    const selected = { name: "review", path: "/registered/review/SKILL.md" }
+    const attachment = store.retainInputFile(bot.id, {
+      filename: "draft.md", mimeType: "text/markdown", filePath: "/snapshot/draft.md",
+      content: "original bytes", size: 14, truncated: false
+    }, "/snapshot/draft.md")
+    const inputFileIds = [attachment.botInputId!]
+    const input = {
+      botId: bot.id, workId: existing.id, requestId: "selected-existing",
+      message: "Review the draft" + buildAttachmentMessageParts([attachment]).attachmentModelBlocks,
+      explicitSkill: selected, skillDraftFromMain: true as const, inputFileIds
+    }
+    const delivered = store.enqueue(input)
+    expect(delivered).toMatchObject({
+      threadId: existing.threadId, origin: { kind: "user", explicitSkill: selected, inputFileIds }
+    })
+    expect(store.enqueue(input).id).toBe(delivered.id)
+    expect(() => store.enqueue({ ...input, explicitSkill: { ...selected, name: "other" } })).toThrow(/请求标识/)
+    const messageHash = createHash("sha256").update(canonicalBotMessageInput(input.message, [], inputFileIds, selected)).digest("hex")
+    expect(store.requestReceipts(bot.id, [{ requestId: input.requestId, messageHash }], existing.id)[0].state).toBe("accepted")
+    expect(store.requestReceipts(bot.id, [{ requestId: input.requestId, messageHash }])[0].state).toBe("conflict")
+    expect(() => store.enqueue({ ...input, requestId: "untrusted" }, { kind: "schedule", scheduleId: "s" })).toThrow(/桌面用户/)
+    const ownedAttachment = store.retainInputFile(bot.id, attachment, "/snapshot/draft.md", existing.id)
+    const creation = { botId: bot.id, operationId: "selected-new", title: "Draft", goal: "Review", explicitSkill: selected, inputFileIds }
+    expect(() => store.createWork({ ...creation, inputFileIds: [ownedAttachment.botInputId!] })).toThrow(/附件不属于/)
+    const receipt = store.createWork(creation)
+    expect(receipt.task).toMatchObject({
+      threadId: receipt.work.threadId, origin: { kind: "user", explicitSkill: selected, inputFileIds }
+    })
+    expect(receipt.task.message).toContain("original bytes")
+    expect(store.createWork(creation)).toEqual(receipt)
+    expect(store.recentTasks().some(task => task.threadId === bot.threadId)).toBe(false)
+  })
+
+  it("binds skill creation to the selected identity even when two Bots share its name", () => {
+    const { store, bot, peer } = fixture()
+    const otherPeer = store.create({ ...peer, name: peer.name })
+    const explicitSkill = { name: "review", path: "/registered/review/SKILL.md" }
+    const mentions = [{ botId: peer.id, start: 0, end: 5, label: "Peer" }]
+    const input = { botId: bot.id, operationId: "skill-with-mention", title: "Draft",
+      goal: "@Peer Review the draft", explicitSkill, mentions }
+    const created = store.createWork(input)
+    expect(created.task.origin).toMatchObject({ kind: "user", explicitSkill, mentions })
+    expect(store.workCreationReceipt(input)).toEqual(created)
+    expect(store.createWork(input)).toEqual(created)
+    expect(() => store.createWork({ ...input, mentions: [{ ...mentions[0], botId: otherPeer.id }] }))
+      .toThrow("工作命令标识")
+    expect(() => store.createWork({
+      ...input, operationId: "unavailable-peer", mentions: [{ ...mentions[0], botId: "missing-peer" }]
+    })).toThrow()
+
+    const source = store.enqueue({ botId: bot.id, requestId: "source", message: "Create a task" })
+    store.transition(source.id, "running")
+    const toolSource = { taskId: source.id, callId: "create-work", key: "create-work" }
+    expect(() => store.createWork(input, toolSource)).toThrow("桌面用户明确选择")
+    expect(() => store.createWork({ ...input, explicitSkill: undefined }, toolSource))
+      .toThrow("桌面技能草稿")
+    expect(store.recentTasks().filter(task => task.workId)).toHaveLength(1)
+  })
+
+  it("replays a pre-upgrade skill creation without changing the accepted task or submitting twice", () => {
+    const { store, bot, peer } = fixture()
+    const input = { botId: bot.id, operationId: "old-skill", title: "Draft", goal: "@Peer Review the draft",
+      explicitSkill: { name: "review", path: "/registered/review/SKILL.md" } }
+    const legacy = store.createWork(input)
+    const retry = { ...input, mentions: [{ botId: peer.id, start: 0, end: 5, label: "Peer" }] }
+    expect(store.workCreationReceipt(retry)).toEqual(legacy)
+    expect(store.createWork(retry)).toEqual(legacy)
+    expect(store.getTask(legacy.task.id).origin).not.toHaveProperty("mentions")
+    expect(store.recentTasks().filter(task => task.workId)).toHaveLength(1)
+    expect(() => store.workCreationReceipt({ ...retry, title: "Different work" })).toThrow("工作命令标识")
+  })
+
+  it("atomically reopens completed work with one follow-up and replays its receipt without reopening again", () => {
+    const f = completedWorkFixture()
+    const sent = f.store.sendWork(f.command, f.work.id, "Revise the draft", f.work.version)
+    const resumed = f.store.getWork(f.bot.id, f.work.id)
+    expect(resumed.state).toBe("active")
+    expect(resumed.workspace).toEqual(f.work.workspace)
+    expect(resumed.threadId).toBe(f.work.threadId)
+    expect(sent).toMatchObject({
+      workId: f.work.id,
+      threadId: f.work.threadId,
+      state: "queued",
+      message: "Revise the draft",
+      origin: { kind: "work", sourceTaskId: f.source.id, dispatch: "follow_up" }
+    })
+    // A lost reply can be retried under another tool call without executing twice.
+    const replay = () =>
+      f.store.sendWork(
+        { ...f.command, callId: "retry" },
+        f.work.id,
+        "Revise the draft",
+        f.work.version
+      )
+    expect(replay()).toEqual(sent)
+    expect(f.store.getWork(f.bot.id, f.work.id)).toEqual(resumed)
+    expect(f.store.recentTasks().filter((t) => t.workId === f.work.id)).toHaveLength(2)
+    finish(f.store, sent.id)
+    const done = f.store.changeWork(f.bot.id, f.work.id, resumed.version, "done-again", "complete")
+    expect(replay()).toEqual(sent)
+    expect(f.store.getWork(f.bot.id, f.work.id)).toEqual(done)
+  })
+
+  it("requires the current completed-work version and preserves the old active-work send contract", () => {
+    const f = completedWorkFixture()
+    const before = f.store.revision()
+    expect(() => f.store.sendWork(f.command, f.work.id, "Revise")).toThrow()
+    expect(() => f.store.sendWork(f.command, f.work.id, "Revise", f.work.version - 1)).toThrow(
+      "已变化"
+    )
+    expect(() => f.store.sendWork(f.command, f.work.id, "Revise", 0)).toThrow("版本无效")
+    expect(f.store.getWork(f.bot.id, f.work.id)).toEqual(f.work)
+    expect(f.store.revision()).toBe(before)
+    f.store.changeWork(f.bot.id, f.work.id, f.work.version, "ui-resume", "continue")
+    const sent = f.store.sendWork(f.command, f.work.id, "Revise")
+    expect(
+      f.store.sendWork({ ...f.command, callId: "old-send-retry" }, f.work.id, "Revise")
+    ).toEqual(sent)
+  })
+
+  it("rolls back reopening when enqueue is full and permits the same operation after capacity returns", () => {
+    const f = completedWorkFixture()
+    const queued = Array.from({ length: 500 }, (_, i) =>
+      f.store.enqueue({
+        botId: f.peer.id,
+        requestId: `queue-${i}`,
+        message: "Unrelated work"
+      })
+    )
+    const revision = f.store.revision()
+    expect(() => f.store.sendWork(f.command, f.work.id, "Revise", f.work.version)).toThrow(
+      "队列已满"
+    )
+    expect(f.store.getWork(f.bot.id, f.work.id)).toEqual(f.work)
+    expect(f.store.revision()).toBe(revision)
+    f.store.transition(queued[0].id, "cancelled")
+    const sent = f.store.sendWork(f.command, f.work.id, "Revise", f.work.version)
+    expect(sent.state).toBe("queued")
+    expect(f.store.getWork(f.bot.id, f.work.id).state).toBe("active")
+    expect(f.store.getTask(queued[1].id).state).toBe("queued")
+  })
+
+  it("does not reopen after source cancellation or resume another Bot's work", () => {
+    const f = completedWorkFixture()
+    const stranger = f.store.enqueue({
+      botId: f.peer.id,
+      requestId: "other-user",
+      message: "Revise"
+    })
+    f.store.transition(stranger.id, "running")
+    expect(() =>
+      f.store.sendWork({ ...f.command, taskId: stranger.id }, f.work.id, "Revise", f.work.version)
+    ).toThrow()
+    f.store.transition(f.source.id, "cancelled")
+    expect(() => f.store.sendWork(f.command, f.work.id, "Revise", f.work.version)).toThrow(
+      "不能转达"
+    )
+    expect(f.store.getWork(f.bot.id, f.work.id)).toEqual(f.work)
+    expect(f.store.recentTasks().filter((t) => t.workId === f.work.id)).toHaveLength(1)
+  })
+
+  it("refuses to resume detached history and leaves its work state intact", () => {
+    const f = completedWorkFixture()
+    const linked = f.store.conversations.prepare({
+      botId: f.bot.id,
+      operationId: "link",
+      title: "Original",
+      goal: "Existing task",
+      conversation: {
+        kind: "local_thread",
+        threadId: "existing",
+        incarnation: { token: "original", legacyCreatedAt: 1 }
+      }
+    })
+    f.store.conversations.bound(f.bot.id, linked.id, linked.conversation!.ref)
+    f.store.conversations.beginDetach(
+      f.bot.id,
+      linked.id,
+      f.store.getWork(f.bot.id, linked.id).version
+    )
+    const detached = f.store.conversations.detached(f.bot.id, linked.id)
+    const revision = f.store.revision()
+    expect(() => f.store.sendWork(f.command, detached.id, "Revise", detached.version)).toThrow(
+      "已解除"
+    )
+    expect(f.store.getWork(f.bot.id, detached.id)).toEqual(detached)
+    expect(f.store.revision()).toBe(revision)
+  })
+
   it("carries a composer skill beyond the input page limit and resolves it again after restart", () => {
     const f = fixture()
     const skill = { name: "需求 PRD", path: "/synthetic/skills/需求 & PRD/SKILL.md" }

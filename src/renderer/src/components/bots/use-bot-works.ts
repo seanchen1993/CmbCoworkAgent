@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import type { BotClient } from "../../../../shared/bots/contracts"
+import { BotError, type BotClient } from "../../../../shared/bots/contracts"
 import type { BotWorkItem, BotWorkSummary } from "../../../../shared/bots/work"
 import { botErrorMessage } from "@/lib/bot-error-message"
+
+function isMissingSelectedWork(cause: unknown): boolean {
+  if (cause instanceof BotError) return cause.code === "NOT_FOUND"
+  // Electron preserves the message but drops the BotError code.
+  return cause instanceof Error &&
+    cause.message === "Error invoking remote method 'bots:work:get': BotError: 工作不属于当前 Bot"
+}
 
 /** Scoped invalidation; one request chain per mounted directory, never transcript polling. */
 export function useBotWorks(
@@ -30,7 +37,7 @@ export function useBotWorks(
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const generation = useRef(0),
-    expanded = useRef(false)
+    loadedPages = useRef(1)
   const current = useRef({ botId, selectedId, audience })
   current.current = { botId, selectedId, audience }
   const load = useCallback(
@@ -48,40 +55,62 @@ export function useBotWorks(
           !!selectedId && !removed.current.has(selectedId) && (!changed || changed.has(selectedId))
         const [page, detail] = await Promise.all([
           client.works.list(botId, undefined, query),
-          readDetail ? client.works.get(botId, selectedId!) : Promise.resolve(undefined)
+          readDetail ? client.works.get(botId, selectedId!).then(
+            work => ({ work, error: null }),
+            cause => {
+              if (!isMissingSelectedWork(cause)) throw cause
+              return { work: null, error: botErrorMessage(cause) }
+            }
+          ) : Promise.resolve(undefined)
         ])
-        const pageIds = new Set(page.items.map((item) => item.id))
-        const candidates =
-          changed ?? new Set(expanded.current ? displayed.current.map((item) => item.id) : [])
-        const extra = [...candidates].filter((id) => !pageIds.has(id) && !removed.current.has(id))
-        const refreshed = new Map<string, BotWorkSummary>()
-        for (let offset = 0; offset < extra.length; offset += 40) {
-          if (generation.current !== token) return
-          for (const item of await client.works.summaries(botId, extra.slice(offset, offset + 40)))
-            refreshed.set(item.id, item)
-        }
         if (generation.current !== token) return
+        const merged = new Map(page.items.map(item => [item.id, item]))
+        let nextCursor = page.nextCursor
+        if (query) {
+          const seen = new Set<string>()
+          for (let index = 1; index < loadedPages.current && nextCursor && !seen.has(nextCursor); index++) {
+            seen.add(nextCursor)
+            const next = await client.works.list(botId, nextCursor, query)
+            if (generation.current !== token) return
+            for (const item of next.items) merged.set(item.id, item)
+            nextCursor = next.nextCursor
+          }
+        } else {
+          const older = loadedPages.current > 1 ? displayed.current : []
+          const candidates = changed ?? new Set(older.map(item => item.id))
+          for (const item of older)
+            if (!merged.has(item.id) && !candidates.has(item.id)) merged.set(item.id, item)
+          const extra = [...candidates].filter(id => !merged.has(id) && !removed.current.has(id))
+          for (let offset = 0; offset < extra.length; offset += 40) {
+            const ids = extra.slice(offset, offset + 40)
+            const batch = await client.works.summaries(botId, ids, true)
+            if (generation.current !== token) return
+            const found = new Map(batch.map(item => [item.id, item]))
+            for (const id of ids) {
+              const item = found.get(id)
+              if (item) merged.set(id, item)
+            }
+          }
+          if (older.length && changed) {
+            // Updating the last loaded page must keep its cursor and relative order.
+            const ordered = new Map(page.items.map(item => [item.id, item]))
+            for (const id of [...older.map(item => item.id), ...merged.keys()]) {
+              const item = merged.get(id)
+              if (item) ordered.set(id, item)
+            }
+            merged.clear()
+            for (const [id, item] of ordered) merged.set(id, item)
+          }
+        }
+        const visible = (item: BotWorkSummary) => !removed.current.has(item.id) && !item.deletionCommitted &&
+          (item.conversation?.state !== "detached" || item.deletionPending)
         setLoadedScope(scope)
-        setPriority(page.priority.filter((item) => !removed.current.has(item.id)))
-        const needle = query.trim().toLowerCase()
-        setItems((old) => {
-          const merged = new Map(page.items.map((item) => [item.id, item]))
-          if (expanded.current)
-            for (const item of old) if (!merged.has(item.id)) merged.set(item.id, item)
-          // Also include newly created rows outside the first page of a burst. Their
-          // IDs come from the bounded scope event, never from an all-history scan.
-          for (const [id, item] of refreshed) merged.set(id, item)
-          return [...merged.values()].filter(
-            (item) =>
-              !removed.current.has(item.id) &&
-              item.conversation?.state !== "detached" &&
-              (!needle || item.title.toLowerCase().includes(needle))
-          )
-        })
-        if (!expanded.current) setCursor(page.nextCursor)
-        if (detail !== undefined) setSelected(detail)
+        setPriority(page.priority.filter(visible))
+        setItems([...merged.values()].filter(visible))
+        if (query || loadedPages.current === 1) setCursor(nextCursor)
+        if (detail) setSelected(detail.work)
         if (!selectedId || removed.current.has(selectedId)) setSelected(null)
-        setError(null)
+        setError(detail?.error ?? null)
       } catch (cause) {
         if (generation.current === token) {
           setSelected(null)
@@ -132,7 +161,7 @@ export function useBotWorks(
     })
   }, [client])
   useEffect(() => {
-    expanded.current = false
+    loadedPages.current = 1
     removed.current.clear()
     setItems([])
     setPriority([])
@@ -167,7 +196,7 @@ export function useBotWorks(
       for (const change of changes) {
         if (change.reset) {
           // Restart cursor paging explicitly when a large transaction changes the directory.
-          expanded.current = false
+          loadedPages.current = 1
           changedIds.current = null
           removed.current.clear()
         } else {
@@ -202,7 +231,7 @@ export function useBotWorks(
       try {
         const page = await client.works!.list(botId, cursor, query)
         if (token !== generation.current) return
-        expanded.current = true
+        loadedPages.current++
         setItems((old) => {
           const ids = new Set(old.map((item) => item.id))
           return [

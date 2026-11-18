@@ -138,7 +138,7 @@ export interface ChatMessageVirtualListProps {
   pendingApproval: HITLRequest | null
   autoApproveGitPush: boolean
   onApprovalDecision: (decision: ChatApprovalDecision) => void
-  onEditUserMessage: (message: Message) => void
+  onEditUserMessage?: (message: Message) => void
   onSetGoalFromMessage?: (text: string) => void
   onForkFromMessage?: (message: Message) => void
   forkingMessageId: string | null

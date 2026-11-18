@@ -836,7 +836,14 @@ export class BotMockChannelStore {
     this.changed()
   }
   /** Mirror new personal replies and their work attachments; never copy group/external transcripts. */
-  mirrorPersonal(task: BotTask, text: string, files?: BotDeliveredFile[]): void {
+  mirrorPersonal(task: BotTask, text: string, files?: BotDeliveredFile[],
+    review?: {
+      threadId: string
+      callIds: readonly string[]
+      previousFiles: readonly { file: BotDeliveredFile; outboxId: string }[]
+    }): void {
+    if (review && review.callIds.length !== (files?.length ?? 0))
+      throw new BotError("INVALID_INPUT", "成果附件来源与文件不匹配")
     const work = task.workId ? this.owner.workForThread(task.botId, task.threadId) : null
     const mainThread = this.owner.getBot(task.botId).threadId
     if (
@@ -877,7 +884,35 @@ export class BotMockChannelStore {
         this.now()
       ]
     )
-    this.freezeFiles(`im-personal-${task.id}`, files)
+    // A resumed review may refer to the same retained result. Reuse its exact
+    // active, confirmed or uncertain delivery here instead of uploading twice.
+    // An unknown receipt must retain its original delivery identity, not be resent.
+    const pendingFiles = files?.map((file, index) => ({ file, callId: review?.callIds[index] }))
+      .filter(({ file }) => !review?.previousFiles.some(previous => {
+        if (JSON.stringify(previous.file) !== JSON.stringify(file)) return false
+        const row = this.rows(`SELECT files_json FROM bot_mock_outbox WHERE id=? AND bot_id=?
+          AND binding_id=? AND grant_version=? AND conversation_id=?
+          AND state IN ('pending','sending','accepted','sent','unknown')
+          AND file_delivery_id IS NOT NULL`,
+          [previous.outboxId, task.botId, binding.id, binding.grantVersion, String(convo.id)])[0]
+        const delivered = row && parseBotFileDelivery(row.files_json)
+        return delivered?.length === 1 && JSON.stringify(delivered[0]) === JSON.stringify(file)
+      }))
+    if (review) {
+      // The publication is already acknowledged in the caller's transaction.
+      // Preserve the original tool-card identity without publishing before review.
+      pendingFiles?.forEach(({ file, callId }, index) => {
+        const id = `im-personal-${task.id}:file:${index}`
+        this.run(`INSERT OR IGNORE INTO bot_mock_outbox
+          (id,bot_id,binding_id,grant_version,conversation_id,reply_to_message_id,source_task_id,work_id,text,state,created_at,delivery_kind,files_json,file_delivery_id,call_key,thread_id)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [id, task.botId, binding.id, binding.grantVersion, String(convo.id), `app-${task.id}`,
+            task.id, task.origin.kind === "work_result" ? task.origin.workId : task.workId ?? null,
+            "", "pending", this.now(), `file:legacy:${index}`,
+            JSON.stringify({ kind: "bot-file-delivery", files: [file] }), id,
+            createHash("sha256").update(callId!).digest("hex"), review.threadId])
+      })
+    } else this.freezeFiles(`im-personal-${task.id}`, pendingFiles?.map(item => item.file))
     this.changed()
   }
   /** Use the same source/realm and personal-link rules for files and browser notices. */
@@ -1005,11 +1040,20 @@ ${help.instruction.slice(0, 500)}
   fileStatuses(botId: string, threadId: string, callId: string): BotFileDeliveryStatus[] {
     this.owner.getBot(botId)
     const callKey = createHash("sha256").update(callId).digest("hex")
-    return this.rows(
-      `SELECT o.* FROM bot_mock_outbox o
+    const rows = this.rows(
+      `SELECT o.*,o.rowid AS insertion_order FROM bot_mock_outbox o
       WHERE o.bot_id=? AND o.call_key=? AND o.thread_id=? ORDER BY o.created_at,o.id`,
       [botId, callKey, threadId]
     )
+    // A resumed review can retry a known failed delivery. The original card
+    // must show that latest attempt, not offer a retry for its superseded one.
+    const latest = new Map<string, Record<string, unknown>>()
+    for (const row of rows) {
+      if (!String(row.delivery_kind).startsWith("file:legacy:")) continue
+      const key = String(row.files_json)
+      if (Number(latest.get(key)?.insertion_order ?? -1) < Number(row.insertion_order)) latest.set(key, row)
+    }
+    return rows.filter(row => !String(row.delivery_kind).startsWith("file:legacy:") || latest.get(String(row.files_json)) === row)
       .map((row) => this.fileStatus(row))
       .filter((row): row is BotFileDeliveryStatus => Boolean(row))
   }

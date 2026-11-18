@@ -27,6 +27,10 @@ export interface AttachmentBytesParseRequest {
 
 /** Text extraction plus the retained original file's identity. */
 export interface FileAttachment {
+  /** Bot picker receipt; ordinary attachments and message text cannot mint this identity. */
+  botInputId?: string
+  /** A linked ordinary draft retained the extracted text without an original file version. */
+  originalUnavailable?: true
   filename: string
   filePath: string
   content: string

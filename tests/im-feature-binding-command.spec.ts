@@ -2,8 +2,14 @@ import assert from "node:assert/strict"
 import { mkdtemp, realpath, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
+import { setImmediate } from "node:timers/promises"
 import initSqlJs from "sql.js"
+import { setWorkConversationLookup } from "../src/main/bots/conversation-link-authority"
+import { BotStore } from "../src/main/bots/store"
 import type { ThreadRow } from "../src/main/db"
+import { NativeSqliteAdapter } from "../src/main/db/native-sqlite-adapter"
+import { withThreadRunMutationLock } from "../src/main/ipc/thread-run-mutation-lock"
 import { ImRemoteCapabilityGuard } from "../src/main/services/im/capability-guard"
 import { ImCardInteractionStore } from "../src/main/services/im/card-interaction-store"
 import { ImCardPublisher } from "../src/main/services/im/card-publisher"
@@ -29,6 +35,7 @@ import {
   ImSelectionContextStore
 } from "../src/main/services/im/selection-context"
 import { ensureImServiceSchema } from "../src/main/services/im/schema"
+import { captureThreadIncarnation } from "../src/main/services/thread-incarnation"
 import type {
   RemoteImAckV1,
   RemoteImEventV1,
@@ -1183,6 +1190,64 @@ async function testControlIngressCompletesOutsideTurnQueueAndSelectionExpires():
   }
 }
 
+async function testNewDesktopGrantHonorsTheBotWorkJournal(): Promise<void> {
+  const context = await createContext()
+  const botDb = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+  const bots = new BotStore(botDb)
+  const bot = bots.create({ name: "Owner", instructions: "", color: "#123456", modelRef: null })
+  const route = { conversationKey: "conversation-1", principalId: "principal-1" }
+  const denied = { code: "REMOTE_THREAD_UNSUPPORTED", message: /由 Bot 任务管理/ }
+  setWorkConversationLookup((threadId) => bots.conversations.forThread(threadId))
+  try {
+    const { work } = bots.createWork({ botId: bot.id, operationId: "native", title: "Native", goal: "Run" })
+    bots.initializeWorkThread(bot.id, work.id)
+    context.makeThread(work.threadId, { workspacePath: context.root, botHostId: "local", botId: bot.id, botWorkId: work.id })
+    assert.equal(bots.conversations.forThread(work.threadId)?.conversation, undefined)
+    await assert.rejects(context.access.enableThread({ route, threadId: work.threadId }), denied)
+    assert.equal(context.access.getThreadGrant(work.threadId), null)
+
+    const row = context.makeThread("association-in-flight", { workspacePath: context.root })
+    const conversation = { kind: "local_thread" as const, threadId: row.thread_id, incarnation: captureThreadIncarnation(row) }
+    let entered!: () => void, resume!: () => void
+    const enteredLock = new Promise<void>((resolve) => { entered = resolve })
+    const beforeCommit = new Promise<void>((resolve) => { resume = resolve })
+    const binding = withThreadRunMutationLock(row.thread_id, async () => {
+      entered()
+      await beforeCommit
+      return bots.conversations.prepare({
+        botId: bot.id, operationId: "associate", title: "Associated", goal: "Run", conversation
+      })
+    })
+    await enteredLock
+    const enabling = assert.rejects(context.access.enableThread({ route, threadId: row.thread_id }), denied)
+    try {
+      await setImmediate()
+      assert.equal(context.access.getThreadGrant(row.thread_id), null, "a grant must wait for the association's mutation boundary")
+    } finally {
+      resume()
+    }
+    const prepared = await binding
+    await enabling
+    assert.equal(prepared.conversation?.state, "preparing")
+    assert.equal(context.access.getThreadGrant(row.thread_id), null)
+
+    const bound = bots.conversations.bound(bot.id, prepared.id, conversation)
+    // Seed a legacy overlapping grant through the store to exercise its existing revoke path.
+    const legacy = await context.grants.enableThreadGrant({ route, threadId: row.thread_id, title: "Legacy" })
+    await assert.rejects(context.access.enableThread({ route, threadId: row.thread_id }), denied)
+    assert.deepEqual(context.access.getThreadGrant(row.thread_id), legacy)
+    assert.equal((await context.access.disableThread(row.thread_id))?.state, "revoked")
+    bots.conversations.beginDetach(bot.id, bound.id, bound.version)
+    bots.conversations.detached(bot.id, bound.id)
+    assert.equal((await context.access.enableThread({ route, threadId: row.thread_id })).state, "active")
+  } finally {
+    setWorkConversationLookup(undefined)
+    botDb.close()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
 async function testDeletedSelectedThreadFallsBackToInbox(): Promise<void> {
   const context = await createContext()
   const route = { conversationKey: "conversation-1", principalId: "principal-1" }
@@ -1937,6 +2002,7 @@ const tests: Array<[string, () => Promise<void>]> = [
     "testDesktopThreadGrantBindsWithoutMutatingMetadata",
     testDesktopThreadGrantBindsWithoutMutatingMetadata
   ],
+  ["testNewDesktopGrantHonorsTheBotWorkJournal", testNewDesktopGrantHonorsTheBotWorkJournal],
   [
     "testControlIngressCompletesOutsideTurnQueueAndSelectionExpires",
     testControlIngressCompletesOutsideTurnQueueAndSelectionExpires

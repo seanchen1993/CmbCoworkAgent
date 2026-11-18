@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs"
 import ts from "typescript"
 import { describe, expect, it, vi } from "vitest"
+import type { FileAttachment } from "../../../shared/file-attachment"
 import { projectChatSkillCatalog, type SkillCatalogSnapshot } from "./app-catalog-cache"
 
 const chat = source("../components/chat/ChatContainer.tsx")
@@ -57,6 +58,87 @@ const forkStore = (
     (node) => ts.isPropertyAssignment(node) && node.name.getText(store) === "forkThread"
   ) as ts.PropertyAssignment
 ).initializer
+
+describe("retained Bot handoff editing after unlink", () => {
+  it.each([false, true])("does not edit a Bot handoff through the ordinary queue (managed=%s)", async managed => {
+    const message = { id: "draft", text: "original", handoffRequestedAt: new Date(),
+      botHandoffTarget: { botId: "bot", workId: "work" } }
+    const toastMessage = vi.fn(), updateQueuedMessage = vi.fn()
+    const save = compile<() => Promise<void>>(callback("saveEditingQueuedMessage"), chat, {
+      editingQueueId: "draft", getQueuedMessage: () => message,
+      managedTurn: managed ? { submitDraft: vi.fn() } : undefined,
+      toast: { message: toastMessage }, updateQueuedMessage
+    })
+    await save()
+    expect(toastMessage).toHaveBeenCalledOnce()
+    expect(updateQueuedMessage).not.toHaveBeenCalled()
+    expect(message.text).toBe("original")
+  })
+
+  it("keeps editing an unsent ordinary draft available", async () => {
+    const updateQueuedMessage = vi.fn()
+    const save = compile<() => Promise<void>>(callback("saveEditingQueuedMessage"), chat, {
+      editingQueueId: "draft", editingQueueText: "updated",
+      getQueuedMessage: () => ({ id: "draft", text: "original" }), managedTurn: undefined,
+      guidingQueuedMessageIdsRef: { current: new Set() }, MAX_INPUT_CHARS: 1000,
+      setEditingQueueId: vi.fn(), setEditingQueueText: vi.fn(), updateQueuedMessage
+    })
+    await save()
+    expect(updateQueuedMessage).toHaveBeenCalledExactlyOnceWith("draft", { text: "updated" })
+  })
+})
+
+describe("replacing a text-only Bot draft attachment", () => {
+  const original: FileAttachment = { filename: "data.txt", filePath: "data.txt", content: "a".repeat(24_031),
+    mimeType: "text/plain", size: 68_000, truncated: true, originalUnavailable: true }
+  const selected: FileAttachment = { filename: "data.txt", filePath: "/snapshots/data.txt", content: "new",
+    mimeType: "text/plain", size: 3, truncated: false, botInputId: "input-10000000-2000-4000-8000-000000000000" }
+
+  function fixture() {
+    const currentThreadIdRef = { current: "thread" }
+    const draft = {
+      draftAttachments: [original, selected],
+      draftMentionedWorkspaceFiles: [{ contentChars: 10 }]
+    }
+    const setAttachments = vi.fn()
+    const setError = vi.fn()
+    const add = compile<(collect: (maxFiles: number, maxChars: number) => Promise<FileAttachment[]>,
+      replacement: FileAttachment) => Promise<void>>(callback("addManagedAttachments"), chat, {
+      managedAttachmentPendingRef: { current: false }, attachmentLoading: false, threadId: "thread",
+      threadContext: { getThreadState: () => draft }, attachmentsRef: { current: draft.draftAttachments },
+      mentionedFilesRef: { current: draft.draftMentionedWorkspaceFiles }, MAX_ATTACHMENTS: 3, MAX_TOTAL_CHARS: 24_000,
+      setError, setAttachmentLoading: vi.fn(), clearError: vi.fn(), chatViewMountedRef: { current: true },
+      workspacePathRef: { current: "/work" }, normalizeWorkspacePathKey: (path: string) => path,
+      currentThreadIdRef, managedTurnRef: { current: { attachFiles: vi.fn() } }, setAttachments
+    })
+    return { add, draft, currentThreadIdRef, setAttachments, setError }
+  }
+
+  it("uses one slot and credits the replaced attachment's characters even in a full draft", async () => {
+    const f = fixture()
+    const replacement = { ...selected, filePath: "/new/data.txt" }
+    const pick = vi.fn(async () => [replacement])
+    await f.add(pick, original)
+    expect(pick).toHaveBeenCalledExactlyOnceWith(1, 23_987)
+    expect(f.setAttachments).toHaveBeenCalledExactlyOnceWith([replacement, selected])
+  })
+
+  it("retains the original on cancellation, failure, concurrent draft edits or conversation switch", async () => {
+    const f = fixture()
+    await f.add(async () => [], original)
+    await f.add(async () => { throw new Error("File unavailable") }, original)
+    expect(f.setError).toHaveBeenCalledWith("File unavailable")
+    await f.add(async () => {
+      f.draft.draftAttachments = [selected, original]
+      return [selected]
+    }, original)
+    await f.add(async () => {
+      f.currentThreadIdRef.current = "other"
+      return [selected]
+    }, original)
+    expect(f.setAttachments).not.toHaveBeenCalled()
+  })
+})
 
 describe("Bot and Harness chat surface boundaries", () => {
   it.each([

@@ -20,10 +20,12 @@ import {
   type BotImEvent
 } from "../../shared/bots/im-channel"
 import type { BotTask } from "../../shared/bots/contracts"
+import { BOT_ROUTINE_SILENT } from "../../shared/bots/routine-silence"
 import { buildBotPrompt } from "./prompt"
 import { parseBotMockSource } from "./mock-channel-validation"
 import { canSteerBotTask } from "./continuation"
 import { BOT_EVENTS } from "../../shared/bots/telemetry"
+import { createBotWorkTools } from "./work-tools"
 
 const interactionCommand = vi.hoisted(() => vi.fn(async () => undefined))
 vi.mock("../services/im/bot-interaction-command", () => ({
@@ -298,6 +300,45 @@ describe("authenticated IM on the existing Bot host", () => {
     expect(sent.map((r) => r.conversationKey)).toEqual([group.conversationKey])
     expect(f.errors).toEqual([])
   })
+  it.each([null, "Original IM input", "Allowed replacement", ""])("retains owner DM input admission without desktop grants (%s)", async body => {
+    const f = fixture(async (task, host) => {
+      host.beginInputPreparation(task.id, task.id)
+      expect(host.inputProjections(task.botId, task.threadId, [task.requestId]).get(task.requestId)).toBeNull()
+      if (body === null) return { state: "failed", error: "Hook rejected input" }
+      host.recordPreparedInput(task.id, task.id, body)
+      return { state: "completed", result: "Done" }
+    })
+    const binding = await f.binding("dm")
+    await f.service.receive(f.event(binding, "admission", "Original IM input"))
+    await eventually(() => f.calls.length === 1 && ["completed", "failed"].includes(f.store.getTask(f.calls[0].id).state))
+    const task = f.store.getTask(f.calls[0].id)
+    expect(task.origin).toMatchObject({ kind: "mock" })
+    expect(task.origin).not.toHaveProperty("allowedInputFileIds")
+    expect(task.mockSource).toMatchObject({ transport: "im", personal: true, audienceKey: "desktop" })
+    expect(task.threadId).toBe(f.bot.threadId)
+    expect(f.host.inputProjections(f.bot.id, f.bot.threadId, [task.requestId])).toEqual(new Map([[task.requestId, body]]))
+    expect(new BotStore(f.db).inputProjections(f.bot.id, f.bot.threadId, [task.requestId])).toEqual(new Map([[task.requestId, body]]))
+    expect(f.errors).toEqual([])
+  })
+
+  it.each([null, "Allowed replacement"])("keeps stopped owner DM facts without replaying refused input (%s)", async body => {
+    const f = fixture(undefined, undefined, () => false)
+    const binding = await f.binding("dm")
+    await f.service.receive(f.event(binding, "stopped-input", "PRIVATE ORIGINAL"))
+    const task = f.store.recentTasks().find(task => task.mockSource)!
+    f.store.transition(task.id, "running")
+    f.store.beginInputPreparation(task.id)
+    if (body !== null) f.store.recordPreparedInput(task.id, body)
+    f.store.transition(task.id, "interrupted")
+    const current = f.store.enqueue({ botId: f.bot.id, requestId: "after-restart", message: "Only reply hello" })
+    const restored = new BotStore(f.db)
+    expect(restored.stoppedTaskContext(current.id)).toEqual([
+      { taskId: task.id, state: "interrupted", source: "mock", messagePreview: body ?? "" }
+    ])
+    expect(() => restored.recordPreparedInput(task.id, "Too late")).toThrow("已停止")
+    expect(restored.inputProjections(f.bot.id, f.bot.threadId, [task.requestId])).toEqual(new Map([[task.requestId, body]]))
+  })
+
   it.each(["group", "personal", "work"] as const)("routes stopped background activity to the IM %s owner", async (scope) => {
     const f = fixture(undefined, undefined, () => false)
     const own = f.host.send({ botId: f.bot.id, requestId: "baseline", message: "Private baseline" })
@@ -992,7 +1033,7 @@ describe("authenticated IM on the existing Bot host", () => {
       host.acceptWorkflow(task.id, run)
       available = false
       return { state: "completed", result: "A internal launch" }
-    }, undefined, () => available)
+      }, undefined, () => available)
     b = f.store.create({ name: "B", instructions: "", color: "#123456", modelRef: null }).id
     const binding = await f.binding()
     await f.service.receive(f.event(binding, "loop-workflow"))
@@ -1269,6 +1310,40 @@ describe("authenticated IM on the existing Bot host", () => {
     expect(f.errors).toEqual([])
   })
 
+  it("pauses only the due legacy routine for a stopped personal IM work", async () => {
+    const nextRunAt = new Date().toISOString()
+    const input = {
+      name: "Follow up", message: "Check progress", frequency: "interval" as const,
+      intervalMinutes: 5, enabled: true
+    }
+    const f = fixture(async (task, host) => {
+      if (task.origin.kind === "mock") {
+        f.store.saveSchedule(task.botId, input, nextRunAt, undefined, task.id)
+        await host.createWork(
+          { botId: task.botId, operationId: "work", title: "Personal work", goal: "Check progress" },
+          { taskId: task.id, callId: "create", key: "create" }
+        )
+      } else if (task.origin.kind === "work") {
+        f.store.saveSchedule(task.botId, input, nextRunAt, undefined, task.id)
+      }
+      return { state: "completed" }
+    })
+    const binding = await f.binding("dm")
+    await f.service.receive(f.event(binding, "legacy-routine"))
+    await eventually(() => f.calls.some(task => task.workId && f.store.getTask(task.id).state === "completed"))
+    const [main, work] = f.store.schedules()
+    expect(work.workId).toBeDefined()
+    expect(work.desktopWork).toBeUndefined()
+    f.host.stopWork(f.bot.id, work.workId!)
+    f.store.fireSchedule(work, new Date(Date.now() + 300_000).toISOString())
+    f.store.fireSchedule(work, new Date(Date.now() + 300_000).toISOString())
+    expect(f.store.schedules()).toEqual([
+      main, { ...work, enabled: false, nextRunAt: null, version: work.version + 1 }
+    ])
+    expect(f.store.recentTasks().some(task => task.origin.kind === "schedule")).toBe(false)
+    expect(f.errors).toEqual([])
+  })
+
   it("creates a group Git task in the selected directory and retains it for follow-up", async () => {
     const directory = await mkdtemp(join(tmpdir(), "bot-im-git-"))
     cleanups.push(() => rm(directory, { recursive: true, force: true }))
@@ -1481,6 +1556,44 @@ describe("authenticated IM on the existing Bot host", () => {
     expect(String(f.errors[0])).toContain("temporary list failure")
     await vi.advanceTimersByTimeAsync(25000)
     expect(f.host.snapshot().imConversations![0].title).toBe("恢复后的群名")
+  })
+
+  it("aggregates private, group, work and IM activity into the local unread indicator", async () => {
+    const f = fixture(undefined, undefined, () => false)
+    const expectUnread = (unread: boolean) => {
+      const revision = f.store.revision()
+      expect(f.host.hasUnread()).toBe(unread)
+      expect(f.store.revision()).toBe(revision)
+    }
+    expectUnread(false)
+
+    f.host.markUnread("bot", f.bot.id)
+    expectUnread(true)
+    f.host.markRead("bot", f.bot.id, f.store.activities().find(item => item.id === f.bot.id)!.version)
+    expectUnread(false)
+
+    const group = f.store.saveGroup({ name: "Local group", memberIds: [f.bot.id] })
+    f.host.markUnread("group", group.id)
+    expectUnread(true)
+    f.host.markRead("group", group.id, f.store.activities().find(item => item.id === group.id)!.version)
+    expectUnread(false)
+
+    const { task, work } = f.store.createWork({
+      botId: f.bot.id, operationId: "work-unread", title: "Desktop work", goal: "Prepare a draft"
+    })
+    f.store.transition(task.id, "running")
+    f.store.settle(task.id, "completed", null, "Draft ready")
+    expectUnread(true)
+    f.host.markRead("work", work.id, f.store.getWork(f.bot.id, work.id).activity!.version)
+    expectUnread(false)
+
+    const binding = await f.binding()
+    await f.service.receive(f.event(binding, "im-unread", "Check the draft"))
+    const conversation = f.store.imGateway.groupConversations()[0]
+    expect(conversation.activity.unread).toBe(true)
+    expectUnread(true)
+    f.host.markRead("im", conversation.id, conversation.activity.version)
+    expectUnread(false)
   })
 
   it("exposes retained groups separately from private previews and keeps read boundaries scoped", async () => {
@@ -1780,6 +1893,89 @@ describe("authenticated IM on the existing Bot host", () => {
     expect(f.errors).toEqual([])
   })
 
+  it.each((["direct", "nested", "workflow"] as const).flatMap(mode =>
+    (["completed", "restart"] as const).map(ending => ({ mode, ending }))
+  ))("keeps $mode retained internal results out of the executing Bot's personal IM ($ending)", async ({ mode, ending }) => {
+    const { snapshotBotDeliveryFile } = await import("./file-copy")
+    const { realpath } = await import("node:fs/promises")
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "bot-private-im-")))
+    const f = fixture(undefined, undefined, () => false)
+    try {
+      await f.binding("dm")
+      const localBinding = f.store.im.bindings(f.bot.id).items.find(binding => binding.kind === "dm")!
+      f.service.stop()
+      const caller = f.store.create({ name: "Caller", instructions: "", color: "#123456", modelRef: null })
+      const root = f.store.enqueue({ botId: caller.id, requestId: "root", message: "Prepare private review" })
+      f.store.transition(root.id, "running")
+      const parent = f.store.delegate(root.id, f.bot.id, "Review privately", "review")
+      f.store.transition(parent.id, "running")
+      let current = parent
+      if (mode === "nested") {
+        const helper = f.store.create({ name: "Helper", instructions: "", color: "#123456", modelRef: null })
+        const nested = f.store.delegate(parent.id, helper.id, "Check", "nested")
+        f.store.settle(parent.id, "completed", null, "Waiting")
+        f.store.transition(nested.id, "running")
+        f.store.settle(nested.id, "completed", null, "Checked")
+        f.store.flushReplies()
+        current = f.store.recentTasks().find(t => t.requestId === `reply-${nested.id}`)!
+        f.store.transition(current.id, "running")
+      } else if (mode === "workflow") {
+        const run = { threadId: parent.threadId, workspacePath: directory, runId: "private-workflow", startedAt: "2026-11-09T00:00:00Z" }
+        f.store.acceptWorkflow(parent.id, run)
+        f.store.settle(parent.id, "completed", null, "Waiting")
+        current = f.host.enqueueNotification(f.bot.id, run.threadId, "workflow", run.runId, "Summary", undefined, run.startedAt)!
+        f.store.transition(current.id, "running")
+      }
+      const path = join(directory, "private-review.md")
+      await writeFile(path, "Private findings for the caller")
+      const file = { filePath: path, name: "private-review.md", ...(await snapshotBotDeliveryFile(directory, path, new AbortController().signal)) }
+      if (ending === "restart") f.store.recover()
+      else f.store.settle(current.id, "completed", null, "Private review complete", [file])
+      expect(f.store.im.history(f.bot.id, localBinding.id).items).toEqual([])
+      expect(f.db.exec("SELECT source_task_id FROM bot_im_outbox")[0]?.values ?? []).toEqual([])
+      // Normal user-facing replies and their attachments still use the existing mirror.
+      const visible = f.store.enqueue({ botId: f.bot.id, requestId: "visible", message: "Deliver my report" })
+      f.store.transition(visible.id, "running")
+      f.store.settle(visible.id, "completed", null, "Your report", [file])
+      expect(f.db.exec("SELECT source_task_id,text FROM bot_im_outbox")[0].values).toEqual([[visible.id, "Your report"]])
+      expect(f.store.im.history(f.bot.id, localBinding.id).items).toHaveLength(1)
+      expect(f.errors).toEqual([])
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it("uses the prepared owner IM work input in the shared desktop result", async () => {
+    let workId = ""
+    const f = fixture(async (task, host) => {
+      if (task.origin.kind === "work_result") return { state: "completed", result: "Reported" }
+      if (task.workId) {
+        host.recordPreparedInput(task.id, task.id, "Approved owner input")
+        return { state: "completed", result: "Verified result" }
+      }
+      const source = { taskId: task.id, callId: task.id, key: task.id }
+      if (task.message === "create") {
+        workId = (await host.createWork({ botId: task.botId, operationId: task.id,
+          title: "REMOVED OWNER INPUT", goal: "REMOVED OWNER INPUT" }, source)).work.id
+      } else {
+        host.sendWork(source, workId, "REMOVED FOLLOWUP")
+      }
+      return { state: "completed", result: "Accepted" }
+    })
+    const dm = await f.binding("dm")
+    await f.service.receive(f.event(dm, "create", "create"))
+    await eventually(() => f.calls.length === 3 && f.store.recentTasks().every(t => t.state === "completed"))
+    await f.service.receive(f.event(dm, "follow-up", "revise"))
+    await eventually(() => f.calls.length === 6 && f.store.recentTasks().every(t => t.state === "completed"))
+    const receipts = f.calls.filter(t => t.origin.kind === "work_result")
+    expect(receipts).toHaveLength(2)
+    for (const receipt of receipts) {
+      expect(JSON.parse(receipt.message)).toMatchObject({ title: "原任务",
+        requestContext: { messages: [{ text: "Approved owner input", truncated: false }] } })
+      expect(JSON.stringify(receipt)).not.toContain("REMOVED")
+    }
+    expect(f.host.getWork(f.bot.id, workId)).toMatchObject({ title: "REMOVED OWNER INPUT", audienceKey: "desktop" })
+    expect(f.errors).toEqual([])
+  })
+
   it("shares personal tasks across DM and App, reports results once, and keeps group tasks separate", async () => {
     let workId = ""
     const f = fixture(async (task, host) => {
@@ -1843,6 +2039,375 @@ describe("authenticated IM on the existing Bot host", () => {
     expect(replies.filter((i) => i.text.startsWith("notice:"))).toHaveLength(0)
     expect(replies.filter((i) => i.text.startsWith("report:"))).toHaveLength(3)
     expect(replies.every((i) => i.text !== "handled:group")).toBe(true)
+    expect(f.errors).toEqual([])
+  })
+
+  it.each([false, true])("observes the owner's IM continuation even with a retired desktop review (%s)", async (retire) => {
+    let workId = "", originalId = "", callbackId = ""
+    const f = fixture(async (task, host) => {
+      if (retire && task.requestId === `work-start-${workId}`) {
+        originalId = task.id
+        host.recordPreparedInput(task.id, task.id, task.message)
+        expect(host.armWorkResultReview(task.id, "incarnation")).toBe(true)
+        host.commandLifecycle(task.id).accepted({
+          id: "old-generator", threadId: task.threadId, command: "generate", cwd: "/reports",
+          startedAt: Date.now(), notifyOnComplete: true
+        })
+        return { state: "completed", result: "Waiting for the old generator" }
+      }
+      if (retire && task.workId && task.mockSource?.personal) {
+        host.recordPreparedInput(task.id, task.id, task.message)
+        expect(host.armWorkResultReview(task.id, "incarnation")).toBe(false)
+      }
+      if (retire && task.origin.kind === "notification" && task.origin.notificationKind === "command") {
+        callbackId = task.id
+        return { state: "failed", error: "Old generator failed" }
+      }
+      if (task.workId || task.origin.kind === "work_result")
+        return { state: "completed", result: task.message }
+      const source = { taskId: task.id, callId: task.id, key: task.id }
+      if (task.message === "create") {
+        if (retire) host.recordPreparedInput(task.id, task.id, task.message)
+        workId = (await host.createWork({
+          botId: task.botId, operationId: task.id, title: "Report", goal: "Initial report"
+        }, source)).work.id
+      } else if (task.message === "observe") {
+        f.store.saveSchedule(f.bot.id, {
+          name: "Watch report", message: "Notify on new results", frequency: "interval", intervalMinutes: 10, enabled: true
+        }, "2030-01-01T00:10:00Z", undefined, undefined, undefined,
+          { input: { workId, mode: "new_result" }, source })
+      } else if (task.message === "revise") {
+        host.sendWork(source, workId, "Revise the report from personal IM")
+      }
+      return { state: "completed", result: "accepted" }
+    })
+    const dm = await f.binding("dm")
+    f.host.send({ botId: f.bot.id, requestId: "desktop-create", message: "create" })
+    await eventually(() => f.calls.length === (retire ? 2 : 3) &&
+      f.store.recentTasks().every(task => task.state === "completed"))
+    f.host.send({ botId: f.bot.id, requestId: "desktop-observe", message: "observe" })
+    await eventually(() => f.calls.length === (retire ? 3 : 4) &&
+      f.store.recentTasks().every(task => task.state === "completed"))
+    const schedule = f.store.schedules()[0]
+    const initial = f.calls.find(task => task.workId === workId)!
+    expect(schedule.workMonitor?.lastSuccessful?.result?.taskId).toBe(retire ? undefined : initial.id)
+
+    await f.service.receive(f.event(dm, "dm-edit", "revise"))
+    await eventually(() => f.calls.length === (retire ? 6 : 7) &&
+      f.store.recentTasks().every(task => task.state === "completed"))
+    const revised = f.calls.find(task => task.workId === workId && task.mockSource?.personal)!
+    expect(revised).toMatchObject({ threadId: initial.threadId, mockSource: { transport: "im", personal: true } })
+    if (retire) {
+      f.host.commandLifecycle(originalId).settled({
+        id: "old-generator", threadId: initial.threadId, exitCode: 1, output: "Old generator failed",
+        cancelled: false, truncated: false
+      })
+      await eventually(() => Boolean(callbackId) && f.store.getTask(callbackId).state === "failed")
+    }
+    f.store.fireSchedule(schedule, "2030-01-01T00:20:00Z")
+    const observation = f.store.nextQueued([], true, true)!
+    expect(f.store.settleScheduledWorkObservation(observation.id))
+      .toMatchObject({ kind: "notify", snapshot: { result: { taskId: revised.id, state: "completed" } } })
+    expect(f.errors).toEqual([])
+  })
+
+  it.each(["late peer", "late command", "unchanged", "attachment", "failed", "group"] as const)(
+    "observes only current results of a personal IM routine (%s)",
+    async (outcome) => {
+      const late = outcome === "late peer" || outcome === "late command"
+      const group = outcome === "group"
+      const failed = late || outcome === "failed"
+      const ready = { kind: "ready" as const, summary: "The updated report has been verified" }
+      const scheduleInput = {
+        name: "Watch report", message: "Check the existing report", frequency: "interval" as const,
+        intervalMinutes: 10, enabled: true
+      }
+      const files = outcome === "attachment"
+        ? [{ name: "report.md", filePath: "/reports/report.md", attachmentPath: "/retained/report.md", size: 8 }]
+        : undefined
+      let workId = "", reviewedId = "", launcher: BotTask | undefined, returned: BotTask | undefined
+      let releasePeer: (() => void) | undefined
+      const f = fixture(async (task, host, signal) => {
+        const { origin } = task
+        const source = { taskId: task.id, callId: task.id, key: task.id }
+        if (origin.kind === "mock" && task.message === "create") {
+          workId = (await host.createWork({
+            botId: task.botId, operationId: "report", title: "Report", goal: "Prepare the report"
+          }, source)).work.id
+        } else if (origin.kind === "work" && task.mockSource) {
+          f.store.saveSchedule(task.botId, scheduleInput, "2030-01-01T00:10:00Z", undefined, task.id)
+        } else if (origin.kind === "schedule") {
+          host.delegate(task.id, peer.id, "Check the report that this routine started with", "check-report")
+          return { state: "completed", result: BOT_ROUTINE_SILENT }
+        } else if (origin.kind === "bot" && origin.expectsReply) {
+          if (late) await new Promise<void>((resolve) => {
+            releasePeer = resolve
+            if (signal.aborted) resolve()
+            else signal.addEventListener("abort", () => resolve(), { once: true })
+          })
+          return { state: "completed", result: "The report needs a checksum check" }
+        } else if (origin.kind === "bot" && task.workId === workId) {
+          if (outcome === "late peer") {
+            returned = task
+            return { state: "failed", error: "The previous report did not pass verification" }
+          }
+          launcher = task
+          host.commandLifecycle(task.id).accepted({
+            id: "verify-checksum", threadId: task.threadId, command: "verify-checksum", cwd: "/reports",
+            startedAt: Date.now(), notifyOnComplete: true
+          })
+        } else if (origin.kind === "notification" && origin.notificationKind === "command") {
+          returned = task
+          return failed
+            ? { state: "failed", error: "Checksum verification failed" }
+            : { state: "completed", result: BOT_ROUTINE_SILENT, files }
+        } else if (origin.kind === "user" && task.message === "revise") {
+          host.recordPreparedInput(task.id, task.id, task.message)
+          host.sendWork(source, workId, "Verify the updated report")
+        } else if (origin.kind === "work" && task.workId === workId) {
+          host.recordPreparedInput(task.id, task.id, task.message)
+          expect(host.armWorkResultReview(task.id, "incarnation")).toBe(true)
+          reviewedId = task.id
+          return { state: "completed", result: ready.summary }
+        } else if (origin.kind === "work_result" && origin.review?.phase === "review") {
+          expect(host.commitWorkResultReview(task.id, { ...ready, evidenceIds: [] }, []).state).toBe("publish")
+        } else if (origin.kind === "work_result" && origin.review?.phase === "publish") {
+          expect(host.acknowledgeWorkResultPublication(task.id)).toBe(true)
+        } else if (origin.kind === "user" && task.message === "observe") {
+          const watch = () => f.store.saveSchedule(task.botId, scheduleInput, "2030-01-01T00:10:00Z", undefined, undefined, undefined,
+            { input: { workId, mode: "new_result" }, source })
+          if (group) expect(watch).toThrow("原任务不属于当前桌面 Bot")
+          else watch()
+        }
+        return { state: "completed", result: "Handled" }
+      }, undefined, undefined, undefined, undefined, Number.POSITIVE_INFINITY)
+      const peer = f.store.create({ name: "Reviewer", instructions: "", color: "#345678", modelRef: null })
+      const binding = await f.binding(group ? "group" : "dm")
+      await f.service.receive(f.event(binding, "create-report", "create"))
+      await eventually(() => Boolean(workId) && f.store.schedules().some(schedule => schedule.workId === workId))
+      const routine = f.store.schedules().find(schedule => schedule.workId === workId)!
+      const trigger = () => {
+        f.store.fireSchedule(routine, "2030-01-01T00:20:00Z")
+        f.host.resume()
+      }
+      if (late || group) trigger()
+      if (late) await eventually(() => Boolean(releasePeer))
+      if (!group) {
+        f.host.send({ botId: f.bot.id, requestId: "desktop-revise", message: "revise" })
+        await eventually(() => f.store.getWork(f.bot.id, workId).resultConclusion?.kind === "ready")
+      }
+      const observer = f.host.send({ botId: f.bot.id, requestId: "desktop-observe", message: "observe" })
+      await eventually(() => f.store.getTask(observer.id).state === "completed")
+      const monitor = f.store.schedules().find(schedule => schedule.workMonitor)
+      const baseline = { taskId: reviewedId, state: "completed", review: "ready" }
+      if (!group) expect(monitor?.workMonitor?.lastSuccessful?.result).toEqual(baseline)
+      if (late) releasePeer!()
+      else if (!group) trigger()
+      if (outcome !== "late peer") {
+        await eventually(() => Boolean(launcher) && f.store.getTask(launcher!.id).state === "completed")
+        f.host.commandLifecycle(launcher!.id).settled({
+          id: "verify-checksum", threadId: launcher!.threadId, exitCode: failed ? 1 : 0,
+          output: failed ? "Checksum mismatch" : "Checksum OK", cancelled: false, truncated: false
+        })
+      }
+      await eventually(() => Boolean(returned) && f.store.getTask(returned!.id).state === (failed ? "failed" : "completed"))
+      const callback = f.store.getTask(returned!.id)
+      expect(callback).toMatchObject({ workId, threadId: f.store.getWork(f.bot.id, workId).threadId })
+      expect(callback.mockSource?.transport).toBe("im")
+      expect(Boolean(callback.mockSource?.personal)).toBe(!group)
+      if (group) {
+        expect(callback.mockSource?.audienceKey).not.toBe("desktop")
+        expect(monitor).toBeUndefined()
+        expect(callback.origin).not.toHaveProperty("observationRequestOrdinal")
+        expect(callback.origin).not.toHaveProperty("workResultSilent")
+      } else {
+        const quiet = late || outcome === "unchanged"
+        expect.soft(f.store.getWork(f.bot.id, workId).resultConclusion).toEqual(quiet ? ready : undefined)
+        expect.soft(f.store.getWork(f.bot.id, workId).executionState).toBe(!quiet && failed ? "failed" : "completed")
+        expect.soft(f.store.listWorks(f.bot.id).items.find(work => work.id === workId)?.executionState)
+          .toBe(!quiet && failed ? "failed" : "completed")
+        f.store.fireSchedule(monitor!, "2030-01-01T00:20:00Z", true)
+        const savedMonitor = f.store.schedules().find(schedule => schedule.id === monitor!.id)
+        expect.soft(savedMonitor?.workMonitor?.lastSuccessful?.result).toEqual(quiet ? baseline : {
+          taskId: callback.id, state: failed ? "failed" : "completed", ...(failed ? { commandOutcome: "failed" } : {})
+        })
+        expect.soft(f.store.pendingScheduledWorkPublications()).toHaveLength(quiet ? 0 : 1)
+        if (files) expect(f.store.pendingScheduledWorkPublications()[0]?.text).toContain("最近一次执行结果为已完成")
+        if (failed && !late) expect(f.store.pendingScheduledWorkPublications()[0]?.text).toContain("后台命令执行失败")
+      }
+      expect(f.errors).toEqual([])
+    }
+  )
+
+  it.each(["failed", "outcome_unknown", "withdrawn"] as const)(
+    "observes a nested command after an authenticated IM continuation's sibling is %s",
+    async (outcome) => {
+      let workId = ""
+      const f = fixture(async (task, host) => {
+        const accept = (id: string) => host.commandLifecycle(task.id).accepted({
+          id, threadId: task.threadId, command: id, cwd: "/reports",
+          startedAt: Date.now(), notifyOnComplete: true
+        })
+        if (task.workId && task.origin.kind === "work" && task.mockSource?.personal) {
+          host.recordPreparedInput(task.id, task.id, task.message)
+          expect(host.armWorkResultReview(task.id, "incarnation")).toBe(false)
+          if (task.message === "Run the independent report") accept("independent")
+          else {
+            accept("first-check")
+            accept("second-check")
+          }
+        } else if (task.origin.kind === "notification" && task.origin.notificationKind === "command" &&
+            task.origin.key === "first-check") {
+          expect(host.commandUserRequest(task.id)).toBeNull()
+          accept("verify-first-check")
+        } else if (!task.workId && task.origin.kind !== "work_result") {
+          const source = { taskId: task.id, callId: task.id, key: task.id }
+          if (task.message === "observe") {
+            f.store.saveSchedule(f.bot.id, {
+              name: "Watch report", message: "Notify on new results", frequency: "interval", intervalMinutes: 10, enabled: true
+            }, "2030-01-01T00:10:00Z", undefined, undefined, undefined, { input: { workId, mode: "report" }, source })
+          } else {
+            host.sendWork(source, workId, task.message === "independent"
+              ? "Run the independent report" : "Perform two independent checks, then verify the first result")
+          }
+        }
+        return { state: "completed", result: "Reported this turn's outcome" }
+      })
+      const dm = await f.binding("dm")
+      const initial = await f.host.createWork({
+        botId: f.bot.id, operationId: "create", title: "Report", goal: "Create report"
+      })
+      workId = initial.work.id
+      await eventually(() => f.store.getTask(initial.task.id).state === "completed")
+      const observer = f.host.send({ botId: f.bot.id, requestId: "desktop-observe", message: "observe" })
+      await eventually(() => f.store.getTask(observer.id).state === "completed")
+      await f.service.receive(f.event(dm, "dm-revise", "revise"))
+      const workRuns = () => f.calls.filter(task => task.workId === workId && task.origin.kind === "work")
+      await eventually(() => workRuns().length === 1 && f.store.getTask(workRuns()[0].id).state === "completed")
+      const [launcher] = workRuns()
+      const threadId = launcher.threadId
+      const callback = (id: string) => f.calls.find(task =>
+        task.origin.kind === "notification" && task.origin.notificationKind === "command" && task.origin.key === id)
+      const settle = async (id: string, exitCode: number, ownerId = launcher.id) => {
+        f.host.commandLifecycle(ownerId).settled({
+          id, threadId, exitCode, output: "Command result", cancelled: false, truncated: false
+        })
+        await eventually(() => Boolean(callback(id)) && f.store.getTask(callback(id)!.id).state === "completed")
+        return callback(id)!
+      }
+      const first = await settle("first-check", 0)
+      expect(f.db.exec("SELECT source_task_id FROM bot_commands WHERE id='verify-first-check'")[0].values)
+        .toEqual([[first.id]])
+
+      if (outcome === "failed") await settle("second-check", 2)
+      else {
+        f.store.settleCommand({ id: "second-check", threadId, exitCode: null, output: "",
+          cancelled: outcome === "withdrawn", truncated: false }, outcome === "outcome_unknown")
+        f.host.resume()
+        if (outcome === "outcome_unknown")
+          await eventually(() => Boolean(callback("second-check")) &&
+            f.store.getTask(callback("second-check")!.id).state === "completed")
+      }
+
+      // Age the earlier receipts out while the nested command is still live.
+      // Silent commands in another thread exercise normal retention without
+      // adding unrelated notification turns.
+      const other = f.store.create({ name: "Other", instructions: "", color: "#123456", modelRef: null })
+      const filler = f.store.enqueue({ botId: other.id, requestId: "retention", message: "Other activity" })
+      f.store.transition(filler.id, "running")
+      for (let index = 0; index < 201; index++) {
+        const id = `retention-${index}`
+        f.store.acceptCommand(filler.id, { id, threadId: filler.threadId, command: "check", cwd: "/other",
+          startedAt: Date.now(), notifyOnComplete: false })
+        f.store.settleCommand({ id, threadId: filler.threadId, exitCode: 0, output: "", cancelled: false, truncated: false })
+      }
+      f.store.settle(filler.id, "completed", null)
+      expect(f.db.exec("SELECT id FROM bot_commands WHERE id IN ('first-check','second-check')")[0].values)
+        .toEqual([])
+
+      const observeResult = () => {
+        const [schedule] = f.store.schedules()
+        f.store.fireSchedule(schedule, "2030-01-01T00:20:00Z", true)
+        const [notice] = f.store.pendingScheduledWorkPublications()
+        f.store.acknowledgeScheduledWorkPublication(notice.taskId)
+        return { text: notice.text, result: f.store.schedules()[0].workMonitor?.lastSuccessful?.result }
+      }
+      const final = await settle("verify-first-check", 0, first.id)
+      const observed = observeResult()
+      if (outcome === "withdrawn") expect(observed.result).toEqual({ taskId: initial.task.id, state: "completed" })
+      else {
+        expect(observed.result).toEqual({ taskId: final.id, state: "completed", commandOutcome: outcome })
+        expect(observed.text).toContain(outcome === "failed" ? "后台命令执行失败" : "后台命令结果待确认")
+      }
+
+      await f.service.receive(f.event(dm, "dm-independent", "independent"))
+      await eventually(() => workRuns().length === 2 && f.store.getTask(workRuns()[1].id).state === "completed")
+      const independent = await settle("independent", 0, workRuns()[1].id)
+      expect(observeResult().result).toEqual({ taskId: independent.id, state: "completed" })
+      expect(f.errors).toEqual([])
+    }
+  )
+
+  it.each([true, false])("lets an authenticated same-work IM correction reach preparation before a queued desktop repair (accepted=%s)", async accepted => {
+    let available = true
+    let workId = "", repairId = "", correctionId = ""
+    const f = fixture(async (task, host, signal) => {
+      if (task.requestId === `work-start-${workId}`) {
+        host.recordPreparedInput(task.id, task.id, task.message)
+        expect(host.armWorkResultReview(task.id, "incarnation")).toBe(true)
+        return { state: "completed", result: "CSV ready" }
+      }
+      if (task.origin.kind === "work_result" && task.origin.review?.phase === "review") {
+        if (repairId) {
+          host.commitWorkResultReview(task.id, { kind: "ready", summary: "Reviewed", evidenceIds: [] }, [])
+          return { state: "completed" }
+        }
+        const result = host.commitWorkResultReview(task.id, {
+          kind: "repair", gap: "CSV upload pending", instruction: "Upload the CSV", evidenceIds: []
+        }, [])
+        if (result.state !== "repair") throw new Error("Expected a queued repair")
+        repairId = result.task.id
+        available = false
+      } else if (task.mockSource && !task.workId) {
+        const tool = createBotWorkTools(task, () => host, signal).find(tool => tool.name === "bot_work_send")!
+        const response = await tool.invoke({
+          type: "tool_call", name: tool.name, id: "im-revision",
+          args: { workId, requestKey: "im-revision", message: task.message }
+        })
+        expect(response.status).not.toBe("error")
+        correctionId = JSON.parse(response.content).receipt.id
+      } else if (task.workId === workId && task.mockSource) {
+        expect(task.mockSource).toMatchObject({ transport: "im", personal: true })
+        host.beginInputPreparation(task.id, task.id)
+        expect(host.armWorkResultReview(task.id, "incarnation")).toBe(false)
+        if (!accepted) return { state: "failed", error: "Input rejected" }
+        host.recordPreparedInput(task.id, task.id, task.message)
+        expect(host.armWorkResultReview(task.id, "incarnation")).toBe(false)
+        return { state: "completed", result: "CSV kept local" }
+      }
+      return { state: "completed" }
+    }, undefined, () => available)
+    const dm = await f.binding("dm")
+    workId = (await f.host.createWork({
+      botId: f.bot.id, operationId: "desktop-original", title: "CSV", goal: "Generate and upload the CSV"
+    })).work.id
+    await eventually(() => Boolean(repairId))
+    expect(f.store.getTask(repairId).state).toBe("queued")
+    await f.service.receive(f.event(dm, "im-correction", "Do not upload the CSV. Keep it local."))
+    available = true
+    f.host.resume()
+    await eventually(() => Boolean(correctionId) && ["completed", "failed"].includes(f.store.getTask(correctionId).state))
+    expect(f.store.getTask(correctionId)).toMatchObject({ state: accepted ? "completed" : "failed" })
+    await eventually(() => ["cancelled", "completed", "failed"].includes(f.store.getTask(repairId).state))
+    expect(f.store.getTask(repairId)).toMatchObject({ state: accepted ? "cancelled" : "completed" })
+    const correctionIndex = f.calls.findIndex(task => task.id === correctionId)
+    expect(correctionIndex).toBeGreaterThan(-1)
+    if (!accepted) expect(f.calls.findIndex(task => task.id === repairId)).toBeGreaterThan(correctionIndex)
+    expect(f.calls.some(task => task.id === repairId)).toBe(!accepted)
+    if (accepted) {
+      expect(f.store.workResultReviewActiveForExecution(correctionId)).toBe(false)
+      expect(f.calls.filter(task => task.origin.kind === "work_result" && task.origin.review?.phase === "review")).toHaveLength(1)
+    }
     expect(f.errors).toEqual([])
   })
 
@@ -2230,7 +2795,8 @@ describe("authenticated IM on the existing Bot host", () => {
         (task) => task.origin.kind === "work_result" && task.origin.executionTaskId === work.task.id
       )
     expect(reports).toHaveLength(1)
-    expect(JSON.parse(reports[0].message)).toMatchObject({ executionState: "cancelled" })
+    expect(JSON.parse(reports[0].message)).toMatchObject({ executionState: "cancelled", title: "原任务",
+      requestContext: { messages: [], messagesOmitted: true } })
     expect(f.client.submitReply).not.toHaveBeenCalled()
   })
 

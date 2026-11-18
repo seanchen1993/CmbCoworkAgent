@@ -2734,54 +2734,294 @@ async function testSessionTranscriptMergeRestoresCurrentRunProviderOccurrence():
   )
 }
 
+async function testForkPreservesBotHistoryProjection(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
+  const { getThreadCheckpointPath, deleteThreadCheckpoint } = await import("../src/main/storage.ts")
+  const { forkThread, registerThreadHandlers } = await import("../src/main/ipc/threads.ts")
+  const { captureThreadIncarnation } = await import("../src/main/services/thread-incarnation.ts")
+  const { botHistoryHidesTitle, decorateBotHistoryPage, setBotHistoryInputSource } = await import("../src/main/bots/history-input-projection.ts")
+  const { readForkInputProjections, readForkReplyOrigins } = await import("../src/main/bots/fork-input-projection.ts")
+  const { formatBotMessageReply } = await import("../src/shared/bots/message-reply.ts")
+  const { createBotOrdinaryThreads } = await import("../src/main/bots/ordinary-threads.ts")
+  const reply = { id: "old-message", ordinal: 0, role: "assistant" as const, text: "OLD_REFERENCE_ONLY " + "x".repeat(7600) }
+  const quoted = formatBotMessageReply("CURRENT_REQUIREMENT", reply)
+  const id = "bot-work-work", title = "Removed original request"
+  const ids = [id]
+  await db.initializeDatabase()
+  try {
+    const row = db.createThread(id, { title, agentMode: "normal", botId: "bot", botWorkId: "work",
+      botHostId: "local", botAudienceKey: "desktop", workspacePath: "/isolated/native-fork" })
+    let existingAssociation = false
+    setBotHistoryInputSource({
+      forkInputs: readForkInputProjections,
+      works: threadId => threadId === id ? [{ id: "work", botId: "bot", threadId: id, audienceKey: "desktop",
+        omitResultTitle: true, threadInitialized: true, title,
+        ...(existingAssociation ? { conversation: { origin: "existing", state: "bound", ref: {
+          kind: "local_thread", threadId: id, incarnation: captureThreadIncarnation(row)
+        } } } : {}) }] : [],
+      inputs: (_bot, _thread, requestIds) => new Map(requestIds.flatMap(requestId =>
+        requestId === "rejected-tail" ? [[requestId, null] as const] : [])),
+      origins: (_thread, _incarnation, requestIds) => requestIds.includes("quoted-user") ? [{
+        id: "quoted-task", requestId: "quoted-user", state: "completed" as const,
+        origin: { kind: "user" as const, replyTo: reply }
+      }] : []
+    })
+    const checkpoint = makeCheckpoint("fork-bot-stable")
+    ;(checkpoint.channel_values as Record<string, unknown>).messages = [
+      { type: "human", id: "user-1", content: "Admitted body", additional_kwargs: {
+        cmb_visible_user_message: "Original body", cmb_bot_prepared_user_request: "Admitted body"
+      } },
+      { type: "ai", id: "assistant-1", content: "Actual response" },
+      { type: "human", id: "legacy-hook-user", content: "Legacy admitted body", additional_kwargs: {
+        cmb_visible_user_message: "LEGACY_RAW_HOOK_INPUT"
+      } },
+      { type: "ai", id: "legacy-hook-answer", content: "Legacy reply" },
+      { type: "human", id: "quoted-user", content: quoted, additional_kwargs: { cmb_bot_prepared_user_request: quoted } },
+      { type: "ai", id: "assistant-2", content: "Done" },
+      { type: "human", id: "literal-user", content: quoted, additional_kwargs: { cmb_bot_prepared_user_request: quoted } },
+      { type: "ai", id: "assistant-3", content: "Literal received" }
+    ]
+    const saver = new SqlJsSaver(getThreadCheckpointPath(id))
+    await saver.put({ configurable: { thread_id: id, checkpoint_ns: "" } }, checkpoint,
+      makeForkBoundaryMetadata(checkpoint.id, "assistant-3"))
+    await saver.flushStrict(); await saver.close()
+    db.upsertThreadMessages(id, [
+      { id: "user-1", role: "user", content: "Original body", created_at: new Date() },
+      { id: "assistant-1", role: "assistant", content: "Actual response", created_at: new Date() },
+      { id: "legacy-hook-user", role: "user", content: "LEGACY_RAW_HOOK_INPUT", created_at: new Date() },
+      { id: "legacy-hook-answer", role: "assistant", content: "Legacy reply", created_at: new Date() },
+      { id: "quoted-user", role: "user", content: quoted, created_at: new Date() },
+      { id: "assistant-2", role: "assistant", content: "Done", created_at: new Date() },
+      { id: "literal-user", role: "user", content: quoted, created_at: new Date() },
+      { id: "assistant-3", role: "assistant", content: "Literal received", created_at: new Date() }
+    ])
+    const fork = await forkThread({ sourceThreadId: id })
+    ids.push(fork.thread.thread_id)
+    const forkRow = db.getThreadCore(fork.thread.thread_id)!
+    assert.equal(forkRow.title, title)
+    assert.equal(botHistoryHidesTitle(forkRow.thread_id, forkRow), true)
+    assert.deepEqual(readForkInputProjections(forkRow.thread_id, ["user-1"]),
+      new Map([["user-1", "Admitted body"]]))
+    assert.deepEqual(readForkInputProjections(forkRow.thread_id, ["quoted-user", "literal-user"]),
+      new Map([["quoted-user", "CURRENT_REQUIREMENT"]]))
+    assert.equal(db.getThreadMessagesByIds(forkRow.thread_id, ["quoted-user"])[0].content, quoted)
+    const checkReference = async (threadId: string) => {
+      const page = await decorateBotHistoryPage(threadId, db.getThreadMessagesPage(threadId), () => db.getThreadCore(threadId), readForkReplyOrigins)
+      assert.deepEqual(page.messages.find(message => message.id === "quoted-user")?.botHistoryInputOrigin?.replyTo,
+        { id: reply.id, ordinal: reply.ordinal, role: reply.role })
+      assert.equal(page.messages.find(message => message.id === "literal-user")?.botHistoryInputOrigin, undefined)
+      assert.deepEqual(db.searchThreadMessages(threadId, "OLD_REFERENCE_ONLY", {}, ids => readForkReplyOrigins(threadId, ids))
+        .matches.map(match => match.messageId), ["literal-user"])
+    }
+    await checkReference(forkRow.thread_id)
+    assert.equal(db.getThreadMessagesByIds(forkRow.thread_id, ["legacy-hook-user"])[0].content, "LEGACY_RAW_HOOK_INPUT")
+    assert.deepEqual(readForkInputProjections(forkRow.thread_id, ["legacy-hook-user"]), new Map([["legacy-hook-user", null]]))
+    const service = createBotOrdinaryThreads(() => ({ conversationLinks: { forThread: () => null },
+      ordinaryThreadInputProjections: readForkInputProjections } as never))
+    const conversation = { kind: "local_thread" as const, threadId: forkRow.thread_id, incarnation: captureThreadIncarnation(forkRow) }
+    const located = await service.read({ conversation, query: "CURRENT_REQUIREMENT" })
+    assert.equal(located.entries.find(entry => entry.source.messageId === "quoted-user")?.text, "CURRENT_REQUIREMENT")
+    const searched = await service.read({ conversation, query: "OLD_REFERENCE_ONLY" })
+    assert.equal(searched.entries.some(entry => entry.source.messageId === "quoted-user"), false)
+    assert.equal(searched.entries.some(entry => entry.source.messageId === "literal-user"), true)
+    assert.equal((await service.read({ conversation, query: "LEGACY_RAW_HOOK_INPUT" })).entries.length, 0)
+    const again = await forkThread({ sourceThreadId: forkRow.thread_id })
+    ids.push(again.thread.thread_id)
+    assert.equal(botHistoryHidesTitle(again.thread.thread_id, db.getThreadCore(again.thread.thread_id)!), true)
+    assert.deepEqual(readForkInputProjections(again.thread.thread_id, ["quoted-user"]),
+      new Map([["quoted-user", "CURRENT_REQUIREMENT"]]))
+    assert.deepEqual(readForkInputProjections(again.thread.thread_id, ["legacy-hook-user"]), new Map([["legacy-hook-user", null]]))
+    await checkReference(again.thread.thread_id)
+    existingAssociation = true
+    const linked = await forkThread({ sourceThreadId: id })
+    ids.push(linked.thread.thread_id)
+    assert.equal(db.getThreadMessagesByIds(linked.thread.thread_id, ["legacy-hook-user"])[0].content, "LEGACY_RAW_HOOK_INPUT")
+    assert.equal(readForkInputProjections(linked.thread.thread_id, ["legacy-hook-user"]).size, 0,
+      "Associating an ordinary conversation must not suppress prior users' messages")
+    existingAssociation = false
+    const handlers = registerTestThreadHandlers(registerThreadHandlers)
+    const rename = (next: string) => handlers.get("threads:update")!({} as never,
+      { threadId: forkRow.thread_id, updates: { title: next } })
+    await rename(title)
+    assert.equal(botHistoryHidesTitle(forkRow.thread_id, db.getThreadCore(forkRow.thread_id)!), true)
+    await rename("Explicit interim title")
+    await rename(title)
+    assert.equal(botHistoryHidesTitle(forkRow.thread_id, db.getThreadCore(forkRow.thread_id)!), false)
+    const afterRename = await forkThread({ sourceThreadId: forkRow.thread_id })
+    ids.push(afterRename.thread.thread_id)
+    assert.equal(botHistoryHidesTitle(afterRename.thread.thread_id, db.getThreadCore(afterRename.thread.thread_id)!), false)
+    const renamed = await forkThread({ sourceThreadId: forkRow.thread_id, title: "Explicit fork title" })
+    ids.push(renamed.thread.thread_id)
+    assert.equal(botHistoryHidesTitle(renamed.thread.thread_id, db.getThreadCore(renamed.thread.thread_id)!), false)
+    db.upsertThreadMessages(id, [{ id: "rejected-tail", role: "user", content: "Rejected visible request", created_at: new Date() }])
+    await assert.rejects(() => forkThread({ sourceThreadId: id }), /checkpoint 不包含可安全 fork/)
+    db.deleteThread(id)
+    db.deleteThread(forkRow.thread_id)
+    await checkReference(again.thread.thread_id)
+  } finally {
+    setBotHistoryInputSource(undefined)
+    for (const threadId of ids) {
+      db.deleteThread(threadId)
+      await closeAndDeleteThreadCheckpoint(threadId, deleteThreadCheckpoint)
+    }
+  }
+}
+
+async function testNativeWorkForkTitleBeforeOpeningAndAfterRename(): Promise<void> {
+  const { DatabaseSync } = await import("node:sqlite")
+  const { NativeSqliteAdapter } = await import("../src/main/db/native-sqlite-adapter.ts")
+  const { BotStore } = await import("../src/main/bots/store.ts")
+  const { LocalBotHost } = await import("../src/main/bots/host.ts")
+  const { prepareBotThread } = await import("../src/main/bots/runtime-adapter.ts")
+  const { exposeWorkConversation, unlinkWorkConversation } = await import("../src/main/bots/conversation-link-service.ts")
+  const { renameBotWorkThread } = await import("../src/main/bots/work-management.ts")
+  const { botHistoryHidesTitle, setBotHistoryInputSource } = await import("../src/main/bots/history-input-projection.ts")
+  const { createBotOrdinaryThreads } = await import("../src/main/bots/ordinary-threads.ts")
+  const db = await import("../src/main/db/index.ts")
+  const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
+  const { getThreadCheckpointPath, deleteThreadCheckpoint } = await import("../src/main/storage.ts")
+  const { forkThread } = await import("../src/main/ipc/threads.ts")
+  const { captureThreadIncarnation } = await import("../src/main/services/thread-incarnation.ts")
+  const controlDb = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+  const store = new BotStore(controlDb)
+  const host = new LocalBotHost(store, { onAvailable: () => () => {}, acquire: () => null })
+  const ids: string[] = []
+  await db.initializeDatabase()
+  try {
+    const bot = store.create({ name: "Fork title owner", modelRef: null, instructions: "", color: "#123456" })
+    const parent = store.enqueue({ botId: bot.id, requestId: "fork-title-parent", message: "Verify a release" })
+    store.transition(parent.id, "running")
+    const { work, task } = store.createWork({ botId: bot.id, operationId: "fork-title-work",
+      title: "Removed creation detail", goal: "Original task input" },
+      { taskId: parent.id, callId: "fork-title-create", key: "fork-title-work" })
+    ids.push(work.threadId)
+    prepareBotThread(bot, task, work)
+    store.initializeWorkThread(bot.id, work.id)
+    store.transition(task.id, "running")
+    store.beginInputPreparation(task.id)
+    store.recordPreparedInput(task.id, "Admitted task input")
+    store.settle(task.id, "completed", null, "Done")
+    store.settle(parent.id, "completed", null, "Assigned")
+    const checkpoint = makeCheckpoint("native-title-stable")
+    ;(checkpoint.channel_values as Record<string, unknown>).messages = [
+      { type: "human", id: task.requestId, content: "Admitted task input", additional_kwargs: {
+        cmb_visible_user_message: task.message, cmb_bot_prepared_user_request: "Admitted task input"
+      } }, { type: "ai", id: "assistant-1", content: "Done" }
+    ]
+    const saver = new SqlJsSaver(getThreadCheckpointPath(work.threadId))
+    await saver.put({ configurable: { thread_id: work.threadId, checkpoint_ns: "" } }, checkpoint,
+      makeForkBoundaryMetadata(checkpoint.id))
+    await saver.flushStrict(); await saver.close()
+    db.upsertThreadMessages(work.threadId, [
+      { id: task.requestId, role: "user", content: task.message, created_at: new Date() },
+      { id: "assistant-1", role: "assistant", content: "Done", created_at: new Date() }
+    ])
+    setBotHistoryInputSource({ works: id => store.desktopDeliveryWorks(id),
+      inputs: (...args) => store.inputProjections(...args) })
+    const readTitle = async (threadId: string) => {
+      const row = db.getThreadCore(threadId)!
+      return (await createBotOrdinaryThreads(() => host).read({ conversation: {
+        kind: "local_thread", threadId, incarnation: captureThreadIncarnation(row)
+      }, query: "absent-title-test-text" })).thread.title
+    }
+    assert.equal(store.getWork(bot.id, work.id).conversation, undefined)
+    await renameBotWorkThread(host, store.getWork(bot.id, work.id),
+      () => store.renameDesktopWork(store.getWork(bot.id, work.id), work.title))
+    assert.equal(botHistoryHidesTitle(work.threadId, db.getThreadCore(work.threadId)!), true)
+    const first = await forkThread({ sourceThreadId: work.threadId })
+    ids.push(first.thread.thread_id)
+    assert.equal(first.thread.title, work.title)
+    assert.equal(await readTitle(first.thread.thread_id), "原任务")
+    const exposed = await exposeWorkConversation(host, bot.id, work.id)
+    const renamed = await renameBotWorkThread(host, exposed, () => store.renameDesktopWork(exposed, "Explicit safe name"))
+    const second = await forkThread({ sourceThreadId: work.threadId })
+    ids.push(second.thread.thread_id)
+    assert.equal(await readTitle(second.thread.thread_id), renamed.title)
+    await unlinkWorkConversation(host, bot.id, work.id, renamed.version)
+    assert.equal(await readTitle(work.threadId), renamed.title)
+    // Preserve this decision when the deleted Bot's detached owner moves to the existing archive.
+    const deleted = store.beginDeletion(bot.id, store.getBot(bot.id).version)
+    store.finishDeletion(bot.id, deleted)
+    assert.equal(await readTitle(work.threadId), renamed.title)
+    const row = db.getThreadCore(work.threadId)!
+    db.updateThread(work.threadId, { title: "Ordinary sidebar rename",
+      metadata: JSON.stringify({ ...JSON.parse(row.metadata || "{}"), title: "Ordinary sidebar rename" }) })
+    assert.equal(await readTitle(work.threadId), "Ordinary sidebar rename")
+    const third = await forkThread({ sourceThreadId: work.threadId })
+    ids.push(third.thread.thread_id)
+    assert.equal(await readTitle(third.thread.thread_id), "Ordinary sidebar rename")
+  } finally {
+    setBotHistoryInputSource(undefined)
+    for (const threadId of ids) {
+      db.deleteThread(threadId)
+      await closeAndDeleteThreadCheckpoint(threadId, deleteThreadCheckpoint)
+    }
+    await host.stop()
+    controlDb.close()
+  }
+}
+
 async function main(): Promise<void> {
-  await withTempHome(async () => {
-    const { setLegacySubagentMigrationParserForTests } = await import(
-      "../src/main/legacy-subagent-migration/coordinator.ts"
-    )
-    const restoreMigrationParser = setLegacySubagentMigrationParserForTests({
-      async parse() {
-        return {
-          inputBytes: 0,
-          batchCount: 0,
-          rowCount: 0,
-          maxBatchBytes: 0,
-          maxResponseBytes: 0,
-          finalization: "absent"
+  // These handler tests run in Node; native Bot thread creation also broadcasts to windows.
+  const { createRequire } = await import("node:module")
+  const requireElectron = createRequire(import.meta.url)
+  const electronPath = requireElectron.resolve("electron")
+  const previousElectron = requireElectron("electron")
+  requireElectron.cache[electronPath]!.exports = { BrowserWindow: { getAllWindows: () => [] } }
+  try {
+    await withTempHome(async () => {
+      const { setLegacySubagentMigrationParserForTests } = await import(
+        "../src/main/legacy-subagent-migration/coordinator.ts"
+      )
+      const restoreMigrationParser = setLegacySubagentMigrationParserForTests({
+        async parse() {
+          return {
+            inputBytes: 0,
+            batchCount: 0,
+            rowCount: 0,
+            maxBatchBytes: 0,
+            maxResponseBytes: 0,
+            finalization: "absent"
+          }
         }
+      })
+      try {
+        await testForkPreservesBotHistoryProjection()
+        await testNativeWorkForkTitleBeforeOpeningAndAfterRename()
+        await testForkThreadCopiesCheckpointThreadRowAndTranscript()
+        await testForkCopiesOnlyReferencedLargeToolResults()
+        await testInterruptedDurableTailForkIsConsistentAndComplete()
+        await testUnsafeLatestDurableTailDoesNotHideHistoricalForks()
+        await testForkLatestAllowsUserInterruptedPendingWritesBoundary()
+        await testForkLatestRejectsUnmarkedCheckpointAfterMarkerEra()
+        await testForkLatestRejectsThreadMarkerEraWithoutCheckpointMarker()
+        await testForkOverrideValidationRejectsInconsistentTargetMetadata()
+        await testForkCopiesGoalStateAndEvents()
+        await testHistoricalForkDoesNotCopyFutureGoalStateAndEvents()
+        await testSessionTranscriptMergeKeepsDurableTailBeyondCheckpoint()
+        await testSessionTranscriptMergeExcludesHiddenCoordinatorIdCollision()
+        await testSessionTranscriptMergeRestoresCurrentRunProviderOccurrence()
+        await testResolveMessageForkReturnsNewestStableCheckpoint()
+        await testResolveAndForkRoleCollisionAssistantBoundary()
+        await testResolveAndForkSameRoleDuplicateAssistantBoundary()
+        await testResolveMessageForkMapsLiveSnapshotToCheckpointMessageId()
+        await testResolveMessageForkMatchesSparseToolAssistantSnapshot()
+        await testResolveMessageForkUsesCheckpointModeForInterruptedToolTail()
+        await testResolveAndForkLegacyMessageBeforeFirstMarker()
+        await testUnmarkedCheckpointBetweenMarkersIsNotForkable()
+        await testResolveMessageForkSkipsHiddenRawTailCheckpoint()
+        await testForkWaitsForQueuedRendererThreadMutations()
+        await testQueuedRendererPersistenceRejectsSameIdReplacement()
+        await testForkThreadCopiesHistoricalForkableCheckpoints()
+        await testForkedBranchesRemainIndependentWhenForkedAgain()
+      } finally {
+        restoreMigrationParser()
       }
     })
-    try {
-      await testForkThreadCopiesCheckpointThreadRowAndTranscript()
-      await testForkCopiesOnlyReferencedLargeToolResults()
-      await testInterruptedDurableTailForkIsConsistentAndComplete()
-      await testUnsafeLatestDurableTailDoesNotHideHistoricalForks()
-      await testForkLatestAllowsUserInterruptedPendingWritesBoundary()
-      await testForkLatestRejectsUnmarkedCheckpointAfterMarkerEra()
-      await testForkLatestRejectsThreadMarkerEraWithoutCheckpointMarker()
-      await testForkOverrideValidationRejectsInconsistentTargetMetadata()
-      await testForkCopiesGoalStateAndEvents()
-      await testHistoricalForkDoesNotCopyFutureGoalStateAndEvents()
-      await testSessionTranscriptMergeKeepsDurableTailBeyondCheckpoint()
-      await testSessionTranscriptMergeExcludesHiddenCoordinatorIdCollision()
-      await testSessionTranscriptMergeRestoresCurrentRunProviderOccurrence()
-      await testResolveMessageForkReturnsNewestStableCheckpoint()
-      await testResolveAndForkRoleCollisionAssistantBoundary()
-      await testResolveAndForkSameRoleDuplicateAssistantBoundary()
-      await testResolveMessageForkMapsLiveSnapshotToCheckpointMessageId()
-      await testResolveMessageForkMatchesSparseToolAssistantSnapshot()
-      await testResolveMessageForkUsesCheckpointModeForInterruptedToolTail()
-      await testResolveAndForkLegacyMessageBeforeFirstMarker()
-      await testUnmarkedCheckpointBetweenMarkersIsNotForkable()
-      await testResolveMessageForkSkipsHiddenRawTailCheckpoint()
-      await testForkWaitsForQueuedRendererThreadMutations()
-      await testQueuedRendererPersistenceRejectsSameIdReplacement()
-      await testForkThreadCopiesHistoricalForkableCheckpoints()
-      await testForkedBranchesRemainIndependentWhenForkedAgain()
-    } finally {
-      restoreMigrationParser()
-    }
-  })
+  } finally {
+    requireElectron.cache[electronPath]!.exports = previousElectron
+  }
   console.log("thread-fork-handler.spec.ts passed")
 }
 

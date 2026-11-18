@@ -1,3 +1,4 @@
+import { chatScrollInsets } from "@/lib/chat-scroll-insets"
 /* eslint-disable react-refresh/only-export-components -- colocated search contracts and bounded runtime primitives are tested directly */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { ChevronUp, ChevronDown, X, Search } from "lucide-react"
@@ -170,12 +171,15 @@ export function scrollChatSearchRangeIntoView(viewport: HTMLElement, range: Rang
   const rect = range.getBoundingClientRect()
   if (rect.height <= 0) return
   const viewportRect = viewport.getBoundingClientRect()
+  const inset = chatScrollInsets(viewport)
+  const visibleHeight = Math.max(1, viewport.clientHeight - inset.top - inset.bottom)
   const target =
     viewport.scrollTop +
     rect.top -
     viewportRect.top -
     viewport.clientTop -
-    (viewport.clientHeight - Math.min(rect.height, viewport.clientHeight)) / 2
+    inset.top -
+    (visibleHeight - Math.min(rect.height, visibleHeight)) / 2
   viewport.scrollTo({
     top: Math.max(0, Math.min(target, viewport.scrollHeight - viewport.clientHeight)),
     behavior: "auto"

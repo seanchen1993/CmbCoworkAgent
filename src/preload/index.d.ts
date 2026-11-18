@@ -95,6 +95,7 @@ import type {
   ThreadGroupIdsOptions,
   ThreadGroupIdsResult,
   ThreadDeleteOptions,
+  ThreadDeleteResult,
   ThreadMessagesPage,
   ThreadMessagesPageOptions,
   ThreadLegacyCheckpointBootstrapResult,
@@ -240,6 +241,7 @@ import type {
   CloseToTrayPromptEvent,
   WindowCloseBehavior
 } from "../shared/close-to-tray"
+import type { StartupView } from "../shared/startup-view"
 import type { AgentRuntimeSettings, AgentToolStrategy } from "../shared/agent-runtime-limits"
 
 interface ElectronAPI {
@@ -258,6 +260,8 @@ interface ElectronAPI {
   getWindowCloseBehavior: () => Promise<WindowCloseBehavior>
   setWindowCloseBehavior: (behavior: WindowCloseBehavior) => Promise<WindowCloseBehavior>
   onWindowCloseBehaviorChanged: (callback: (behavior: WindowCloseBehavior) => void) => () => void
+  getStartupView: () => Promise<StartupView>
+  setStartupView: (view: StartupView) => Promise<StartupView>
   getGitChangeNoticeEnabled: () => Promise<boolean>
   setGitChangeNoticeEnabled: (enabled: boolean) => Promise<boolean>
   getAgentRuntimeSettings: () => Promise<AgentRuntimeSettings>
@@ -1225,7 +1229,7 @@ interface CustomAPI {
       threadId: string,
       transcripts: Record<string, unknown>
     ) => Promise<Record<string, unknown>>
-    delete: (threadId: string, options?: ThreadDeleteOptions) => Promise<void>
+    delete: (threadId: string, options?: ThreadDeleteOptions) => Promise<ThreadDeleteResult>
     getMessages: (threadId: string) => Promise<Message[]>
     getMessagesPage: (
       threadId: string,

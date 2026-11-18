@@ -1712,6 +1712,28 @@ describe("bounded group discussion on the existing Bot queue", () => {
     expect(f.reviews().map((t) => t.botId)).toEqual([f.members[1].id])
   })
 
+  it("returns failed private findings only to the caller while keeping the group failure notice", () => {
+    const f = fixture(), root = f.send()[0]
+    f.store.transition(root.id, "running")
+    const peer = f.store.delegate(root.id, f.members[1].id, "Internal check", "failed-private-check")
+    f.store.transition(peer.id, "running")
+    const partial = `Private findings @${f.members[0].name}`
+    f.store.settleRun(peer.id, [], "failed", "Required report missing", partial, undefined, true)
+    f.store.flushReplies()
+    f.store.flushReplies()
+    const callbacks = f.store.recentTasks().filter(t => t.requestId === `reply-${peer.id}`)
+    expect(callbacks).toHaveLength(1)
+    expect(callbacks[0].message).toContain(partial)
+    expect(callbacks[0].message).toContain("执行失败")
+    const notice = f.store.groupMessages(f.group.id).find(m => m.id === `result-${peer.id}`)!
+    expect(notice.text).toBe("Required report missing")
+    expect(notice.mentions ?? []).toEqual([])
+    const activity = f.store.activities().find(item => item.id === f.group.id)!
+    expect(activity.preview).toContain("Required report missing")
+    expect(activity.preview).not.toContain(partial)
+    expect(f.store.groupMessages(f.group.id).some(m => m.text.includes(partial))).toBe(false)
+  })
+
   it("keeps internal handoffs and callbacks private while preserving the real peer result", () => {
     const f = fixture(),
       root = f.send()[0]

@@ -85,8 +85,8 @@ window.avatarFixture.render();`
     await page.evaluate(() => (window as any).avatarFixture.step(120, 1000 / 120))
     const activePaints = await page.evaluate(() => (window as any).avatarFixture.paints.changed)
     assert(
-      activePaints - activeStart >= 29 && activePaints - activeStart <= 31,
-      "active SVG painting stays within 30 fps even on a 120 Hz display"
+      activePaints - activeStart >= 14 && activePaints - activeStart <= 16,
+      "active SVG painting stays within 15 fps even on a 120 Hz display"
     )
     assert(
       (await page.evaluate(() => (window as any).avatarFixture.paints.changed)) > after.changed + 1,
@@ -96,10 +96,28 @@ window.avatarFixture.render();`
       await page.evaluate(() => (window as any).avatarFixture.paints.unchanged),
       before.unchanged
     )
+    await page.emulateMedia({ reducedMotion: "reduce" })
+    await page.waitForTimeout(50)
+    await page.evaluate(() => (window as any).avatarFixture.step(60))
+    const reducedPaints = await page.evaluate(() => (window as any).avatarFixture.paints.changed)
+    await page.evaluate(() => (window as any).avatarFixture.step(120))
+    assert.equal(await page.evaluate(() => (window as any).avatarFixture.paints.changed), reducedPaints,
+      "reduced motion stops continuous painting even while the task is busy")
+    assert.equal(await page.evaluate(() => (window as any).avatarFixture.pending()), 0)
+    await page.emulateMedia({ reducedMotion: "no-preference" })
+    await page.waitForTimeout(50)
+    await page.evaluate(() => (window as any).avatarFixture.step(60))
+    assert((await page.evaluate(() => (window as any).avatarFixture.paints.changed)) > reducedPaints,
+      "removing reduced motion resumes the same busy avatar")
     // Use Chromium's actual IntersectionObserver: a working face leaving the
     // viewport must stop drawing, then resume without changing its task state.
     await page.locator("#root").evaluate((node) => { node.style.marginTop = "2000px" })
-    await page.waitForTimeout(100)
+    // IntersectionObserver delivery is asynchronous. Wait for its actual pause,
+    // rather than assuming a 100ms wall-clock delay means it has been delivered.
+    await page.waitForFunction(() => {
+      ;(window as any).avatarFixture.step(2)
+      return (window as any).avatarFixture.pending() === 0
+    }, undefined, { timeout: 3000, polling: 50 })
     await page.evaluate(() => (window as any).avatarFixture.step(10))
     const offscreenPaints = await page.evaluate(() => (window as any).avatarFixture.paints.changed)
     await page.evaluate(() => (window as any).avatarFixture.step(120))
@@ -162,7 +180,7 @@ window.avatarFixture.render();`
     )
     assert.equal(await page.locator("svg.bot-avatar").count(), 0)
     console.log(
-      "PASS: real avatar paint is local; 30fps budget; actual offscreen pause/resume; hidden pause/resume; idle/unmount cancel the clock"
+      "PASS: real avatar paint is local; 15fps budget; actual offscreen pause/resume; hidden pause/resume; idle/unmount cancel the clock"
     )
   } finally {
     await browser.close()

@@ -11,17 +11,37 @@ import { canonicalBotMessageInput } from "../../../shared/bots/message-mentions"
 import { botErrorMessage } from "./bot-error-message"
 import type { FileAttachment } from "../../../shared/file-attachment"
 import { buildAttachmentMessageParts } from "../../../shared/attachment-message-parts"
+import { botInputFileIds } from "../../../shared/bots/input-files"
+import type { BotSkillSelection } from "../../../shared/bots/skill-selection"
+import { parseSkillUseBlock } from "../features/slash-commands/skill-marker"
 
 type Queue = Pick<ThreadActions, "getQueuedMessage" | "updateQueuedMessage" | "deleteQueuedMessage">
 const UNKNOWN = "发送确认未收到，原消息和附件已保留。请重试发送。"
 
-export function validateBotDraft(draft: QueuedMessage): string | null {
+export async function assertCurrentBotUserQuote(
+  draft: QueuedMessage,
+  botId: string,
+  client: Partial<Pick<BotClient, "messageReply">>
+): Promise<void> {
+  const saved = draft.botReplyTo
+  if (saved?.role !== "user") return
   try {
-    getQueuedBotMessageInput(draft)
+    const current = await client.messageReply?.(botId, saved.id)
+    if (current?.id === saved.id && current.ordinal === saved.ordinal &&
+        current.role === saved.role && current.text === saved.text) return
   } catch {
-    return "Bot 提及与原消息不一致，请重新选择。"
+    // The draft has not been sent; an unavailable source can be retried or removed.
   }
-  const message = getQueuedModelContent(draft, "bot").trim()
+  throw new Error("无法核对原引用。草稿已保留，请重试或取消回复后发送。")
+}
+
+export function validateBotDraft(draft: QueuedMessage): string | null {
+  let message: string
+  try {
+    message = getQueuedBotMessageInput(draft).message
+  } catch {
+    return "消息中的 Bot 提及或附件引用无效，请重新选择。"
+  }
   return !message || message.length > 64_000 || message.includes("\0")
     ? "消息和附件内容超出发送限制，请调整后重试。"
     : null
@@ -34,10 +54,12 @@ export function queueBotChatDraft(
   attachments: readonly FileAttachment[]
 ): QueuedMessage {
   const now = new Date()
+  const inputFileIds = botInputFileIds(attachments)
   const draft: QueuedMessage = {
     id: crypto.randomUUID(),
     text: text.trim() || (attachments.length ? "请分析以下文件内容。" : ""),
-    ...buildAttachmentMessageParts(attachments),
+    ...buildAttachmentMessageParts(attachments, true),
+    ...(inputFileIds.length ? { botInputFileIds: inputFileIds } : {}),
     created_at: now,
     updated_at: now
   }
@@ -56,7 +78,7 @@ export function queueBotChatDraft(
 
 async function checkFor(draft: QueuedMessage): Promise<BotRequestCheck> {
   const input = getQueuedBotMessageInput(draft)
-  const bytes = new TextEncoder().encode(canonicalBotMessageInput(input.message, input.mentions))
+  const bytes = new TextEncoder().encode(canonicalBotMessageInput(input.message, input.mentions, input.inputFileIds, input.explicitSkill))
   const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))
   return {
     requestId: draft.id,
@@ -71,13 +93,14 @@ export class BotDraftSender {
   private dispatchEpoch = 0
   private failedDraftId: string | undefined
   constructor(
-    private readonly client: Pick<BotClient, "send" | "requestReceipts">,
+    private readonly client: Pick<BotClient, "send" | "requestReceipts"> & Partial<Pick<BotClient, "messageReply">>,
     private readonly botId: string,
     private readonly queue: Queue,
     private readonly report: (message: string | null) => void,
     private readonly changed: () => void,
     private readonly now = Date.now,
-    private readonly target?: { botId: string; workId: string }
+    private readonly target?: { botId: string; workId: string },
+    private readonly skillDraftSourceThreadId?: string
   ) {}
 
   stopPreparing(): void {
@@ -117,12 +140,12 @@ export class BotDraftSender {
     const current = this.queue.getQueuedMessage(draft.id)
     if (!current) return false
     if (getQueuedModelContent(current, "bot") !== getQueuedModelContent(draft, "bot")) return false
-    if (!current.botMentions?.length && !draft.botMentions?.length) return true
+    if (JSON.stringify(current.botSkillTarget) !== JSON.stringify(draft.botSkillTarget)) return false
     const actual = getQueuedBotMessageInput(current),
       expected = getQueuedBotMessageInput(draft)
     return (
-      canonicalBotMessageInput(actual.message, actual.mentions) ===
-      canonicalBotMessageInput(expected.message, expected.mentions)
+      canonicalBotMessageInput(actual.message, actual.mentions, actual.inputFileIds, actual.explicitSkill) ===
+      canonicalBotMessageInput(expected.message, expected.mentions, expected.inputFileIds, expected.explicitSkill)
     )
   }
   private acknowledge(draft: QueuedMessage): void {
@@ -147,7 +170,58 @@ export class BotDraftSender {
     return false
   }
 
-  async send(expected: QueuedMessage): Promise<void> {
+  private assertTarget(draft: QueuedMessage): void {
+    if (draft.botHandoffTarget &&
+        (draft.botHandoffTarget.botId !== this.target?.botId ||
+          draft.botHandoffTarget.workId !== this.target?.workId))
+      throw new Error(
+        "此草稿属于此前的 Bot 任务，未确认发送不能转成新的任务请求。请先核对原任务记录；确认后可删除旧草稿并明确发送新消息。"
+      )
+  }
+
+  private async canRetry(draft: QueuedMessage): Promise<boolean> {
+    if (!draft.handoffRequestedAt) return true
+    if (await this.accepted(draft)) return false
+    const age = this.now() - draft.handoffRequestedAt.getTime()
+    if (!Number.isFinite(age) || age < 0 || age >= BOT_REQUEST_RECEIPT_RETENTION_MS)
+      throw new Error("这条消息已超过发送回执的保留期，无法安全重试；请先核对会话结果。")
+    return true
+  }
+
+  /** The composer used to store its selection only in this separate field. */
+  async restoreLegacySkill(expected: QueuedMessage): Promise<QueuedMessage | undefined> {
+    const draft = this.queue.getQueuedMessage(expected.id)
+    if (draft !== expected || this.sending.has(expected.id)) return
+    this.sending.add(draft.id)
+    const epoch = this.dispatchEpoch
+    this.changed()
+    try {
+      this.assertTarget(draft)
+      // A previous send hashed the original marker-bearing payload. Settle it
+      // before changing the wire representation, keeping the original queue ID.
+      if (!await this.canRetry(draft) || epoch !== this.dispatchEpoch ||
+          this.queue.getQueuedMessage(draft.id) !== draft) return
+      const selection = parseSkillUseBlock(draft.skillBlock ?? "")
+      if (!selection || selection.rest.trim())
+        throw new Error("原技能选择无法核对，草稿已保留。请重新选择技能。")
+      let persistenceError: string | null = "未能保存原技能选择。"
+      this.queue.updateQueuedMessage(draft.id, {
+        botExplicitSkill: { name: selection.skillName, path: selection.skillPath }
+      }, error => { persistenceError = error })
+      if (persistenceError) throw new Error(persistenceError)
+      return this.queue.getQueuedMessage(draft.id)
+    } finally {
+      this.sending.delete(draft.id)
+      this.changed()
+    }
+  }
+
+  async send(
+    expected: QueuedMessage,
+    validateSkill?: (selection: BotSkillSelection) => Promise<boolean>,
+    quoteClient: Partial<Pick<BotClient, "messageReply">> = this.client,
+    supplementRunId?: string
+  ): Promise<void> {
     if (this.sending.has(expected.id)) return
     const draft = this.queue.getQueuedMessage(expected.id)
     if (!draft || draft.updated_at.getTime() !== expected.updated_at.getTime()) return
@@ -157,30 +231,36 @@ export class BotDraftSender {
     this.failedDraftId = undefined
     this.report(null)
     try {
-      if (
-        draft.botHandoffTarget &&
-        (!this.target ||
-          draft.botHandoffTarget.botId !== this.target.botId ||
-          draft.botHandoffTarget.workId !== this.target.workId)
-      )
-        throw new Error(
-          "此草稿属于此前的 Bot 任务，未确认发送不能转成新的任务请求。请先核对原任务记录；确认后可删除旧草稿并明确发送新消息。"
-        )
-      const { message, mentions } = getQueuedBotMessageInput(draft)
+      this.assertTarget(draft)
+      const { message, mentions, inputFileIds, explicitSkill } = getQueuedBotMessageInput(draft)
+      const skillWork = explicitSkill && draft.botSkillTarget?.kind === "work" ? draft.botSkillTarget : undefined
+      if (skillWork && skillWork.workId !== this.target?.workId)
+        throw new Error("技能草稿的原任务目标已改变，请核对后重试。")
+      if (skillWork && !this.skillDraftSourceThreadId)
+        throw new Error("技能草稿缺少原主对话，请在原主对话核对后重试。")
       const validationError = validateBotDraft(draft)
       if (validationError) throw new Error(validationError)
-      if (draft.handoffRequestedAt) {
-        if (await this.accepted(draft)) return
-        const age = this.now() - draft.handoffRequestedAt.getTime()
-        if (!Number.isFinite(age) || age < 0 || age >= BOT_REQUEST_RECEIPT_RETENTION_MS)
-          throw new Error("这条消息已超过发送回执的保留期，无法安全重试；请先核对会话结果。")
-      }
+      if (draft.handoffRequestedAt && !await this.canRetry(draft)) return
       if (epoch !== this.dispatchEpoch || !this.same(draft)) return
+      if (explicitSkill && validateSkill) {
+        if (!await validateSkill(explicitSkill) || epoch !== this.dispatchEpoch || !this.same(draft)) return
+      }
+      if (!draft.handoffRequestedAt && !draft.botHandoffTarget && draft.botReplyTo?.role === "user") {
+        const isCurrent = () => epoch === this.dispatchEpoch && this.queue.getQueuedMessage(draft.id) === draft
+        try {
+          await assertCurrentBotUserQuote(draft, this.botId, quoteClient)
+        } catch (cause) {
+          if (isCurrent()) this.report(botErrorMessage(cause))
+          return
+        }
+        if (!isCurrent()) return
+      }
+      const target = draft.botHandoffTarget ?? (this.target && { ...this.target, ...(supplementRunId ? { runId: supplementRunId } : {}) })
       let persistenceError: string | null = "消息未能保存，未发送。"
       this.queue.updateQueuedMessage(
         draft.id,
         {
-          ...(this.target ? { botHandoffTarget: this.target } : {}),
+          ...(target ? { botHandoffTarget: target } : {}),
           handoffRequestedAt: draft.handoffRequestedAt ?? new Date(this.now())
         },
         (error) => {
@@ -194,18 +274,24 @@ export class BotDraftSender {
           botId: this.botId,
           requestId: draft.id,
           message,
+          ...(target?.runId ? { supplementRunId: target.runId } : {}),
           ...(mentions?.length ? { mentions } : {}),
-          ...(draft.botReplyTo ? { replyToId: draft.botReplyTo.id } : {})
+          ...(inputFileIds?.length ? { inputFileIds } : {}),
+          ...(explicitSkill ? { explicitSkill } : {}),
+          ...(skillWork ? { skillDraftFromMain: true, skillDraftSourceThreadId: this.skillDraftSourceThreadId } : {}),
+          ...(draft.botReplyTo && !skillWork ? { replyToId: draft.botReplyTo.id } : {})
         })
         if (
           task.botId !== this.botId ||
           task.requestId !== draft.id ||
           task.message !== message ||
-          (mentions?.length &&
+          ((mentions?.length || inputFileIds?.length || explicitSkill) &&
             canonicalBotMessageInput(
               task.message,
-              task.origin?.kind === "user" ? task.origin.mentions : undefined
-            ) !== canonicalBotMessageInput(message, mentions))
+              task.origin?.kind === "user" ? task.origin.mentions : undefined,
+              task.origin?.kind === "user" ? task.origin.inputFileIds : undefined,
+              task.origin?.kind === "user" ? task.origin.explicitSkill : undefined
+            ) !== canonicalBotMessageInput(message, mentions, inputFileIds, explicitSkill))
         )
           throw new Error("收到的发送确认与原消息不一致，请核对回执。")
         this.acknowledge(draft)
@@ -232,7 +318,9 @@ export class BotDraftSender {
     this.clearSettledError()
     if (this.reconciling) return this.reconciling
     const pending = drafts.filter(
-      (draft) => draft.handoffRequestedAt && !this.sending.has(draft.id)
+      (draft) => draft.handoffRequestedAt && !this.sending.has(draft.id) &&
+        draft.botSkillTarget?.kind !== "create" &&
+        (draft.botSkillTarget?.kind !== "work" || draft.botSkillTarget.workId === this.target?.workId)
     )
     if (!pending.length) return Promise.resolve()
     this.reconciling = (async () => {

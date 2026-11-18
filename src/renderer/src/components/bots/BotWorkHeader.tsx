@@ -2,6 +2,8 @@ import { ModelSwitcher } from "@/components/chat/ModelSwitcher"
 import { botWorkStatus } from "@/lib/bot-work-status"
 import { useRef, useState, type ReactNode } from "react"
 import { ArrowLeft, ArrowUpRight, Check, MoreHorizontal, RotateCcw } from "lucide-react"
+import { useThreadContext } from "@/lib/thread-context"
+import { openBotWorkThreadChat, resolveBotWorkThreadForNavigation } from "@/lib/bot/work-thread-summary"
 import { useAppStore } from "@/lib/store"
 import { botErrorMessage } from "@/lib/bot-error-message"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -14,6 +16,7 @@ export function BotWorkHeader({
   client,
   work,
   controller,
+  captureWorkNavigation,
   disabled,
   onBack,
   backLabel
@@ -21,10 +24,12 @@ export function BotWorkHeader({
   client: BotClient
   work: BotWorkItem
   controller: ReturnType<typeof useBotWorks>
+  captureWorkNavigation?(): () => boolean
   disabled: boolean
   onBack(): void
   backLabel: string
 }) {
+  const threadContext = useThreadContext()
   const [saving, setSaving] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const [error, setError] = useState<string>()
@@ -40,31 +45,48 @@ export function BotWorkHeader({
     controller.current.current.selectedId === work.id &&
     controller.current.current.audience ===
       (work.source && !work.source.personal ? work.source.bindingId : "desktop")
-  const apply = async (open: boolean) => {
+  const openConversation = async () => {
+    if (saving || !client.conversations) return
+    const isNavigationCurrent = captureWorkNavigation?.()
+    const isCurrent = () => current() && isNavigationCurrent?.() !== false
+    setMenuOpen(false)
+    setSaving(true)
+    setError(undefined)
+    try {
+      if (work.source) {
+        const result = await client.conversations.expose(work.botId, work.id)
+        if (!isCurrent()) return
+        await useAppStore.getState().loadThreads()
+        if (isCurrent()) await useAppStore.getState().selectThread(result.threadId)
+      } else {
+        const threadId = await resolveBotWorkThreadForNavigation(client, work, isCurrent)
+        if (threadId && isCurrent()) await openBotWorkThreadChat(threadContext, threadId)
+      }
+    } catch (cause) {
+      if (isCurrent()) setError(botErrorMessage(cause))
+    } finally {
+      setSaving(false)
+    }
+  }
+  const apply = async () => {
     if (saving) return
     setMenuOpen(false)
     setSaving(true)
     setError(undefined)
     try {
-      if (open) {
-        const result = await client.conversations!.expose(work.botId, work.id)
-        await useAppStore.getState().loadThreads()
-        if (current()) await useAppStore.getState().selectThread(result.threadId)
-      } else {
-        const action = work.state === "completed" ? "continue" : "complete"
-        const fingerprint = JSON.stringify([work.id, work.version, action])
-        if (operation.current?.fingerprint !== fingerprint)
-          operation.current = { fingerprint, id: crypto.randomUUID() }
-        await client.works!.lifecycle({
-          botId: work.botId,
-          workId: work.id,
-          expectedVersion: work.version,
-          action,
-          operationId: operation.current.id
-        })
-        operation.current = undefined
-        if (current()) await controller.refresh()
-      }
+      const action = work.state === "completed" ? "continue" : "complete"
+      const fingerprint = JSON.stringify([work.id, work.version, action])
+      if (operation.current?.fingerprint !== fingerprint)
+        operation.current = { fingerprint, id: crypto.randomUUID() }
+      await client.works!.lifecycle({
+        botId: work.botId,
+        workId: work.id,
+        expectedVersion: work.version,
+        action,
+        operationId: operation.current.id
+      })
+      operation.current = undefined
+      if (current()) await controller.refresh()
     } catch (cause) {
       if (current()) setError(botErrorMessage(cause))
     } finally {
@@ -85,7 +107,7 @@ export function BotWorkHeader({
           <button
             className="flex w-full items-center gap-2 rounded-md p-2 text-left text-sm hover:bg-accent disabled:opacity-40"
             disabled={saving}
-            onClick={() => void apply(true)}
+            onClick={() => void openConversation()}
           >
             <ArrowUpRight size={14} />
             在对话模式打开
@@ -95,7 +117,7 @@ export function BotWorkHeader({
           <button
             className="flex w-full items-center gap-2 rounded-md p-2 text-left text-sm hover:bg-accent disabled:opacity-40"
             disabled={!canChange}
-            onClick={() => void apply(false)}
+            onClick={() => void apply()}
           >
             <Check size={14} />
             完成任务
@@ -124,7 +146,7 @@ export function BotWorkHeader({
           <button
             className="bot-task-finish"
             disabled={!canChange}
-            onClick={() => void apply(false)}
+            onClick={() => void apply()}
           >
             <Check size={14} />
             完成任务
@@ -134,7 +156,7 @@ export function BotWorkHeader({
           <button
             className="bot-task-finish"
             disabled={!canChange}
-            onClick={() => void apply(false)}
+            onClick={() => void apply()}
           >
             <RotateCcw size={14} />
             继续处理

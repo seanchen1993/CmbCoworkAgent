@@ -1,6 +1,8 @@
 import type { BuiltinRobotManager } from "../services/im/manager"
+import { botThreadOwners } from "../bots/work-owners"
 import { BrowserWindow, powerMonitor, type IpcMain, type IpcMainInvokeEvent } from "electron"
 import { botImExternalId } from "../../shared/bots/im-channel"
+import { botWorkBrowserScope } from "../../shared/bots/work"
 import {
   BotError,
   LOCAL_BOT_HOST_ID,
@@ -21,9 +23,15 @@ import {
   parseGroupHistoryCursor,
   parseBotRequestChecks,
   parseCreateBotWork,
-  parseBotWorkLifecycle
+  parseBotSkillWorkspaceTarget,
+  parseBotWorkLifecycle,
+  parseBotWorkControl,
+  parseBotScheduleEdit,
+  parseBotDesktopWorkScheduleBinding
 } from "../../shared/bots/validation"
 import { prepareBotThread } from "../bots/runtime-adapter"
+import { verifyUnexposedWorkUnlinkThread } from "../bots/conversation-link-authority"
+import { setBotConversationDeletionService } from "../bots/conversation-tool-management"
 import {
   initializeBotNotificationDispatch,
   refreshBotFeatureProjects,
@@ -31,11 +39,16 @@ import {
   getBotMemoryService,
   getBotBrowserService
 } from "../bots/local-service"
-import { getThreadCore } from "../db"
+import { getThreadCore, getThreadMessagesByIds } from "../db"
+import { botHistoryInputProjection } from "../bots/history-input-projection"
+import { matchesThreadIncarnation } from "../services/thread-incarnation"
+import { cleanUserAttachmentContentForDisplay } from "../../shared/user-attachment-display"
+import { projectVisibleChatSearchContent } from "../../shared/chat-search-visible-content"
 import type { ThreadDeletionService } from "./threads"
 import { registerBotFileHandlers } from "./bot-files"
 import { configureBotFeatureWindow } from "../bots/feature-window"
 import { withCurrentHarnessFeature } from "../harness-board/feature-catalog-lifecycle"
+import { isUserInputResponse } from "./user-input"
 import {
   exposeWorkConversation,
   linkExistingConversation,
@@ -44,7 +57,11 @@ import {
   unlinkDeletingWorkConversation
 } from "../bots/conversation-link-service"
 import { localWorkConversationRef } from "../bots/conversation-link-validation"
-import { isBotThreadMessageId } from "../../shared/bots/message-reply"
+import {
+  finishBotConversationTransition,
+  listenBotConversationTransitions
+} from "../bots/conversation-transition"
+import { isBotMessageReply, isBotThreadMessageId } from "../../shared/bots/message-reply"
 import {
   parseBotReactionTarget,
   parseBotReactionMessageIds,
@@ -65,6 +82,7 @@ export function registerBotHandlers(
   getFeatureWindow?: () => BrowserWindow | null
 ): void {
   if (getFeatureWindow) configureBotFeatureWindow(getFeatureWindow)
+  setBotConversationDeletionService(deleteThread)
   initializeBotNotificationDispatch()
   im?.setBotHostResolver(getLocalBotHost)
   const imChannel = () => {
@@ -227,13 +245,61 @@ export function registerBotHandlers(
       botIdentifier(threadId)
     )
   })
+  ipcMain.handle("bots:conversation:listen", (event, hostId: unknown, listening: unknown) => {
+    desktopHost(event, hostId)
+    if (typeof listening !== "boolean") throw new BotError("INVALID_INPUT", "监听参数无效")
+    listenBotConversationTransitions(event.sender, listening)
+  })
+  ipcMain.handle(
+    "bots:conversation:finish-transition",
+    (event, hostId: unknown, id: unknown, error: unknown) => {
+      desktopHost(event, hostId)
+      if (error !== undefined && (typeof error !== "string" || error.length > 1000))
+        throw new BotError("INVALID_INPUT", "草稿核对结果无效")
+      return finishBotConversationTransition(event.sender.id, botIdentifier(id), error, event)
+    }
+  )
   ipcMain.handle("bots:conversation:resolve", (event, hostId, threadId) =>
     resolveWorkConversation(desktopHost(event, hostId), botIdentifier(threadId))
   )
+  ipcMain.handle("bots:conversation:owners", (event, hostId, threadIds) => {
+    const host = desktopHost(event, hostId)
+    if (!Array.isArray(threadIds) || threadIds.length > 64 || new Set(threadIds).size !== threadIds.length)
+      throw new BotError("INVALID_INPUT", "会话归属查询批次无效")
+    return botThreadOwners(host, threadIds.map(id => botIdentifier(id)))
+  })
+  ipcMain.handle("bots:conversation:revalidate-draft-reply", (event, hostId, conversation, reply: unknown) => {
+    desktopHost(event, hostId)
+    const ref = localWorkConversationRef(conversation)
+    if (!isBotMessageReply(reply) || reply.role !== "user")
+      throw new BotError("INVALID_INPUT", "原草稿的引用无效。")
+    const row = getThreadCore(ref.threadId)
+    if (!row || !matchesThreadIncarnation(row, ref.incarnation))
+      throw new BotError("CONFLICT", "原会话身份已变化。请取消回复后继续发送。")
+    const [message] = getThreadMessagesByIds(ref.threadId, [reply.id])
+    if (message?.id !== reply.id || message.role !== reply.role || message.ordinal !== reply.ordinal)
+      throw new BotError("CONFLICT", "找不到原引用消息。请取消回复后继续发送。")
+    const content = botHistoryInputProjection(ref.threadId, row)?.([reply.id], "reply").get(reply.id)
+    if (content === undefined) return reply
+    const text = content === null ? "" :
+      projectVisibleChatSearchContent("user", cleanUserAttachmentContentForDisplay(content)).slice(0, 8_000)
+    const projected = { id: reply.id, ordinal: reply.ordinal, role: reply.role, text }
+    if (!isBotMessageReply(projected))
+      throw new BotError("CONFLICT", "原消息没有可引用的放行内容。请取消回复后继续发送。")
+    return projected
+  })
+  ipcMain.handle("bots:conversation:resolve-history", (event, hostId, botId, source) => {
+    const host = desktopHost(event, hostId)
+    const ref = localWorkConversationRef(source?.conversation)
+    if (typeof source?.messageId !== "string" || !source.messageId || source.messageId.length > 512)
+      throw new BotError("INVALID_INPUT", "消息来源无效")
+    return host.resolveOrdinaryThreadSource(botIdentifier(botId), { conversation: ref, messageId: source.messageId })
+  })
   ipcMain.handle("bots:conversation:expose", async (event, hostId, botId, workId) => {
     const host = desktopHost(event, hostId),
       bot = host.getBot(botIdentifier(botId)),
       work = host.getWork(bot.id, botIdentifier(workId))
+    host.assertWorkNotDeleting(work)
     if (work.source && work.source.transport !== "im")
       throw new BotError("CONFLICT", "模拟渠道任务不能在对话模式打开。")
     if (!work.conversation) {
@@ -272,6 +338,20 @@ export function registerBotHandlers(
       botIdentifier(workId),
       version
     )
+  })
+  ipcMain.handle("bots:conversation:unlink-has-open-pages", (event, hostId, botId, workId) => {
+    const host = desktopHost(event, hostId)
+    const work = host.getWork(botIdentifier(botId), botIdentifier(workId))
+    host.assertWorkNotDeleting(work)
+    if (work.source || work.audienceKey !== "desktop" || (work.conversation &&
+        work.conversation.state !== "bound" && work.conversation.state !== "detaching"))
+      throw new BotError("CONFLICT", "原任务关联已变化，请重新核对。")
+    if (!work.conversation) {
+      const row = getThreadCore(work.threadId)
+      if (!row) throw new BotError("CONFLICT", "原会话不存在。")
+      verifyUnexposedWorkUnlinkThread(work, row, JSON.parse(row.metadata || "{}"))
+    }
+    return getBotBrowserService().hasOpenPages(botWorkBrowserScope(work.id, work.botId))
   })
   ipcMain.handle("bots:im:file-statuses", (event, hostId, botId, threadId, callId) => {
     if (typeof callId !== "string" || !callId || callId.length > 40000)
@@ -470,10 +550,11 @@ export function registerBotHandlers(
       )
     }
   )
-  ipcMain.handle("bots:work:summaries", (_event, hostId: unknown, botId: unknown, ids: unknown) => {
-    if (!Array.isArray(ids) || ids.length > 40 || new Set(ids).size !== ids.length)
+  ipcMain.handle("bots:work:summaries", (_event, hostId: unknown, botId: unknown, ids: unknown, allowMissing: unknown) => {
+    if (!Array.isArray(ids) || ids.length > 40 || new Set(ids).size !== ids.length ||
+        (allowMissing !== undefined && allowMissing !== true))
       throw new BotError("INVALID_INPUT", "工作摘要批次无效")
-    return hostFor(hostId).workSummaries(botIdentifier(botId), ids.map(botIdentifier))
+    return hostFor(hostId).workSummaries(botIdentifier(botId), ids.map(botIdentifier), allowMissing)
   })
   ipcMain.handle(
     "bots:work:mark-all-read",
@@ -486,6 +567,15 @@ export function registerBotHandlers(
   ipcMain.handle("bots:work:associations", (event, hostId, botId) =>
     desktopHost(event, hostId).associatedWorks(botIdentifier(botId))
   )
+  ipcMain.handle("bots:work:pending-questions", (event, hostId, botId) =>
+    desktopHost(event, hostId).pendingWorkQuestions(botIdentifier(botId))
+  )
+  ipcMain.handle("bots:work:answer-question", (event, hostId, botId, taskId, response: unknown) => {
+    const host = desktopHost(event, hostId)
+    if (!isUserInputResponse(response)) throw new BotError("INVALID_INPUT", "问题答复无效")
+    botIdentifier(response.requestId)
+    return host.answerWorkQuestion(botIdentifier(botId), botIdentifier(taskId), response)
+  })
   ipcMain.handle("bots:work:source", (event, hostId, botId, source) => {
     if (
       !source ||
@@ -504,19 +594,33 @@ export function registerBotHandlers(
   ipcMain.handle("bots:work:get", (_event, hostId: unknown, botId: unknown, workId: unknown) =>
     hostFor(hostId).getWork(botIdentifier(botId), botIdentifier(workId))
   )
+  ipcMain.handle("bots:work:validate-skill-workspace", (event, hostId: unknown, botId: unknown, target: unknown) =>
+    desktopHost(event, hostId).validateSkillWorkspace(botIdentifier(botId), parseBotSkillWorkspaceTarget(target))
+  )
   ipcMain.handle("bots:work:create", (event, hostId: unknown, input: unknown) => {
-    const work = parseCreateBotWork(input)
-    const host = work.imConversationId ? desktopHost(event, hostId) : hostFor(hostId)
-    return host.createWork(work)
+    const request = parseCreateBotWork(input)
+    const host = (request.explicitSkill || request.imConversationId) ? desktopHost(event, hostId) : hostFor(hostId)
+    return host.createWork(request)
   })
   ipcMain.handle("bots:work:lifecycle", (_event, hostId: unknown, input: unknown) => {
     const v = parseBotWorkLifecycle(input)
     return hostFor(hostId).changeWork(v.botId, v.workId, v.expectedVersion, v.operationId, v.action)
   })
+  ipcMain.handle("bots:work:stop", (event, hostId, botId, workId) =>
+    desktopHost(event, hostId).stopWork(botIdentifier(botId), botIdentifier(workId))
+  )
+  ipcMain.handle("bots:work:control", (event, hostId: unknown, input: unknown) =>
+    desktopHost(event, hostId).changeWorkControl(parseBotWorkControl(input))
+  )
+  ipcMain.handle("bots:work:control-pending", (event, hostId: unknown, botId: unknown, workId: unknown, taskId: unknown) =>
+    desktopHost(event, hostId).workControlPending(botIdentifier(botId), botIdentifier(workId),
+      taskId === undefined ? undefined : botIdentifier(taskId))
+  )
   ipcMain.handle("bots:open", (_event, hostId: unknown, id: unknown, workId: unknown) => {
     const host = hostFor(hostId),
       bot = host.getBot(botIdentifier(id)),
       work = workId == null ? undefined : host.getWork(bot.id, botIdentifier(workId))
+    if (work) host.assertWorkNotDeleting(work)
     prepareBotThread(
       bot,
       work ? { threadId: work.threadId, origin: { kind: "user" } } : undefined,
@@ -527,6 +631,7 @@ export function registerBotHandlers(
     return { threadId: work?.threadId ?? bot.threadId }
   })
   ipcMain.handle("bots:snapshot", (_event, hostId: unknown) => hostFor(hostId).snapshot())
+  ipcMain.handle("bots:has-unread", (_event, hostId: unknown) => hostFor(hostId).hasUnread())
   ipcMain.handle(
     "bots:exchange",
     (_event, hostId: unknown, botId: unknown, taskId: unknown, groupId: unknown, workId: unknown, imConversationId: unknown) =>
@@ -593,12 +698,14 @@ export function registerBotHandlers(
   )
   ipcMain.handle(
     "bots:stop-conversation",
-    (_event, hostId: unknown, botId: unknown, groupId: unknown, workId: unknown) =>
-      hostFor(hostId).stopConversation(
-        botIdentifier(botId),
-        groupId === undefined ? undefined : botIdentifier(groupId),
-        workId == null ? undefined : botIdentifier(workId)
-      )
+    (_event, hostId: unknown, botId: unknown, groupId: unknown, workId: unknown, scope: unknown) => {
+      if (scope !== undefined && scope !== "background") throw new BotError("INVALID_INPUT", "停止范围无效")
+      const host = hostFor(hostId)
+      const owner = botIdentifier(botId)
+      const group = groupId === undefined ? undefined : botIdentifier(groupId)
+      const work = workId == null ? undefined : botIdentifier(workId)
+      return scope ? host.stopConversation(owner, group, work, scope) : host.stopConversation(owner, group, work)
+    }
   )
   ipcMain.handle(
     "bots:stop-group",
@@ -683,9 +790,11 @@ export function registerBotHandlers(
   ipcMain.handle("bots:update", (_event, hostId: unknown, input: unknown) =>
     hostFor(hostId).update(parseUpdateBot(input))
   )
-  ipcMain.handle("bots:send", (_event, hostId: unknown, input: unknown) =>
-    hostFor(hostId).send(parseSendBotMessage(input))
-  )
+  ipcMain.handle("bots:send", (event, hostId: unknown, input: unknown) => {
+    const request = parseSendBotMessage(input)
+    const host = request.explicitSkill || request.workId ? desktopHost(event, hostId) : hostFor(hostId)
+    return host.sendDesktopMessage(request)
+  })
   ipcMain.handle(
     "bots:message-reply",
     (_event, hostId: unknown, botId: unknown, messageId: unknown, workId: unknown) => {
@@ -727,18 +836,32 @@ export function registerBotHandlers(
   )
   ipcMain.handle(
     "bots:schedule:save",
-    (_event, hostId: unknown, botId: unknown, input: unknown, existing: unknown) =>
-      hostFor(hostId).saveSchedule(
+    (event, hostId: unknown, botId: unknown, input: unknown, existing: unknown, desktopWork: unknown) => {
+      const binding = parseBotDesktopWorkScheduleBinding(desktopWork)
+      const current = parseBotScheduleEdit(existing)
+      const desktopOnly = binding || current?.expiresAt || current?.workMonitor || current?.withdrawTaskId
+      const host = desktopOnly ? desktopHost(event, hostId) : hostFor(hostId)
+      const prior = !desktopOnly && current && host.snapshot().schedules.find(schedule => schedule.id === current.id)
+      if (prior && (prior.desktopWork || prior.workMonitor || prior.fixedReminder))
+        desktopHost(event, hostId)
+      return host.saveSchedule(
         botIdentifier(botId),
         parseSchedule(input),
-        parseExistingVersion(existing)
+        current,
+        undefined,
+        binding
       )
+    }
   )
   ipcMain.handle(
     "bots:schedule:remove",
-    (_event, hostId: unknown, id: unknown, version: unknown) => {
+    (event, hostId: unknown, id: unknown, version: unknown) => {
       const existing = parseExistingVersion({ id, version })!
-      hostFor(hostId).removeSchedule(existing.id, existing.version)
+      const host = hostFor(hostId)
+      const prior = host.snapshot().schedules.find(schedule => schedule.id === existing.id)
+      if (prior && (prior.desktopWork || prior.workMonitor || prior.fixedReminder))
+        desktopHost(event, hostId)
+      host.removeSchedule(existing.id, existing.version)
     }
   )
 }

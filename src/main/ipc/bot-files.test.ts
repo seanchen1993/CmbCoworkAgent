@@ -24,6 +24,8 @@ const fixture = vi.hoisted(() => ({
   stableRead: vi.fn(),
   stableClose: vi.fn(),
   parse: vi.fn(),
+  snapshot: vi.fn(),
+  retainInputFile: vi.fn(),
   cancelParser: vi.fn()
 }))
 vi.mock("electron", () => ({
@@ -40,7 +42,8 @@ vi.mock("../bots/file-copy", () => ({
   botImportDestination: fixture.destination,
   copyBotFile: fixture.copy,
   exportBotFile: fixture.exportCopy,
-  copyBotFileBytes: fixture.copyBytes
+  copyBotFileBytes: fixture.copyBytes,
+  snapshotBotDeliveryFile: fixture.snapshot
 }))
 vi.mock("../workspace-file-scan/manager", () => ({
   openWorkspaceFileScan: fixture.scan,
@@ -94,6 +97,8 @@ beforeEach(() => {
   fixture.save.mockResolvedValue({ canceled: false, filePath: "/saved/report.md" })
   fixture.stableOpen.mockResolvedValue({ size: 12, handle: { close: fixture.stableClose } })
   fixture.stableRead.mockResolvedValue(Buffer.from("# synthetic"))
+  fixture.snapshot.mockImplementation(async (root, source) => ({ attachmentPath: `${root}/.bot-deliveries/hash/${source.split("/").pop()}`, size: 12 }))
+  fixture.retainInputFile.mockImplementation((_bot, attachment) => ({ ...attachment, botInputId: "input-11111111-1111-1111-1111-111111111111" }))
   fixture.stableClose.mockResolvedValue(undefined)
   fixture.parse.mockResolvedValue({
     filename: "report.md",
@@ -103,6 +108,24 @@ beforeEach(() => {
     size: 12,
     truncated: false
   })
+})
+
+it.each(["private", "group", "im", "work"])("preserves a result's logical save name without changing %s file ownership", async (scope) => {
+  const invoke = register(), path = ".bot-deliveries/hash/report.md"
+  fixture.imGateway.binding.mockReturnValue({ binding: { botId: "a", kind: "group" } })
+  fixture.getWork.mockReturnValue({ id: "work", botId: "a", threadId: "work-thread" })
+  const save = (name: unknown) => scope === "group" ? invoke("export-group", "g", path, name) :
+    scope === "im" ? invoke("export-im", "a", "binding", path, undefined, name) :
+    invoke("export", "a", path, undefined, scope === "work" ? "work" : undefined, name)
+  await expect(save("Report.md")).resolves.toBe(true)
+  expect(fixture.save).toHaveBeenLastCalledWith({}, { title: "保存工作成果", defaultPath: "Report.md" })
+  expect(fixture.exportCopy.mock.calls[0][1]).toContain(path)
+  fixture.save.mockResolvedValueOnce({ canceled: true })
+  await expect(save("Report.md")).resolves.toBe(false)
+  expect(fixture.exportCopy).toHaveBeenCalledTimes(1)
+  for (const invalid of ["../report.md", "dir/report.md", "dir\\report.md", "..", "", "a\0b", 42])
+    await expect(save(invalid)).rejects.toThrow("保存文件名无效")
+  expect(fixture.save).toHaveBeenCalledTimes(2)
 })
 
 it("exports a retained IM group snapshot only through its owning Bot and binding", async () => {
@@ -364,6 +387,8 @@ describe("Bot file IPC group scope", () => {
     )) as Array<{ filePath: string }>
     expect(dropped[0].filePath).toBe("shared/copy.md")
     expect(fixture.copyBytes).toHaveBeenCalledWith("/group/shared/copy.md", bytes)
+    expect(fixture.snapshot).not.toHaveBeenCalled()
+    expect(fixture.retainInputFile).not.toHaveBeenCalled()
     fixture.copy.mockClear()
     fixture.getGroupMember.mockImplementation(() => {
       throw new Error("Not a member")
@@ -398,9 +423,11 @@ describe("Bot file IPC group scope", () => {
     expect(fixture.copy).toHaveBeenCalledWith(
       "/selected",
       "/selected/report.md",
-      "/private/a/shared/copy.md"
+      "/private/a/shared/copy.md",
+      undefined,
+      5 * 1024 * 1024
     )
-    expect(fixture.stableOpen).toHaveBeenCalledWith("/private/a", "/private/a/shared/copy.md")
+    expect(fixture.stableOpen).toHaveBeenCalledWith("/private/a", "/private/a/.bot-deliveries/hash/copy.md")
     expect(fixture.stableRead).toHaveBeenCalledWith(expect.anything(), 5 * 1024 * 1024)
     expect(fixture.parse).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -411,10 +438,30 @@ describe("Bot file IPC group scope", () => {
       expect.any(Number),
       "bot-attachment:1"
     )
-    expect(result[0]).toMatchObject({ filename: "report.md", filePath: "shared/copy.md", size: 12 })
+    expect(result[0]).toMatchObject({ filename: "report.md", filePath: "shared/copy.md", size: 12,
+      botInputId: "input-11111111-1111-1111-1111-111111111111" })
     expect(result[0].content).toContain("# parsed report")
     expect(result[0].content.length).toBeLessThanOrEqual(500)
     expect(fixture.stableClose).toHaveBeenCalledOnce()
+    expect(fixture.retainInputFile).toHaveBeenCalledWith("a", expect.objectContaining({
+      filePath: "shared/copy.md"
+    }), "/private/a/.bot-deliveries/hash/copy.md")
+  })
+
+  it("does not retain or parse a file rejected by the parser-size copy bound", async () => {
+    const call = register()
+    fixture.copy.mockImplementation(async (_root, _source, _target, _signal, maxBytes) => {
+      if (maxBytes === 5 * 1024 * 1024) throw new Error("单个文件不能超过 5 MiB")
+    })
+    await expect(call("attach", "a", 1, 500)).rejects.toThrow("5 MiB")
+    expect(fixture.snapshot).not.toHaveBeenCalled()
+    expect(fixture.retainInputFile).not.toHaveBeenCalled()
+    expect(fixture.parse).not.toHaveBeenCalled()
+    await expect(call("import", "a")).resolves.toEqual(["shared/copy.md"])
+    fixture.open.mockResolvedValue({ canceled: false, filePaths: ["/selected/archive.zip"] })
+    await expect(call("attach", "a", 1, 500)).resolves.toHaveLength(1)
+    expect(fixture.copy).toHaveBeenLastCalledWith("/selected", "/selected/archive.zip", "/private/a/shared/copy.md")
+    expect(fixture.parse).not.toHaveBeenCalled()
   })
 
   it("closes the stable file on parse failure and refuses a revoked Bot before returning attachment text", async () => {
@@ -428,6 +475,19 @@ describe("Bot file IPC group scope", () => {
     })
     await expect(call("attach", "a", 3, 500)).rejects.toThrow("归档")
     expect(fixture.stableClose).toHaveBeenCalledTimes(2)
+    expect(fixture.retainInputFile).not.toHaveBeenCalled()
+  })
+
+  it("does not issue a reference when version retention fails, and leaves explicit library imports unchanged", async () => {
+    const call = register()
+    fixture.snapshot.mockRejectedValueOnce(new Error("version changed"))
+    await expect(call("attach", "a", 1, 500)).rejects.toThrow("version changed")
+    expect(fixture.retainInputFile).not.toHaveBeenCalled()
+    expect(fixture.parse).not.toHaveBeenCalled()
+    fixture.snapshot.mockClear()
+    await expect(call("import", "a")).resolves.toEqual(["shared/copy.md"])
+    expect(fixture.snapshot).not.toHaveBeenCalled()
+    expect(fixture.retainInputFile).not.toHaveBeenCalled()
   })
 
   it("caps extracted text and rejects invalid character budgets before selecting files", async () => {
@@ -458,6 +518,7 @@ describe("Bot file IPC group scope", () => {
       path: "/private/a/shared/raw.json"
     })
     const bytes = new TextEncoder().encode('{"synthetic":true}').buffer
+    fixture.stableOpen.mockResolvedValueOnce({ size: bytes.byteLength, handle: { close: fixture.stableClose } })
     const result = (await call(
       "attach-bytes",
       "a",
@@ -477,6 +538,7 @@ describe("Bot file IPC group scope", () => {
       size: bytes.byteLength
     })
     expect(result[0].content).toContain("shared/raw.json")
+    expect(result[0].content).not.toContain(".bot-deliveries")
     await expect(
       call("attach-bytes", "a", [{ fileName: "bad.txt", bytes: "not-bytes" }], 500)
     ).rejects.toThrow("拖入文件")
@@ -494,6 +556,15 @@ describe("Bot file IPC group scope", () => {
       )
     ).rejects.toThrow("3 个文件")
     expect(fixture.copyBytes).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps the existing sanitized basename for private drag extraction", async () => {
+    const call = register()
+    fixture.destination.mockResolvedValueOnce({ id: "shared/report.txt", path: "/private/a/shared/report.txt" })
+    const result = await call("attach-bytes", "a", [{ fileName: "report.txt.", bytes: new TextEncoder().encode("text").buffer }], 500)
+    expect(fixture.parse).toHaveBeenCalledWith(expect.objectContaining({ fileName: "report.txt" }), expect.any(Number), "bot-attachment:1")
+    expect(result).toEqual([expect.objectContaining({ filename: "report.txt", filePath: "shared/report.txt" })])
+    expect(fixture.retainInputFile).toHaveBeenCalledWith("a", expect.objectContaining({ filePath: "shared/report.txt" }), "/private/a/.bot-deliveries/hash/report.txt")
   })
 
   it("reuses bounded text extraction for dropped documents and refuses a Bot revoked during destination creation", async () => {

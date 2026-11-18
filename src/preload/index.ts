@@ -1,4 +1,5 @@
 import { localBotsApi } from "./bots"
+import { createBotWorkStreamPreview } from "./bot-work-stream-preview"
 import type {
   ManagedRunSchedule,
   ManagedRunScheduleInput,
@@ -34,6 +35,7 @@ import {
   type CloseToTrayPromptEvent,
   type WindowCloseBehavior
 } from "../shared/close-to-tray"
+import { STARTUP_VIEW_GET_CHANNEL, STARTUP_VIEW_SET_CHANNEL, type StartupView } from "../shared/startup-view"
 import type { AgentRuntimeSettings, AgentToolStrategy } from "../shared/agent-runtime-limits"
 import type {
   Thread,
@@ -95,6 +97,7 @@ import type {
   ThreadGroupIdsOptions,
   ThreadGroupIdsResult,
   ThreadDeleteOptions,
+  ThreadDeleteResult,
   ThreadMessagesPage,
   ThreadMessagesPageOptions,
   ThreadLegacyCheckpointBootstrapResult,
@@ -337,6 +340,8 @@ function notifyForAgentStreamEvent(event: unknown, threadId?: string): void {
 }
 
 // Simple electron API - replaces @electron-toolkit/preload
+const takeBotWorkStreamPreview = createBotWorkStreamPreview(ipcRenderer)
+
 const electronAPI = {
   openExternal: (url: string) => shell.openExternal(url),
   openManagedLink: (id: "skillEvalDoc" | "knowledgeGuide") =>
@@ -374,6 +379,10 @@ const electronAPI = {
     ipcRenderer.on(WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL, handler)
     return () => ipcRenderer.removeListener(WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL, handler)
   },
+  getStartupView: (): Promise<StartupView> =>
+    ipcRenderer.invoke(STARTUP_VIEW_GET_CHANNEL) as Promise<StartupView>,
+  setStartupView: (view: StartupView): Promise<StartupView> =>
+    ipcRenderer.invoke(STARTUP_VIEW_SET_CHANNEL, view) as Promise<StartupView>,
   getGitChangeNoticeEnabled: (): Promise<boolean> =>
     ipcRenderer.invoke(GIT_CHANGE_NOTICE_GET_CHANNEL) as Promise<boolean>,
   setGitChangeNoticeEnabled: (enabled: boolean): Promise<boolean> =>
@@ -1204,7 +1213,7 @@ const api = {
         transcripts
       })
     },
-    delete: (threadId: string, options?: ThreadDeleteOptions): Promise<void> => {
+    delete: (threadId: string, options?: ThreadDeleteOptions): Promise<ThreadDeleteResult> => {
       return ipcRenderer.invoke("threads:delete", threadId, options)
     },
     getMessages: (threadId: string): Promise<Message[]> => {
@@ -2693,6 +2702,8 @@ const api = {
       callback: (event: { type: string; [key: string]: unknown }) => void
     ): (() => void) => {
       const channel = `scheduler:stream:${threadId}`
+      const preview = takeBotWorkStreamPreview(threadId)
+      if (preview) callback(preview)
       const handler = (_: unknown, data: { type: string; [key: string]: unknown }): void => {
         callback(data)
       }

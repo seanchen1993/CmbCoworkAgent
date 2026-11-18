@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { ThreadSummaryPage } from "../../../main/types"
 import type { Thread } from "../types"
-import { useAppStore } from "./store"
+import { initializeStartupWorkspace, useAppStore } from "./store"
+import { useChatSourceNavigation } from "./chat-source-navigation"
 
 function createThread(threadId: string): Thread {
   return {
@@ -180,5 +181,116 @@ describe("app store thread-directory loading", () => {
     await expect(
       useAppStore.getState().loadThreads({ selectInitialThread: true })
     ).rejects.toThrow("latest refresh failed")
+  })
+})
+
+describe("app startup destination", () => {
+  beforeEach(resetRoute)
+  afterEach(() => {
+    useChatSourceNavigation.getState().clear()
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  function fixture(threads: Thread[] = [createThread("first")], navigationType = "navigate") {
+    const getStartupView = vi.fn().mockResolvedValue("bots")
+    const listPage = vi.fn().mockResolvedValue(createPage(threads))
+    const create = vi.fn().mockResolvedValue(createThread("new"))
+    vi.stubGlobal("window", {
+      electron: { getStartupView },
+      api: { threads: { listPage, create } },
+      performance: { getEntriesByType: () => [{ type: navigationType }] }
+    })
+    return { getStartupView, listPage, create }
+  }
+
+  it.each([{ threads: [] }, { threads: [createThread("first")] }])("opens Bots without selecting or creating a workbench task (%j)", async ({ threads }) => {
+    const { getStartupView, create } = fixture(threads)
+    await initializeStartupWorkspace(() => true)
+    expect(getStartupView).toHaveBeenCalledOnce()
+    expect(useAppStore.getState()).toMatchObject({ mainView: "bots", currentThreadId: null, threads })
+    expect(create).not.toHaveBeenCalled()
+
+    useAppStore.getState().setMainView("thread")
+    await useAppStore.getState().loadThreads()
+    expect(useAppStore.getState().mainView).toBe("thread")
+    expect(getStartupView).toHaveBeenCalledOnce()
+  })
+
+  it("falls back to selecting the first workbench task when the preference is unavailable", async () => {
+    const { getStartupView } = fixture()
+    getStartupView.mockRejectedValue(new Error("unavailable"))
+    vi.spyOn(console, "warn").mockImplementation(() => {})
+
+    await initializeStartupWorkspace(() => true)
+    expect(useAppStore.getState()).toMatchObject({ mainView: "thread", currentThreadId: "first" })
+  })
+
+  it("does not apply the preference to a renderer reload", async () => {
+    const { getStartupView } = fixture([createThread("first")], "reload")
+
+    await initializeStartupWorkspace(() => true)
+    expect(getStartupView).not.toHaveBeenCalled()
+    expect(useAppStore.getState()).toMatchObject({ mainView: "thread", currentThreadId: "first" })
+  })
+
+  it("preserves a pending deep link when the Bots preference returns", async () => {
+    const { getStartupView, create } = fixture()
+    let finish!: (view: string) => void
+    getStartupView.mockReturnValue(new Promise<string>((resolve) => { finish = resolve }))
+    const startup = initializeStartupWorkspace(() => true)
+    useChatSourceNavigation.getState().request({ threadId: "linked", messageId: "message", ordinal: 2 })
+    finish("bots")
+
+    await startup
+    expect(useAppStore.getState()).toMatchObject({ mainView: "thread", currentThreadId: null })
+    expect(useChatSourceNavigation.getState().target?.threadId).toBe("linked")
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it("preserves explicit navigation even after returning to the original surface while the preference is pending", async () => {
+    const { getStartupView } = fixture()
+    let finish!: (view: string) => void
+    getStartupView.mockReturnValue(new Promise<string>((resolve) => { finish = resolve }))
+    const startup = initializeStartupWorkspace(() => true)
+    useAppStore.getState().setShowCustomizeView(true, "general")
+    useAppStore.getState().setShowCustomizeView(false)
+    finish("bots")
+
+    await startup
+    expect(useAppStore.getState()).toMatchObject({ mainView: "thread", currentThreadId: null })
+  })
+
+  it("keeps an explicitly selected startup thread", async () => {
+    const { getStartupView } = fixture()
+    await useAppStore.getState().selectThread("selected")
+
+    await initializeStartupWorkspace(() => true)
+    expect(getStartupView).not.toHaveBeenCalled()
+    expect(useAppStore.getState()).toMatchObject({ mainView: "thread", currentThreadId: "selected" })
+  })
+
+  it("selects a new task on the first launch with the default setting and an empty directory", async () => {
+    const { getStartupView, create } = fixture([])
+    getStartupView.mockResolvedValue("thread")
+
+    await initializeStartupWorkspace(() => true)
+    expect(create).toHaveBeenCalledOnce()
+    expect(useAppStore.getState()).toMatchObject({ mainView: "thread", currentThreadId: "new" })
+  })
+
+  it("creates the default first task without replacing a session explicitly selected while creation is pending", async () => {
+    const { getStartupView, create } = fixture([])
+    getStartupView.mockResolvedValue("thread")
+    let finish!: (thread: Thread) => void
+    create.mockReturnValue(new Promise<Thread>((resolve) => { finish = resolve }))
+    const startup = initializeStartupWorkspace(() => true)
+    await vi.waitFor(() => expect(create).toHaveBeenCalledOnce())
+    await useAppStore.getState().selectThread("selected")
+    finish(createThread("new"))
+
+    await startup
+    expect(useAppStore.getState().currentThreadId).toBe("selected")
+    expect(useAppStore.getState().threads[0]?.thread_id).toBe("new")
   })
 })

@@ -1,14 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { DatabaseSync } from "node:sqlite"
-import { mkdtempSync, rmSync } from "node:fs"
+import { createHash } from "node:crypto"
+import { mkdtempSync, renameSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { IpcMain } from "electron"
 import { botContinuationMessageId } from "../bots/continuation"
 import { parseGroup, parseSendBotMessage } from "../../shared/bots/validation"
+import { formatBotMessageReply } from "../../shared/bots/message-reply"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "../bots/store"
 import { LocalBotHost } from "../bots/host"
+import { deleteBotThreadHistory, setBotHistoryInputSource } from "../bots/history-input-projection"
+import { localBotWorkspaces } from "../bots/workspace"
 import { BotMemoryService } from "../bots/memory"
 import { BotImChannelService, type BotImGatewayClient } from "../services/im/bot-channel-service"
 import {
@@ -23,6 +27,7 @@ const fixture = vi.hoisted(() => ({
   conversationLinks: { forBot: () => [], forThread: () => null },
   introduce: vi.fn(),
   getThread: vi.fn(),
+  getThreadMessagesByIds: vi.fn(),
   removeBot: vi.fn(),
   removeGroup: vi.fn(),
   removeBrowserGroup: vi.fn(),
@@ -34,6 +39,8 @@ const fixture = vi.hoisted(() => ({
   listMemory: vi.fn(),
   create: vi.fn(),
   preview: vi.fn(),
+  hasOpenPages: vi.fn(),
+  assertWorkNotDeleting: vi.fn(),
   takeOver: vi.fn(),
   navigate: vi.fn(),
   giveBack: vi.fn(),
@@ -51,16 +58,27 @@ const fixture = vi.hoisted(() => ({
   setMessageReaction: vi.fn(),
   requestReceipts: vi.fn(),
   stopConversation: vi.fn(),
+  stopWork: vi.fn(),
   stopGroup: vi.fn(),
   markUnread: vi.fn(),
   markRead: vi.fn(),
   groupMessages: vi.fn(),
   listWorks: vi.fn(),
   workSummaries: vi.fn(),
+  pendingWorkQuestions: vi.fn(),
+  answerWorkQuestion: vi.fn(),
   getWork: vi.fn(),
+  workOwnerCandidates: vi.fn(() => []),
+  resolveOrdinaryThreadSource: vi.fn(),
   createWork: vi.fn(),
+  sendDesktopMessage: vi.fn(),
   changeWork: vi.fn(),
+  changeWorkControl: vi.fn(),
+  saveSchedule: vi.fn(),
+  removeSchedule: vi.fn(),
   markWorksRead: vi.fn(),
+  listenConversationTransitions: vi.fn(),
+  finishConversationTransition: vi.fn(),
   windowFor: vi.fn(() => ({}))
 }))
 vi.mock("electron", () => ({
@@ -82,6 +100,7 @@ vi.mock("../bots/local-service", () => ({
     giveBack: fixture.giveBack,
     operateAsHuman: fixture.operateBrowser,
     preview: fixture.preview,
+    hasOpenPages: fixture.hasOpenPages,
     takeOver: fixture.takeOver,
     navigateAsHuman: fixture.navigate,
     removeBot: fixture.removeBot,
@@ -95,8 +114,18 @@ vi.mock("../bots/conversation-link-service", () => ({
   unlinkWorkConversation: vi.fn(),
   unlinkDeletingWorkConversation: vi.fn()
 }))
+vi.mock("../bots/conversation-transition", () => ({
+  listenBotConversationTransitions: fixture.listenConversationTransitions,
+  finishBotConversationTransition: fixture.finishConversationTransition
+}))
 vi.mock("../services/im/withheld-text-notices", () => ({ conversationSwitchedToText: () => false }))
-vi.mock("../db", () => ({ getThreadCore: fixture.getThread }))
+vi.mock("../db", () => ({
+  getThreadCore: fixture.getThread,
+  getThreadMessagesByIds: fixture.getThreadMessagesByIds,
+  getDb: vi.fn(),
+  saveToDisk: vi.fn(),
+  flushStrict: vi.fn()
+}))
 vi.mock("../bots/runtime-adapter", () => ({ prepareBotThread: vi.fn() }))
 vi.mock("./bot-files", () => ({ registerBotFileHandlers: vi.fn() }))
 import { registerBotHandlers } from "./bots"
@@ -120,7 +149,417 @@ beforeEach(() => {
   vi.clearAllMocks()
   fixture.getHost.mockImplementation(() => fixture)
 })
+it("keeps surviving historical card summaries when an unlinked work's native conversation is deleted", async () => {
+  const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+  const store = new BotStore(db)
+  const bot = store.create({ name: "Desk", instructions: "", color: "#abcdef", modelRef: null })
+  const peer = store.create({ name: "Peer", instructions: "", color: "#123456", modelRef: null })
+  const host = new LocalBotHost(store, { acquire: () => null, onAvailable: () => () => {} })
+  fixture.getHost.mockReturnValue(host)
+  const call = register(), channel = "bots:work:summaries"
+  try {
+    const conversation = { kind: "local_thread", threadId: "linked-thread",
+      incarnation: { token: "original", legacyCreatedAt: 1 } } as const
+    const prepared = store.conversations.prepare({ botId: bot.id, operationId: "link", title: "Original", goal: "Review", conversation })
+    const linked = store.conversations.bound(bot.id, prepared.id, conversation)
+    store.conversations.beginDetach(bot.id, linked.id, linked.version)
+    store.conversations.detached(bot.id, linked.id)
+    const create = (botId: string, title: string) => store.createWork({ botId, operationId: title, title, goal: "Review" }).work.id
+    const surviving = create(bot.id, "Surviving"), unrelated = create(peer.id, "Unrelated")
+    const selected = [linked.id, surviving]
+    expect(call(channel, "local", bot.id, selected)).toHaveLength(2)
+    expect(deleteBotThreadHistory(db, [conversation.threadId])).toBe(true)
+    expect(() => call(channel, "local", bot.id, selected)).toThrow("工作摘要不属于当前 Bot")
+    expect(call(channel, "local", bot.id, [...selected, unrelated], true))
+      .toMatchObject([{ id: surviving, botId: bot.id, title: "Surviving" }])
+    expect(call(channel, "local", bot.id, [unrelated], true)).toEqual([])
+    expect(() => call(channel, "local", bot.id, [surviving], "true")).toThrow("工作摘要批次无效")
+  } finally {
+    await host.stop()
+    db.close()
+  }
+})
+it("validates a selected skill workspace without creating work, only from the desktop", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "bot-skill-workspace-"))
+  const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+  const store = new BotStore(db)
+  const bot = store.create({ name: "Desk", instructions: "", color: "#abcdef", modelRef: null })
+  const validateSkillSelection = vi.fn(async () => {})
+  const host = new LocalBotHost(store, {
+    acquire: () => null, onAvailable: () => () => {}, workspaces: localBotWorkspaces, validateSkillSelection
+  })
+  fixture.getHost.mockReturnValue(host)
+  const frame = {}
+  const event = { senderFrame: frame, sender: { mainFrame: frame } }
+  const channel = "bots:work:validate-skill-workspace"
+  const target = { kind: "directory", path: directory }
+  try {
+    const call = register(undefined, event)
+    expect(() => register()(channel, "local", bot.id, target)).toThrow("仅支持本机桌面窗口")
+    expect(() => call(channel, "local", bot.id, { ...target, unrelated: true })).toThrow("请选择目录")
+    await expect(call(channel, "local", bot.id, { ...target, path: join(directory, "missing") }))
+      .rejects.toThrow("不存在")
+    await expect(call(channel, "local", bot.id, target)).resolves.toBeUndefined()
+    expect(store.listWorks(bot.id).items).toEqual([])
+    expect(store.recentTasks()).toEqual([])
+
+    const input = { botId: bot.id, operationId: "original-skill-draft", title: "Original work",
+      goal: "Check the sample", explicitSkill: { name: "review", path: "/skills/review/SKILL.md" },
+      workspace: target }
+    const original = await call("bots:work:create", "local", input) as Awaited<ReturnType<LocalBotHost["createWork"]>>
+    expect(validateSkillSelection).toHaveBeenCalledExactlyOnceWith(input.explicitSkill)
+    validateSkillSelection.mockRejectedValue(new Error("原技能已不可用"))
+    await expect(call("bots:work:create", "local", input)).resolves.toEqual(original)
+    expect(validateSkillSelection).toHaveBeenCalledTimes(1)
+    await expect(call("bots:work:create", "local", { ...input, operationId: "unreceived-skill-draft" }))
+      .rejects.toThrow("原技能已不可用")
+    expect(validateSkillSelection).toHaveBeenCalledTimes(2)
+    const existing = { kind: "work", workId: original.work.id, threadId: original.work.threadId }
+    await expect(call(channel, "local", bot.id, existing)).resolves.toBeUndefined()
+    expect(fixture.getThread).not.toHaveBeenCalled()
+    await expect(call(channel, "local", bot.id, { ...existing, threadId: "other-thread" })).rejects.toThrow("所选任务")
+    expect(() => call(channel, "local", bot.id, { ...existing, path: directory })).toThrow("技能任务目标无效")
+    renameSync(directory, `${directory}-moved`)
+    await expect(call(channel, "local", bot.id, existing)).rejects.toThrow("不存在")
+    const { execution, ...persisted } = host.getWork(bot.id, original.work.id)
+    expect(persisted).toEqual(original.work)
+    expect(execution?.phase).toBeDefined()
+    await expect(call("bots:work:create", "local", input)).resolves.toEqual(original)
+    expect(store.listWorks(bot.id).items).toHaveLength(1)
+    expect(store.recentTasks()).toHaveLength(1)
+  } finally {
+    await host.stop()
+    db.close()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(`${directory}-moved`, { recursive: true, force: true })
+  }
+})
+it("checks the original linked skill target's incarnation and actual directory", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "bot-linked-skill-workspace-"))
+  const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+  const store = new BotStore(db)
+  const bot = store.create({ name: "Desk", instructions: "", color: "#abcdef", modelRef: null })
+  const host = new LocalBotHost(store, { acquire: () => null, onAvailable: () => () => {} })
+  fixture.getHost.mockReturnValue(host)
+  const frame = {}, call = register(undefined, { senderFrame: frame, sender: { mainFrame: frame } })
+  const channel = "bots:work:validate-skill-workspace"
+  try {
+    const conversation = { kind: "local_thread", threadId: "linked-thread",
+      incarnation: { token: "original", legacyCreatedAt: 1 } } as const
+    const prepared = store.conversations.prepare({ botId: bot.id, operationId: "link", title: "Original", goal: "Review", conversation })
+    const work = store.conversations.bound(bot.id, prepared.id, conversation)
+    const target = { kind: "work", workId: work.id, threadId: work.threadId }
+    const row = (token: string) => ({ created_at: 1, metadata: JSON.stringify({
+      cmb_thread_incarnation: token, botHostId: "local", botId: bot.id, botWorkId: work.id,
+      botLocalConversation: true, botAudienceKey: "desktop", botWorkOrigin: "existing", workspacePath: directory
+    }) })
+    fixture.getThread.mockReturnValueOnce(row("recreated"))
+    await expect(call(channel, "local", bot.id, target)).rejects.toThrow("身份不一致")
+    fixture.getThread.mockReturnValueOnce(row("original"))
+    await expect(call(channel, "local", bot.id, target)).resolves.toBeUndefined()
+    renameSync(directory, `${directory}-moved`)
+    fixture.getThread.mockReturnValueOnce(row("original"))
+    await expect(call(channel, "local", bot.id, target)).rejects.toThrow("不存在")
+    expect(store.getWork(bot.id, work.id)).toEqual(work)
+    expect(store.recentTasks()).toEqual([])
+  } finally {
+    await host.stop()
+    db.close()
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(`${directory}-moved`, { recursive: true, force: true })
+  }
+})
+it("validates ordinary history citations at the desktop IPC boundary before resolving a target", async () => {
+  const frame = {}, event = { senderFrame: frame, sender: { mainFrame: frame } }
+  const call = register(undefined, event)
+  const source = { conversation: { kind: "local_thread", threadId: "original",
+    incarnation: { token: "identity", legacyCreatedAt: 1 } }, messageId: "message-1" }
+  fixture.resolveOrdinaryThreadSource.mockResolvedValue({ threadId: "original", messageId: "message-1", ordinal: 2 })
+  await expect(call("bots:conversation:resolve-history", "local", "bot", source)).resolves.toMatchObject({ threadId: "original" })
+  expect(fixture.resolveOrdinaryThreadSource).toHaveBeenCalledWith("bot", source)
+  fixture.resolveOrdinaryThreadSource.mockClear()
+  for (const invalid of [null, { ...source, messageId: 1 }, { ...source, messageId: "x".repeat(513) },
+    { ...source, conversation: { kind: "cloud_session" } },
+    { ...source, conversation: { ...source.conversation, incarnation: null } }])
+    expect(() => call("bots:conversation:resolve-history", "local", "bot", invalid)).toThrow()
+  const foreignFrame = register(undefined, { senderFrame: {}, sender: { mainFrame: {} } })
+  expect(() => foreignFrame("bots:conversation:resolve-history", "local", "bot", source)).toThrow()
+  expect(fixture.resolveOrdinaryThreadSource).not.toHaveBeenCalled()
+})
+it("revalidates only the original detached native user quote against its Bot input decision", () => {
+  const frame = {}, call = register(undefined, { senderFrame: frame, sender: { mainFrame: frame } })
+  const channel = "bots:conversation:revalidate-draft-reply"
+  const ref = { kind: "local_thread", threadId: "original",
+    incarnation: { token: "identity", legacyCreatedAt: 1 } } as const
+  const row = { thread_id: ref.threadId, created_at: 1, metadata: '{"cmb_thread_incarnation":"identity"}' }
+  const saved = { id: "old-user-message", ordinal: 4, role: "user", text: "Not approved", preview: "Not approved" }
+  const durable = { ...saved, content: saved.text }
+  const inputs = vi.fn()
+  setBotHistoryInputSource({
+    works: () => [{ id: "detached-work", botId: "old-owner", threadId: ref.threadId, audienceKey: "desktop",
+      conversation: { ref, origin: "existing", state: "detached" } }],
+    inputs
+  })
+  try {
+    fixture.getThread.mockReturnValueOnce(row)
+    fixture.getThreadMessagesByIds.mockReturnValueOnce([durable])
+    inputs.mockReturnValueOnce(new Map([[saved.id, "Approved summary"]]))
+    const projected = call(channel, "local", ref, saved) as Parameters<typeof formatBotMessageReply>[1]
+    expect(projected).toEqual({
+      id: saved.id, ordinal: saved.ordinal, role: saved.role, text: "Approved summary"
+    })
+    expect(formatBotMessageReply("请继续任务", projected, "workbench")).not.toContain(saved.text)
+    expect(formatBotMessageReply("我重新写了 Not approved", projected, "workbench"))
+      .toMatch(/\n> Approved summary\n\n我重新写了 Not approved$/)
+    expect(inputs).toHaveBeenCalledWith("old-owner", ref.threadId, [saved.id], ["detached-work"], "reply")
+    expect(durable.content).toBe("Not approved")
+
+    fixture.getThread.mockReturnValueOnce(row)
+    fixture.getThreadMessagesByIds.mockReturnValueOnce([durable])
+    inputs.mockReturnValueOnce(new Map([[saved.id, null]]))
+    expect(() => call(channel, "local", ref, saved)).toThrow("取消回复")
+
+    fixture.getThread.mockReturnValueOnce(row)
+    fixture.getThreadMessagesByIds.mockReturnValueOnce([durable])
+    inputs.mockReturnValueOnce(new Map([[saved.id, ""]]))
+    expect(() => call(channel, "local", ref, saved)).toThrow("取消回复")
+
+    fixture.getThread.mockReturnValueOnce(row)
+    fixture.getThreadMessagesByIds.mockReturnValueOnce([durable])
+    inputs.mockReturnValueOnce(new Map())
+    expect(call(channel, "local", ref, saved)).toEqual(saved)
+
+    inputs.mockClear()
+    fixture.getThread.mockReturnValueOnce({ ...row, metadata: '{"cmb_thread_incarnation":"recreated"}' })
+    expect(() => call(channel, "local", ref, saved)).toThrow("会话身份")
+    fixture.getThread.mockReturnValueOnce(row)
+    fixture.getThreadMessagesByIds.mockReturnValueOnce([{ ...durable, ordinal: 5 }])
+    expect(() => call(channel, "local", ref, saved)).toThrow("取消回复")
+    expect(() => call(channel, "local", ref, { ...saved, role: "assistant" })).toThrow("引用")
+    expect(() => register()(channel, "local", ref, saved)).toThrow("本机桌面")
+    expect(inputs).not.toHaveBeenCalled()
+  } finally {
+    setBotHistoryInputSource(undefined)
+  }
+})
 describe("Bot IPC boundaries", () => {
+  it("allows reading and answering an exact work question only from the desktop main frame", () => {
+    const frame = {}
+    const call = register(undefined, { senderFrame: frame, sender: { mainFrame: frame } })
+    const foreign = register(undefined, { senderFrame: {}, sender: { mainFrame: frame } })
+    const response = { requestId: "question", answers: {}, ignored: true }
+    expect(() => foreign("bots:work:pending-questions", "local", "bot")).toThrow("本机桌面")
+    expect(() => foreign("bots:work:answer-question", "local", "bot", "task", response)).toThrow("本机桌面")
+    expect(() => call("bots:work:answer-question", "local", "bot", "task", { ...response, answers: null })).toThrow("答复无效")
+    expect(() => call("bots:work:answer-question", "local", "bot", "task", { ...response, requestId: "../other" })).toThrow("标识")
+    expect(fixture.pendingWorkQuestions).not.toHaveBeenCalled()
+    expect(fixture.answerWorkQuestion).not.toHaveBeenCalled()
+    call("bots:work:pending-questions", "local", "bot")
+    call("bots:work:answer-question", "local", "bot", "task", response)
+    expect(fixture.pendingWorkQuestions).toHaveBeenCalledExactlyOnceWith("bot")
+    expect(fixture.answerWorkQuestion).toHaveBeenCalledExactlyOnceWith("bot", "task", response)
+  })
+  it("accepts typed Bot skill selection only from the desktop frame", () => {
+    const frame = {}
+    const call = register(undefined, { senderFrame: frame, sender: { mainFrame: frame } })
+    const foreign = register(undefined, { senderFrame: {}, sender: { mainFrame: frame } })
+    const explicitSkill = { name: "review", path: "/registered/review/SKILL.md" }
+    const input = { botId: "bot", requestId: "request", workId: "work", message: "Review", explicitSkill,
+      skillDraftFromMain: true, skillDraftSourceThreadId: "bot-main" }
+    const mentions = [{ botId: "peer", start: 0, end: 5, label: "Peer" }]
+    const create = { botId: "bot", operationId: "request", title: "Review", goal: "@Peer Review", explicitSkill, mentions }
+    expect(() => foreign("bots:send", "local", input)).toThrow("本机桌面")
+    expect(() => foreign("bots:work:create", "local", create)).toThrow("本机桌面")
+    expect(() => call("bots:send", "local", { ...input, explicitSkill: undefined })).toThrow("技能草稿")
+    expect(() => call("bots:send", "local", { ...input, skillDraftSourceThreadId: undefined })).toThrow("技能草稿")
+    expect(() => call("bots:send", "local", { ...input, skillDraftFromMain: undefined })).toThrow("技能草稿")
+    expect(() => call("bots:send", "local", { ...input, explicitSkill: { ...explicitSkill, allowedTools: ["*"] } })).toThrow("技能选择")
+    expect(() => call("bots:work:create", "local", { ...create, explicitSkill: undefined })).toThrow("桌面技能草稿")
+    expect(() => call("bots:work:create", "local", { ...create, goal: "@Different Review" })).toThrow("提及与原消息")
+    expect(fixture.sendDesktopMessage).not.toHaveBeenCalled()
+    expect(fixture.createWork).not.toHaveBeenCalled()
+    call("bots:send", "local", input)
+    call("bots:work:create", "local", create)
+    expect(fixture.sendDesktopMessage).toHaveBeenCalledExactlyOnceWith(input)
+    expect(fixture.createWork).toHaveBeenCalledExactlyOnceWith(create)
+  })
+  it("requires completed takeover for direct desktop work sends, including skill and retry requests", async () => {
+    const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+    const store = new BotStore(db)
+    const bot = store.create({ name: "Desk", instructions: "", color: "#abcdef", modelRef: null })
+    const host = new LocalBotHost(store, { acquire: () => null, onAvailable: () => () => {} })
+    fixture.getHost.mockReturnValue(host)
+    const frame = {}
+    const call = register(undefined, { senderFrame: frame, sender: { mainFrame: frame } })
+    const foreign = register(undefined, { senderFrame: {}, sender: { mainFrame: frame } })
+    try {
+      const { work, task: start } = await host.createWork({ botId: bot.id, operationId: "create-work",
+        title: "Review", goal: "Review the report" })
+      const input = { botId: bot.id, workId: work.id, requestId: "manual-input", message: "Make a correction" }
+      const skill = { ...input, requestId: "manual-skill", explicitSkill: { name: "review", path: "/registered/review/SKILL.md" } }
+      const queued = () => store.recentTasks().map(task => task.id)
+      expect(() => foreign("bots:send", "local", input)).toThrow("本机桌面")
+      expect(() => call("bots:send", "local", input)).toThrow("先获取控制权")
+      expect(() => call("bots:send", "local", skill)).toThrow("先获取控制权")
+      expect(() => call("bots:send", "local", { ...skill, skillDraftFromMain: true })).toThrow("技能草稿")
+      expect(() => call("bots:send", "local", { ...skill, skillDraftFromMain: true,
+        skillDraftSourceThreadId: work.threadId })).toThrow("主对话来源或任务目标已变化")
+      expect(queued()).toEqual([start.id])
+      expect(call("bots:send", "local", { botId: bot.id, requestId: "main-user", message: "Continue the review" }))
+        .toMatchObject({ botId: bot.id, threadId: bot.threadId })
+      const mainSkill = { ...skill, requestId: "main-selected-skill", skillDraftFromMain: true,
+        skillDraftSourceThreadId: bot.threadId }
+      expect(await call("bots:send", "local", mainSkill))
+        .toMatchObject({ workId: work.id, threadId: work.threadId, origin: { explicitSkill: skill.explicitSkill } })
+      const workAttachment = host.retainInputFile(bot.id, {
+        filename: "sample.txt", filePath: "/selected/sample.txt", content: "sample",
+        mimeType: "text/plain", size: 6, truncated: false
+      }, "/snapshots/.bot-deliveries/" + "a".repeat(64) + "/sample.txt", work.id)
+      await expect(call("bots:send", "local", { ...mainSkill, requestId: "wrong-main-attachment",
+        inputFileIds: [workAttachment.botInputId] })).rejects.toThrow("不属于此会话的本机输入")
+      const selectedCreation = await call("bots:work:create", "local", { botId: bot.id, operationId: "main-skill-create",
+        title: "New skill task", goal: "Review another report", explicitSkill: skill.explicitSkill })
+      expect(selectedCreation).toMatchObject({ task: { origin: { kind: "user", explicitSkill: skill.explicitSkill } } })
+      const taken = host.changeWorkControl({ botId: bot.id, workId: work.id, expectedVersion: host.getWork(bot.id, work.id).version,
+        operationId: "take", action: "take" })
+      expect(taken.userControl?.settling).toBe(false)
+      const accepted = call("bots:send", "local", input)
+      expect(accepted).toMatchObject({ workId: work.id, threadId: work.threadId })
+      expect(call("bots:send", "local", input)).toEqual(accepted)
+      expect(await call("bots:send", "local", skill)).toMatchObject({ workId: work.id, origin: { explicitSkill: skill.explicitSkill } })
+      const held = host.workControlPending(bot.id, work.id)
+      host.changeWorkControl({ botId: bot.id, workId: work.id, expectedVersion: held.version,
+        operationId: "return", action: "return", confirmedTaskIds: held.items.map(item => item.taskId) })
+      const beforeRetry = queued()
+      expect(() => call("bots:send", "local", input)).toThrow("先获取控制权")
+      expect(() => call("bots:send", "local", skill)).toThrow("先获取控制权")
+      expect(queued()).toEqual(beforeRetry)
+      expect(host.requestReceipts(bot.id, [{ requestId: input.requestId,
+        messageHash: createHash("sha256").update(input.message).digest("hex") }], work.id))
+        .toMatchObject([{ requestId: input.requestId, state: "accepted" }])
+      expect(await call("bots:send", "local", mainSkill))
+        .toMatchObject({ requestId: mainSkill.requestId, workId: work.id })
+    } finally {
+      await host.stop()
+      db.close()
+    }
+  })
+  it("requires the actual desktop frame for creating or managing a desktop-only routine", () => {
+    const frame = {}, event = { senderFrame: frame, sender: { mainFrame: frame } }
+    const call = register(undefined, event)
+    const foreign = register(undefined, { senderFrame: {}, sender: { mainFrame: frame } })
+    const input = { name: "Progress", message: "Report progress", enabled: true,
+      frequency: "daily", runAtTime: "14:25" }
+    const binding = { workId: "work", operationId: "save-once" }
+    expect(() => foreign("bots:schedule:save", "local", "bot", input, undefined, binding)).toThrow("本机桌面")
+    expect(fixture.saveSchedule).not.toHaveBeenCalled()
+    call("bots:schedule:save", "local", "bot", input, undefined, binding)
+    expect(fixture.saveSchedule).toHaveBeenCalledWith("bot", expect.objectContaining(input), undefined, undefined, binding)
+    fixture.saveSchedule.mockClear()
+    for (const protection of [
+      { desktopWork: true, workId: "work" },
+      { workMonitor: { workId: "work", mode: "new_result", generation: 1 } },
+      { fixedReminder: { kind: "fixed_reminder" } }
+    ]) {
+      fixture.snapshot.mockImplementationOnce(() => ({ revision: 1, schedules: [{ id: "routine", ...protection }] }))
+      expect(() => foreign("bots:schedule:save", "local", "bot", input, { id: "routine", version: 1 })).toThrow("本机桌面")
+      fixture.snapshot.mockImplementationOnce(() => ({ revision: 1, schedules: [{ id: "routine", ...protection }] }))
+      expect(() => foreign("bots:schedule:remove", "local", "routine", 1)).toThrow("本机桌面")
+    }
+    expect(fixture.saveSchedule).not.toHaveBeenCalled()
+    expect(fixture.removeSchedule).not.toHaveBeenCalled()
+    for (const invalid of [null, {}, { workId: "work" }, { ...binding, sourceTaskId: "forged" }])
+      expect(() => call("bots:schedule:save", "local", "bot", input, undefined, invalid)).toThrow()
+    expect(fixture.saveSchedule).not.toHaveBeenCalled()
+    // Existing ordinary routine creation retains its original entry semantics.
+    foreign("bots:schedule:save", "local", "bot", input)
+    expect(fixture.saveSchedule).toHaveBeenCalledWith("bot", expect.objectContaining(input), undefined, undefined, undefined)
+  })
+  it("passes only the normalized desktop deadline or exact occurrence from a routine card", () => {
+    const frame = {}, event = { senderFrame: frame, sender: { mainFrame: frame } }
+    const call = register(undefined, event)
+    const foreign = register(undefined, { senderFrame: {}, sender: { mainFrame: frame } })
+    const input = { name: "Progress", message: "Report progress", enabled: false, frequency: "daily", runAtTime: "14:25" }
+    const identity = { id: "routine", version: 2 }
+    const expiry = { ...identity, expiresAt: "2099-11-01T09:30:00+08:00" }
+    const withdraw = { ...identity, withdrawTaskId: "occurrence" }
+    const save = (invoke: typeof call, edit: object) => invoke("bots:schedule:save", "local", "bot", input, edit)
+    expect(() => save(foreign, expiry)).toThrow("本机桌面")
+    expect(() => save(foreign, withdraw)).toThrow("本机桌面")
+    expect(() => save(call, { ...expiry, ...withdraw })).toThrow("分别")
+    expect(() => save(call, { ...expiry, expiresAt: "2099-11-01T09:30:00" })).toThrow("时区")
+    expect(fixture.saveSchedule).not.toHaveBeenCalled()
+    call("bots:schedule:save", "local", "bot", input, { ...expiry, pauseRequested: true, sourceTaskId: "spoof" })
+    expect(fixture.saveSchedule).toHaveBeenLastCalledWith("bot", input,
+      { ...identity, expiresAt: "2099-11-01T01:30:00.000Z" }, undefined, undefined)
+    save(call, withdraw)
+    expect(fixture.saveSchedule).toHaveBeenLastCalledWith("bot", input, withdraw, undefined, undefined)
+    const monitor = { ...identity, workMonitor: { workId: "existing-work", mode: "new_result" } }
+    expect(() => save(foreign, monitor)).toThrow("本机桌面")
+    expect(() => save(call, { ...withdraw, ...monitor })).toThrow("分别")
+    expect(() => save(call, { ...monitor, workMonitor: { ...monitor.workMonitor, sourceTaskId: "forged" } }))
+      .toThrow("配置无效")
+    save(call, monitor)
+    expect(fixture.saveSchedule).toHaveBeenLastCalledWith("bot", input, monitor, undefined, undefined)
+  })
+  it("accepts transition acknowledgments only from the local desktop with a bounded result", () => {
+    const frame = {}
+    const sender = { id: 7, mainFrame: frame }
+    const call = register(undefined, { senderFrame: frame, sender })
+    call("bots:conversation:listen", "local", true)
+    expect(fixture.listenConversationTransitions).toHaveBeenCalledExactlyOnceWith(sender, true)
+    call("bots:conversation:finish-transition", "local", "request-1", "x".repeat(1000))
+    expect(fixture.finishConversationTransition).toHaveBeenCalledExactlyOnceWith(
+      7, "request-1", "x".repeat(1000), { senderFrame: frame, sender }
+    )
+
+    fixture.listenConversationTransitions.mockClear()
+    fixture.finishConversationTransition.mockClear()
+    expect(() => call("bots:conversation:listen", "local", "true")).toThrow()
+    expect(() => call("bots:conversation:listen", "foreign", true)).toThrow()
+    for (const invalid of [{ threadId: "target", action: "link" }, null, "x".repeat(1001)]) {
+      expect(() => call("bots:conversation:finish-transition", "local", "request-1", invalid)).toThrow()
+    }
+    expect(() => call("bots:conversation:finish-transition", "local", "../request")).toThrow()
+    const foreignFrame = register(undefined, { senderFrame: {}, sender })
+    expect(() => foreignFrame("bots:conversation:listen", "local", true)).toThrow()
+    expect(() => foreignFrame("bots:conversation:finish-transition", "local", "request-1")).toThrow()
+    expect(fixture.listenConversationTransitions).not.toHaveBeenCalled()
+    expect(fixture.finishConversationTransition).not.toHaveBeenCalled()
+  })
+
+  it("accepts task control only from the local desktop with a versioned narrow request", () => {
+    const frame = {}, call = register(undefined, { senderFrame: frame, sender: { mainFrame: frame } })
+    const input = { botId: "a", workId: "work", expectedVersion: 1, operationId: "take", action: "take" }
+    call("bots:work:control", "local", input)
+    expect(fixture.changeWorkControl).toHaveBeenCalledExactlyOnceWith(input)
+    call("bots:work:control", "local", { ...input, action: "stop_and_take" })
+    expect(fixture.changeWorkControl).toHaveBeenLastCalledWith({ ...input, action: "stop_and_take" })
+    const returning = { ...input, action: "return", confirmedTaskIds: ["pending-task"] }
+    call("bots:work:control", "local", returning)
+    expect(fixture.changeWorkControl).toHaveBeenLastCalledWith(returning)
+    fixture.changeWorkControl.mockClear()
+    for (const invalid of [null, { ...input, expectedVersion: 0 }, { ...input, action: "run" },
+      { ...input, workId: "../work" }, { ...input, operationId: "x".repeat(129) },
+      { ...input, sourceTaskId: "pretend-user" }, { ...input, heldTaskIds: [] },
+      { ...input, confirmedTaskIds: [] }, { ...returning, confirmedTaskIds: ["../foreign"] },
+      { ...returning, confirmedTaskIds: ["duplicate", "duplicate"] },
+      { ...returning, confirmedTaskIds: Array.from({ length: 501 }, (_, i) => `task-${i}`) }])
+      expect(() => call("bots:work:control", "local", invalid)).toThrow()
+    expect(() => call("bots:work:control", "remote", input)).toThrow()
+    expect(() => register()("bots:work:control", "local", input)).toThrow("本机桌面")
+    expect(fixture.changeWorkControl).not.toHaveBeenCalled()
+  })
+  it("bounds sidebar ownership reads to validated desktop requests", () => {
+    const frame = {}, call = register(undefined, { senderFrame: frame, sender: { mainFrame: frame } })
+    expect(call("bots:conversation:owners", "local", ["thread-one"])).toEqual([])
+    expect(fixture.workOwnerCandidates).toHaveBeenCalledWith(["thread-one"])
+    fixture.workOwnerCandidates.mockClear()
+    for (const input of [null, ["same", "same"], [""], [123], Array.from({ length: 65 }, (_, i) => `thread-${i}`)])
+      expect(() => call("bots:conversation:owners", "local", input)).toThrow()
+    expect(() => register()("bots:conversation:owners", "local", ["thread-one"])).toThrow("本机桌面")
+    expect(fixture.workOwnerCandidates).not.toHaveBeenCalled()
+  })
   it.each(["deleted", "left"])("keeps retained group memories manageable after the group is %s", async (action) => {
     const root = mkdtempSync(join(tmpdir(), "cmb-memory-management-"))
     const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
@@ -576,6 +1015,19 @@ describe("Bot IPC boundaries", () => {
     expect(() => call("bots:stop-conversation", "local", "a", undefined, "../w")).toThrow()
     call("bots:stop-conversation", "local", "a", undefined, "w")
     expect(fixture.stopConversation).toHaveBeenLastCalledWith("a", undefined, "w")
+    expect(fixture.stopWork).not.toHaveBeenCalled()
+  })
+  it("routes explicit work Stop only from a local desktop window to the exact work", () => {
+    const frame = {}
+    const call = register(undefined, { senderFrame: frame, sender: { mainFrame: frame } })
+    expect(() => register()("bots:work:stop", "local", "a", "w")).toThrow("桌面")
+    expect(() => call("bots:work:stop", "remote", "a", "w")).toThrow("本机")
+    expect(() => call("bots:work:stop", "local", "../a", "w")).toThrow()
+    expect(() => call("bots:work:stop", "local", "a", "../w")).toThrow()
+    expect(fixture.stopWork).not.toHaveBeenCalled()
+    call("bots:work:stop", "local", "a", "w")
+    expect(fixture.stopWork).toHaveBeenCalledExactlyOnceWith("a", "w")
+    expect(fixture.stopConversation).not.toHaveBeenCalled()
   })
   it("validates private quote host and both identities before domain access", () => {
     const call = register()
@@ -802,6 +1254,28 @@ describe("Bot IPC boundaries", () => {
     expect(fixture.exchangeHistory).toHaveBeenLastCalledWith("a", "task", undefined, "cursor", undefined, "im-one")
   })
 
+  it("returns a local unread boolean from existing activity without loading or marking conversations", () => {
+    const unread = { bot: false, group: false, work: false, im: false }
+    fixture.getHost.mockReturnValue({
+      ...fixture,
+      hasUnread: LocalBotHost.prototype.hasUnread,
+      store: {
+        hasUnread: () => Object.values(unread).some(Boolean)
+      }
+    })
+    const call = register()
+    expect(() => call("bots:has-unread", "remote")).toThrow("仅支持本机")
+    expect(call("bots:has-unread", "local")).toBe(false)
+    for (const source of ["bot", "group", "work", "im"] as const) {
+      unread[source] = true
+      expect(call("bots:has-unread", "local"), source).toBe(true)
+      unread[source] = false
+    }
+    expect(call("bots:has-unread", "local")).toBe(false)
+    expect(fixture.snapshot).not.toHaveBeenCalled()
+    expect(fixture.markRead).not.toHaveBeenCalled()
+  })
+
   it("validates manual unread requests before mutating a host", () => {
     const call = register()
     expect(() => call("bots:mark-unread", "remote", "bot", "a")).toThrow()
@@ -960,4 +1434,33 @@ it.each([false, true])("accepts real IM browser scopes through every IPC (tool-c
     expect(() => invoke("bots:browser:preview", "local", scopes[0], "p".repeat(129))).toThrow()
     expect(fixture.preview).toHaveBeenCalledTimes(calls)
   } finally { await host.stop(); db.close() }
+})
+
+it("checks only the exact bound or initialized native desktop work's browser scope before unlink", () => {
+  const mainFrame = {}
+  const sender = { mainFrame }
+  const invoke = register(undefined, { sender, senderFrame: mainFrame })
+  const work = { id: "work", botId: "a", audienceKey: "desktop", conversation: { state: "bound" } }
+  fixture.getWork.mockReturnValue(work)
+  fixture.hasOpenPages.mockReturnValue(true)
+  const channel = "bots:conversation:unlink-has-open-pages"
+  expect(invoke(channel, "local", "a", "work")).toBe(true)
+  expect(fixture.getWork).toHaveBeenCalledWith("a", "work")
+  expect(fixture.hasOpenPages).toHaveBeenCalledWith("work-work--a")
+  expect(fixture.preview).not.toHaveBeenCalled()
+  fixture.getWork.mockReturnValue({ ...work, conversation: { state: "detached" } })
+  expect(() => invoke(channel, "local", "a", "work")).toThrow("原任务关联已变化")
+  const native = { ...work, conversation: undefined, threadId: "native", threadInitialized: true }
+  const metadata = { botId: "a", botWorkId: "work", botHostId: "local", botAudienceKey: "desktop", workspacePath: "/native" }
+  fixture.getWork.mockReturnValue(native)
+  fixture.getThread.mockReturnValue({ thread_id: "native", metadata: JSON.stringify(metadata) })
+  expect(invoke(channel, "local", "a", "work")).toBe(true)
+  expect(fixture.hasOpenPages).toHaveBeenLastCalledWith("work-work--a")
+  fixture.getThread.mockReturnValue({ thread_id: "native", metadata: JSON.stringify({ ...metadata, botWorkId: "other" }) })
+  expect(() => invoke(channel, "local", "a", "work")).toThrow("归属不一致")
+  fixture.getWork.mockReturnValue({ ...native, threadInitialized: false })
+  expect(() => invoke(channel, "local", "a", "work")).toThrow("尚无可解除")
+  const otherFrame = register(undefined, { sender, senderFrame: {} })
+  expect(() => otherFrame(channel, "local", "a", "work")).toThrow()
+  expect(fixture.hasOpenPages).toHaveBeenCalledTimes(2)
 })

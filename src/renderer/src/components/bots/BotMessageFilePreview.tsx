@@ -14,7 +14,9 @@ import {
   type TextFilePreviewAdapter
 } from "@/components/tabs/FileViewer"
 import { useResourcePreviewRequest } from "@/lib/use-resource-preview-request"
-import type { BotClient } from "../../../../shared/bots/contracts"
+import type { OpenResourcePreviewDetail } from "@/lib/resource-preview-events"
+import { isHarnessPluginRunArtifactGrantFresh } from "@/lib/harness-plugin-run-artifacts"
+import { LOCAL_BOT_HOST_ID, type BotClient } from "../../../../shared/bots/contracts"
 import { BotJsonFilePreview } from "./BotJsonFilePreview"
 
 const botJsonFilePreview: TextFilePreviewAdapter = {
@@ -35,23 +37,38 @@ const botOfficeFilePreview: OfficeFilePreviewAdapter = {
   )
 }
 
-/** Reuse the workbench's ordered preview requests, bound to the message's owning thread. */
-export function BotMessageFilePreview({
-  botId,
-  groupId,
-  imConversationId,
-  threadId,
-  name,
-  client
-}: {
+type BotFilePreviewProps = {
   botId: string
   groupId?: string
   imConversationId?: string
   threadId: string
   name: string
   client: BotClient
+}
+
+/** Reuse the workbench's ordered preview requests, bound to the message's owning thread. */
+export function BotMessageFilePreview(props: BotFilePreviewProps) {
+  const { request, clear } = useResourcePreviewRequest(props.threadId)
+  return <BotFileDeliveryPreview {...props} request={request} clear={clear} />
+}
+
+/** The caller owns the dialog lifetime; threadId remains the exact read-only delivery source. */
+export function BotFileDeliveryPreview({
+  botId,
+  groupId,
+  imConversationId,
+  threadId,
+  name,
+  client,
+  ownerThreadId,
+  request,
+  clear
+}: BotFilePreviewProps & {
+  /** Cross-thread dialogs isolate cancellation by their visible owner without changing source identity. */
+  ownerThreadId?: string
+  request: OpenResourcePreviewDetail | null
+  clear(): void
 }) {
-  const { request, clear } = useResourcePreviewRequest(threadId)
   const transport = useMemo(
     () =>
       groupId
@@ -80,17 +97,43 @@ export function BotMessageFilePreview({
   const [saving, setSaving] = useState(false)
   const savingRef = useRef(false)
   const trigger = useRef<HTMLElement | null>(null)
+  const resolveExternalPreviewGrant = useMemo(() => {
+    const source = request?.botDeliverySource
+    const initialGrant = request?.externalPreviewGrant
+    if (
+      !request || !initialGrant || source?.threadId !== threadId ||
+      groupId || imConversationId || client.hostId !== LOCAL_BOT_HOST_ID || !client.authorizeDeliveredFile
+    ) return undefined
+
+    let grant = initialGrant
+    let expiresAt = request.externalPreviewGrantExpiresAt
+    let pending: Promise<string> | undefined
+    return async () => {
+      if (isHarnessPluginRunArtifactGrantFresh(grant, expiresAt)) return grant
+      pending ??= client.authorizeDeliveredFile!(source).then(result => {
+        if (result.filePath !== request.filePath)
+          throw new Error("原交付附件路径已变化，请重新打开。")
+        grant = result.grant
+        expiresAt = result.expiresAt
+        return grant
+      }).finally(() => { pending = undefined })
+      return pending
+    }
+  }, [client, groupId, imConversationId, request, threadId])
   if (!request) return null
+  const fileName = (request.markdownBasePath ?? request.filePath).split(/[\\/]/).pop()
   const save = async () => {
     if (savingRef.current) return
     savingRef.current = true
     setSaving(true)
     try {
-      if (imConversationId) {
+      if (request.botDeliverySource && client.exportDeliveredFile) {
+        await client.exportDeliveredFile(request.botDeliverySource)
+      } else if (imConversationId) {
         if (!client.im?.exportFile) throw new Error("当前主机不支持保存招乎群文件")
-        await client.im.exportFile(botId, imConversationId, request.filePath)
-      } else if (groupId) await client.exportGroupFile(groupId, request.filePath)
-      else await client.exportFile(botId, request.filePath)
+        await client.im.exportFile(botId, imConversationId, request.filePath, undefined, fileName)
+      } else if (groupId) await client.exportGroupFile(groupId, request.filePath, fileName)
+      else await client.exportFile(botId, request.filePath, undefined, undefined, fileName)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "文件保存失败，请重试")
     } finally {
@@ -121,10 +164,10 @@ export function BotMessageFilePreview({
       >
         <DialogHeader className="bot-file-preview-header space-y-0">
           <DialogTitle className="bot-file-preview-title">
-            {request.filePath.split(/[\\/]/).pop()}
+            {fileName}
           </DialogTitle>
           <DialogDescription className="sr-only">{name}的工作成果</DialogDescription>
-          {!request.externalPreviewGrant && (
+          {(!request.externalPreviewGrant || (request.botDeliverySource && client.exportDeliveredFile)) && (
             <button
               type="button"
               className="bot-file-preview-save"
@@ -146,10 +189,15 @@ export function BotMessageFilePreview({
             workspacePathKind={request.workspacePathKind}
             externalFullPath={request.externalPreviewGrant ? request.filePath : undefined}
             externalPreviewGrant={request.externalPreviewGrant}
+            resolveExternalPreviewGrant={resolveExternalPreviewGrant}
+            botDeliveryMarkdown={request.botDeliverySource}
+            botDelivery={request.botDelivery}
             transport={transport}
             cacheNamespace={`bot:${client.hostId}:`}
             reloadToken={request.intentId}
-            requestLane={`bot-message:${client.hostId}:${threadId}`}
+            requestLane={ownerThreadId
+              ? `bot-delivery:${client.hostId}:${ownerThreadId}:${threadId}`
+              : `bot-message:${client.hostId}:${threadId}`}
             htmlPreviewPolicy="workspace-scripted"
             textPreview={botJsonFilePreview}
             officePreview={botOfficeFilePreview}

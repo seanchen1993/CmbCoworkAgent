@@ -1,11 +1,46 @@
 import { useRef, useState } from "react"
-import { Plus, Search, ChevronDown } from "lucide-react"
-import { botWorkStatus as status } from "@/lib/bot-work-status"
+import { Plus, Search, Eye, ChevronDown, Loader2, Clock3, CirclePause, CircleCheck, CircleAlert, CircleStop, CircleDot, CircleDashed } from "lucide-react"
+import { resolveBotWorkStatus } from "@/lib/bot/work-status"
 import type { BotClient } from "../../../../shared/bots/contracts"
-import type { BotWorkItem } from "../../../../shared/bots/work"
+import type { BotWorkItem, BotWorkSummary } from "../../../../shared/bots/work"
 import { FeatureRow, FollowPicker, useBotFeatureTasks } from "./BotFeaturePanel"
 import type { useBotWorks } from "./use-bot-works"
 import { botErrorMessage } from "@/lib/bot-error-message"
+
+export function botWorkStatus(work: BotWorkSummary): string {
+  return resolveBotWorkStatus(work).label
+}
+
+export function botWorkStatusTone(work: BotWorkSummary): string {
+  return resolveBotWorkStatus(work).tone
+}
+
+const botWorkStatusIcons = {
+  running: Loader2,
+  queued: Clock3,
+  waiting: CirclePause,
+  complete: CircleCheck,
+  alert: CircleAlert,
+  stopped: CircleStop,
+  ready: CircleDot,
+  idle: CircleDashed
+}
+
+export function BotWorkStatusIcon({
+  work,
+  status = resolveBotWorkStatus(work)
+}: {
+  work: BotWorkSummary
+  status?: ReturnType<typeof resolveBotWorkStatus>
+}) {
+  const Icon = botWorkStatusIcons[status.icon]
+  return <Icon
+    aria-hidden="true"
+    className={status.icon === "running" ? "bot-work-state-icon motion-safe:animate-spin" : "bot-work-state-icon"}
+    data-tone={status.tone}
+    size={20}
+  />
+}
 
 export function BotWorkPanel({
   client,
@@ -13,6 +48,8 @@ export function BotWorkPanel({
   controller,
   selected,
   onSelect,
+  onPreview,
+  captureWorkNavigation,
   disabled,
   groupId,
   readOnlyGroup = false,
@@ -23,6 +60,8 @@ export function BotWorkPanel({
   controller: ReturnType<typeof useBotWorks>
   selected: BotWorkItem | null
   onSelect(id: string | null): void
+  onPreview?(work: BotWorkSummary, trigger: HTMLButtonElement): void
+  captureWorkNavigation?(): () => boolean
   groupId?: string
   readOnlyGroup?: boolean
   heading?: string
@@ -41,6 +80,7 @@ export function BotWorkPanel({
   const [completedOpen, setCompletedOpen] = useState(false)
   const features = useBotFeatureTasks({ client, botId, groupId, query: controller.query })
   const [createKind, setCreateKind] = useState<"work" | "feature">("work")
+  const createButton = useRef<HTMLButtonElement>(null)
   const canAdd = !disabled && !readOnlyGroup
   const isCurrentAudience = () =>
     controller.current.current.botId === botId &&
@@ -53,6 +93,8 @@ export function BotWorkPanel({
   }
   const create = async () => {
     if (!client.works || saving || !canAdd) return
+    const trigger = createButton.current
+    const isNavigationCurrent = captureWorkNavigation?.()
     setSaving(true)
     setError(null)
     try {
@@ -66,14 +108,16 @@ export function BotWorkPanel({
           ? { workspace: { kind: "directory" as const, path: directoryPath.trim() } }
           : {})
       })
+      void controller.refresh()
       if (!isCurrentAudience()) return
       operation.current = null
       setEditing(false)
       setTitle("")
       setGoal("")
       setDirectoryPath("")
-      onSelect(receipt.work.id)
-      void controller.refresh()
+      if (isNavigationCurrent?.() === false || !trigger || createButton.current !== trigger) return
+      if (onPreview && !groupId) onPreview(receipt.work, trigger)
+      else onSelect(receipt.work.id)
     } catch (cause) {
       if (isCurrentAudience()) setError(botErrorMessage(cause))
     } finally {
@@ -145,6 +189,7 @@ export function BotWorkPanel({
           </button>
           {!readOnlyGroup && (
             <button
+              ref={createButton}
               disabled={!canAdd || saving}
               onClick={() => setEditing(!editing)}
               aria-label="添加任务"
@@ -269,10 +314,10 @@ export function BotWorkPanel({
             )
           const work = entry.work
           return (
+            <div key={work.id} className="group relative">
             <button
-              className="bot-work-row"
+              className="bot-work-row w-full pr-8"
               data-work-id={work.id}
-              key={work.id}
               aria-pressed={selected?.id === work.id}
               onClick={() => onSelect(work.id)}
             >
@@ -280,8 +325,13 @@ export function BotWorkPanel({
                 {work.activity?.unread ? "● " : ""}
                 {work.title}
               </span>
-              <small>{status(work)}</small>
+              <small>{botWorkStatus(work)}</small>
             </button>
+            {onPreview && !work.source && <button type="button"
+              className="absolute right-1 top-1/2 grid size-7 -translate-y-1/2 place-items-center rounded-md bg-background text-muted-foreground opacity-0 hover:text-foreground focus:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
+              aria-label={`预览任务：${work.title}`} title="预览任务"
+              onClick={event => onPreview(work, event.currentTarget)}><Eye size={14} /></button>}
+            </div>
           )
         })}
       </div>

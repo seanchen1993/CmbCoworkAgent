@@ -21,6 +21,7 @@ async function main() {
     join(originalWorkspace, "existing.md"),
     "# Existing material\n\nOriginal workspace content.\n"
   )
+  await writeFile(join(otherWorkspace, "existing.md"), "Unrelated workspace content.\n")
   const calls: Array<{ path: string; user: string; all: string }> = [],
     errors: string[] = []
   const server = createServer(async (req, res) => {
@@ -68,6 +69,9 @@ async function main() {
         if (user.includes("LINK_NEW_WORK")) reply = "LINK_NEW_REPLY：新任务也有同一个本机会话入口。"
         if (user.includes("LINK_UNLINKED")) reply = "LINK_UNLINKED_REPLY：普通会话继续保留。"
         if (user.includes("memory") && !user.includes("LINK_")) reply = "[]"
+        if (user.includes("LINK_CONTROL_GOAL") && messages.some((message: any) =>
+          message.role === "system" && String(message.content).startsWith("You are a strict evaluator for an autonomous coding agent goal.")))
+          reply = JSON.stringify({ verdict: "blocked", blocker_type: "other", reason: "等待核对。" })
       }
       const linkedTurn = !reporting && /LINK_(MODIFY_FROM_BOT|MODIFY_FROM_CHAT|NEW_WORK)/.test(user)
       const toolNames = (body.tools ?? []).map(
@@ -280,6 +284,7 @@ async function main() {
             enableThinking: true
           })
         await api.models.setDefault("custom:link-original")
+        await api.models.setGoalSettings({ evaluatorModelId: "custom:link-original" })
         const bot = await api.bots.create({
           name: "会话关联专家",
           instructions: "使用原会话持续讨论。",
@@ -293,8 +298,14 @@ async function main() {
           agentMode: "normal",
           memoryEnabled: true
         })
+        const otherThread = await api.threads.create({
+          title: "另一目录的独立会话",
+          workspacePath: otherWorkspace,
+          model: "custom:link-original",
+          agentMode: "normal"
+        })
         await api.workspace.set(undefined, otherWorkspace)
-        return { bot, thread }
+        return { bot, thread, otherThread }
       },
       { base: `http://127.0.0.1:${address.port}`, originalWorkspace, otherWorkspace }
     )
@@ -302,8 +313,15 @@ async function main() {
     await page.getByText("既有本机讨论", { exact: true }).first().click()
     const threadId = setup.thread.thread_id
     const chat = () => page.locator(`[data-chat-thread-id="${threadId}"]`)
+    const editor = () => chat().locator('textarea, [role="textbox"][contenteditable="true"]').last()
+    const fileChip = chat().getByRole("button", { name: "查看文件路径 existing.md", exact: true })
+    const addExistingFile = async (text: string) => {
+      await editor().fill(`${text} @existing`)
+      await chat().getByRole("option", { name: /existing\.md/ }).click()
+      await fileChip.waitFor()
+    }
     const send = async (text: string) => {
-      await chat().locator('textarea, [role="textbox"][contenteditable="true"]').last().fill(text)
+      await editor().fill(text)
       await page.evaluate(
         () =>
           new Promise<void>((done) =>
@@ -311,6 +329,33 @@ async function main() {
           )
       )
       await chat().locator('button[type="submit"]').last().click()
+    }
+    const takeControl = async (targetThreadId = threadId) => {
+      await page.getByRole("button", { name: /^(获取|归还)控制权$/ }).waitFor()
+      const take = page.getByRole("button", { name: "获取控制权", exact: true })
+      if (await take.count()) await take.click()
+      await page.getByRole("button", { name: "归还控制权", exact: true }).waitFor()
+      await page.locator(`[data-chat-thread-id="${targetThreadId}"] [data-bot-owner-composer]`).waitFor()
+    }
+    const returnToTask = async (workId: string, targetThreadId = threadId) => {
+      await page.getByRole("button", { name: /返回 .* 主对话$/ }).first().click()
+      await page.locator(`[data-work-id="${workId}"]`).click()
+      await page.getByRole("button", { name: "打开任务", exact: true }).click()
+      await page.locator(`[data-chat-thread-id="${targetThreadId}"]`).waitFor()
+    }
+    const composerActions = () => chat().locator("[data-composer-actions]")
+    const assertManagedGoalReadOnly = async () => {
+      await chat().getByRole("button", { name: "获取控制权", exact: true }).waitFor()
+      assert.equal(await editor().count(), 0)
+      assert.equal(await composerActions().count(), 0)
+      assert.equal(await chat().locator("[data-composer-environment]").count(), 0)
+      assert.equal(await chat().getByRole("button", { name: "回复消息", exact: true }).count(), 0)
+      await chat().getByRole("button", { name: "查看 Goal 详情", exact: true }).click()
+      await chat().getByRole("button", { name: "关闭 Goal 详情", exact: true }).waitFor()
+      assert.equal(await chat().getByRole("button", {
+        name: /^(编辑|暂停|继续|清除)( Goal)?$|^刷新状态$/
+      }).count(), 0)
+      await chat().getByRole("button", { name: "关闭 Goal 详情", exact: true }).click()
     }
     const assertComposerLayout = async () => {
       const composer = page.locator("[data-bot-owner-composer]").last()
@@ -367,6 +412,19 @@ async function main() {
       async (id) => (await (window as any).api.threads.get(id)).status === "idle",
       threadId
     )
+    await send("/goal LINK_CONTROL_GOAL：保留目标以测试只读任务详情。")
+    await waitForBotAppState(page, async (id) => {
+      const api = (window as any).api
+      return (await api.threads.getGoalState(id)).goal?.status === "paused" &&
+        (await api.threads.get(id)).status === "idle"
+    }, threadId)
+    await addExistingFile("LINK_RETAINED_DRAFT")
+    await page.getByText("另一目录的独立会话", { exact: true }).first().click()
+    const otherChat = page.locator(`[data-chat-thread-id="${setup.otherThread.thread_id}"]`)
+    await otherChat.locator("textarea").last().waitFor()
+    assert.equal(await otherChat.getByRole("button", { name: "查看文件路径 existing.md", exact: true }).count(), 0)
+    await page.getByText("既有本机讨论", { exact: true }).first().click()
+    await fileChip.waitFor()
     const before = await page.evaluate(
       async () => (await (window as any).api.bots.snapshot()).tasks.length
     )
@@ -404,18 +462,22 @@ async function main() {
     assert.equal(preserved.metadata.memoryEnabled, true)
     assert.equal(preserved.metadata.workspacePath, originalWorkspace)
     console.log("stage: existing-associated-no-execution", threadId, linked.work.id)
-    await page.getByRole("button", { name: "返回 Bot 任务", exact: true }).click()
-    await chat().waitFor()
+    await assertManagedGoalReadOnly()
+    await returnToTask(linked.work.id)
+    await assertManagedGoalReadOnly()
     // Main chat learns the association and can retrieve pre-link history without running that work.
-    await page.getByRole("button", { name: "返回主对话", exact: true }).first().click()
+    await page.locator(".bot-task-parent").click()
     assert.equal(await page.locator("[data-bot-association-notice]").count(), 0)
     await page.locator(`[data-work-id="${linked.work.id}"]`).waitFor()
     await page.locator(`[data-work-id="${linked.work.id}"]`).click()
-    await page.getByText("来源 · 已有会话关联", { exact: true }).waitFor()
+    await page.getByRole("button", { name: "打开任务", exact: true }).click()
+    await page.getByRole("button", { name: "任务详情与操作", exact: true }).click()
+    await page.locator(".bot-work-options").getByText("已有会话关联", { exact: true }).waitFor()
     await page.getByRole("button", { name: "打开原会话", exact: true }).waitFor()
     await chat().getByText(/LINK_INITIAL_REPLY/).last().waitFor()
     await page.screenshot({ path: join(out, "artifacts", "bot-unified-task-source.png"), fullPage: true })
-    await page.getByRole("button", { name: "返回主对话", exact: true }).first().click()
+    await page.keyboard.press("Escape")
+    await page.locator(".bot-task-parent").click()
     const notices = await page.evaluate(
       async (id) => (window as any).api.bots.works.associations(id),
       setup.bot.id
@@ -504,11 +566,43 @@ async function main() {
       .waitFor()
     await page.keyboard.press("Escape")
     await page.getByRole("tab", { name: "详情", exact: true }).click()
+    await takeControl()
+    assert.equal((await editor().inputValue()).trim(), "LINK_RETAINED_DRAFT")
+    await chat().getByRole("button", { name: "继续 Goal", exact: true }).waitFor()
+    await fileChip.waitFor()
+    await page.getByRole("button", { name: "打开原会话", exact: true }).click()
+    await page.getByRole("button", { name: "任务选项", exact: true }).waitFor()
+    await fileChip.waitFor()
+    await returnToTask(linked.work.id)
+    await fileChip.waitFor()
+    const originalUserRow = chat().locator("[data-chat-message-id]").filter({
+      hasText: "LINK_INITIAL：先在普通对话讨论。"
+    }).first()
+    await originalUserRow.getByRole("button", { name: "回复消息", exact: true }).click()
+    const quote = chat().getByRole("button", { name: "跳转到被回复的消息", exact: true })
+    await quote.getByText(/LINK_INITIAL/).waitFor()
+    await chat().getByRole("button", { name: "归还控制权", exact: true }).click()
+    await assertManagedGoalReadOnly()
+    await originalUserRow.getByRole("button", { name: "更多消息操作", exact: true }).click()
+    assert.equal(await page.getByRole("button", { name: "编辑后重新发送", exact: true }).count(), 0)
+    await page.keyboard.press("Escape")
+    await takeControl()
+    assert.equal((await editor().inputValue()).trim(), "LINK_RETAINED_DRAFT")
+    await quote.getByText(/LINK_INITIAL/).waitFor()
+    await fileChip.waitFor()
+    await chat().getByRole("button", { name: "取消回复", exact: true }).click()
+    await chat().getByRole("button", { name: "清除 Goal", exact: true }).click()
+    await waitForBotAppState(page, async (id) => !(await (window as any).api.threads.getGoalState(id)).goal, threadId)
     await send("LINK_MODIFY_FROM_BOT：从 Bot 入口修改。")
+    await fileChip.waitFor({ state: "hidden" })
     await page
       .getByText(/LINK_BOT_REPLY/)
       .last()
       .waitFor({ timeout: 90000 })
+    const managedInput = calls.find((call) => call.user.startsWith("LINK_MODIFY_FROM_BOT"))?.user ?? ""
+    assert.match(managedInput, /<attachment filename="existing\.md" input_id="input-[^"]+"/)
+    assert.match(managedInput, /Original workspace content\./)
+    assert.doesNotMatch(managedInput, /Unrelated workspace content\./)
     await waitForBotAppState(
       page,
       async () =>
@@ -517,7 +611,7 @@ async function main() {
         )
     )
     await page.getByRole("button", { name: "打开原会话", exact: true }).click()
-    await page.getByRole("button", { name: "返回 Bot 任务", exact: true }).waitFor()
+    await page.getByRole("button", { name: /返回 .* 主对话$/ }).first().waitFor()
     await page
       .getByText(/LINK_INITIAL_REPLY/)
       .last()
@@ -601,18 +695,24 @@ async function main() {
       path: join(out, "artifacts", "linked-task-execution-details.png"),
       fullPage: true
     })
-    await page.getByRole("button", { name: "返回 Bot 任务", exact: true }).click()
+    await returnToTask(linked.work.id)
     assert.equal(await detailButton().getAttribute("aria-pressed"), "true")
     await detailButton().click()
     await page.getByRole("button", { name: "打开原会话", exact: true }).click()
-    await page.getByRole("button", { name: "返回 Bot 任务", exact: true }).waitFor()
+    await page.getByRole("button", { name: /返回 .* 主对话$/ }).first().waitFor()
     assert.equal(await detailButton().getAttribute("aria-pressed"), "false")
     assert.equal(await chat().getByRole("button", { name: "思考", exact: true }).count(), 0)
     console.log(
       "stage: linked-task reasoning and tool details toggle stays in sync across entrances"
     )
-    // Both entrances edit the actual Thread model, never the Bot default.
-    await chat().getByRole("button", { name: "Original fixture", exact: true }).click()
+    // Takeover restores the ordinary composer toolbar and the bound workspace display.
+    await composerActions().getByRole("button", { name: /执行模式：Solo/ }).waitFor()
+    const environment = chat().locator("[data-composer-environment]")
+    await environment.getByRole("button", { name: "original-workspace", exact: true }).click()
+    await page.getByText("任务沿用已绑定的工作目录。", { exact: true }).waitFor()
+    assert.equal(await page.getByRole("button", { name: "更换文件夹", exact: true }).count(), 0)
+    await page.keyboard.press("Escape")
+    await composerActions().getByRole("button", { name: "Original fixture", exact: true }).click()
     await page.getByText("Bot default fixture", { exact: true }).last().click()
     await waitForBotAppState(
       page,
@@ -620,9 +720,8 @@ async function main() {
         (await (window as any).api.threads.get(id)).metadata.model === "custom:link-default",
       threadId
     )
-    await page.getByRole("button", { name: "返回 Bot 任务", exact: true }).click()
-    await chat().getByRole("button", { name: "Bot default fixture", exact: true }).waitFor()
-    await chat().getByRole("button", { name: "Bot default fixture", exact: true }).click()
+    await returnToTask(linked.work.id)
+    await composerActions().getByRole("button", { name: "Bot default fixture", exact: true }).click()
     await page.getByText("Original fixture", { exact: true }).last().click()
     await waitForBotAppState(
       page,
@@ -631,9 +730,12 @@ async function main() {
       threadId
     )
     await page.getByRole("button", { name: "打开原会话", exact: true }).click()
-    await page.getByRole("button", { name: "返回 Bot 任务", exact: true }).waitFor()
+    await page.getByRole("button", { name: /返回 .* 主对话$/ }).first().waitFor()
+    await page.getByRole("button", { name: "任务选项", exact: true }).click()
     await page.getByRole("button", { name: "完成任务", exact: true }).click()
+    await page.getByRole("button", { name: "任务选项", exact: true }).click()
     await page.getByRole("button", { name: "继续处理", exact: true }).waitFor()
+    await page.keyboard.press("Escape")
     const completed = await page.evaluate(
       async (id) => (window as any).api.bots.conversations.resolve(id),
       threadId
@@ -660,8 +762,11 @@ async function main() {
     }, threadId)
     assert.ok(JSON.stringify(bypass).includes("BOT_WORK_MANAGED_CONVERSATION"))
     assert.ok(!calls.some((c) => c.user.includes("LINK_RAW_BYPASS")))
+    await page.getByRole("button", { name: "任务选项", exact: true }).click()
     await page.getByRole("button", { name: "继续处理", exact: true }).click()
+    await page.getByRole("button", { name: "任务选项", exact: true }).click()
     await page.getByRole("button", { name: "完成任务", exact: true }).waitFor()
+    await page.keyboard.press("Escape")
     await chat()
       .getByText(/LINK_CHAT_REPLY/)
       .last()
@@ -671,10 +776,15 @@ async function main() {
       path: join(out, "artifacts", "m05-06-linked-conversation.png"),
       fullPage: true
     })
-    page.once("dialog", (dialog) => void dialog.accept())
+    const unlinkedDraft = "LINK_UNLINKED：解除后继续普通对话。"
+    await addExistingFile(unlinkedDraft)
     await page.getByRole("button", { name: "更多任务操作", exact: true }).click()
     await page.getByRole("button", { name: "解除任务关联", exact: true }).click()
+    await page.getByRole("button", { name: "确认解除", exact: true }).click()
     await page.getByRole("button", { name: "关联为 Bot 任务", exact: true }).waitFor()
+    await fileChip.waitFor()
+    assert.equal((await editor().inputValue()).trim(), unlinkedDraft)
+    assert.ok(!calls.some((call) => call.user.startsWith(unlinkedDraft)), "unlink must preserve the draft without sending it")
     assert.equal(
       await page.evaluate(
         async (id) => (window as any).api.bots.conversations.resolve(id),
@@ -694,11 +804,16 @@ async function main() {
       { botId: setup.bot.id, source: sourceReference }
     )
     assert.notEqual(stale, "unexpected success", "an old source cannot reopen an unlinked task")
-    await send("LINK_UNLINKED：解除后继续普通对话。")
+    await send(unlinkedDraft)
+    await fileChip.waitFor({ state: "hidden" })
     await page
       .getByText(/LINK_UNLINKED_REPLY/)
       .last()
       .waitFor({ timeout: 90000 })
+    const ordinaryInput = calls.find((call) => call.user.startsWith(unlinkedDraft))?.user ?? ""
+    assert.match(ordinaryInput, /<attachment filename="existing\.md" path="[^"]+existing\.md"/)
+    assert.match(ordinaryInput, /Original workspace content\./)
+    assert.doesNotMatch(ordinaryInput, /input_id=|Unrelated workspace content\./)
     const final = await page.evaluate(async (id) => (window as any).api.threads.get(id), threadId)
     assert.equal(final.metadata.workspacePath, originalWorkspace)
     assert.equal(final.metadata.model, "custom:link-original")
@@ -731,11 +846,15 @@ async function main() {
     )
     await page.reload()
     await page.getByText("新建独立任务的对话", { exact: true }).first().click()
-    await page.getByRole("button", { name: "返回 Bot 任务", exact: true }).waitFor()
-    await page.getByRole("button", { name: "返回 Bot 任务", exact: true }).click()
-    await page.getByText("来源 · Bot 内新建", { exact: true }).waitFor()
-    await page.getByRole("button", { name: "在对话模式打开", exact: true }).click()
-    await page.getByRole("button", { name: "返回 Bot 任务", exact: true }).waitFor()
+    await page.getByRole("button", { name: "打开任务", exact: true }).click()
+    await page.getByRole("button", { name: /返回 .* 主对话$/ }).first().waitFor()
+    await returnToTask(created.work.id, created.work.threadId)
+    assert.equal(await page.locator(".bot-work-options").getByText("Bot 内新建", { exact: true }).isVisible(), false)
+    await page.getByRole("button", { name: "任务详情与操作", exact: true }).click()
+    await page.locator(".bot-work-options").getByText("Bot 内新建", { exact: true }).waitFor()
+    await page.keyboard.press("Escape")
+    await page.getByRole("button", { name: "在工作台打开", exact: true }).click()
+    await page.getByRole("button", { name: /返回 .* 主对话$/ }).first().waitFor()
     const newLink = await page.evaluate(
       async (id) => (window as any).api.bots.conversations.resolve(id),
       created.work.threadId
@@ -757,6 +876,7 @@ async function main() {
       !calls.find((c) => c.user.includes("LINK_NEW_WORK"))!.all.includes("LINK_INITIAL_REPLY"),
       "a new task must not import another conversation history"
     )
+    await takeControl(created.work.threadId)
     await assertComposerLayout()
     await page.screenshot({
       path: join(out, "artifacts", "m05-06-created-conversation.png"),

@@ -6,9 +6,11 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 export function QueuedMessageActions({
   botState,
   onEdit,
+  onChooseSkillTarget,
   onDelete
 }: {
   botState?: "queued" | "sending" | "unconfirmed"
+  onChooseSkillTarget?(): void
   onEdit(): void
   onDelete(): void
 }) {
@@ -40,6 +42,8 @@ export function QueuedMessageActions({
           </button>
         </PopoverTrigger>
         <PopoverContent align="end" className="w-48 p-1">
+          {onChooseSkillTarget && !immutable && <button type="button" className="flex w-full rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted"
+            onClick={() => { setOpen(false); onChooseSkillTarget() }}>选择技能执行位置</button>}
           {immutable && (
             <p className="px-2 py-1.5 text-xs leading-relaxed text-muted-foreground">
               {busy

@@ -11,6 +11,7 @@ import {
 import { resolveResourcePreviewPaths } from "@/lib/resource-preview-paths"
 import { emitOpenResourcePreview } from "@/lib/resource-preview-events"
 import { useThreadStateSelector } from "@/lib/thread-context"
+import { parseBotWorkAttachmentHref } from "../../../../shared/bots/work-history"
 import type { FileInfo } from "@/types"
 import {
   ChatHistorySourceContext,
@@ -290,13 +291,14 @@ export function useMarkdownFilePreviewComponents({
           return <span>{children}</span>
         }
 
-        if (href.startsWith("#bot-history/")) {
+        if (href.startsWith("#bot-history/") || href.startsWith("#bot-thread-history/") || href.startsWith("#bot-work/")) {
           return openHistorySource ? (
             <button
               type="button"
               className="bot-history-citation"
               data-history-source={href}
-              title="打开原会话并定位这条消息"
+              title={parseBotWorkAttachmentHref(href) ? "预览附件" :
+                href.startsWith("#bot-work/") ? "查看原任务" : "打开原会话并定位这条消息"}
               onClick={() => openHistorySource(href)}
             >
               {children}

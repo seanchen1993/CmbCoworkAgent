@@ -21,6 +21,8 @@ async function main() {
     results: unknown[] = []
   let app: Awaited<ReturnType<typeof _electron.launch>> | undefined, page: Page | undefined
   let passed = false
+  let workerTokenSent!: () => void
+  const firstWorkerToken = new Promise<void>(resolve => { workerTokenSent = resolve })
   const model = createServer(async (req, res) => {
     try {
       let raw = ""
@@ -30,7 +32,7 @@ async function main() {
       const text = typeof user?.content === "string" ? user.content : JSON.stringify(user?.content)
       // Work-result reporting includes the original request inside its JSON.
       // It is a new notification, not another held user execution.
-      const match = text?.trimStart().startsWith('{"workId":')
+      const match = /<bot_runtime_context event="task_result(?:_review)?">/.test(text ?? "") || text?.trimStart().startsWith('{"workId":') || text?.trimStart().startsWith('{"kind":"host_work_result"')
         ? null
         : /STEER_(START|SECOND)_(bot-main|bot-work)/.exec(text ?? "")
       const stage = match?.[1],
@@ -47,6 +49,7 @@ async function main() {
           `data: ${JSON.stringify({ ...reply, choices: [{ index: 0, delta, finish_reason }] })}\n\n`
         )
       frame({ content: marker })
+      if (kind === "bot-work" && stage === "START") workerTokenSent()
       if (match) await new Promise<void>((done) => gates.set(`${stage}_${kind}`, done))
       frame({}, "stop")
       res.end("data: [DONE]\n\n")
@@ -173,6 +176,8 @@ async function main() {
           bot.id
         )
         threadId = result.work.threadId
+        // Exercise a task that is already streaming while its chat is still closed.
+        await Promise.race([firstWorkerToken, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error("worker did not stream")), 30000); timer.unref() })])
         await page.locator(".bot-work-row").filter({ hasText: "流式补充验收任务" }).click()
       }
       const chat = page.locator(`[data-chat-thread-id="${threadId}"]`)
@@ -319,9 +324,14 @@ async function main() {
     assert.deepEqual(errors, [])
     passed = true
   } finally {
-    for (const release of gates.values()) release()
-    if (!passed && page)
+    if (!passed && page) {
       await page.screenshot({ path: join(evidence, "failure.png") }).catch(() => {})
+      await writeFile(join(evidence, "failure-state.json"), JSON.stringify(await page.evaluate(async () => ({
+        chat: document.querySelector("[data-chat-thread-id]")?.textContent,
+        tasks: (await (window as any).api.bots.snapshot()).tasks.map((t: any) => ({ thread: t.threadId, state: t.state }))
+      })).catch(() => ({}))))
+    }
+    for (const release of gates.values()) release()
     await writeFile(
       join(evidence, "result.json"),
       JSON.stringify(

@@ -18,11 +18,12 @@ export function broadcastToRenderers(channel: string, payload: unknown): void {
 
 export function mirrorStandardTurnStreamToRenderer(
   threadId: string,
-  event: SchedulerRendererEvent
+  event: SchedulerRendererEvent,
+  botWork = false
 ): void {
   broadcastToRenderers(`scheduler:stream:${threadId}`, event)
   if (event.type === "started" || event.type === "done" || event.type === "error") {
-    broadcastToRenderers(THREAD_ACTIVITY_CHANNEL, { threadId, type: event.type })
+    broadcastToRenderers(THREAD_ACTIVITY_CHANNEL, { threadId, type: event.type, ...(botWork && event.type === "started" ? { botWork: true } : {}) })
   }
 }
 

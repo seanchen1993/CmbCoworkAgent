@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import type { Message, ToolCallState } from "@/types"
+import type { BotWorkSummary } from "../../../shared/bots/work"
 import { isBotExecutionTool, projectBotExecution } from "./bot-execution-visibility"
 import { isBotContinuationReceipt } from "../../../shared/bots/turn-feedback"
-import { botWorkReceipt } from "./bot-work-receipt"
+import { botWorkCardIds, botWorkReceipt, loadBotWorkCardTitles } from "./bot-work-receipt"
 import { getWorkerToolUiKey } from "./worker-tool-result-key"
 const created_at = new Date(2026, 9, 14)
 
@@ -44,6 +45,32 @@ describe("Bot execution presentation", () => {
     const projection = projectBotExecution([message,returned],false,new Set())
     expect(projection.hiddenMessages.has(message.id)).toBe(false)
     expect(projection.foldedTools.size).toBe(0)
+  })
+
+  it("folds a copied desktop receipt without losing a valid live delivery or its author's text", () => {
+    const assistant = { ...call("delivery", "bot_deliver_files"),
+      botHistoryDeliveryScope: { receiptThread: `thread-${"a".repeat(64)}`, workIds: ["fork-work"] } }
+    const receipt = (workId: string) => result("delivery", false, JSON.stringify({ kind: "bot-file-delivery",
+      receiptThread: `thread-${"b".repeat(64)}`, receiptWorkId: workId,
+      files: [{ name: "report.md", filePath: "/project/report.md", size: 1 }] }))
+    const project = (message: Message, delivery: Message) =>
+      projectBotExecution([message, delivery], false, new Set(), null, undefined, "fork-work")
+    expect(project(assistant, receipt("source-work")).hiddenMessages.has("delivery")).toBe(true)
+    expect(project({ ...assistant, content: "Original report summary" }, receipt("source-work")).hiddenMessages.size).toBe(0)
+    expect(project({ ...assistant, botHistoryDeliveryScope: undefined }, receipt("fork-work")).hiddenMessages.size).toBe(0)
+  })
+  it("refreshes the current title beside a historical card whose work is gone", async () => {
+    const card = (id: string) => [call(id, "bot_work_send"), result(id, false, JSON.stringify({
+      kind: "bot-work-receipt", operation: "bot_work_send", receipt: { workId: id, botId: "owner", title: "Old title" }
+    }))]
+    const ids = botWorkCardIds([...card("deleted"), ...card("renamed")], new Map(), "owner")
+    const summaries = vi.fn(async () => [
+      { id: "renamed", botId: "owner", title: "New title" },
+      { id: "deleted", botId: "another-bot", title: "Unrelated title" }
+    ] as BotWorkSummary[])
+    const titles = await loadBotWorkCardTitles({ summaries }, "owner", ids, () => true)
+    expect(summaries).toHaveBeenCalledWith("owner", ["deleted", "renamed"], true)
+    expect([...titles]).toEqual([["renamed", "New title"]])
   })
   it("keeps usable history sources visible and folds empty search results", () => {
     const message = call("history", "bot_work_search")
@@ -90,7 +117,7 @@ describe("Bot execution presentation", () => {
       }
     }
   })
-  it.each(["bot_skill_dispatch", "bot_work_create", "bot_work_send", "bot_work_complete", "bot_work_continue"])(
+  it.each(["bot_skill_dispatch", "bot_work_create", "bot_work_send", "bot_work_complete", "bot_work_continue", "bot_work_rename"])(
     "keeps a verified %s navigation card visible after beta folds execution details",
     (name) => {
       const work = { id: "work-id", workId: "work-id", botId: "owner", title: "Draft", threadId: "work-thread" }
@@ -106,6 +133,19 @@ describe("Bot execution presentation", () => {
       expect(botWorkReceipt(tool, { content: returned.content, is_error: true }, "owner")).toBeNull()
     }
   )
+  it.each([
+    [true, "已继续原任务"],
+    [false, "任务未变更"],
+    [undefined, "查看原任务"]
+  ] as const)("labels a Continue receipt with continued=%s without losing navigation", (continued, label) => {
+    const message = call("continue", "bot_work_continue")
+    const returned = result("continue", false, JSON.stringify({
+      kind: "bot-work-receipt",
+      operation: "bot_work_continue",
+      receipt: { id: "work-id", botId: "owner", title: "Draft", state: "active", continued }
+    }))
+    expect(botWorkReceipt(message.tool_calls![0], returned, "owner")).toMatchObject({ id: "work-id", label })
+  })
   it.each([
     [
       "bot_deliver_files",

@@ -1,6 +1,26 @@
 import { lstat, realpath } from "node:fs/promises"
-import { isAbsolute, relative, resolve } from "node:path"
+import { lstatSync, realpathSync } from "node:fs"
+import { dirname, isAbsolute, relative, resolve } from "node:path"
 import { BotError } from "../../shared/bots/contracts"
+
+/** Compare an old reference with an already verified canonical file, without
+ * treating filesystem spelling changes as redirects. The ordinary path is free
+ * of extra I/O; only changed spellings inspect entries up to the trusted root. */
+export function isUnredirectedBotFileReference(workspace: string, source: string, actual: string): boolean {
+  if (source === actual) return true
+  try {
+    const root = realpathSync.native(workspace)
+    let entry = resolve(source)
+    if (realpathSync.native(entry) !== actual) return false
+    for (;;) {
+      if (lstatSync(entry).isSymbolicLink() && entry !== resolve(workspace)) return false
+      if (realpathSync.native(entry) === root) return true
+      const parent = dirname(entry)
+      if (parent === entry) return false
+      entry = parent
+    }
+  } catch { return false }
+}
 
 /** Listing IDs stay relative. Runtime and preview export may opt into absolute paths inside this workspace. */
 export async function resolveBotWorkspaceFile(

@@ -39,6 +39,7 @@ import {
 import type { AgentAutoCommitSettings, AgentAutoCommitWorkspaceCard } from "./types"
 import { normalizeWorkspacePathKey } from "../shared/workspace-path"
 import { normalizeWindowCloseBehavior, type WindowCloseBehavior } from "../shared/close-to-tray"
+import { DEFAULT_STARTUP_VIEW, isStartupView, type StartupView } from "../shared/startup-view"
 import { isBotContextBudget, normalizeBotContextBudget } from "../shared/bots/context-budget"
 import { readdir, rm, mkdir, readFile, writeFile } from "fs/promises"
 import {
@@ -385,6 +386,12 @@ function deleteIndexedCheckpointArtifacts(
 
   forgetCheckpointThreadId(index, threadId)
   return hadIndexedArtifacts || removedLive
+}
+
+/** Resolve a history lookup without creating directories or registering a checkpoint. */
+export function peekThreadCheckpointPath(threadId: string): string {
+  assertSafeThreadCheckpointId(threadId)
+  return threadCheckpointPath(join(OPENWORK_DIR, "threads"), threadId)
 }
 
 export function getThreadCheckpointPath(threadId: string): string {
@@ -2038,6 +2045,7 @@ export function setStoredDefaultModelId(modelId: string): void {
 }
 
 const WINDOW_CLOSE_BEHAVIOR_KEY = "windowCloseBehavior"
+const STARTUP_VIEW_KEY = "startupView"
 const GIT_CHANGE_NOTICE_ENABLED_KEY = "gitChangeNoticeEnabled"
 
 export function getGitChangeNoticeEnabled(): boolean {
@@ -2068,6 +2076,22 @@ export function setWindowCloseBehavior(behavior: WindowCloseBehavior): WindowClo
   const normalized = normalizeWindowCloseBehavior(behavior)
   getSettingsStore().set(WINDOW_CLOSE_BEHAVIOR_KEY, normalized)
   return normalized
+}
+
+export function getStartupView(): StartupView {
+  try {
+    const value = getSettingsStore().get(STARTUP_VIEW_KEY)
+    return isStartupView(value) ? value : DEFAULT_STARTUP_VIEW
+  } catch (error) {
+    console.warn("[Storage] Failed to load startup view:", error)
+    return DEFAULT_STARTUP_VIEW
+  }
+}
+
+export function setStartupView(view: unknown): StartupView {
+  if (!isStartupView(view)) throw new Error("Invalid startup view")
+  getSettingsStore().set(STARTUP_VIEW_KEY, view)
+  return view
 }
 
 const AGENT_GRAPH_RECURSION_LIMIT_KEY = "agentGraphRecursionLimit"

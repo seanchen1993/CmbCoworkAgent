@@ -117,4 +117,35 @@ describe("host-resolved work directories", () => {
     ])
       expect(() => parseCreateBotWork({ ...base, workspace })).toThrow()
   })
+  it("lists registered projects without a guessed name and preserves bounded pagination", async () => {
+    fixture.catalog.mockResolvedValue({
+      projects: [{
+        projectId: "orders", name: "Orders", workspacePath: "/repo",
+        projectDir: "orders", projectCode: "orders", lifecycle: { status: "active" }
+      }],
+      projectNextCursor: 40
+    })
+    for (const query of [undefined, "", "  "]) {
+      const page = await localBotWorkspaces.projects(query, 20)
+      expect(page).toEqual({
+        items: [{ projectId: "orders", name: "Orders", path: "/repo/orders", archived: false }],
+        nextCursor: 40
+      })
+      expect(fixture.catalog).toHaveBeenLastCalledWith(
+        { query: undefined, projectCursor: 20, includeRegistry: false, projectLimit: 20 },
+        expect.any(String)
+      )
+    }
+    await localBotWorkspaces.projects(" Orders ")
+    expect(fixture.catalog).toHaveBeenLastCalledWith(
+      { query: "Orders", projectCursor: undefined, includeRegistry: false, projectLimit: 20 },
+      expect.any(String)
+    )
+  })
+  it("rejects invalid discovery input before reading the project catalog", async () => {
+    await expect(localBotWorkspaces.projects("x".repeat(161))).rejects.toThrow("项目名称过长")
+    for (const cursor of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1])
+      await expect(localBotWorkspaces.projects(undefined, cursor)).rejects.toThrow("分页游标")
+    expect(fixture.catalog).not.toHaveBeenCalled()
+  })
 })

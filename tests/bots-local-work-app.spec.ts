@@ -69,7 +69,17 @@ async function main() {
       let reply = "本机专家可以持续讨论并修改文字或文件。",
         call: { name: string; args: Record<string, unknown> } | undefined
       const reporting = user.includes('<bot_runtime_context event="task_result">')
-      if (reporting) {
+      if (user.includes('<bot_runtime_context event="task_result_review">') || user.startsWith('{"kind":"host_work_result"')) {
+        const envelope = JSON.parse(user.split("\n\n<bot_runtime_context")[0])
+        assert.equal(envelope.kind, "host_work_result")
+        assert.ok(envelope.requests.length)
+        assert.ok(!JSON.stringify(envelope.requests).includes("M05_PRIVATE_MAIN"))
+        const offered = (body.tools ?? []).map((t: any) => t.function?.name)
+        assert.ok(offered.includes("bot_work_result_read") && !offered.includes("bot_work_create"))
+        reply = JSON.stringify(envelope.outcome).includes("第二版")
+          ? "M05_WORK_RETURN：季度安排已按意见更新为第二版，文件在原任务中。"
+          : "M05_WORK_RETURN：季度安排第一版已写好，report.md 在原任务中，可继续修改。"
+      } else if (reporting) {
         assert.equal(body.tool_choice, "none", "a result report may not execute the task again")
         assert.ok((body.tools ?? []).some((t: any) => t.function?.name === "bot_work_create"), "reporting retains stable tool schemas")
         assert.ok(user.includes('"phase":"idle"'), "the automatic report must know the task runtime is idle")
@@ -369,10 +379,7 @@ async function main() {
     if (explicitWorkspace) assert.equal(work.workspace.path, await realpath(chosenDirectory))
     await page.locator(`[data-chat-thread-id="${bot.threadId}"]`).waitFor()
     console.log("stage: main-created-work-without-switch")
-    await page
-      .getByRole("button", { name: /季度安排草稿/ })
-      .last()
-      .click()
+    await page.locator(`[data-work-id="${work.id}"]`).click()
     await page.locator(`[data-chat-thread-id="${work.threadId}"]`).waitFor()
     const approve = async () => {
       const button = page.getByRole("button", { name: /^(允许|运行|全部批准并执行)$/ }).first()
@@ -397,10 +404,7 @@ async function main() {
     await fillComposer("M05_MAIN_PING：工作等待时主对话能继续吗？")
     await send()
     await page.getByText("主对话仍然可用。", { exact: true }).last().waitFor({ timeout: 90000 })
-    await page
-      .getByRole("button", { name: /季度安排草稿/ })
-      .last()
-      .click()
+    await page.locator(`[data-work-id="${work.id}"]`).click()
     await page.locator(`[data-chat-thread-id="${work.threadId}"]`).waitFor()
     await approve()
     const waitSettled = async (count: number) =>
@@ -476,13 +480,11 @@ async function main() {
       },
       { botId: bot.id, workId: work.id, threadId: work.threadId }
     )
-    assert.equal(
-      originCheck.tasks[0].message,
-      "M05_WORK_GOAL：请写一份季度安排到 report.md 并交付文件。"
-    )
+    assert.ok(originCheck.tasks[0].message.includes("M05_WORK_GOAL：请写一份季度安排到 report.md 并交付文件。"))
+    assert.ok(originCheck.tasks[0].message.includes("M05_CREATE_WORK"))
     assert.equal(originCheck.origins[0].origin.dispatch, "create")
     assert.ok(originCheck.origins[0].origin.sourceMessageIds.length > 0)
-    assert.ok(!JSON.stringify(originCheck.messages).includes("M05_CREATE_WORK"))
+    assert.ok(!JSON.stringify(originCheck.messages).includes("M05_PRIVATE_MAIN"))
     await assignment.scrollIntoViewIfNeeded()
     await page.screenshot({
       path: join(out, "artifacts", "bot-work-assignment.png"),
@@ -495,7 +497,7 @@ async function main() {
         async ({ botId, workId, count }) => {
           const rows = (await (window as any).api.bots.snapshot()).tasks.filter(
             (t: any) =>
-              t.botId === botId && t.origin.kind === "work_result" && t.origin.workId === workId
+              t.botId === botId && t.origin.kind === "work_result" && t.origin.workId === workId && (!t.origin.review || t.origin.review.phase === "publish")
           )
           return rows.length === count && rows.every((t: any) => t.state === "completed")
         },
@@ -530,7 +532,7 @@ async function main() {
       const resultTasks = await page.evaluate(
         async ({ botId, workId }) =>
           (await (window as any).api.bots.snapshot()).tasks.filter(
-            (t: any) => t.botId === botId && t.origin.kind === "work_result" && t.origin.workId === workId
+            (t: any) => t.botId === botId && t.origin.kind === "work_result" && t.origin.workId === workId && (!t.origin.review || t.origin.review.phase === "publish")
           ),
         { botId: bot.id, workId: work.id }
       )
@@ -551,7 +553,7 @@ async function main() {
       )
       for (const resultTask of resultTasks) {
         assert.ok(
-          visibleHistory.some((m: any) => m.id === resultTask.requestId),
+          resultTask.origin.review ? visibleHistory.some((m: any) => m.role === "assistant" && String(m.content).includes("查看原任务结果")) : visibleHistory.some((m: any) => m.id === resultTask.requestId),
           "each result must retain its own navigation boundary after revisions"
         )
       }
@@ -561,7 +563,8 @@ async function main() {
       await summary.waitFor()
       await summary.scrollIntoViewIfNeeded()
       assert.ok((await summary.innerText()).includes(count === 1 ? "第一版" : "第二版"))
-      const cards = page.getByRole("button", { name: "任务有新结果：季度安排草稿", exact: true })
+      const reviewed = resultTasks.every((t: any) => t.origin.review?.phase === "publish")
+      const cards = reviewed ? page.getByText("查看原任务结果", { exact: true }) : page.getByRole("button", { name: "任务有新结果：季度安排草稿", exact: true })
       if ((await cards.count()) !== count) {
         const before = await page
           .locator("[data-chat-message-id]")
@@ -580,7 +583,11 @@ async function main() {
         path: join(out, "artifacts", `bot-work-result-${count}.png`),
         animations: "disabled"
       })
-      await card.click()
+      if (reviewed) {
+        await card.click()
+        // Reviewed evidence opens the original workbench thread at the exact result.
+        await page.locator("[data-bot-task-header]").getByRole("button", { name: "返回 Bot 任务", exact: true }).click()
+      } else await card.click()
       await page.locator(`[data-chat-thread-id="${work.threadId}"]`).waitFor()
       assert.equal(
         (
@@ -592,9 +599,17 @@ async function main() {
         "active"
       )
     }
+    const takeControl = async () => {
+      await page.getByRole("button", { name: /^(获取|归还)控制权$/ }).waitFor()
+      const take = page.getByRole("button", { name: "获取控制权", exact: true })
+      if (await take.count()) await take.click()
+      await page.getByRole("button", { name: "归还控制权", exact: true }).waitFor()
+      await composer().waitFor()
+    }
     await checkReturned(1)
     if (explicitWorkspace) {
       // Keep direct task-local edits covered in the explicit-directory variant.
+      await takeControl()
       await fillComposer("M05_EDIT_WORK：把第一版改为第二版。")
       await send()
     } else {
@@ -616,7 +631,7 @@ async function main() {
       await followUp.waitFor()
       assert.ok((await followUp.innerText()).includes("Bot 补充"))
       assert.ok((await followUp.innerText()).includes("M05_EDIT_WORK"))
-      assert.ok(!(await page.locator(".bots-conversation").innerText()).includes("M05_PARENT_EDIT"))
+      assert.ok(!(await page.locator(".bots-conversation").innerText()).includes("M05_PRIVATE_MAIN"))
       await followUp.scrollIntoViewIfNeeded()
       await page.screenshot({
         path: join(out, "artifacts", "bot-work-follow-up.png"),
@@ -629,7 +644,7 @@ async function main() {
     assert.equal(secondReport.success, true)
     assert.match(secondReport.content, /第二版安排/)
     assert.ok(!secondReport.content.includes("第一版安排"))
-    await page.getByText("第二版安排", { exact: false }).last().waitFor({ timeout: 90000 })
+    await page.locator('[data-message-bubble="assistant"]').getByText("第二版安排", { exact: true }).last().waitFor({ timeout: 90000 })
     await checkReturned(2)
     if (process.env.BOT_FEEDBACK_ONLY === "1") {
       assert.deepEqual(errors, [])
@@ -643,7 +658,7 @@ async function main() {
       0
     )
     await page.getByRole("button", { name: "继续处理", exact: true }).click()
-    await composer().waitFor()
+    await takeControl()
     const reopened = await page.evaluate(
       async ({ botId, id }) => (window as any).api.bots.works.get(botId, id),
       { botId: bot.id, id: work.id }
@@ -668,14 +683,11 @@ async function main() {
     await fillComposer("M05_MAIN_PING：主对话能继续吗？")
     await send()
     await page.getByText("主对话仍然可用。", { exact: true }).last().waitFor({ timeout: 90000 })
-    await page
-      .getByRole("button", { name: /季度安排草稿/ })
-      .last()
-      .click()
+    await page.locator(`[data-work-id="${work.id}"]`).click()
     await page.locator(`[data-chat-thread-id="${work.threadId}"]`).waitFor()
     assert.equal(await composerValue(), "这个工作的未发送草稿")
     await fillComposer("")
-    await page.getByText("第二版安排", { exact: false }).last().waitFor({ timeout: 30000 })
+    await page.locator('[data-message-bubble="assistant"]').getByText("第二版安排", { exact: true }).last().waitFor({ timeout: 30000 })
     // Hold the real work-get IPC while the resource tabs remain selected. No fallback to main is permitted.
     await page
       .locator(".bots-conversation")
@@ -738,7 +750,7 @@ async function main() {
       )
     )
     await page.getByRole("tab", { name: "详情", exact: true }).click()
-    await page.getByText("第二版安排", { exact: false }).last().waitFor({ timeout: 30000 })
+    await page.locator('[data-message-bubble="assistant"]').getByText("第二版安排", { exact: true }).last().waitFor({ timeout: 30000 })
     console.log("stage: delayed/failed Work target never opens main files/browser")
     await page.screenshot({ path: join(out, "artifacts", "m05-local-work-app.png") })
     await page.getByRole("button", { name: "Bot 工作区设置", exact: true }).click()

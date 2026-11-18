@@ -16,9 +16,10 @@ vi.mock("@/components/bots/use-bots", () => ({
   useBots: () => ({ snapshot: fixture.snapshot })
 }))
 vi.mock("@/lib/thread-context", () => ({
+  useThreadStateSelector: () => false,
   useThreadStateSummaries: () => fixture.summaries
 }))
-vi.mock("@/components/bots/ConversationTaskControls", () => ({ returnToBotTask: vi.fn() }))
+vi.mock("@/components/bots/ConversationTaskControls", () => ({ returnToBotMain: vi.fn(), returnToBotTask: vi.fn() }))
 vi.mock("@/components/bots/BotConversation", () => ({
   BotConversation: (props: unknown) => {
     fixture.capture(props)

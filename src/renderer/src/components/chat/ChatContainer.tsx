@@ -1,3 +1,6 @@
+import "./chat-floating.css"
+import { useFloatingChatLayout } from "./use-floating-chat-layout"
+import { chatScrollInsets } from "@/lib/chat-scroll-insets"
 import { useChatSourceNavigation } from "@/lib/chat-source-navigation"
 import type { BotGroupInputControl } from "@/components/bots/BotGroupMentionInput"
 import { parseBotMessageMentions } from "../../../../shared/bots/message-mentions"
@@ -25,6 +28,7 @@ import {
   ChatActivityPresentationContext,
   ChatExecutionCardCallIdsContext,
   ChatExecutionDetailsContext,
+  ChatDesktopWorkIdContext,
   ChatToolPresentationContext
 } from "./chat-presentation-context"
 import { QueuedMessageActions } from "./QueuedMessageActions"
@@ -219,6 +223,7 @@ import {
 } from "../../../../shared/file-attachment"
 import { cleanUserAttachmentContentForDisplay } from "../../../../shared/user-attachment-display"
 import { buildAttachmentMessageParts } from "../../../../shared/attachment-message-parts"
+import { botInputFileIds } from "../../../../shared/bots/input-files"
 import { resolveChatSearchContiguousTailStart } from "@/lib/chat-search-gap-boundary"
 import { createMessageIdIndexLookup, type MessageIdIndexLookup } from "@/lib/lazy-message-id-index"
 import { BuiltinBrowserChip } from "@/features/builtin-browser/BuiltinBrowserChip"
@@ -236,15 +241,20 @@ import {
   type ChatSkillCatalogProjection
 } from "@/lib/app-catalog-cache"
 import { readHarnessBoardCatalogCache } from "@/components/harness-board/harness-board-cache"
+import { threadDraftIncarnation } from "@/lib/bot-conversation-draft"
 import {
   getQueuedModelContent,
   getQueuedDisplayContent,
   getQueuedPreview,
   guardCoordinatorPlainText,
   canClaimQueuedMessage,
+  canResumeParkedQueuedMessage,
+  hasUnresolvedQueuedHandoff,
+  nextOrdinaryQueuedMessage,
+  prepareParkedSkillResume,
   classifyGuidedMessage
 } from "@/lib/queued-message-content"
-import { getSkillMetadataId, isSkillDisabled } from "@/lib/skill-ids"
+import { findEnabledSkillSelection, getSkillMetadataId, isSkillDisabled } from "@/lib/skill-ids"
 import { formatGoalEventMessage, isVisibleCheckpointTranscriptMessage } from "@/lib/goal-transcript"
 import { buildGoalPanelViewModel, goalVerdictTone } from "@/lib/goal-panel-view"
 import { buildLatestChatReportBatch, type ChatReportBatch } from "@/lib/chat-report-batch"
@@ -460,12 +470,14 @@ function goalEventTimeLabel(value: Date | string | number): string {
 function GoalStatusPanel({
   goalUi,
   open,
+  readOnly,
   onOpenChange,
   onCommand,
   onEditGoal
 }: {
   goalUi: GoalUiState
   open: boolean
+  readOnly: boolean
   onOpenChange: (open: boolean) => void
   onCommand: (command: string) => void
   onEditGoal: () => void
@@ -521,20 +533,22 @@ function GoalStatusPanel({
           </button>
 
           <div className="flex shrink-0 items-center gap-1">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  className="flex size-8 items-center justify-center rounded-full bg-background-interactive/90 text-foreground/70 ring-1 ring-border transition-colors hover:bg-secondary hover:text-foreground"
-                  onClick={onEditGoal}
-                  aria-label="编辑 Goal"
-                >
-                  <FilePenLine className="size-4" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>编辑目标</TooltipContent>
-            </Tooltip>
-            {canPause && (
+            {!readOnly && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className="flex size-8 items-center justify-center rounded-full bg-background-interactive/90 text-foreground/70 ring-1 ring-border transition-colors hover:bg-secondary hover:text-foreground"
+                    onClick={onEditGoal}
+                    aria-label="编辑 Goal"
+                  >
+                    <FilePenLine className="size-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>编辑目标</TooltipContent>
+              </Tooltip>
+            )}
+            {!readOnly && canPause && (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
@@ -549,7 +563,7 @@ function GoalStatusPanel({
                 <TooltipContent>暂停</TooltipContent>
               </Tooltip>
             )}
-            {canResume && (
+            {!readOnly && canResume && (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
@@ -577,19 +591,21 @@ function GoalStatusPanel({
               </TooltipTrigger>
               <TooltipContent>详情</TooltipContent>
             </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  className="flex size-8 items-center justify-center rounded-full bg-background-interactive/90 text-foreground/70 ring-1 ring-border transition-colors hover:bg-secondary hover:text-foreground"
-                  onClick={() => onCommand("/goal clear")}
-                  aria-label="清除 Goal"
-                >
-                  <Trash2 className="size-4" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>清除</TooltipContent>
-            </Tooltip>
+            {!readOnly && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className="flex size-8 items-center justify-center rounded-full bg-background-interactive/90 text-foreground/70 ring-1 ring-border transition-colors hover:bg-secondary hover:text-foreground"
+                    onClick={() => onCommand("/goal clear")}
+                    aria-label="清除 Goal"
+                  >
+                    <Trash2 className="size-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>清除</TooltipContent>
+              </Tooltip>
+            )}
           </div>
         </div>
 
@@ -820,7 +836,7 @@ function GoalStatusPanel({
               </section>
             </div>
 
-            <div className="flex items-center justify-between gap-2 border-t border-border bg-background-elevated px-5 py-3">
+            {!readOnly && <div className="flex items-center justify-between gap-2 border-t border-border bg-background-elevated px-5 py-3">
               <button
                 type="button"
                 className="rounded-xl px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted"
@@ -862,7 +878,7 @@ function GoalStatusPanel({
                   清除
                 </button>
               </div>
-            </div>
+            </div>}
           </div>
         )}
       </div>
@@ -907,6 +923,14 @@ const BotPrivateMentionInput = React.lazy(() => import("@/components/bots/BotGro
 export interface ManagedChatTurn {
   /** Host-selected Bot skills; null/omitted keeps the ordinary catalog. */
   allowedSkillNames?: string[] | null
+  /** Optional Bot task ownership UI; ordinary conversations have neither slot nor styling. */
+  composerHeader?: React.ReactNode
+  userOwnsComposer?: boolean
+  controlColor?: string
+  /** Bot-owned task details keep the original draft while hiding all compose controls. */
+  composerReadOnlyReason?: string
+  /** Focus only after an explicit, acknowledged task control action. */
+  controlFocusRequest?: { id: number; target: "composer" | "control" }
   /** Only local private Bot conversations supply a verified same-host roster. */
   mentionOptions?: { bots: BotDefinition[]; groups: readonly import("../../../../shared/bots/im-channel").BotGroupTarget[] }
   /** Trusted local task: preserve the Thread's configuration; its model control lives in the task header. */
@@ -915,6 +939,7 @@ export interface ManagedChatTurn {
   textOnlyReason?: string
   /** Host-owned file selection; returns references to files retained in its workspace. */
   attachFiles?(maxFiles: number, maxChars: number): Promise<FileAttachment[]>
+  attachWorkspaceFile?(fileId: string, maxChars: number): Promise<FileAttachment>
   attachFileBytes?(
     files: Array<{ fileName: string; bytes: ArrayBuffer }>,
     maxChars: number
@@ -922,6 +947,7 @@ export interface ManagedChatTurn {
   configureModel?(): void
   /** Bot inbox transport reuses the original durable draft queue, separate from runtime guidance. */
   submitDraft?(draft: QueuedMessage): Promise<void>
+  chooseSkillTarget?(draft: QueuedMessage): void
   /** Removes a retained Bot draft; does not withdraw agent guidance or cancel accepted work. */
   discardDraft?(draft: QueuedMessage): void
   validateDraft?(draft: QueuedMessage): string | null
@@ -931,6 +957,8 @@ export interface ManagedChatTurn {
   maxPendingDrafts?: number
   submit: NonNullable<ReturnType<typeof useThreadStream>["stream"]>["submit"]
   cancel(): Promise<void>
+  stopLabel?: string
+  showReadOnlyStop?: boolean
   busy: boolean
   /** Detached work may be busy while the inbox can immediately handle another message. */
   busySubmitLabel?: string
@@ -943,6 +971,9 @@ interface ChatContainerProps {
   managedTurn?: ManagedChatTurn
   /** Host-owned pending work, kept beside the composer rather than above history. */
   composerNotice?: React.ReactNode
+  /** A former Bot composer draft stays durable through ordinary submit preparation. */
+  restoredBotDraft?: boolean
+  restoredBotDraftError?: string | null
   threadId: string
   surface?: ChatSurface
   hideWelcomeSkillTabs?: boolean
@@ -1078,6 +1109,7 @@ const queuedDraftPreparingThreads = new Set<string>()
  * stream boundary. Solo/Team/Workflow live + reload coverage lives in
  * tests/bots-private-group-app.spec.ts. Stop remains an explicit separate action. */
 const CURRENT_RUN_GUIDE_UI_ENABLED = true
+const ORDINARY_BOT_QUOTE_UNAVAILABLE = "无法核对原引用。草稿已保留，请重试或取消回复后发送。"
 const QUEUE_MODEL_REQUIRED_ERROR = "请先在下方选择模型后再发送消息。"
 const QUEUE_MODEL_MISSING_ERROR = "当前线程模型不存在，请重新选择模型。"
 const QUEUE_MODEL_UNAVAILABLE_ERROR = "当前模型不可用，请先在模型配置中设置 API 密钥。"
@@ -1093,6 +1125,15 @@ const RECOVERABLE_QUEUE_ERRORS = new Set([
 const CHAT_REPORT_UPLOAD_DEBOUNCE_MS = 250
 const CHAT_REPORT_RETRY_DELAY_MS = 1_000
 const CHAT_REPORT_MAX_RETRY_ATTEMPTS = 3
+
+async function revalidateOrdinaryBotReply(thread: Thread | null, reply: BotMessageReply): Promise<BotMessageReply> {
+  const revalidate = window.api.bots?.conversations?.revalidateDraftReply
+  if (!thread || !revalidate) throw new Error(ORDINARY_BOT_QUOTE_UNAVAILABLE)
+  return revalidate(
+    { kind: "local_thread", threadId: thread.thread_id, incarnation: threadDraftIncarnation(thread) },
+    reply
+  )
+}
 
 const ROTATING_WORDS = [
   "编写代码",
@@ -1730,7 +1771,9 @@ export function ChatContainer({
   readOnlyReason = null,
   allowUserInputInReadOnly = false,
   onHarnessSessionCreated,
-  managedTurn
+  managedTurn,
+  restoredBotDraft = false,
+  restoredBotDraftError = null
 }: ChatContainerProps): React.JSX.Element {
   const remoteThread = useAppStore(
     (state) => state.threads.find((thread) => thread.thread_id === threadId) ?? null
@@ -1751,6 +1794,13 @@ export function ChatContainer({
   const chatScrollSessionLeaseRef = useRef(initialChatScrollView.lease)
   const initialPendingDurableRevealMessageId = initialChatScrollView.pendingRevealMessageId
   const readOnly = Boolean(resolvedReadOnlyReason)
+  const composerReadOnly = Boolean(managedTurn?.composerReadOnlyReason)
+  const showBotTaskComposerControls =
+    managedTurn?.ownerConversation === true && managedTurn.userOwnsComposer === true
+  const managedTurnRef = useRef(managedTurn)
+  managedTurnRef.current = managedTurn
+  const readOnlyRef = useRef(readOnly)
+  readOnlyRef.current = readOnly
   const canAnswerUserInput = !readOnly || (surface === "bot" && allowUserInputInReadOnly)
   const shouldShowWelcomeHeadline = surfaceConfig.showWelcomeHeadline
   const shouldShowWelcomeSkillTabs = surfaceConfig.showWelcomeSkillTabs && !hideWelcomeSkillTabs
@@ -1761,6 +1811,7 @@ export function ChatContainer({
   const textareaResizeFrameRef = useRef<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const chatRootRef = useRef<HTMLDivElement>(null)
+  useFloatingChatLayout(chatRootRef, threadId)
   const [dismissedRemoteTipThreadIds, setDismissedRemoteTipThreadIds] = useState(
     loadRemoteThreadTipDismissals
   )
@@ -2118,6 +2169,12 @@ export function ChatContainer({
     PROJECT_MODE_AGENT_TEAM_ENABLED
   )
   const disableWorkflowModeOption = false
+  const coordinatorModeDisabledReason = managedTurn?.ownerConversation
+    ? "Bot 任务暂不支持 Agent Team。"
+    : disableCoordinatorModeOption ? "项目模式暂不支持 Agent Team。" : undefined
+  const workflowModeDisabledReason = managedTurn?.ownerConversation
+    ? "Bot 任务暂不支持启动 Workflow。"
+    : disableWorkflowModeOption ? "项目模式暂不支持 Workflow。" : undefined
   const pendingHarnessNextActionVersion = useSyncExternalStore(
     subscribePendingHarnessNextActions,
     getPendingHarnessNextActionVersion,
@@ -2330,6 +2387,7 @@ export function ChatContainer({
     draftBotReplyTo,
     draftBotMentions,
     draftAttachments,
+    draftMentionedWorkspaceFiles: mentionedFiles,
     harnessNextActionDialogTips,
     draftSkill: selectedSkill,
     workspaceFiles,
@@ -2381,6 +2439,7 @@ export function ChatContainer({
     setDraftBotInput,
     setDraftBotReplyTo,
     setDraftAttachments,
+    setDraftMentionedWorkspaceFiles: setMentionedFiles,
     setHarnessNextActionDialogTips,
     setDraftSkill: setSelectedSkill,
     draftBuiltinBrowser: selectedBuiltinBrowser,
@@ -2558,12 +2617,12 @@ export function ChatContainer({
       }
       const requestId = ++agentModeChangeRequestRef.current
       const operation = agentModeChangeChainRef.current.then(async () => {
-        if (disableCoordinatorModeOption && nextMode === "coordinator") {
-          toast.error("项目模式暂不支持 Agent Team。")
+        if (coordinatorModeDisabledReason && nextMode === "coordinator") {
+          toast.error(coordinatorModeDisabledReason)
           return
         }
-        if (disableWorkflowModeOption && nextMode === "workflow") {
-          toast.error("项目模式暂不支持 Workflow。")
+        if (workflowModeDisabledReason && nextMode === "workflow") {
+          toast.error(workflowModeDisabledReason)
           return
         }
         if (historyLoading) {
@@ -2647,8 +2706,9 @@ export function ChatContainer({
         })
     },
     [
+      coordinatorModeDisabledReason,
       disableCoordinatorModeOption,
-      disableWorkflowModeOption,
+      workflowModeDisabledReason,
       historyLoading,
       historyConversationPresence,
       threadId,
@@ -2685,10 +2745,9 @@ export function ChatContainer({
   )
 
   // ── File attachments state ──
-  // The actual Thread owns draft attachments across both entrances and association.
+  // The thread owns draft attachments and @file selections across association and navigation.
   const attachments = draftAttachments
   const setAttachments = setDraftAttachments
-  const [mentionedFiles, setMentionedFiles] = useState<MentionedWorkspaceFile[]>([])
   const [attachmentLoading, setAttachmentLoading] = useState(false)
   const [dragOver, setDragOver] = useState(false)
   const attachmentsRef = useRef<FileAttachment[]>([])
@@ -2704,13 +2763,15 @@ export function ChatContainer({
     mentionedFilesRef.current = mentionedFiles
   }, [mentionedFiles])
   useEffect(() => {
+    // The draft and transcript can arrive before the workspace is hydrated.
+    if (historyLoading || !workspacePath || !mentionedFilesRef.current.length) return
     setMentionedFiles((current) => {
       const retained = retainMentionedWorkspaceFilesForWorkspace(current, workspacePath)
       if (retained.length === current.length) return current
       mentionedFilesRef.current = retained
       return retained
     })
-  }, [workspacePath])
+  }, [workspacePath, historyLoading, mentionedFiles, setMentionedFiles])
   useEffect(
     () => () => {
       for (const requestToken of activeAtFilePreviewTokensRef.current) {
@@ -2824,14 +2885,23 @@ export function ChatContainer({
   )
 
   const addManagedAttachments = useCallback(
-    async (collect: (maxFiles: number, maxChars: number) => Promise<FileAttachment[]>) => {
+    async (
+      collect: (maxFiles: number, maxChars: number) => Promise<FileAttachment[]>,
+      replacement?: FileAttachment
+    ) => {
       if (managedAttachmentPendingRef.current || attachmentLoading) return
-      const maxFiles =
-        MAX_ATTACHMENTS - attachmentsRef.current.length - mentionedFilesRef.current.length
+      const originalDraft = replacement ? threadContext.getThreadState(threadId) : undefined
+      const originalAttachments = originalDraft?.draftAttachments ?? attachmentsRef.current
+      if (replacement && !originalAttachments.includes(replacement)) return
+      const existingAttachments = replacement
+        ? originalAttachments.filter(file => file !== replacement)
+        : originalAttachments
+      const existingMentions = originalDraft?.draftMentionedWorkspaceFiles ?? mentionedFilesRef.current
+      const maxFiles = MAX_ATTACHMENTS - existingAttachments.length - existingMentions.length
       const maxChars =
         MAX_TOTAL_CHARS -
-        attachmentsRef.current.reduce((sum, item) => sum + item.content.length, 0) -
-        mentionedFilesRef.current.reduce((sum, item) => sum + (item.contentChars ?? 0), 0)
+        existingAttachments.reduce((sum, item) => sum + item.content.length, 0) -
+        existingMentions.reduce((sum, item) => sum + (item.contentChars ?? 0), 0)
       if (maxFiles <= 0 || maxChars <= 0) {
         setError(maxFiles <= 0 ? `最多只能添加 ${MAX_ATTACHMENTS} 个文件` : "附件内容已达上限")
         return
@@ -2841,35 +2911,49 @@ export function ChatContainer({
       clearError()
       const originalWorkspace = normalizeWorkspacePathKey(workspacePathRef.current)
       try {
-        const files = await collect(maxFiles, maxChars)
+        const files = await collect(replacement ? 1 : maxFiles, maxChars)
         if (!chatViewMountedRef.current) return
+        if (replacement && (currentThreadIdRef.current !== threadId ||
+          !managedTurnRef.current?.attachFiles || managedTurnRef.current.composerReadOnlyReason)) return
         if (normalizeWorkspacePathKey(workspacePathRef.current) !== originalWorkspace) {
           setError("工作目录已改变，请从资料库重新添加文件。")
           return
         }
-        const next = [...attachmentsRef.current, ...files]
+        let next: FileAttachment[]
+        if (replacement) {
+          if (!files.length) return
+          const [selected] = files
+          if (files.length !== 1 || !selected?.botInputId)
+            throw new Error("未能保留所选原文件，原草稿已保留。")
+          const currentDraft = threadContext.getThreadState(threadId)
+          if (currentDraft.draftAttachments !== originalAttachments ||
+            currentDraft.draftMentionedWorkspaceFiles !== existingMentions) return
+          next = currentDraft.draftAttachments.map(file => file === replacement ? selected : file)
+        } else next = [...attachmentsRef.current, ...files]
         attachmentsRef.current = next
         setAttachments(next)
       } catch (error) {
-        if (chatViewMountedRef.current)
+        if (chatViewMountedRef.current && (!replacement || currentThreadIdRef.current === threadId))
           setError(error instanceof Error ? error.message : "添加文件失败")
       } finally {
         managedAttachmentPendingRef.current = false
         if (chatViewMountedRef.current) setAttachmentLoading(false)
       }
     },
-    [attachmentLoading, setError, clearError, setAttachments]
+    [attachmentLoading, setError, clearError, setAttachments, threadContext, threadId]
   )
 
-  const handleAttachClick = useCallback(async () => {
+  const handleAttachClick = useCallback(async (replacement?: FileAttachment) => {
+    if (managedTurnRef.current?.composerReadOnlyReason) return
     if (managedTurn?.textOnlyReason) {
       setError(managedTurn.textOnlyReason)
       return
     }
     if (managedTurn?.attachFiles) {
-      await addManagedAttachments(managedTurn.attachFiles)
+      await addManagedAttachments(managedTurn.attachFiles, replacement)
       return
     }
+    if (replacement) return
     if (attachmentsRef.current.length + mentionedFilesRef.current.length >= MAX_ATTACHMENTS) {
       setError(`最多只能添加 ${MAX_ATTACHMENTS} 个文件`)
       return
@@ -2891,7 +2975,7 @@ export function ChatContainer({
   )
   const removeMentionedFile = useCallback((index: number) => {
     setMentionedFiles((prev) => prev.filter((_, i) => i !== index))
-  }, [])
+  }, [setMentionedFiles])
 
   const dropZoneRef = useRef<HTMLDivElement>(null)
 
@@ -2900,6 +2984,7 @@ export function ChatContainer({
       e.preventDefault()
       e.stopPropagation()
       setDragOver(false)
+      if (managedTurnRef.current?.composerReadOnlyReason) return
       if (managedTurn?.textOnlyReason) {
         setError(managedTurn.textOnlyReason)
         return
@@ -3555,6 +3640,7 @@ export function ChatContainer({
   const hiddenMessageIds = useContext(ChatMessageVisibilityContext)
   const executionCardCallIds = useContext(ChatExecutionCardCallIdsContext)
   const showExecutionDetails = useContext(ChatExecutionDetailsContext)
+  const desktopWorkId = useContext(ChatDesktopWorkIdContext)
   const searchExpandsExecutionDetails = searchOpen && surface !== "bot"
   const searchBodyOnly = surface === "bot" && !showExecutionDetails
   const replySource = useContext(ChatReplySourceContext)
@@ -3644,17 +3730,19 @@ export function ChatContainer({
   const botQuestionUsesComposer =
     surface === "bot" &&
     !readOnly &&
+    !composerReadOnly &&
     managedTurn?.canReplyToQuestionsInComposer === true &&
     pendingUserInput?.questions.length === 1 &&
     inlineQuestion?.isMain === true
   const presentInlineQuestion = useCallback(
-    (tool: ToolCall, result?: Pick<ToolResult, "content" | "is_error">) =>
+    (tool: ToolCall, result?: Pick<ToolResult, "content" | "is_error">, assistantMessageId?: string,
+      deliveryScope?: Message["botHistoryDeliveryScope"]) =>
       !showExecutionDetails &&
       !searchExpandsExecutionDetails &&
       !result &&
       tool.id === inlineQuestionCallId
         ? <></>
-        : parentToolPresentation?.(tool, result),
+        : parentToolPresentation?.(tool, result, assistantMessageId, deliveryScope),
     [showExecutionDetails, searchExpandsExecutionDetails, inlineQuestionCallId, parentToolPresentation]
   )
   // Ordinary assistant tokens update only the changed display slot. Keep the
@@ -3769,7 +3857,8 @@ export function ChatContainer({
             isLoading,
             executionCardCallIds,
             inlineQuestionCallId,
-            toolCallDisplayStates
+            toolCallDisplayStates,
+            desktopWorkId
           ).hiddenMessages
         : new Set<string>(),
     [
@@ -3782,6 +3871,7 @@ export function ChatContainer({
       dynamicVisibilityProjection.version,
       inlineQuestionCallId,
       toolCallDisplayStates,
+      desktopWorkId,
       isLoading
     ]
   )
@@ -3843,7 +3933,7 @@ export function ChatContainer({
       // think/attachment wrapper before stripping it could expose hidden transport content.
       const hasVisibleReasoning =
         message.role === "assistant" && Boolean(normalizeVisibleReasoningText(message.reasoning))
-      const quote = surface === "bot" ? replySource?.quoteFor(message) : undefined
+      const quote = replySource?.quoteFor(message) ?? message.botHistoryInputOrigin?.replyTo
       const parsedReply =
         quote && typeof message.content === "string" ? parseBotMessageReply(message.content) : null
       const verifiedReply =
@@ -4764,16 +4854,17 @@ export function ChatContainer({
       dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
       const targetElement = contentMessageRefs.current.get(messageId)
       const viewport = getViewport()
+      const topInset = chatScrollInsets(viewport).top
       if (targetElement && viewport) {
         const viewportRect = viewport.getBoundingClientRect()
         const targetRect = targetElement.getBoundingClientRect()
         viewport.scrollTo({
-          top: Math.max(0, viewport.scrollTop + targetRect.top - viewportRect.top - 8),
+          top: Math.max(0, viewport.scrollTop + targetRect.top - viewportRect.top - topInset - 8),
           behavior: "smooth"
         })
         return
       }
-      virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: virtualBehavior })
+      virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: virtualBehavior, offset: -topInset })
     },
     [dispatchChatScrollEvent, getViewport, invalidateDurableMessageReveal, visibleMessageIndexById]
   )
@@ -4841,27 +4932,36 @@ export function ChatContainer({
       surface !== "bot" || !replySource
         ? null
         : {
-            canReply: !readOnly,
+            canReply: !readOnly && !composerReadOnly,
+            editReady: replySource.editReady,
             quoteFor: replySource.quoteFor,
-            setDraftReply: setDraftBotReplyTo,
+            setDraftReply: (reply) => {
+              if (managedTurnRef.current?.composerReadOnlyReason) return
+              setDraftBotReplyTo(reply)
+            },
             jump: jumpToBotReply,
             reply: (messageId: string) => {
-              if (readOnly) return
+              if (readOnly || managedTurnRef.current?.composerReadOnlyReason) return
               const selection = ++replySelection.current
               void replySource
                 .resolve(messageId)
                 .then((reply) => {
-                  if (!chatViewMountedRef.current || selection !== replySelection.current) return
+                  if (
+                    !chatViewMountedRef.current ||
+                    selection !== replySelection.current ||
+                    managedTurnRef.current?.composerReadOnlyReason
+                  ) return
                   setDraftBotReplyTo(reply)
                   ;(botInputRef.current ?? inputRef.current)?.focus()
                 })
                 .catch((error) => {
-                  if (chatViewMountedRef.current && selection === replySelection.current)
+                  if (chatViewMountedRef.current && selection === replySelection.current &&
+                      !managedTurnRef.current?.composerReadOnlyReason)
                     toast.error(error instanceof Error ? error.message : "无法引用原消息")
                 })
             }
           },
-    [surface, replySource, jumpToBotReply, readOnly, setDraftBotReplyTo]
+    [surface, replySource, jumpToBotReply, readOnly, composerReadOnly, setDraftBotReplyTo]
   )
   const handleScrollToQuestion = useCallback((): void => {
     invalidateDurableMessageReveal()
@@ -5366,6 +5466,13 @@ export function ChatContainer({
     () => skills.filter((skill) => !isLocalSkillDisabled(skill)),
     [skills, isLocalSkillDisabled]
   )
+  const restoredSkill = selectedSkill && (restoredBotDraft || "restored" in selectedSkill)
+    ? selectedSkill : null
+  const restoredSkillUnavailable = useMemo(
+    () => restoredSkill && !skillsLoading && isSkillCatalogFresh(readSkillCatalogCache(), pluginVersion) &&
+      !findEnabledSkillSelection(restoredSkill, enabledSkillsForSlash, disabledSkillIds),
+    [restoredSkill, skillsLoading, pluginVersion, enabledSkillsForSlash, disabledSkillIds]
+  )
 
   useEffect(() => {
     const nextAction = pendingHarnessNextAction
@@ -5422,8 +5529,8 @@ export function ChatContainer({
   ])
 
   const slash = useSlashCommands({
-    input: managedTurn?.textOnlyReason ? "" : input,
-    skills: managedTurn?.textOnlyReason ? [] : enabledSkillsForSlash,
+    input: managedTurn?.textOnlyReason || composerReadOnly ? "" : input,
+    skills: managedTurn?.textOnlyReason || composerReadOnly ? [] : enabledSkillsForSlash,
     skillSelected: selectedSkill !== null,
     browserSelected: selectedBuiltinBrowser,
     generalCommands: managedTurn?.textOnlyReason
@@ -5474,7 +5581,7 @@ export function ChatContainer({
     cursorOffset: managedTurn?.mentionOptions ? botCaret : inputRef.current?.selectionStart ?? input.length,
     workspaceFiles,
     loadMoreWorkspaceFiles: loadMoreWorkspaceMentionFiles,
-    disabled: Boolean(managedTurn?.textOnlyReason) || slash.mode.kind === "slash" || !workspacePath ||
+    disabled: composerReadOnly || Boolean(managedTurn?.textOnlyReason) || slash.mode.kind === "slash" || !workspacePath ||
       Boolean(managedTurn?.mentionOptions && draftBotMentions?.some((item) => botCaret > item.start && botCaret <= item.end))
   })
   const slashPopoverKind = slash.mode.kind
@@ -5508,9 +5615,25 @@ export function ChatContainer({
     (managedTurn ? historyLoading : inputDisabled) ||
     contextReminderPending ||
     readOnly ||
+    composerReadOnly ||
     bizRetryPending
   const effectiveComposerControlsDisabled =
-    composerControlsDisabled || contextReminderPending || readOnly || bizRetryPending
+    composerControlsDisabled || contextReminderPending || readOnly || composerReadOnly || bizRetryPending
+  const appliedControlFocusRequest = useRef<number | undefined>(undefined)
+  useEffect(() => {
+    const request = managedTurn?.controlFocusRequest
+    if (!request || appliedControlFocusRequest.current === request.id || historyLoading ||
+        (request.target === "composer" ? composerReadOnly : !composerReadOnly)) return
+    const frame = requestAnimationFrame(() => {
+      const target = request.target === "composer"
+        ? botInputRef.current ?? inputRef.current
+        : chatRootRef.current?.querySelector<HTMLButtonElement>(".bot-task-control-action:not(:disabled)")
+      if (!target) return
+      target.focus({ preventScroll: true })
+      appliedControlFocusRequest.current = request.id
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [composerReadOnly, managedTurn?.controlFocusRequest, historyLoading])
   const inputPlaceholder = useMemo(() => {
     if (managedTurn)
       return botQuestionUsesComposer ? "输入你的回答，或聊点别的" : managedTurn.placeholder
@@ -5597,6 +5720,7 @@ export function ChatContainer({
 
   const applyAtFileMention = useCallback(
     (file: AtFileSuggestion) => {
+      if (managedTurnRef.current?.composerReadOnlyReason) return
       if (atFileMentions.mode.kind !== "at-file" || !workspacePath) return
 
       try {
@@ -5650,7 +5774,7 @@ export function ChatContainer({
         setError("@文件暂时不可用，请直接发送消息或改用普通附件。")
       }
     },
-    [atFileMentions.mode, clearError, input, setError, setInput, workspacePath]
+    [atFileMentions.mode, clearError, input, setError, setInput, setMentionedFiles, workspacePath]
   )
 
   const appendVisibleUserMessageWithTime = useCallback(
@@ -5689,6 +5813,7 @@ export function ChatContainer({
   }, [])
 
   const submitGoalResumeCommand = useCallback(async (): Promise<void> => {
+    if (managedTurnRef.current?.composerReadOnlyReason) return
     if (!stream || historyLoading || isLoading || scheduledTaskLoading) return
     if (!tryAcquireSubmitInFlightLock(submitInFlightRef, true, threadId)) return
     try {
@@ -5747,6 +5872,7 @@ export function ChatContainer({
     setError,
     setAttachments,
     setInput,
+    setMentionedFiles,
     setSelectedSkill,
     appendVisibleUserMessageWithTime,
     stream,
@@ -5757,6 +5883,7 @@ export function ChatContainer({
 
   const applyGoalPanelCommand = useCallback(
     (command: string) => {
+      if (managedTurnRef.current?.composerReadOnlyReason) return
       if (historyLoading) {
         toast.warning("线程历史正在恢复，请稍后再操作 Goal。")
         return
@@ -5849,6 +5976,11 @@ export function ChatContainer({
 
   const handleSubmit = async (e: Pick<Event, "preventDefault">, defaultText = ""): Promise<void> => {
     e.preventDefault()
+    if (managedTurnRef.current?.composerReadOnlyReason) return
+    if (restoredBotDraftError) {
+      setError(restoredBotDraftError)
+      return
+    }
     const trimmedInput = defaultText || input.trim()
     let selectedBotMentions = !defaultText && managedTurn?.mentionOptions
       ? parseBotMessageMentions(trimmedInput, draftBotMentions, input.length - input.trimStart().length)
@@ -5861,6 +5993,7 @@ export function ChatContainer({
       return
     }
     const isGoalSlashInput = /^\/goal(?:\s|$)/i.test(trimmedInput)
+    const queueRestoredDraft = restoredBotDraft && !managedTurn && !defaultText && !isGoalSlashInput
     const shouldOpenGoalDetailsForStatus = /^\/goal(?:\s+status)?\s*$/i.test(trimmedInput)
     // Defense-in-depth: every current trigger already short-circuits while the
     // popover is open — the send button is disabled, and handleKeyDown's
@@ -6046,6 +6179,58 @@ export function ChatContainer({
         toast.error("Agent 模式保存失败，消息未发送；再次发送将使用原模式")
         return
       }
+      let skill: SkillMetadata | null = null
+      if (selectedSkill && (restoredBotDraft || "restored" in selectedSkill)) {
+        try {
+          const catalog = await revalidateSkillCatalog(useAppStore.getState().pluginVersion)
+          const draft = threadContext.getThreadState(threadId)
+          if (currentThreadIdRef.current !== threadId || draft.workspacePath !== workspacePath ||
+              draft.draftSkill !== selectedSkill || draft.draftInput !== input ||
+              draft.draftAttachments !== attachments || draft.draftMentionedWorkspaceFiles !== mentionedFiles ||
+              draft.draftBotReplyTo !== draftBotReplyTo || draft.draftBotMentions !== draftBotMentions ||
+              draft.draftBuiltinBrowser !== selectedBuiltinBrowser || managedTurnRef.current?.composerReadOnlyReason)
+            return
+          if (!isSkillCatalogFresh(catalog, useAppStore.getState().pluginVersion)) {
+            toast.error("技能目录正在更新，草稿已保留，请稍后重试。")
+            return
+          }
+          const projected = projectChatSkillCatalog(catalog, {
+            harnessScoped: surface === "harness-project" || surface === "harness-feature-session" ||
+              Boolean(harnessFeatureBinding),
+            preferredPlugin: skillsHarnessPreferredPlugin
+          })
+          skill = findEnabledSkillSelection(selectedSkill, projected.skills, projected.disabledSkillIds) ?? null
+          if (!skill) {
+            toast.error("原技能已不可用，草稿已保留。可移除该技能选择后继续编辑。")
+            return
+          }
+        } catch {
+          toast.error("暂时无法核对原技能，草稿已保留，请重试。")
+          return
+        }
+      } else {
+        skill = selectedSkill
+      }
+      const claimedReply = surface === "bot" || (!defaultText && !isGoalSlashInput)
+        ? draftBotReplyTo : undefined
+      let replyForSubmission = claimedReply
+      if (!managedTurn && claimedReply?.role === "user") {
+        const isCurrent = () => {
+          const draft = threadContext.getThreadState(threadId)
+          return chatViewMountedRef.current && currentThreadIdRef.current === threadId &&
+            !readOnlyRef.current && !managedTurnRef.current && draft.workspacePath === workspacePath &&
+            draft.draftInput === input && draft.draftBotReplyTo === claimedReply &&
+            draft.draftAttachments === attachments && draft.draftMentionedWorkspaceFiles === mentionedFiles &&
+            draft.draftSkill === selectedSkill && draft.draftBuiltinBrowser === selectedBuiltinBrowser
+        }
+        try {
+          replyForSubmission = await revalidateOrdinaryBotReply(currentThread, claimedReply)
+        } catch {
+          if (isCurrent()) toast.error(ORDINARY_BOT_QUOTE_UNAVAILABLE)
+          return
+        }
+        if (!isCurrent()) return
+      }
       // Reset both the error message and its structured detail at turn start so
       // no stale diagnostics linger into the new turn.
       if (threadError || errorDetail) {
@@ -6076,14 +6261,13 @@ export function ChatContainer({
       // Claim the current composer payload before @file IO. A second Enter sees
       // the preparation guard, while text typed during the await goes into a
       // fresh composer and is not cleared when this draft is enqueued.
-      const skill = selectedSkill
       const browser = selectedBuiltinBrowser
       const claimedAttachments = attachments
       const claimedMentionedFiles = mentionedFiles
       let rawMessage = trimmedInput
       // Bot drafts stay in the composer during preparation. Only the durable
       // outbox handoff below consumes them; IO or storage failure preserves the draft.
-      if (!managedTurn?.submitDraft) {
+      if (!managedTurn?.submitDraft && !queueRestoredDraft) {
         setInput("")
         setAttachments([])
         setMentionedFiles([])
@@ -6092,7 +6276,10 @@ export function ChatContainer({
       // The original composer payload is now atomically claimed. Any later
       // Enter belongs to newly typed input and should queue behind this submit
       // while @file IO is still running, rather than being silently ignored.
-      if (shouldLockSubmit && !managedTurn?.submitDraft) liveSubmitPreparingThreads.delete(threadId)
+      // A retained quote stays visible until this draft commits. Keep the
+      // preparation guard for that draft so a second send cannot claim it too.
+      if (shouldLockSubmit && !managedTurn?.submitDraft && !claimedReply && !queueRestoredDraft)
+        liveSubmitPreparingThreads.delete(threadId)
       // 统一在 helper 里完成 @文件解析、内容读取、附件去重和文本清洗，
       // 这里仅消费结果，避免发送流程继续堆积细节分支。
       const atFileRequestToken = crypto.randomUUID()
@@ -6106,6 +6293,7 @@ export function ChatContainer({
       }
       let atFileResolution: Awaited<ReturnType<typeof resolveAtFileAttachments>>
       try {
+        const attachWorkspaceFile = managedTurn?.attachWorkspaceFile
         atFileResolution = await resolveAtFileAttachments({
           rawMessage,
           ...(selectedBotMentions.length ? { protectedRanges: selectedBotMentions } : {}),
@@ -6115,6 +6303,19 @@ export function ChatContainer({
           workspaceFiles,
           maxAttachments: MAX_ATTACHMENTS,
           maxTotalChars: MAX_TOTAL_CHARS,
+          ...(attachWorkspaceFile ? {
+            readWorkspaceAttachment: async (filePath: string, maxChars: number) => {
+              const checkWorkspace = () => {
+                if (normalizeWorkspacePathKey(workspacePathRef.current) !== atFileWorkspaceKey)
+                  throw new Error("@文件所属工作区已变更，请重新选择。")
+              }
+              checkWorkspace()
+              const id = filePath.startsWith("/") ? filePath.slice(1) : filePath
+              const attachment = await attachWorkspaceFile(id, maxChars)
+              checkWorkspace()
+              return attachment
+            }
+          } : {}),
           readWorkspaceFile: async (filePath, maxChars) => {
             // A workspace can still change before the first user turn is
             // committed. Fence both sides of the async read so content from a
@@ -6138,6 +6339,9 @@ export function ChatContainer({
           },
           cancelWorkspaceFileReads: cancelAtFileReads
         })
+      } catch (error) {
+        setError(error instanceof Error ? error.message : "无法保留所选 @文件，草稿已保留。")
+        return
       } finally {
         activeAtFilePreviewTokensRef.current.delete(atFileRequestToken)
         cancelAtFileReads()
@@ -6157,6 +6361,11 @@ export function ChatContainer({
         rawMessage = next
       }
       rawMessage = cleanedMessage
+      if ((queueRestoredDraft || managedTurn?.attachWorkspaceFile) &&
+          (mentionCountLimitHit || mentionAttachmentLimitHit || atFileWarningMessage)) {
+        setError(atFileWarningMessage || "部分 @文件超过本次附件限制，原草稿已保留。")
+        return
+      }
 
       // These are delivery warnings, not run failures. A thread error blocks the
       // queue pump, so keep the degraded send non-blocking in both live and busy paths.
@@ -6189,7 +6398,7 @@ export function ChatContainer({
       // instruction will tell the model what to do with the attachment, and a
       // generic "请分析以下文件内容" would compete with it.
       const userText = rawMessage || (attachmentPayload && !skill ? "请分析以下文件内容。" : "")
-      if (browser && !managedTurn?.submitDraft) setSelectedBuiltinBrowser(false)
+      if (browser && !managedTurn?.submitDraft && !queueRestoredDraft) setSelectedBuiltinBrowser(false)
       if (shouldOpenGoalDetailsForStatus) {
         setGoalDetailsOpen(true)
       }
@@ -6213,7 +6422,7 @@ export function ChatContainer({
       let attachmentDisplayPrefix = ""
       if (attachmentPayload && attachmentPayload.length > 0) {
         ;({ attachmentModelBlocks, attachmentDisplayPrefix } =
-          buildAttachmentMessageParts(attachmentPayload))
+          buildAttachmentMessageParts(attachmentPayload, surface === "bot"))
       }
 
       // Skill-use block, appended last. The model is told to `read` the SKILL.md
@@ -6228,23 +6437,43 @@ export function ChatContainer({
           })
         : ""
 
+      const inputFileIds = surface === "bot" ? botInputFileIds(attachmentPayload ?? []) : []
       const composedDraft: QueuedMessage = {
         id: crypto.randomUUID(),
         text: userText,
         ...(selectedBotMentions.length ? { botMentions: parseBotMessageMentions(userText, selectedBotMentions) } : {}),
-        ...(surface === "bot" && draftBotReplyTo ? { botReplyTo: draftBotReplyTo } : {}),
+        ...(replyForSubmission ? { botReplyTo: replyForSubmission } : {}),
         attachmentModelBlocks,
         attachmentDisplayPrefix,
+        ...(inputFileIds.length ? { botInputFileIds: inputFileIds } : {}),
         skillBlock,
         skillName: skill?.name,
         skillDescription: skill?.description,
+        ...(surface === "bot" && skill ? { botExplicitSkill: { name: skill.name, path: skill.path } } : {}),
         builtinBrowser: browser,
         modelId: currentModel,
         created_at: new Date(),
         updated_at: new Date()
       }
+      const clearSubmittedReply = () => {
+        if (claimedReply && threadContext.getThreadState(threadId).draftBotReplyTo === claimedReply)
+          setDraftBotReplyTo(null)
+      }
+      const clearClaimedDraft = () => {
+        const currentDraft = threadContext.getThreadState(threadId)
+        if (!defaultText && currentDraft.draftInput.trim() === trimmedInput &&
+          (!managedTurn?.mentionOptions || currentDraft.draftBotMentions === draftBotMentions)) setInput("")
+        if (currentDraft.draftAttachments === claimedAttachments) setAttachments([])
+        clearSubmittedReply()
+        if (currentDraft.draftMentionedWorkspaceFiles === claimedMentionedFiles) setMentionedFiles([])
+        if (selectedSkill && currentDraft.draftSkill === selectedSkill) setSelectedSkill(null)
+        if (browser && currentDraft.draftBuiltinBrowser) setSelectedBuiltinBrowser(false)
+      }
 
       if (managedTurn?.submitDraft) {
+        // Preparation can span a control handoff. Keep the original composer
+        // untouched if the task became managed again while reading attachments.
+        if (managedTurnRef.current?.composerReadOnlyReason) return
         const validationError = managedTurn.validateDraft?.(composedDraft)
         if (validationError) {
           setError(validationError)
@@ -6259,15 +6488,7 @@ export function ChatContainer({
           setError(storageError)
           return
         }
-        const currentDraft = threadContext.getThreadState(threadId)
-        if (!defaultText && currentDraft.draftInput.trim() === trimmedInput &&
-          (!managedTurn.mentionOptions || currentDraft.draftBotMentions === draftBotMentions)) setInput("")
-        if (currentDraft.draftAttachments === claimedAttachments) setAttachments([])
-        if (composedDraft.botReplyTo && currentDraft.draftBotReplyTo === composedDraft.botReplyTo)
-          setDraftBotReplyTo(null)
-        if (mentionedFilesRef.current === claimedMentionedFiles) setMentionedFiles([])
-        if (skill && currentDraft.draftSkill === skill) setSelectedSkill(null)
-        if (browser && currentDraft.draftBuiltinBrowser) setSelectedBuiltinBrowser(false)
+        clearClaimedDraft()
         // The Host, rather than the native queue pump, serializes execution.
         // Dispatch now even during an approval or another Bot task.
         void managedTurn.submitDraft(composedDraft).catch((error) => {
@@ -6279,8 +6500,20 @@ export function ChatContainer({
 
       // Busy → park the draft and stop. The auto-drain effect sends it once the
       // thread is idle again, or the user can steer it into the running turn.
-      if (willEnqueueWhileBusy) {
-        addQueuedMessage(composedDraft)
+      if (willEnqueueWhileBusy || queueRestoredDraft) {
+        if (queueRestoredDraft) {
+          let storageError: string | null = "消息未能保存，未发送。"
+          addQueuedMessage(composedDraft, error => { storageError = error })
+          if (storageError) {
+            deleteQueuedMessage(composedDraft.id)
+            setError(storageError)
+            return
+          }
+          clearClaimedDraft()
+        } else {
+          addQueuedMessage(composedDraft)
+          clearSubmittedReply()
+        }
         // An actual enqueue is unambiguous renewed intent to keep going — lift
         // any Stop-driven pause so this (and any earlier still-queued) draft can
         // auto-drain once idle. Cleared here (not merely "past the guards") so a
@@ -6297,7 +6530,7 @@ export function ChatContainer({
       // fullMessage, so after a reload MessageBubble renders raw attachment XML
       // rather than 📎 names — a pre-existing attachment-pipeline limitation.
       const fullMessage = getQueuedModelContent(composedDraft, managedTurn ? "bot" : "workbench")
-      const displayContent = guardCoordinatorPlainText(getQueuedDisplayContent(composedDraft))
+      const displayContent = guardCoordinatorPlainText(getQueuedDisplayContent(composedDraft, !managedTurn))
 
       const coordinatorPrefixed =
         !managedTurn &&
@@ -6396,6 +6629,7 @@ export function ChatContainer({
       // that should lift a Stop-driven pause, not merely having reached past the
       // early-return guards (a later failed attempt, e.g. MAX_INPUT_CHARS or a
       // held lock, would otherwise un-suppress without anything having sent).
+      clearSubmittedReply()
       setQueueAutoDrainSuppressed(false)
       // Payload preparation and the optimistic bubble are committed. A later
       // Enter is now new input and should queue behind the held run lock even
@@ -6436,6 +6670,45 @@ export function ChatContainer({
     setEditingQueueText(message.text)
   }, [])
 
+  const resumeParkedQueuedMessage = async (draft: QueuedMessage): Promise<void> => {
+    const stillParked = () => !managedTurnRef.current && !readOnly &&
+      getQueuedMessage(draft.id) === draft && canResumeParkedQueuedMessage(draft)
+    if (!stillParked()) return
+    let patch: Partial<QueuedMessage> = { parkedForConversationLink: false }
+    if (draft.botExplicitSkill) {
+      try {
+        const catalog = await revalidateSkillCatalog(useAppStore.getState().pluginVersion)
+        if (!stillParked()) return
+        if (hasUnresolvedQueuedHandoff(threadContext.getThreadState(threadId).queuedMessages)) {
+          toast.info("请先核对待确认消息，再继续发送这份技能草稿。")
+          return
+        }
+        const { skills, disabledSkillIds } = projectChatSkillCatalog(catalog)
+        const resume = isSkillCatalogFresh(catalog, useAppStore.getState().pluginVersion)
+          ? prepareParkedSkillResume(draft, skills, disabledSkillIds) : undefined
+        if (!resume) {
+          toast.error("原技能选择已变化或不可用，草稿已保留。")
+          return
+        }
+        patch = resume
+      } catch {
+        toast.error("暂时无法核对原技能，草稿已保留。")
+        return
+      }
+    }
+    updateQueuedMessage(draft.id, patch, error => {
+      if (error) {
+        updateQueuedMessage(draft.id, {
+          parkedForConversationLink: true,
+          ...(draft.botExplicitSkill ? { botExplicitSkill: draft.botExplicitSkill, skillBlock: draft.skillBlock } : {})
+        })
+        setError(error)
+        return
+      }
+      setQueueAutoDrainSuppressed(false)
+    })
+  }
+
   const cancelEditingQueuedMessage = useCallback((): void => {
     setEditingQueueId(null)
     setEditingQueueText("")
@@ -6449,7 +6722,7 @@ export function ChatContainer({
       setEditingQueueText("")
       return
     }
-    if (managedTurn?.submitDraft && message.handoffRequestedAt) {
+    if (message.botHandoffTarget || (managedTurn?.submitDraft && message.handoffRequestedAt)) {
       toast.message("发送结果待确认，请先重试核对回执，不能修改原消息。")
       return
     }
@@ -6508,7 +6781,7 @@ export function ChatContainer({
         appendMessage({
           id: message.id,
           role: "user",
-          content: guardCoordinatorPlainText(getQueuedDisplayContent(message)),
+          content: guardCoordinatorPlainText(getQueuedDisplayContent(message, true)),
           created_at: new Date()
         })
       }
@@ -6530,7 +6803,7 @@ export function ChatContainer({
       const result = await window.api.agent.queueCurrentRunMessage(threadId, {
         id: message.id,
         content: getQueuedModelContent(updatedMessage),
-        displayContent: guardCoordinatorPlainText(getQueuedDisplayContent(updatedMessage))
+        displayContent: guardCoordinatorPlainText(getQueuedDisplayContent(updatedMessage, true))
       })
       if (!isCurrentRequest() || !getUnchangedGuidedMessage()) return
       if (result.queued) {
@@ -6611,7 +6884,7 @@ export function ChatContainer({
         return
       }
       const current = getQueuedMessage(message.id)
-      if (!current || current.handoffRequestedAt) return
+      if (!current || current.handoffRequestedAt || current.botExplicitSkill) return
       // Claim ownership before crossing the IPC boundary. This synchronously
       // blocks local editing, reordering, and auto-drain while main is deciding
       // whether it can accept the steer.
@@ -6621,7 +6894,7 @@ export function ChatContainer({
         const result = await window.api.agent.queueCurrentRunMessage(threadId, {
           id: current.id,
           content: getQueuedModelContent(current),
-          displayContent: guardCoordinatorPlainText(getQueuedDisplayContent(current))
+          displayContent: guardCoordinatorPlainText(getQueuedDisplayContent(current, true))
         })
         if (result.queued) {
           toast.success("已提交给当前运行，会在下一次模型调用前接收")
@@ -6648,7 +6921,7 @@ export function ChatContainer({
                 appendMessage({
                   id: current.id,
                   role: "user",
-                  content: guardCoordinatorPlainText(getQueuedDisplayContent(current)),
+                  content: guardCoordinatorPlainText(getQueuedDisplayContent(current, true)),
                   created_at: new Date()
                 })
               }
@@ -6710,18 +6983,37 @@ export function ChatContainer({
 
   const submitQueuedMessage = useCallback(
     async (queued: QueuedMessage): Promise<void> => {
+      if (managedTurnRef.current?.composerReadOnlyReason) return
       if (managedTurn?.submitDraft) {
         await managedTurn.submitDraft(queued)
         return
       }
-      if (queued.botHandoffTarget) {
+      if (queued.botHandoffTarget || queued.botExplicitSkill) {
         setError(
           "此草稿曾交给 Bot 任务，请先核对原任务记录。不要重复发送；确认后可删除旧草稿并明确发送新消息。"
         )
         return
       }
       if (!stream) return
-      const fullMessage = getQueuedModelContent(queued)
+      let draftForSubmission = queued
+      if (queued.botReplyTo?.role === "user") {
+        const isCurrent = () => {
+          const current = getQueuedMessage(queued.id)
+          return chatViewMountedRef.current && currentThreadIdRef.current === threadId &&
+            !readOnlyRef.current && !managedTurnRef.current && current === queued &&
+            canClaimQueuedMessage(queued, current)
+        }
+        if (!isCurrent()) return
+        try {
+          const botReplyTo = await revalidateOrdinaryBotReply(currentThread, queued.botReplyTo)
+          if (!isCurrent()) return
+          draftForSubmission = { ...queued, botReplyTo }
+        } catch {
+          if (isCurrent()) setError(ORDINARY_BOT_QUOTE_UNAVAILABLE)
+          return
+        }
+      }
+      const fullMessage = getQueuedModelContent(draftForSubmission)
       if (!fullMessage.trim()) {
         deleteQueuedMessage(queued.id)
         return
@@ -6763,7 +7055,7 @@ export function ChatContainer({
         setError(QUEUE_WORKSPACE_REQUIRED_ERROR)
         return
       }
-      const displayContent = guardCoordinatorPlainText(getQueuedDisplayContent(queued))
+      const displayContent = guardCoordinatorPlainText(getQueuedDisplayContent(draftForSubmission, true))
       // A queued message is a fresh turn: resolve agent_mode from the user's
       // current selection (plus a [coordinator] text prefix), matching handleSubmit
       // exactly — including the async hydration below. A draft can auto-drain before
@@ -6829,6 +7121,8 @@ export function ChatContainer({
       // check and deletion, so the claim is atomic on the renderer event loop.
       const currentQueued = getQueuedMessage(queued.id)
       if (!canClaimQueuedMessage(queued, currentQueued)) return
+      if (draftForSubmission !== queued && (currentQueued !== queued || !chatViewMountedRef.current ||
+          currentThreadIdRef.current !== threadId || readOnlyRef.current || managedTurnRef.current)) return
       const isFirstMessage = threadMessages.length === 0
       deleteQueuedMessage(queued.id)
       // Reuse the draft's own id for the optimistic bubble. If stream.submit below
@@ -6881,6 +7175,7 @@ export function ChatContainer({
       canChangeAgentMode,
       clearFinishedWorkflowRun,
       currentModel,
+      currentThread,
       deleteQueuedMessage,
       disableCoordinatorModeOption,
       disableWorkflowModeOption,
@@ -6919,7 +7214,7 @@ export function ChatContainer({
     if (managedTurn?.submitDraft) return
     if (isLoading || pendingApproval || historyLoading) return
     const handedOff = queuedMessages.filter(
-      (queued) => queued.handoffRequestedAt && !queued.botHandoffTarget
+      (queued) => queued.handoffRequestedAt && !queued.botHandoffTarget && !queued.botExplicitSkill
     )
     if (handedOff.length === 0) return
 
@@ -7023,9 +7318,8 @@ export function ChatContainer({
     // Reconciliation owns transcript ordering for every handed-off draft, not
     // only the queue head. Draining any ordinary item first could append it
     // before a previously injected guided turn whose acknowledgement is late.
-    if (queuedMessages.some((queued) => queued.handoffRequestedAt)) return
-    const next = queuedMessages[0]
-    if (!next || next.parkedForConversationLink || next.botHandoffTarget) return
+    const next = nextOrdinaryQueuedMessage(queuedMessages)
+    if (!next) return
 
     if (!tryAcquireSubmitInFlightLock(submitInFlightRef, true, threadId)) return
     submitQueuedMessage(next)
@@ -7111,6 +7405,7 @@ export function ChatContainer({
   }, [reconcileBotDrafts, botDraftReceiptRevision, queuedMessages, historyLoading])
 
   const handleKeyDown = (e: React.KeyboardEvent | KeyboardEvent): void => {
+    if (managedTurnRef.current?.composerReadOnlyReason) return
     // IME composing (Chinese/Japanese/Korean) should not trigger submit on Enter
     const isComposing = ("nativeEvent" in e ? e.nativeEvent.isComposing : e.isComposing) || isComposingRef.current
     if (isComposing) return
@@ -7243,7 +7538,7 @@ export function ChatContainer({
         textareaResizeFrameRef.current = null
       }
     }
-  }, [adjustTextareaHeight, input])
+  }, [adjustTextareaHeight, input, composerReadOnly])
 
   const handleCancel = async (e): Promise<void> => {
     e.preventDefault()
@@ -7310,12 +7605,38 @@ export function ChatContainer({
     <button
       type="button"
       onClick={handleCancel}
-      aria-label="停止生成"
-      title="停止生成"
+      aria-label={managedTurn?.stopLabel ?? "停止生成"}
+      title={managedTurn?.stopLabel ?? "停止生成"}
       className="flex size-8 shrink-0 items-center justify-center rounded-full bg-destructive text-destructive-foreground transition-colors hover:bg-destructive/90"
     >
       <Square className="size-3 fill-current" />
     </button>
+  )
+
+  const modelAndModeControls = (
+    <>
+      <ModelSwitcher threadId={threadId} />
+      <AgentModeSwitcher
+        showWorkflow
+        mode={
+          (disableCoordinatorModeOption && agentMode === "coordinator") ||
+          (disableWorkflowModeOption && agentMode === "workflow")
+            ? "normal"
+            : agentMode
+        }
+        locked={isLoading || !canChangeAgentMode}
+        lockedReason={agentModeSwitchDisabledReason}
+        disabledModes={{
+          coordinator: Boolean(coordinatorModeDisabledReason),
+          workflow: Boolean(workflowModeDisabledReason)
+        }}
+        disabledModeReasons={{
+          coordinator: coordinatorModeDisabledReason,
+          workflow: workflowModeDisabledReason
+        }}
+        onChange={handleAgentModeChange}
+      />
+    </>
   )
 
   const handleCancelBackgroundWorkers = async (): Promise<void> => {
@@ -7691,6 +8012,7 @@ export function ChatContainer({
 
   const handleEditUserMessage = useCallback(
     (message: Message): void => {
+      if (managedTurnRef.current?.composerReadOnlyReason || replySource?.editReady === false) return
       const original = extractMessageText(message.content)
       // Strip the trailing <CMBDEVCLAW-SKILL-USE-V1> block first so the raw tag
       // doesn't leak into the composer. Restore the chip by looking the skill
@@ -7698,6 +8020,10 @@ export function ChatContainer({
       // message was sent, drop the chip and surface a notice; sending the raw
       // name as text is never useful.
       const skillParsed = parseSkillUseBlock(original)
+      // Bot sends keep the selected skill in their Host-verified origin instead
+      // of the visible body. Ordinary chats retain their existing marker path.
+      const originSkill = replySource?.skillFor?.(message.id) ?? (surface === "default" ? message.botHistoryInputOrigin?.explicitSkill : undefined)
+      if (surface === "default" && message.botHistoryInputOrigin?.replyTo) setDraftBotReplyTo(null)
       const bodyAfterSkill = skillParsed ? skillParsed.rest : original
       const browserParsed = parseBuiltinBrowserEditDraft(bodyAfterSkill)
       const bodyAfterBrowser = browserParsed.visibleText
@@ -7706,7 +8032,12 @@ export function ChatContainer({
       // ref. Editing an unrelated old message must NOT silently wipe whatever
       // skill the user has currently picked in the composer — that's user
       // intent for the next send, unrelated to the message being edited.
-      if (skillParsed) {
+      if (originSkill) {
+        // Preserve the exact selection while the catalog loads; the existing
+        // restored-draft flow revalidates availability before sending.
+        setSelectedSkill({ ...originSkill, restored: true })
+        setSelectedBuiltinBrowser(false)
+      } else if (skillParsed) {
         // Match by path first, fall back to name. Path is the more stable
         // identifier when a plugin and a custom skill happen to share a name —
         // without it we'd silently restore the chip to "the wrong foo".
@@ -7753,6 +8084,9 @@ export function ChatContainer({
       setInput,
       setSelectedBuiltinBrowser,
       skills,
+      replySource,
+      surface,
+      setDraftBotReplyTo,
       setSelectedSkill
     ]
   )
@@ -7928,6 +8262,7 @@ export function ChatContainer({
   ])
 
   const handleEditGoal = useCallback((): void => {
+    if (managedTurnRef.current?.composerReadOnlyReason) return
     const objective = goalUi.goal?.objective?.trim()
     if (!objective) return
     const nextInput = `/goal ${objective}`
@@ -7945,7 +8280,7 @@ export function ChatContainer({
   // declaring a component inside the parent creates a new function reference each render,
   // which causes children to lose focus/animation state.
   const skillIntentBanner = !skillIntentRequest ? null : (
-    <div className="shrink-0 flex items-center gap-3 px-4 py-2.5 bg-violet-500/10 border-b border-violet-500/20 text-xs">
+    <div data-chat-notice className="shrink-0 flex items-center gap-3 px-4 py-2.5 bg-violet-500/10 border-b border-violet-500/20 text-xs">
       <Sparkles className="size-3.5 text-violet-500 shrink-0" />
       <div className="flex-1 text-violet-700 dark:text-violet-300 leading-snug">
         {skillIntentRequest.mode === "mode_b_llm" ? (
@@ -8116,8 +8451,8 @@ export function ChatContainer({
   }, [threadId])
   const chatMessageListFooter = (
     <div
+      data-chat-message-footer
       className="space-y-4 pt-4 pb-4"
-      style={userInputScrollPadding ? { paddingBottom: `${userInputScrollPadding}px` } : undefined}
     >
       {contextCompaction && <ContextCompactionCard compaction={contextCompaction} />}
       {modelRetry && (
@@ -8259,10 +8594,11 @@ export function ChatContainer({
       ref={chatRootRef}
       data-chat-thread-id={threadId}
       data-chat-surface={surface}
+      style={{ "--chat-question-inset": `${userInputScrollPadding ?? 0}px` } as React.CSSProperties}
       className="relative flex flex-1 flex-col min-h-0 overflow-hidden"
     >
       {remoteThreadInfo && !dismissedRemoteTipThreadIds.has(threadId) ? (
-        <div className="flex shrink-0 items-start gap-2 border-b border-status-info/20 bg-status-info/5 px-4 py-2 text-xs">
+        <div data-chat-notice className="flex shrink-0 items-start gap-2 border-b border-status-info/20 bg-status-info/5 px-4 py-2 text-xs">
           <Info className="mt-0.5 size-3.5 shrink-0 text-status-info" />
           <div className="min-w-0 flex-1 space-y-0.5">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -8477,10 +8813,11 @@ export function ChatContainer({
         {({ reserveLeftSpace, setMessageRef, virtualRangeRef }) => (
           <>
             <ScrollArea
+              data-chat-scroll
               className={cn("flex-1 min-h-0", surface === "bot" && "bot-chat-scroll")}
               ref={scrollRef}
             >
-              <div className={cn("px-4 pt-4", reserveLeftSpace && "md:pl-[20px]")}>
+              <div data-chat-message-inset className={cn("px-4 pt-4", reserveLeftSpace && "md:pl-[20px]")}>
                 <div className="max-w-3xl mx-auto space-y-4">
                   {historyLoading && displayMessages.length === 0 && (
                     <div
@@ -8504,7 +8841,7 @@ export function ChatContainer({
                     </div>
                   )}
                   {welcomePane}
-                  {displayMessages.length === 0 && !isLoading && !historyLoading && (
+                  {displayMessages.length === 0 && !isLoading && !historyLoading && !composerReadOnly && (
                     <WelcomeSkills
                       skills={skills}
                       skillsLoading={skillsLoading}
@@ -8551,7 +8888,7 @@ export function ChatContainer({
                         pendingApproval={pendingApproval}
                         autoApproveGitPush={autoApproveGitPush}
                         onApprovalDecision={handleApprovalDecision}
-                        onEditUserMessage={handleEditUserMessage}
+                        onEditUserMessage={composerReadOnly ? undefined : handleEditUserMessage}
                         onSetGoalFromMessage={managedTurn ? undefined : handleSetGoalFromMessage}
                         onForkFromMessage={
                           managedTurn && !managedTurn.ownerConversation
@@ -8582,6 +8919,7 @@ export function ChatContainer({
                 </div>
               </div>
             </ScrollArea>
+            <div data-chat-footer className="contents">
             {bizRetry && (
               <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-[20px]")}>
                 <div className="mx-auto w-full max-w-3xl">
@@ -8681,6 +9019,7 @@ export function ChatContainer({
 
                     return (
                       <div
+                        data-chat-approval
                         data-bot-approval={surface === "bot" ? true : undefined}
                         className={`max-w-3xl mx-auto rounded-lg border-2 p-4 space-y-3 ${
                           isFileApproval
@@ -8931,6 +9270,7 @@ export function ChatContainer({
                 <GoalStatusPanel
                   goalUi={goalUi}
                   open={goalDetailsOpen}
+                  readOnly={composerReadOnly}
                   onOpenChange={setGoalDetailsOpen}
                   onCommand={applyGoalPanelCommand}
                   onEditGoal={handleEditGoal}
@@ -8946,6 +9286,20 @@ export function ChatContainer({
               )}
             >
               <GitChangeNotice threadId={threadId} />
+              {composerReadOnly ? (
+                <div className="bot-task-readonly-footer max-w-3xl mx-auto relative">
+                  <ChatScrollToBottomButton
+                    visible={chatScrollUiState.mode === "detached"}
+                    hasUnread={chatScrollUiState.hasUnread}
+                    unreadCount={chatScrollUiState.unreadCount}
+                    onScrollToBottom={scrollToConversationBottom}
+                  />
+                  <div className="bot-task-readonly-controls">
+                    {managedTurn?.composerHeader}
+                    {isLoading && managedTurn?.showReadOnlyStop !== false && stopGenerationButton}
+                  </div>
+                </div>
+              ) : (
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
                 <ChatScrollToBottomButton
                   visible={chatScrollUiState.mode === "detached"}
@@ -8999,10 +9353,12 @@ export function ChatContainer({
                           条
                         </span>
                       </div>
-                      <div className="space-y-1.5">
+                      <div data-chat-queued-list className="space-y-1.5">
                         {queuedMessages.map((queued) => {
                           const isEditing = editingQueueId === queued.id
                           const isGuided = Boolean(queued.handoffRequestedAt)
+                          const retainedReply = !managedTurn ? queued.botReplyTo : undefined
+                          const canResumeParked = !managedTurn && !readOnly && canResumeParkedQueuedMessage(queued)
                           return (
                             <div
                               key={queued.id}
@@ -9074,10 +9430,29 @@ export function ChatContainer({
                               ) : (
                                 <div className="flex min-w-0 items-center gap-1.5">
                                   <GripVertical className="size-4 shrink-0 cursor-grab text-muted-foreground/50" />
-                                  <CornerDownRight className="size-4 shrink-0 text-muted-foreground/70" />
+                                  {retainedReply ? (
+                                    <button
+                                      type="button"
+                                      aria-label="跳转到排队消息引用的原消息"
+                                      title={cleanUserAttachmentContentForDisplay(retainedReply.preview ?? retainedReply.text).slice(0, 160)}
+                                      className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted"
+                                      onClick={() => jumpToBotReply(retainedReply)}
+                                    >
+                                      <Reply className="size-3.5" />
+                                    </button>
+                                  ) : <CornerDownRight className="size-4 shrink-0 text-muted-foreground/70" />}
                                   <div className="min-w-0 flex-1 truncate text-sm text-foreground/80">
                                     {getQueuedPreview(queued)}
                                   </div>
+                                  {canResumeParked && (
+                                    <button
+                                      type="button"
+                                      onClick={() => void resumeParkedQueuedMessage(queued)}
+                                      className="flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+                                    >
+                                      继续发送
+                                    </button>
+                                  )}
                                   {managedTurn?.submitDraft && (
                                     <button
                                       type="button"
@@ -9087,10 +9462,12 @@ export function ChatContainer({
                                     >
                                       {managedTurn.sendingDraftIds?.has(queued.id)
                                         ? "正在发送"
-                                        : "重试发送"}
+                                        : queued.botExplicitSkill && !queued.botSkillTarget && !queued.handoffRequestedAt
+                                          ? "继续发送"
+                                          : "重试发送"}
                                     </button>
                                   )}
-                                  {!managedTurn?.submitDraft && CURRENT_RUN_GUIDE_UI_ENABLED && (
+                                  {!managedTurn?.submitDraft && !queued.botExplicitSkill && CURRENT_RUN_GUIDE_UI_ENABLED && (
                                     <button
                                       type="button"
                                       onClick={() => void handleGuideQueuedMessage(queued)}
@@ -9122,6 +9499,8 @@ export function ChatContainer({
                                             : "queued"
                                         : undefined
                                     }
+                                    onChooseSkillTarget={queued.botExplicitSkill && !queued.botSkillTarget && !queued.handoffRequestedAt && !queued.botHandoffTarget && managedTurn?.chooseSkillTarget
+                                      ? () => managedTurn.chooseSkillTarget!(queued) : undefined}
                                     onEdit={() => startEditingQueuedMessage(queued)}
                                     onDelete={() => handleDeleteQueuedMessage(queued)}
                                   />
@@ -9133,9 +9512,11 @@ export function ChatContainer({
                       </div>
                     </div>
                   )}
+                  {managedTurn?.composerHeader}
                   {/* Composer environment rail, visually tucked behind the primary input card. */}
                   <div
                     data-composer-environment
+                    data-bot-user-control={showBotTaskComposerControls || undefined}
                     aria-hidden={composerEnvironmentRailCollapsed}
                     className={cn(
                       "relative z-0 mx-3 -mb-4 flex min-w-0 items-center gap-1 rounded-t-[28px] bg-background-interactive/70 pb-[13px] pl-3 pr-2 pt-[5px]",
@@ -9147,6 +9528,9 @@ export function ChatContainer({
                       <WorkspacePicker
                         threadId={threadId}
                         environmentRailCollapsed={composerEnvironmentRailCollapsed}
+                        workspaceLockedReason={
+                          managedTurn?.userOwnsComposer ? "任务沿用已绑定的工作目录。" : undefined
+                        }
                         onGitStatusChange={setGitWorkspaceStatus}
                       />
                       <GitBranchSwitcher
@@ -9314,7 +9698,10 @@ export function ChatContainer({
                                 会话行为
                               </div>
                               <div className="grid gap-0.5 rounded-xl bg-background-interactive/45 p-1 [&_[data-slot=popover-trigger]]:h-9 [&_[data-slot=popover-trigger]]:w-full [&_[data-slot=popover-trigger]]:justify-start [&_[data-slot=popover-trigger]]:rounded-lg">
-                                <MemorySessionSwitcher onOpenSettings={handleOpenMemorySettings} />
+                                <MemorySessionSwitcher
+                                  threadId={showBotTaskComposerControls ? threadId : undefined}
+                                  onOpenSettings={handleOpenMemorySettings}
+                                />
                                 {(agentMode === "normal" || agentMode === "multi") && (
                                   <OutputStyleSwitcher threadId={threadId} disabled={isLoading} />
                                 )}
@@ -9393,6 +9780,8 @@ export function ChatContainer({
                       ref={dropZoneRef}
                       data-bot-composer={managedTurn ? true : undefined}
                       data-bot-owner-composer={managedTurn?.ownerConversation ? true : undefined}
+                      data-bot-user-control={managedTurn?.userOwnsComposer || undefined}
+                      style={managedTurn?.controlColor ? { borderColor: managedTurn.userOwnsComposer ? managedTurn.controlColor : undefined } : undefined}
                       className={cn(
                         "relative flex-1 min-w-0 flex flex-col rounded-[28px] border border-border/80 shadow-sm transition-colors duration-300",
                         managedTurn?.mentionOptions ? "overflow-visible" : "overflow-hidden",
@@ -9451,7 +9840,7 @@ export function ChatContainer({
                       {selectedSkill && (
                         <div
                           className={cn(
-                            "flex items-center gap-1.5 px-3 pt-2.5",
+                            "flex flex-wrap items-center gap-1.5 px-3 pt-2.5",
                             composerRightClearanceClass
                           )}
                         >
@@ -9459,6 +9848,11 @@ export function ChatContainer({
                             label={selectedSkill.name}
                             onRemove={() => setSelectedSkill(null)}
                           />
+                          {restoredSkillUnavailable && (
+                            <span role="status" className="text-xs text-status-warning">
+                              原技能已不可用，草稿已保留。
+                            </span>
+                          )}
                         </div>
                       )}
                       {selectedBuiltinBrowser && (
@@ -9524,6 +9918,23 @@ export function ChatContainer({
                                     ⚠
                                   </span>
                                 )}
+                                {surface === "bot" && att.originalUnavailable && !att.botInputId && (
+                                  <>
+                                    <span className="text-muted-foreground" title="未保留原文件版本">仅文本</span>
+                                    {managedTurn?.attachFiles && !managedTurn.textOnlyReason && (
+                                      <button
+                                        type="button"
+                                        className="text-primary hover:underline disabled:opacity-50"
+                                        disabled={attachmentLoading}
+                                        aria-label={`重新选择原文件 ${att.filename}`}
+                                        title="重新选择原文件"
+                                        onClick={() => void handleAttachClick(att)}
+                                      >
+                                        重新选择
+                                      </button>
+                                    )}
+                                  </>
+                                )}
                                 <button
                                   type="button"
                                   onClick={() => removeAttachment(idx)}
@@ -9560,7 +9971,7 @@ export function ChatContainer({
                           mentions={draftBotMentions ?? []}
                           members={managedTurn.mentionOptions.bots}
                           inputRef={botInputRef}
-                          placeholder={botReplyActions && draftBotReplyTo ? "回复…" : inputPlaceholder}
+                          placeholder={draftBotReplyTo ? "回复…" : inputPlaceholder}
                           onEdit={({ text, mentions }) => setDraftBotInput(text, mentions)}
                           onCancelReply={() => {
                             if (!draftBotReplyTo) return false
@@ -9612,9 +10023,7 @@ export function ChatContainer({
                           isComposingRef.current = false
                         }}
                         onKeyDown={handleKeyDown}
-                        placeholder={
-                          botReplyActions && draftBotReplyTo ? "回复…" : inputPlaceholder
-                        }
+                        placeholder={draftBotReplyTo ? "回复…" : inputPlaceholder}
                         disabled={effectiveInputDisabled}
                         className={cn(
                           "composer-textarea relative z-[1] mr-2 w-[calc(100%-0.5rem)] resize-none overflow-y-auto bg-transparent",
@@ -9623,7 +10032,7 @@ export function ChatContainer({
                           hasPendingFilePayload && "pt-1.5",
                           composerRightClearanceClass
                         )}
-                        rows={managedTurn ? 1 : 2}
+                        rows={managedTurn && !showBotTaskComposerControls ? 1 : 2}
                         style={{ minHeight: "44px", maxHeight: "200px" }}
                       />
                       )}
@@ -9648,48 +10057,12 @@ export function ChatContainer({
                             }
                             aria-label="添加文件"
                             className="size-7 rounded-md p-0 text-muted-foreground hover:bg-muted/50 disabled:opacity-40 disabled:cursor-not-allowed"
-                            onClick={handleAttachClick}
+                            onClick={() => void handleAttachClick()}
                           />
-                          {surface !== "bot" && !managedTurn?.textOnlyReason && (
+                          {(surface !== "bot" || showBotTaskComposerControls) && !managedTurn?.textOnlyReason && (
                             <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
                           )}
-                          {!managedTurn && (
-                            <ModelSwitcher threadId={threadId} />
-                          )}
-                          {!managedTurn && (
-                            <AgentModeSwitcher
-                              showWorkflow
-                              mode={
-                                (disableCoordinatorModeOption && agentMode === "coordinator") ||
-                                (disableWorkflowModeOption && agentMode === "workflow")
-                                  ? "normal"
-                                  : agentMode
-                              }
-                              locked={isLoading || !canChangeAgentMode}
-                              lockedReason={agentModeSwitchDisabledReason}
-                              disabledModes={
-                                disableCoordinatorModeOption || disableWorkflowModeOption
-                                  ? {
-                                      coordinator: disableCoordinatorModeOption,
-                                      workflow: disableWorkflowModeOption
-                                    }
-                                  : undefined
-                              }
-                              disabledModeReasons={
-                                disableCoordinatorModeOption || disableWorkflowModeOption
-                                  ? {
-                                      coordinator: disableCoordinatorModeOption
-                                        ? "项目模式暂不支持 Agent Team。"
-                                        : undefined,
-                                      workflow: disableWorkflowModeOption
-                                        ? "项目模式暂不支持 Workflow。"
-                                        : undefined
-                                    }
-                                  : undefined
-                              }
-                              onChange={handleAgentModeChange}
-                            />
-                          )}
+                          {!managedTurn && modelAndModeControls}
                         </div>
                         <div className="ml-auto flex shrink-0 items-center justify-end gap-1.5">
                           {isLoading ? (
@@ -9772,6 +10145,10 @@ export function ChatContainer({
                           )}
                         </div>
                       </div>
+
+                    </div>
+                    {/* Keep the upward-opening request panel outside the composer's clipped shell. */}
+                    {surface !== "bot" && <>
                       <AgentGitCommitDialog
                         key={agentCommitApproval?.id ?? "agent-commit-idle"}
                         // Portal 不受工作区 inert 限制；设置期间只隐藏，保留待审批请求。
@@ -9789,18 +10166,17 @@ export function ChatContainer({
                         onCommitted={handleAgentCommitCommitted}
                         onCancel={handleAgentCommitCancel}
                       />
-                    </div>
-                    {/* Keep the upward-opening request panel outside the composer's clipped shell. */}
-                    {surface !== "bot" && (
                       <UserInputRequestDialog
                         request={pendingUserInput}
                         onSubmit={handleUserInputSubmit}
                         onLayoutChange={handleUserInputDialogLayoutChange}
                       />
-                    )}
+                    </>}
                   </div>
                 </div>
               </form>
+              )}
+            </div>
             </div>
           </>
         )}

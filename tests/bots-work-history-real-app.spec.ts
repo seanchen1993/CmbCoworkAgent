@@ -234,7 +234,9 @@ async function main() {
     await dialog.getByLabel("任务名称").fill("社区读书会 · 筹备")
     await dialog.getByLabel("任务目标").fill("继续跟进社区读书会的筹备安排。")
     await dialog.getByRole("button", { name: "关联此会话", exact: true }).click()
-    await page.getByRole("button", { name: "更多任务操作", exact: true }).waitFor()
+    const taskOptions = page.getByRole("button", { name: "更多任务操作", exact: true })
+    const returnToMain = page.getByRole("button", { name: `返回 ${setup.bot.name} 主对话`, exact: true })
+    await taskOptions.waitFor()
     const linked = await page.evaluate(
       async (id) => (window as ApiWindow).api.bots.conversations.resolve(id),
       threadId
@@ -245,8 +247,7 @@ async function main() {
       ),
       before
     )
-    await page.getByRole("button", { name: "返回 Bot 任务", exact: true }).click()
-    await page.getByRole("button", { name: "返回主对话", exact: true }).first().click()
+    await returnToMain.click()
     const mainId = setup.bot.threadId
     await ready(mainId)
     const notice = page.locator("[data-bot-association-notice]")
@@ -280,14 +281,18 @@ async function main() {
       animations: "disabled"
     })
     await page.locator(`[data-work-id="${linked.work.id}"]`).click()
-    await page.getByText("来源 · 已有会话关联", { exact: true }).waitFor()
+    await page.getByRole("button", { name: "打开聊天", exact: true }).click()
+    await ready(threadId)
+    await taskOptions.click()
+    await page.getByRole("button", { name: "解除任务关联", exact: true }).waitFor()
     await paint()
     await page.screenshot({
       path: join(dir, "01-associated-task-details.png"),
       fullPage: true,
       animations: "disabled"
     })
-    await page.getByRole("button", { name: "返回主对话", exact: true }).first().click()
+    await page.keyboard.press("Escape")
+    await returnToMain.click()
     await ready(mainId)
     console.log("stage: real-model-correct-final-decisions", {
       toolNames: calls.map((call: any) => call.name)
@@ -331,6 +336,7 @@ async function main() {
     assert.ok(citedSource)
     await citations.last().click()
     await sourceVisible(threadId, citedSource.messageId)
+    await taskOptions.waitFor()
     await page.screenshot({
       path: join(dir, "04-source-reveal.png"),
       fullPage: true,
@@ -346,7 +352,7 @@ async function main() {
       ),
       beforeWorkRuns
     )
-    await page.getByRole("button", { name: "返回主对话", exact: true }).first().click()
+    await returnToMain.click()
     await ready(mainId)
     const sourceGroup = chat(mainId).locator("[data-bot-history-sources]").last()
     await sourceGroup.locator("summary").click()
@@ -378,9 +384,9 @@ async function main() {
     await sourceGroup.getByRole("button").first().click()
     await sourceVisible(threadId, sourceReceipt.receipt.entries[0].source.messageId)
     await page.getByRole("button", { name: "打开原会话", exact: true }).click()
-    page.once("dialog", (dialog) => void dialog.accept())
-    await page.getByRole("button", { name: "更多任务操作", exact: true }).click()
+    await taskOptions.click()
     await page.getByRole("button", { name: "解除任务关联", exact: true }).click()
+    await page.getByRole("dialog").getByRole("button", { name: "确认解除", exact: true }).click()
     await page.getByRole("button", { name: "关联为 Bot 任务", exact: true }).waitFor()
     const stale = await page.evaluate(
       async ({ botId, source }) => {

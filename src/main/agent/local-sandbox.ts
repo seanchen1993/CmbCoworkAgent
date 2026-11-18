@@ -6,6 +6,7 @@ import {
   MARKET_CONTENT_DENIED
 } from "../services/market-content"
 import { getCustomSkillsDir, getPlugins } from "../storage"
+import { foregroundCommandCall, observedProcessExits } from "./foreground-command-evidence"
 /**
  * LocalSandbox: Execute shell commands locally on the host machine.
  *
@@ -7665,6 +7666,7 @@ export class LocalSandbox
           () => !foregroundCommandContext.getStore()?.detached()
         )
       )
+      this.observeForegroundCommand(result, effectiveCommand, effectiveCwd, effectiveCwd === requestedCwd && effectiveCommand === command)
       // Adoption tracking: react to agent rm/mv of generated files (side-effect
       // only, never throws). Only successful commands act (exitCode === 0).
       recordAdoptionShellFileOps(effectiveCommand, effectiveCwd, result.exitCode)
@@ -7684,6 +7686,7 @@ export class LocalSandbox
         cwd: effectiveCwd
       })
     )
+    this.observeForegroundCommand(result, effectiveCommand, effectiveCwd, effectiveCwd === requestedCwd && effectiveCommand === command)
     recordAdoptionShellFileOps(effectiveCommand, effectiveCwd, result.exitCode)
     this.recordShellReadTelemetry(effectiveCommand, effectiveCwd, result, shellSyntax)
     const postResult = await this.runHooks("PostToolUse", {
@@ -7694,6 +7697,15 @@ export class LocalSandbox
       sessionId: this.runId
     })
     return LocalSandbox.applyPostHookToExecResult(result, postResult)
+  }
+
+  private observeForegroundCommand(result: ExecuteResponse, command: string, cwd: string, unchanged: boolean): void {
+    const call = foregroundCommandCall.getStore()
+    if (!call || !unchanged || call.threadId !== this.runId || result.exitCode === null ||
+        !observedProcessExits.has(result) ||
+        (this.windowsSandbox !== "none" && LocalSandbox.isLikelySandboxDenied(result.exitCode, result.output, command))) return
+    const directory = path.relative(this.workingDir, cwd) || "."
+    call.completed = { command, directory, exitCode: result.exitCode, output: result.output, truncated: result.truncated }
   }
 
   /**
@@ -9068,7 +9080,9 @@ export class LocalSandbox
               resolve({ output: metadata + output, exitCode: 124, truncated })
             }
           } else {
-            resolve({ output, exitCode: signal ? null : code, truncated })
+            const result = { output, exitCode: signal ? null : code, truncated }
+            if (foregroundCommandCall.getStore() && result.exitCode !== null) observedProcessExits.add(result)
+            resolve(result)
           }
         } catch (err) {
           // Encoding detection or incremental decoding can throw on unusual binary output.

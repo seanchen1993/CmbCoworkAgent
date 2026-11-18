@@ -103,7 +103,7 @@ function paint(now: number): void {
     const delta =
       target.lastTime === undefined
         ? 0
-        : Math.max(0, Math.min(0.05, (now - target.lastTime) / 1000))
+        : Math.max(0, Math.min(0.1, (now - target.lastTime) / 1000))
     target.lastTime = now
     if (instant) {
       // Settle once for reduced motion; no ticking/blinking or leftover hover.
@@ -159,9 +159,9 @@ function observe(node: SVGSVGElement, host: SVGGElement, target: AvatarTarget): 
       invalidatePointer()
     })
     loop = createBudgetedLoop(paint, {
-      // Multiple working faces share the page with scrolling and streamed text.
-      // Budget decorative SVG work; motion still advances by elapsed time.
-      fps: 30,
+      // Match Hermes' avatar-scale budget. Grok's shape geometry is expensive
+      // even at small display sizes; elapsed time preserves the clip speed.
+      fps: 15,
       idleWhen: () => {
         for (const value of targets.values()) {
           if (!value.visible) continue

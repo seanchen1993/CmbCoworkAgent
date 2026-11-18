@@ -1,0 +1,66 @@
+/* A single layout for ordinary threads, owned tasks and the Bot main chat.
+   File tabs and project panels opt out. Only the first/last messages reserve
+   space; the transcript itself scrolls behind the floating controls. */
+[data-thread-floating-chat="true"] > [data-thread-floating-header] {
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: 20;
+  pointer-events: none;
+}
+[data-thread-floating-chat="true"] > [data-thread-floating-header] > * { pointer-events: auto; }
+[data-thread-floating-chat="true"] [data-conversation-task-controls] {
+  border: 0;
+  width: fit-content;
+  max-width: calc(100% - 24px);
+  margin: 8px 12px;
+  padding: 4px 8px;
+  border-radius: 24px;
+  background: var(--background);
+  box-shadow: 0 1px 4px #00000008;
+}
+[data-thread-floating-chat="true"] [data-conversation-task-controls][data-linked] { margin-inline: auto; }
+[data-thread-floating-chat="true"] [data-conversation-task-controls] > span { max-width: min(55vw, 480px); }
+[data-floating-chat="true"] [data-chat-message-inset] {
+  padding-top: calc(var(--chat-header-inset, 0px) + 16px);
+}
+[data-floating-chat="true"] [data-chat-scroll] > [data-radix-scroll-area-viewport] {
+  scroll-padding-top: var(--chat-header-inset, 0px);
+  scroll-padding-bottom: calc(var(--chat-composer-inset, 0px) + var(--chat-question-inset, 0px));
+}
+[data-floating-chat="true"] > [data-chat-footer] {
+  display: block;
+  position: absolute;
+  z-index: 10;
+  inset-inline: 0;
+  bottom: 0;
+  pointer-events: none;
+}
+/* Outer rows only provide spacing. Keep their empty margins transparent to
+   scrolling; cards, forms and their descendants retain normal interaction. */
+[data-floating-chat="true"] > [data-chat-footer] > * > * { pointer-events: auto; }
+[data-floating-chat="true"] > [data-chat-footer]::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: -24px 0 0;
+  background: linear-gradient(transparent, var(--background) 80%);
+}
+[data-chat-message-footer] { padding-bottom: max(16px, var(--chat-question-inset, 0px)); }
+[data-floating-chat="true"] [data-chat-message-footer] {
+  padding-bottom: calc(var(--chat-composer-inset, 0px) + var(--chat-question-inset, 0px) + 16px);
+}
+/* Large queues/approvals scroll inside their own card, not around menus. */
+[data-floating-chat="true"] [data-chat-queued-list] { max-height: 24vh; overflow-y: auto; }
+[data-floating-chat="true"] [data-chat-approval] { max-height: 36vh; overflow-y: auto; }
+[data-chat-dock-expanded="true"] > [data-chat-footer] {
+  position: relative;
+  flex: none;
+  background: var(--background);
+}
+[data-chat-dock-expanded="true"] > [data-chat-footer]::before { display: none; }
+
+/* Reserve the header once when a real notice sits outside the transcript.
+   This also covers notices above ChatContainer (e.g. draft recovery). */
+[data-thread-floating-chat="true"] > [data-thread-chat-content]:has([data-chat-notice], .bot-notice, .bot-queue, .bot-empty) {
+  padding-top: var(--chat-floating-header-height, 0px);
+}

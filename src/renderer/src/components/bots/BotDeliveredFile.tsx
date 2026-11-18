@@ -2,9 +2,9 @@ import { botErrorMessage } from "@/lib/bot-error-message"
 import { useEffect, useRef, useState, type ReactNode } from "react"
 import { Download, FileText, Loader2, RotateCcw } from "lucide-react"
 import { toast } from "sonner"
-import { emitOpenResourcePreview } from "@/lib/resource-preview-events"
+import { beginOpenResourcePreviewIntent, emitOpenResourcePreview } from "@/lib/resource-preview-events"
 import type { BotFileDeliveryStatus } from "../../../../shared/bots/mock-channel"
-import type { BotDeliveredFile as DeliveredFile } from "../../../../shared/bots/file-delivery"
+import type { BotDeliveredFile as DeliveredFile, BotDeliveredFileSource } from "../../../../shared/bots/file-delivery"
 import type { BotClient } from "../../../../shared/bots/contracts"
 
 /** No file reads during rendering. Preview and save reuse the existing scoped file boundary. */
@@ -19,10 +19,11 @@ export function BotDeliveredFile({
   attachmentPath,
   label,
   size,
-  delivery
+  delivery,
+  source
 }: {
   client: BotClient
-  botId: string
+  botId?: string
   groupId?: string
   imConversationId?: string
   workId?: string
@@ -32,6 +33,7 @@ export function BotDeliveredFile({
   label?: ReactNode
   size?: number
   delivery?: BotFileDeliveryStatus
+  source?: BotDeliveredFileSource
 }) {
   const name = filePath.split(/[\\/]/).pop() || filePath
   const openedPath = attachmentPath ?? filePath
@@ -43,16 +45,42 @@ export function BotDeliveredFile({
     lock.current = true
     setSaving(true)
     try {
-      if (imConversationId) {
+      if (source && client.exportDeliveredFile) await client.exportDeliveredFile(source)
+      else if (imConversationId && botId) {
         if (!client.im?.exportFile) throw new Error("当前主机不支持 IM 文件导出")
-        await client.im.exportFile(botId, imConversationId, openedPath, workId)
-      } else if (groupId) await client.exportGroupFile(groupId, openedPath)
-      else await client.exportFile(botId, openedPath)
+        await client.im.exportFile(botId, imConversationId, openedPath, workId, name)
+      } else if (groupId) await client.exportGroupFile(groupId, openedPath, name)
+      else if (botId) await client.exportFile(botId, openedPath, undefined, undefined, name)
     } catch (cause) {
       toast.error(botErrorMessage(cause, "文件保存失败，请重试"))
     } finally {
       lock.current = false
       setSaving(false)
+    }
+  }
+  const open = async () => {
+    const intentId = beginOpenResourcePreviewIntent(threadId)
+    try {
+      const authorized = source && client.authorizeDeliveredFile
+        ? await client.authorizeDeliveredFile(source)
+        : undefined
+      const markdownBasePath = authorized
+        ? authorized.markdownBasePath : attachmentPath ? filePath : undefined
+      emitOpenResourcePreview({
+        threadId,
+        intentId,
+        filePath: authorized?.filePath ?? openedPath,
+        ...(attachmentPath ? { botDelivery: true } : {}),
+        ...(markdownBasePath ? { markdownBasePath } : {}),
+        ...(authorized ? {
+          externalPreviewGrant: authorized.grant,
+          externalPreviewGrantExpiresAt: authorized.expiresAt,
+          botDeliverySource: source
+        } : {}),
+        workspacePathKind: "absolute"
+      })
+    } catch (error) {
+      toast.error(botErrorMessage(error, "原交付附件已不可用"))
     }
   }
   return (
@@ -62,14 +90,7 @@ export function BotDeliveredFile({
         className="bot-delivered-file-open"
         aria-label={`打开 ${name}`}
         title={filePath}
-        onClick={() =>
-          emitOpenResourcePreview({
-            threadId,
-            filePath: openedPath,
-            ...(attachmentPath ? { markdownBasePath: filePath } : {}),
-            workspacePathKind: "absolute"
-          })
-        }
+        onClick={() => void open()}
       >
         <FileText size={22} strokeWidth={1.5} aria-hidden="true" />
         <span className="bot-delivered-file-label">
@@ -108,7 +129,7 @@ export function BotDeliveredFile({
           )}
         </span>
       </button>
-      {delivery?.state === "failed" && client.im?.retryFile && (
+      {botId && delivery?.state === "failed" && client.im?.retryFile && (
         <button
           type="button"
           className="bot-delivered-file-save"
@@ -147,20 +168,23 @@ export function BotDeliveredFile({
 export function BotDeliveredFiles({
   files,
   callId,
+  assistantMessageId,
   ...props
 }: {
   client: BotClient
-  botId: string
+  botId?: string
   groupId?: string
   imConversationId?: string
   threadId: string
   callId: string
+  assistantMessageId?: string
   files: DeliveredFile[]
 }) {
   const root = useRef<HTMLDivElement>(null)
   const [statuses, setStatuses] = useState<BotFileDeliveryStatus[]>([])
   useEffect(() => {
-    if (!props.client.im?.fileStatuses || props.groupId) return
+    const botId = props.botId
+    if (!botId || !props.client.im?.fileStatuses || props.groupId) return
     let alive = true,
       visible = typeof IntersectionObserver === "undefined",
       running = false,
@@ -176,7 +200,7 @@ export function BotDeliveredFiles({
       running = true
       dirty = false
       try {
-        const result = await props.client.im!.fileStatuses!(props.botId, props.threadId, callId)
+        const result = await props.client.im!.fileStatuses!(botId, props.threadId, callId)
         if (alive) setStatuses(result)
       } catch {
         /* A local file remains usable while its transport state is unavailable. */
@@ -210,13 +234,15 @@ export function BotDeliveredFiles({
   }, [props.client, props.botId, props.threadId, props.groupId, callId])
   return (
     <div className="bot-delivered-files" ref={root}>
-      {files.map((file) => (
+      {files.map((file, fileIndex) => (props.botId || file.attachmentPath) && (
         <BotDeliveredFile
           key={file.filePath}
           {...props}
           filePath={file.filePath}
           attachmentPath={file.attachmentPath}
           size={file.size}
+          source={assistantMessageId && file.attachmentPath
+            ? { threadId: props.threadId, assistantMessageId, callId, fileIndex } : undefined}
           delivery={statuses.find(
             (item) =>
               item.file.attachmentPath === file.attachmentPath &&

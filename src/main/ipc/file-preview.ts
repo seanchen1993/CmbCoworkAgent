@@ -1,4 +1,4 @@
-import { type IpcMain, type WebContents } from "electron"
+import { BrowserWindow, type IpcMain, type IpcMainInvokeEvent, type WebContents } from "electron"
 import path from "node:path"
 import {
   WORKSPACE_FILE_PREVIEW_CANCELLED,
@@ -21,7 +21,7 @@ import {
   revokeExternalFileReadGrantsForOwner
 } from "../services/external-file-read-tokens"
 import { authorizeTrustedToolFilePreview } from "../services/trusted-tool-file-preview"
-import { openStableFileHandle } from "../services/stable-file-handle"
+import { openStableFileHandle, type StableFileHandle } from "../services/stable-file-handle"
 import { getWorkspaceFilePreviewClient } from "../workspace-file-preview/client"
 import { workspaceFilePreviewFailure } from "../workspace-file-preview/errors"
 import type { WorkspaceFilePreviewWorkerSource } from "../workspace-file-preview/protocol"
@@ -178,6 +178,59 @@ async function prepareWorkerSource(
     },
     workspacePath,
     trustedRootPath: workspacePath
+  }
+}
+
+async function prepareBotDeliveryImage(
+  event: IpcMainInvokeEvent,
+  request: WorkspaceFilePreviewOpenMediaRequest
+) {
+  const assertDesktop = () => {
+    if (!event.senderFrame || event.senderFrame !== event.sender.mainFrame ||
+        !BrowserWindow.fromWebContents(event.sender))
+      throw new Error("Access denied: Bot delivery images require a local desktop window")
+  }
+  assertDesktop()
+  const {
+    parseBotDeliveredFileSource,
+    readDesktopBotDelivery,
+    revalidateDesktopBotDelivery,
+    verifyDesktopBotDeliveryImage
+  } = await import("../bots/delivery-receipt")
+  const source = parseBotDeliveredFileSource(request.botDeliveryImage)
+  const image = request.source
+  if (image.threadId !== source.threadId || image.workspacePathKind !== "absolute" ||
+      image.botGroupId !== undefined)
+    throw new Error("Access denied: Bot delivery image belongs to another source")
+  if (!mimeTypeForPath(image.filePath).startsWith("image/"))
+    throw new Error("Access denied: Bot delivery dependencies must be images")
+  const host = (await import("../bots/local-service")).getLocalBotHost()
+  const receipt = readDesktopBotDelivery(host, source)
+  const workspace = receipt.markdownWorkspace
+  if (!workspace) throw new Error("Access denied: Bot delivery no longer has its original workspace")
+  const snapshot = receipt.markdownImageSnapshot(image.filePath)
+  if (!snapshot && !receipt.allowMarkdownWorkspaceFallback)
+    throw new Error("Access denied: Only images in the original Bot delivery are available")
+  return {
+    source: snapshot
+      ? { externalFullPath: snapshot.path, trustedRootPath: snapshot.root }
+      : { threadId: source.threadId, filePath: image.filePath, workspacePathKind: "absolute" as const },
+    workspacePath: snapshot ? undefined : workspace,
+    trustedRootPath: snapshot?.root ?? workspace,
+    verifySnapshot: snapshot
+      ? (file: StableFileHandle, assertActive: () => void) => verifyDesktopBotDeliveryImage(file, snapshot, assertActive)
+      : undefined,
+    assertCurrent: () => {
+      assertDesktop()
+      const current = revalidateDesktopBotDelivery(host, source, receipt)
+      if (current.markdownWorkspace !== workspace || current.resultId !== receipt.resultId ||
+          (!snapshot && !current.allowMarkdownWorkspaceFallback))
+        throw new Error("Access denied: Bot delivery workspace changed")
+      const currentSnapshot = current.markdownImageSnapshot(image.filePath)
+      if (currentSnapshot?.path !== snapshot?.path || currentSnapshot?.root !== snapshot?.root ||
+          currentSnapshot?.file.size !== snapshot?.file.size)
+        throw new Error("Access denied: Bot delivery image changed")
+    }
   }
 }
 
@@ -346,7 +399,10 @@ export function registerWorkspaceFilePreviewHandlers(ipcMain: IpcMain): void {
       const active = beginRequest(event.sender, request.lane, request.requestToken)
       const client = getWorkspaceFilePreviewClient()
       try {
-        const prepared = await prepareWorkerSource(request.source, event.sender.id)
+        const botImage = request.botDeliveryImage !== undefined
+          ? await prepareBotDeliveryImage(event, request)
+          : undefined
+        const prepared = botImage ?? await prepareWorkerSource(request.source, event.sender.id)
         if (!isCurrent(active))
           throw Object.assign(new Error("Preview superseded"), {
             name: WORKSPACE_FILE_PREVIEW_CANCELLED
@@ -370,12 +426,24 @@ export function registerWorkspaceFilePreviewHandlers(ipcMain: IpcMain): void {
             name: WORKSPACE_FILE_PREVIEW_CANCELLED
           })
         }
-        const displayPath =
-          "externalGrant" in request.source ? stableFile.filePath : request.source.filePath
-        const mimeType = mimeTypeForPath(displayPath, request.mimeType)
-        const inlinePolicy = inlineMediaPolicy(mimeType, stableFile.size)
         let transferred = false
         try {
+          const displayPath = botImage || "externalGrant" in request.source
+            ? stableFile.filePath : request.source.filePath
+          const mimeType = mimeTypeForPath(displayPath, botImage ? undefined : request.mimeType)
+          if (botImage && !mimeType.startsWith("image/"))
+            throw new Error("Access denied: Bot delivery dependencies must be images")
+          const inlinePolicy = inlineMediaPolicy(mimeType, stableFile.size)
+          if (botImage?.verifySnapshot) {
+            if (!inlinePolicy.allowed) throw new Error(inlinePolicy.reason)
+            await botImage.verifySnapshot(stableFile, () => {
+              if (!isCurrent(active))
+                throw Object.assign(new Error("Preview superseded"), {
+                  name: WORKSPACE_FILE_PREVIEW_CANCELLED
+                })
+            })
+          }
+          botImage?.assertCurrent()
           const entry = workspaceFilePreviewMediaRegistry.issue({
             ownerId: event.sender.id,
             lane: request.lane,

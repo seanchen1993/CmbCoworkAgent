@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BotStore } from "./store"
 import { LocalBotHost, type BotRunLease, type BotRunPort } from "./host"
+import { buildBotPrompt, buildBotTurnContext } from "./prompt"
 import type { BotTask } from "../../shared/bots/contracts"
 
 const cleanups: (() => Promise<void>)[] = []
@@ -45,7 +46,8 @@ function fixture() {
       release: vi.fn()
     }
   })
-  const host = new LocalBotHost(store, { acquire, onAvailable: () => () => {} })
+  const onSettled = vi.fn<NonNullable<BotRunPort["onSettled"]>>()
+  const host = new LocalBotHost(store, { acquire, onAvailable: () => () => {}, onSettled })
   cleanups.push(async () => {
     finish({ state: "completed", result: "Done" })
     await host.stop()
@@ -60,6 +62,7 @@ function fixture() {
     injections,
     finish,
     acquire,
+    onSettled,
     yieldToUser,
     dismissQuestion,
     wait: (value: boolean) => waiting(value)
@@ -74,6 +77,82 @@ async function running(f: ReturnType<typeof fixture>) {
 }
 
 describe("independent work uses beta's interactive inbox", () => {
+  it.each(["running", "waiting", "cancelled"] as const)(
+    "keeps forwarded input behind an owned command receipt (%s), without yielding or replaying",
+    async (mode) => {
+      const f = fixture()
+      const source = f.store.enqueue({ botId: f.bot.id, requestId: "create", message: "Start a work" })
+      f.store.transition(source.id, "running")
+      const { task, work } = f.store.createWork(
+        { botId: f.bot.id, operationId: "work", title: "Work", goal: "Original" },
+        { taskId: source.id, callId: "create", key: "create" }
+      )
+      f.store.settle(source.id, "completed", null, "Started")
+      f.store.transition(task.id, "running")
+      f.store.settle(task.id, "completed", null, "Command started")
+      const receipt = f.store.enqueue(
+        { botId: f.bot.id, workId: work.id, requestId: "command-result", message: "Command completed" },
+        { kind: "notification", notificationKind: "command", key: "command" }
+      )
+      const acquireReceipt = f.acquire.getMockImplementation()!
+      f.acquire.mockImplementation((bot, candidate, work) => candidate.id === receipt.id
+        ? acquireReceipt(bot, candidate, work) : null)
+      f.host.resume()
+      await vi.waitFor(() => expect(f.store.getTask(receipt.id).state).toBe("running"))
+      f.host.onSteeringReady(receipt.id)
+      if (mode !== "running") f.wait(true)
+      let incoming!: BotTask
+      f.acquire.mockImplementation((_bot, source) => source.requestId === "main" ? ({
+        execute: async () => {
+          incoming = f.host.sendWork({ taskId: source.id, callId: "forward", key: "forward" }, work.id, "Keep the new context")
+          return { state: "completed", result: "Forwarded" }
+        },
+        release: vi.fn()
+      }) : null)
+      f.host.send({ botId: f.bot.id, requestId: "main", message: "Add context to the existing task" })
+      await vi.waitFor(() => expect(incoming).toBeDefined())
+      expect(incoming.origin).toMatchObject({ kind: "work", dispatch: "follow_up" })
+      expect(f.store.getTask(incoming.id).state).toBe("queued")
+      expect(f.store.getTask(receipt.id).state).toBe(mode === "running" ? "running" : "waiting_user")
+      expect(f.yieldToUser).not.toHaveBeenCalled()
+      expect(f.dismissQuestion).not.toHaveBeenCalled()
+      expect(f.steer).not.toHaveBeenCalled()
+      if (mode === "cancelled") f.host.cancel(incoming.id)
+      const execute = vi.fn(async () => ({ state: "completed" as const, result: "Context handled" }))
+      f.acquire.mockImplementation((_bot, candidate) => candidate.id === incoming.id
+        ? { execute, release: vi.fn() }
+        : null)
+      if (mode !== "running") f.wait(false)
+      expect(execute).not.toHaveBeenCalled()
+      f.finish({ state: "completed", result: "Receipt processed" })
+      await vi.waitFor(() => expect(f.store.getTask(receipt.id).state).toBe("completed"))
+      await vi.waitFor(() => expect(f.store.getTask(incoming.id).state).toBe(mode === "cancelled" ? "cancelled" : "completed"))
+      expect(execute).toHaveBeenCalledTimes(mode === "cancelled" ? 0 : 1)
+      expect(f.yieldToUser).not.toHaveBeenCalled()
+    }
+  )
+
+  it("offers a deferred work supplement once after its interaction ends, without a second execution", async () => {
+    const f = fixture()
+    const { task: owner, work } = f.store.createWork({ botId: f.bot.id, operationId: "work", title: "Work", goal: "Original" })
+    await vi.waitFor(() => expect(f.store.getTask(owner.id).state).toBe("running"))
+    f.host.onSteeringReady(owner.id)
+    f.wait(true)
+    f.steer.mockResolvedValueOnce(false)
+    const incoming = f.host.send({ botId: f.bot.id, workId: work.id, requestId: "supplement", message: "Context" })
+    await vi.waitFor(() => expect(f.steer).toHaveBeenCalledOnce())
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(f.store.getTask(incoming.id).state).toBe("queued")
+    f.wait(false)
+    await vi.waitFor(() => expect(f.steer).toHaveBeenCalledTimes(2))
+    expect(f.injections.get(incoming.id)!()).toBe(true)
+    expect(f.injections.get(incoming.id)!()).toBe(true)
+    f.finish({ state: "completed", result: "Both handled" })
+    await vi.waitFor(() => expect(f.store.getTask(incoming.id).state).toBe("completed"))
+    expect(f.acquire.mock.calls.filter(([, t]) => t.workId === work.id)).toHaveLength(1)
+    expect(f.store.recentTasks().filter(t => t.origin.kind === "work_result")).toHaveLength(1)
+  })
+
   it.each(["direct", "forwarded"] as const)(
     "injects the actual %s instruction into the same work and reports the consumed context",
     async (kind) => {
@@ -124,6 +203,7 @@ describe("independent work uses beta's interactive inbox", () => {
       expect(child.message).toBe(instruction)
       expect(f.steer).toHaveBeenCalledExactlyOnceWith(
         expect.objectContaining({ id: child.id, workId: work.id, message: instruction }),
+        expect.any(Function),
         expect.any(Function)
       )
       if (kind === "forwarded") {
@@ -197,9 +277,137 @@ describe("independent work uses beta's interactive inbox", () => {
     })
     expect(f.injections.get(own.id)!()).toBe(true)
   })
+  it.each(["rejected", "consumed", "queued"] as const)(
+    "does not prepare a %s forwarded addition again when its work command is replayed",
+    async (outcome) => {
+      const f = fixture()
+      const { work, task: owner } = f.store.createWork({
+        botId: f.bot.id, operationId: "work", title: "Report", goal: "Write the report"
+      })
+      await vi.waitFor(() => expect(f.store.getTask(owner.id).state).toBe("running"))
+      f.host.onSteeringReady(owner.id)
+      f.wait(true)
+      f.steer.mockImplementationOnce(async (entry, inject) => {
+        if (outcome === "rejected") return { rejected: true }
+        f.injections.set(entry.id, inject)
+        return outcome === "consumed" ? inject() : true
+      })
+      // Re-preparation is not harmless: another Hook decision must not discard
+      // an already accepted message waiting for the next model boundary.
+      f.steer.mockResolvedValueOnce({ rejected: true })
+      let child!: BotTask
+      let replay!: BotTask
+      f.acquire.mockImplementationOnce((_bot, source) => ({
+        execute: async () => {
+          const key = { taskId: source.id, callId: "call-1", key: "same-request" }
+          child = f.host.sendWork(key, work.id, "Add a table")
+          await vi.waitFor(() => expect(f.store.getTask(child.id).state)
+            .toBe(outcome === "rejected" ? "failed" : outcome === "consumed" ? "running" : "queued"))
+          await new Promise<void>((resolve) => setImmediate(resolve))
+          replay = f.host.sendWork({ ...key, callId: "call-2" }, work.id, "Add a table")
+          return { state: "completed", result: "Forwarded" }
+        },
+        release: vi.fn()
+      }))
+      const main = f.host.send({ botId: f.bot.id, requestId: "forward", message: "Ask the report task to add a table" })
+      await vi.waitFor(() => expect(f.store.getTask(main.id).state).toBe("completed"))
+      expect(replay).toMatchObject({ id: child.id, state: "queued" }) // stable admission receipt
+      expect(f.steer).toHaveBeenCalledTimes(1)
+      expect(f.store.getTask(owner.id).state).toBe("waiting_user")
+      expect(f.store.getTask(child.id).state).toBe(outcome === "rejected" ? "failed" : outcome === "consumed" ? "running" : "queued")
+      if (outcome === "queued") {
+        expect(f.injections.get(child.id)!()).toBe(true)
+        expect(f.store.getTask(child.id).state).toBe("running")
+      }
+      expect(f.onSettled.mock.calls.filter(([entry]) => entry.id === child.id))
+        .toHaveLength(outcome === "rejected" ? 1 : 0)
+    }
+  )
 })
 
 describe("Bot messages during a user run", () => {
+  it("reoffers a temporarily unready addition within the same live run", async () => {
+    const f = fixture(), root = await running(f)
+    f.steer.mockResolvedValueOnce(false)
+    const child = f.host.send({ botId: f.bot.id, requestId: "not-ready", message: "Include the appendix" })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(f.store.getTask(child.id).state).toBe("queued")
+    f.host.onSteeringReady(root.id)
+    expect(f.steer).toHaveBeenCalledTimes(2)
+    expect(f.injections.get(child.id)!()).toBe(true)
+    f.finish({ state: "completed", result: "Included the appendix" })
+    await vi.waitFor(() => expect(f.store.getTask(child.id).state).toBe("completed"))
+  })
+  it.each(["user", "work"] as const)(
+    "settles a Hook-rejected %s addition once without restarting it or stopping the owner",
+    async (kind) => {
+      const f = fixture()
+      const root = kind === "work"
+        ? f.store.createWork({ botId: f.bot.id, operationId: "work", title: "Report", goal: "Write a report" }).task
+        : f.host.send({ botId: f.bot.id, requestId: "root", message: "Write a report" })
+      await vi.waitFor(() => expect(f.store.getTask(root.id).state).toBe("running"))
+      f.host.onSteeringReady(root.id)
+      const reason = "输入检查未通过，未执行这条补充消息。"
+      f.steer.mockResolvedValueOnce({ rejected: true })
+      const input = { botId: f.bot.id, workId: root.workId, requestId: "blocked", message: "Rejected addition" }
+      const rejected = f.host.send(input)
+      await vi.waitFor(() => expect(f.store.getTask(rejected.id)).toMatchObject({ state: "failed", error: reason }))
+      expect(f.store.getTask(root.id).state).toBe("running")
+      expect(f.injections.has(rejected.id)).toBe(false)
+      expect(f.host.send(input)).toMatchObject({ id: rejected.id, state: "failed" })
+      f.host.onSteeringReady(root.id)
+      expect(f.steer).toHaveBeenCalledTimes(1)
+
+      const accepted = f.host.send({ botId: f.bot.id, workId: root.workId, requestId: "allowed", message: "Include the approved appendix" })
+      expect(f.injections.get(accepted.id)!()).toBe(true)
+      f.finish({ state: "completed", result: "Report with approved appendix" })
+      await vi.waitFor(() => expect(f.store.getTask(root.id).state).toBe("completed"))
+      expect(f.store.getTask(accepted.id).state).toBe("completed")
+      expect(f.store.getTask(rejected.id).state).toBe("failed")
+      expect(f.acquire.mock.calls.some(([, entry]) => entry.id === rejected.id)).toBe(false)
+      expect(f.onSettled.mock.calls.filter(([entry]) => entry.id === rejected.id)).toEqual([
+        [expect.objectContaining({ id: rejected.id }), "failed", reason]
+      ])
+      if (kind === "work") {
+        const receipts = f.store.recentTasks().filter((entry) => entry.origin.kind === "work_result")
+        expect(receipts.filter((entry) => entry.origin.kind === "work_result" && entry.origin.executionTaskId === rejected.id))
+          .toHaveLength(1)
+        const rejection = receipts.find((entry) => entry.origin.kind === "work_result" && entry.origin.executionTaskId === rejected.id)!
+        expect(JSON.parse(rejection.message)).toMatchObject({
+          executionState: "failed", result: reason,
+          requestContext: { messages: [], messagesOmitted: true }
+        })
+        expect(rejection.message).not.toContain(input.message)
+      }
+    }
+  )
+
+  it("does not turn a withdrawn addition into a failure when its Hook returns late", async () => {
+    const f = fixture(), root = await running(f)
+    let reject!: (value: { rejected: true }) => void
+    f.steer.mockImplementationOnce(() => new Promise((resolve) => { reject = resolve }))
+    const child = f.host.send({ botId: f.bot.id, requestId: "withdraw", message: "Withdraw me" })
+    f.host.cancel(child.id)
+    reject({ rejected: true })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(f.store.getTask(child.id).state).toBe("cancelled")
+    expect(f.store.getTask(root.id).state).toBe("running")
+    expect(f.onSettled).not.toHaveBeenCalled()
+  })
+
+  it("ignores a late refusal from an expired owner instead of settling another run's inbox", async () => {
+    const f = fixture(), root = await running(f)
+    let reject!: (value: { rejected: true }) => void
+    f.steer.mockImplementationOnce(() => new Promise((resolve) => { reject = resolve }))
+    const child = f.host.send({ botId: f.bot.id, requestId: "late", message: "Prepare under the next live run" })
+    f.finish({ state: "completed", result: "Done" })
+    await vi.waitFor(() => expect(f.store.getTask(root.id).state).toBe("completed"))
+    reject({ rejected: true })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(f.store.getTask(child.id).state).toBe("queued")
+    expect(f.onSettled.mock.calls.some(([entry]) => entry.id === child.id)).toBe(false)
+  })
+
   it("preserves every unconsumed inbox message when its model round is superseded", async () => {
     const f = fixture(),
       root = await running(f)
@@ -232,8 +440,14 @@ describe("Bot messages during a user run", () => {
     f.host.introduce(f.bot.id)
     await vi.waitFor(() => expect(f.acquire).toHaveBeenCalledOnce())
     const intro = f.acquire.mock.calls[0][1]
+    // This prompt is already built when the welcome question starts waiting;
+    // the injected request must not need another runtime to receive its routing contract.
+    const prompt = buildBotPrompt(f.bot, intro, "/private")
+    expect(buildBotTurnContext(intro)).toContain("If a real user message arrives, prioritize it immediately")
+    expect(prompt).toContain("revisions use bot_work_send")
     f.host.onSteeringReady(intro.id)
-    const child = f.host.send({ botId: f.bot.id, requestId: "first-user", message: "Start here" })
+    f.wait(true)
+    const child = f.host.send({ botId: f.bot.id, requestId: "first-user", message: "Fix the CSV project in /projects/export, test and deliver it" })
     expect(f.injections.get(child.id)!()).toBe(true)
     f.finish({ state: "completed", result: "Actual result" })
     await vi.waitFor(() => expect(f.store.getTask(child.id).state).toBe("completed"))
@@ -535,6 +749,23 @@ describe("group input during an existing question", () => {
     f.wait(true)
     return { ...f, group, send, root }
   }
+
+  it("publishes one refusal without consuming or dismissing the group's original question", async () => {
+    const f = await groupQuestion()
+    f.steer.mockResolvedValueOnce({ rejected: true })
+    const rejected = f.send("blocked-answer")
+    await vi.waitFor(() => expect(f.store.getTask(rejected.id).state).toBe("failed"))
+    expect(f.store.getTask(f.root.id).state).toBe("waiting_user")
+    expect(f.injections.has(rejected.id)).toBe(false)
+    expect(f.dismissQuestion).not.toHaveBeenCalled()
+    expect(f.store.groupMessages(f.group.id).filter((message) => message.id === `result-${rejected.id}`))
+      .toEqual([expect.objectContaining({ text: "输入检查未通过，未执行这条补充消息。" })])
+    f.send("blocked-answer")
+    f.host.onSteeringReady(f.root.id)
+    expect(f.steer).toHaveBeenCalledTimes(1)
+    expect(f.store.groupMessages(f.group.id).filter((message) => message.id === `result-${rejected.id}`))
+      .toHaveLength(1)
+  })
 
   it("uses the original run, acknowledges each inbox once and publishes only its actual result", async () => {
     const f = await groupQuestion()

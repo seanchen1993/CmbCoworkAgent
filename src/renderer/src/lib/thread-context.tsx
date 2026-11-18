@@ -1,3 +1,4 @@
+import { isManagedLocalWorkConversation } from "./thread-classification"
 import { shouldClearCoordinatorNotificationError } from "./coordinator-notification-error"
 import {
   createContext,
@@ -29,8 +30,13 @@ import {
 } from "./user-input-answer"
 import { rebaseGroupMentions } from "./bot-group-mentions"
 import { parseBotMessageMentions } from "../../../shared/bots/message-mentions"
-import type { BotMessageMention, BotMessageReply } from "../../../shared/bots/contracts"
+import {
+  LOCAL_BOT_HOST_ID,
+  type BotMessageMention,
+  type BotMessageReply
+} from "../../../shared/bots/contracts"
 import { isBotMessageReply } from "../../../shared/bots/message-reply"
+import type { MentionedWorkspaceFile } from "@/features/mentions/atFileAttachments"
 import {
   CONTEXT_COMPACTION_EVENT_TYPE,
   parseContextCompactionLifecycleEvent,
@@ -77,6 +83,7 @@ import type {
   GoalEvent,
   QueuedMessage
 } from "@/types"
+import type { BotSkillSelection } from "../../../shared/bots/skill-selection"
 import { isThreadDeletionPending, isThreadRetired, useAppStore } from "@/lib/store"
 import { toast } from "sonner"
 import { formatAutoCommitText } from "../../../shared/auto-commit-format"
@@ -634,6 +641,9 @@ function createDefaultContextReminderState(): ContextReminderState {
 }
 
 // Per-thread state (persisted/restored from checkpoints)
+/** A saved Bot draft carries only the selected identity until the catalog confirms it. */
+export type ThreadDraftSkill = SkillMetadata | (BotSkillSelection & { restored: true })
+
 export interface ThreadState {
   /** Heavy fields were evicted; lightweight summaries stay valid until rehydration finishes. */
   dehydrated: boolean
@@ -702,13 +712,15 @@ export interface ThreadState {
   draftBotMentions?: BotMessageMention[]
   /** Managed Bot composer attachments survive navigation; no binary data is retained here. */
   draftAttachments: FileAttachment[]
+  /** Selected workspace paths awaiting a Bot input snapshot at send time. */
+  draftMentionedWorkspaceFiles: MentionedWorkspaceFile[]
   harnessNextActionDialogTips: string | null
   /**
    * Skill chip the user has selected for the next send. Kept alongside
    * draftInput so the chip survives view switches (chat → customize → back),
    * matching how draftInput already behaves.
    */
-  draftSkill: SkillMetadata | null
+  draftSkill: ThreadDraftSkill | null
   /** Whether the built-in browser mode is selected for the next send. */
   draftBuiltinBrowser: boolean
   scheduledTaskLoading: boolean
@@ -761,9 +773,14 @@ function summarizeThreadState(
     hasDraft:
       previousSummary &&
       previous?.draftInput === state.draftInput &&
-      previous?.draftAttachments === state.draftAttachments
+      previous?.draftAttachments === state.draftAttachments &&
+      previous?.draftMentionedWorkspaceFiles === state.draftMentionedWorkspaceFiles
         ? previousSummary.hasDraft
-        : Boolean(state.draftInput.trim() || state.draftAttachments?.length),
+        : Boolean(
+            state.draftInput.trim() ||
+            state.draftAttachments?.length ||
+            state.draftMentionedWorkspaceFiles?.length
+          ),
     hasPendingApproval: state.pendingApproval !== null,
     hasPendingUserInput: state.pendingUserInput !== null,
     hasContextReminder: state.contextReminder.pending,
@@ -942,8 +959,11 @@ export interface ThreadActions {
   setDraftAttachments: (
     update: FileAttachment[] | ((previous: FileAttachment[]) => FileAttachment[])
   ) => void
+  setDraftMentionedWorkspaceFiles: (
+    update: MentionedWorkspaceFile[] | ((previous: MentionedWorkspaceFile[]) => MentionedWorkspaceFile[])
+  ) => void
   setHarnessNextActionDialogTips: (tips: string | null) => void
-  setDraftSkill: (skill: SkillMetadata | null) => void
+  setDraftSkill: (skill: ThreadDraftSkill | null) => void
   setDraftBuiltinBrowser: (selected: boolean) => void
 }
 
@@ -952,7 +972,7 @@ interface ThreadContextValue {
   getThreadState: (threadId: string) => ThreadState
   subscribeToThreadState: (threadId: string, callback: () => void) => () => void
   getThreadActions: (threadId: string) => ThreadActions
-  initializeThread: (threadId: string) => void
+  initializeThread: (threadId: string, options?: { requireQueuedMessages?: boolean }) => void
   cleanupThread: (threadId: string) => void
   // Stream subscription
   subscribeToStream: (threadId: string, callback: () => void) => () => void
@@ -990,6 +1010,16 @@ function normalizeQueuedMessage(raw: unknown): QueuedMessage | null {
   const createdAt = item.created_at ? new Date(item.created_at) : new Date()
   const updatedAt = item.updated_at ? new Date(item.updated_at) : createdAt
   const handoffRequestedAt = item.handoffRequestedAt ? new Date(item.handoffRequestedAt) : null
+  const skillTarget = item.botSkillTarget
+  const validSkillTarget = skillTarget && (
+    skillTarget.kind === "main" ||
+    (skillTarget.kind === "work" && typeof skillTarget.workId === "string") ||
+    (skillTarget.kind === "create" && typeof skillTarget.title === "string" && (
+      "projectId" in skillTarget
+        ? typeof skillTarget.projectId === "string" && skillTarget.projectId.trim().length > 0
+        : typeof skillTarget.path === "string"
+    ))
+  )
   return {
     id: item.id,
     text: item.text,
@@ -997,12 +1027,18 @@ function normalizeQueuedMessage(raw: unknown): QueuedMessage | null {
     // Legacy queued request identity is retained only for exact receipt reconciliation.
     // The composer no longer creates or edits private mention bindings.
     ...(item.botMentions !== undefined ? { botMentions: item.botMentions } : {}),
+    // Preserve the original request identity even when a restored reference is
+    // malformed; the Bot sender rejects it instead of silently dropping files.
+    ...(item.botInputFileIds !== undefined ? { botInputFileIds: item.botInputFileIds } : {}),
     attachmentModelBlocks:
       typeof item.attachmentModelBlocks === "string" ? item.attachmentModelBlocks : undefined,
     attachmentDisplayPrefix:
       typeof item.attachmentDisplayPrefix === "string" ? item.attachmentDisplayPrefix : undefined,
     skillBlock: typeof item.skillBlock === "string" ? item.skillBlock : undefined,
     skillName: typeof item.skillName === "string" ? item.skillName : undefined,
+    ...(item.botExplicitSkill && typeof item.botExplicitSkill.name === "string" &&
+      typeof item.botExplicitSkill.path === "string" ? { botExplicitSkill: item.botExplicitSkill } : {}),
+    ...(validSkillTarget ? { botSkillTarget: skillTarget } : {}),
     builtinBrowser: item.builtinBrowser === true,
     modelId: typeof item.modelId === "string" ? item.modelId : undefined,
     parkedForConversationLink: item.parkedForConversationLink === true,
@@ -1016,14 +1052,19 @@ function normalizeQueuedMessage(raw: unknown): QueuedMessage | null {
   }
 }
 
-function loadQueuedMessages(threadId: string): QueuedMessage[] {
+function loadQueuedMessages(threadId: string, required = false): QueuedMessage[] {
   try {
     const raw = window.localStorage.getItem(queueStorageKey(threadId))
-    if (!raw) return []
+    if (raw === null) return []
     const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-    return parsed.map(normalizeQueuedMessage).filter((item): item is QueuedMessage => Boolean(item))
+    if (!Array.isArray(parsed)) throw new Error("Invalid queue format")
+    const queue = parsed
+      .map(normalizeQueuedMessage)
+      .filter((item): item is QueuedMessage => Boolean(item))
+    if (required && queue.length !== parsed.length) throw new Error("Invalid queued message")
+    return queue
   } catch {
+    if (required) throw new Error("无法读取原会话的待发送消息，请检查草稿后重试。")
     return []
   }
 }
@@ -1088,6 +1129,7 @@ const createDefaultThreadState = (): ThreadState => ({
   harnessAgentmdLoadStatus: null,
   draftInput: "",
   draftAttachments: [],
+  draftMentionedWorkspaceFiles: [],
   harnessNextActionDialogTips: null,
   draftSkill: null,
   draftBuiltinBrowser: false,
@@ -1311,6 +1353,7 @@ function normalizeThreadState(state: ThreadState): ThreadState {
     historyLoadedMessageCount: state.historyLoadedMessageCount ?? state.messages.length,
     draftBuiltinBrowser: state.draftBuiltinBrowser ?? false,
     draftAttachments: state.draftAttachments ?? [],
+    draftMentionedWorkspaceFiles: state.draftMentionedWorkspaceFiles ?? [],
     toolCallStates: state.toolCallStates || {},
     contextCompaction: state.contextCompaction ?? null,
     ...buildPendingApprovalState(pendingQueue)
@@ -1856,9 +1899,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const threadHistoryLoadGenerationRef = useRef<Record<string, number>>({})
   const [messageWindowIntentCoordinator] = useState(createThreadMessageWindowIntentCoordinator)
   const firstTranscriptPublishedThreadIdsRef = useRef<Set<string>>(new Set())
-  const threadHistoryHydrationAttemptsRef = useRef<Record<string, ThreadHistoryHydrationAttempt>>(
-    {}
-  )
+  const threadHistoryHydrationAttemptsRef = useRef<Record<string, ThreadHistoryHydrationAttempt & {
+    botNotices?: Message[]
+  }>>({})
   const cancelThreadHistoryHydrationRetry = useCallback((threadId: string): void => {
     const timer = threadHistoryHydrationRetryTimersRef.current[threadId]
     if (timer === undefined) return
@@ -5809,11 +5852,17 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               typeof update === "function" ? update(state.draftAttachments ?? []) : update
           }))
         },
+        setDraftMentionedWorkspaceFiles: (update) => {
+          updateThreadState(threadId, (state) => ({
+            draftMentionedWorkspaceFiles:
+              typeof update === "function" ? update(state.draftMentionedWorkspaceFiles) : update
+          }))
+        },
         setHarnessNextActionDialogTips: (tips: string | null) => {
           const normalizedTips = tips?.trim() || null
           updateThreadState(threadId, () => ({ harnessNextActionDialogTips: normalizedTips }))
         },
-        setDraftSkill: (skill: SkillMetadata | null) => {
+        setDraftSkill: (skill: ThreadDraftSkill | null) => {
           updateThreadState(threadId, () => ({ draftSkill: skill }))
         },
         setDraftBuiltinBrowser: (selected: boolean) => {
@@ -5910,10 +5959,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       threadHistoryLoadGenerationRef.current[threadId] = loadGeneration
       foregroundHydrationGeneration.transition(useAppStore.getState().currentThreadId)
       const foregroundToken = foregroundHydrationGeneration.capture(threadId)
-      threadHistoryHydrationAttemptsRef.current[threadId] = {
+      const hydrationAttempt: ThreadHistoryHydrationAttempt & { botNotices?: Message[] } = {
         loadGeneration,
         foregroundToken
       }
+      threadHistoryHydrationAttemptsRef.current[threadId] = hydrationAttempt
       const isCurrentLoad = (): boolean =>
         threadProviderMountedRef.current &&
         !isThreadRetired(threadId) &&
@@ -5925,6 +5975,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       const isCurrentTranscriptHydration = (): boolean =>
         isCurrentLoad() && messageWindowIntentCoordinator.isCurrent(transcriptHydrationIntent)
       const actions = getThreadActions(threadId)
+      const preserveBotNotices = (messages: Message[]): Message[] => {
+        const restored = hydrationAttempt.botNotices?.length
+          ? mergePersistedMessagesIntoTranscript(messages, hydrationAttempt.botNotices)
+          : messages
+        // The first durable page can arrive after the worker's streaming reply.
+        // It cannot contain that uncommitted row yet. Keep only the live row.
+        const liveId = schedulerStreamingRef.current[threadId]?.currentMsgId
+        if (!liveId || (!threadId.startsWith("bot-work-") && !isManagedLocalWorkConversation(
+          useAppStore.getState().threads.find(thread => thread.thread_id === threadId)
+        ))) return restored
+        const live = threadStatesRef.current[threadId]?.messages.find(message => message.id === liveId && message.role === "assistant")
+        return live && !restored.some(message => message.id === liveId) ? [...restored, live] : restored
+      }
       let persistedMessageTimes: MessageTimeMap = {}
       let persistedInternalGoalMessageTimes: MessageTimeMap = {}
       let persistedInternalGoalMessageTimeOrder: MessageTimeEntry[] = []
@@ -6022,7 +6085,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         mainTranscriptPublished = !keepMainTranscriptLoading
         if (isCurrentTranscriptHydration()) {
           if (mainTranscriptPublished) {
-            actions.setMessages(visiblePersistedThreadMessages)
+            actions.setMessages(preserveBotNotices(visiblePersistedThreadMessages))
             firstTranscriptPublishedThreadIdsRef.current.add(threadId)
           }
           updateThreadState(threadId, () => ({
@@ -6243,7 +6306,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             isVisibleCheckpointTranscriptMessage
           )
           if (isCurrentTranscriptHydration()) {
-            actions.setMessages(visiblePersistedThreadMessages)
+            actions.setMessages(preserveBotNotices(visiblePersistedThreadMessages))
             firstTranscriptPublishedThreadIdsRef.current.add(threadId)
             mainTranscriptPublished = true
             updateThreadState(threadId, () => ({
@@ -6614,10 +6677,21 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       // The durable page may already be visible. Preserve any live/scheduler
       // rows committed after that early paint while enriching it with goal and
       // legacy-checkpoint restoration.
-      const hydratedTranscriptMessages = mergePersistedMessagesIntoTranscript(
-        restoredTranscriptMessages,
+      let hydratedTranscriptMessages = mergePersistedMessagesIntoTranscript(
+        preserveBotNotices(restoredTranscriptMessages),
         threadStatesRef.current[threadId]?.messages ?? []
       )
+      delete hydrationAttempt.botNotices
+      const botHistoryOrigins = new Map(visiblePersistedThreadMessages.flatMap(message =>
+        message.role === "user" && message.botHistoryInputOrigin ? [[message.id, message.botHistoryInputOrigin] as const] : []))
+      if (botHistoryOrigins.size) hydratedTranscriptMessages = hydratedTranscriptMessages.map(message =>
+        message.role === "user" && botHistoryOrigins.has(message.id)
+          ? { ...message, botHistoryInputOrigin: botHistoryOrigins.get(message.id) } : message)
+      const botHistoryDeliveries = new Map(visiblePersistedThreadMessages.flatMap(message =>
+        message.role === "assistant" && message.botHistoryDeliveryScope ? [[message.id, message.botHistoryDeliveryScope] as const] : []))
+      if (botHistoryDeliveries.size) hydratedTranscriptMessages = hydratedTranscriptMessages.map(message =>
+        message.role === "assistant" && botHistoryDeliveries.has(message.id)
+          ? { ...message, botHistoryDeliveryScope: botHistoryDeliveries.get(message.id) } : message)
       if (isCurrentTranscriptHydration()) {
         actions.setMessages(hydratedTranscriptMessages)
         firstTranscriptPublishedThreadIdsRef.current.add(threadId)
@@ -7246,8 +7320,22 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   )
 
   const initializeThread = useCallback(
-    (threadId: string) => {
-      if (isThreadDeletionPending(threadId)) return
+    (threadId: string, options?: { requireQueuedMessages?: boolean }) => {
+      const requireQueuedMessages = options?.requireQueuedMessages === true
+      if (isThreadDeletionPending(threadId) || (requireQueuedMessages && isThreadRetired(threadId))) {
+        if (requireQueuedMessages) throw new Error("原会话已关闭，无法核对草稿。")
+        return
+      }
+      const persistedQueue = requireQueuedMessages ? loadQueuedMessages(threadId, true) : undefined
+      const existingState = threadStatesRef.current[threadId]
+      const initialized = initializedThreadsRef.current.has(threadId)
+      // Background activity can create a partial state before queue restoration.
+      // A warm in-memory queue remains authoritative if an earlier write failed.
+      if (persistedQueue?.length && (initialized || existingState?.queuedMessages.length)) {
+        const inMemoryIds = new Set(existingState?.queuedMessages.map((message) => message.id))
+        if (persistedQueue.some((message) => !inMemoryIds.has(message.id)))
+          throw new Error("原会话的待发送消息尚未核对，请检查草稿后重试。")
+      }
       // activeThreadIds is also the stream-holder LRU. Touch an already
       // initialized thread when a consumer revisits it so an evicted idle
       // holder is mounted again with a fresh transport.
@@ -7261,7 +7349,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       })
       foregroundHydrationGeneration.transition(useAppStore.getState().currentThreadId)
       const foregroundToken = foregroundHydrationGeneration.capture(threadId)
-      if (initializedThreadsRef.current.has(threadId)) {
+      if (initialized) {
         const state = threadStatesRef.current[threadId]
         const attempt = threadHistoryHydrationAttemptsRef.current[threadId]
         const attemptMatchesForeground = foregroundToken
@@ -7321,14 +7409,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         initializedThreadsRef.current.has(threadId) &&
         threadListenerEpochRef.current[threadId] === listenerEpoch
 
-      if (!threadStatesRef.current[threadId]) {
+      if (!existingState || (persistedQueue?.length && !existingState.queuedMessages.length)) {
         commitThreadStateChanges([
           {
             threadId,
             state: {
-              ...createDefaultThreadState(),
-              queuedMessages: loadQueuedMessages(threadId),
-              historyLoading: true
+              ...(existingState ?? createDefaultThreadState()),
+              queuedMessages: persistedQueue ?? loadQueuedMessages(threadId),
+              historyLoading: existingState?.historyLoading ?? true
             }
           }
         ])
@@ -7606,6 +7694,33 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       scheduleSubagentTranscriptsPersist
     ]
   )
+
+  useEffect(() => {
+    // Fixed reminders are already durable and have no Agent stream. Keep a
+    // resident transcript current even when its Bot conversation is unmounted.
+    return window.api.bots?.subscribe(({ hostId, reminder }) => {
+      if (hostId !== LOCAL_BOT_HOST_ID || !reminder) return
+      const { threadId, id, content, createdAt } = reminder
+      if (
+        // Unloaded shells restore this durable message from history on reopen.
+        !initializedThreadsRef.current.has(threadId) ||
+        !threadStatesRef.current[threadId] ||
+        isThreadDeletionPending(threadId) ||
+        knownDurableMessageIdsRef.current[threadId]?.has(id)
+      )
+        return
+
+      const message: Message = { id, role: "assistant", content, created_at: new Date(createdAt) }
+      const { historyLoading, historyPageLoading } = threadStatesRef.current[threadId]
+      const hydrationAttempt = threadHistoryHydrationAttemptsRef.current[threadId]
+      if (hydrationAttempt && (historyLoading || historyPageLoading) &&
+          isThreadHistoryHydrationAttemptActive(hydrationAttempt,
+            threadHistoryLoadGenerationRef.current[threadId], foregroundHydrationGeneration))
+        (hydrationAttempt.botNotices ??= []).push(message)
+      rememberDurableMessageIds(threadId, [message])
+      getThreadActions(threadId).appendMessage(message)
+    })
+  }, [foregroundHydrationGeneration, getThreadActions, rememberDurableMessageIds])
 
   useEffect(() => {
     return window.api.agent.onManagedAutoSendStreamStart((event) => {

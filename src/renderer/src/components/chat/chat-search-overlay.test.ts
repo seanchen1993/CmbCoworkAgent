@@ -365,6 +365,24 @@ describe("bounded renderer search results", () => {
     expect(scrollTo).not.toHaveBeenCalled()
   })
 
+  it("keeps a search hit between a floating header and an expanded composer", () => {
+    const scrollTo = vi.fn()
+    const viewport = {
+      scrollTop: 400, scrollHeight: 3000, clientHeight: 400, clientTop: 0,
+      getBoundingClientRect: () => ({ top: 80 }), scrollTo,
+      ownerDocument: { defaultView: { getComputedStyle: () => ({
+        scrollPaddingTop: "68px", scrollPaddingBottom: "240px"
+      }) } }
+    } as unknown as HTMLElement
+    const range = { getBoundingClientRect: () => ({ top: 1600, height: 20 }) } as Range
+    scrollChatSearchRangeIntoView(viewport, range)
+    const target = scrollTo.mock.calls[0][0].top
+    const hitTop = 400 + 1600 - 80 - target
+    expect(hitTop).toBe(104)
+    expect(hitTop).toBeGreaterThanOrEqual(68)
+    expect(hitTop + 20).toBeLessThanOrEqual(400 - 240)
+  })
+
   it("preserves local/live matches, de-duplicates durable message ids, and caps expansion", () => {
     const localMatches: ChatSearchMatch[] = [
       { messageId: "loaded", occurrenceIndex: 0, sortIndex: 10 },

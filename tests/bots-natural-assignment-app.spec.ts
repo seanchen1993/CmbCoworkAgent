@@ -209,7 +209,18 @@ async function main() {
       (await list()).map((w: any) => w.id),
       [work.id]
     )
-    await page.locator(".bot-work-row").filter({ hasText: work.title }).click()
+    const row = page.locator(".bot-work-row").filter({ hasText: work.title })
+    const preview = page.getByRole("region", { name: "任务预览", exact: true })
+    const previewDraft = "查看任务时保留这条未发送草稿。"
+    await composer().fill(previewDraft)
+    await row.click()
+    await preview.getByText(/四点|4[:：]00|16[:：]00|下午\s*4/).first().waitFor()
+    await page.locator('[data-chat-thread-id="' + bot.threadId + '"]').waitFor()
+    assert.equal(await composer().inputValue(), previewDraft)
+    await preview.getByRole("button", { name: "返回任务列表", exact: true }).click()
+    await preview.waitFor({ state: "hidden" })
+    await row.click()
+    await preview.getByRole("button", { name: "打开任务", exact: true }).click()
     await page.locator('[data-chat-thread-id="' + work.threadId + '"]').waitFor()
     const messages = await page.evaluate(
       async (id) => (window as any).api.threads.getMessages(id),
@@ -221,8 +232,11 @@ async function main() {
           m.role === "assistant" && /四点|4[:：]00|16[:：]00|下午4/.test(JSON.stringify(m.content))
       )
     )
+    await page.getByRole("button", { name: "任务详情与操作", exact: true }).click()
     await page.getByRole("button", { name: "完成任务", exact: true }).click()
+    await page.getByRole("button", { name: "任务详情与操作", exact: true }).click()
     await page.getByRole("button", { name: "继续处理", exact: true }).waitFor()
+    await page.keyboard.press("Escape")
     await page
       .locator(".bots-conversation")
       .getByRole("button", { name: /主对话$/ })
@@ -265,7 +279,8 @@ async function main() {
       work.threadId
     )
     assert.equal(thread.metadata.workspacePath, work.workspace.path)
-    await page.locator(".bot-work-row").filter({ hasText: work.title }).click()
+    await row.click()
+    await preview.getByRole("button", { name: "打开任务", exact: true }).click()
     await page.locator('[data-chat-thread-id="' + work.threadId + '"]').waitFor()
     const delivery = page.locator(
       '[data-chat-thread-id="' +

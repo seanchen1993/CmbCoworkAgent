@@ -59,3 +59,46 @@ export function useBots(client: BotClient) {
     retry: () => refreshRef.current()
   }
 }
+
+/** Read the workbench indicator through the existing Bot change notifications. */
+export function useLocalBotsUnread(): boolean {
+  const [hasUnread, setHasUnread] = useState(false)
+
+  useEffect(() => {
+    const client = window.api?.bots
+    const read = client?.hasUnread?.bind(client)
+    if (!client || !read) return
+
+    let disposed = false
+    let pending = false
+    let dirty = false
+    const refresh = async () => {
+      dirty = true
+      if (pending || disposed) return
+      pending = true
+      while (dirty && !disposed) {
+        dirty = false
+        try {
+          const unread = await read()
+          if (!disposed && !dirty) setHasUnread(unread)
+        } catch {
+          // A failed read leaves the last known indicator in place.
+        }
+      }
+      pending = false
+    }
+    const unsubscribe = client.subscribe((event) => {
+      if (event.hostId === client.hostId && !event.memoryBotId) void refresh()
+    })
+    window.addEventListener("focus", refresh)
+    void refresh()
+
+    return () => {
+      disposed = true
+      unsubscribe()
+      window.removeEventListener("focus", refresh)
+    }
+  }, [])
+
+  return hasUnread
+}

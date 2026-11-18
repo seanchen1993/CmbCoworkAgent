@@ -13,6 +13,7 @@ export interface BotSkillDispatch {
 /** Only a local main-Bot composer selection. Task, project and remote text keep their existing behavior. */
 export function selectedMainBotSkill(task: BotTask): BotSkillDispatch | undefined {
   if (task.workId || task.mockSource || task.origin.kind !== "user") return
+  if (task.origin.explicitSkill) return { ...task.origin.explicitSkill, block: "" }
   const selected = parseSkillUseBlock(task.message)
   return selected ? { name: selected.skillName, path: selected.skillPath, block: selected.block } : undefined
 }

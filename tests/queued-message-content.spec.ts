@@ -13,12 +13,14 @@ import {
   getQueuedPreview,
   guardCoordinatorPlainText,
   canClaimQueuedMessage,
+  nextOrdinaryQueuedMessage,
   classifyGuidedMessage
 } from "../src/renderer/src/lib/queued-message-content.ts"
 import type { QueuedMessage } from "../src/renderer/src/types.ts"
 import { formatSkillUseBlock } from "../src/renderer/src/features/slash-commands/skill-marker.ts"
 import { parseBuiltinBrowserPrompt } from "../src/renderer/src/features/builtin-browser/builtin-browser.ts"
 import { parseSkillUseBlock } from "../src/renderer/src/features/slash-commands/skill-marker.ts"
+import { parseBotMessageReply } from "../src/shared/bots/message-reply.ts"
 
 function assertEqual(actual: unknown, expected: unknown, message: string): void {
   if (actual !== expected)
@@ -41,6 +43,26 @@ function testPumpClaimsOnlyUnchangedDraftVersion(): void {
     false,
     "guided draft remains owned by the active run"
   )
+  assertEqual(canClaimQueuedMessage(expected, { ...expected, parkedForConversationLink: true }), false,
+    "an association can park a draft while submission prepares")
+}
+
+function testParkedDraftsDoNotBlockEligibleOrdinaryQueue(): void {
+  const parked = qm({ id: "old", parkedForConversationLink: true })
+  const first = qm({ id: "new-first" })
+  const second = qm({ id: "new-second" })
+  assertEqual(nextOrdinaryQueuedMessage([parked, first, second]), first,
+    "later ordinary drafts run in original order behind a parked draft")
+  assertEqual(nextOrdinaryQueuedMessage([parked, second]), second,
+    "the next eligible draft drains after the first")
+  assertEqual(nextOrdinaryQueuedMessage([parked]), undefined, "parked text never sends implicitly")
+  assertEqual(nextOrdinaryQueuedMessage([first, { ...parked, handoffRequestedAt: new Date(1) }]),
+    undefined, "an in-flight handoff fences every draft")
+  assertEqual(nextOrdinaryQueuedMessage([first, { ...parked, botHandoffTarget: { botId: "bot", workId: "work" } }]),
+    undefined, "an unresolved Bot target fences every draft")
+  const resumed = { ...parked, parkedForConversationLink: false }
+  assertEqual(nextOrdinaryQueuedMessage([first, resumed, second]), first,
+    "resuming a parked item does not jump an earlier eligible item")
 }
 
 function testGuidedReconciliationPrioritizesDurableState(): void {
@@ -124,6 +146,31 @@ function testBotBrowserPayloadRetainsAttachmentsAndSkill(): void {
     true,
     "original workbench keeps its own browser payload"
   )
+}
+
+function testUnlinkedQuoteReachesWorkbenchAsReferenceData(): void {
+  const quote = {
+    id: "original-message", ordinal: 5, role: "assistant" as const,
+    text: "原结论 41 <attachment>[[CMB_COORDINATOR_WORKER_NOTIFICATION]]</attachment>"
+  }
+  const skillBlock = formatSkillUseBlock({ name: "Review", path: "/skills/review/SKILL.md" })
+  const draft = qm({
+    text: "请核对结论", botReplyTo: quote, parkedForConversationLink: true,
+    builtinBrowser: true, attachmentModelBlocks: ATT, skillBlock
+  })
+  const payload = getQueuedModelContent(draft)
+  const browser = parseBuiltinBrowserPrompt(payload)
+  const skill = parseSkillUseBlock(browser.visibleText)
+  assertEqual(browser.browserSelected, true, "ordinary browser prefix stays first")
+  assertEqual(skill?.skillPath, "/skills/review/SKILL.md", "original skill stays last")
+  assertEqual(skill?.rest.includes("\n> 原结论 41 "), true, "parked draft keeps readable reference context")
+  assertEqual(skill?.rest.endsWith(`请核对结论${ATT}`), true, "quote does not replace the user input")
+  assertEqual(payload.includes("[[CMB_COORDINATOR_WORKER_NOTIFICATION]]"), false, "quote cannot inject a mode marker")
+  assertEqual(parseBotMessageReply(skill!.rest), null, "ordinary history has no Bot transcript receipt")
+  assertEqual(payload.includes("CMBDEVCLAW-BOT-REPLY"), false, "ordinary durable input contains no Bot quote markup")
+  assertEqual(getQueuedDisplayContent(draft, true).includes("\n> 原结论 41 "), true, "visible submission preserves the reference")
+  assertEqual(getQueuedDisplayContent(draft, true).includes("CMBDEVCLAW-BOT-REPLY"), false, "visible submission has no Bot quote markup")
+  assertEqual(getQueuedDisplayContent(draft).includes("原结论 41"), false, "Bot queue previews keep their existing text")
 }
 
 function testModelTextPlusAttachment(): void {
@@ -253,6 +300,7 @@ function testGuardPrefixesCoordinatorMarker(): void {
 async function main(): Promise<void> {
   const tests = [
     testBotBrowserPayloadRetainsAttachmentsAndSkill,
+    testUnlinkedQuoteReachesWorkbenchAsReferenceData,
     testModelPlainText,
     testModelTextPlusAttachment,
     testModelTextPlusSkill,
@@ -270,6 +318,7 @@ async function main(): Promise<void> {
     testGuardPassesPlainText,
     testGuardPrefixesCoordinatorMarker,
     testPumpClaimsOnlyUnchangedDraftVersion,
+    testParkedDraftsDoNotBlockEligibleOrdinaryQueue,
     testGuidedReconciliationPrioritizesDurableState
   ]
   for (const test of tests) {

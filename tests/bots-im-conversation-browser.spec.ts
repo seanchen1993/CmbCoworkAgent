@@ -104,6 +104,7 @@ async function main() {
                     "./BotConversationList",
                     "./BotPanelDivider",
                     "./BotWorkPanel",
+                    "./BotEditor",
                     "./BotWorkHeader",
                     "./BotWorkAttention",
                     "./BotTaskBrowser",
@@ -124,17 +125,20 @@ async function main() {
               if (a.path === "@/lib/store")
                 contents = `import {create} from 'zustand';export const useAppStore=create(set=>({models:[],threads:[],mainView:'bots',showCustomizeView:false,loadThreads:async()=>{window.fixture.calls.push(['load-threads'])},selectThread:async id=>{window.fixture.calls.push(['select-thread',id]);set({mainView:'thread'})},setMainView:mainView=>set({mainView})}));`
               else if (a.path === "@/lib/thread-context")
-                contents = `const state={messages:[],draftInput:'',draftAttachments:[],queuedMessages:[],pendingApprovals:[],coordinatorWorkers:[]};const context={initializeThread:()=>{},getThreadState:()=>state,getStreamData:()=>({isLoading:false,liveMessages:[]}),getThreadActions:()=>({setDraftInput:()=>{},setDraftAttachments:()=>{}}),subscribeToThreadState:()=>()=>{},subscribeToStream:()=>()=>{}};export const useThreadContext=()=>context;export const useThreadStateSummaries=()=>({});export const useThreadStateSelector=(id,selector)=>id?selector({...state,historyLoading:window.fixture.executionReady===false,historyConversationPresence:window.fixture.executionReady===false?"unknown":"nonempty"}):null;`
+                contents = `const state={messages:[],draftInput:'',draftAttachments:[],queuedMessages:[],pendingApprovals:[],coordinatorWorkers:[]};const context={initializeThread:()=>{},getThreadState:()=>state,getStreamData:()=>({isLoading:false,liveMessages:[]}),getThreadActions:id=>({setActiveTab:tab=>window.fixture.calls.push(['active-tab',id,tab]),setDraftInput:()=>{},setDraftAttachments:()=>{}}),subscribeToThreadState:()=>()=>{},subscribeToStream:()=>()=>{}};export const useThreadActions=()=>({});export const useThreadContext=()=>context;export const useThreadStateSummaries=()=>({});export const useThreadStateSelector=(id,selector)=>id?selector({...state,historyLoading:window.fixture.executionReady===false,historyConversationPresence:window.fixture.executionReady===false?"unknown":"nonempty"}):null;`
               else if (a.path === "@/components/chat/ChatContainer")
                 contents = `export const ChatContainer=({threadId,readOnlyReason})=><div data-testid="native-execution" data-thread={threadId}>{readOnlyReason}</div>;`
               else if (a.path === "./BotConversationTools")
                 contents = `export const BotConversationTools=({children,conversationThreadId,executionDetails})=><div data-testid="execution-tools" data-thread={conversationThreadId} data-details={executionDetails}>{children}</div>;`
+              else if (a.path === "./BotWorkPreview")
+                contents = `export const BotWorkPreview=()=>null;export const isWorkDeletionPending=()=>false;export const BOT_WORK_DELETION_PENDING_MESSAGE="删除待完成";`
               else if (a.path === "./BotMessageFilePreview")
                 contents = `export const BotMessageFilePreview=()=>null;`
               else if (a.path === "./BotConversation")
                 contents = `export const BotConversation=({work})=><div data-testid="private-conversation">{work?.id==='work-a'?'任务对话：演示准备清单':'私人主对话'}</div>;`
               else
                 contents = [
+                  "BotSkillSelect", "BotUnlinkDialog", "BotWorkPreview",
                   "BotNameInput",
                   "BotGroupMembers",
                   "BotGroupConversation",
@@ -409,7 +413,7 @@ async function main() {
     await page.getByRole("button", { name: "电脑", exact: true }).click()
     await page.waitForFunction(() =>
       (window as any).fixture.calls.some(
-        (c: any[]) => c[0] === "browser" && c[1] === "im-group-a--bot"
+        (c: any[]) => c[0] === "browser" && c[1] === "work-work-a--bot"
       )
     )
     await page.screenshot({ animations: "disabled", path: join(artifacts, "bot-im-computer.png") })
@@ -449,8 +453,10 @@ async function main() {
     assert.equal(await ordinary.getByRole("button", { name: "任务更多操作" }).count(), 0)
     assert.deepEqual(await page.evaluate(() => (window as any).fixture.opened.at(-1)), ["expose", "bot", "work-a"])
     assert.ok((await page.evaluate(() => (window as any).fixture.calls)).some((c: any[]) => c[0] === "select-thread" && c[1] === "task-a"))
-    await ordinary.getByRole("button", { name: "工作目录：产品协作群 · 默认工作区", exact: true }).click()
+    await ordinary.getByRole("button", { name: "更多任务操作", exact: true }).click()
+    await page.getByRole("button", { name: "工作目录：产品协作群 · 默认工作区", exact: true }).click()
     await page.getByText("产品协作群 · 默认工作区", { exact: true }).waitFor()
+    await page.keyboard.press("Escape")
     await page.keyboard.press("Escape")
     await page.screenshot({ animations: "disabled", path: join(artifacts, "bot-im-task-ordinary-workbench.png") })
     await ordinary.getByRole("button", { name: "返回群内任务", exact: true }).click()
@@ -463,6 +469,7 @@ async function main() {
       animations: "disabled",
       path: join(artifacts, "bot-im-task-scope.png")
     })
+    await page.keyboard.press("Escape")
     await details.getByRole("button", { name: "电脑", exact: true }).click()
     await page.waitForFunction(() =>
       (window as any).fixture.calls.some(
@@ -787,14 +794,15 @@ async function main() {
     })
     await page.getByRole("button", { name: "保存 任务报告.xlsx", exact: true }).click()
     assert.deepEqual(await page.evaluate(() => (window as any).fixture.exported), [
-      ["bot", "group-a", "/selected-project/.bot-deliveries/hash/任务报告.xlsx", "work-a"]
+      ["bot", "group-a", "/selected-project/.bot-deliveries/hash/任务报告.xlsx", "work-a", "任务报告.xlsx"]
     ])
     await page.getByRole("button", { name: "保存 report-1.docx", exact: true }).click()
     assert.deepEqual(await page.evaluate(() => (window as any).fixture.exported[1]), [
       "bot",
       "group-a",
       "/workspace/.bot-deliveries/hash/report-1.docx",
-      undefined
+      undefined,
+      "report-1.docx"
     ])
     await page.getByRole("button", { name: "招乎群聊：体验优化小组", exact: true }).click()
     await page.getByText("接入已解除，历史消息仍可查看", { exact: true }).waitFor()

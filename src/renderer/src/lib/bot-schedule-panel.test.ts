@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { ReactElement } from "react"
-import type { BotClient, BotSchedule, BotScheduleInput } from "../../../shared/bots/contracts"
+import type { BotClient, BotDesktopWorkScheduleBinding, BotSchedule, BotScheduleEditInput, BotScheduleInput } from "../../../shared/bots/contracts"
 import { parseSchedule } from "../../../shared/bots/validation"
 
 // Exercise the real editor callbacks without mounting a portaled Dialog in the Node suite.
@@ -30,6 +30,7 @@ type Node = ReactElement<{
   type?: string
   maxLength?: number
   "aria-label"?: string
+  disabled?: boolean
   role?: string
   value: string | number
   defaultValue?: string
@@ -56,7 +57,8 @@ const once: BotScheduleInput = {
   frequency: "once",
   runAt: "2099-11-01T01:00:00.000Z"
 }
-function fixture(source: BotScheduleInput | "new") {
+function fixture(source: BotScheduleInput | "new", work?: { id: string; title: string }, loseFirstResponse = false,
+  state?: Partial<BotSchedule>, openEditor = true) {
   const schedule =
     source === "new"
       ? undefined
@@ -65,13 +67,16 @@ function fixture(source: BotScheduleInput | "new") {
           id: "routine",
           botId: "bot",
           version: 3,
-          nextRunAt: null
+          nextRunAt: null,
+          ...state
         } as BotSchedule)
   const saved: BotScheduleInput[] = []
   const failures: string[] = []
-  const saveSchedule = vi.fn(async (_botId: string, input: BotScheduleInput) => {
+  const saveSchedule = vi.fn(async (_botId: string, input: BotScheduleInput,
+    _existing?: BotScheduleEditInput, _desktopWork?: BotDesktopWorkScheduleBinding) => {
     try {
       saved.push(parseSchedule(input))
+      if (loseFirstResponse && saved.length === 1) throw new Error("回复未到达")
     } catch (error) {
       failures.push((error as Error).message)
       throw error
@@ -82,6 +87,7 @@ function fixture(source: BotScheduleInput | "new") {
     return flatten(
       BotSchedulePanel({
         botId: "bot",
+        work,
         schedules: schedule ? [schedule] : [],
         client: { saveSchedule } as unknown as BotClient
       })
@@ -92,7 +98,7 @@ function fixture(source: BotScheduleInput | "new") {
     if (!node) throw new Error("Missing editor control")
     return node
   }
-  find(
+  if (openEditor) find(
     (node) => node.props["aria-label"] === (schedule ? "编辑例行任务" : "创建例行任务")
   ).props.onClick({ currentTarget: {} })
   return {
@@ -130,6 +136,57 @@ beforeEach(() => {
 })
 
 describe("routine editor frequency changes", () => {
+  it("exposes an exact queued occurrence on the card and withdraws it without deleting the routine", () => {
+    const editor = fixture({ ...once, enabled: false }, undefined, false,
+      { desktopWork: true, lastTriggeredAt: once.runAt, pendingOccurrenceId: "occurrence" }, false)
+    expect(editor.render().some(node => Array.isArray(node.props.children) && node.props.children.includes("已入队，等待执行"))).toBe(true)
+    editor.find(node => node.props["aria-label"] === "撤回本次执行").props.onClick({ currentTarget: {} })
+    expect(editor.saveSchedule).toHaveBeenCalledExactlyOnceWith("bot", expect.objectContaining({ enabled: false }),
+      { id: "routine", version: 3, withdrawTaskId: "occurrence" })
+  })
+
+  it("renews the same expired reminder with an explicitly selected trigger and deadline", async () => {
+    const expired = { ...once, enabled: false }
+    const state = { fixedReminder: { kind: "fixed_reminder" as const, ended: "expired" as const,
+      expiresAt: "2099-11-01T01:01:00.000Z" } }
+    const editor = fixture(expired, undefined, false, state, false)
+    const renew = editor.find(node => node.props["aria-label"] === "续期例行任务")
+    expect(renew.props.disabled).toBe(false)
+    renew.props.onClick({ currentTarget: {} })
+    expect(editor.field("datetime-local").props.defaultValue).toBe("")
+    const expiry = () => editor.find(node => node.props["aria-label"] === "失效时间")
+    expect(expiry().props.value).toBe("")
+    editor.field("datetime-local").props.onChange({ target: { value: "2099-11-01T09:00" } })
+    expiry().props.onChange({ target: { value: "2099-11-01T09:30" } })
+    await editor.submit()
+    expect(editor.saveSchedule).toHaveBeenCalledExactlyOnceWith("bot",
+      expect.objectContaining({ enabled: true, runAt: new Date("2099-11-01T09:00").toISOString() }),
+      { id: "routine", version: 3, expiresAt: new Date("2099-11-01T09:30").toISOString() })
+  })
+
+  it("preserves an expired observation and its exact existing deadline on a name edit", async () => {
+    const editor = fixture({ ...daily, enabled: false }, undefined, false,
+      { workMonitor: { workId: "work", mode: "report", generation: 1, ended: "expired",
+        expiresAt: "2099-11-01T01:01:59.000Z" } })
+    await editor.submit()
+    expect(editor.saveSchedule).toHaveBeenCalledExactlyOnceWith("bot", expect.objectContaining({ enabled: false }),
+      { id: "routine", version: 3 })
+  })
+
+  it("binds an explicit work creation and reuses its request identity if the reply is lost", async () => {
+    const editor = fixture("new", { id: "report-work", title: "Report" }, true)
+    editor.find(node => node.type === "input" && node.props.maxLength === 120)
+      .props.onChange({ target: { value: "Review report" } })
+    editor.find(node => node.type === "textarea").props.onChange({ target: { value: "Update the existing report" } })
+    await editor.submit()
+    expect(editor.failures).toEqual(["回复未到达"])
+    await editor.submit()
+    const [first, second] = editor.saveSchedule.mock.calls
+    expect(first[2]).toBeUndefined()
+    expect(first[3]).toEqual({ workId: "report-work", operationId: expect.any(String) })
+    expect(second[3]).toEqual(first[3])
+  })
+
   it.each([
     [daily, "weekly", { frequency: "weekly", runAtTime: "14:25", weekday: 1 }],
     [daily, "interval", { frequency: "interval", intervalMinutes: 60 }],
