@@ -4,6 +4,7 @@ import { z } from "zod"
 import { getCurrentHookAgentId, getHookAgentIdFromRequest } from "../hooks/execution-context"
 import { toolFailureSignalFromAbort } from "../hooks/tool-failure"
 import { mergeUpdatedInput } from "../hooks/updated-input"
+import { WorkspaceExecutionLockUnavailableError } from "./file-operation-lock"
 import type { LocalSandbox } from "./local-sandbox"
 import {
   SHELL_TASK_MONITOR_MAX_WAIT_MS,
@@ -38,13 +39,18 @@ const DEFAULT_TASK_OUTPUT_WAIT_MS = 30_000
 
 const monitorSchema = z.object({
   task_id: z.string().describe("The task ID returned by execute for a background command"),
-  block: z.boolean().optional().describe("Wait for completion (default: true)"),
+  block: z
+    .boolean()
+    .optional()
+    .describe(
+      "Wait for completion (default: true). For a snapshot, a busy hook workspace returns not_ready."
+    ),
   timeout: z
     .number()
     .min(0)
     .max(SHELL_TASK_MONITOR_MAX_WAIT_MS)
     .optional()
-    .describe("Optional maximum wait in milliseconds")
+    .describe("Wait budget in milliseconds for hook workspace access and command completion")
 })
 
 function formatTaskSnapshot(
@@ -79,47 +85,77 @@ export function createShellTaskMonitorTools(sandbox: ShellMonitorBackend) {
     const abortMessage = legacy
       ? "Task polling aborted: conversation was cancelled by user."
       : "Task monitoring aborted: conversation was cancelled by user."
+    const signal = config?.signal
+    if (signal?.aborted) return abortMessage
+    const startedAt = performance.now()
     const toolArgs: Record<string, unknown> = { ...input }
-    const preResult = await sandbox.runPreToolUseHookForTool(toolName, toolArgs)
-    if (preResult?.blocked || preResult?.decision === "block") {
-      const reason = preResult.stdout || preResult.reason || `${toolName} was blocked by a hook`
-      return `[Hook blocked] ${reason}`
-    }
-    if (config?.signal?.aborted) return abortMessage
+    let timeoutMs = input.block === false ? 0 : (input.timeout ?? defaultTimeout)
+    const workspaceLockDeadline = () =>
+      timeoutMs === undefined ? undefined : startedAt + timeoutMs
 
-    const effectiveArgs = mergeUpdatedInput(toolArgs, preResult?.updatedInput)
-    const taskId =
-      typeof effectiveArgs.task_id === "string" && effectiveArgs.task_id.trim()
-        ? effectiveArgs.task_id
-        : input.task_id
-    if (!taskId) return "Error: Invalid task id."
-    const notFound = `Error: No background task found with id "${taskId}".`
-    const block =
-      typeof effectiveArgs.block === "boolean" ? effectiveArgs.block : input.block !== false
-    const timeout = effectiveArgs.timeout
-    const timeoutMs =
-      typeof timeout === "number" && Number.isFinite(timeout)
-        ? Math.max(0, Math.min(timeout, SHELL_TASK_MONITOR_MAX_WAIT_MS))
-        : (input.timeout ?? defaultTimeout)
+    try {
+      const preResult = await sandbox.runPreToolUseHookForTool(
+        toolName,
+        toolArgs,
+        signal,
+        workspaceLockDeadline()
+      )
+      if (signal?.aborted) return abortMessage
+      if (preResult?.blocked || preResult?.decision === "block") {
+        const reason = preResult.stdout || preResult.reason || `${toolName} was blocked by a hook`
+        return `[Hook blocked] ${reason}`
+      }
 
-    let snapshot: ShellTaskSnapshot | null
-    if (block) {
-      const wait = await sandbox.waitForTaskOutput(taskId, {
-        ownerId,
-        timeoutMs,
-        signal: config?.signal
+      const effectiveArgs = mergeUpdatedInput(toolArgs, preResult?.updatedInput)
+      const taskId =
+        typeof effectiveArgs.task_id === "string" && effectiveArgs.task_id.trim()
+          ? effectiveArgs.task_id
+          : input.task_id
+      if (!taskId) return "Error: Invalid task id."
+      const block =
+        typeof effectiveArgs.block === "boolean" ? effectiveArgs.block : input.block !== false
+      const timeout = effectiveArgs.timeout
+      timeoutMs =
+        typeof timeout === "number" && Number.isFinite(timeout)
+          ? Math.max(0, Math.min(timeout, SHELL_TASK_MONITOR_MAX_WAIT_MS))
+          : (input.timeout ?? defaultTimeout)
+      if (!block) timeoutMs = 0
+      const deadline = workspaceLockDeadline()
+
+      let snapshot: ShellTaskSnapshot | null
+      if (block) {
+        const wait = await sandbox.waitForTaskOutput(taskId, {
+          ownerId,
+          timeoutMs:
+            deadline === undefined ? undefined : Math.max(0, Math.ceil(deadline - performance.now())),
+          signal
+        })
+        if (wait.status === "aborted") return abortMessage
+        snapshot = "result" in wait ? wait.result : null
+      } else {
+        snapshot = sandbox.getTaskOutput(taskId, ownerId)
+      }
+      if (signal?.aborted) return abortMessage
+      const resultText = snapshot
+        ? formatTaskSnapshot(snapshot, block ? "timeout" : "not_ready")
+        : `Error: No background task found with id "${taskId}".`
+      const failureSignal = snapshot?.cancelled ? toolFailureSignalFromAbort(resultText) : undefined
+      const result = await sandbox.applyPostToolUseHookToText(
+        toolName,
+        effectiveArgs,
+        resultText,
+        failureSignal,
+        { abortSignal: signal, workspaceLockDeadline: deadline }
+      )
+      return signal?.aborted ? abortMessage : result
+    } catch (error) {
+      if (signal?.aborted) return abortMessage
+      if (!(error instanceof WorkspaceExecutionLockUnavailableError)) throw error
+      return JSON.stringify({
+        retrieval_status: timeoutMs === 0 ? "not_ready" : "timeout",
+        reason: "workspace_hook_busy"
       })
-      if (wait.status === "aborted") return abortMessage
-      snapshot = "result" in wait ? wait.result : null
-    } else {
-      snapshot = sandbox.getTaskOutput(taskId, ownerId)
     }
-    if (config?.signal?.aborted) return abortMessage
-    const resultText = snapshot
-      ? formatTaskSnapshot(snapshot, block ? "timeout" : "not_ready")
-      : notFound
-    const failureSignal = snapshot?.cancelled ? toolFailureSignalFromAbort(resultText) : undefined
-    return sandbox.applyPostToolUseHookToText(toolName, effectiveArgs, resultText, failureSignal)
   }
 
   const [monitorName, taskOutputName] = SHELL_TASK_MONITOR_TOOL_NAMES

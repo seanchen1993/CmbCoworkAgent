@@ -3104,6 +3104,7 @@ export class LocalSandbox
 
     const failureContext: HookContext = {
       ...context,
+      workspaceLockDeadline: undefined,
       toolResult: JSON.stringify({
         error: signal.message,
         error_type: signal.errorType,
@@ -3153,14 +3154,16 @@ export class LocalSandbox
   private async runPreToolUseHook(
     toolName: string,
     toolArgs: Record<string, unknown>,
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    workspaceLockDeadline?: number
   ): Promise<HookResult | null> {
     const context: HookContext = {
       toolName,
       toolArgs,
       workspacePath: this.workingDir,
       sessionId: this.runId,
-      ...(abortSignal && { abortSignal })
+      abortSignal,
+      workspaceLockDeadline
     }
     const preResult = await this.runHooks("PreToolUse", context)
     throwIfHookHalt("PreToolUse", preResult, `${toolName} was stopped by a PreToolUse hook`)
@@ -3170,20 +3173,29 @@ export class LocalSandbox
   async runPreToolUseHookForTool(
     toolName: string,
     toolArgs: Record<string, unknown>,
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    workspaceLockDeadline?: number
   ): Promise<HookResult | null> {
-    return this.runPreToolUseHook(toolName, toolArgs, abortSignal)
+    return this.runPreToolUseHook(toolName, toolArgs, abortSignal, workspaceLockDeadline)
   }
 
   async applyPostToolUseHookToText(
     toolName: string,
     toolArgs: Record<string, unknown>,
     toolResult: string,
-    failureSignal?: ToolFailureSignal
+    failureSignal?: ToolFailureSignal,
+    hookOptions?: Pick<HookContext, "abortSignal" | "workspaceLockDeadline">
   ): Promise<string> {
     const postResult = await this.runHooks(
       "PostToolUse",
-      { toolName, toolArgs, toolResult, workspacePath: this.workingDir, sessionId: this.runId },
+      {
+        toolName,
+        toolArgs,
+        toolResult,
+        workspacePath: this.workingDir,
+        sessionId: this.runId,
+        ...hookOptions
+      },
       { failureSignal }
     )
     throwIfHookHalt("PostToolUse", postResult, `${toolName} was stopped by a PostToolUse hook`)

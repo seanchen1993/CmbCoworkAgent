@@ -6,6 +6,12 @@ type Access = "read" | "write"
 type Entry = { lock: AsyncRWLock; users: number }
 type WorkspaceAccess = "file-read" | "file-write" | "scan" | "exclusive"
 
+export class WorkspaceExecutionLockUnavailableError extends Error {
+  constructor() {
+    super("Timed out waiting for the workspace execution lock")
+  }
+}
+
 /** Compatible groups overlap, but queued incompatible work cannot be starved. */
 class WorkspaceLock {
   private active: Record<WorkspaceAccess, number> = {
@@ -30,37 +36,66 @@ class WorkspaceLock {
     }
   }
 
-  private acquire(access: WorkspaceAccess, signal?: AbortSignal): Promise<void> {
+  private acquire(
+    access: WorkspaceAccess,
+    signal?: AbortSignal,
+    deadline?: number
+  ): Promise<void> {
     signal?.throwIfAborted()
     if (this.queue.length === 0 && this.compatible(access)) {
       this.active[access]++
       return Promise.resolve()
     }
+    const remaining = deadline === undefined ? undefined : deadline - performance.now()
+    if (remaining !== undefined && remaining <= 0) {
+      return Promise.reject(new WorkspaceExecutionLockUnavailableError())
+    }
     return new Promise<void>((resolve, reject) => {
-      const onAbort = () => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const cleanup = () => {
+        clearTimeout(timer)
+        signal?.removeEventListener("abort", onAbort)
+      }
+      const cancel = (reason: unknown) => {
         const index = this.queue.indexOf(waiter)
         if (index < 0) return
         this.queue.splice(index, 1)
-        signal?.removeEventListener("abort", onAbort)
-        reject(signal?.reason ?? new DOMException("Aborted", "AbortError"))
+        cleanup()
+        reject(reason)
         this.drain()
       }
+      const onAbort = () => cancel(signal?.reason ?? new DOMException("Aborted", "AbortError"))
       const waiter = {
         access,
         grant: () => {
-          signal?.removeEventListener("abort", onAbort)
+          cleanup()
+          if (deadline !== undefined && performance.now() >= deadline) {
+            reject(new WorkspaceExecutionLockUnavailableError())
+            return
+          }
           this.active[access]++
           resolve()
         }
       }
       this.queue.push(waiter)
+      if (remaining !== undefined) {
+        timer = setTimeout(
+          () => cancel(new WorkspaceExecutionLockUnavailableError()),
+          Math.ceil(remaining)
+        )
+      }
       signal?.addEventListener("abort", onAbort, { once: true })
       if (signal?.aborted) onAbort()
     })
   }
 
-  async run<T>(access: WorkspaceAccess, operation: () => Promise<T>, signal?: AbortSignal) {
-    await this.acquire(access, signal)
+  async run<T>(
+    access: WorkspaceAccess,
+    operation: () => Promise<T>,
+    signal?: AbortSignal,
+    deadline?: number
+  ) {
+    await this.acquire(access, signal, deadline)
     try {
       signal?.throwIfAborted()
       return await operation()
@@ -148,7 +183,8 @@ async function withWorkspaceAccess<T>(
   workspace: string,
   access: WorkspaceAccess,
   operation: () => Promise<T>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  deadline?: number
 ): Promise<T> {
   signal?.throwIfAborted()
   const key = await resourceKey(workspace)
@@ -159,7 +195,7 @@ async function withWorkspaceAccess<T>(
   }
   entry.users++
   try {
-    return await entry.lock.run(access, operation, signal)
+    return await entry.lock.run(access, operation, signal, deadline)
   } finally {
     if (--entry.users === 0) workspaceLocks.delete(key)
   }
@@ -170,9 +206,17 @@ export async function withWorkspaceExecution<T>(
   workspace: string,
   access: Access,
   operation: () => Promise<T>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  /** Monotonic deadline for queued admission. A free lock can still be acquired. */
+  deadline?: number
 ): Promise<T> {
-  return withWorkspaceAccess(workspace, access === "read" ? "scan" : "exclusive", operation, signal)
+  return withWorkspaceAccess(
+    workspace,
+    access === "read" ? "scan" : "exclusive",
+    operation,
+    signal,
+    deadline
+  )
 }
 
 /** Acquire in workspace -> file order, after hooks and approval resolve the target. */

@@ -68,6 +68,8 @@ export interface HookContext {
   workspacePath?: string
   /** Internal cancellation for queued synchronous command hooks; never sent to the hook process. */
   abortSignal?: AbortSignal
+  /** Monotonic deadline for synchronous command hooks queued behind workspace activity. */
+  workspaceLockDeadline?: number
   /** Session / thread identifier — exposed to hooks as SESSION_ID and session_id in stdin JSON */
   sessionId?: string
   /** Optional system identifier exposed to hook commands as SYSTEM_ID. */
@@ -1245,7 +1247,8 @@ async function executeSyncHook(
             context.workspacePath,
             "write",
             runCommand,
-            context.abortSignal
+            context.abortSignal,
+            context.workspaceLockDeadline
           )
         : await runCommand()
   }

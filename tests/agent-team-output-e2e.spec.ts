@@ -10,7 +10,7 @@ import { join, resolve } from "node:path"
 import { _electron, type ElectronApplication } from "playwright"
 import type { WebContents } from "electron"
 import recorded from "./fixtures/reused-provider-live-stream.json"
-import { projectDisplayToolCallId } from "../src/main/display-tool-call-id"
+import { projectDisplayMessageId } from "../src/main/display-message-identity"
 import {
   createStreamDataSerializer,
   sanitizeCoordinatorWorkerStreamDataForRenderer
@@ -209,8 +209,8 @@ async function main() {
       [
         frame("A"),
         toolFrame(),
-        identifiedToolFrame(projectDisplayToolCallId(longCallId)),
-        toolFrame(false, projectDisplayToolCallId(longCallId))
+        identifiedToolFrame(projectDisplayMessageId(longCallId, "tool-call")),
+        toolFrame(false, projectDisplayMessageId(longCallId, "tool-call"))
       ]
     )
     await page.waitForFunction(() =>

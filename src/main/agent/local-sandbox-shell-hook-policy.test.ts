@@ -1,10 +1,12 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
+import { setTimeout as delay } from "node:timers/promises"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { HookHaltError } from "../hooks/halt"
 import type { HookConfig } from "../hooks/types"
 import { FailureFuseHaltError } from "./failure-fuse"
+import { withWorkspaceExecution } from "./file-operation-lock"
 import { LocalSandbox, type LocalSandboxOptions } from "./local-sandbox"
 import { createShellTaskMonitorTools } from "./shell-monitor-tool"
 
@@ -83,6 +85,68 @@ function respond(data: unknown): Response {
 }
 
 describe("shell monitor hook policy", () => {
+  it.each(["PreToolUse", "PostToolUse"] as const)(
+    "defers legacy %s command hooks while an automatically handed-off process owns the workspace",
+    async (event) => {
+      const hook: HookConfig = {
+        id: "workspace-hook",
+        enabled: true,
+        event,
+        type: "command",
+        matcher: "^task_output$",
+        command: "echo hook-ready",
+        createdAt: "",
+        updatedAt: ""
+      }
+      const onHookResult = vi.fn()
+      const { root, sandbox, raw } = await fixture({ hooks: [hook], onHookResult })
+      raw.mockRestore()
+      await writeFile(
+        path.join(root, "running.cjs"),
+        [
+          'const { existsSync } = require("node:fs")',
+          'console.log("process-ready")',
+          'const timer = setInterval(() => { if (existsSync("release")) clearInterval(timer) }, 20)'
+        ].join("\n")
+      )
+      const task = await sandbox.executeForTool("node running.cjs", undefined, {
+        backgroundAfterMs: 100
+      })
+      if (task.status !== "background") throw new Error(task.result.output)
+      const [monitor, taskOutput] = createShellTaskMonitorTools(sandbox)
+      const input = { task_id: task.taskId }
+      try {
+        await vi.waitFor(
+          () => expect(sandbox.getTaskOutput(task.taskId)?.partialOutput).toContain("process-ready"),
+          { timeout: 10_000 }
+        )
+        const results = await Promise.race([
+          Promise.all([
+            monitor.invoke({ ...input, block: false }),
+            taskOutput.invoke({ ...input, timeout: 0 }),
+            monitor.invoke({ ...input, timeout: 100 })
+          ]),
+          delay(2000, "monitor waited for the shell to exit")
+        ])
+        expect(results).toEqual(
+          ["not_ready", "not_ready", "timeout"].map((retrieval_status) =>
+            JSON.stringify({ retrieval_status, reason: "workspace_hook_busy" })
+          )
+        )
+        expect(onHookResult).not.toHaveBeenCalled()
+      } finally {
+        await writeFile(path.join(root, "release"), "")
+        await sandbox.waitForTaskOutput(task.taskId)
+      }
+      expect(onHookResult).not.toHaveBeenCalled()
+      await expect(monitor.invoke({ ...input, block: false })).resolves.toContain(
+        "[Command succeeded with exit code 0"
+      )
+      expect(onHookResult).toHaveBeenCalledExactlyOnceWith(event, hook, expect.anything())
+    },
+    25_000
+  )
+
   it.each([37, null, 0])("reports terminal exit %s to the failure hook", async (exitCode) => {
     const hook = httpHook({ event: "PostToolUseFailure", matcher: "^monitor$" })
     const onHookResult = vi.fn()
@@ -118,6 +182,34 @@ describe("shell monitor hook policy", () => {
         failure_kind: "exit-nonzero",
         error: expect.stringContaining(`[Command failed with exit code ${exitCode}, elapsed: `)
       }
+    })
+  })
+
+  it("keeps a detached command failure hook queued beyond a snapshot's deadline", async () => {
+    const hook = httpHook({
+      event: "PostToolUseFailure",
+      matcher: "^task_output$",
+      type: "command",
+      command: "echo failure-reported"
+    })
+    const onHookResult = vi.fn()
+    const { root, sandbox, finish } = await fixture({ hooks: [hook], onHookResult })
+    const started = await sandbox.executeBackground("echo probe")
+    const taskId = started.match(/\bid: (\w+)/)?.[1] ?? ""
+    expect(taskId).not.toBe("")
+    finish(1)
+    await sandbox.waitForTaskOutput(taskId)
+
+    const [monitor] = createShellTaskMonitorTools(sandbox)
+    await withWorkspaceExecution(root, "write", async () => {
+      await expect(monitor.invoke({ task_id: taskId, block: false })).resolves.toContain(
+        "[Command failed with exit code 1"
+      )
+      await delay(100)
+      expect(onHookResult).not.toHaveBeenCalled()
+    })
+    await vi.waitFor(() => {
+      expect(onHookResult).toHaveBeenCalledWith("PostToolUseFailure", hook, expect.anything())
     })
   })
 

@@ -48,13 +48,15 @@ describe("shell monitor tools", () => {
     await expect(taskOutput.invoke(input)).resolves.toBe(
       "finished\n[Command succeeded with exit code 0, elapsed: 2s]"
     )
-    expect(backend.waitForTaskOutput.mock.calls.map(([, options]) => options?.timeoutMs)).toEqual([
-      undefined,
-      30_000
-    ])
+    const [unbounded, legacy] = backend.waitForTaskOutput.mock.calls.map(
+      ([, options]) => options?.timeoutMs
+    )
+    expect(unbounded).toBeUndefined()
+    expect(legacy).toBeGreaterThan(0)
+    expect(legacy).toBeLessThanOrEqual(30_000)
     expect(backend.runPreToolUseHookForTool.mock.calls).toEqual([
-      ["monitor", input],
-      ["task_output", input]
+      ["monitor", input, undefined, undefined],
+      ["task_output", input, undefined, expect.any(Number)]
     ])
     expect(backend.applyPostToolUseHookToText.mock.calls.map(([name]) => name)).toEqual([
       "monitor",
@@ -112,9 +114,42 @@ describe("shell monitor tools", () => {
     ).resolves.toBe('Error: No background task found with id "other-task".')
     expect(backend.waitForTaskOutput).toHaveBeenCalledExactlyOnceWith("other-task", {
       ownerId: "my-child",
-      timeoutMs: 600_000,
+      timeoutMs: expect.any(Number),
       signal: undefined
     })
+    expect(backend.waitForTaskOutput.mock.calls[0][1]?.timeoutMs).toBeLessThanOrEqual(600_000)
+  })
+
+  it("uses one timeout budget for pre-hook admission, result wait and post-hook admission", async () => {
+    const backend = createBackend()
+    let time = 1000
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => time)
+    try {
+      const signal = new AbortController().signal
+      backend.runPreToolUseHookForTool.mockImplementation(async () => {
+        time += 325
+        return null
+      })
+      const [monitor] = createShellTaskMonitorTools(backend)
+      const input = { task_id: "task", timeout: 1000 }
+      await monitor.invoke(input, { signal })
+
+      expect(backend.runPreToolUseHookForTool).toHaveBeenCalledWith("monitor", input, signal, 2000)
+      expect(backend.waitForTaskOutput).toHaveBeenCalledWith("task", {
+        ownerId: undefined,
+        timeoutMs: 675,
+        signal
+      })
+      expect(backend.applyPostToolUseHookToText).toHaveBeenCalledWith(
+        "monitor",
+        input,
+        expect.stringContaining("finished"),
+        undefined,
+        { abortSignal: signal, workspaceLockDeadline: 2000 }
+      )
+    } finally {
+      clock.mockRestore()
+    }
   })
 
   it("prefers the internal child invocation owner over provider tool-call attribution", async () => {
