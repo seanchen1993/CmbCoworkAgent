@@ -34,6 +34,7 @@ import type {
   HarnessProjectDetailViewModel,
   HarnessProjectListItem
 } from "../../shared/harness-board-types"
+import { formatHarnessStageName } from "../../shared/harness-stage-bucket"
 import { parseHookTimestamp } from "../../shared/hook-time"
 import { buildEvent } from "./event-reporter"
 
@@ -210,6 +211,13 @@ async function buildProjectDoc(
     // 不影响它；「托管运行次数」是另一条路，按时间范围聚合 harness.managed_run.started。
     managedRunEverStarted: Boolean(project.managedRunFirstStartedAt),
     managedRunFirstStartedAt: project.managedRunFirstStartedAt,
+    ...(detail?.workflow?.nodes.length
+      ? {
+          workflowStageNames: detail.workflow.nodes
+            .map((node) => formatHarnessStageName(node.label, node.group))
+            .filter(Boolean)
+        }
+      : {}),
     featureCount: features.length,
     features,
     ...(detail?.error ? { error: detail.error } : {})

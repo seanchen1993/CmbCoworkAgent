@@ -32,7 +32,8 @@ const bundle = await build({
       import {getDefaultRange,navigateRange} from './components/dashboard/use-dashboard';
       import {ProjectModePanel} from './components/dashboard/panels/ProjectModePanel';
       import {TooltipProvider} from './components/ui/tooltip';
-      import {makeMockRunAnalysis, makeMockRunAnalysisStages} from '../../main/ipc/project-run-analysis-mock';
+      import {groupRunAnalysisExportTargets} from '../../main/ipc/project-run-analysis';
+      import {makeMockRunAnalysis, makeMockRunAnalysisStages, makeMockRunAnalysisPluginStages} from '../../main/ipc/project-run-analysis-mock';
       import {resolveOperationsPeriod} from '../../shared/project-operations-period';
       import {RECOMMENDED_REPORT_TEMPLATE_ID,RECOMMENDED_REPORT_TEMPLATE_NAME} from '../../shared/project-analysis-report';
       const range = {from:'2020-01-01T00:00:00Z', to:'2030-01-01T00:00:00Z'};
@@ -98,9 +99,13 @@ const bundle = await build({
         },
         cancelRequests: async families => {calls.push({type:'cancel',families});return {cancelled:1}},
         projectModeRunAnalysis: async (range,options) => ({success:true,data:await qa.load(range,options)}),
+        projectModeRunAnalysisExportStages: async (range, options, request) => {
+          const groups=groupRunAnalysisExportTargets(qa.loadedRows, request.targets);
+          return {success:true,data:[...groups].map(([adapterName,features])=>({adapterName,stages:makeMockRunAnalysisPluginStages(features)}))};
+        },
         projectModeRunAnalysisStages: async request => {
           calls.push({type:'stages',request});
-          return {success:true,data:{rows:makeMockRunAnalysisStages(),dataAsOf:new Date().toISOString()}};
+          return {success:true,data:{rows:makeMockRunAnalysisStages(request.projectId),dataAsOf:new Date().toISOString()}};
         },
         projectModeRunAnalysisSessions: async request => {
           calls.push({type:'sessions',request});
@@ -370,6 +375,40 @@ try {
   const download = await downloadPromise
   const workbook = XLSX.readFile(await download.path(), { cellNF: true })
   const exported = XLSX.utils.sheet_to_json(workbook.Sheets["匹配特性"], { defval: null })
+  function checkPluginSheets(book) {
+    const features = XLSX.utils.sheet_to_json(book.Sheets["匹配特性"], { defval: null })
+    const plugins = [...new Set(features.map((row) => row.插件名称))]
+    assert.equal(book.SheetNames.filter((name) => name.startsWith("插件-")).length, plugins.length)
+    for (const plugin of plugins) {
+      const details = features.filter((row) => row.插件名称 === plugin)
+      const sheet = book.Sheets["插件-" + plugin]
+      const rows = XLSX.utils.sheet_to_json(sheet, { defval: null })
+      const names =
+        plugin === "数据研发插件"
+          ? ["取数", "校验"]
+          : ["design-方案设计", "dev-编码实现", "test-测试"]
+      const metrics = ["主对话（轮）", "节点完成后（次）", "无 Skill 归因（次）"]
+      const totals = ["主Agent对话（轮）", "节点完成后主对话（次）", "无 Skill 归因主对话（次）"]
+      const columns = names.flatMap((name) => metrics.map((metric) => name + " · " + metric))
+      assert.deepEqual(
+        Object.keys(rows[0]).filter((key) => key.includes(" · ")),
+        columns
+      )
+      assert.ok(Object.keys(features[0]).every((key) => !columns.includes(key)))
+      assert.equal(rows.length, details.length)
+      rows.forEach((row, i) => {
+        for (const key of Object.keys(details[i])) assert.deepEqual(row[key], details[i][key])
+        metrics.forEach((metric, j) =>
+          assert.equal(
+            names.reduce((sum, stage) => sum + row[stage + " · " + metric], 0),
+            row[totals[j]]
+          )
+        )
+      })
+    }
+  }
+  checkPluginSheets(workbook)
+  assert.equal(workbook.SheetNames.filter((name) => name.startsWith("插件-")).length, 2)
   assert.equal(exported.find((row) => row.项目编号 === "LEAN-000002").是否精益项目, "否")
   assert.equal(exported.find((row) => row.项目编号 === "LEAN-000003").是否精益项目, "是")
   assert.equal(exported.find((row) => row.项目名称.endsWith("客户经营平台 1")).项目编号, null)
@@ -417,6 +456,18 @@ try {
     36,
     "Export must include all pages"
   )
+  const searchBox = page.getByRole("textbox", { name: "项目或特性关键词" })
+  await searchBox.fill("LEAN-000003")
+  const filteredDownload = page.waitForEvent("download")
+  await page.getByRole("button", { name: "导出Excel", exact: true }).click()
+  const filteredBook = XLSX.readFile(await (await filteredDownload).path())
+  checkPluginSheets(filteredBook)
+  assert.deepEqual(
+    filteredBook.SheetNames.filter((name) => name.startsWith("插件-")),
+    ["插件-数据研发插件"]
+  )
+  assert.equal(XLSX.utils.sheet_to_json(filteredBook.Sheets["匹配特性"]).length, 3)
+  await searchBox.fill("")
   await page.getByRole("button", { name: "复制汇总", exact: true }).click()
   assert.match(await page.evaluate(() => window.runQA.copied), /36/)
   assert.match(await page.evaluate(() => window.runQA.copied), /LEAN-000002/)
@@ -425,6 +476,7 @@ try {
   const projectDownloadPromise = page.waitForEvent("download")
   await page.getByRole("button", { name: "导出Excel", exact: true }).click()
   const projectWorkbook = XLSX.readFile(await (await projectDownloadPromise).path())
+  checkPluginSheets(projectWorkbook)
   const exportedProjects = XLSX.utils.sheet_to_json(projectWorkbook.Sheets["项目汇总"], {
     defval: null
   })
@@ -445,11 +497,11 @@ try {
   await page.getByText("匹配特性", { exact: true }).waitFor()
   await page.getByRole("button", { name: "按特性", exact: true }).click()
   await tableRows.first().locator('td:last-child button[aria-label^="查看"]').click()
-  await page
-    .getByRole("dialog")
-    .getByRole("cell", { name: "design-方案设计", exact: true })
-    .waitFor()
-  assert.equal(await page.getByRole("dialog").locator("tbody > tr").count(), 3)
+  const stageTable = page.getByRole("dialog").locator("tbody")
+  await stageTable.locator("tr").first().waitFor()
+  const firstStage = await stageTable.locator("tr").first().locator("td").first().innerText()
+  assert.ok(["取数", "design-方案设计"].includes(firstStage))
+  assert.equal(await stageTable.locator("tr").count(), firstStage === "取数" ? 2 : 3)
   assert.equal(
     await page
       .getByRole("dialog")
@@ -505,7 +557,7 @@ try {
     ["stages", "sessions", "thread"]
   )
   assert.equal(detailCalls[1].request.metric, "noSkill")
-  assert.equal(detailCalls[1].request.nodeName, "design-方案设计")
+  assert.equal(detailCalls[1].request.nodeName, firstStage)
   assert.equal(detailCalls[2].request.traceId, "acceptance-trace")
   assert.deepEqual(detailCalls[2].request.upperOrgLv1, ["A"])
   await page.screenshot({ path: join(output, "trace.png") })

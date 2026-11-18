@@ -44,6 +44,7 @@ import { deriveUpperOrgLevelsFromPath } from "../org-levels"
 import { managedRunStore } from "./managed-run-store"
 import type { PluginMetadata } from "../types"
 import type { HarnessConfigReadSnapshot } from "./service-read-snapshot"
+import { formatHarnessStageName } from "../../shared/harness-stage-bucket"
 import { normalizeHarnessAgentmdLoadStatus } from "../../shared/harness-board-types"
 import { resolveHarnessNextAction } from "../../shared/harness-run-next-action"
 import {
@@ -3182,10 +3183,8 @@ function resolveCurrentStageFromWorkflow(
   labelOnly = false
 ): { name: string; status: string | null } | null {
   const node = workflow.nodes.find((item) => item.id === currentNodeId)
-  const label = normalizeText(node?.label).trim()
-  if (!label) return null
-  const group = normalizeText(node?.group).trim()
-  const name = group && !labelOnly ? `${group}-${label}` : label
+  const name = formatHarnessStageName(normalizeText(node?.label), labelOnly ? undefined : node?.group)
+  if (!name) return null
   const nodeStatus = normalizeNodeStatus(rawStatus)
   const status = nodeStatus === UNKNOWN_NODE_STATUS ? null : DEFAULT_NODE_STATUS_LABELS[nodeStatus]
 

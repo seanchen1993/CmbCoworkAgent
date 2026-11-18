@@ -52,8 +52,6 @@ import {
   filterRunAnalysis,
   groupRunAnalysis,
   idleDays,
-  runAnalysisExportRows,
-  formatRunAnalysisExportTime,
   runAnalysisPreset,
   runAnalysisPresetCounts,
   runAnalysisFilterChips,
@@ -185,6 +183,8 @@ export function ProjectRunAnalysis({
   const [result, setResult] = useState<{ key: string; data: RunAnalysisData } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const exportRequest = useRef<symbol | null>(null)
+  const [exporting, setExporting] = useState(false)
   const [notice, setNotice] = useState("")
   const [diagnose, setDiagnose] = useState<RunAnalysisFeature | null>(null)
   const [sessions, setSessions] = useState<RunAnalysisSessionRequest | null>(null)
@@ -196,6 +196,16 @@ export function ProjectRunAnalysis({
   const handledRefresh = useRef({ refresh, refreshKey })
   const key = JSON.stringify([range, options, membership, refresh, refreshKey])
   const data = result?.key === key ? result.data : null
+  useEffect(() => {
+    setExporting(false)
+    return () => {
+      if (!exportRequest.current) return
+      exportRequest.current = null
+      void window.api.dashboard
+        .cancelRequests?.(["dashboard:projectModeRunAnalysisExportStages"])
+        .catch(() => undefined)
+    }
+  }, [key, active])
   // Account-owned Agent state is hosted by the app shell, independently of this page.
   const agentScopeKey = JSON.stringify(options)
   useEffect(() => {
@@ -317,93 +327,48 @@ export function ProjectRunAnalysis({
     }
   }
   const exportExcel = async () => {
-    if (!data) return
+    if (!data || exportRequest.current) return
+    const requestId = Symbol()
+    exportRequest.current = requestId
+    setExporting(true)
+    setNotice("")
     try {
-      const XLSX = await import("xlsx")
-      const book = XLSX.utils.book_new()
-      const appendRows = (name: string, rows: Record<string, unknown>[]) => {
-        const sheet = XLSX.utils.json_to_sheet(rows)
-        const headers = Object.keys(rows[0] ?? {})
-        headers.forEach((header, column) => {
-          const format =
-            header.endsWith("率") || header.endsWith("占比")
-              ? "0.0%"
-              : /（天）|（小时）/.test(header)
-                ? "0.0"
-                : null
-          if (!format) return
-          for (let row = 1; row <= rows.length; row++) {
-            const cell = sheet[XLSX.utils.encode_cell({ r: row, c: column })]
-            if (cell?.t === "n") cell.z = format
+      const [response, { downloadRunAnalysisWorkbook }] = await Promise.all([
+        window.api.dashboard.projectModeRunAnalysisExportStages(
+          data.range,
+          { ...options, membership: data.membership },
+          {
+            asOf: data.dataAsOf,
+            targets: matches.map(({ row: { projectId, featureSlug, adapterName } }) => ({
+              projectId,
+              featureSlug,
+              adapterName
+            }))
           }
-        })
-        const textWidth = (value: unknown): number =>
-          Array.from(String(value ?? "")).reduce(
-            (width, char) => width + (char.charCodeAt(0) > 255 ? 2 : 1),
-            0
-          )
-        sheet["!cols"] = headers.map((header) => ({
-          wch: rows.reduce(
-            (width, row) => Math.min(48, Math.max(width, textWidth(row[header]) + 2)),
-            Math.min(48, Math.max(12, textWidth(header) + 2))
-          )
-        }))
-        XLSX.utils.book_append_sheet(book, sheet, name)
-      }
-      appendRows("匹配特性", runAnalysisExportRows(data, matches))
-      if (mode === "project")
-        appendRows(
-          "项目汇总",
-          groups.map((g) => {
-            const row = runAnalysisExportRows(data, [g])[0]
-            // These columns describe a feature, not the whole project.
-            for (const key of ["特性名称", "当前阶段", "当前状态"]) delete row[key]
-            return {
-              ...row,
-              名单内特性数: g.totalFeatures,
-              匹配特性数: g.features.filter((f) => f.row.featureSlug !== null).length,
-              匹配特性: g.features.map((f) => f.row.featureTitle).join("；")
-            }
-          })
-        )
-      appendRows("统计口径", [
-        { 项目: "查看范围", 说明: RUN_ANALYSIS_MEMBERSHIP_LABELS[data.membership] },
-        ...(data.membership === "executed" || data.membership === "created"
-          ? [
-              {
-                项目: "名单日期",
-                说明: `${formatRunAnalysisExportTime(data.range.from)} 至 ${formatRunAnalysisExportTime(data.range.to)}`
-              }
-            ]
-          : []),
-        {
-          项目: "筛选条件",
-          说明:
-            runAnalysisFilterChips(filters)
-              .map((chip) => chip.label)
-              .join("；") || "无"
-        },
-        {
-          项目: "排序",
-          说明: `${RUN_ANALYSIS_SORT_LABELS[sort]} · ${desc ? "从高到低" : "从低到高"}`
-        },
-        { 项目: "数据截至（北京时间）", 说明: formatRunAnalysisExportTime(data.dataAsOf) },
-        {
-          项目: "指标范围",
-          说明: "匹配特性展示各特性的累计指标；项目汇总展示入选项目在名单范围内全部特性的累计指标，采纳率按总行数计算。"
-        },
-        { 项目: "执行跨度", 说明: RUN_ANALYSIS_NOTES.span },
-        { 项目: "采纳率", 说明: RUN_ANALYSIS_NOTES.adoption },
-        { 项目: "调用次数", 说明: RUN_ANALYSIS_NOTES.cost },
-        {
-          项目: "数值格式",
-          说明: "所有时间为北京时间；采纳率、占比为百分比。空白表示未记录或不适用，0表示统计值为零。"
-        }
+        ),
+        import("./project-run-analysis-workbook")
       ])
-      XLSX.writeFile(book, `项目分析-${new Date(data.dataAsOf).toISOString().slice(0, 10)}.xlsx`)
-      setNotice(`已导出全部${matches.length}条匹配记录`)
+      if (exportRequest.current !== requestId) return
+      if (!response.success || !response.data)
+        throw new Error(response.error ?? "获取插件阶段统计失败")
+      downloadRunAnalysisWorkbook({
+        data,
+        matches,
+        groups: mode === "project" ? groups : undefined,
+        filters,
+        sort,
+        desc,
+        plugins: response.data
+      })
+      setNotice(`已导出全部${matches.length}条匹配记录，按${response.data.length}个插件分表`)
     } catch (e) {
-      setNotice(`导出失败：${e instanceof Error ? e.message : String(e)}`)
+      if (exportRequest.current === requestId)
+        setNotice(`导出失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      if (exportRequest.current === requestId) {
+        exportRequest.current = null
+        setExporting(false)
+      }
     }
   }
   const numberFilter = (name: NumericFilterKey) => {
@@ -685,11 +650,11 @@ export function ProjectRunAnalysis({
           <Button
             size="sm"
             variant="outline"
-            disabled={!data || !matches.length}
+            disabled={!data || !matches.length || exporting}
             onClick={() => void exportExcel()}
           >
             <Download className="mr-1 size-3" />
-            导出Excel
+            {exporting ? "导出中…" : "导出Excel"}
           </Button>
         </div>
       </div>

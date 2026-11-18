@@ -85,6 +85,8 @@ export interface RunAnalysisFeature extends RunAnalysisMetrics {
   vibeAdoptedShare: number | null
 }
 export interface RunAnalysisData {
+  /** Workflow stage names in plugin order, when reported by the project snapshot. */
+  workflowStageNamesByProject?: Record<string, string[]>
   rows: RunAnalysisFeature[]
   projectCount: number
   featureCount: number
@@ -98,6 +100,38 @@ export interface RunAnalysisStage extends RunAnalysisMetrics {
   attributedDurationMs?: number | null
   attributedToolCalls?: number | null
   attributedModelCalls?: number | null
+}
+export const runAnalysisKey = (project: string, feature: string | null): string =>
+  JSON.stringify([project, feature])
+export type RunAnalysisFeatureTarget = Pick<RunAnalysisFeature, "projectId" | "featureSlug">
+export interface RunAnalysisStageExportRequest {
+  asOf: string
+  targets: Pick<RunAnalysisFeature, "projectId" | "featureSlug" | "adapterName">[]
+}
+export interface StageTurnCounts {
+  conversationCount: number
+  completedNode: number
+  unattributedSkill: number
+  nodeStatusReported: number
+  skillAttributionReported: number
+}
+export const emptyStageTurnCounts = (): StageTurnCounts => ({
+  conversationCount: 0,
+  completedNode: 0,
+  unattributedSkill: 0,
+  nodeStatusReported: 0,
+  skillAttributionReported: 0
+})
+export function addStageTurnCounts(total: StageTurnCounts, row: StageTurnCounts): void {
+  total.conversationCount += row.conversationCount
+  total.completedNode += row.completedNode
+  total.unattributedSkill += row.unattributedSkill
+  total.nodeStatusReported += row.nodeStatusReported
+  total.skillAttributionReported += row.skillAttributionReported
+}
+export interface RunAnalysisPluginStages {
+  adapterName: string | null
+  stages: (RunAnalysisFeatureTarget & StageTurnCounts & { nodeName: string | null })[]
 }
 export interface RunAnalysisStages {
   rows: RunAnalysisStage[]

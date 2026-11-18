@@ -20,12 +20,16 @@ import {
 import type {
   RunAnalysisData,
   RunAnalysisOptions,
+  RunAnalysisStageExportRequest,
+  RunAnalysisPluginStages,
   RunAnalysisRange,
   RunAnalysisSessionRequest
 } from "../../shared/project-run-analysis"
 import {
   fetchRunAnalysis,
   fetchRunAnalysisStages,
+  fetchRunAnalysisPluginStages,
+  groupRunAnalysisExportTargets,
   fetchRunAnalysisSessions,
   emptyRunAnalysisMetrics,
   fetchRunAnalysisThread,
@@ -34,6 +38,7 @@ import {
 import {
   makeMockRunAnalysis,
   makeMockRunAnalysisStages,
+  makeMockRunAnalysisPluginStages,
   mockRunAnalysisSessionIndexes,
   mockStageNames
 } from "./project-run-analysis-mock"
@@ -13895,7 +13900,8 @@ function makeMockRunAnalysisTrace(
   trace.usedSkills = index < 12 ? [] : ["示例研发技能"]
   trace.harnessProjectId = request.projectId
   trace.harnessFeatureSlug = request.featureSlug ?? undefined
-  trace.harnessNodeName = mockStageNames[index % mockStageNames.length]
+  const stages = mockStageNames(request.projectId)
+  trace.harnessNodeName = stages[index % stages.length]
   trace.harnessNodeStatus = index % 5 === 0 ? "已完成" : "进行中"
   return makeMockDashboardTraceDetail(trace, index % 6)
 }
@@ -16061,7 +16067,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       inReportRoomScope(room, signal, () =>
         import.meta.env.DEV
           ? Promise.resolve({
-              rows: makeMockRunAnalysisStages(),
+              rows: makeMockRunAnalysisStages(projectId),
               dataAsOf: new Date().toISOString()
             })
           : fetchProjectRunAnalysisStageDetails({ upperOrgLv1: room, projectId, featureSlug })
@@ -16547,7 +16553,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
             dashboardRequestContext.run({ signal }, () =>
               import.meta.env.DEV
                 ? Promise.resolve({
-                    rows: makeMockRunAnalysisStages(),
+                    rows: makeMockRunAnalysisStages(request.projectId),
                     dataAsOf: new Date().toISOString()
                   })
                 : fetchProjectRunAnalysisStageDetails(request)
@@ -16591,13 +16597,47 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   )
   registerLatestDashboardHandler(
     _ipcMain,
+    "dashboard:projectModeRunAnalysisExportStages",
+    async (
+      _,
+      range: RunAnalysisRange,
+      options: RunAnalysisOptions,
+      request: RunAnalysisStageExportRequest
+    ) => {
+      try {
+        const inventory = import.meta.env.DEV
+          ? makeMockRunAnalysis(range, options)
+          : await fetchProjectRunAnalysis(range, { ...options, refresh: false })
+        const groups = groupRunAnalysisExportTargets(inventory.rows, request.targets)
+        const plugins: RunAnalysisPluginStages[] = []
+        const filters = import.meta.env.DEV
+          ? []
+          : projectModeTraceFilters(
+              null,
+              buildProjectModeOrgFilter(options, requireDashboardProjectModeAccess())
+            )
+        for (const [adapterName, features] of groups) {
+          const stages = import.meta.env.DEV
+            ? makeMockRunAnalysisPluginStages(features)
+            : await fetchRunAnalysisPluginStages(esQuery, getEsIndex("trace"), filters, features, request.asOf)
+          plugins.push({ adapterName, stages })
+        }
+        return { success: true, data: plugins }
+      } catch (e) {
+        logDashboardRequestError("projectModeRunAnalysisExportStages", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+  registerLatestDashboardHandler(
+    _ipcMain,
     "dashboard:projectModeRunAnalysisStages",
     async (_, request: RunAnalysisSessionRequest) => {
       try {
         if (import.meta.env.DEV)
           return {
             success: true,
-            data: { rows: makeMockRunAnalysisStages(), dataAsOf: new Date().toISOString() }
+            data: { rows: makeMockRunAnalysisStages(request.projectId), dataAsOf: new Date().toISOString() }
           }
         return { success: true, data: await fetchProjectRunAnalysisStageDetails(request) }
       } catch (e) {

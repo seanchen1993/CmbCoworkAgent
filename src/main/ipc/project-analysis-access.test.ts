@@ -33,6 +33,7 @@ const ids = ["383331", "231855", "319167", "312613", "256963"]
 const analysisChannels = [
   "projectModeRunAnalysis",
   "projectModeRunAnalysisStages",
+  "projectModeRunAnalysisExportStages",
   "projectModeRunAnalysisSessions",
   "projectModeRunAnalysisThread",
   "projectModePeriodMetrics"

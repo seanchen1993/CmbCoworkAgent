@@ -1,6 +1,10 @@
+import { emptyStageTurnCounts } from "../../shared/project-run-analysis"
 import { describe, expect, it } from "vitest"
 import {
   fetchRunAnalysis,
+  fetchRunAnalysisPluginStages,
+  groupRunAnalysisExportTargets,
+  RUN_ANALYSIS_BATCH_SIZE,
   runAnalysisSessionMetricFilters,
   type RunAnalysisScope
 } from "./project-run-analysis"
@@ -118,6 +122,111 @@ function harness(events: Doc[], traces: Doc[], stripNullKeys = false) {
 }
 
 describe("运行分析独立场景验收", () => {
+  it("按项目、特性和开始阶段分别计数，保留未知阶段和历史字段覆盖数", async () => {
+    const h = harness(
+      [
+        snapshot("p", ["same", "excluded"], {
+          adapterName: "插件",
+          adapterVersion: "1",
+          workflowStageNames: ["design", "test", "deploy"]
+        }),
+        snapshot("q", ["same"], { adapterName: "插件", adapterVersion: "2" }),
+        snapshot("r", ["same"])
+      ],
+      [
+        trace("a", {
+          harnessNodeName: "design",
+          harnessNodeStatus: "已完成",
+          hasCodeAttributedSkill: false
+        }),
+        trace("b", {
+          harnessNodeName: "design",
+          harnessNodeStatus: "进行中",
+          hasCodeAttributedSkill: true,
+          harnessProjectId: "q"
+        }),
+        trace("legacy", { harnessFeatureSlug: undefined }),
+        trace("other-feature", { harnessFeatureSlug: "excluded", harnessNodeName: "dev" }),
+        trace("child", { traceKind: "subagent", harnessNodeName: "design" }),
+        trace("timer", { triggerSource: "scheduler", harnessNodeName: "test" }),
+        trace("new-after-list", { startedAt: "2026-10-26T00:00:00Z", harnessNodeName: "deploy" }),
+        trace("outside", { room: "other", harnessNodeName: "design" }),
+        trace("unselected-project", { harnessProjectId: "r", harnessNodeName: "design" })
+      ],
+      true
+    )
+    const { rows, workflowStageNamesByProject } = await fetchRunAnalysis(scope(), h.query)
+    expect(workflowStageNamesByProject?.p).toEqual(["design", "test", "deploy"])
+    const targets = rows.filter((row) => row.featureSlug !== "excluded")
+    const groups = groupRunAnalysisExportTargets(rows, targets)
+    expect([...groups.keys()].sort()).toEqual([null, "插件"].sort())
+    const group = groups.get("插件")!
+    const stages = await fetchRunAnalysisPluginStages(
+      h.query,
+      "trace",
+      scope().traceFilters,
+      group,
+      range.to
+    )
+    const zero = emptyStageTurnCounts()
+    expect(stages).toHaveLength(4)
+    expect(stages).toEqual(
+      expect.arrayContaining([
+        {
+          projectId: "p",
+          featureSlug: "same",
+          nodeName: "design",
+          conversationCount: 1,
+          nodeStatusReported: 1,
+          completedNode: 1,
+          skillAttributionReported: 1,
+          unattributedSkill: 1
+        },
+        {
+          ...zero,
+          projectId: "q",
+          featureSlug: "same",
+          nodeName: "design",
+          conversationCount: 1,
+          nodeStatusReported: 1,
+          skillAttributionReported: 1
+        },
+        { ...zero, projectId: "p", featureSlug: "same", nodeName: "test" },
+        { ...zero, projectId: "p", featureSlug: null, nodeName: null, conversationCount: 1 }
+      ])
+    )
+    expect(() =>
+      groupRunAnalysisExportTargets(rows, [
+        { projectId: "forbidden", featureSlug: "same", adapterName: "插件" }
+      ])
+    ).toThrow("名单")
+    expect(() => groupRunAnalysisExportTargets(rows, [group[0], group[0]])).toThrow("名单")
+  })
+  it("同名阶段跨多个批次仍归入各自的特性", async () => {
+    const targets = Array.from({ length: RUN_ANALYSIS_BATCH_SIZE + 1 }, (_, i) => ({
+      projectId: "p",
+      featureSlug: String(i)
+    }))
+    const h = harness(
+      [],
+      [
+        trace("first", { harnessFeatureSlug: "0", harnessNodeName: "dev" }),
+        trace("last", {
+          harnessFeatureSlug: String(RUN_ANALYSIS_BATCH_SIZE),
+          harnessNodeName: "dev"
+        })
+      ]
+    )
+    expect(await fetchRunAnalysisPluginStages(h.query, "trace", [], targets, range.to)).toEqual(
+      ["0", String(RUN_ANALYSIS_BATCH_SIZE)].map((featureSlug) => ({
+        ...emptyStageTurnCounts(),
+        projectId: "p",
+        featureSlug,
+        nodeName: "dev",
+        conversationCount: 1
+      }))
+    )
+  })
   it("读取项目编号与精益关联标记，历史缺失保留为空，未归因特性也继承项目属性", async () => {
     const h = harness(
       [
