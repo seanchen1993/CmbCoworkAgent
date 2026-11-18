@@ -78,6 +78,8 @@ export interface CmbSummarizationMiddlewareOptions {
    * OpenAI-compatible model IDs.
    */
   maxInputTokens?: number
+  /** Summarizer input budget after reserving its own output and safety space. */
+  summaryModelInputBudgetTokens?: number
   /**
    * Maximum estimated input sent to the outer Agent model after compaction.
    * This value already reserves that model's output and safety space.
@@ -129,7 +131,9 @@ const EMPTY_SUMMARY_QUALITY_ISSUE = "empty final content"
 const TOOL_CALL_SUMMARY_QUALITY_ISSUE = "tool call instead of final text"
 const DSML_SUMMARY_QUALITY_ISSUE = "DSML tool-call markup instead of final text"
 const COMPACTION_RETRY_MARKER = "[earlier conversation truncated for compaction retry]"
-const INITIAL_USER_REQUEST_KEY = "cmb_initial_user_request"
+export const INITIAL_USER_REQUEST_KEY = "cmb_initial_user_request"
+const PROMPT_INITIAL_USER_REQUEST_KEY = "cmb_prompt_initial_user_request"
+const SUMMARY_BODY_START_KEY = "cmb_summary_body_start"
 const INITIAL_USER_REQUEST_MAX_CHARS = 3_000
 const INITIAL_USER_REQUEST_TRUNCATION_MARKER = "\n...[initial user request middle truncated]...\n"
 const LATEST_USER_REQUEST_MAX_CHARS = 3_000
@@ -256,13 +260,17 @@ Use concise, high-information bullets. Preserve exact file paths, commands, erro
 const SUMMARY_TEXT_ONLY_INSTRUCTION =
   "Do not call, request, or imitate any tool. Do not emit tool-call markup or arguments. Return only the continuation handoff as text in the final content field."
 
-const SummarizationEventSchema = z.object({
+export const SummarizationEventSchema = z.object({
   cutoffIndex: z.number(),
   // Checkpointers can restore a valid message through a different module or
   // serialization boundary. LangChain's branded guard is cross-runtime safe;
   // JavaScript instanceof can reject "HumanMessage received HumanMessage".
   summaryMessage: z.custom<HumanMessage>((value) => HumanMessage.isInstance(value)),
-  filePath: z.string().nullable()
+  filePath: z.string().nullable(),
+  // Imported responses may describe a different prompt or model. Use provider
+  // usage only from responses at or after this raw message index in a fork.
+  usageStartIndex: z.number().int().nonnegative().optional(),
+  archiveIncomplete: z.boolean().optional()
 })
 
 export type SummarizationEvent = z.infer<typeof SummarizationEventSchema>
@@ -272,6 +280,43 @@ const SummarizationStateSchema = z.object({
   _summarizationEvent: SummarizationEventSchema.optional(),
   [SUMMARIZATION_STATE_OWNER_KEY]: z.string().optional()
 })
+
+export function buildSummaryMessage(
+  summary: string,
+  filePath: string | null,
+  initialUserRequest: string | null,
+  archiveIncomplete = false,
+  promptInitialUserRequest = initialUserRequest
+): HumanMessage {
+  const initialAnchor = promptInitialUserRequest
+    ? `\n\nThe initial request below is historical context. Later user corrections and the condensed summary take precedence over conflicting details.\n\n<initial-user-request>\n${promptInitialUserRequest}\n</initial-user-request>`
+    : ""
+  const prefix = filePath
+    ? `You are in the middle of a conversation that has been summarized.
+
+A ${archiveIncomplete ? "partial text transcript" : "text transcript"} of the earlier conversation has been saved to ${filePath} should you need to refer back to it for details. Structured media and binary payloads may be represented by placeholders.
+${initialAnchor}
+
+A condensed summary follows:
+
+<summary>
+`
+    : promptInitialUserRequest
+      ? `Here is a summary of the conversation to date.${initialAnchor}\n\n<summary>\n`
+      : "Here is a summary of the conversation to date:\n\n"
+  const suffix = filePath || promptInitialUserRequest ? "\n</summary>" : ""
+  return new HumanMessage({
+    content: prefix + summary + suffix,
+    additional_kwargs: {
+      lc_source: "summarization",
+      [SUMMARY_BODY_START_KEY]: prefix.length,
+      ...(initialUserRequest ? { [INITIAL_USER_REQUEST_KEY]: initialUserRequest } : {}),
+      ...(promptInitialUserRequest !== initialUserRequest && {
+        [PROMPT_INITIAL_USER_REQUEST_KEY]: promptInitialUserRequest
+      })
+    }
+  })
+}
 
 function isSummaryMessage(message: BaseMessage): boolean {
   return (
@@ -484,12 +529,19 @@ function findLatestUserRequest(messages: BaseMessage[]): string | null {
 }
 
 function truncateUserRequestAnchor(content: string, maxChars: number, marker: string): string {
-  const characters = Array.from(content)
-  if (characters.length <= maxChars) return content
-
+  if (content.length <= maxChars) return content
   const headLength = Math.floor(maxChars / 2)
   const tailLength = maxChars - headLength
-  return `${characters.slice(0, headLength).join("")}${marker}${characters.slice(-tailLength).join("")}`
+  if (content.length <= maxChars * 2) {
+    const characters = Array.from(content)
+    if (characters.length <= maxChars) return content
+    return characters.slice(0, headLength).join("") + marker + characters.slice(-tailLength).join("")
+  }
+  // At least maxChars + 1 code points exist. Decode only the two edges, each
+  // with up to two code units per code point, even for multi-megabyte prompts.
+  const head = Array.from(content.slice(0, headLength * 2)).slice(0, headLength)
+  const tail = Array.from(content.slice(-tailLength * 2)).slice(-tailLength)
+  return head.join("") + marker + tail.join("")
 }
 
 function truncateInitialUserRequest(content: string): string {
@@ -514,7 +566,54 @@ function findInitialUserRequest(
   // effective view starts at the summarized tail, but LangGraph still retains
   // the original state.messages. Recover the true first request from that raw
   // history instead of promoting the first post-cutoff correction.
-  for (const message of originalMessages) {
+  return findInitialUserRequestInHistory(originalMessages)
+}
+
+export function readSummaryPromptInitialRequest(
+  message: BaseMessage, initialRequest: string | null
+): string | null {
+  const prompt = message.additional_kwargs?.[PROMPT_INITIAL_USER_REQUEST_KEY]
+  return typeof prompt === "string" || prompt === null ? prompt : initialRequest
+}
+
+export function shortenInitialPromptAnchor(anchor: string | null): string | null {
+  return anchor && truncateUserRequestAnchor(
+    anchor, Math.max(128, Math.floor(anchor.length / 2)), INITIAL_USER_REQUEST_TRUNCATION_MARKER
+  )
+}
+
+/** Fit only the displayed copy and reserve space for the handoff itself. */
+function fitInitialPromptAnchor(
+  anchor: string | null,
+  inputBudget: number,
+  countFixed: (promptAnchor: string | null) => number,
+  tighter: boolean
+): string | null {
+  if (!anchor) return anchor
+  const estimate = (text: string): number =>
+    Math.ceil(text.length / 4 + (Buffer.byteLength(text) - text.length) / 2)
+  const current = estimate(anchor)
+  const room = Number.isFinite(inputBudget) ? inputBudget - countFixed(" ") : Infinity
+  const budget = Math.min(room * 0.75, tighter ? Math.floor(current / 2) : Infinity)
+  if (current <= budget) return anchor
+  let low = 1
+  let high = anchor.length - 1
+  let fitted: string | null = null
+  while (low <= high) {
+    const chars = Math.floor((low + high) / 2)
+    const candidate = truncateUserRequestAnchor(anchor, chars, INITIAL_USER_REQUEST_TRUNCATION_MARKER)
+    if (estimate(candidate) <= budget) {
+      fitted = candidate
+      low = chars + 1
+    } else {
+      high = chars - 1
+    }
+  }
+  return fitted
+}
+
+export function findInitialUserRequestInHistory(messages: Iterable<BaseMessage>): string | null {
+  for (const message of messages) {
     if (!isRealUserMessage(message)) continue
     const content = userRequestText(message)
     if (content) return truncateInitialUserRequest(content)
@@ -522,15 +621,29 @@ function findInitialUserRequest(
   return null
 }
 
+function previousSummaryBody(message: BaseMessage): string {
+  const content = messageText(message.content)
+  const start = message.additional_kwargs?.[SUMMARY_BODY_START_KEY]
+  if (typeof start === "number" && Number.isSafeInteger(start) && start > 0 && start < content.length) {
+    const end = content.slice(0, start).endsWith("<summary>\n") && content.endsWith("\n</summary>")
+      ? content.length - "\n</summary>".length
+      : content.length
+    return content.slice(start, end).trim()
+  }
+  return content.match(/<summary>\s*([\s\S]*?)\s*<\/summary>/i)?.[1]?.trim() || content
+}
+
+function previousSummaryContext(body: string): HumanMessage {
+  return new HumanMessage({
+    content: body,
+    additional_kwargs: { lc_source: "summarization_context" }
+  })
+}
+
 function prepareStructuredSummaryMessages(messages: BaseMessage[]): BaseMessage[] {
   return messages.map((message) => {
     if (!isSummaryMessage(message)) return message
-    const previousContent = messageText(message.content)
-    const summaryBody = previousContent.match(/<summary>\s*([\s\S]*?)\s*<\/summary>/i)?.[1]?.trim()
-    return new HumanMessage({
-      content: `<previous-summary>\n${summaryBody || previousContent}\n</previous-summary>`,
-      additional_kwargs: { lc_source: "summarization_context" }
-    })
+    return previousSummaryContext(previousSummaryBody(message))
   })
 }
 
@@ -627,10 +740,7 @@ function renderMessagesAsSummaryXml(messages: BaseMessage[]): string {
         message.additional_kwargs?.lc_source === "summarization_context" &&
         typeof message.content === "string"
       ) {
-        const previousSummary =
-          message.content.match(/<previous-summary>\s*([\s\S]*?)\s*<\/previous-summary>/i)?.[1] ??
-          message.content
-        return `<message ${attributes.join(" ")}><previous-summary>${escapeSummaryXmlText(previousSummary)}</previous-summary></message>`
+        return `<message ${attributes.join(" ")}><previous-summary>${escapeSummaryXmlText(message.content)}</previous-summary></message>`
       }
 
       const content = renderSummaryContentXml(message.content)
@@ -661,10 +771,131 @@ function renderMessagesAsSummaryXml(messages: BaseMessage[]): string {
     .join("\n")
 }
 
+/** Check input fields before XML escaping or serializing tool arguments. The
+ * caller also checks the encoded record, which includes XML syntax and spacing. */
+function checkHistoryRecordBudget(message: BaseMessage, maxBytes: number): void {
+  let remaining = maxBytes
+  const reserve = (bytes: number): void => {
+    remaining -= bytes
+    if (remaining < 0) throw new Error("Fork history record exceeds its byte limit.")
+  }
+  const reserveText = (text: string, attribute = false): void => {
+    if (text.length > remaining) throw new Error("Fork history record exceeds its byte limit.")
+    reserve(Buffer.byteLength(text))
+    for (const match of text.matchAll(attribute ? /[&<>"']/g : /[&<>]/g)) {
+      reserve(match[0] === "&" ? 4 : match[0] === "<" || match[0] === ">" ? 3 : 5)
+    }
+  }
+
+  if (message.name) reserveText(message.name, true)
+  if (typeof message.content === "string") {
+    reserveText(message.content)
+  } else {
+    for (const block of message.content) {
+      reserve(1)
+      const media = summaryMediaPlaceholder(block)
+      if (media) {
+        reserveText(media)
+      } else if (
+        typeof block === "object" &&
+        block &&
+        "text" in block &&
+        typeof block.text === "string"
+      ) {
+        reserveText(block.text)
+      } else {
+        reserveText(historyArchiveBlockText(block))
+      }
+    }
+  }
+  if (ToolMessage.isInstance(message)) reserveText(message.tool_call_id, true)
+  if (!AIMessage.isInstance(message)) return
+  for (const call of message.tool_calls ?? []) {
+    reserve(32)
+    reserveText(call.id ?? "", true)
+    reserveText(call.name, true)
+    // Check strings and container entries as stringify visits them, before it
+    // allocates their JSON escapes. Check the serialized value's XML cost too.
+    let jsonBytes = 0
+    const serialized = JSON.stringify(call.args ?? {}, (key, value: unknown) => {
+      jsonBytes += Buffer.byteLength(key) + 1
+      if (typeof value === "string") jsonBytes += Buffer.byteLength(value)
+      if (jsonBytes > remaining)
+        throw new Error("Fork history tool arguments exceed its byte limit.")
+      return value
+    })
+    reserveText(serialized ?? "")
+  }
+  const legacyCall = message.additional_kwargs?.function_call
+  if (legacyCall && !message.tool_calls?.length) {
+    reserveText(legacyCall.name ?? "", true)
+    reserveText(legacyCall.arguments ?? "")
+  }
+}
+
+export function renderConversationHistoryMessages(
+  messages: BaseMessage[],
+  maxRecordBytes?: number
+): string {
+  const archived = messages.filter((message) => !isSummaryMessage(message))
+  if (maxRecordBytes !== undefined) {
+    for (const message of archived) checkHistoryRecordBudget(message, maxRecordBytes)
+  }
+  return renderMessagesAsSummaryXml(prepareHistoryArchiveMessages(archived))
+}
+
 function renderSummaryTranscript(messages: BaseMessage[]): string {
   return renderMessagesAsSummaryXml(
     prepareSummaryModelRequest(prepareStructuredSummaryMessages(messages))
   )
+}
+
+/** Fit only the compactor's transient tool argument display. Raw calls and
+ * their matching results are still available to checkpoint and archive code. */
+function compactSummaryToolArguments(
+  messages: BaseMessage[],
+  maxChars: number
+): { messages: BaseMessage[]; modified: boolean } {
+  let modified = false
+  const fitted = messages.map((message) => {
+    if (!AIMessage.isInstance(message)) return message
+    const calls = message.tool_calls ?? []
+    const legacyCall = calls.length === 0 ? message.additional_kwargs?.function_call : undefined
+    if (calls.length === 0 && !legacyCall) return message
+    const maxPerCall = Math.max(128, Math.floor(maxChars / Math.max(1, calls.length)))
+    const preview = (args: string) => ({
+      arguments_preview: truncateUserRequestAnchor(
+        args, maxPerCall, "\n[... tool arguments shortened for compaction ...]\n"
+      )
+    })
+    let changed = false
+    const toolCalls = calls.map((call) => {
+      const args = stringifySummaryToolArgs(call.args)
+      if (args.length <= maxPerCall) return call
+      changed = true
+      return { ...call, args: preview(args) }
+    })
+    let additionalKwargs = message.additional_kwargs
+    if (
+      legacyCall && typeof legacyCall.arguments === "string" && legacyCall.arguments.length > maxPerCall
+    ) {
+      changed = true
+      additionalKwargs = {
+        ...additionalKwargs,
+        function_call: { ...legacyCall, arguments: JSON.stringify(preview(legacyCall.arguments)) }
+      }
+    }
+    if (!changed) return message
+    modified = true
+    return new AIMessage({
+      content: message.content,
+      name: message.name,
+      id: message.id,
+      tool_calls: toolCalls,
+      additional_kwargs: additionalKwargs
+    })
+  })
+  return { messages: fitted, modified }
 }
 
 function buildSummaryInstruction(
@@ -832,6 +1063,7 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
     summaryPrompt = DEFAULT_SUMMARY_PROMPT,
     trimTokensToSummarize = DEFAULT_OVERFLOW_RETRY_TARGET,
     maxInputTokens: configuredMaxInputTokens,
+    summaryModelInputBudgetTokens,
     postCompactionInputBudgetTokens,
     historyPathPrefix = "/conversation_history",
     legacyHistoryPathPrefix,
@@ -1145,14 +1377,20 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
    */
   function countTokensForTrigger(
     messages: BaseMessage[],
-    approximateTotal: number
+    approximateTotal: number,
+    event: SummarizationEvent | undefined
   ): {
     tokens: number
     reportedTotalTokens: number | null
     reportedInputTokens: number | null
     appendedEstimatedTokens: number
   } {
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
+    // Effective index 0 is the summary; index 1 maps to the raw cutoff.
+    const usageStart =
+      event?.usageStartIndex === undefined
+        ? 0
+        : 1 + Math.max(0, event.usageStartIndex - event.cutoffIndex)
+    for (let index = messages.length - 1; index >= usageStart; index -= 1) {
       const message = messages[index]
       if (!AIMessage.isInstance(message)) continue
       const reportedTokens = reportedUsageTokens(message)
@@ -1177,7 +1415,8 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
     messages: BaseMessage[],
     maxInputTokens: number,
     systemMessage?: SystemMessage | unknown,
-    tools?: (ServerTool | ClientTool)[] | unknown[]
+    tools?: (ServerTool | ClientTool)[] | unknown[],
+    maxChars?: number
   ): { messages: BaseMessage[]; modified: boolean } {
     const toolMessageIndexes = messages.flatMap((message, index) =>
       ToolMessage.isInstance(message) ? [index] : []
@@ -1191,7 +1430,7 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
     )
     const adjustedMax = maxInputTokens / tokenEstimationMultiplier
     const budgetForTools = Math.max(adjustedMax * 0.7 - overheadTokens, 1_000)
-    const perToolBudgetChars = Math.floor(budgetForTools / toolMessageIndexes.length) * 4
+    const perToolBudgetChars = maxChars ?? Math.floor(budgetForTools / toolMessageIndexes.length) * 4
     const result = [...messages]
     let modified = false
 
@@ -1205,6 +1444,79 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
         tool_call_id: message.tool_call_id,
         name: message.name
       })
+      modified = true
+    }
+    return { messages: result, modified }
+  }
+
+  function compactOversizedNonToolContent(
+    messages: BaseMessage[],
+    maxInputTokens: number,
+    systemMessage?: SystemMessage | unknown,
+    tools?: (ServerTool | ClientTool)[] | unknown[],
+    maxChars?: number
+  ): { messages: BaseMessage[]; modified: boolean } {
+    const candidateContent = new Map<number, string>()
+    for (const [index, message] of messages.entries()) {
+      if (
+        ToolMessage.isInstance(message) ||
+        (!HumanMessage.isInstance(message) && !AIMessage.isInstance(message))
+      ) {
+        continue
+      }
+      if (typeof message.content === "string") {
+        candidateContent.set(index, message.content)
+        continue
+      }
+      if (Array.isArray(message.content)) {
+        // Emergency recovery operates only on the transient summary request.
+        // Serialising structured text/file blocks preserves their evidence while
+        // allowing the same deterministic budget used for plain message text.
+        candidateContent.set(index, JSON.stringify(message.content))
+      }
+    }
+    const candidateIndexes = [...candidateContent.keys()]
+    if (candidateIndexes.length === 0) return { messages, modified: false }
+
+    const overheadTokens = countTotalTokens(
+      messages.filter((_, index) => !candidateContent.has(index)),
+      systemMessage,
+      tools
+    )
+    const adjustedMax = maxInputTokens / tokenEstimationMultiplier
+    const availableChars = Math.max((adjustedMax * 0.7 - overheadTokens) * 4, 2_000)
+    const perMessageBudgetChars = maxChars ?? Math.max(
+      Math.floor(availableChars / candidateIndexes.length),
+      512
+    )
+    const result = [...messages]
+    let modified = false
+
+    for (const index of candidateIndexes) {
+      const message = messages[index]
+      const content = candidateContent.get(index)!
+      if (content.length <= perMessageBudgetChars) continue
+
+      // Grok Build and Codex both use a token-budgeted prefix plus an explicit
+      // omission marker for the emergency case where one ordinary message is
+      // larger than the entire summarizer window. Keep that predictable policy
+      // rather than adding a CmbCowork-specific content heuristic.
+      const marker = "\n[... truncated to fit the compaction window ...]"
+      const keptChars = Math.max(perMessageBudgetChars - marker.length, 1)
+      const droppedChars = content.length - keptChars
+      const compactedContent = `${content.slice(0, keptChars)}${marker} (${droppedChars} chars omitted)`
+      if (HumanMessage.isInstance(message)) {
+        result[index] = new HumanMessage({
+          content: compactedContent,
+          additional_kwargs: message.additional_kwargs
+        })
+      } else if (AIMessage.isInstance(message)) {
+        result[index] = new AIMessage({
+          content: compactedContent,
+          tool_calls: message.tool_calls,
+          additional_kwargs: message.additional_kwargs
+        })
+      }
       modified = true
     }
     return { messages: result, modified }
@@ -1266,8 +1578,7 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
   ): Promise<string | null> {
     const filePath = getHistoryPath(state, owner, initialOwnerSessionId)
     const legacyFilePath = getLegacyHistoryPath(state, owner, initialOwnerSessionId)
-    const filteredMessages = messages.filter((message) => !isSummaryMessage(message))
-    const newSection = `## Summarized at ${new Date().toISOString()}\n\n${renderMessagesAsSummaryXml(prepareHistoryArchiveMessages(filteredMessages))}\n\n`
+    const newSection = `## Summarized at ${new Date().toISOString()}\n\n${renderConversationHistoryMessages(messages)}\n\n`
     const sectionBytes = new TextEncoder().encode(newSection)
 
     try {
@@ -1357,9 +1668,67 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
     latestUserRequest: string | null,
     signal?: AbortSignal,
     targetSummaryTokens?: number,
-    maxAdditionalAttempts?: number
+    maxAdditionalAttempts?: number,
+    fitInheritedHandoff = false
   ): Promise<string> {
-    let attemptMessages = messages
+    let attemptMessages = fitInheritedHandoff ? messages.map(sanitizeSummaryMedia) : messages
+    let attemptInitialRequest = initialUserRequest
+    let attemptLatestRequest = latestUserRequest
+    const inheritedText =
+      fitInheritedHandoff && typeof messages[0]?.content === "string"
+        ? previousSummaryBody(messages[0]).replace(
+            /^Here is a summary of the conversation to date:\n\n/,
+            ""
+          )
+        : undefined
+    let inheritedCharLimit = inheritedText?.length ?? 0
+    const shrinkInheritedHandoff = (charLimit: number): boolean => {
+      if (inheritedText === undefined || inheritedCharLimit <= 128) return false
+      inheritedCharLimit = Math.max(128, Math.min(inheritedCharLimit - 1, Math.floor(charLimit)))
+      attemptMessages = [
+        previousSummaryContext(
+          truncateUserRequestAnchor(
+            inheritedText,
+            inheritedCharLimit,
+            "\n[... middle of inherited handoff omitted to fit the compaction window ...]\n"
+          )
+        ),
+        ...attemptMessages.slice(1)
+      ]
+      return true
+    }
+    const reduceInheritedRequest = (budget: number): boolean => {
+      const [originalHandoff, ...remaining] = attemptMessages
+      const rawBudget = Math.min(trimTokensToSummarize, Math.max(128, Math.floor(budget / 2)))
+      const maxChars = Math.max(128, Math.floor(budget / (remaining.length + 1)))
+      const maxAnchorChars = Math.max(128, Math.floor(budget / 4))
+      const initial = initialUserRequest && truncateUserRequestAnchor(
+        initialUserRequest, maxAnchorChars, INITIAL_USER_REQUEST_TRUNCATION_MARKER
+      )
+      const latest = latestUserRequest && truncateUserRequestAnchor(
+        latestUserRequest, maxAnchorChars, LATEST_USER_REQUEST_TRUNCATION_MARKER
+      )
+      const resizedAnchors = initial !== attemptInitialRequest || latest !== attemptLatestRequest
+      attemptInitialRequest = initial
+      attemptLatestRequest = latest
+      const resizedHandoff = shrinkInheritedHandoff(Math.min(maxChars, inheritedCharLimit * 0.4))
+      const handoff = resizedHandoff ? attemptMessages[0] : originalHandoff
+      const tools = compactToolResults(remaining, rawBudget, undefined, undefined, maxChars)
+      const raw = compactOversizedNonToolContent(tools.messages, budget, undefined, undefined, maxChars)
+      const argumentsFit = compactSummaryToolArguments(raw.messages, maxChars)
+      const trimmed = argumentsFit.messages.length > 2 && estimateSummaryInput(argumentsFit.messages) > rawBudget
+        ? truncateOldestRoundsForRetry(argumentsFit.messages, rawBudget)
+        : null
+      attemptMessages = [handoff, ...(trimmed ?? argumentsFit.messages)]
+      return resizedAnchors || resizedHandoff || trimmed !== null || tools.modified ||
+        raw.modified || argumentsFit.modified
+    }
+    const estimateSummaryInput = (content: BaseMessage[]): number =>
+      countTotalTokens(content) + content.reduce((extra, message) => {
+        const text = typeof message.content === "string" ? message.content : ""
+        return extra + Buffer.byteLength(text) - text.length
+      }, 0)
+    let preflightChecked = false
     let overflowRetries = 0
     let retryByteBudget: number | undefined
     let observedContextWindow: number | undefined
@@ -1373,6 +1742,15 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
         : MAX_SUMMARY_MODEL_ATTEMPTS
 
     for (;;) {
+      signal?.throwIfAborted()
+      const inheritedInputBudget = fitInheritedHandoff
+        ? summaryModelInputBudgetTokens ?? getMaxInputTokens(activeModel)
+        : undefined
+      const inputTarget = inheritedInputBudget ? inheritedInputBudget * 0.8 : undefined
+      if (!preflightChecked && inputTarget && estimateSummaryInput(attemptMessages) > inputTarget) {
+        // Fit the handoff and raw tail together before either is encoded as XML.
+        reduceInheritedRequest(inputTarget)
+      }
       const conversationTranscript = renderSummaryTranscript(attemptMessages)
       const buildRequest = (transcript: string, compactInstructions = false): BaseMessage[] => [
         new SystemMessage({
@@ -1385,18 +1763,18 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
               compactInstructions
                 ? "Summarize this transcript excerpt as a concise continuation handoff. Preserve the goal, constraints, completed work, blockers, exact evidence, and next step. Earlier omitted history remains in the source conversation."
                 : summaryPrompt,
-              compactInstructions && initialUserRequest
+              compactInstructions && attemptInitialRequest
                 ? excerptUtf8(
-                    initialUserRequest,
+                    attemptInitialRequest,
                     Math.min(512, Math.floor((retryByteBudget ?? 4_096) / 8))
                   )
-                : initialUserRequest,
-              compactInstructions && latestUserRequest
+                : attemptInitialRequest,
+              compactInstructions && attemptLatestRequest
                 ? excerptUtf8(
-                    latestUserRequest,
+                    attemptLatestRequest,
                     Math.min(512, Math.floor((retryByteBudget ?? 4_096) / 8))
                   )
-                : latestUserRequest,
+                : attemptLatestRequest,
               targetSummaryTokens,
               transcript
             ),
@@ -1417,6 +1795,15 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
           ? buildRequest(conversationTranscript)
           : fitSummaryRequestToBytes(conversationTranscript, retryByteBudget, buildRequest)
       const requestBytes = summaryRequestBytes(summaryMessages)
+      const estimatedInput = fitInheritedHandoff ? estimateSummaryInput(summaryMessages) : 0
+      if (!preflightChecked) {
+        // Check prompt and XML expansion once without repeatedly encoding an
+        // unchanged large tail. Provider feedback can tighten the request later.
+        preflightChecked = true
+        if (inputTarget && estimatedInput > inputTarget && reduceInheritedRequest(inputTarget / 2)) {
+          continue
+        }
+      }
       try {
         if (attemptBudget.used >= attemptLimit) {
           throw new Error(`Summary model attempt limit reached (${MAX_SUMMARY_MODEL_ATTEMPTS})`)
@@ -1468,12 +1855,6 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
         ) {
           throw error
         }
-        // Retry from the same transient, provider-safe message shape used by
-        // the failed summary request. A malformed/orphan ToolMessage can make
-        // an otherwise all-Human history look like one indivisible API round;
-        // sanitizing first removes that artificial boundary without mutating
-        // checkpoint or archive history.
-        const retryMessages = prepareSummaryModelRequest(attemptMessages)
         const beforeMessageCount = attemptMessages.length
         const beforeEstimatedTokens = countTokensApproximately(summaryMessages)
         if (overflowModel) {
@@ -1491,13 +1872,25 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
           lastAttempt: attemptBudget.used === attemptLimit - 1
         })
         previousQualityIssues = []
+        if (fitInheritedHandoff) {
+          // Trim inherited content structurally before the serialized byte
+          // fitter runs, and keep its handoff out of the old-round eviction.
+          reduceInheritedRequest(Math.min(retryByteBudget, inputTarget ?? Infinity))
+        }
+        const handoff = fitInheritedHandoff ? attemptMessages[0] : undefined
+        const retryMessages = prepareSummaryModelRequest(
+          handoff ? attemptMessages.slice(1) : attemptMessages
+        )
+        const withHandoff = (remaining: BaseMessage[]): BaseMessage[] =>
+          handoff ? [handoff, ...remaining] : remaining
         const truncated = truncateOldestRoundsForRetry(
           retryMessages,
           trimTokensToSummarize,
           (messages) =>
-            summaryRequestBytes(buildRequest(renderSummaryTranscript(messages))) <= retryByteBudget!
+            summaryRequestBytes(buildRequest(renderSummaryTranscript(withHandoff(messages)))) <=
+            retryByteBudget!
         )
-        attemptMessages = truncated ?? retryMessages
+        attemptMessages = withHandoff(truncated ?? retryMessages)
         let nextRequest: BaseMessage[]
         try {
           nextRequest = fitSummaryRequestToBytes(
@@ -1532,46 +1925,6 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
     }
   }
 
-  function buildSummaryMessage(
-    summary: string,
-    filePath: string | null,
-    initialUserRequest: string | null
-  ): HumanMessage {
-    const initialAnchor = initialUserRequest
-      ? `\n\nThe initial request below is historical context. Later user corrections and the condensed summary take precedence over conflicting details.\n\n<initial-user-request>\n${initialUserRequest}\n</initial-user-request>`
-      : ""
-    const content = filePath
-      ? `You are in the middle of a conversation that has been summarized.
-
-A text transcript of the earlier conversation has been saved to ${filePath} should you need to refer back to it for details. Structured media and binary payloads may be represented by placeholders.
-${initialAnchor}
-
-A condensed summary follows:
-
-<summary>
-${summary}
-</summary>`
-      : initialUserRequest
-        ? `Here is a summary of the conversation to date.${initialAnchor}\n\n<summary>\n${summary}\n</summary>`
-        : `Here is a summary of the conversation to date:\n\n${summary}`
-    return new HumanMessage({
-      content,
-      additional_kwargs: {
-        lc_source: "summarization",
-        ...(initialUserRequest ? { [INITIAL_USER_REQUEST_KEY]: initialUserRequest } : {})
-      }
-    })
-  }
-
-  function getEffectiveMessages(
-    messages: BaseMessage[],
-    state: Record<string, unknown>,
-    owner?: string
-  ): BaseMessage[] {
-    const event = getValidSummarizationEvent(state, owner)
-    return event ? [event.summaryMessage, ...messages.slice(event.cutoffIndex)] : messages
-  }
-
   async function summarizeMessages(
     messagesToSummarize: BaseMessage[],
     resolvedModel: BaseChatModel,
@@ -1585,10 +1938,10 @@ ${summary}
     signal?: AbortSignal,
     owner?: string,
     initialOwnerSessionId?: string,
-    historyMessages: BaseMessage[] = messagesToSummarize
+    historyMessages: BaseMessage[] = messagesToSummarize,
+    fitInheritedHandoff = false
   ): Promise<{
     summary: string
-    summaryMessage: HumanMessage
     filePath: string | null
     stateCutoffIndex: number
   }> {
@@ -1602,7 +1955,10 @@ ${summary}
       attemptBudget,
       initialUserRequest,
       latestUserRequest,
-      signal
+      signal,
+      undefined,
+      undefined,
+      fitInheritedHandoff
     )
     signal?.throwIfAborted()
     const resolvedBackend = getBackend(state)
@@ -1624,7 +1980,6 @@ ${summary}
     }
     return {
       summary,
-      summaryMessage: buildSummaryMessage(summary, filePath, initialUserRequest),
       filePath,
       stateCutoffIndex:
         previousCutoffIndex != null ? previousCutoffIndex + cutoffIndex - 1 : cutoffIndex
@@ -1648,8 +2003,25 @@ ${summary}
     owner?: string,
     historySourceMessages: BaseMessage[] = truncatedMessages,
     diagnostics?: CompactionDiagnostics,
-    forceRecovery = false
+    rejectedRequest?: { error: unknown }
   ): Promise<any> {
+    const invokeShortHandoff = async (
+      summaryMessage: HumanMessage,
+      tail: BaseMessage[],
+      withoutPromptAnchor?: HumanMessage
+    ): Promise<HumanMessage> => {
+      try {
+        await handler({ ...request, messages: [summaryMessage, ...tail] })
+        return summaryMessage
+      } catch (error) {
+        if (!withoutPromptAnchor || !isCmbContextOverflow(error)) throw error
+        // The provider measures the complete request. Reuse the handoff and
+        // live tail once without the optional displayed anchor.
+        request.runtime?.signal?.throwIfAborted()
+        await handler({ ...request, messages: [withoutPromptAnchor, ...tail] })
+        return withoutPromptAnchor
+      }
+    }
     const initialOwnerSessionId =
       owner &&
       (!stateBelongsToOwner(request.state, owner) ||
@@ -1658,6 +2030,16 @@ ${summary}
         ? `session_${crypto.randomUUID().substring(0, 8)}`
         : undefined
     const previousEvent = getValidSummarizationEvent(request.state, owner)
+    const nextUsageStartIndex =
+      previousEvent?.usageStartIndex === undefined
+        ? undefined
+        : Math.max(
+            previousEvent.usageStartIndex,
+            Array.isArray(request.state.messages)
+              ? request.state.messages.length
+              : request.messages.length
+          )
+    let archiveIncomplete = previousEvent?.archiveIncomplete === true
     let cutoffIndex = determineCutoffIndex(truncatedMessages, maxInputTokens)
     // DeepAgents Python refuses token-based compaction when it cannot preserve
     // any message. CmbCowork intentionally still supports summarizing one
@@ -1665,11 +2047,13 @@ ${summary}
     // effective[0] is the synthetic previous summary, so
     // previousCutoff + 1 - 1 would not advance the raw-state cutoff at all.
     // Re-summarizing it cannot evict new history and can otherwise create a
-    // compaction loop. A real provider rejection is different: summarize the
-    // whole effective input, even if it lies entirely inside the keep budget.
+    // compaction loop. After a provider rejection, native sessions can recover
+    // by summarizing the whole input. Forks try shortening their handoff while
+    // keeping the raw tail.
     const advancesStateCutoff = previousEvent == null || cutoffIndex > 1
-    if (cutoffIndex <= 0 || !advancesStateCutoff) {
-      if (!forceRecovery) {
+    const noProgress = cutoffIndex <= 0 || !advancesStateCutoff
+    if (noProgress && previousEvent?.usageStartIndex === undefined) {
+      if (!rejectedRequest) {
         try {
           return await handler({ ...request, messages: truncatedMessages })
         } catch (error) {
@@ -1681,6 +2065,94 @@ ${summary}
         reason: "provider_overflow_within_keep_budget",
         cutoffIndex
       })
+    } else if (noProgress && previousEvent?.usageStartIndex !== undefined) {
+      // A fork can resume on a smaller model with a handoff too large for that
+      // window even though every raw tail message should be kept verbatim.
+      if (!rejectedRequest) {
+        try {
+          return await handler({ ...request, messages: truncatedMessages })
+        } catch (error) {
+          if (!isCmbContextOverflow(error)) throw error
+          rejectedRequest = { error }
+        }
+      }
+      const tail = truncatedMessages.slice(1)
+      const initialUserRequest = findInitialUserRequest(truncatedMessages, request.messages)
+      const lastPromptAnchor = readSummaryPromptInitialRequest(previousEvent.summaryMessage, initialUserRequest)
+      const inputBudget = postCompactionInputBudgetTokens ?? maxInputTokens
+      const count = (messages: BaseMessage[]): number =>
+        countTotalTokens(messages, request.systemMessage, request.tools)
+      const previousCost = count(truncatedMessages)
+      const countWrapper = (promptAnchor: string | null): number => count([
+        buildSummaryMessage("", previousEvent.filePath, initialUserRequest, archiveIncomplete, promptAnchor),
+        ...tail
+      ])
+      const attemptBudget: SummaryAttemptBudget = { used: 0, diagnostics }
+      let lastOverflow = rejectedRequest.error
+      let previousTarget: number | undefined
+      for (let revision = 0; revision < 2; revision += 1) {
+        if (attemptBudget.used >= MAX_SUMMARY_MODEL_ATTEMPTS) break
+        const budget = Math.min(inputBudget ?? Infinity, previousCost)
+        const promptAnchor = fitInitialPromptAnchor(
+          lastPromptAnchor, budget, countWrapper, revision > 0
+        )
+        const fixedCost = countWrapper(promptAnchor)
+        const available = budget - fixedCost
+        const scaledAvailable = (inputBudget ?? Infinity) / tokenEstimationMultiplier - fixedCost
+        // The observed ratio describes the entire rejected prompt, so verify
+        // with the provider when that ratio overestimates the fixed cost.
+        const targetBudget = scaledAvailable > 0 ? Math.min(available, scaledAvailable) : available
+        const target = Math.min(
+          Math.floor(targetBudget * 0.8),
+          previousTarget === undefined ? Infinity : Math.max(1, Math.floor(previousTarget / 3))
+        )
+        if (target <= 0) continue
+        previousTarget = target
+        const shorter = await createSummary(
+          [previousEvent.summaryMessage],
+          resolvedModel,
+          fallbackModel,
+          attemptBudget,
+          null,
+          null,
+          request.runtime?.signal,
+          target,
+          undefined,
+          true
+        )
+        const summaryMessage = buildSummaryMessage(
+          shorter, previousEvent.filePath, initialUserRequest, archiveIncomplete, promptAnchor
+        )
+        const withoutAnchor = revision > 0 && promptAnchor ? buildSummaryMessage(
+          shorter, previousEvent.filePath, initialUserRequest, archiveIncomplete, null
+        ) : undefined
+        const fits = (candidate: HumanMessage): boolean => {
+          const estimated = count([candidate, ...tail])
+          return estimated < previousCost && (inputBudget === undefined || estimated <= inputBudget)
+        }
+        const candidate = fits(summaryMessage) ? summaryMessage :
+          withoutAnchor && fits(withoutAnchor) ? withoutAnchor : undefined
+        if (candidate) {
+          try {
+            const accepted = await invokeShortHandoff(
+              candidate, tail, candidate === summaryMessage ? withoutAnchor : undefined
+            )
+            return new Command({
+              update: {
+                _summarizationEvent: {
+                  ...previousEvent,
+                  summaryMessage: accepted,
+                  usageStartIndex: nextUsageStartIndex
+                }
+              }
+            })
+          } catch (error) {
+            if (!isCmbContextOverflow(error)) throw error
+            lastOverflow = error
+          }
+        }
+      }
+      throw lastOverflow
     }
 
     const messagesToSummarize = truncatedMessages.slice(0, cutoffIndex)
@@ -1717,6 +2189,10 @@ ${summary}
     }
 
     const summaryAttemptBudget: SummaryAttemptBudget = { used: 0, diagnostics }
+    const hasInheritedHandoff = previousEvent?.usageStartIndex !== undefined
+    const lastPromptAnchor = previousEvent
+      ? readSummaryPromptInitialRequest(previousEvent.summaryMessage, initialUserRequest)
+      : initialUserRequest
     const summaryResult = await summarizeMessages(
       messagesToSummarize,
       resolvedModel,
@@ -1730,13 +2206,20 @@ ${summary}
       request.runtime?.signal,
       owner,
       initialOwnerSessionId,
-      historyMessagesToSummarize
+      historyMessagesToSummarize,
+      hasInheritedHandoff
     )
 
-    let finalSummaryMessage = summaryResult.summaryMessage
     let finalFilePath = summaryResult.filePath
+    if (!finalFilePath && (hasInheritedHandoff || previousEvent?.filePath)) {
+      finalFilePath = previousEvent?.filePath ?? null
+      archiveIncomplete = true
+    }
+    let finalSummaryMessage = buildSummaryMessage(
+      summaryResult.summary, finalFilePath, initialUserRequest, archiveIncomplete, lastPromptAnchor
+    )
     let finalStateCutoffIndex = summaryResult.stateCutoffIndex
-    let modifiedMessages = [summaryResult.summaryMessage, ...preservedMessages]
+    let modifiedMessages = [finalSummaryMessage, ...preservedMessages]
     const modifiedTokens = countTotalTokens(modifiedMessages, request.systemMessage, request.tools)
     const estimatedModifiedTokens = Math.ceil(modifiedTokens * tokenEstimationMultiplier)
     let needsWholeConversationRetry =
@@ -1782,36 +2265,70 @@ ${summary}
         // The first successful summary has already archived the summarized
         // head. On the whole-conversation retry, append only the tail that was
         // previously retained; otherwise the historical head is duplicated.
-        summaryResult.filePath ? preservedHistoryMessages : historySourceMessages
+        summaryResult.filePath ? preservedHistoryMessages : historySourceMessages,
+        hasInheritedHandoff
       )
       // The head may already be durably archived even if this best-effort tail
       // append fails. Never discard that valid recovery pointer because a
       // later write returned null.
-      finalFilePath = retryResult.filePath ?? summaryResult.filePath
+      finalFilePath = retryResult.filePath ?? finalFilePath
+      if (hasInheritedHandoff || finalFilePath) {
+        archiveIncomplete = previousEvent?.archiveIncomplete === true || !retryResult.filePath
+      }
       finalSummaryMessage = buildSummaryMessage(
         retryResult.summary,
         finalFilePath,
-        initialUserRequest
+        initialUserRequest,
+        archiveIncomplete,
+        lastPromptAnchor
       )
       finalStateCutoffIndex = retryResult.stateCutoffIndex
       modifiedMessages = [finalSummaryMessage]
 
       const retryEstimatedTokens = estimateOuterInputTokens(modifiedMessages)
-      if (outerInputBudget != null && retryEstimatedTokens > outerInputBudget) {
-        const fixedInputTokens = estimateOuterInputTokens([
-          buildSummaryMessage("", finalFilePath, initialUserRequest)
-        ])
-        const targetSummaryTokens = Math.floor(
-          (outerInputBudget - fixedInputTokens) / tokenEstimationMultiplier
+      const estimatedOverflow = outerInputBudget != null && retryEstimatedTokens > outerInputBudget
+      let providerOverflow = false
+      if (!estimatedOverflow) {
+        try {
+          await handler({ ...request, messages: modifiedMessages })
+        } catch (error) {
+          if (!hasInheritedHandoff || !isCmbContextOverflow(error)) throw error
+          providerOverflow = true
+        }
+      }
+      if (estimatedOverflow || providerOverflow) {
+        const summaryBudget = outerInputBudget ?? maxInputTokens ?? Infinity
+        const countWrapper = (promptAnchor: string | null): number => {
+          const wrapper = buildSummaryMessage(
+            "", finalFilePath, initialUserRequest, archiveIncomplete, promptAnchor
+          )
+          return countTotalTokens([wrapper], request.systemMessage, request.tools)
+        }
+        const fullFixedCost = countWrapper(lastPromptAnchor)
+        const promptAnchor = hasInheritedHandoff
+          ? fitInitialPromptAnchor(lastPromptAnchor, summaryBudget, countWrapper, providerOverflow)
+          : lastPromptAnchor
+        const fixedCost = promptAnchor === lastPromptAnchor ? fullFixedCost : countWrapper(promptAnchor)
+        const fixedInputTokens = Math.ceil(fixedCost * tokenEstimationMultiplier)
+        const scaledAvailable = (summaryBudget - fixedInputTokens) / tokenEstimationMultiplier
+        const available = hasInheritedHandoff && scaledAvailable <= 0
+          ? summaryBudget - fixedCost
+          : scaledAvailable
+        const targetSummaryTokens = Math.floor(providerOverflow
+          ? Math.min(available, Math.max(1, countTotalTokens([new HumanMessage(retryResult.summary)]) / 3))
+          : available
         )
         if (targetSummaryTokens <= 0) {
           throw new Error(
-            `Compacted request cannot fit the outer model input budget: fixed system, tools, and handoff wrapper require approximately ${fixedInputTokens} tokens, exceeding the ${outerInputBudget}-token budget.`
+            `Compacted request cannot fit the outer model input budget: fixed system, tools, and handoff wrapper require approximately ${fixedInputTokens} tokens, exceeding the ${summaryBudget}-token budget.`
           )
         }
 
+        const reason = providerOverflow
+          ? "was rejected by the outer model as too large"
+          : `remains above the outer model input budget (${retryEstimatedTokens} estimated tokens > ${outerInputBudget})`
         console.warn(
-          `[SummarizationMiddleware] Whole-conversation summary remains above the outer model input budget (${retryEstimatedTokens} estimated tokens > ${outerInputBudget}); requesting one bounded shorter handoff (target ${targetSummaryTokens} tokens).`
+          `[SummarizationMiddleware] Whole-conversation summary ${reason}; requesting one bounded shorter handoff (target ${targetSummaryTokens} tokens).`
         )
         const shortenedSummary = await createSummary(
           [finalSummaryMessage],
@@ -1822,23 +2339,35 @@ ${summary}
           null,
           request.runtime?.signal,
           targetSummaryTokens,
-          1
+          1,
+          hasInheritedHandoff
         )
         const shortenedSummaryMessage = buildSummaryMessage(
           shortenedSummary,
           finalFilePath,
-          initialUserRequest
+          initialUserRequest,
+          archiveIncomplete,
+          promptAnchor
         )
-        const shortenedEstimatedTokens = estimateOuterInputTokens([shortenedSummaryMessage])
-        if (shortenedEstimatedTokens > outerInputBudget) {
-          throw new Error(
-            `Shortened whole-conversation summary still exceeds the outer model input budget (${shortenedEstimatedTokens} estimated tokens > ${outerInputBudget}).`
-          )
+        const shortenedCost = countTotalTokens([shortenedSummaryMessage], request.systemMessage, request.tools)
+        const shortenedEstimatedTokens = Math.ceil(shortenedCost * tokenEstimationMultiplier)
+        const withoutAnchor = hasInheritedHandoff && promptAnchor ? buildSummaryMessage(
+          shortenedSummary, finalFilePath, initialUserRequest, archiveIncomplete, null
+        ) : undefined
+        let candidate = shortenedSummaryMessage
+        if (outerInputBudget != null && shortenedEstimatedTokens > outerInputBudget &&
+            (!hasInheritedHandoff || shortenedCost > outerInputBudget)) {
+          if (!withoutAnchor || countTotalTokens([withoutAnchor], request.systemMessage, request.tools) > outerInputBudget) {
+            throw new Error(
+              `Shortened whole-conversation summary still exceeds the outer model input budget (${shortenedEstimatedTokens} estimated tokens > ${outerInputBudget}).`
+            )
+          }
+          candidate = withoutAnchor
         }
-        finalSummaryMessage = shortenedSummaryMessage
-        modifiedMessages = [shortenedSummaryMessage]
+        finalSummaryMessage = await invokeShortHandoff(
+          candidate, [], candidate === shortenedSummaryMessage ? withoutAnchor : undefined
+        )
       }
-      await handler({ ...request, messages: modifiedMessages })
     }
 
     return new Command({
@@ -1846,7 +2375,12 @@ ${summary}
         _summarizationEvent: {
           cutoffIndex: finalStateCutoffIndex,
           summaryMessage: finalSummaryMessage,
-          filePath: finalFilePath
+          filePath: finalFilePath,
+          ...(nextUsageStartIndex !== undefined && { usageStartIndex: nextUsageStartIndex }),
+          ...((archiveIncomplete ||
+            (previousEvent?.usageStartIndex !== undefined && !finalFilePath)) && {
+            archiveIncomplete: true
+          })
         } satisfies SummarizationEvent,
         _summarizationSessionId: getSessionId(request.state, owner, initialOwnerSessionId),
         ...(owner ? { [SUMMARIZATION_STATE_OWNER_KEY]: owner } : {})
@@ -1859,7 +2393,11 @@ ${summary}
     stateSchema: SummarizationStateSchema,
     async wrapModelCall(request, handler) {
       const owner = getStateOwner(request)
-      const effectiveMessages = getEffectiveMessages(request.messages ?? [], request.state, owner)
+      const event = getValidSummarizationEvent(request.state, owner)
+      const messages = request.messages ?? []
+      const effectiveMessages = event
+        ? [event.summaryMessage, ...messages.slice(event.cutoffIndex)]
+        : messages
       if (effectiveMessages.length === 0) return handler(request)
 
       const resolvedModel = await getChatModel()
@@ -1883,15 +2421,15 @@ ${summary}
       const totalTokens = truncateModified
         ? countTotalTokens(truncatedMessages, request.systemMessage, request.tools)
         : initialTokens
-      const triggerTokens = countTokensForTrigger(truncatedMessages, totalTokens)
-      let triggerError: unknown
+      const triggerTokens = countTokensForTrigger(truncatedMessages, totalTokens, event)
 
+      let rejectedRequest: { error: unknown } | undefined
       if (!shouldSummarize(truncatedMessages, triggerTokens.tokens, maxInputTokens)) {
         try {
           return await handler({ ...request, messages: truncatedMessages })
         } catch (error) {
           if (!isCmbContextOverflow(error)) throw error
-          triggerError = error
+          rejectedRequest = { error }
           if (maxInputTokens && totalTokens > 0) {
             const observedRatio = maxInputTokens / totalTokens
             if (observedRatio > tokenEstimationMultiplier) {
@@ -1916,7 +2454,7 @@ ${summary}
         .sort((a, b) => b.estimatedTokens - a.estimatedTokens)
         .slice(0, 10)
       const diagnostics = new CompactionDiagnostics({
-        reason: triggerError ? "provider_overflow" : "threshold",
+        reason: rejectedRequest ? "provider_overflow" : "threshold",
         tokenEstimator: "characters_divided_by_4_with_provider_usage_floor",
         retryBudgetUnit: "utf8_bytes_of_serialized_summary_messages",
         owner,
@@ -1939,7 +2477,7 @@ ${summary}
         tokenEstimationMultiplier,
         adjustedTriggerTokens: Math.ceil(triggerTokens.tokens * tokenEstimationMultiplier),
         largestMessages,
-        ...(triggerError ? { error: compactionErrorDetails(triggerError) } : {})
+        ...(rejectedRequest ? { error: compactionErrorDetails(rejectedRequest.error) } : {})
       })
       const observedHandler = async (next: typeof request) => {
         diagnostics.record("agent_attempt", {
@@ -1967,7 +2505,7 @@ ${summary}
           owner,
           effectiveMessages,
           diagnostics,
-          triggerError !== undefined
+          rejectedRequest
         )
         await diagnostics.finish("completed", options.onDiagnostic)
         return result

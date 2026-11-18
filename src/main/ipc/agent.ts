@@ -59,7 +59,14 @@ import {
   isProjectModeAgentTeamEnabled
 } from "../../shared/project-mode-agent-team"
 import { HumanMessage, SystemMessage, type BaseMessage } from "@langchain/core/messages"
-import { getDurableRuntimeTail } from "./thread-runtime-tail"
+import {
+  getDurableRuntimeTail,
+  getForkableReplyId,
+  materializeSavedForkTails,
+  preserveForkDurableTail,
+  captureInterruptedForkReply,
+  type DurableRuntimeTail
+} from "./thread-runtime-tail"
 import { Command, isCommand } from "@langchain/langgraph"
 import {
   getCapturedSystemPromptPreview,
@@ -158,6 +165,7 @@ import {
 import {
   checkpointHasInterrupt,
   deriveCheckpointTranscriptIndex,
+  getCheckpointUserMessageIndex,
   isWorkflowPlumbingTranscriptContent,
   neutralizeWorkflowPlumbingUserText
 } from "../../shared/checkpoint-transcript"
@@ -193,7 +201,14 @@ import {
 } from "./stream-message-side-effect-buffer"
 import {
   FORK_BOUNDARY_MARKER_VERSION,
-  FORK_BOUNDARY_THREAD_METADATA_KEY
+  FORK_BOUNDARY_THREAD_METADATA_KEY,
+  FORK_DURABLE_TAIL_KEY,
+  getCheckpointId,
+  getForkBoundaryMarker,
+  isSyntheticContinuationTurnId,
+  readForkBoundaryMarker,
+  readForkDurableTail,
+  readInterruptedTurnUserId
 } from "../../shared/checkpoint-forkability"
 import { normalizeTraceTokenUsage } from "../agent/trace/token-usage"
 import { getSoloTaskOwnerIdFromStreamPayload, SoloTaskTraceManager } from "../agent/trace/solo-task"
@@ -652,6 +667,7 @@ async function queueAutoModeAgentTurnEnd(input: {
 async function markLatestForkBoundary(input: {
   threadId: string
   turnId?: string
+  graphInputUserId?: string
   source: "agent_run_complete" | "agent_run_interrupted"
   runToken: string
   controller: AbortController
@@ -669,10 +685,7 @@ async function markLatestForkBoundary(input: {
       })
       if (!ownsPhysicalLease()) return
       if (!tuple) return
-      // 用户中断场景（agent_run_interrupted）下，checkpoint 可能包含 __interrupt__，
-      // 此时应跳过 checkpointHasInterrupt 检查，允许创建 fork boundary，
-      // 以便用户可以在中断点之后进行 fork 操作。
-      if (checkpointHasInterrupt(tuple.checkpoint) && source !== "agent_run_interrupted") return
+      if (checkpointHasInterrupt(tuple.checkpoint) || tuple.metadata?.source === "input") return
       if ((tuple.pendingWrites?.length ?? 0) > 0 && source !== "agent_run_interrupted") return
 
       const checkpointId =
@@ -680,22 +693,46 @@ async function markLatestForkBoundary(input: {
           ? tuple.config.configurable.checkpoint_id
           : tuple.checkpoint.id
       if (!checkpointId) return
+      let turnUserMessageId: string | undefined
+      if (source === "agent_run_interrupted") {
+        if (getForkBoundaryMarker(tuple) || readForkDurableTail(tuple.metadata)) return
+        const protectedIds = await checkpointer.getLegacyForkCheckpointIds(threadId)
+        if (!ownsPhysicalLease() || protectedIds?.has(checkpointId)) return
+        turnUserMessageId = readInterruptedTurnUserId(
+          tuple.checkpoint,
+          { kind: "turn_complete", outcome, turnId },
+          input.graphInputUserId
+        )
+        if (turnId && !turnUserMessageId && !isSyntheticContinuationTurnId(turnId)) return
+      }
 
       const transcript = deriveCheckpointTranscriptIndex(tuple.checkpoint)
-      const lastVisibleMessageId = transcript.visibleMessageIds.at(-1)
+      const rawReplyId = getForkableReplyId(tuple, source === "agent_run_interrupted", transcript)
+      const durableReply = !rawReplyId && turnUserMessageId
+        ? captureInterruptedForkReply(threadId, tuple, turnUserMessageId, transcript)
+        : undefined
+      const lastVisibleMessageId = rawReplyId ?? durableReply?.replyId
+      if (!lastVisibleMessageId) return
       if (!ownsPhysicalLease()) return
       await checkpointer.updateCheckpointMetadata(tuple.config, (metadata) => {
+        if (!ownsPhysicalLease()) return metadata
+        if (source === "agent_run_interrupted" &&
+            (readForkBoundaryMarker(metadata) || readForkDurableTail(metadata))) {
+          return metadata
+        }
         const base =
           metadata && typeof metadata === "object" && !Array.isArray(metadata)
             ? (metadata as Record<string, unknown>)
             : {}
         return {
           ...base,
+          ...(durableReply && { [FORK_DURABLE_TAIL_KEY]: durableReply.durableTail }),
           cmb_fork_boundary: {
             version: 1,
             kind: "turn_complete",
             boundaryId: `${outcome === "interrupted" ? "turn_interrupted" : "turn_complete"}:${threadId}:${checkpointId}`,
             turnId,
+            ...(turnUserMessageId && { turnUserMessageId }),
             checkpointId,
             checkpointNs: "",
             completedAt: new Date().toISOString(),
@@ -734,15 +771,65 @@ async function markLatestForkBoundaryBestEffort(
   })
 }
 
-function ensureThreadForkBoundaryMarkerEra(
+async function ensureThreadForkBoundaryMarkerEra(
   threadId: string,
-  metadata: Record<string, unknown>
-): void {
-  if (metadata[FORK_BOUNDARY_THREAD_METADATA_KEY] === FORK_BOUNDARY_MARKER_VERSION) return
+  metadata: Record<string, unknown>,
+  ownsRun: () => boolean,
+  options: { continuationTurnId?: string; durableTail?: DurableRuntimeTail } = {}
+): Promise<string | undefined> {
+  const { continuationTurnId, durableTail } = options
+  const inMarkerEra = metadata[FORK_BOUNDARY_THREAD_METADATA_KEY] === FORK_BOUNDARY_MARKER_VERSION
+  const recoverContinuationInput = continuationTurnId && isSyntheticContinuationTurnId(continuationTurnId)
+  if (inMarkerEra && !recoverContinuationInput && !durableTail?.persistedMessages.length) return
+  const graphInputUserId = await withCheckpointer(threadId, async (checkpointer) => {
+    if (!ownsRun()) return
+    const capturedLegacyIds = await checkpointer.getLegacyForkCheckpointIds(threadId)
+    const shouldCapture = !inMarkerEra && capturedLegacyIds === undefined
+    if (durableTail) {
+      await preserveForkDurableTail(checkpointer, durableTail, {
+        activeRun: false,
+        pendingApproval: hasPendingApprovalForThread(threadId),
+        legacyFallbackMode: shouldCapture ? "all" : "none",
+        legacyCheckpointIds: capturedLegacyIds
+      }, ownsRun)
+    }
+    let beforeTurnUserId: string | null | undefined
+    let userId: string | undefined
+    if (continuationTurnId) {
+      const config = { configurable: { thread_id: threadId, checkpoint_ns: "" } }
+      const latest = await checkpointer.getTuple(config)
+      if (latest) {
+        const heldTurn =
+          checkpointHasInterrupt(latest.checkpoint) ||
+          (latest.pendingWrites?.length ?? 0) > 0 ||
+          hasPendingApprovalForThread(threadId)
+        if (getCheckpointUserMessageIndex(latest.checkpoint, continuationTurnId) >= 0) {
+          userId = continuationTurnId
+        } else if (recoverContinuationInput) {
+          const savedOrigin = await checkpointer.getForkTurnUserId(threadId, getCheckpointId(latest))
+          if (savedOrigin && getCheckpointUserMessageIndex(latest.checkpoint, savedOrigin) >= 0) {
+            userId = savedOrigin
+          }
+        }
+        if (shouldCapture && (heldTurn || (userId && !recoverContinuationInput))) {
+          beforeTurnUserId = userId ?? null
+        }
+      }
+    }
+    if (shouldCapture && ownsRun()) {
+      await checkpointer.captureLegacyForkCheckpointIds(
+        threadId, beforeTurnUserId, ownsRun,
+        (tuples) => materializeSavedForkTails(threadId, tuples)
+      )
+    }
+    return userId
+  })
+  if (inMarkerEra || !ownsRun()) return graphInputUserId
   metadata[FORK_BOUNDARY_THREAD_METADATA_KEY] = FORK_BOUNDARY_MARKER_VERSION
   patchLatestThreadMetadata(threadId, {
     set: { [FORK_BOUNDARY_THREAD_METADATA_KEY]: FORK_BOUNDARY_MARKER_VERSION }
   })
+  return graphInputUserId
 }
 
 const COORDINATOR_OWNED_THREAD_METADATA_KEYS = [
@@ -1901,6 +1988,9 @@ interface PhysicalAgentRunSettlementOptions {
   cleanupNotificationSkills: () => void
   turnStateShouldDispose: boolean
   disposeTurnState: () => void
+  interruptedForkBoundary?: Pick<
+    Parameters<typeof markLatestForkBoundary>[0], "turnId" | "graphInputUserId"
+  >
   criticalBeforeReleasePhases?: readonly RunSettlementPhase[]
   beforeNotificationPhases?: readonly RunSettlementPhase[]
   runOwner?: LocalThreadRunLease["owner"]
@@ -1919,6 +2009,7 @@ async function settlePhysicalAgentRun({
   cleanupNotificationSkills,
   turnStateShouldDispose,
   disposeTurnState,
+  interruptedForkBoundary,
   criticalBeforeReleasePhases = [],
   beforeNotificationPhases = [],
   runOwner = "desktop",
@@ -1955,6 +2046,16 @@ async function settlePhysicalAgentRun({
           transcriptFlushSucceeded = true
         }
       },
+      ...(interruptedForkBoundary ? [{
+        name: "persist-interrupted-fork-boundary",
+        run: () => markLatestForkBoundaryBestEffort({
+          ...interruptedForkBoundary,
+          threadId,
+          source: "agent_run_interrupted",
+          runToken,
+          controller
+        })
+      }] : []),
       {
         name: "discard-tool-call-accumulators",
         shouldRun: () => transcriptFlushSucceeded,
@@ -6572,6 +6673,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
         const desktopCompletionCursor = captureStreamAssistantCursor(threadId)
         let turnStateShouldDispose = false
+        let interruptedForkBoundary: PhysicalAgentRunSettlementOptions["interruptedForkBoundary"]
         const runGoal = goalManager.getActive(threadId)
         runGoalId = runGoal?.goalId ?? null
         runGoalActiveWindowId = runGoal?.activeWindowId ?? null
@@ -7078,7 +7180,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               console.warn("[Agent] Failed to parse thread metadata, using empty object")
           })
           metadata = parsedThreadMetadata.metadata
-          ensureThreadForkBoundaryMarkerEra(threadId, metadata)
           console.log("[Agent] Thread metadata:", metadata)
 
           const workspacePath = parsedThreadMetadata.workspacePath
@@ -7127,6 +7228,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             finishTraceInBackground(tracer, "error", "WORKSPACE_REQUIRED", "Agent")
             return
           }
+          await ensureThreadForkBoundaryMarkerEra(
+            threadId,
+            metadata,
+            () => isPhysicalStreamRunActive(threadId, runToken, abortController.signal),
+            { durableTail: durableRuntimeTail }
+          )
+          throwIfInvokeAborted()
 
           // Apply hook-supplied prompt rewrite / context injection. `message` remains the raw
           // user input for tracing and proposal capture; `effectiveMessage` is what the LLM sees.
@@ -9738,13 +9846,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
               })
             }
-            await markLatestForkBoundaryBestEffort({
-              threadId,
-              turnId: turnState.turnId,
-              source: "agent_run_interrupted",
-              runToken,
-              controller: abortController
-            })
+            interruptedForkBoundary = { turnId: turnState.turnId }
             turnStateShouldDispose = true
           }
         } catch (error) {
@@ -9945,13 +10047,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
               })
             }
-            await markLatestForkBoundaryBestEffort({
-              threadId,
-              turnId: turnState.turnId,
-              source: "agent_run_interrupted",
-              runToken,
-              controller: abortController
-            })
+            interruptedForkBoundary = { turnId: turnState.turnId }
             turnStateShouldDispose = true
           }
         } finally {
@@ -9975,6 +10071,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             threadId,
             runToken,
             controller: abortController,
+            interruptedForkBoundary,
             settledPromise: activeRunSettledPromise,
             resolveSettlement: resolveActiveRunSettled,
             runOwner: runExecutionContext.localRunLease?.owner ?? "desktop",
@@ -10204,7 +10301,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           console.warn("[Agent] Failed to parse thread metadata, using empty object")
       })
       let metadata = parsedThreadMetadata.metadata
-      ensureThreadForkBoundaryMarkerEra(threadId, metadata)
       const workspacePath = parsedThreadMetadata.workspacePath
       let harnessAgentContext: HarnessAgentContext
       try {
@@ -10539,8 +10635,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
         pruneTurnStateAtInterrupt(turnState, getAllEnabledHooksForInterrupt(workspacePath))
         ensureTurnId(turnState, threadId, "resume")
+        const forkBoundarySetup = await awaitResumeSetup(() =>
+          ensureThreadForkBoundaryMarkerEra(
+            threadId,
+            metadata,
+            () => isPhysicalStreamRunActive(threadId, runToken, abortController.signal),
+            { continuationTurnId: turnState.turnId }
+          )
+        )
+        if (forkBoundarySetup.status === "abandoned") return
         const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
         let turnStateShouldDispose = false
+        let interruptedForkBoundary: PhysicalAgentRunSettlementOptions["interruptedForkBoundary"]
         const boundaryGoal = goalManager.getActive(threadId)
         const boundaryGoalId = boundaryGoal?.goalId ?? null
         const boundaryGoalActiveWindowId = boundaryGoal?.activeWindowId ?? null
@@ -11427,13 +11533,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               error: error instanceof Error ? error.message : "Unknown error"
             })
           } else {
-            await markLatestForkBoundaryBestEffort({
-              threadId,
+            interruptedForkBoundary = {
               turnId: turnState.turnId,
-              source: "agent_run_interrupted",
-              runToken,
-              controller: abortController
-            })
+              graphInputUserId: forkBoundarySetup.value
+            }
           }
           turnStateShouldDispose = true
         } finally {
@@ -11445,6 +11548,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             threadId,
             runToken,
             controller: abortController,
+            interruptedForkBoundary,
             settledPromise: resumeRunSettledPromise,
             resolveSettlement: resolveResumeRunSettled,
             criticalBeforeReleasePhases: [
@@ -11555,7 +11659,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         console.warn("[Agent] Failed to parse thread metadata, using empty object")
     })
     const metadata = parsedThreadMetadata.metadata
-    ensureThreadForkBoundaryMarkerEra(threadId, metadata)
     const workspacePath = parsedThreadMetadata.workspacePath
     const modelId = parsedThreadMetadata.modelId
     let harnessAgentContext: HarnessAgentContext
@@ -11710,8 +11813,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
       pruneTurnStateAtInterrupt(turnState, getAllEnabledHooksForInterrupt(workspacePath))
       ensureTurnId(turnState, threadId, "interrupt")
+      const forkBoundarySetup = await awaitInterruptSetup(() =>
+        ensureThreadForkBoundaryMarkerEra(
+          threadId,
+          metadata,
+          () => isPhysicalStreamRunActive(threadId, runToken, abortController.signal),
+          { continuationTurnId: turnState.turnId }
+        )
+      )
+      if (forkBoundarySetup.status === "abandoned") return
       const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
       let turnStateShouldDispose = false
+      let interruptedForkBoundary: PhysicalAgentRunSettlementOptions["interruptedForkBoundary"]
       const autoCommitSetup = await awaitInterruptSetup(() =>
         beginAutoCommitTracking(threadId, workspacePath, {
           reuseSnapshot: turnState.autoCommitSnapshot !== undefined,
@@ -12581,13 +12694,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             error: error instanceof Error ? error.message : "Unknown error"
           })
         } else {
-          await markLatestForkBoundaryBestEffort({
-            threadId,
+          interruptedForkBoundary = {
             turnId: turnState.turnId,
-            source: "agent_run_interrupted",
-            runToken,
-            controller: abortController
-          })
+            graphInputUserId: forkBoundarySetup.value
+          }
           turnStateShouldDispose = true
         }
       } finally {
@@ -12598,6 +12708,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           threadId,
           runToken,
           controller: abortController,
+          interruptedForkBoundary,
           settledPromise: interruptRunSettledPromise,
           resolveSettlement: resolveInterruptRunSettled,
           criticalBeforeReleasePhases: [

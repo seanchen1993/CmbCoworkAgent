@@ -2099,6 +2099,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     toolTokenLimitBeforeEvict,
     trimTokensToSummarize,
     summarizationMaxInputTokens,
+    summarizationModelInputBudgetTokens,
     summarizationPostCompactionInputBudgetTokens,
     summarizationSummaryPrompt,
     summarizationHistoryPathPrefix,
@@ -2242,6 +2243,9 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     ...(trimTokensToSummarize != null && { trimTokensToSummarize }),
     ...(summarizationMaxInputTokens != null && {
       maxInputTokens: summarizationMaxInputTokens
+    }),
+    ...(summarizationModelInputBudgetTokens != null && {
+      summaryModelInputBudgetTokens: summarizationModelInputBudgetTokens
     }),
     ...(summarizationPostCompactionInputBudgetTokens != null && {
       postCompactionInputBudgetTokens: summarizationPostCompactionInputBudgetTokens
@@ -6901,6 +6905,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     toolTokenLimitBeforeEvict: toolEvictLimit,
     trimTokensToSummarize: summaryOverflowRetryTarget,
     summarizationMaxInputTokens: maxTokens,
+    summarizationModelInputBudgetTokens: summaryInputBudget,
     summarizationPostCompactionInputBudgetTokens: mainModelInputBudget,
     summarizationSummaryPrompt: CMB_COWORK_SUMMARY_PROMPT,
     summarizationHistoryPathPrefix: conversationHistoryPathPrefix,

@@ -671,6 +671,94 @@ function getCheckpointMessages(checkpoint: unknown): unknown[] {
   return Array.isArray(channelValues?.messages) ? channelValues.messages : []
 }
 
+export function filterNewCheckpointReplayMessages(
+  checkpoint: unknown,
+  replay: readonly unknown[]
+): unknown[] {
+  const identity = (message: unknown): string | undefined => {
+    if (!isRecord(message)) return undefined
+    const kwargs = isRecord(message.kwargs) ? message.kwargs : undefined
+    const id = readString(kwargs?.id) ?? readString(message.id)
+    return id ? getMessageRole(message) + "\u0000" + id : undefined
+  }
+  const known = new Set(getCheckpointMessages(checkpoint).map(identity))
+  return replay.filter((message) => {
+    const key = identity(message)
+    if (!key) return true
+    if (known.has(key)) return false
+    known.add(key)
+    return true
+  })
+}
+
+export function getCheckpointUserMessageIndex(checkpoint: unknown, messageId: string): number {
+  return getCheckpointMessages(checkpoint).findIndex(
+    (message, index) =>
+      isRecord(message) &&
+      getMessageRole(message) === "user" &&
+      getMessageId(message, index) === messageId
+  )
+}
+
+export function getCheckpointGraphInputUserId(checkpoint: unknown): string | undefined {
+  if (!isRecord(checkpoint) || !isRecord(checkpoint.channel_values)) return undefined
+  const start = checkpoint.channel_values.__start__
+  const messages = isRecord(start) && Array.isArray(start.messages) ? start.messages : []
+  // A normal invoke appends its own user message after any replayed durable
+  // messages. Steering is injected inside graph nodes, not via this channel.
+  const message = messages.at(-1)
+  if (!isRecord(message) || getMessageRole(message) !== "user") return undefined
+  const kwargs = isRecord(message.kwargs) ? message.kwargs : undefined
+  return readString(kwargs?.id) ?? readString(message.id)
+}
+
+/** An input snapshot can prove the exact durable rows replayed before its new
+ * user message, even when the parent predates explicit fork-tail metadata. */
+export function getCheckpointGraphInputReplay(
+  checkpoint: unknown,
+  limit: number
+): Array<{ id: string; message: Record<string, unknown> }> {
+  if (!isRecord(checkpoint) || !isRecord(checkpoint.channel_values)) return []
+  const input = checkpoint.channel_values.__start__
+  if (!isRecord(input) || !Array.isArray(input.messages)) return []
+  const replay: Array<{ id: string; message: Record<string, unknown> }> = []
+  for (const message of input.messages) {
+    if (!isRecord(message)) return []
+    const kwargs = isRecord(message.kwargs) ? message.kwargs : undefined
+    const id = readString(kwargs?.id) ?? readString(message.id)
+    if (getMessageRole(message) === "user") return id ? replay : []
+    if (!id || replay.length >= limit) return []
+    replay.push({ id, message })
+  }
+  return []
+}
+
+export function getForkReplayMessagePayload(value: unknown): unknown[] | undefined {
+  if (!isRecord(value)) return
+  const role = getMessageRole(value)
+  const kwargs = isRecord(value.kwargs) ? value.kwargs : undefined
+  const content = getMessageContent(value)
+  const additional = getAdditionalKwargs(value)
+  if (role === "tool") {
+    return [
+      role, content, value.tool_call_id ?? kwargs?.tool_call_id, value.name ?? kwargs?.name,
+      value.status ?? kwargs?.status, additional?.is_error === true
+    ]
+  }
+  if (role === "assistant") {
+    const calls = getMessageToolCalls(value).map((call) =>
+      isRecord(call) ? [call.id, call.name, call.args, call.function] : call
+    )
+    return [role, content, calls, additional?.reasoning, additional?.function_call]
+  }
+  return [role, content]
+}
+
+export function checkpointEndsWithAssistantToolCalls(checkpoint: unknown): boolean {
+  const last = getCheckpointMessages(checkpoint).at(-1)
+  return isRecord(last) && getMessageRole(last) === "assistant" && getMessageToolCalls(last).length > 0
+}
+
 export function truncateCheckpointMessagesAfter(checkpoint: unknown, messageId: string): boolean {
   const targetMessageId = messageId.trim()
   if (!targetMessageId || !isRecord(checkpoint)) return false
@@ -807,10 +895,10 @@ export function deriveCheckpointTranscriptIndex(checkpoint: unknown): Checkpoint
 
 export function describeCheckpointMessageForkTarget(
   checkpoint: unknown,
-  messageId: string
+  messageId: string,
+  transcript = deriveCheckpointTranscriptIndex(checkpoint)
 ): CheckpointMessageForkTargetStatus {
   const targetMessageId = messageId.trim()
-  const transcript = deriveCheckpointTranscriptIndex(checkpoint)
   const missing = (
     reason: CheckpointMessageForkTargetReason
   ): CheckpointMessageForkTargetStatus => ({
