@@ -2787,9 +2787,9 @@ interface CustomAPI {
     projectModeRunAnalysisStages: (
       request: RunAnalysisSessionRequest
     ) => Promise<{ success: boolean; data?: RunAnalysisStages; error?: string }>
-    projectModeRunAnalysisTrace: (
+    projectModeRunAnalysisThread: (
       request: RunAnalysisSessionRequest & { traceId: string }
-    ) => Promise<{ success: boolean; data?: DashboardTraceDetail; error?: string }>
+    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     projectModeRunAnalysisSessions: (
       request: RunAnalysisSessionRequest
     ) => Promise<{ success: boolean; data?: RunAnalysisSessions; error?: string }>

@@ -26,6 +26,18 @@ describe("running code-attribution contexts", () => {
     expect(patchAdoptionContextForTrace("late-child", "late-child", {})).toBe(true)
   })
 
+  it("snapshots code attribution from the owning turn, distinguishing empty from unknown", () => {
+    for (const [id, skills, expected] of [
+      ["inherited", ["prior-skill"], true],
+      ["empty", [], false],
+      ["not-initialized", undefined, undefined]
+    ] as const) {
+      setAdoptionContext(id, { traceId: id, usedSkills: skills ? [...skills] : undefined })
+      expect(clearAdoptionContext(id, "other")).toBeUndefined()
+      expect(clearAdoptionContext(id, id)).toBe(expected)
+    }
+  })
+
   it("does not let untraced metadata evict a running child", () => {
     start("running-child")
     for (let i = 0; i < 600; i++) {

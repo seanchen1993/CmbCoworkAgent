@@ -109,16 +109,22 @@ const bundle = await build({
             endedAt:'2026-10-20T01:01:00Z',durationMs:60000,nodeName:request.nodeName??'dev-编码实现',usedSkills:[]
           }]}};
         },
-        projectModeRunAnalysisTrace: async request => {
-          calls.push({type:'trace',request});
-          return {success:true,data:{traceId:request.traceId,threadId:'acceptance-thread',
+        projectModeRunAnalysisThread: async request => {
+          calls.push({type:'thread',request});
+          const selected={traceId:request.traceId,threadId:'acceptance-thread',
             startedAt:'2026-10-20T01:00:00Z',endedAt:'2026-10-20T01:01:00Z',durationMs:60000,
             userMessage:'验收会话：检查本次执行',outcome:'success',totalToolCalls:1,modelCallCount:1,
             userInputRequestCount:0,totalInputTokens:100,totalOutputTokens:50,totalTokens:150,
             usedSkills:[],evolvedSkills:[],traceKind:'root',rawAvailable:true,nodes:[{
               id:'msg1',type:'message',parentId:null,name:'assistant',startedAt:'2026-10-20T01:01:00Z',
               output:'验收回复：本次执行已完成',metadata:{role:'assistant'}
-            }]}};
+            }]};
+          const round=(id,start,end,message,reply,usedSkills)=>({...selected,traceId:id,startedAt:start,endedAt:end,
+            userMessage:message,usedSkills,nodes:[{...selected.nodes[0],startedAt:end,output:reply}]});
+          return {success:true,data:[
+            round('previous','2026-10-20T00:58:00Z','2026-10-20T00:59:00Z','上一轮使用过技能','已完成前置检查',['qa-skill']),
+            selected,round('next','2026-10-20T01:02:00Z','2026-10-20T01:03:00Z','下一轮继续核对','已核对后续结果',[])
+          ]};
         },
         threadTraces: () => {throw Error('Unexpected whole-thread fetch')}
       }};
@@ -468,10 +474,35 @@ try {
   await sessions.getByRole("button", { name: "查看完整会话", exact: true }).click()
   await page.getByRole("heading", { name: "项目分析 · 完整会话", exact: true }).waitFor()
   await page.getByText("验收会话：检查本次执行", { exact: false }).first().waitFor()
+  const conversation = page.getByRole("dialog", { name: "项目分析 · 完整会话", exact: true })
+  for (const message of [
+    "上一轮使用过技能",
+    "已完成前置检查",
+    "验收会话：检查本次执行",
+    "下一轮继续核对",
+    "已核对后续结果"
+  ]) {
+    await conversation
+      .locator("[data-trace-id]")
+      .getByText(message, { exact: true })
+      .first()
+      .waitFor()
+  }
+  const roundIds = await conversation
+    .locator("[data-trace-id]")
+    .evaluateAll((nodes) => [...new Set(nodes.map((node) => node.dataset.traceId))])
+  assert.deepEqual(roundIds, ["previous", "acceptance-trace", "next"])
+  const selectedRound = conversation.getByRole("button", {
+    name: /验收会话：检查本次执行/,
+    pressed: true
+  })
+  await selectedRound.waitFor()
+  await conversation.getByRole("button", { name: /下一轮继续核对/, pressed: false }).click()
+  await conversation.getByRole("button", { name: /下一轮继续核对/, pressed: true }).waitFor()
   const detailCalls = await page.evaluate(() => window.runQA.calls.filter((c) => c.type !== "load"))
   assert.deepEqual(
     detailCalls.map((c) => c.type),
-    ["stages", "sessions", "trace"]
+    ["stages", "sessions", "thread"]
   )
   assert.equal(detailCalls[1].request.metric, "noSkill")
   assert.equal(detailCalls[1].request.nodeName, "design-方案设计")
@@ -482,6 +513,33 @@ try {
   await page.keyboard.press("Escape")
   await page.keyboard.press("Escape")
   await page.getByRole("dialog").waitFor({ state: "hidden" })
+  for (const [label, metric] of [
+    ["节点完成后", "completedNode"],
+    ["无 Skill 归因", "unattributedSkill"]
+  ]) {
+    const matchedFeature = page.getByRole("button", { name: /查看.+详情/ }).first()
+    await matchedFeature.click()
+    const stages = page
+      .getByRole("dialog")
+      .filter({ has: page.getByText("开始于该阶段的主对话", { exact: true }) })
+    await stages
+      .getByRole("button", { name: new RegExp("查看" + label + "的") })
+      .first()
+      .click()
+    await page
+      .getByRole("heading", {
+        name: label === "节点完成后" ? "节点完成后的主 Agent 对话" : "无 Skill 归因的主 Agent 对话"
+      })
+      .waitFor()
+    assert.equal(
+      await page.evaluate(
+        () => window.runQA.calls.filter((c) => c.type === "sessions").at(-1).request.metric
+      ),
+      metric
+    )
+    await page.keyboard.press("Escape")
+    await page.keyboard.press("Escape")
+  }
   await page.evaluate(() => window.runQA.setRoom("B"))
   await waitLoad("B:all")
   assert.equal(await tableRows.count(), 0, "Old room results cannot remain visible")

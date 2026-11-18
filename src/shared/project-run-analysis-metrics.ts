@@ -427,6 +427,13 @@ export function groupRunAnalysis(
         rows.reduce((n, r) => n + (typeof r[key] === "number" ? (r[key] as number) : 0), 0)
       const sumNullable = (key: keyof RunAnalysisFeature): number | null =>
         rows.some((r) => typeof r[key] === "number") ? sum(key) : null
+      const observedTurnSum = (
+        key: "completedNodeConversationCount" | "unattributedSkillConversationCount"
+      ) =>
+        rows.some((r) => r.conversationCount > 0) &&
+        !rows.some((r) => r.conversationCount > 0 && r[key] != null)
+          ? null
+          : sum(key)
       const first =
         rows.flatMap((r) => (r.firstExecutedAt ? [r.firstExecutedAt] : [])).sort()[0] ?? null
       const last =
@@ -458,6 +465,8 @@ export function groupRunAnalysis(
         traceCount: sum("traceCount"),
         conversationCount: sum("conversationCount"),
         noSkillConversationCount: sum("noSkillConversationCount"),
+        completedNodeConversationCount: observedTurnSum("completedNodeConversationCount"),
+        unattributedSkillConversationCount: observedTurnSum("unattributedSkillConversationCount"),
         totalDurationMs: sumNullable("totalDurationMs"),
         toolCalls: sumNullable("toolCalls"),
         modelCalls: sumNullable("modelCalls"),
@@ -544,6 +553,8 @@ export function runAnalysisExportRows(
     "未使用Skill主对话（轮）": r.noSkillConversationCount,
     未使用Skill主对话占比:
       r.conversationCount > 0 ? r.noSkillConversationCount / r.conversationCount : null,
+    "节点完成后主对话（次）": r.completedNodeConversationCount,
+    "无 Skill 归因主对话（次）": r.unattributedSkillConversationCount,
     "工具调用（次）": r.toolCalls,
     "模型调用（次）": r.modelCalls,
     "有效生成代码（行）": r.codeStats?.inclusiveEffectiveGeneratedLines ?? null,

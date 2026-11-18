@@ -28,9 +28,15 @@ import {
   fetchRunAnalysisStages,
   fetchRunAnalysisSessions,
   emptyRunAnalysisMetrics,
-  fetchRunAnalysisTrace
+  fetchRunAnalysisThread,
+  runAnalysisAttributionFilters
 } from "./project-run-analysis"
-import { makeMockRunAnalysis, makeMockRunAnalysisStages } from "./project-run-analysis-mock"
+import {
+  makeMockRunAnalysis,
+  makeMockRunAnalysisStages,
+  mockRunAnalysisSessionIndexes,
+  mockStageNames
+} from "./project-run-analysis-mock"
 import {
   excludesTestProjects,
   excludeTestProjectsFromQuery,
@@ -13204,7 +13210,10 @@ async function fetchProjectModePageUsage(
     const featureAgg = asRecord(mainAgentConversations.by_feature)
     const featureBuckets = Array.isArray(featureAgg.buckets) ? featureAgg.buckets : []
     lastExecutionByProject.set(key, readLastExecution(mainAgentConversations))
-    lastExecutionEndByProject.set(key, readLastExecution(mainAgentConversations, "last_execution_end"))
+    lastExecutionEndByProject.set(
+      key,
+      readLastExecution(mainAgentConversations, "last_execution_end")
+    )
     if (
       asNumber(featureAgg.sum_other_doc_count) > 0 ||
       asNumber(featureAgg.doc_count_error_upper_bound) !== 0
@@ -13865,14 +13874,14 @@ const projectModePageCache = new ProjectModePageCache<ProjectModeProjectPageData
 const runAnalysisCache = new ProjectModePageCache<RunAnalysisData>()
 
 function makeMockRunAnalysisTrace(
-  request: RunAnalysisSessionRequest & { traceId?: string },
+  request: RunAnalysisSessionRequest,
   index: number
 ): DashboardTraceDetail {
-  const traceId =
-    request.traceId ?? `run-analysis-demo:${request.projectId}:${request.featureSlug}:${index}`
+  const scope = `run-analysis-demo:${request.projectId}:${request.featureSlug}`
+  const traceId = `${scope}:${index}`
   const trace = makeMockTraceWithConversation({
     traceId,
-    threadId: `demo-thread-${index}`,
+    threadId: `${scope}:thread-${index < 3 ? "new" : index % 6}`,
     startedAt: new Date(Date.now() - (index + 1) * 600000),
     durationMs: 60000,
     skill: "示例研发技能",
@@ -13886,12 +13895,12 @@ function makeMockRunAnalysisTrace(
   trace.usedSkills = index < 12 ? [] : ["示例研发技能"]
   trace.harnessProjectId = request.projectId
   trace.harnessFeatureSlug = request.featureSlug ?? undefined
-  trace.harnessNodeName =
-    request.nodeName ?? ["design-方案设计", "dev-编码实现", "test-测试"][index % 3]
-  return makeMockDashboardTraceDetail(trace, index)
+  trace.harnessNodeName = mockStageNames[index % mockStageNames.length]
+  trace.harnessNodeStatus = index % 5 === 0 ? "已完成" : "进行中"
+  return makeMockDashboardTraceDetail(trace, index % 6)
 }
 function makeMockRunAnalysisSessions(request: RunAnalysisSessionRequest) {
-  const indexes = Array.from({ length: request.metric === "noSkill" ? 12 : 30 }, (_, i) => i)
+  const indexes = mockRunAnalysisSessionIndexes(request)
   const rows = indexes
     .map((index) => makeMockRunAnalysisTrace(request, index))
     .map((trace) => ({
@@ -14044,7 +14053,7 @@ async function fetchProjectRunAnalysis(
   return data
 }
 
-async function runAnalysisDetailFilters(
+async function runAnalysisProjectFilters(
   request: RunAnalysisSessionRequest
 ): Promise<Record<string, unknown>[]> {
   const access = requireDashboardProjectModeAccess()
@@ -14082,18 +14091,11 @@ async function runAnalysisDetailFilters(
   const total = getTotalHits(raw, NaN)
   if (!Number.isSafeInteger(total) || total < 0) throw new Error("项目范围校验结果不完整，请重试")
   if (total === 0) throw new Error("当前可访问及筛选范围内未找到该项目，请刷新项目列表后重试")
-  return [
-    ...projectModeTraceFilters(null, org),
-    { term: { harnessProjectId: request.projectId } },
-    request.featureSlug === null
-      ? { bool: { must_not: [{ exists: { field: "harnessFeatureSlug" } }] } }
-      : { term: { harnessFeatureSlug: request.featureSlug } },
-    ...(request.nodeName === undefined
-      ? []
-      : request.nodeName === null
-        ? [{ bool: { must_not: [{ exists: { field: "harnessNodeName" } }] } }]
-        : [{ term: { harnessNodeName: request.nodeName } }])
-  ]
+  return [...projectModeTraceFilters(null, org), { term: { harnessProjectId: request.projectId } }]
+}
+
+async function runAnalysisDetailFilters(request: RunAnalysisSessionRequest) {
+  return [...(await runAnalysisProjectFilters(request)), ...runAnalysisAttributionFilters(request)]
 }
 
 async function fetchProjectModeMetricSortedPage(
@@ -16629,29 +16631,37 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   registerLatestDashboardHandler(
     _ipcMain,
-    "dashboard:projectModeRunAnalysisTrace",
+    "dashboard:projectModeRunAnalysisThread",
     async (_, request: RunAnalysisSessionRequest & { traceId: string }) => {
       try {
         if (!request.traceId?.trim()) throw new Error("Trace ID is required")
-        if (import.meta.env.DEV)
+        if (import.meta.env.DEV) {
+          const rows = Array.from({ length: 30 }, (_, index) =>
+            makeMockRunAnalysisTrace(request, index)
+          )
+          const selected = mockRunAnalysisSessionIndexes(request)
+            .map((i) => rows[i])
+            .find((row) => row.traceId === request.traceId)
+          if (!selected) throw new Error("未找到所选轮次")
           return {
             success: true,
-            data: makeMockRunAnalysisTrace(request, Number(request.traceId.split(":").at(-1)) || 0)
+            data: rows.filter((row) => row.threadId === selected.threadId).reverse()
           }
-        const filters = await runAnalysisDetailFilters(request)
+        }
         return {
           success: true,
-          data: await fetchRunAnalysisTrace(
-            esQuery,
-            getEsIndex("trace"),
-            filters,
+          data: await fetchRunAnalysisThread({
+            query: esQuery,
+            index: getEsIndex("trace"),
+            projectFilters: await runAnalysisProjectFilters(request),
             request,
-            dashboardTraceSourceIncludes(),
-            (hit) => normalizeTraceDetail(hit as EsSearchHit)
-          )
+            sourceIncludes: dashboardTraceSourceIncludes(),
+            normalize: (hit) => normalizeTraceDetail(hit as EsSearchHit),
+            isResponseTooLarge: isDashboardEsResponseTooLarge
+          })
         }
       } catch (e) {
-        logDashboardRequestError("projectModeRunAnalysisTrace", e)
+        logDashboardRequestError("projectModeRunAnalysisThread", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

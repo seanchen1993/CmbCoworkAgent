@@ -4,6 +4,7 @@ import {
   fetchRunAnalysisSessions,
   fetchRunAnalysisStages,
   fetchRunAnalysisTrace,
+  fetchRunAnalysisThread,
   forEachRunAnalysisBucket,
   noSkillMainConversationFilter,
   readRunAnalysisMetrics,
@@ -337,5 +338,85 @@ describe("precise complete conversation lookup", () => {
         )
       ).rejects.toThrow()
     }
+  })
+})
+
+describe("project analysis thread drilldown", () => {
+  const request = {
+    projectId: "p",
+    featureSlug: "f",
+    nodeName: "dev",
+    metric: "noSkill" as const,
+    traceId: "t201"
+  }
+  const projectFilters = [{ term: { harnessProjectId: "p" } }, { term: { upperOrgLv1: "本室" } }]
+  const options = {
+    index: "trace",
+    projectFilters,
+    request,
+    sourceIncludes: ["_raw"],
+    normalize: (hit: Json) => hit._source as { traceId: string },
+    isResponseTooLarge: () => false
+  }
+  it("validates the selected round, then includes other stages and Skill rounds through the last page", async () => {
+    const rows = Array.from({ length: 205 }, (_, i) => ({
+      _source: { traceId: `t${i}`, usedSkills: i === 201 ? [] : ["skill"] },
+      sort: [i, `t${i}`]
+    }))
+    const query = async (_index: string, body: Json) => {
+      if (body.track_total_hits) {
+        expect(body.query.bool.filter).toEqual([
+          ...projectFilters,
+          { term: { harnessFeatureSlug: "f" } },
+          { term: { harnessNodeName: "dev" } },
+          noSkillMainConversationFilter(),
+          { term: { traceId: "t201" } }
+        ])
+        return {
+          hits: {
+            total: 1,
+            hits: [
+              { _source: { threadId: "child", parentThreadId: "parent", rootThreadId: "root" } }
+            ]
+          }
+        }
+      }
+      expect(body.query.bool.filter).toEqual([
+        ...projectFilters,
+        {
+          bool: {
+            should: ["rootThreadId", "parentThreadId", "threadId"].map((field) => ({
+              term: { [field]: "root" }
+            })),
+            minimum_should_match: 1
+          }
+        }
+      ])
+      const start = body.search_after ? body.search_after[0] + 1 : 0
+      return { hits: { hits: rows.slice(start, start + body.size) } }
+    }
+    expect(await fetchRunAnalysisThread({ ...options, query })).toEqual(
+      rows.map((row) => row._source)
+    )
+  })
+  it("does not expand when the selected round is outside the drilldown scope", async () => {
+    const query = vi.fn().mockResolvedValue({ hits: { total: 0, hits: [] } })
+    await expect(fetchRunAnalysisThread({ ...options, query })).rejects.toThrow()
+    expect(query).toHaveBeenCalledTimes(1)
+  })
+  it("restricts legacy unlinked records to their exact trace", async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({
+        hits: { total: 1, hits: [{ _source: { threadId: "unknown-thread" } }] }
+      })
+      .mockResolvedValueOnce({ hits: { hits: [{ _source: { traceId: request.traceId } }] } })
+    expect(await fetchRunAnalysisThread({ ...options, query })).toEqual([
+      { traceId: request.traceId }
+    ])
+    expect(query.mock.calls[1][1].query.bool.filter).toEqual([
+      ...projectFilters,
+      { term: { traceId: request.traceId } }
+    ])
   })
 })

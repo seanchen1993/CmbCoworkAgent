@@ -1027,10 +1027,18 @@ export function patchAdoptionContextForTrace(
   return true
 }
 
-export function clearAdoptionContext(threadId: string, expectedTraceId?: string): void {
-  if (expectedTraceId && getContext(threadId).traceId !== expectedTraceId) return
+/** When finishing the owning trace, snapshot the same Skill attribution used by code_gen. */
+export function clearAdoptionContext(
+  threadId: string,
+  expectedTraceId?: string
+): boolean | undefined {
+  const context = getContext(threadId)
+  if (expectedTraceId && context.traceId !== expectedTraceId) return
   threadContexts.delete(threadId)
   traceOwnedContexts.delete(threadId)
+  return expectedTraceId && context.usedSkills !== undefined
+    ? normalizeUsedSkills(context.usedSkills).length > 0
+    : undefined
 }
 
 function getContext(threadId: string): AdoptionContext {

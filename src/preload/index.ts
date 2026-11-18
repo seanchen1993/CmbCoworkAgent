@@ -4114,10 +4114,10 @@ const api = {
       request: RunAnalysisSessionRequest
     ): Promise<{ success: boolean; data?: RunAnalysisStages; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeRunAnalysisStages", request),
-    projectModeRunAnalysisTrace: (
+    projectModeRunAnalysisThread: (
       request: RunAnalysisSessionRequest & { traceId: string }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:projectModeRunAnalysisTrace", request),
+      ipcRenderer.invoke("dashboard:projectModeRunAnalysisThread", request),
     projectModeRunAnalysisSessions: (
       request: RunAnalysisSessionRequest
     ): Promise<{ success: boolean; data?: RunAnalysisSessions; error?: string }> =>

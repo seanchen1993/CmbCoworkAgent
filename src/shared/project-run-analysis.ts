@@ -38,6 +38,8 @@ export interface RunAnalysisMetrics {
   traceCount: number
   conversationCount: number
   noSkillConversationCount: number
+  completedNodeConversationCount: number | null
+  unattributedSkillConversationCount: number | null
   firstExecutedAt: string | null
   lastExecutedAt: string | null
   lastEndedAt: string | null
@@ -115,7 +117,7 @@ export interface RunAnalysisSessionRequest extends RunAnalysisOptions {
   projectId: string
   featureSlug: string | null
   nodeName?: string | null
-  metric?: "all" | "main" | "noSkill" | "subagent"
+  metric?: "all" | "main" | "noSkill" | "completedNode" | "unattributedSkill" | "subagent"
   after?: unknown[] | null
 }
 export interface RunAnalysisSessions {
@@ -128,7 +130,10 @@ export const RUN_ANALYSIS_NOTES = {
     "日期仅用于确定名单；指标均为项目/特性累计数据。默认所选日期内有执行（含归档）；全部项目含已归档项目，不受日期限制。名单范围不受顶部“仅本期新建”影响。",
   span: "执行跨度=已上报记录最早执行开始至最晚执行结束，不代表业务完成或阶段停留时长；缺少边界时显示 —。累计执行耗时仅累加主动触发的主 Agent 轮次，避免父子重复。",
   skill:
-    "未使用 Skill 的主 Agent 对话=主动触发主 Agent 轮次且未记录有效技能（继承技能算使用）。空值及历史缺失按未使用统计，历史漏采可能使结果偏高；阶段按轮次开始阶段归属。",
+    "统计本轮未记录 Skill 的主动触发主 Agent 对话。仅沿用同一会话先前 Skill 的轮次也计入。历史记录缺少 Skill 字段时同样计入，阶段按轮次开始时的节点归属。",
+  completedNode: "主 Agent 轮次开始时，当前节点已经完成。按已上报节点状态累计次数。",
+  unattributedSkill:
+    "主 Agent 轮次没有代码 Skill 归因时计一次，含纯对话。沿用同一会话活跃 Skill 的轮次已有归因。仅统计已上报归因结果的轮次。",
   cost: "工具/模型调用为已上报记录的累计次数，包含主、子 Agent 的调用。历史漏报可能导致统计不完整；没有记录时显示 —。",
   adoption:
     "提交采纳率（Commit）=提交采纳行数/全量有效生成行数；入库采纳率（Push）=已Push采纳行数/全量有效生成行数。全量有效生成包含已测量有效生成及尚未测量的生成代码。项目汇总先合并分子分母。Vibe采纳占比=Vibe采纳/(Harness采纳+Vibe采纳)，未归因不入分母。无代码样本显示 —。",

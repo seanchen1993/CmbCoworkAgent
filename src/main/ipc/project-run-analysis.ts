@@ -15,6 +15,8 @@ import {
   stageBucketCodeFilterClause
 } from "./dashboard-stage-buckets"
 import { normalizeCodeStatsFromContainer } from "./dashboard-code-stats"
+import { STAGE_DONE_LABEL } from "../../shared/harness-stage-bucket"
+import { readDashboardTracePages } from "./dashboard-trace-pages"
 import { assertProjectModeResultComplete } from "./project-mode-query-scope"
 
 type Json = Record<string, unknown>
@@ -208,12 +210,25 @@ const featureSources = (prefix = ""): Json[] => [
   source("feature", `${prefix}harnessFeatureSlug`, true)
 ]
 
+const completedNode = { term: { harnessNodeStatus: STAGE_DONE_LABEL } }
+const unattributedSkill = { term: { hasCodeAttributedSkill: false } }
+
 export function runAnalysisMetricAggs(range: RunAnalysisRange): Json {
   return {
     first_execution: { min: { field: "startedAt" } },
     last_execution: { max: { field: "startedAt" } },
     last_end: { max: { field: "endedAt" } },
-    ...mainAgentConversationAggs({ duration: { stats: { field: "durationMs" } } }),
+    ...mainAgentConversationAggs({
+      duration: { stats: { field: "durationMs" } },
+      node_status_reported: {
+        filter: { exists: { field: "harnessNodeStatus" } },
+        aggs: { completed: { filter: completedNode } }
+      },
+      skill_attribution_reported: {
+        filter: { exists: { field: "hasCodeAttributedSkill" } },
+        aggs: { unattributed: { filter: unattributedSkill } }
+      }
+    }),
     no_skill: { filter: noSkillMainConversationFilter() },
     tool_calls: { stats: { field: "totalToolCalls" } },
     model_calls: { stats: { field: "modelCallCount" } },
@@ -230,6 +245,8 @@ export function emptyRunAnalysisMetrics(): RunAnalysisMetrics {
     traceCount: 0,
     conversationCount: 0,
     noSkillConversationCount: 0,
+    completedNodeConversationCount: 0,
+    unattributedSkillConversationCount: 0,
     firstExecutedAt: null,
     lastExecutedAt: null,
     lastEndedAt: null,
@@ -250,6 +267,12 @@ export function emptyRunAnalysisMetrics(): RunAnalysisMetrics {
 export function readRunAnalysisMetrics(bucket: Json): RunAnalysisMetrics {
   const main = readMainAgentConversations(bucket),
     duration = record(main.duration)
+  const observedCount = (coverage: unknown, metric: string): number | null => {
+    const observed = record(coverage)
+    return number(main.doc_count) > 0 && !number(observed.doc_count)
+      ? null
+      : number(record(observed[metric]).doc_count)
+  }
   const start = record(bucket.first_execution).value,
     end = record(bucket.last_end).value
   const tool = record(bucket.tool_calls),
@@ -259,6 +282,11 @@ export function readRunAnalysisMetrics(bucket: Json): RunAnalysisMetrics {
     traceCount: number(bucket.doc_count),
     conversationCount: number(main.doc_count),
     noSkillConversationCount: number(record(bucket.no_skill).doc_count),
+    completedNodeConversationCount: observedCount(main.node_status_reported, "completed"),
+    unattributedSkillConversationCount: observedCount(
+      main.skill_attribution_reported,
+      "unattributed"
+    ),
     firstExecutedAt: iso(start),
     lastExecutedAt: iso(record(bucket.last_execution).value),
     lastEndedAt: iso(end),
@@ -585,6 +613,9 @@ export async function fetchRunAnalysisStages(
 export function runAnalysisSessionMetricFilters(
   metric: RunAnalysisSessionRequest["metric"]
 ): Json[] {
+  if (metric === "completedNode") return [projectModeMainAgentConversationFilter(), completedNode]
+  if (metric === "unattributedSkill")
+    return [projectModeMainAgentConversationFilter(), unattributedSkill]
   return metric === "noSkill"
     ? [noSkillMainConversationFilter()]
     : metric === "main"
@@ -592,6 +623,29 @@ export function runAnalysisSessionMetricFilters(
       : metric === "subagent"
         ? [childFilter]
         : []
+}
+
+export function runAnalysisAttributionFilters(request: RunAnalysisSessionRequest): Json[] {
+  return [
+    request.featureSlug === null
+      ? { bool: { must_not: [{ exists: { field: "harnessFeatureSlug" } }] } }
+      : { term: { harnessFeatureSlug: request.featureSlug } },
+    ...(request.nodeName === undefined
+      ? []
+      : request.nodeName === null
+        ? [{ bool: { must_not: [{ exists: { field: "harnessNodeName" } }] } }]
+        : [{ term: { harnessNodeName: request.nodeName } }])
+  ]
+}
+
+const threadFields = ["rootThreadId", "parentThreadId", "threadId"] as const
+
+function conversationThreadId(source: Json): string | null {
+  for (const field of threadFields) {
+    const id = text(source[field])?.trim()
+    if (id && id !== "unknown-thread") return id
+  }
+  return null
 }
 
 /** Cursor paging for drilldowns: only lightweight headers, matching the counted metric. */
@@ -621,7 +675,7 @@ export async function fetchRunAnalysisSessions(
       _source: {
         includes: [
           "traceId",
-          "threadId",
+          ...threadFields,
           "startedAt",
           "endedAt",
           "durationMs",
@@ -653,7 +707,7 @@ export async function fetchRunAnalysisSessions(
       if (!text(s.traceId)) throw new Error("会话缺少标识")
       return {
         traceId: text(s.traceId)!,
-        threadId: text(s.threadId),
+        threadId: conversationThreadId(s),
         startedAt: text(s.startedAt),
         endedAt: text(s.endedAt),
         durationMs: typeof s.durationMs === "number" ? s.durationMs : null,
@@ -698,4 +752,47 @@ export async function fetchRunAnalysisTrace<T>(
   if (!Array.isArray(hits.hits) || hits.hits.length !== 1 || exactTotalHits(hits.total) !== 1)
     throw new Error("未找到该口径下唯一的完整会话记录")
   return normalize(record(hits.hits[0]))
+}
+
+/** Resolve the selected round under its original metric, then read its thread under the same project/room access. */
+export async function fetchRunAnalysisThread<T extends { traceId: string }>(input: {
+  query: RunAnalysisQuery
+  index: string
+  projectFilters: Json[]
+  request: RunAnalysisSessionRequest & { traceId: string }
+  sourceIncludes: string[]
+  normalize: (hit: Json) => T
+  isResponseTooLarge: (error: unknown) => boolean
+}): Promise<T[]> {
+  const { query, index, request, projectFilters } = input
+  const threadId = await fetchRunAnalysisTrace(
+    query,
+    index,
+    [...projectFilters, ...runAnalysisAttributionFilters(request)],
+    request,
+    [...threadFields],
+    (hit) => conversationThreadId(record(hit._source))
+  )
+  const selection = threadId
+    ? {
+        bool: {
+          should: threadFields.map((field) => ({ term: { [field]: threadId } })),
+          minimum_should_match: 1
+        }
+      }
+    : { term: { traceId: request.traceId } }
+  const traces = new Map<string, T>()
+  for await (const hits of readDashboardTracePages({
+    filters: [...projectFilters, selection],
+    sourceIncludes: input.sourceIncludes,
+    query: (body) => query(index, body),
+    isResponseTooLarge: input.isResponseTooLarge
+  })) {
+    for (const hit of hits) {
+      const trace = input.normalize(hit)
+      traces.set(trace.traceId, trace)
+    }
+  }
+  if (!traces.has(request.traceId)) throw new Error("所选轮次已变化，请刷新会话列表后重试")
+  return [...traces.values()]
 }

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest"
-import { fetchRunAnalysis, type RunAnalysisScope } from "./project-run-analysis"
+import {
+  fetchRunAnalysis,
+  runAnalysisSessionMetricFilters,
+  type RunAnalysisScope
+} from "./project-run-analysis"
 import {
   DEFAULT_RUN_ANALYSIS_FILTERS,
   filterRunAnalysis,
@@ -139,18 +143,33 @@ describe("运行分析独立场景验收", () => {
       expect.arrayContaining(["properties.projectCode", "properties.projectFromLean"])
     )
   })
-  it("只把无技能主轮次计入，继承技能及后台/子轮次不混入，同一子代理多轮只算一个", async () => {
+  it("独立统计节点完成后与无 Skill 归因的主轮次；继承、重叠、缺失和子代理各按其口径", async () => {
     const h = harness(
       [snapshot("p", ["same"])],
       [
-        trace("empty"),
+        trace("empty", { harnessNodeStatus: "已完成", hasCodeAttributedSkill: false }),
         trace("missing", { usedSkills: undefined }),
-        trace("used", { usedSkills: ["skill-v1"] }),
-        trace("inherited", { usedSkills: ["inherited-v1"] }),
-        trace("heartbeat", { triggerSource: "heartbeat" }),
+        trace("used", {
+          harnessNodeStatus: "已完成",
+          usedSkills: ["skill-v1"],
+          hasCodeAttributedSkill: true
+        }),
+        trace("inherited", {
+          harnessNodeStatus: "已完成",
+          usedSkills: [],
+          hasCodeAttributedSkill: true
+        }),
+        trace("no-attribution", { harnessNodeStatus: "进行中", hasCodeAttributedSkill: false }),
+        trace("heartbeat", {
+          triggerSource: "heartbeat",
+          harnessNodeStatus: "已完成",
+          hasCodeAttributedSkill: false
+        }),
         ...[1, 2, 3].map((i) =>
           trace(`child${i}`, {
             traceKind: "subagent",
+            harnessNodeStatus: "已完成",
+            hasCodeAttributedSkill: false,
             parentTraceId: "empty",
             subagentThreadId: "worker",
             subagentRunId: `worker:turn:${i}`,
@@ -163,15 +182,48 @@ describe("运行分析独立场景验收", () => {
     const { rows } = await fetchRunAnalysis(scope(), h.query)
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({
-      conversationCount: 4,
-      noSkillConversationCount: 2,
+      conversationCount: 5,
+      noSkillConversationCount: 4,
+      completedNodeConversationCount: 3,
+      unattributedSkillConversationCount: 2,
       subagentCount: 1,
       subagentTurns: 3,
-      totalDurationMs: 240_000
+      totalDurationMs: 300_000
     })
+    const roundDocs = h.requests.find(
+      (req) => req.index === "trace" && req.body.aggs?.rows?.aggs?.main_agent_conversations
+    )!.matches
+    for (const [metric, expected] of [
+      ["completedNode", ["empty", "used", "inherited"]],
+      ["unattributedSkill", ["empty", "no-attribution"]]
+    ] as const) {
+      expect(
+        roundDocs
+          .filter((doc) =>
+            runAnalysisSessionMetricFilters(metric).every((filter) => matches(doc, filter))
+          )
+          .map((doc) => doc.traceId)
+      ).toEqual(expected)
+    }
     expect(h.peak()).toBeLessThanOrEqual(2)
   })
 
+  it("归因字段缺失时保留未知，项目内的空特性不把未知汇总为零", async () => {
+    const h = harness(
+      [snapshot("p", ["same", "empty"])],
+      [trace("legacy", { harnessNodeStatus: "已完成" })]
+    )
+    const data = await fetchRunAnalysis(scope(), h.query)
+    const matches = filterRunAnalysis(data, DEFAULT_RUN_ANALYSIS_FILTERS, "idle", true)
+    const project = groupRunAnalysis(data, matches, "idle", true)[0]
+    expect(project.row).toMatchObject({
+      completedNodeConversationCount: 1,
+      unattributedSkillConversationCount: null
+    })
+    expect(
+      runAnalysisExportRows(data, matches).find((row) => row.特性名称 === "same")
+    ).toMatchObject({ "节点完成后主对话（次）": 1, "无 Skill 归因主对话（次）": null })
+  })
   it("先选本期执行特性再读累计数据，保留以前的执行边界而不扫描无关特性", async () => {
     const old = "2026-09-01T00:00:00Z"
     const h = harness(

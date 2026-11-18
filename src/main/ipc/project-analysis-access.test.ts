@@ -34,7 +34,7 @@ const analysisChannels = [
   "projectModeRunAnalysis",
   "projectModeRunAnalysisStages",
   "projectModeRunAnalysisSessions",
-  "projectModeRunAnalysisTrace",
+  "projectModeRunAnalysisThread",
   "projectModePeriodMetrics"
 ]
 const agentChannels = [

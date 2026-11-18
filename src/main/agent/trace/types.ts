@@ -585,6 +585,8 @@ export interface AgentTrace extends Partial<TraceStageUsageSnapshot> {
   appVersion?: string
   /** Which skills were actually used during this run, format: "name-version" e.g. "scheduler-assistant-v1.0.0" */
   usedSkills: string[]
+  /** Effective code Skill attribution at turn completion, including inherited Skills. Absent if unobserved. */
+  hasCodeAttributedSkill?: boolean
   /** Source refs for plugin-owned usedSkills, format: "plugin:<pluginId>/<skillIdentifier>". */
   skillSource?: string[]
   /** Optional skill-eval payload computed before upload. Existing trace fields remain unchanged. */

@@ -1593,17 +1593,22 @@ export class TraceCollector {
       // Tool writes already capture attribution synchronously in recordGen.
       // Release execution state now, before potentially slow/hung metadata
       // enrichment in finishOnce. A late finish cannot clear a newer turn.
+      let hasCodeAttributedSkill: boolean | undefined
       try {
-        clearAdoptionContext(this.threadId, this.traceId)
+        hasCodeAttributedSkill = clearAdoptionContext(this.threadId, this.traceId)
       } catch {
         // Attribution cleanup must not mask the original finish result.
       }
-      this.finishPromise = this.finishOnce(outcome, errorMessage)
+      this.finishPromise = this.finishOnce(outcome, errorMessage, hasCodeAttributedSkill)
     }
     return this.finishPromise
   }
 
-  private async finishOnce(outcome: TraceOutcome, errorMessage?: string): Promise<AgentTrace> {
+  private async finishOnce(
+    outcome: TraceOutcome,
+    errorMessage?: string,
+    hasCodeAttributedSkill?: boolean
+  ): Promise<AgentTrace> {
     unregisterTraceStageUsage(this.traceId)
     const endedAt = nowIsoLocal()
     this.stageDurationEndedAt = new Date(endedAt).getTime()
@@ -1786,6 +1791,7 @@ export class TraceCollector {
       outcome,
       ...(boundedErrorMessage ? { errorMessage: boundedErrorMessage } : {}),
       usedSkills: usedSkillsWithVersions,
+      ...(hasCodeAttributedSkill !== undefined ? { hasCodeAttributedSkill } : {}),
       ...(skillSource.length > 0 ? { skillSource } : {}),
       evolvedSkills: evolvedSkillsWithVersions,
       triggerSource: this.triggerSource,

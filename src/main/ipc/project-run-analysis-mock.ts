@@ -2,10 +2,25 @@ import type {
   RunAnalysisData,
   RunAnalysisOptions,
   RunAnalysisRange,
-  RunAnalysisStage
+  RunAnalysisStage,
+  RunAnalysisSessionRequest
 } from "../../shared/project-run-analysis"
 import { emptyRunAnalysisMetrics } from "./project-run-analysis"
 import { makeDashboardCodeStats } from "./dashboard-code-stats"
+
+export const mockStageNames = ["design-方案设计", "dev-编码实现", "test-测试"]
+export function mockRunAnalysisSessionIndexes({
+  metric,
+  nodeName
+}: Pick<RunAnalysisSessionRequest, "metric" | "nodeName">): number[] {
+  return Array.from({ length: 30 }, (_, i) => i).filter(
+    (i) =>
+      (nodeName === undefined || nodeName === mockStageNames[i % mockStageNames.length]) &&
+      (metric !== "noSkill" || i < 12) &&
+      (metric !== "completedNode" || i % 5 === 0) &&
+      (metric !== "unattributedSkill" || i < 3)
+  )
+}
 
 /** Explicit development fixture; no generated values enter the production branch. */
 export function makeMockRunAnalysis(
@@ -58,6 +73,10 @@ export function makeMockRunAnalysis(
       traceCount: i % 7 === 0 ? 0 : 40,
       conversationCount: i % 7 === 0 ? 0 : 30,
       noSkillConversationCount: i % 7 === 0 ? 0 : i % 2 === 0 ? 12 : 20,
+      completedNodeConversationCount:
+        i % 7 === 0 ? 0 : mockRunAnalysisSessionIndexes({ metric: "completedNode" }).length,
+      unattributedSkillConversationCount:
+        i % 7 === 0 ? 0 : mockRunAnalysisSessionIndexes({ metric: "unattributedSkill" }).length,
       firstExecutedAt: i % 7 === 0 ? null : first,
       lastExecutedAt: i % 7 === 0 ? null : last,
       lastEndedAt: i % 7 === 0 ? null : last,
@@ -101,12 +120,20 @@ export function makeMockRunAnalysis(
   }
 }
 export function makeMockRunAnalysisStages(): RunAnalysisStage[] {
-  return ["design-方案设计", "dev-编码实现", "test-测试"].map((nodeName, i) => ({
+  return mockStageNames.map((nodeName, i) => ({
     ...emptyRunAnalysisMetrics(),
     nodeName,
     traceCount: 14,
     conversationCount: 10,
     noSkillConversationCount: i + 2,
+    completedNodeConversationCount: mockRunAnalysisSessionIndexes({
+      nodeName,
+      metric: "completedNode"
+    }).length,
+    unattributedSkillConversationCount: mockRunAnalysisSessionIndexes({
+      nodeName,
+      metric: "unattributedSkill"
+    }).length,
     firstExecutedAt: new Date(Date.now() - 3 * 86400000).toISOString(),
     lastExecutedAt: new Date().toISOString(),
     lastEndedAt: new Date().toISOString(),

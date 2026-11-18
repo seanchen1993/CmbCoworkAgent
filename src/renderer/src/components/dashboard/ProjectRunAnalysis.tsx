@@ -27,6 +27,7 @@ import type {
   RunAnalysisData,
   RunAnalysisFeature,
   RunAnalysisMembership,
+  RunAnalysisMetrics,
   RunAnalysisOptions,
   RunAnalysisRange,
   RunAnalysisSession,
@@ -93,6 +94,49 @@ function AnalysisLink({ children, className, ...props }: ButtonHTMLAttributes<HT
       {children}
       <ChevronRight className="size-3 shrink-0" aria-hidden="true" />
     </button>
+  )
+}
+const turnMetrics = [
+  { metric: "completedNode", field: "completedNodeConversationCount", label: "节点完成后" },
+  {
+    metric: "unattributedSkill",
+    field: "unattributedSkillConversationCount",
+    label: "无 Skill 归因"
+  }
+] as const
+
+function MainTurnCounts({
+  row,
+  onSelect
+}: {
+  row: RunAnalysisMetrics
+  onSelect?: (metric: (typeof turnMetrics)[number]["metric"]) => void
+}) {
+  return (
+    <div className="grid gap-1 whitespace-nowrap">
+      {turnMetrics.map(({ metric, field, label }) => {
+        const total = row[field]
+        return (
+          <div
+            key={metric}
+            className="flex items-baseline justify-between gap-2"
+            title={RUN_ANALYSIS_NOTES[metric]}
+          >
+            <span className="text-muted-foreground">{label}</span>
+            {onSelect && total != null && total > 0 ? (
+              <AnalysisLink
+                aria-label={`查看${label}的${total}轮主对话`}
+                onClick={() => onSelect(metric)}
+              >
+                {count(total)}
+              </AnalysisLink>
+            ) : (
+              <span>{count(total)}</span>
+            )}
+          </div>
+        )
+      })}
+    </div>
   )
 }
 function Hint({ note }: { note: string }) {
@@ -540,6 +584,9 @@ export function ProjectRunAnalysis({
             共 {count(r.conversationCount)} 轮主对话
           </div>
         </td>
+        <td className="px-3 py-3">
+          <MainTurnCounts row={r} onSelect={group ? undefined : (metric) => request(r, metric)} />
+        </td>
         <td
           className="px-3 py-3 whitespace-nowrap"
           title={`已上报工具调用的记录 ${r.toolReportedTraceCount}/${r.traceCount}；模型调用 ${r.modelReportedTraceCount}/${r.traceCount}`}
@@ -902,7 +949,13 @@ export function ProjectRunAnalysis({
                     ["提交采纳率", RUN_ANALYSIS_NOTES.adoption],
                     ["入库采纳率", RUN_ANALYSIS_NOTES.adoption],
                     ["Harness / Vibe采纳", RUN_ANALYSIS_NOTES.adoption],
-                    ["未使用Skill主对话", RUN_ANALYSIS_NOTES.skill],
+                    ["本轮未记录 Skill", RUN_ANALYSIS_NOTES.skill],
+                    [
+                      "主对话次数",
+                      [RUN_ANALYSIS_NOTES.completedNode, RUN_ANALYSIS_NOTES.unattributedSkill].join(
+                        "\n"
+                      )
+                    ],
                     ["工具 / 模型调用", RUN_ANALYSIS_NOTES.cost]
                   ].map(([label, note]) => (
                     <th key={label} className="px-3 py-2 font-medium">
@@ -919,7 +972,7 @@ export function ProjectRunAnalysis({
                     {renderRow(match, mode === "project")}
                     {mode === "project" && expanded === match.row.projectId && (
                       <tr>
-                        <td colSpan={10} className="border-t bg-muted/20 p-3">
+                        <td colSpan={11} className="border-t bg-muted/20 p-3">
                           <div className="mb-2 font-medium">匹配特性</div>
                           <div className="flex flex-wrap gap-2">
                             {(match as RunAnalysisProjectMatch).features.map((f) => (
@@ -1144,7 +1197,8 @@ function RunAnalysisDiagnosis({
                     "累计执行耗时",
                     "执行跨度（近似）",
                     "开始于该阶段的主对话",
-                    "未用Skill主对话",
+                    "本轮未记录 Skill",
+                    "主对话次数",
                     "已上报工具 / 模型调用",
                     "会话入口"
                   ].map((h) => (
@@ -1181,6 +1235,12 @@ function RunAnalysisDiagnosis({
                       >
                         {noSkillLabel(s)}
                       </AnalysisLink>
+                    </td>
+                    <td className="px-3 py-3">
+                      <MainTurnCounts
+                        row={s}
+                        onSelect={(metric) => onSessions(row, metric, s.nodeName)}
+                      />
                     </td>
                     <td className="px-3 py-3">
                       {count(s.attributedToolCalls ?? s.toolCalls)} /{" "}
@@ -1253,19 +1313,30 @@ function RunAnalysisSessionDialog({
       <DialogContent className="flex max-h-[85vh] w-[95vw] max-w-[1100px] min-w-0 flex-col overflow-hidden">
         <DialogHeader>
           <DialogTitle>
-            {request.metric === "noSkill"
-              ? "未使用Skill的主Agent对话"
-              : request.metric === "main"
-                ? "主Agent对话"
-                : "阶段执行记录"}
+            {
+              {
+                noSkill: "未使用Skill的主Agent对话",
+                main: "主Agent对话",
+                completedNode: "节点完成后的主 Agent 对话",
+                unattributedSkill: "无 Skill 归因的主 Agent 对话",
+                subagent: "子 Agent 执行记录",
+                all: "阶段执行记录"
+              }[request.metric ?? "all"]
+            }
           </DialogTitle>
           <DialogDescription>
             {request.projectId} / {request.featureSlug ?? "未归因特性"}
             {request.nodeName !== undefined ? ` · ${request.nodeName ?? "未归因阶段"}` : ""} ·
-            累计口径，点击进入完整会话
+            累计口径，按轮次统计
           </DialogDescription>
         </DialogHeader>
-        <p className="text-xs text-muted-foreground">{RUN_ANALYSIS_NOTES.skill}</p>
+        {(request.metric === "completedNode" ||
+          request.metric === "unattributedSkill" ||
+          request.metric === "noSkill") && (
+          <p className="text-xs text-muted-foreground">
+            {RUN_ANALYSIS_NOTES[request.metric === "noSkill" ? "skill" : request.metric]}
+          </p>
+        )}
         {loading ? (
           <Loader2 className="size-5 animate-spin" />
         ) : error ? (
@@ -1293,12 +1364,8 @@ function RunAnalysisSessionDialog({
                       <td className="p-2">{duration(r.durationMs)}</td>
                       <td className="max-w-64 break-all p-2">{r.traceId}</td>
                       <td className="p-2">
-                        <AnalysisLink
-                          className={linkClass}
-                          disabled={!r.threadId}
-                          onClick={() => setSelected(r)}
-                        >
-                          查看完整会话
+                        <AnalysisLink className={linkClass} onClick={() => setSelected(r)}>
+                          {r.threadId ? "查看完整会话" : "查看本轮"}
                         </AnalysisLink>
                       </td>
                     </tr>
@@ -1366,11 +1433,11 @@ function RunAnalysisConversation({
   useEffect(() => {
     let cancelled = false
     void window.api.dashboard
-      .projectModeRunAnalysisTrace({ ...request, traceId: session.traceId })
+      .projectModeRunAnalysisThread({ ...request, traceId: session.traceId })
       .then((res) => {
         if (cancelled) return
         if (!res.success || !res.data) throw new Error(res.error ?? "完整会话加载失败")
-        setTraces([res.data])
+        setTraces(res.data)
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e))
@@ -1391,17 +1458,24 @@ function RunAnalysisConversation({
     >
       <DialogContent className="flex h-[82vh] w-[95vw] max-w-[1100px] min-w-0 flex-col gap-0 p-0">
         <DialogHeader className="border-b p-4">
-          <DialogTitle>项目分析 · 完整会话</DialogTitle>
-          <DialogDescription className="break-all">{session.traceId}</DialogDescription>
+          <DialogTitle>项目分析 · {session.threadId ? "完整会话" : "当前轮次"}</DialogTitle>
+          <DialogDescription className="break-all">
+            {session.threadId
+              ? `会话 ID · ${session.threadId}`
+              : "该记录缺少会话 ID，仅能查看当前轮次。"}
+          </DialogDescription>
         </DialogHeader>
         <TraceExplorer
           traces={traces}
           loading={loading}
           error={error}
-          viewMode="trace"
+          completeThreadId={session.threadId}
+          initialTraceId={session.traceId}
+          viewMode={session.threadId ? "thread" : "trace"}
           showViewModeToggle={false}
           showCodeStats={false}
-          title="执行步骤详情"
+          title={session.threadId ? "会话轮次" : "执行步骤详情"}
+          subtitle="选择轮次查看对应的输入、回复和执行详情"
         />
       </DialogContent>
     </Dialog>
