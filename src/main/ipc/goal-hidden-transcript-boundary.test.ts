@@ -10,6 +10,7 @@ import {
   WORKFLOW_NOTIFICATION_MARKER_PREFIX
 } from "../../shared/checkpoint-transcript"
 import {
+  buildMessageSameRoleDuplicateId,
   MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY,
   MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY
 } from "../../shared/message-role-collision"
@@ -305,156 +306,209 @@ it.each([
   }
 )
 
-it("assigns one live Goal occurrence while an older checkpoint reply still awaits bootstrap", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "cmb-goal-recovery-occurrence-"))
-  const checkpointPath = join(directory, "checkpoint.sqlite")
-  storage.path = join(directory, "threads.sqlite")
-  const threadId = "goal-with-missing-earlier-reply"
-  const runToken = "physical-run"
-  const signal = new AbortController().signal
-  const providerId = "reused-provider"
-  const provider = (occurrence: number) => ({
-    [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: providerId,
-    [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: occurrence
-  })
-  await db.initializeDatabase()
-  try {
-    db.createThread(threadId)
-    const goal = goalManager.set(threadId, "Report the result")
-    setCurrentRunMessageQueueOwner(threadId, runToken)
-    const user = new HumanMessage({ id: "user", content: "/goal Report the result" })
-    const previous = new AIMessage({
-      id: providerId,
-      content: "Durable reply",
-      additional_kwargs: provider(1)
+it.each(["declared", "encoded", "raw"] as const)(
+  "keeps one live Goal occurrence and both tool results with a %s older checkpoint identity",
+  async (identity) => {
+    const directory = mkdtempSync(join(tmpdir(), "cmb-goal-recovery-occurrence-"))
+    const checkpointPath = join(directory, "checkpoint.sqlite")
+    storage.path = join(directory, "threads.sqlite")
+    const threadId = "goal-with-missing-earlier-reply"
+    const runToken = "physical-run"
+    const signal = new AbortController().signal
+    const providerId = "reused-provider"
+    const historyOccurrence = identity === "raw" ? 1 : 2
+    const liveOccurrence = historyOccurrence + 1
+    const sharedCallId = "reused-call-id"
+    const toolCalls = [{ id: sharedCallId, name: "read", args: {} }]
+    const provider = (occurrence: number) => ({
+      [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: providerId,
+      [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: occurrence
     })
-    db.upsertThreadMessages(threadId, [
-      { id: user.id!, role: "user", content: String(user.content), created_at: new Date() },
-      {
-        id: previous.id!,
-        role: "assistant",
-        content: String(previous.content),
-        created_at: new Date(),
-        provider_source_id: providerId,
-        provider_occurrence: 1
-      }
-    ])
-    const earlier = createPhysicalRunHiddenUserMessage(threadId, runToken, signal, goal, {
-      content: "Earlier continuation"
-    })
-    const missing = new AIMessage({
-      id: "checkpoint-only-reply",
-      content: "Recovered reply",
-      additional_kwargs: provider(2)
-    })
-    const saved = [user, previous, earlier, missing]
-    const saver = new SqlJsSaver(checkpointPath)
+    await db.initializeDatabase()
     try {
-      await saver.put(
-        { configurable: { thread_id: threadId, checkpoint_ns: "" } },
+      db.createThread(threadId)
+      const goal = goalManager.set(threadId, "Report the result")
+      setCurrentRunMessageQueueOwner(threadId, runToken)
+      const user = new HumanMessage({ id: "user", content: "/goal Report the result" })
+      const previous = new AIMessage({
+        id: identity === "raw" ? "different-provider" : providerId,
+        content: "Durable reply",
+        additional_kwargs: identity === "raw" ? {} : provider(1)
+      })
+      db.upsertThreadMessages(threadId, [
+        { id: user.id!, role: "user", content: String(user.content), created_at: new Date() },
         {
-          v: 1,
-          id: "checkpoint-awaiting-legacy-bootstrap",
-          ts: new Date().toISOString(),
-          channel_values: { messages: saved },
-          channel_versions: { messages: 1 },
-          versions_seen: {}
-        },
-        { source: "loop", step: 1, parents: {} }
-      )
-    } finally {
-      await saver.close()
-    }
-
-    const current = createPhysicalRunHiddenUserMessage(threadId, runToken, signal, goal, {
-      content: "Current continuation"
-    })
-    const graph = addMessages(saved, [current])
-    const serialize = createStreamDataSerializer({ projectMessageChunks: true })
-    const values = createSerializedValuesMessageAccumulator()
-    const forward = (mode: "values" | "messages", payload: unknown) => {
-      const frame = serialize(mode, payload)
-      const snapshot = mode === "values" ? values.update(frame) : undefined
-      persistAndForwardPhysicalRunStreamChunk(
-        window,
-        "agent:test",
-        threadId,
-        runToken,
-        signal,
-        mode,
-        frame.data,
-        frame.valuesMessageIndexOffset,
-        frame.valuesSnapshotKind,
-        snapshot?.messages,
-        true
-      )
-    }
-    forward("values", { messages: graph })
-    const middleware = createCurrentRunMessageQueueMiddleware(
-      runToken,
-      (scope, boundaryId, source) => {
-        const previous = db.getThreadMessageProviderOccurrencesBeforeUser(scope, boundaryId, [
-          source
-        ])
-        return previous?.find((entry) => entry.role === "assistant")?.provider_occurrence
+          id: previous.id!,
+          role: "assistant",
+          content: String(previous.content),
+          created_at: new Date(),
+          ...(identity !== "raw" && { provider_source_id: providerId, provider_occurrence: 1 })
+        }
+      ])
+      const earlier = createPhysicalRunHiddenUserMessage(threadId, runToken, signal, goal, {
+        content: "Earlier continuation"
+      })
+      const missing = new AIMessage({
+        id:
+          identity === "declared"
+            ? "checkpoint-only-reply"
+            : identity === "encoded"
+              ? buildMessageSameRoleDuplicateId(providerId, "assistant", historyOccurrence)
+              : providerId,
+        content: "Recovered reply",
+        tool_calls: toolCalls,
+        additional_kwargs: identity === "declared" ? provider(historyOccurrence) : {}
+      })
+      const earlierResult = new ToolMessage({
+        id: "earlier-result",
+        content: "Recovered evidence",
+        tool_call_id: sharedCallId,
+        status: "success"
+      })
+      const saved = [user, previous, earlier, missing, earlierResult]
+      const saver = new SqlJsSaver(checkpointPath)
+      try {
+        await saver.put(
+          { configurable: { thread_id: threadId, checkpoint_ns: "" } },
+          {
+            v: 1,
+            id: "checkpoint-awaiting-legacy-bootstrap",
+            ts: new Date().toISOString(),
+            channel_values: { messages: saved },
+            channel_versions: { messages: 1 },
+            versions_seen: {}
+          },
+          { source: "loop", step: 1, parents: {} }
+        )
+      } finally {
+        await saver.close()
       }
-    )
-    const wrapModelCall = middleware.wrapModelCall as unknown as (
-      request: { runtime: { configurable: { thread_id: string } }; messages: typeof graph },
-      handler: () => Promise<AIMessage>
-    ) => Promise<AIMessage>
-    let reply: AIMessage
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
-    try {
-      reply = await wrapModelCall(
-        { runtime: { configurable: { thread_id: threadId } }, messages: graph },
-        async () => {
-          forward("messages", [
-            new AIMessageChunk({ id: providerId, content: "Live reply" }),
-            { checkpoint_ns: "model:fixture" }
+
+      const current = createPhysicalRunHiddenUserMessage(threadId, runToken, signal, goal, {
+        content: "Current continuation"
+      })
+      const graph = addMessages(saved, [current])
+      const serialize = createStreamDataSerializer({ projectMessageChunks: true })
+      const values = createSerializedValuesMessageAccumulator()
+      const forward = (mode: "values" | "messages", payload: unknown) => {
+        const frame = serialize(mode, payload)
+        const snapshot = mode === "values" ? values.update(frame) : undefined
+        persistAndForwardPhysicalRunStreamChunk(
+          window,
+          "agent:test",
+          threadId,
+          runToken,
+          signal,
+          mode,
+          frame.data,
+          frame.valuesMessageIndexOffset,
+          frame.valuesSnapshotKind,
+          snapshot?.messages,
+          true
+        )
+      }
+      forward("values", { messages: graph })
+      const middleware = createCurrentRunMessageQueueMiddleware(
+        runToken,
+        (scope, boundaryId, source) => {
+          const previous = db.getThreadMessageProviderOccurrencesBeforeUser(scope, boundaryId, [
+            source
           ])
-          await vi.advanceTimersByTimeAsync(250)
-          expect(db.getThreadMessages(threadId).at(-1)).toMatchObject({
-            content: "Live reply",
-            provider_occurrence: 3
-          })
-          return new AIMessage({ id: providerId, content: "Live reply" })
+          return previous === undefined
+            ? undefined
+            : (previous.find((entry) => entry.role === "assistant")?.provider_occurrence ?? 0)
         }
       )
-    } finally {
-      vi.useRealTimers()
-    }
-    expect(reply.additional_kwargs).toMatchObject(provider(3))
-    forward("values", { messages: addMessages(graph, [reply]) })
-    expect(db.getThreadMessages(threadId).map(({ content }) => content)).toEqual([
-      user.content,
-      previous.content,
-      reply.content
-    ])
+      const wrapModelCall = middleware.wrapModelCall as unknown as (
+        request: { runtime: { configurable: { thread_id: string } }; messages: typeof graph },
+        handler: () => Promise<AIMessage>
+      ) => Promise<AIMessage>
+      let reply: AIMessage
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+      try {
+        reply = await wrapModelCall(
+          { runtime: { configurable: { thread_id: threadId } }, messages: graph },
+          async () => {
+            forward("messages", [
+              new AIMessageChunk({ id: providerId, content: "Live reply" }),
+              { checkpoint_ns: "model:fixture" }
+            ])
+            await vi.advanceTimersByTimeAsync(250)
+            expect(db.getThreadMessages(threadId).at(-1)).toMatchObject({
+              content: "Live reply",
+              provider_occurrence: liveOccurrence
+            })
+            return new AIMessage({ id: providerId, content: "Live reply", tool_calls: toolCalls })
+          }
+        )
+      } finally {
+        vi.useRealTimers()
+      }
+      expect(reply.additional_kwargs).toMatchObject(provider(liveOccurrence))
+      const currentResult = new ToolMessage({
+        id: "current-result",
+        content: "Live evidence",
+        tool_call_id: sharedCallId,
+        status: "success"
+      })
+      forward("values", { messages: addMessages(graph, [reply, currentResult]) })
+      expect(db.getThreadMessages(threadId).map(({ content }) => content)).toEqual([
+        user.content,
+        previous.content,
+        reply.content,
+        currentResult.content
+      ])
+      const rendererEvent = vi.mocked(window.webContents.send).mock.lastCall?.[1] as {
+        data: { messages: Array<{ kwargs: Record<string, unknown> }> }
+      }
+      expect(rendererEvent.data.messages.map(({ kwargs }) => kwargs)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            content: "Live reply",
+            additional_kwargs: expect.objectContaining(provider(liveOccurrence))
+          }),
+          expect.objectContaining({ content: "Live evidence", tool_call_id: sharedCallId })
+        ])
+      )
 
-    const restored = bootstrapLegacyCheckpointTranscript(
-      checkpointPath,
-      storage.path,
-      threadId,
-      "",
-      new SharedArrayBuffer(4)
-    )
-    expect(restored.stats.migratedMessages).toBe(1)
-    expect(db.getThreadMessages(threadId).map(({ content, provider_occurrence }) => [
-      content,
-      provider_occurrence
-    ])).toEqual([
-      [user.content, undefined],
-      [previous.content, 1],
-      [missing.content, 2],
-      [reply.content, 3]
-    ])
-  } finally {
-    clearCurrentRunMessageQueue(threadId, runToken)
-    await db.closeDatabase()
-    rmSync(directory, { recursive: true, force: true })
+      const restored = bootstrapLegacyCheckpointTranscript(
+        checkpointPath,
+        storage.path,
+        threadId,
+        "",
+        new SharedArrayBuffer(4)
+      )
+      expect(restored.stats.migratedMessages).toBe(2)
+      const transcript = db.getThreadMessages(threadId)
+      expect(
+        transcript.map(({ content, ordinal, provider_occurrence }) => [
+          content,
+          ordinal,
+          provider_occurrence
+        ])
+      ).toEqual([
+        [user.content, 0, undefined],
+        [previous.content, 1, identity === "raw" ? undefined : 1],
+        [missing.content, 3, identity === "raw" ? undefined : historyOccurrence],
+        [earlierResult.content, 4, undefined],
+        [reply.content, 6, liveOccurrence],
+        [currentResult.content, 7, 1]
+      ])
+      expect(
+        transcript
+          .filter(({ role }) => role === "tool")
+          .map(({ content, status, tool_call_id }) => [content, status, tool_call_id])
+      ).toEqual([
+        [earlierResult.content, "success", sharedCallId],
+        [currentResult.content, "success", sharedCallId]
+      ])
+    } finally {
+      clearCurrentRunMessageQueue(threadId, runToken)
+      await db.closeDatabase()
+      rmSync(directory, { recursive: true, force: true })
+    }
   }
-})
+)
 
 it("prepares upgraded Goal history before the provider runs and respects its physical owner", async () => {
   const threadId = "goal-with-upgraded-provider-history"

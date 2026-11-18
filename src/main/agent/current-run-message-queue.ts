@@ -23,10 +23,22 @@
 // renderer notification (which uses BrowserWindow) is injected by runtime.ts via
 // `setCurrentRunInjectionNotifier`.
 
-import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages"
+import {
+  AIMessage,
+  HumanMessage,
+  SystemMessage,
+  ToolMessage,
+  type BaseMessage
+} from "@langchain/core/messages"
 import { createMiddleware } from "langchain"
 import { randomUUID } from "crypto"
 import type { Message } from "../types"
+import {
+  getCheckpointTranscriptMessageIdentity,
+  isInternalNotificationMessage,
+  isWorkflowPlumbingTranscriptContent
+} from "../../shared/checkpoint-transcript"
+import { isSerializedSummarizationMessage } from "../../shared/context-compaction-messages"
 import {
   GOAL_CONTINUATION_BOUNDARY_METADATA_KEY,
   GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY
@@ -38,7 +50,8 @@ import {
   getMessageProviderTupleFromMetadata,
   MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY,
   MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY,
-  normalizeAppendedMessageIds
+  normalizeAppendedMessageIds,
+  normalizeCompleteSnapshotMessageIds
 } from "../../shared/message-role-collision"
 
 export interface CurrentRunQueuedMessage {
@@ -524,11 +537,11 @@ async function drainCurrentRunMessagesForInjection(
 
 function graphAssistantProviderSourceId(message: AIMessage): string | undefined {
   const providerSourceId = message.additional_kwargs[MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]
-  return (
-    typeof providerSourceId === "string" && providerSourceId.trim()
-      ? providerSourceId.trim()
-      : message.id?.trim() || undefined
-  )
+  if (typeof providerSourceId === "string" && providerSourceId.trim()) {
+    return providerSourceId.trim()
+  }
+  const id = message.id?.trim()
+  return id ? getMessageProviderSourceId({ id, role: "assistant" }) : undefined
 }
 
 function completedAssistantMessageForTranscript(
@@ -563,6 +576,63 @@ type GoalProviderOccurrenceLoader = (
   providerSourceId: string
 ) => number | undefined
 
+function collectPreviousGoalGraphProviderOccurrences(
+  messages: readonly BaseMessage[],
+  end: number
+): GoalGraphProviderOccurrences {
+  const candidates: Array<ReturnType<typeof getCheckpointTranscriptMessageIdentity>> = []
+  for (let index = 0; index < end; index += 1) {
+    const message = messages[index]
+    if (isSerializedSummarizationMessage(message) || isInternalNotificationMessage(message)) {
+      continue
+    }
+    const role = AIMessage.isInstance(message)
+      ? "assistant"
+      : ToolMessage.isInstance(message)
+        ? "tool"
+        : HumanMessage.isInstance(message)
+          ? "user"
+          : SystemMessage.isInstance(message)
+            ? "system"
+            : undefined
+    if (!role) continue
+    const metadata = message.additional_kwargs
+    const visibleUserMessage = metadata[VISIBLE_USER_MESSAGE_KEY]
+    if (
+      role === "user" &&
+      metadata[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] === true &&
+      !(typeof visibleUserMessage === "string" && visibleUserMessage.trim())
+    ) {
+      continue
+    }
+    const content =
+      role === "user" && typeof visibleUserMessage === "string" && visibleUserMessage.length > 0
+        ? visibleUserMessage
+        : message.content
+    if (isWorkflowPlumbingTranscriptContent(content)) continue
+    candidates.push(
+      getCheckpointTranscriptMessageIdentity(
+        message.id?.trim() || `checkpoint-${index}`,
+        role,
+        metadata,
+        ToolMessage.isInstance(message) ? message.tool_call_id : undefined
+      )
+    )
+  }
+
+  const occurrences: GoalGraphProviderOccurrences = new Map()
+  for (const message of normalizeCompleteSnapshotMessageIds([], candidates)) {
+    const { role } = message
+    if (role !== "assistant" && role !== "tool") continue
+    const sourceId = getMessageProviderSourceId(message)
+    const occurrence = getMessageProviderOccurrence(message) ?? 1
+    const source = occurrences.get(sourceId) ?? {}
+    source[role] = Math.max(source[role] ?? 0, occurrence)
+    occurrences.set(sourceId, source)
+  }
+  return occurrences
+}
+
 function rememberGoalGraphProviderOccurrences(
   threadId: string,
   runToken: string,
@@ -586,22 +656,7 @@ function rememberGoalGraphProviderOccurrences(
   const parentId = boundary.additional_kwargs[GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]
   const remember = (id: string, end: number): void => {
     if (scope.boundaries.has(id)) return
-    const occurrences: GoalGraphProviderOccurrences = new Map()
-    for (let index = 0; index < end; index += 1) {
-      const message = messages[index]
-      const role = AIMessage.isInstance(message)
-        ? "assistant"
-        : ToolMessage.isInstance(message)
-          ? "tool"
-          : undefined
-      if (!role) continue
-      const declared = getMessageProviderTupleFromMetadata(message.additional_kwargs)
-      if (!declared) continue
-      const source = occurrences.get(declared.provider_source_id) ?? {}
-      source[role] = Math.max(source[role] ?? 0, declared.provider_occurrence)
-      occurrences.set(declared.provider_source_id, source)
-    }
-    scope.boundaries.set(id, occurrences)
+    scope.boundaries.set(id, collectPreviousGoalGraphProviderOccurrences(messages, end))
   }
   if (typeof parentId === "string" && !scope.boundaries.has(parentId)) {
     const parentIndex = messages.findIndex(

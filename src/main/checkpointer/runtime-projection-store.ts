@@ -31,6 +31,7 @@ import {
   normalizeCompleteSnapshotMessageIds
 } from "../../shared/message-role-collision"
 import {
+  getCheckpointTranscriptMessageIdentity,
   isRestorableConversationTranscriptMessage,
   isWorkflowPlumbingTranscriptContent
 } from "../../shared/checkpoint-transcript"
@@ -1273,6 +1274,7 @@ function buildDurableLegacyCheckpointMessages(
       content: unknown
       provider_source_id?: string
       provider_occurrence?: number
+      tool_call_id?: string
     }
   > = []
 
@@ -1345,13 +1347,9 @@ function buildDurableLegacyCheckpointMessages(
       message.is_error === true || kwargs.is_error === true || additionalKwargs.is_error === true
         ? 1
         : null
-    const providerTuple =
-      role === "assistant" || role === "tool"
-        ? getMessageProviderTupleFromMetadata(additionalKwargs)
-        : undefined
     candidates.push({
       checkpointIndex: index,
-      declaredProviderIdentity: providerTuple,
+      ...getCheckpointTranscriptMessageIdentity(sourceId, role, additionalKwargs, toolCallId),
       recoveryIntegrity:
         content === rawContent &&
         !kwargs.reasoning &&
@@ -1361,10 +1359,7 @@ function buildDurableLegacyCheckpointMessages(
         toolCallsJson === rawToolCallsJson
           ? 1
           : 0,
-      id: sourceId,
       content,
-      ...providerTuple,
-      role,
       contentJson,
       reasoning,
       toolCallsJson,
