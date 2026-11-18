@@ -185,7 +185,8 @@ describe("fork summary state", () => {
   it.each([
     { body: "Long archived decision. ".repeat(700), window: 1_000, providerLimit: 3_000 },
     { body: "界".repeat(30_000), window: 8_000, providerLimit: 7_000 },
-    { body: "界".repeat(30_000), window: 8_000, providerLimit: 2_100 }
+    { body: "界".repeat(30_000), window: 8_000, providerLimit: 2_100 },
+    { body: "界".repeat(30_000), window: 8_000, providerLimit: 1_200 }
   ])(
     "shortens an oversized inherited handoff for a $providerLimit-character provider",
     async ({ body, window, providerLimit }) => {
@@ -237,7 +238,7 @@ describe("fork summary state", () => {
       const requestLengths = invoke.mock.calls.map(([requestMessages]) =>
         requestMessages.reduce((total, message) => total + String(message.content).length, 0)
       )
-      if (providerLimit === 2_100) {
+      if (providerLimit <= 2_100) {
         expect(requestLengths.length).toBeGreaterThan(1)
         expect(requestLengths.length).toBeLessThanOrEqual(4)
         expect(

@@ -2076,10 +2076,10 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
       let lastOverflow = rejectedRequest.error
       let previousTarget: number | undefined
       for (let revision = 0; revision < 2; revision += 1) {
-        // Give the first handoff rewrite room to recover from summarizer
-        // overflow. Reserve more for whole-input recovery once a rewrite
-        // has already failed to make the raw tail fit.
-        const reservedAttempts = tail.length === 0 ? 0 : revision + 1
+        // Preserve progressively smaller summary requests until the first
+        // handoff rewrite completes. A second rewrite can share its remaining
+        // attempts with whole-input recovery.
+        const reservedAttempts = revision === 0 || tail.length === 0 ? 0 : 2
         const remainingAttempts = MAX_SUMMARY_MODEL_ATTEMPTS - reservedAttempts -
           summaryAttemptBudget.used
         if (remainingAttempts <= 0) break
@@ -2114,7 +2114,7 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
             true
           )
         } catch (error) {
-          if (tail.length === 0 || !isCmbContextOverflow(error)) throw error
+          if (revision === 0 || tail.length === 0 || !isCmbContextOverflow(error)) throw error
           break
         }
         const summaryMessage = buildSummaryMessage(
@@ -2149,7 +2149,9 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
           }
         }
       }
-      if (tail.length === 0) throw lastOverflow
+      if (tail.length === 0 || summaryAttemptBudget.used >= MAX_SUMMARY_MODEL_ATTEMPTS) {
+        throw lastOverflow
+      }
     }
     if (noProgress) {
       request.runtime?.signal?.throwIfAborted()
