@@ -14,6 +14,7 @@ import {
   type BrowserProfileImportOptions,
   type BrowserProfileImportResult,
   type BrowserRecordingDraftUpdateInput,
+  type BrowserRecordingEnvironment,
   type BrowserRecordingSession,
   type BrowserScreenshotResult,
   type BrowserScriptExecutionInput,
@@ -25,6 +26,7 @@ import {
   type BrowserScriptLibrarySaveInput,
   type BrowserScriptLibraryUpdateInput,
   type BrowserState,
+  type BrowserViewportUpdate,
   type ScriptRecordingStartOptions
 } from "../shared/browser-types"
 
@@ -35,6 +37,8 @@ export function createBrowserApi() {
     detach: () => ipcRenderer.invoke("browser:detach") as Promise<BrowserState>,
     setBounds: (bounds: BrowserBounds, visible?: boolean) =>
       ipcRenderer.invoke("browser:setBounds", bounds, visible) as Promise<BrowserState>,
+    setViewport: (update: BrowserViewportUpdate) =>
+      ipcRenderer.invoke("browser:setViewport", update) as Promise<BrowserState>,
     setZoomFactor: (zoomFactor: number) =>
       ipcRenderer.invoke("browser:setZoomFactor", zoomFactor) as Promise<BrowserState>,
     navigate: (url: string, options?: BrowserNavigateOptions) =>
@@ -77,10 +81,10 @@ export function createBrowserApi() {
       ) as Promise<BrowserRecordingSession>,
     resumeScriptRecording: () =>
       ipcRenderer.invoke("browser:resumeScriptRecording") as Promise<BrowserRecordingSession>,
-    stopScriptRecording: (panelWidth?: number) =>
+    stopScriptRecording: (environment?: BrowserRecordingEnvironment) =>
       ipcRenderer.invoke(
         "browser:stopScriptRecording",
-        panelWidth
+        environment
       ) as Promise<BrowserRecordingSession>,
     getScriptRecording: () =>
       ipcRenderer.invoke("browser:getScriptRecording") as Promise<BrowserRecordingSession>,

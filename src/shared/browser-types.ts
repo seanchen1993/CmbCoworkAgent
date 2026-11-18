@@ -5,6 +5,24 @@ export interface BrowserBounds {
   height: number
 }
 
+export interface BrowserDeviceViewport {
+  width: number
+  height: number
+  scale: number
+}
+
+export interface BrowserRecordingEnvironment {
+  panelWidth?: number
+  deviceViewport?: BrowserDeviceViewport
+}
+
+export interface BrowserViewportUpdate {
+  revision: number
+  bounds: BrowserBounds
+  visible: boolean
+  metrics: BrowserDeviceViewport | null
+}
+
 export type BrowserConsoleLevel = "info" | "warn" | "error" | "debug" | "log"
 
 export interface BrowserConsoleEntry {
@@ -27,6 +45,7 @@ export interface BrowserState {
   visible: boolean
   created: boolean
   consoleEntries: BrowserConsoleEntry[]
+  pendingDeviceViewport?: BrowserDeviceViewport
   error?: string
 }
 
@@ -88,6 +107,7 @@ interface BrowserRecordedActionBase {
 export interface BrowserPanelRequest {
   threadId?: string
   panelWidth?: number
+  deviceViewport?: BrowserDeviceViewport
   restoreDefaultPanelWidth?: boolean
 }
 
@@ -171,6 +191,7 @@ export interface ScriptRecordingStartOptions {
   libraryDisplayName?: string | null
   /** Browser panel width in CSS pixels at recording time. */
   panelWidth?: number
+  deviceViewport?: BrowserDeviceViewport
 }
 
 export interface BrowserRecordingSession {
@@ -185,6 +206,7 @@ export interface BrowserRecordingSession {
   libraryFileName?: string
   libraryDisplayName?: string
   panelWidth?: number
+  deviceViewport?: BrowserDeviceViewport
   variableActionIds?: string[]
   variableActionNames?: Record<string, string>
   actions: BrowserRecordedAction[]
@@ -197,6 +219,7 @@ export interface BrowserScriptLibraryEntry {
   displayName: string
   fileName: string
   hasVariables?: boolean
+  deviceViewport?: BrowserDeviceViewport
   isEdited?: boolean
   recordingSource: BrowserRecordingSource
   threadId: string

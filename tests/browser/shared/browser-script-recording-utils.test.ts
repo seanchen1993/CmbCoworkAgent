@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import {
   applyScriptRecordingVariableValues,
   buildScriptExecutableScript,
+  extractScriptRecordingDeviceViewport,
   extractScriptRecordingPanelWidth,
   extractScriptRecordingVariables,
   generateScriptRecording,
@@ -16,6 +17,20 @@ describe("browser script recording", () => {
 
     expect(script).toContain("// cmb-browser-panel-width: 864")
     expect(extractScriptRecordingPanelWidth(script)).toBe(864)
+  })
+
+  it("stores and reads the recorded device viewport and scale", () => {
+    const script = generateScriptRecording([], {
+      source: "script",
+      deviceViewport: { width: 1920, height: 1080, scale: 0.625 }
+    })
+
+    expect(script).toContain("// cmb-browser-device-viewport: 1920x1080@0.625")
+    expect(extractScriptRecordingDeviceViewport(script)).toEqual({
+      width: 1920,
+      height: 1080,
+      scale: 0.625
+    })
   })
 
   it("treats historical scripts without panel width metadata as unspecified", () => {

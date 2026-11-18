@@ -568,6 +568,7 @@ export function BrowserRecordingListDialog({
                               <col />
                               <col className="w-[76px]" />
                               <col className="w-[72px]" />
+                              <col className="w-[94px]" />
                               <col className="w-[144px]" />
                               <col className="w-[120px]" />
                             </colgroup>
@@ -579,6 +580,9 @@ export function BrowserRecordingListDialog({
                                 </th>
                                 <th className="border-b border-border/70 px-2 py-2.5 text-center">
                                   是否编辑
+                                </th>
+                                <th className="border-b border-border/70 px-2 py-2.5 text-center">
+                                  设备
                                 </th>
                                 <th className="border-b border-border/70 px-2 py-2.5">时间</th>
                                 <th className="border-b border-border/70 px-2 py-2.5 text-right">
@@ -637,6 +641,18 @@ export function BrowserRecordingListDialog({
                                         <span className="text-emerald-500">是</span>
                                       ) : (
                                         <span className="text-muted-foreground">否</span>
+                                      )}
+                                    </td>
+                                    <td className="whitespace-nowrap px-2 py-3 text-center align-middle text-[11px] text-muted-foreground">
+                                      {entry.deviceViewport ? (
+                                        <span>
+                                          {entry.deviceViewport.width} ×{" "}
+                                          {entry.deviceViewport.height}
+                                          <br />
+                                          {entry.deviceViewport.scale.toFixed(2)}×
+                                        </span>
+                                      ) : (
+                                        <span>—</span>
                                       )}
                                     </td>
                                     <td

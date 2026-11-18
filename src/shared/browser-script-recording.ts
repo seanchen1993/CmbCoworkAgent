@@ -1,5 +1,6 @@
 import type {
   BrowserRecordedAction,
+  BrowserDeviceViewport,
   BrowserLocatorMetadata,
   BrowserRecordingSource
 } from "./browser-types"
@@ -51,19 +52,51 @@ export interface ScriptRecordingOptions {
   variableActionNames?: Record<string, string>
   source?: BrowserRecordingSource
   panelWidth?: number
+  deviceViewport?: BrowserDeviceViewport
 }
 
 const BROWSER_PANEL_WIDTH_METADATA_PATTERN = /^\s*\/\/\s*cmb-browser-panel-width:\s*(\d+)\s*$/imu
+const BROWSER_DEVICE_VIEWPORT_METADATA_PATTERN =
+  /^\s*\/\/\s*cmb-browser-device-viewport:\s*(\d+)x(\d+)@(\d+(?:\.\d+)?)\s*$/imu
 
 export function extractScriptRecordingPanelWidth(script: string): number | undefined {
   const value = Number(BROWSER_PANEL_WIDTH_METADATA_PATTERN.exec(script)?.[1])
   return Number.isFinite(value) && value > 0 ? Math.round(value) : undefined
 }
 
+export function extractScriptRecordingDeviceViewport(
+  script: string
+): BrowserDeviceViewport | undefined {
+  const match = BROWSER_DEVICE_VIEWPORT_METADATA_PATTERN.exec(script)
+  const [width, height, scale] = match?.slice(1).map(Number) ?? []
+  return Number.isFinite(width) &&
+    width > 0 &&
+    Number.isFinite(height) &&
+    height > 0 &&
+    Number.isFinite(scale) &&
+    scale > 0
+    ? { width: Math.round(width), height: Math.round(height), scale }
+    : undefined
+}
+
 export function withScriptRecordingPanelWidth(script: string, panelWidth: number): string {
   const metadata = `// cmb-browser-panel-width: ${Math.round(panelWidth)}`
   if (BROWSER_PANEL_WIDTH_METADATA_PATTERN.test(script)) {
     return script.replace(BROWSER_PANEL_WIDTH_METADATA_PATTERN, metadata)
+  }
+  const importEnd = script.indexOf("\n")
+  return importEnd >= 0
+    ? `${script.slice(0, importEnd + 1)}${metadata}\n${script.slice(importEnd + 1)}`
+    : `${metadata}\n${script}`
+}
+
+export function withScriptRecordingDeviceViewport(
+  script: string,
+  viewport: BrowserDeviceViewport
+): string {
+  const metadata = `// cmb-browser-device-viewport: ${Math.round(viewport.width)}x${Math.round(viewport.height)}@${viewport.scale.toFixed(3)}`
+  if (BROWSER_DEVICE_VIEWPORT_METADATA_PATTERN.test(script)) {
+    return script.replace(BROWSER_DEVICE_VIEWPORT_METADATA_PATTERN, metadata)
   }
   const importEnd = script.indexOf("\n")
   return importEnd >= 0
@@ -1487,8 +1520,11 @@ export function generateScriptRecording(
     options.panelWidth > 0
       ? `\n// cmb-browser-panel-width: ${Math.round(options.panelWidth)}`
       : ""
+  const deviceViewportMetadata = options.deviceViewport
+    ? `\n// cmb-browser-device-viewport: ${Math.round(options.deviceViewport.width)}x${Math.round(options.deviceViewport.height)}@${options.deviceViewport.scale.toFixed(3)}`
+    : ""
 
-  return `import { test } from "@playwright/test";${panelWidthMetadata}
+  return `import { test } from "@playwright/test";${panelWidthMetadata}${deviceViewportMetadata}
 
 ${variableDeclarations ? `${variableDeclarations}\n` : ""}
 

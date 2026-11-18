@@ -33,11 +33,13 @@ import type {
   BrowserConsoleLevel,
   BrowserDownloadRecord,
   BrowserDownloadsChangedPayload,
+  BrowserDeviceViewport,
   BrowserNavigateOptions,
   BrowserProfileImportSkipReason,
   BrowserProfileImportSkippedWebsite,
   BrowserScreenshotResult,
-  BrowserState
+  BrowserState,
+  BrowserViewportUpdate
 } from "../../../shared/browser-types"
 import type {
   BrowserSessionCookie,
@@ -52,6 +54,7 @@ const MAX_BROWSER_ZOOM_FACTOR = 5
 const BROWSER_PROFILE_PARTITION = "persist:cmbdevclaw-browser-profile"
 const BROWSER_SERVICE_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[BrowserService]`
 const MAX_EXTRACTED_IFRAME_LINKS = 100
+const VIEWPORT_SYNC_TIMEOUT_MS = 2_000
 const configuredDownloadSessions = new WeakSet<Session>()
 
 function safeDownloadFileName(fileName: string): string {
@@ -180,6 +183,10 @@ interface BrowserSession {
   workspacePath: string | null
   consoleEntries: BrowserConsoleEntry[]
   nextConsoleEntryId: number
+  viewportRevision: number
+  userZoomFactor: number
+  deviceScaleFactor: number
+  deviceViewport: BrowserDeviceViewport | null
   error?: string
 }
 
@@ -442,6 +449,7 @@ function getChannel(sessionId: string): string {
 
 export class BrowserService {
   private activeSession: BrowserSession | null = null
+  private pendingDeviceViewport: BrowserDeviceViewport | undefined
   private readonly downloadRecords: BrowserDownloadRecord[] = []
   private hasUnreadCompletedDownload = false
 
@@ -668,7 +676,7 @@ export class BrowserService {
     return this.getState()
   }
 
-  setBounds(bounds: BrowserBounds, visible = true): BrowserState {
+  setBounds(bounds: BrowserBounds, visible = true, emitState = true): BrowserState {
     const sessionId = BROWSER_SESSION_ID
     const session = this.getActiveSession()
     if (!session) {
@@ -703,7 +711,7 @@ export class BrowserService {
     if (nextVisible && (boundsChanged || visibilityChanged)) {
       this.invalidateSession(session)
     }
-    this.emitState(sessionId)
+    if (emitState) this.emitState(sessionId)
     return this.getState()
   }
 
@@ -717,10 +725,61 @@ export class BrowserService {
       return this.getState()
     }
 
-    const nextZoomFactor = normalizeZoomFactor(zoomFactor)
-    session.view.webContents.setZoomFactor(nextZoomFactor)
+    session.userZoomFactor = normalizeZoomFactor(zoomFactor)
+    this.applyEffectiveZoom(session)
     this.emitState(sessionId)
     return this.getState()
+  }
+
+  private setDeviceMetrics(metrics: BrowserDeviceViewport | null): void {
+    const session = this.getActiveSession()
+    if (!session || session.view.webContents.isDestroyed()) return
+    session.deviceScaleFactor =
+      metrics && Number.isFinite(metrics.scale) ? Math.min(1, Math.max(0.1, metrics.scale)) : 1
+    this.applyEffectiveZoom(session)
+  }
+
+  async setViewport(update: BrowserViewportUpdate): Promise<BrowserState> {
+    const session = this.getActiveSession()
+    if (!session || !Number.isSafeInteger(update.revision)) return this.getState()
+    if (update.revision <= session.viewportRevision) return this.getState()
+    session.viewportRevision = update.revision
+    this.setBounds(update.bounds, update.visible, false)
+    const metricsChanged =
+      session.deviceViewport?.width !== update.metrics?.width ||
+      session.deviceViewport?.height !== update.metrics?.height ||
+      session.deviceViewport?.scale !== update.metrics?.scale
+    if (metricsChanged) {
+      this.setDeviceMetrics(update.metrics)
+      session.deviceViewport = update.metrics
+        ? {
+            width: update.metrics.width,
+            height: update.metrics.height,
+            scale: update.metrics.scale
+          }
+        : null
+    }
+    if (
+      this.pendingDeviceViewport &&
+      session.deviceViewport &&
+      session.deviceViewport.width === this.pendingDeviceViewport.width &&
+      session.deviceViewport.height === this.pendingDeviceViewport.height
+    ) {
+      this.pendingDeviceViewport = undefined
+    }
+    this.emitState(session.id)
+    return this.getState()
+  }
+
+  async waitForDeviceViewport(viewport?: BrowserDeviceViewport): Promise<void> {
+    if (!viewport) return
+    const deadline = Date.now() + VIEWPORT_SYNC_TIMEOUT_MS
+    while (Date.now() < deadline) {
+      const current = this.getActiveSession()?.deviceViewport
+      if (current && current.width === viewport.width && current.height === viewport.height) return
+      await new Promise<void>((resolve) => setTimeout(resolve, 25))
+    }
+    throw new Error("设备预览设置未在回放开始前完成同步")
   }
 
   async navigate(inputUrl: string, options: BrowserNavigateOptions = {}): Promise<BrowserState> {
@@ -750,8 +809,8 @@ export class BrowserService {
 
     try {
       session.error = undefined
-      markNextScriptNavigationExplicit(url)
       await session.view.webContents.loadURL(url)
+      recordScriptNavigation(url, "explicit")
     } catch (error) {
       const message = formatError(error)
       session.error = message
@@ -865,13 +924,21 @@ export class BrowserService {
     }
   }
 
-  requestPanel(threadId?: string, panelWidth?: number, restoreDefaultPanelWidth = false): void {
+  requestPanel(
+    threadId?: string,
+    panelWidth?: number,
+    restoreDefaultPanelWidth = false,
+    deviceViewport?: BrowserDeviceViewport
+  ): void {
+    this.pendingDeviceViewport = deviceViewport ? { ...deviceViewport } : undefined
     const window = this.getUsableWindow()
     window.webContents.send(BROWSER_PANEL_REQUEST_CHANNEL, {
       threadId,
       panelWidth,
+      deviceViewport,
       restoreDefaultPanelWidth
     })
+    if (this.activeSession) this.emitState()
   }
 
   getState(): BrowserState {
@@ -888,7 +955,8 @@ export class BrowserService {
         zoomFactor: 1,
         visible: false,
         created: false,
-        consoleEntries: []
+        consoleEntries: [],
+        pendingDeviceViewport: this.pendingDeviceViewport
       }
     }
 
@@ -901,10 +969,11 @@ export class BrowserService {
       isLoading: isDestroyed ? false : webContents.isLoading(),
       canGoBack: isDestroyed ? false : webContents.canGoBack(),
       canGoForward: isDestroyed ? false : webContents.canGoForward(),
-      zoomFactor: isDestroyed ? 1 : webContents.getZoomFactor(),
+      zoomFactor: session.userZoomFactor,
       visible: session.view.getVisible(),
       created: true,
       consoleEntries: session.consoleEntries.slice(),
+      pendingDeviceViewport: this.pendingDeviceViewport,
       error: session.error
     }
   }
@@ -955,7 +1024,11 @@ export class BrowserService {
       targetReady: Promise.resolve(),
       workspacePath: workspacePath ?? null,
       consoleEntries: [],
-      nextConsoleEntryId: 1
+      nextConsoleEntryId: 1,
+      viewportRevision: 0,
+      userZoomFactor: 1,
+      deviceScaleFactor: 1,
+      deviceViewport: null
     }
 
     this.activeSession = session
@@ -1036,6 +1109,9 @@ export class BrowserService {
     })
     webContents.on("did-navigate", (_event, url) => {
       session.error = undefined
+      // Chromium persists page zoom by origin in the profile partition. Reset a zoom
+      // inherited from an earlier device preview once navigation is no longer scaled.
+      if (session.deviceScaleFactor === 1) this.applyEffectiveZoom(session)
       const permissionError = getUrlPermissionError(url, session.workspacePath)
       if (permissionError) {
         session.error = permissionError
@@ -1115,6 +1191,14 @@ export class BrowserService {
 
   private getActiveSession(): BrowserSession | null {
     return this.activeSession
+  }
+
+  private applyEffectiveZoom(session: BrowserSession): void {
+    const webContents = session.view.webContents
+    if (webContents.isDestroyed()) return
+    const nextZoomFactor = session.userZoomFactor * session.deviceScaleFactor
+    if (Math.abs(webContents.getZoomFactor() - nextZoomFactor) < 0.001) return
+    webContents.setZoomFactor(nextZoomFactor)
   }
 
   private invalidateSession(session: BrowserSession): void {

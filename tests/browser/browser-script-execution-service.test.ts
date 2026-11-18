@@ -32,6 +32,7 @@ describe("browser script execution service", () => {
     cdpMocks.getCurrentBrowserCdpPort.mockReturnValue(38127)
     registryMocks.getGlobalBrowserService.mockReturnValue({
       requestPanel: vi.fn(),
+      waitForDeviceViewport: vi.fn(async () => undefined),
       prepareTarget: vi.fn(async () => ({
         sessionId: "app-browser",
         url: "https://example.com",

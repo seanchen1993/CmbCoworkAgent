@@ -29,6 +29,8 @@ import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { hasOpenModalDialog, MODAL_DIALOG_CHANGE_EVENT } from "@/lib/modal-dialog"
 import { BrowserScriptRecordingControls } from "./BrowserScriptRecordingControls"
 import { BrowserCdpConfigCard } from "./BrowserCdpConfigCard"
+import { BrowserDeviceToolbar } from "./BrowserDeviceToolbar"
+import { useBrowserDevicePreview } from "./useBrowserDevicePreview"
 import {
   BrowserOptionsMenu,
   MAX_BROWSER_ZOOM_FACTOR,
@@ -77,7 +79,6 @@ const AUTO_COOKIE_IMPORT_RETRYABLE_ERROR_CODES = new Set([
   "import_timeout",
   "import_in_progress"
 ])
-
 function isInitialBrowserPage(url: string): boolean {
   return !url || url === "about:blank"
 }
@@ -137,6 +138,9 @@ function browserStatesEqual(a: BrowserState, b: BrowserState): boolean {
     a.zoomFactor === b.zoomFactor &&
     a.visible === b.visible &&
     a.created === b.created &&
+    a.pendingDeviceViewport?.width === b.pendingDeviceViewport?.width &&
+    a.pendingDeviceViewport?.height === b.pendingDeviceViewport?.height &&
+    a.pendingDeviceViewport?.scale === b.pendingDeviceViewport?.scale &&
     (a.error ?? "") === (b.error ?? "") &&
     a.consoleEntries.length === b.consoleEntries.length &&
     getLastConsoleEntryId(a.consoleEntries) === getLastConsoleEntryId(b.consoleEntries)
@@ -265,12 +269,13 @@ export function BrowserPanel({
   const viewportRef = useRef<HTMLDivElement>(null)
   const lastBoundsRef = useRef<BrowserBounds | null>(null)
   const lastBrowserViewVisibleRef = useRef<boolean | null>(null)
+  const lastDeviceMetricsRef = useRef("")
+  const boundsSyncRevisionRef = useRef(0)
   const hasVisibleBoundsRef = useRef(false)
   const isSessionCreatedRef = useRef(false)
   const isInitialBrowserPageRef = useRef(true)
   const isUrlFocusedRef = useRef(false)
   const lastInitialNavigationRef = useRef<string | null>(null)
-  const pendingSyncReasonRef = useRef<string | null>(null)
   const consoleScrollerRef = useRef<HTMLDivElement>(null)
   const [state, setState] = useState<BrowserState>(EMPTY_STATE)
   const [panelError, setPanelError] = useState<string | null>(null)
@@ -312,6 +317,34 @@ export function BrowserPanel({
     }
   }, [])
 
+  useEffect(() => {
+    let cancelled = false
+
+    void window.api.browser
+      .getScriptExecutionState()
+      .then((executionState) => {
+        if (!cancelled && executionState.status === "running") {
+          setRecordingBoxOpen(true)
+        }
+      })
+      .catch((error) => {
+        console.error(
+          `${BROWSER_PANEL_LOG_PREFIX} Failed to load script execution state: ${formatError(error)}`
+        )
+      })
+
+    const unsubscribe = window.api.browser.onScriptExecutionState((executionState) => {
+      if (executionState.status === "running") {
+        setRecordingBoxOpen(true)
+      }
+    })
+
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [])
+
   const applyBrowserState = useCallback((nextState: BrowserState) => {
     isSessionCreatedRef.current = nextState.created
     isInitialBrowserPageRef.current = isInitialBrowserPage(nextState.url)
@@ -321,6 +354,43 @@ export function BrowserPanel({
   const reportBrowserError = useCallback((error: string) => {
     setPanelError(error)
   }, [])
+
+  const clearDevicePreviewZoom = useCallback(() => {
+    if (!isSessionCreatedRef.current || !lastBoundsRef.current) return
+    lastDeviceMetricsRef.current = "null"
+    const revision = ++boundsSyncRevisionRef.current
+    void window.api.browser
+      .setViewport({
+        revision,
+        bounds: lastBoundsRef.current,
+        visible: lastBrowserViewVisibleRef.current ?? false,
+        metrics: null
+      })
+      .then((nextState) => {
+        if (revision === boundsSyncRevisionRef.current) applyBrowserState(nextState)
+      })
+      .catch((error) => {
+        if (revision === boundsSyncRevisionRef.current) {
+          reportBrowserError(formatError(error) || "浏览器视图同步失败")
+        }
+      })
+  }, [applyBrowserState, reportBrowserError])
+
+  const {
+    applyViewport: applyDeviceViewport,
+    deviceFrameRef,
+    getLayout: getDeviceLayout,
+    getRecordingViewport,
+    reset: resetDevicePreview,
+    scale: devicePreviewScale,
+    settings: deviceSettings,
+    updateSettings: updateDeviceSettings
+  } = useBrowserDevicePreview(clearDevicePreviewZoom)
+
+  const applyPendingDeviceViewport = useCallback(
+    (viewport) => applyDeviceViewport(viewport),
+    [applyDeviceViewport]
+  )
 
   const reportBrowserNotice = useCallback((message: string) => {
     setPanelError(message)
@@ -396,6 +466,7 @@ export function BrowserPanel({
   useEffect(() => {
     const unsubscribe = window.api.browser.onState((nextState) => {
       applyBrowserState(nextState)
+      applyPendingDeviceViewport(nextState.pendingDeviceViewport)
       if (!isUrlFocusedRef.current) {
         setUrlInput(getBrowserAddressValue(nextState.url))
       }
@@ -403,78 +474,77 @@ export function BrowserPanel({
     return () => {
       unsubscribe()
     }
-  }, [applyBrowserState])
+  }, [applyBrowserState, applyPendingDeviceViewport])
 
-  const syncBounds = useCallback(
-    (_reason: string) => {
-      if (!isSessionCreatedRef.current) {
-        return
-      }
-      const element = viewportRef.current
-      if (!element) {
-        return
-      }
-      const rect = element.getBoundingClientRect()
-      const zoomLevel = detectRendererZoomLevel()
-      const scaledLeft = rect.left * zoomLevel
-      const scaledTop = rect.top * zoomLevel
-      const scaledRight = rect.right * zoomLevel
-      const scaledBottom = rect.bottom * zoomLevel
-      const bounds: BrowserBounds = {
-        x: Math.floor(scaledLeft),
-        y: Math.floor(scaledTop),
-        width: Math.max(0, Math.ceil(scaledRight) - Math.floor(scaledLeft)),
-        height: Math.max(0, Math.ceil(scaledBottom) - Math.floor(scaledTop))
-      }
-      const layoutVisible = rect.width >= 8 && rect.height >= 8
-      const modalDialogOpen = hasOpenModalDialog()
-      const initialBrowserPage = isInitialBrowserPageRef.current
-      const visible = layoutVisible && !modalDialogOpen && !initialBrowserPage
-      if (!layoutVisible && hasVisibleBoundsRef.current) {
-        return
-      }
-      if (
-        isSameBounds(lastBoundsRef.current, bounds) &&
-        lastBrowserViewVisibleRef.current === visible
-      ) {
-        return
-      }
-      lastBoundsRef.current = bounds
-      lastBrowserViewVisibleRef.current = visible
-      if (layoutVisible) hasVisibleBoundsRef.current = true
-      void window.api.browser
-        .setBounds(bounds, visible)
-        .then(applyBrowserState)
-        .catch((error) => {
-          console.error(`${BROWSER_PANEL_LOG_PREFIX} Bounds sync failed: ${formatError(error)}`)
-          reportBrowserError(formatError(error) || "浏览器视图同步失败")
-        })
-    },
-    [applyBrowserState, reportBrowserError]
-  )
+  const syncBounds = useCallback(() => {
+    if (!isSessionCreatedRef.current) {
+      return
+    }
+    const element = viewportRef.current
+    if (!element) {
+      return
+    }
+    const rect = element.getBoundingClientRect()
+    const deviceLayout = getDeviceLayout(rect)
+    const zoomLevel = detectRendererZoomLevel()
+    const scaledLeft = deviceLayout.displayLeft * zoomLevel
+    const scaledTop = deviceLayout.displayTop * zoomLevel
+    const scaledRight = (deviceLayout.displayLeft + deviceLayout.displayWidth) * zoomLevel
+    const scaledBottom = (deviceLayout.displayTop + deviceLayout.displayHeight) * zoomLevel
+    const bounds: BrowserBounds = {
+      x: Math.floor(scaledLeft),
+      y: Math.floor(scaledTop),
+      width: Math.max(0, Math.ceil(scaledRight) - Math.floor(scaledLeft)),
+      height: Math.max(0, Math.ceil(scaledBottom) - Math.floor(scaledTop))
+    }
+    const layoutVisible = rect.width >= 8 && rect.height >= 8
+    const modalDialogOpen = hasOpenModalDialog()
+    const initialBrowserPage = isInitialBrowserPageRef.current
+    const visible = layoutVisible && !modalDialogOpen && !initialBrowserPage
+    const metrics = layoutVisible ? deviceLayout.metrics : null
+    const metricsKey = JSON.stringify(metrics)
+    if (!layoutVisible && hasVisibleBoundsRef.current) {
+      return
+    }
+    const boundsChanged = !isSameBounds(lastBoundsRef.current, bounds)
+    const visibilityChanged = lastBrowserViewVisibleRef.current !== visible
+    const metricsChanged = lastDeviceMetricsRef.current !== metricsKey
+    if (!boundsChanged && !visibilityChanged && !metricsChanged) return
+    lastBoundsRef.current = bounds
+    lastBrowserViewVisibleRef.current = visible
+    lastDeviceMetricsRef.current = metricsKey
+    if (layoutVisible) hasVisibleBoundsRef.current = true
+    const revision = ++boundsSyncRevisionRef.current
+    void window.api.browser
+      .setViewport({ revision, bounds, visible, metrics })
+      .then((nextState) => {
+        if (revision !== boundsSyncRevisionRef.current) return
+        applyBrowserState(nextState)
+      })
+      .catch((error) => {
+        if (revision !== boundsSyncRevisionRef.current) return
+        console.error(`${BROWSER_PANEL_LOG_PREFIX} Browser sync failed: ${formatError(error)}`)
+        reportBrowserError(formatError(error) || "浏览器视图同步失败")
+      })
+  }, [applyBrowserState, getDeviceLayout, reportBrowserError])
 
   useEffect(() => {
     let cancelled = false
     let frame: number | null = null
     const timers: number[] = []
 
-    const scheduleSync = (reason: string): void => {
-      pendingSyncReasonRef.current = pendingSyncReasonRef.current
-        ? `${pendingSyncReasonRef.current},${reason}`
-        : reason
+    const scheduleSync = (): void => {
       if (frame !== null) return
       frame = window.requestAnimationFrame(() => {
         frame = null
-        const nextReason = pendingSyncReasonRef.current || "raf"
-        pendingSyncReasonRef.current = null
-        if (!cancelled) syncBounds(nextReason)
+        if (!cancelled) syncBounds()
       })
     }
 
     const scheduleStabilizedSync = (): void => {
-      scheduleSync("attach:raf")
+      scheduleSync()
       for (const delay of [50, 150, 300, 600, 1000]) {
-        timers.push(window.setTimeout(() => scheduleSync(`attach:${delay}ms`), delay))
+        timers.push(window.setTimeout(scheduleSync, delay))
       }
     }
 
@@ -483,6 +553,7 @@ export function BrowserPanel({
       .then((nextState) => {
         if (cancelled) return
         applyBrowserState(nextState)
+        applyPendingDeviceViewport(nextState.pendingDeviceViewport)
         if (!isUrlFocusedRef.current) setUrlInput(getBrowserAddressValue(nextState.url))
         scheduleStabilizedSync()
         void window.api.browser
@@ -505,9 +576,9 @@ export function BrowserPanel({
         reportBrowserError(formatError(error) || "内置浏览器启动失败")
       })
 
-    const observer = new ResizeObserver(() => scheduleSync("resize-observer"))
-    const handleResize = (): void => scheduleSync("window-resize")
-    const handleScroll = (): void => scheduleSync("window-scroll")
+    const observer = new ResizeObserver(scheduleSync)
+    const handleResize = (): void => scheduleSync()
+    const handleScroll = (): void => scheduleSync()
     if (viewportRef.current) observer.observe(viewportRef.current)
     window.addEventListener("resize", handleResize)
     window.addEventListener("scroll", handleScroll, true)
@@ -524,6 +595,7 @@ export function BrowserPanel({
     }
   }, [
     applyBrowserState,
+    applyPendingDeviceViewport,
     initialUrl,
     markBrowserProfileImportFeedback,
     reloadToken,
@@ -535,18 +607,26 @@ export function BrowserPanel({
 
   useEffect(() => {
     if (!state.created) return
-    const frame = window.requestAnimationFrame(() => syncBounds("state-change:raf"))
-    const timer = window.setTimeout(() => syncBounds("state-change:120ms"), 120)
+    const frame = window.requestAnimationFrame(syncBounds)
+    const timer = window.setTimeout(syncBounds, 120)
     return () => {
       window.cancelAnimationFrame(frame)
       window.clearTimeout(timer)
     }
-  }, [consoleOpen, isFullscreen, state.created, state.isLoading, state.url, syncBounds])
+  }, [
+    consoleOpen,
+    deviceSettings,
+    isFullscreen,
+    state.created,
+    state.isLoading,
+    state.url,
+    syncBounds
+  ])
 
   useEffect(() => {
     if (!state.created) return
     // ResizeObserver misses pure position shifts, but BrowserView bounds are window-relative.
-    const interval = window.setInterval(() => syncBounds("position-poll"), BOUNDS_POSITION_POLL_MS)
+    const interval = window.setInterval(syncBounds, BOUNDS_POSITION_POLL_MS)
     return () => {
       window.clearInterval(interval)
     }
@@ -555,7 +635,7 @@ export function BrowserPanel({
   useEffect(() => {
     const handleModalDialogChange = (): void => {
       setIsHiddenByModalDialog(hasOpenModalDialog())
-      syncBounds("modal-dialog-change")
+      syncBounds()
     }
     handleModalDialogChange()
     window.addEventListener(MODAL_DIALOG_CHANGE_EVENT, handleModalDialogChange)
@@ -649,10 +729,12 @@ export function BrowserPanel({
 
   const resetToHome = useCallback(async () => {
     setIsResettingHome(true)
+    resetDevicePreview()
     try {
       await window.api.browser.detach()
       const nextState = await window.api.browser.attach({ workspacePath, visible: false })
       applyBrowserState(nextState)
+      applyPendingDeviceViewport(nextState.pendingDeviceViewport)
       setUrlInput("")
       setCopiedConsole(false)
       setConsoleOpen(false)
@@ -662,7 +744,13 @@ export function BrowserPanel({
     } finally {
       setIsResettingHome(false)
     }
-  }, [applyBrowserState, reportBrowserError, workspacePath])
+  }, [
+    applyBrowserState,
+    applyPendingDeviceViewport,
+    reportBrowserError,
+    resetDevicePreview,
+    workspacePath
+  ])
 
   const captureScreenshot = useCallback(async () => {
     setIsCapturing(true)
@@ -824,74 +912,81 @@ export function BrowserPanel({
 
   return (
     <div ref={panelRef} className="flex h-full min-h-0 flex-col overflow-hidden bg-background">
-      <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border bg-background-elevated px-2">
-        <BrowserOptionsMenu
-          browserCreated={state.created}
-          zoomFactor={state.zoomFactor}
-          onZoomChange={(zoomFactor) => void updateBrowserZoom(zoomFactor)}
-        />
-        <IconPopoverButton
-          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
-          icon={<ArrowLeft className="size-4" strokeWidth={1.8} />}
-          popoverContent="后退"
-          aria-label="后退"
-          disabled={!state.canGoBack}
-          onClick={() => void window.api.browser.goBack().then(applyBrowserState)}
-        />
-        <IconPopoverButton
-          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
-          icon={<ArrowRight className="size-4" strokeWidth={1.8} />}
-          popoverContent="前进"
-          aria-label="前进"
-          disabled={!state.canGoForward}
-          onClick={() => void window.api.browser.goForward().then(applyBrowserState)}
-        />
-        <IconPopoverButton
-          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
-          icon={
-            state.isLoading ? (
-              <RotateCcw className="size-3.5 animate-spin" strokeWidth={2} />
-            ) : (
-              <RotateCcw className="size-4" strokeWidth={1.8} />
-            )
-          }
-          popoverContent={state.isLoading ? "停止" : "刷新"}
-          aria-label={state.isLoading ? "停止" : "刷新"}
-          onClick={() =>
-            void (state.isLoading ? window.api.browser.stop() : window.api.browser.reload()).then(
-              applyBrowserState
-            )
-          }
-        />
-        <form onSubmit={navigate} className="flex min-w-0 flex-1 items-center">
-          <div className="relative flex min-w-0 flex-1 items-center">
-            <Globe2 className="pointer-events-none absolute left-2 size-4 text-muted-foreground/70" />
-            <input
-              value={urlInput}
-              onChange={(event) => setUrlInput(event.target.value)}
-              onFocus={() => {
-                isUrlFocusedRef.current = true
-                setIsUrlFocused(true)
-              }}
-              onBlur={() => {
-                isUrlFocusedRef.current = false
-                setIsUrlFocused(false)
-              }}
-              placeholder="localhost:5173"
-              className="h-8 w-full rounded-md border border-border bg-background px-8 text-[12px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-status-warning/70"
+      <BrowserDeviceToolbar
+        onSettingsChange={updateDeviceSettings}
+        scale={devicePreviewScale}
+        settings={deviceSettings}
+      >
+        {(deviceToolbarToggle) => (
+          <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border bg-background-elevated px-2">
+            <BrowserOptionsMenu
+              browserCreated={state.created}
+              zoomFactor={state.zoomFactor}
+              onZoomChange={(zoomFactor) => void updateBrowserZoom(zoomFactor)}
             />
-            {urlInput && (
-              <IconPopoverButton
-                className={BROWSER_INPUT_ICON_BUTTON_CLASSNAME}
-                icon={<X className="size-3.5" strokeWidth={2} />}
-                popoverContent="清空"
-                aria-label="清空"
-                onClick={() => setUrlInput("")}
-              />
-            )}
-          </div>
-        </form>
-        {/* 暂时隐藏“读取页面状态”动作，后续可能恢复。
+            {deviceToolbarToggle}
+            <IconPopoverButton
+              className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+              icon={<ArrowLeft className="size-4" strokeWidth={1.8} />}
+              popoverContent="后退"
+              aria-label="后退"
+              disabled={!state.canGoBack}
+              onClick={() => void window.api.browser.goBack().then(applyBrowserState)}
+            />
+            <IconPopoverButton
+              className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+              icon={<ArrowRight className="size-4" strokeWidth={1.8} />}
+              popoverContent="前进"
+              aria-label="前进"
+              disabled={!state.canGoForward}
+              onClick={() => void window.api.browser.goForward().then(applyBrowserState)}
+            />
+            <IconPopoverButton
+              className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+              icon={
+                state.isLoading ? (
+                  <RotateCcw className="size-3.5 animate-spin" strokeWidth={2} />
+                ) : (
+                  <RotateCcw className="size-4" strokeWidth={1.8} />
+                )
+              }
+              popoverContent={state.isLoading ? "停止" : "刷新"}
+              aria-label={state.isLoading ? "停止" : "刷新"}
+              onClick={() =>
+                void (
+                  state.isLoading ? window.api.browser.stop() : window.api.browser.reload()
+                ).then(applyBrowserState)
+              }
+            />
+            <form onSubmit={navigate} className="flex min-w-0 flex-1 items-center">
+              <div className="relative flex min-w-0 flex-1 items-center">
+                <Globe2 className="pointer-events-none absolute left-2 size-4 text-muted-foreground/70" />
+                <input
+                  value={urlInput}
+                  onChange={(event) => setUrlInput(event.target.value)}
+                  onFocus={() => {
+                    isUrlFocusedRef.current = true
+                    setIsUrlFocused(true)
+                  }}
+                  onBlur={() => {
+                    isUrlFocusedRef.current = false
+                    setIsUrlFocused(false)
+                  }}
+                  placeholder="localhost:5173"
+                  className="h-8 w-full rounded-md border border-border bg-background px-8 text-[12px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-status-warning/70"
+                />
+                {urlInput && (
+                  <IconPopoverButton
+                    className={BROWSER_INPUT_ICON_BUTTON_CLASSNAME}
+                    icon={<X className="size-3.5" strokeWidth={2} />}
+                    popoverContent="清空"
+                    aria-label="清空"
+                    onClick={() => setUrlInput("")}
+                  />
+                )}
+              </div>
+            </form>
+            {/* 暂时隐藏“读取页面状态”动作，后续可能恢复。
         <button
           type="button"
           className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
@@ -903,47 +998,49 @@ export function BrowserPanel({
           <Code2 className="size-4" strokeWidth={1.8} />
         </button>
         */}
-        <IconPopoverButton
-          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
-          icon={
-            isImportingBrowserProfile ? (
-              <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
-            ) : isBrowserProfileImportFailed ? (
-              <X className="size-4 text-destructive" strokeWidth={2} />
-            ) : isBrowserProfileImportSuccessful ? (
-              <Check className="size-4 text-green-500" strokeWidth={2} />
-            ) : (
-              <KeyRound className="size-4" strokeWidth={1.8} />
-            )
-          }
-          popoverContent={browserProfileImportPopoverContent}
-          aria-label="导入浏览器数据"
-          disabled={browserProfileImportDisabled}
-          onClick={() => void importBrowserProfileData()}
-        />
-        <IconPopoverButton
-          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
-          icon={<SquareArrowOutUpRight className="size-4" strokeWidth={1.8} />}
-          popoverContent="在浏览器打开"
-          aria-label="在浏览器打开"
-          disabled={externalBrowserOpenDisabled}
-          onClick={() => void openCurrentUrlInExternalBrowser()}
-        />
-        <IconPopoverButton
-          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
-          icon={
-            isFullscreen ? (
-              <Minimize2 className="size-4" strokeWidth={1.8} />
-            ) : (
-              <Maximize2 className="size-4" strokeWidth={1.8} />
-            )
-          }
-          popoverContent={isFullscreen ? "缩小全屏" : "全屏预览"}
-          aria-label={isFullscreen ? "缩小全屏" : "全屏预览"}
-          aria-pressed={isFullscreen}
-          onClick={toggleFullscreen}
-        />
-      </div>
+            <IconPopoverButton
+              className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+              icon={
+                isImportingBrowserProfile ? (
+                  <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
+                ) : isBrowserProfileImportFailed ? (
+                  <X className="size-4 text-destructive" strokeWidth={2} />
+                ) : isBrowserProfileImportSuccessful ? (
+                  <Check className="size-4 text-green-500" strokeWidth={2} />
+                ) : (
+                  <KeyRound className="size-4" strokeWidth={1.8} />
+                )
+              }
+              popoverContent={browserProfileImportPopoverContent}
+              aria-label="导入浏览器数据"
+              disabled={browserProfileImportDisabled}
+              onClick={() => void importBrowserProfileData()}
+            />
+            <IconPopoverButton
+              className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+              icon={<SquareArrowOutUpRight className="size-4" strokeWidth={1.8} />}
+              popoverContent="在浏览器打开"
+              aria-label="在浏览器打开"
+              disabled={externalBrowserOpenDisabled}
+              onClick={() => void openCurrentUrlInExternalBrowser()}
+            />
+            <IconPopoverButton
+              className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+              icon={
+                isFullscreen ? (
+                  <Minimize2 className="size-4" strokeWidth={1.8} />
+                ) : (
+                  <Maximize2 className="size-4" strokeWidth={1.8} />
+                )
+              }
+              popoverContent={isFullscreen ? "缩小全屏" : "全屏预览"}
+              aria-label={isFullscreen ? "缩小全屏" : "全屏预览"}
+              aria-pressed={isFullscreen}
+              onClick={toggleFullscreen}
+            />
+          </div>
+        )}
+      </BrowserDeviceToolbar>
 
       {visibleError && (
         <div className="flex shrink-0 items-center gap-2 border-b border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive">
@@ -959,7 +1056,9 @@ export function BrowserPanel({
         </div>
       )}
 
-      <div className="relative min-h-0 flex-1 bg-background">
+      <div
+        className={`relative min-h-0 flex-1 ${deviceSettings.open ? "bg-white" : "bg-background"}`}
+      >
         {/* Keep the welcome panel mounted so any dialogs launched from it are not
             immediately unmounted by the BrowserView modal-hide guard. */}
         {showBrowserWelcome && <BrowserWelcomePanel />}
@@ -983,22 +1082,31 @@ export function BrowserPanel({
           </div>
         )}
         <div ref={viewportRef} className="pointer-events-none absolute inset-0" />
-      </div>
-
-      {recordingBoxOpen && (
-        <div className="shrink-0 border-t border-border bg-background px-2 py-1">
-          <BrowserScriptRecordingControls
-            browserCreated={state.created}
-            currentUrl={state.url}
-            getPanelWidth={() => {
-              const width = panelRef.current?.getBoundingClientRect().width
-              return width && width > 0 ? Math.round(width) : undefined
-            }}
-            threadId={threadId}
-            workspacePath={workspacePath}
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <div
+            ref={deviceFrameRef}
+            className="opacity-0 shadow-[0_14px_40px_rgba(0,0,0,0.28)] ring-1 ring-black/10 transition-opacity dark:ring-white/15"
           />
         </div>
-      )}
+      </div>
+
+      <div
+        className={
+          recordingBoxOpen ? "shrink-0 border-t border-border bg-background px-2 py-1" : "hidden"
+        }
+      >
+        <BrowserScriptRecordingControls
+          browserCreated={state.created}
+          currentUrl={state.url}
+          getPanelWidth={() => {
+            const width = panelRef.current?.getBoundingClientRect().width
+            return width && width > 0 ? Math.round(width) : undefined
+          }}
+          getDeviceViewport={getRecordingViewport}
+          threadId={threadId}
+          workspacePath={workspacePath}
+        />
+      </div>
 
       <div className="flex shrink-0 items-center justify-between gap-2 border-t border-border bg-background-elevated h-10">
         <div className="flex min-w-0 items-center gap-2">

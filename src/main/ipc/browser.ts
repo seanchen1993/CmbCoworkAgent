@@ -9,6 +9,7 @@ import {
   type BrowserDownloadsChangedPayload,
   type BrowserNavigateOptions,
   type BrowserRecordingDraftUpdateInput,
+  type BrowserRecordingEnvironment,
   type BrowserRecordingSession,
   type BrowserScriptExecutionInput,
   type BrowserScriptLibraryDeleteInput,
@@ -16,6 +17,7 @@ import {
   type BrowserScriptLibraryReadInput,
   type BrowserScriptLibrarySaveInput,
   type BrowserScriptLibraryUpdateInput,
+  type BrowserViewportUpdate,
   type ScriptRecordingStartOptions
 } from "../../shared/browser-types"
 import {
@@ -106,6 +108,10 @@ function registerBrowserControlIpc({ browserService, ipcMain }: BrowserIpcContex
     return browserService.setBounds(bounds, visible)
   })
 
+  ipcMain.handle("browser:setViewport", (_event, update: BrowserViewportUpdate) => {
+    return browserService.setViewport(update)
+  })
+
   ipcMain.handle("browser:setZoomFactor", (_event, zoomFactor: number) => {
     return browserService.setZoomFactor(zoomFactor)
   })
@@ -170,7 +176,8 @@ function registerBrowserScriptRecordingIpc({ browserService, ipcMain }: BrowserI
 
   ipcMain.handle(
     "browser:stopScriptRecording",
-    (_event, panelWidth?: number): BrowserRecordingSession => stopScriptRecording(panelWidth)
+    (_event, environment?: BrowserRecordingEnvironment): BrowserRecordingSession =>
+      stopScriptRecording(environment)
   )
 
   ipcMain.handle("browser:getScriptRecording", (): BrowserRecordingSession => getScriptRecording())
