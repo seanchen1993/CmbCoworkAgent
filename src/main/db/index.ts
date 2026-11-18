@@ -6,6 +6,7 @@ import {
   markMemorySessionOptInMigrated
 } from "../storage"
 import { type NativeSqliteAdapter, openNativeSqliteDatabase } from "./native-sqlite-adapter"
+import { ensureLegacyTranscriptSlots } from "./legacy-transcript-slots"
 import { mergeThreadValueObjects } from "../../shared/thread-values"
 import { ensureLegacyMessageTimeArchive } from "../checkpointer/legacy-message-times"
 import {
@@ -704,6 +705,7 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
       "ALTER TABLE legacy_checkpoint_transcript_migrations ADD COLUMN current_fragment_index INTEGER NOT NULL DEFAULT 0"
     )
   }
+  ensureLegacyTranscriptSlots(db)
 
   db.run(`
     CREATE TABLE IF NOT EXISTS thread_message_fragments (
@@ -733,12 +735,18 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
         thread_id, message_count, next_ordinal, updated_at
       )
       SELECT
-        thread_id,
+        message.thread_id,
         COUNT(*),
-        COALESCE(MAX(ordinal), -1) + 1,
-        COALESCE(MAX(created_at), 0)
-      FROM thread_messages
-      GROUP BY thread_id
+        MAX(COALESCE(MAX(message.ordinal), -1), COALESCE((
+          SELECT MAX(ordinal) FROM thread_graph_transcript_boundaries
+          WHERE thread_id = message.thread_id
+        ), -1), COALESCE((
+          SELECT MAX(ordinal) FROM legacy_checkpoint_transcript_slots
+          WHERE thread_id = message.thread_id
+        ), -1)) + 1,
+        COALESCE(MAX(message.created_at), 0)
+      FROM thread_messages AS message
+      GROUP BY message.thread_id
     `)
   })
 
@@ -1533,11 +1541,13 @@ function getOrRepairThreadMessageBucket(
     `SELECT COUNT(*) AS message_count,
        MAX(COALESCE(MAX(ordinal), -1), COALESCE((
          SELECT MAX(ordinal) FROM thread_graph_transcript_boundaries WHERE thread_id = ?
+       ), -1), COALESCE((
+         SELECT MAX(ordinal) FROM legacy_checkpoint_transcript_slots WHERE thread_id = ?
        ), -1)) + 1 AS next_ordinal
      FROM thread_messages
      WHERE thread_id = ?`
   )
-  stmt.bind([threadId, threadId])
+  stmt.bind([threadId, threadId, threadId])
   try {
     const row = stmt.step()
       ? (stmt.getAsObject() as { message_count?: unknown; next_ordinal?: unknown })
@@ -4175,7 +4185,21 @@ export function getThreadTranscriptBoundaryOrdinal(
   }
 }
 
+export function withThreadMessageIdentitySnapshot<T>(operation: () => T): T {
+  return getDb().withReadSnapshot(operation)
+}
+
 export function getThreadMessageProviderOccurrencesBeforeUser(
+  threadId: string,
+  userMessageId: string,
+  providerSourceIds: readonly string[]
+): Array<{ provider_source_id: string; role: Message["role"]; provider_occurrence: number }> | undefined {
+  return withThreadMessageIdentitySnapshot(() =>
+    readThreadMessageProviderOccurrencesBeforeUser(threadId, userMessageId, providerSourceIds)
+  )
+}
+
+function readThreadMessageProviderOccurrencesBeforeUser(
   threadId: string,
   userMessageId: string,
   providerSourceIds: readonly string[]
@@ -5256,7 +5280,25 @@ function moveThreadMessageBlockAfterOrdinal(
     adjacentIds.length === orderedIds.length &&
     adjacentIds.every((messageId, index) => messageId === orderedIds[index])
   ) {
-    return false
+    const lastOrdinal = movedRows.get(orderedIds[orderedIds.length - 1])!.ordinal
+    if (lastOrdinal === anchorOrdinal + orderedIds.length) return false
+    // A visible neighbor can still have an unfilled checkpoint slot or a
+    // graph-only user boundary between it and the requested predecessor.
+    const hiddenNeighbor = database.prepare(
+      `SELECT 1 FROM thread_graph_transcript_boundaries
+       WHERE thread_id = ? AND ordinal > ? AND ordinal < ?
+       UNION ALL
+       SELECT 1 FROM legacy_checkpoint_transcript_slots
+       WHERE thread_id = ? AND ordinal > ? AND ordinal < ? LIMIT 1`
+    )
+    try {
+      hiddenNeighbor.bind([
+        threadId, anchorOrdinal, lastOrdinal, threadId, anchorOrdinal, lastOrdinal
+      ])
+      if (!hiddenNeighbor.step()) return false
+    } finally {
+      hiddenNeighbor.free()
+    }
   }
 
   const { bucket, create: createBucket } = getOrRepairThreadMessageBucket(database, threadId)
@@ -5280,6 +5322,12 @@ function moveThreadMessageBlockAfterOrdinal(
   )
   database.run(
     `UPDATE thread_graph_transcript_boundaries
+     SET ordinal = ordinal + ?
+     WHERE thread_id = ? AND ordinal > ?`,
+    [orderedIds.length, threadId, anchorOrdinal]
+  )
+  database.run(
+    `UPDATE legacy_checkpoint_transcript_slots
      SET ordinal = ordinal + ?
      WHERE thread_id = ? AND ordinal > ?`,
     [orderedIds.length, threadId, anchorOrdinal]
@@ -6161,6 +6209,7 @@ export function deleteThread(threadId: string): void {
     database.run("DELETE FROM thread_graph_transcript_boundaries WHERE thread_id = ?", [threadId])
     database.run("DELETE FROM thread_message_buckets WHERE thread_id = ?", [threadId])
     database.run("DELETE FROM trusted_tool_file_preview_sources WHERE thread_id = ?", [threadId])
+    database.run("DELETE FROM legacy_checkpoint_transcript_slots WHERE thread_id = ?", [threadId])
     database.run("DELETE FROM legacy_checkpoint_transcript_migrations WHERE thread_id = ?", [
       threadId
     ])

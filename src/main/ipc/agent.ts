@@ -100,7 +100,8 @@ import {
   getThreadTranscriptBoundaryOrdinal,
   reserveThreadGraphTranscriptBoundary,
   updateThread,
-  upsertThreadMessages
+  upsertThreadMessages,
+  withThreadMessageIdentitySnapshot
 } from "../db"
 import {
   assertNoTranscriptAgentModeTransition,
@@ -4052,25 +4053,27 @@ function flushPendingStreamTranscriptMessages(
       }
     }
     const boundaryId = streamTranscriptBoundaryIds.get(pendingKey)
-    const resolved = resolveStreamTranscriptFlush({
-      queuedMessages: pending.messages,
-      currentAssistantIdentity: streamTranscriptAssistantIdentities.get(pendingKey),
-      ...(boundaryId && {
-        boundaryOrdinal: getThreadTranscriptBoundaryOrdinal(threadId, boundaryId),
-        loadPreviousOccurrences: (sourceIds: readonly string[]) =>
-          getThreadMessageProviderOccurrencesBeforeUser(threadId, boundaryId, sourceIds)
-      }),
-      loadBaselineMessages: () =>
-        getThreadMessageIdentityContext(
-          threadId,
-          pending.messages.map((message) => ({
-            messageId: message.id,
-            providerSourceId: getMessageProviderSourceId(message),
-            providerOccurrence: getMessageProviderOccurrence(message),
-            role: message.role
-          }))
-        )
-    })
+    const resolve = () =>
+      resolveStreamTranscriptFlush({
+        queuedMessages: pending.messages,
+        currentAssistantIdentity: streamTranscriptAssistantIdentities.get(pendingKey),
+        ...(boundaryId && {
+          boundaryOrdinal: getThreadTranscriptBoundaryOrdinal(threadId, boundaryId),
+          loadPreviousOccurrences: (sourceIds: readonly string[]) =>
+            getThreadMessageProviderOccurrencesBeforeUser(threadId, boundaryId, sourceIds)
+        }),
+        loadBaselineMessages: () =>
+          getThreadMessageIdentityContext(
+            threadId,
+            pending.messages.map((message) => ({
+              messageId: message.id,
+              providerSourceId: getMessageProviderSourceId(message),
+              providerOccurrence: getMessageProviderOccurrence(message),
+              role: message.role
+            }))
+          )
+      })
+    const resolved = boundaryId ? withThreadMessageIdentitySnapshot(resolve) : resolve()
     const { messages, preserveExistingOrder } = resolved
     if (messages.length === 0) return
     let streamAttempt = streamTranscriptAttempts.get(pendingKey)
@@ -4460,28 +4463,30 @@ export function persistAndForwardPhysicalRunStreamChunk(
     // and values-only finals do not depend on an unmarked renderer writeback.
     const goalReceipts = projectGoalValues || streamTranscriptBoundaryIds.has(runKey)
     const receipts: Array<[object, Record<string, unknown>]> = []
-    const snapshots = selectStreamTranscriptValueSnapshots(payload, valuesSnapshotKind, {
-      completeMessages: completeValuesMessages,
-      onResolve: goalReceipts
-        ? (source, canonical) => {
-            receipts.push([source, canonical])
-          }
-        : undefined,
-      resolveBoundaryOrdinal: (userMessageId) =>
-        getThreadTranscriptBoundaryOrdinal(threadId, userMessageId),
-      loadBaselineMessages: (selectors) =>
-        getThreadMessageIdentityContext(
-          threadId,
-          selectors.map((message) => ({
-            messageId: message.id,
-            providerSourceId: getMessageProviderSourceId(message),
-            providerOccurrence: getMessageProviderOccurrence(message),
-            role: message.role as Message["role"]
-          }))
-        ),
-      loadPreviousTurnOccurrences: (userMessageId, sourceIds) =>
-        getThreadMessageProviderOccurrencesBeforeUser(threadId, userMessageId, sourceIds)
-    })
+    const snapshots = withThreadMessageIdentitySnapshot(() =>
+      selectStreamTranscriptValueSnapshots(payload, valuesSnapshotKind, {
+        completeMessages: completeValuesMessages,
+        onResolve: goalReceipts
+          ? (source, canonical) => {
+              receipts.push([source, canonical])
+            }
+          : undefined,
+        resolveBoundaryOrdinal: (userMessageId) =>
+          getThreadTranscriptBoundaryOrdinal(threadId, userMessageId),
+        loadBaselineMessages: (selectors) =>
+          getThreadMessageIdentityContext(
+            threadId,
+            selectors.map((message) => ({
+              messageId: message.id,
+              providerSourceId: getMessageProviderSourceId(message),
+              providerOccurrence: getMessageProviderOccurrence(message),
+              role: message.role as Message["role"]
+            }))
+          ),
+        loadPreviousTurnOccurrences: (userMessageId, sourceIds) =>
+          getThreadMessageProviderOccurrencesBeforeUser(threadId, userMessageId, sourceIds)
+      })
+    )
     rememberSelectedStreamTranscriptValueSnapshots(payload, snapshots)
     for (const snapshot of snapshots) {
       persistStreamTranscriptChunk(threadId, runToken, "messages", snapshot, { deferFlush: true })

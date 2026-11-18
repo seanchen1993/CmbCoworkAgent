@@ -5949,6 +5949,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       let latestTrustedCheckpointMessageAt: Date | undefined
       let persistedThreadMessages: Message[] = []
       let visiblePersistedThreadMessages: Message[] = []
+      let publishedInitialPageWindows: ThreadMessagePageWindow[] | undefined
       let durableMessageTotal = 0
       let durableMessageHasMore = false
       let durableMessagePageCursor: ThreadMessagePageCursor | null = null
@@ -6032,22 +6033,24 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         )
         mainTranscriptPublished = !keepMainTranscriptLoading
         if (isCurrentTranscriptHydration()) {
+          const pageWindows =
+            visiblePersistedThreadMessages.length > 0
+              ? [createThreadMessagePageWindow(visiblePersistedThreadMessages, null)]
+              : []
           if (mainTranscriptPublished) {
             actions.setMessages(visiblePersistedThreadMessages)
             firstTranscriptPublishedThreadIdsRef.current.add(threadId)
+            publishedInitialPageWindows = pageWindows
           }
           updateThreadState(threadId, () => ({
             historyLoading: keepMainTranscriptLoading,
-            historyPageLoading: false,
+            historyPageLoading: keepMainTranscriptLoading,
             historyHasMore: durableMessageHasMore,
             historyPageCursor: durableMessagePageCursor,
             goalTranscriptPageBoundary: persistedThreadMessages.find(
               (message) => message.id === durableMessagePageCursor?.beforeMessageId
             ),
-            historyPageWindows:
-              visiblePersistedThreadMessages.length > 0
-                ? [createThreadMessagePageWindow(visiblePersistedThreadMessages, null)]
-                : [],
+            historyPageWindows: pageWindows,
             historyWindowGap: null,
             historyMessageTotal: durableMessageTotal,
             historyConversationPresence: durableConversationPresence,
@@ -6083,11 +6086,38 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             delete pendingGoalTranscriptEventsRef.current[threadId]
           }
           if (result.succeeded && isCurrentLoad()) {
-            updateThreadState(threadId, () => ({
-              goalTranscriptEvents: goalNoticeEventsToGoalUiEvents(threadId, result.events).filter(
-                (event) => goalUserEventToMessage(event) !== null
-              )
-            }))
+            const goalTranscriptEvents = goalNoticeEventsToGoalUiEvents(
+              threadId,
+              result.events
+            ).filter((event) => goalUserEventToMessage(event) !== null)
+            updateThreadState(threadId, (state) => {
+              // Paging can supersede hydration after the first paint. Enrich that
+              // page before its retained rows are carried into a new window.
+              if (
+                goalTranscriptEvents.length === 0 ||
+                state.historyPageWindows !== publishedInitialPageWindows ||
+                state.historyWindowGap
+              ) {
+                return { goalTranscriptEvents }
+              }
+              const pageWindow = publishedInitialPageWindows[0]
+              if (
+                pageWindow &&
+                (!state.messages.some((message) => message.id === pageWindow.firstMessageId) ||
+                  !state.messages.some((message) => message.id === pageWindow.lastMessageId))
+              ) {
+                return { goalTranscriptEvents }
+              }
+              return {
+                goalTranscriptEvents,
+                messages: mergeGoalUserEventsIntoDurablePage(
+                  state.messages,
+                  goalTranscriptEvents,
+                  persistedThreadMessages,
+                  getGoalTranscriptPageRange(persistedThreadMessages, durableMessageHasMore)
+                )
+              }
+            })
           }
           return result
         })
@@ -6271,7 +6301,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             isVisibleCheckpointTranscriptMessage
           )
           if (isCurrentTranscriptHydration()) {
-            actions.setMessages(visiblePersistedThreadMessages)
+            actions.setMessages(
+              mergeGoalUserEventsIntoDurablePage(
+                visiblePersistedThreadMessages,
+                threadStatesRef.current[threadId]?.goalTranscriptEvents ?? [],
+                persistedThreadMessages,
+                getGoalTranscriptPageRange(persistedThreadMessages, durableMessageHasMore)
+              )
+            )
             firstTranscriptPublishedThreadIdsRef.current.add(threadId)
             mainTranscriptPublished = true
             updateThreadState(threadId, () => ({

@@ -14,6 +14,9 @@ const output = path.join(root, "output", "goal-transcript-restart-e2e", String(D
 const workspace = path.join(output, "workspace")
 const modelId = "custom:goal-transcript-restart"
 const title = "Goal transcript restart fixture"
+const historyTitle = "Goal first-page paging fixture"
+const historyRowCount = 8
+const historyStart = Date.UTC(2025, 11, 31)
 const providerId = "goal-reused-provider"
 const callId = "goal-reused-call"
 const expectedAssistantText = [
@@ -34,6 +37,13 @@ interface StoredMessage {
   ordinal?: number
 }
 
+interface GoalColdPagingFixture {
+  initialPageLimited: boolean
+  goalRequestWaiting: boolean
+  earlierRequestReceived: boolean
+  latestRequestAfterPaging: boolean
+}
+
 interface FixtureWindow {
   api: {
     models: {
@@ -49,6 +59,7 @@ interface FixtureWindow {
       create(metadata: Record<string, unknown>): Promise<{ thread_id: string }>
       getGoalState(id: string): Promise<{ goal?: { status: string } }>
       getMessages(id: string): Promise<StoredMessage[]>
+      appendMessages(id: string, messages: Record<string, unknown>[]): Promise<{ count: number }>
       getMessagesPage(
         id: string,
         options: { includeVisibleMessagePresence: boolean }
@@ -327,27 +338,61 @@ async function main(): Promise<void> {
       "complete"
     )
     await assertTranscript(initial, threadId, "live-complete")
+    const historyThreadId = await initial.evaluate(
+      async ({ title, workspace, modelId, count, start }) => {
+        const api = (window as unknown as FixtureWindow).api
+        const { thread_id: id } = await api.threads.create({
+          title,
+          workspacePath: workspace,
+          model: modelId,
+          agentMode: "normal"
+        })
+        await api.workspace.set(id, workspace)
+        const messages = Array.from({ length: count }, (_, index) => ({
+          id: `goal-history-row-${index}`,
+          role: index % 2 === 0 ? "user" : "assistant",
+          content: `Goal history row ${index}`,
+          created_at: new Date(start + 1_000 * index)
+        }))
+        const result = await api.threads.appendMessages(id, messages)
+        if (result.count !== count) throw new Error("Failed to seed durable Goal history")
+        return id
+      },
+      { title: historyTitle, workspace, modelId, count: historyRowCount, start: historyStart }
+    )
     await app!.close()
     app = undefined
 
     // A legacy resume can have a saved event even if its visible user row was never written.
     const database = new DatabaseSync(path.join(output, "profile", "cmbcoworkagent.sqlite"))
+    let historyEventId: number | bigint
     try {
       const goal = database
         .prepare("SELECT goal_id FROM thread_goals WHERE thread_id = ?")
         .get(threadId) as { goal_id: string } | undefined
       assert.ok(goal)
+      const insertEvent = database.prepare(
+        `INSERT INTO thread_goal_events
+           (thread_id, goal_id, active_window_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      const resumeEvent = `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal resume`
+      insertEvent.run(threadId, goal.goal_id, "fixture-missing-window", resumeEvent, Date.now())
+      // The seeded history starts with a fully migrated transcript and no graph checkpoint.
       database
         .prepare(
-          "INSERT INTO thread_goal_events (thread_id, goal_id, active_window_id, message, created_at) VALUES (?, ?, ?, ?, ?)"
+          `INSERT INTO legacy_checkpoint_transcript_migrations
+             (thread_id, checkpoint_id, total_messages, next_index, status, updated_at)
+           VALUES (?, ?, ?, ?, 'complete', ?)`
         )
-        .run(
-          threadId,
-          goal.goal_id,
-          "fixture-missing-window",
-          `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal resume`,
-          Date.now()
-        )
+        .run(historyThreadId, "fixture-history", historyRowCount, historyRowCount, Date.now())
+      historyEventId = insertEvent.run(
+        historyThreadId,
+        null,
+        "fixture-history-missing-window",
+        resumeEvent,
+        historyStart + 1_000 * (historyRowCount - 2) + 1
+      ).lastInsertRowid
     } finally {
       database.close()
     }
@@ -362,6 +407,107 @@ async function main(): Promise<void> {
     const lastAnswer = orderedRows.findIndex((row) => row.includes("second verified"))
     const resume = orderedRows.findIndex((row) => row.includes("继续 Goal"))
     assert.ok(lastAnswer >= 0 && resume > lastAnswer, "the unanchored resume stays after the Goal")
+
+    await app!.evaluate(({ ipcMain }, id) => {
+      type Handler = (event: Electron.IpcMainInvokeEvent, ...args: unknown[]) => unknown
+      const handlers = (ipcMain as typeof ipcMain & { _invokeHandlers: Map<string, Handler> })
+        ._invokeHandlers
+      const goalEventsKey = "threads:goalEvents"
+      const messagesPageKey = "threads:messages-page"
+      const goalEvents = handlers.get(goalEventsKey)
+      const messagesPage = handlers.get(messagesPageKey)
+      if (!goalEvents || !messagesPage) throw new Error("Goal history test IPC handlers missing")
+
+      const fixture: GoalColdPagingFixture = {
+        initialPageLimited: false,
+        goalRequestWaiting: false,
+        earlierRequestReceived: false,
+        latestRequestAfterPaging: false
+      }
+      Object.assign(globalThis, { goalColdPagingFixture: fixture })
+      let releaseEvents!: () => void
+      const earlierRequest = new Promise<void>((resolve) => {
+        releaseEvents = resolve
+      })
+      handlers.set(goalEventsKey, async (event, ...args) => {
+        if (args[0] === id && (args[1] as { restore?: boolean })?.restore) {
+          fixture.goalRequestWaiting = !fixture.earlierRequestReceived
+          await earlierRequest
+          handlers.set(goalEventsKey, goalEvents)
+        }
+        return goalEvents(event, ...args)
+      })
+      handlers.set(messagesPageKey, (event, ...args) => {
+        const request = args[0] as {
+          threadId: string
+          options?: { beforeOrdinal?: number; includeVisibleMessagePresence?: boolean }
+        }
+        if (request.threadId === id) {
+          if (request.options?.beforeOrdinal !== undefined) {
+            fixture.earlierRequestReceived = true
+            releaseEvents()
+          } else if (fixture.earlierRequestReceived) {
+            fixture.latestRequestAfterPaging = true
+          } else if (request.options?.includeVisibleMessagePresence) {
+            // Keep the fixture's first page and older page small.
+            fixture.initialPageLimited = true
+            return messagesPage(event, {
+              ...request,
+              options: { ...request.options, limit: 4 }
+            })
+          }
+        }
+        return messagesPage(event, ...args)
+      })
+    }, historyThreadId)
+    await reopened.getByText(historyTitle, { exact: true }).first().click({ timeout: 30_000 })
+    const historyChat = reopened.locator(`[data-chat-thread-id="${historyThreadId}"]`)
+    const earlierHistory = historyChat.locator('[data-chat-history-boundary="older"]')
+    const historyResume = historyChat.locator(
+      `[data-chat-message-id="goal-user-event-${historyEventId}"]`
+    )
+    const lastHistoryRowId = `goal-history-row-${historyRowCount - 1}`
+    const lastHistoryRow = historyChat.locator(`[data-chat-message-id="${lastHistoryRowId}"]`)
+    await app!.evaluate(async () => {
+      const { goalColdPagingFixture: fixture } = globalThis as typeof globalThis & {
+        goalColdPagingFixture: GoalColdPagingFixture
+      }
+      const deadline = Date.now() + 10_000
+      while (!fixture.goalRequestWaiting && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+      if (!fixture.goalRequestWaiting) throw new Error("The cold Goal request was never held")
+    })
+    await lastHistoryRow.waitFor({ state: "visible", timeout: 10_000 })
+    assert.equal(await historyResume.count(), 0, "first paint is independent of the Goal event IPC")
+    await earlierHistory.click()
+    await earlierHistory.waitFor({ state: "hidden" })
+    await lastHistoryRow.waitFor({ state: "visible", timeout: 10_000 })
+    await app!.evaluate(() => {
+      const { goalColdPagingFixture: fixture } = globalThis as typeof globalThis & {
+        goalColdPagingFixture: GoalColdPagingFixture
+      }
+      if (
+        !fixture.initialPageLimited ||
+        !fixture.earlierRequestReceived ||
+        fixture.latestRequestAfterPaging
+      ) {
+        throw new Error("Expected to reach the retained tail without a latest-page IPC")
+      }
+    })
+    await historyResume.waitFor({ state: "visible", timeout: 10_000 })
+    const historyRows = await historyChat
+      .locator("[data-chat-message-id]")
+      .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-chat-message-id")))
+    const historyResumeId = `goal-user-event-${historyEventId}`
+    const historyResumeIndex = historyRows.indexOf(historyResumeId)
+    assert.equal(historyRows.filter((id) => id === historyResumeId).length, 1)
+    assert.deepEqual(historyRows.slice(historyResumeIndex - 1, historyResumeIndex + 2), [
+      `goal-history-row-${historyRowCount - 2}`,
+      historyResumeId,
+      lastHistoryRowId
+    ])
+
     assert.equal(executions, expectedAssistantText.length)
     assert.equal(evaluations, 2)
     assert.equal(revisionsRequested, 1)
@@ -373,7 +519,7 @@ async function main(): Promise<void> {
     assert.deepEqual(serverErrors, [])
     assert.deepEqual(pageErrors, [])
     console.log(
-      "PASS Goal continuation and Stop revision, repeated IDs, cold order and tool status"
+      "PASS Goal continuation, repeated IDs, tool status, cold order and early history paging"
     )
   } catch (error) {
     await page?.screenshot({ path: path.join(output, "failure.png") }).catch(() => undefined)

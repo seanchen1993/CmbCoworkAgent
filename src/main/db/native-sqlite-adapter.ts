@@ -160,6 +160,7 @@ export class NativeSqliteStatement {
 export class NativeSqliteAdapter {
   private closed = false
   private lastRowsModified = 0
+  private transactionOwned = false
 
   constructor(private readonly native: DatabaseSync) {}
 
@@ -177,8 +178,21 @@ export class NativeSqliteAdapter {
   /** Admit the writer before a read can pin a WAL snapshot. Transaction
    * control uses no row-count query, including on a read-only early return. */
   withImmediateWriteTransaction<T>(operation: () => T): T {
+    return this.withTransaction("BEGIN IMMEDIATE", operation)
+  }
+
+  /** Keep related reads on one WAL snapshot without taking the writer lock. */
+  withReadSnapshot<T>(operation: () => T): T {
     this.assertOpen()
-    this.native.exec("BEGIN IMMEDIATE")
+    return this.transactionOwned || this.native.isTransaction
+      ? operation()
+      : this.withTransaction("BEGIN", operation)
+  }
+
+  private withTransaction<T>(begin: string, operation: () => T): T {
+    this.assertOpen()
+    this.native.exec(begin)
+    this.transactionOwned = true
     try {
       const result = operation()
       this.native.exec("COMMIT")
@@ -190,6 +204,8 @@ export class NativeSqliteAdapter {
         // Preserve the original transaction error.
       }
       throw error
+    } finally {
+      this.transactionOwned = false
     }
   }
 

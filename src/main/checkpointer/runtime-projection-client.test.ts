@@ -1745,8 +1745,11 @@ describe("checkpoint runtime projection worker", () => {
           expect(after.find((row) => row.message_id === "resume")?.content_json).toBe(
             '"/goal resume"'
           )
-          expect(after.filter((row) => row.goal_id === "goal").map(({ ordinal: _, ...row }) => row))
-            .toEqual(before.map(({ ordinal: _, ...row }) => row))
+          const omitOrdinal = (row: Record<string, unknown>) =>
+            Object.fromEntries(Object.entries(row).filter(([column]) => column !== "ordinal"))
+          expect(after.filter((row) => row.goal_id === "goal").map(omitOrdinal)).toEqual(
+            before.map(omitOrdinal)
+          )
         }
         expect(database.prepare("SELECT ordinal FROM thread_graph_transcript_boundaries").get())
           .toMatchObject({ ordinal: partialLegacyHistory ? 4 : 3 })

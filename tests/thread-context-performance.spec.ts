@@ -520,6 +520,11 @@ async function main(): Promise<void> {
     "only main transcript publication may release first-screen history loading"
   )
   assert.match(
+    firstPagePublishSource,
+    /historyPageLoading: keepMainTranscriptLoading/,
+    "older pages must not replace a pending first transcript during legacy bootstrap"
+  )
+  assert.match(
     loadHistorySource,
     /foregroundHydrationGeneration\.capture\(threadId\)[\s\S]*foregroundHydrationGeneration\.isCurrent\(foregroundToken\)/,
     "A -> B -> C foreground navigation must fence stale renderer hydration generations"
