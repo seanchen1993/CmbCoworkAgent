@@ -61,7 +61,7 @@ const _regexCache = new Map<string, RegExp | null>()
 
 export interface HookContext {
   toolName?: string
-  /** Match this legacy tool name when the hook does not match the actual name. */
+  /** Prefer this legacy tool name when it meets the hook's criteria. */
   fallbackToolName?: string
   toolArgs?: Record<string, unknown>
   toolResult?: string
@@ -1379,19 +1379,20 @@ function matchingHookContext(
   if (!hook.enabled || hook.event !== event || shouldSkipOnceHook(hook, event, context)) {
     return undefined
   }
+  if (context.fallbackToolName) {
+    const legacyContext = { ...context, toolName: context.fallbackToolName }
+    if (
+      matchesEventMatcher(hook.matcher, event, legacyContext) &&
+      matchesIfCondition(hook.if, event, legacyContext)
+    ) {
+      return legacyContext
+    }
+  }
   if (
     matchesEventMatcher(hook.matcher, event, context) &&
     matchesIfCondition(hook.if, event, context)
   ) {
     return context
-  }
-  if (!context.fallbackToolName) return undefined
-  const fallbackContext = { ...context, toolName: context.fallbackToolName }
-  if (
-    matchesEventMatcher(hook.matcher, event, fallbackContext) &&
-    matchesIfCondition(hook.if, event, fallbackContext)
-  ) {
-    return fallbackContext
   }
   return undefined
 }

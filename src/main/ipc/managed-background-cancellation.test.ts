@@ -151,7 +151,9 @@ describe("managed background cancellation IPC wiring", () => {
     expect(await status(event, "thread")).toBe(true)
     expect(await stop(event, "thread")).toBe(true)
     expect(await stop(event, { threadId: "thread" })).toBe(false)
-    expect(hasActiveBackgroundTasks).toHaveBeenCalledExactlyOnceWith("thread")
+    expect(hasActiveBackgroundTasks).toHaveBeenCalledExactlyOnceWith("thread", {
+      desktopOwnedOnly: true
+    })
     expect(cancelDetachedBackgroundTasks).toHaveBeenCalledExactlyOnceWith("thread")
   })
 

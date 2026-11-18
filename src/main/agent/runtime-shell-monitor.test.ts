@@ -159,6 +159,11 @@ describe("shell monitor runtime dispatch", () => {
 
   it.each([
     { mode: "explicit foreground", requestedBackground: false, runtime: {} },
+    {
+      mode: "explicit background opt-in",
+      requestedBackground: undefined,
+      runtime: { autoBackgroundHandoff: false }
+    },
     { mode: "managed session", requestedBackground: true, runtime: { managedExecution: true } },
     {
       mode: "monitor denied",
@@ -187,7 +192,7 @@ describe("shell monitor runtime dispatch", () => {
             ? new AIMessage({ content: "Finished", response_metadata: { finish_reason: "stop" } })
             : requestTool("execute", {
                 command: "echo probe",
-                run_in_background: requestedBackground
+                ...(requestedBackground !== undefined && { run_in_background: requestedBackground })
               })
         ),
         backend: sandbox,
@@ -229,6 +234,31 @@ describe("shell monitor runtime dispatch", () => {
       expect(fetchHook).toHaveBeenCalledOnce()
     }
   )
+
+  it("still supports explicit background commands with automatic handoff disabled", async () => {
+    const { sandbox, physicalExit } = await fixture()
+    const raw = vi.spyOn(sandbox, "executeRaw").mockImplementation(async () => {
+      await physicalExit.promise
+      return { output: "probe finished", exitCode: 0, truncated: false }
+    })
+    const agent = createDeepAgent({
+      autoBackgroundHandoff: false,
+      model: new ReplayModel((messages) =>
+        messages.at(-1)?._getType() === "tool"
+          ? new AIMessage({ content: "Finished", response_metadata: { finish_reason: "stop" } })
+          : requestTool("execute", { command: "echo probe", run_in_background: true })
+      ),
+      backend: sandbox,
+      mainTodosEnabled: false,
+      mainSubagentsEnabled: false
+    })
+
+    const result = await agent.invoke({ messages: [new HumanMessage("Run this probe")] })
+    const output = result.messages.find((message: BaseMessage) => message._getType() === "tool")
+    expect(output?.content).toMatch(/^Background task started \(id: [0-9a-f]+\)/)
+    expect(raw.mock.calls[0]?.[4]).toMatchObject({ background: true })
+    expect(LocalSandbox.hasActiveBackgroundTasks(sandbox.runId)).toBe(true)
+  })
 
   it("keeps a synchronous shell Hook halt in the originating graph turn", async () => {
     const { sandbox, physicalExit } = await fixture({

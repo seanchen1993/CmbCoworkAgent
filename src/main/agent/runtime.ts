@@ -426,6 +426,13 @@ execute 默认从进程启动开始等待 60 秒。命令仍在运行时会继�
 - 如需立即在后台启动，传入 run_in_background: true。传入 false 时按前台时限运行。
 `
 
+const BACKGROUND_EXEC_OPT_IN_GUIDANCE = `
+### 长时间命令执行
+
+execute 默认按前台时限运行。传入 run_in_background: true 可立即在后台启动并返回 task_id。
+- 使用 monitor({ task_id: "..." }) 监听终态并获取退出码和输出。依赖命令结果的后续步骤必须等到终态。
+`
+
 function isAbortError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
   return error.name === "AbortError" || (error as { code?: unknown }).code === "ABORT_ERR"
@@ -2175,6 +2182,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     filesystemAccess,
     mainBlockedToolNames = [],
     managedExecution = false,
+    autoBackgroundHandoff = true,
     registrySubagentSpecs = [],
     // Windows shell kind the runtime's commands execute in (derived from the
     // sandbox). Threaded into the read-only execute gate so Windows PowerShell
@@ -2423,10 +2431,9 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
           return typeof result === "string" ? result : (JSON.stringify(result) ?? String(result))
         }
         const canMonitor = !runtimeShellMonitorBlocked && !shellMonitorDeniedContext.getStore()
-        const canRunInBackground =
-          canMonitor && !managedExecution && input.run_in_background !== false
+        const canRunInBackground = canMonitor && !managedExecution
         const ownerId = getShellTaskOwnerId(config)
-        if (canRunInBackground && input.run_in_background) {
+        if (canRunInBackground && input.run_in_background === true) {
           return shellTaskBackend.executeBackground(
             input.command,
             input.cwd,
@@ -2436,7 +2443,10 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
         }
         const execution = await shellTaskBackend.executeForTool(input.command, input.cwd, {
           ownerId,
-          backgroundAfterMs: canRunInBackground ? SHELL_BACKGROUND_AFTER_MS : undefined,
+          backgroundAfterMs:
+            canRunInBackground && autoBackgroundHandoff && input.run_in_background === undefined
+              ? SHELL_BACKGROUND_AFTER_MS
+              : undefined,
           signal: config?.signal
         })
         return execution.status === "background"
@@ -2476,7 +2486,9 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
                   ? "Managed sessions wait in the foreground up to 20 minutes and return the final command result."
                   : runtimeShellMonitorBlocked
                     ? "This session runs commands in the foreground."
-                    : "Omit for automatic background handoff after 60 seconds. Set true to start in the background or false to stay in the foreground. Use monitor with the returned task ID to wait for the final result."
+                    : autoBackgroundHandoff
+                      ? "Omit for automatic background handoff after 60 seconds. Set true to start in the background or false to stay in the foreground. Use monitor with the returned task ID to wait for the final result."
+                      : "Set true to start in the background and use monitor with the returned task ID. Commands run in the foreground by default."
               )
           })
         }
@@ -3110,6 +3122,7 @@ export function getSystemPrompt(
   options: {
     includeBackgroundExec?: boolean
     managedForegroundExec?: boolean
+    autoBackgroundHandoff?: boolean
     includeSubagents?: boolean
     includeMemory?: boolean
     includeCurrentTime?: boolean
@@ -3172,7 +3185,9 @@ ${effectiveToolStrategy !== "standard" ? "- Inspect the workspace root with tool
     ? ""
     : managedForegroundExec
       ? BACKGROUND_EXEC_MANAGED_GUIDANCE
-      : BACKGROUND_EXEC_GUIDANCE
+      : options.autoBackgroundHandoff === false
+        ? BACKGROUND_EXEC_OPT_IN_GUIDANCE
+        : BACKGROUND_EXEC_GUIDANCE
 
   const sandboxSection =
     windowsSandbox === "readonly"
@@ -4349,6 +4364,8 @@ export interface CreateAgentRuntimeOptions {
   /** ManagedRun execution boundary. Forces detached shell execution into a
    * foreground Tool Call with the managed timeout and is inherited by leaf runtimes. */
   managedExecution?: boolean
+  /** Allow omitted run_in_background to hand off after the foreground wait. Defaults to true. */
+  autoBackgroundHandoff?: boolean
   /** Turn-local observer invoked only after a Dynamic Workflow launch succeeds. */
   onWorkflowLaunched?: (runId: string) => void
   /** Recorded on any background task this turn launches — a workflow run or a
@@ -4650,6 +4667,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     }
   })()
   const managedExecution = options.managedExecution === true
+  const autoBackgroundHandoff = options.autoBackgroundHandoff !== false
   const memoryEnabledForThread =
     inheritedMemoryEnabled ?? isThreadMemoryEnabled(runtimeThreadMetadata)
   const runtimePolicy = createRuntimePromptToolPolicy({
@@ -5123,6 +5141,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     filesystemEnabled: !isCoordinatorMode,
     includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
     managedForegroundExec: managedExecution,
+    autoBackgroundHandoff,
     includeSubagents: mainSubagentsEnabled,
     includeMemory: runtimePolicy.includeMemory,
     includeCurrentTime: runtimePolicy.includeCurrentTime
@@ -5645,7 +5664,8 @@ The workspace root is: ${fileRoot}`
               // Only shared-workspace mutations belong to the parent's commit
               // scope. Isolated worktrees retain their own generation records.
               onFileMutation: worktreeIsolation ? undefined : onFileMutation,
-              managedExecution
+              managedExecution,
+              autoBackgroundHandoff
             })
             return subagentRuntime as unknown as WorkflowSubagentRuntime
           },
@@ -6191,6 +6211,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             shellParentThreadId: workerInput.parentThreadId,
             workspacePath,
             managedExecution,
+            autoBackgroundHandoff,
             modelId: candidateId,
             extraSystemPrompt: `${workerRolePrompt}\n\n${workerMetadataPrompt}`,
             noSchedulerTool: true,
@@ -6265,6 +6286,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             shellParentThreadId: workerInput.parentThreadId,
             workspacePath,
             managedExecution,
+            autoBackgroundHandoff,
             modelId: nextCandidate,
             extraSystemPrompt: `${workerRolePrompt}\n\n${workerMetadataPrompt}`,
             noSchedulerTool: true,
@@ -6323,6 +6345,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             shellParentThreadId: workerInput.parentThreadId,
             workspacePath,
             managedExecution,
+            autoBackgroundHandoff,
             modelId: usedWorkerModelId ?? modelId,
             extraSystemPrompt: `${workerRolePrompt}\n\n${handoffMetadataPrompt}`,
             noSchedulerTool: true,
@@ -6744,6 +6767,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     filesystemAccess: options.filesystemAccess,
     mainBlockedToolNames: [...runtimeBlockedToolNames],
     managedExecution,
+    autoBackgroundHandoff,
     registrySubagentSpecs,
     // The runtime's commands execute via the sandbox; on Windows with a sandbox
     // that's PowerShell. Pass that to the read-only execute gate so PS read-only

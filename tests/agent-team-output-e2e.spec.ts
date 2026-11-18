@@ -432,6 +432,45 @@ async function main() {
     assert.equal(await rows.count(), 3)
     results.push("long tool IDs keep checkpoint, append, and full live results on the same card")
 
+    const [prompt, call, toolResult, answer] = identifiedToolFrame("alias-read", true)
+    const sparseCall = {
+      ...call,
+      kwargs: {
+        ...call.kwargs,
+        id: "sparse-call-alias",
+        content: "Sparse call correction",
+        tool_calls: []
+      }
+    }
+    await send([prompt, call, sparseCall, toolResult, answer])
+    const sparseRow = rows.filter({ hasText: "Sparse call correction" })
+    await sparseRow.getByText("OK", { exact: true }).waitFor()
+    if (!(await sparseRow.getByText("Tool result", { exact: true }).isVisible())) {
+      await sparseRow.getByRole("button", { name: "读取文件: file.txt", exact: true }).click()
+    }
+    await sparseRow.getByText("Tool result", { exact: true }).waitFor()
+    assert.equal(await rows.count(), 3)
+    results.push("a sparse ToolCall alias preserves the already executed tool result")
+
+    await emit({
+      type: "stream",
+      mode: "messages",
+      workerTurn: 1,
+      data: [{ ...toolResult, kwargs: { ...toolResult.kwargs, id: "replayed-tool-result" } }, {}]
+    })
+    await emit({
+      type: "stream",
+      mode: "messages",
+      workerTurn: 1,
+      data: [
+        wire(" continues", answer.kwargs.id, "AIMessageChunk"),
+        { [STREAM_MESSAGE_CONTENT_MODE_KEY]: "delta" }
+      ]
+    })
+    await page.getByText("Worker tool final continues", { exact: true }).waitFor()
+    assert.equal(await rows.count(), 3)
+    results.push("a replayed ToolMessage preserves the active reply across a subsequent delta")
+
     await page.getByRole("button", { name: "返回", exact: true }).click()
     await open(3)
     const legacyLongCall = toolFrame(true, longCallId)

@@ -14,6 +14,7 @@ const fixture = vi.hoisted(() => ({
   events: [] as Array<{ channel: string; data: Record<string, unknown> }>,
   terminalMessages: [] as Array<{ content: unknown; reasoning?: string }>,
   result: vi.fn(),
+  createAgentRuntime: vi.fn(),
   close: vi.fn(async () => {})
 }))
 vi.mock("../storage", () => ({
@@ -57,9 +58,7 @@ vi.mock("../agent/trace/collector", () => ({
   }
 }))
 vi.mock("../agent/runtime", () => ({
-  createAgentRuntime: async () => ({
-    stream: async (input: { messages: HumanMessage[] }) => fixture.stream!(input)
-  }),
+  createAgentRuntime: fixture.createAgentRuntime,
   pinCheckpointer: () => () => {},
   closeCheckpointer: fixture.close,
   retireThreadCheckpointers: vi.fn()
@@ -88,6 +87,9 @@ beforeEach(() => {
   fixture.events = []
   fixture.terminalMessages = []
   fixture.result.mockClear()
+  fixture.createAgentRuntime.mockReset().mockResolvedValue({
+    stream: async (input: { messages: HumanMessage[] }) => fixture.stream!(input)
+  })
   fixture.close.mockClear()
   fixture.task = {
     id: crypto.randomUUID(),
@@ -160,6 +162,10 @@ it.each(["complete", "cancel", "error"])(
       ]
     }
     await runTaskNow(fixture.task.id)
+    expect(fixture.createAgentRuntime).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ autoBackgroundHandoff: false, threadId: currentThreadId() })
+    )
+    expect(fixture.createAgentRuntime.mock.calls[0][0]).not.toHaveProperty("managedExecution")
     expect(db.getThreadMessages(currentThreadId()).at(-1)).toMatchObject({
       role: "assistant",
       content: "displayed answer",

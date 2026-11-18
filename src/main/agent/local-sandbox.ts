@@ -64,6 +64,7 @@ import {
   type ShellTaskWaitOptions,
   type ShellTaskWaitResult
 } from "./shell-task-monitor"
+import { getLocalThreadRunLease, type LocalThreadRunOwner } from "./thread-run-lease"
 import {
   assessCommandSafety,
   classifyCommandConcurrency,
@@ -525,6 +526,7 @@ interface ShellTaskScope {
   threadId: string
   shellParentThreadId?: string
   ownerId?: string
+  threadRunOwner: LocalThreadRunOwner
 }
 
 interface BackgroundShellTask extends ShellTaskScope {
@@ -6844,7 +6846,7 @@ export class LocalSandbox
   }
 
   private static notifyBackgroundShellChange(threadId: string): void {
-    const active = LocalSandbox.hasActiveBackgroundTasks(threadId)
+    const active = LocalSandbox.hasActiveBackgroundTasks(threadId, { desktopOwnedOnly: true })
     if (active === LocalSandbox.activeBackgroundThreads.has(threadId)) return
     if (active) LocalSandbox.activeBackgroundThreads.add(threadId)
     else LocalSandbox.activeBackgroundThreads.delete(threadId)
@@ -6879,6 +6881,7 @@ export class LocalSandbox
     signal?: AbortSignal
   ): {
     abortController: AbortController
+    scope: ShellTaskScope
     blockedByAutoCommit?: Promise<void>
     releaseWorkspace?: () => void
     finish: () => void
@@ -6900,10 +6903,18 @@ export class LocalSandbox
     const onAbort = (): void => abortController.abort(signal?.reason)
     signal?.addEventListener("abort", onAbort, { once: true })
     let resolveSettled!: () => void
-    const pending: PendingBackgroundStart = {
+    // A new transport may claim the thread while this shell is starting or detached.
+    const currentLease =
+      getLocalThreadRunLease(this.runId) ??
+      (this.shellParentThreadId ? getLocalThreadRunLease(this.shellParentThreadId) : undefined)
+    const scope: ShellTaskScope = {
       threadId: this.runId,
       shellParentThreadId: this.shellParentThreadId,
       ownerId,
+      threadRunOwner: currentLease?.owner ?? "desktop"
+    }
+    const pending: PendingBackgroundStart = {
+      ...scope,
       detached,
       abortController,
       settled: new Promise<void>((resolve) => {
@@ -6916,6 +6927,7 @@ export class LocalSandbox
     let finished = false
     return {
       abortController,
+      scope,
       blockedByAutoCommit: workspaceShell?.blockedByAutoCommit,
       releaseWorkspace: workspaceShell?.release,
       finish: () => {
@@ -6939,14 +6951,12 @@ export class LocalSandbox
     command: string,
     cwd: string,
     abortController: AbortController,
-    ownerId?: string
+    scope: ShellTaskScope
   ): BackgroundShellTask {
     const now = Date.now()
     return {
       id: randomUUID().replaceAll("-", ""),
-      threadId: this.runId,
-      shellParentThreadId: this.shellParentThreadId,
-      ownerId,
+      ...scope,
       aclOwnerId: this.aclOwnerId,
       command,
       cwd,
@@ -7062,7 +7072,7 @@ export class LocalSandbox
   ): Promise<string> {
     const pendingStart = this.beginBackgroundTaskStart(ownerId, true, callerSignal)
     if (!pendingStart) return LocalSandbox.backgroundStartCancelledMessage()
-    const { abortController, blockedByAutoCommit, releaseWorkspace, finish } = pendingStart
+    const { abortController, scope, blockedByAutoCommit, releaseWorkspace, finish } = pendingStart
     let registered = false
     try {
       if (blockedByAutoCommit) {
@@ -7072,7 +7082,7 @@ export class LocalSandbox
         command,
         cwd,
         abortController,
-        ownerId,
+        scope,
         (completion) => {
           registered = true
           if (releaseWorkspace) void completion.then(releaseWorkspace, releaseWorkspace)
@@ -7094,7 +7104,7 @@ export class LocalSandbox
     command: string,
     cwd: string | undefined,
     taskAbortController: AbortController,
-    ownerId: string | undefined,
+    scope: ShellTaskScope,
     register: (completion: Promise<void>) => void
   ): Promise<string> {
     const requestedCwd = this.resolveExecutionCwd(cwd)
@@ -7122,7 +7132,7 @@ export class LocalSandbox
         toolArgs,
         preResult,
         taskAbortController,
-        ownerId,
+        scope,
         register,
         (completion) => {
           leaseTransferred = true
@@ -7140,7 +7150,7 @@ export class LocalSandbox
     toolArgs: { command: string; run_in_background: true; cwd: string },
     preResult: HookResult | null,
     taskAbortController: AbortController,
-    ownerId: string | undefined,
+    scope: ShellTaskScope,
     register: (completion: Promise<void>) => void,
     transferHumanGateLease: (completion: Promise<void>) => void
   ): Promise<string> {
@@ -7265,7 +7275,7 @@ export class LocalSandbox
       effectiveCommand,
       effectiveCwd,
       taskAbortController,
-      ownerId
+      scope
     )
     const taskId = task.id
     LocalSandbox.backgroundTasks.set(taskId, task)
@@ -7451,30 +7461,33 @@ export class LocalSandbox
     LocalSandbox.cancelBackgroundTasksMatching({ threadId })
   }
 
-  /** The dedicated shell Stop control leaves the foreground invocation alone. */
+  /** The desktop shell Stop control only affects detached desktop commands. */
   static cancelDetachedBackgroundTasks(threadId: string): boolean {
-    if (!LocalSandbox.hasActiveBackgroundTasks(threadId)) return false
-    LocalSandbox.cancelBackgroundTasksMatching({ threadId, detachedPendingOnly: true })
+    if (!LocalSandbox.hasActiveBackgroundTasks(threadId, { desktopOwnedOnly: true })) return false
+    LocalSandbox.cancelBackgroundTasksMatching({
+      threadId,
+      detachedPendingOnly: true,
+      desktopOwnedOnly: true
+    })
     return true
   }
 
   /** Deletion also considers child runtimes and tracked foreground shell invocations. */
   static hasActiveBackgroundTasks(
     threadId: string,
-    { includeChildRuns = false }: { includeChildRuns?: boolean } = {}
+    {
+      includeChildRuns = false,
+      desktopOwnedOnly = false
+    }: { includeChildRuns?: boolean; desktopOwnedOnly?: boolean } = {}
   ): boolean {
+    const matches = (task: ShellTaskScope): boolean =>
+      (!desktopOwnedOnly || task.threadRunOwner === "desktop") &&
+      LocalSandbox.shellBelongsToThread(task, threadId, includeChildRuns)
     for (const pending of LocalSandbox.pendingBackgroundTaskStarts) {
-      if (
-        (pending.detached || includeChildRuns) &&
-        LocalSandbox.shellBelongsToThread(pending, threadId, includeChildRuns)
-      ) {
-        return true
-      }
+      if ((pending.detached || includeChildRuns) && matches(pending)) return true
     }
     for (const task of LocalSandbox.backgroundTasks.values()) {
-      if (!task.settled && LocalSandbox.shellBelongsToThread(task, threadId, includeChildRuns)) {
-        return true
-      }
+      if (!task.settled && matches(task)) return true
     }
     return false
   }
@@ -7516,17 +7529,20 @@ export class LocalSandbox
     threadId,
     ownerId,
     includeChildRuns = false,
-    detachedPendingOnly = false
+    detachedPendingOnly = false,
+    desktopOwnedOnly = false
   }: {
     threadId?: string
     ownerId?: string
     includeChildRuns?: boolean
     detachedPendingOnly?: boolean
+    desktopOwnedOnly?: boolean
   }): Promise<void>[] {
     const matches = (task: ShellTaskScope): boolean =>
       (threadId === undefined ||
         LocalSandbox.shellBelongsToThread(task, threadId, includeChildRuns)) &&
-      (ownerId === undefined || ownerId === task.ownerId)
+      (ownerId === undefined || ownerId === task.ownerId) &&
+      (!desktopOwnedOnly || task.threadRunOwner === "desktop")
 
     const completions: Promise<void>[] = []
     for (const pending of LocalSandbox.pendingBackgroundTaskStarts) {
@@ -7578,12 +7594,12 @@ export class LocalSandbox
     if (!pendingStart) {
       return { status: "completed", result: LocalSandbox.createAbortedExecuteResponse() }
     }
-    const { abortController, blockedByAutoCommit, releaseWorkspace, finish } = pendingStart
+    const { abortController, scope, blockedByAutoCommit, releaseWorkspace, finish } = pendingStart
     const task = this.createBackgroundTask(
       command,
       this.resolveExecutionCwd(cwd),
       abortController,
-      ownerId
+      scope
     )
     const processController = new AbortController()
     const abortProcess = (): void => processController.abort(abortController.signal.reason)

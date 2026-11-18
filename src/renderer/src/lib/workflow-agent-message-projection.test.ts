@@ -14,7 +14,7 @@ import { agentToolStreamPath, readAgentToolStream } from "../../../main/agent/wo
 import type { Message } from "../types"
 import { ElectronIPCTransport } from "./electron-transport"
 import { createWorkflowAgentMessageProjector } from "./workflow-agent-message-projection"
-import { buildToolResultAssociations } from "./worker-tool-result-key"
+import { buildToolResultAssociations, getWorkerToolUiKey } from "./worker-tool-result-key"
 
 function message(index: number, overrides: Partial<Message> = {}): Message {
   return {
@@ -27,6 +27,72 @@ function message(index: number, overrides: Partial<Message> = {}): Message {
 }
 
 describe("workflow complete snapshot projection", () => {
+  it("distinguishes omitted calls, cleared calls and completed calls on snapshot aliases", () => {
+    const call = (id: string) => ({ id, name: "read_file", args: { path: `${id}.txt` } })
+    const metadata = (source: string) => ({
+      cmb_internal_provider_source_id: source,
+      cmb_internal_provider_occurrence: 1
+    })
+    const assistant = (source: string, tool_calls: ReturnType<typeof call>[]) =>
+      new AIMessage({
+        id: `${source}-first`,
+        content: "Earlier",
+        additional_kwargs: metadata(source),
+        tool_calls
+      })
+    const alias = (source: string) =>
+      new AIMessage({
+        id: `${source}-alias`,
+        content: source,
+        additional_kwargs: metadata(source)
+      })
+    const repeatedCall = call("reused-call")
+    const completedCall = call("completed-call")
+    const pendingCall = call("pending-call")
+    const toolResult = (id: string, content: string) =>
+      new ToolMessage({ id: `${id}-result`, tool_call_id: id, content })
+    const frame = serializeWorkflowAgentSnapshotMessages({
+      messages: [
+        new HumanMessage({ id: "prompt", content: "Request" }),
+        assistant("completed", [completedCall, call("discarded")]),
+        alias("completed"),
+        toolResult(completedCall.id, "Completed output"),
+        assistant("omitted", [pendingCall]),
+        {
+          id: ["langchain_core", "messages", "AIMessage"],
+          kwargs: {
+            id: "omitted-alias",
+            content: "omitted",
+            additional_kwargs: metadata("omitted")
+          }
+        },
+        assistant("cleared", [repeatedCall]),
+        alias("cleared"),
+        new AIMessage({ id: "independent", content: "Independent", tool_calls: [repeatedCall] }),
+        toolResult(repeatedCall.id, "Independent output")
+      ]
+    })
+
+    for (const snapshot of [frame, JSON.parse(JSON.stringify(frame))]) {
+      const rows = new ElectronIPCTransport().convertWorkflowAgentValuesSnapshot(snapshot, "run/0")
+      const assistants = rows.filter(({ role }) => role === "assistant")
+      expect(assistants.map(({ content, tool_calls }) => [content, tool_calls])).toEqual([
+        ["completed", [completedCall]],
+        ["omitted", [pendingCall]],
+        ["cleared", []],
+        ["Independent", [repeatedCall]]
+      ])
+      const results = buildToolResultAssociations(rows)
+      expect(results.get(getWorkerToolUiKey(assistants[0].id, completedCall.id, 0))).toMatchObject({
+        content: "Completed output"
+      })
+      expect(results.get(getWorkerToolUiKey(assistants[3].id, repeatedCall.id, 0))).toMatchObject({
+        content: "Independent output"
+      })
+      expect(results.size).toBe(2)
+    }
+  })
+
   it("keeps distinct replies and tool rows from a sidecar with legacy truncated identities", async () => {
     const scratch = mkdtempSync(join(tmpdir(), "cmb-workflow-legacy-toolstream-"))
     vi.stubEnv("CMB_COWORK_AGENT_HOME", join(scratch, "home"))

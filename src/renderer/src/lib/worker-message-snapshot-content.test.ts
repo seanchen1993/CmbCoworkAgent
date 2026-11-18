@@ -113,6 +113,111 @@ beforeEach(() => {
 afterEach(() => useAppStore.getState().closeWorkerFocusView())
 
 describe("Team worker authoritative content", () => {
+  it("retains only the cleared alias calls backed by results in live and checkpoint snapshots", () => {
+    const publish = publishWorkerFrames()
+    const additional_kwargs = providerWire("call-wire", "start").kwargs.additional_kwargs
+    const call = { id: "completed-call", name: "read_file", args: { path: "completed.txt" } }
+    const unexecuted = { ...call, id: "unexecuted-call" }
+    const prompt = new HumanMessage({ id: "request", content: "Request" })
+    const started = new AIMessage({
+      id: "call-wire",
+      content: "Starting",
+      additional_kwargs,
+      tool_calls: [call, unexecuted]
+    })
+    const alias = new AIMessage({ id: "final-wire", content: "Final", additional_kwargs })
+    const result = new ToolMessage({
+      id: "result",
+      tool_call_id: call.id,
+      content: "Tool finished"
+    })
+    publish("messages", [started, {}])
+    expect(publish("values", { messages: [prompt, started, alias, result] })).toBe("full")
+
+    for (const messages of [
+      useAppStore.getState().workerFocusMessages,
+      buildWorkerCheckpointHistory([prompt, started, alias, result], worker).messages
+    ]) {
+      const assistants = messages.filter((message) => message.role === "assistant")
+      expect(assistants).toMatchObject([{ content: "Final", tool_calls: [call] }])
+      expect(
+        buildToolResultAssociations(messages).get(getWorkerToolUiKey(assistants[0].id, call.id, 0))
+      ).toMatchObject({ content: "Tool finished" })
+    }
+  })
+
+  it.each([false, true])(
+    "continues a Team reply past an exact result replay (provider alias: %s)",
+    (hasProviderAlias) => {
+      const publish = publishWorkerFrames()
+      const resultMetadata = hasProviderAlias
+        ? providerWire("result-a", "Tool finished").kwargs.additional_kwargs
+        : undefined
+      const call = { id: "call", name: "read_file", args: { path: "probe.txt" } }
+      const result = (id: string) =>
+        new ToolMessage({
+          id,
+          tool_call_id: call.id,
+          content: "Tool finished",
+          additional_kwargs: resultMetadata
+        })
+      const reply = new AIMessage({
+        id: "reply-wire",
+        content: "Done",
+        additional_kwargs: {
+          cmb_internal_provider_source_id: "reply",
+          cmb_internal_provider_occurrence: 1
+        }
+      })
+      expect(
+        publish("values", {
+          messages: [
+            new HumanMessage({ id: "prompt", content: "Request" }),
+            new AIMessage({ id: "call-wire", content: "Calling", tool_calls: [call] }),
+            result("result-a"),
+            reply
+          ]
+        })
+      ).toBe("full")
+      const originalReplyId = useAppStore.getState().workerFocusMessages.at(-1)?.id
+
+      publish("messages", [result(hasProviderAlias ? "result-b" : "result-a"), {}])
+      publish("messages", [
+        new AIMessageChunk({ id: "reply-wire", content: " now" }),
+        { [STREAM_MESSAGE_CONTENT_MODE_KEY]: "delta" }
+      ])
+      const rows = useAppStore.getState().workerFocusMessages
+      expect(rows.map(({ content }) => content)).toEqual(["Calling", "Tool finished", "Done now"])
+      expect(rows.at(-1)?.id).toBe(originalReplyId)
+    }
+  )
+
+  it("keeps a repeated result as a boundary when the active assistant requests that call again", () => {
+    const publish = publishWorkerFrames()
+    const call = { id: "call", name: "read_file", args: { path: "probe.txt" } }
+    const result = new ToolMessage({ id: "result", tool_call_id: call.id, content: "Tool finished" })
+    const calls = (id: string, content: string) =>
+      new AIMessage({ id, content, tool_calls: [call] })
+    expect(
+      publish("values", {
+        messages: [
+          new HumanMessage({ id: "prompt", content: "Request" }),
+          calls("call-wire", "First cycle"),
+          result,
+          calls("reused-wire", "Second cycle")
+        ]
+      })
+    ).toBe("full")
+
+    publish("messages", [result, {}])
+    publish("messages", [new AIMessageChunk({ id: "reused-wire", content: "Done" }), {}])
+    expect(
+      useAppStore.getState().workerFocusMessages
+        .filter(({ role }) => role === "assistant")
+        .map(({ content }) => content)
+    ).toEqual(["First cycle", "Second cycle", "Done"])
+  })
+
   it("keeps a declared tuple independent from an inferred occurrence in the same full frame", () => {
     const legacy = wire("Legacy answer", "provider")
     const explicit = providerWire("named-explicit", "Explicit answer")

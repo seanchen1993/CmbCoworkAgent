@@ -1,5 +1,6 @@
-import type { Message } from "../types"
+import type { Message, ToolCall } from "../types"
 import { normalizeCompleteMessageIds } from "../../../shared/message-role-collision"
+import { getWorkerToolResultKey } from "./worker-tool-result-key"
 
 const WORKFLOW_PROVIDER_ID_PREFIX = "workflow-provider:"
 const MAX_WORKER_PROVIDER_WIRE_IDS = 16
@@ -22,6 +23,72 @@ function hasExplicitProviderTuple(message: Message): boolean {
   return !!message.provider_source_id && !!message.provider_occurrence
 }
 
+export function replaceSnapshotAliasToolCalls(
+  previous: Message,
+  incoming: Message,
+  merged: Message,
+  earlierCallsByMessage: Map<Message, readonly ToolCall[]>
+): Message {
+  if (!incoming.worker_tool_calls_source) return merged
+  const replacement = { ...merged, tool_calls: incoming.tool_calls }
+  if (previous.tool_calls?.length) earlierCallsByMessage.set(replacement, previous.tool_calls)
+  return replacement
+}
+
+export function restoreSnapshotAliasCallsWithResults(
+  messages: Message[],
+  earlierCallsByMessage: ReadonlyMap<Message, readonly ToolCall[]>
+): Message[] {
+  if (earlierCallsByMessage.size === 0) return messages
+
+  const trailingResults = new Map<string, number>()
+  const takeResult = (key: string): boolean => {
+    const count = trailingResults.get(key) ?? 0
+    if (count === 0) return false
+    if (count === 1) trailingResults.delete(key)
+    else trailingResults.set(key, count - 1)
+    return true
+  }
+
+  // The nearest preceding call owns the evidence. A later independent call
+  // reusing an ID must not restore a cleared call or cross a prompt boundary.
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message.role === "user") trailingResults.clear()
+    if (message.role === "tool") {
+      const key = getWorkerToolResultKey(message.id, message.tool_call_id)
+      if (key) trailingResults.set(key, (trailingResults.get(key) ?? 0) + 1)
+    }
+    if (message.role !== "assistant") continue
+
+    const currentKeys = new Set<string>()
+    for (const call of message.tool_calls ?? []) {
+      const key = getWorkerToolResultKey(message.id, call.id)
+      if (!key) continue
+      takeResult(key)
+      currentKeys.add(key)
+    }
+    const earlierCalls = earlierCallsByMessage.get(message)
+    if (!earlierCalls) continue
+
+    const restored: ToolCall[] = []
+    for (let callIndex = earlierCalls.length - 1; callIndex >= 0; callIndex -= 1) {
+      const call = earlierCalls[callIndex]
+      const key = getWorkerToolResultKey(message.id, call.id)
+      if (!key || currentKeys.has(key) || !takeResult(key)) continue
+      restored.push(call)
+      currentKeys.add(key)
+    }
+    if (restored.length > 0) {
+      messages[index] = {
+        ...message,
+        tool_calls: [...(message.tool_calls ?? []), ...restored.reverse()]
+      }
+    }
+  }
+  return messages
+}
+
 /**
  * Complete snapshots can contain different wire IDs for one explicitly
  * identified message. Run this before normalizing IDs, since the normalizer
@@ -33,6 +100,7 @@ export function coalesceSnapshotMessageAliases(
 ): Message[] {
   const result: Message[] = []
   const indexByIdentity = new Map<string, number>()
+  const earlierCallsByMessage = new Map<Message, ToolCall[]>()
   let workflowTurn = workflow?.precedingPromptIndex
   for (const message of messages) {
     if (workflow && message.role === "user") {
@@ -53,10 +121,20 @@ export function coalesceSnapshotMessageAliases(
     const previousIndex = indexByIdentity.get(identity)
     if (previousIndex !== undefined) {
       const previous = result[previousIndex]
-      result[previousIndex] = {
+      const earlierCalls = earlierCallsByMessage.get(previous) ?? []
+      earlierCallsByMessage.delete(previous)
+      if (message.tool_calls !== undefined && previous.tool_calls?.length) {
+        for (const call of previous.tool_calls) earlierCalls.push(call)
+      }
+      const merged: Message = {
         ...message,
         id: previous.id,
         worker_snapshot_index: previous.worker_snapshot_index,
+        ...(message.role === "assistant" && {
+          tool_calls: message.tool_calls ?? previous.tool_calls,
+          worker_tool_calls_source:
+            message.tool_calls !== undefined ? "alias-snapshot" : previous.worker_tool_calls_source
+        }),
         ...(!workflow && {
           worker_provider_wire_ids: mergeWorkerProviderWireIds(
             previous.worker_provider_wire_ids,
@@ -64,6 +142,8 @@ export function coalesceSnapshotMessageAliases(
           )
         })
       }
+      result[previousIndex] = merged
+      if (earlierCalls.length > 0) earlierCallsByMessage.set(merged, earlierCalls)
       continue
     }
     indexByIdentity.set(identity, result.length)
@@ -76,7 +156,7 @@ export function coalesceSnapshotMessageAliases(
         : message
     )
   }
-  return result
+  return restoreSnapshotAliasCallsWithResults(result, earlierCallsByMessage)
 }
 
 export function normalizeWorkflowSnapshotMessageIds(messages: readonly Message[]): Message[] {

@@ -5364,7 +5364,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "agent:has-background-shell",
     (_event, threadId: unknown) =>
-      typeof threadId === "string" && LocalSandbox.hasActiveBackgroundTasks(threadId)
+      typeof threadId === "string" &&
+      LocalSandbox.hasActiveBackgroundTasks(threadId, { desktopOwnedOnly: true })
   )
   ipcMain.handle(
     "agent:cancel-background-shell",

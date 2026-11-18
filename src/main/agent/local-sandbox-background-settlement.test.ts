@@ -13,6 +13,7 @@ vi.mock("node:child_process", async () => {
 })
 
 import { LocalSandbox } from "./local-sandbox"
+import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "./thread-run-lease"
 
 interface Deferred<T> {
   promise: Promise<T>
@@ -295,6 +296,78 @@ describe("LocalSandbox background-task settlement", () => {
     })
     expect(raw).toHaveBeenCalledTimes(1)
     expect(raw.mock.calls[0][0]).toBe("echo foreground")
+  })
+
+  it("stops only desktop shells when another transport owns the same thread", async () => {
+    const threadId = "shared-shell-stop-ownership"
+    const sandbox = new LocalSandbox({
+      rootDir: process.cwd(),
+      runId: threadId,
+      windowsSandbox: "none"
+    })
+    const externalHook = createDeferred<null>()
+    const desktopExecution = createDeferred<{ output: string; exitCode: number; truncated: boolean }>()
+    const externalExecution = createDeferred<{ output: string; exitCode: number; truncated: boolean }>()
+    let externalSignal: AbortSignal | undefined
+    vi.spyOn(sandbox, "runPreToolUseHookForTool").mockImplementation(async (_tool, args, signal) => {
+      if (args.command !== "echo external") return null
+      externalSignal = signal
+      return externalHook.promise
+    })
+    const raw = vi.spyOn(sandbox, "executeRaw").mockImplementation((command) =>
+      command === "echo external" ? externalExecution.promise : desktopExecution.promise
+    )
+    const changes = vi.fn()
+    const unsubscribe = LocalSandbox.onBackgroundShellChange(changes)
+    const desktopOnly = { desktopOwnedOnly: true }
+
+    try {
+      expect(
+        claimLocalThreadRunLease({ threadId, owner: "desktop", runId: "one" }).acquired
+      ).toBe(true)
+      const desktopStarted = await sandbox.executeBackground("echo desktop")
+      const desktopTask = desktopStarted.match(/id:\s*([a-f0-9]+)/i)?.[1]
+      expect(desktopTask).toBeTruthy()
+      await vi.waitFor(() => expect(raw).toHaveBeenCalledOnce())
+      releaseLocalThreadRunLease(threadId, "desktop", "one")
+      expect(claimLocalThreadRunLease({ threadId, owner: "im", runId: "two" }).acquired).toBe(true)
+
+      const externalPending = sandbox.executeBackground("echo external")
+      await vi.waitFor(() => expect(externalSignal).toBeDefined())
+      expect(LocalSandbox.cancelDetachedBackgroundTasks(threadId)).toBe(true)
+      expect(sandbox.getTaskOutput(desktopTask!)).toMatchObject({ exitCode: 130 })
+      expect(externalSignal?.aborted).toBe(false)
+
+      // The source must survive even if the lease changes during a pending approval.
+      releaseLocalThreadRunLease(threadId, "im", "two")
+      externalHook.resolve(null)
+      const externalStarted = await externalPending
+      const externalTask = externalStarted.match(/id:\s*([a-f0-9]+)/i)?.[1]
+      expect(externalTask).toBeTruthy()
+      desktopExecution.resolve({ output: "finished", exitCode: 0, truncated: false })
+      await vi.waitFor(() =>
+        expect(LocalSandbox.hasActiveBackgroundTasks(threadId, desktopOnly)).toBe(false)
+      )
+      expect(LocalSandbox.hasActiveBackgroundTasks(threadId)).toBe(true)
+      expect(LocalSandbox.cancelDetachedBackgroundTasks(threadId)).toBe(false)
+      externalExecution.resolve({ output: "finished", exitCode: 0, truncated: false })
+      await expect(sandbox.waitForTaskOutput(externalTask!)).resolves.toMatchObject({
+        status: "completed",
+        result: { exitCode: 0 }
+      })
+      expect(changes.mock.calls).toEqual([
+        [{ threadId, active: true }],
+        [{ threadId, active: false }]
+      ])
+    } finally {
+      releaseLocalThreadRunLease(threadId, "desktop", "one")
+      releaseLocalThreadRunLease(threadId, "im", "two")
+      unsubscribe()
+      externalHook.resolve(null)
+      desktopExecution.resolve({ output: "finished", exitCode: 0, truncated: false })
+      externalExecution.resolve({ output: "finished", exitCode: 0, truncated: false })
+      await LocalSandbox.cancelBackgroundTasksAndWait(threadId)
+    }
   })
 
   it("aborts before registration and disconnects the caller signal once registered", async () => {

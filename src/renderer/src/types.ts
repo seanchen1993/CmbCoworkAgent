@@ -291,6 +291,8 @@ export interface Message {
   provider_occurrence?: number
   /** Renderer-only provenance for Team worker content; absent for partial fragments. */
   worker_content_source?: "values" | "snapshot"
+  /** A replacement provided by a later alias in the same complete snapshot. */
+  worker_tool_calls_source?: "alias-snapshot"
   /** This worker identity has appeared in a complete ordered values frame. */
   worker_snapshot_identity?: boolean
   /** Absolute position in the producer's complete values frame. */

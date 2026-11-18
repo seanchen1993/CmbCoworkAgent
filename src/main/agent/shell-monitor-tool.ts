@@ -89,7 +89,8 @@ export function createShellTaskMonitorTools(sandbox: ShellMonitorBackend) {
     if (signal?.aborted) return abortMessage
     const startedAt = performance.now()
     const toolArgs: Record<string, unknown> = { ...input }
-    let timeoutMs = input.block === false ? 0 : (input.timeout ?? defaultTimeout)
+    let block = input.block !== false
+    let timeoutMs = block ? (input.timeout ?? defaultTimeout) : 0
     const workspaceLockDeadline = () =>
       timeoutMs === undefined ? undefined : startedAt + timeoutMs
 
@@ -112,8 +113,7 @@ export function createShellTaskMonitorTools(sandbox: ShellMonitorBackend) {
           ? effectiveArgs.task_id
           : input.task_id
       if (!taskId) return "Error: Invalid task id."
-      const block =
-        typeof effectiveArgs.block === "boolean" ? effectiveArgs.block : input.block !== false
+      if (typeof effectiveArgs.block === "boolean") block = effectiveArgs.block
       const timeout = effectiveArgs.timeout
       timeoutMs =
         typeof timeout === "number" && Number.isFinite(timeout)
@@ -152,7 +152,7 @@ export function createShellTaskMonitorTools(sandbox: ShellMonitorBackend) {
       if (signal?.aborted) return abortMessage
       if (!(error instanceof WorkspaceExecutionLockUnavailableError)) throw error
       return JSON.stringify({
-        retrieval_status: timeoutMs === 0 ? "not_ready" : "timeout",
+        retrieval_status: block ? "timeout" : "not_ready",
         reason: "workspace_hook_busy"
       })
     }

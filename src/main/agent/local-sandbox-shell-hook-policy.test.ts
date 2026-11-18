@@ -123,13 +123,14 @@ describe("shell monitor hook policy", () => {
         const results = await Promise.race([
           Promise.all([
             monitor.invoke({ ...input, block: false }),
+            monitor.invoke({ ...input, block: true, timeout: 0 }),
             taskOutput.invoke({ ...input, timeout: 0 }),
             monitor.invoke({ ...input, timeout: 100 })
           ]),
           delay(2000, "monitor waited for the shell to exit")
         ])
         expect(results).toEqual(
-          ["not_ready", "not_ready", "timeout"].map((retrieval_status) =>
+          ["not_ready", "timeout", "timeout", "timeout"].map((retrieval_status) =>
             JSON.stringify({ retrieval_status, reason: "workspace_hook_busy" })
           )
         )
@@ -257,12 +258,12 @@ describe("shell monitor hook policy", () => {
 
     await vi.waitFor(() => expect(fetchHook).toHaveBeenCalledTimes(2))
     const responses = fetchHook.mock.calls.map(([, { body }]) => JSON.parse(String(body)))
-    expect(responses).toMatchObject(
-      ["monitor", "task_output"].map((toolName) => ({
-        tool_name: toolName,
+    for (const response of responses) {
+      expect(response).toMatchObject({
+        tool_name: "task_output",
         tool_response: { failure_kind: "abort", is_interrupt: true, is_timeout: false }
-      }))
-    )
+      })
+    }
   }, 20_000)
 
   it("still treats a natural exit 130 as a failure even with identical output", async () => {
@@ -348,11 +349,11 @@ describe("shell monitor hook policy", () => {
     expect(calls).toEqual([
       { id: "PreToolUse-legacy", tool: "task_output", input },
       { id: "PreToolUse-new", tool: "monitor", input },
-      { id: "PreToolUse-both", tool: "monitor", input },
-      { id: "PreToolUse-broad", tool: "monitor", input },
+      { id: "PreToolUse-both", tool: "task_output", input },
+      { id: "PreToolUse-broad", tool: "task_output", input },
       ...["legacy", "new", "both", "broad"].map((name) => ({
         id: `PostToolUse-${name}`,
-        tool: name === "legacy" ? "task_output" : "monitor",
+        tool: name === "new" ? "monitor" : "task_output",
         input: { task_id: taskId, block: true, timeout: 20 }
       }))
     ])
@@ -380,6 +381,37 @@ describe("shell monitor hook policy", () => {
     expect(onHookResult.mock.calls.map(([, hook]) => hook.id)).toEqual(calls.map(({ id }) => id))
   })
 
+  it.each(["*", undefined])("keeps the legacy output policy for matcher %s", async (matcher) => {
+    const hook = httpHook({ event: "PreToolUse", matcher })
+    const { sandbox, finish } = await fixture({ hooks: [hook] })
+    const fetchHook = vi.fn(async (_url: string, init: RequestInit) => {
+      const payload = JSON.parse(String(init.body))
+      return respond(
+        payload.tool_name === "task_output"
+          ? { decision: "block", reason: "Task output access denied" }
+          : { decision: "approve" }
+      )
+    })
+    vi.stubGlobal("fetch", fetchHook)
+
+    const started = await sandbox.executeBackground("echo probe")
+    const taskId = started.match(/\bid: (\w+)/)?.[1] ?? ""
+    expect(taskId).not.toBe("")
+    finish()
+    await sandbox.waitForTaskOutput(taskId)
+    fetchHook.mockClear()
+
+    const tools = createShellTaskMonitorTools(sandbox)
+    for (const tool of tools) {
+      await expect(tool.invoke({ task_id: taskId })).resolves.toBe(
+        "[Hook blocked] Task output access denied"
+      )
+    }
+    expect(
+      fetchHook.mock.calls.map(([, init]) => JSON.parse(String(init.body)).tool_name)
+    ).toEqual(["task_output", "task_output"])
+  })
+
   it("honors a legacy input condition and a monitor-specific block or halt", async () => {
     const hooks = [
       httpHook({
@@ -395,7 +427,8 @@ describe("shell monitor hook policy", () => {
       }),
       httpHook({
         id: "monitor-post",
-        matcher: "^monitor$",
+        matcher: "*",
+        if: "monitor(*)",
         url: "https://hooks.invalid/post"
       })
     ]

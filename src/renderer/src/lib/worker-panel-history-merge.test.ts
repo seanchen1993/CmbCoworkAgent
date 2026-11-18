@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { AIMessage, AIMessageChunk, HumanMessage } from "@langchain/core/messages"
+import { AIMessage, AIMessageChunk, HumanMessage, ToolMessage } from "@langchain/core/messages"
 import { mergeWorkerHistoryWithLiveMessages } from "../components/chat/WorkerStreamPanel"
 import { ElectronIPCTransport } from "./electron-transport"
 import { useAppStore } from "./store"
 import { buildWorkerCheckpointHistory } from "./worker-checkpoint-history"
+import { buildToolResultAssociations } from "./worker-tool-result-key"
 
 const parent = "team-panel-merge-test"
 const worker = `${parent}__worker__one`
@@ -96,6 +97,52 @@ describe("Team panel history and live messages", () => {
     ])
     expect(merged[1].worker_provider_identity).toBe(true)
   })
+
+  it.each([false, true])(
+    "applies an alias tool clear while retaining completed checkpoint calls (result: %s)",
+    (hasCheckpointResult) => {
+      const call = { id: "call", name: "read_file", args: { path: "old.txt" } }
+      const callMessage = new AIMessage({
+        id: "first-wire-id",
+        content: "Draft",
+        tool_calls: [call],
+        additional_kwargs: declaredAnswer("first-wire-id", "Draft").additional_kwargs
+      })
+      const prompt = new HumanMessage({ id: "prompt", content: "Prompt" })
+      const result = new ToolMessage({
+        id: "result",
+        tool_call_id: call.id,
+        content: "Checkpoint output"
+      })
+      const history = buildWorkerCheckpointHistory(
+        hasCheckpointResult ? [prompt, callMessage, result] : [prompt, callMessage],
+        worker
+      ).messages
+      const live = new ElectronIPCTransport().convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          type: "stream",
+          mode: "values",
+          workerTurn: 1,
+          data: {
+            messages: [
+              prompt.toJSON(),
+              callMessage.toJSON(),
+              declaredAnswer("latest-wire-id", "Updated answer").toJSON()
+            ]
+          }
+        },
+        parent
+      )
+
+      const merged = mergeWorkerHistoryWithLiveMessages(history, live)
+      expect(merged.filter(({ role }) => role === "assistant")).toMatchObject([
+        { content: "Updated answer", tool_calls: hasCheckpointResult ? [call] : [] }
+      ])
+      expect([...buildToolResultAssociations(merged).values()].map(({ content }) => content)).toEqual(
+        hasCheckpointResult ? ["Checkpoint output"] : []
+      )
+    }
+  )
 
   it("adopts live provider metadata for an earlier reply with the same wire ID", () => {
     const history = checkpointHistory(new AIMessage({ id: "first-wire-id", content: "Draft" }))

@@ -5,7 +5,11 @@ import {
   resolveWorkerSnapshotContent,
   sameWorkerRoleAndToolCall
 } from "./worker-message-content"
-import { mergeWorkerProviderWireIds } from "./snapshot-message-aliases"
+import {
+  mergeWorkerProviderWireIds,
+  replaceSnapshotAliasToolCalls,
+  restoreSnapshotAliasCallsWithResults
+} from "./snapshot-message-aliases"
 import { create } from "zustand"
 import type { EvolutionCandidate } from "@/api/evolution"
 import type {
@@ -13,6 +17,7 @@ import type {
   ModelConfig,
   Provider,
   Message,
+  ToolCall,
   ForkableCheckpoint,
   ThreadForkParams
 } from "@/types"
@@ -1829,6 +1834,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           })
 
       const next = [...normalizedExistingMessages]
+      const earlierAliasToolCalls = new Map<Message, readonly ToolCall[]>()
       const existingUserCount = normalizedExistingMessages.filter(
         (message) => message.role === "user"
       ).length
@@ -2117,7 +2123,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         const incomingDefinesRepeatedOccurrence =
           repeatedIncomingTransportIdentities.has(workerTransportIdentityKey(message, turnKey)) &&
           !useRepeatedOccurrenceReservation
-        next[existingIndex] = {
+        const merged: Message = {
           ...existing,
           ...message,
           id,
@@ -2150,6 +2156,12 @@ export const useAppStore = create<AppState>((set, get) => ({
             ? message.is_error
             : (message.is_error ?? existing.is_error)
         }
+        next[existingIndex] = replaceSnapshotAliasToolCalls(
+          existing,
+          message,
+          merged,
+          earlierAliasToolCalls
+        )
         const existingTurnKey = nextTurnKeys[existingIndex]
         const priorOccurrenceKey = workerOccurrenceKey(existing, existingTurnKey)
         const updated = next[existingIndex]
@@ -2166,7 +2178,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         ? reorderWorkerFocusMessagesByIncomingOrder(next, incomingResolvedIndexes, nextTurnKeys)
         : next
       const prunedMessages = pruneWorkerFocusMessages(
-        orderWorkerFocusMessagesByScopedTurn(orderedMessages)
+        restoreSnapshotAliasCallsWithResults(
+          orderWorkerFocusMessagesByScopedTurn(orderedMessages),
+          earlierAliasToolCalls
+        )
       )
       return {
         workerFocusMessagesThreadId: workerThreadId,

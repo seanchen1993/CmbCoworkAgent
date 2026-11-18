@@ -2359,7 +2359,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
             }),
           worker_snapshot_index: snapshotIndex,
           ...(reasoning && { reasoning }),
-          ...(toolCalls.length && { tool_calls: toolCalls as Message["tool_calls"] }),
+          ...(Array.isArray(kwargs.tool_calls) && { tool_calls: toolCalls as Message["tool_calls"] }),
           created_at: new Date()
         }
         converted.push(assistant)
@@ -4710,8 +4710,6 @@ export class ElectronIPCTransport implements UseStreamTransport {
     if (kwargs.additional_kwargs?.cmb_internal_coordinator_notification === true) {
       return events
     }
-    // Scope tool-call-chunk stitching to this worker message (see processStreamEvent).
-    this.currentChunkMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
     const isHumanMessage =
       input.className.includes("HumanMessage") || kwargs.type === "human" || kwargs.type === "user"
     const isToolMessage = input.className.includes("ToolMessage") && !!kwargs.tool_call_id
@@ -4733,6 +4731,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
         : undefined
 
     if (isHumanMessage) {
+      this.currentChunkMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
       for (const deferredToolMessage of this.takeFocusedWorkerDeferredToolMessages(
         focused.workerThreadId
       )) {
@@ -5054,9 +5053,22 @@ export class ElectronIPCTransport implements UseStreamTransport {
         status: kwargs.status,
         isError
       })
+      const toolMessage: Message = {
+        id: msgId,
+        role: "tool",
+        content,
+        ...scopedProviderTuple,
+        tool_call_id: kwargs.tool_call_id,
+        ...(kwargs.name && { name: kwargs.name }),
+        ...(kwargs.status && { status: kwargs.status }),
+        ...(isError && { is_error: true }),
+        created_at: new Date()
+      }
+      const toolResultIdentity = this.focusedWorkerToolResultIdentity(toolMessage)
       const knownToolMessageSignatures =
         this.workerKnownToolMessageSignatures.get(focused.workerThreadId) ?? new Map()
-      const knownSignaturesForId = knownToolMessageSignatures.get(msgId) ?? new Set<string>()
+      const knownSignaturesForId =
+        knownToolMessageSignatures.get(toolResultIdentity) ?? new Set<string>()
       const isKnownToolReplay = knownSignaturesForId.has(toolResultSignature)
       const knownToolResultCallIds =
         this.workerKnownToolResultCallIds.get(focused.workerThreadId) ?? new Set<string>()
@@ -5073,23 +5085,29 @@ export class ElectronIPCTransport implements UseStreamTransport {
       )
       const provesRepeatedToolExecution =
         callWasKnown && !isKnownToolReplay && !isKnownToolResultGrowth
-      const toolMessage: Message = {
-        id: msgId,
-        role: "tool",
-        content,
-        ...scopedProviderTuple,
-        tool_call_id: kwargs.tool_call_id,
-        ...(kwargs.name && { name: kwargs.name }),
-        ...(kwargs.status && { status: kwargs.status }),
-        ...(isError && { is_error: true }),
-        created_at: new Date()
-      }
       const currentAmbiguousReplay = this.workerAmbiguousReplayPins.get(
         focused.workerThreadId
       )
       const deferredAmbiguousReplay = this.workerDeferredAmbiguousReplayPins.get(
         focused.workerThreadId
       )
+      const activeAssistant = isKnownToolReplay
+        ? this.currentFocusedWorkerAssistant(focused.workerThreadId)
+        : undefined
+      if (
+        activeAssistant &&
+        !currentAmbiguousReplay &&
+        !deferredAmbiguousReplay &&
+        !activeAssistant.tool_calls?.some(({ id }) => id === kwargs.tool_call_id) &&
+        !this.completedToolCallsByMessageId.get(activeAssistant.id)?.has(kwargs.tool_call_id) &&
+        !(this.currentChunkMessageId === activeAssistant.id &&
+          this.accumulatedToolCalls.has(kwargs.tool_call_id))
+      ) {
+        // The identical result already belongs to an earlier tool cycle. It
+        // supplies no new data and must not reset the current assistant stream.
+        return events
+      }
+      this.currentChunkMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
       const repeatsDeferredPendingCall =
         Boolean(
           deferredAmbiguousReplay?.toolMessages.some(
@@ -5152,7 +5170,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       }
       knownSignaturesForId.add(toolResultSignature)
       pruneSetToLimit(knownSignaturesForId, MAX_TRACKED_TOOL_CALLS)
-      knownToolMessageSignatures.set(msgId, knownSignaturesForId)
+      knownToolMessageSignatures.set(toolResultIdentity, knownSignaturesForId)
       pruneMapToLimit(knownToolMessageSignatures, MAX_TRACKED_MESSAGE_TOOL_CALLS)
       this.workerKnownToolMessageSignatures.set(
         focused.workerThreadId,
@@ -6054,6 +6072,14 @@ export class ElectronIPCTransport implements UseStreamTransport {
     }
   }
 
+  private focusedWorkerToolResultIdentity(message: Message): string {
+    return JSON.stringify(
+      message.worker_provider_identity
+        ? [message.provider_source_id, message.provider_occurrence]
+        : [message.id]
+    )
+  }
+
   private focusedWorkerToolResultSignature(input: {
     content: unknown
     toolCallId: string
@@ -6175,14 +6201,19 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.registerWorkerWireOwners(workerThreadId, message)
   }
 
-  private currentExplicitWorkerAssistant(workerThreadId: string): Message | undefined {
+  private currentFocusedWorkerAssistant(workerThreadId: string): Message | undefined {
     const sourceId = this.workerCurrentProviderSourceIds.get(workerThreadId)
     const id = this.workerCurrentMessageIds.get(workerThreadId)
     if (!sourceId || !id) return undefined
     return this.workerProviderReplayCandidates
       .get(workerThreadId)
       ?.get(sourceId)
-      ?.findLast((message) => message.id === id && message.worker_provider_identity)
+      ?.findLast((message) => message.id === id)
+  }
+
+  private currentExplicitWorkerAssistant(workerThreadId: string): Message | undefined {
+    const current = this.currentFocusedWorkerAssistant(workerThreadId)
+    return current?.worker_provider_identity ? current : undefined
   }
 
   private registerWorkerWireOwners(workerThreadId: string, message: Message): void {
@@ -6264,7 +6295,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
     const knownToolResultCallIds = new Set<string>()
     for (const message of currentTurnMessages) {
       if (message.role !== "tool" || !message.tool_call_id) continue
-      const signatures = knownToolMessageSignatures.get(message.id) ?? new Set<string>()
+      const identity = this.focusedWorkerToolResultIdentity(message)
+      const signatures = knownToolMessageSignatures.get(identity) ?? new Set<string>()
       signatures.add(
         this.focusedWorkerToolResultSignature({
           content: message.content,
@@ -6274,7 +6306,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
           isError: message.is_error === true || message.status === "error"
         })
       )
-      knownToolMessageSignatures.set(message.id, signatures)
+      knownToolMessageSignatures.set(identity, signatures)
       knownToolResultCallIds.add(message.tool_call_id)
     }
     this.workerKnownToolMessageSignatures.set(workerThreadId, knownToolMessageSignatures)
@@ -6437,10 +6469,10 @@ export class ElectronIPCTransport implements UseStreamTransport {
       this.workerKnownToolMessageSignatures.set(
         workerThreadId,
         new Map(
-          Array.from(knownToolMessageSignatures, ([messageId, signatures]) => [
-            messageId.startsWith(prefix) ? messageId : `${prefix}${messageId}`,
-            signatures
-          ])
+          Array.from(knownToolMessageSignatures, ([identity, signatures]) => {
+            const [id, ...tuple] = JSON.parse(identity) as [string, ...number[]]
+            return [JSON.stringify([scopeProviderSourceId(id), ...tuple]), signatures]
+          })
         )
       )
     }
