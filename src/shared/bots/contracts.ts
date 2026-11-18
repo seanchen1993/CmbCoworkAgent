@@ -197,6 +197,7 @@ export type BotTaskOrigin =
       dispatch?: "create" | "follow_up" | "repair"
       /** Host-owned original execution request for a bounded automatic repair. */
       reviewRequestTaskId?: string
+      delivery?: import("./work").BotResultDelivery
       inputFileIds?: string[]
       allowedInputFileIds?: string[]
       /** Host-captured source references, scoped to the original conversation. */
@@ -215,7 +216,7 @@ export type BotTaskOrigin =
       executionTaskId: string
       executionState: BotTaskState
       /** Private verification or committed publication of the same result. */
-      review?: { requestTaskId: string; phase: "review" | "publish"; attempt?: number }
+      review?: { requestTaskId: string; phase: "review" | "confirm" | "publish"; attempt?: number; previewInWork?: true }
     }
   | {
       kind: "bot"

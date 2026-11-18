@@ -749,7 +749,7 @@ describe("Bot Runtime integration", () => {
       const receipt = fixture.deliveryTools.mock.calls.at(-1)![2]!([file], "delivery")
       if (reviewExpected) expect(receipt).toEqual({
         deliveryScope: { kind: "task", threadId: source.threadId, onwardPublication: "pending_review" },
-        deliveryNote: expect.stringContaining("does not confirm that onward delivery")
+        deliveryNote: expect.stringContaining("confirms local retention")
       })
       else expect(receipt).toBeUndefined()
       context.onFinalAssistant?.({ messageId: "real-final", finalText: "Report exists" })
@@ -769,7 +769,7 @@ describe("Bot Runtime integration", () => {
         expect(fixture.recordResultEvidence).not.toHaveBeenCalled()
         expect(fixture.publishImFiles).toHaveBeenCalledWith(source.id, "delivery", [file])
       } else {
-        expect(fixture.armResultReview).toHaveBeenCalledWith(source.id, expect.stringMatching(/^[a-f0-9]{64}$/))
+        expect(fixture.armResultReview).toHaveBeenCalledWith(source.id, expect.stringMatching(/^[a-f0-9]{64}$/), true)
         expect(fixture.recordResultEvidence).toHaveBeenCalledWith(source.id, { callId: "delivery", files: [file] })
         expect(fixture.recordResultEvidence).toHaveBeenCalledWith(source.id, { finalMessageId: "real-final" })
         expect(fixture.publishImFiles).not.toHaveBeenCalled()
@@ -1320,7 +1320,7 @@ describe("Bot Runtime integration", () => {
     expect(fixture.create).not.toHaveBeenCalled()
     const context = fixture.start.mock.calls[0][2]
     expect(context.remotePolicy).toEqual({ disableScheduler: true, blockedToolNames: ["workflow"], sharedTaskContext: true })
-    expect(context.onUserPromptPrepared).toBeUndefined()
+    expect(context.onUserPromptPrepared).toBeTypeOf("function")
     const { buildPersonalIdentityPrompt } = await import("../agent/personal-context")
     const readIdentity = vi.fn(() => ({ userName: "DESKTOP_OWNER" }))
     expect(buildPersonalIdentityPrompt(context.remotePolicy, readIdentity)).toBe("")
@@ -1419,7 +1419,7 @@ describe("Bot Runtime integration", () => {
       disableSkillEvolution: true
     })
     expect(context.additionalTools).toEqual([
-      "works",
+      { name: "bot_work_result_continue" }, "works",
       "scoped-memory",
       "delivery",
       "collaboration",
@@ -1579,10 +1579,11 @@ describe("Bot Runtime integration", () => {
     if (accepted)
       expect(fixture.preparedInput).toHaveBeenCalledWith(incoming.id, incoming.id, "Approved owner input")
     else expect(fixture.preparedInput).not.toHaveBeenCalled()
-    if (checking && accepted)
-      expect(fixture.armResultReview).toHaveBeenCalledExactlyOnceWith(incoming.id, expect.stringMatching(/^[a-f0-9]{64}$/))
+    if (accepted)
+      expect(fixture.armResultReview).toHaveBeenCalledExactlyOnceWith(incoming.id, expect.stringMatching(/^[a-f0-9]{64}$/), true)
     else expect(fixture.armResultReview).not.toHaveBeenCalled()
-    expect(fixture.recordResultEvidence).not.toHaveBeenCalled()
+    if (accepted && !checking) expect(fixture.recordResultEvidence).toHaveBeenCalledWith(incoming.id, { finalMessageId: "reply" })
+    else expect(fixture.recordResultEvidence).not.toHaveBeenCalled()
     expect(remote.additionalTools).toEqual([
       "works",
       "scoped-memory",
@@ -1675,7 +1676,7 @@ describe("Bot Runtime integration", () => {
     expect(context.botTurnContext?.text).toContain("An independent task returned a host-recorded result")
     expect(context.extraSystemPrompt).not.toContain("An independent task returned")
     expect(context.extraSystemPrompt).not.toContain("Independent task execution snapshot")
-    expect(context.extraSystemPrompt).toContain("bot_work_send")
+    expect((await import("../agent/bot-communication-prompt")).BOT_COMMUNICATION_PROMPT).toContain("bot_work_send")
     expect(fixture.memorySnapshot).toHaveBeenCalledOnce()
     expect(fixture.deliveryTools).toHaveBeenCalledOnce()
     expect(fixture.workTools).toHaveBeenCalledOnce()
@@ -4708,19 +4709,22 @@ describe("Bot Runtime integration", () => {
     if (origin.kind === "schedule") expect(prompt).toContain("reply exactly BOT_ROUTINE_SILENT")
     else expect(prompt).not.toContain("reply exactly BOT_ROUTINE_SILENT")
     if (origin.kind === "user" || origin.kind === "introduction") {
-      expect(prompt).toContain("Browser operations belong to independent tasks")
+      expect((await import("../agent/bot-communication-prompt")).BOT_COMMUNICATION_PROMPT).toContain("Browser operations always belong to the executing task")
       expect(prompt).not.toContain("browser-help tool")
       expect(prompt).toContain("queued uploads are not confirmed delivery")
-      expect(prompt).toContain("Do not ask for passwords")
+      expect((await import("../agent/bot-communication-prompt")).BOT_COMMUNICATION_PROMPT).toContain("human handoff")
       return // execution instructions are tested on executor turns below
     }
     expect(prompt).toContain("call bot_request_browser_help")
-    expect(prompt).toContain(origin.kind === "bot" && origin.expectsReply ? "Use bot_return_files" : "Use bot_deliver_files")
+    expect(prompt).toContain(origin.kind === "bot" && origin.expectsReply ? "Use bot_return_files" :
+      origin.kind === "work" ? "Stage requested files with bot_deliver_files" : "Use bot_deliver_files")
     if (origin.kind === "bot" && origin.expectsReply) {
       expect(prompt).toContain("caller owns delivery")
     } else if (origin.kind === "discussion") {
       expect(prompt).not.toContain("Generated workspace files are deliverables")
       expect(prompt).toContain("missing or corrected requested deliverable")
+    } else if (origin.kind === "work") {
+      expect(prompt).toContain("private handoff lets the host review and release the files")
     } else {
       expect(prompt).toContain(
         "Generated workspace files are deliverables even when the user attached no input files"
@@ -5012,6 +5016,7 @@ describe("Bot Runtime integration", () => {
       userInputWithoutToolLock: true,
       botBrowserToolsOwnFileLock: true,
       additionalTools: [
+        { name: "bot_work_result_continue" },
         expect.objectContaining({ name: "bot_react_to_message" }),
         expect.objectContaining({ name: "bot_list_groups" }),
         expect.objectContaining({ name: "bot_send_message" }),
@@ -8451,7 +8456,8 @@ it("isolates authenticated IM peer browser owners while retaining their binding 
       { enqueue: () => {} } as any
     )
     const outputs: Array<{ thread: string; scope: unknown }> = []
-    // Browser-owner fixture likewise executes direct Runtime leases rather than Host turns.
+    // This test exercises direct Runtime leases outside Host admission.
+    vi.spyOn(host, "beginInputPreparation").mockImplementation(() => {})
     vi.spyOn(host, "workStatusContext").mockReturnValue({ items: [], hasMore: false })
     const capture = async (t: BotTask) => {
       const lease = runtime.acquire(store.getBot(t.botId), t)!
@@ -8570,10 +8576,11 @@ it.each([false, true])("uses the normal parent result turn and its final receipt
   const [request, , context] = fixture.start.mock.calls[0]
   expect(JSON.parse(request.message)).toMatchObject({ kind: "host_work_result", requests: result.requests,
     requestsOmitted: true, outcome: result.outcome })
-  expect(context.remotePolicy?.allowedToolNames).toEqual(["bot_work_result_continue"])
-  expect(context.additionalTools).toEqual([{ name: "bot_work_result_continue" }])
+  expect(context.remotePolicy?.allowedToolNames).toBeUndefined()
+  expect(context.botTurnContext?.event).toBe("task_result_review")
+  expect(context.additionalTools).toEqual(expect.arrayContaining([{ name: "bot_work_result_continue" }, "works"]))
   expect(context.shouldRaiseCompletionAttention?.()).toBe(false)
-  expect(fixture.workTools).not.toHaveBeenCalled()
+  expect(fixture.workTools).toHaveBeenCalledOnce()
   if (continued) expect(fixture.commitResult).not.toHaveBeenCalled()
   else expect(fixture.commitResult).toHaveBeenCalledWith(task.id, null, [], [], undefined,
     { messageId: "reply", finalText: "Done" })

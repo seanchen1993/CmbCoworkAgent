@@ -51,6 +51,16 @@ describe("main Bot foreground allowance", () => {
     expect(budget.checkFinal()).toBeUndefined()
   })
 
+  it("sends a request with a release condition to an executor before an inline file is exposed", () => {
+    const guard = createForegroundWorkBudget({ yieldCommand: vi.fn(), requiresSeparateExecution: () => true })
+    expect(guard.beforeTool("bot_work_list", {})).toBeUndefined()
+    expect(guard.beforeTool("bot_deliver_files", {})).toBeDefined()
+    expect(guard.beforeTool("execute", {})).toBeDefined()
+    expect(guard.beforeTool("bot_work_create", {})).toBeUndefined()
+    guard.afterTool("bot_work_create", receipt("bot_work_create"))
+    expect(guard.checkFinal()).toBeUndefined()
+  })
+
   it("keeps group discovery and delivery outside the execution allowance", () => {
     let clock = 0
     const budget = createForegroundWorkBudget({
@@ -89,6 +99,10 @@ describe("main Bot foreground allowance", () => {
       "bot_work_delete",
       "bot_thread_delete",
       "bot_work_unlink",
+      "bot_work_stop",
+      "bot_work_rename",
+      "bot_thread_rename",
+      "bot_list_groups",
       "bot_work_send",
       "bot_work_list",
       "bot_schedule"

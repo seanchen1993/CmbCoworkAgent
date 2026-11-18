@@ -57,7 +57,8 @@ export interface BotFileCaptureReceipt {
 }
 type BotFileCapture = (
   files: BotDeliveredFile[], callId: string, content?: string,
-  selectedPaths?: readonly BotSelectedLocalFile[], selectedPeers?: readonly BotSelectedPeerFile[]
+  selectedPaths?: readonly BotSelectedLocalFile[], selectedPeers?: readonly BotSelectedPeerFile[],
+  disposition?: { interim?: boolean; selectionReason?: string }
 ) => BotFileCaptureReceipt | void
 type BotHistoricalDelivery = (reference: BotHistoricalDeliveryReference) => Promise<{
   path: string
@@ -240,6 +241,10 @@ function createBotFileTools(
   const sourceId = z.string().min(1).max(1024)
   const filesSchema = z
     .object({
+      ...(receiptWorkId && mode === "private" ? {
+        interim: z.boolean().optional().describe("Use only for an early draft explicitly requested by the user."),
+        selectionReason: z.string().trim().min(1).max(600).optional().describe("Explain an unresolved version choice. Retain the candidates for the parent to select.")
+      } : {}),
       files: z.array(resolveHistoricalDelivery
         ? z.union([filePath, z.object({
             attachmentPath: filePath,
@@ -458,7 +463,8 @@ function createBotFileTools(
           // The adapter must distinguish an explicit local declaration from an
           // absolute peer receipt that happens to use the same shared path.
           const publication = publish?.(deliveredFiles, callId, content, selectedPaths,
-            selectedPeers.length ? selectedPeers : undefined)
+            selectedPeers.length ? selectedPeers : undefined,
+            ...(input.interim || input.selectionReason ? [{ interim: input.interim, selectionReason: input.selectionReason }] as const : []))
           return JSON.stringify({
             kind: mode === "return" ? "bot-file-return" : "bot-file-delivery",
             files: deliveredFiles,
@@ -499,6 +505,8 @@ function createBotFileTools(
         description:
           mode === "return"
             ? "Verify existing workspace files and retain their current bytes for the automatic private reply to the delegating Bot. This does not publish attachments or deliver files to the user. Use this for internal drafts and results; the caller owns public delivery. Use bot_deliver_files only for an explicitly authorized public group attachment. Use workspace-relative paths for current files, retaining subdirectories. For a host-verified peer receipt, pass its exact absolute filePath or attachmentPath to privately forward the retained version and its logical identity. The receipt preserves this version but is not proof of content correctness. Never return a directory, another Bot's private file or an unverified path."
+            : desktopWorkDelivery
+            ? "Stage files privately from this task for the host to deliver. Calling this tool does not send anything to the requester. Use it before returning, including when the user requires review or approval. The host will request release approval once if needed. Use workspace-relative paths or exact retained references. The receipt pins the bytes. Mark an explicitly requested early version with interim."
             : "Deliver actual completed or useful partial files as attachments that can be opened and saved. Screenshots and images can be sent by path without a vision model. Use workspace-relative paths, retaining subdirectories; this verifies existence, ownership and metadata. Each public attachment retains its sent bytes separately from the editable workspace original. The host includes verified references in automatic private collaboration replies and verifies declared outputFiles before completion. Never deliver a directory or an unverified path. The receipt confirms local handoff, not delivery confirmation from an external IM platform. If deliveryScope is returned, it identifies where files were retained and whether onward publication is still pending. " +
               (publicGroup
                 ? "This publishes to the current shared group. When the user requested a summary with these files, include it in content so the text and attachments are delivered together. Ordinary assistant text is private and is not published. Set content to an empty string for a file-only delivery. Only current workspace files are eligible; other Bots' private files are rejected. For a host-verified peer receipt, pass its exact absolute filePath or attachmentPath to deliver that retained version without another copy; relative paths select current workspace content."
@@ -860,9 +868,9 @@ export function createBotScheduleTools(
   signal: AbortSignal
 ): DynamicStructuredTool[] {
   const desktopMain = !task.mockSource && !task.workId && task.threadId === bot.threadId &&
-    (task.origin.kind === "user" || task.origin.kind === "introduction")
+    (task.origin.kind === "user" || task.origin.kind === "introduction" || task.origin.kind === "work_result")
   const groupMain = task.mockSource?.transport === "im" && !task.mockSource.personal && !task.workId &&
-    task.origin.kind === "mock"
+    (task.origin.kind === "mock" || task.origin.kind === "work_result")
   // Model-facing receipts identify the skill by name. Its installation path stays on the host.
   const receipt = (schedule: BotSchedule) =>
     schedule.explicitSkill ? { ...schedule, explicitSkill: { name: schedule.explicitSkill.name } } : schedule
@@ -872,6 +880,7 @@ export function createBotScheduleTools(
         try {
           signal.throwIfAborted()
           assertParentBot(config)
+          if (task.origin.kind === "work_result") throw new Error("结果回合不能创建或更改例行任务。")
           const host = getHost()
           if (input.action === "recover") {
             if (!desktopMain || !config.toolCall?.id)

@@ -72,6 +72,8 @@ export type SchedulerEvent =
     }
   | {
       type: "turn-messages"
+      /** Host result arriving while a different model turn is streaming. */
+      independentBotPublication?: true
       messages: Array<{
         id: string
         role: "user" | "assistant" | "tool" | "system"

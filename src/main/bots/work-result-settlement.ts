@@ -1,5 +1,6 @@
 import { parseBotWorkAttachmentHref, parseBotWorkHistoryHref } from "../../shared/bots/work-history"
 import type { BotDeliveredFile } from "../../shared/bots/file-delivery"
+import type { BotResultDelivery } from "../../shared/bots/work"
 import type { BotTask, BotTaskState } from "../../shared/bots/contracts"
 import { splitBotInlineReasoning } from "../../shared/bots/inline-reasoning"
 
@@ -17,6 +18,7 @@ export type BotWorkResultCommandReference = { evidenceId: string; sourceTaskId: 
 
 export interface BotWorkResultAttachment extends BotWorkResultAttachmentReference {
   file: BotDeliveredFile
+  owner?: { workId: string; threadId: string; incarnation: string }
   finalMessageId?: string
   assistantMessageId?: string
 }
@@ -33,6 +35,11 @@ export interface BotWorkResultExecutionEvidence {
 }
 
 export interface BotWorkResultReviewRecord {
+  /** Absent on pre-upgrade reviews, which retain the existing verification contract. */
+  delivery?: import("../../shared/bots/work").BotResultDelivery
+  combined?: { workId: string; requestTaskId: string; executionTaskId: string }[]
+  interimFiles?: string[]
+  selectionReason?: string
   requestTaskId: string
   authorityTaskId: string
   sourceTaskIds?: string[]
@@ -166,4 +173,26 @@ export function normalWorkResultSummary(text: string, workId: string,
     if (publication?.finalMessageId === history.messageId && deliveredNames.has(link[1])) return false
     return link[1] !== "查看原任务结果"
   }).join("\n").trimEnd()
+}
+
+/** A host-only publication writes one durable message without acquiring the model's turn. */
+export function botPublicationLease(task: Pick<import("../../shared/bots/contracts").BotTask, "threadId" | "origin">): string {
+  return task.origin.kind === "work_result" && task.origin.review?.phase === "publish"
+    ? `bot-result-publication:${task.threadId}` : task.threadId
+}
+
+/** Explicit release conditions in the admitted user's own words are a floor.
+ * The dispatch tool supplies structured conditions for other languages and phrasing. */
+export function admittedWorkDelivery(instruction: string, requirements: BotResultDelivery): BotResultDelivery {
+  const delivery = { ...requirements }
+  const clauses = instruction.split(/[。！？!?；;\n]/u)
+  for (const clause of clauses) {
+    if (!/(?:不必|无需|不用|不需要|don't|do not|no need to)\s*(?:等|让我|我|确认|wait|ask)/iu.test(clause) &&
+        /(?:等我(?:本人)?(?:先)?(?:确认|批准)|(?:发|交付|发布)(?:送)?(?:之)?前.{0,20}(?:我(?:本人)?(?:确认|批准))|(?:我(?:本人)?(?:确认|批准)(?:后|之后)再(?:发|交付))|(?:after|until) I (?:approve|confirm)|my (?:approval|sign.off) before)/iu.test(clause))
+      delivery.confirmBeforeSending = true
+    if (!delivery.review && !/(?:不用|无需|不必|不需要).{0,12}(?:复核|核查|核对)/u.test(clause) &&
+        /(?:主\s*bot.{0,26}(?:复核|核查|核对)|independent(?:ly)? (?:review|verify|check))/iu.test(clause))
+      delivery.review = "independent"
+  }
+  return delivery
 }

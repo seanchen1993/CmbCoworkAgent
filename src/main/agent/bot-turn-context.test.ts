@@ -115,6 +115,24 @@ describe("Bot event context and reporting boundary", () => {
     expect(third.bindings[0].choice).not.toBe("none")
   })
 
+  it("keeps the catalog stable and blocks an unscoped review call before executing a side effect", async () => {
+    const read = vi.fn(async () => "verified")
+    const write = vi.fn(async () => "changed")
+    const model = new Model([
+      new AIMessage({ content: "", tool_calls: [
+        { id: "attempt", name: "write_file", args: {} }, { id: "evidence", name: "bot_work_result_read", args: {} }
+      ] }),
+      new AIMessage("Checked")
+    ])
+    await createAgent({ model, tools: [
+      tool(write, { name: "write_file", description: "Write", schema: z.object({}) }),
+      tool(read, { name: "bot_work_result_read", description: "Read", schema: z.object({}) })
+    ], middleware: [createBotResultReportMiddleware(true)] }).invoke({ messages: [input("review", "Check the result")] })
+    expect(write).not.toHaveBeenCalled()
+    expect(read).toHaveBeenCalledTimes(1)
+    expect(model.bindings[0].names).toEqual(["write_file", "bot_work_result_read"])
+  })
+
   it.each([false, true])(
     "enforces the report gate before hooks and side effects only when opted in: %s",
     async (report) => {

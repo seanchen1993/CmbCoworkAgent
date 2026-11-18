@@ -75,7 +75,7 @@ async function main() {
         assert.ok(envelope.requests.length)
         assert.ok(!JSON.stringify(envelope.requests).includes("M05_PRIVATE_MAIN"))
         const offered = (body.tools ?? []).map((t: any) => t.function?.name)
-        assert.ok(offered.includes("bot_work_result_read") && !offered.includes("bot_work_create"))
+        assert.ok(offered.includes("bot_work_result_read") && offered.includes("bot_work_create"), "review retains the parent tool schemas")
         reply = JSON.stringify(envelope.outcome).includes("第二版")
           ? "M05_WORK_RETURN：季度安排已按意见更新为第二版，文件在原任务中。"
           : "M05_WORK_RETURN：季度安排第一版已写好，report.md 在原任务中，可继续修改。"
@@ -511,14 +511,12 @@ async function main() {
         .click()
       await page.locator(`[data-chat-thread-id="${bot.threadId}"]`).waitFor()
       const report = await page.evaluate(
-        async (threadId) =>
-          (await (window as any).api.threads.getMessages(threadId)).findLast(
-            (m: any) =>
-              m.role === "assistant" &&
-              typeof m.content === "string" &&
-              m.content.startsWith("M05_WORK_RETURN")
-          ),
-        bot.threadId
+        async ({ botId, threadId, workId }) => {
+          const api = (window as any).api
+          const receipt = (await api.bots.works.get(botId, workId)).resultPublicationId
+          return (await api.threads.getMessages(threadId)).findLast((m: any) => m.role === "assistant" &&
+            (receipt ? m.id === receipt : typeof m.content === "string" && m.content.startsWith("M05_WORK_RETURN")))
+        }, { botId: bot.id, threadId: bot.threadId, workId: work.id }
       )
       assert.ok(report, "the completed report must be persisted in main history")
       const visibleHistory = await page.evaluate(
@@ -759,7 +757,7 @@ async function main() {
     await page.keyboard.press("Escape")
     await page.waitForFunction(() => document.documentElement.dataset.colorScheme === "dark")
     await page.getByRole("button", { name: "搜索任务", exact: true }).click()
-    const searchColors = await page.locator(".bot-work-search").evaluate((input) => {
+    const searchColors = await page.getByRole("textbox", { name: "搜索任务", exact: true }).evaluate((input) => {
       const style = getComputedStyle(input),
         probe = document.createElement("span")
       input.parentElement!.appendChild(probe)

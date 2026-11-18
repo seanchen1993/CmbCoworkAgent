@@ -1,3 +1,5 @@
+import { botPublicationLease } from "./work-result-settlement"
+import type { BotWorkDispatchSource } from "../../shared/bots/work"
 import { createHash } from "node:crypto"
 import { selectedMainBotSkill } from "../agent/bot-skill-dispatch"
 import { lstat, realpath, rm, stat } from "node:fs/promises"
@@ -136,6 +138,7 @@ export interface BotRunLease {
 }
 
 export interface BotRunPort {
+  independentResultPublication?: boolean
   workHistory?: BotWorkHistoryPort
   workRuntimeStatus?(work: BotWorkSummary): BotWorkRuntimeState
   ordinaryThreads?: BotOrdinaryThreadsPort
@@ -584,7 +587,7 @@ export class LocalBotHost {
     return receipt
   }
   sendWork(
-    source: { taskId: string; callId: string; key: string },
+    source: BotWorkDispatchSource,
     workId: string,
     message: string,
     expectedVersion?: number,
@@ -606,7 +609,7 @@ export class LocalBotHost {
     return result
   }
   async sendWorkWithFiles(
-    source: { taskId: string; callId: string; key: string }, workId: string, message: string,
+    source: BotWorkDispatchSource, workId: string, message: string,
     expectedVersion: number | undefined, inputFileIds: readonly string[]
   ) {
     if (!this.store.hasWorkUserRequest(this.workToolSource(source.taskId).id))
@@ -617,7 +620,7 @@ export class LocalBotHost {
       admitted => this.publishWorkSend(admitted))
   }
   private async withVerifiedWorkInputs<T>(
-    source: { taskId: string; callId: string; key: string }, workId: string, inputFileIds: readonly string[],
+    source: BotWorkDispatchSource, workId: string, inputFileIds: readonly string[],
     replay: () => T | undefined, commit: (pins?: ReadonlyMap<string, string>) => T, onCommit: (receipt: T) => void
   ) {
     const task = this.workToolSource(source.taskId)
@@ -686,9 +689,9 @@ export class LocalBotHost {
     this.store.recordPreparedInput(inputTaskId, body)
     if (revision !== this.store.revision()) this.changed()
   }
-  armWorkResultReview(taskId: string, incarnation: string): boolean {
+  armWorkResultReview(taskId: string, incarnation: string, unified = false): boolean {
     this.workToolSource(taskId)
-    return this.store.armWorkResultReview(taskId, incarnation)
+    return this.store.armWorkResultReview(taskId, incarnation, false, unified)
   }
   workResultReviewActiveForExecution(taskId: string): boolean {
     this.requireRunning()
@@ -724,6 +727,22 @@ export class LocalBotHost {
     this.changed()
     this.wake()
     return receipt
+  }
+  markWorkDelivery(taskId: string, callId: string, disposition: { interim?: boolean; selectionReason?: string }) {
+    this.workToolSource(taskId)
+    this.store.markWorkDelivery(taskId, callId, disposition)
+    this.changed()
+    this.wake()
+  }
+  pendingResultConfirmation(taskId: string) {
+    this.workToolSource(taskId)
+    return this.store.pendingResultConfirmation(taskId)
+  }
+  resolveResultConfirmation(taskId: string, approved: boolean) {
+    this.workToolSource(taskId)
+    this.store.resolveResultConfirmation(taskId, approved)
+    this.changed()
+    this.wake()
   }
   workResultPublication(taskId: string, refreshUnwritten = false) {
     this.workToolSource(taskId)
@@ -776,7 +795,7 @@ export class LocalBotHost {
     return { ...work, execution: this.workExecutionStatus(work) }
   }
   /** One accepted assignment, retaining the existing task's workspace and source/audience checks. */
-  continueSkillWork(source: { taskId: string; callId: string; key: string }, workId: string, message: string) {
+  continueSkillWork(source: BotWorkDispatchSource, workId: string, message: string) {
     const task = this.workToolSource(source.taskId)
     if (!selectedMainBotSkill(task)) throw new BotError("CONFLICT", "当前主对话没有通过 / 选择技能")
     const receipt = this.store.continueSkillWork(source, workId, message)
@@ -785,7 +804,7 @@ export class LocalBotHost {
     this.wake()
     return receipt
   }
-  async continueSkillWorkWithFiles(source: { taskId: string; callId: string; key: string }, workId: string,
+  async continueSkillWorkWithFiles(source: BotWorkDispatchSource, workId: string,
     message: string, inputFileIds: readonly string[]) {
     const task = this.workToolSource(source.taskId)
     if (!selectedMainBotSkill(task)) throw new BotError("CONFLICT", "当前主对话没有通过 / 选择技能")
@@ -1016,7 +1035,9 @@ export class LocalBotHost {
     return projectBotWorkStatus(work, runtime, runs.length > 0, runs.find(run => run.browserHelp)?.browserHelp?.instruction)
   }
   private workStatusForModel(work: BotWorkSummary) {
+    const delivery = this.store.publishedWorkDelivery(work)
     return {
+      ...(delivery ? { lastDelivery: delivery } : {}),
       version: work.version,
       ...(work.dispatchStopped ? { dispatchStopped: true } : {}),
       execution: this.workExecutionStatus(work)
@@ -1542,7 +1563,7 @@ export class LocalBotHost {
   }
   async createWork(
     input: CreateBotWorkInput,
-    source?: { taskId: string; callId: string; key: string }
+    source?: BotWorkDispatchSource
   ) {
     this.requireRunning()
     input = parseCreateBotWork(input)
@@ -3080,6 +3101,8 @@ export class LocalBotHost {
     this.finishWorkControlHandoffs()
     for (const run of this.active.values()) {
       const { task, controller } = run
+      if (task.origin.kind === "work_result" && task.origin.review?.phase === "confirm" &&
+          !controller.signal.aborted && this.store.getTask(task.id).state === "cancelled") controller.abort()
       if (
         task.origin.kind === "work_result" && task.origin.review?.phase === "review" &&
         !run.workReviewCommitted && !controller.signal.aborted &&
@@ -3088,9 +3111,10 @@ export class LocalBotHost {
     }
     this.pumpMockDelivery()
     const unavailable = this.admissionExcluded ?? new Set<string>()
+    const lane = (task: BotTask) => this.runtime.independentResultPublication ? botPublicationLease(task) : task.threadId
     const excluded = new Set([
       ...unavailable,
-      ...[...this.active.values()].map((run) => run.task.threadId),
+      ...[...this.active.values()].map((run) => lane(run.task)),
       ...[...this.commandCancellations.values()].map((run) => run.threadId)
     ])
     this.admissionExcluded = undefined
@@ -3111,7 +3135,8 @@ export class LocalBotHost {
       const task = this.store.nextQueued(
         [...excluded],
         this.concurrency === Number.POSITIVE_INFINITY ||
-          ![...this.active.values()].some(run => !!botTaskWorkFamily(run.task))
+          ![...this.active.values()].some(run => !!botTaskWorkFamily(run.task)),
+        false, this.runtime.independentResultPublication
       )
       if (!task) return
       // A review may have queued before a follow-up reached its submit hook.
@@ -3123,10 +3148,10 @@ export class LocalBotHost {
       }
       if (this.store.taskRootCancelled(task)) {
         this.cancel(task.id)
-        excluded.add(task.threadId)
+        excluded.add(lane(task))
         continue
       }
-      excluded.add(task.threadId)
+      excluded.add(lane(task))
       const schedule = this.runtime.desktopWorkScheduleDirectory
         ? this.store.desktopWorkScheduleForDispatch(task) : undefined
       const lease = this.runtime.acquire(
@@ -3135,7 +3160,7 @@ export class LocalBotHost {
         task.workId ? this.store.getWork(task.botId, task.workId) : undefined
       )
       if (!lease) {
-        unavailable.add(task.threadId)
+        unavailable.add(lane(task))
         continue
       }
       try {

@@ -83,15 +83,17 @@ export async function announceBotResultMessage(input: {
   notificationBody: string
   petTitle?: string
   mirrorTranscript?: boolean
+  preserveActiveTurn?: boolean
 }): Promise<void> {
   const { threadId, id, content } = input
   const send = [
     ...(input.mirrorTranscript === false ? [] : [() => {
       mirrorStandardTurnStreamToRenderer(threadId, {
         type: "turn-messages",
+        ...(input.preserveActiveTurn ? { independentBotPublication: true as const } : {}),
         messages: [{ id, role: "assistant", content }]
       })
-      mirrorStandardTurnStreamToRenderer(threadId, { type: "done" })
+      if (!input.preserveActiveTurn) mirrorStandardTurnStreamToRenderer(threadId, { type: "done" })
     }]),
     () => emitAppAttention({ kind: input.attention, threadId, key: `bot:${id}` }),
     () => notifyIfBackground(input.notificationTitle, input.notificationBody)

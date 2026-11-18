@@ -7007,6 +7007,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         // Projected values snapshot for the current turn only. Unlike the
         // legacy full-messages event, this must never replace durable history.
         case "turn-messages": {
+          if (event.independentBotPublication === true) {
+            updateThreadState(threadId, state => ({
+              messages: mergeSchedulerTurnMessageSnapshot(state.messages,
+                event.messages as Parameters<typeof normalizeSchedulerMessageSnapshot>[0]).messages
+            }))
+            break
+          }
           const previousTurnLocation = schedulerTurnMessageLocationRef.current[threadId]
           clearSchedulerMainStreamingForThread(threadId)
           updateThreadState(threadId, (state) => {

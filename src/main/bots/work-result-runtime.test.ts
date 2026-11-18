@@ -6,6 +6,7 @@ import type { Message } from "../types"
 import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../agent/thread-run-lease"
 import type { LocalBotHost } from "./host"
 import { publishWorkResult, createWorkResultEvidenceAccess } from "./work-result-runtime"
+import { announceBotResultMessage } from "./work-result-publication"
 import { verifiedWorkResultThread } from "./work-result-thread"
 import {
   RetryableBotWorkPublicationError,
@@ -86,7 +87,7 @@ const work = {
   threadId: "work-thread",
   audienceKey: "desktop"
 } as BotWorkItem
-const task = { id: "lease", threadId: bot.threadId, botId: bot.id, createdAt: 100 } as BotTask
+const task = { id: "lease", threadId: bot.threadId, botId: bot.id, origin: { kind: "user" }, createdAt: 100 } as BotTask
 const incarnation = (target = work) => verifiedWorkResultThread(target).incarnation
 const contextFor = (target: BotWorkItem) => ({
   work: target,
@@ -240,6 +241,15 @@ describe("Bot work result runtime", () => {
     expect(bounded.steps.reduce((size, step) => size + JSON.stringify(step).length + 1, 0)).toBeLessThanOrEqual(4000)
     expect(bounded.steps.at(-1)).toEqual(current.steps.at(-1))
     expect(includeWorkResultAnswers(current, [{ coverage: "unavailable", steps: [] }])).toBe(current)
+  })
+
+  it("delivers into a streaming main chat without sending a turn-complete event", async () => {
+    await announceBotResultMessage({ threadId: bot.threadId, id: "result", content: "文件已准备好",
+      preserveActiveTurn: true, attention: "task-complete", notificationTitle: "成果", notificationBody: "文件已准备好" })
+    expect(f.mirror.mock.calls).toEqual([[bot.threadId, {
+      type: "turn-messages", independentBotPublication: true,
+      messages: [{ id: "result", role: "assistant", content: "文件已准备好" }]
+    }]])
   })
 
   it.each(["ready", "reported"])("publishes %s once without treating an unverified report as an error", async kind => {

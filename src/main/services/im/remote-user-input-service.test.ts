@@ -15,7 +15,7 @@ imRemoteUserInputService.dispose()
 const cleanups: (() => void)[] = []
 afterEach(() => cleanups.splice(0).reverse().forEach((cleanup) => cleanup()))
 
-async function pending(multiple: boolean, group = false) {
+async function pending(multiple: boolean, group = false, resultConfirmation = false) {
   const threadId = `im-choice-${Math.random()}`
   const submitted: UserInputResponse[] = []
   const notices: string[] = []
@@ -35,12 +35,13 @@ async function pending(multiple: boolean, group = false) {
   const releaseTransport = botInteractionRoutes.setTransport(() => true)
   const releaseRoute = botInteractionRoutes.register({
     principalId: "p", conversationKey: "c", realm: "r", kind: group ? "group" : "dm", prefix: "Bot", threadId, isCurrent: () => true,
-    ...(group ? {botBindingRef:"binding:room:1"} : {})
+    ...(group ? {botBindingRef:"binding:room:1", ...(resultConfirmation ? { senderId: "original-member" } : {})} : {})
   })
   cleanups.push(() => { service.dispose(); releaseRoute(); releaseTransport(); cancelUserInputsForThread(threadId, "cleanup") })
   const question = { id: "format", header: "格式", question: "选择格式", allowMultiple: multiple || undefined,
     options: [{ label: "CSV", description: "数据" }, { label: "JSON", description: "结构" }] }
-  const result = requestUserInput({ threadId, questions: [question], allowDeferredRenderer: true })
+  const result = requestUserInput({ threadId, questions: [question], allowDeferredRenderer: true,
+    ...(resultConfirmation ? { kind: "bot_result_confirmation" as const, originalGroupSenderOnly: true } : {}) })
   void result.catch(() => {})
   await vi.waitFor(() => expect(notices).toHaveLength(1))
   const request = getPendingUserInputForThread(threadId)!
@@ -51,6 +52,18 @@ async function pending(multiple: boolean, group = false) {
   })
   return { service, answer, card, result, request, submitted, question, publish }
 }
+
+it("requires the original authenticated group member to confirm this delivery", async () => {
+  const ctx = await pending(false, true, true)
+  const reply = (botSenderId: string) => ctx.service.resolveAnswer({ principalId: "p", conversationKey: "c",
+    botSenderId, argument: "AABB01 1" })
+  expect(await reply("different-member")).toContain("群成员")
+  expect(ctx.submitted).toHaveLength(0)
+  expect(submitUserInputResponse({ requestId: ctx.request.requestId, answers: {} }, { desktopMainFrame: true })).toBe(false)
+  expect(await reply("original-member")).toContain("任务将继续")
+  expect((await ctx.result).answers.format).toMatchObject({ type: "option", optionIndex: 0 })
+  expect(ctx.submitted).toHaveLength(1)
+})
 
 it.each([false, true])("accepts one or several real Bot multi choices through card=%s", async (card) => {
   for (const value of ["1", "1,2"]) {

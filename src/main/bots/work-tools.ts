@@ -21,7 +21,7 @@ export function createBotWorkTools(
   // An introduction can receive a live user submission through steering. The
   // Host still checks that authority on invocation, including for introductions.
   const ordinaryConversationTools = !task.workId && !task.mockSource &&
-    (task.origin?.kind === "user" || task.origin?.kind === "introduction")
+    (task.origin?.kind === "user" || task.origin?.kind === "introduction" || task.origin?.kind === "work_result")
   const key = z.string().trim().min(1).max(160)
   const id = z.string().trim().min(1).max(160)
   const workspaceSelection = z.discriminatedUnion("kind", [
@@ -32,6 +32,12 @@ export function createBotWorkTools(
     }).strict(),
     z.object({ kind: z.literal("project"), projectId: z.string().trim().min(1).max(512) }).strict()
   ]).optional()
+  const delivery = z.object({
+    review: z.enum(["independent", "combine"]).optional().describe("Independent second check explicitly requested, or one synthesis across sibling tasks in this dispatch."),
+    confirmBeforeSending: z.boolean().optional().describe("The requester wants to approve the output before publication."),
+    requiredFiles: z.array(z.string().trim().min(1).max(240)).max(64).optional().describe("Explicitly required attachment filenames, without directories."),
+    allowInterim: z.boolean().optional().describe("The user explicitly asked for a draft delivery before the final version.")
+  }).strict().optional().describe("Original user's delivery requirements. Ordinary worker self-checks do not need independent review.")
   const finishTurn = z.boolean().optional().describe("Set true when this batch contains all requested dispatches and no immediate answer or decision remains. The host verifies every receipt, keeps the initial acknowledgement and ends the main turn without another announcement. Omit when further planning is needed.")
   const conversation = z.object({
     kind: z.literal("local_thread"),
@@ -316,7 +322,7 @@ export function createBotWorkTools(
       }
     ),
     ...(!task.workId ? [tool(
-      async ({ workId, workQuery, title, goal, workspace, projectQuery, contextMessageIds, schedule }, config) =>
+      async ({ workId, workQuery, title, goal, workspace, projectQuery, contextMessageIds, schedule, delivery: requirements }, config) =>
         invoke(BOT_SKILL_DISPATCH_TOOL, config, async host => {
           const source = host.workToolSource(taskId)
           const selected = selectedMainBotSkill(source)
@@ -328,7 +334,7 @@ export function createBotWorkTools(
           signal.throwIfAborted()
           const admitted = host.workToolSource(taskId)
           const inputFileIds = admitted.origin.kind === "user" ? admitted.origin.allowedInputFileIds ?? [] : []
-          const command = { taskId, callId: config.toolCall!.id!, key: `skill:${source.requestId}` }
+          const command = { taskId, callId: config.toolCall!.id!, key: `skill:${source.requestId}`, delivery: requirements }
           if (workId && workQuery) throw new Error("请只指定任务 ID 或任务名称")
           if (workQuery) {
             const page = host.workTargets(taskId, undefined, workQuery)
@@ -373,6 +379,7 @@ export function createBotWorkTools(
         description: "Route a host-confirmed / skill selection in the main Bot. For future or recurring work supply schedule and title; the host saves the skill and starts work only when due. Otherwise dispatch now. For a revision or continuation reuse the existing workId or workQuery. For new work use a short title and the user's explicit workspace, or omit for the default; use projectQuery for a named project. Do not read inputs, infer paths or open the skill here. The host acknowledges acceptance and ends the main turn.",
         schema: z.object({
           workId: id.optional(),
+          delivery,
           workQuery: z.string().trim().min(1).max(160).optional(),
           title: z.string().trim().min(1).max(160).optional(),
           goal: z.string().trim().min(1).max(2000).optional().describe("Only necessary earlier facts or routing notes; original request and selected skill are supplied by the host."),
@@ -392,7 +399,7 @@ export function createBotWorkTools(
       }
     )] : []),
     tool(
-      async ({ requestKey, title, goal, contextMessageIds, workspace, inputFileIds }, config) =>
+      async ({ requestKey, title, goal, contextMessageIds, workspace, inputFileIds, delivery: requirements }, config) =>
         invoke("bot_work_create", config, async (host) => {
           const task = host.workToolSource(taskId)
           const receipt = await host.createWork(
@@ -405,7 +412,7 @@ export function createBotWorkTools(
               workspace,
               ...(inputFileIds.length ? { inputFileIds } : {})
             },
-            { taskId, callId: config.toolCall!.id!, key: requestKey }
+            { taskId, callId: config.toolCall!.id!, key: requestKey, delivery: requirements }
           )
           const work = host.projectWorkForModel(receipt.work)
           // A replay may return the original admission after the target rejected or rewrote it.
@@ -415,10 +422,11 @@ export function createBotWorkTools(
         name: "bot_work_create",
         metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
         description:
-          "Start substantive work asynchronously so you can keep talking with the user. Choose based on the whole outcome, not the first tool: use BEFORE reading inputs for multi-file reconciliation, code fixes with tests, investigation or a checked deliverable; simple questions and bounded short actions can stay inline. Returns immediately after acceptance; results and questions return automatically. The host supplies the original current request, applied corrections and selected source messages. Provide a short goal or necessary routing facts, not a detailed plan or rewritten request. Use one task per outcome; revisions go to bot_work_send, followed Features use project tools. Honor the designated directory/project from bot_work_projects or omit workspace for the default. Give one short acknowledgement with the dispatch, then set finishTurn: true for the final dispatch batch; do not poll, repeat the acknowledgement or redo the work. Reuse requestKey after a lost reply.",
+          "Start an independent task for one substantive outcome. Provide its short goal, designated workspace and any delivery conditions (including a separate review or human approval). The host forwards the admitted request and selected context. Reuse requestKey after a lost reply.",
         schema: z.object({
           requestKey: key,
           finishTurn,
+          delivery,
           inputFileIds: inputFiles,
           title: z.string().trim().min(1).max(160),
           goal: z
@@ -441,9 +449,9 @@ export function createBotWorkTools(
       }
     ),
     tool(
-      async ({ requestKey, workId, message, expectedVersion, inputFileIds }, config) =>
+      async ({ requestKey, workId, message, expectedVersion, inputFileIds, delivery: requirements }, config) =>
         invoke("bot_work_send", config, (host) => {
-          const source = { taskId, callId: config.toolCall!.id!, key: requestKey }
+          const source = { taskId, callId: config.toolCall!.id!, key: requestKey, delivery: requirements }
           return inputFileIds.length
             ? host.sendWorkWithFiles(source, workId, message, expectedVersion, inputFileIds)
             : host.sendWork(source, workId, message, expectedVersion)
@@ -457,6 +465,7 @@ export function createBotWorkTools(
           requestKey: key,
           finishTurn,
           workId: id,
+          delivery,
           inputFileIds: inputFiles,
           expectedVersion: z
             .number()
@@ -564,12 +573,15 @@ export function createBotWorkResultTools(
   task: BotTask, getHost: () => LocalBotHost, signal: AbortSignal,
   access?: ReturnType<typeof import("./work-result-runtime").createWorkResultEvidenceAccess>
 ): DynamicStructuredTool[] {
-  if (task.origin.kind !== "work_result" || task.origin.review?.phase !== "review") return []
+  const evidence = () => {
+    if (!access) throw new Error("当前没有可核查的任务结果。")
+    return access
+  }
   const invoke = async (name: string, config: { toolCall?: { id?: string } }, action: () => unknown | Promise<unknown>) => {
     const callId = config.toolCall?.id
     try {
       signal.throwIfAborted()
-      if (!callId || getHookAgentIdFromRequest(config))
+      if (task.origin.kind !== "work_result" || task.origin.review?.phase !== "review" || !callId || getHookAgentIdFromRequest(config))
         throw new Error("只有原主 Bot 的当前结果回合可以处理此结果。")
       return JSON.stringify(await action())
     } catch (error) {
@@ -580,8 +592,8 @@ export function createBotWorkResultTools(
   }
   const metadata = { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true }
   return [
-    ...(access ? [
-      tool(async (input, config) => invoke("bot_work_result_read", config, async () => {
+    tool(async (input, config) => invoke("bot_work_result_read", config, async () => {
+        const access = evidence()
         access.current()
         if (input.kind === "process") return access.readProcess()
         if (input.kind === "catalogue") return access.reader.list(input.cursor)
@@ -603,6 +615,7 @@ export function createBotWorkResultTools(
         ])
       }),
       tool(async (input, config) => invoke("bot_work_result_select_files", config, () => {
+        const access = evidence()
         access.current()
         const references = input.evidenceIds.map(id => access.reader.reference(id))
         if (references.some(item => item.kind !== "snapshot") ||
@@ -617,6 +630,7 @@ export function createBotWorkResultTools(
         schema: z.object({ evidenceIds: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(8) }).strict()
       }),
       tool(async (input, config) => invoke("bot_work_result_keep_service", config, () => {
+        const access = evidence()
         access.current()
         const check = input.evidenceId ? access.inspectedCommands.get(input.evidenceId) : undefined
         if (input.evidenceId && !check) throw new Error("请先读取该次真实就绪检查的完整命令回执。")
@@ -628,8 +642,7 @@ export function createBotWorkResultTools(
         description: "Select only services this report actually depends on and the original request requires to remain running. An already ready service needs no new evidence; otherwise first read a successful readiness-check receipt and explain why it proves this exact service ready. This preserves ordinary user takeover without stopping the required service; it neither starts a process nor declares the task independently verified.",
         schema: z.object({ serviceId: z.string().trim().min(1).max(160),
           evidenceId: z.string().regex(/^[a-f0-9]{64}$/).optional(), reason: z.string().trim().min(1).max(600) }).strict()
-      })
-    ] : []),
+      }),
     tool(async (input, config) => invoke("bot_work_result_continue", config, () =>
       // Existing commit validates the live request, cancellation, takeover,
       // newer input, repeated gaps and persisted follow-up budget atomically.

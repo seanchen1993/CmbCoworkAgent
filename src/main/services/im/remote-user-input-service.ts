@@ -295,9 +295,9 @@ export class ImRemoteUserInputService {
     // Group questions can be answered by any member of the same conversation.
     // Keep the route/grant checks above and private-route identity checks intact.
     if (
-      session.route.kind !== "group" &&
-      session.route.senderId &&
-      input.botSenderId !== session.route.senderId
+      session.request.kind === "bot_result_confirmation" && session.route.kind === "group"
+        ? !session.route.senderId || input.botSenderId !== session.route.senderId
+        : session.route.kind !== "group" && session.route.senderId && input.botSenderId !== session.route.senderId
     )
       return "请由提出这项问题的群成员回答。"
     const question = session.request.questions[session.questionIndex]
@@ -339,6 +339,7 @@ export class ImRemoteUserInputService {
     session.pendingCardOutcome = "已回答"
     const submitted = this.dependencies.submitResponse(response, {
       notifyRenderer: true,
+      ...(session.request.kind === "bot_result_confirmation" && session.route.kind === "group" ? { verifiedGroupSender: true as const } : {}),
       reason: "已从招乎完成补充输入。"
     })
     if (!submitted) {
@@ -427,6 +428,8 @@ export class ImRemoteUserInputService {
       return "这项补充输入已在桌面处理或不再有效。"
     }
 
+    if (session.request.kind === "bot_result_confirmation" && session.route.kind === "group")
+      return "请由发起人使用群内的回答指令确认发送。"
     const submitted = new Map(input.feedback.map((entry) => [entry.key, entry.value]))
     const staged: Record<string, UserInputAnswer> = {}
     const missing: string[] = []
@@ -549,7 +552,10 @@ export class ImRemoteUserInputService {
     // waiting on an answer has no timeout. The card earns a shorter notice.
     let carded = false
     try {
-      carded = await this.publishCard(session)
+      // Group card callbacks carry the Bot principal, not the clicking member. The
+      // authenticated /回答 route carries the sender needed for a personal sign-off.
+      if (request.kind !== "bot_result_confirmation" || route.kind !== "group")
+        carded = await this.publishCard(session)
     } catch (error) {
       this.dependencies.warn("Remote user-input card could not be published.", error)
     }

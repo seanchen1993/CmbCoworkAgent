@@ -201,7 +201,8 @@ describe("work Runtime tools", () => {
     expect(f.store.listWorks(f.bot.id).items).toEqual([])
     const routeTools = buildBotPrompt(f.bot, f.source, "/desktop")
       .match(/\bbot_(?:thread_link|work_send)\b/g) ?? []
-    expect(routeTools).toEqual(["bot_thread_link", "bot_work_send"])
+    expect(routeTools).toEqual(["bot_thread_link"])
+    expect((await import("../agent/bot-communication-prompt")).BOT_COMMUNICATION_PROMPT).toContain("bot_work_send")
     const desktopTools = createBotWorkTools(f.source, () => f.host, new AbortController().signal)
     expect(desktopTools.map(tool => tool.name)).toEqual(expect.arrayContaining(routeTools))
     const { task } = await f.host.createWork({ botId: f.bot.id, operationId: "separate", title: "Separate", goal: "Work only" })
@@ -777,7 +778,8 @@ it("binds result continuation to the current task without accepting a model targ
   const commit = vi.fn(() => ({ state: "repair", task: { id: "fixed-follow-up" } }))
   const host = { commitWorkResultReview: commit } as unknown as LocalBotHost
   const controller = new AbortController()
-  const [tool] = createBotWorkResultTools(result, () => host, controller.signal)
+  const tools = createBotWorkResultTools(result, () => host, controller.signal)
+  const tool = tools.find(t => t.name === "bot_work_result_continue")!
   const args = { gap: "Requested total missing", instruction: "Add the requested total only" }
   await tool.invoke({ type: "tool_call", id: "continue", name: tool.name, args })
   expect(commit).toHaveBeenCalledWith(result.id, { kind: "repair", ...args, evidenceIds: [] }, [], [], undefined, undefined, true)
@@ -787,5 +789,9 @@ it("binds result continuation to the current task without accepting a model targ
   controller.abort()
   await expect(tool.invoke({ type: "tool_call", id: "cancelled", name: tool.name, args })).rejects.toThrow()
   expect(commit).toHaveBeenCalledTimes(1)
-  expect(createBotWorkResultTools(source, () => host, new AbortController().signal)).toEqual([])
+  const ordinary = createBotWorkResultTools(source, () => host, new AbortController().signal)
+  expect(ordinary.map(t => t.name)).toEqual(tools.map(t => t.name))
+  const rejected = await ordinary.find(t => t.name === tool.name)!.invoke({ type: "tool_call", id: "ordinary", name: tool.name, args })
+  expect(rejected.status).toBe("error")
+  expect(commit).toHaveBeenCalledTimes(1)
 })

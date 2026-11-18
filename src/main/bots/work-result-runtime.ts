@@ -11,7 +11,7 @@ import { verifiedWorkResultThread } from "./work-result-thread"
 import { botHistoryMessageBody } from "./work-history"
 import { announceBotResultMessage, persistBotResultMessage, completeBotResultMessage } from "./work-result-publication"
 import { botSnapshotSourceRoot } from "./attachment-storage"
-import { RetryableBotWorkPublicationError, normalWorkResultSummary, hasWorkCommandOutput, workResultMoreAttachmentsLabel, workResultServiceReadAllowance, type BotWorkResultCommandReference, type BotWorkResultAttachmentReference } from "./work-result-settlement"
+import { botPublicationLease, RetryableBotWorkPublicationError, normalWorkResultSummary, hasWorkCommandOutput, workResultMoreAttachmentsLabel, workResultServiceReadAllowance, type BotWorkResultCommandReference, type BotWorkResultAttachmentReference } from "./work-result-settlement"
 import { isBinaryExtension } from "../ipc/plugin-file-gates"
 
 const MAX_RESULT_TEXT_RECORDS = 3
@@ -21,7 +21,7 @@ type ReviewCommandEvidence = Extract<BotResultEvidence, { kind: "text" }> & { re
 
 function assertLease(task: BotTask, signal: AbortSignal) {
   signal.throwIfAborted()
-  const lease = getLocalThreadRunLease(task.threadId)
+  const lease = getLocalThreadRunLease(botPublicationLease(task))
   if (lease?.owner !== "bot" || lease.runId !== task.id)
     throw new Error("原结果核查的执行归属已变化。")
 }
@@ -294,7 +294,6 @@ export async function publishWorkResult(
   prepareMainThread: () => void
 ): Promise<void> {
   assertLease(task, signal)
-  if (task.threadId !== bot.threadId) throw new Error("原结果交付身份已变化。")
   let written: ReturnType<typeof getThreadMessagesByIds>[number] | null
   let publication: NonNullable<ReturnType<LocalBotHost["workResultPublication"]>>
   let work: ReturnType<LocalBotHost["getWork"]>
@@ -310,7 +309,8 @@ export async function publishWorkResult(
     publication = (!written || unfinished ? host.workResultPublication(task.id, true) : pending) ?? pending
     work = host.getWork(bot.id, publication.workId)
     identity = verifiedWorkResultThread(work)
-    if (work.threadId !== publication.workThreadId || identity.incarnation !== publication.incarnation)
+    if ((work.source ? work.parentThreadId !== task.threadId : bot.threadId !== task.threadId) ||
+        work.threadId !== publication.workThreadId || identity.incarnation !== publication.incarnation)
       throw new BotError("CONFLICT", "原任务会话已变化，无法交付。")
   } catch (error) {
     if (signal.aborted || error instanceof BotError) throw error
@@ -319,16 +319,23 @@ export async function publishWorkResult(
   const historyHref = (messageId: string) =>
     botWorkHistoryHref({ workId: work.id, messageId, incarnation: identity.incarnation })
   const links = publication.attachments.map((item) => {
+    const owner = item.owner
+    if (owner) {
+      const sibling = host.getWork(bot.id, owner.workId)
+      if (sibling.threadId !== owner.threadId || sibling.parentThreadId !== task.threadId ||
+          sibling.audienceKey !== work.audienceKey || verifiedWorkResultThread(sibling).incarnation !== owner.incarnation)
+        throw new BotError("CONFLICT", "关联成果的原会话已变化。")
+    }
     const name = item.file.name
       .replace(/\p{Cc}/gu, " ")
       .replace(/([\\[\]])/g, "\\$1")
       .slice(0, 160)
     const messageId = item.assistantMessageId ?? item.finalMessageId
-    if (!messageId) return `- ${name}`
+    if (!messageId) return `- [${name}](${botWorkHref(owner?.workId ?? work.id)})`
     const href = publication.attachmentLinkVersion === 1 && item.assistantMessageId
-      ? botWorkAttachmentHref({ workId: work.id, messageId: item.assistantMessageId,
-          incarnation: identity.incarnation, callId: item.callId, fileIndex: item.fileIndex })
-      : historyHref(messageId)
+      ? botWorkAttachmentHref({ workId: owner?.workId ?? work.id, messageId: item.assistantMessageId,
+          incarnation: owner?.incarnation ?? identity.incarnation, callId: item.callId, fileIndex: item.fileIndex })
+      : botWorkHistoryHref({ workId: owner?.workId ?? work.id, messageId, incarnation: owner?.incarnation ?? identity.incarnation })
     return `- [${name}](${href})`
   })
   const more = publication.moreAttachments
@@ -358,12 +365,14 @@ export async function publishWorkResult(
     if (signal.aborted || error instanceof BotError) throw error
     throw new RetryableBotWorkPublicationError({ cause: error })
   }
+  const activeRun = getLocalThreadRunLease(task.threadId)
   const ready = publication.kind === "ready"
   const reported = publication.kind === "reported"
   await announceBotResultMessage({
     threadId: task.threadId,
     id: publication.responseMessageId ?? publication.id,
     content,
+    preserveActiveTurn: Boolean(activeRun && activeRun.runId !== task.id),
     attention: ready || reported
       ? "task-complete"
       : publication.kind === "needs_user"

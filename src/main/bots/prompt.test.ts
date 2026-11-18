@@ -1,3 +1,4 @@
+import { BOT_COMMUNICATION_PROMPT } from "../agent/bot-communication-prompt"
 import { describe, expect, it } from "vitest"
 import type { BotDefinition, BotMemory, BotTask } from "../../shared/bots/contracts"
 import { buildBotMemoryPrompt, buildBotPrompt, buildBotTurnContext, buildBotStoppedTaskPrompt, buildBotWorkStatusPrompt } from "./prompt"
@@ -74,12 +75,12 @@ describe("Bot asynchronous assignment guidance", () => {
   ] as const)("guides %s user assignments without forcing a split", (_name, source) => {
     const prompt = buildBotPrompt(bot, source, "/workspace")
     expect(prompt).toContain("persistent Bot")
-    expect(prompt).toContain("The host passes the original current request")
-    expect(prompt).toContain("Keep the goal short")
-    expect(prompt).toContain("Browser operations belong to independent tasks")
+    expect(BOT_COMMUNICATION_PROMPT).toContain("The host supplies the original request")
+    expect(BOT_COMMUNICATION_PROMPT).toContain("Dispatch a concise goal")
+    expect(BOT_COMMUNICATION_PROMPT).toContain("Browser operations always belong to the executing task")
     expect(prompt).not.toContain("available browser-help tool")
     expect(prompt).toContain("businessState=active does not mean running")
-    expect(prompt).toContain("revisions use bot_work_send")
+    expect(BOT_COMMUNICATION_PROMPT).toContain("Use bot_work_send on the original task")
     expect(prompt).not.toContain("bot_work_continue first")
     expect(prompt).not.toContain("check each requested acceptance criterion")
   })
@@ -143,9 +144,9 @@ describe("Bot first conversation", () => {
   it("routes new desktop project work while retaining direct work and existing-task continuity", () => {
     const prompt = buildBotPrompt(bot, task, "/private")
     expect(prompt).toContain("Honor a user-designated project or directory")
-    expect(prompt).toContain("an input file path alone does not designate a project")
-    expect(prompt).toContain("revisions use bot_work_send")
-    expect(prompt).toContain("Browser operations belong to independent tasks")
+    expect(prompt).toMatch(/an input path alone does not designate a project/i)
+    expect(BOT_COMMUNICATION_PROMPT).toContain("Use bot_work_send on the original task")
+    expect(BOT_COMMUNICATION_PROMPT).toContain("Browser operations always belong to the executing task")
 
   })
 

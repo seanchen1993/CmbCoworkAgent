@@ -224,6 +224,63 @@ function fixture(
 }
 
 describe("authenticated IM on the existing Bot host", () => {
+  it.each(["dm", "group"] as const)("holds both files and final text until authenticated %s publication, once", async kind => {
+    const f = fixture(undefined, undefined, () => false)
+    const binding = await f.binding(kind), foreign = await f.binding("group")
+    await f.service.receive(f.event(binding, "source", "Send report.md after I approve"))
+    const parent = f.store.recentTasks().find(t => t.origin.kind === "mock" && !!t.mockSource)!
+    f.store.transition(parent.id, "running")
+    f.store.recordPreparedInput(parent.id, parent.message)
+    const { work, task } = f.store.createWork({ botId: f.bot.id, operationId: "report", title: "Report", goal: "Write report" },
+      { taskId: parent.id, key: "report", callId: "report", delivery: { confirmBeforeSending: true, requiredFiles: ["report.md"] } })
+    f.store.transition(parent.id, "completed")
+    f.store.transition(task.id, "running")
+    f.store.recordPreparedInput(task.id, task.message)
+    expect(f.store.armWorkResultReview(task.id, "original-incarnation", false, true)).toBe(true)
+    const file = { name: "report.md", filePath: "/work/report.md", size: 8, attachmentPath: "/saved/report.md" }
+    f.store.recordWorkResultEvidence(task.id, { callId: "formal", files: [file], assistantMessageId: "card" })
+    f.store.settle(task.id, "completed", null, "Final report", [file])
+    f.store.flushReplies()
+    const publications = () => f.store.recentTasks().filter(t => t.origin.kind === "work_result")
+    const waiting = publications().find(t => t.origin.kind === "work_result" && t.origin.review?.phase === "confirm")!
+    expect(waiting.threadId).toBe(work.threadId)
+    expect(f.store.im.fileStatuses(f.bot.id, work.threadId, "formal")).toEqual([])
+    expect(f.service.history(f.bot.id, binding.id).items.some(i => i.text === "Final report")).toBe(false)
+    f.store.transition(waiting.id, "running")
+    expect(f.store.pendingResultConfirmation(waiting.id)?.attachments.map(a => a.file.name)).toEqual(["report.md"])
+    f.store.resolveResultConfirmation(waiting.id, true)
+    f.store.settle(waiting.id, "completed", null)
+    f.store.flushReplies()
+    const delivery = publications().find(t => t.origin.kind === "work_result" && t.origin.review?.phase === "publish")!
+    expect(delivery.threadId).toBe(parent.threadId)
+    f.store.transition(delivery.id, "running")
+    expect(f.store.acknowledgeWorkResultPublication(delivery.id)).toBe(true)
+    expect(f.store.acknowledgeWorkResultPublication(delivery.id)).toBe(false)
+    expect(f.store.im.fileStatuses(f.bot.id, work.threadId, "formal")).toHaveLength(1)
+    expect(f.store.publishedWorkDelivery(f.store.getWork(f.bot.id, work.id))).toMatchObject({
+      files: [{ name: "report.md", imState: "pending" }], fileCount: 1
+    })
+    expect(f.service.history(f.bot.id, binding.id).items.filter(i => i.text === "Final report")).toHaveLength(1)
+    expect(f.service.history(f.bot.id, foreign.id).items).toHaveLength(0)
+  })
+
+  it("reports a pre-execution failure to the originating group without releasing held material", async () => {
+    const f = fixture(undefined, undefined, () => false)
+    const binding = await f.binding("group")
+    await f.service.receive(f.event(binding, "source", "Confirm before sending"))
+    const parent = f.store.recentTasks().find(item => item.origin.kind === "mock")!
+    f.store.transition(parent.id, "running")
+    f.store.recordPreparedInput(parent.id, parent.message)
+    const { task } = f.store.createWork({ botId: f.bot.id, operationId: "held", title: "Report", goal: "Draft" },
+      { taskId: parent.id, key: "held", callId: "held", delivery: { confirmBeforeSending: true } })
+    f.store.transition(parent.id, "completed")
+    f.store.transition(task.id, "running")
+    f.store.settle(task.id, "failed", "private diagnostic", "private unfinished text")
+    const messages = f.service.history(f.bot.id, binding.id).items.map(item => item.text)
+    expect(messages.some(text => text?.includes("原任务查看详情"))).toBe(true)
+    expect(messages.join(" ")).not.toContain("private")
+  })
+
   it("creates desktop work in an empty bound group, executes once and returns results only there", async () => {
     const resolve = vi.fn(async () => ({ kind: "directory" as const, path: "/projects/report" }))
     const f = fixture(undefined, undefined, () => true, { resolve, projects: async () => ({ items: [], nextCursor: null }) })

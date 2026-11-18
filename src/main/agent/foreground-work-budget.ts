@@ -24,6 +24,9 @@ const COORDINATION = new Set([
   "bot_work_read",
   "bot_work_search",
   "bot_work_projects",
+  "bot_thread_rename",
+  "bot_work_rename",
+  "bot_work_stop",
   "bot_thread_list",
   "bot_thread_read",
   "bot_thread_link",
@@ -55,6 +58,7 @@ export function createForegroundWorkBudget(options: {
   yieldCommand(): void
   now?: () => number
   maxOperations?: number
+  requiresSeparateExecution?: () => boolean
   maxDurationMs?: number
 }): ForegroundWorkBudget {
   const now = options.now ?? Date.now
@@ -73,7 +77,7 @@ export function createForegroundWorkBudget(options: {
       // A synchronous child/workflow blocks the caller for its entire lifetime.
       // Persistent work is the asynchronous executor available to a main Bot.
       const exhausted =
-        name === "task" ||
+        options.requiresSeparateExecution?.() || name === "task" ||
         name === "workflow" ||
         operations >= (options.maxOperations ?? 4) ||
         (started !== undefined && now() - started >= (options.maxDurationMs ?? 30_000))

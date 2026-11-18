@@ -31,16 +31,19 @@ export function appendBotTurnContext(
 }
 
 /** Keep schemas stable; automatic result events cannot execute even if a provider ignores none. */
-export function createBotResultReportMiddleware() {
+export const BOT_REVIEW_TOOLS = new Set(["bot_work_result_read", "bot_work_result_select_files",
+  "bot_work_result_keep_service", "bot_work_result_continue"])
+
+export function createBotResultReportMiddleware(review = false) {
   return createMiddleware({
     name: "botResultReport",
-    wrapModelCall: (request, handler) => handler({ ...request, toolChoice: "none" }),
-    wrapToolCall: (request) =>
-      new ToolMessage({
+    wrapModelCall: (request, handler) => handler(review ? request : { ...request, toolChoice: "none" }),
+    wrapToolCall: (request, handler) =>
+      review && BOT_REVIEW_TOOLS.has(request.toolCall.name) ? handler(request) : new ToolMessage({
         name: request.toolCall.name,
         tool_call_id: request.toolCall.id!,
         status: "error",
-        content:
+        content: review ? "Only the four scoped bot_work_result tools can run in a result review. This call did not execute." :
           "This task_result event cannot invoke tools. The call did not execute. Report only the supplied result, host status and receipts; do not retry or start work."
       })
   })

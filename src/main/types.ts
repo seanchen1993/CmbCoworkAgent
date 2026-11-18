@@ -1209,7 +1209,7 @@ export interface UserInputRequest {
   requestId: string
   threadId: string
   /** A host-created, desktop-only choice bound to one Bot conversation operation. */
-  kind?: "bot_conversation_action"
+  kind?: "bot_conversation_action" | "bot_result_confirmation"
   questions: UserInputQuestion[]
   autoResolutionMs?: number
   createdAt: string

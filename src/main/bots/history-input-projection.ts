@@ -30,9 +30,9 @@ let source: HistorySource | undefined
 
 /** Only private user inputs use the existing Hook admission receipt. */
 export function tracksBotInputPreparation(task: Pick<BotTask, "origin" | "mockSource">): boolean {
-  const personal = task.mockSource?.transport === "im" && task.mockSource.personal === true
-  return (!task.mockSource || personal) &&
-    (task.origin.kind === "user" || task.origin.kind === "work" || (personal && task.origin.kind === "mock"))
+  const authenticated = task.mockSource?.transport === "im"
+  return (!task.mockSource || authenticated) &&
+    (task.origin.kind === "user" || task.origin.kind === "work" || (authenticated && task.origin.kind === "mock"))
 }
 
 /** Installed only by the existing Bot Host. This grants no execution or reading capability. */

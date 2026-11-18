@@ -78,6 +78,26 @@ export function isLocalBotWork(work: Pick<BotWorkItem, "source" | "audienceKey">
     ? work.source.transport === "im" && work.source.audienceKey === work.audienceKey
     : work.audienceKey === "desktop"
 }
+/** The parent freezes delivery requirements at dispatch. It cannot choose another audience. */
+export interface BotResultDelivery {
+  review?: "independent" | "combine"
+  confirmBeforeSending?: boolean
+  requiredFiles?: string[]
+  allowInterim?: boolean
+}
+/** A later message in the same IM group can have a different event and sender. */
+export function matchesBotWorkAudience(work: Pick<BotWorkItem, "source" | "audienceKey">, source?: BotWorkItem["source"]): boolean {
+  if (!work.source) return work.audienceKey === "desktop" && (!source || (source.transport === "im" && source.personal === true && source.audienceKey === "desktop"))
+  return source?.transport === "im" && work.source.transport === "im" &&
+    source.audienceKey === work.audienceKey && source.bindingId === work.source.bindingId &&
+    source.conversationId === work.source.conversationId && source.grantVersion === work.source.grantVersion
+}
+export interface BotWorkDispatchSource {
+  taskId: string
+  callId: string
+  key: string
+  delivery?: BotResultDelivery
+}
 export interface CreateBotWorkInput {
   botId: string
   /** Local binding selected in the desktop group panel. Tool calls inherit their own audience. */

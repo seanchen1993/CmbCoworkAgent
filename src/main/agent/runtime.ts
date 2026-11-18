@@ -667,6 +667,7 @@ const taskConcurrencyLimiters = new Map<string, AsyncSemaphore>()
 const BOT_WORK_COORDINATION_TOOLS = new Set([
   "bot_work_list", "bot_work_read", "bot_work_search", "bot_work_projects",
   "bot_work_create", "bot_work_send", "bot_work_continue", "bot_work_complete",
+  "bot_thread_list", "bot_thread_read", "bot_thread_rename", "bot_work_rename", "bot_work_stop",
   "bot_thread_link", "bot_work_unlink", "bot_thread_delete", "bot_work_delete",
   "bot_feature_list", "bot_feature_read", "bot_feature_update"
 ])
@@ -2247,6 +2248,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     onPrimaryModelRequestState,
     foregroundWorkBudget,
     botResultReport = false,
+    botResultReview = false,
     botSkillDispatch = false,
     soloTaskTraceManager,
     actionStationarityTurnId,
@@ -2280,6 +2282,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     onBotDispatchFeedback?: (feedback: BotDispatchFeedback | undefined) => void
     openingReplyReminder?: boolean
     botResultReport?: boolean
+  botResultReview?: boolean
     botSkillDispatch?: boolean
     turnCompletionTodoGateEnabled?: boolean
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -3121,7 +3124,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       // task-mmd must not observe a tool that never runs. Mirrors Claude Code's
       // validate-before-permissions order.
       createMalformedToolCallGuardMiddleware(),
-      ...(botResultReport ? [createBotResultReportMiddleware()] : []),
+      ...(botResultReport || botResultReview ? [createBotResultReportMiddleware(botResultReview)] : []),
       ...(botSkillDispatch ? [createBotSkillDispatchMiddleware()] : []),
       ...(loopGuardsEnabled
         ? [
@@ -3502,15 +3505,20 @@ ${options.silentBackgroundServices ? "For a server/daemon needed during this tas
         : ""
 
   const memorySection = options.includeMemory !== false ? MEMORY_SYSTEM_PROMPT : ""
+  if (options.botCommunication) {
+    // The parent can review a held result on its worker thread. Paths and the
+    // current clock belong to the turn, not the shared model/tool prefix.
+    return [BOT_COMMUNICATION_PROMPT, `Host environment: ${platform} (${process.arch}), shell ${shell}.`,
+      sandboxSection, memorySection].filter(Boolean).join("\n\n")
+  }
   return (
-    (options.botCommunication ? BOT_COMMUNICATION_PROMPT + "\n\n" : "") +
     workingDirSection +
     backgroundExecSection +
     sandboxSection +
-    (options.botCommunication ? "" : renderBaseSystemPrompt({
+    renderBaseSystemPrompt({
       includeSubagents: options.includeSubagents,
       toolStrategy: effectiveToolStrategy
-    })) +
+    }) +
     memorySection
   )
 }
@@ -4684,6 +4692,7 @@ export interface CreateAgentRuntimeOptions {
   botCommunication?: boolean
   /** Host-only result event gate; preserves the main Bot's model-visible tool definitions. */
   botResultReport?: boolean
+  botResultReview?: boolean
   botSkillDispatch?: boolean
   /** Plugin-provided runtime context for skill artifact paths and feature bindings. */
   pluginPromptInject?: string
@@ -7264,6 +7273,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     currentRunMessageQueueOwnerToken: options.currentRunMessageQueueOwnerToken,
     onPrimaryModelRequestState: options.onPrimaryModelRequestState,
     foregroundWorkBudget: options.foregroundWorkBudget,
+    botResultReview: options.botCommunication === true && options.botResultReview === true,
     botResultReport: options.botCommunication === true && options.botResultReport === true,
     botSkillDispatch: options.botCommunication === true && options.botSkillDispatch === true && !options.botResultReport,
     onTurnCompletionRecovery: options.onTurnCompletionRecovery,

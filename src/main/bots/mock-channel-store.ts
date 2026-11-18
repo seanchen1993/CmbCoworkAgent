@@ -996,7 +996,7 @@ ${help.instruction.slice(0, 500)}
     )
     if (this.db.getRowsModified()) this.changed()
   }
-  publishFiles(task: BotTask, callId: string, files: BotDeliveredFile[]): void {
+  publishFiles(task: BotTask, callId: string, files: BotDeliveredFile[], startIndex = 0): void {
     if (this.transport !== "im" || !files.length) return
     if (!parseBotFileDelivery(JSON.stringify({ kind: "bot-file-delivery", files })))
       throw new BotError("INVALID_INPUT", "交付附件记录无效")
@@ -1005,7 +1005,8 @@ ${help.instruction.slice(0, 500)}
     const { bindingId, conversationId, messageId, version } = target
     const callKey = createHash("sha256").update(callId).digest("hex")
     this.transaction(() => {
-      files.forEach((file, index) => {
+      files.forEach((file, offset) => {
+        const index = startIndex + offset
         const id = `im-file-${createHash("sha256").update(`${task.id}:${callId}:${index}`).digest("hex")}`
         const json = JSON.stringify({ kind: "bot-file-delivery", files: [file] })
         const old = this.rows("SELECT files_json FROM bot_mock_outbox WHERE id=?", [id])[0]

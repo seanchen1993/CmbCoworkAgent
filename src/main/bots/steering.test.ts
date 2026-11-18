@@ -442,9 +442,9 @@ describe("Bot messages during a user run", () => {
     const intro = f.acquire.mock.calls[0][1]
     // This prompt is already built when the welcome question starts waiting;
     // the injected request must not need another runtime to receive its routing contract.
-    const prompt = buildBotPrompt(f.bot, intro, "/private")
+    const prompt = buildBotPrompt(f.bot, intro, "/private") + (await import("../agent/bot-communication-prompt")).BOT_COMMUNICATION_PROMPT
     expect(buildBotTurnContext(intro)).toContain("If a real user message arrives, prioritize it immediately")
-    expect(prompt).toContain("revisions use bot_work_send")
+    expect(prompt).toContain("Use bot_work_send on the original task")
     f.host.onSteeringReady(intro.id)
     f.wait(true)
     const child = f.host.send({ botId: f.bot.id, requestId: "first-user", message: "Fix the CSV project in /projects/export, test and deliver it" })

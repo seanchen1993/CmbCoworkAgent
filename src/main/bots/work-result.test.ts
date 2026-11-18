@@ -60,6 +60,127 @@ function settle(
 }
 
 describe("private work result settlement", () => {
+  function dispatched(delivery: import("../../shared/bots/work").BotResultDelivery) {
+    const f = fixture()
+    const parent = f.store.enqueue({ botId: f.bot.id, requestId: "request", message: "Prepare the requested report" })
+    f.store.transition(parent.id, "running")
+    f.store.recordPreparedInput(parent.id, parent.message)
+    const child = f.store.createWork({ botId: f.bot.id, operationId: "report", title: "Report", goal: "Deliver report" },
+      { taskId: parent.id, callId: "report", key: "report", delivery })
+    f.store.transition(parent.id, "completed")
+    f.store.transition(child.task.id, "running")
+    f.store.recordPreparedInput(child.task.id, child.task.message)
+    expect(f.store.armWorkResultReview(child.task.id, "incarnation", false, true)).toBe(true)
+    return { ...f, ...child }
+  }
+
+  it("publishes the exact worker reply while the main chat runs; explicit review waits for that chat", () => {
+    for (const independent of [false, true]) {
+      const f = dispatched(independent ? { review: "independent" } : {})
+      f.store.settle(f.task.id, "completed", null, "The answer is 11")
+      f.store.flushReplies()
+      const foreground = f.store.enqueue({ botId: f.bot.id, requestId: "chat", message: "Hello" })
+      f.store.transition(foreground.id, "running")
+      const next = f.store.nextQueued([f.bot.threadId], true, false, true)
+      if (independent) expect(next?.origin.kind).not.toBe("work_result")
+      else {
+        expect(next?.origin).toMatchObject({ kind: "work_result", review: { phase: "publish" } })
+        f.store.transition(next!.id, "running")
+        expect(f.store.getWorkResultPublication(next!.id)?.summary).toBe("The answer is 11")
+        expect(f.store.getTask(foreground.id).state).toBe("running")
+      }
+    }
+  })
+
+  it("respects a declined confirmation after restart and never queues the frozen file", () => {
+    const f = dispatched({ confirmBeforeSending: true })
+    f.store.settle(f.task.id, "completed", null, "private preview")
+    f.store.flushReplies()
+    const confirmation = notices(f.store)[0]
+    f.store.transition(confirmation.id, "running")
+    const reopened = new BotStore(f.db)
+    expect(reopened.pendingResultConfirmation(confirmation.id)?.summary).toBe("private preview")
+    reopened.resolveResultConfirmation(confirmation.id, false)
+    expect(() => reopened.resolveResultConfirmation(confirmation.id, true)).toThrow()
+    reopened.settle(confirmation.id, "completed", null)
+    reopened.flushReplies()
+    expect(notices(reopened)).toHaveLength(1)
+  })
+
+  it("routes a missing mandatory file to review and withholds unresolved candidate versions", () => {
+    const f = dispatched({ requiredFiles: ["final.md"] })
+    f.store.recordWorkResultEvidence(f.task.id, { callId: "candidate", files: [
+      { name: "draft.md", filePath: "/work/draft.md", attachmentPath: "/saved/draft.md", size: 8 }
+    ] })
+    f.store.markWorkDelivery(f.task.id, "candidate", { selectionReason: "Two versions, no approval" })
+    f.store.settle(f.task.id, "completed", null, "Please choose a version")
+    const review = privateReview(f.store)
+    expect(f.store.getWorkResultReview(review.id)).toMatchObject({ delivery: { requiredFiles: ["final.md"] },
+      missingFiles: ["final.md"], selectionReason: "Two versions, no approval" })
+    expect(f.store.commitWorkResultReview(review.id, null, [], [], undefined, { messageId: "choice",
+      finalText: "Which version?" })).toMatchObject({ publication: { attachments: [] } })
+  })
+
+  it("repairs a missing required receipt in the original task even when the result claims success", () => {
+    const f = dispatched({ requiredFiles: ["report.md"] })
+    f.store.settle(f.task.id, "completed", null, "report.md was sent")
+    const review = privateReview(f.store)
+    const result = f.store.commitWorkResultReview(review.id, null, [], [], undefined,
+      { messageId: "claim", finalText: "Everything is delivered" })
+    expect(result).toMatchObject({ state: "repair", task: { threadId: f.work.threadId, workId: f.work.id } })
+    expect(notices(f.store).some(n => n.origin.kind === "work_result" && n.origin.review?.phase === "publish")).toBe(false)
+  })
+
+  it.each([false, true])("sends an authorized draft once and only attaches a changed final version (changed=%s)", changed => {
+    const f = dispatched({ allowInterim: true })
+    const draft = { name: "report.md", filePath: "/work/report.md", attachmentPath: "/saved/v1/report.md", size: 8 }
+    f.store.recordWorkResultEvidence(f.task.id, { callId: "draft", files: [draft], assistantMessageId: "draft-message" })
+    f.store.markWorkDelivery(f.task.id, "draft", { interim: true })
+    f.store.markWorkDelivery(f.task.id, "draft", { interim: true })
+    f.store.flushReplies()
+    const interim = notices(f.store)[0]
+    f.store.transition(interim.id, "running")
+    expect(f.store.getWorkResultPublication(interim.id)?.attachments.map(item => item.file)).toEqual([draft])
+    f.store.acknowledgeWorkResultPublication(interim.id)
+    f.store.settle(interim.id, "completed", null)
+    const final = changed ? { ...draft, attachmentPath: "/saved/v2/report.md", size: 12 } : draft
+    f.store.recordWorkResultEvidence(f.task.id, { callId: "end", files: [final], assistantMessageId: "final-message" })
+    f.store.settle(f.task.id, "completed", null, "Final report")
+    f.store.flushReplies()
+    const delivery = notices(f.store).find(item => item.state === "queued")!
+    f.store.transition(delivery.id, "running")
+    expect(f.store.getWorkResultPublication(delivery.id)?.attachments.map(item => item.file)).toEqual(changed ? [final] : [])
+    expect(notices(f.store)).toHaveLength(2)
+  })
+
+  it("combines only sibling tasks from the same request in one reviewed result", () => {
+    const f = fixture()
+    const parent = f.store.enqueue({ botId: f.bot.id, requestId: "combine", message: "Give me one combined result" })
+    f.store.transition(parent.id, "running")
+    f.store.recordPreparedInput(parent.id, parent.message)
+    const children = ["Design", "Data"].map(title => f.store.createWork({ botId: f.bot.id, operationId: title, title, goal: title },
+      { taskId: parent.id, callId: title, key: title, delivery: { review: "combine" } }))
+    f.store.transition(parent.id, "completed")
+    for (const [i, child] of children.entries()) {
+      f.store.transition(child.task.id, "running")
+      f.store.recordPreparedInput(child.task.id, child.task.message)
+      f.store.armWorkResultReview(child.task.id, "inc-" + i, false, true)
+      const name = "result-" + i + ".md"
+      f.store.recordWorkResultEvidence(child.task.id, { callId: name, files: [{ name, filePath: "/work/" + name,
+        attachmentPath: "/saved/" + name, size: 1 }], assistantMessageId: "message-" + i })
+      f.store.settle(child.task.id, "completed", null, "Conclusion " + i)
+      f.store.flushReplies()
+      if (i === 0) expect(notices(f.store)).toHaveLength(0)
+    }
+    const review = privateReview(f.store)
+    expect(f.store.getWorkResultReview(review.id)?.combinedResults).toMatchObject([{ text: "Conclusion 1" }])
+    const result = f.store.commitWorkResultReview(review.id, null, [], [], undefined, { messageId: "summary", finalText: "Both conclusions" })
+    expect(result.state).toBe("publish")
+    if (result.state === "publish") expect(result.publication.attachments.map(item => item.file.name).sort()).toEqual(["result-0.md", "result-1.md"])
+    f.store.flushReplies()
+    expect(notices(f.store).filter(item => item.origin.kind === "work_result" && item.origin.review?.phase === "publish")).toHaveLength(1)
+  })
+
   it("reads a suppressed background cancellation receipt without resuming the stopped task", () => {
     const f = fixture()
     beginVerifiedWork(f)

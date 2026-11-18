@@ -8397,6 +8397,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 : runExecutionContext.extraSystemPrompt,
               botCommunication: runExecutionContext.source === "bot" && runExecutionContext.botCommunication,
               botResultReport: botTurnContext?.event === "task_result",
+              botResultReview: botTurnContext?.event === "task_result_review",
               botSkillDispatch: !!botSkillDispatch,
               additionalTools: runExecutionContext.additionalTools,
               foregroundWorkBudget: runExecutionContext.foregroundWorkBudget,
