@@ -266,6 +266,24 @@ import type {
   ProjectMetricListOptions,
   ProjectMetricTrendFilters
 } from "../../shared/project-metrics"
+import { fetchProjectMetricPeriodCode } from "./project-metric-period-code"
+import {
+  fetchPersonalEfficiency,
+  fetchPersonalEfficiencyCode,
+  makeMockPersonalEfficiency
+} from "./dashboard-personal-efficiency"
+import type {
+  PersonalEfficiencyData,
+  PersonalEfficiencyFilters
+} from "../../shared/personal-efficiency"
+import type { PersonalEfficiencyExportOptions } from "../../shared/personal-efficiency-export"
+import {
+  personalEfficiencyExportSheets,
+  validatePersonalEfficiencyExportOptions
+} from "./personal-efficiency-export"
+import { projectMetricIndicatorSheets } from "./project-metric-indicator-export"
+import { buildDashboardExcelBuffer, type DashboardExcelSheet } from "./dashboard-excel-workbook"
+import { formatProjectDate } from "../../shared/project-metric-calendar"
 import {
   fetchProjectMetricEligibleHarnessIds,
   fetchProjectMetricOverview,
@@ -1626,13 +1644,25 @@ function projectMetricDependencies(access: DashboardAccessContext): ProjectMetri
       })()
       return fieldsChecked
     },
-    codeStats: async (range, rooms, ids) => {
-      const extra: Record<string, unknown>[] = [
+    codeEvidence: async (range, ids) => {
+      if (!ids.length) return []
+      const { codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(null, range, [
         { term: { upperOrgLv2: PROJECT_METRIC_TEAM } },
-        ...(rooms === null
-          ? []
-          : [rooms.length ? { terms: { upperOrgLv1: rooms } } : { match_none: {} }])
-      ]
+        projectMetricHarnessFilter("properties.harnessProjectId", ids)
+      ])
+      return fetchProjectMetricPeriodCode(
+        esQuery,
+        getEsIndex("event"),
+        codeAdoptFilters,
+        perBucketAggs.code_adopt_pushed
+      )
+    },
+    codeStats: async (range, rooms, ids) => {
+      const extra: Record<string, unknown>[] = [{ term: { upperOrgLv2: PROJECT_METRIC_TEAM } }]
+      if (rooms !== null) {
+        if (rooms.length) appendOptionalFilter(extra, buildUpperOrgLv1ListFilter(rooms))
+        else extra.push({ match_none: {} })
+      }
       const raw = await fetchProjectModeCodeAggs(null, range, (aggs) => aggs, [
         ...extra,
         projectMetricHarnessFilter("properties.harnessProjectId", ids)
@@ -1648,6 +1678,54 @@ function projectMetricDependencies(access: DashboardAccessContext): ProjectMetri
       }
     }
   }
+}
+
+async function fetchDashboardPersonalEfficiency(
+  filters: PersonalEfficiencyFilters,
+  access: DashboardAccessContext,
+  sapId?: string,
+  includeAllProjectNames = false
+): Promise<PersonalEfficiencyData> {
+  if (sapId !== undefined && (typeof sapId !== "string" || !sapId.trim()))
+    throw new Error("人员编号无效")
+  const deps = projectMetricDependencies(access)
+  if (import.meta.env.DEV) return makeMockPersonalEfficiency(filters)
+  return fetchPersonalEfficiency(
+    filters,
+    deps,
+    async (ids, rooms) => {
+      if (!ids.length || rooms?.length === 0) return []
+      const orgFilter = rooms === null ? null : buildUpperOrgLv1ListFilter(rooms)
+      const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
+        null,
+        filters.range,
+        [
+          { term: { upperOrgLv2: PROJECT_METRIC_TEAM } },
+          ...(orgFilter ? [orgFilter] : []),
+          ...(sapId ? [{ term: { sapId } }] : []),
+          projectMetricHarnessFilter("properties.harnessProjectId", ids)
+        ]
+      )
+      return fetchPersonalEfficiencyCode(
+        esQuery,
+        getEsIndex("event"),
+        [
+          {
+            bool: {
+              should: [
+                { bool: { filter: codeGenFilters } },
+                { bool: { filter: codeAdoptFilters } }
+              ],
+              minimum_should_match: 1
+            }
+          }
+        ],
+        perBucketAggs
+      )
+    },
+    sapId,
+    includeAllProjectNames
+  )
 }
 
 function getDashboardEsIndexByAlias(): Record<DashboardEsIndexAlias, string> {
@@ -1716,6 +1794,25 @@ function timeRangeFilter(field: string, range: TimeRange): Record<string, unknow
 
 function escapeWildcard(value: string): string {
   return value.replace(/[\\*?]/g, "\\$&")
+}
+
+async function saveDashboardWorkbook(
+  sheets: DashboardExcelSheet[],
+  options?: { fileName?: string }
+): Promise<{ success: boolean; canceled?: boolean; filePath?: string }> {
+  const buffer = await buildDashboardExcelBuffer(sheets)
+  if (getDashboardRequestSignal()?.aborted) throw new DashboardRequestCancelledError()
+  const win = BrowserWindow.getFocusedWindow()
+  const exportName = safeExportFileName(options?.fileName || "运营面板数据")
+  const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
+    title: "导出运营面板数据",
+    defaultPath: `${exportName}_${formatProjectDate(Date.now()).slice(0, 10)}.xlsx`,
+    filters: [{ name: "Excel", extensions: ["xlsx"] }]
+  })
+  if (result.canceled || !result.filePath) return { success: false, canceled: true }
+  if (getDashboardRequestSignal()?.aborted) throw new DashboardRequestCancelledError()
+  fs.writeFileSync(result.filePath, buffer)
+  return { success: true, filePath: result.filePath }
 }
 
 function safeExportFileName(value: string): string {
@@ -15888,6 +15985,58 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   registerLatestDashboardHandler(
     _ipcMain,
+    "dashboard:personalEfficiency",
+    async (_, filters: PersonalEfficiencyFilters, sapId?: string) => {
+      try {
+        const access = requireDashboardProjectModeAccess()
+        const data = await fetchDashboardPersonalEfficiency(filters, access, sapId)
+        return {
+          success: true,
+          data: {
+            ...data,
+            people: sapId
+              ? data.people.filter((person) => person.sapId === sapId)
+              : data.people.map((person) => ({ ...person, projects: [], code: [] }))
+          }
+        }
+      } catch (e) {
+        logDashboardRequestError("personalEfficiency", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    },
+    (_filters, sapId) =>
+      sapId ? "dashboard:personalEfficiency:detail" : "dashboard:personalEfficiency:list"
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:personalEfficiencyExport",
+    async (
+      _,
+      filters: PersonalEfficiencyFilters,
+      options: PersonalEfficiencyExportOptions = {}
+    ) => {
+      try {
+        const access = requireDashboardProjectModeAccess()
+        validatePersonalEfficiencyExportOptions(options)
+        const data = await fetchDashboardPersonalEfficiency(
+          filters,
+          access,
+          options.sapId?.trim(),
+          true
+        )
+        return await saveDashboardWorkbook(personalEfficiencyExportSheets(data, filters, options), {
+          fileName: options.sapId ? "研发效能看板-个人项目明细" : "研发效能看板-个人效能明细"
+        })
+      } catch (e) {
+        logDashboardRequestError("personalEfficiencyExport", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
     "dashboard:projectMetricOverview",
     async (_, filters: ProjectMetricFilters) => {
       if (import.meta.env.DEV)
@@ -15909,14 +16058,14 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     _ipcMain,
     "dashboard:projectMetricIndicatorExport",
     async (_, filters: ProjectMetricFilters) => {
-      if (import.meta.env.DEV)
-        return { success: true, data: makeMockProjectMetricIndicatorExport(filters) }
       try {
         const access = requireDashboardProjectModeAccess()
-        return {
-          success: true,
-          data: await fetchProjectMetricIndicatorExport(filters, projectMetricDependencies(access))
-        }
+        const data = import.meta.env.DEV
+          ? makeMockProjectMetricIndicatorExport(filters)
+          : await fetchProjectMetricIndicatorExport(filters, projectMetricDependencies(access))
+        return await saveDashboardWorkbook(projectMetricIndicatorSheets(data, filters), {
+          fileName: "研发效能看板-研发智能化应用广度与先进性指标"
+        })
       } catch (e) {
         logDashboardRequestError("projectMetricIndicatorExport", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
@@ -17035,50 +17184,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       options?: { fileName?: string }
     ) => {
       try {
-        // Dynamic import xlsx to avoid bundling issues
-        const XLSX = await import("xlsx")
-
-        const wb = XLSX.utils.book_new()
-        for (const sheet of sheets) {
-          const summaryRows = sheet.summaryRows ?? []
-          const wsData = [
-            ...summaryRows,
-            ...(summaryRows.length > 0 ? [[]] : []),
-            sheet.header,
-            ...sheet.rows
-          ]
-          const ws = XLSX.utils.aoa_to_sheet(wsData)
-
-          // Auto-size columns based on content
-          const colWidths = sheet.header.map((h, i) => {
-            let maxLen = h.length
-            for (const row of [...summaryRows, ...sheet.rows]) {
-              const cellLen = String(row[i] ?? "").length
-              if (cellLen > maxLen) maxLen = cellLen
-            }
-            return { wch: Math.min(maxLen + 4, 40) }
-          })
-          ws["!cols"] = colWidths
-
-          XLSX.utils.book_append_sheet(wb, ws, sheet.name.slice(0, 31))
-        }
-
-        const win = BrowserWindow.getFocusedWindow()
-        const exportName = safeExportFileName(options?.fileName || "运营面板数据")
-        const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
-          title: "导出运营面板数据",
-          defaultPath: `${exportName}_${new Date().toISOString().slice(0, 10)}.xlsx`,
-          filters: [{ name: "Excel", extensions: ["xlsx"] }]
-        })
-
-        if (result.canceled || !result.filePath) {
-          return { success: false, canceled: true }
-        }
-
-        const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" })
-        fs.writeFileSync(result.filePath, buf)
-
-        return { success: true, filePath: result.filePath }
+        return await saveDashboardWorkbook(sheets, options)
       } catch (e) {
         console.error("[Dashboard] exportExcel error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }

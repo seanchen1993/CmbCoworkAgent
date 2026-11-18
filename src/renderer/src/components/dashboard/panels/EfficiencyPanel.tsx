@@ -29,6 +29,10 @@ import type {
   DashboardEfficiencyData
 } from "../use-dashboard"
 import { ProjectMetricsSection } from "./ProjectMetricsSection"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { PersonalEfficiencySection } from "./PersonalEfficiencySection"
+import { ProjectMetricDateBasisSelect } from "./ProjectMetricDateBasisSelect"
+import type { ProjectMetricFilters } from "../../../../../shared/project-metrics"
 
 // ─────────────────────────────────────────────────────────
 // 目标线
@@ -829,53 +833,93 @@ export function EfficiencyPanel({
   upperOrgLv1: string[]
   projectMetricRefreshKey: number
 }): React.JSX.Element {
+  const [view, setView] = useState<"organization" | "personal">("organization")
+  const [personalVisited, setPersonalVisited] = useState(false)
+  const [dateBasis, setDateBasis] =
+    useState<NonNullable<ProjectMetricFilters["dateBasis"]>>("developmentCompleted")
   return (
-    <div className="space-y-4 px-6 py-4">
-      <ProjectMetricsSection
-        range={range}
-        upperOrgLv1={upperOrgLv1}
-        refreshKey={projectMetricRefreshKey}
-      />
-
-      {loading && !data ? (
-        <div className="flex min-h-40 items-center justify-center rounded-lg border border-border text-sm text-muted-foreground">
-          <Loader2 className="mr-2 size-4 animate-spin" />
-          加载现有研发效能指标
+    <div className="px-6 py-4">
+      <Tabs
+        value={view}
+        onValueChange={(value) => {
+          if (value !== "organization" && value !== "personal") return
+          setView(value)
+          if (value === "personal") setPersonalVisited(true)
+        }}
+      >
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <TabsList aria-label="研发效能视图">
+            <TabsTrigger value="organization">组织效能</TabsTrigger>
+            <TabsTrigger value="personal">个人效能</TabsTrigger>
+          </TabsList>
+          <ProjectMetricDateBasisSelect value={dateBasis} onChange={setDateBasis} />
         </div>
-      ) : error ? (
-        <div className="flex items-start gap-2 rounded-md bg-destructive/10 px-4 py-3 text-sm text-destructive">
-          <AlertCircle className="mt-0.5 size-4 shrink-0" />
-          <span>{error}</span>
-        </div>
-      ) : !data ? (
-        <div className="flex min-h-40 items-center justify-center rounded-lg border border-border text-sm text-muted-foreground">
-          暂无现有研发效能数据
-        </div>
-      ) : (
-        <>
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-            <span>统计范围：项目模式 · 已绑定精益项目</span>
-            <span>·</span>
-            <span>{formatCount(data.meta.projectCount)} 个项目</span>
-            {data.meta.truncated ? (
-              <>
-                <span>·</span>
-                <span className="text-status-warning-foreground">
-                  项目数超过上限，以下为截断后的子集
-                </span>
-              </>
-            ) : null}
-          </div>
-
-          <AdoptionCard adoption={data.adoption} />
-          <ComputeSection
-            data={data}
-            loading={loading}
-            pluginFilter={pluginFilter}
-            onPluginFilterChange={onPluginFilterChange}
+        <TabsContent
+          value="organization"
+          forceMount
+          hidden={view !== "organization"}
+          className="space-y-4"
+        >
+          <ProjectMetricsSection
+            range={range}
+            upperOrgLv1={upperOrgLv1}
+            refreshKey={projectMetricRefreshKey}
+            dateBasis={dateBasis}
           />
-        </>
-      )}
+
+          {loading && !data ? (
+            <div className="flex min-h-40 items-center justify-center rounded-lg border border-border text-sm text-muted-foreground">
+              <Loader2 className="mr-2 size-4 animate-spin" />
+              加载现有研发效能指标
+            </div>
+          ) : error ? (
+            <div className="flex items-start gap-2 rounded-md bg-destructive/10 px-4 py-3 text-sm text-destructive">
+              <AlertCircle className="mt-0.5 size-4 shrink-0" />
+              <span>{error}</span>
+            </div>
+          ) : !data ? (
+            <div className="flex min-h-40 items-center justify-center rounded-lg border border-border text-sm text-muted-foreground">
+              暂无现有研发效能数据
+            </div>
+          ) : (
+            <>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                <span>统计范围：项目模式 · 已绑定精益项目</span>
+                <span>·</span>
+                <span>{formatCount(data.meta.projectCount)} 个项目</span>
+                {data.meta.truncated ? (
+                  <>
+                    <span>·</span>
+                    <span className="text-status-warning-foreground">
+                      项目数超过上限，以下为截断后的子集
+                    </span>
+                  </>
+                ) : null}
+              </div>
+
+              <AdoptionCard adoption={data.adoption} />
+              <ComputeSection
+                data={data}
+                loading={loading}
+                pluginFilter={pluginFilter}
+                onPluginFilterChange={onPluginFilterChange}
+              />
+            </>
+          )}
+        </TabsContent>
+        {personalVisited ? (
+          <TabsContent value="personal" forceMount hidden={view !== "personal"}>
+            <div className="rounded-lg border border-border bg-card p-4">
+              <PersonalEfficiencySection
+                range={range}
+                upperOrgLv1={upperOrgLv1}
+                dateBasis={dateBasis}
+                refreshKey={projectMetricRefreshKey}
+              />
+            </div>
+          </TabsContent>
+        ) : null}
+      </Tabs>
     </div>
   )
 }

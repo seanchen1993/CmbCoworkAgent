@@ -1,3 +1,8 @@
+import type { PersonalEfficiencyExportOptions } from "../shared/personal-efficiency-export"
+import type {
+  PersonalEfficiencyData,
+  PersonalEfficiencyFilters
+} from "../shared/personal-efficiency"
 import type {
   ManagedRunSchedule,
   ManagedRunScheduleInput,
@@ -4031,13 +4036,23 @@ const api = {
       filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">
     ): Promise<{ success: boolean; data?: string[]; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectMetricGroupOptions", filters),
+    personalEfficiency: (
+      filters: PersonalEfficiencyFilters,
+      sapId?: string
+    ): Promise<{ success: boolean; data?: PersonalEfficiencyData; error?: string }> =>
+      ipcRenderer.invoke("dashboard:personalEfficiency", filters, sapId),
+    personalEfficiencyExport: (
+      filters: PersonalEfficiencyFilters,
+      options?: PersonalEfficiencyExportOptions
+    ): Promise<{ success: boolean; filePath?: string; canceled?: boolean; error?: string }> =>
+      ipcRenderer.invoke("dashboard:personalEfficiencyExport", filters, options),
     projectMetricOverview: (
       filters: ProjectMetricFilters
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectMetricOverview", filters),
     projectMetricIndicatorExport: (
       filters: ProjectMetricFilters
-    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+    ): Promise<{ success: boolean; filePath?: string; canceled?: boolean; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectMetricIndicatorExport", filters),
     projectMetricSummary: (
       filters: ProjectMetricFilters

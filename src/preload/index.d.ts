@@ -1,3 +1,8 @@
+import type { PersonalEfficiencyExportOptions } from "../shared/personal-efficiency-export"
+import type {
+  PersonalEfficiencyData,
+  PersonalEfficiencyFilters
+} from "../shared/personal-efficiency"
 import type {
   ManagedRunSchedule,
   ManagedRunScheduleInput,
@@ -175,7 +180,6 @@ import type {
   ProjectMetricListOptions,
   ProjectMetricProjectsData,
   ProjectMetricOverviewData,
-  ProjectMetricIndicatorExportData,
   ProjectMetricSummaryData,
   ProjectMetricTrendData,
   ProjectMetricTrendFilters
@@ -2764,12 +2768,20 @@ interface CustomAPI {
     projectMetricGroupOptions: (
       filters: Pick<ProjectMetricFilters, "range" | "upperOrgLv1">
     ) => Promise<{ success: boolean; data?: string[]; error?: string }>
+    personalEfficiency: (
+      filters: PersonalEfficiencyFilters,
+      sapId?: string
+    ) => Promise<{ success: boolean; data?: PersonalEfficiencyData; error?: string }>
+    personalEfficiencyExport: (
+      filters: PersonalEfficiencyFilters,
+      options?: PersonalEfficiencyExportOptions
+    ) => Promise<{ success: boolean; filePath?: string; canceled?: boolean; error?: string }>
     projectMetricOverview: (
       filters: ProjectMetricFilters
     ) => Promise<{ success: boolean; data?: ProjectMetricOverviewData; error?: string }>
     projectMetricIndicatorExport: (
       filters: ProjectMetricFilters
-    ) => Promise<{ success: boolean; data?: ProjectMetricIndicatorExportData; error?: string }>
+    ) => Promise<{ success: boolean; filePath?: string; canceled?: boolean; error?: string }>
     projectMetricSummary: (
       filters: ProjectMetricFilters
     ) => Promise<{ success: boolean; data?: ProjectMetricSummaryData; error?: string }>

@@ -25,7 +25,6 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { ProjectMetricOverview } from "./ProjectMetricOverview"
-import { projectMetricIndicatorSheets } from "./project-metric-indicator-export"
 import { PROJECT_CALENDAR_NOTE } from "../../../../../shared/project-metric-calendar"
 import { PROJECT_METRIC_INDICATORS } from "../../../../../shared/project-metric-indicators"
 import { ProjectMetricTrend } from "./ProjectMetricTrend"
@@ -92,34 +91,6 @@ function formatSourceDateTime(value: string | null): string {
   return value ? value.replace("T", " ").replace(/\.\d+$/, "") : "—"
 }
 
-function TimeScopeTip({
-  dateBasis
-}: {
-  dateBasis: "developmentCompleted" | "created"
-}): React.JSX.Element {
-  return (
-    <TooltipProvider delayDuration={150}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            className="inline-flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground"
-            aria-label="查看日期筛选说明"
-          >
-            <Info className="size-3.5" />
-            日期筛选
-          </button>
-        </TooltipTrigger>
-        <TooltipContent className="max-w-[420px] text-xs leading-relaxed">
-          {dateBasis === "created"
-            ? "项目立项日期落在所选周期内。"
-            : "开发完成日期落在所选周期内。开发完成日期定义：首次 ST 发起日期；没有 ST、但有 UAT 流程时，取首次 UAT 发起日期。"}
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
-  )
-}
-
 function MetricHint({
   label,
   children
@@ -161,7 +132,7 @@ function SummaryValue({
   tone
 }: {
   value: number | null
-  sample?: number
+  sample?: React.ReactNode
   formatter?: (value: number | null) => string
   tone: "devclaw" | "non_devclaw"
 }): React.JSX.Element {
@@ -177,9 +148,7 @@ function SummaryValue({
       >
         {formatter(value)}
       </div>
-      {sample === undefined ? null : (
-        <div className="text-[10px] text-muted-foreground">有效样本 {sample}</div>
-      )}
+      {sample}
     </div>
   )
 }
@@ -192,7 +161,7 @@ function SummaryTokenPerLineValue({
 }: {
   input: number | null
   output: number | null
-  sample?: number
+  sample?: React.ReactNode
   tone: "devclaw" | "non_devclaw"
 }): React.JSX.Element {
   if (input === null && output === null) {
@@ -211,9 +180,7 @@ function SummaryTokenPerLineValue({
         <div>输入 Token/行 {formatCompact(input)}</div>
         <div>输出 Token/行 {formatCompact(output)}</div>
       </div>
-      {sample === undefined ? null : (
-        <div className="text-[10px] text-muted-foreground">有效样本 {sample}</div>
-      )}
+      {sample}
     </div>
   )
 }
@@ -226,17 +193,38 @@ interface SummaryMetricRow {
   sample?: keyof ProjectMetricSummaryGroup["samples"]
   formatter?: (value: number | null) => string
 }
+interface ProjectMetricSampleSelection {
+  key: NonNullable<ProjectMetricListOptions["metricSample"]>
+  label: string
+  developmentMode: "devclaw" | "non_devclaw"
+}
 
 function SummaryMetricValue({
   row,
   group,
-  tone
+  tone,
+  onSelectSample,
+  sampleDisabled
 }: {
   row: SummaryMetricRow
   group: ProjectMetricSummaryGroup | null
   tone: "devclaw" | "non_devclaw"
+  onSelectSample: (sample: ProjectMetricSampleSelection) => void
+  sampleDisabled: boolean
 }): React.JSX.Element {
-  const sample = row.sample && group ? group.samples[row.sample] : undefined
+  const sampleKey = row.sample
+  const sample =
+    sampleKey && group ? (
+      <button
+        type="button"
+        className="block text-[10px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:no-underline disabled:opacity-50"
+        disabled={sampleDisabled}
+        aria-label={`查看${row.label}的${tone === "devclaw" ? "CMBDevClaw" : "非CMBDevClaw"}有效样本`}
+        onClick={() => onSelectSample({ key: sampleKey, label: row.label, developmentMode: tone })}
+      >
+        有效样本 {group.samples[sampleKey]}
+      </button>
+    ) : undefined
   if (row.readPair) {
     const pair = group ? row.readPair(group) : { input: null, output: null }
     return (
@@ -262,18 +250,30 @@ function SummaryMetricCell({
   row,
   group,
   tone,
-  issueGroups
+  issueGroups,
+  onSelectSample,
+  sampleDisabled
 }: {
   row: SummaryMetricRow
   group: ProjectMetricSummaryGroup | null
   tone: "devclaw" | "non_devclaw"
   issueGroups: ProjectMetricSummaryGroup[]
+  onSelectSample: (sample: ProjectMetricSampleSelection) => void
+  sampleDisabled: boolean
 }): React.JSX.Element {
   const cellClassName =
     tone === "devclaw"
       ? "border-l border-sky-500/10 bg-sky-500/[0.025]"
       : "border-l border-amber-500/10 bg-amber-500/[0.025]"
-  const value = <SummaryMetricValue row={row} group={group} tone={tone} />
+  const value = (
+    <SummaryMetricValue
+      row={row}
+      group={group}
+      tone={tone}
+      onSelectSample={onSelectSample}
+      sampleDisabled={sampleDisabled}
+    />
+  )
   if (row.sample !== "kenanIssue") {
     return <td className={`${cellClassName} px-4 py-2.5`}>{value}</td>
   }
@@ -304,13 +304,15 @@ function SummaryComparison({
   loading,
   error,
   adapterName,
-  tokenConsumptionFiltered
+  tokenConsumptionFiltered,
+  onSelectSample
 }: {
   data: ProjectMetricSummaryData | null
   loading: boolean
   error: string | null
   adapterName: string
   tokenConsumptionFiltered: boolean
+  onSelectSample: (sample: ProjectMetricSampleSelection) => void
 }): React.JSX.Element {
   const devclaw = summaryGroup(data, "devclaw")
   const nonDevclaw = summaryGroup(data, "non_devclaw")
@@ -446,7 +448,12 @@ function SummaryComparison({
           <thead className="text-left text-xs">
             <tr>
               <th className="w-[38%] bg-muted/40 px-4 py-3 font-medium text-muted-foreground">
-                对比指标
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span>对比指标</span>
+                  <span className="text-[10px] font-normal text-muted-foreground">
+                    点击有效样本可查看对应明细
+                  </span>
+                </div>
               </th>
               <th className="border-l border-sky-500/15 bg-sky-500/10 px-4 py-3">
                 <div className="flex items-center gap-2 font-semibold text-sky-800 dark:text-sky-200">
@@ -481,12 +488,16 @@ function SummaryComparison({
                   group={devclaw}
                   tone="devclaw"
                   issueGroups={issueGroups}
+                  onSelectSample={onSelectSample}
+                  sampleDisabled={loading || Boolean(error)}
                 />
                 <SummaryMetricCell
                   row={row}
                   group={nonDevclaw}
                   tone="non_devclaw"
                   issueGroups={issueGroups}
+                  onSelectSample={onSelectSample}
+                  sampleDisabled={loading || Boolean(error)}
                 />
               </tr>
             ))}
@@ -762,15 +773,14 @@ function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Ele
 export function ProjectMetricsSection({
   range,
   upperOrgLv1,
-  refreshKey
+  refreshKey,
+  dateBasis
 }: {
   range: { from: string; to: string }
   upperOrgLv1: string[]
   refreshKey: number
+  dateBasis: NonNullable<ProjectMetricFilters["dateBasis"]>
 }): React.JSX.Element {
-  const [dateBasis, setDateBasis] = useState<"developmentCompleted" | "created">(
-    "developmentCompleted"
-  )
   const [indicatorExporting, setIndicatorExporting] = useState(false)
   const [retry, setRetry] = useState(0)
   const [phaseStatuses, setPhaseStatuses] = useState<string[]>([])
@@ -784,11 +794,18 @@ export function ProjectMetricsSection({
   const [debouncedTokenConsumptionMax, setDebouncedTokenConsumptionMax] = useState("")
   const [adapterName, setAdapterName] = useState("")
   const [developmentMode, setDevelopmentMode] = useState<"all" | "devclaw" | "non_devclaw">("all")
+  const [activeSample, setActiveSample] = useState<ProjectMetricSampleSelection | null>(null)
+  const detailRef = useRef<HTMLDivElement>(null)
   const [keyword, setKeyword] = useState("")
   const [debouncedKeyword, setDebouncedKeyword] = useState("")
   const [departmentKeyword, setDepartmentKeyword] = useState("")
   const [debouncedDepartmentKeyword, setDebouncedDepartmentKeyword] = useState("")
   const [page, setPage] = useState(1)
+  const [previousDateBasis, setPreviousDateBasis] = useState(dateBasis)
+  if (previousDateBasis !== dateBasis) {
+    setPreviousDateBasis(dateBasis)
+    setPage(1)
+  }
   const [pageSize, setPageSize] = useState<20 | 50 | 100>(20)
   const [sortBy, setSortBy] = useState<ProjectMetricSortKey>("deliveryDays")
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc")
@@ -850,6 +867,7 @@ export function ProjectMetricsSection({
   const listOptions = useMemo<ProjectMetricListOptions>(
     () => ({
       developmentMode,
+      metricSample: activeSample?.key,
       keyword: debouncedKeyword,
       departmentKeyword: debouncedDepartmentKeyword,
       page,
@@ -858,6 +876,7 @@ export function ProjectMetricsSection({
       sortOrder
     }),
     [
+      activeSample,
       debouncedDepartmentKeyword,
       debouncedKeyword,
       developmentMode,
@@ -920,6 +939,16 @@ export function ProjectMetricsSection({
   }, [filters, listOptions, refreshKey, retry])
 
   const totalPages = Math.max(1, Math.ceil((projects?.total ?? 0) / pageSize))
+  const selectSample = (sample: ProjectMetricSampleSelection): void => {
+    setActiveSample(sample)
+    setDevelopmentMode(sample.developmentMode)
+    setKeyword("")
+    setDebouncedKeyword("")
+    setDepartmentKeyword("")
+    setDebouncedDepartmentKeyword("")
+    setPage(1)
+    detailRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
+  }
   const exportProjects = async (): Promise<void> => {
     setExporting(true)
     setExportError(null)
@@ -949,12 +978,7 @@ export function ProjectMetricsSection({
     setIndicatorExporting(true)
     setExportError(null)
     try {
-      const result = await window.api.dashboard.projectMetricIndicatorExport(exportFilters)
-      if (!result.success || !result.data) throw new Error(result.error || "获取指标导出数据失败")
-      const saved = await window.api.dashboard.exportExcel(
-        projectMetricIndicatorSheets(result.data, exportFilters),
-        { fileName: "研发效能看板-研发智能化应用广度与先进性指标" }
-      )
+      const saved = await window.api.dashboard.projectMetricIndicatorExport(exportFilters)
       if (!saved.success && !saved.canceled) throw new Error(saved.error || "导出指标失败")
     } catch (error) {
       setExportError(error instanceof Error ? error.message : String(error))
@@ -984,35 +1008,6 @@ export function ProjectMetricsSection({
           <h2 className="text-sm font-semibold text-foreground">研发智能化应用广度与先进性</h2>
         </div>
         <div className="flex items-center gap-3">
-          <TimeScopeTip dateBasis={dateBasis} />
-          <Select
-            value={dateBasis}
-            onValueChange={(value: "developmentCompleted" | "created") => {
-              setDateBasis(value)
-              setPage(1)
-            }}
-          >
-            <SelectTrigger
-              aria-label="项目日期口径"
-              className={cn(FILTER_CONTROL_CLASS, "w-40 justify-between px-3 [&>svg]:shrink-0")}
-            >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent align="start" className="w-40 p-2" viewportClassName="space-y-0.5 p-0">
-              <SelectItem
-                value="developmentCompleted"
-                className="cursor-pointer rounded py-1.5 text-xs focus:bg-muted focus:text-foreground"
-              >
-                开发完成日期
-              </SelectItem>
-              <SelectItem
-                value="created"
-                className="cursor-pointer rounded py-1.5 text-xs focus:bg-muted focus:text-foreground"
-              >
-                立项日期
-              </SelectItem>
-            </SelectContent>
-          </Select>
           <Button
             variant="outline"
             size="sm"
@@ -1025,7 +1020,7 @@ export function ProjectMetricsSection({
             ) : (
               <Download className="mr-1.5 size-3.5" />
             )}
-            导出指标
+            导出组织效能明细
           </Button>
           {summaryLoading || projectsLoading ? (
             <div className="flex items-center text-xs text-muted-foreground">
@@ -1158,6 +1153,7 @@ export function ProjectMetricsSection({
             nullableNumber(debouncedTokenConsumptionMin) !== null ||
             nullableNumber(debouncedTokenConsumptionMax) !== null
           }
+          onSelectSample={selectSample}
         />
       </div>
 
@@ -1169,7 +1165,7 @@ export function ProjectMetricsSection({
           </p>
         ))}
 
-      <div className="mt-6 border-t border-border pt-4">
+      <div ref={detailRef} className="mt-6 scroll-mt-4 border-t border-border pt-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h3 className="text-xs font-semibold text-foreground">项目明细</h3>
           <div className="flex flex-wrap items-center gap-2">
@@ -1190,6 +1186,7 @@ export function ProjectMetricsSection({
             <Select
               value={developmentMode}
               onValueChange={(value: "all" | "devclaw" | "non_devclaw") => {
+                setActiveSample(null)
                 setDevelopmentMode(value)
                 if (value === "non_devclaw") {
                   setAdapterName("")
@@ -1236,6 +1233,27 @@ export function ProjectMetricsSection({
             </div>
           </div>
         </div>
+
+        {activeSample ? (
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <span>
+              有效样本：{activeSample.label} ·{" "}
+              {activeSample.developmentMode === "devclaw" ? "CMBDevClaw" : "非 CMBDevClaw 项目"}
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2 text-xs"
+              onClick={() => {
+                setActiveSample(null)
+                setDevelopmentMode("all")
+                setPage(1)
+              }}
+            >
+              清除样本筛选
+            </Button>
+          </div>
+        ) : null}
 
         {exportError ? (
           <div className="mt-3 flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">

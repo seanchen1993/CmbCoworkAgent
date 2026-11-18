@@ -152,6 +152,7 @@ export function ProjectMetricTrend({
   filters: ProjectMetricTrendFilters
   refreshKey: number
 }): React.JSX.Element {
+  const [expanded, setExpanded] = useState(false)
   const [selected, setSelected] = useState<MetricKey[]>(["avgBugCount"])
   const [scaleMode, setScaleMode] = useState<"raw" | "normalized">("raw")
   const [data, setData] = useState<ProjectMetricTrendData | null>(null)
@@ -160,6 +161,7 @@ export function ProjectMetricTrend({
   const [retry, setRetry] = useState(0)
 
   useEffect(() => {
+    if (!expanded) return
     let active = true
     setLoading(true)
     setError(null)
@@ -180,7 +182,7 @@ export function ProjectMetricTrend({
     return () => {
       active = false
     }
-  }, [filters, refreshKey, retry])
+  }, [expanded, filters, refreshKey, retry])
 
   const metrics = METRICS.filter((metric) => selected.includes(metric.key))
   const tooltipMetrics = [
@@ -241,12 +243,28 @@ export function ProjectMetricTrend({
   const hasValues = chartData.some((point) =>
     metrics.some((metric) => MODES.some((mode) => point[`${metric.key}_${mode.key}`] !== null))
   )
+  const toggle = (
+    <h3>
+      <button
+        type="button"
+        className="flex items-center gap-1.5 text-xs font-semibold text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        aria-expanded={expanded}
+        aria-label={expanded ? "收起指标月度趋势" : "展开指标月度趋势"}
+        onClick={() => setExpanded((value) => !value)}
+      >
+        <ChevronDown className={`size-3.5 transition-transform ${expanded ? "" : "-rotate-90"}`} />
+        指标月度趋势
+      </button>
+    </h3>
+  )
+  if (!expanded)
+    return <div className="mt-5 rounded-lg border border-border bg-background p-4">{toggle}</div>
 
   return (
     <div className="mt-5 rounded-lg border border-border bg-background p-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3">
-          <h3 className="text-xs font-semibold text-foreground">指标月度趋势</h3>
+          {toggle}
 
           <Popover>
             <PopoverTrigger asChild>

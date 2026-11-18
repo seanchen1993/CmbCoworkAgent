@@ -1,12 +1,7 @@
-import type { ProjectMetricSummaryGroup } from "./project-metrics"
+import type { ProjectMetricSummaryGroup, ProjectMetricValueKey } from "./project-metrics"
 
-type NumericKey = {
-  [K in keyof ProjectMetricSummaryGroup]: ProjectMetricSummaryGroup[K] extends number | null
-    ? K
-    : never
-}[keyof ProjectMetricSummaryGroup]
 export interface ProjectMetricIndicator {
-  key: NumericKey
+  key: ProjectMetricValueKey
   label: string
   unit: string
   sample: keyof ProjectMetricSummaryGroup["samples"]

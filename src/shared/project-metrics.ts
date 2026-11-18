@@ -16,6 +16,8 @@ export interface ProjectMetricFilters {
 export interface ProjectMetricListOptions {
   exportAll?: boolean
   developmentMode?: "all" | ProjectMetricDevelopmentMode
+  /** 项目明细按指定指标的有效样本过滤，先筛选再分页。 */
+  metricSample?: keyof ProjectMetricSamples
   keyword?: string
   departmentKeyword?: string
   page?: number
@@ -52,9 +54,34 @@ export interface ProjectMetricIssueCategoryCount {
   count: number
 }
 
+export type ProjectMetricValueKey =
+  | "functionPointsPerPersonMonth"
+  | "featuresPerPersonMonth"
+  | "avgApprovalDevelopmentDays"
+  | "avgApprovalCreationDays"
+  | "avgBugCount"
+  | "avgKenanIssueCount"
+  | "avgFuncPointCount"
+  | "defectDensityPer100Fp"
+  | "avgTestLeadDays"
+  | "avgUatLeadDays"
+  | "avgDeliveryDays"
+  | "avgInputTokens"
+  | "avgOutputTokens"
+  | "avgPushedAdoptedLines"
+  | "inputTokensPerAdoptedLine"
+  | "outputTokensPerAdoptedLine"
+
+export interface ProjectMetricCalculation {
+  numerator: number
+  denominator: number
+  multiplier: number
+}
+
 export interface ProjectMetricSummaryGroup {
   developmentMode: ProjectMetricDevelopmentMode
   projectCount: number
+  calculations: Record<ProjectMetricValueKey, ProjectMetricCalculation>
   functionPointsPerPersonMonth: number | null
   featuresPerPersonMonth: number | null
   avgApprovalDevelopmentDays: number | null
@@ -95,12 +122,15 @@ export interface ProjectMetricTrendData {
 }
 
 export interface ProjectMetricProjectItem {
+  pm?: string | null
   prjCode: string
   prjName: string
   teamName: string
   devWorkHours: number | null
   featureCodes: string[]
   features: Array<{ featureCode: string; featureName: string | null }>
+  syncBatchNo: string | null
+  syncedAt: string | null
   approvalDevelopmentDays: number | null
   approvalCreationDays: number | null
   developmentMode: ProjectMetricDevelopmentMode
@@ -188,4 +218,57 @@ export interface ProjectMetricIndicatorExportData {
     overview: ProjectMetricOverviewData
   }>
   exportedAt: string
+  evidence: ProjectMetricExportEvidence
+}
+
+export interface ProjectMetricPeriodCode {
+  harnessProjectId: string
+  roomName: string
+  pushedAdoptedLines: number
+  pushedEffectiveGeneratedLines: number
+}
+
+export interface ProjectMetricProjectEvidence {
+  project: ProjectMetricProjectItem
+  factAvailable: boolean
+  eligibleBindingCount: number
+}
+
+export interface ProjectMetricFeatureEvidence {
+  classificationComplete: boolean
+  featureCode: string
+  featureName: string | null
+  approvedDate: string | null
+  syncedAt: string | null
+  syncBatchNo: string | null
+  projectCodes: string[]
+}
+
+export interface ProjectMetricCodeEvidence {
+  roomName: string
+  prjCode: string
+  prjName: string | null
+  projectRoomName: string | null
+  pushedAdoptedLines: number
+  pushedEffectiveGeneratedLines: number
+}
+
+export interface ProjectMetricMonthlyEvidence {
+  orgLevel: "team" | "room"
+  teamName: string
+  roomName: string | null
+  month: string
+  totalPushedLines: number | null
+  devagentIdePushedLines: number | null
+  devagentCloudPushedLines: number | null
+  devagentCliPushedLines: number | null
+  updatedAt: string | null
+  updatedBy: string | null
+}
+
+export interface ProjectMetricExportEvidence {
+  projects: ProjectMetricProjectEvidence[]
+  features: ProjectMetricFeatureEvidence[]
+  code: ProjectMetricCodeEvidence[]
+  monthly: ProjectMetricMonthlyEvidence[]
 }

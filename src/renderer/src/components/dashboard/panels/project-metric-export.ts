@@ -19,7 +19,10 @@ const HEADER = [
   "特性上线耗时（工作日）",
   "Token",
   "代码行数",
-  "单行代码消耗 Token 数"
+  "单行代码消耗 Token 数",
+  "关联特性编号",
+  "开发报工工时（小时）",
+  "首次上线日期"
 ]
 
 function valueOrDash(value: number | null): number | string {
@@ -71,7 +74,10 @@ export function projectMetricExportSheet(items: ProjectMetricProjectItem[]): {
         item.inputTokensPerAdoptedLine,
         "输出 Token/行",
         item.outputTokensPerAdoptedLine
-      )
+      ),
+      item.featureCodes.join("\n") || "—",
+      valueOrDash(item.devWorkHours),
+      dateOrDash(item.firstOnlineDate)
     ])
   }
 }

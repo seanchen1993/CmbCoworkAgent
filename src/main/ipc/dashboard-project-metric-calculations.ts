@@ -2,147 +2,127 @@ import {
   PROJECT_HOURS_PER_PERSON_MONTH,
   type ProjectMetricProjectItem,
   type ProjectMetricSummaryGroup,
-  type ProjectMetricFilters
+  type ProjectMetricFilters,
+  type ProjectMetricCalculation,
+  type ProjectMetricValueKey
 } from "../../shared/project-metrics"
-import { projectDateMillis, projectRangeBounds } from "../../shared/project-metric-calendar"
-
-export function projectInPeriod(
-  date: string | null,
-  range: ProjectMetricFilters["range"]
-): boolean {
-  const value = projectDateMillis(date)
-  const bounds = projectRangeBounds(range)
-  return (
-    value !== null &&
-    value >= projectDateMillis(bounds.gte)! &&
-    value < projectDateMillis(bounds.lt)!
-  )
-}
+import {
+  PROJECT_METRIC_SAMPLE_KEYS,
+  advancedProjectReason,
+  projectCandidateReason,
+  projectMetricSampleReasons,
+  type ProjectMetricSampleKey
+} from "../../shared/project-metric-samples"
+export { projectInPeriod } from "../../shared/project-metric-samples"
 
 export function projectMetricGroups(
   items: ProjectMetricProjectItem[],
   filters: ProjectMetricFilters
 ): ProjectMetricSummaryGroup[] {
+  const evaluated = items.map((item) => ({
+    item,
+    reasons: projectMetricSampleReasons(item, filters)
+  }))
   return (["devclaw", "non_devclaw"] as const).map((mode) => {
-    const grouped = items.filter((item) => item.developmentMode === mode)
-    const projects = grouped.filter((item) =>
-      projectInPeriod(
-        filters.dateBasis === "created"
-          ? item.createDate
-          : item.firstStStartDate || item.firstUatStartDate,
-        filters.range
+    const grouped = evaluated.filter(({ item }) => item.developmentMode === mode)
+    const projects = grouped
+      .map(({ item }) => item)
+      .filter(
+        (item) => !projectCandidateReason(item, filters) && !advancedProjectReason(item, filters)
       )
-    )
-    const online = grouped.filter((item) => projectInPeriod(item.firstOnlineDate, filters.range))
-    const validHours = (item: ProjectMetricProjectItem): boolean =>
-      item.devWorkHours !== null && item.devWorkHours >= 0
-    const productivity = projects.filter(
-      (item) => validHours(item) && item.notAdjustFuns !== null && item.notAdjustFuns >= 0
-    )
-    const throughput = online.filter((item) => validHours(item) && item.featureCodes.length > 0)
+    const samples = Object.fromEntries(
+      PROJECT_METRIC_SAMPLE_KEYS.map((key) => [
+        key,
+        grouped.filter(({ reasons }) => reasons[key] === null).map(({ item }) => item)
+      ])
+    ) as Record<ProjectMetricSampleKey, ProjectMetricProjectItem[]>
     const sum = (
       list: ProjectMetricProjectItem[],
       read: (item: ProjectMetricProjectItem) => number | null
     ): number => list.reduce((total, item) => total + (read(item) ?? 0), 0)
-    const mean = (
-      read: (item: ProjectMetricProjectItem) => number | null
-    ): { value: number | null; count: number } => {
-      const values = projects
-        .map(read)
-        .filter((value): value is number => value !== null && Number.isFinite(value))
-      return {
-        value: values.length ? values.reduce((a, b) => a + b, 0) / values.length : null,
-        count: values.length
+    const measure = (
+      sample: ProjectMetricSampleKey,
+      read: (p: ProjectMetricProjectItem) => number | null
+    ): ProjectMetricCalculation => ({
+      numerator: sum(samples[sample], read),
+      denominator: samples[sample].length,
+      multiplier: 1
+    })
+    const calculations: Record<ProjectMetricValueKey, ProjectMetricCalculation> = {
+      functionPointsPerPersonMonth: {
+        numerator: sum(samples.productivity, (p) => p.notAdjustFuns),
+        denominator: sum(samples.productivity, (p) => p.devWorkHours),
+        multiplier: PROJECT_HOURS_PER_PERSON_MONTH
+      },
+      featuresPerPersonMonth: {
+        numerator: new Set(samples.throughput.flatMap((p) => p.featureCodes)).size,
+        denominator: sum(samples.throughput, (p) => p.devWorkHours),
+        multiplier: PROJECT_HOURS_PER_PERSON_MONTH
+      },
+      avgApprovalDevelopmentDays: measure("approvalDevelopment", (p) => p.approvalDevelopmentDays),
+      avgApprovalCreationDays: measure("approvalCreation", (p) => p.approvalCreationDays),
+      avgBugCount: measure("bug", (p) => p.bugNum),
+      avgKenanIssueCount: measure("kenanIssue", (p) => p.kenanIssueCount),
+      avgFuncPointCount: measure("functionPoint", (p) => p.notAdjustFuns),
+      defectDensityPer100Fp: {
+        numerator: sum(samples.defectDensity, (p) => p.bugNum),
+        denominator: sum(samples.defectDensity, (p) => p.notAdjustFuns),
+        multiplier: 100
+      },
+      avgTestLeadDays: measure("testLead", (p) => p.testLeadDays),
+      avgUatLeadDays: measure("uatLead", (p) => p.uatLeadDays),
+      avgDeliveryDays: measure("delivery", (p) => p.deliveryDays),
+      avgInputTokens: measure("token", (p) => p.totalInputTokens),
+      avgOutputTokens: measure("token", (p) => p.totalOutputTokens),
+      avgPushedAdoptedLines: measure("codeLines", (p) => p.pushedAdoptedLines),
+      inputTokensPerAdoptedLine: {
+        numerator: sum(samples.tokensPerLine, (p) => p.totalInputTokens),
+        denominator: sum(samples.tokensPerLine, (p) => p.pushedAdoptedLines),
+        multiplier: 1
+      },
+      outputTokensPerAdoptedLine: {
+        numerator: sum(samples.tokensPerLine, (p) => p.totalOutputTokens),
+        denominator: sum(samples.tokensPerLine, (p) => p.pushedAdoptedLines),
+        multiplier: 1
       }
     }
-    const bug = mean((p) => p.bugNum)
-    const fp = mean((p) => p.notAdjustFuns)
-    const test = mean((p) => p.testLeadDays)
-    const uat = mean((p) => p.uatLeadDays)
-    const delivery = mean((p) => p.deliveryDays)
-    const approvalDevelopment = mean((p) => p.approvalDevelopmentDays)
-    const approvalCreation = mean((p) => p.approvalCreationDays)
-    const input = mean((p) => p.totalInputTokens)
-    const output = mean((p) => p.totalOutputTokens)
-    const code = mean((p) => p.pushedAdoptedLines)
-    const density = projects.filter(
-      (p) => p.bugNum !== null && p.notAdjustFuns !== null && p.notAdjustFuns > 0
-    )
-    const perLine = projects.filter(
-      (p) =>
-        p.pushedAdoptedLines !== null &&
-        p.pushedAdoptedLines > 0 &&
-        p.totalInputTokens !== null &&
-        p.totalOutputTokens !== null
-    )
+    const values = Object.fromEntries(
+      Object.entries(calculations).map(([key, c]) => [
+        key,
+        c.denominator > 0 ? (c.numerator * c.multiplier) / c.denominator : null
+      ])
+    ) as Record<ProjectMetricValueKey, number | null>
     const categories = new Map<string, number>()
     for (const p of projects)
       for (const c of p.kenanIssueCategories)
         categories.set(c.category, (categories.get(c.category) ?? 0) + c.count)
-    const productivityHours = sum(productivity, (p) => p.devWorkHours)
-    const productivityFp = sum(productivity, (p) => p.notAdjustFuns)
-    const throughputHours = sum(throughput, (p) => p.devWorkHours)
-    const throughputFeatures = new Set(throughput.flatMap((p) => p.featureCodes)).size
-    const divide = (a: number, b: number): number | null => (b > 0 ? a / b : null)
     return {
       developmentMode: mode,
       projectCount: projects.length,
-      functionPointsPerPersonMonth: divide(
-        productivityFp * PROJECT_HOURS_PER_PERSON_MONTH,
-        productivityHours
-      ),
-      featuresPerPersonMonth: divide(
-        throughputFeatures * PROJECT_HOURS_PER_PERSON_MONTH,
-        throughputHours
-      ),
-      avgApprovalDevelopmentDays: approvalDevelopment.value,
-      avgApprovalCreationDays: approvalCreation.value,
-      productivityFunctionPoints: productivityFp,
-      productivityWorkHours: productivityHours,
-      throughputFeatureCount: throughputFeatures,
-      throughputWorkHours: throughputHours,
-      avgBugCount: bug.value,
-      avgKenanIssueCount: divide(
-        sum(projects, (p) => p.kenanIssueCount),
-        projects.length
-      ),
+      ...values,
+      calculations,
+      productivityFunctionPoints: calculations.functionPointsPerPersonMonth.numerator,
+      productivityWorkHours: calculations.functionPointsPerPersonMonth.denominator,
+      throughputFeatureCount: calculations.featuresPerPersonMonth.numerator,
+      throughputWorkHours: calculations.featuresPerPersonMonth.denominator,
       kenanIssueCategories: [...categories]
         .sort(([a], [b]) => a.localeCompare(b, "zh-CN"))
         .map(([category, count]) => ({ category, count })),
-      avgFuncPointCount: fp.value,
-      defectDensityPer100Fp: divide(
-        sum(density, (p) => p.bugNum) * 100,
-        sum(density, (p) => p.notAdjustFuns)
-      ),
-      avgTestLeadDays: test.value,
-      avgUatLeadDays: uat.value,
-      avgDeliveryDays: delivery.value,
-      avgInputTokens: input.value,
-      avgOutputTokens: output.value,
-      avgPushedAdoptedLines: code.value,
-      inputTokensPerAdoptedLine: divide(
-        sum(perLine, (p) => p.totalInputTokens),
-        sum(perLine, (p) => p.pushedAdoptedLines)
-      ),
-      outputTokensPerAdoptedLine: divide(
-        sum(perLine, (p) => p.totalOutputTokens),
-        sum(perLine, (p) => p.pushedAdoptedLines)
-      ),
       samples: {
-        bug: bug.count,
-        kenanIssue: projects.length,
-        functionPoint: fp.count,
-        defectDensity: density.length,
-        testLead: test.count,
-        uatLead: uat.count,
-        delivery: delivery.count,
-        token: input.count,
-        codeLines: code.count,
-        tokensPerLine: perLine.length,
-        productivity: productivity.length,
-        throughput: throughput.length,
-        approvalDevelopment: approvalDevelopment.count,
-        approvalCreation: approvalCreation.count
+        productivity: samples.productivity.length,
+        throughput: samples.throughput.length,
+        approvalDevelopment: samples.approvalDevelopment.length,
+        approvalCreation: samples.approvalCreation.length,
+        bug: samples.bug.length,
+        kenanIssue: samples.kenanIssue.length,
+        functionPoint: samples.functionPoint.length,
+        defectDensity: samples.defectDensity.length,
+        testLead: samples.testLead.length,
+        uatLead: samples.uatLead.length,
+        delivery: samples.delivery.length,
+        token: samples.token.length,
+        codeLines: samples.codeLines.length,
+        tokensPerLine: samples.tokensPerLine.length
       }
     }
   })

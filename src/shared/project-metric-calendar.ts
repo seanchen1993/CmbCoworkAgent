@@ -81,6 +81,23 @@ export function projectNaturalMonth(range: { from: string; to: string }): string
   return bounds.gte === `${month}-01 00:00:00` && bounds.lt === next ? month : null
 }
 
+/** 所选日期须覆盖连续完整自然月；含任一不完整月份时不产生月度统计范围。 */
+export function projectCompleteMonths(range: { from: string; to: string }): string[] {
+  const bounds = projectRangeBounds(range)
+  if (!bounds.gte.endsWith("-01 00:00:00") || !bounds.lt.endsWith("-01 00:00:00")) return []
+  const first = Number(bounds.gte.slice(0, 4)) * 12 + Number(bounds.gte.slice(5, 7)) - 1
+  const last = Number(bounds.lt.slice(0, 4)) * 12 + Number(bounds.lt.slice(5, 7)) - 1
+  return Array.from({ length: last - first }, (_, index) => {
+    const month = first + index
+    return `${String(Math.floor(month / 12)).padStart(4, "0")}-${String((month % 12) + 1).padStart(2, "0")}`
+  })
+}
+
+export function projectMonthlyPeriodLabel(months: string[]): string {
+  if (!months.length) return ""
+  return months.length === 1 ? months[0] : `${months[0]} 至 ${months[months.length - 1]}`
+}
+
 // 两年日历只有 730 天。预先累计工作日，统计、排序和导出无需对每个项目逐日遍历。
 const CALENDAR_START = Date.UTC(2026, 0, 1) - GMT8_MS
 const CALENDAR_END = Date.UTC(2028, 0, 1) - GMT8_MS
@@ -107,12 +124,14 @@ export function projectWorkingDays(start: string | null, end: string | null): nu
   if (
     a === null ||
     b === null ||
-    b < a ||
     a < CALENDAR_START ||
     a >= CALENDAR_END ||
+    b < CALENDAR_START ||
     b > CALENDAR_END
   )
     return null
+  if (b < a)
+    return Math.floor((a + GMT8_MS) / DAY_MS) === Math.floor((b + GMT8_MS) / DAY_MS) ? 0 : null
   const elapsed = (time: number): number => {
     const index = Math.floor((time - CALENDAR_START) / DAY_MS)
     const partialDay = (time - CALENDAR_START) % DAY_MS
@@ -122,4 +141,4 @@ export function projectWorkingDays(start: string | null, end: string | null): nu
 }
 
 export const PROJECT_CALENDAR_NOTE =
-  "耗时按 GMT+8 国家工作日计算，含调休，保留小数；日历覆盖 2026、2027 年，缺失、倒置或超出日历范围的日期不参与均值。"
+  "耗时按 GMT+8 国家工作日计算，含调休，保留小数；同日时间倒置按0计入，日历覆盖2026、2027年，缺失、跨日倒置或超出日历范围的日期不参与均值。"
