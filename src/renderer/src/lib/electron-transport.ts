@@ -54,7 +54,10 @@ import {
   coalesceSnapshotMessageAliases,
   normalizeWorkflowSnapshotMessageIds
 } from "./snapshot-message-aliases"
-import { WORKFLOW_PRECEDING_PROMPT_INDEX_KEY } from "../../../shared/workflow-agent-snapshot"
+import {
+  isLegacyTruncatedWorkflowIdentity,
+  WORKFLOW_PRECEDING_PROMPT_INDEX_KEY
+} from "../../../shared/workflow-agent-snapshot"
 
 export type StreamFallbackIndexBaselines = {
   ai: number
@@ -2244,7 +2247,15 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
       const isAssistantMessage = this.isSerializedAIMessage(message)
       const content = this.extractContent(kwargs.content)
-      const explicitProviderTuple = getMessageProviderTupleFromMetadata(additionalKwargs)
+      const hasLossyWorkflowIdentity =
+        workflowSnapshot &&
+        (isLegacyTruncatedWorkflowIdentity(
+          additionalKwargs?.[MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]
+        ) ||
+          isLegacyTruncatedWorkflowIdentity(kwargs.tool_call_id))
+      const explicitProviderTuple = hasLossyWorkflowIdentity
+        ? undefined
+        : getMessageProviderTupleFromMetadata(additionalKwargs)
       const providerTuple =
         explicitProviderTuple && !workflowSnapshot
           ? {

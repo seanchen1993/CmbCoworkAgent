@@ -2423,11 +2423,10 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
           return typeof result === "string" ? result : (JSON.stringify(result) ?? String(result))
         }
         const canMonitor = !runtimeShellMonitorBlocked && !shellMonitorDeniedContext.getStore()
-        if (managedExecution || !canMonitor || input.run_in_background === false) {
-          return formatExecuteResponse(await shellTaskBackend.execute(input.command, input.cwd))
-        }
+        const canRunInBackground =
+          canMonitor && !managedExecution && input.run_in_background !== false
         const ownerId = getShellTaskOwnerId(config)
-        if (input.run_in_background) {
+        if (canRunInBackground && input.run_in_background) {
           return shellTaskBackend.executeBackground(
             input.command,
             input.cwd,
@@ -2437,7 +2436,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
         }
         const execution = await shellTaskBackend.executeForTool(input.command, input.cwd, {
           ownerId,
-          backgroundAfterMs: SHELL_BACKGROUND_AFTER_MS,
+          backgroundAfterMs: canRunInBackground ? SHELL_BACKGROUND_AFTER_MS : undefined,
           signal: config?.signal
         })
         return execution.status === "background"

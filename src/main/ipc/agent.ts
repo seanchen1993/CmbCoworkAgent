@@ -20,6 +20,7 @@ import { withThreadRunMutationLock } from "./thread-run-mutation-lock"
 import {
   createSerializedValuesMessageAccumulator,
   createStreamDataSerializer,
+  sanitizeCoordinatorWorkerStreamDataForRenderer,
   sanitizeStreamDataForRenderer
 } from "./stream-data-serialization"
 import {
@@ -2755,7 +2756,7 @@ function sendCoordinatorWorkerStream(
     const serialized = focusedWorker.serialize(stream.mode, stream.data)
     valuesSnapshotKind = serialized.valuesSnapshotKind
     if (isContextCompactionStreamPayload(stream.mode, serialized.data)) return
-    data = sanitizeStreamDataForRenderer(
+    data = sanitizeCoordinatorWorkerStreamDataForRenderer(
       stream.mode,
       serialized.data,
       serialized.valuesMessageIndexOffset

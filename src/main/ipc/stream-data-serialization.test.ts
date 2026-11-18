@@ -3,9 +3,11 @@ import { describe, expect, it } from "vitest"
 import {
   createStreamDataSerializer,
   createSerializedValuesMessageAccumulator,
+  sanitizeCoordinatorWorkerStreamDataForRenderer,
   sanitizeStreamDataForRenderer,
   serializeStreamData
 } from "./stream-data-serialization"
+import { projectDisplayToolCallId } from "../display-tool-call-id"
 import {
   STREAM_MESSAGE_CONTENT_MODE_KEY,
   STREAM_MESSAGE_REASONING_MODE_KEY,
@@ -13,6 +15,74 @@ import {
 } from "../../shared/stream-message-wire-mode"
 
 describe("stream data serialization", () => {
+  it("projects long Team tool IDs without changing message identity, chunk tags or source payloads", () => {
+    const longId = "x".repeat(300) + "\ud840\u0000"
+    const id = projectDisplayToolCallId(longId)
+    const serialize = createStreamDataSerializer()
+    const chunk = new AIMessageChunk({
+      id: "request",
+      content: "",
+      tool_call_chunks: [{ id: longId, index: 0, name: "read_file", args: '{"path":' }]
+    })
+    const rawChunk = serialize("messages", [chunk, { marker: "preserve" }]).data
+    expect(sanitizeCoordinatorWorkerStreamDataForRenderer("messages", rawChunk, 0)).toEqual([
+      expect.objectContaining({
+        kwargs: expect.objectContaining({
+          id: "request",
+          tool_call_chunks: [
+            expect.objectContaining({
+              id,
+              args: '{"path":',
+              [STREAM_TOOL_CALL_ARGS_MODE_KEY]: "delta"
+            })
+          ]
+        })
+      }),
+      expect.objectContaining({ marker: "preserve" })
+    ])
+    expect(JSON.stringify(rawChunk)).toContain(JSON.stringify(longId))
+    expect(chunk.tool_call_chunks?.[0].id).toBe(longId)
+
+    const values = serialize("values", {
+      messages: [
+        new HumanMessage("prompt"),
+        new AIMessage({
+          id: "request",
+          content: "",
+          tool_calls: [
+            { id: longId, name: "read_file", args: { path: "probe.txt" } },
+            { id: "short", name: "read_file", args: {} }
+          ],
+          additional_kwargs: {
+            tool_calls: [
+              { id: longId, type: "function", function: { name: "read_file", arguments: "{}" } }
+            ]
+          }
+        }),
+        new ToolMessage({ id: "result", tool_call_id: longId, content: "done" })
+      ]
+    })
+    expect(
+      sanitizeCoordinatorWorkerStreamDataForRenderer(
+        "values",
+        values.data,
+        values.valuesMessageIndexOffset
+      )
+    ).toMatchObject({
+      messages: [
+        {
+          kwargs: {
+            id: "request",
+            tool_calls: [{ id, args: { path: "probe.txt" } }, { id: "short" }],
+            additional_kwargs: { tool_calls: [{ id }], cmb_worker_snapshot_index: 1 }
+          }
+        },
+        { kwargs: { id: "result", tool_call_id: id } }
+      ]
+    })
+    expect(JSON.stringify(values.data)).toContain(JSON.stringify(longId))
+  })
+
   it.each([
     ["哈", "哈", "，你好"],
     ["a", "ab", "abc"],

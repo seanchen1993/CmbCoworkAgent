@@ -50,8 +50,13 @@ async function fixture(options: Partial<LocalSandboxOptions> = {}, isolateWorktr
     ...options
   })
   const entered = Promise.withResolvers<void>()
-  const release = Promise.withResolvers<{ exitCode: number; output: string; truncated: boolean }>()
-  const finish = (exitCode = 0) => release.resolve({ exitCode, output: "shell", truncated: false })
+  const release = Promise.withResolvers<{
+    exitCode: number | null
+    output: string
+    truncated: boolean
+  }>()
+  const finish = (exitCode: number | null = 0, output = "shell") =>
+    release.resolve({ exitCode, output, truncated: false })
   const raw = vi
     .spyOn(sandbox, "executeRaw")
     .mockImplementation(async (_cmd, _mode, _ms, _signal, opts) => {
@@ -78,6 +83,44 @@ function respond(data: unknown): Response {
 }
 
 describe("shell monitor hook policy", () => {
+  it.each([37, null, 0])("reports terminal exit %s to the failure hook", async (exitCode) => {
+    const hook = httpHook({ event: "PostToolUseFailure", matcher: "^monitor$" })
+    const onHookResult = vi.fn()
+    const fetchHook = vi.fn<(url: string, init: RequestInit) => Promise<Response>>(async () =>
+      respond({})
+    )
+    vi.stubGlobal("fetch", fetchHook)
+    const { sandbox, finish } = await fixture({ hooks: [hook], onHookResult })
+    const started = await sandbox.executeBackground("echo probe")
+    const taskId = started.match(/\bid: (\w+)/)?.[1] ?? ""
+    expect(taskId).not.toBe("")
+    const outputMarker =
+      exitCode === 0 ? "[Command failed with exit code 9]" : "[Command succeeded with exit code 0]"
+    finish(exitCode, `${outputMarker}\nshell output`)
+
+    const [monitor] = createShellTaskMonitorTools(sandbox)
+    const result = await monitor.invoke({ task_id: taskId })
+    const status = exitCode === 0 ? "succeeded" : "failed"
+    expect(result).toContain(`[Command ${status} with exit code ${exitCode}, elapsed: `)
+
+    if (exitCode === 0) {
+      expect(fetchHook).not.toHaveBeenCalled()
+      return
+    }
+    await vi.waitFor(() => {
+      expect(onHookResult).toHaveBeenCalledWith("PostToolUseFailure", hook, expect.anything())
+    })
+    expect(fetchHook).toHaveBeenCalledOnce()
+    const [, { body }] = fetchHook.mock.calls[0]
+    expect(JSON.parse(String(body))).toMatchObject({
+      tool_name: "monitor",
+      tool_response: {
+        failure_kind: "exit-nonzero",
+        error: expect.stringContaining(`[Command failed with exit code ${exitCode}, elapsed: `)
+      }
+    })
+  })
+
   it("matches each tool name in configured order and applies each hook exactly once", async () => {
     const hooks = (["PreToolUse", "PostToolUse"] as const).flatMap((event) =>
       [

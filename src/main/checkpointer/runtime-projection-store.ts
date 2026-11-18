@@ -5,6 +5,11 @@ import { ensureMessageSnapshotGeneration as migrateMessageSnapshotGeneration } f
 import { migrateLegacyMessageTimes } from "./legacy-message-times"
 import { isLosslessTranscriptPayload } from "../../shared/transcript-recovery-integrity"
 import { createHash, randomUUID, type Hash } from "node:crypto"
+import {
+  formatDisplayToolCallIdHash,
+  MAX_BOUNDED_TRANSCRIPT_ID_LENGTH,
+  projectDisplayToolCallId
+} from "../display-tool-call-id"
 import type {
   CheckpointRuntimeProjectionStats,
   LegacyCheckpointTranscriptMigrationStats
@@ -2021,10 +2026,8 @@ const CHECKPOINT_TRANSFER_CONTENT_TEXT_LIMIT = 120_000
 const CHECKPOINT_TRANSFER_CONTENT_BLOCK_LIMIT = 80
 const CHECKPOINT_TRANSFER_BLOCK_TEXT_LIMIT = 20_000
 const CHECKPOINT_TRANSFER_TOOL_CALL_LIMIT = 50
-const CHECKPOINT_TRANSFER_IDENTITY_LIMIT = 256
 // A JSON string token uses at most six bytes per UTF-16 code unit, plus its quotes.
-const CHECKPOINT_TRANSFER_IDENTITY_TOKEN_BYTE_LIMIT = CHECKPOINT_TRANSFER_IDENTITY_LIMIT * 6 + 2
-const CHECKPOINT_TOOL_ID_HASH_PREFIX = "cmb-checkpoint-tool-id:sha256:"
+const CHECKPOINT_TRANSFER_IDENTITY_TOKEN_BYTE_LIMIT = MAX_BOUNDED_TRANSCRIPT_ID_LENGTH * 6 + 2
 const CHECKPOINT_TOOL_ID_HASH_FIELD = "cmb_checkpoint_tool_id_sha256"
 // The SQLite tail reader never lets an individual serialized message enter V8
 // above this size. Oversized rows are projected to bounded scalar fields in SQL.
@@ -2114,26 +2117,15 @@ function boundedTransferToolArgs(value: unknown): Record<string, unknown> {
 }
 
 function boundedTransferIdentity(value: unknown): string | undefined {
-  return typeof value === "string" && value.length <= CHECKPOINT_TRANSFER_IDENTITY_LIMIT
+  return typeof value === "string" && value.length <= MAX_BOUNDED_TRANSCRIPT_ID_LENGTH
     ? value
     : undefined
 }
 
 function projectedToolIdentity(value: unknown, fromSql: boolean): string | undefined {
-  if (typeof value === "string") {
-    if (
-      value.length <= CHECKPOINT_TRANSFER_IDENTITY_LIMIT &&
-      !value.startsWith(CHECKPOINT_TOOL_ID_HASH_PREFIX)
-    ) {
-      return value
-    }
-    return (
-      CHECKPOINT_TOOL_ID_HASH_PREFIX +
-      createHash("sha256").update(JSON.stringify(value)).digest("hex")
-    )
-  }
+  if (typeof value === "string") return projectDisplayToolCallId(value)
   const hash = fromSql ? objectRecord(value)?.[CHECKPOINT_TOOL_ID_HASH_FIELD] : undefined
-  return typeof hash === "string" ? CHECKPOINT_TOOL_ID_HASH_PREFIX + hash : undefined
+  return typeof hash === "string" ? formatDisplayToolCallIdHash(hash) : undefined
 }
 
 function boundedTransferToolCalls(

@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { dirname, join } from "node:path"
+import { describe, expect, it, vi } from "vitest"
 import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages"
 import {
   boundedCloneSnapshotValue,
@@ -7,6 +10,7 @@ import {
   WORKFLOW_AGENT_SNAPSHOT_MAX_MESSAGES,
   WORKFLOW_AGENT_SNAPSHOT_TOTAL_CAP
 } from "../../../main/agent/workflow/agent-snapshot"
+import { agentToolStreamPath, readAgentToolStream } from "../../../main/agent/workflow/run-store"
 import type { Message } from "../types"
 import { ElectronIPCTransport } from "./electron-transport"
 import { createWorkflowAgentMessageProjector } from "./workflow-agent-message-projection"
@@ -23,6 +27,64 @@ function message(index: number, overrides: Partial<Message> = {}): Message {
 }
 
 describe("workflow complete snapshot projection", () => {
+  it("keeps distinct replies and tool rows from a sidecar with legacy truncated identities", async () => {
+    const scratch = mkdtempSync(join(tmpdir(), "cmb-workflow-legacy-toolstream-"))
+    vi.stubEnv("CMB_COWORK_AGENT_HOME", join(scratch, "home"))
+    try {
+      const workspacePath = join(scratch, "workspace")
+      const threadId = "workflow-thread"
+      const runId = "wf_abcdef"
+      const toolStreamKey = "probe_c0"
+      const path = agentToolStreamPath(workspacePath, threadId, runId, toolStreamKey)
+      mkdirSync(dirname(path), { recursive: true })
+      // The old serializer saved the equal-length truncations of distinct IDs verbatim.
+      const truncatedId = " ".repeat(3) + "x".repeat(23_997) + "\n…[truncated 1 chars]"
+      const provider = (id: string) => ({
+        cmb_internal_provider_source_id: id,
+        cmb_internal_provider_occurrence: 1
+      })
+      const message = (id: string, content: string, source = truncatedId) =>
+        new AIMessage({ id, content, additional_kwargs: provider(source) }).toJSON()
+      const tool = (id: string, content: string) =>
+        new ToolMessage({
+          id,
+          tool_call_id: truncatedId,
+          content,
+          additional_kwargs: provider("tool-provider")
+        }).toJSON()
+      const ordinarySource = "ordinary\n…[truncated 1 chars]"
+      const snapshotMessages = [
+        message("wire-one", "first reply"),
+        message("wire-two", "second reply"),
+        tool("old-tool-one", "first result"),
+        tool("old-tool-two", "second result"),
+        message("ordinary-first", "ordinary draft", ordinarySource),
+        message("ordinary-latest", "ordinary correction", ordinarySource)
+      ]
+      writeFileSync(path, JSON.stringify({ runId, toolStreamKey, snapshotMessages }))
+
+      const snapshot = await readAgentToolStream(workspacePath, threadId, runId, toolStreamKey)
+      expect(snapshot).toHaveLength(6)
+      const rows = new ElectronIPCTransport().convertWorkflowAgentValuesSnapshot(snapshot, "run/0")
+      expect(rows.map(({ content }) => content)).toEqual([
+        "first reply",
+        "second reply",
+        "first result",
+        "second result",
+        "ordinary correction"
+      ])
+      expect(rows.slice(0, 4).map(({ id }) => id)).toEqual([
+        "wire-one",
+        "wire-two",
+        "old-tool-one",
+        "old-tool-two"
+      ])
+    } finally {
+      vi.unstubAllEnvs()
+      rmSync(scratch, { recursive: true, force: true })
+    }
+  })
+
   it("keeps long provider identities distinct and pairs long tool IDs in live and restored frames", () => {
     const prefix = "x".repeat(WORKFLOW_AGENT_SNAPSHOT_CONTENT_CAP) + "\ud840\u0000"
     const first = prefix + "a"

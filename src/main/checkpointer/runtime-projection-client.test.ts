@@ -5,6 +5,7 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { Worker } from "node:worker_threads"
+import { AIMessage, ToolMessage } from "@langchain/core/messages"
 import type { RunnableConfig } from "@langchain/core/runnables"
 import type {
   Checkpoint,
@@ -34,6 +35,10 @@ import {
 } from "../thread-message-hydration/page-reader"
 import { buildWorkerCheckpointHistory } from "../../renderer/src/lib/worker-checkpoint-history"
 import { buildToolResultAssociations } from "../../renderer/src/lib/worker-tool-result-key"
+import {
+  createStreamDataSerializer,
+  sanitizeCoordinatorWorkerStreamDataForRenderer
+} from "../ipc/stream-data-serialization"
 
 const temporaryDirectories: string[] = []
 const clients: CheckpointRuntimeProjectionClient[] = []
@@ -963,6 +968,28 @@ describe("checkpoint runtime projection worker", () => {
       expect(
         [...buildToolResultAssociations(projected).values()].map(({ content }) => content)
       ).toEqual(["exact-call", "long-call-a", "long-call-b"])
+
+      const live = createStreamDataSerializer()("values", {
+        messages: [
+          new AIMessage({
+            content: "requests",
+            tool_calls: toolIds.map((id) => ({ id, name: "read_file", args: {} }))
+          }),
+          ...toolIds.map((id) => new ToolMessage({ content: "result", tool_call_id: id }))
+        ]
+      })
+      expect(
+        sanitizeCoordinatorWorkerStreamDataForRenderer(
+          "values",
+          live.data,
+          live.valuesMessageIndexOffset
+        )
+      ).toMatchObject({
+        messages: [
+          { kwargs: { tool_calls: expectedIds.map((id) => ({ id })) } },
+          ...expectedIds.map((id) => ({ kwargs: { tool_call_id: id } }))
+        ]
+      })
     }
   )
 

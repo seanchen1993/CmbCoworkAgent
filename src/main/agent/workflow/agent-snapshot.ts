@@ -18,9 +18,12 @@
 
 import { createHash } from "node:crypto"
 import { MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY } from "../../../shared/message-role-collision"
-import { WORKFLOW_PRECEDING_PROMPT_INDEX_KEY } from "../../../shared/workflow-agent-snapshot"
+import {
+  WORKFLOW_AGENT_SNAPSHOT_CONTENT_CAP,
+  WORKFLOW_PRECEDING_PROMPT_INDEX_KEY
+} from "../../../shared/workflow-agent-snapshot"
 
-export const WORKFLOW_AGENT_SNAPSHOT_CONTENT_CAP = 24_000
+export { WORKFLOW_AGENT_SNAPSHOT_CONTENT_CAP }
 export const WORKFLOW_AGENT_SNAPSHOT_MAX_MESSAGES = 400
 export const WORKFLOW_AGENT_SNAPSHOT_TOTAL_CAP = 1_000_000
 const WORKFLOW_AGENT_SNAPSHOT_MAX_DEPTH = 12

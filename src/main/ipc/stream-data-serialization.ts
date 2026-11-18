@@ -5,6 +5,7 @@ import {
   readStreamMessageWireMode,
   type StreamMessageWireMode
 } from "../../shared/stream-message-wire-mode"
+import { projectDisplayToolCallId } from "../display-tool-call-id"
 
 const WORKER_SNAPSHOT_INDEX_MESSAGE_KEY = "cmb_worker_snapshot_index"
 
@@ -738,7 +739,8 @@ function annotateWorkerSnapshotIndexForRenderer(message: unknown, index: number)
 
 function sanitizeValuesMessagesForRenderer(
   messages: unknown,
-  valuesMessageIndexOffset: number
+  valuesMessageIndexOffset: number,
+  projectMessage?: (message: unknown) => unknown
 ): unknown[] | undefined {
   if (!Array.isArray(messages)) return undefined
 
@@ -754,7 +756,7 @@ function sanitizeValuesMessagesForRenderer(
     .slice(currentTurnStart)
     .map((message, offset) =>
       annotateWorkerSnapshotIndexForRenderer(
-        message,
+        projectMessage ? projectMessage(message) : message,
         valuesMessageIndexOffset + currentTurnStart + offset
       )
     )
@@ -766,14 +768,88 @@ export function sanitizeStreamDataForRenderer(
   payload: unknown,
   valuesMessageIndexOffset = 0
 ): unknown {
-  if (mode !== "values" || !payload || typeof payload !== "object" || Array.isArray(payload)) {
-    return payload
-  }
+  return mode === "values"
+    ? sanitizeValuesStreamDataForRenderer(payload, valuesMessageIndexOffset)
+    : payload
+}
 
-  const { messages, ...rest } = payload as Record<string, unknown>
-  const currentTurnMessages = sanitizeValuesMessagesForRenderer(messages, valuesMessageIndexOffset)
+function sanitizeValuesStreamDataForRenderer(
+  payload: unknown,
+  valuesMessageIndexOffset: number,
+  projectMessage?: (message: unknown) => unknown
+): unknown {
+  const values = asRecord(payload)
+  if (!values) return payload
+  const { messages, ...rest } = values
+  const currentTurnMessages = sanitizeValuesMessagesForRenderer(
+    messages,
+    valuesMessageIndexOffset,
+    projectMessage
+  )
   if (currentTurnMessages) {
     return { ...rest, messages: currentTurnMessages }
   }
   return rest
+}
+
+function projectTeamMessageToolIds(message: unknown): unknown {
+  const record = asRecord(message)
+  const kwargs = asRecord(record?.kwargs)
+  if (!kwargs) return message
+
+  let nextKwargs = projectToolIds(kwargs)
+  const additionalKwargs = asRecord(kwargs.additional_kwargs)
+  if (additionalKwargs) {
+    const projected = projectToolIds(additionalKwargs)
+    if (projected !== additionalKwargs) {
+      nextKwargs = { ...nextKwargs, additional_kwargs: projected }
+    }
+  }
+  return nextKwargs === kwargs ? message : { ...record, kwargs: nextKwargs }
+}
+
+function projectToolIds(fields: Record<string, unknown>): Record<string, unknown> {
+  let projected = fields
+  const resultId = fields.tool_call_id
+  if (typeof resultId === "string") {
+    const id = projectDisplayToolCallId(resultId)
+    if (resultId !== id) projected = { ...fields, tool_call_id: id }
+  }
+  for (const key of ["tool_calls", "tool_call_chunks"] as const) {
+    const calls = fields[key]
+    if (!Array.isArray(calls)) continue
+    let nextCalls: unknown[] | undefined
+    for (const [index, rawCall] of calls.entries()) {
+      const call = asRecord(rawCall)
+      if (typeof call?.id !== "string") continue
+      const id = projectDisplayToolCallId(call.id)
+      if (id === call.id) continue
+      nextCalls ??= calls.slice()
+      nextCalls[index] = { ...call, id }
+    }
+    if (nextCalls) {
+      if (projected === fields) projected = { ...fields }
+      projected[key] = nextCalls
+    }
+  }
+  return projected
+}
+
+/** Keep Team's renderer-only tool identities aligned with bounded checkpoint reads. */
+export function sanitizeCoordinatorWorkerStreamDataForRenderer(
+  mode: string,
+  payload: unknown,
+  valuesMessageIndexOffset: number
+): unknown {
+  if (mode === "messages" && Array.isArray(payload) && payload.length === 2) {
+    const message = projectTeamMessageToolIds(payload[0])
+    return payload[0] === message ? payload : [message, payload[1]]
+  }
+  return mode === "values"
+    ? sanitizeValuesStreamDataForRenderer(
+        payload,
+        valuesMessageIndexOffset,
+        projectTeamMessageToolIds
+      )
+    : payload
 }

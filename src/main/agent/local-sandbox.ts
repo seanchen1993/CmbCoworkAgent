@@ -543,9 +543,9 @@ interface PendingBackgroundStart {
   settled: Promise<void>
 }
 
-interface ShellHandoff {
+interface ToolShellExecution {
   task: BackgroundShellTask
-  process: NonNullable<ExecuteRawOptions["handoff"]>
+  handoff?: ExecuteRawOptions["handoff"]
   processSignal: AbortSignal
   onCommandResult: () => void
 }
@@ -7497,7 +7497,7 @@ export class LocalSandbox
     return this.executeWithHooks(command, cwd)
   }
 
-  /** A soft foreground deadline changes who awaits this execution, never how it was approved. */
+  /** Own execution through completion, with an optional soft deadline for background handoff. */
   async executeForTool(
     command: string,
     cwd: string | undefined,
@@ -7507,7 +7507,7 @@ export class LocalSandbox
       signal = this.abortSignal
     }: {
       ownerId?: string
-      backgroundAfterMs: number
+      backgroundAfterMs?: number
       signal?: AbortSignal
     }
   ): Promise<ToolShellResult> {
@@ -7528,7 +7528,7 @@ export class LocalSandbox
     if (abortController.signal.aborted) abortProcess()
 
     let promoted = false
-    let foregroundBudgetMs = backgroundAfterMs
+    let foregroundBudgetMs = backgroundAfterMs ?? 0
     let foregroundTimer: ReturnType<typeof setTimeout> | undefined
     let capTimer: ReturnType<typeof setTimeout> | undefined
     const clearForegroundTimer = (): void => {
@@ -7541,9 +7541,12 @@ export class LocalSandbox
     }
 
     let returnHandoff!: (result: ToolShellResult) => void
-    const handedOff = new Promise<ToolShellResult>((resolve) => {
-      returnHandoff = resolve
-    })
+    const handedOff =
+      backgroundAfterMs === undefined
+        ? undefined
+        : new Promise<ToolShellResult>((resolve) => {
+            returnHandoff = resolve
+          })
     const promote = (): void => {
       if (abortController.signal.aborted || LocalSandbox.applicationShutdownStarted) return
       promoted = true
@@ -7577,7 +7580,9 @@ export class LocalSandbox
     const run = (): Promise<ExecuteResponse> =>
       this.executeWithHooks(command, cwd, {
         task,
-        process: { onSpawn, onPromote: promote, isPromoted: () => promoted },
+        handoff: handedOff
+          ? { onSpawn, onPromote: promote, isPromoted: () => promoted }
+          : undefined,
         processSignal: processController.signal,
         onCommandResult
       })
@@ -7614,18 +7619,16 @@ export class LocalSandbox
       })
     task.completion = completion
 
-    return Promise.race([
-      handedOff,
-      execution
-        .finally(() => completion)
-        .then((result): ToolShellResult => ({ status: "completed", result }))
-    ])
+    const completed = execution
+      .finally(() => completion)
+      .then((result): ToolShellResult => ({ status: "completed", result }))
+    return handedOff ? Promise.race([handedOff, completed]) : completed
   }
 
   private async executeWithHooks(
     command: string,
     cwd?: string,
-    handoff?: ShellHandoff
+    toolExecution?: ToolShellExecution
   ): Promise<ExecuteResponse> {
     if (!command || typeof command !== "string") {
       return {
@@ -7639,7 +7642,7 @@ export class LocalSandbox
       `[LocalSandbox] execute: hasOrchestrator=${!!this.orchestrator} sandbox=${this.windowsSandbox}`
     )
 
-    const signal = handoff?.task.abortController.signal
+    const signal = toolExecution?.task.abortController.signal
     if (signal?.aborted) return LocalSandbox.createAbortedExecuteResponse()
     const requestedCwd = this.resolveExecutionCwd(cwd)
     const requestedArgs = { command, cwd: requestedCwd }
@@ -7660,7 +7663,7 @@ export class LocalSandbox
         requestedCwd,
         requestedArgs,
         preResult,
-        handoff
+        toolExecution
       )
     } finally {
       humanGateLease?.release()
@@ -7672,7 +7675,7 @@ export class LocalSandbox
     requestedCwd: string,
     requestedArgs: { command: string; cwd: string },
     preResult: HookResult | null,
-    handoff?: ShellHandoff
+    toolExecution?: ToolShellExecution
   ): Promise<ExecuteResponse> {
     const updatedArgs = LocalSandbox.mergeUpdatedInput(requestedArgs, preResult?.updatedInput)
     const effectiveCommand =
@@ -7759,9 +7762,9 @@ export class LocalSandbox
       }
     }
 
-    const task = handoff?.task
+    const task = toolExecution?.task
     const foregroundOnly =
-      task &&
+      toolExecution?.handoff &&
       (isGitCommitCommand(effectiveCommand, shellSyntax) ||
         isGitPushCommand(effectiveCommand, shellSyntax) ||
         (outsideShellSyntax !== shellSyntax &&
@@ -7778,19 +7781,21 @@ export class LocalSandbox
     // An execute that can hand off must keep the same hook policy through completion.
     // A newly enabled synchronous hook applies starting with the next invocation.
     const postHookPolicy =
-      task && !foregroundOnly ? this.captureExecutePostHookPolicy(postHookContext) : undefined
+      toolExecution?.handoff && !foregroundOnly
+        ? this.captureExecutePostHookPolicy(postHookContext)
+        : undefined
     let execution: OrchestratedExecuteOptions | undefined
-    if (task && handoff) {
+    if (task && toolExecution) {
       task.command = effectiveCommand
       task.cwd = effectiveCwd
       // The invocation owns cancellation and process settlement even when Git or a hook
       // requires the tool to stay in the foreground.
       const processHandoff =
-        foregroundOnly || postHookPolicy?.requiresForeground ? undefined : handoff.process
+        foregroundOnly || postHookPolicy?.requiresForeground ? undefined : toolExecution.handoff
       execution = {
-        signal: handoff.processSignal,
+        signal: toolExecution.processSignal,
         rawExecute: (command, sandboxMode, cwd) =>
-          this.executeRaw(command, sandboxMode, undefined, handoff.processSignal, {
+          this.executeRaw(command, sandboxMode, undefined, toolExecution.processSignal, {
             cwd,
             handoff: processHandoff,
             waitForProcessTree: true,
@@ -7828,7 +7833,7 @@ export class LocalSandbox
       if (execution?.signal.reason !== SHELL_TASK_HARD_CAP || !task) throw error
       result = LocalSandbox.createBackgroundCapResult(task)
     } finally {
-      handoff?.onCommandResult()
+      toolExecution?.onCommandResult()
     }
     if (execution?.signal.reason === SHELL_TASK_HARD_CAP && task) {
       result = LocalSandbox.createBackgroundCapResult(task)

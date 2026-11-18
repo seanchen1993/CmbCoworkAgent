@@ -10,9 +10,10 @@ import { join, resolve } from "node:path"
 import { _electron, type ElectronApplication } from "playwright"
 import type { WebContents } from "electron"
 import recorded from "./fixtures/reused-provider-live-stream.json"
+import { projectDisplayToolCallId } from "../src/main/display-tool-call-id"
 import {
   createStreamDataSerializer,
-  sanitizeStreamDataForRenderer
+  sanitizeCoordinatorWorkerStreamDataForRenderer
 } from "../src/main/ipc/stream-data-serialization"
 import { STREAM_MESSAGE_CONTENT_MODE_KEY } from "../src/shared/stream-message-wire-mode"
 
@@ -66,7 +67,7 @@ function frame(prefix: string, count = 40) {
     )
   ]
 }
-function toolFrame(corrected = false) {
+function toolFrame(corrected = false, callId = "read-call") {
   return [
     wire("Tool request", "tool-user", "HumanMessage"),
     {
@@ -74,7 +75,7 @@ function toolFrame(corrected = false) {
       kwargs: {
         id: "tool-call",
         content: corrected ? "Tool draft fixed" : draft,
-        tool_calls: [{ id: "read-call", name: "read_file", args: { path: "file.txt" } }]
+        tool_calls: [{ id: callId, name: "read_file", args: { path: "file.txt" } }]
       }
     },
     {
@@ -82,12 +83,28 @@ function toolFrame(corrected = false) {
       kwargs: {
         id: "tool-result",
         content: "Tool result",
-        tool_call_id: "read-call",
+        tool_call_id: callId,
         name: "read_file"
       }
     },
     wire("Worker tool final", "tool-final")
   ]
+}
+function identifiedToolFrame(callId: string, corrected = false) {
+  return toolFrame(corrected, callId).map((message, index) =>
+    index === 0
+      ? message
+      : {
+          ...message,
+          kwargs: {
+            ...message.kwargs,
+            additional_kwargs: {
+              cmb_internal_provider_source_id: message.kwargs.id,
+              cmb_internal_provider_occurrence: 1
+            }
+          }
+        }
+  )
 }
 async function until(check: () => Promise<boolean>, label: string) {
   const deadline = Date.now() + 20_000
@@ -122,6 +139,7 @@ async function main() {
   let app: ElectronApplication | undefined
   const results: string[] = []
   const errors: string[] = []
+  const longCallId = "long-" + "x".repeat(300)
   const packaged = process.env.TEAM_OUTPUT_PACKAGED_EXE
   try {
     app = await _electron.launch({
@@ -188,7 +206,12 @@ async function main() {
           }
         }
       },
-      [frame("A"), toolFrame()]
+      [
+        frame("A"),
+        toolFrame(),
+        identifiedToolFrame(projectDisplayToolCallId(longCallId)),
+        toolFrame(false, projectDisplayToolCallId(longCallId))
+      ]
     )
     await page.waitForFunction(() =>
       Boolean(
@@ -215,7 +238,7 @@ async function main() {
     await app.evaluate((_electron, id) => {
       const state = (globalThis as unknown as MainGlobal).teamFixture
       state.threadId = id
-      state.workers = [0, 1].map((i) => ({
+      state.workers = state.history.map((_, i) => ({
         worker_id: `worker-${i}`,
         worker_thread_id: `${id}__worker__${i}`,
         parent_thread_id: id,
@@ -294,13 +317,18 @@ async function main() {
       const { data, valuesMessageIndexOffset, valuesSnapshotKind } = serialize("values", {
         messages
       })
-      return emit({
+      await emit({
         type: "stream",
         mode: "values",
         workerTurn: 1,
         valuesSnapshotKind,
-        data: sanitizeStreamDataForRenderer("values", data, valuesMessageIndexOffset)
+        data: sanitizeCoordinatorWorkerStreamDataForRenderer(
+          "values",
+          data,
+          valuesMessageIndexOffset
+        )
       })
+      return valuesSnapshotKind
     }
     await send(frame("A"))
     assert.equal(await rows.count(), 41)
@@ -382,6 +410,39 @@ async function main() {
     assert.equal(await rows.filter({ hasText: "Worker tool final" }).count(), 0)
     assert.equal(await page.getByText("Active second answer", { exact: true }).count(), 1)
     results.push("late previous-turn clear and delta update one slot without duplicating messages")
+
+    await page.getByRole("button", { name: "返回", exact: true }).click()
+    await open(2)
+    const appendedLongCall = identifiedToolFrame(longCallId, true)
+    await send(appendedLongCall.slice(0, 2))
+    const toolRow = rows.filter({ hasText: "Tool draft fixed" })
+    // The live frame has not reached the result. Its request must use the
+    // completed checkpoint result rather than changing the card to interrupted.
+    await toolRow.getByText("OK", { exact: true }).waitFor()
+    await toolRow.getByRole("button", { name: "读取文件: file.txt", exact: true }).click()
+    await toolRow.getByText("Tool result", { exact: true }).waitFor()
+    appendedLongCall[2].kwargs.content = "Appended long tool result"
+    assert.equal(await send(appendedLongCall), "append")
+    await toolRow.getByText("Appended long tool result", { exact: true }).waitFor()
+    const completeLongCall = identifiedToolFrame(longCallId, true)
+    completeLongCall[2].kwargs.content = "Corrected long tool result"
+    assert.equal(await send(completeLongCall), "full")
+    await toolRow.getByText("Corrected long tool result", { exact: true }).waitFor()
+    assert.equal(await toolRow.getByText("Appended long tool result", { exact: true }).count(), 0)
+    assert.equal(await rows.count(), 3)
+    results.push("long tool IDs keep checkpoint, append, and full live results on the same card")
+
+    await page.getByRole("button", { name: "返回", exact: true }).click()
+    await open(3)
+    const legacyLongCall = toolFrame(true, longCallId)
+    await send(legacyLongCall.slice(0, 2))
+    await toolRow.getByText("OK", { exact: true }).waitFor()
+    assert.equal(await send(legacyLongCall), "append")
+    await toolRow.getByRole("button", { name: "读取文件: file.txt", exact: true }).click()
+    await toolRow.getByText("Tool result", { exact: true }).waitFor()
+    assert.equal(await rows.count(), 3)
+    results.push("legacy append with a long ID reuses the checkpoint result")
+
     await page.getByRole("button", { name: "返回", exact: true }).click()
     await page
       .getByRole("button", { name: /打开工具流/ })

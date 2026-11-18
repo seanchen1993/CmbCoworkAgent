@@ -9,6 +9,7 @@ import type { ChatResult } from "@langchain/core/outputs"
 import { tool } from "langchain"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { z } from "zod"
+import type { HookConfig } from "../hooks/types"
 import type { ApprovalDecision, ApprovalRequest } from "../types"
 import { ApprovalStore } from "./approval-store"
 import { LocalSandbox, type LocalSandboxOptions } from "./local-sandbox"
@@ -132,6 +133,79 @@ describe("shell monitor runtime dispatch", () => {
     expect(visibleTools).not.toContainEqual(expect.objectContaining({ name: "task_output" }))
   })
 
+  it.each([
+    { mode: "explicit foreground", requestedBackground: false, runtime: {} },
+    { mode: "managed session", requestedBackground: true, runtime: { managedExecution: true } },
+    {
+      mode: "monitor denied",
+      requestedBackground: true,
+      runtime: { mainBlockedToolNames: ["task_output"] }
+    }
+  ])(
+    "returns the foreground result and current hooks in $mode",
+    async ({ requestedBackground, runtime }) => {
+      const postHooks: HookConfig[] = []
+      const { sandbox, physicalExit } = await fixture({
+        hookResolver: (event) => (event === "PostToolUse" ? postHooks : [])
+      })
+      const fetchHook = vi.fn(async () => Response.json({ additionalContext: "current policy" }))
+      vi.stubGlobal("fetch", fetchHook)
+      const rawEntered = Promise.withResolvers<void>()
+      const raw = vi.spyOn(sandbox, "executeRaw").mockImplementation(async () => {
+        rawEntered.resolve()
+        await physicalExit.promise
+        return { output: "probe finished", exitCode: 0, truncated: false }
+      })
+      const agent = createDeepAgent({
+        ...runtime,
+        model: new ReplayModel((messages) =>
+          messages.at(-1)?._getType() === "tool"
+            ? new AIMessage({ content: "Finished", response_metadata: { finish_reason: "stop" } })
+            : requestTool("execute", {
+                command: "echo probe",
+                run_in_background: requestedBackground
+              })
+        ),
+        backend: sandbox,
+        mainTodosEnabled: false,
+        mainSubagentsEnabled: false
+      })
+      const caller = new AbortController()
+      const run = agent.invoke(
+        { messages: [new HumanMessage("Run this probe")] },
+        {
+          signal: caller.signal
+        }
+      )
+      try {
+        await Promise.race([rawEntered.promise, run])
+        expect(raw.mock.calls[0]?.[2]).toBeUndefined()
+        expect(raw.mock.calls[0]?.[3]).toBeInstanceOf(AbortSignal)
+        expect(raw.mock.calls[0]?.[4]).toMatchObject({ waitForProcessTree: true })
+        expect(raw.mock.calls[0]?.[4]?.handoff).toBeUndefined()
+        expect(LocalSandbox.hasActiveBackgroundTasks(sandbox.runId)).toBe(false)
+        postHooks.push({
+          id: "late-foreground-hook",
+          enabled: true,
+          event: "PostToolUse",
+          matcher: "execute",
+          type: "http",
+          url: "https://hooks.invalid/current-policy",
+          createdAt: "",
+          updatedAt: ""
+        })
+      } finally {
+        physicalExit.resolve()
+      }
+      const result = await run
+      const output = result.messages.find((message: BaseMessage) => message._getType() === "tool")
+      expect(output?.content).toBe(
+        "probe finished\n\n[Hook context]\ncurrent policy\n[Command succeeded with exit code 0]"
+      )
+      expect(fetchHook).toHaveBeenCalledOnce()
+    }
+  )
+
   it("keeps a synchronous shell Hook halt in the originating graph turn", async () => {
     const { sandbox, physicalExit } = await fixture({
       hooks: [
@@ -229,98 +303,102 @@ describe("shell monitor runtime dispatch", () => {
     expect(cancelled.mock.calls).toEqual([["echo child"]])
   })
 
-  it("cancels a pending foreground Git approval when a sibling monitor hook stops the Solo task", async () => {
-    const parent = new AbortController()
-    const { sandbox } = await fixture({
-      abortSignal: parent.signal,
-      hooks: [
-        {
-          id: "monitor-stop",
-          event: "PreToolUse",
-          matcher: "monitor",
-          enabled: true,
-          type: "http",
-          url: "https://hooks.invalid/stop",
-          createdAt: "",
-          updatedAt: ""
-        }
-      ]
-    })
-    vi.stubEnv("GIT_CONFIG_GLOBAL", path.join(sandbox.runId, "empty-git-config"))
-    vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1")
-    execFileSync("git", ["init", "--quiet", sandbox.runId])
+  it.each([{}, { run_in_background: false }])(
+    "cancels Solo Git approval for %j",
+    async (input) => {
+      const parent = new AbortController()
+      const { sandbox } = await fixture({
+        abortSignal: parent.signal,
+        hooks: [
+          {
+            id: "monitor-stop",
+            event: "PreToolUse",
+            matcher: "monitor",
+            enabled: true,
+            type: "http",
+            url: "https://hooks.invalid/stop",
+            createdAt: "",
+            updatedAt: ""
+          }
+        ]
+      })
+      vi.stubEnv("GIT_CONFIG_GLOBAL", path.join(sandbox.runId, "empty-git-config"))
+      vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1")
+      execFileSync("git", ["init", "--quiet", sandbox.runId])
 
-    const approvalRequested = Promise.withResolvers<void>()
-    const approval = Promise.withResolvers<ApprovalDecision>()
-    const approvalCancelled = vi.fn()
-    const requestApproval = vi.fn((request: ApprovalRequest, signal = parent.signal) => {
-      approvalRequested.resolve()
-      signal.addEventListener(
-        "abort",
-        () => {
-          approvalCancelled()
-          approval.resolve({ type: "reject", tool_call_id: request.id })
-        },
-        { once: true }
+      const approvalRequested = Promise.withResolvers<void>()
+      const approval = Promise.withResolvers<ApprovalDecision>()
+      const approvalCancelled = vi.fn()
+      const requestApproval = vi.fn((request: ApprovalRequest, signal = parent.signal) => {
+        approvalRequested.resolve()
+        signal.addEventListener(
+          "abort",
+          () => {
+            approvalCancelled()
+            approval.resolve({ type: "reject", tool_call_id: request.id })
+          },
+          { once: true }
+        )
+        return approval.promise
+      })
+      vi.stubGlobal("fetch", async () => {
+        await approvalRequested.promise
+        return Response.json({ continue: false, stopReason: "monitor hook stopped the Solo task" })
+      })
+      const raw = vi.spyOn(sandbox, "executeRaw")
+      sandbox.setOrchestrator(
+        new ToolOrchestrator(
+          new ApprovalStore(),
+          (command, mode, cwd) => sandbox.executeRaw(command, mode, undefined, undefined, { cwd }),
+          requestApproval
+        )
       )
-      return approval.promise
-    })
-    vi.stubGlobal("fetch", async () => {
-      await approvalRequested.promise
-      return Response.json({ continue: false, stopReason: "monitor hook stopped the Solo task" })
-    })
-    const raw = vi.spyOn(sandbox, "executeRaw")
-    sandbox.setOrchestrator(
-      new ToolOrchestrator(
-        new ApprovalStore(),
-        (command, mode, cwd) => sandbox.executeRaw(command, mode, undefined, undefined, { cwd }),
-        requestApproval
-      )
-    )
 
-    const agent = createDeepAgent({
-      backend: sandbox,
-      mainTodosEnabled: false,
-      model: new ReplayModel((messages) => {
-        const last = messages.at(-1)
-        if (last?.content === "Check in child") {
-          return requestTools([
-            ["execute", { command: "git push" }],
-            ["monitor", { task_id: "probe-id" }]
-          ])
-        }
-        return requestTool("task", {
-          description: "Check in child",
-          subagent_type: "general-purpose"
+      const agent = createDeepAgent({
+        backend: sandbox,
+        mainTodosEnabled: false,
+        model: new ReplayModel((messages) => {
+          const last = messages.at(-1)
+          if (last?.content === "Check in child") {
+            return requestTools([
+              ["execute", { command: "git push", ...input }],
+              ["monitor", { task_id: "probe-id" }]
+            ])
+          }
+          return requestTool("task", {
+            description: "Check in child",
+            subagent_type: "general-purpose"
+          })
         })
       })
-    })
-    const run = agent.invoke(
-      { messages: [new HumanMessage("Start a Solo task")] },
-      {
-        signal: parent.signal
-      }
-    )
-    const outcome = run.catch((error: unknown) => error)
-    try {
-      await vi.waitFor(() => expect(approvalCancelled).toHaveBeenCalledOnce(), { timeout: 3_000 })
-      expect(await outcome).toMatchObject({
-        name: "HookHaltError",
-        message: "monitor hook stopped the Solo task"
-      })
-      expect(requestApproval).toHaveBeenCalledWith(
-        expect.objectContaining({ operation: "git_push" }),
-        expect.any(AbortSignal)
+      const run = agent.invoke(
+        { messages: [new HumanMessage("Start a Solo task")] },
+        {
+          signal: parent.signal
+        }
       )
-      expect(parent.signal.aborted).toBe(false)
-      expect(raw).not.toHaveBeenCalled()
-    } finally {
-      approvalRequested.resolve()
-      approval.resolve({ type: "reject", tool_call_id: "cleanup" })
-      parent.abort()
-      await outcome
-    }
-  }, 10_000)
+      const outcome = run.catch((error: unknown) => error)
+      try {
+        await vi.waitFor(() => expect(approvalCancelled).toHaveBeenCalledOnce(), { timeout: 3_000 })
+        expect(await outcome).toMatchObject({
+          name: "HookHaltError",
+          message: "monitor hook stopped the Solo task"
+        })
+        expect(requestApproval).toHaveBeenCalledWith(
+          expect.objectContaining({ operation: "git_push" }),
+          expect.any(AbortSignal)
+        )
+        expect(parent.signal.aborted).toBe(false)
+        expect(raw).not.toHaveBeenCalled()
+      } finally {
+        approvalRequested.resolve()
+        approval.resolve({ type: "reject", tool_call_id: "cleanup" })
+        parent.abort()
+        await outcome
+      }
+    },
+    10_000
+  )
 
   it("waits for physical termination when cancelling a Git command that stays in the foreground", async () => {
     const { sandbox, physicalExit } = await fixture()

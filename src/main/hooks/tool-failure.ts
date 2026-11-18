@@ -19,6 +19,7 @@
  */
 
 import { classifyApiError, type ApiErrorCode } from "../agent/failover"
+import { isShellTaskMonitorToolName } from "../agent/shell-task-monitor"
 
 export type ToolFailureKind =
   | "throw"
@@ -41,10 +42,7 @@ export interface ToolFailureSignal {
  * is intentionally permissive (covers many ad-hoc shapes) because tools in
  * this codebase have no schema for their return values.
  */
-export function detectToolFailure(
-  _toolName: string,
-  toolResult: unknown
-): ToolFailureSignal | null {
+export function detectToolFailure(toolName: string, toolResult: unknown): ToolFailureSignal | null {
   if (toolResult === null || toolResult === undefined) return null
 
   // PR-12 follow-up — plain-string results. The execute tool (deepagents)
@@ -55,19 +53,20 @@ export function detectToolFailure(
   // failed) with exit code N]" marker — only "failed" (and any explicit
   // non-zero code) triggers; bare "succeeded" returns null.
   if (typeof toolResult === "string") {
-    const m = /\[Command (succeeded|failed) with exit code (-?\d+)\]/.exec(toolResult)
-    if (m) {
-      const status = m[1]
-      const code = parseInt(m[2], 10)
-      if (status === "failed" || code !== 0) {
-        const truncated = toolResult.length > 500 ? toolResult.slice(0, 500) + "…" : toolResult
-        return {
-          kind: "exit-nonzero",
-          message: truncated,
-          errorType: classifyApiError({ message: toolResult } as Error),
-          isInterrupt: false,
-          isTimeout: false
-        }
+    // Shell monitors append their own terminal line after arbitrary command output.
+    const match = isShellTaskMonitorToolName(toolName)
+      ? /^\[Command (succeeded|failed) with exit code (-?\d+|null), elapsed: \d+s\]$/.exec(
+          toolResult.slice(toolResult.lastIndexOf("\n") + 1)
+        )
+      : /\[Command (succeeded|failed) with exit code (-?\d+)\]/.exec(toolResult)
+    if (match && (match[1] === "failed" || (match[2] !== "null" && Number(match[2]) !== 0))) {
+      const truncated = toolResult.length > 500 ? toolResult.slice(0, 500) + "…" : toolResult
+      return {
+        kind: "exit-nonzero",
+        message: truncated,
+        errorType: classifyApiError({ message: toolResult } as Error),
+        isInterrupt: false,
+        isTimeout: false
       }
     }
     return null
