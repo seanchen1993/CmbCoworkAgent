@@ -4,6 +4,7 @@ import { designAttr, designSourceNodes } from "../../../shared/design-node-ids"
 import { elements } from "../../../shared/design-tweaks"
 import { sourceHash } from "./document-index"
 import type { DesignEditableNode } from "../../../shared/design-edit"
+import { applyHtmlSourceEdits } from "../../../shared/design-html-mutations"
 
 export interface EditRange {
   start: number
@@ -11,15 +12,7 @@ export interface EditRange {
   value: string
 }
 export function replaceEditRanges(source: string, ranges: EditRange[]): string {
-  const ordered = [...ranges].sort((a, b) => b.start - a.start)
-  let boundary = source.length + 1
-  for (const edit of ordered) {
-    if (edit.end > boundary || edit.start < 0 || edit.end < edit.start)
-      throw new Error("编辑范围重叠")
-    source = source.slice(0, edit.start) + edit.value + source.slice(edit.end)
-    boundary = edit.start
-  }
-  return source
+  return applyHtmlSourceEdits(source, [...ranges].reverse())
 }
 export const escapeDesignText = (value: string) =>
   value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
@@ -199,6 +192,8 @@ export function stabilizeEditableSource(html: string): string {
 
 export function indexEditableSource(html: string): EditSourceIndex {
   const surfaces = editSurfaces(html)
+  const mounts = new Set([...html.matchAll(/\.mount\(\s*['"]#([\w-]+)['"]\s*\)/g)].map((m) => m[1]))
+  const hasRuntime = /ReactDOM|createRoot|createApp/.test(html)
   const targets = new Map<string, EditSourceTarget>()
   const add = (target: EditSourceTarget) => {
     if (targets.has(target.info.id)) throw new Error("编辑节点身份重复")
@@ -250,19 +245,18 @@ export function indexEditableSource(html: string): EditSourceIndex {
         }
         const dynamic =
           repeatedAncestor || elements(el).some((e) => e.attrs.some((a) => /^v-for$/.test(a.name)))
-        const mounts = [...html.matchAll(/\.mount\(\s*['"]#([\w-]+)['"]\s*\)/g)].map((m) => m[1])
         let inVueMount = false
         let owner: Tree.Node | null = el
         while (owner) {
-          if ("tagName" in owner && mounts.includes(designAttr(owner, "id") ?? ""))
+          if ("tagName" in owner && mounts.has(designAttr(owner, "id") ?? ""))
             inVueMount = true
           owner = "parentNode" in owner ? owner.parentNode : null
         }
         const runtime =
           s === 0 &&
           el.attrs.some((a) => a.name === "id") &&
-          /ReactDOM|createRoot|createApp/.test(html) &&
-          (mounts.includes(designAttr(el, "id") ?? "") ||
+          hasRuntime &&
+          (mounts.has(designAttr(el, "id") ?? "") ||
             !el.childNodes.some((n) => "tagName" in n || textValue(n).trim()))
         const info: DesignEditableNode = {
           id: node.id,

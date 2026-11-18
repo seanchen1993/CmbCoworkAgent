@@ -32,6 +32,7 @@ export function designDirectEditRuntime(
     return
   }
   let config = initial
+  let configNodes = new Map(config.nodes.map((node) => [node.id, node]))
   let mode = initialMode
   let selected: Element | null = null
   let fallbackSelection: Element | null = null
@@ -140,15 +141,25 @@ export function designDirectEditRuntime(
       : el.getAttribute("data-design-node")
     return frameId && local ? `${frameId}:${local}` : local
   }
+  let duplicates: Set<string> | null = null
+  function duplicateIds() {
+    if (duplicates) return duplicates
+    const seen = new Set<string>()
+    duplicates = new Set<string>()
+    for (const el of document.querySelectorAll("[data-design-node],[data-design-bind]")) {
+      const id = nodeId(el)
+      if (!id) continue
+      if (seen.has(id)) duplicates.add(id)
+      else seen.add(id)
+    }
+    return duplicates
+  }
   const describe = (el: Element | null): DesignEditableNode | undefined => {
     if (!el) return
     const id = nodeId(el)
-    const node = config.nodes.find((n) => n.id === id)
+    const node = id ? configNodes.get(id) : undefined
     if (!node) return
-    const duplicates = [
-      ...document.querySelectorAll("[data-design-node],[data-design-bind]")
-    ].filter((candidate) => nodeId(candidate) === id)
-    return duplicates.length > 1
+    return duplicateIds().has(node.id)
       ? {
           ...node,
           text: [],
@@ -449,17 +460,17 @@ export function designDirectEditRuntime(
       dy: 0,
       flow,
       horizontal: parentStyle?.display === "flex" && parentStyle.flexDirection.startsWith("row"),
-      siblings: [...(el.parentElement?.children ?? [])].flatMap((sibling) => {
+      siblings: flow ? [...(el.parentElement?.children ?? [])].flatMap((sibling) => {
+        if (sibling === el) return []
         const info = describe(sibling)
+        if (!info) return []
         const rect = sibling.getBoundingClientRect()
-        return sibling !== el &&
-          info &&
-          rect.width &&
+        return rect.width &&
           rect.height &&
           !["absolute", "fixed"].includes(getComputedStyle(sibling).position)
           ? [{ el: sibling, node: info, rect }]
           : []
-      }),
+      }) : [],
       drop: null,
       next: el.nextSibling,
       parent: el.parentNode!
@@ -582,7 +593,9 @@ export function designDirectEditRuntime(
     // Restore transitions only after the gesture has settled.
     restore("transition", item.transition, item.transitionPriority)
     if (!cancel && item.moved && item.flow && item.drop) {
+      const { scrollX, scrollY } = window
       item.parent.insertBefore(item.el, item.drop.before ? item.drop.el : item.drop.el.nextSibling)
+      window.scrollTo({ left: scrollX, top: scrollY, behavior: "instant" })
     }
     refreshPosition()
     if (!item.moved) return
@@ -756,9 +769,16 @@ export function designDirectEditRuntime(
   window.addEventListener("scroll", refreshPosition, true)
   window.addEventListener("resize", refreshPosition)
   const observer = new MutationObserver((records) => {
-    if (!disposed && records.some((record) => !root.contains(record.target))) refreshPosition()
+    if (!disposed && records.some((record) => !root.contains(record.target))) {
+      duplicates = null
+      refreshPosition()
+    }
   })
-  observer.observe(document.documentElement, { childList: true, subtree: true })
+  observer.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    attributeFilter: ["data-design-node", "data-design-bind"]
+  })
   w.__designEditor = {
     update(value, nextMode = mode) {
       if (value.revision < config.revision) return
@@ -784,6 +804,7 @@ export function designDirectEditRuntime(
       )
         finishDrag(true)
       config = value
+      configNodes = new Map(value.nodes.map((node) => [node.id, node]))
       if (!editing && !pending)
         select(
           selected?.isConnected

@@ -14,7 +14,7 @@ const entries = new Set<Preparation>()
 let active: Preparation | undefined
 let latest: Preparation | undefined
 
-export function prepareDesignPreview(html: string, path = ""): Promise<string> {
+export function prepareDesignPreview(html: string, path = "", reuseCaptureResources = false): Promise<string> {
   const cached = [...entries].find((entry) => entry.source === html && entry.path === path)
   if (cached) {
     latest = cached
@@ -26,7 +26,13 @@ export function prepareDesignPreview(html: string, path = ""): Promise<string> {
       entry.cancel()
       entries.delete(entry)
     }
-  const resources = new DesignPreviewResources()
+  // Editor initialization can publish its first live revision before the
+  // initial iframe finishes loading. Its prepared HTML already owns assets.
+  const previous = reuseCaptureResources
+    ? active?.path === path ? active : [...entries].reverse().find((entry) =>
+        entry.path === path && entry.html !== undefined)
+    : undefined
+  const resources = previous?.resources.fork() ?? new DesignPreviewResources()
   const worker = new Worker(new URL("./design-preview-worker.ts", import.meta.url), {
     type: "module"
   })

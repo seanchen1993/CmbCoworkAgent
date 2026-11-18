@@ -1800,7 +1800,9 @@ export function DesignView({
       client.markRead(id, snapshot.seq)
       if (htmlChanged && snapshot.state.html) {
         const raw = snapshot.state.html
-        void prepareHtmlForSrcDoc(raw, state.artifactPath)
+        const reuseCaptureResources = snapshot.state.sourceInfo?.kind === "import_url" &&
+          snapshot.state.appliedPatch?.mode === "live"
+        void prepareDesignPreview(raw, state.artifactPath ?? "", reuseCaptureResources)
           .then((html) => {
             if (
               disposed ||

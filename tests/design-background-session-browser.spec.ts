@@ -138,7 +138,9 @@ const requests: DesignRunRequest[] = []
 let aborted = 0
 let deliver: (change: DesignSessionChange) => void = () => undefined
 const subscriptions = new Set<string>()
+const browserValidatedEdits: string[] = []
 const manager = new DesignRunManager(new DesignSessionStore(db), {
+  validateDirectEdit: async (candidate) => { browserValidatedEdits.push(...candidate.targetIds) },
   execute: (_request, _id, emit) => {
     requests.push(_request)
     emitters.push(emit)
@@ -445,7 +447,7 @@ try {
     mkdirSync(resolve(directory, "frames"), { recursive: true })
     writeFileSync(artifactPath, html)
     writeFileSync(resolve(directory, "frames/f_1.html"), '<!doctype html><html><head></head><body><iframe id="frame-two" data-design-capture-frame="f_2" src="../frames/f_2.html" style="width:400px;height:300px;border:4px solid blue;transform:scale(.9);transform-origin:top left"></iframe></body></html>')
-    writeFileSync(resolve(directory, "frames/f_2.html"), '<!doctype html><html><head><style>article{height:58px;padding:8px;background:#eee;margin-bottom:5px}</style></head><body><article id="first">子页面一</article><article id="second">子页面二</article></body></html>')
+    writeFileSync(resolve(directory, "frames/f_2.html"), '<!doctype html><html><head><style>body{min-height:600px}article{height:58px;padding:8px;background:#eee;margin-bottom:5px}#free{position:absolute;top:180px;left:20px}</style></head><body><article id="first">子页面一</article><article id="second">子页面二</article><button id="free">自由移动</button><img width="8" height="8" src="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%278%27 height=%278%27%3E%3Crect width=%278%27 height=%278%27/%3E%3C/svg%3E"></body></html>')
     manager.create({
       id, meta: { id, title: id, createdAt: 1, updatedAt: 1 }, workspacePath: captureWorkspace,
       state: { ...createDesignState(), html, artifactPath, activeMode: "edit", tweaksOn: true, generationState: "done",
@@ -455,26 +457,75 @@ try {
     await page.reload()
     const nested = page.frameLocator("iframe").frameLocator("#frame-one").frameLocator("#frame-two")
     await nested.locator('[data-design-editor-mode="edit"]').waitFor({ state: "attached" })
+    const rootFrame = page.locator('iframe[title="Design Preview"]')
+    const revision = async () => Number(await page.frameLocator('iframe[title="Design Preview"]').locator("html").getAttribute("data-design-artifact-revision"))
+    const waitForRevision = (expected: number) => page.waitForFunction((target) => {
+      const root = document.querySelector<HTMLIFrameElement>('iframe[title="Design Preview"]')!
+      return root.contentDocument?.documentElement.dataset.designArtifactRevision === String(target)
+    }, expected)
+    const saved = await rootFrame.evaluateHandle((frame) => {
+      const root = (frame as HTMLIFrameElement).contentDocument!
+      const child = root.querySelector<HTMLIFrameElement>("#frame-one")!.contentDocument!
+      const nested = child.querySelector<HTMLIFrameElement>("#frame-two")!.contentDocument!
+      nested.defaultView!.scrollTo(0, 6)
+      return { root, child, nested, first: nested.querySelector("#first")!, asset: nested.images[0].src }
+    })
+    const checkLive = async () => {
+      const state = await rootFrame.evaluate(async (frame, old) => {
+        await new Promise(requestAnimationFrame)
+        const root = (frame as HTMLIFrameElement).contentDocument
+        const child = root?.querySelector<HTMLIFrameElement>("#frame-one")?.contentDocument
+        const nested = child?.querySelector<HTMLIFrameElement>("#frame-two")?.contentDocument
+        return {
+          root: root === old.root, child: child === old.child, nested: nested === old.nested,
+          first: nested?.querySelector("#first") === old.first, scrollY: nested?.defaultView?.scrollY,
+          asset: nested?.images[0].src === old.asset && (await fetch(old.asset)).ok
+        }
+      }, saved)
+      assert.deepEqual(state, { root: true, child: true, nested: true, first: true, scrollY: 6, asset: true })
+    }
+    let expected = await revision()
     await nested.locator("#first").dblclick()
     const input = nested.getByRole("textbox", { name: "编辑文字" })
     await input.fill("子页面直接修改")
     await input.press("Enter")
-    await nested.getByText("子页面直接修改", { exact: true }).waitFor()
+    await nested.locator("#first").filter({ hasText: "子页面直接修改" }).waitFor()
+    await waitForRevision(++expected)
+    await checkLive()
     await page.getByRole("button", { name: "移动", exact: true }).click()
     await nested.locator('[data-design-editor-mode="move"]').waitFor({ state: "attached" })
     const first = (await nested.locator("#first").boundingBox())!
     const second = (await nested.locator("#second").boundingBox())!
+    const beforePlacement = browserValidatedEdits.length
     await page.mouse.move(second.x + 20, second.y + 20)
     await page.mouse.down()
     await page.mouse.move(first.x + 20, first.y + 2, { steps: 8 })
     await page.mouse.up()
-    await nested.locator("#second + #first").waitFor()
+    await waitForRevision(++expected)
+    await checkLive()
+    assert.equal(await nested.locator("#second + #first").count(), 1)
     await page.getByTitle("撤销局部修改").click()
+    await waitForRevision(++expected)
     await nested.locator("#first + #second").waitFor()
+    await checkLive()
     await page.getByTitle("重做局部修改").click()
+    await waitForRevision(++expected)
     await nested.locator("#second + #first").waitFor()
+    await checkLive()
+    const free = (await nested.locator("#free").boundingBox())!
+    await page.mouse.move(free.x + 10, free.y + 10)
+    await page.mouse.down()
+    await page.mouse.move(free.x + 50, free.y + 24, { steps: 8 })
+    await page.mouse.up()
+    await waitForRevision(++expected)
+    await checkLive()
+    assert.equal(browserValidatedEdits.length, beforePlacement, "iframe placement uses source validation")
+    const translate = await nested.locator("#free").evaluate((el) => getComputedStyle(el).translate)
+    assert.notEqual(translate, "none")
+    await saved.dispose()
     await page.reload()
     await nested.locator("#second + #first").filter({ hasText: "子页面直接修改" }).waitFor()
+    assert.equal(await nested.locator("#free").evaluate((el) => getComputedStyle(el).translate), translate)
 
     const applyAnnotation = async (index: number, text: string) => {
       await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()

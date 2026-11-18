@@ -17,6 +17,7 @@ import type { DesignDraftPreview } from "../../../../shared/design-progressive"
 import { buildDesignHtmlPreviewDocument } from "@/lib/design-html-srcdoc"
 import { createDesignLiveDelta } from "@/lib/design-live-patch"
 import type { DesignAppliedPatch } from "../../../../shared/design-patch"
+import { splitFrameNodeId } from "../../../../shared/design-captured-frame"
 
 interface Props {
   appliedPatch?: DesignAppliedPatch | null
@@ -162,9 +163,10 @@ function DesignPreviewContext({
       (html === live.current.html && artifactRevision === live.current.revision)
     )
       return
+    const frameTarget = splitFrameNodeId(appliedPatch?.targetIds[0])
     const delta =
-      appliedPatch?.mode === "live" && artifactRevision !== live.current.revision
-        ? createDesignLiveDelta(live.current.html, html)
+      appliedPatch?.mode === "live" && artifactRevision === live.current.revision + 1
+        ? createDesignLiveDelta(live.current.html, html, frameTarget ?? undefined)
         : null
     if (!delta) {
       const frame = requestAnimationFrame(() =>

@@ -240,7 +240,6 @@ export class DesignRunManager {
         candidate = {
           ...child,
           html: updateCapturedFrames(before.state.html, frames.roots, new Map([[frameId, child.html]])),
-          mode: "reload",
           targetIds: child.targetIds.map((id) => frameNodeId(frameId, id)),
           tweaks: before.state.tweaks ?? null,
           touchedTweaks: []

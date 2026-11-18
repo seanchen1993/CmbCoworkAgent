@@ -1,4 +1,5 @@
 export interface DesignLiveDelta {
+  frameId?: string
   nodes: Array<{
     id: string
     attributes: Array<[string, string | null]>
@@ -8,13 +9,36 @@ export interface DesignLiveDelta {
   styles: Array<{ id: string; css: string | null }>
   removes?: string[]
   orders?: Array<{ parentId: string | null; ids: string[] }>
+  move?: {
+    id: string
+    sibling: { id: string; frame: boolean }
+    before: boolean
+  }
 }
 
 /** Compare canonical preview documents, never serialize or replace the running DOM. */
-export function createDesignLiveDelta(before: string, after: string): DesignLiveDelta | null {
+export function createDesignLiveDelta(
+  before: string,
+  after: string,
+  frameTarget?: { frameId: string; nodeId: string }
+): DesignLiveDelta | null {
   const parser = new DOMParser()
-  const old = parser.parseFromString(before, "text/html"),
-    fresh = parser.parseFromString(after, "text/html")
+  const documentFor = (html: string): Document | null => {
+    const root = parser.parseFromString(html, "text/html")
+    if (!frameTarget) return root
+    const documents = [root]
+    for (const doc of documents)
+      for (const iframe of doc.querySelectorAll("iframe[data-design-frame-preview][srcdoc]")) {
+        const source = iframe.getAttribute("srcdoc")!
+        if (iframe.getAttribute("data-design-frame-preview") === frameTarget.frameId)
+          return parser.parseFromString(source, "text/html")
+        if (source.includes("data-design-frame-preview"))
+          documents.push(parser.parseFromString(source, "text/html"))
+      }
+    return null
+  }
+  const old = documentFor(before), fresh = documentFor(after)
+  if (!old || !fresh) return null
   const executable = (doc: Document) =>
     [...doc.querySelectorAll("script")]
       .filter(
@@ -55,16 +79,11 @@ export function createDesignLiveDelta(before: string, after: string): DesignLive
     const survivingChildren = [...original.children].filter(
       (e) => !missing.has(e.getAttribute("data-design-node") ?? "")
     )
+    const childIds = new Set(survivingChildren.map((child) => child.getAttribute("data-design-node")))
     if (
       el.tagName !== original.tagName ||
       el.children.length !== survivingChildren.length ||
-      [...el.children].some(
-        (child) =>
-          !survivingChildren.some(
-            (oldChild) =>
-              child.getAttribute("data-design-node") === oldChild.getAttribute("data-design-node")
-          )
-      )
+      [...el.children].some((child) => !childIds.has(child.getAttribute("data-design-node")))
     )
       return null
     const attributes: Array<[string, string | null]> = []
@@ -105,6 +124,30 @@ export function createDesignLiveDelta(before: string, after: string): DesignLive
     if (attributes.length || text !== undefined || textSlots.length)
       nodes.push({ id, attributes, text, textSlots })
   }
+  let move: DesignLiveDelta["move"]
+  // Move only the edited item. Re-inserting an unaffected sibling that contains
+  // an iframe can navigate that iframe even when the outer document stays mounted.
+  const moved = frameTarget && next.get(frameTarget.nodeId)
+  const priorMoved = frameTarget && previous.get(frameTarget.nodeId)
+  const siblingRef = (el: Element | null): { id: string; frame: boolean } | null => {
+    const id = el?.getAttribute("data-design-node")
+    if (id) return { id, frame: false }
+    const frame = el?.getAttribute("data-design-frame-preview")
+    return frame ? { id: frame, frame: true } : null
+  }
+  if (moved && priorMoved) {
+    const placement = (el: Element) => {
+      let sibling = el.nextElementSibling
+      while (sibling && !siblingRef(sibling)) sibling = sibling.nextElementSibling
+      if (sibling) return { sibling: siblingRef(sibling)!, before: true }
+      sibling = el.previousElementSibling
+      while (sibling && !siblingRef(sibling)) sibling = sibling.previousElementSibling
+      return sibling ? { sibling: siblingRef(sibling)!, before: false } : undefined
+    }
+    const desired = placement(moved)
+    if (desired && JSON.stringify(desired) !== JSON.stringify(placement(priorMoved)))
+      move = { id: frameTarget.nodeId, ...desired }
+  }
   for (const parent of [fresh.body, ...next.values()]) {
     const id = parent.getAttribute("data-design-node")
     const prior = id ? previous.get(id)! : old.body
@@ -114,8 +157,15 @@ export function createDesignLiveDelta(before: string, after: string): DesignLive
     const oldIds = [...prior.children]
       .map((e) => e.getAttribute("data-design-node"))
       .filter((v): v is string => !!v && !missing.has(v))
-    if (ids.length !== oldIds.length || ids.some((v) => !oldIds.includes(v))) return null
-    if (ids.some((v, i) => v !== oldIds[i])) orders.push({ parentId: id, ids })
+    const oldIdSet = new Set(oldIds)
+    if (ids.length !== oldIds.length || ids.some((v) => !oldIdSet.has(v))) return null
+    if (ids.some((v, i) => v !== oldIds[i])) {
+      if (move && moved && parent === moved.parentElement) {
+        const stationary = oldIds.filter((item) => item !== move!.id)
+        if (ids.filter((item) => item !== move!.id).some((item, i) => item !== stationary[i]))
+          return null
+      } else orders.push({ parentId: id, ids })
+    }
   }
   const oldStyles = new Map(
     [...old.querySelectorAll("style[data-design-patch-style]")].map((e) => [
@@ -132,7 +182,7 @@ export function createDesignLiveDelta(before: string, after: string): DesignLive
   const styles = [...new Set([...oldStyles.keys(), ...newStyles.keys()])]
     .filter((id) => oldStyles.get(id) !== newStyles.get(id))
     .map((id) => ({ id, css: newStyles.get(id) ?? null }))
-  return { nodes, styles, removes, orders }
+  return { nodes, styles, removes, orders, move, frameId: frameTarget?.frameId }
 }
 
 /** Closure-free, host-owned runtime. It never evaluates source scripts or replaces interactive nodes. */
@@ -165,11 +215,36 @@ export function designLivePatchRuntime(): void {
       reply("__design_live_resync")
       return
     }
+    const delta = message.delta as DesignLiveDelta
+    let targetDocument = document
+    if (delta.frameId) {
+      const documents = [document]
+      let found: Document | undefined
+      for (const current of documents) {
+        for (const frame of current.querySelectorAll<HTMLIFrameElement>(
+          "iframe[data-design-frame-preview][srcdoc]"
+        )) {
+          const child = frame.contentDocument
+          if (child?.URL !== "about:srcdoc") continue
+          if (frame.getAttribute("data-design-frame-preview") === delta.frameId) found = child
+          else documents.push(child)
+        }
+        if (found) break
+      }
+      if (!found) {
+        reply("__design_live_resync")
+        return
+      }
+      targetDocument = found
+    }
+    const nodes = new Map<string, Element | null>()
+    for (const el of targetDocument.querySelectorAll("[data-design-node]")) {
+      const id = el.getAttribute("data-design-node")!
+      nodes.set(id, nodes.has(id) ? null : el)
+    }
     const targets: Array<{ el: Element; change: DesignLiveDelta["nodes"][number] }> = []
-    for (const change of message.delta.nodes as DesignLiveDelta["nodes"]) {
-      const el = [...document.querySelectorAll("[data-design-node]")].find(
-        (e) => e.getAttribute("data-design-node") === change.id
-      )
+    for (const change of delta.nodes) {
+      const el = nodes.get(change.id)
       if (
         !el ||
         (change.text !== undefined && el.children.length) ||
@@ -180,44 +255,57 @@ export function designLivePatchRuntime(): void {
       }
       targets.push({ el, change })
     }
-    const removed = (message.delta.removes ?? []).map((id: string) =>
-      [...document.querySelectorAll("[data-design-node]")].find(
-        (e) => e.getAttribute("data-design-node") === id
-      )
-    )
-    if (removed.some((el: Element | undefined) => !el)) {
+    const removed = (delta.removes ?? []).map((id) => nodes.get(id))
+    if (removed.some((el) => !el)) {
       reply("__design_live_resync")
       return
     }
-    const x = window.scrollX,
-      y = window.scrollY
+    const targetWindow = targetDocument.defaultView
+    const x = targetWindow?.scrollX ?? 0
+    const y = targetWindow?.scrollY ?? 0
     const reorders: Array<{ parent: Element; children: Element[] }> = []
-    for (const order of (message.delta.orders ?? []) as NonNullable<DesignLiveDelta["orders"]>) {
-      const parent = order.parentId
-        ? [...document.querySelectorAll("[data-design-node]")].find(
-            (el) => el.getAttribute("data-design-node") === order.parentId
-          )
-        : document.body
-      const children = order.ids.map(
-        (id) =>
-          parent && [...parent.children].find((el) => el.getAttribute("data-design-node") === id)
-      )
-      if (!parent || children.some((el) => !el)) {
+    for (const order of delta.orders ?? []) {
+      const parent = order.parentId ? nodes.get(order.parentId) : targetDocument.body
+      const children = order.ids.map((id) => nodes.get(id))
+      if (!parent || children.some((el) => el?.parentElement !== parent)) {
         reply("__design_live_resync")
         return
       }
       reorders.push({ parent, children: children as Element[] })
     }
+    let placement: { item: Element; sibling: Element; before: boolean } | undefined
+    if (delta.move) {
+      const item = nodes.get(delta.move.id)
+      const sibling = delta.move.sibling.frame
+        ? [...(item?.parentElement?.children ?? [])].find(
+            (el) => el.getAttribute("data-design-frame-preview") === delta.move!.sibling.id
+          )
+        : nodes.get(delta.move.sibling.id)
+      if (!item?.parentElement || !sibling || item.parentElement !== sibling.parentElement) {
+        reply("__design_live_resync")
+        return
+      }
+      placement = { item, sibling, before: delta.move.before }
+    }
     for (const el of removed) el!.remove()
     for (const { parent, children } of reorders) {
-      const slots = [...parent.children]
-        .filter((el) => children.includes(el))
+      const changed = new Set(children)
+      const current = [...parent.children].filter((el) => changed.has(el))
+      if (current.every((el, i) => el === children[i])) continue
+      const slots = current
         .map((el) => {
-          const slot = document.createComment("design-move")
+          const slot = targetDocument.createComment("design-move")
           el.before(slot)
           return slot
         })
       slots.forEach((slot, i) => slot.replaceWith(children[i]))
+    }
+    if (placement) {
+      const { item, sibling, before } = placement
+      if (before ? sibling.previousElementSibling !== item : sibling.nextElementSibling !== item) {
+        if (before) sibling.before(item)
+        else sibling.after(item)
+      }
     }
     for (const { el, change } of targets) {
       for (const [name, value] of change.attributes) {
@@ -230,30 +318,30 @@ export function designLivePatchRuntime(): void {
           text.nodeValue = change.text
           for (const n of [...el.childNodes])
             if (n !== text && n.nodeType === Node.TEXT_NODE) n.remove()
-        } else el.appendChild(document.createTextNode(change.text))
+        } else el.appendChild(targetDocument.createTextNode(change.text))
       }
       for (const slot of change.textSlots ?? []) el.childNodes[slot.index].nodeValue = slot.value
       el.animate?.([{ outline: "2px solid #d97706" }, { outline: "2px solid transparent" }], {
         duration: 700
       })
     }
-    for (const style of message.delta.styles as DesignLiveDelta["styles"]) {
+    for (const style of delta.styles) {
       let el = [
-        ...document.querySelectorAll<HTMLStyleElement>("style[data-design-patch-style]")
+        ...targetDocument.querySelectorAll<HTMLStyleElement>("style[data-design-patch-style]")
       ].find((e) => e.getAttribute("data-design-patch-style") === style.id)
       if (style.css === null) el?.remove()
       else {
         if (!el) {
-          el = document.createElement("style")
+          el = targetDocument.createElement("style")
           el.setAttribute("data-design-patch-style", style.id)
-          document.head.appendChild(el)
+          targetDocument.head.appendChild(el)
         }
         el.textContent = style.css
       }
     }
     root.dataset.designArtifactRevision = String(message.revision)
     requestAnimationFrame(() => {
-      window.scrollTo(x, y)
+      targetWindow?.scrollTo({ left: x, top: y, behavior: "instant" })
       reply("__design_live_applied")
     })
   })
