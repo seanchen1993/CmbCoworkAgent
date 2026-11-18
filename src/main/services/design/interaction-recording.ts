@@ -68,6 +68,7 @@ export function controlDesignInteractionRecording(
   const ids = new WeakMap<Element, string>()
   const locations = new Map<string, { node: Element; id: string }>()
   const steps: DesignClickRecording["steps"] = []
+  const maxSteps = 50
   const url = location.href
   let nextId = 0,
     bytes = 0,
@@ -78,6 +79,8 @@ export function controlDesignInteractionRecording(
         started: number
         index?: number
         size?: number
+        hoverState?: string
+        saved?: boolean
       })
     | undefined
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -159,20 +162,40 @@ export function controlDesignInteractionRecording(
         node.hasAttribute("popover") && node.matches(":popover-open")
       )
     })
-    copy.querySelectorAll("script,noscript").forEach((node) => node.remove())
+    copy.querySelectorAll("script,noscript,[data-sites-widget]").forEach((node) => node.remove())
     const root = document.createElement("div")
     for (const attr of [...copy.attributes]) root.setAttribute(attr.name, attr.value)
     root.append(...copy.childNodes)
     return root
   }
+  // Hover decoration alone is not a replayable action; retain visible content/state changes.
+  const hoverState = (): string => JSON.stringify(
+    [document.body, ...document.body.querySelectorAll("*")].flatMap((node) => {
+      if (node.closest("[data-sites-widget]") || node.matches('script,style,noscript,template,input[type="password"],input[type="hidden"],input[type="file"]')) return []
+      const style = getComputedStyle(node), box = node.getBoundingClientRect()
+      if (style.visibility !== "visible" || Number(style.opacity) === 0 || box.width <= 0 || box.height <= 0) return []
+      return [[
+        id(node),
+        [...node.childNodes].filter((child) => child.nodeType === Node.TEXT_NODE)
+          .map((child) => child.textContent?.replace(/\s+/g, " ").trim()).join(""),
+        node instanceof HTMLInputElement || node instanceof HTMLSelectElement || node instanceof HTMLTextAreaElement
+          ? valueOf(node) : null,
+        node.getAttribute("aria-expanded"),
+        node.getAttribute("aria-selected"),
+        node.matches('dialog:modal,[popover]:popover-open')
+      ]]
+    })
+  )
   const saveDraft = () => {
     const step = pending
     if (!step) return
     try {
       if (location.href !== url) throw new Error("页面已跳转，请重新录制")
       const after = snapshot()
+      step.saved = true
       step.started = Date.now()
-      if (step.before.isEqualNode(after)) {
+      if (step.before.isEqualNode(after) ||
+        (step.hoverState !== undefined && step.hoverState === hoverState())) {
         if (step.index !== undefined) {
           steps.splice(step.index, 1)
           bytes -= step.size ?? 0
@@ -201,10 +224,10 @@ export function controlDesignInteractionRecording(
       }
       bytes += size - (step.size ?? 0)
       step.size = size
-      if (steps.length >= 8) {
+      if (steps.length >= maxSteps) {
         // Stop accepting actions, but let the final action finish its delayed DOM updates.
         recording = false
-        message = "已记录 8 次页面变化，请抓取或重新录制"
+        message = `已记录 ${maxSteps} 次页面变化，请抓取或重新录制`
       }
     } catch (error) {
       halt(error instanceof Error ? error.message : "交互录制失败，请重新录制")
@@ -252,6 +275,7 @@ export function controlDesignInteractionRecording(
       return
     const target = event.composedPath().find((node): node is Element => node instanceof Element)
     if (!target) return
+    if (event.composedPath().some((node) => node instanceof Element && node.matches("[data-sites-widget]"))) return
     const label = target.closest("label") as HTMLLabelElement | null
     const control = target.closest("input,select,textarea,[contenteditable]") ?? label?.control
     if (
@@ -289,6 +313,12 @@ export function controlDesignInteractionRecording(
     )
       return
     const triggerId = id(trigger)
+    // A dialog can emit boundary events before its close/focus handlers finish.
+    if (["pointerover", "pointerout"].includes(type) && pending && !pending.saved &&
+      !["pointerover", "pointerout"].includes(pending.event ?? "")) {
+      schedule()
+      return
+    }
     // Pointer-driven menus may open before click. Keep their original pre-press state.
     if (
       pending?.trigger === triggerId &&
@@ -320,6 +350,7 @@ export function controlDesignInteractionRecording(
         trigger: triggerId,
         event: type,
         before,
+        hoverState: ["pointerover", "pointerout"].includes(type) ? hoverState() : undefined,
         started: Date.now(),
         key:
           event instanceof KeyboardEvent && type === "keydown"

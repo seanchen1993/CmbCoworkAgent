@@ -90,6 +90,51 @@ const server = createServer((request, response) => {
       </script></body></html>`)
     return
   }
+  if (request.url === "/hover-noise") {
+    response.setHeader("content-type", "text/html; charset=utf-8")
+    response.end(`<!doctype html><html><head><style>
+      #open{position:absolute;left:30px;top:30px;width:180px;height:50px}
+      dialog{width:400px;height:240px}
+      #cancel{position:absolute;left:140px;top:150px;width:120px;height:40px}
+      [data-hover]{background-color:rgb(220,230,240)}
+      #hint{position:absolute;left:500px;top:30px}
+      #hint-popup{position:absolute;left:500px;top:90px;display:none}
+      #hint-popup.shown{display:block}
+    </style></head><body>
+      <button id="open">Open modal</button><b id="action-count">0</b><p id="untouched">Editable</p>
+      <dialog id="modal"><p>Settings</p><button id="cancel">Cancel</button></dialog>
+      <button id="hint">Hint</button><p id="hint-popup" class="tooltip">Helpful content</p>
+      <div data-sites-widget="editor-composer" popover="manual"></div>
+      <div id="business-popover" popover="manual">Business popover</div>
+      <script>
+        const editor=document.querySelector('[data-sites-widget]');
+        editor.attachShadow({mode:'open'}).innerHTML='<style>:host{border:0;padding:0;background:transparent;position:fixed;inset:auto 0 0 auto}</style><button>Edit website</button>';
+        editor.showPopover();
+        let actions=0;
+        document.getElementById('open').onclick=()=>{document.getElementById('modal').showModal();document.body.style.overflow='hidden';document.getElementById('action-count').textContent=++actions};
+        document.getElementById('cancel').onclick=()=>{document.getElementById('modal').close();document.getElementById('action-count').textContent=++actions};
+        document.getElementById('modal').onclose=()=>{document.body.style.overflow=''};
+        for(const element of document.querySelectorAll('#open,#cancel,dialog')) {
+          element.onpointerenter=()=>element.setAttribute('data-hover','true');
+          element.onpointerleave=()=>element.removeAttribute('data-hover');
+        }
+        document.getElementById('hint').onpointerenter=()=>document.getElementById('hint-popup').classList.add('shown');
+        document.getElementById('hint').onpointerleave=()=>document.getElementById('hint-popup').classList.remove('shown');
+      </script></body></html>`)
+    return
+  }
+  if (request.url === "/filter-tabs") {
+    response.setHeader("content-type", "text/html; charset=utf-8")
+    response.end(`<!doctype html><html><body><section>
+      <div role="tablist"><button id="filter-one" role="tab" class="active" aria-selected="true">One</button><button id="filter-two" role="tab" class="" aria-selected="false">Two</button></div>
+      <article id="filter-panel-one"><p id="filter-copy">Editable panel</p></article><article id="filter-panel-two" hidden>Second panel</article>
+      </section><b id="filter-log">0</b><script>
+      let count=0;for(const [index,button]of [...document.querySelectorAll('[role="tab"]')].entries())button.onclick=()=>{
+        for(const [i,tab]of [...document.querySelectorAll('[role="tab"]')].entries()){tab.classList.toggle('active',i===index);tab.setAttribute('aria-selected',String(i===index));document.getElementById(i?'filter-panel-two':'filter-panel-one').hidden=i!==index}
+        document.getElementById('filter-log').textContent=++count;
+      };</script></body></html>`)
+    return
+  }
   if (request.url === "/menu-only.svg" || request.url?.startsWith("/scene-")) {
     response.setHeader("content-type", "image/svg+xml")
     const width = request.url?.startsWith("/scene-two")
@@ -183,6 +228,102 @@ try {
   await compatPreview.click("#modal-close")
   assert.equal(await compatPreview.locator("#modal").isVisible(), false)
   await compatPreview.close()
+  await source.goto(origin + "/hover-noise")
+  await source.evaluate(async () => {
+    const modulePath = "/app.js"
+    const m = await import(modulePath)
+    ;(window as any).recordingModule = m
+    m.controlDesignInteractionRecording("start")
+  })
+  for (const [index, selector] of ["#open", "#cancel"].entries()) {
+    await source.click(selector)
+    await source.waitForTimeout(400)
+    const status = await source.evaluate(() =>
+      (window as any).recordingModule.controlDesignInteractionRecording("status")
+    )
+    assert.equal(status.count, index + 1, "hover attributes and colors must not inflate click counts")
+    assert.equal(status.recording, true)
+  }
+  await source.hover("#open")
+  await source.waitForTimeout(400)
+  assert.equal(await source.evaluate(() =>
+    (window as any).recordingModule.controlDesignInteractionRecording("status").count
+  ), 2, "moving back to the page must not consume another recording slot")
+  const noiseSnapshot = await source.evaluate(() =>
+    (window as any).recordingModule.extractDesignPageSnapshot()
+  )
+  assert.doesNotMatch(noiseSnapshot.html, /data-sites-widget|Edit website/,
+    "site authoring overlays must not be captured or serialized in recorded states")
+  assert.equal(noiseSnapshot.warnings.some((warning: any) => warning.code === "shadow_dom"), false,
+    "excluded authoring widgets must not be flattened as business shadow components")
+  const noisePreview = await browser.newPage()
+  await noisePreview.setContent(installSnapshotRuntime(noiseSnapshot.html))
+  await noisePreview.locator("#untouched").evaluate(node => node.textContent = "User edited")
+  for (let round = 0; round < 2; round++) {
+    await noisePreview.click("#open")
+    assert.equal(await noisePreview.locator("#modal").isVisible(), true)
+    await noisePreview.click("#cancel")
+    assert.equal(await noisePreview.locator("#modal").isVisible(), false)
+    assert.equal(await noisePreview.locator("#modal").evaluate(node => node.matches(":modal")), false,
+      "closing must release the native top layer so the page remains clickable")
+    assert.equal(await noisePreview.evaluate(() => document.body.style.overflow), "",
+      "the delayed native close handler must remain part of the recorded click")
+    assert.equal(await noisePreview.locator("#untouched").textContent(), "User edited")
+  }
+  await noisePreview.close()
+  const legacyWidgetPreview = await browser.newPage()
+  const legacyWidgetHtml = noiseSnapshot.html.replace("</body>",
+    '<div data-sites-widget="editor-composer" popover="manual" data-design-capture-popover>Old editor overlay</div><div id="saved-business-popover" popover="manual" data-design-capture-popover>Business overlay</div></body>')
+  await legacyWidgetPreview.setContent(installSnapshotRuntime(legacyWidgetHtml))
+  assert.equal(await legacyWidgetPreview.locator("[data-sites-widget]").count(), 0,
+    "old captures must also discard the authoring popover instead of displaying a black border")
+  assert.equal(await legacyWidgetPreview.locator("#saved-business-popover").evaluate(node => node.matches(":popover-open")), true,
+    "actual business popovers must still be restored")
+  await legacyWidgetPreview.close()
+  await source.evaluate(() =>
+    (window as any).recordingModule.controlDesignInteractionRecording("start")
+  )
+  await source.hover("#hint")
+  await source.waitForTimeout(400)
+  await source.mouse.move(900, 700)
+  await source.waitForTimeout(400)
+  assert.equal(await source.evaluate(() =>
+    (window as any).recordingModule.controlDesignInteractionRecording("status").count
+  ), 2, "class-driven tooltip visibility changes must still be recorded")
+  const hintSnapshot = await source.evaluate(() =>
+    (window as any).recordingModule.extractDesignPageSnapshot()
+  )
+  const hintPreview = await browser.newPage()
+  await hintPreview.setContent(installSnapshotRuntime(hintSnapshot.html))
+  await hintPreview.hover("#hint")
+  assert.equal(await hintPreview.locator("#hint-popup").isVisible(), true)
+  await hintPreview.mouse.move(900, 700)
+  assert.equal(await hintPreview.locator("#hint-popup").isVisible(), false)
+  await hintPreview.close()
+  await source.goto(origin + "/filter-tabs")
+  await source.evaluate(async () => {
+    const modulePath = "/app.js"
+    const m = await import(modulePath)
+    ;(window as any).recordingModule = m
+    m.controlDesignInteractionRecording("start")
+  })
+  for (const selector of ["#filter-two", "#filter-one"]) {
+    await source.click(selector)
+    await source.waitForTimeout(400)
+  }
+  const filterSnapshot = await source.evaluate(() =>
+    (window as any).recordingModule.extractDesignPageSnapshot()
+  )
+  const filterPreview = await browser.newPage()
+  await filterPreview.setContent(installSnapshotRuntime(filterSnapshot.html))
+  await filterPreview.locator("#filter-copy").evaluate(node => node.textContent = "User edited panel")
+  for (const name of ["two", "one", "two"]) {
+    await filterPreview.click(`#filter-${name}`)
+    assert.equal(await filterPreview.locator(`#filter-panel-${name}`).isVisible(), true)
+    assert.equal(await filterPreview.locator(`#filter-panel-${name === "one" ? "two" : "one"}`).isVisible(), false)
+    assert.equal(await filterPreview.locator("#filter-copy").textContent(), "User edited panel")
+  }
+  await filterPreview.close()
   const startEvents = async () => {
     await source.goto(origin + "/events")
     await source.evaluate(async () => {
@@ -320,7 +461,7 @@ try {
   assert.equal(await focusPreview.evaluate(() => document.activeElement?.id), "tab-b")
   await focusPreview.close()
   await startEvents()
-  for (let index = 0; index < 7; index++) {
+  for (let index = 0; index < 49; index++) {
     await source.click("#check")
     await settled()
   }
@@ -329,7 +470,7 @@ try {
   const lastPreview = await eventsPreview()
   await lastPreview.locator("#late-result").evaluate(node => node.textContent = "initial")
   await lastPreview.click("#late")
-  assert.equal(await lastPreview.locator("#late-result").textContent(), "complete", "the eighth action must retain its delayed result")
+  assert.equal(await lastPreview.locator("#late-result").textContent(), "complete", "the fiftieth action must retain its delayed result")
   await lastPreview.close()
   await source.goto(origin)
   await source.evaluate(async () => {
@@ -457,7 +598,7 @@ try {
   await source.evaluate(() =>
     (window as any).recordingModule.controlDesignInteractionRecording("start")
   )
-  for (let count = 1; count <= 8; count++) {
+  for (let count = 1; count <= 50; count++) {
     await source.click("#toggle")
     await source.waitForFunction(
       (expected) =>
@@ -465,12 +606,22 @@ try {
         expected,
       count
     )
+    if (count === 8 || count === 49) {
+      assert.equal(await source.evaluate(() =>
+        (window as any).recordingModule.controlDesignInteractionRecording("status").recording
+      ), true, "recording must continue before the fiftieth action")
+    }
   }
   const limited = await source.evaluate(() =>
     (window as any).recordingModule.controlDesignInteractionRecording("status")
   )
   assert.equal(limited.recording, false)
-  assert.equal(limited.count, 8)
+  assert.equal(limited.count, 50)
+  assert.equal(limited.message, "已记录 50 次页面变化，请抓取或重新录制")
+  await source.click("#toggle")
+  assert.equal(await source.evaluate(() =>
+    (window as any).recordingModule.controlDesignInteractionRecording("status").count
+  ), 50, "the fifty-first action must not be recorded")
   await source.evaluate(() => {
     const m = (window as any).recordingModule
     m.controlDesignInteractionRecording("start")
@@ -558,7 +709,7 @@ try {
     await preview.close()
   }
   console.log(
-    "PASS native forms, input/reset, keyboard/Escape, hover, double/right click, delayed eighth action, input dropdowns, CSSOM, animated modals, Windows paths, Tab round trips, old captures, offline assets, unrelated edits, limits and navigation reset"
+    "PASS native forms, input/reset, keyboard/Escape, hover, double/right click, delayed fiftieth action, input dropdowns, CSSOM, animated modals, Windows paths, Tab round trips, old captures, offline assets, unrelated edits, 50-action limit and navigation reset"
   )
 } finally {
   await browser.close()

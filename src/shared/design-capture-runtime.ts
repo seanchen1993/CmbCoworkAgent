@@ -2,6 +2,8 @@ import { insertDesignBodyScript } from "./design-html-mutations"
 
 /** Host-owned behavior only, installed after removing all source scripts. */
 export function designSnapshotRuntime(): void {
+  // Publishing/authoring controls are not part of the captured site's interface.
+  document.querySelectorAll("[data-sites-widget]").forEach((node) => node.remove())
   document
     .querySelectorAll<HTMLDialogElement>("dialog[data-design-capture-modal]")
     .forEach((dialog) => {
@@ -53,6 +55,8 @@ export function installDesignClickPlayback(): void {
     .filter((step) => step.before && step.after)
   if (!steps.length) return
   const states = steps.flatMap((step) => [step.before!, step.after!]).reverse()
+  for (const state of states)
+    state.querySelectorAll("[data-sites-widget]").forEach((node) => node.remove())
 
   // Tabs select a recorded destination independently of the tab active at capture time.
   const selectTab = (tab: Element): boolean => {
@@ -82,6 +86,19 @@ export function installDesignClickPlayback(): void {
       )
     )
     const regions: Array<[Element, Element, Element]> = [[beforeGroup, afterGroup, group]]
+    if (!ids.size) {
+      // Filter tabs often control hidden siblings without declaring aria-controls.
+      const desired = new Map([...after.querySelectorAll(`[${attr}]`)].map((node) => [key(node), node]))
+      for (const old of before.querySelectorAll(`[${attr}]`)) {
+        const next = desired.get(key(old)), live = find(key(old))
+        if (!next || !live || !group.parentElement?.contains(live) ||
+          old.hasAttribute("hidden") === next.hasAttribute("hidden")) continue
+        const target = old.cloneNode(false) as Element
+        target.toggleAttribute("hidden", next.hasAttribute("hidden"))
+        regions.push([old.cloneNode(false) as Element, target, live])
+      }
+      if (regions.length === 1) return false
+    }
     for (const id of ids) {
       const oldPanel = [...before.querySelectorAll("[id]")].find((node) => node.id === id)
       const panel = [...after.querySelectorAll("[id]")].find((node) => node.id === id)
@@ -100,7 +117,8 @@ export function installDesignClickPlayback(): void {
     after: Element,
     live: Element,
     apply: boolean,
-    form = false
+    form = false,
+    trigger?: Element
   ): boolean => {
     if (before.isEqualNode(after)) return true
     for (const name of new Set(
@@ -111,11 +129,15 @@ export function installDesignClickPlayback(): void {
       if (oldValue === value || name === attr) continue
       if (
         !apply &&
+        (!trigger || trigger.contains(live)) &&
         live.getAttribute(name) !== oldValue &&
+        !/^data-(hover|focus)/.test(name) &&
+        !(name === "style" && (live as HTMLElement).style?.cssText === (before as HTMLElement).style?.cssText) &&
         !(form && ["value", "checked", "selected"].includes(name) && live.matches("input,option"))
       )
         return false
       if (apply) {
+        if (live instanceof HTMLDialogElement && name === "open" && value === null) live.close()
         if (value === null) live.removeAttribute(name)
         else live.setAttribute(name, value)
         if (live instanceof HTMLInputElement && name === "value") live.value = value ?? ""
@@ -138,7 +160,7 @@ export function installDesignClickPlayback(): void {
       const node = find(key(child))
       if (old) {
         if (old.isEqualNode(child)) continue
-        if (!node || !patch(old, child, node, apply, form)) return false
+        if (!node || !patch(old, child, node, apply, form, trigger)) return false
       } else {
         if (!apply && node) return false
         if (apply) {
@@ -169,15 +191,7 @@ export function installDesignClickPlayback(): void {
       oldText.map((node) => node.textContent).join() !== text.map((node) => node.textContent).join()
     ) {
       const current = [...live.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE)
-      if (
-        !apply &&
-        ![oldText, text].some(
-          (nodes) =>
-            current.map((node) => node.textContent).join() ===
-            nodes.map((node) => node.textContent).join()
-        )
-      )
-        return false
+      // Captures start in their final state; counters and labels need not equal an earlier step.
       if (apply) {
         current.forEach((node) => node.remove())
         for (const node of [...after.childNodes])
@@ -231,7 +245,7 @@ export function installDesignClickPlayback(): void {
         break
       }
       let reverse = false
-      const step = steps.find((item) => {
+      const matches = (item: (typeof steps)[number], local = false) => {
         if (
           item.trigger !== key(target) ||
           item.event !== event.type ||
@@ -245,9 +259,12 @@ export function installDesignClickPlayback(): void {
           reverse ? item.before! : item.after!,
           document.body,
           false,
-          form
+          form,
+          local ? target : undefined
         )
-      })
+      }
+      // Prefer the exact toggle state; relax unrelated state only when no exact step matches.
+      const step = steps.find((item) => matches(item)) ?? steps.find((item) => matches(item, true))
       if (!step) continue
       if (!(event instanceof KeyboardEvent && event.key === "Tab")) event.preventDefault()
       patch(
@@ -289,7 +306,7 @@ export function installDesignClickPlayback(): void {
     document.addEventListener(event, replay)
 }
 
-const runtimeVersion = "/* design-interaction-runtime-v4 */"
+const runtimeVersion = "/* design-interaction-runtime-v5 */"
 
 export function installDesignSnapshotRuntime(html: string): string {
   const playback = html.includes('data-design-interaction="click"')

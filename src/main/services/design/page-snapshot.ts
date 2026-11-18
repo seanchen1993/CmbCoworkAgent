@@ -120,6 +120,7 @@ export async function extractDesignPageSnapshot(options?: { bridgeKey: string; a
     if (i && i % 250 === 0) await yieldCapture()
     const source = sourceNodes[i],
       target = clonedNodes[i]
+    if (source.closest("[data-sites-widget]")) continue
     captureOpenLayer(source, target)
     const recordedId = recording?.ids.get(source)
     if (recordedId) target.setAttribute("data-design-recorded-node", recordedId)
@@ -194,6 +195,7 @@ export async function extractDesignPageSnapshot(options?: { bridgeKey: string; a
     }
   }
   for (const [index, source] of sourceNodes.entries()) {
+    if (source.closest("[data-sites-widget]")) continue
     if (source.shadowRoot) await copyShadow(source, clonedNodes[index], 0)
     else if (source.tagName.includes("-") && !source.children.length && visible(source))
       warn("custom_element", "部分自定义组件可能包含无法读取的内部内容，请检查预览。")
@@ -238,7 +240,7 @@ export async function extractDesignPageSnapshot(options?: { bridgeKey: string; a
   // Include template content in sanitization, even though it is currently inert.
   const clean = (root: ParentNode) => {
     root
-      .querySelectorAll("script,base,meta[http-equiv],object,embed,noscript")
+      .querySelectorAll("script,base,meta[http-equiv],object,embed,noscript,[data-sites-widget]")
       .forEach((node) => node.remove())
     root.querySelectorAll("iframe").forEach(node => {
       if (!options?.allowedFrameIds.includes(node.getAttribute("data-design-capture-frame") ?? "")) node.remove()
