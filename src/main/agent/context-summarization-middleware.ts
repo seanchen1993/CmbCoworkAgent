@@ -126,7 +126,17 @@ const PROFILE_TRUNCATE_ARGS: TruncateArgsSettings = {
 const MAX_SUMMARY_MODEL_ATTEMPTS = 4
 const MAX_SUMMARY_OVERFLOW_RETRIES = 3
 const MAX_SUMMARY_QUALITY_ATTEMPTS = 3
-type SummaryAttemptBudget = { used: number; diagnostics?: CompactionDiagnostics }
+type SummaryAttemptBudget = {
+  used: number
+  limit: number
+  diagnostics?: CompactionDiagnostics
+  recovery?: {
+    model: BaseChatModel
+    byteBudget: number
+    observedContextWindow?: number
+    reservedOutputTokens: number
+  }
+}
 const EMPTY_SUMMARY_QUALITY_ISSUE = "empty final content"
 const TOOL_CALL_SUMMARY_QUALITY_ISSUE = "tool call instead of final text"
 const DSML_SUMMARY_QUALITY_ISSUE = "DSML tool-call markup instead of final text"
@@ -1729,18 +1739,43 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
         const text = typeof message.content === "string" ? message.content : ""
         return extra + Buffer.byteLength(text) - text.length
       }, 0)
+    const trimMessagesForRetry = (
+      byteBudget: number,
+      inputTarget: number | undefined,
+      buildRequest: (transcript: string) => BaseMessage[]
+    ): boolean => {
+      if (fitInheritedHandoff) {
+        // Resize content before dropping old rounds, and keep the handoff
+        // outside the round eviction.
+        reduceInheritedRequest(Math.min(byteBudget, inputTarget ?? Infinity), false)
+      }
+      const handoff = fitInheritedHandoff ? attemptMessages[0] : undefined
+      const retryMessages = prepareSummaryModelRequest(
+        handoff ? attemptMessages.slice(1) : attemptMessages
+      )
+      const withHandoff = (remaining: BaseMessage[]): BaseMessage[] =>
+        handoff ? [handoff, ...remaining] : remaining
+      const fitsRequest = (messages: BaseMessage[]): boolean =>
+        summaryRequestBytes(buildRequest(renderSummaryTranscript(withHandoff(messages)))) <= byteBudget
+      const truncated = handoff && fitsRequest(retryMessages)
+        ? null
+        : truncateOldestRoundsForRetry(retryMessages, trimTokensToSummarize, fitsRequest)
+      attemptMessages = withHandoff(truncated ?? retryMessages)
+      return truncated !== null
+    }
     let preflightChecked = false
     let overflowRetries = 0
-    let retryByteBudget: number | undefined
-    let observedContextWindow: number | undefined
-    let reservedOutputTokens = summaryMaxOutputTokens
+    const recovery = fitInheritedHandoff ? attemptBudget.recovery : undefined
+    let retryByteBudget = recovery?.byteBudget
+    let observedContextWindow = recovery?.observedContextWindow
+    let reservedOutputTokens = recovery?.reservedOutputTokens ?? summaryMaxOutputTokens
     let invalidSummaryAttempts = 0
     let previousQualityIssues: string[] = []
-    let activeModel = chatModel
+    let activeModel = recovery?.model ?? chatModel
     const attemptLimit =
       typeof maxAdditionalAttempts === "number"
-        ? Math.min(MAX_SUMMARY_MODEL_ATTEMPTS, attemptBudget.used + maxAdditionalAttempts)
-        : MAX_SUMMARY_MODEL_ATTEMPTS
+        ? Math.min(attemptBudget.limit, attemptBudget.used + maxAdditionalAttempts)
+        : attemptBudget.limit
 
     for (;;) {
       signal?.throwIfAborted()
@@ -1748,11 +1783,11 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
         ? summaryModelInputBudgetTokens ?? getMaxInputTokens(activeModel)
         : undefined
       const inputTarget = inheritedInputBudget ? inheritedInputBudget * 0.8 : undefined
-      if (!preflightChecked && inputTarget && estimateSummaryInput(attemptMessages) > inputTarget) {
+      if (!preflightChecked && retryByteBudget === undefined &&
+          inputTarget && estimateSummaryInput(attemptMessages) > inputTarget) {
         // Fit the handoff and raw tail together before either is encoded as XML.
         reduceInheritedRequest(inputTarget, true)
       }
-      const conversationTranscript = renderSummaryTranscript(attemptMessages)
       const buildRequest = (transcript: string, compactInstructions = false): BaseMessage[] => [
         new SystemMessage({
           content: SUMMARY_TEXT_ONLY_INSTRUCTION,
@@ -1791,6 +1826,12 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
           }
         })
       ]
+      let conversationTranscript = renderSummaryTranscript(attemptMessages)
+      if (!preflightChecked && retryByteBudget !== undefined &&
+          summaryRequestBytes(buildRequest(conversationTranscript)) > retryByteBudget) {
+        trimMessagesForRetry(retryByteBudget, inputTarget, buildRequest)
+        conversationTranscript = renderSummaryTranscript(attemptMessages)
+      }
       const summaryMessages =
         retryByteBudget === undefined
           ? buildRequest(conversationTranscript)
@@ -1801,13 +1842,14 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
         // Check prompt and XML expansion once without repeatedly encoding an
         // unchanged large tail. Provider feedback can tighten the request later.
         preflightChecked = true
-        if (inputTarget && estimatedInput > inputTarget && reduceInheritedRequest(inputTarget / 2, true)) {
+        if (retryByteBudget === undefined && inputTarget && estimatedInput > inputTarget &&
+            reduceInheritedRequest(inputTarget / 2, true)) {
           continue
         }
       }
       try {
         if (attemptBudget.used >= attemptLimit) {
-          throw new Error(`Summary model attempt limit reached (${MAX_SUMMARY_MODEL_ATTEMPTS})`)
+          throw new Error(`Summary model attempt limit reached (${attemptBudget.limit})`)
         }
         signal?.throwIfAborted()
         attemptBudget.used += 1
@@ -1842,6 +1884,16 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
           summaryChars: summary.length,
           summaryBytes: Buffer.byteLength(summary)
         })
+        if (fitInheritedHandoff && retryByteBudget !== undefined) {
+          // The next stage of this same compaction can start with a model and
+          // request size that the gateway accepted.
+          attemptBudget.recovery = {
+            model: activeModel,
+            byteBudget: Math.min(retryByteBudget, requestBytes),
+            observedContextWindow,
+            reservedOutputTokens
+          }
+        }
         return summary
       } catch (error) {
         attemptBudget.diagnostics?.record("summary_error", {
@@ -1874,23 +1926,7 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
         })
         retryByteBudget = byteBudget
         previousQualityIssues = []
-        if (fitInheritedHandoff) {
-          // Trim inherited content structurally before the serialized byte
-          // fitter runs, and keep its handoff out of the old-round eviction.
-          reduceInheritedRequest(Math.min(byteBudget, inputTarget ?? Infinity), false)
-        }
-        const handoff = fitInheritedHandoff ? attemptMessages[0] : undefined
-        const retryMessages = prepareSummaryModelRequest(
-          handoff ? attemptMessages.slice(1) : attemptMessages
-        )
-        const withHandoff = (remaining: BaseMessage[]): BaseMessage[] =>
-          handoff ? [handoff, ...remaining] : remaining
-        const fitsRequest = (messages: BaseMessage[]): boolean =>
-          summaryRequestBytes(buildRequest(renderSummaryTranscript(withHandoff(messages)))) <= byteBudget
-        const truncated = handoff && fitsRequest(retryMessages)
-          ? null
-          : truncateOldestRoundsForRetry(retryMessages, trimTokensToSummarize, fitsRequest)
-        attemptMessages = withHandoff(truncated ?? retryMessages)
+        const trimmedRounds = trimMessagesForRetry(byteBudget, inputTarget, buildRequest)
         let nextRequest: BaseMessage[]
         try {
           nextRequest = fitSummaryRequestToBytes(
@@ -1907,7 +1943,7 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
         }
         attemptBudget.diagnostics?.record("summary_retry_trim", {
           attempt: attemptBudget.used,
-          strategy: truncated
+          strategy: trimmedRounds
             ? "oldest_rounds_then_serialized_byte_budget"
             : "serialized_byte_budget",
           beforeMessageCount,
@@ -2040,7 +2076,9 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
               : request.messages.length
           )
     let archiveIncomplete = previousEvent?.archiveIncomplete === true
-    const summaryAttemptBudget: SummaryAttemptBudget = { used: 0, diagnostics }
+    const summaryAttemptBudget: SummaryAttemptBudget = {
+      used: 0, limit: MAX_SUMMARY_MODEL_ATTEMPTS, diagnostics
+    }
     let cutoffIndex = determineCutoffIndex(truncatedMessages, maxInputTokens)
     // DeepAgents Python refuses token-based compaction when it cannot preserve
     // any message. CmbCowork intentionally still supports summarizing one
@@ -2074,6 +2112,7 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
         ...tail
       ])
       let lastOverflow = rejectedRequest.error
+      let rewrittenRequestOverflow = false
       let previousTarget: number | undefined
       for (let revision = 0; revision < 2; revision += 1) {
         // Preserve progressively smaller summary requests until the first
@@ -2146,12 +2185,18 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
           } catch (error) {
             if (!isCmbContextOverflow(error)) throw error
             lastOverflow = error
+            rewrittenRequestOverflow = true
           }
         }
       }
-      if (tail.length === 0 || summaryAttemptBudget.used >= MAX_SUMMARY_MODEL_ATTEMPTS) {
-        throw lastOverflow
+      if (tail.length === 0) throw lastOverflow
+      if (rewrittenRequestOverflow && summaryAttemptBudget.recovery &&
+          summaryAttemptBudget.used >= MAX_SUMMARY_MODEL_ATTEMPTS - 1) {
+        // An accepted summary still overflowed with the raw tail attached.
+        // Allow one extra attempt for whole-input recovery at the known fit.
+        summaryAttemptBudget.limit += 1
       }
+      if (summaryAttemptBudget.used >= summaryAttemptBudget.limit) throw lastOverflow
     }
     if (noProgress) {
       request.runtime?.signal?.throwIfAborted()

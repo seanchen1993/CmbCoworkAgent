@@ -848,6 +848,122 @@ describe("fork summary state", () => {
     expect(write).toHaveBeenCalledOnce()
   })
 
+  it.each([1_200, 1_250])(
+    "reuses the accepted %s-character recovery budget when the fork's raw tail also overflows",
+    async (summaryLimit) => {
+      const raw = [new HumanMessage("original request"), new AIMessage("original answer")]
+      const value = checkpoint(raw, raw.length)
+      value.channel_values._summarizationEvent = {
+        cutoffIndex: raw.length,
+        filePath: null,
+        summaryMessage: buildSummaryMessage("界".repeat(30_000), null, null)
+      }
+      await inheritForkSummarization({ checkpoint: value, persistedMessageCount: raw.length })
+      const messages = [
+        ...raw,
+        new HumanMessage("review evidence"),
+        new AIMessage("界".repeat(1_000)),
+        new HumanMessage("Continue")
+      ]
+      const systemMessage = new SystemMessage("界".repeat(15_400))
+      const invoke = vi.fn(async (request: BaseMessage[]) => {
+        const length = request.reduce((total, message) => total + String(message.content).length, 0)
+        if (length > summaryLimit) throw new Error("maximum context length")
+        return new AIMessage("Earlier decision and next step")
+      })
+      const middleware = createCmbSummarizationMiddleware({
+        model: { invoke } as never,
+        backend: { write: vi.fn(async () => ({})) } as never,
+        maxInputTokens: 32_000,
+        postCompactionInputBudgetTokens: 27_000,
+        trigger: { type: "tokens", value: 500 },
+        keep: { type: "tokens", value: 3_200 }
+      }) as unknown as {
+        wrapModelCall: (
+          request: unknown,
+          handler: (request: { messages: BaseMessage[] }) => Promise<AIMessage>
+        ) => Promise<{ update: { _summarizationEvent: unknown } }>
+      }
+      const result = await middleware.wrapModelCall({
+        messages, systemMessage, state: { ...value.channel_values, messages }, tools: []
+      }, async ({ messages }) => {
+        if (estimateCjkProviderTokens([systemMessage, ...messages]) > 16_000) {
+          throw new Error("maximum context length")
+        }
+        expect(messages).toHaveLength(1)
+        expect(messages[0].content).toContain("Earlier decision and next step")
+        return new AIMessage("done")
+      })
+      expect(SummarizationEventSchema.parse(result.update._summarizationEvent).cutoffIndex)
+        .toBe(messages.length)
+      expect(invoke).toHaveBeenCalledTimes(5)
+    }
+  )
+
+  it("keeps the gateway recovery model when a fork must compact its raw tail", async () => {
+    const raw = [
+      new HumanMessage("original request"),
+      new AIMessage("domain evidence ".repeat(750) + "COVERED_ONLY")
+    ]
+    const value = checkpoint(raw, raw.length)
+    value.channel_values._summarizationEvent = {
+      cutoffIndex: raw.length,
+      filePath: null,
+      summaryMessage: buildSummaryMessage("Inherited decision: " + "界".repeat(18_400), null, null)
+    }
+    await inheritForkSummarization({ checkpoint: value, persistedMessageCount: raw.length })
+    const messages = [
+      ...raw,
+      new HumanMessage("review evidence"),
+      new AIMessage("RECENT_EVIDENCE " + "界".repeat(1_000)),
+      new HumanMessage("continue this work")
+    ]
+    const systemMessage = new SystemMessage("界".repeat(3_400))
+    const overflow = () => Object.assign(new Error("任务上下文超过最大限度"), { status: 485 })
+    const modelWithReserve = (reserve: number) => vi.fn(async (request: BaseMessage[]) => {
+      if (estimateCjkProviderTokens(request) + reserve > 8_000) throw overflow()
+      return new AIMessage("Inherited decision and RECENT_EVIDENCE")
+    })
+    const invoke = modelWithReserve(4_000)
+    const recover = modelWithReserve(1_024)
+    const middleware = createCmbSummarizationMiddleware({
+      model: { invoke } as never,
+      overflowModel: { invoke: recover } as never,
+      backend: { write: vi.fn(async () => ({})) } as never,
+      maxInputTokens: 128_000,
+      summaryModelInputBudgetTokens: 123_000,
+      postCompactionInputBudgetTokens: 123_000,
+      trimTokensToSummarize: 83_200,
+      summaryMaxOutputTokens: 4_000,
+      overflowMaxOutputTokens: 1_024,
+      trigger: { type: "tokens", value: 96_000 },
+      keep: { type: "tokens", value: 12_000 }
+    }) as unknown as {
+      wrapModelCall: (
+        request: unknown,
+        handler: (request: { messages: BaseMessage[] }) => Promise<AIMessage>
+      ) => Promise<{ update: { _summarizationEvent: unknown } }>
+    }
+    const result = await middleware.wrapModelCall({
+      messages, systemMessage, state: { ...value.channel_values, messages }, tools: []
+    }, async ({ messages }) => {
+      if (estimateCjkProviderTokens([systemMessage, ...messages]) + 4_000 > 8_000) throw overflow()
+      expect(messages).toHaveLength(1)
+      return new AIMessage("done")
+    })
+    expect(SummarizationEventSchema.parse(result.update._summarizationEvent).cutoffIndex)
+      .toBe(messages.length)
+    expect(invoke).toHaveBeenCalledOnce()
+    expect(recover).toHaveBeenCalledTimes(3)
+    const lastRequest = recover.mock.calls.at(-1)![0]
+    expect(lastRequest[1].content).toContain("RECENT_EVIDENCE")
+    expect(lastRequest[1].content).toContain("Inherited decision")
+    expect(lastRequest[1].content).not.toContain("COVERED_ONLY")
+    expect(summaryRequestBytes(lastRequest)).toBeLessThanOrEqual(
+      summaryRequestBytes(recover.mock.calls[1][0])
+    )
+  })
+
   it.each([
     { first: "decision ".repeat(700), whole: "decision ".repeat(280), budget: 7_000, limit: 250 },
     { first: "decision ".repeat(1_200), whole: "界".repeat(3_400), budget: 2_300, limit: 3_300 }
