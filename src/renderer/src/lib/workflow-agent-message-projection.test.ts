@@ -10,6 +10,7 @@ import {
 import type { Message } from "../types"
 import { ElectronIPCTransport } from "./electron-transport"
 import { createWorkflowAgentMessageProjector } from "./workflow-agent-message-projection"
+import { buildToolResultAssociations } from "./worker-tool-result-key"
 
 function message(index: number, overrides: Partial<Message> = {}): Message {
   return {
@@ -22,6 +23,55 @@ function message(index: number, overrides: Partial<Message> = {}): Message {
 }
 
 describe("workflow complete snapshot projection", () => {
+  it("keeps long provider identities distinct and pairs long tool IDs in live and restored frames", () => {
+    const prefix = "x".repeat(WORKFLOW_AGENT_SNAPSHOT_CONTENT_CAP) + "\ud840\u0000"
+    const first = prefix + "a"
+    const second = prefix + "b"
+    const tuple = (source: string) => ({
+      cmb_internal_provider_source_id: source,
+      cmb_internal_provider_occurrence: 1
+    })
+    const frame = serializeWorkflowAgentSnapshotMessages({
+      messages: [
+        new AIMessage({ id: "answer-a", content: "draft", additional_kwargs: tuple(first) }),
+        new AIMessage({ id: "answer-a-final", content: "first", additional_kwargs: tuple(first) }),
+        new AIMessage({ id: "answer-b", content: "second", additional_kwargs: tuple(second) }),
+        new AIMessage({
+          id: "calls",
+          content: "requests",
+          tool_calls: [first, second].map((id) => ({ id, name: "read_file", args: {} }))
+        }),
+        new ToolMessage({
+          id: "result-a",
+          tool_call_id: first,
+          content: "done a",
+          additional_kwargs: tuple(first)
+        }),
+        new ToolMessage({
+          id: "result-b",
+          tool_call_id: second,
+          content: "done b",
+          additional_kwargs: tuple(first)
+        })
+      ]
+    })
+    expect(frame).toBeDefined()
+    expect(JSON.stringify(frame)).not.toContain(prefix.slice(0, 200))
+    for (const snapshot of [frame, JSON.parse(JSON.stringify(frame))]) {
+      const rows = new ElectronIPCTransport().convertWorkflowAgentValuesSnapshot(snapshot, "run/0")
+      expect(rows.map(({ content }) => content)).toEqual([
+        "first",
+        "second",
+        "requests",
+        "done a",
+        "done b"
+      ])
+      expect([...buildToolResultAssociations(rows).values()].map(({ content }) => content)).toEqual(
+        ["done a", "done b"]
+      )
+    }
+  })
+
   it("projects explicit aliases with stable IDs through full snapshots and their sidecar form", () => {
     const transport = new ElectronIPCTransport()
     const additional_kwargs = {

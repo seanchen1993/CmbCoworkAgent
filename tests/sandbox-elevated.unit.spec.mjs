@@ -768,12 +768,12 @@ test("orchestrator wraps every sandbox failure in Codex's single retry-without-s
   )
   assert.match(
     orchestratorSection,
-    /safety\.level === "safe"[\s\S]*rawExecute\(command, sandboxMode, cwd\)[\s\S]*maybeRetryOutsideSandbox\(\s*command,\s*cwd,\s*sandboxMode,\s*result,\s*outsideShellSyntax\s*\)/,
+    /safety\.level === "safe"[\s\S]*rawExecute\(command, sandboxMode, cwd\)[\s\S]*maybeRetryOutsideSandbox\(\s*command,\s*cwd,\s*sandboxMode,\s*result,\s*outsideShellSyntax,\s*execution\s*\)/,
     "safe commands should also be eligible for Codex-style sandbox bypass prompts after sandbox failure"
   )
   assert.match(
     orchestratorSection,
-    /const yoloMode = this\.readYoloMode\(\)[\s\S]*if \(yoloMode\) \{[\s\S]*rawExecute\(command, sandboxMode, cwd\)[\s\S]*maybeRetryOutsideSandbox\(\s*command,\s*cwd,\s*sandboxMode,\s*result,\s*outsideShellSyntax\s*\)/,
+    /const yoloMode = this\.readYoloMode\(\)[\s\S]*if \(yoloMode\) \{[\s\S]*rawExecute\(command, sandboxMode, cwd\)[\s\S]*maybeRetryOutsideSandbox\(\s*command,\s*cwd,\s*sandboxMode,\s*result,\s*outsideShellSyntax,\s*execution\s*\)/,
     "YOLO mode should skip only the initial command approval; sandbox escape must still require the retry approval prompt"
   )
   assert.match(
@@ -798,7 +798,7 @@ test("orchestrator wraps every sandbox failure in Codex's single retry-without-s
   )
   assert.match(
     bypassSection,
-    /rawExecute\(command, "none", cwd\)/,
+    /\(execution\?\.rawExecute \?\? this\.rawExecute\)\(command, "none", cwd\)/,
     "approval should hand the command to rawExecute with mode=none (host token)"
   )
   assert.match(
@@ -928,13 +928,13 @@ test("isLikelySandboxDenied keyword check matches real failure outputs and rejec
 test("background execute() routes results through the orchestrator's bypass check", () => {
   const backgroundSection = sectionBetween(
     localSandboxSource,
-    "async executeBackground(command: string, cwd?: string)",
-    "  /**\r\n   * Retrieve a background task's"
+    "private async executeBackgroundAfterPreToolUse(",
+    "  private getOwnedBackgroundTask("
   )
 
   assert.match(
     backgroundSection,
-    /this\.orchestrator[\s\S]*maybeRetryOutsideSandbox\(\s*effectiveCommand,\s*effectiveCwd,\s*this\.windowsSandbox,\s*rawResult,\s*outsideShellSyntax\s*\)/,
+    /this\.orchestrator[\s\S]*maybeRetryOutsideSandbox\(\s*effectiveCommand,\s*effectiveCwd,\s*this\.windowsSandbox,\s*rawResult,\s*outsideShellSyntax,\s*\{\s*signal: taskAbortController\.signal,/,
     "executeBackground must hand the raw result to the orchestrator's bypass check before marking the task complete — otherwise backgrounded `npm run build` skips the approval prompt"
   )
   assert.match(
@@ -1076,8 +1076,8 @@ test("approval requests do not auto-timeout and are cleaned up on run abort", ()
   )
   assert.match(
     runtimeApprovalSection,
-    /options\.abortSignal\?\.addEventListener\("abort", onAbort, \{ once: true \}\)/,
-    "approval requests should subscribe to the run abort signal"
+    /requestApproval = async \(\s*req: ApprovalRequest,\s*signal = options\.abortSignal[\s\S]*signal\?\.addEventListener\("abort", onAbort, \{ once: true \}\)/,
+    "approval requests should subscribe to the invocation signal, which defaults to the run signal"
   )
   // On run abort: onAbort → rejectPending("abort") notifies the renderer on the
   // cancel channel, then resolveOnce removes the pending approval and resolves a
@@ -1255,8 +1255,12 @@ test("sandbox ACL grants only cover writable sandbox roots", () => {
 
 test("sandbox execute helpers do not create visible console windows", () => {
   const windowsSandboxSpawnSection = sectionBetween(
-    localSandboxSource,
-    "const proc = spawn(this.codexExePath, sandboxArgs, {",
+    sectionBetween(
+      localSandboxSource,
+      "private async executeInWindowsSandbox(",
+      "private executeOnce("
+    ),
+    "const spawnOptions = {",
     "console.log(`[LocalSandbox] spawned pid="
   )
   const executeOnceSection = sectionBetween(
@@ -1287,7 +1291,7 @@ test("sandbox execute helpers do not create visible console windows", () => {
 
   assert.match(
     windowsSandboxSpawnSection,
-    /windowsHide: true/,
+    /windowsHide: true[\s\S]*spawnWindowsHandoffProcess\([\s\S]*spawnOptions,[\s\S]*spawn\(this\.codexExePath, sandboxArgs, \{\s*\.\.\.spawnOptions,/,
     "codex windows sandbox wrapper should be spawned without a visible console window"
   )
   assert.match(
@@ -1454,7 +1458,7 @@ test("Windows sandbox keeps workspace root separate from command cwd", () => {
   )
   assert.match(
     executeWindowsSection,
-    /spawn\(this\.codexExePath, sandboxArgs, \{[\s\S]*cwd: sandboxWorkspaceRoot/,
+    /const spawnOptions = \{\s*cwd: sandboxWorkspaceRoot,[\s\S]*spawnWindowsHandoffProcess\([\s\S]*spawnOptions,[\s\S]*spawn\(this\.codexExePath, sandboxArgs, \{\s*\.\.\.spawnOptions,/,
     "codex sandbox process should still be launched from the real workspace root"
   )
 })

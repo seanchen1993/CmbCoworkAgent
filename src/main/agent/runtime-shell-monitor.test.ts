@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -8,6 +9,8 @@ import type { ChatResult } from "@langchain/core/outputs"
 import { tool } from "langchain"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { z } from "zod"
+import type { ApprovalDecision, ApprovalRequest } from "../types"
+import { ApprovalStore } from "./approval-store"
 import { LocalSandbox, type LocalSandboxOptions } from "./local-sandbox"
 import { getShellTaskOwnerId, SHELL_TASK_OWNER_CONFIG_KEY } from "./shell-monitor-tool"
 import {
@@ -16,6 +19,7 @@ import {
   createRuntimeToolDenylistMiddleware,
   wrapTaskToolWithOwnerMetadata
 } from "./runtime"
+import { ToolOrchestrator } from "./tool-orchestrator"
 
 function testTool(name: string) {
   return tool(() => "", { name, description: name, schema: z.object({}) })
@@ -42,9 +46,18 @@ class ReplayModel extends BaseChatModel {
 }
 
 function requestTool(name: string, args: Record<string, unknown>): AIMessage {
+  return requestTools([[name, args]])
+}
+
+function requestTools(calls: Array<[string, Record<string, unknown>]>): AIMessage {
   return new AIMessage({
     content: "",
-    tool_calls: [{ id: "call-" + name, type: "tool_call", name, args }],
+    tool_calls: calls.map(([name, args]) => ({
+      id: "call-" + name,
+      type: "tool_call",
+      name,
+      args
+    })),
     response_metadata: { finish_reason: "tool_calls" }
   })
 }
@@ -214,6 +227,143 @@ describe("shell monitor runtime dispatch", () => {
     await run
     expect(parentResumed).toHaveBeenCalledOnce()
     expect(cancelled.mock.calls).toEqual([["echo child"]])
+  })
+
+  it("cancels a pending foreground Git approval when a sibling monitor hook stops the Solo task", async () => {
+    const parent = new AbortController()
+    const { sandbox } = await fixture({
+      abortSignal: parent.signal,
+      hooks: [
+        {
+          id: "monitor-stop",
+          event: "PreToolUse",
+          matcher: "monitor",
+          enabled: true,
+          type: "http",
+          url: "https://hooks.invalid/stop",
+          createdAt: "",
+          updatedAt: ""
+        }
+      ]
+    })
+    vi.stubEnv("GIT_CONFIG_GLOBAL", path.join(sandbox.runId, "empty-git-config"))
+    vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1")
+    execFileSync("git", ["init", "--quiet", sandbox.runId])
+
+    const approvalRequested = Promise.withResolvers<void>()
+    const approval = Promise.withResolvers<ApprovalDecision>()
+    const approvalCancelled = vi.fn()
+    const requestApproval = vi.fn((request: ApprovalRequest, signal = parent.signal) => {
+      approvalRequested.resolve()
+      signal.addEventListener(
+        "abort",
+        () => {
+          approvalCancelled()
+          approval.resolve({ type: "reject", tool_call_id: request.id })
+        },
+        { once: true }
+      )
+      return approval.promise
+    })
+    vi.stubGlobal("fetch", async () => {
+      await approvalRequested.promise
+      return Response.json({ continue: false, stopReason: "monitor hook stopped the Solo task" })
+    })
+    const raw = vi.spyOn(sandbox, "executeRaw")
+    sandbox.setOrchestrator(
+      new ToolOrchestrator(
+        new ApprovalStore(),
+        (command, mode, cwd) => sandbox.executeRaw(command, mode, undefined, undefined, { cwd }),
+        requestApproval
+      )
+    )
+
+    const agent = createDeepAgent({
+      backend: sandbox,
+      mainTodosEnabled: false,
+      model: new ReplayModel((messages) => {
+        const last = messages.at(-1)
+        if (last?.content === "Check in child") {
+          return requestTools([
+            ["execute", { command: "git push" }],
+            ["monitor", { task_id: "probe-id" }]
+          ])
+        }
+        return requestTool("task", {
+          description: "Check in child",
+          subagent_type: "general-purpose"
+        })
+      })
+    })
+    const run = agent.invoke(
+      { messages: [new HumanMessage("Start a Solo task")] },
+      {
+        signal: parent.signal
+      }
+    )
+    const outcome = run.catch((error: unknown) => error)
+    try {
+      await vi.waitFor(() => expect(approvalCancelled).toHaveBeenCalledOnce(), { timeout: 3_000 })
+      expect(await outcome).toMatchObject({
+        name: "HookHaltError",
+        message: "monitor hook stopped the Solo task"
+      })
+      expect(requestApproval).toHaveBeenCalledWith(
+        expect.objectContaining({ operation: "git_push" }),
+        expect.any(AbortSignal)
+      )
+      expect(parent.signal.aborted).toBe(false)
+      expect(raw).not.toHaveBeenCalled()
+    } finally {
+      approvalRequested.resolve()
+      approval.resolve({ type: "reject", tool_call_id: "cleanup" })
+      parent.abort()
+      await outcome
+    }
+  }, 10_000)
+
+  it("waits for physical termination when cancelling a Git command that stays in the foreground", async () => {
+    const { sandbox, physicalExit } = await fixture()
+    const aborted = { output: "cancelled", exitCode: 130, truncated: false }
+    const rawResult = Promise.withResolvers<typeof aborted>()
+    const rawEntered = Promise.withResolvers<void>()
+    const raw = vi
+      .spyOn(sandbox, "executeRaw")
+      .mockImplementation((_command, _mode, _timeout, signal, options) => {
+        signal?.addEventListener(
+          "abort",
+          () => {
+            options?.onTermination?.(physicalExit.promise)
+            rawResult.resolve(aborted)
+          },
+          { once: true }
+        )
+        rawEntered.resolve()
+        return rawResult.promise
+      })
+    const caller = new AbortController()
+    const settled = vi.fn()
+    const run = sandbox
+      .executeForTool("git push", undefined, {
+        backgroundAfterMs: 1,
+        signal: caller.signal
+      })
+      .finally(settled)
+    try {
+      await rawEntered.promise
+      expect(raw.mock.calls[0]?.[4]).toMatchObject({ waitForProcessTree: true })
+      expect(raw.mock.calls[0]?.[4]?.handoff).toBeUndefined()
+      caller.abort()
+      await rawResult.promise
+      await expect(LocalSandbox.cancelBackgroundTasksWithin(sandbox.runId, 10)).resolves.toBe(false)
+      expect(settled).not.toHaveBeenCalled()
+    } finally {
+      rawResult.resolve(aborted)
+      physicalExit.resolve()
+      await run
+    }
+    await expect(run).resolves.toEqual({ status: "completed", result: aborted })
+    await expect(LocalSandbox.cancelBackgroundTasksWithin(sandbox.runId, 10)).resolves.toBe(true)
   })
 
   it.each(["error", "abort"] as const)(

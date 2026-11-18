@@ -4,7 +4,7 @@ import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { ensureMessageSnapshotGeneration as migrateMessageSnapshotGeneration } from "./message-snapshot-schema"
 import { migrateLegacyMessageTimes } from "./legacy-message-times"
 import { isLosslessTranscriptPayload } from "../../shared/transcript-recovery-integrity"
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID, type Hash } from "node:crypto"
 import type {
   CheckpointRuntimeProjectionStats,
   LegacyCheckpointTranscriptMigrationStats
@@ -2024,6 +2024,8 @@ const CHECKPOINT_TRANSFER_TOOL_CALL_LIMIT = 50
 const CHECKPOINT_TRANSFER_IDENTITY_LIMIT = 256
 // A JSON string token uses at most six bytes per UTF-16 code unit, plus its quotes.
 const CHECKPOINT_TRANSFER_IDENTITY_TOKEN_BYTE_LIMIT = CHECKPOINT_TRANSFER_IDENTITY_LIMIT * 6 + 2
+const CHECKPOINT_TOOL_ID_HASH_PREFIX = "cmb-checkpoint-tool-id:sha256:"
+const CHECKPOINT_TOOL_ID_HASH_FIELD = "cmb_checkpoint_tool_id_sha256"
 // The SQLite tail reader never lets an individual serialized message enter V8
 // above this size. Oversized rows are projected to bounded scalar fields in SQL.
 const CHECKPOINT_TRANSFER_RAW_MESSAGE_BYTE_LIMIT = 64 * 1024
@@ -2117,12 +2119,32 @@ function boundedTransferIdentity(value: unknown): string | undefined {
     : undefined
 }
 
-function boundedTransferToolCalls(value: unknown): unknown[] | undefined {
+function projectedToolIdentity(value: unknown, fromSql: boolean): string | undefined {
+  if (typeof value === "string") {
+    if (
+      value.length <= CHECKPOINT_TRANSFER_IDENTITY_LIMIT &&
+      !value.startsWith(CHECKPOINT_TOOL_ID_HASH_PREFIX)
+    ) {
+      return value
+    }
+    return (
+      CHECKPOINT_TOOL_ID_HASH_PREFIX +
+      createHash("sha256").update(JSON.stringify(value)).digest("hex")
+    )
+  }
+  const hash = fromSql ? objectRecord(value)?.[CHECKPOINT_TOOL_ID_HASH_FIELD] : undefined
+  return typeof hash === "string" ? CHECKPOINT_TOOL_ID_HASH_PREFIX + hash : undefined
+}
+
+function boundedTransferToolCalls(
+  value: unknown,
+  projectId = boundedTransferIdentity
+): unknown[] | undefined {
   if (!Array.isArray(value)) return undefined
   return value.slice(0, CHECKPOINT_TRANSFER_TOOL_CALL_LIMIT).flatMap((rawToolCall) => {
     const toolCall = objectRecord(rawToolCall)
     if (!toolCall) return []
-    const id = boundedTransferIdentity(toolCall.id)
+    const id = projectId(toolCall.id)
     return [
       {
         ...(id !== undefined ? { id } : {}),
@@ -2133,7 +2155,11 @@ function boundedTransferToolCalls(value: unknown): unknown[] | undefined {
   })
 }
 
-function boundedTransferCheckpointMessage(raw: unknown, index: number): unknown | null {
+function boundedTransferCheckpointMessage(
+  raw: unknown,
+  index: number,
+  fromSql: boolean
+): unknown | null {
   const message = objectRecord(raw)
   if (!message) return null
   const kwargs = objectRecord(message.kwargs) ?? {}
@@ -2141,8 +2167,10 @@ function boundedTransferCheckpointMessage(raw: unknown, index: number): unknown 
     objectRecord(message.additional_kwargs) ?? objectRecord(kwargs.additional_kwargs) ?? {}
   const role = serializedMessageRole(message, kwargs)
   const rawId = kwargs.id ?? (typeof message.id === "string" ? message.id : undefined)
-  const toolCalls = boundedTransferToolCalls(message.tool_calls ?? kwargs.tool_calls)
-  const toolCallId = boundedTransferIdentity(message.tool_call_id ?? kwargs.tool_call_id)
+  const toolCalls = boundedTransferToolCalls(message.tool_calls ?? kwargs.tool_calls, (id) =>
+    projectedToolIdentity(id, fromSql)
+  )
+  const toolCallId = projectedToolIdentity(message.tool_call_id ?? kwargs.tool_call_id, fromSql)
   const name = message.name ?? kwargs.name
   const status = message.status ?? kwargs.status
   const provider =
@@ -2201,7 +2229,8 @@ function boundedTransferCheckpointMessageFromRow(
   if (serialized === null) return null
   return boundedTransferCheckpointMessage(
     JSON.parse(serialized) as unknown,
-    row.messageIndex
+    row.messageIndex,
+    row.rawMessage === null
   )
 }
 
@@ -2257,6 +2286,49 @@ function boundedCheckpointIdentityJson(jsonToken: string): string {
   END`
 }
 
+function registerCheckpointToolIdHash(database: DatabaseSync): void {
+  // Store only the hash state in JS. SQLite supplies oversized IDs in 4 KiB pieces.
+  const states = new Map<number, Hash>()
+  let next = 0
+  database.aggregate<number>("cmb_checkpoint_tool_id_hash", {
+    start: () => {
+      const id = ++next
+      states.set(id, createHash("sha256"))
+      return id
+    },
+    step: (id, bytes) => {
+      if (bytes instanceof Uint8Array) states.get(id)?.update(bytes)
+      return id
+    },
+    result: (id) => {
+      const hash = states.get(id)?.digest("hex") ?? null
+      states.delete(id)
+      return hash
+    }
+  })
+}
+
+function checkpointToolIdentityJson(jsonToken: string): string {
+  // The token comes from the serialized checkpoint, so the chunks hash the same
+  // UTF-8 JSON representation as JSON.stringify on the ordinary row path.
+  return `json((
+    WITH RECURSIVE token(bytes) AS MATERIALIZED (SELECT CAST((${jsonToken}) AS BLOB)),
+      chunks(position) AS (
+        SELECT 1
+        UNION ALL
+        SELECT position + 4096 FROM chunks, token WHERE position + 4096 <= length(bytes)
+      )
+    SELECT CASE
+      WHEN length(bytes) <= ${CHECKPOINT_TRANSFER_IDENTITY_TOKEN_BYTE_LIMIT}
+        THEN CAST(bytes AS TEXT)
+      WHEN bytes IS NOT NULL THEN json_object(
+        '${CHECKPOINT_TOOL_ID_HASH_FIELD}',
+        (SELECT cmb_checkpoint_tool_id_hash(substr(bytes, position, 4096) ORDER BY position) FROM chunks)
+      )
+    END FROM token
+  ))`
+}
+
 const BOUNDED_CHECKPOINT_MESSAGE_SELECT = `
   CAST(message.key AS INTEGER) AS message_index,
   CASE
@@ -2306,7 +2378,9 @@ const BOUNDED_CHECKPOINT_MESSAGE_SELECT = `
             (
               SELECT json_group_array(
                 json_object(
-                  'id', ${boundedCheckpointIdentityJson("bounded_tool.tool_value -> '$.id'")},
+                  'id', ${checkpointToolIdentityJson(`CASE
+                    WHEN json_type(bounded_tool.tool_value, '$.id') = 'text'
+                    THEN bounded_tool.tool_value -> '$.id' END`)},
                   'name', substr(
                     CASE WHEN json_type(bounded_tool.tool_value, '$.name') = 'text'
                       THEN json_extract(bounded_tool.tool_value, '$.name') END,
@@ -2354,7 +2428,7 @@ const BOUNDED_CHECKPOINT_MESSAGE_SELECT = `
             1,
             256
           ),
-          'tool_call_id', ${boundedCheckpointIdentityJson(`
+          'tool_call_id', ${checkpointToolIdentityJson(`
             COALESCE(
               CASE WHEN json_type(message.value, '$.tool_call_id') = 'text'
                 THEN message.value -> '$.tool_call_id' END,
@@ -2880,6 +2954,7 @@ export function readLatestCheckpointTuple(
     const boundedTransfer =
       options.messageLimit !== undefined || options.messageByteBudget !== undefined
     if (boundedTransfer) {
+      registerCheckpointToolIdHash(database)
       const tuple = readLatestBoundedCheckpointTuple({
         database,
         threadId,

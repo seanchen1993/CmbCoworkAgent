@@ -21,7 +21,10 @@ import {
   type ProjectMetricSortKey
 } from "./project-attention-ranking"
 import { isNestedMappingError } from "./dashboard-es-nested-mapping"
-import { queryWithToolUsageMappingFallback } from "./dashboard-tool-usage-query"
+import {
+  FILTERED_TOOL_EXCLUDES,
+  queryWithToolUsageMappingFallback
+} from "./dashboard-tool-usage-query"
 import { fetchUserProfileDirectory } from "./dashboard-user-profile-query"
 import {
   projectModeMetricTimeFilters,
@@ -11383,30 +11386,6 @@ function makeMockProjectModeProjectCommits(
  * 报 "Result window is too large"，所以翻页深度必须按 pageSize 钳制在此窗口内。
  */
 const ES_MAX_RESULT_WINDOW = 10000
-
-/** Built-in file/system/meta tools excluded from the "已过滤" tool ranking. */
-const FILTERED_TOOL_EXCLUDES = [
-  // Claude Code 内置文件 / 系统工具
-  "execute",
-  "read_file",
-  "write_file",
-  "glob",
-  "grep",
-  "list_directory",
-  "task",
-  "task_output",
-  "ls",
-  "edit_file",
-  // 工具搜索 / 元工具
-  "search_tool",
-  "inspect_tool",
-  "invoke_deferred_tool",
-  // 内置代码执行辅助
-  "code_exec",
-  "save_code_exec_tool",
-  // 内置任务管理
-  "write_todos"
-]
 
 interface ProjectModeFeatureView {
   totalDurationMs?: number | null

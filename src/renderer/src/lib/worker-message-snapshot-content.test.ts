@@ -1,4 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { AIMessage, AIMessageChunk, HumanMessage } from "@langchain/core/messages"
+import {
+  createStreamDataSerializer,
+  sanitizeStreamDataForRenderer
+} from "../../../main/ipc/stream-data-serialization"
 import { ElectronIPCTransport } from "./electron-transport"
 import { enrichWorkerProviderIdentities, useAppStore } from "./store"
 import {
@@ -301,6 +306,51 @@ describe("Team worker authoritative content", () => {
     useAppStore.getState().appendWorkerFocusMessages(worker, update)
     expect(useAppStore.getState().workerFocusMessages).toMatchObject([
       { id: original.id, content: "Original answer with continuation" }
+    ])
+  })
+
+  it("continues the identified reply through the production wire when the next delta omits its tuple", () => {
+    const transport = new ElectronIPCTransport()
+    const serialize = createStreamDataSerializer()
+    const publish = (mode: "messages" | "values", payload: unknown, workerTurn = 1) => {
+      const { data, valuesMessageIndexOffset, valuesSnapshotKind } = serialize(mode, payload)
+      const rows = transport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          type: "stream",
+          mode,
+          data: sanitizeStreamDataForRenderer(mode, data, valuesMessageIndexOffset),
+          workerTurn,
+          valuesSnapshotKind
+        },
+        parent
+      )
+      useAppStore.getState().appendWorkerFocusMessages(worker, rows, {
+        orderedSnapshot: mode === "values" && valuesSnapshotKind === "full"
+      })
+    }
+    const initial = {
+      id: "wire-a",
+      content: "First reply",
+      additional_kwargs: {
+        cmb_internal_provider_source_id: "provider-with-different-wire-id",
+        cmb_internal_provider_occurrence: 1
+      }
+    }
+    publish("messages", [new AIMessageChunk(initial), {}])
+    const [original] = useAppStore.getState().workerFocusMessages
+    publish("values", {
+      messages: [new HumanMessage("First request"), new AIMessage(initial)]
+    })
+    publish("messages", [new AIMessageChunk({ id: "wire-a", content: " continues" }), {}])
+    expect(useAppStore.getState().workerFocusMessages).toMatchObject([
+      { id: original.id, content: "First reply continues", worker_provider_identity: true }
+    ])
+
+    publish("messages", [new AIMessageChunk({ id: "wire-a", content: "Second turn" }), {}], 2)
+    publish("messages", [new AIMessageChunk({ id: "wire-a", content: " later" }), {}], 1)
+    expect(useAppStore.getState().workerFocusMessages).toMatchObject([
+      { id: original.id, content: "First reply continues later", worker_provider_identity: true },
+      { content: "Second turn" }
     ])
   })
 

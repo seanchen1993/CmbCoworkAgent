@@ -7586,7 +7586,7 @@ export class LocalSandbox
           LocalSandbox.createAbortedExecuteResponse()
         )
       : run()
-    task.completion = execution
+    const completion = execution
       .then(
         (result) => LocalSandbox.publishBackgroundResult(task, result),
         (error: unknown) => {
@@ -7612,10 +7612,13 @@ export class LocalSandbox
         releaseWorkspace?.()
         finish()
       })
+    task.completion = completion
 
     return Promise.race([
       handedOff,
-      execution.then((result): ToolShellResult => ({ status: "completed", result }))
+      execution
+        .finally(() => completion)
+        .then((result): ToolShellResult => ({ status: "completed", result }))
     ])
   }
 
@@ -7777,15 +7780,19 @@ export class LocalSandbox
     const postHookPolicy =
       task && !foregroundOnly ? this.captureExecutePostHookPolicy(postHookContext) : undefined
     let execution: OrchestratedExecuteOptions | undefined
-    if (task && handoff && !foregroundOnly) {
+    if (task && handoff) {
       task.command = effectiveCommand
       task.cwd = effectiveCwd
+      // The invocation owns cancellation and process settlement even when Git or a hook
+      // requires the tool to stay in the foreground.
+      const processHandoff =
+        foregroundOnly || postHookPolicy?.requiresForeground ? undefined : handoff.process
       execution = {
         signal: handoff.processSignal,
         rawExecute: (command, sandboxMode, cwd) =>
           this.executeRaw(command, sandboxMode, undefined, handoff.processSignal, {
             cwd,
-            handoff: postHookPolicy?.requiresForeground ? undefined : handoff.process,
+            handoff: processHandoff,
             waitForProcessTree: true,
             onData: (text) => this.appendBackgroundOutput(task, text),
             onTermination: (termination) => {

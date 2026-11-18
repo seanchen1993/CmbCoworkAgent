@@ -16,6 +16,8 @@
  *    is spent, so the recent activity the user is looking at always survives.
  */
 
+import { createHash } from "node:crypto"
+import { MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY } from "../../../shared/message-role-collision"
 import { WORKFLOW_PRECEDING_PROMPT_INDEX_KEY } from "../../../shared/workflow-agent-snapshot"
 
 export const WORKFLOW_AGENT_SNAPSHOT_CONTENT_CAP = 24_000
@@ -23,6 +25,9 @@ export const WORKFLOW_AGENT_SNAPSHOT_MAX_MESSAGES = 400
 export const WORKFLOW_AGENT_SNAPSHOT_TOTAL_CAP = 1_000_000
 const WORKFLOW_AGENT_SNAPSHOT_MAX_DEPTH = 12
 const WORKFLOW_AGENT_SNAPSHOT_MAX_ARRAY = 2_000
+const WORKFLOW_IDENTITY_PREFIX = "cmb-workflow-id:sha256:"
+
+type SnapshotField = "message" | "metadata" | "tool-calls" | "tool-call" | "identity"
 
 interface SnapshotBudget {
   left: number
@@ -41,6 +46,35 @@ function truncateString(value: string): string {
     : value
 }
 
+function snapshotField(parent: SnapshotField | undefined, key: string): SnapshotField | undefined {
+  if (parent === "message") {
+    if (key === "kwargs") return "message"
+    if (key === "additional_kwargs") return "metadata"
+    if (key === "tool_call_id" || key === "id") return "identity"
+  }
+  if (parent === "message" || parent === "metadata") {
+    if (key === "tool_calls" || key === "tool_call_chunks") return "tool-calls"
+  }
+  if (parent === "metadata" && key === MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY) return "identity"
+  if (parent === "tool-call" && key === "id") return "identity"
+  return undefined
+}
+
+function boundIdentity(value: string): string {
+  if (
+    value.length <= WORKFLOW_AGENT_SNAPSHOT_CONTENT_CAP &&
+    !value.startsWith(WORKFLOW_IDENTITY_PREFIX)
+  ) {
+    return value
+  }
+  // Hash UTF-16 code units in bounded chunks, including lone surrogates.
+  const hash = createHash("sha256")
+  for (let start = 0; start < value.length; start += 4096) {
+    hash.update(value.slice(start, start + 4096), "utf16le")
+  }
+  return WORKFLOW_IDENTITY_PREFIX + hash.digest("hex")
+}
+
 /** Recursively copy a serialized message value, truncating over-long strings in place,
  * capping array length + nesting depth, and decrementing a shared TOTAL char budget so
  * the whole payload is bounded regardless of breadth. Honors `toJSON` (LangChain
@@ -49,11 +83,12 @@ function truncateString(value: string): string {
 export function boundedCloneSnapshotValue(
   value: unknown,
   depth: number,
-  budget: SnapshotBudget
+  budget: SnapshotBudget,
+  field?: SnapshotField
 ): unknown {
   if (budget.left <= 0) return undefined
   if (typeof value === "string") {
-    const capped = truncateString(value)
+    const capped = field === "identity" ? boundIdentity(value) : truncateString(value)
     budget.left -= capped.length
     return capped
   }
@@ -64,7 +99,12 @@ export function boundedCloneSnapshotValue(
   if (depth >= WORKFLOW_AGENT_SNAPSHOT_MAX_DEPTH) return undefined
   const serializable = value as { toJSON?: unknown }
   if (typeof serializable.toJSON === "function") {
-    return boundedCloneSnapshotValue((serializable.toJSON as () => unknown)(), depth + 1, budget)
+    return boundedCloneSnapshotValue(
+      (serializable.toJSON as () => unknown)(),
+      depth + 1,
+      budget,
+      field
+    )
   }
   if (Array.isArray(value)) {
     // The container itself costs budget: a tree of empty arrays has no leaf chars and would
@@ -79,7 +119,14 @@ export function boundedCloneSnapshotValue(
     const out: unknown[] = []
     for (const item of capped) {
       if (budget.left <= 0) break
-      out.push(boundedCloneSnapshotValue(item, depth + 1, budget))
+      out.push(
+        boundedCloneSnapshotValue(
+          item,
+          depth + 1,
+          budget,
+          field === "tool-calls" ? "tool-call" : undefined
+        )
+      )
     }
     return out
   }
@@ -93,7 +140,7 @@ export function boundedCloneSnapshotValue(
     if (!Object.prototype.hasOwnProperty.call(record, key)) continue
     if (budget.left <= 0) break
     budget.left -= key.length
-    out[key] = boundedCloneSnapshotValue(record[key], depth + 1, budget)
+    out[key] = boundedCloneSnapshotValue(record[key], depth + 1, budget, snapshotField(field, key))
   }
   return out
 }
@@ -113,7 +160,7 @@ export function serializeWorkflowAgentSnapshotMessages(snapshot: unknown): unkno
     const keptNewestFirst: unknown[] = []
     for (let index = raw.length - 1; index >= oldestIndex; index -= 1) {
       if (budget.left <= 0) break
-      const cloned = boundedCloneSnapshotValue(raw[index], 0, budget)
+      const cloned = boundedCloneSnapshotValue(raw[index], 0, budget, "message")
       // The budget can cut through a message's role or provider tuple. Keep
       // the newest activity, but omit a partial older row from the window.
       if (budget.left <= 0 && keptNewestFirst.length > 0) break

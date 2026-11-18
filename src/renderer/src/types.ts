@@ -297,6 +297,8 @@ export interface Message {
   worker_snapshot_index?: number
   /** The worker identity supplied by the producer, before occurrence inference. */
   worker_provider_identity?: boolean
+  /** Latest wire ID observed for this explicitly identified worker reply. */
+  worker_provider_wire_id?: string
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
   content_priority?: number

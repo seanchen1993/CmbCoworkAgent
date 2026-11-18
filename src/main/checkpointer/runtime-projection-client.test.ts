@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from "node:fs"
+import { createHash } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
@@ -32,6 +33,7 @@ import {
   readThreadMessagesPage
 } from "../thread-message-hydration/page-reader"
 import { buildWorkerCheckpointHistory } from "../../renderer/src/lib/worker-checkpoint-history"
+import { buildToolResultAssociations } from "../../renderer/src/lib/worker-tool-result-key"
 
 const temporaryDirectories: string[] = []
 const clients: CheckpointRuntimeProjectionClient[] = []
@@ -860,6 +862,8 @@ describe("checkpoint runtime projection worker", () => {
       const ascii = "p".repeat(256)
       const supplementary = "😀".repeat(128)
       const longSource = oversized ? "x".repeat(65_536) : ascii
+      const longToolId = "x".repeat(12_000) + '😀\u0000"\\\ud840'
+      const toolIds = [supplementary, longToolId + "1", longToolId + "2"]
       const messages = [
         { id: "user", type: "human", content: "request" },
         ...[
@@ -883,11 +887,18 @@ describe("checkpoint runtime projection worker", () => {
             }
           }
         })),
+        {
+          id: "requests",
+          type: "ai",
+          content: "requests",
+          tool_calls: toolIds.map((id) => ({ id, name: "read_file", args: {} })),
+          ...(oversized && { response_metadata: { ignored: "x".repeat(65_536) } })
+        },
         ...["exact-call", "long-call-a", "long-call-b"].map((id, index) => ({
           id,
           type: "tool",
           content: id,
-          tool_call_id: index === 0 ? supplementary : supplementary + index,
+          tool_call_id: toolIds[index],
           ...(oversized && { response_metadata: { ignored: "x".repeat(65_536) } }),
           additional_kwargs: {
             cmb_internal_provider_source_id: "tool-source",
@@ -915,6 +926,7 @@ describe("checkpoint runtime projection worker", () => {
         "too-many-code-units",
         "encoded-nul",
         "encoded-surrogate",
+        "requests",
         "exact-call",
         "long-call-a",
         "long-call-b"
@@ -939,10 +951,18 @@ describe("checkpoint runtime projection worker", () => {
         expect(byContent.get(content)?.id).toBe(scope + content)
         expect(byContent.get(content)?.worker_provider_identity).toBeUndefined()
       }
-      for (const content of ["long-call-a", "long-call-b"]) {
-        expect(byContent.get(content)?.tool_call_id).toBeUndefined()
-        expect(byContent.get(content)?.worker_provider_identity).toBeUndefined()
-      }
+      const expectedIds = toolIds.map((id, index) =>
+        index === 0
+          ? id
+          : "cmb-checkpoint-tool-id:sha256:" +
+            createHash("sha256").update(JSON.stringify(id)).digest("hex")
+      )
+      expect(byContent.get("requests")?.tool_calls?.map(({ id }) => id)).toEqual(expectedIds)
+      expect(byContent.get("long-call-a")?.tool_call_id).toBe(expectedIds[1])
+      expect(byContent.get("long-call-b")?.tool_call_id).toBe(expectedIds[2])
+      expect(
+        [...buildToolResultAssociations(projected).values()].map(({ content }) => content)
+      ).toEqual(["exact-call", "long-call-a", "long-call-b"])
     }
   )
 
