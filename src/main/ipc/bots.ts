@@ -842,7 +842,7 @@ export function registerBotHandlers(
       const desktopOnly = binding || current?.expiresAt || current?.workMonitor || current?.withdrawTaskId
       const host = desktopOnly ? desktopHost(event, hostId) : hostFor(hostId)
       const prior = !desktopOnly && current && host.snapshot().schedules.find(schedule => schedule.id === current.id)
-      if (prior && (prior.desktopWork || prior.workMonitor || prior.fixedReminder))
+      if (prior && (prior.desktopWork || prior.workMonitor || prior.fixedReminder || prior.explicitSkill))
         desktopHost(event, hostId)
       return host.saveSchedule(
         botIdentifier(botId),
@@ -859,7 +859,7 @@ export function registerBotHandlers(
       const existing = parseExistingVersion({ id, version })!
       const host = hostFor(hostId)
       const prior = host.snapshot().schedules.find(schedule => schedule.id === existing.id)
-      if (prior && (prior.desktopWork || prior.workMonitor || prior.fixedReminder))
+      if (prior && (prior.desktopWork || prior.workMonitor || prior.fixedReminder || prior.explicitSkill))
         desktopHost(event, hostId)
       host.removeSchedule(existing.id, existing.version)
     }

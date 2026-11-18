@@ -81,6 +81,61 @@ const interval: BotScheduleInput = {
 }
 const DAY = 24 * 60 * 60 * 1000
 
+it("pins a recurring skill and its workspace once and reuses both after edits, retries and restart", async () => {
+  const f = fixture()
+  const skill = { name: "report", path: "/skills/report/SKILL.md" }
+  const workspace = { kind: "directory" as const, path: "/reports" }
+  const request = f.store.enqueue({ botId: f.bot.id, requestId: "routine-request", message: "每天用所选技能检查报告", explicitSkill: skill })
+  f.store.transition(request.id, "running")
+  const source = { taskId: request.id, callId: "save", key: "daily" }
+  const schedule = f.store.saveSchedule(f.bot.id, interval, "2030-01-01T00:10:00Z", undefined, undefined,
+    { source, explicitSkill: skill, workspace })
+  expect(f.store.saveSchedule(f.bot.id, interval, schedule.nextRunAt, undefined, undefined,
+    { source: { ...source, callId: "retry" }, explicitSkill: skill, workspace })).toEqual(schedule)
+  expect(f.triggers()).toEqual([])
+  expect(schedule).toMatchObject({ dedicatedWork: true, explicitSkill: skill })
+  const work = f.store.getWork(f.bot.id, schedule.workId!)
+  expect(work).toMatchObject({ parentThreadId: f.bot.threadId, workspace })
+  expect(work.threadId).not.toBe(f.bot.threadId)
+  f.store.settle(request.id, "completed", null)
+  const renamed = f.host.saveSchedule(f.bot.id, { ...interval, name: "每日统计" }, schedule)
+  expect(renamed).toMatchObject({ workId: work.id, explicitSkill: skill })
+  await f.host.stop()
+  const { store } = f.reopen()
+  for (let i = 1; i <= 2; i++) {
+    const [current] = store.schedules()
+    const next = new Date(Date.parse(current.nextRunAt!) + 600_000).toISOString()
+    store.fireSchedule(current, next)
+    store.fireSchedule(current, next)
+    expect(f.triggers()).toHaveLength(i)
+    const trigger = f.triggers().find(t => t.state === "queued")!
+    expect(trigger).toMatchObject({ workId: work.id, threadId: work.threadId, origin: { scheduleId: schedule.id, explicitSkill: skill } })
+    store.transition(trigger.id, "running")
+    store.settle(trigger.id, "completed", null, BOT_ROUTINE_SILENT)
+  }
+  expect(f.store.recentTasks().filter(t => t.origin.kind === "work_result" && t.origin.workId === work.id)).toEqual([])
+})
+
+it("migrates an unbound saved routine once, after the last old main-thread occurrence settles", () => {
+  const f = fixture()
+  const legacy: BotSchedule = { ...interval, id: "old-routine", botId: f.bot.id, version: 1,
+    timezone: "Asia/Shanghai", nextRunAt: "2030-01-01T00:10:00Z" }
+  f.db.run("INSERT INTO bot_schedules VALUES (?,?,?)", [legacy.id, f.bot.id, JSON.stringify(legacy)])
+  const old = f.store.enqueue({ botId: f.bot.id, requestId: "before-upgrade", message: interval.message },
+    { kind: "schedule", scheduleId: legacy.id })
+  f.store.transition(old.id, "running")
+  const edited = f.store.saveSchedule(f.bot.id, { ...interval, name: "迁移中的例行" }, legacy.nextRunAt, legacy)
+  f.store.fireSchedule(edited, "2030-01-01T00:20:00Z")
+  expect(f.triggers().map(t => t.id)).toEqual([old.id])
+  f.store.settle(old.id, "completed", null, BOT_ROUTINE_SILENT)
+  f.store.fireSchedule(f.store.schedules()[0], "2030-01-01T00:30:00Z")
+  const [migrated] = f.store.schedules()
+  expect(migrated.dedicatedWork).toBe(true)
+  const worker = f.store.getWork(f.bot.id, migrated.workId!)
+  expect(f.triggers().find(t => t.id !== old.id)).toMatchObject({ workId: worker.id, threadId: worker.threadId })
+  expect(worker.parentThreadId).toBe(f.bot.threadId)
+})
+
 it.each(["user", "introduction"] as const)("anchors relative schedules to a consumed user input in a %s run", async origin => {
   const f = fixture({
     scheduleObservationPublication: { persist() {}, async announce() {} },
@@ -2780,7 +2835,6 @@ describe("fixed one-time reminders", () => {
         input: { kind: "fixed_reminder", expiresAt },
         source: { taskId: request.id, callId, key: "remind" }
       })
-    expect(() => save("recurring", interval)).toThrow("固定提醒只能安排一次")
     const saved = save("create")
     expect(save("retry")).toEqual(saved)
     f.store.settle(request.id, "completed", null)

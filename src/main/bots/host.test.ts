@@ -3714,6 +3714,7 @@ describe("Bot host scheduling", () => {
     const runtime: BotRunPort = {
       acquire: (_bot, task) => {
         if (!available) return null
+        if (task.origin.kind === "work_result") return null
         expect(task.id).toBe(pending.id)
         return { execute, release: () => {} }
       },
@@ -3746,7 +3747,8 @@ describe("Bot host scheduling", () => {
     restarted.resume()
     await vi.waitFor(() => expect(reopened.getTask(pending.id).state).toBe("completed"))
     expect(execute).toHaveBeenCalledTimes(1)
-    expect(reopened.recentTasks().map((task) => task.id)).toEqual([pending.id])
+    expect(reopened.recentTasks().filter(task => task.origin.kind === "schedule").map(task => task.id)).toEqual([pending.id])
+    expect(reopened.recentTasks().find(task => task.origin.kind === "work_result")?.threadId).toBe(bot.threadId)
     expect(next).toHaveBeenCalledTimes(1)
   })
 

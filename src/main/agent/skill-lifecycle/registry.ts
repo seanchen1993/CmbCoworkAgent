@@ -85,6 +85,10 @@ export class SkillLifecycleRegistry {
     }
   }
 
+  exactNameMatches(name: string): SkillLifecycleMatch[] {
+    return this.entries.filter(entry => entry.name === name).map(entry => this.toMatch(entry))
+  }
+
   resolveExplicit(input: {
     skillName?: string | null
     skillPath?: string | null

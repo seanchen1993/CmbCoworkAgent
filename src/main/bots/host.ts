@@ -1968,6 +1968,7 @@ export class LocalBotHost {
   ): BotSchedule {
     this.requireRunning()
     if (existing?.tool) this.workToolSource(existing.tool.source.taskId)
+    if (desktopWork && "source" in desktopWork) this.workToolSource(desktopWork.source.taskId)
     if (!this.nextSchedule) throw new BotError("CONFLICT", "此主机未启用例行任务")
     const expired = input.enabled && input.frequency === "once" && Date.parse(input.runAt ?? "") <= Date.now()
     if (expired && !desktopWork)
@@ -2013,6 +2014,20 @@ export class LocalBotHost {
     return this.saveSchedule(botId, input, undefined, undefined, { workId, source })
   }
 
+  async saveSelectedSkillSchedule(source: BotConversationToolSource, input: BotScheduleInput, workId?: string,
+    target?: CreateBotWorkInput["workspace"]): Promise<BotSchedule> {
+    const task = this.workToolSource(source.taskId)
+    const selected = selectedMainBotSkill(task)
+    if (!selected) throw new BotError("CONFLICT", "当前请求没有选择技能，未保存日程")
+    if (workId && target) throw new BotError("CONFLICT", "定时续办会沿用原任务的目录")
+    if (target && !this.runtime.workspaces) throw new BotError("CONFLICT", "当前主机不支持指定工作目录")
+    const workspace = target ? await this.runtime.workspaces!.resolve(task.botId, target) : undefined
+    this.workToolSource(source.taskId)
+    return this.saveSchedule(task.botId, input, undefined, undefined, {
+      source, workId, explicitSkill: { name: selected.name, path: selected.path }, workspace
+    })
+  }
+
   saveDesktopScheduleFollowUp(
     botId: string,
     input: BotScheduleInput,
@@ -2020,14 +2035,15 @@ export class LocalBotHost {
     source: BotConversationToolSource,
     existing?: BotScheduleEdit
   ): BotSchedule {
-    this.workToolSource(source.taskId)
+    const task = this.workToolSource(source.taskId)
     if (!this.nextSchedule || !this.runtime.scheduleObservationPublication)
       throw new BotError("CONFLICT", "此主机未启用工作观察或固定提醒")
     const now = new Date()
     const next = input.enabled && (input.frequency !== "once" || Date.parse(input.runAt ?? "") > now.getTime())
       ? this.nextSchedule(input, now)
       : null
-    const schedule = this.store.saveSchedule(botId, input, next, existing, undefined, undefined, { input: followUp, source })
+    const schedule = this.store.saveSchedule(botId, input, next, existing, task.mockSource ? task.id : undefined,
+      undefined, { input: followUp, source })
     this.changed()
     this.wake()
     this.armSchedules()

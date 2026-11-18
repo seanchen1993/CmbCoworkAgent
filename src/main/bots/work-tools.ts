@@ -8,6 +8,7 @@ import { getHookAgentIdFromRequest } from "../hooks/execution-context"
 import type { BotTask } from "../../shared/bots/contracts"
 import { BOT_SKILL_DISPATCH_TOOL, selectedMainBotSkill } from "../agent/bot-skill-dispatch"
 import { botWorkOperationQuery } from "./desktop-operation"
+import { parseSchedule } from "../../shared/bots/validation"
 
 /** Extends the ordinary beta Runtime. Final assistant replies remain normal chat. */
 export function createBotWorkTools(
@@ -314,7 +315,7 @@ export function createBotWorkTools(
       }
     ),
     ...(!task.workId ? [tool(
-      async ({ workId, workQuery, title, goal, workspace, projectQuery, contextMessageIds }, config) =>
+      async ({ workId, workQuery, title, goal, workspace, projectQuery, contextMessageIds, schedule }, config) =>
         invoke(BOT_SKILL_DISPATCH_TOOL, config, async host => {
           const source = host.workToolSource(taskId)
           const selected = selectedMainBotSkill(source)
@@ -334,13 +335,13 @@ export function createBotWorkTools(
               throw new Error("无法唯一确定要继续的任务，请确认任务名称；尚未新建任务。")
             workId = page.items[0].id
           }
-          if (workId) {
-            if (workspace || projectQuery) throw new Error("继续已有任务会沿用原工作目录，请勿重新指定目录")
+          if (workId && (workspace || projectQuery)) throw new Error("继续已有任务会沿用原工作目录，请勿重新指定目录")
+          if (workId && !schedule) {
             const message = goal || "按本次原始请求和所选技能继续处理。"
             return inputFileIds.length ? host.continueSkillWorkWithFiles(command, workId, message, inputFileIds)
               : host.continueSkillWork(command, workId, message)
           }
-          if (!title) throw new Error("新任务缺少名称，尚未启动")
+          if (!title) throw new Error(schedule ? "缺少例行名称，尚未保存日程" : "新任务缺少名称，尚未启动")
           if (projectQuery) {
             if (workspace) throw new Error("请只指定项目名称或工作目录")
             const page = await host.workProjects(taskId, projectQuery)
@@ -349,13 +350,26 @@ export function createBotWorkTools(
             workspace = { kind: "project", projectId: page.items[0].projectId }
           }
           signal.throwIfAborted()
+          if (schedule) {
+            if (inputFileIds.length || contextMessageIds.length)
+              throw new Error("定时执行需要可重复读取的输入，请提供工作目录中的文件或长期有效的链接。尚未保存日程。")
+            const { afterSeconds, ...timing } = schedule
+            if (afterSeconds !== undefined && (timing.frequency !== "once" || timing.runAt !== undefined ||
+                timing.runAtTime !== undefined || timing.weekday !== undefined || timing.intervalMinutes !== undefined))
+              throw new Error("相对时间只能用于一次日程，不能同时指定执行时间")
+            const input = parseSchedule({ ...timing, name: title, enabled: true,
+              ...(afterSeconds === undefined ? {} : { runAt: new Date(host.desktopScheduleRequestTime(taskId) + afterSeconds * 1000).toISOString() }) })
+            const saved = await host.saveSelectedSkillSchedule(command, input, workId, workspace)
+            return { schedule: { id: saved.id, name: saved.name, enabled: saved.enabled, nextRunAt: saved.nextRunAt,
+              timezone: saved.timezone, workId: saved.workId, skillName: saved.explicitSkill?.name } }
+          }
           return host.createWork({ botId: source.botId, operationId: command.callId,
             title, goal: goal || title, contextMessageIds, workspace, ...(inputFileIds.length ? { inputFileIds } : {}) }, command)
         }),
       {
         name: BOT_SKILL_DISPATCH_TOOL,
         metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
-        description: "Reserved for a host-confirmed / skill selection in the main Bot. Dispatch immediately, without reading inputs or the skill. For a revision/continuation use the existing workId (or workQuery if its ID is unavailable); the host reopens completed work and retains its workspace. For new work give a short title and the user's explicit workspace, or omit for the default; use projectQuery for a named project without a known ID. Do not infer paths. The host forwards original input and activates the skill, then acknowledges acceptance once. This call ends the main turn. Other turns must use the ordinary task tools.",
+        description: "Route a host-confirmed / skill selection in the main Bot. For future or recurring work supply schedule and title; the host saves the skill and starts work only when due. Otherwise dispatch now. For a revision or continuation reuse the existing workId or workQuery. For new work use a short title and the user's explicit workspace, or omit for the default; use projectQuery for a named project. Do not read inputs, infer paths or open the skill here. The host acknowledges acceptance and ends the main turn.",
         schema: z.object({
           workId: id.optional(),
           workQuery: z.string().trim().min(1).max(160).optional(),
@@ -363,7 +377,16 @@ export function createBotWorkTools(
           goal: z.string().trim().min(1).max(2000).optional().describe("Only necessary earlier facts or routing notes; original request and selected skill are supplied by the host."),
           workspace: workspaceSelection,
           projectQuery: z.string().trim().min(1).max(160).optional(),
-          contextMessageIds: z.array(id).max(12).default([])
+          contextMessageIds: z.array(id).max(12).default([]),
+          schedule: z.object({
+            frequency: z.enum(["once", "daily", "weekly", "interval"]),
+            runAt: z.string().optional().describe("One-time date and time with UTC offset."),
+            afterSeconds: z.number().int().positive().max(315360000).optional(),
+            runAtTime: z.string().optional().describe("Daily/weekly local HH:mm."),
+            weekday: z.number().int().min(0).max(6).optional().describe("For weekly: Sunday is 0."),
+            intervalMinutes: z.number().int().min(5).max(525600).optional(),
+            message: z.string().trim().min(1).max(30000).describe("Standalone work for each occurrence: inputs, deliverable, constraints and when to notify. The host supplies the selected skill.")
+          }).strict().optional().describe("Set when the user asks for this skill to run later or on a recurring schedule. Saves a routine without starting work now. Omit for immediate work.")
         })
       }
     )] : []),

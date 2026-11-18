@@ -41,6 +41,15 @@ describe("Bot schedule host receipts", () => {
   const call = { id: "call", name: "bot_schedule", args: { action: "save" } }
   const content = JSON.stringify(schedule)
 
+  it("presents a saved slash skill as a schedule and verifies its exact work destination", () => {
+    const call = { id: "route", name: "bot_skill_dispatch", args: { schedule: { frequency: "daily" }, workId: "old-work" } }
+    const saved = { ...schedule, enabled: true, nextRunAt: schedule.runAt, workId: "old-work", skillName: "review" }
+    const result = { content: JSON.stringify({ kind: "bot-work-receipt", operation: call.name, receipt: { schedule: saved } }) }
+    expect(botScheduleReceipt(call, result)).toEqual({ action: "save", id: schedule.id, name: schedule.name, created: true })
+    expect(botScheduleReceipt({ ...call, args: { ...call.args, workId: "other" } }, result)).toBeNull()
+    expect(botScheduleReceipt(call, { ...result, is_error: true })).toBeNull()
+  })
+
   it("uses the returned identity and name, including restored text blocks", () => {
     const expected = { action: "save", id: "routine", name: "Review", created: true }
     expect(botScheduleReceipt(call, { content })).toEqual(expected)

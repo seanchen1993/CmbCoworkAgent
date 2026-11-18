@@ -408,6 +408,16 @@ export async function validateExplicitSkillReference(
   return skill ? null : `显式选择的技能不存在、已禁用或不在当前可用范围：${input.name}`
 }
 
+/** IM has a slash name but no desktop picker path. Never guess between installations. */
+export async function resolveBotRoutineSkill(name: string, allowedSkillNames?: readonly string[]) {
+  const registry = await buildSkillLifecycleRegistryForHooks({ projectMode: false }, allowedSkillNames)
+  const matches = registry?.exactNameMatches(name).filter(skill => !isDisabledSkillMatch(skill)) ?? []
+  if (matches.length !== 1) throw new Error(matches.length
+    ? `存在多个同名技能「${name}」，请先确认唯一的安装项。`
+    : `技能「${name}」不存在、已禁用或不在当前 Bot 的可用范围。`)
+  return { name: matches[0].name, path: matches[0].path }
+}
+
 async function resolveEnabledExplicitSkill(
   input: { skillName: string; skillPath: string },
   visibilityScope?: ProjectModeSkillScope,

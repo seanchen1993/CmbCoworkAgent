@@ -22,7 +22,8 @@ export function selectedMainBotSkill(task: BotTask): BotSkillDispatch | undefine
 export function botSkillDispatchInput(input: string, selection: BotSkillDispatch): string {
   return input.replace(selection.block, "").trimEnd() +
     `\n\n<bot_skill_dispatch>\nThe user explicitly selected skill ${JSON.stringify(selection.name)}. ` +
-    "Call bot_skill_dispatch now, with arguments only and no preliminary reply. Choose the destination, not whether to delegate. " +
+    "Call bot_skill_dispatch now, with arguments only and no preliminary reply. Choose the destination and timing. " +
+    "When asked to use this skill later or repeatedly, fill schedule and title: save the routine with a standalone instruction for each run. Otherwise omit schedule to start or continue work now. " +
     "Reuse the existing workId for a revision/continuation (or workQuery if its ID is absent); otherwise supply a short title. " +
     "Honor an explicitly designated directory or project; omit workspace for the default. " +
     "Do not read the skill or business files, run commands, plan the implementation or repeat the original request in the goal. " +

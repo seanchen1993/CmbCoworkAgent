@@ -1564,7 +1564,7 @@ describe("Bot schedule tool contract", () => {
     expect(contract.description).not.toContain("Routines need standalone authorized instructions")
     expect(contract.parameters).toMatchObject({ properties: {
       message: { description: expect.stringContaining("For work observations omit this field") },
-      kind: { const: "fixed_reminder", description: expect.stringContaining("without checking task status") },
+      kind: { const: "fixed_reminder", description: expect.stringContaining("without running an agent") },
       workId: { description: expect.stringContaining("Execution destination") },
       workMonitor: {
         description: expect.stringContaining('mode="report"'),
@@ -1630,7 +1630,7 @@ describe("Bot schedule tool contract", () => {
   it("uses the fixed reminder path only for an explicit kind", async () => {
     const { schedule, save, saveFollowUp } = fixture()
     const contract = convertToOpenAITool(schedule).function
-    expect(contract.description).toContain("For one-time reminders set kind=fixed_reminder")
+    expect(contract.description).toContain("For exact reminders set kind=fixed_reminder")
     expect(contract.parameters).toHaveProperty("properties.priorOperation")
     const args = { action: "save", name: "Call", message: "Remind me to call",
       frequency: "once", runAt: "2099-01-01T10:00:00Z" }
@@ -1697,8 +1697,8 @@ describe("Bot schedule tool contract", () => {
 
     expect((await schedule.invoke(call)).status).not.toBe("error")
     expect(save).toHaveBeenCalledExactlyOnceWith("a",
-      expect.objectContaining({ frequency: "once", message: call.args.message }), undefined,
-      ...("mockSource" in source ? ["source-task"] : []))
+      expect.objectContaining({ frequency: "once", message: call.args.message }), undefined, "source-task",
+      expect.objectContaining({ source: { taskId: "source-task", callId: "once", key: "once" } }))
   })
 
   it("returns error ToolMessages for real calls while preserving cancellation and validation", async () => {

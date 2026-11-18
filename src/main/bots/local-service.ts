@@ -155,8 +155,7 @@ export function getLocalBotHost(): LocalBotHost {
       },
       (id) => isBotMemoryEnabled(host!.getBot(id))
     )
-    host = new LocalBotHost(
-      new BotStore(
+    const store = new BotStore(
         database,
         Date.now,
         (threadId, ids) => {
@@ -317,7 +316,9 @@ export function getLocalBotHost(): LocalBotHost {
           } = buildEvent("bot.context", "bot")
           return context
         }
-      ),
+      )
+    host = new LocalBotHost(
+      store,
       {
         ...createLocalBotRunPort(
           getBotMemoryService(),
@@ -343,6 +344,18 @@ export function getLocalBotHost(): LocalBotHost {
         }),
         scheduleObservationPublication: {
           persist: (bot, publication) => {
+            if (publication.reminder && bot.threadId !== publication.threadId) {
+              const task = store.getTask(publication.taskId)
+              const meta = JSON.parse(getThreadCore(publication.threadId)?.metadata || "{}")
+              if (task.mockSource?.transport !== "im" || task.mockSource.personal || task.workId ||
+                  task.threadId !== publication.threadId || task.botId !== bot.id ||
+                  meta.botId !== bot.id || meta.botHostId !== "local" || meta.botWorkId ||
+                  meta.botMockBindingId !== task.mockSource.bindingId || meta.botMockGrantVersion !== task.mockSource.grantVersion ||
+                  meta.botAudienceKey !== task.mockSource.audienceKey ||
+                  meta.botMockConversationId !== task.mockSource.conversationId)
+                throw new BotError("CONFLICT", "固定提醒的原群聊身份已变化")
+              return persistScheduledBotResultMessage(publication)
+            }
             if (bot.threadId !== publication.threadId)
               throw new BotError("CONFLICT", "工作观察的原对话身份已变化")
             const thread = getThreadCore(bot.threadId)

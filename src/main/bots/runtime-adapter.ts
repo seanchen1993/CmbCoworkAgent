@@ -1436,7 +1436,7 @@ export function createLocalBotRunPort(
                       ])
                 ].join("\n\n")
               : task.origin.kind === "schedule"
-                ? `例行任务：\n\n${task.message}`
+                ? `例行任务：\n\n${literalBotSkillMarker(task.message)}`
                 : task.origin.kind === "discussion"
                   ? `群聊后续讨论（非新用户指令）：\n\nHost-selected participant for this group continuation (current identity):\n${JSON.stringify({ id: bot.id, name: bot.name })}\n\n${task.message}`
                   : task.origin.kind === "group"
@@ -1753,11 +1753,11 @@ export function createLocalBotRunPort(
                 commandInternalNotification:
                   task.origin.kind === "notification" && task.origin.notificationKind === "command",
                 botIntroduction: task.origin.kind === "introduction",
-                // Only the local user's composer may select a skill. Peer replies,
-                // shared context and generated routines cannot impersonate that selection.
-                // The original runtime still resolves the registered skill and runs its hooks.
+                // Resolve the saved selection against today's catalog for each new occurrence.
+                // Text in the instruction or in a peer reply cannot select a skill.
                 allowTrustedTransportSkillMarker: false,
-                trustedExplicitSkill: workInputs?.explicitSkill ?? (!mock && !continueBotTaskCheckpointId && task.origin.kind === "user" ? task.origin.explicitSkill : undefined),
+                trustedExplicitSkill: workInputs?.explicitSkill ?? (!continueBotTaskCheckpointId &&
+                  (task.origin.kind === "schedule" || (!mock && task.origin.kind === "user")) ? task.origin.explicitSkill : undefined),
                 botSkillDispatch: selectedMainBotSkill(task),
                 ...(simulated
                   ? {}

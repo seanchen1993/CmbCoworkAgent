@@ -268,6 +268,8 @@ export type BotTaskOrigin =
       kind: "schedule"
       scheduleId: string
       sourceTaskId?: string
+      /** Snapshot of the skill selected when this occurrence was scheduled. */
+      explicitSkill?: import("./skill-selection").BotSkillSelection
       observation?: import("./schedule-observation").BotScheduledWorkObservation
       fixedReminder?: import("./schedule-observation").BotScheduledFixedReminder
     }
@@ -383,6 +385,9 @@ export interface BotSchedule extends BotScheduleInput {
   sourceTaskId?: string
   audienceKey?: string
   workId?: string
+  /** This schedule created the work once and reuses it for every execution. */
+  dedicatedWork?: true
+  explicitSkill?: import("./skill-selection").BotSkillSelection
   /** Execution stays on this exact local work; no channel source is inherited. */
   desktopWork?: true
   workUnavailable?: true

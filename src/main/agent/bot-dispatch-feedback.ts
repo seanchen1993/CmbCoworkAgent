@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto"
 import type { BotDispatchFeedback } from "../../shared/bots/turn-feedback"
 import { currentBotReplyState } from "./opening-reply-reminder"
 import { BOT_SKILL_DISPATCH_TOOL } from "./bot-skill-dispatch"
+import { isSavedBotSkillSchedule } from "../../shared/bots/skill-selection"
 
 const record = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === "object" && !Array.isArray(value)
@@ -25,6 +26,15 @@ function readDispatchReceipt(name: string, result: unknown): Record<string, unkn
 /** Use the accepted task's origin, including name lookups and replayed receipts. */
 function skillDispatchAcknowledgement(result: unknown): string {
   const receipt = readDispatchReceipt(BOT_SKILL_DISPATCH_TOOL, result)
+  if (isSavedBotSkillSchedule(receipt?.schedule)) {
+    const { name, nextRunAt, timezone } = receipt.schedule
+    let next = nextRunAt
+    try {
+      next = new Date(nextRunAt).toLocaleString("zh-CN", { timeZone: timezone, month: "numeric", day: "numeric",
+        hour: "2-digit", minute: "2-digit", hour12: false })
+    } catch { /* An older host may have a timezone unknown to this runtime. */ }
+    return `已安排「${name}」，下次执行时间是 ${next}，结果会发回这里。`
+  }
   const origin = record(receipt?.task) ? receipt.task.origin : undefined
   if (record(origin) && origin.kind === "work") {
     if (origin.dispatch === "create")
@@ -48,6 +58,8 @@ export function acceptedBotDispatch(name: string, args: unknown, result: unknown
       nonempty(task.threadId) &&
       typeof task.state === "string" &&
       ["queued", "running", "waiting_user", "completed"].includes(task.state)
+    if (name === BOT_SKILL_DISPATCH_TOOL && record(args) && args.schedule)
+      return isSavedBotSkillSchedule(receipt.schedule, args.workId)
     if (name === "bot_work_create" || name === BOT_SKILL_DISPATCH_TOOL)
       return (
         acceptedTask(receipt.task) &&

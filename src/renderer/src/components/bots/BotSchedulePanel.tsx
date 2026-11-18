@@ -221,6 +221,7 @@ export function BotSchedulePanel({
                   {schedule.desktopWork && !work && " · 关联任务"}
                   {schedule.workMonitor && ` · ${botWorkMonitorLabel(schedule)}`}
                   {schedule.fixedReminder && " · 固定提醒"}
+                  {schedule.explicitSkill && ` · /${schedule.explicitSkill.name}`}
                 </small>
               </button>
               <button
@@ -265,7 +266,7 @@ export function BotSchedulePanel({
               <DialogTitle>{editing === "new" ? "创建例行任务" : renewing ? "续期例行任务" : "编辑例行任务"}</DialogTitle>
               <DialogDescription>
                 {editing !== "new" && editing.fixedReminder
-                  ? "按填写内容提醒一次。"
+                  ? "到点发送填写的提醒内容。"
                   : editing !== "new" && editing.workMonitor
                   ? ""
                   : work
@@ -316,7 +317,7 @@ export function BotSchedulePanel({
                 重复
                 <Select
                   value={input.frequency}
-                  disabled={busy || (editing !== "new" && Boolean(editing.fixedReminder))}
+                  disabled={busy}
                   onValueChange={(frequency) =>
                     setInput((value) => ({
                       ...value,

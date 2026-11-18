@@ -2986,7 +2986,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                             (item.audienceKey ?? "desktop") ===
                               (selectedWork?.audienceKey ?? "desktop") &&
                             (!desktopScheduleWork ||
-                              (item.desktopWork && item.workId === desktopScheduleWork.id) ||
+                              item.workId === desktopScheduleWork.id ||
                               item.workMonitor?.workId === desktopScheduleWork.id)
                         )}
                       />

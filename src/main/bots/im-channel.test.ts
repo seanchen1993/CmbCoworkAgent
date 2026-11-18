@@ -26,6 +26,7 @@ import { parseBotMockSource } from "./mock-channel-validation"
 import { canSteerBotTask } from "./continuation"
 import { BOT_EVENTS } from "../../shared/bots/telemetry"
 import { createBotWorkTools } from "./work-tools"
+import { createBotScheduleTools } from "./tools"
 
 const interactionCommand = vi.hoisted(() => vi.fn(async () => undefined))
 vi.mock("../services/im/bot-interaction-command", () => ({
@@ -58,7 +59,8 @@ function fixture(
   workspaces?: BotWorkWorkspacePort,
   workHistory?: BotWorkHistoryPort,
   concurrency = 2,
-  workRuntimeStatus?: BotRunPort["workRuntimeStatus"]
+  workRuntimeStatus?: BotRunPort["workRuntimeStatus"],
+  routinePublisher?: BotRunPort["scheduleObservationPublication"]
 ) {
   const db = new NativeSqliteAdapter(new DatabaseSync(":memory:")),
     store = new BotStore(db)
@@ -81,6 +83,7 @@ function fixture(
       workspaces,
       workHistory,
       workRuntimeStatus,
+      scheduleObservationPublication: routinePublisher,
       cancelBackground,
       cancelBackgroundCommands,
       cancelWorkflowInstances,
@@ -100,7 +103,8 @@ function fixture(
           : null
     },
     concurrency,
-    (error) => errors.push(error)
+    (error) => errors.push(error),
+    routinePublisher ? (input, from) => input.runAt ?? new Date(from.getTime() + 300_000).toISOString() : undefined
   )
   const remote = new Map<string, BotImBinding>()
   const createOperations = new Map<string, string>()
@@ -1267,46 +1271,75 @@ describe("authenticated IM on the existing Bot host", () => {
     expect(f.errors).toEqual([])
   })
 
-  it("persists a group routine's audience and stops it when the binding is revoked", async () => {
-    let scheduleId = ""
-    const f = fixture(async (task) => {
-      if (task.origin.kind === "mock") {
-        const schedule = f.store.saveSchedule(
-          task.botId,
-          {
-            name: "Group reminder",
-            message: "only this group",
-            frequency: "interval",
-            intervalMinutes: 5,
-            enabled: true
-          },
-          new Date().toISOString(),
-          undefined,
-          task.id
-        )
-        scheduleId = schedule.id
+  it("keeps the group main chat responsive during a recurring worker, returns only to its group and stops on revocation", async () => {
+    const gate = Promise.withResolvers<void>()
+    const f = fixture(async (task, host, signal) => {
+      if (task.origin.kind === "schedule") {
+        await gate.promise
+        return { state: "completed", result: "检查完成：7 条" }
       }
-      return { state: "completed", result: "routine-result" }
-    })
+      if (task.message === "你好") return { state: "completed", result: "群主对话在线" }
+      const [tool] = createBotScheduleTools(f.bot, task, () => host, signal)
+      const saved = await tool.invoke({ type: "tool_call", name: tool.name, id: "routine", args: {
+        action: "save", name: "群内检查", message: "检查本群数据", frequency: "interval", intervalMinutes: 5
+      } })
+      expect(saved.status, String(saved.content)).toBe("success")
+      return { state: "completed", result: "日程已保存" }
+    }, undefined, undefined, undefined, undefined, 2, undefined, { persist() {}, async announce() {} })
     const binding = await f.binding()
+    await f.binding()
     await f.service.receive(f.event(binding, "routine"))
-    await eventually(
-      () => Boolean(scheduleId) && f.store.getTask(f.calls[0].id).state === "completed"
-    )
-    const schedule = f.store.schedules().find((s) => s.id === scheduleId)!
+    await eventually(() => f.store.schedules().length === 1 && f.store.getTask(f.calls[0].id).state === "completed")
+    const [schedule] = f.store.schedules()
     expect(schedule.audienceKey).toBe(f.calls[0].mockSource!.audienceKey)
+    const work = f.store.getWork(f.bot.id, schedule.workId!)
+    expect(work.parentThreadId).toBe(f.calls[0].threadId)
+    expect(work.threadId).not.toBe(work.parentThreadId)
+    expect(f.calls).toHaveLength(1)
     f.store.fireSchedule(schedule, new Date(Date.now() + 300000).toISOString())
     f.host.resume()
-    await eventually(
-      () => f.calls.length === 2 && f.store.getTask(f.calls[1].id).state === "completed"
-    )
-    expect(f.calls[1].threadId).toBe(f.calls[0].threadId)
-    expect(f.calls[1].origin.kind).toBe("schedule")
+    try {
+      await eventually(() => f.calls.some(t => t.origin.kind === "schedule"))
+      await f.service.receive(f.event(binding, "ping", "你好"))
+      await eventually(() => f.client.submitReply.mock.calls.some(([r]) => r.message.content === "群主对话在线"))
+      expect(f.store.getTask(f.calls[1].id)).toMatchObject({ state: "running", workId: work.id, threadId: work.threadId })
+      f.store.fireSchedule(f.store.schedules()[0], new Date(Date.now() + 600_000).toISOString())
+      expect(f.store.recentTasks().filter(t => t.origin.kind === "schedule")).toHaveLength(1)
+    } finally { gate.resolve() }
+    await eventually(() => f.client.submitReply.mock.calls.some(([r]) => r.message.content === "检查完成：7 条"))
+    expect(f.client.submitReply.mock.calls.filter(([r]) => r.message.content === "检查完成：7 条")).toHaveLength(1)
+    expect(f.client.submitReply.mock.calls.every(([r]) => r.conversationKey === binding.conversationKey)).toBe(true)
     const local = f.calls[0].mockSource!
     f.store.im.revoke(f.bot.id, local.bindingId, local.grantVersion)
     f.store.fireSchedule(f.store.schedules()[0], new Date().toISOString())
     expect(f.store.schedules()[0].enabled).toBe(false)
-    expect(f.calls).toHaveLength(2)
+    expect(f.calls.filter(t => t.origin.kind === "schedule")).toHaveLength(1)
+    expect(f.errors).toEqual([])
+  })
+
+  it("delivers recurring fixed reminder text to its original IM group without acquiring a worker", async () => {
+    const publication = { persist: vi.fn(), announce: vi.fn(async () => {}) }
+    const f = fixture(async (task, host, signal) => {
+      const [tool] = createBotScheduleTools(f.bot, task, () => host, signal)
+      const result = await tool.invoke({ type: "tool_call", name: tool.name, id: "remind", args: {
+        action: "save", kind: "fixed_reminder", name: "打卡", message: "记得打卡", frequency: "daily", runAtTime: "09:00"
+      } })
+      expect(result.status, String(result.content)).toBe("success")
+      return { state: "completed", result: "提醒已保存" }
+    }, undefined, undefined, undefined, undefined, 2, undefined, publication)
+    const group = await f.binding()
+    await f.service.receive(f.event(group, "remind-me", "每天九点提醒我打卡"))
+    await eventually(() => f.store.schedules().length === 1 && f.store.getTask(f.calls[0].id).state === "completed")
+    for (let i = 1; i <= 2; i++) {
+      const [current] = f.store.schedules()
+      expect(current.workId).toBeUndefined()
+      f.store.fireSchedule(current, new Date(Date.parse(current.nextRunAt!) + 86_400_000).toISOString())
+      f.host.resume()
+      await eventually(() => f.client.submitReply.mock.calls.filter(([r]) => r.message.content === "记得打卡").length === i)
+    }
+    expect(publication.persist).toHaveBeenCalledTimes(2)
+    expect(f.calls).toHaveLength(1)
+    expect(f.client.submitReply.mock.calls.every(([r]) => r.conversationKey === group.conversationKey)).toBe(true)
     expect(f.errors).toEqual([])
   })
 

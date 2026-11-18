@@ -1,4 +1,5 @@
 import type { BotSchedule } from "../../../shared/bots/contracts"
+import { isSavedBotSkillSchedule } from "../../../shared/bots/skill-selection"
 import type { BotWorkScheduleMonitorInput } from "../../../shared/bots/schedule-observation"
 import { botIdentifier, parseExistingVersion, parseSchedule } from "../../../shared/bots/validation"
 import type { ToolCall, ToolResult } from "@/types"
@@ -13,7 +14,8 @@ export function botScheduleReceipt(
   tool: ToolCall,
   result: Pick<ToolResult, "content" | "is_error">
 ): ScheduleReceipt | null {
-  if (tool.name !== "bot_schedule" || result.is_error) return null
+  const skillSchedule = tool.name === "bot_skill_dispatch" && Boolean(tool.args.schedule)
+  if ((!skillSchedule && tool.name !== "bot_schedule") || result.is_error) return null
   try {
     let value = result.content
     if (
@@ -22,7 +24,7 @@ export function botScheduleReceipt(
       value.every((part) => part?.type === "text" && typeof part.text === "string")
     )
       value = value.map((part) => part.text).join("")
-    if (tool.args.action === "remove") {
+    if (!skillSchedule && tool.args.action === "remove") {
       if (
         value !== "例行任务已删除，尚未开始的排队触发已取消。已开始的执行按原约定结算。" &&
         value !== "例行任务已删除，排队中的触发已取消。"
@@ -31,6 +33,13 @@ export function botScheduleReceipt(
       return { action: "remove", id: botIdentifier(tool.args.id) }
     }
     if (typeof value === "string") value = JSON.parse(value)
+    if (skillSchedule) {
+      const envelope = value as { kind?: unknown; operation?: unknown; receipt?: { schedule?: unknown } } | null
+      const saved = envelope?.receipt?.schedule
+      if (envelope?.kind !== "bot-work-receipt" || envelope.operation !== tool.name ||
+          !isSavedBotSkillSchedule(saved, tool.args.workId)) return null
+      return { action: "save", id: botIdentifier(saved.id), name: saved.name, created: true }
+    }
     const schedule = (input: unknown) => {
       // Reuse the same shape validation as schedule creation and editing.
       const config = parseSchedule(input)
@@ -83,7 +92,7 @@ export function botSchedulePresentation(schedule: BotSchedule, now = Date.now())
   }
   if (schedule.fixedReminder?.ended === "expired")
     return { label: "已错过，提醒已过期", reschedule: false }
-  if (schedule.fixedReminder && schedule.lastTriggeredAt)
+  if (schedule.fixedReminder && schedule.frequency === "once" && schedule.lastTriggeredAt)
     return { label: "提醒已触发", reschedule: true }
   const once = schedule.frequency === "once" && !schedule.enabled
   if (once && schedule.lastTriggeredAt)

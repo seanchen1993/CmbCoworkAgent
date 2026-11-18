@@ -53,7 +53,7 @@ import {
   resolveStandardTurnRouting,
   prepareStandardThreadRuntimeFactory
 } from "./standard-thread-turn"
-import { prepareStandardUserPrompt, validateExplicitSkillReference } from "./standard-thread-turn"
+import { prepareStandardUserPrompt, resolveBotRoutineSkill, validateExplicitSkillReference } from "./standard-thread-turn"
 import { createHookScope } from "../hooks/scope"
 import { createSkillUseTracker } from "./skill-lifecycle/tracker"
 import { extractErrorDetail } from "./failover"
@@ -126,6 +126,24 @@ describe("managed model routing", () => {
 })
 
 describe("original submit body receipt", () => {
+  it("resolves a group routine's slash name only to a unique skill allowed for that Bot", async () => {
+    const root = mkdtempSync(join(tmpdir(), "bot-routine-catalog-"))
+    try {
+      const sources = ["one", "two"].map(dir => join(root, dir))
+      for (const dir of sources) {
+        mkdirSync(join(dir, "daily"), { recursive: true })
+        writeFileSync(join(dir, "daily", "SKILL.md"), "---\nname: daily\ndescription: Run a daily check\n---\nRead the inputs.")
+      }
+      skillRoots.mockResolvedValue([sources[0]])
+      await expect(resolveBotRoutineSkill("daily", ["daily"])).resolves.toEqual({ name: "daily", path: join(sources[0], "daily", "SKILL.md") })
+      await expect(resolveBotRoutineSkill("daily", [])).rejects.toThrow("可用范围")
+      skillRoots.mockResolvedValue(sources)
+      await expect(resolveBotRoutineSkill("daily", ["daily"])).rejects.toThrow("多个同名技能")
+    } finally {
+      skillRoots.mockResolvedValue([])
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
   const prepare = (rawMessage: string, internalGoalInput?: boolean) => prepareStandardUserPrompt({
     rawMessage, initialModelInput: rawMessage, allowExplicitSkillFromMessage: false, internalGoalInput,
     threadId: "synthetic-input", workspacePath: "/fixture",

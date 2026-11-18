@@ -36,6 +36,7 @@ import type {
   BotWorkPage
 } from "../../shared/bots/work"
 import type { BotMockSource } from "../../shared/bots/mock-channel"
+import type { BotSkillSelection } from "../../shared/bots/skill-selection"
 import type { WorkflowRunReference } from "../agent/workflow/run-manager"
 import { BotMockChannelStore } from "./mock-channel-store"
 import { assertBotMockText, parseBotChannelSource } from "./mock-channel-validation"
@@ -379,8 +380,10 @@ export interface BotWorkflowReference extends WorkflowRunReference {
 }
 
 export type BotWorkScheduleCreation = BotDesktopWorkScheduleBinding | {
-  workId: string
+  workId?: string
   source: BotConversationToolSource
+  explicitSkill?: BotSkillSelection
+  workspace?: BotWorkWorkspace
 }
 
 export type BotScheduleToolEdit = { source: BotConversationToolSource; fingerprint: string }
@@ -1952,6 +1955,16 @@ export class BotStore {
     const { fingerprint, commandId } = this.workCreation(input, source)
     return this.workCommandReceipt<BotWorkReceipt>(commandId, fingerprint, source)
   }
+  /** Allocate the conversation without starting a turn (routines start only when due). */
+  private insertWorkItem(id: string, botId: string, parentThreadId: string, title: string, goal: string,
+    source?: BotMockSource, workspace?: BotWorkWorkspace): void {
+    const now = this.now()
+    this.db.run(
+      "INSERT INTO bot_work_items(id,bot_id,thread_id,parent_thread_id,title,goal,audience_key,created_at,updated_at,source_json,workspace_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+      [id, botId, `bot-work-${id}`, parentThreadId, title, goal, source?.audienceKey ?? "desktop", now, now,
+        source && !source.personal ? JSON.stringify(source) : null, workspace ? JSON.stringify(workspace) : null]
+    )
+  }
   createWork(
     input: CreateBotWorkInput,
     source?: { taskId: string; callId: string; key: string },
@@ -1999,24 +2012,7 @@ export class BotStore {
           // from the task being created. Validate only fresh operations here.
           const quote = !source && input.explicitSkill ? parseBotMessageReply(goal) : null
           if (quote) this.assertMessageReply(bot.id, goal, quote.reply.id)
-          const now = this.now(),
-            threadId = `bot-work-${id}`
-          this.db.run(
-            "INSERT INTO bot_work_items(id,bot_id,thread_id,parent_thread_id,title,goal,audience_key,created_at,updated_at,source_json,workspace_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            [
-              id,
-              bot.id,
-              threadId,
-              sourceThread,
-              input.title.trim(),
-              goal,
-              mockSource?.audienceKey ?? "desktop",
-              now,
-              now,
-              mockSource && !mockSource.personal ? JSON.stringify(mockSource) : null,
-              workspace ? JSON.stringify(workspace) : null
-            ]
-          )
+          this.insertWorkItem(id, bot.id, sourceThread, input.title.trim(), goal, mockSource, workspace)
           const attachments = source
             ? this.forwardedInput(source.taskId, input.inputFileIds, id)
             : { text: buildAttachmentMessageParts(desktopFiles.map(file => file.attachment!)).attachmentModelBlocks,
@@ -9150,8 +9146,10 @@ export class BotStore {
       const task = this.getTask(taskId)
       const bot = this.getBot(task.botId)
       const reminder = task.origin.kind === "schedule" ? task.origin.fixedReminder : undefined
-      if (!reminder || task.origin.kind !== "schedule" || task.workId || task.mockSource ||
-          task.threadId !== bot.threadId || bot.archived || bot.deleting || task.state !== "queued")
+      const threadId = task.mockSource && !task.mockSource.personal ? this.im.thread(task.mockSource) : bot.threadId
+      if (!reminder || task.origin.kind !== "schedule" || task.workId ||
+          (task.mockSource && task.mockSource.transport !== "im") || task.threadId !== threadId ||
+          bot.archived || bot.deleting || task.state !== "queued")
         throw new BotError("CONFLICT", "不是当前已接受的固定提醒")
       const { scheduleId } = task.origin
       if (reminder.expiresAt && Date.parse(reminder.expiresAt) <= this.now()) {
@@ -9226,8 +9224,11 @@ export class BotStore {
           (!task.origin.fixedReminder || deliveredText !== delayedBotReminderText(publication.text)))
         throw new BotError("CONFLICT", "工作观察通知内容已变化")
       const text = deliveredText ?? publication.text
-      this.im.mirrorPersonal({ ...task, createdAt: publication.sourceCreatedAt }, text)
-      this.noteActivity("bot", task.botId, text, true)
+      if (task.mockSource) this.im.settle(task, "completed", text)
+      else this.im.mirrorPersonal({ ...task, createdAt: publication.sourceCreatedAt }, text)
+      if (task.mockSource && !task.mockSource.personal)
+        this.noteActivity("im", task.mockSource.bindingId, text, true)
+      else this.noteActivity("bot", task.botId, text, true)
       this.db.run("DELETE FROM bot_reply_outbox WHERE task_id=?", [taskId])
       this.changed()
       return true
@@ -9278,29 +9279,47 @@ export class BotStore {
     return this.savedSchedule(botId, id)
   }
 
+  private hasPendingScheduleTurn(id: string, threadId: string): boolean {
+    return this.rows(`SELECT 1 FROM bot_tasks WHERE thread_id=? AND state IN ('queued','running','waiting_user')
+      AND json_extract(origin_json,'$.scheduleId')=? LIMIT 1`, [threadId, id]).length > 0
+  }
+
+  private bindRoutineWork(schedule: BotSchedule, bot: BotDefinition, source?: BotTask, workspace?: BotWorkWorkspace): BotSchedule {
+    if (schedule.workId || schedule.workMonitor || schedule.fixedReminder) return schedule
+    // A legacy routine can be edited while its old main-thread turn is still active.
+    const parentThread = source?.threadId ?? bot.threadId
+    if (schedule.version > 1 && this.hasPendingScheduleTurn(schedule.id, parentThread)) return schedule
+    const workId = randomUUID()
+    this.insertWorkItem(workId, bot.id, parentThread, schedule.name, schedule.message, source?.mockSource, workspace)
+    return { ...schedule, workId, dedicatedWork: true }
+  }
+
   saveSchedule(
     botId: string,
     input: BotScheduleInput,
     nextRunAt: string | null,
     existing?: BotScheduleEdit,
     sourceTaskId?: string,
-    desktopWork?: BotWorkScheduleCreation,
+    execution?: BotWorkScheduleCreation,
     followUpRequest?: { input: BotWorkScheduleMonitorInput | BotFixedReminderInput; source: BotConversationToolSource }
   ): BotSchedule {
     return this.transaction(() => {
       const bot = this.getBot(botId)
-      if (bot.archived) throw new BotError("CONFLICT", "请先恢复 Bot")
-      const schedules = this.schedules(),
-        prior = existing ? schedules.find((item) => item.id === existing.id) : undefined
+      if (bot.archived || bot.deleting) throw new BotError("CONFLICT", "请先恢复 Bot")
+      const priorRow = existing && this.rows("SELECT payload FROM bot_schedules WHERE id=? AND bot_id=?", [existing.id, botId])[0]
+      const prior = priorRow ? JSON.parse(String(priorRow.payload)) as BotSchedule : undefined
+      const source = sourceTaskId ? this.getTask(sourceTaskId) : undefined
+      const imSource = source?.mockSource
       const requested = followUpRequest?.input
       const requestedReminder = requested && "kind" in requested ? requested : undefined
+      const toolExecution = execution && "source" in execution ? execution : undefined
       if (existing && (!prior || prior.botId !== botId || prior.version !== existing.version))
         throw new BotError("CONFLICT", "例行任务已改变，请刷新后重试")
       const toolEdit = existing?.tool
       const newExpiry = existing?.expiresAt
       const desktopMonitor = existing?.workMonitor
       if ((existing?.withdrawTaskId || newExpiry || desktopMonitor) &&
-          (toolEdit || sourceTaskId || desktopWork || followUpRequest || bot.deleting))
+          (toolEdit || sourceTaskId || execution || followUpRequest || bot.deleting))
         throw new BotError("CONFLICT", "只能在桌面修改原例行安排")
       if (desktopMonitor && (!prior?.workMonitor || prior.audienceKey !== "desktop" || existing?.withdrawTaskId))
         throw new BotError("CONFLICT", "只能编辑已有的桌面工作观察")
@@ -9322,14 +9341,14 @@ export class BotStore {
           throw new BotError("CONFLICT", "此例行不支持设置失效时间")
         if (!(Date.parse(newExpiry) > this.now())) throw new BotError("INVALID_INPUT", "失效时间必须在未来")
       }
-      if (toolEdit && (desktopWork || sourceTaskId ||
+      if (toolEdit && (execution || sourceTaskId ||
           !(prior?.desktopWork || prior?.workMonitor || prior?.fixedReminder)))
         throw new BotError("CONFLICT", "原例行的编辑范围已变化")
-      if ((desktopWork && (existing || sourceTaskId)) || (prior?.desktopWork && sourceTaskId))
+      if ((execution && existing) || (prior?.desktopWork && source && prior.workId !== source.workId) ||
+          (sourceTaskId && execution && toolExecution?.source.taskId !== sourceTaskId))
         throw new BotError("CONFLICT", "工作例行的执行目标和渠道不能变更")
-      if ((followUpRequest && (desktopWork || sourceTaskId ||
-          (prior && !(requestedReminder ? prior.fixedReminder : prior.workMonitor)))) ||
-          ((prior?.workMonitor || prior?.fixedReminder) && sourceTaskId))
+      if (followUpRequest && (execution || (sourceTaskId && (!requestedReminder || followUpRequest.source.taskId !== sourceTaskId)) ||
+          (prior && !(requestedReminder ? prior.fixedReminder : prior.workMonitor))))
         throw new BotError("CONFLICT", "例行的类型和渠道不能变更")
       if (prior?.desktopWork && !prior.workId)
         throw new BotError("CONFLICT", "工作例行缺少执行目标")
@@ -9339,25 +9358,40 @@ export class BotStore {
           ["frequency", "runAt", "runAtTime", "weekday", "intervalMinutes"] as const
         ).some((key) => prior[key] !== input[key])
       const changedExecution = prior && (changedTiming || prior.message !== input.message)
-      const source = sourceTaskId ? this.getTask(sourceTaskId) : undefined
       if (source) {
         if (source.botId !== botId || !this.hasWorkUserRequest(source.id))
           throw new BotError("CONFLICT", "例行任务需要当前用户直接交办")
-        if (source.mockSource?.transport !== "im")
+        if (source.mockSource ? source.mockSource.transport !== "im" : !source.workId || source.origin.kind !== "user")
           throw new BotError("CONFLICT", "例行任务渠道来源无效")
-        this.im.execution(source)
-        if (prior && (prior.audienceKey ?? "desktop") !== source.mockSource.audienceKey)
+        if (prior && (prior.audienceKey ?? "desktop") !== (source.mockSource?.audienceKey ?? "desktop"))
           throw new BotError("CONFLICT", "例行任务不属于当前会话")
+        if (prior && source.workId && prior.workId !== source.workId)
+          throw new BotError("CONFLICT", "任务中的例行只能继续当前任务")
       }
-      const executionSource = desktopWork && "source" in desktopWork ? desktopWork.source : undefined
-      const toolSource = executionSource ?? followUpRequest?.source ?? toolEdit?.source
-      const userRequest = toolSource ? this.scheduleToolUserRequest(bot, toolSource) : undefined
-      const originalSourceTaskId = prior?.sourceTaskId ?? (toolEdit ? undefined : userRequest?.id)
-      const workId = desktopWork?.workId ?? (prior?.desktopWork ? prior.workId : undefined)
+      const toolSource = toolExecution?.source ?? followUpRequest?.source ?? toolEdit?.source
+      const userRequest = source ?? (toolSource ? this.scheduleToolUserRequest(bot, toolSource) : undefined)
+      const originalSourceTaskId = prior ? prior.sourceTaskId : userRequest?.id
+      const workId = prior ? prior.workId : execution?.workId ?? source?.workId
+      if ((requestedReminder || prior?.fixedReminder || prior?.workMonitor) && source &&
+          (!imSource || imSource.personal || source.workId || source.origin.kind !== "mock" || prior?.workMonitor))
+        throw new BotError("CONFLICT", "此提醒只能在原主对话中安排")
+      if (source?.workId && execution?.workId && source.workId !== execution.workId)
+        throw new BotError("CONFLICT", "任务中的例行只能继续当前任务")
+      if (source && execution?.workId) this.assertWorkAudience(source, execution.workId)
       const save = () => {
-        if (!existing && schedules.length >= 200) throw new BotError("CONFLICT", "例行任务已达上限")
-        if (workId && (desktopWork || input.enabled)) this.requireDesktopWorkScheduleTarget(bot, workId)
-        if ((desktopWork || followUpRequest) && input.enabled && input.frequency === "once" && !nextRunAt)
+        if (!existing && Number(this.rows("SELECT count(*) AS total FROM bot_schedules")[0].total) >= 200)
+          throw new BotError("CONFLICT", "例行任务已达上限")
+        if (workId && (execution || input.enabled)) {
+          if ((prior?.audienceKey ?? imSource?.audienceKey ?? "desktop") === "desktop")
+            this.requireDesktopWorkScheduleTarget(bot, workId)
+          else {
+            const work = this.getWork(botId, workId)
+            if (work.audienceKey !== (prior?.audienceKey ?? imSource?.audienceKey) ||
+                work.state !== "active" || work.dispatchStopped)
+              throw new BotError("CONFLICT", "原任务已不可用，无法安排执行")
+          }
+        }
+        if ((execution || followUpRequest) && input.enabled && input.frequency === "once" && !nextRunAt)
           throw new BotError("INVALID_INPUT", "执行时间必须在未来")
         const previousMonitor = prior?.workMonitor
         const previousReminder = prior?.fixedReminder
@@ -9369,8 +9403,6 @@ export class BotStore {
           ? { ...requestedReminder, expiresAt: requestedReminder.expiresAt ?? previousReminder?.expiresAt }
           : previousReminder && newExpiry ? { ...previousReminder, expiresAt: newExpiry }
           : previousReminder
-        if (reminder && input.frequency !== "once")
-          throw new BotError("INVALID_INPUT", "固定提醒只能安排一次")
         if (reminder && input.enabled && reminder.expiresAt && Date.parse(reminder.expiresAt) <= this.now())
           throw new BotError("CONFLICT", "固定提醒已过期，请先修改失效时间")
         const reminderChanged = reminder?.expiresAt !== previousReminder?.expiresAt
@@ -9393,7 +9425,7 @@ export class BotStore {
             (!prior?.enabled || changedTiming || expiresAt !== (previousMonitor?.expiresAt ?? previousReminder?.expiresAt)) &&
             Date.parse(next) >= Date.parse(expiresAt))
           throw new BotError("INVALID_INPUT", "下一次执行必须早于失效时间")
-        const schedule: BotSchedule = {
+        const schedule = this.bindRoutineWork({
           ...input,
           ...(monitor ? {
             audienceKey: "desktop", sourceTaskId: originalSourceTaskId,
@@ -9406,24 +9438,25 @@ export class BotStore {
                 : resetObservation || (monitorChanged && previousMonitor?.ended === "expired") ? undefined
                 : previousMonitor?.ended }
           } : reminder ? {
-            audienceKey: "desktop", sourceTaskId: originalSourceTaskId,
+            audienceKey: prior?.audienceKey ?? imSource?.audienceKey ?? "desktop", sourceTaskId: originalSourceTaskId,
             fixedReminder: { ...reminder, ended: input.enabled ? undefined : previousReminder?.ended }
-          } : workId
-            ? { desktopWork: true, audienceKey: "desktop", workId,
-                ...(originalSourceTaskId ? { sourceTaskId: originalSourceTaskId } : {}),
-                ...(!input.enabled && prior?.workUnavailable ? { workUnavailable: true } : {}) }
-            : source
-              ? { sourceTaskId: source.id, audienceKey: source.mockSource!.audienceKey, workId: source.workId }
-              : prior?.sourceTaskId
-                ? { sourceTaskId: prior.sourceTaskId, audienceKey: prior.audienceKey, workId: prior.workId }
-                : {}),
+          } : {
+            audienceKey: prior?.audienceKey ?? imSource?.audienceKey ?? "desktop",
+            ...(originalSourceTaskId ? { sourceTaskId: originalSourceTaskId } : {}),
+            ...(workId ? { workId } : {}),
+            ...(prior?.desktopWork || (!prior && workId && !imSource) ? { desktopWork: true } : {}),
+            ...(prior?.dedicatedWork ? { dedicatedWork: true } : {}),
+            ...(prior?.explicitSkill || toolExecution?.explicitSkill
+              ? { explicitSkill: prior?.explicitSkill ?? toolExecution?.explicitSkill } : {}),
+            ...(!input.enabled && prior?.workUnavailable ? { workUnavailable: true } : {})
+          }),
           id: prior?.id ?? randomUUID(),
           botId,
           version: (prior?.version ?? 0) + 1,
           nextRunAt: next,
           timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           lastTriggeredAt: changedExecution ? undefined : prior?.lastTriggeredAt
-        }
+        }, bot, prior ? (prior.sourceTaskId ? this.getTask(prior.sourceTaskId) : undefined) : userRequest, toolExecution?.workspace)
         this.db.run(
           "INSERT OR REPLACE INTO bot_schedules VALUES (?, ?, ?)",
           [schedule.id, botId, JSON.stringify(schedule)]
@@ -9440,12 +9473,13 @@ export class BotStore {
         this.changed()
         return schedule
       }
-      if (!desktopWork && !followUpRequest && !toolEdit) return save()
-      const fingerprint = toolEdit?.fingerprint ?? createHash("sha256").update(JSON.stringify(desktopWork
-        ? [desktopWork.workId, input] : [followUpRequest?.input, existing?.id, input])).digest("hex")
+      if (!execution && !followUpRequest && !toolEdit) return save()
+      const fingerprint = toolEdit?.fingerprint ?? createHash("sha256").update(JSON.stringify(execution
+        ? [execution.workId, input, ...(toolExecution?.explicitSkill ? [toolExecution.explicitSkill, toolExecution.workspace] : [])]
+        : [followUpRequest?.input, existing?.id, input])).digest("hex")
       const command = toolSource ? `tool:${toolSource.taskId}:${toolSource.callId}`
-        : desktopWork && "operationId" in desktopWork
-          ? `desktop-work-schedule:${botId}:${desktopWork.operationId}` : undefined
+        : execution && "operationId" in execution
+          ? `desktop-work-schedule:${botId}:${execution.operationId}` : undefined
       if (!command) throw new BotError("INVALID_INPUT", "例行任务缺少操作标识")
       const receipt = this.workCommand(command, fingerprint, () => ({ id: save().id }), toolSource,
         saved => ({ kind: "schedule_save", targetId: saved.id }))
@@ -9471,7 +9505,7 @@ export class BotStore {
     const row = this.rows("SELECT payload FROM bot_schedules WHERE id=? AND bot_id=?",
       [task.origin.scheduleId, task.botId])[0]
     const schedule = row ? JSON.parse(String(row.payload)) as BotSchedule : undefined
-    return schedule?.desktopWork && schedule.workId === task.workId && schedule.enabled &&
+    return (schedule?.desktopWork || schedule?.dedicatedWork) && schedule.workId === task.workId && schedule.enabled &&
       schedule.frequency !== "once" ? schedule : undefined
   }
 
@@ -9497,11 +9531,11 @@ export class BotStore {
     this.changed()
   }
 
-  private pendingDesktopWorkSchedule(schedule: BotSchedule): boolean {
+  private pendingWorkSchedule(schedule: BotSchedule): boolean {
     // Keep recursion on exact receipt identities. Unary + preserves the family expression index lookup.
     return this.rows(`WITH RECURSIVE occurrence AS (
         SELECT id,work_id FROM bot_tasks WHERE work_id=? AND bot_id=?
-          AND mock_source_json IS NULL AND json_extract(origin_json,'$.kind')='schedule'
+          AND json_extract(origin_json,'$.kind')='schedule'
           AND json_extract(origin_json,'$.scheduleId')=?
       ), members(id,thread_id,bot_id,state,root_work_id) AS (
         SELECT root.id,root.thread_id,root.bot_id,root.state,occurrence.work_id
@@ -9531,7 +9565,8 @@ export class BotStore {
 
   fireSchedule(schedule: BotSchedule, nextRunAt: string | null, settleObservation = false): void {
     this.transaction(() => {
-      const latest = this.schedules().find((item) => item.id === schedule.id)
+      const row = this.rows("SELECT payload FROM bot_schedules WHERE id=? AND bot_id=?", [schedule.id, schedule.botId])[0]
+      let latest = row ? JSON.parse(String(row.payload)) as BotSchedule : undefined
       if (
         !latest ||
         latest.version !== schedule.version ||
@@ -9544,14 +9579,18 @@ export class BotStore {
       let fixedReminderTaskId: string | undefined
       let observationTaskId: string | undefined
       const source = latest.sourceTaskId ? this.getTask(latest.sourceTaskId) : undefined
+      if (((latest.desktopWork || latest.dedicatedWork) && !latest.workId) ||
+          (latest.audienceKey?.startsWith("im:") && latest.audienceKey !== source?.mockSource?.audienceKey)) {
+        this.pauseUnavailableWorkSchedule(latest)
+        return
+      }
       const expiresAt = latest.workMonitor?.expiresAt ?? latest.fixedReminder?.expiresAt
       if (expiresAt && Date.parse(expiresAt) <= this.now()) {
         this.expireSchedule(latest)
         return
       }
-      if (latest.desktopWork) {
+      if (latest.workId && !source?.mockSource) {
         try {
-          if (!latest.workId) throw new BotError("CONFLICT", "工作例行缺少执行目标")
           this.requireDesktopWorkScheduleTarget(bot, latest.workId)
         } catch (error) {
           if (!(error instanceof BotError) || !["CONFLICT", "NOT_FOUND"].includes(error.code)) throw error
@@ -9564,7 +9603,7 @@ export class BotStore {
           this.im.validateSource(source.mockSource, this.im.continuationOwner(source))
           if (latest.workId) {
             const work = this.getWork(bot.id, latest.workId)
-            if (work.state !== "active" || work.dispatchStopped)
+            if (work.audienceKey !== source.mockSource.audienceKey || work.state !== "active" || work.dispatchStopped)
               throw new BotError("CONFLICT", "原任务已完成或停止，例行任务已暂停")
           }
         } catch {
@@ -9583,14 +9622,14 @@ export class BotStore {
         }
       }
       if (!bot.archived) {
-        // Only a desktop work recurrence follows the previous occurrence's asynchronous return route.
-        const pending = latest.desktopWork
-          ? latest.frequency !== "once" && this.pendingDesktopWorkSchedule(latest)
-          : this.rows(
-              "SELECT id FROM bot_tasks WHERE state IN ('queued','running','waiting_user') AND json_extract(origin_json,'$.scheduleId')=? LIMIT 1",
-              [latest.id]
-            ).length > 0
+        // Upgrades may still own a checkpoint in the original conversation. Keep its
+        // accepted execution until it settles, even if the route has already been saved.
+        const pending = this.hasPendingScheduleTurn(latest.id, source?.threadId ?? bot.threadId) ||
+          Boolean(latest.workId && latest.frequency !== "once" && this.pendingWorkSchedule(latest))
         if (!pending) {
+          // Upgrade previously unbound routines in this transaction. A queued occurrence
+          // from the old version keeps its original thread until it settles.
+          latest = this.bindRoutineWork(latest, bot, source)
           const task = this.enqueue(
             {
               botId: latest.botId,
@@ -9601,6 +9640,7 @@ export class BotStore {
             {
               kind: "schedule",
               scheduleId: latest.id,
+              ...(latest.explicitSkill ? { explicitSkill: latest.explicitSkill } : {}),
               ...(source ? { sourceTaskId: source.id } : {}),
               ...(latest.workMonitor ? {
                 observation: { ...latest.workMonitor, scheduledAt: latest.nextRunAt! }
