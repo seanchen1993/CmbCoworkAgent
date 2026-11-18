@@ -4,7 +4,8 @@ import { createServer } from "node:http"
 import { DatabaseSync } from "node:sqlite"
 import { basename, dirname, resolve } from "node:path"
 import { build, transformSync } from "esbuild"
-import { readFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { prepareEditableSource } from "../src/main/services/design/direct-edit"
 import { chromium } from "playwright"
 import { NativeSqliteAdapter } from "../src/main/db/native-sqlite-adapter"
@@ -13,6 +14,7 @@ import { DesignRunManager } from "../src/main/services/design/run-manager"
 import { inspectDesignDocument } from "../src/shared/design-progressive"
 import type { RequirementDesignEntry } from "../src/renderer/src/lib/requirement-design-entry"
 import { executeDesignPatch } from "../src/main/services/design/patch-executor"
+import { executeDesignArtifactPatch } from "../src/main/services/design/captured-frame-patch"
 import {
   designPatchStyleProbe,
   inspectDesignPatchStyles
@@ -129,6 +131,7 @@ const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_EXECUTABLE_PATH || undefined
 })
 const db = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
+const captureWorkspace = mkdtempSync(resolve(tmpdir(), "design-frame-edit-"))
 const emitters: Array<(event: DesignRunEvent) => void> = []
 const completions: Array<() => void> = []
 const requests: DesignRunRequest[] = []
@@ -144,7 +147,11 @@ const manager = new DesignRunManager(new DesignSessionStore(db), {
   abort: () => {
     aborted++
   },
-  finalize: (event) => ({ ...event, artifactPath: "/workspace/design.html" }),
+  finalize: (event) => ({ ...event, artifactPath: event.artifactPath ?? "/workspace/design.html" }),
+  project: (snapshot) => {
+    const file = snapshot.state.artifactPath
+    if (file?.startsWith(captureWorkspace)) writeFileSync(file, snapshot.state.html)
+  },
   publish: (change) =>
     deliver(subscriptions.has(change.id) ? change : { ...change, snapshot: undefined })
 })
@@ -197,6 +204,10 @@ try {
     throw new Error(`Unknown RPC ${method}`)
   })
   await page.exposeFunction("compileDesignJsx", (source: string) => transformSync(source, { loader: "jsx", jsx: "transform" }).code)
+  await page.exposeFunction("readFrameFixture", (file: string) => {
+    assert.ok(file.startsWith(captureWorkspace + "/"))
+    return { success: true, content: readFileSync(file, "utf8") }
+  })
   deliver = (change) => {
     void page
       .evaluate(
@@ -205,7 +216,7 @@ try {
       )
       .catch(() => undefined)
   }
-  await page.addInitScript(() => {
+  await page.addInitScript((captureWorkspace) => {
     // Electron's preload belongs to the host, not sandboxed template thumbnails.
     if (window !== window.top) return
     if (!localStorage.getItem("design_browser_seeded")) {
@@ -269,6 +280,7 @@ try {
         disposeAllForRendererUnload: () => {}
       },
       design: {
+        controlImportInteractions: async () => ({ success: true }),
         sessions,
         listImportedTemplates: async () => [],
         importTemplate: async (source: string) => {
@@ -410,7 +422,9 @@ try {
           ]
         }),
         readText: async (path: string) =>
-          path.endsWith(".css")
+          path.startsWith(captureWorkspace + "/")
+            ? (window as unknown as { readFrameFixture: (file: string) => Promise<unknown> }).readFrameFixture(path)
+            : path.endsWith(".css")
             ? { success: true, content: "h1{color:rgb(12,34,56)}" }
             : {
                 success: true,
@@ -421,8 +435,100 @@ try {
         readDataUrl: async () => ({ success: false })
       }
     }
-  })
+  }, captureWorkspace)
   await page.goto(`http://127.0.0.1:${address.port}`)
+  const verifyCapturedFrames = async () => {
+    const id = "ds_captured_frame"
+    const directory = resolve(captureWorkspace, ".cmb-design", id + "_design-main")
+    const artifactPath = resolve(directory, "index.html")
+    const html = '<!doctype html><html><head></head><body><h1>外层内容</h1><iframe id="frame-one" data-design-capture-frame="f_1" src="frames/f_1.html" style="width:480px;height:380px;border:8px solid red"></iframe></body></html>'
+    mkdirSync(resolve(directory, "frames"), { recursive: true })
+    writeFileSync(artifactPath, html)
+    writeFileSync(resolve(directory, "frames/f_1.html"), '<!doctype html><html><head></head><body><iframe id="frame-two" data-design-capture-frame="f_2" src="../frames/f_2.html" style="width:400px;height:300px;border:4px solid blue;transform:scale(.9);transform-origin:top left"></iframe></body></html>')
+    writeFileSync(resolve(directory, "frames/f_2.html"), '<!doctype html><html><head><style>article{height:58px;padding:8px;background:#eee;margin-bottom:5px}</style></head><body><article id="first">子页面一</article><article id="second">子页面二</article></body></html>')
+    manager.create({
+      id, meta: { id, title: id, createdAt: 1, updatedAt: 1 }, workspacePath: captureWorkspace,
+      state: { ...createDesignState(), html, artifactPath, activeMode: "edit", tweaksOn: true, generationState: "done",
+        sourceInfo: { kind: "import_url", label: "嵌套页面" }, selectedModelId: "builtin:test" }
+    })
+    await page.evaluate((value) => localStorage.setItem("design_last_session", value), id)
+    await page.reload()
+    const nested = page.frameLocator("iframe").frameLocator("#frame-one").frameLocator("#frame-two")
+    await nested.locator('[data-design-editor-mode="edit"]').waitFor({ state: "attached" })
+    await nested.locator("#first").dblclick()
+    const input = nested.getByRole("textbox", { name: "编辑文字" })
+    await input.fill("子页面直接修改")
+    await input.press("Enter")
+    await nested.getByText("子页面直接修改", { exact: true }).waitFor()
+    await page.getByRole("button", { name: "移动", exact: true }).click()
+    await nested.locator('[data-design-editor-mode="move"]').waitFor({ state: "attached" })
+    const first = (await nested.locator("#first").boundingBox())!
+    const second = (await nested.locator("#second").boundingBox())!
+    await page.mouse.move(second.x + 20, second.y + 20)
+    await page.mouse.down()
+    await page.mouse.move(first.x + 20, first.y + 2, { steps: 8 })
+    await page.mouse.up()
+    await nested.locator("#second + #first").waitFor()
+    await page.getByTitle("撤销局部修改").click()
+    await nested.locator("#first + #second").waitFor()
+    await page.getByTitle("重做局部修改").click()
+    await nested.locator("#second + #first").waitFor()
+    await page.reload()
+    await nested.locator("#second + #first").filter({ hasText: "子页面直接修改" }).waitFor()
+
+    const applyAnnotation = async (index: number, text: string) => {
+      await page.getByRole("button", { name: "■ 停止", exact: true }).waitFor()
+      const { patch, prompt } = requests[index]
+      const state = manager.get(id).state
+      assert.ok(patch?.targets.length)
+      assert.ok(patch.targets.every(({ nodeId }) => nodeId?.startsWith("f_2:")))
+      const candidate = await executeDesignArtifactPatch({
+        html: state.html, artifactPath, capturePath: artifactPath, workspacePath: captureWorkspace,
+        artifactRevision: state.artifactRevision ?? 0, request: patch, instruction: prompt,
+        tweaks: state.tweaks ?? null, signal: new AbortController().signal, status: () => {},
+        validate: async (_candidate, scope) => {
+          assert.equal(scope.frameId, "f_2")
+          assert.ok(scope.artifactPath?.endsWith(".html"))
+          return []
+        },
+        complete: async (messages) => {
+          const context = JSON.parse(messages[1].content)
+          const [target] = context.targets
+          assert.match(target.html, /id="first"/)
+          return { content: JSON.stringify({
+            protocol: "design-patch/1", contextId: context.contextId, baseArtifactRevision: context.baseArtifactRevision,
+            summary: "更新嵌入页面文案", operations: [
+              { op: "set_text", targetId: target.targetId, expectedHash: target.hash, text }
+            ]
+          }) }
+        }
+      })
+      emitters[index]({ type: "done", html: candidate.html, artifactPath, tweaks: candidate.tweaks,
+        patchResult: candidate })
+      completions[index]()
+      await nested.getByText(text, { exact: true }).waitFor()
+      await page.frameLocator("iframe").getByText("外层内容", { exact: true }).waitFor()
+    }
+    await page.getByRole("button", { name: "注释", exact: true }).click()
+    await nested.locator("#first").click()
+    await page.getByPlaceholder("输入批注内容… (Shift+Enter 换行)").fill("修改嵌入页面文案")
+    const commentIndex = requests.length
+    await page.getByRole("button", { name: "发送 →", exact: true }).click()
+    await applyAnnotation(commentIndex, "评论已应用")
+    await page.getByRole("button", { name: "绘制", exact: true }).click()
+    const rect = (await nested.locator("#first").boundingBox())!
+    await page.mouse.move(rect.x + 12, rect.y + 12)
+    await page.mouse.down()
+    await page.mouse.move(rect.x + 80, rect.y + 25, { steps: 8 })
+    await page.mouse.up()
+    const drawIndex = requests.length
+    await page.getByTitle("发送绘制标记", { exact: true }).click()
+    await applyAnnotation(drawIndex, "绘制已应用")
+    console.log("PASS: nested capture supports text edit, moving, undo/redo, reload, comment and draw")
+  }
+  if (process.env.DESIGN_CAPTURE_FRAME_ONLY === "1") {
+    await verifyCapturedFrames()
+  } else {
   if (process.env.DESIGN_PARALLEL_ORDER_ONLY !== "1") {
   const input = page.locator("textarea").first()
   await input.waitFor()
@@ -2094,6 +2200,7 @@ try {
   completions.at(-1)!()
   console.log("PASS: questions appear before completion, accept answers while streaming, and preserve them across refresh and submission")
 
+  await verifyCapturedFrames()
   assert.deepEqual(errors, [])
   console.log(
     "PASS: progressive previews, bounded chat/comment patches, live node/listener preservation, durable undo/redo, background recovery, full-page creation, template/requirement persistence and URL/HTML/ZIP imports"
@@ -2158,6 +2265,7 @@ try {
   await waitForOrder(["ds_order_a", "ds_order_b"])
   console.log("PASS: parallel output and terminal events keep gallery order stable; explicit follow-ups move once and survive reload")
   }
+  }
   assert.deepEqual(errors, [])
 } finally {
   await browser.close()
@@ -2165,4 +2273,5 @@ try {
     server.close((error) => (error ? reject(error) : done()))
   )
   db.close()
+  rmSync(captureWorkspace, { recursive: true, force: true })
 }

@@ -33,6 +33,8 @@ import {
   type DesignEditableDocument
 } from "../../../shared/design-edit"
 import { sourceHash, verifyDesignPatchDependencies } from "./document-index"
+import { CAPTURE_FRAME_ATTRIBUTE, frameNodeId, splitFrameNodeId } from "../../../shared/design-captured-frame"
+import { editableCapturePath, readCapturedFrames, updateCapturedFrames } from "./captured-frame-source"
 import { inspectDesignDocument, type DesignDraftPreview } from "../../../shared/design-progressive"
 import { DesignLiveOutputTracker } from "../../../shared/design-live-output"
 import { compareDesignSessionOrder, withDesignSessionOrder } from "../../../shared/design-session-order"
@@ -175,7 +177,25 @@ export class DesignRunManager {
       this.commit(next, [{ type: "editor_initialized" }])
       this.replayProjections()
     }
-    return inspectEditableSource(html, next.state.artifactRevision ?? 0, next.state.tweaks)
+    const config = inspectEditableSource(html, next.state.artifactRevision ?? 0, next.state.tweaks)
+    const frames = this.capturedFrames(next)
+    for (const frame of frames.byId.values()) {
+      if (!frame.editable) continue
+      const child = inspectEditableSource(prepareEditableSource(frame.html), config.revision)
+      for (const node of child.nodes)
+        config.nodes.push({
+          ...node,
+          id: frameNodeId(frame.id, node.id),
+          parentId: node.parentId && frameNodeId(frame.id, node.parentId)
+        })
+    }
+    return config
+  }
+
+  private capturedFrames(snapshot: DesignSessionSnapshot) {
+    return readCapturedFrames(snapshot.state.html, snapshot.state.sourceInfo?.kind === "import_url" && snapshot.state.html.includes(CAPTURE_FRAME_ATTRIBUTE)
+      ? editableCapturePath(snapshot.workspacePath, snapshot.id, snapshot.state.artifactPath)
+      : undefined)
   }
 
   async edit(id: string, input: DesignEditCommand): Promise<DesignSessionSnapshot> {
@@ -198,7 +218,36 @@ export class DesignRunManager {
       throw new Error("相关参数已变化，请重新选择文字")
     this.editing.add(id)
     try {
-      const candidate = applyDirectEdit(before.state.html, before.state.tweaks ?? null, command)
+      const frameId = splitFrameNodeId(command.operations[0].nodeId)?.frameId
+      if (command.operations.some((op) => splitFrameNodeId(op.nodeId)?.frameId !== frameId))
+        throw new Error("请分别编辑各个嵌入页面")
+      let candidate: DirectEditCandidate
+      if (frameId) {
+        const frames = this.capturedFrames(before)
+        const frame = frames.byId.get(frameId)
+        if (!frame?.editable) throw new Error("此嵌入页面没有可编辑的源码")
+        const child = applyDirectEdit(prepareEditableSource(frame.html), null, {
+          ...command,
+          variationId: null,
+          operations: command.operations.map((op) => {
+            const nodeId = splitFrameNodeId(op.nodeId)!.nodeId
+            if (op.type !== "move_node") return { ...op, nodeId }
+            const destination = splitFrameNodeId(op.targetId)
+            if (destination?.frameId !== frameId) throw new Error("请在同一嵌入页面内拖动")
+            return { ...op, nodeId, targetId: destination.nodeId }
+          })
+        })
+        candidate = {
+          ...child,
+          html: updateCapturedFrames(before.state.html, frames.roots, new Map([[frameId, child.html]])),
+          mode: "reload",
+          targetIds: child.targetIds.map((id) => frameNodeId(frameId, id)),
+          tweaks: before.state.tweaks ?? null,
+          touchedTweaks: []
+        }
+      } else {
+        candidate = applyDirectEdit(before.state.html, before.state.tweaks ?? null, command)
+      }
       // Source/hash/CSS checks validate these gestures, including sibling-only
       // moves of code-free nodes. Avoid loading a hidden page and its network
       // resources for every drop; retain browser validation for other edits.

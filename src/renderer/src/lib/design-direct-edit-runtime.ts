@@ -13,13 +13,17 @@ export interface DesignEditorController {
   flush: () => Promise<void>
   editSelected: () => void
   deleteSelected: () => void
+  clearSelection: () => void
   takeCommand: () => Omit<DesignEditCommand, "protocol" | "variationId"> | null
 }
 
 /** Stringified into the iframe. All editor DOM lives in a host-owned shadow root. */
 export function designDirectEditRuntime(
   initial: DesignEditableDocument,
-  initialMode: DesignEditorMode = "edit"
+  initialMode: DesignEditorMode = "edit",
+  frameId?: string,
+  frameDepth = 0,
+  previewInstance?: string
 ): void {
   if (!document.body) return
   const w = window as unknown as { __designEditor?: DesignEditorController }
@@ -79,7 +83,9 @@ export function designDirectEditRuntime(
     command: Omit<DesignEditCommand, "protocol" | "variationId">
     timer: number
   } | null = null
-  const instance = document.documentElement.dataset.designPreviewInstance
+  const instance = previewInstance ?? document.documentElement.dataset.designPreviewInstance
+  let host = window.parent
+  for (let depth = 0; depth < frameDepth; depth++) host = host.parent
   const root = document.createElement("div")
   root.setAttribute("data-design-host-runtime", "editor")
   root.dataset.designEditorMode = mode
@@ -118,7 +124,7 @@ export function designDirectEditRuntime(
   shadow.append(origin, feedback, insertion)
   document.documentElement.appendChild(root)
   const post = (type: string, payload: object = {}) =>
-    window.parent.postMessage(
+    host.postMessage(
       {
         type,
         previewInstanceId: instance,
@@ -128,10 +134,12 @@ export function designDirectEditRuntime(
       },
       "*"
     )
-  const nodeId = (el: Element) =>
-    el.hasAttribute("data-design-bind")
+  const nodeId = (el: Element) => {
+    const local = el.hasAttribute("data-design-bind")
       ? `b_${el.getAttribute("data-design-bind")}`
       : el.getAttribute("data-design-node")
+    return frameId && local ? `${frameId}:${local}` : local
+  }
   const describe = (el: Element | null): DesignEditableNode | undefined => {
     if (!el) return
     const id = nodeId(el)
@@ -706,7 +714,7 @@ export function designDirectEditRuntime(
   function message(event: MessageEvent) {
     const m = event.data
     if (
-      event.source !== window.parent ||
+      event.source !== host ||
       m?.previewInstanceId !== instance ||
       m.type !== "__design_editor_result" ||
       m.commandId !== pending?.id
@@ -788,6 +796,7 @@ export function designDirectEditRuntime(
     flush,
     editSelected: () => beginText(),
     deleteSelected: removeSelected,
+    clearSelection: () => { if (!editing && !pending) select(null) },
     takeCommand() {
       if (pending) return pending.command
       if (!editing || editing.input.value === editing.original) return null

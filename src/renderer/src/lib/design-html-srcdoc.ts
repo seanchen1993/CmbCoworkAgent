@@ -1,6 +1,10 @@
 import type { DesignPreviewResources } from "./design-preview-resources"
 import { refreshDesignSnapshotRuntime } from "../../../shared/design-capture-runtime"
 import { applyHtmlSourceEdits } from "../../../shared/design-html-mutations"
+import { decorateDesignNodes } from "../../../shared/design-node-ids"
+import {
+  CAPTURE_FRAME_ATTRIBUTE, CAPTURE_FRAME_PREVIEW_ATTRIBUTE, capturedFrameReference, isCapturedFrameScreenshot
+} from "../../../shared/design-captured-frame"
 import { parse, type Node } from "acorn"
 
 // Design previews execute page interactions and editor scripts. Keep this
@@ -521,13 +525,16 @@ export async function buildDesignHtmlPreviewDocument({
   await Promise.all([
     ...Array.from(doc.querySelectorAll<HTMLIFrameElement>("iframe[data-design-capture-frame][src]")).map(async frame => {
       const src = frame.getAttribute("src")!
+      const id = frame.getAttribute(CAPTURE_FRAME_ATTRIBUTE) ?? ""
+      if (!capturedFrameReference(id, src, ancestors.length > 0)) return
       const resolved = resolveLocalAssetPath(htmlPath, src, rootHtmlPath)
       if (!resolved || !readTextFile) throw new Error("嵌入页面路径无效")
       const child = await readWithCache(resolved)
       if (child === null) throw new Error("嵌入页面文件缺失")
-      const prepared = await buildDesignHtmlPreviewDocument({ html: child, htmlPath: resolved, rootHtmlPath, ancestors: [...ancestors, htmlPath], resources, readTextFile, readDataUrlFile })
+      const prepared = await buildDesignHtmlPreviewDocument({ html: decorateDesignNodes(child), htmlPath: resolved, rootHtmlPath, ancestors: [...ancestors, htmlPath], resources, readTextFile, readDataUrlFile })
       frame.removeAttribute("src")
       frame.setAttribute("srcdoc", prepared)
+      if (!isCapturedFrameScreenshot(child)) frame.setAttribute(CAPTURE_FRAME_PREVIEW_ATTRIBUTE, id)
       frame.setAttribute("sandbox", "allow-scripts allow-same-origin")
     }),
     ...stylesheetLinks.map(async (link) => {

@@ -34,11 +34,14 @@ import {
   prepareDesignDraftResume, validateDesignDraftResumeEdit, recoverDesignDraftCheckpoint,
   buildDesignDraftResumeArtifactInstruction, DESIGN_DRAFT_RESUME_SYSTEM_PROMPT
 } from "../services/design/draft-resume"
-import { executeDesignPatch, DesignPatchLayoutScopeError, DESIGN_PATCH_TOOLS, normalizeDesignPatchReply, readDesignPatchStream } from "../services/design/patch-executor"
+import { DesignPatchLayoutScopeError, DESIGN_PATCH_TOOLS, normalizeDesignPatchReply, readDesignPatchStream } from "../services/design/patch-executor"
 import { DesignPatchScopeError, DesignPatchTargetError } from "../services/design/patch-context"
 import { decorateDesignNodes } from "../../shared/design-node-ids"
 import { installDesignEditDataRuntime } from "../../shared/design-edit-data"
 import type { DesignPatchMetrics } from "../../shared/design-patch"
+import { splitFrameNodeId } from "../../shared/design-captured-frame"
+import { editableCapturePath } from "../services/design/captured-frame-source"
+import { executeDesignArtifactPatch } from "../services/design/captured-frame-patch"
 import { designPatchLayoutProbe, inspectDesignPatchStyles, compareDesignPatchLayouts, withDesignValidationDeadline, type DesignLayoutProbe } from "../services/design/artifact-validator"
 import {
   DESIGN_PROGRESSIVE_PROMPT, DESIGN_DECLARATIVE_TWEAKS_PROMPT,
@@ -2671,7 +2674,8 @@ export function registerDesignHandlers(): void {
         const resolved = resolveDesignArtifactPath(`${snapshot.id}_design-main`, snapshot.workspacePath ?? undefined)
         if (!resolved.filePath) throw new Error(resolved.error)
         const artifactPath = resolved.filePath
-        const candidateFile = path.join(path.dirname(artifactPath), `.patch-${runId}.html`)
+        const hasFrameTargets = request.patch.targets.some((target) => splitFrameNodeId(target.nodeId))
+        const candidateFiles = new Set<string>()
         activeSessions.set(runId, controller)
         let nativeTools = true
         let patchModelCall = 0
@@ -2679,9 +2683,12 @@ export function registerDesignHandlers(): void {
           if (process.env.DESIGN_LOCAL_PATCH === "0") throw new DesignPatchScopeError("局部补丁通道已通过配置关闭")
           if (designVariantPolicyIssue(snapshot.state.html, isSingleDesignVariant(snapshot.state, snapshot.meta)))
             throw new DesignPatchScopeError("该对话需先将历史多方案合并为一个完整页面")
-          const { candidate } = await executeDesignPatch({
+          const candidate = await executeDesignArtifactPatch({
             html: snapshot.state.html,
             artifactPath: snapshot.state.artifactPath,
+            capturePath: hasFrameTargets && snapshot.state.sourceInfo?.kind === "import_url"
+              ? editableCapturePath(snapshot.workspacePath, snapshot.id, snapshot.state.artifactPath)
+              : undefined,
             workspacePath: snapshot.workspacePath,
             artifactRevision: snapshot.state.artifactRevision ?? 0,
             request: request.patch,
@@ -2709,9 +2716,11 @@ export function registerDesignHandlers(): void {
               return normalizeDesignPatchReply(reply)
             },
             onProposal: (summary) => emit({ type: "token", token: `候选修改：${summary}\n` }),
-            validate: async (candidate) => {
+            validate: async (candidate, scope) => {
               if (controller.signal.aborted) throw createDesignAbortError()
-              const policyIssue = designVariantPolicyIssue(candidate.html, isSingleDesignVariant(snapshot.state, snapshot.meta))
+              const candidateFile = path.join(path.dirname(scope.frameId ? scope.artifactPath! : artifactPath), `.patch-${runId}.html`)
+              candidateFiles.add(candidateFile)
+              const policyIssue = !scope.frameId && designVariantPolicyIssue(candidate.html, isSingleDesignVariant(snapshot.state, snapshot.meta))
               if (policyIssue) return [policyIssue]
               fs.mkdirSync(path.dirname(candidateFile), { recursive: true })
               fs.writeFileSync(candidateFile, decorateDesignNodes(materializeTweaks(candidate.html, candidate.tweaks)), "utf8")
@@ -2721,11 +2730,11 @@ export function registerDesignHandlers(): void {
               }
               const beforeFile = `${candidateFile}.before.html`
               const issues: string[] = []
-              fs.writeFileSync(beforeFile, decorateDesignNodes(materializeTweaks(snapshot.state.html, snapshot.state.tweaks)), "utf8")
+              fs.writeFileSync(beforeFile, decorateDesignNodes(materializeTweaks(scope.html, scope.tweaks)), "utf8")
               let probe: BrowserWindow | null = null
               try {
                 probe = new BrowserWindow({ width: 1440, height: 1000, show: false, webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } })
-                const currentWidth = Math.min(1920, Math.max(320, Math.round(request.patch!.viewport?.width || 1440)))
+                const currentWidth = Math.min(1920, Math.max(320, Math.round(scope.request.viewport?.width || 1440)))
                 for (const width of [...new Set(candidate.validationLevel === "source" ? [currentWidth] : [currentWidth, 390])]) {
                   if (controller.signal.aborted) throw createDesignAbortError()
                   probe.setContentSize(width, 900)
@@ -2746,7 +2755,10 @@ export function registerDesignHandlers(): void {
               return issues
             },
             status: (patchStatus) => emit({ type: "patch_status", patchStatus }),
-            metrics: (patchMetrics) => { localMetrics = patchMetrics; emit({ type: "patch_metrics", patchMetrics }) }
+            metrics: (patchMetrics) => {
+              emit({ type: "patch_metrics", patchMetrics })
+              localMetrics = patchMetrics
+            }
           })
           if (controller.signal.aborted) return
           emit({ type: "done", html: candidate.html, tweaks: candidate.tweaks, artifactPath,
@@ -2755,6 +2767,7 @@ export function registerDesignHandlers(): void {
           return
         } catch (error) {
           if (controller.signal.aborted) { emit({ type: "cancelled" }); return }
+          if (hasFrameTargets) throw error
           if (!(error instanceof DesignPatchScopeError) || error instanceof DesignPatchTargetError) throw error
           if (error instanceof DesignPatchLayoutScopeError)
             request = { ...request, prompt: `${request.prompt}\n\n布局适配要求：保留本次新增功能及所有内容，仅调整相关模块及必要的父容器布局。在当前预览宽度和 390px 下，空间不足时自动换行、扩大可用宽度并让高度随内容增长；不要隐藏内容或缩放整页。以下为未应用候选的校验信息，请基于当前页面完成原始需求和布局适配：\n${error.layoutIssues.join("\n")}` }
@@ -2763,7 +2776,8 @@ export function registerDesignHandlers(): void {
           request = { ...request, kind: "agent", currentHtml: materializeTweaks(manager.get(snapshot.id).state.html, manager.get(snapshot.id).state.tweaks, false), isIteration: true }
         } finally {
           activeSessions.delete(runId)
-          try { fs.unlinkSync(candidateFile) } catch { /* No candidate was persisted. */ }
+          for (const file of candidateFiles)
+            try { fs.unlinkSync(file) } catch { /* No candidate was persisted. */ }
         }
       }
       const channel =

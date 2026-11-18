@@ -11,6 +11,8 @@ import type {
 } from "../../../../shared/design-edit"
 import type { ElementStyles } from "./types"
 import { getDesignSessionClient } from "./session-client"
+import { previewDocuments } from "@/lib/design-frame-dom"
+import { splitFrameNodeId } from "../../../../shared/design-captured-frame"
 
 interface Options {
   id: string | null
@@ -31,7 +33,8 @@ export function useDesignDirectEdit(options: Options) {
   latest.current = options
   const descriptor = useRef<DesignEditableDocument | null>(null)
   const selected = useRef<DesignEditableNode | null>(null)
-  const controller = useRef<DesignEditorController | null>(null)
+  const controllers = useRef(new Map<Window, DesignEditorController>())
+  const selectedWindow = useRef<Window | null>(null)
   const stylePending = useRef(new Map<string, Record<string, string>>())
   const styleWork = useRef<Promise<void> | null>(null)
   const workingStyle = useRef<{ id: string; values: Record<string, string> } | null>(null)
@@ -50,12 +53,37 @@ export function useDesignDirectEdit(options: Options) {
       Number(w.document.documentElement.dataset.designArtifactRevision) !== config.revision
     )
       return false
-    const script = w.document.createElement("script")
-    script.setAttribute("data-design-host-runtime", "editor-installer")
-    script.textContent = `(${designDirectEditRuntime.toString()})(${JSON.stringify(config).replace(/</g, "\\u003c")},${JSON.stringify(mode)})`
-    w.document.documentElement.appendChild(script)
-    script.remove()
-    controller.current = w.__designEditor ?? null
+    const next = new Map<Window, DesignEditorController>()
+    const instance = w.document.documentElement.dataset.designPreviewInstance
+    const nodes = new Map<string | undefined, DesignEditableNode[]>()
+    for (const node of config.nodes) {
+      const frameId = splitFrameNodeId(node.id)?.frameId
+      const group = nodes.get(frameId)
+      if (group) group.push(node)
+      else nodes.set(frameId, [node])
+    }
+    for (const { doc, frameId, depth } of previewDocuments(w.document)) {
+      const current = doc.defaultView as EditorWindow | null
+      if (!current || (frameId && !nodes.has(frameId))) continue
+      const local = { ...config, nodes: nodes.get(frameId) ?? [] }
+      if (current.__designEditor) current.__designEditor.update(local, mode)
+      else {
+        const script = doc.createElement("script")
+        script.setAttribute("data-design-host-runtime", "editor-installer")
+        const args = JSON.stringify([local, mode, frameId, depth, instance]).replace(/</g, "\\u003c")
+        script.textContent = `(${designDirectEditRuntime.toString()})(...${args})`
+        doc.documentElement.appendChild(script)
+        script.remove()
+      }
+      if (current.__designEditor) next.set(current, current.__designEditor)
+    }
+    for (const [source, editor] of controllers.current)
+      if (!next.has(source)) editor.cleanup()
+    if (selectedWindow.current && !next.has(selectedWindow.current)) {
+      selectedWindow.current = null
+      selected.current = null
+    }
+    controllers.current = next
     return true
   }, [])
 
@@ -97,14 +125,12 @@ export function useDesignDirectEdit(options: Options) {
   useEffect(() => {
     const pendingStyles = stylePending.current
     if (!options.active) {
-      ;(
-        options.iframe.current?.contentWindow as EditorWindow | undefined
-      )?.__designEditor?.cleanup()
       selected.current = null
+      selectedWindow.current = null
     }
     return () => {
-      const editor = controller.current
-      const command = editor?.takeCommand()
+      const editor = selectedWindow.current && controllers.current.get(selectedWindow.current)
+      const command = editor ? editor.takeCommand() : null
       if (command && options.id) {
         // A host mode switch can detach the iframe before its final postMessage is delivered.
         void getDesignSessionClient()
@@ -124,26 +150,33 @@ export function useDesignDirectEdit(options: Options) {
             .catch((error) => latest.current.onError(`离开页面后的样式保存失败：${String(error)}`))
         }
       pendingStyles.clear()
-      editor?.cleanup()
-      controller.current = null
+      for (const current of controllers.current.values()) current.cleanup()
+      controllers.current.clear()
+      selectedWindow.current = null
     }
   }, [options.id, options.active, options.iframe, options.variationId])
 
   useEffect(() => {
     const handler = async (event: MessageEvent) => {
-      const o = latest.current,
-        w = o.iframe.current?.contentWindow
+      const o = latest.current
+      const root = o.iframe.current?.contentDocument
+      const w = event.source as Window | null
       const m = event.data
       if (
         !o.active ||
         !o.id ||
-        event.source !== w ||
+        !w || !root || !controllers.current.has(w) ||
+        !previewDocuments(root).some(({ doc }) => doc.defaultView === w) ||
         !m ||
-        m.previewInstanceId !== w?.document.documentElement.dataset.designPreviewInstance
+        m.previewInstanceId !== root.documentElement.dataset.designPreviewInstance
       )
         return
       if (m.type === "__design_editor_select") {
+        if (!m.nodeId && selectedWindow.current && selectedWindow.current !== w) return
+        if (m.nodeId && selectedWindow.current && selectedWindow.current !== w)
+          controllers.current.get(selectedWindow.current)?.clearSelection()
         selected.current = descriptor.current?.nodes.find((n) => n.id === m.nodeId) ?? null
+        selectedWindow.current = selected.current ? w : null
         o.onSelect(m.nodeId ? { edId: m.nodeId, tagName: m.tagName, styles: m.styles } : null)
       } else if (m.type === "__design_editor_error") {
         o.onError(String(m.error))
@@ -260,9 +293,7 @@ export function useDesignDirectEdit(options: Options) {
     [flushStyles]
   )
   const flush = useCallback(async () => {
-    await (
-      latest.current.iframe.current?.contentWindow as EditorWindow | undefined
-    )?.__designEditor?.flush()
+    for (const editor of controllers.current.values()) await editor.flush()
     await flushStyles()
     if (latest.current.id) await getDesignSessionClient().flush(latest.current.id)
   }, [flushStyles])
@@ -277,13 +308,11 @@ export function useDesignDirectEdit(options: Options) {
     onLoad,
     flush,
     changeStyle,
-    editSelected: () =>
-      (
-        latest.current.iframe.current?.contentWindow as EditorWindow | undefined
-      )?.__designEditor?.editSelected(),
-    deleteSelected: () =>
-      (
-        latest.current.iframe.current?.contentWindow as EditorWindow | undefined
-      )?.__designEditor?.deleteSelected()
+    editSelected: () => {
+      if (selectedWindow.current) controllers.current.get(selectedWindow.current)?.editSelected()
+    },
+    deleteSelected: () => {
+      if (selectedWindow.current) controllers.current.get(selectedWindow.current)?.deleteSelected()
+    }
   }
 }

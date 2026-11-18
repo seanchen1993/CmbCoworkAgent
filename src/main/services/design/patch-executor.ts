@@ -148,6 +148,7 @@ export interface PatchExecutorOptions {
   request: DesignPatchRequest
   instruction: string
   tweaks: DesignTweaksState | null
+  scopedFrame?: boolean
   signal: AbortSignal
   complete: (messages: PatchModelMessage[], signal: AbortSignal) => Promise<PatchModelReply>
   /** A generated candidate is visible before browser validation, including failed attempts. */
@@ -231,7 +232,7 @@ export async function executeDesignPatch(
     options.artifactRevision,
     options.tweaks
   )
-  if (!shouldUseDesignPatch(options.instruction, !!options.request.targets.length))
+  if (!options.scopedFrame && !shouldUseDesignPatch(options.instruction, !!options.request.targets.length))
     throw new DesignPatchScopeError("该修改需要完整设计执行，以更新交互或全局设计")
   let feedback = ""
   let repairingOverflow = false

@@ -18,6 +18,10 @@ import { buildDesignHtmlPreviewDocument } from "@/lib/design-html-srcdoc"
 import { DESIGN_PREVIEW_NAVIGATION_SCRIPT } from "@/lib/design-preview-navigation"
 import { buildDesignVariationDocument } from "@/lib/design-variation-document"
 import { getDesignPreviewViewportStyle } from "@/lib/design-preview-viewport"
+import { designElementAtPoint, designRectInPage, previewDocuments } from "@/lib/design-frame-dom"
+import {
+  CAPTURE_FRAME_PREVIEW_ATTRIBUTE, frameNodeId, splitFrameNodeId
+} from "../../../../shared/design-captured-frame"
 import { useAppStore } from "@/lib/store"
 import {
   loadActiveRequirementDesignEntry,
@@ -687,11 +691,9 @@ function buildElementSelector(element: Element): string {
       .map((value) => `.${escapeCssIdent(value)}`)
       .join("")
     part += className
-    const parent = current.parentElement
+    const parent: Element | null = current.parentElement
     if (parent) {
-      const siblings = Array.from(parent.children).filter((child): child is Element => {
-        return child instanceof Element && child.tagName === current?.tagName
-      })
+      const siblings = Array.from(parent.children).filter((child) => child.tagName === current?.tagName)
       if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(current) + 1})`
     }
     parts.unshift(part)
@@ -703,17 +705,15 @@ function buildElementSelector(element: Element): string {
 
 function getPointAnchor(doc: Document | null, point: DrawPoint): DesignElementAnchor | undefined {
   if (!doc) return undefined
-  const win = doc.defaultView
-  if (!win) return undefined
-  const element = doc.elementFromPoint(
-    Math.round(point.x - win.scrollX),
-    Math.round(point.y - win.scrollY)
-  )
-  if (!element || element === doc.documentElement || element === doc.body) return undefined
-  const rect = element.getBoundingClientRect()
-  if (rect.width <= 0 || rect.height <= 0) return undefined
+  const element = designElementAtPoint(doc, point)
+  if (!element) return undefined
+  const rect = designRectInPage(doc, element.ownerDocument, element.getBoundingClientRect())
+  if (!rect || rect.width <= 0 || rect.height <= 0) return undefined
+  const frameId = element.ownerDocument.defaultView?.frameElement?.getAttribute(CAPTURE_FRAME_PREVIEW_ATTRIBUTE)
+  const nodeId = element.getAttribute("data-design-node")
+  if (frameId && !nodeId) return undefined
   return {
-    nodeId: element.getAttribute("data-design-node") || undefined,
+    nodeId: nodeId ? (frameId ? frameNodeId(frameId, nodeId) : nodeId) : undefined,
     sectionId: element.closest("[data-design-section]")?.getAttribute("data-design-section") || undefined,
     artifactRevision: Number(doc.documentElement.dataset.designArtifactRevision ?? 0),
     selector: buildElementSelector(element),
@@ -722,8 +722,8 @@ function getPointAnchor(doc: Document | null, point: DrawPoint): DesignElementAn
     role: element.getAttribute("role") || undefined,
     text: getElementTextSignature(element) || undefined,
     screenLabel: getScreenLabelForElement(element),
-    offsetXRatio: Math.min(1, Math.max(0, (point.x - win.scrollX - rect.left) / rect.width)),
-    offsetYRatio: Math.min(1, Math.max(0, (point.y - win.scrollY - rect.top) / rect.height))
+    offsetXRatio: Math.min(1, Math.max(0, (point.x - rect.x) / rect.width)),
+    offsetYRatio: Math.min(1, Math.max(0, (point.y - rect.y) / rect.height))
   }
 }
 
@@ -743,7 +743,7 @@ function getDominantPointAnchor(
 
   const counts = new Map<string, { anchor: DesignElementAnchor; count: number }>()
   for (const anchor of anchors) {
-    const key = anchor.selector || anchor.label || `${anchor.tagName}:${anchor.text ?? ""}`
+    const key = anchor.nodeId || anchor.selector || anchor.label || `${anchor.tagName}:${anchor.text ?? ""}`
     const current = counts.get(key)
     counts.set(key, { anchor, count: (current?.count ?? 0) + 1 })
   }
@@ -757,6 +757,11 @@ function resolveAnchorElement(
 ): Element | null {
   if (!doc || !anchor?.selector) return null
   if (anchor.artifactRevision !== undefined && anchor.artifactRevision !== Number(doc.documentElement.dataset.designArtifactRevision ?? 0)) return null
+  const scoped = splitFrameNodeId(anchor.nodeId)
+  if (scoped) {
+    const child = previewDocuments(doc).find((entry) => entry.frameId === scoped.frameId)?.doc
+    return child?.querySelector(`[data-design-node="${CSS.escape(scoped.nodeId)}"]`) ?? null
+  }
   if (anchor.nodeId) {
     const stable = [...doc.querySelectorAll("[data-design-node]")].find((element) => element.getAttribute("data-design-node") === anchor.nodeId)
     if (stable) return stable
@@ -783,13 +788,12 @@ function resolveAnchorPagePoint(
   anchor: DesignElementAnchor | undefined
 ): DrawPoint | null {
   const element = resolveAnchorElement(doc, anchor)
-  const win = doc?.defaultView
-  if (!element || !win || !anchor) return null
-  const rect = element.getBoundingClientRect()
-  if (rect.width <= 0 || rect.height <= 0) return null
+  if (!element || !doc || !anchor) return null
+  const rect = designRectInPage(doc, element.ownerDocument, element.getBoundingClientRect())
+  if (!rect || rect.width <= 0 || rect.height <= 0) return null
   return {
-    x: win.scrollX + rect.left + rect.width * anchor.offsetXRatio,
-    y: win.scrollY + rect.top + rect.height * anchor.offsetYRatio
+    x: rect.x + rect.width * anchor.offsetXRatio,
+    y: rect.y + rect.height * anchor.offsetYRatio
   }
 }
 
@@ -798,25 +802,23 @@ function anchorPointsForStroke(
   stroke: DrawStroke
 ): AnchoredDrawPoint[] | undefined {
   const element = resolveAnchorElement(doc, stroke.anchor)
-  const win = doc?.defaultView
-  if (!element || !win) return undefined
-  const rect = element.getBoundingClientRect()
-  if (rect.width <= 0 || rect.height <= 0) return undefined
+  if (!element || !doc) return undefined
+  const rect = designRectInPage(doc, element.ownerDocument, element.getBoundingClientRect())
+  if (!rect || rect.width <= 0 || rect.height <= 0) return undefined
   return stroke.points.map((point) => ({
-    xRatio: (point.x - win.scrollX - rect.left) / rect.width,
-    yRatio: (point.y - win.scrollY - rect.top) / rect.height
+    xRatio: (point.x - rect.x) / rect.width,
+    yRatio: (point.y - rect.y) / rect.height
   }))
 }
 
 function resolveAnchoredStrokePoints(doc: Document | null, stroke: DrawStroke): DrawPoint[] {
   const element = resolveAnchorElement(doc, stroke.anchor)
-  const win = doc?.defaultView
-  if (!element || !win || !stroke.anchoredPoints?.length) return stroke.points
-  const rect = element.getBoundingClientRect()
-  if (rect.width <= 0 || rect.height <= 0) return stroke.points
+  if (!element || !doc || !stroke.anchoredPoints?.length) return stroke.points
+  const rect = designRectInPage(doc, element.ownerDocument, element.getBoundingClientRect())
+  if (!rect || rect.width <= 0 || rect.height <= 0) return stroke.points
   return stroke.anchoredPoints.map((point) => ({
-    x: win.scrollX + rect.left + rect.width * point.xRatio,
-    y: win.scrollY + rect.top + rect.height * point.yRatio
+    x: rect.x + rect.width * point.xRatio,
+    y: rect.y + rect.height * point.yRatio
   }))
 }
 
@@ -1338,6 +1340,8 @@ export function DesignView({
   }, [])
   // Canvas refs
   const iframeRef = useRef<HTMLIFrameElement>(null)
+  const [previewLoad, setPreviewLoad] = useState(0)
+  const [, refreshFrameAnnotations] = useState(0)
   const [canvasContainer, setCanvasContainer] = useState<HTMLDivElement | null>(null)
   const previewScrollRef = useRef<HTMLDivElement>(null)
   const [previewSize, setPreviewSize] = useState({ width: 800, height: 600 })
@@ -2607,6 +2611,67 @@ export function DesignView({
     }
   }, [activeMode, activeTabId, updateTs])
 
+  useEffect(() => {
+    const root = iframeRef.current?.contentDocument
+    if (!root || (activeMode !== "comment" && activeMode !== "draw")) return
+    let raf = 0
+    const onScroll = () => {
+      if (raf) return
+      raf = requestAnimationFrame(() => {
+        raf = 0
+        refreshFrameAnnotations((n) => n + 1)
+      })
+    }
+    const cleanup = previewDocuments(root).slice(1).map(({ doc }) => {
+      const win = doc.defaultView
+      win?.addEventListener("scroll", onScroll, true)
+      const style = doc.createElement("style")
+      style.textContent = ".__cm_h{outline:2px solid rgba(245,158,11,.7)!important;cursor:crosshair!important}"
+      let hover: Element | null = null
+      const clearHover = () => {
+        hover?.classList.remove("__cm_h")
+        hover = null
+      }
+      const over = (event: MouseEvent) => {
+        clearHover()
+        const target = event.target as Element | null
+        if (!target?.hasAttribute?.("data-design-node")) return
+        hover = target
+        hover.classList.add("__cm_h")
+      }
+      const click = (event: MouseEvent) => {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        const point = designRectInPage(root, doc, { x: event.clientX, y: event.clientY, width: 0, height: 0 })
+        const anchor = point && getPointAnchor(root, point)
+        if (!point || !anchor || !splitFrameNodeId(anchor.nodeId)) return
+        updateTs(activeTabId, {
+          draftComment: { pageX: point.x, pageY: point.y, elementDesc: anchor.label || "元素", anchor },
+          activeCommentId: null
+        })
+      }
+      if (activeMode === "comment") {
+        style.setAttribute("data-design-host-runtime", "comments")
+        doc.head.appendChild(style)
+        doc.addEventListener("mouseover", over, true)
+        doc.addEventListener("mouseout", clearHover, true)
+        doc.addEventListener("click", click, true)
+      }
+      return () => {
+        win?.removeEventListener("scroll", onScroll, true)
+        doc.removeEventListener("mouseover", over, true)
+        doc.removeEventListener("mouseout", clearHover, true)
+        doc.removeEventListener("click", click, true)
+        clearHover()
+        style.remove()
+      }
+    })
+    return () => {
+      cancelAnimationFrame(raf)
+      cleanup.forEach((dispose) => dispose())
+    }
+  }, [activeMode, activeTabId, previewLoad, updateTs])
+
   // ── Listen for all postMessages from iframe ───────────────
   useEffect(() => {
     const handler = (e: MessageEvent) => {
@@ -2801,14 +2866,17 @@ export function DesignView({
       patchTargets?: DesignPatchTarget[]
     ) => {
       const state = tabStatesRef.current[SINGLE_DESIGN_TAB_ID]
-      const local = isIteration && !image && !skill && !state.draftPreview && !state.creationSelection?.template.package && shouldUseDesignPatch(prompt, !!patchTargets?.length)
+      const hasFrameTarget = patchTargets?.some((target) => splitFrameNodeId(target.nodeId))
+      const local = isIteration && !image && !skill && !state.draftPreview && !state.creationSelection?.template.package && (hasFrameTarget || shouldUseDesignPatch(prompt, !!patchTargets?.length))
       const observations = (patchTargets ?? []).flatMap((target) => {
-        const doc = iframeRef.current?.contentDocument
-        const el = doc && [...doc.querySelectorAll<HTMLElement>("[data-design-node]")].find((n) => n.dataset.designNode === target.nodeId)
+        const scoped = splitFrameNodeId(target.nodeId)
+        const root = iframeRef.current?.contentDocument ?? null
+        const doc = scoped ? previewDocuments(root).find((entry) => entry.frameId === scoped.frameId)?.doc : root
+        const el = doc && [...doc.querySelectorAll<HTMLElement>("[data-design-node]")].find((n) => n.dataset.designNode === (scoped?.nodeId ?? target.nodeId))
         if (!el) return []
         return [el, el.parentElement].filter((n): n is HTMLElement => !!n?.dataset.designNode).map((n) => {
           const style = getComputedStyle(n), box = n.getBoundingClientRect()
-          return { nodeId: n.dataset.designNode!, box: { width: box.width, height: box.height },
+          return { nodeId: scoped ? frameNodeId(scoped.frameId, n.dataset.designNode!) : n.dataset.designNode!, box: { width: box.width, height: box.height },
             computed: Object.fromEntries(["display", "position", "width", "height", "gap", "padding", "margin", "grid-template-columns", "flex-direction", "font-size", "line-height", "color", "background-color"].map((key) => [key, style.getPropertyValue(key)])) }
         })
       })
@@ -3194,18 +3262,14 @@ ${commentLines}${variantNote}`
 
   const collectDrawElementLabels = useCallback((points: DrawPoint[]): string[] => {
     const doc = iframeRef.current?.contentDocument
-    const win = iframeRef.current?.contentWindow
-    if (!doc || !win || points.length === 0) return []
+    if (!doc || points.length === 0) return []
 
     const sampleCount = Math.min(6, points.length)
     const step = Math.max(1, Math.floor(points.length / sampleCount))
     const sampledPoints = points.filter((_, index) => index % step === 0).slice(0, sampleCount)
     const seen = new Set<string>()
     sampledPoints.forEach((point) => {
-      const element = doc.elementFromPoint(
-        Math.round(point.x - win.scrollX),
-        Math.round(point.y - win.scrollY)
-      )
+      const element = designElementAtPoint(doc, point)
       const label = getDrawElementLabel(element)
       if (label) seen.add(label)
     })
@@ -5502,6 +5566,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
                                       : "none"
                                 }}
                                 onLoad={(isDraft, loadedHtml) => {
+                                  setPreviewLoad((n) => n + 1)
                                   if (!isDraft && loadedHtml) commitPreparedDesignPreview(loadedHtml)
                                   directEditor.onLoad()
                                   // Block link/form navigation so clicks inside the preview
