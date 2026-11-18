@@ -30,7 +30,8 @@ class ReplayModel extends BaseChatModel {
     return "shell-monitor-replay"
   }
 
-  bindTools(_tools: unknown[]): this {
+  bindTools(tools: unknown[]): this {
+    void tools
     return this
   }
 

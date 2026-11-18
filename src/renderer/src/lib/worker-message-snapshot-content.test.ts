@@ -191,6 +191,35 @@ describe("Team worker authoritative content", () => {
     }
   )
 
+  it("reserves a new provider's accumulator when another provider owns its proposed ID", () => {
+    const transport = new ElectronIPCTransport()
+    values(transport, [providerWire("other-provider", "Earlier independent reply.")])
+    const update = (id: string, body: string) => {
+      const message = providerWire(id, body, "AIMessageChunk")
+      message.kwargs.additional_kwargs.cmb_internal_provider_source_id = "other-provider"
+      const updates = transport.convertFocusedCoordinatorWorkerIPCEvent(
+        {
+          type: "stream",
+          mode: "messages",
+          workerTurn: 1,
+          data: [message, { [STREAM_MESSAGE_CONTENT_MODE_KEY]: "delta" }]
+        },
+        parent
+      )
+      useAppStore.getState().appendWorkerFocusMessages(worker, updates)
+      return updates[0]
+    }
+
+    const first = update("first-wire-id", "New independent reply")
+    const second = update("another-wire-id", " continues.")
+    expect(first.content).toBe("New independent reply")
+    expect(second).toMatchObject({ id: first.id, content: "New independent reply continues." })
+    expect(useAppStore.getState().workerFocusMessages.map(({ content }) => content)).toEqual([
+      "Earlier independent reply.",
+      "New independent reply continues."
+    ])
+  })
+
   it("does not assign an explicit tuple to a legacy exact row if that tuple already has a row", () => {
     const transport = new ElectronIPCTransport()
     values(transport, [

@@ -14,19 +14,15 @@ function hasExplicitProviderTuple(message: Message): boolean {
  */
 export function coalesceSnapshotMessageAliases(
   messages: readonly Message[],
-  workflowScope?: string
+  workflow?: { scope: string; precedingPromptIndex?: number }
 ): Message[] {
   const result: Message[] = []
   const indexByIdentity = new Map<string, number>()
-  const workflowUserOccurrences = new Map<string, number>()
-  let workflowTurn: [string, number] | undefined
+  let workflowTurn = workflow?.precedingPromptIndex
   for (const message of messages) {
-    if (workflowScope !== undefined && message.role === "user") {
-      const occurrence = (workflowUserOccurrences.get(message.id) ?? 0) + 1
-      workflowUserOccurrences.set(message.id, occurrence)
-      // The initial prompt may roll out of the bounded history. Later prompts
-      // in the same run (for example a structured-output nudge) start a new turn.
-      workflowTurn = message.worker_snapshot_index === 0 ? undefined : [message.id, occurrence]
+    if (workflow && message.role === "user") {
+      // The initial prompt and replies before any later prompt share the first turn.
+      workflowTurn = message.worker_snapshot_index || undefined
     }
     if (!hasExplicitProviderTuple(message)) {
       result.push(message)
@@ -51,10 +47,10 @@ export function coalesceSnapshotMessageAliases(
     }
     indexByIdentity.set(identity, result.length)
     result.push(
-      workflowScope !== undefined
+      workflow
         ? {
             ...message,
-            id: `${WORKFLOW_PROVIDER_ID_PREFIX}${JSON.stringify([workflowScope, identity])}`
+            id: `${WORKFLOW_PROVIDER_ID_PREFIX}${JSON.stringify([workflow.scope, identity])}`
           }
         : message
     )

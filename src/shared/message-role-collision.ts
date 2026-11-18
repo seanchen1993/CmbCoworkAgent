@@ -432,7 +432,7 @@ export function buildAvailableProviderOccurrenceId(
   sourceId: string,
   role: string,
   occurrence: number,
-  occupiedIds: ReadonlySet<string>
+  occupiedIds: Pick<ReadonlySet<string>, "has">
 ): string {
   const primaryId =
     occurrence === 1

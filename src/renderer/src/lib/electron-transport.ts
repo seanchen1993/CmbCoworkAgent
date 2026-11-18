@@ -54,6 +54,7 @@ import {
   coalesceSnapshotMessageAliases,
   normalizeWorkflowSnapshotMessageIds
 } from "./snapshot-message-aliases"
+import { WORKFLOW_PRECEDING_PROMPT_INDEX_KEY } from "../../../shared/workflow-agent-snapshot"
 
 export type StreamFallbackIndexBaselines = {
   ai: number
@@ -582,19 +583,13 @@ function isWorkerFallbackProviderSourceId(sourceId: string): boolean {
 function availableWorkerAssistantProviderId(
   sourceId: string,
   occurrence: number,
-  messages: readonly Message[] = []
+  occupiedIds: Pick<ReadonlySet<string>, "has">
 ): string {
   const candidate =
     occurrence > 1 ? buildMessageSameRoleDuplicateId(sourceId, "assistant", occurrence) : sourceId
-  // A legacy occurrence can already occupy the ID derived from a new
-  // declaration. Use a separate accumulator if the wire supplied no match.
-  if (!messages.some((message) => message.id === candidate)) return candidate
-  return buildAvailableProviderOccurrenceId(
-    sourceId,
-    "assistant",
-    occurrence,
-    new Set(messages.map((message) => message.id))
-  )
+  // A different occurrence or provider can already occupy the proposed render ID.
+  if (!occupiedIds.has(candidate)) return candidate
+  return buildAvailableProviderOccurrenceId(sourceId, "assistant", occurrence, occupiedIds)
 }
 
 function getWorkerSnapshotFallbackIndex(
@@ -1162,7 +1157,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
           availableWorkerAssistantProviderId(
             providerSourceId,
             scopedProviderTuple.provider_occurrence,
-            storedMessages
+            { has: (id) => storedMessages.some((message) => message.id === id) }
           )
       } else if (
         currentMessageId &&
@@ -2308,11 +2303,24 @@ export class ElectronIPCTransport implements UseStreamTransport {
         })
       }
     }
-    const completeSnapshot = coalesceSnapshotMessageAliases(
-      converted,
-      workflowSnapshot ? workerThreadId : undefined
-    )
-    if (workflowSnapshot) return normalizeWorkflowSnapshotMessageIds(completeSnapshot)
+    if (workflowSnapshot) {
+      const first = messages[0]
+      const precedingPromptIndex =
+        first?.kwargs?.additional_kwargs?.[WORKFLOW_PRECEDING_PROMPT_INDEX_KEY]
+      return normalizeWorkflowSnapshotMessageIds(
+        coalesceSnapshotMessageAliases(converted, {
+          scope: workerThreadId,
+          precedingPromptIndex:
+            typeof precedingPromptIndex === "number" &&
+            Number.isSafeInteger(precedingPromptIndex) &&
+            precedingPromptIndex > 0 &&
+            precedingPromptIndex < getWorkerSnapshotFallbackIndex(first, 0)
+              ? precedingPromptIndex
+              : undefined
+        })
+      )
+    }
+    const completeSnapshot = coalesceSnapshotMessageAliases(converted)
 
     const previousActiveMessageId = this.workerCurrentMessageIds.get(workerThreadId)
     const previousActiveProviderSourceId = this.workerCurrentProviderSourceIds.get(workerThreadId)
@@ -5007,7 +5015,18 @@ export class ElectronIPCTransport implements UseStreamTransport {
         : undefined)
     const id =
       prior?.id ??
-      availableWorkerAssistantProviderId(providerSourceId, providerOccurrence, sourceCandidates)
+      availableWorkerAssistantProviderId(providerSourceId, providerOccurrence, {
+        has: (id) => {
+          const state = useAppStore.getState()
+          return (
+            this.workerAssistantTextByMessageId.has(id) ||
+            this.workerAssistantReasoningByMessageId.has(id) ||
+            this.completedToolCallsByMessageId.has(id) ||
+            (state.workerFocusMessagesThreadId === workerThreadId &&
+              state.workerFocusMessages.some((message) => message.id === id))
+          )
+        }
+      })
     if (prior && this.workerCurrentMessageIds.get(workerThreadId) !== id) {
       this.seedFocusedWorkerAssistantAccumulator(prior, true)
     }

@@ -20,6 +20,7 @@ import { getCustomSkillsDir, getPlugins } from "../storage"
 
 import { AsyncLocalStorage } from "node:async_hooks"
 import { spawn, execFile, type ChildProcess } from "node:child_process"
+import type { Duplex } from "node:stream"
 import { createHash, randomUUID } from "node:crypto"
 import {
   constants as fsConstants,
@@ -487,7 +488,8 @@ interface ExecuteRawOptions {
   cwd?: string
   /** A command started with foreground semantics that may be handed off to its task. */
   handoff?: {
-    onSpawn: () => (() => void) | undefined
+    onSpawn: (requestPromotion?: () => void) => (() => void) | undefined
+    onPromote: () => void
     isPromoted: () => boolean
   }
   /** Background teardown waits for residual descendants before releasing ownership. */
@@ -5902,6 +5904,10 @@ export class LocalSandbox
 
   /** Track all active child processes for cleanup on app quit. */
   private static readonly activeProcesses = new Set<ChildProcess>()
+  private static readonly windowsHandoffControls = new WeakMap<
+    ChildProcess,
+    { started: Promise<void>; readyToCollect: Promise<void>; terminate: () => Promise<void> }
+  >()
   private static readonly activeProcessTerminations = new WeakMap<
     ChildProcess,
     { promise: Promise<void>; waitForProcessTree: boolean }
@@ -5936,6 +5942,8 @@ export class LocalSandbox
     exited: () => boolean,
     waitForProcessTree = false
   ): Promise<void> {
+    const windowsControl = LocalSandbox.windowsHandoffControls.get(proc)
+    if (windowsControl) return windowsControl.terminate()
     const requireProcessTree = waitForProcessTree || LocalSandbox.applicationShutdownStarted
     const previous = LocalSandbox.activeProcessTerminations.get(proc)
     if (previous?.waitForProcessTree || (previous && !requireProcessTree)) {
@@ -7524,7 +7532,7 @@ export class LocalSandbox
         output: LocalSandbox.backgroundTaskStartedMessage(task.id)
       })
     }
-    const onSpawn = (): (() => void) | undefined => {
+    const onSpawn = (requestPromotion = promote): (() => void) | undefined => {
       if (processController.signal.aborted) return
       if (capTimer === undefined) {
         task.startedAt = task.lastOutputAt = Date.now()
@@ -7535,7 +7543,7 @@ export class LocalSandbox
       }
       if (promoted) return
       const startedAt = performance.now()
-      foregroundTimer = setTimeout(promote, Math.max(0, foregroundBudgetMs))
+      foregroundTimer = setTimeout(requestPromotion, Math.max(0, foregroundBudgetMs))
       return () => {
         foregroundBudgetMs -= performance.now() - startedAt
         clearForegroundTimer()
@@ -7545,7 +7553,7 @@ export class LocalSandbox
     const run = (): Promise<ExecuteResponse> =>
       this.executeWithHooks(command, cwd, {
         task,
-        process: { onSpawn, isPromoted: () => promoted },
+        process: { onSpawn, onPromote: promote, isPromoted: () => promoted },
         processSignal: processController.signal,
         onCommandResult
       })
@@ -7849,6 +7857,116 @@ export class LocalSandbox
     if (process.platform === "win32") proc.once("exit", stop)
     proc.once("close", stop)
     proc.once("error", stop)
+  }
+
+  private static quoteWindowsChildArgument(argument: string): string {
+    // Match libuv's native argv quoting. cmd.exe uses a separate verbatim path.
+    return argument && !/[ \t"]/.test(argument)
+      ? argument
+      : `"${argument.replace(/(\\*)"/g, '$1$1\\"').replace(/\\+$/, "$&$&")}"`
+  }
+
+  private static spawnWindowsHandoffProcess(
+    executable: string,
+    argumentsText: string,
+    options: { cwd: string; env: NodeJS.ProcessEnv; windowsHide: boolean; pipeInput?: boolean },
+    handoff: NonNullable<ExecuteRawOptions["handoff"]>
+  ): ChildProcess {
+    const { pipeInput, ...spawnOptions } = options
+    const proc = spawn(
+      resolveWindowsBackgroundJobControllerPath(),
+      [executable, options.windowsHide ? "handoff-hidden" : "handoff-visible"],
+      { ...spawnOptions, stdio: [pipeInput ? "pipe" : "ignore", "pipe", "pipe", "pipe", "pipe"] }
+    )
+    const request = proc.stdio[3] as Duplex
+    const status = proc.stdio[4] as Duplex
+    const argumentBytes = Buffer.from(argumentsText, "utf16le")
+    const length = Buffer.alloc(4)
+    length.writeUInt32LE(argumentBytes.length)
+    let finishStartup!: () => void
+    const started = new Promise<void>((resolve) => {
+      finishStartup = resolve
+    })
+    let stopTiming: (() => void) | undefined
+    let finishControl!: () => void
+    const readyToCollect = new Promise<void>((resolve) => {
+      finishControl = () => {
+        finishStartup()
+        stopTiming?.()
+        stopTiming = undefined
+        resolve()
+      }
+    })
+    let finished = false
+    let forceStop: ReturnType<typeof setTimeout> | undefined
+    const settled = new Promise<void>((resolve) => {
+      const settle = (): void => {
+        finished = true
+        clearTimeout(forceStop)
+        resolve()
+      }
+      proc.once("exit", settle)
+      proc.once("error", settle)
+    })
+    let stopping = false
+    LocalSandbox.windowsHandoffControls.set(proc, {
+      started,
+      readyToCollect,
+      terminate: () => {
+        if (!finished && !stopping) {
+          stopping = true
+          if (request.writable) {
+            // A broken launch or control pipe can leave the helper unresponsive.
+            // Windows closes its kill-on-close Job handle if we force it down.
+            forceStop = setTimeout(() => proc.kill(), LocalSandbox.IO_DRAIN_TIMEOUT_MS)
+            request.write("C", (error) => {
+              if (error) proc.kill()
+            })
+          } else proc.kill()
+        }
+        return settled
+      }
+    })
+    status.on("data", (messages: Buffer) => {
+      for (const code of messages) {
+        if (code === 83) {
+          finishStartup()
+          stopTiming = handoff.onSpawn(() => {
+            if (request.writable) request.write("P")
+          })
+        } else if (code === 80) handoff.onPromote()
+        else if (code === 69) finishControl()
+      }
+    })
+    const controlClosed = (): void => finishControl()
+    status.once("error", controlClosed)
+    status.once("close", controlClosed)
+    status.once("end", controlClosed)
+    request.once("error", () => proc.kill())
+    proc.once("error", finishControl)
+    request.write(Buffer.concat([length, argumentBytes]))
+    return proc
+  }
+
+  private static collectAfterWindowsHandoffControl(proc: ChildProcess, collect: () => void): void {
+    const control = LocalSandbox.windowsHandoffControls.get(proc)
+    if (control) void control.readyToCollect.then(collect)
+    else collect()
+  }
+
+  private static shellProcessTimeout(
+    proc: ChildProcess,
+    handoff: ExecuteRawOptions["handoff"],
+    timeoutMs: number,
+    onTimeout: () => void
+  ): ReturnType<typeof setTimeout> | undefined {
+    const control = LocalSandbox.windowsHandoffControls.get(proc)
+    if (handoff && !control) return
+    // The hard cap starts at the real Windows command launch. Keep a separate
+    // bound while the controller is starting and its launch status is pending.
+    const timer = setTimeout(onTimeout, timeoutMs)
+    if (control) void control.started.then(() => clearTimeout(timer))
+    return timer
   }
 
   private static isBackgroundExecution(
@@ -8647,12 +8765,22 @@ export class LocalSandbox
         console.log(`[LocalSandbox] sandbox cwd: ${sandboxWorkspaceRoot}`)
         console.log(`[LocalSandbox] command cwd: ${executionCwd}`)
 
-        const proc = spawn(this.codexExePath, sandboxArgs, {
+        const spawnOptions = {
           cwd: sandboxWorkspaceRoot,
           env: sandboxEnv,
-          stdio: ["ignore", "pipe", "pipe"],
           windowsHide: true
-        })
+        }
+        const proc = options?.handoff
+          ? LocalSandbox.spawnWindowsHandoffProcess(
+              this.codexExePath,
+              sandboxArgs.map(LocalSandbox.quoteWindowsChildArgument).join(" "),
+              spawnOptions,
+              options.handoff
+            )
+          : spawn(this.codexExePath, sandboxArgs, {
+              ...spawnOptions,
+              stdio: ["ignore", "pipe", "pipe"]
+            })
 
         console.log(`[LocalSandbox] spawned pid=${proc.pid} at +${Date.now() - execStartMs}ms`)
         if (!proc.pid) {
@@ -8661,7 +8789,6 @@ export class LocalSandbox
           )
         }
         LocalSandbox.activeProcesses.add(proc)
-        LocalSandbox.trackShellHandoffProcess(proc, options?.handoff)
         let termination: Promise<void> | undefined
         const killProc = (): void => {
           termination ??= LocalSandbox.terminateProcessTree(
@@ -8673,20 +8800,23 @@ export class LocalSandbox
         }
 
         const cmdTimeout = timeoutMs ?? this.timeout
-        const timeoutId = options?.handoff
-          ? undefined
-          : setTimeout(() => {
-              if (resolved || timedOut || aborted) return
-              console.log(`[LocalSandbox] timeout: pid=${proc.pid}, killing after ${cmdTimeout}ms`)
-              timedOut = true
-              killProc()
-              drainTimerId = setTimeout(() => {
-                console.log(
-                  `[LocalSandbox] drain timeout: pid=${proc.pid}, force-resolving after ${LocalSandbox.IO_DRAIN_TIMEOUT_MS}ms`
-                )
-                collectAndResolve(null, "SIGKILL")
-              }, LocalSandbox.IO_DRAIN_TIMEOUT_MS)
-            }, cmdTimeout)
+        const timeoutId = LocalSandbox.shellProcessTimeout(
+          proc,
+          options?.handoff,
+          cmdTimeout,
+          () => {
+            if (resolved || timedOut || aborted) return
+            console.log(`[LocalSandbox] timeout: pid=${proc.pid}, killing after ${cmdTimeout}ms`)
+            timedOut = true
+            killProc()
+            drainTimerId = setTimeout(() => {
+              console.log(
+                `[LocalSandbox] drain timeout: pid=${proc.pid}, force-resolving after ${LocalSandbox.IO_DRAIN_TIMEOUT_MS}ms`
+              )
+              collectAndResolve(null, "SIGKILL")
+            }, LocalSandbox.IO_DRAIN_TIMEOUT_MS)
+          }
+        )
 
         const abortHandler = (): void => {
           if (resolved || timedOut || aborted) return
@@ -8821,7 +8951,9 @@ export class LocalSandbox
           )
           exited = true
           windowsExitTimerId = setTimeout(() => {
-            collectAndResolve(code, signal as string | null)
+            LocalSandbox.collectAfterWindowsHandoffControl(proc, () =>
+              collectAndResolve(code, signal as string | null)
+            )
           }, 500)
         })
 
@@ -8830,7 +8962,9 @@ export class LocalSandbox
             `[LocalSandbox] event=close pid=${proc.pid} code=${code} signal=${signal} at +${Date.now() - execStartMs}ms resolved=${resolved}`
           )
           exited = true
-          collectAndResolve(code, signal as string | null)
+          LocalSandbox.collectAfterWindowsHandoffControl(proc, () =>
+            collectAndResolve(code, signal as string | null)
+          )
         })
 
         proc.on("error", (err) => {
@@ -9003,30 +9137,51 @@ export class LocalSandbox
           : shellBase === "cmd"
             ? "cmd"
             : "stdin"
-      const proc = useWindowsBackgroundJob
-        ? spawn(resolveWindowsBackgroundJobControllerPath(), [shell, windowsBackgroundShellKind], {
-            cwd: effectiveCwd,
-            env: spawnEnv,
-            stdio: ["pipe", "pipe", "pipe"],
-            detached: false,
-            windowsHide: !allowInteractiveGitAuth
-          })
-        : isBashOnWin
-          ? spawn(shell, [], {
+      const windowsHandoff = isWindows ? options?.handoff : undefined
+      const proc = windowsHandoff
+        ? LocalSandbox.spawnWindowsHandoffProcess(
+            shell,
+            isBashOnWin
+              ? ""
+              : /^(?:.*\\)?cmd(?:\.exe)?$/i.test(shell)
+                ? `/d /s /c "${command}"`
+                : `-c ${LocalSandbox.quoteWindowsChildArgument(command)}`,
+            {
               cwd: effectiveCwd,
               env: spawnEnv,
-              stdio: ["pipe", "pipe", "pipe"],
-              detached: false,
-              windowsHide: !allowInteractiveGitAuth
-            })
-          : spawn(command, {
-              shell,
-              cwd: effectiveCwd,
-              env: spawnEnv,
-              stdio: ["ignore", "pipe", "pipe"],
-              detached: !isWindows,
-              windowsHide: !allowInteractiveGitAuth
-            })
+              windowsHide: !allowInteractiveGitAuth,
+              pipeInput: isBashOnWin
+            },
+            windowsHandoff
+          )
+        : useWindowsBackgroundJob
+          ? spawn(
+              resolveWindowsBackgroundJobControllerPath(),
+              [shell, windowsBackgroundShellKind],
+              {
+                cwd: effectiveCwd,
+                env: spawnEnv,
+                stdio: ["pipe", "pipe", "pipe"],
+                detached: false,
+                windowsHide: !allowInteractiveGitAuth
+              }
+            )
+          : isBashOnWin
+            ? spawn(shell, [], {
+                cwd: effectiveCwd,
+                env: spawnEnv,
+                stdio: ["pipe", "pipe", "pipe"],
+                detached: false,
+                windowsHide: !allowInteractiveGitAuth
+              })
+            : spawn(command, {
+                shell,
+                cwd: effectiveCwd,
+                env: spawnEnv,
+                stdio: ["ignore", "pipe", "pipe"],
+                detached: !isWindows,
+                windowsHide: !allowInteractiveGitAuth
+              })
 
       if ((isBashOnWin || useWindowsBackgroundJob) && proc.stdin) {
         proc.stdin.on("error", () => {
@@ -9043,7 +9198,7 @@ export class LocalSandbox
         console.warn(`[LocalSandbox] WARNING: spawn returned no pid — process may not have started`)
       }
       LocalSandbox.activeProcesses.add(proc)
-      LocalSandbox.trackShellHandoffProcess(proc, options?.handoff)
+      if (!windowsHandoff) LocalSandbox.trackShellHandoffProcess(proc, options?.handoff)
 
       let windowsExitTimerId: ReturnType<typeof setTimeout> | null = null
       let timedOut = false
@@ -9064,18 +9219,16 @@ export class LocalSandbox
       }
 
       const cmdTimeout = timeoutMs ?? this.timeout
-      const timeoutId = options?.handoff
-        ? undefined
-        : setTimeout(() => {
-            if (resolved || timedOut || aborted) return
-            timedOut = true
-            killProc()
-            // Give close event up to 2s to fire (drain remaining output).
-            // If it doesn't come, force-resolve with whatever we have.
-            drainTimerId = setTimeout(() => {
-              collectAndResolve(null, "SIGKILL")
-            }, LocalSandbox.IO_DRAIN_TIMEOUT_MS)
-          }, cmdTimeout)
+      const timeoutId = LocalSandbox.shellProcessTimeout(proc, options?.handoff, cmdTimeout, () => {
+        if (resolved || timedOut || aborted) return
+        timedOut = true
+        killProc()
+        // Give close event up to 2s to fire (drain remaining output).
+        // If it doesn't come, force-resolve with whatever we have.
+        drainTimerId = setTimeout(() => {
+          collectAndResolve(null, "SIGKILL")
+        }, LocalSandbox.IO_DRAIN_TIMEOUT_MS)
+      })
 
       const abortHandler = (): void => {
         if (resolved || timedOut || aborted) return
@@ -9090,7 +9243,7 @@ export class LocalSandbox
         effectiveAbortSignal.addEventListener("abort", abortHandler, { once: true })
       }
 
-      proc.stdout.on("data", (chunk: Buffer) => {
+      proc.stdout?.on("data", (chunk: Buffer) => {
         if (!firstDataAt) {
           firstDataAt = Date.now()
           console.log(
@@ -9104,7 +9257,7 @@ export class LocalSandbox
         if (totalBytes >= this.maxOutputBytes) byteCapReached = true
       })
 
-      proc.stderr.on("data", (chunk: Buffer) => {
+      proc.stderr?.on("data", (chunk: Buffer) => {
         if (!firstDataAt) {
           firstDataAt = Date.now()
           console.log(
@@ -9212,7 +9365,9 @@ export class LocalSandbox
           )
           exited = true
           windowsExitTimerId = setTimeout(() => {
-            collectAndResolve(code, signal as string | null)
+            LocalSandbox.collectAfterWindowsHandoffControl(proc, () =>
+              collectAndResolve(code, signal as string | null)
+            )
           }, 500)
         })
       }
@@ -9233,7 +9388,9 @@ export class LocalSandbox
           void termination?.finally(() => collectAndResolve(code, signal as string | null))
           return
         }
-        collectAndResolve(code, signal as string | null)
+        LocalSandbox.collectAfterWindowsHandoffControl(proc, () =>
+          collectAndResolve(code, signal as string | null)
+        )
       })
 
       proc.on("error", (err) => {

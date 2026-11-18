@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest"
 import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages"
-import { serializeWorkflowAgentSnapshotMessages } from "../../../main/agent/workflow/agent-snapshot"
+import {
+  serializeWorkflowAgentSnapshotMessages,
+  WORKFLOW_AGENT_SNAPSHOT_MAX_MESSAGES
+} from "../../../main/agent/workflow/agent-snapshot"
 import type { Message } from "../types"
 import { ElectronIPCTransport } from "./electron-transport"
 import { createWorkflowAgentMessageProjector } from "./workflow-agent-message-projection"
@@ -120,6 +123,60 @@ describe("workflow complete snapshot projection", () => {
     ])
     expect(replay.map((message) => message.id)).toEqual(afterRetry.map((message) => message.id))
     expect(replay.at(-1)?.content).toBe("Corrected second reply")
+  })
+
+  it("keeps the reply identity when the bounded snapshot drops the retry prompt", () => {
+    const transport = new ElectronIPCTransport()
+    const scope = "parent/run/0"
+    const assistant = (id: string, content: string) =>
+      new AIMessage({
+        id,
+        content,
+        additional_kwargs: {
+          cmb_internal_provider_source_id: "reused-provider",
+          cmb_internal_provider_occurrence: 1
+        }
+      })
+    const firstTurn = [
+      new HumanMessage({ id: "initial-user", content: "Run the workflow" }),
+      assistant("first-answer", "First reply")
+    ]
+    const retryPrompt = new HumanMessage({ id: "retry-user", content: "Submit structured output" })
+    const reply = assistant("second-answer", "Second reply")
+    const retryPromptIndex = firstTurn.length
+    // The old sidecar format can infer the retry boundary when its prompt is present.
+    const legacyFrame = serializeWorkflowAgentSnapshotMessages({
+      messages: [...firstTurn, retryPrompt, reply]
+    })
+    const [, firstReply, , secondReply] = transport.convertWorkflowAgentValuesSnapshot(
+      legacyFrame,
+      scope
+    )
+    expect(firstReply.id).not.toBe(secondReply.id)
+
+    const messages = [
+      ...firstTurn,
+      retryPrompt,
+      reply,
+      ...Array.from(
+        { length: WORKFLOW_AGENT_SNAPSHOT_MAX_MESSAGES - 2 },
+        (_, index) => new AIMessage({ id: `filler-${index}`, content: "tool activity" })
+      )
+    ]
+    const bounded = serializeWorkflowAgentSnapshotMessages({ messages, retryPromptIndex })
+    expect(transport.convertWorkflowAgentValuesSnapshot(bounded, scope)[1].id).toBe(secondReply.id)
+
+    const rolled = serializeWorkflowAgentSnapshotMessages({
+      messages: [...messages, new AIMessage({ id: "extra", content: "more activity" })],
+      retryPromptIndex
+    })
+    const live = transport.convertWorkflowAgentValuesSnapshot(rolled, scope)
+    const restored = new ElectronIPCTransport().convertWorkflowAgentValuesSnapshot(
+      JSON.parse(JSON.stringify(rolled)),
+      scope
+    )
+    expect(live[0]).toMatchObject({ id: secondReply.id, content: "Second reply" })
+    expect(restored[0].id).toBe(secondReply.id)
   })
 
   it("applies corrections outside the last 32 messages without duplicating the tail", () => {

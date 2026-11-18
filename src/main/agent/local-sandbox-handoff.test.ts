@@ -175,6 +175,50 @@ describe("LocalSandbox execute handoff", () => {
     30_000
   )
 
+  it.skipIf(process.platform !== "win32" || !existsSync(windowsGitBash))(
+    "settles a promoted Git Bash task only after reaping a redirected child of the exited shell",
+    async () => {
+      const { root, sandbox } = await fixture()
+      const shell = vi
+        .spyOn(LocalSandbox as unknown as { resolveShell: () => Promise<string> }, "resolveShell")
+        .mockResolvedValue(windowsGitBash)
+      try {
+        await writeFile(
+          path.join(root, "detached.cjs"),
+          [
+            'const fs = require("node:fs")',
+            'fs.writeFileSync("child-pid", String(process.pid))',
+            'setTimeout(() => fs.writeFileSync("late-write", "still running"), 1800)'
+          ].join("\n")
+        )
+        const shellCommand =
+          "sleep 1; node detached.cjs </dev/null >/dev/null 2>&1 & " +
+          "while [ ! -f child-pid ]; do sleep 0.05; done; echo started"
+        const task = await sandbox.executeForTool(shellCommand, undefined, {
+          backgroundAfterMs: 80
+        })
+        if (task.status !== "background") throw new Error(task.result.output)
+
+        await expect(
+          sandbox.waitForTaskOutput(task.taskId, { timeoutMs: 10_000 })
+        ).resolves.toMatchObject({
+          status: "completed",
+          result: { exitCode: 0, output: "started\n" }
+        })
+        await expect(LocalSandbox.cancelBackgroundTasksWithin(sandbox.runId, 1000)).resolves.toBe(
+          true
+        )
+        const pid = Number(await readFile(path.join(root, "child-pid"), "utf8"))
+        expect(Number.isSafeInteger(pid) && pid > 0).toBe(true)
+        expect(() => process.kill(pid, 0)).toThrow("ESRCH")
+        expect(existsSync(path.join(root, "late-write"))).toBe(false)
+      } finally {
+        shell.mockRestore()
+      }
+    },
+    30_000
+  )
+
   it("stops the native runner's whole process tree after handoff", async () => {
     const { root, sandbox } = await fixture()
     await writeFile(

@@ -1,9 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Win32.SafeHandles;
 
 internal static class WindowsBackgroundJobController
 {
@@ -12,6 +15,13 @@ internal static class WindowsBackgroundJobController
         "background-job-controller-powershell-bootstrap.ps1";
     private const int CmdMaximumArgumentsLength = 8191;
     private const int CmdMaximumInputBytes = CmdMaximumArgumentsLength * 4 + 2;
+    private const uint StartWithStandardHandles = 0x00000100;
+    private const uint CreateNoWindow = 0x08000000;
+    private const uint ExtendedStartupInfoPresent = 0x00080000;
+    private const int JobListAttribute = 0x0002000D;
+    private const uint HandleFlagInherit = 1;
+    private const uint WaitTimeout = 258;
+    private const uint Infinite = 0xffffffff;
     private static IntPtr jobHandle = IntPtr.Zero;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -50,6 +60,30 @@ internal static class WindowsBackgroundJobController
         public UIntPtr PeakJobMemoryUsed;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct StartupInfo
+    {
+        public int Size;
+        public IntPtr Reserved, Desktop, Title;
+        public uint X, Y, XSize, YSize, XChars, YChars, Fill, Flags;
+        public ushort ShowWindow, ReservedCount;
+        public IntPtr ReservedPointer, Input, Output, Error;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessInformation
+    {
+        public IntPtr Process, Thread;
+        public uint ProcessId, ThreadId;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ExtendedStartupInfo
+    {
+        public StartupInfo StartupInfo;
+        public IntPtr Attributes;
+    }
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CreateJobObject(IntPtr securityAttributes, string name);
 
@@ -65,6 +99,69 @@ internal static class WindowsBackgroundJobController
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool QueryInformationJobObject(
+        IntPtr job, int informationClass, IntPtr information, uint length, IntPtr returnedLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint access, bool inherit, uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool result);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool InitializeProcThreadAttributeList(
+        IntPtr attributes, int count, int flags, ref IntPtr size);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool UpdateProcThreadAttribute(
+        IntPtr attributes, uint flags, IntPtr attribute, ref IntPtr value, IntPtr size,
+        IntPtr previousValue, IntPtr returnSize);
+
+    [DllImport("kernel32.dll")]
+    private static extern void DeleteProcThreadAttributeList(IntPtr attributes);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetStdHandle(int standardHandle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CreateProcess(
+        string application, StringBuilder commandLine, IntPtr processAttributes,
+        IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment,
+        string currentDirectory, ref ExtendedStartupInfo startupInfo, out ProcessInformation processInfo);
+
+    [DllImport("msvcrt.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr _get_osfhandle(int fd);
+
+    private static bool SetKillOnClose(IntPtr job, bool enabled)
+    {
+        ExtendedLimitInformation limits = new ExtendedLimitInformation();
+        limits.BasicLimitInformation.LimitFlags = enabled ? JobObjectLimitKillOnJobClose : 0;
+        int size = Marshal.SizeOf(typeof(ExtendedLimitInformation));
+        IntPtr pointer = Marshal.AllocHGlobal(size);
+        try
+        {
+            Marshal.StructureToPtr(limits, pointer, false);
+            return SetInformationJobObject(job, 9, pointer, (uint)size);
+        }
+        finally { Marshal.FreeHGlobal(pointer); }
+    }
+
     private static bool InitializeKillOnCloseJob(out string error)
     {
         jobHandle = CreateJobObject(IntPtr.Zero, null);
@@ -74,22 +171,10 @@ internal static class WindowsBackgroundJobController
             return false;
         }
 
-        ExtendedLimitInformation limits = new ExtendedLimitInformation();
-        limits.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
-        int limitsSize = Marshal.SizeOf(typeof(ExtendedLimitInformation));
-        IntPtr limitsPointer = Marshal.AllocHGlobal(limitsSize);
-        try
+        if (!SetKillOnClose(jobHandle, true))
         {
-            Marshal.StructureToPtr(limits, limitsPointer, false);
-            if (!SetInformationJobObject(jobHandle, 9, limitsPointer, (uint)limitsSize))
-            {
-                error = "SetInformationJobObject failed: " + Marshal.GetLastWin32Error();
-                return false;
-            }
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(limitsPointer);
+            error = "SetInformationJobObject failed: " + Marshal.GetLastWin32Error();
+            return false;
         }
 
         using (Process current = Process.GetCurrentProcess())
@@ -102,6 +187,208 @@ internal static class WindowsBackgroundJobController
         }
         error = null;
         return true;
+    }
+
+    private static List<IntPtr> OpenJobProcessHandles(IntPtr job)
+    {
+        // JobObjectBasicProcessIdList has two DWORDs, followed by a pointer-sized PID array.
+        // Open handles before termination so cleanup can wait on the actual process objects,
+        // even after their PIDs leave the Job list.
+        int capacity = 16;
+        while (true)
+        {
+            int size = 8 + capacity * IntPtr.Size;
+            IntPtr buffer = Marshal.AllocHGlobal(size);
+            try
+            {
+                if (QueryInformationJobObject(job, 3, buffer, (uint)size, IntPtr.Zero))
+                {
+                    List<IntPtr> handles = new List<IntPtr>();
+                    int count = Marshal.ReadInt32(buffer, 4);
+                    for (int index = 0; index < count; index++)
+                    {
+                        uint pid = (uint)Marshal.ReadIntPtr(buffer, 8 + index * IntPtr.Size).ToInt64();
+                        // Query membership as well as opening SYNCHRONIZE. A rapid
+                        // exit and PID reuse must not make us wait on an unrelated process.
+                        IntPtr process = OpenProcess(0x00101000, false, pid);
+                        if (process == IntPtr.Zero) continue;
+                        bool belongsToJob;
+                        if (IsProcessInJob(process, job, out belongsToJob) && belongsToJob)
+                            handles.Add(process);
+                        else CloseHandle(process);
+                    }
+                    return handles;
+                }
+                if (Marshal.GetLastWin32Error() != 234)
+                    throw new IOException("Could not read Windows Job process list");
+                capacity = Math.Max(capacity * 2, Marshal.ReadInt32(buffer));
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+        }
+    }
+
+    private static void TerminateAndWait(IntPtr job)
+    {
+        List<IntPtr> handles = OpenJobProcessHandles(job);
+        try
+        {
+            if (!TerminateJobObject(job, 130))
+                throw new IOException("Could not terminate Windows Job");
+            // Capture any remaining members created during the first list read.
+            // TerminateJobObject also covers members whose handles cannot be opened.
+            handles.AddRange(OpenJobProcessHandles(job));
+            foreach (IntPtr process in handles) WaitForSingleObject(process, Infinite);
+        }
+        finally
+        {
+            foreach (IntPtr process in handles) CloseHandle(process);
+        }
+    }
+
+    private static ProcessInformation StartContainedProcess(
+        IntPtr job, string executable, string commandLine, bool hidden)
+    {
+        IntPtr size = IntPtr.Zero;
+        InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
+        IntPtr attributes = Marshal.AllocHGlobal(size);
+        bool initialized = false;
+        try
+        {
+            initialized = InitializeProcThreadAttributeList(attributes, 1, 0, ref size);
+            // Assign the job during CreateProcess. The controller can be stopped at
+            // any point during startup without leaving an unassigned child behind.
+            if (!initialized || !UpdateProcThreadAttribute(attributes, 0,
+                new IntPtr(JobListAttribute), ref job, new IntPtr(IntPtr.Size), IntPtr.Zero, IntPtr.Zero))
+                throw new IOException("Could not prepare Windows Job process attributes");
+            ExtendedStartupInfo startup = new ExtendedStartupInfo
+            {
+                StartupInfo = new StartupInfo
+                {
+                    Size = Marshal.SizeOf(typeof(ExtendedStartupInfo)),
+                    Flags = StartWithStandardHandles,
+                    Input = GetStdHandle(-10),
+                    Output = GetStdHandle(-11),
+                    Error = GetStdHandle(-12)
+                },
+                Attributes = attributes
+            };
+            ProcessInformation child;
+            if (!CreateProcess(Path.IsPathRooted(executable) ? executable : null,
+                new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true,
+                ExtendedStartupInfoPresent | (hidden ? CreateNoWindow : 0), IntPtr.Zero, null,
+                ref startup, out child))
+                throw new IOException("Could not start Windows command (" + Marshal.GetLastWin32Error() + ")");
+            return child;
+        }
+        finally
+        {
+            if (initialized) DeleteProcThreadAttributeList(attributes);
+            Marshal.FreeHGlobal(attributes);
+        }
+    }
+
+    private static int ExecuteWithHandoff(string executable, bool hidden)
+    {
+        IntPtr requestHandle = _get_osfhandle(3);
+        IntPtr statusHandle = _get_osfhandle(4);
+        // Use separate synchronous pipes so a blocked read cannot delay an exit
+        // notification. Neither pipe is inherited by the command.
+        if (requestHandle == new IntPtr(-1) || statusHandle == new IntPtr(-1) ||
+            !SetHandleInformation(requestHandle, HandleFlagInherit, 0) ||
+            !SetHandleInformation(statusHandle, HandleFlagInherit, 0))
+            throw new IOException("Windows Job control pipe is unavailable");
+        var input = new FileStream(new SafeFileHandle(requestHandle, false), FileAccess.Read, 1);
+        var output = new FileStream(new SafeFileHandle(statusHandle, false), FileAccess.Write, 1);
+        var reader = new BinaryReader(input);
+        int byteCount = reader.ReadInt32();
+        if (byteCount < 0 || byteCount > 2 * 32767 || byteCount % 2 != 0)
+            throw new InvalidDataException("Windows command line exceeds its transport limit");
+        byte[] arguments = reader.ReadBytes(byteCount);
+        if (arguments.Length != byteCount) throw new EndOfStreamException();
+        string commandLine = "\"" + executable + "\" " + Encoding.Unicode.GetString(arguments);
+        if (commandLine.Length >= 32767 || commandLine.IndexOf('\0') >= 0)
+            throw new InvalidDataException("Invalid Windows command line");
+
+        IntPtr job = CreateJobObject(IntPtr.Zero, null);
+        if (job == IntPtr.Zero) throw new IOException("Could not create Windows Job");
+        ProcessInformation child = new ProcessInformation();
+        try
+        {
+            if (!SetKillOnClose(job, true)) throw new IOException("Could not configure Windows Job");
+            child = StartContainedProcess(job, executable, commandLine, hidden);
+
+            object gate = new object();
+            bool promoted = false;
+            bool finished = false;
+            bool cancelled = false;
+            bool cleanupDone = false;
+            Action<byte> send = value => { output.WriteByte(value); output.Flush(); };
+            send((byte)'S');
+            var control = new Thread(() =>
+            {
+                try
+                {
+                    for (;;)
+                    {
+                        int key = input.ReadByte();
+                        lock (gate)
+                        {
+                            if (finished) return;
+                            if (key == (byte)'C' || key < 0)
+                            {
+                                cancelled = true;
+                                TerminateAndWait(job);
+                                cleanupDone = true;
+                                return;
+                            }
+                            if (key == (byte)'P' && !promoted &&
+                                WaitForSingleObject(child.Process, 0) == WaitTimeout)
+                            {
+                                promoted = true;
+                                send((byte)'P');
+                            }
+                        }
+                    }
+                }
+                catch (IOException)
+                {
+                    lock (gate)
+                    {
+                        if (finished) return;
+                        cancelled = true;
+                        TerminateJobObject(job, 130);
+                    }
+                }
+            });
+            control.IsBackground = true;
+            control.Start();
+
+            WaitForSingleObject(child.Process, Infinite);
+            lock (gate)
+            {
+                // A promotion is accepted only while the actual command runs.
+                // The Node timer cannot promote a process that already exited
+                // while its controller and stdout/stderr pipes are still draining.
+                finished = true;
+                send((byte)'E');
+                if (promoted || cancelled)
+                {
+                    if (!cleanupDone) TerminateAndWait(job);
+                }
+                else if (!SetKillOnClose(job, false))
+                    throw new IOException("Could not release short command's Windows Job");
+            }
+            uint exitCode;
+            if (!GetExitCodeProcess(child.Process, out exitCode))
+                throw new IOException("Could not read Windows command exit code");
+            return unchecked((int)exitCode);
+        }
+        finally
+        {
+            if (child.Thread != IntPtr.Zero) CloseHandle(child.Thread);
+            if (child.Process != IntPtr.Zero) CloseHandle(child.Process);
+            CloseHandle(job);
+        }
     }
 
     private static string ShellArguments(string shellKind, string cmdCommand)
@@ -190,6 +477,16 @@ internal static class WindowsBackgroundJobController
         {
             Console.Error.WriteLine("[LocalSandbox] Background shell path is missing");
             return 126;
+        }
+
+        if (args[1] == "handoff-hidden" || args[1] == "handoff-visible")
+        {
+            try { return ExecuteWithHandoff(args[0], args[1] == "handoff-hidden"); }
+            catch (Exception error)
+            {
+                Console.Error.WriteLine("[LocalSandbox] Windows Job command failed: " + error.Message);
+                return 125;
+            }
         }
 
         string jobError;

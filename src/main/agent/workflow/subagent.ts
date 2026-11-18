@@ -24,6 +24,10 @@ import type { TraceContext, TraceNodeStatus, TraceOutcome } from "../trace/types
 import { createSubagentSkillAttribution } from "../turn-attribution"
 import { validateJsonSchemaValue } from "./json-schema"
 import {
+  WORKFLOW_AGENT_SNAPSHOT_MAX_MESSAGES,
+  type WorkflowAgentDisplaySnapshot
+} from "./agent-snapshot"
+import {
   WORKFLOW_STRUCTURED_OUTPUT_MAX_ATTEMPTS,
   WORKFLOW_SUBAGENT_MAX_RUNS,
   WorkflowAbortError,
@@ -137,13 +141,13 @@ export interface RunWorkflowSubagentRequest {
   /** Runtime checkout identity for the private worktree. */
   worktreeIsolation?: WorkflowWorktreeIsolationBoundary
   /**
-   * Best-effort display tap: invoked with each "values" snapshot (the graph state
-   * `{ messages: [...] }`) so the renderer can show this subagent's live tool stream.
+   * Best-effort display tap: invoked with the messages and prompt boundary from
+   * each values snapshot so the renderer can show this subagent's live tool stream.
    * PURELY additive — it never affects the returned result, the structured-stop
    * logic, or the journal. The callee guards it with try/catch, but callers MUST
    * keep it non-throwing and cheap. Undefined for all non-display callers.
    */
-  onValues?: (snapshot: unknown) => void
+  onValues?: (snapshot: WorkflowAgentDisplaySnapshot) => void
 }
 
 interface StructuredOutputLogContext {
@@ -364,6 +368,8 @@ async function runOnce(
   let traceRecorder: TurnTraceRecorder | undefined
   let tracer: TraceCollector | undefined
   let latestSnapshot: unknown
+  let retryPrompt: { id: string; expectedIndex: number } | undefined
+  let retryPromptIndex: number | undefined
   let traceTerminalRecorded = false
   let traceOutcome: TraceOutcome = "success"
   let traceError: string | undefined
@@ -388,7 +394,13 @@ async function runOnce(
         syncSkillAttribution()
       }
     })
-    request.onValues?.(snapshot)
+    if (request.onValues) {
+      const messages = snapshotMessages(snapshot)
+      if (retryPrompt && retryPromptIndex === undefined) {
+        retryPromptIndex = findRetryPromptIndex(messages, retryPrompt.id, retryPrompt.expectedIndex)
+      }
+      request.onValues({ messages, retryPromptIndex })
+    }
   }
 
   try {
@@ -541,20 +553,20 @@ async function runOnce(
               "by itself, with input matching the required JSON Schema.]"
           })
       )
+      const retryPromptId = randomUUID()
+      const retryMessage = new HumanMessage({
+        id: retryPromptId,
+        content:
+          "You have not returned a valid structured result yet. Call the structured_output tool now, exactly once, with an input matching the required JSON Schema. Do not reply with plain text."
+      })
+      retryPrompt = {
+        id: retryPromptId,
+        expectedIndex: snapshotMessages(snapshot).length + repairMessages.length
+      }
       snapshot = await raceWithAbort(
         (async () =>
           consumeValuesStream(
-            await runtime.stream(
-              {
-                messages: [
-                  ...repairMessages,
-                  new HumanMessage(
-                    "You have not returned a valid structured result yet. Call the structured_output tool now, exactly once, with an input matching the required JSON Schema. Do not reply with plain text."
-                  )
-                ]
-              },
-              streamConfig
-            ),
+            await runtime.stream({ messages: [...repairMessages, retryMessage] }, streamConfig),
             controller.signal,
             stopAfterStructuredAccepted,
             recordValuesSnapshot
@@ -1907,6 +1919,7 @@ interface MessageLike {
   kwargs?: {
     additional_kwargs?: { tool_calls?: unknown[] }
     content?: unknown
+    id?: unknown
     name?: unknown
     status?: unknown
     tool_calls?: unknown[]
@@ -1926,6 +1939,24 @@ function snapshotMessages(snapshot: unknown): MessageLike[] {
   if (typeof snapshot !== "object" || snapshot === null) return []
   const messages = (snapshot as { messages?: unknown }).messages
   return Array.isArray(messages) ? (messages as MessageLike[]) : []
+}
+
+function findRetryPromptIndex(
+  messages: readonly MessageLike[],
+  promptId: string,
+  expectedIndex: number
+): number | undefined {
+  const isPrompt = (message?: MessageLike): boolean =>
+    message?.id === promptId || message?.kwargs?.id === promptId
+  if (isPrompt(messages[expectedIndex])) return expectedIndex
+
+  // The retry appends to the same checkpoint. A tool repair can shift the
+  // expected position, so check the recent values window until we see it once.
+  const oldestIndex = Math.max(0, messages.length - WORKFLOW_AGENT_SNAPSHOT_MAX_MESSAGES)
+  for (let index = messages.length - 1; index >= oldestIndex; index -= 1) {
+    if (isPrompt(messages[index])) return index
+  }
+  return undefined
 }
 
 function messageClassName(message: MessageLike): string {
