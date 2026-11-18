@@ -39,6 +39,7 @@ const states: Record<string, string> = {
   outcome_unknown: "结果待核对"
 }
 const button = "bot-im-connect-button"
+const zhaohuBotMention = "@CMBDevClaw Bot"
 
 export function BotImChannelDialog({
   client,
@@ -435,8 +436,8 @@ export function BotImChannelDialog({
                 {bot.archived
                   ? "恢复此 Bot 后，可新增接入。"
                   : kind === "dm"
-                    ? "用本人账号，在招乎私聊机器人发送指令。"
-                    : "用本人账号，在目标群 @机器人发送指令。"}
+                    ? `用本人账号，在招乎打开与 ${zhaohuBotMention} 的私聊并发送指令。`
+                    : `用本人账号，在目标招乎群 ${zhaohuBotMention} 并发送指令。`}
               </p>
               <button
                 className={`${button} bot-im-connect-primary`}
@@ -568,8 +569,8 @@ export function BotImChannelDialog({
                           <>
                             <p>
                               {binding.kind === "group"
-                                ? "在目标招乎群 @机器人，粘贴并发送这条指令。"
-                                : "在招乎私聊机器人，粘贴并发送这条指令。"}
+                                ? `在目标招乎群 ${zhaohuBotMention}，粘贴并发送这条指令。`
+                                : `在招乎打开与 ${zhaohuBotMention} 的私聊，粘贴并发送这条指令。`}
                             </p>
                             <div className="bot-im-connect-code">
                               <code>{binding.instruction}</code>
@@ -716,7 +717,7 @@ export function BotImChannelDialog({
                 )}
                 {entries.length === 0 && (
                   <p className="bot-im-connect-hint">
-                    暂无接入记录。绑定后在招乎发送消息，群聊请 @机器人。
+                    暂无接入记录。绑定后在招乎发送消息，群聊请 {zhaohuBotMention}。
                   </p>
                 )}
                 {[...entries]

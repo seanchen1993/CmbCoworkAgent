@@ -98,11 +98,17 @@ createRoot(document.getElementById('root')).render(<BotImChannelDialog client={{
     await page.getByRole("button", { name: "刷新", exact: true }).click()
     await page.getByRole("radio", { name: "群聊", exact: true }).check()
     assert(await page.getByRole("radio", { name: "群聊", exact: true }).isChecked())
+    await page
+      .getByText("用本人账号，在目标招乎群 @CMBDevClaw Bot 并发送指令。", { exact: true })
+      .waitFor()
     await screenshot("bot-im-connect-ready.png")
     await page.getByRole("button", { name: "生成绑定指令" }).click()
     await page.getByRole("alert").getByText("回包丢失，请重试").waitFor()
     await page.getByRole("button", { name: "生成绑定指令" }).click()
     await page.getByText("/绑定Bot abcdefghijklmnopqrstuvwx", { exact: true }).waitFor()
+    await page
+      .getByText("在目标招乎群 @CMBDevClaw Bot，粘贴并发送这条指令。", { exact: true })
+      .waitFor()
     assert.equal(await page.evaluate(() => new Set((window as any).fixture.attempts).size), 1)
     await page.getByRole("button", { name: "复制绑定指令", exact: true }).click()
     await page.getByRole("button", { name: "已复制", exact: true }).waitFor()
@@ -195,6 +201,9 @@ createRoot(document.getElementById('root')).render(<BotImChannelDialog client={{
     await page.getByRole("radio", { name: "本人私聊", exact: true }).check()
     await page.getByRole("button", { name: "生成绑定指令", exact: true }).waitFor()
     await page
+      .getByText("用本人账号，在招乎打开与 @CMBDevClaw Bot 的私聊并发送指令。", { exact: true })
+      .waitFor()
+    await page
       .getByText("生成新指令会自动解除原私聊绑定；发送后连接此 Bot，历史消息与任务保留。", {
         exact: true
       })
@@ -215,6 +224,9 @@ createRoot(document.getElementById('root')).render(<BotImChannelDialog client={{
       .getByText("原私聊绑定已解除。发送下方指令后连接此 Bot，历史消息与任务保留。", {
         exact: true
       })
+      .waitFor()
+    await page
+      .getByText("在招乎打开与 @CMBDevClaw Bot 的私聊，粘贴并发送这条指令。", { exact: true })
       .waitFor()
     const attempts = await page.evaluate(() => (window as any).fixture.attempts.slice(-2))
     assert.equal(attempts[0], attempts[1])
