@@ -8985,6 +8985,7 @@ export function ChatContainer({
                           />
                         </div>
                         <div className="ml-auto flex shrink-0 items-center justify-end gap-1.5">
+                          <BackgroundShellStopButton key={threadId} threadId={threadId} />
                           {isLoading ? (
                             <>
                               {canSubmitGoalCommandWhileLoading && (
@@ -9012,7 +9013,6 @@ export function ChatContainer({
                             </>
                           ) : (
                             <>
-                              <BackgroundShellStopButton key={threadId} threadId={threadId} />
                               {hasRunningCoordinatorWorker && (
                                 <TooltipProvider delayDuration={0}>
                                   <Tooltip>

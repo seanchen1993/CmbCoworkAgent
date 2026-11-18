@@ -6,8 +6,9 @@ import {
   sameWorkerRoleAndToolCall
 } from "./worker-message-content"
 import {
-  mergeWorkerProviderWireIds,
   applyWorkerToolCallSnapshot,
+  mergeWorkerProviderWireIds,
+  mergeWorkerToolCallSnapshot,
   restoreSnapshotAliasCallsWithResults
 } from "./snapshot-message-aliases"
 import { create } from "zustand"
@@ -805,7 +806,7 @@ export function mergeWorkerFocusTailUpdate(
     content: resolveWorkerFocusContent(existing, incomingMessage),
     reasoning: incomingMessage.reasoning ?? existing.reasoning,
     tool_calls: incomingMessage.worker_tool_calls_source
-      ? incomingMessage.tool_calls
+      ? mergeWorkerToolCallSnapshot(existing.tool_calls, incomingMessage.tool_calls)
       : mergeWorkerToolCalls(existing.tool_calls, incomingMessage.tool_calls),
     tool_call_id: incomingMessage.tool_call_id ?? existing.tool_call_id,
     name: incomingMessage.name ?? existing.name,

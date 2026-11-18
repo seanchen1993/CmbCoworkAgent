@@ -54,6 +54,7 @@ import { CursorQueue } from "./cursor-queue"
 import {
   coalesceSnapshotMessageAliases,
   mergeWorkerProviderWireIds,
+  mergeWorkerToolCallSnapshot,
   normalizeWorkflowSnapshotMessageIds
 } from "./snapshot-message-aliases"
 import { readWorkerToolResultError, workerToolCallSnapshot } from "./worker-message-content"
@@ -1383,26 +1384,34 @@ export class ElectronIPCTransport implements UseStreamTransport {
       for (const id of callsById.keys()) {
         if (!declaredIds.has(id)) callsById.delete(id)
       }
+      for (const [key, id] of this.staleWorkerToolCallChunkIndexToId) {
+        if (key.slice(0, key.lastIndexOf("\u001f")) === messageId && !declaredIds.has(id)) {
+          this.staleWorkerToolCallChunkIndexToId.delete(key)
+        }
+      }
     }
 
     if (Array.isArray(kwargs?.tool_calls)) {
       for (const toolCall of kwargs.tool_calls) {
         if (!toolCall || typeof toolCall.id !== "string") continue
         const existing = callsById.get(toolCall.id)
+        const incomingArgs =
+          toolCall.args && typeof toolCall.args === "object" && !Array.isArray(toolCall.args)
+            ? toolCall.args
+            : undefined
+        const args = this.hasToolArgs(incomingArgs)
+          ? incomingArgs
+          : (existing?.args ?? incomingArgs)
         callsById.set(toolCall.id, {
           id: toolCall.id,
           name: toolCall.name || existing?.name,
           argsText: existing?.argsText ?? "",
-          ...(toolCall.args && typeof toolCall.args === "object" && !Array.isArray(toolCall.args)
-            ? { args: toolCall.args }
-            : existing?.args
-              ? { args: existing.args }
-              : {})
+          ...(args && { args })
         })
       }
     }
 
-    if (Array.isArray(kwargs?.tool_call_chunks)) {
+    if (!toolCallsAreSnapshot && Array.isArray(kwargs?.tool_call_chunks)) {
       for (const chunk of kwargs.tool_call_chunks) {
         const indexKey =
           typeof chunk.index === "number" ? `${messageId}\u001f${chunk.index}` : undefined
@@ -2678,7 +2687,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
           ? {
               ...message,
               id: previousActiveMessageId!,
-              provider_source_id: getMessageProviderSourceId(message)
+              provider_source_id: getMessageProviderSourceId(message),
+              // A legacy snapshot can adopt an anonymous draft by partial text or call overlap.
+              // That match does not establish which of the draft's other calls were removed.
+              ...(!previousActiveProviderSourceId &&
+                !message.worker_provider_identity && { worker_tool_calls_source: undefined })
             }
           : message
       const normalizedMessage =
@@ -2706,9 +2719,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
       return {
         ...normalizedMessage,
-        tool_calls: this.hydrateToolCallsWithAccumulatedArgs(
-          normalizedMessage.tool_calls
-        ) as Message["tool_calls"]
+        tool_calls: mergeWorkerToolCallSnapshot(
+          previousStoredMessage?.tool_calls,
+          this.hydrateToolCallsWithAccumulatedArgs(
+            normalizedMessage.tool_calls
+          ) as Message["tool_calls"]
+        )
       }
     })
     this.syncFocusedWorkerProviderStateFromValues(
@@ -4940,7 +4956,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       }
 
       const toolCalls = this.hydrateToolCallsWithAccumulatedArgs(kwargs.tool_calls ?? [])
-      if (toolCallsAreSnapshot) this.completedToolCallsByMessageId.delete(msgId)
+      if (toolCallsAreSnapshot) this.pruneFocusedWorkerToolCallState(msgId, toolCalls)
       if (toolCalls.length) {
         this.rememberCompletedToolCallsForMessage(msgId, toolCalls)
       }
@@ -5006,7 +5022,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
         )
       }
 
-      if (kwargs.tool_call_chunks?.length) {
+      if (!toolCallsAreSnapshot && kwargs.tool_call_chunks?.length) {
         this.accumulateToolCallChunks(kwargs.tool_call_chunks)
         const completedToolCalls = this.completedToolCallsFromAccumulatedChunks(
           kwargs.tool_call_chunks
@@ -6199,7 +6215,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
         content: message.content || existing.content,
         reasoning: message.reasoning || existing.reasoning,
         tool_calls: message.worker_tool_calls_source
-          ? message.tool_calls
+          ? mergeWorkerToolCallSnapshot(existing.tool_calls, message.tool_calls)
           : message.tool_calls?.length
             ? message.tool_calls
             : existing.tool_calls
@@ -6308,6 +6324,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
         this.workerInitialTurnAdoptionPending.delete(workerThreadId)
         return
       }
+      if (latestMessage.worker_tool_calls_source === "snapshot") {
+        this.pruneFocusedWorkerToolCallState(latestMessage.id, latestMessage.tool_calls ?? [])
+      }
       if (!latestMessage.id.startsWith("worker-snapshot-")) return
       this.workerCurrentMessageIds.set(workerThreadId, latestMessage.id)
       this.workerCurrentProviderSourceIds.delete(workerThreadId)
@@ -6359,6 +6378,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
       this.workerAssistantTextByMessageId.delete(previousMessageId)
       this.workerAssistantReasoningByMessageId.delete(previousMessageId)
       this.resetFocusedWorkerTurnToolState()
+    }
+    if (latestMessage.worker_tool_calls_source === "snapshot") {
+      this.pruneFocusedWorkerToolCallState(latestMessage.id, latestMessage.tool_calls ?? [])
     }
     this.workerCurrentMessageIds.set(workerThreadId, latestMessage.id)
     this.workerCurrentProviderSourceIds.set(
@@ -6499,6 +6521,29 @@ export class ElectronIPCTransport implements UseStreamTransport {
     if (messageId) {
       this.workerAssistantTextByMessageId.delete(messageId)
       this.workerAssistantReasoningByMessageId.delete(messageId)
+    }
+  }
+
+  private pruneFocusedWorkerToolCallState(
+    messageId: string,
+    toolCalls: readonly { id?: string }[]
+  ): void {
+    const declaredIds = new Set(toolCalls.map((call) => call.id))
+    const completedCalls = this.completedToolCallsByMessageId.get(messageId)
+    if (completedCalls) {
+      for (const id of completedCalls.keys()) {
+        if (!declaredIds.has(id)) completedCalls.delete(id)
+      }
+    }
+    if (this.currentChunkMessageId !== messageId) return
+
+    for (const id of this.accumulatedToolCalls.keys()) {
+      if (!declaredIds.has(id)) this.accumulatedToolCalls.delete(id)
+    }
+    for (const [key, id] of this.toolCallChunkIndexToId) {
+      if (key.slice(0, key.lastIndexOf(":")) === messageId && !declaredIds.has(id)) {
+        this.toolCallChunkIndexToId.delete(key)
+      }
     }
   }
 

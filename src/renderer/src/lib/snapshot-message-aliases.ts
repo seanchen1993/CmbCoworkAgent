@@ -23,6 +23,25 @@ function hasExplicitProviderTuple(message: Message): boolean {
   return !!message.provider_source_id && !!message.provider_occurrence
 }
 
+// A complete list defines membership. A retained call can still carry sparse args.
+export function mergeWorkerToolCallSnapshot(
+  previous: Message["tool_calls"],
+  snapshot: Message["tool_calls"]
+): Message["tool_calls"] {
+  if (!previous?.length || !snapshot?.length) return snapshot
+
+  const priorById = new Map(previous.map((call) => [call.id, call]))
+  return snapshot.map((call) => {
+    const prior = call.id ? priorById.get(call.id) : undefined
+    if (!prior || (call.name && prior.name && call.name !== prior.name)) return call
+
+    const name = call.name || prior.name
+    const args =
+      call.args && Object.keys(call.args).length > 0 ? call.args : (prior.args ?? call.args)
+    return name === call.name && args === call.args ? call : { ...call, name, args }
+  })
+}
+
 export function applyWorkerToolCallSnapshot(
   previous: Message,
   incoming: Message,
@@ -33,7 +52,10 @@ export function applyWorkerToolCallSnapshot(
   earlierCallsByMessage.delete(previous)
   const isSnapshot = incoming.worker_tool_calls_source === "snapshot"
   const replacement = isSnapshot
-    ? { ...merged, tool_calls: incoming.tool_calls }
+    ? {
+        ...merged,
+        tool_calls: mergeWorkerToolCallSnapshot(previous.tool_calls, incoming.tool_calls)
+      }
     : merged
   const removedCalls = isSnapshot ? previous.tool_calls : undefined
   if (removedCalls?.length) {

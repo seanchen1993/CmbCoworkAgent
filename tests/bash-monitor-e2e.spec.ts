@@ -270,7 +270,18 @@ async function main(): Promise<void> {
       await page.reload({ waitUntil: "domcontentloaded" })
       await page.getByText("Bash monitor E2E", { exact: true }).first().click({ timeout: 60_000 })
     }
+    const emitExternalTurnLifecycle = (type: "started" | "done") =>
+      app!.evaluate(
+        ({ BrowserWindow }, { threadId, type }) => {
+          for (const window of BrowserWindow.getAllWindows()) {
+            window.webContents.send(`scheduler:stream:${threadId}`, { type })
+            window.webContents.send("scheduler:thread-activity", { threadId, type })
+          }
+        },
+        { threadId, type }
+      )
     const stopShell = page.getByRole("button", { name: "停止后台 Bash", exact: true })
+    const stopGeneration = page.getByRole("button", { name: "停止生成", exact: true })
     await openChat()
     await stopShell.waitFor({ state: "hidden" })
     await invoke("DETACH")
@@ -291,8 +302,14 @@ async function main(): Promise<void> {
       "detached shell is alive after turn settles"
     )
     await openChat()
-    await stopShell.click({ timeout: 30_000 })
+    await stopShell.waitFor({ state: "visible", timeout: 30_000 })
+    await emitExternalTurnLifecycle("started")
+    await stopGeneration.waitFor({ state: "visible", timeout: 30_000 })
+    await stopShell.click({ timeout: 10_000 })
     await stopShell.waitFor({ state: "hidden" })
+    assert.equal(await stopGeneration.isVisible(), true, "the external turn is still running")
+    await emitExternalTurnLifecycle("done")
+    await stopGeneration.waitFor({ state: "hidden" })
     await invoke("CHECK")
     assert.match(toolsById.get("check-stop") ?? "", /exit code 130/)
     for (let i = 0; i < 50 && processAlive(detachedPid); i++) await setTimeout(100)
@@ -300,7 +317,7 @@ async function main(): Promise<void> {
     assert.deepEqual(modelErrors, [])
     assert.deepEqual(pageErrors, [])
     console.log(
-      "PASS idle Stop button survives renderer reload and cancels the auto-detached shell"
+      "PASS Bash Stop survives reload and cancels the detached shell during an external turn"
     )
   } finally {
     await app?.close().catch(() => undefined)

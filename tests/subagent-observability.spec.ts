@@ -7,6 +7,7 @@
 
 import { readFile } from "fs/promises"
 import { join, resolve } from "path"
+import { buildWorkerCheckpointHistory } from "../src/renderer/src/lib/worker-checkpoint-history"
 
 const PROJECT_ROOT = resolve(__dirname, "..")
 
@@ -934,16 +935,20 @@ async function testWorkerToolFlowPreservesToolErrorStatus(): Promise<void> {
     "export const MAX_WORKER_HISTORY_MESSAGES = 500",
     "worker checkpoint helper bounds history restore to a recent message window"
   )
-  assertIncludes(
-    workerCheckpointHistory,
-    "message.is_error === true ||",
+  const [explicitFailure, reportedFailure, success] = buildWorkerCheckpointHistory([
+    { type: "tool", content: "Failed", tool_call_id: "call-one", is_error: true },
+    { type: "tool", content: "Failed", tool_call_id: "call-two", status: "error" },
+    { type: "tool", content: "Done", tool_call_id: "call-three", status: "success" }
+  ]).messages
+  assert(
+    explicitFailure?.is_error === true,
     "worker checkpoint helper preserves explicit tool error flags"
   )
-  assertIncludes(
-    workerCheckpointHistory,
-    'toolStatus === "error"',
+  assert(
+    reportedFailure?.is_error === true,
     "worker checkpoint helper also derives tool errors from provider status"
   )
+  assert(success?.is_error === false, "worker checkpoint helper preserves explicit success")
   assertIncludes(
     rendererTypes,
     "status?: string",

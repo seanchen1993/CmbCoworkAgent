@@ -330,6 +330,127 @@ describe("Team worker authoritative content", () => {
     }
   )
 
+  it.each(["full", "append", "tail", "messages", "stale"] as const)(
+    "keeps the active reply after a %s correction removes a call and its old result replays",
+    (kind) => {
+      const publish = publishWorkerFrames()
+      const call = { id: "repeat", name: "read_file", args: { path: "earlier.txt" } }
+      const prompt = new HumanMessage({ id: "prompt", content: "Request" })
+      const request = new AIMessage({ id: "request", content: "Calling", tool_calls: [call] })
+      const result = new ToolMessage({ id: "result", tool_call_id: call.id, content: "Done" })
+      const additional_kwargs = providerWire("reply-wire", "Current").kwargs.additional_kwargs
+      const prior = [prompt, request, result]
+      const draft = new AIMessage({
+        id: "reply-wire",
+        content: "Current",
+        additional_kwargs,
+        tool_calls: [call]
+      })
+      if (kind === "append" || kind === "tail") {
+        publish("values", { messages: kind === "tail" ? [...prior, draft] : prior })
+      } else if (kind === "stale") {
+        publish("values", { messages: prior })
+        publish(
+          "values",
+          {
+            messages: [
+              ...prior,
+              new HumanMessage({ content: "Next request" }),
+              new AIMessage({ content: "Next" })
+            ]
+          },
+          2
+        )
+      } else {
+        publish("messages", [request, {}])
+        publish("messages", [result, {}])
+      }
+
+      publish("messages", [
+        new AIMessageChunk({
+          id: draft.id,
+          content: kind === "tail" ? "" : "Current",
+          additional_kwargs,
+          tool_call_chunks: [
+            { id: call.id, name: call.name, args: '{"path":"proposed.txt"}', index: 0 }
+          ]
+        }),
+        {}
+      ])
+      const originalReply = useAppStore
+        .getState()
+        .workerFocusMessages.find(({ content }) => content === "Current")
+      expect(originalReply?.tool_calls).toHaveLength(1)
+
+      const correction = new AIMessage({
+        id: draft.id,
+        content: "Current corrected",
+        additional_kwargs,
+        tool_calls: []
+      })
+      if (kind === "messages" || kind === "stale") {
+        publish("messages", [correction, {}])
+      } else {
+        expect(publish("values", { messages: [...prior, correction] })).toBe(kind)
+      }
+
+      // A delayed fragment may refer to the removed call by index alone.
+      publish("messages", [
+        new AIMessageChunk({
+          id: draft.id,
+          content: "",
+          additional_kwargs,
+          tool_call_chunks: [{ args: '{"path":"proposed.txt"}', index: 0 }]
+        }),
+        {}
+      ])
+      publish("messages", [result, {}])
+      publish("messages", [
+        new AIMessageChunk({ id: draft.id, content: " tail" }),
+        { [STREAM_MESSAGE_CONTENT_MODE_KEY]: "delta" }
+      ])
+      const rows = useAppStore.getState().workerFocusMessages
+      expect(rows.map(({ content }) => content)).toEqual([
+        "Calling",
+        "Done",
+        "Current corrected tail",
+        ...(kind === "stale" ? ["Next"] : [])
+      ])
+      expect(rows.find(({ id }) => id === originalReply?.id)).toMatchObject({ tool_calls: [] })
+      expect([...buildToolResultAssociations(rows).values()]).toEqual([
+        { content: "Done", is_error: false }
+      ])
+    }
+  )
+
+  it("keeps retained call args when an authoritative update removes another call", () => {
+    const publish = publishWorkerFrames()
+    const retained = { id: "keep", name: "read_file", args: { path: "retained.txt" } }
+    const removed = { ...retained, id: "remove" }
+    const prompt = new HumanMessage({ id: "prompt", content: "Request" })
+    const draft = new AIMessage({
+      id: "reply",
+      content: "Calling",
+      tool_calls: [retained, removed]
+    })
+    publish("values", { messages: [prompt, draft] })
+
+    const update = (args: Record<string, unknown>) =>
+      new AIMessage({
+        id: draft.id,
+        content: "Calling revised",
+        tool_calls: [{ ...retained, args }]
+      })
+    publish("values", { messages: [prompt, update({})] })
+    expect(useAppStore.getState().workerFocusMessages.at(-1)?.tool_calls).toEqual([retained])
+
+    const revised = { path: "revised.txt" }
+    publish("values", { messages: [prompt, update(revised)] })
+    expect(useAppStore.getState().workerFocusMessages.at(-1)?.tool_calls).toEqual([
+      { ...retained, args: revised }
+    ])
+  })
+
   it("keeps a repeated result as a boundary when the active assistant requests that call again", () => {
     const publish = publishWorkerFrames()
     const call = { id: "call", name: "read_file", args: { path: "probe.txt" } }
