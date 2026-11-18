@@ -15,6 +15,7 @@ import { ApprovalStore } from "./approval-store"
 import { LocalSandbox, type LocalSandboxOptions } from "./local-sandbox"
 import { getShellTaskOwnerId, SHELL_TASK_OWNER_CONFIG_KEY } from "./shell-monitor-tool"
 import {
+  cleanupChildRuntimeResources,
   createDeepAgent,
   createGradedToolConcurrencyMiddleware,
   createRuntimeToolDenylistMiddleware,
@@ -110,6 +111,29 @@ afterEach(async () => {
 })
 
 describe("shell monitor runtime dispatch", () => {
+  it("waits for a child's physical shell exit before releasing runtime resources", async () => {
+    const { sandbox, physicalExit } = await fixture({ shellParentThreadId: "parent" })
+    const cancelled = watchTaskTermination(sandbox, physicalExit.promise)
+    const revoke = vi.spyOn(LocalSandbox, "revokeGrantedAclsForRun").mockResolvedValue()
+    try {
+      await sandbox.executeBackground("echo child")
+
+      const release = cleanupChildRuntimeResources(sandbox.runId)
+      expect(cancelled).toHaveBeenCalledExactlyOnceWith("echo child")
+      await vi.waitFor(() => expect(LocalSandbox.hasActiveBackgroundTasks(sandbox.runId)).toBe(true))
+      expect(revoke).not.toHaveBeenCalled()
+
+      physicalExit.resolve()
+      await expect(release).resolves.toEqual([
+        { status: "fulfilled", value: undefined },
+        { status: "fulfilled", value: undefined }
+      ])
+      expect(revoke).toHaveBeenCalledExactlyOnceWith(sandbox.runId)
+    } finally {
+      revoke.mockRestore()
+    }
+  })
+
   it("preserves execute for a backend without shell task monitoring capabilities", async () => {
     const model = new ReplayModel((messages) => {
       const last = messages.at(-1)

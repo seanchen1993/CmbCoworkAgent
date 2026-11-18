@@ -88,6 +88,23 @@ describe("threads:get hydration contract", () => {
     expect(deletionIndex).toBeGreaterThan(membershipIndex)
   })
 
+  it("rechecks grouped deletion shell activity directly before blocking new starts", () => {
+    const start = source.indexOf('"threads:delete"')
+    const end = source.indexOf("// Get thread history", start)
+    const handler = source.slice(start, end)
+    const priorDeletion = handler.indexOf("await deletingThreads.get(threadId)")
+    const idleCheck = handler.indexOf("await isThreadDeletionBusy(threadId")
+    const shellRecheck = handler.indexOf("busy || hasBackgroundShell(threadId)")
+    const block = handler.indexOf("LocalSandbox.blockNewBackgroundTasks(threadId)")
+
+    expect(handler).toContain("hasActiveBackgroundTasks(id, { includeChildRuns: true })")
+    expect(priorDeletion).toBeGreaterThanOrEqual(0)
+    expect(idleCheck).toBeGreaterThan(priorDeletion)
+    expect(shellRecheck).toBeGreaterThan(idleCheck)
+    expect(block).toBeGreaterThan(shellRecheck)
+    expect(handler.slice(shellRecheck, block)).not.toMatch(/\bawait\b/)
+  })
+
   it("revalidates a grouped selection again at the synchronous database commit boundary", () => {
     const start = source.indexOf("const performThreadDeletion = async")
     const end = source.indexOf('"threads:delete"', start)

@@ -1178,7 +1178,8 @@ export async function cancelAndWaitForAgentThreadRun(
 ): Promise<"settled" | "timed_out" | "shell_timed_out"> {
   const shellSettlement = LocalSandbox.cancelBackgroundTasksWithin(
     threadId,
-    ACTIVE_RUN_REPLACEMENT_MAX_WAIT_MS
+    ACTIVE_RUN_REPLACEMENT_MAX_WAIT_MS,
+    { includeChildRuns: true }
   )
   const controller = activeRuns.get(threadId)
   if (!controller) return (await shellSettlement) ? "settled" : "shell_timed_out"

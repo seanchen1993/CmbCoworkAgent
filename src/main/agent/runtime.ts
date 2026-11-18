@@ -3597,6 +3597,16 @@ export async function closeCheckpointer(threadId: string): Promise<void> {
   await closing
 }
 
+export async function cleanupChildRuntimeResources(
+  threadId: string
+): Promise<PromiseSettledResult<void>[]> {
+  await LocalSandbox.cancelBackgroundTasksAndWait(threadId)
+  return Promise.allSettled([
+    LocalSandbox.revokeGrantedAclsForRun(threadId),
+    closeCheckpointer(threadId)
+  ])
+}
+
 /**
  * THE deletion primitive for checkpointer lifecycle: permanently retire the
  * thread's checkpointer AND every sub-thread's (`__worker__`, `__wf_`, any
@@ -4330,6 +4340,8 @@ export interface CreateAgentRuntimeOptions {
   turnCompletionTodoGateEnabled?: boolean
   /** Optional UI thread ID for approval prompts. Async worker runtimes keep their own checkpoint thread but surface approvals on the parent thread UI. */
   approvalThreadId?: string
+  /** Parent conversation owning this child runtime's shell tasks for deletion. */
+  shellParentThreadId?: string
   /** Optional model ID from thread/runtime config */
   modelId?: string
   /** Workspace path - REQUIRED for agent to operate on files */
@@ -4879,6 +4891,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     ),
     abortSignal: options.abortSignal,
     runId: threadId,
+    shellParentThreadId: options.shellParentThreadId,
     // Foreground turns on the same thread can overlap briefly during bounded
     // replacement. Keep background-task ownership logical, but scope ACL
     // ownership to the physical run so predecessor cleanup cannot revoke a
@@ -5510,7 +5523,6 @@ The workspace root is: ${fileRoot}`
 
   if (isWorkflowMode) {
     const workflowAgentProfiles = await loadAgentProfilesAsync(workspacePath)
-    const worktreeSubagentThreads = new Set<string>()
     // Dynamic Workflows: the model writes a JS orchestration script; the run
     // executes in the BACKGROUND (detached from this turn — the manager owns
     // its abort), each agent() runs as a one-shot leaf runtime on its own
@@ -5560,6 +5572,7 @@ The workspace root is: ${fileRoot}`
               agentId: subagentOptions.agentId,
               actionStationarityTurnId: subagentOptions.threadId,
               approvalThreadId: threadId,
+              shellParentThreadId: threadId,
               workspacePath,
               ...(worktreeIsolation ? { worktreeIsolation } : {}),
               modelId: subagentOptions.modelId,
@@ -5634,30 +5647,11 @@ The workspace root is: ${fileRoot}`
               onFileMutation: worktreeIsolation ? undefined : onFileMutation,
               managedExecution
             })
-            if (worktreeIsolation) worktreeSubagentThreads.add(subagentOptions.threadId)
             return subagentRuntime as unknown as WorkflowSubagentRuntime
           },
           cleanupThread: async (workflowThreadId: string): Promise<void> => {
             clearActionStationarityTurn(workflowThreadId, workflowThreadId)
-            // Kill any run_in_background tasks the subagent started so they don't
-            // outlive the run (coordinator workers cancel theirs the same way via
-            // cancelBackgroundTasks — without this a backgrounded process leaks
-            // CPU/memory/file writes after the workflow completes or is cancelled).
-            const processCleanupResults = worktreeSubagentThreads.delete(workflowThreadId)
-              ? await Promise.allSettled([
-                  LocalSandbox.cancelBackgroundTasksAndWait(workflowThreadId)
-                ])
-              : (LocalSandbox.cancelBackgroundTasks(workflowThreadId), [])
-            for (const result of processCleanupResults) {
-              if (result.status === "rejected") {
-                console.warn("[Workflow] Subagent process cleanup error:", result.reason)
-              }
-            }
-            // Release resources after any worktree-specific process drain.
-            const resourceCleanupResults = await Promise.allSettled([
-              LocalSandbox.revokeGrantedAclsForRun(workflowThreadId),
-              closeCheckpointer(workflowThreadId)
-            ])
+            const resourceCleanupResults = await cleanupChildRuntimeResources(workflowThreadId)
             for (const result of resourceCleanupResults) {
               if (result.status === "rejected") {
                 console.warn("[Workflow] Subagent cleanup error:", result.reason)
@@ -6194,6 +6188,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             toolStrategy,
             actionStationarityTurnId: workerActionStationarityTurnId,
             approvalThreadId: workerInput.parentThreadId,
+            shellParentThreadId: workerInput.parentThreadId,
             workspacePath,
             managedExecution,
             modelId: candidateId,
@@ -6267,6 +6262,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             toolStrategy,
             actionStationarityTurnId: workerActionStationarityTurnId,
             approvalThreadId: workerInput.parentThreadId,
+            shellParentThreadId: workerInput.parentThreadId,
             workspacePath,
             managedExecution,
             modelId: nextCandidate,
@@ -6324,6 +6320,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             threadId: workerInput.workerThreadId,
             actionStationarityTurnId: workerActionStationarityTurnId,
             approvalThreadId: workerInput.parentThreadId,
+            shellParentThreadId: workerInput.parentThreadId,
             workspacePath,
             managedExecution,
             modelId: usedWorkerModelId ?? modelId,
@@ -6463,11 +6460,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         )
       }
       workerInput.abortSignal.removeEventListener("abort", cancelWorkerBackgroundTasks)
-      const cleanupResults = await Promise.allSettled([
-        Promise.resolve().then(cancelWorkerBackgroundTasks),
-        LocalSandbox.revokeGrantedAclsForRun(workerInput.workerThreadId),
-        closeCheckpointer(workerInput.workerThreadId)
-      ])
+      const cleanupResults = await cleanupChildRuntimeResources(workerInput.workerThreadId)
       for (const result of cleanupResults) {
         if (result.status === "rejected") {
           console.warn("[CoordinatorWorker] Worker cleanup error:", result.reason)

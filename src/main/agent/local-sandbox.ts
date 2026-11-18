@@ -427,6 +427,8 @@ export interface LocalSandboxOptions {
   abortSignal?: AbortSignal
   /** Logical thread/run owner used for background-task cancellation and hook/session identity. */
   runId?: string
+  /** Parent conversation that must wait for this child runtime's shell tasks during deletion. */
+  shellParentThreadId?: string
   /** Physical run owner used only for Windows ACL ref-counting and cleanup. */
   aclOwnerId?: string
   /** Absolute app-managed directory backing DeepAgents' logical /large_tool_results path. */
@@ -519,10 +521,14 @@ interface ExecuteRawOptions {
  */
 type LocalExecuteResponse = ExecuteResponse & { capReached?: boolean; cancelled?: true }
 
-interface BackgroundShellTask {
-  id: string
+interface ShellTaskScope {
   threadId: string
+  shellParentThreadId?: string
   ownerId?: string
+}
+
+interface BackgroundShellTask extends ShellTaskScope {
+  id: string
   aclOwnerId: string
   command: string
   cwd: string
@@ -540,9 +546,7 @@ interface BackgroundShellTask {
   termination?: Promise<void>
 }
 
-interface PendingBackgroundStart {
-  threadId: string
-  ownerId?: string
+interface PendingBackgroundStart extends ShellTaskScope {
   detached: boolean
   abortController: AbortController
   settled: Promise<void>
@@ -753,6 +757,7 @@ export class LocalSandbox
   readonly id: string
   /** Logical run/thread identifier for background-task cancellation and hooks. */
   readonly runId: string
+  private readonly shellParentThreadId?: string
   /** Physical ACL owner; distinct from logical runId during foreground replacement. */
   readonly aclOwnerId: string
 
@@ -2055,6 +2060,7 @@ export class LocalSandbox
 
     this.id = `local-sandbox-${randomUUID().slice(0, 8)}`
     this.runId = options.runId ?? this.id
+    this.shellParentThreadId = options.shellParentThreadId
     this.aclOwnerId = options.aclOwnerId ?? this.runId
     this.timeout = options.timeout ?? 60_000 // 1 minute default
     this.maxOutputBytes = options.maxOutputBytes ?? 100_000 // ~100KB default
@@ -6845,6 +6851,16 @@ export class LocalSandbox
     return () => LocalSandbox.closingBackgroundThreads.delete(threadId)
   }
 
+  private static shellBelongsToThread(
+    task: ShellTaskScope,
+    threadId: string,
+    includeChildRuns: boolean
+  ): boolean {
+    return (
+      task.threadId === threadId || (includeChildRuns && task.shellParentThreadId === threadId)
+    )
+  }
+
   private beginBackgroundTaskStart(
     ownerId: string | undefined,
     detached: boolean,
@@ -6858,6 +6874,8 @@ export class LocalSandbox
     if (
       LocalSandbox.applicationShutdownStarted ||
       LocalSandbox.closingBackgroundThreads.has(this.runId) ||
+      (this.shellParentThreadId !== undefined &&
+        LocalSandbox.closingBackgroundThreads.has(this.shellParentThreadId)) ||
       signal?.aborted
     ) {
       return null
@@ -6872,6 +6890,7 @@ export class LocalSandbox
     let resolveSettled!: () => void
     const pending: PendingBackgroundStart = {
       threadId: this.runId,
+      shellParentThreadId: this.shellParentThreadId,
       ownerId,
       detached,
       abortController,
@@ -6914,6 +6933,7 @@ export class LocalSandbox
     return {
       id: randomUUID().replaceAll("-", ""),
       threadId: this.runId,
+      shellParentThreadId: this.shellParentThreadId,
       ownerId,
       aclOwnerId: this.aclOwnerId,
       command,
@@ -7426,13 +7446,23 @@ export class LocalSandbox
     return true
   }
 
-  /** A visible result can precede physical process-tree settlement. */
-  static hasActiveBackgroundTasks(threadId: string): boolean {
+  /** Deletion also considers child runtimes and tracked foreground shell invocations. */
+  static hasActiveBackgroundTasks(
+    threadId: string,
+    { includeChildRuns = false }: { includeChildRuns?: boolean } = {}
+  ): boolean {
     for (const pending of LocalSandbox.pendingBackgroundTaskStarts) {
-      if (pending.threadId === threadId && pending.detached) return true
+      if (
+        (pending.detached || includeChildRuns) &&
+        LocalSandbox.shellBelongsToThread(pending, threadId, includeChildRuns)
+      ) {
+        return true
+      }
     }
     for (const task of LocalSandbox.backgroundTasks.values()) {
-      if (task.threadId === threadId && !task.settled) return true
+      if (!task.settled && LocalSandbox.shellBelongsToThread(task, threadId, includeChildRuns)) {
+        return true
+      }
     }
     return false
   }
@@ -7446,9 +7476,13 @@ export class LocalSandbox
     await Promise.allSettled(LocalSandbox.cancelBackgroundTasksMatching({ threadId, ownerId }))
   }
 
-  static cancelBackgroundTasksWithin(threadId: string, timeoutMs: number): Promise<boolean> {
+  static cancelBackgroundTasksWithin(
+    threadId: string,
+    timeoutMs: number,
+    { includeChildRuns = false }: { includeChildRuns?: boolean } = {}
+  ): Promise<boolean> {
     return LocalSandbox.waitForPromisesWithin(
-      LocalSandbox.cancelBackgroundTasksMatching({ threadId }),
+      LocalSandbox.cancelBackgroundTasksMatching({ threadId, includeChildRuns }),
       timeoutMs
     )
   }
@@ -7469,14 +7503,17 @@ export class LocalSandbox
   private static cancelBackgroundTasksMatching({
     threadId,
     ownerId,
+    includeChildRuns = false,
     detachedPendingOnly = false
   }: {
     threadId?: string
     ownerId?: string
+    includeChildRuns?: boolean
     detachedPendingOnly?: boolean
   }): Promise<void>[] {
-    const matches = (task: { threadId: string; ownerId?: string }): boolean =>
-      (threadId === undefined || threadId === task.threadId) &&
+    const matches = (task: ShellTaskScope): boolean =>
+      (threadId === undefined ||
+        LocalSandbox.shellBelongsToThread(task, threadId, includeChildRuns)) &&
       (ownerId === undefined || ownerId === task.ownerId)
 
     const completions: Promise<void>[] = []

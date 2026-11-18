@@ -1840,7 +1840,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   assertSourceOrder(
     agentIpc,
     "const serialized = focusedWorker.serialize(stream.mode, stream.data)",
-    "data = sanitizeStreamDataForRenderer(",
+    "data = sanitizeCoordinatorWorkerStreamDataForRenderer(",
     "focused worker stream uses its run-scoped serializer before renderer sanitization"
   )
   assertIncludes(
@@ -3009,7 +3009,7 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     coordinatorMode,
-    "read_only workers do not receive direct write_file/edit_file tools, but they DO keep execute",
+    "read_only workers keep execute and monitor",
     "coordinator prompt reflects that read_only workers keep (read-only-gated) execute — so the model prefers cheap read_only workers for shell inspection"
   )
   assertIncludes(
@@ -3050,8 +3050,23 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "closeCheckpointer(workerInput.workerThreadId)",
+    "await cleanupChildRuntimeResources(workerInput.workerThreadId)",
     "runtime releases worker checkpointer resources when a worker turn finishes"
+  )
+  assertIncludes(
+    runtime,
+    "await cleanupChildRuntimeResources(workflowThreadId)",
+    "runtime releases every workflow subagent's resources through the same shell fence"
+  )
+  assertIncludes(
+    runtime,
+    "shellParentThreadId: workerInput.parentThreadId",
+    "worker runtime registers actual parent ownership for thread deletion"
+  )
+  assertIncludes(
+    runtime,
+    "shellParentThreadId: threadId",
+    "workflow subagent runtime registers actual parent ownership for thread deletion"
   )
   assertMatches(
     runtime,
@@ -3244,23 +3259,24 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "await Promise.allSettled",
-    "runtime waits for worker resource cleanup before a worker run resolves"
-  )
-  assertIncludes(
-    runtime,
-    "Promise.resolve().then(cancelWorkerBackgroundTasks)",
-    "runtime keeps worker ACL/checkpointer cleanup running even if background-task cancellation throws"
-  )
-  assertIncludes(
-    runtime,
     'workerInput.abortSignal.removeEventListener("abort", cancelWorkerBackgroundTasks)',
     "runtime removes async worker abort cleanup listeners"
   )
-  assertIncludes(
-    runtime,
-    "LocalSandbox.revokeGrantedAclsForRun(workerInput.workerThreadId)",
-    "runtime revokes worker-scoped sandbox ACLs after async worker run"
+  const childRuntimeCleanup = runtime.slice(
+    runtime.indexOf("export async function cleanupChildRuntimeResources("),
+    runtime.indexOf("export async function retireThreadCheckpointer")
+  )
+  assertSourceOrder(
+    childRuntimeCleanup,
+    "await LocalSandbox.cancelBackgroundTasksAndWait(threadId)",
+    "LocalSandbox.revokeGrantedAclsForRun(threadId)",
+    "runtime waits for physical shell cleanup before revoking child ACLs"
+  )
+  assertSourceOrder(
+    childRuntimeCleanup,
+    "await LocalSandbox.cancelBackgroundTasksAndWait(threadId)",
+    "closeCheckpointer(threadId)",
+    "runtime waits for physical shell cleanup before closing the child checkpoint"
   )
   assertIncludes(
     runtime,

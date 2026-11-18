@@ -379,6 +379,94 @@ describe("LocalSandbox background-task settlement", () => {
     expect(raw).toHaveBeenCalledTimes(1)
   })
 
+  it("fences pending and registered child shells by their recorded parent during deletion", async () => {
+    const parent = "shell-deletion-parent"
+    const scope = { includeChildRuns: true }
+    const pendingChild = new LocalSandbox({
+      rootDir: process.cwd(),
+      runId: "pending-child",
+      shellParentThreadId: parent,
+      windowsSandbox: "none"
+    })
+    const registeredChild = new LocalSandbox({
+      rootDir: process.cwd(),
+      runId: "registered-child",
+      shellParentThreadId: parent,
+      windowsSandbox: "none"
+    })
+    const unrelated = new LocalSandbox({
+      rootDir: process.cwd(),
+      runId: `${parent}__worker__unrelated`,
+      shellParentThreadId: "another-parent",
+      windowsSandbox: "none"
+    })
+    const hook = createDeferred<null>()
+    const physicalExit = createDeferred<void>()
+    const unrelatedExit = createDeferred<{ output: string; exitCode: number; truncated: boolean }>()
+    vi.spyOn(pendingChild, "runPreToolUseHookForTool").mockReturnValueOnce(hook.promise)
+    const pendingRaw = vi.spyOn(pendingChild, "executeRaw")
+    const unrelatedRaw = vi.spyOn(unrelated, "executeRaw").mockReturnValue(unrelatedExit.promise)
+    const onAbort = vi.fn()
+    vi.spyOn(registeredChild, "executeRaw").mockImplementation(
+      (_command, _mode, _timeout, signal, options) =>
+        new Promise((resolve) => {
+          options?.handoff?.onSpawn()
+          signal?.addEventListener("abort", () => {
+            onAbort()
+            options?.onTermination?.(physicalExit.promise)
+            resolve({ output: "aborted", exitCode: 130, truncated: false })
+          })
+        })
+    )
+
+    const pending = pendingChild.executeBackground("echo pending")
+    let unblock: (() => void) | undefined
+    try {
+      expect(LocalSandbox.hasActiveBackgroundTasks(parent, scope)).toBe(true)
+      const handedOff = await registeredChild.executeForTool("echo promoted", undefined, {
+        backgroundAfterMs: 1
+      })
+      if (handedOff.status !== "background") throw new Error("Expected a shell handoff")
+
+      expect(LocalSandbox.hasActiveBackgroundTasks(parent)).toBe(false)
+      expect(LocalSandbox.hasActiveBackgroundTasks(parent, scope)).toBe(true)
+      expect(LocalSandbox.cancelDetachedBackgroundTasks(parent)).toBe(false)
+      LocalSandbox.cancelBackgroundTasks(parent)
+      expect(onAbort).not.toHaveBeenCalled()
+
+      unblock = LocalSandbox.blockNewBackgroundTasks(parent)
+      await expect(unrelated.executeBackground("echo unrelated")).resolves.toContain(
+        "Background task started"
+      )
+      expect(unrelatedRaw).toHaveBeenCalledOnce()
+      await expect(LocalSandbox.cancelBackgroundTasksWithin(parent, 10, scope)).resolves.toBe(false)
+      expect(onAbort).toHaveBeenCalledOnce()
+      expect(unrelatedRaw.mock.calls[0][3]?.aborted).toBe(false)
+      expect(registeredChild.getTaskOutput(handedOff.taskId)?.exitCode).toBe(130)
+      await expect(pendingChild.executeBackground("echo late")).resolves.toContain("cancelled before")
+      await expect(registeredChild.executeForTool("echo late", undefined, {})).resolves.toMatchObject({
+        status: "completed",
+        result: { exitCode: 130 }
+      })
+      hook.resolve(null)
+      await expect(pending).resolves.toContain("cancelled before")
+      expect(pendingRaw).not.toHaveBeenCalled()
+      expect(LocalSandbox.hasActiveBackgroundTasks(parent, scope)).toBe(true)
+      await expect(LocalSandbox.cancelBackgroundTasksWithin(parent, 10, scope)).resolves.toBe(false)
+
+      physicalExit.resolve()
+      await expect(LocalSandbox.cancelBackgroundTasksWithin(parent, 100, scope)).resolves.toBe(true)
+      expect(LocalSandbox.hasActiveBackgroundTasks(parent, scope)).toBe(false)
+    } finally {
+      unblock?.()
+      hook.resolve(null)
+      physicalExit.resolve()
+      unrelatedExit.resolve({ output: "unrelated", exitCode: 0, truncated: false })
+      await LocalSandbox.cancelBackgroundTasksWithin(parent, 100, scope)
+      await LocalSandbox.cancelBackgroundTasksAndWait(unrelated.runId)
+    }
+  })
+
   it.each([
     { promoted: true, isolated: false },
     { promoted: false, isolated: false },

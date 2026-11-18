@@ -158,12 +158,14 @@ describe("managed background cancellation IPC wiring", () => {
   it.each([
     [true, "settled"],
     [false, "shell_timed_out"]
-  ])("waits for idle thread shell cleanup before deletion (%s)", async (shellSettled, outcome) => {
+  ])("waits for idle thread and child shell cleanup before deletion (%s)", async (shellSettled, outcome) => {
     const cancelShell = vi.fn(async () => shellSettled)
     const closeThread = loadThreadDeletionHelper(cancelShell)
 
     await expect(closeThread("idle-thread")).resolves.toBe(outcome)
-    expect(cancelShell).toHaveBeenCalledExactlyOnceWith("idle-thread", 30_000)
+    expect(cancelShell).toHaveBeenCalledExactlyOnceWith("idle-thread", 30_000, {
+      includeChildRuns: true
+    })
   })
 
   it.each([true, false])(

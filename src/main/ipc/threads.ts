@@ -3895,22 +3895,25 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         ) {
           throw new Error("会话已变更或已移出分组，请重新确认。")
         }
-        if (options?.requireIdle) {
-          if (
-            await isThreadDeletionBusy(threadId, {
-              hasActiveRun: hasActiveAgentRun,
-              isAborting: isActiveAgentRunAborting,
-              waitForSettlement: waitForActiveAgentRunToSettle,
-              hasExternalRun: (id) => isExternallyManagedThreadRunBusy(id, metadata),
-              hasWorkflowRun: (id) => workflowRunManager.isActive(id),
-              hasWorkerRun: (id) => coordinatorWorkerManager.hasRunningWorkersForThread(id)
-            })
-          ) {
-            throw new Error("会话仍在运行，已跳过该会话。")
-          }
-        }
         while (deletingThreads.has(threadId)) {
           await deletingThreads.get(threadId)?.catch(() => undefined)
+        }
+        if (options?.requireIdle) {
+          const hasBackgroundShell = (id: string): boolean =>
+            LocalSandbox.hasActiveBackgroundTasks(id, { includeChildRuns: true })
+          const busy = await isThreadDeletionBusy(threadId, {
+            hasActiveRun: hasActiveAgentRun,
+            isAborting: isActiveAgentRunAborting,
+            waitForSettlement: waitForActiveAgentRunToSettle,
+            hasExternalRun: (id) => isExternallyManagedThreadRunBusy(id, metadata),
+            hasWorkflowRun: (id) => workflowRunManager.isActive(id),
+            hasWorkerRun: (id) => coordinatorWorkerManager.hasRunningWorkersForThread(id),
+            hasBackgroundShell
+          })
+          // A shell can hand off while the idle guard resolves. Recheck before blocking starts.
+          if (busy || hasBackgroundShell(threadId)) {
+            throw new Error("会话仍在运行，已跳过该会话。")
+          }
         }
         const releaseShellBlock = LocalSandbox.blockNewBackgroundTasks(threadId)
         const deletion = performThreadDeletion(event, threadId, options?.groupGuard).finally(

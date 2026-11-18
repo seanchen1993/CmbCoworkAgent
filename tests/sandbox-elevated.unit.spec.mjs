@@ -2957,14 +2957,16 @@ test("workflow state gates switch-to-normal, and thread delete clears tool-concu
   )
 })
 
-test("workflow subagent cleanup cancels run_in_background tasks (no leak past the run)", () => {
-  // Coordinator workers cancel their background tasks on teardown; the workflow
-  // subagent cleanup must too, or a backgrounded process outlives the run and
-  // leaks CPU/memory/file writes after the workflow completes or is cancelled.
+test("workflow subagent cleanup waits for physical shell exit before releasing resources", () => {
   assert.match(
     runtimeSource,
-    /LocalSandbox\.cancelBackgroundTasksAndWait\(workflowThreadId\)/,
-    "workflow subagent cleanup cancels and waits for run_in_background process trees"
+    /await cleanupChildRuntimeResources\(workflowThreadId\)/,
+    "workflow subagent cleanup uses the child runtime shell fence"
+  )
+  assert.match(
+    runtimeSource,
+    /async function cleanupChildRuntimeResources\([\s\S]*?await LocalSandbox\.cancelBackgroundTasksAndWait\(threadId\)\s+return Promise\.allSettled\(\[\s*LocalSandbox\.revokeGrantedAclsForRun\(threadId\),\s*closeCheckpointer\(threadId\)/,
+    "child runtime waits for process trees before revoking ACLs and closing its checkpoint"
   )
   assert.doesNotMatch(
     runtimeSource,
