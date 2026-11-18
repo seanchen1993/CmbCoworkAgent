@@ -7,9 +7,10 @@ import { parseSchedule } from "../../../shared/bots/validation"
 const hooks = vi.hoisted(() => ({ cursor: 0, slots: [] as unknown[] }))
 vi.mock("react", async (importOriginal) => ({
   ...(await importOriginal<typeof import("react")>()),
+  useId: () => "fixture-schedule-panel",
   useState(initial: unknown) {
     const index = hooks.cursor++
-    if (!(index in hooks.slots)) hooks.slots[index] = initial
+    if (!(index in hooks.slots)) hooks.slots[index] = typeof initial === "function" ? initial() : initial
     return [
       hooks.slots[index],
       (next: unknown) => {
@@ -24,9 +25,11 @@ vi.mock("react", async (importOriginal) => ({
   }
 }))
 import { BotSchedulePanel } from "../components/bots/BotSchedulePanel"
+import { BotScheduleEditor } from "../components/bots/BotScheduleEditor"
 
 type Node = ReactElement<{
   children?: unknown
+  actions?: unknown
   type?: string
   maxLength?: number
   "aria-label"?: string
@@ -43,7 +46,8 @@ function flatten(node: unknown): Node[] {
   if (Array.isArray(node)) return node.flatMap(flatten)
   if (!node || typeof node !== "object" || !("props" in node)) return []
   const element = node as Node
-  return [element, ...flatten(element.props.children)]
+  if (element.type === BotScheduleEditor) return flatten(BotScheduleEditor((node as ReactElement<Parameters<typeof BotScheduleEditor>[0]>).props))
+  return [element, ...flatten(element.props.actions), ...flatten(element.props.children)]
 }
 const daily: BotScheduleInput = {
   name: "Synthetic routine",
@@ -100,7 +104,7 @@ function fixture(source: BotScheduleInput | "new", work?: { id: string; title: s
   }
   if (openEditor) find(
     (node) => node.props["aria-label"] === (schedule ? "编辑例行任务" : "创建例行任务")
-  ).props.onClick({ currentTarget: {} })
+  ).props.onClick({ currentTarget: { closest: () => null } })
   return {
     saved,
     failures,
@@ -140,7 +144,7 @@ describe("routine editor frequency changes", () => {
     const editor = fixture({ ...once, enabled: false }, undefined, false,
       { desktopWork: true, lastTriggeredAt: once.runAt, pendingOccurrenceId: "occurrence" }, false)
     expect(editor.render().some(node => Array.isArray(node.props.children) && node.props.children.includes("已入队，等待执行"))).toBe(true)
-    editor.find(node => node.props["aria-label"] === "撤回本次执行").props.onClick({ currentTarget: {} })
+    editor.find(node => node.props["aria-label"] === "撤回本次执行").props.onClick({ currentTarget: { closest: () => null } })
     expect(editor.saveSchedule).toHaveBeenCalledExactlyOnceWith("bot", expect.objectContaining({ enabled: false }),
       { id: "routine", version: 3, withdrawTaskId: "occurrence" })
   })
@@ -152,7 +156,7 @@ describe("routine editor frequency changes", () => {
     const editor = fixture(expired, undefined, false, state, false)
     const renew = editor.find(node => node.props["aria-label"] === "续期例行任务")
     expect(renew.props.disabled).toBe(false)
-    renew.props.onClick({ currentTarget: {} })
+    renew.props.onClick({ currentTarget: { closest: () => null } })
     expect(editor.field("datetime-local").props.defaultValue).toBe("")
     const expiry = () => editor.find(node => node.props["aria-label"] === "失效时间")
     expect(expiry().props.value).toBe("")

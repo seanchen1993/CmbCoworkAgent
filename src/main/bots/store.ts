@@ -105,7 +105,7 @@ import {
 } from "./group-discussion"
 import { createBotAppearance } from "../../shared/bots/appearance"
 import { canDeferBotTask, canSteerBotTask, canDeliverBotFeedback, type BotStoppedTaskContext } from "./continuation"
-import type { BotDesktopOperationBinding, BotDesktopOperationQuery, BotDesktopOperationTarget } from "./desktop-operation"
+import { namesWorkForDeletion, type BotDesktopOperationBinding, type BotDesktopOperationQuery, type BotDesktopOperationTarget } from "./desktop-operation"
 import { botContinuationTaskId } from "../../shared/bots/task-continuation"
 import { botWorkResultLabel, type BotWorkResultOrigin } from "../../shared/bots/work-result"
 import type { BotWorkResultDecision, BotWorkResultReviewAlternative, BotWorkResultServiceAssessment } from "./work-result-review"
@@ -1678,6 +1678,19 @@ export class BotStore {
     if (request.botId !== bot.id || request.threadId !== bot.threadId || request.workId || request.mockSource ||
         request.origin.kind !== "user" || !this.preparedReviewInput(request.id)?.trim()) return undefined
     return { ...target, requestTaskId: request.id }
+  }
+
+  explicitWorkDeletionRequest(taskId: string, work: BotWorkItem): string | undefined {
+    const binding = this.desktopOperationBinding(taskId, { kind: "work_delete", targetId: work.id })
+    if (!binding) return
+    const request = this.getTask(binding.requestTaskId)
+    const admitted = this.preparedReviewInput(request.id)
+    if (request.botId !== work.botId || !admitted || !namesWorkForDeletion(request.message, work.title) ||
+        !namesWorkForDeletion(admitted, work.title)) return
+    const duplicate = this.rows(`SELECT 1 FROM bot_work_items
+      WHERE bot_id=? AND audience_key='desktop' AND detached=0 AND title=? COLLATE NOCASE AND id<>? LIMIT 1`,
+      [work.botId, work.title, work.id])
+    return duplicate.length ? undefined : request.id
   }
 
   /** Read only committed operations on this desktop conversation, with no original prompts or file paths. */

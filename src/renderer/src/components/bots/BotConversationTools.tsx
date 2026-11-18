@@ -57,6 +57,7 @@ import { botImBrowserScope } from "../../../../shared/bots/im-channel"
 import { projectBotExecution, visibleBotDelivery } from "@/lib/bot-execution-visibility"
 import { botProfileEvent } from "@/lib/bot-profile-event"
 import { botScheduleReceipt } from "@/lib/bot-schedule-view"
+import { BotScheduleEditor } from "./BotScheduleEditor"
 import {
   botQuestionHistory,
   stoppedBotQuestionHistory,
@@ -83,7 +84,8 @@ export function BotConversationTools({
   workRevision = 0,
   onOpenWork,
   onPreviewWork,
-  onOpenRoutineDetails,
+  scheduleAudience = imConversationId ? `im:${imConversationId}` : "desktop",
+  schedulesReadOnly = false,
   onOpenBot,
   onOpenGroup,
   groups = [],
@@ -102,7 +104,8 @@ export function BotConversationTools({
   workRevision?: number
   onOpenWork?(workId: string): void
   onPreviewWork?(workId: string, trigger: HTMLButtonElement, title: string): void
-  onOpenRoutineDetails?(): void
+  scheduleAudience?: string
+  schedulesReadOnly?: boolean
   onOpenBot?(botId: string): void
   onOpenGroup?(groupId: string, source?: "app" | "zhaohu"): void
   groups?: readonly BotGroupTarget[]
@@ -113,6 +116,15 @@ export function BotConversationTools({
   children: ReactNode
 }) {
   const [exchangeId, setExchangeId] = useState<string | null>(null)
+  const [routineEditor, setRoutineEditor] = useState<{ schedule: BotSchedule; opener: HTMLButtonElement } | null>(null)
+  const routinesById = useMemo(() => {
+    const index = new Map<string, BotSchedule>()
+    for (const schedule of schedules ?? []) {
+      if (schedule.botId === botId && (schedule.audienceKey ?? "desktop") === scheduleAudience)
+        index.set(schedule.id, schedule)
+    }
+    return index
+  }, [schedules, botId, scheduleAudience])
   const bot = bots.find((item) => item.id === botId)
   const exchangeTrigger = useRef<HTMLButtonElement | null>(null)
   const threadId =
@@ -555,13 +567,11 @@ export function BotConversationTools({
               例行任务已删除
             </div>
           )
-        const exists = schedules?.some(
-          (schedule) => schedule.id === scheduleReceipt.id && schedule.botId === botId
-        )
+        const saved = routinesById.get(scheduleReceipt.id)
         return (
           <div className="bot-profile-event bot-schedule-event" role="note">
             <span>已{scheduleReceipt.created ? "创建" : "更新"}例行任务</span>
-            {exists ? (
+            {saved ? (
               <button
                 type="button"
                 className="bot-routine-link"
@@ -569,15 +579,7 @@ export function BotConversationTools({
                 aria-label={`查看例行任务：${scheduleReceipt.name}`}
                 onClick={(event) => {
                   event.stopPropagation()
-                  if (onOpenRoutineDetails) onOpenRoutineDetails()
-                  else {
-                    useBotViewStore.getState().update(client.hostId, {
-                      selectedId: botId,
-                      groupId: null,
-                      detailOpen: true,
-                      detailTab: "details"
-                    })
-                  }
+                  setRoutineEditor({ schedule: saved, opener: event.currentTarget })
                 }}
               >
                 <Clock size={14} aria-hidden="true" />
@@ -634,9 +636,8 @@ export function BotConversationTools({
       bot?.threadId,
       onOpenWork,
       onPreviewWork,
-      onOpenRoutineDetails,
       workTitles,
-      schedules,
+      routinesById,
       tasks,
       client,
       groupId,
@@ -794,6 +795,10 @@ export function BotConversationTools({
           request={attachmentPreview.request}
           clear={closeAttachmentPreview}
         />
+      )}
+      {routineEditor && routinesById.has(routineEditor.schedule.id) && (
+        <BotScheduleEditor target={routineEditor} client={client} botId={botId}
+          readOnly={schedulesReadOnly} onClose={() => setRoutineEditor(null)} />
       )}
       {exchangeId && (
         <BotExchangePanel

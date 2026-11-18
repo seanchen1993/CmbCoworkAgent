@@ -57,7 +57,7 @@ export function BotConversation({
   onOpenWorkConversation,
   captureWorkNavigation,
   onPreviewWork,
-  onOpenRoutineDetails,
+  linkControlOwner = false,
   onOpenBot,
   onOpenGroup
 }: {
@@ -81,7 +81,7 @@ export function BotConversation({
   onOpenWorkConversation?(workId: string): void
   captureWorkNavigation?(): () => boolean
   onPreviewWork?(workId: string, trigger: HTMLButtonElement, title: string): void
-  onOpenRoutineDetails?(): void
+  linkControlOwner?: boolean
   onOpenBot?(botId: string): void
   onOpenGroup?(groupId: string, source?: "app" | "zhaohu"): void
 }) {
@@ -97,6 +97,11 @@ export function BotConversation({
     ]
   }, [groups, imGroups, bots, bot.hostId, bot.id])
   const threadId = work?.threadId ?? bot.threadId
+  const source = work?.source
+  const schedulesReadOnly = Boolean(bot.archived || bot.deleting || (
+    source?.transport === "im" && !source.personal &&
+    !imGroups.some(group => group.id === source.bindingId && group.botId === bot.id && group.state === "active")
+  ))
   const reactionIdsKey = useThreadStateSelector(threadId, (state) =>
     JSON.stringify(
       state.messages
@@ -456,7 +461,7 @@ export function BotConversation({
         : {}),
       ownerConversation: work?.conversation?.state === "bound" && (!userOwnsComposer || hasBoundWorkSettings),
       ...(work && !work.source ? {
-        composerHeader: <BotWorkControl key={work.id} bot={bot} work={work} client={client} onOpenBot={onOpenBot}
+        composerHeader: <BotWorkControl key={work.id} bot={bot} work={work} client={client} onOpenBot={linkControlOwner ? onOpenBot : undefined}
           beforeChange={() => sender.stopPreparing()}
           onControlChanged={changed => setControlFocusRequest(previous => ({
             id: (previous?.id ?? 0) + 1, target: changed.userControl ? "composer" : "control"
@@ -537,7 +542,8 @@ export function BotConversation({
       threadId,
       client,
       onConfigureModel,
-      onOpenBot
+      onOpenBot,
+      linkControlOwner
     ]
   )
   const workReactionsReadOnly = Boolean(managedTurn.composerReadOnlyReason)
@@ -604,15 +610,14 @@ export function BotConversation({
           workRevision={workRevision}
           onOpenWork={onOpenWorkConversation ?? onOpenWork}
           onPreviewWork={onPreviewWork}
-          onOpenRoutineDetails={onOpenRoutineDetails}
+          scheduleAudience={work?.audienceKey}
+          schedulesReadOnly={schedulesReadOnly}
           onOpenBot={onOpenBot}
           onOpenGroup={onOpenGroup}
           groups={mentionGroups}
           tasks={tasks}
           bots={bots}
-          schedules={schedules.filter(
-            (item) => (item.audienceKey ?? "desktop") === (work?.audienceKey ?? "desktop")
-          )}
+          schedules={schedules}
         >
           <ChatContainer
             threadId={threadId}

@@ -62,7 +62,7 @@ const missingDetail = () => new Error(
 
 afterEach(() => vi.unstubAllGlobals())
 
-function fixture() {
+function fixture(withIm = true) {
   vi.stubGlobal("window", new EventTarget())
   const firstPage = Array.from({ length: 40 }, (_, index) => work(`first-${index}`))
   const later = ["unlinked", "deleted", "committed", "retry-cleanup", "surviving"].map(work)
@@ -83,7 +83,9 @@ function fixture() {
     if (!row) throw missingDetail()
     return row
   })
-  const client = { hostId: "local", subscribe: () => () => {}, works: { list, summaries, get } } as unknown as BotClient
+  const conversationWorks = vi.fn<NonNullable<NonNullable<BotClient["im"]>["conversationWorks"]>>()
+  const client = { hostId: "local", subscribe: () => () => {}, works: { list, summaries, get },
+    im: withIm ? { conversationWorks } : undefined } as unknown as BotClient
   const render = (selectedId: string | null = null, revision = 0, audience = "desktop") => {
     hooks.cursor = 0
     const result = useBotWorks(client, "bot", selectedId, revision, audience)
@@ -94,7 +96,7 @@ function fixture() {
     await render(selectedId, revision, audience).refresh()
     return render(selectedId, revision, audience)
   }
-  return { firstPage, later, rows, list, summaries, get, render, refresh }
+  return { firstPage, later, rows, list, conversationWorks, summaries, get, render, refresh }
 }
 
 it("refreshes loaded pages after unlink and original-thread deletion, retaining valid work and its order", async () => {
@@ -173,22 +175,35 @@ it("includes an older work renamed into the search after the last page was loade
   expect(summaries).not.toHaveBeenCalled()
 })
 
-it("uses the new search cursor when changing audience during an expanded refresh", async () => {
-  const { list, recent, render, refresh } = await expandedSearch()
-  const newPage = { items: recent, priority: [], nextCursor: "new-audience-page-2" }
+it("switches to the group's directory and cursor when a private refresh is in flight", async () => {
+  const { list, conversationWorks, recent, render, refresh } = await expandedSearch()
+  const groupWork = { ...work("group-work"), audienceKey: "im:other-audience" }
+  const newPage = { items: [groupWork], priority: [], nextCursor: "new-audience-page-2" }
   let finishOldPage!: (page: typeof newPage) => void
   list.mockImplementationOnce(() => new Promise(resolve => { finishOldPage = resolve }))
-  list.mockResolvedValueOnce(newPage)
+  conversationWorks.mockResolvedValueOnce(newPage).mockResolvedValueOnce({ items: [], priority: [], nextCursor: null })
   const old = render(null, 1).refresh()
   await Promise.resolve()
   const current = refresh(null, 2, "other-audience")
-  finishOldPage({ ...newPage, nextCursor: "old-audience-page-2" })
+  finishOldPage({ ...newPage, items: recent, nextCursor: "old-audience-page-2" })
   await old
 
   const view = await current
-  expect(view.items).toEqual(recent)
+  expect(view.items).toEqual([groupWork])
   expect(view.cursor).toBe("new-audience-page-2")
-  expect(list.mock.calls).toEqual([["bot", undefined, "release"], ["bot", undefined, "release"]])
+  await view.more()
+  expect(list.mock.calls).toEqual([["bot", undefined, "release"]])
+  expect(conversationWorks.mock.calls).toEqual([
+    ["bot", "other-audience", undefined, "release"], ["bot", "other-audience", "new-audience-page-2", "release"]
+  ])
+})
+
+it("reports an unavailable group directory without listing private tasks", async () => {
+  const { refresh, list } = fixture(false)
+  const view = await refresh(null, 0, "group")
+  expect(view.items).toEqual([])
+  expect(view.error).toBe("当前主机不支持查看招乎群任务")
+  expect(list).not.toHaveBeenCalled()
 })
 
 it.each([

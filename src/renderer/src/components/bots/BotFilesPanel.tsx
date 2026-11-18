@@ -2,13 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   Download,
   File,
-  Folder,
   Loader2,
   MoreHorizontal,
   Plus,
   RefreshCw,
   Share2
 } from "lucide-react"
+import { BotDetailCard } from "./BotDetailsPane"
 import { toast } from "sonner"
 import {
   Dialog,
@@ -117,10 +117,8 @@ export function BotFilesPanel({
     }
   }
   return (
-    <section className="bot-files-panel">
-      <div className="bot-files-toolbar">
-        <span>最近修改</span>
-        <div className="flex gap-1">
+    <BotDetailCard className="bot-files-panel" title="最近修改" label="工作资料" actions={
+        <>
           <button
             className="bot-icon-button"
             aria-label="刷新资料"
@@ -143,8 +141,8 @@ export function BotFilesPanel({
           >
             <Plus size={17} />
           </button>
-        </div>
-      </div>
+        </>
+      }>
       {loading && (
         <div className="flex justify-center py-5">
           <Loader2 className="animate-spin" size={18} />
@@ -156,20 +154,9 @@ export function BotFilesPanel({
         </p>
       )}
       {!loading && page && files.length === 0 && (
-        <div className="bot-files-empty">
-          <Folder size={27} strokeWidth={1.4} />
-          <p>
-            {page.cursor ? (
-              "这一页没有文件，请继续查看下一页。"
-            ) : (
-              <>
-                添加工作资料，或让 Bot 创建文件。
-                <br />
-                它的工作成果也会出现在这里。
-              </>
-            )}
-          </p>
-        </div>
+        <p className="bot-detail-empty">
+          {page.cursor ? "本页没有文件，可继续查看下一页。" : "暂无资料"}
+        </p>
       )}
       <div className="bot-file-list">
         {groups.map(({ label, files: entries }) => (
@@ -298,6 +285,6 @@ export function BotFilesPanel({
           </DialogContent>
         </Dialog>
       )}
-    </section>
+    </BotDetailCard>
   )
 }

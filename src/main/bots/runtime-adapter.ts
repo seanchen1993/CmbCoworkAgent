@@ -415,7 +415,7 @@ export function createLocalBotRunPort(
         || coordinatorWorkerManager.hasAutoRunnableNotifications(id, { owner: "desktop" })
     }),
     ordinaryThreads: createBotOrdinaryThreads(getHost),
-    conversationTools: createBotConversationTools(getHost),
+    conversationTools: createBotConversationTools(getHost, work => browser.hasOpenPages(botWorkBrowserScope(work.id, work.botId))),
     renameWork: (work, commit, lease) => renameBotWorkThread(getHost(), work, commit, lease),
     removeWorkBrowser: (scope) => browser.removeBot(scope),
     removeGroupMemberBrowser(groupId, botId) {
@@ -1937,7 +1937,7 @@ export function createLocalBotRunPort(
                           (task.origin.kind === "user" || task.origin.kind === "introduction" || reporting || profileContinuationRequest)
                             ? [...(!work ? [createBotGroupListTool(task, getHost, signal)] : []), createBotGroupMessageTool(task, getHost, signal, () => {})]
                             : []),
-                          ...createBotWorkTools(task, getHost, signal),
+                          ...createBotWorkTools(task, getHost, signal, waiting),
                           ...createBotDeliveryTools(workspacePath, signal, captureDeliveredFiles, peerDelivery, false,
                             storageRoot, work?.id, desktopWork
                               ? reference => getHost().acceptedDeliveryInputFile?.(task.id, reference, historyStorage)

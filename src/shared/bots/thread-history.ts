@@ -45,7 +45,10 @@ export interface BotConversationToolSource {
   taskId: string
   callId: string
   key: string
+  /** Runtime lifecycle hook, never a tool argument or part of the durable operation identity. */
+  onWaiting?(waiting: boolean): void
 }
+export type BotConversationCancelled = { state: "cancelled" }
 export interface BotConversationToolReceipt {
   workId: string
   version: number
@@ -56,11 +59,11 @@ export interface BotConversationToolsPort {
   link(botId: string, input: BotThreadLinkInput, source: BotConversationToolSource,
     signal: AbortSignal, assertLive: () => void): Promise<BotConversationToolReceipt>
   unlink(botId: string, input: BotWorkUnlinkInput, source: BotConversationToolSource,
-    signal: AbortSignal, assertLive: () => void): Promise<BotConversationToolReceipt>
+    signal: AbortSignal, assertLive: () => void): Promise<BotConversationToolReceipt | BotConversationCancelled>
   deleteThread?(botId: string, input: BotThreadDeleteInput, source: BotConversationToolSource,
-    signal: AbortSignal, assertLive: () => void): Promise<BotConversationDeleteReceipt>
+    signal: AbortSignal, assertLive: () => void): Promise<BotConversationDeleteReceipt | BotConversationCancelled>
   deleteWork?(botId: string, input: BotWorkUnlinkInput, source: BotConversationToolSource,
-    signal: AbortSignal, assertLive: () => void): Promise<BotConversationDeleteReceipt>
+    signal: AbortSignal, assertLive: () => void): Promise<BotConversationDeleteReceipt | BotConversationToolReceipt | BotConversationCancelled>
 }
 export interface BotThreadSummary {
   conversation: BotOrdinaryThreadRef

@@ -1,11 +1,12 @@
-import { useRef, useState } from "react"
-import { Plus, Search, Eye, ChevronDown, Loader2, Clock3, CirclePause, CircleCheck, CircleAlert, CircleStop, CircleDot, CircleDashed } from "lucide-react"
+import { useId, useRef, useState } from "react"
+import { Plus, Search, Eye, ChevronDown, ChevronRight, X, Loader2, Clock3, CirclePause, CircleCheck, CircleAlert, CircleStop, CircleDot, CircleDashed } from "lucide-react"
 import { resolveBotWorkStatus } from "@/lib/bot/work-status"
 import type { BotClient } from "../../../../shared/bots/contracts"
 import type { BotWorkItem, BotWorkSummary } from "../../../../shared/bots/work"
 import { FeatureRow, FollowPicker, useBotFeatureTasks } from "./BotFeaturePanel"
 import type { useBotWorks } from "./use-bot-works"
 import { botErrorMessage } from "@/lib/bot-error-message"
+import { BotDetailCard } from "./BotDetailsPane"
 
 export function botWorkStatus(work: BotWorkSummary): string {
   return resolveBotWorkStatus(work).label
@@ -77,10 +78,23 @@ export function BotWorkPanel({
     [error, setError] = useState<string | null>(null),
     [limit, setLimit] = useState(6)
   const [searching, setSearching] = useState(false)
+  const searchButton = useRef<HTMLButtonElement>(null)
+  const searchId = useId()
+  const searchOpen = searching || Boolean(controller.query)
+  const closeSearch = () => {
+    controller.setQuery("")
+    setSearching(false)
+    setLimit(6)
+    searchButton.current?.focus({ preventScroll: true })
+  }
   const [completedOpen, setCompletedOpen] = useState(false)
   const features = useBotFeatureTasks({ client, botId, groupId, query: controller.query })
   const [createKind, setCreateKind] = useState<"work" | "feature">("work")
   const createButton = useRef<HTMLButtonElement>(null)
+  const closeCreate = () => {
+    setEditing(false)
+    createButton.current?.focus({ preventScroll: true })
+  }
   const canAdd = !disabled && !readOnlyGroup
   const isCurrentAudience = () =>
     controller.current.current.botId === botId &&
@@ -175,20 +189,24 @@ export function BotWorkPanel({
       (entry.kind === "work" && entry.work.id === selected?.id)
   )
   return (
-    <section className="bot-detail-section bot-works" aria-label={heading}>
-      <div className="bot-works-heading">
-        <h3>{heading}</h3>
-        <div className="bot-task-list-actions">
+    <BotDetailCard className="bot-works" title={heading} actions={
+        <>
           <button
-            onClick={() => setSearching(!searching)}
+            ref={searchButton}
+            type="button"
+            className="bot-icon-button"
+            onClick={() => searchOpen ? closeSearch() : setSearching(true)}
             aria-label="搜索任务"
-            aria-expanded={searching}
+            aria-expanded={searchOpen}
+            aria-controls={searchOpen ? searchId : undefined}
             title="搜索任务"
           >
             <Search size={15} />
           </button>
           {!readOnlyGroup && (
             <button
+              type="button"
+              className="bot-icon-button"
               ref={createButton}
               disabled={!canAdd || saving}
               onClick={() => setEditing(!editing)}
@@ -199,8 +217,8 @@ export function BotWorkPanel({
               <Plus size={16} />
             </button>
           )}
-        </div>
-      </div>
+        </>
+      }>
       {editing && canAdd && client.features && (
         <div className="bot-task-picker" role="group" aria-label="任务类型">
           <button aria-pressed={createKind === "work"} onClick={() => setCreateKind("work")}>
@@ -218,7 +236,7 @@ export function BotWorkPanel({
           groupId={groupId}
           followed={features.loading || features.error ? undefined : features.items}
           done={() => {
-            setEditing(false)
+            closeCreate()
             features.refresh()
           }}
         />
@@ -230,10 +248,17 @@ export function BotWorkPanel({
             void create()
           }}
           className="bot-work-create"
+          onKeyDown={(event) => {
+            if (event.key !== "Escape" || event.nativeEvent.isComposing || saving) return
+            event.preventDefault()
+            event.stopPropagation()
+            closeCreate()
+          }}
         >
           <label>
             任务名称
             <input
+              autoFocus
               value={title}
               maxLength={160}
               onChange={(e) => setTitle(e.target.value)}
@@ -260,7 +285,7 @@ export function BotWorkPanel({
             />
           </label>
           <div>
-            <button type="button" onClick={() => setEditing(false)}>
+            <button type="button" disabled={saving} onClick={closeCreate}>
               取消
             </button>
             <button disabled={disabled || saving || !title.trim() || !goal.trim()} type="submit">
@@ -269,18 +294,16 @@ export function BotWorkPanel({
           </div>
         </form>
       )}
-      {(searching || controller.query) && (
-        <input
-          autoFocus
-          className="bot-work-search"
-          aria-label="搜索任务"
-          placeholder="搜索任务…"
-          value={controller.query}
-          onChange={(e) => {
-            setLimit(6)
-            controller.setQuery(e.target.value)
-          }}
-        />
+      {searchOpen && (
+        <div className="bot-work-search-field" id={searchId}>
+          <Search size={14} aria-hidden="true" />
+          <input autoFocus aria-label="搜索任务" placeholder="搜索任务…" value={controller.query}
+            onChange={(e) => { setLimit(6); controller.setQuery(e.target.value) }}
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && !e.nativeEvent.isComposing) { e.stopPropagation(); closeSearch() }
+            }} />
+          <button type="button" className="bot-icon-button" aria-label="关闭搜索" onClick={closeSearch}><X size={14} /></button>
+        </div>
       )}
       {(error || controller.error || features.error) && (
         <p role="alert">
@@ -313,24 +336,22 @@ export function BotWorkPanel({
               )
             )
           const work = entry.work
+          const status = resolveBotWorkStatus(work)
           return (
-            <div key={work.id} className="group relative">
-            <button
-              className="bot-work-row w-full pr-8"
-              data-work-id={work.id}
-              aria-pressed={selected?.id === work.id}
-              onClick={() => onSelect(work.id)}
-            >
-              <span>
-                {work.activity?.unread ? "● " : ""}
-                {work.title}
-              </span>
-              <small>{botWorkStatus(work)}</small>
-            </button>
-            {onPreview && !work.source && <button type="button"
-              className="absolute right-1 top-1/2 grid size-7 -translate-y-1/2 place-items-center rounded-md bg-background text-muted-foreground opacity-0 hover:text-foreground focus:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
-              aria-label={`预览任务：${work.title}`} title="预览任务"
-              onClick={event => onPreview(work, event.currentTarget)}><Eye size={14} /></button>}
+            <div key={work.id} className="bot-work-entry">
+              <button type="button" className="bot-work-row" data-work-id={work.id}
+                aria-pressed={selected?.id === work.id} onClick={() => onSelect(work.id)}>
+                <BotWorkStatusIcon work={work} status={status} />
+                <span className="bot-work-row-copy">
+                  <span className="bot-work-row-title" title={work.title}>{work.title}</span>
+                  <small>{status.label}</small>
+                </span>
+                {work.activity?.unread && <span className="bot-work-unread" role="img" aria-label="未读" />}
+                <ChevronRight size={14} className="bot-work-row-chevron" aria-hidden="true" />
+              </button>
+              {onPreview && !work.source && <button type="button" className="bot-icon-button bot-work-preview-action"
+                aria-label={`预览任务：${work.title}`} title="预览任务"
+                onClick={event => onPreview(work, event.currentTarget)}><Eye size={14} /></button>}
             </div>
           )
         })}
@@ -350,16 +371,13 @@ export function BotWorkPanel({
         !features.loading &&
         !controller.error &&
         !features.error && (
-          <p className="text-muted-foreground">
-            {needle
-              ? "没有找到匹配的任务。"
-              : readOnlyGroup
-                ? "在群聊中告诉 Bot 要完成什么。"
-                : "在聊天中交办一项工作，或点击 + 创建。"}
+          <p className="bot-detail-empty">
+            {needle ? "没有匹配的任务" : groupId ? "暂无群内任务" : "暂无任务"}
           </p>
         )}
       {(visible.length > limit || controller.cursor || features.cursor) && (
         <button
+          className="bot-work-more"
           disabled={controller.loading || features.loading}
           onClick={() => {
             if (limit < visible.length) setLimit(Math.min(visible.length, limit + 40))
@@ -373,6 +391,6 @@ export function BotWorkPanel({
           更多任务
         </button>
       )}
-    </section>
+    </BotDetailCard>
   )
 }

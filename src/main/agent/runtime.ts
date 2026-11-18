@@ -667,6 +667,7 @@ const taskConcurrencyLimiters = new Map<string, AsyncSemaphore>()
 const BOT_WORK_COORDINATION_TOOLS = new Set([
   "bot_work_list", "bot_work_read", "bot_work_search", "bot_work_projects",
   "bot_work_create", "bot_work_send", "bot_work_continue", "bot_work_complete",
+  "bot_thread_link", "bot_work_unlink", "bot_thread_delete", "bot_work_delete",
   "bot_feature_list", "bot_feature_read", "bot_feature_update"
 ])
 

@@ -90,6 +90,20 @@ import { botWorkBrowserScope } from "../../shared/bots/work"
 import { createBotConversationTools, setBotConversationDeletionService } from "./conversation-tool-management"
 import { protectedBotHistoryTitle } from "./history-input-projection"
 import { finishBotConversationTransition, listenBotConversationTransitions } from "./conversation-transition"
+import { getPendingUserInputForThread, submitUserInputResponse, subscribePendingUserInput } from "../services/user-input"
+
+function answerInChat(threadId: string, label: string) {
+  const request = getPendingUserInputForThread(threadId)!
+  expect(request?.threadId).toBe(threadId)
+  const question = request.questions[0]
+  const optionIndex = question.options.findIndex(option => option.label === label)
+  expect(optionIndex).toBeGreaterThanOrEqual(0)
+  const response = { requestId: request.requestId, answers: {
+    [question.id]: { type: "option" as const, questionId: question.id, optionIndex, ...question.options[optionIndex] }
+  } }
+  expect(submitUserInputResponse(response)).toBe(false)
+  expect(submitUserInputResponse(response, { desktopMainFrame: true })).toBe(true)
+}
 const resources: Array<{ db: NativeSqliteAdapter; host: LocalBotHost }> = []
 afterEach(async () => {
   await Promise.all(resources.map((r) => r.host.stop()))
@@ -113,6 +127,7 @@ function fixture(desktopTools = false, waitForStop?: () => Promise<void>) {
   const pending = vi.fn(async (_threads: readonly string[], _options?: { allowPendingCoordinatorNotifications?: boolean }) => false)
   const coordinatorPending = vi.fn((_threads: string[]) => false)
   const removeWorkBrowser = vi.fn(async (_scope: string) => {})
+  const hasOpenPages = vi.fn(() => false)
   const host = new LocalBotHost(
     store,
     {
@@ -128,7 +143,7 @@ function fixture(desktopTools = false, waitForStop?: () => Promise<void>) {
       hasPendingWork: pending,
       hasPendingCoordinator: coordinatorPending,
       removeWorkBrowser,
-      ...(desktopTools ? { conversationTools: createBotConversationTools(() => f.host!) } : {})
+      ...(desktopTools ? { conversationTools: createBotConversationTools(() => f.host!, hasOpenPages) } : {})
     },
     2,
     () => {}
@@ -174,7 +189,7 @@ function fixture(desktopTools = false, waitForStop?: () => Promise<void>) {
       incarnation: captureThreadIncarnation(row)
     }
   }
-  return { db, store, host, bot, original, row, input, pending, coordinatorPending, removeWorkBrowser }
+  return { db, store, host, bot, original, row, input, pending, coordinatorPending, removeWorkBrowser, hasOpenPages }
 }
 describe("trusted local conversation handshake", () => {
   it.each([false, true])("keeps default protected Fork names out of model work context, explicit new name=%s", async explicit => {
@@ -293,7 +308,7 @@ describe("trusted local conversation handshake", () => {
     }
   })
 
-  it("deletes the exact ordinary thread only after desktop confirmation and replays without repeating cleanup", async () => {
+  it("deletes the exact ordinary thread only after the private chat choice and replays without repeating cleanup", async () => {
     const x = fixture(true)
     const requests: BotConversationTransitionRequest[] = []
     const window = Object.assign(new EventEmitter(), { id: 64, mainFrame: {}, isDestroyed: () => false,
@@ -319,6 +334,9 @@ describe("trusted local conversation handshake", () => {
       expect(requests).toHaveLength(0)
       f.rows.set("original", x.row)
       const result = x.host.deleteOrdinaryThreadFromTool(source, input, new AbortController().signal)
+      expect(requests).toHaveLength(0)
+      answerInChat(x.bot.threadId, "删除会话")
+      await vi.waitFor(() => expect(requests).toHaveLength(1))
       expect(requests[0]).toMatchObject({ action: "delete", title: "Original title", threadId: "original" })
       expect(service).not.toHaveBeenCalled()
       expect(x.host.conversationLinks.ordinaryDeletion(x.bot.id, input, source)).toBeUndefined()
@@ -353,21 +371,24 @@ describe("trusted local conversation handshake", () => {
       const result = x.host.deleteOrdinaryThreadFromTool(source, input, new AbortController().signal)
       const check = expect(result).rejects.toThrow("待删除会话已变化")
       f.rows.set("original", { ...x.row, title: "User renamed" })
+      answerInChat(x.bot.threadId, "删除会话")
+      await vi.waitFor(() => expect(requests).toHaveLength(1))
       await expect(finishBotConversationTransition(window.id, requests[0].id, undefined, event)).rejects.toThrow("待删除会话已变化")
       await check
       expect(x.host.conversationLinks.ordinaryDeletion(x.bot.id, input, source)).toBeUndefined()
       f.rows.set("original", x.row)
       const controller = new AbortController()
       const cancelled = x.host.deleteOrdinaryThreadFromTool(source, input, controller.signal)
-      const cancelledCheck = expect(cancelled).rejects.toThrow("原任务已停止")
+      const cancelledCheck = expect(cancelled).rejects.toThrow()
       controller.abort()
       await cancelledCheck
+      expect(getPendingUserInputForThread(x.bot.threadId)).toBeNull()
       expect(service).not.toHaveBeenCalled()
       expect(f.rows.get("original")).toEqual(x.row)
     } finally { listenBotConversationTransitions(window, false) }
   })
 
-  it("confirms deletion of one uninitialized work without creating a thread or stopping its caller", async () => {
+  it("directly deletes a uniquely named native task without asking again or stopping its caller", async () => {
     const x = fixture(true), requests: BotConversationTransitionRequest[] = []
     const window = Object.assign(new EventEmitter(), { id: 66, mainFrame: {}, isDestroyed: () => false,
       send: (channel: string, request: BotConversationTransitionRequest) => { if (channel === "bots:conversation:transition") requests.push(request) }
@@ -377,13 +398,15 @@ describe("trusted local conversation handshake", () => {
     const service = vi.fn()
     setBotConversationDeletionService(service)
     try {
-      const task = x.host.send({ botId: x.bot.id, requestId: "delete work", message: "Delete the pending work" })
+      const task = x.host.send({ botId: x.bot.id, requestId: "delete work", message: "帮我把「Pending work」这个任务删掉吧。" })
       await vi.waitFor(() => expect(x.host.workToolSource(task.id).id).toBe(task.id))
+      x.host.recordPreparedInput(task.id, task.id, task.message)
       const created = await x.host.createWork({ botId: x.bot.id, operationId: "delete-pending", title: "Pending work", goal: "Pending" })
       const input = { workId: created.work.id, expectedVersion: created.work.version }
       const source = { taskId: task.id, callId: "work-delete-call", key: "work-delete-key" }
       const result = x.host.deleteWorkFromTool(source, input, new AbortController().signal)
       await vi.waitFor(() => expect(requests).toHaveLength(1))
+      expect(getPendingUserInputForThread(x.bot.threadId)).toBeNull()
       expect(x.host.workDeletionRecord(x.bot.id, created.work.id)).toBeUndefined()
       await expect(finishBotConversationTransition(window.id, requests[0].id, undefined, event)).resolves.toEqual({ deletedWork: { botId: x.bot.id, workId: created.work.id } })
       await expect(result).resolves.toEqual({ botId: x.bot.id, workId: created.work.id, state: "deleted" })
@@ -393,6 +416,85 @@ describe("trusted local conversation handshake", () => {
       await expect(x.host.deleteWorkFromTool({ ...source, callId: "retry-work-delete" }, input, new AbortController().signal)).resolves.toMatchObject({ state: "deleted" })
       expect(requests).toHaveLength(1)
     } finally { listenBotConversationTransitions(window, false) }
+  })
+
+  it.each(["仅解除关联", "连同原会话删除", "取消"])("honors the linked-work scope choice %s only once", async choice => {
+    const x = fixture(true)
+    const work = await linkExistingConversation(x.host, x.input)
+    const task = x.host.send({ botId: x.bot.id, requestId: "delete-linked", message: "删除任务「Task title」" })
+    await vi.waitFor(() => expect(x.host.workToolSource(task.id).id).toBe(task.id))
+    x.host.recordPreparedInput(task.id, task.id, task.message)
+    x.hasOpenPages.mockReturnValue(true)
+    const send = vi.fn()
+    const window = Object.assign(new EventEmitter(), { id: 69, mainFrame: {}, isDestroyed: () => false, send }) as unknown as WebContents
+    const event = { sender: window, senderFrame: window.mainFrame } as IpcMainInvokeEvent
+    listenBotConversationTransitions(window, true)
+    const service = vi.fn(async (_event, threadId: string) => { f.rows.delete(threadId) })
+    setBotConversationDeletionService(service)
+    const published = vi.fn(), unsubscribe = subscribePendingUserInput(published)
+    try {
+      const source = { taskId: task.id, callId: "linked-delete", key: "linked-delete", onWaiting: vi.fn() }
+      const input = { workId: work.id, expectedVersion: work.version }
+      const attempt = () => x.host.deleteWorkFromTool(source, input, new AbortController().signal)
+      const result = attempt()
+      const question = getPendingUserInputForThread(x.bot.threadId)?.questions[0]
+      expect(question?.question).toContain("Original title")
+      expect(question?.options[0].description).toContain("网页")
+      expect(getPendingUserInputForThread(work.threadId)).toBeNull()
+      expect(send).not.toHaveBeenCalled()
+      expect(published).not.toHaveBeenCalled()
+      answerInChat(x.bot.threadId, choice)
+      if (choice === "取消") {
+        await expect(result).resolves.toEqual({ state: "cancelled" })
+        expect(send).not.toHaveBeenCalled()
+        expect(x.store.getWork(x.bot.id, work.id).conversation?.state).toBe("bound")
+      } else {
+        await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1))
+        const request = send.mock.calls[0][1]
+        expect(request.action).toBe(choice === "仅解除关联" ? "unlink" : "delete")
+        await finishBotConversationTransition(window.id, request.id, undefined, event)
+        const expected = choice === "仅解除关联" ? "detached" : "deleted"
+        await expect(result).resolves.toMatchObject({ state: expected })
+        await expect(attempt()).resolves.toMatchObject({ state: expected })
+        expect(getPendingUserInputForThread(x.bot.threadId)).toBeNull()
+        expect(send).toHaveBeenCalledTimes(1)
+      }
+      expect(source.onWaiting.mock.calls).toEqual([[true], [false]])
+      expect(f.rows.has("original")).toBe(choice !== "连同原会话删除")
+      expect(service).toHaveBeenCalledTimes(choice === "连同原会话删除" ? 1 : 0)
+    } finally { unsubscribe(); listenBotConversationTransitions(window, false) }
+  })
+
+  it.each(["同名", "不用测了", "改写"])("requires an explicit answer for a native task when the request is %s", async reason => {
+    const x = fixture(true)
+    const title = "周报"
+    const message = reason === "不用测了" ? reason : "删除「周报」"
+    const task = x.host.send({ botId: x.bot.id, requestId: "native", message })
+    await vi.waitFor(() => expect(x.host.workToolSource(task.id).id).toBe(task.id))
+    x.host.recordPreparedInput(task.id, task.id, reason === "改写" ? "查看周报" : message)
+    const { work } = x.store.createWork({ botId: x.bot.id, operationId: "one", title, goal: "First" })
+    if (reason === "同名") x.store.createWork({ botId: x.bot.id, operationId: "two", title, goal: "Second" })
+    setBotConversationDeletionService(vi.fn())
+    const result = x.host.deleteWorkFromTool({ taskId: task.id, callId: "del", key: "del" },
+      { workId: work.id, expectedVersion: work.version }, new AbortController().signal)
+    expect(getPendingUserInputForThread(x.bot.threadId)?.questions[0].question).toContain(title)
+    answerInChat(x.bot.threadId, "保留任务")
+    await expect(result).resolves.toMatchObject({ state: "cancelled" })
+    expect(x.host.workDeletionRecord(x.bot.id, work.id)).toBeUndefined()
+  })
+
+  it("keeps the existing binding and open pages when the user declines unlink in chat", async () => {
+    const x = fixture(true)
+    const work = await linkExistingConversation(x.host, x.input)
+    const task = x.host.send({ botId: x.bot.id, requestId: "unlink", message: "解除任务关联" })
+    await vi.waitFor(() => expect(x.host.workToolSource(task.id).id).toBe(task.id))
+    x.hasOpenPages.mockReturnValue(true)
+    const result = x.host.unlinkWorkFromTool({ taskId: task.id, callId: "unlink", key: "unlink" },
+      { workId: work.id, expectedVersion: work.version }, new AbortController().signal)
+    answerInChat(x.bot.threadId, "保留关联")
+    await expect(result).resolves.toEqual({ state: "cancelled" })
+    expect(x.store.getWork(x.bot.id, work.id).conversation?.state).toBe("bound")
+    expect(x.removeWorkBrowser).not.toHaveBeenCalled()
   })
 
   it("blocks opening an uninitialized work awaiting deletion and retries without creating a thread", async () => {

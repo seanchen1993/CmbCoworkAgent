@@ -35,6 +35,13 @@ const render = (props: Partial<Parameters<typeof BotQuestionInput>[0]> = {}): st
   renderToStaticMarkup(createElement(BotQuestionInput, { ...defaults, ...props }))
 
 describe("Bot custom answer entry", () => {
+  it("offers only the explicit choices and cancellation for a conversation action", () => {
+    const card = render({ request: { ...request, kind: "bot_conversation_action" } })
+    expect(card).toContain("甲版")
+    expect(card).toContain('aria-label="取消操作"')
+    expect(card).not.toMatch(/自定义回答|添加补充说明|提交回答/)
+  })
+
   it("keeps a direct answer field unless the main inbox is proven available", () => {
     expect(render()).toContain('aria-label="自定义回答"')
     const inbox = render({ useComposerForSingleAnswer: true })

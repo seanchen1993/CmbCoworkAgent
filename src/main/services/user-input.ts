@@ -27,6 +27,8 @@ type RemovedUserInputListener = (requestId: string, threadId: string) => void
 
 interface RequestUserInputParams {
   threadId: string
+  /** A local conversation-management choice may only be shown and answered in the desktop App. */
+  kind?: UserInputRequest["kind"]
   questions: UserInputQuestion[]
   autoResolutionMs?: number
   autoResolution?: {
@@ -153,11 +155,11 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
   const {
     threadId,
     questions,
-    autoResolutionMs,
     autoResolution,
     abortSignal,
     allowDeferredRenderer = false
   } = params
+  const autoResolutionMs = params.kind === "bot_conversation_action" ? undefined : params.autoResolutionMs
   if (abortSignal?.aborted) {
     return Promise.reject(new Error("User input request was cancelled before it was shown."))
   }
@@ -185,6 +187,7 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
   const request: UserInputRequest = {
     requestId: randomUUID(),
     threadId,
+    ...(params.kind ? { kind: params.kind } : {}),
     questions,
     autoResolutionMs,
     createdAt: new Date().toISOString()
@@ -278,6 +281,7 @@ export function requestUserInput(params: RequestUserInputParams): Promise<UserIn
       key: `user-input:${request.requestId}`
     })
     sendToThread(threadId, "request", request)
+    if (request.kind === "bot_conversation_action") return
     for (const listener of pendingUserInputListeners) {
       try {
         listener(request)
@@ -300,9 +304,11 @@ export function acknowledgeUserInputRequest(requestId: string, threadId: string)
 
 export function submitUserInputResponse(
   response: UserInputResponse,
-  options: { notifyRenderer?: boolean; reason?: string } = {}
+  options: { notifyRenderer?: boolean; reason?: string; desktopMainFrame?: boolean } = {}
 ): boolean {
-  const request = pendingUserInputs.get(response.requestId)?.request
+  const entry = pendingUserInputs.get(response.requestId)
+  if (entry?.request.kind === "bot_conversation_action" && !options.desktopMainFrame && !response.ignored) return false
+  const request = entry?.request
   if (request && !validMultipleChoiceResponse(request, response)) return false
   const pending = cleanupPending(response.requestId)
   if (!pending) return false

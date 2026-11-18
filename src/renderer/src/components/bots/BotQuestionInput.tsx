@@ -34,10 +34,11 @@ export function BotQuestionInput({
 }) {
   const question = request.questions[activeIndex]
   const titleId = `${request.requestId}-question`
+  const isAction = request.kind === "bot_conversation_action"
   const answered =
     userInputAnswers([question], draft ? { [question.id]: draft } : {}, true) !== null
   const showCustomInput =
-    request.questions.length > 1 || !useComposerForSingleAnswer || draft?.type === "other"
+    !isAction && (request.questions.length > 1 || !useComposerForSingleAnswer || draft?.type === "other")
   const singleMultiple = question.allowMultiple === true && request.questions.length === 1
   const submitLabel = singleMultiple ? "完成" : complete ? "提交回答" : "继续回答下一题"
   return (
@@ -71,8 +72,8 @@ export function BotQuestionInput({
           <button
             type="button"
             className="bot-question-dismiss"
-            aria-label={request.questions.length > 1 ? "跳过全部问题" : "跳过问题"}
-            title="跳过"
+            aria-label={isAction ? "取消操作" : (request.questions.length > 1 ? "跳过全部问题" : "跳过问题")}
+            title={isAction ? "取消操作" : "跳过"}
             onClick={onIgnore}
           >
             <X size={16} aria-hidden="true" />
@@ -101,7 +102,7 @@ export function BotQuestionInput({
                     {option.description && <small>{option.description}</small>}
                   </span>
                 </button>
-                {!question.allowMultiple && (
+                {!isAction && !question.allowMultiple && (
                   <button
                     type="button"
                     className="bot-question-additional"
@@ -152,7 +153,7 @@ export function BotQuestionInput({
             />
           </div>
         )}
-        {(request.questions.length > 1 || answered || question.allowMultiple) && (
+        {!isAction && (request.questions.length > 1 || answered || question.allowMultiple) && (
           <footer>
             {request.questions.length > 1 ? (
               <nav aria-label="问题导航">

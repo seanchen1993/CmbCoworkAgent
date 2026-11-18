@@ -57,9 +57,9 @@ createRoot(document.getElementById('root')).render(<Fixture/>);
           b.onLoad({ filter: /.*/, namespace: "fixture" }, (a) => {
             let contents = ""
             if (a.path === "@/lib/store")
-              contents = `const state={models:[],threads:[],mainView:'bots',showCustomizeView:false,setMainView:v=>window.fixture.change(v),setShowCustomizeView:()=>{},loadThreads:()=>{}};export const useAppStore=Object.assign(selector=>selector(state),{getState:()=>state});`
+              contents = `const state={models:[],threads:[],mainView:'bots',showCustomizeView:false,setMainView:v=>window.fixture.change(v),setShowCustomizeView:()=>{},loadThreads:()=>{}};export const useAppStore=Object.assign(selector=>selector(state),{getState:()=>state,subscribe:()=>()=>{}});`
             else if (a.path === "@/lib/thread-context")
-              contents = `const threads={};const current=id=>threads[id]??=( {messages:[],draftInput:'',draftAttachments:[],queuedMessages:[]});const context={initializeThread:id=>current(id),getThreadState:current,getThreadActions:id=>({setDraftInput:text=>current(id).draftInput=text,setDraftAttachments:files=>current(id).draftAttachments=files,addQueuedMessage:(draft,done)=>{if(window.fixture.failQueue)done('synthetic queue write failed');else{current(id).queuedMessages.push(draft);done(null)}},deleteQueuedMessage:(draftId,done)=>{current(id).queuedMessages=current(id).queuedMessages.filter(x=>x.id!==draftId);done?.(null)},getQueuedMessage:draftId=>current(id).queuedMessages.find(x=>x.id===draftId),updateQueuedMessage:(draftId,patch,done)=>{Object.assign(current(id).queuedMessages.find(x=>x.id===draftId),patch);done?.(null)}}),subscribeToThreadState:()=>()=>{}};export const useThreadContext=()=>(window.fixture.threads=threads,context);export const useThreadStateSummaries=()=>({});`
+              contents = `const threads={};const current=id=>threads[id]??=( {messages:[],draftInput:'',draftAttachments:[],draftMentionedWorkspaceFiles:[],queuedMessages:[]});const context={initializeThread:id=>current(id),getThreadState:current,getThreadActions:id=>({setDraftInput:text=>current(id).draftInput=text,setDraftAttachments:files=>current(id).draftAttachments=files,addQueuedMessage:(draft,done)=>{if(window.fixture.failQueue)done('synthetic queue write failed');else{current(id).queuedMessages.push(draft);done(null)}},deleteQueuedMessage:(draftId,done)=>{current(id).queuedMessages=current(id).queuedMessages.filter(x=>x.id!==draftId);done?.(null)},getQueuedMessage:draftId=>current(id).queuedMessages.find(x=>x.id===draftId),updateQueuedMessage:(draftId,patch,done)=>{Object.assign(current(id).queuedMessages.find(x=>x.id===draftId),patch);done?.(null)}}),subscribeToThreadState:()=>()=>{}};export const useThreadContext=()=>(window.fixture.threads=threads,context);export const useThreadStateSummaries=()=>({});`
             else if (a.path === "./use-bots")
               contents = `const bot={id:'synthetic-bot',hostId:'synthetic',threadId:'synthetic-thread',name:'Synthetic Bot',instructions:'',modelRef:null,color:'#ed2040',shape:'drop',archived:false,deleting:false,version:1,createdAt:1,updatedAt:1};const snapshot={bots:[bot],groups:[],tasks:[],activities:[],workActivity:[],schedules:[],backgroundThreads:[],revision:1};const snapshots={};export const useBots=client=>(window.fixture.snapshots=snapshots,{snapshot:snapshots[client.hostId]??=({...snapshot,groups:[],bots:[{...bot,hostId:client.hostId,id:'synthetic-bot-'+client.hostId,threadId:'synthetic-thread-'+client.hostId}]}),error:null,retry:()=>{}});`
             else if (a.path === "./use-bot-read-state")
@@ -72,6 +72,8 @@ createRoot(document.getElementById('root')).render(<Fixture/>);
             else if (a.path === "./BotConversation")
               contents =
                 "export const BotConversation=({onConfigureModel})=><button onClick={onConfigureModel}>Configure synthetic profile</button>;"
+            else if (a.path === "./BotWorkPreview")
+              contents = 'export const BotWorkPreview=()=>null;export const isWorkDeletionPending=()=>false;export const BOT_WORK_DELETION_PENDING_MESSAGE="删除待完成";'
             else if (a.path === "./BotWorkspaceMenu")
               contents =
                 "export const BotWorkspaceMenu=({onWorkbench})=><button onClick={onWorkbench}>Synthetic workbench menu</button>;"
@@ -87,12 +89,16 @@ createRoot(document.getElementById('root')).render(<Fixture/>);
                 "BotAvatarEditor",
                 "BotDeleteDialog",
                 "BotMemoryPanel",
+                "BotMemoryNavigation",
                 "BotSchedulePanel",
                 "BotGroupEditor",
                 "BotNameInput",
                 "BotGroupMembers",
                 "BotGroupConversation",
                 "BotDetailsPane",
+                "BotDetailCard",
+                "BotDetailTabs",
+                "BotDetailRow",
                 "BotSectionEditor",
                 "BotRowMenu",
                 "BotConversationList",

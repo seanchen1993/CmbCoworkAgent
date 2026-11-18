@@ -1,7 +1,7 @@
 import { ModelSwitcher } from "@/components/chat/ModelSwitcher"
 import { botWorkStatus } from "@/lib/bot-work-status"
 import { useRef, useState, type ReactNode } from "react"
-import { ArrowLeft, ArrowUpRight, Check, MoreHorizontal, RotateCcw } from "lucide-react"
+import { ArrowUpRight, Check, MoreHorizontal, RotateCcw } from "lucide-react"
 import { useThreadContext } from "@/lib/thread-context"
 import { openBotWorkThreadChat, resolveBotWorkThreadForNavigation } from "@/lib/bot/work-thread-summary"
 import { useAppStore } from "@/lib/store"
@@ -17,17 +17,13 @@ export function BotWorkHeader({
   work,
   controller,
   captureWorkNavigation,
-  disabled,
-  onBack,
-  backLabel
+  disabled
 }: {
   client: BotClient
   work: BotWorkItem
   controller: ReturnType<typeof useBotWorks>
   captureWorkNavigation?(): () => boolean
   disabled: boolean
-  onBack(): void
-  backLabel: string
 }) {
   const threadContext = useThreadContext()
   const [saving, setSaving] = useState(false)
@@ -135,10 +131,6 @@ export function BotWorkHeader({
   return (
     <div className="bot-task-toolbar">
       <div className="bot-task-toolbar-row">
-        <button className="bot-task-back" onClick={onBack} title={backLabel}>
-          <ArrowLeft size={14} />
-          <span>{backLabel}</span>
-        </button>
         <span className="bot-task-status" role="status">
           {botWorkStatus(work)}
         </span>

@@ -5,18 +5,8 @@
   justify-content: space-between;
   gap: 0.5rem;
 }
-.bot-work-row.bot-feature-summary {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-}
-.bot-feature-summary small {
-  grid-column: 1;
-}
-.bot-feature-summary > svg {
-  grid-column: 2;
-  grid-row: 1 / 3;
-  color: var(--bot-muted);
+.bot-feature-summary[aria-expanded="true"] .bot-work-row-chevron {
+  transform: rotate(90deg);
 }
 .bot-feature-links button:hover {
   background: var(--bot-hover);

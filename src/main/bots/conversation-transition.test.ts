@@ -23,7 +23,7 @@ const input = {
 const requestId = (sender: WebContents) => vi.mocked(sender.send).mock.calls.filter(call => call[0] === "bots:conversation:transition").at(-1)![1].id as string
 
 describe("Bot desktop conversation transition", () => {
-  it("requires a real main-frame confirmation and returns only the committed deletion facts", async () => {
+  it("requires the original desktop main frame for cleanup and returns only committed deletion facts", async () => {
     const sender = desktop()
     Object.assign(sender, { mainFrame: {} })
     const apply = vi.fn(async () => ({ state: "cleanup_pending", deletedThreadId: "original", error: "工作回执待补" }))
@@ -33,9 +33,9 @@ describe("Bot desktop conversation transition", () => {
       receipt => ({ deletedThreadId: receipt.deletedThreadId, error: receipt.error })
     )
     const id = requestId(sender)
-    await expect(finishBotConversationTransition(sender.id, id)).rejects.toThrow("桌面确认")
+    await expect(finishBotConversationTransition(sender.id, id)).rejects.toThrow("桌面主窗口")
     await expect(finishBotConversationTransition(sender.id, id, undefined,
-      { sender, senderFrame: {} } as IpcMainInvokeEvent)).rejects.toThrow("桌面确认")
+      { sender, senderFrame: {} } as IpcMainInvokeEvent)).rejects.toThrow("桌面主窗口")
     expect(apply).not.toHaveBeenCalled()
     const event = { sender, senderFrame: sender.mainFrame } as IpcMainInvokeEvent
     await expect(finishBotConversationTransition(sender.id, id, undefined, event)).resolves.toEqual({ deletedThreadId: "original", error: "工作回执待补" })
@@ -58,7 +58,7 @@ describe("Bot desktop conversation transition", () => {
     const sender = desktop(), apply = vi.fn(async () => undefined)
     const link = { work: { id: "work" }, bot: { id: "bot" } } as BotWorkConversationResolution
     const result = requestBotConversationTransition({ action: "unlink", threadId: "original", link }, new AbortController().signal, apply)
-    const check = expect(result).rejects.toThrow("解除关联尚未完成确认")
+    const check = expect(result).rejects.toThrow("解除关联尚未完成草稿核对")
     const id = requestId(sender)
     await vi.advanceTimersByTimeAsync(15_000)
     expect(sender.send).not.toHaveBeenCalledWith("bots:conversation:transition-dismissed", id)

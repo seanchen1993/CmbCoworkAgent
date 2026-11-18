@@ -143,6 +143,9 @@ const request = (name: string, id = name, args?: unknown): Request => ({
 })
 const humanWaits = [
   { name: "request_user_input", args: undefined },
+  { name: "bot_work_delete", args: undefined },
+  { name: "bot_thread_delete", args: undefined },
+  { name: "bot_work_unlink", args: undefined },
   { name: "bot_request_browser_help", args: undefined },
   { name: "bot_browser", args: { action: "request_help" } }
 ]

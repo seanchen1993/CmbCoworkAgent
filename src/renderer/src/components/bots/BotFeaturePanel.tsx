@@ -1,7 +1,7 @@
 import { useBotRefresh } from "./use-bot-refresh"
 import { useCallback, useEffect, useRef, useState } from "react"
 import "./bot-features.css"
-import { ArrowUpRight, ChevronDown, ChevronRight } from "lucide-react"
+import { ArrowUpRight, ChevronRight, GitBranch } from "lucide-react"
 import { useAppStore } from "@/lib/store"
 import { botErrorMessage } from "@/lib/bot-error-message"
 import type { BotClient } from "../../../../shared/bots/contracts"
@@ -208,15 +208,15 @@ export function FeatureRow({
         aria-expanded={open}
         onClick={() => setOpen(!open)}
       >
-        <span>{feature.title}</span>
-        <small>
-          <span data-attention={Boolean(current.attentionThreadId)}>
-            {featureTaskLabels[current.phase]}
-          </span>
-          {" · Feature · "}
-          {feature.projectName}
-        </small>
-        {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        <GitBranch size={16} className="bot-work-state-icon" aria-hidden="true" />
+        <span className="bot-work-row-copy">
+          <span className="bot-work-row-title" title={feature.title}>{feature.title}</span>
+          <small>
+            <span data-attention={Boolean(current.attentionThreadId)}>{featureTaskLabels[current.phase]}</span>
+            {" · Feature · "}{feature.projectName}
+          </small>
+        </span>
+        <ChevronRight className="bot-work-row-chevron" size={14} aria-hidden="true" />
       </button>
       {open && (
         <div className="bot-feature-expanded">

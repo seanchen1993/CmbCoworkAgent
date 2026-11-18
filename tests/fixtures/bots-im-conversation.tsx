@@ -96,6 +96,7 @@ const f = ((window as any).fixture = {
   exported: [] as any[],
   manage: 0,
   tasks: [] as any[],
+  schedules: [] as import("../../src/shared/bots/contracts").BotSchedule[],
   backgroundThreads: [] as string[],
   stoppedBackgroundThreads: [] as string[],
   cancelled: [] as string[],
@@ -197,7 +198,7 @@ const client = {
     backgroundThreads: [...f.backgroundThreads],
     activities: f.activities.map((activity) => ({ ...activity })),
     workActivity: [],
-    schedules: [],
+    schedules: f.schedules.map(schedule => ({ ...schedule })),
     revision
   }),
   subscribe: (fn: Function) => {

@@ -50,15 +50,15 @@ export function requestBotConversationTransition<T>(
     } }
     const abort = () => fail(new BotError("CONFLICT", "原任务已停止，未执行会话关联变更。"))
     const timer = setTimeout(() => fail(new BotError("CONFLICT", input.action === "delete"
-      ? "删除未在确认窗口中完成，未执行删除。"
+      ? "桌面未及时响应会话清理请求，未执行删除。"
       : input.action === "unlink"
-        ? "解除关联尚未完成确认或草稿核对，未执行操作。"
+        ? "解除关联尚未完成草稿核对，未执行操作。"
         : "原会话草稿尚未完成核对，未执行关联变更；请先检查原会话。")),
     input.action === "link" ? 15_000 : 120_000)
     pending.set(id, { owner: window.id, fail, apply: async (event) => {
       if (applying) throw new BotError("CONFLICT", "原关联操作正在处理，请读取原回执。")
       if (input.action === "delete" && (!event || event.sender.id !== window.id || event.senderFrame !== event.sender.mainFrame))
-        throw new BotError("CONFLICT", "删除必须由当前桌面确认窗口提交。")
+        throw new BotError("CONFLICT", "会话清理必须由发起握手的桌面主窗口提交。")
       signal.throwIfAborted()
       applying = true
       clearTimeout(timer)

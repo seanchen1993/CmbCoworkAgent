@@ -5,10 +5,25 @@ import type { BotTask } from "../../shared/bots/contracts"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { LocalBotHost, type BotRunPort } from "./host"
 import { BotStore } from "./store"
+import { namesWorkForDeletion } from "./desktop-operation"
 import { createBotScheduleTools } from "./tools"
 import { createBotWorkTools } from "./work-tools"
 
 const cleanup: Array<() => Promise<void>> = []
+it.each([
+  ["帮我把「Pending work」这个任务删掉吧。", "Pending work", true],
+  ["请删除任务：周报", "周报", true],
+  ['Please delete the task "Weekly report".', "Weekly report", true],
+  ["删除所有任务", "所有任务", false],
+  ["删除「所有任务」", "所有任务", true],
+  ["删除任务周报", "任务周报", false],
+  ["别删除周报", "周报", false],
+  ["删除周报？", "周报", false],
+  ["删除「周报」和「月报」", "月报", false],
+  ["例如：删除「周报」", "周报", false]
+] as const)("recognizes only the named task in %s", (message, title, granted) => {
+  expect(namesWorkForDeletion(message, title)).toBe(granted)
+})
 afterEach(async () => {
   for (const close of cleanup.splice(0)) await close()
 })

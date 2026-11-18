@@ -9,6 +9,7 @@ import {
   SelectTrigger,
   SelectValue
 } from "@/components/ui/select"
+import { BotDetailCard } from "./BotDetailsPane"
 import { BotBrowserPanel } from "./BotBrowserPanel"
 import { botWorkStatus } from "@/lib/bot-work-status"
 
@@ -38,35 +39,34 @@ export function BotTaskBrowser({
     : available.find((item) => item.id === chosen) ?? suggested)
   const scope = work ? botWorkBrowserScope(work.id, botId) : mainScope
   return (
-    <>
-      {!selectedWork && (
-        <div className="px-5 pt-4">
+    <BotDetailCard title="工作浏览器" className="bot-computer-card">
+      <div className="bot-computer-source">
+        {selectedWork || available.length === 0 ? (
+          <p>{selectedWork?.title ?? "例行与后台工作"}</p>
+        ) : (
           <Select value={work?.id ?? "other"} onValueChange={setChosen}>
-            <SelectTrigger aria-label="查看任务浏览器" className="rounded-xl shadow-none">
+            <SelectTrigger aria-label="查看任务浏览器" className="w-full rounded-lg shadow-none">
               <SelectValue />
             </SelectTrigger>
             <SelectContent data-bot-popup className="bot-workspace-select rounded-xl">
-              {available
-                .map((item) => (
-                  <SelectItem key={item.id} value={item.id}>
-                    {item.title}
-                  </SelectItem>
-                ))}
+              {available.map(item => (
+                <SelectItem key={item.id} value={item.id}>{item.title}</SelectItem>
+              ))}
               <SelectItem value="other">例行与后台工作</SelectItem>
             </SelectContent>
           </Select>
-          {work && (
-            <button
-              className="mt-2 flex items-center gap-1 text-xs text-muted-foreground"
-              onClick={() => onWork(work.id)}
-            >
-              {botWorkStatus(work)} · 打开任务
-              <ArrowUpRight size={12} />
-            </button>
-          )}
-        </div>
-      )}
+        )}
+        {work && !selectedWork && (
+          <button
+            className="mt-2 flex items-center gap-1 text-xs text-muted-foreground"
+            onClick={() => onWork(work.id)}
+          >
+            {botWorkStatus(work)} · 打开任务
+            <ArrowUpRight size={12} />
+          </button>
+        )}
+      </div>
       <BotBrowserPanel key={scope} botId={scope} client={client} />
-    </>
+    </BotDetailCard>
   )
 }

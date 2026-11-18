@@ -117,7 +117,7 @@ async function main() {
       const all = JSON.stringify(messages)
       let index = -1
       messages.forEach((m: any, i: number) => {
-        if (m.role === "user") index = i
+        if (m.role === "user" && !text(m.content).trimStart().startsWith("<bot_reply_reminder>")) index = i
       })
       const user = text(messages[index]?.content ?? "")
       const used = messages
@@ -125,7 +125,11 @@ async function main() {
         .flatMap((m: any) => (m.tool_calls ?? []).map((c: any) => c.function?.name))
       const tools = (body.tools ?? []).map((t: any) => t.function?.name)
       requests.push({ user, used, tools })
-      if (!all.includes("An independent task returned a host-recorded result") && (user.includes("LIVE_ORDINARY_HOLD") || user.includes("STEER_HOLD_"))) {
+      const reporting = tools.includes("bot_work_result_read") ||
+        /<bot_runtime_context event="task_result(?:_review)?">/.test(user) ||
+        all.includes("An independent task returned a host-recorded result")
+      const heldSteer = !reporting && user.startsWith("STEER_HOLD_")
+      if (heldSteer || (!reporting && user.startsWith("LIVE_ORDINARY_HOLD"))) {
         await new Promise<void>((done) => {
           releaseOrdinaryTurn = done
         })
@@ -133,11 +137,11 @@ async function main() {
       }
       let reply = "本地测试已就绪。",
         call: { name: string; args: any } | undefined
-      if (all.includes("You are ALREADY inside independent task")) {
+      if (reporting) {
+        reply = "群任务结果：需求清单已整理。"
+      } else if (all.includes("You are ALREADY inside independent task")) {
         assert.ok(!all.includes("PRIVATE_SECRET"), "task must not inherit private history")
         reply = "群任务检查完成：需求清单已整理。"
-      } else if (all.includes("An independent task returned a host-recorded result")) {
-        reply = "群任务结果：需求清单已整理。"
       } else if (user.includes("LIVE_TO_IM")) {
         if (!used.includes("bot_send_message"))
           call = {
@@ -201,8 +205,8 @@ async function main() {
       else if (user.includes("PRIVATE_SECRET")) reply = "私聊内容仅保留在本会话。"
       else if (user.includes("LIVE_RETRY") || user.includes("LIVE_LOST"))
         reply = "发送已接收，仅执行一轮。"
-      if (!all.includes("An independent task returned a host-recorded result") && user.includes("STEER_HOLD_")) reply = "STEER_BEFORE_BOUNDARY"
-      else if (!all.includes("An independent task returned a host-recorded result") && user.includes("STEER_SECOND_")) {
+      if (heldSteer) reply = "STEER_BEFORE_BOUNDARY"
+      else if (!reporting && user.startsWith("STEER_SECOND_")) {
         assert.ok(all.includes("STEER_FIRST_"), "both corrections enter the same model history")
         assert.ok(all.includes("STEER_BEFORE_BOUNDARY"), "the interrupted-looking reply is actually retained")
         reply = "STEER_AFTER_BOUNDARY"
@@ -521,13 +525,13 @@ async function main() {
     await idle()
     await page.getByRole("button", { name: "已交办到招乎群 · 产品协作群", exact: true }).click()
     await page.getByRole("button").filter({ hasText: "群内需求清单" }).last().click()
-    await page.locator(".bot-task-toolbar").getByRole("button", { name: "返回群主对话", exact: true }).waitFor()
+    await page.locator(".bot-personal-header[data-task]").getByRole("button", { name: "返回群聊「产品协作群」", exact: true }).waitFor()
     await page
       .locator(".bots-conversation")
       .getByText("群任务检查完成：需求清单已整理。", { exact: true })
       .waitFor()
     await page.screenshot({ path: join(out, "artifacts/group-app-work.png") })
-    await page.locator(".bot-task-toolbar").getByRole("button", { name: "返回群主对话", exact: true }).click()
+    await page.locator(".bot-personal-header[data-task]").getByRole("button", { name: "返回群聊「产品协作群」", exact: true }).click()
     await page.getByRole("button", { name: "前往私人主对话", exact: true }).click()
     await page.getByText("私人助手", { exact: true }).first().click()
     console.log(
@@ -807,6 +811,9 @@ async function main() {
       }), `补充验收-${kind}`)
       await idle()
       await page.getByText(bot.name, { exact: true }).first().click()
+      const mainChat = page.locator(`[data-chat-thread-id="${bot.threadId}"]`)
+      await mainChat.getByText("本地测试已就绪。", { exact: true }).first().waitFor()
+      await idle()
       let threadId = bot.threadId
       if (kind === "bot-work") {
         const result = await page.evaluate(async botId => (window as any).api.bots.works.create({
@@ -819,16 +826,24 @@ async function main() {
         await send()
       }
       await wait(() => !!releaseOrdinaryTurn, `${kind} model in flight`)
+      const chat = page.locator(`[data-chat-thread-id="${threadId}"]`)
+      await chat.getByText(`STEER_HOLD_${kind}`, { exact: true }).first().waitFor()
+      const taskInput = chat.locator('textarea, [role="textbox"][contenteditable="true"]').last()
+      const supplements: string[] = []
       for (const marker of ["STEER_FIRST_", "STEER_SECOND_"]) {
-        await fill(`${marker}${kind}`)
-        await composer().press("Enter")
+        const message = marker + kind
+        await taskInput.fill(message)
+        await settle()
+        await taskInput.press("Enter")
+        supplements.push(message)
+        await waitForBotAppState(page, async ({ threadId, supplements }) => {
+          const { tasks } = await window.api.bots.snapshot()
+          const queued = tasks.filter(task => task.threadId === threadId && task.state === "queued")
+          return supplements.every(message => queued.some(task => task.message === message))
+        }, { threadId, supplements })
       }
-      await waitForBotAppState(page, async () => (await (window as any).api.bots.snapshot()).tasks
-        .filter((t: any) => t.message.startsWith("STEER_FIRST_") || t.message.startsWith("STEER_SECOND_"))
-        .filter((t: any) => t.state === "queued").length === 2)
       assert.equal(requests.filter(item => item.user.includes(`STEER_HOLD_${kind}`)).length, 1)
       releaseOrdinaryTurn!()
-      const chat = page.locator(`[data-chat-thread-id="${threadId}"]`)
       await chat.getByText("STEER_AFTER_BOUNDARY", { exact: true }).waitFor({ timeout: 90000 })
       await idle()
       const expected = ["STEER_BEFORE_BOUNDARY", `STEER_FIRST_${kind}`, `STEER_SECOND_${kind}`, "STEER_AFTER_BOUNDARY"]

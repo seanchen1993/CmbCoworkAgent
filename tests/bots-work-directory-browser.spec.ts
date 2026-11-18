@@ -46,7 +46,7 @@ async function main() {
     await page.waitForFunction(() => Boolean((window as any).m05Directory))
     await page.waitForFunction(() => document.querySelectorAll(".bot-work-row").length === 6)
     assert.equal(await page.getByRole("textbox", { name: "搜索任务", exact: true }).count(), 0)
-    const createTask = page.getByRole("button", { name: "新建独立任务", exact: true })
+    const createTask = page.getByRole("button", { name: "添加任务", exact: true })
     await createTask.click()
     await page.getByRole("button", { name: "取消", exact: true }).click()
     assert.equal(await createTask.evaluate(button => button === document.activeElement), true)
@@ -73,7 +73,7 @@ async function main() {
     await page.getByRole("button", { name: "更多任务", exact: true }).click()
     await page.waitForFunction(() => document.querySelectorAll(".bot-work-row").length === 7)
     await page.getByRole("textbox", { name: "搜索任务", exact: true }).press("Escape")
-    await page.waitForFunction(() => !document.querySelector(".bot-work-search"))
+    await page.getByRole("textbox", { name: "搜索任务", exact: true }).waitFor({ state: "detached" })
     assert.equal(await page.getByRole("button", { name: "搜索任务", exact: true }).evaluate(button => button === document.activeElement), true)
     // Late selection responses cannot restore a previous work after switching Bot.
     await page.evaluate(() => {

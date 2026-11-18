@@ -259,7 +259,7 @@ state.render('removed');`
             await page.waitForFunction((count) => (window as any).historyFixture.saves.length === count + 1, previousSaves)
             assert.deepEqual(
               await page.evaluate(() => (window as any).historyFixture.saves.at(-1)),
-              ["g", "library.md"],
+              ["g", "library.md", "library.md"],
               `${mode}: library preview saves through the retained group owner`
             )
           }

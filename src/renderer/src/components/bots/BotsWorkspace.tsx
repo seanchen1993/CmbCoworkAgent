@@ -11,6 +11,7 @@ import {
   Brain,
   CircleAlert,
   ChevronRight,
+  History,
   Loader2,
   MessageCircle,
   MoreHorizontal,
@@ -42,7 +43,7 @@ import {
   SelectTrigger,
   SelectValue
 } from "@/components/ui/select"
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
+import { Tabs, TabsContent } from "@/components/ui/tabs"
 import { useAppStore } from "@/lib/store"
 import { useChatSourceNavigation } from "@/lib/chat-source-navigation"
 import { useThreadContext, useThreadStateSummaries } from "@/lib/thread-context"
@@ -90,13 +91,13 @@ import { BotRuntimeAvatar } from "./BotRuntimeAvatar"
 import { botActiveTaskCreatedAt } from "@/lib/bot-avatar-mood"
 import { BotAvatarEditor } from "./BotAppearancePicker"
 import { BotDeleteDialog } from "./BotDeleteDialog"
-import { BotMemoryPanel } from "./BotMemoryPanel"
+import { BotMemoryNavigation, BotMemoryPanel } from "./BotMemoryPanel"
 import { BotSchedulePanel } from "./BotSchedulePanel"
 import { BotGroupEditor } from "./BotGroupEditor"
 import { BotNameInput } from "./BotNameInput"
 import { BotGroupMembers } from "./BotGroupMembers"
 import { BotGroupConversation } from "./BotGroupConversation"
-import { BotDetailsPane } from "./BotDetailsPane"
+import { BotDetailCard, BotDetailRow, BotDetailsPane, BotDetailTabs } from "./BotDetailsPane"
 import { BotNewChat } from "./BotNewChat"
 import { BotSectionEditor } from "./BotSectionEditor"
 import {
@@ -177,58 +178,71 @@ export function restoreBotWorkPreviewPosition(
     target.scrollIntoView({ block: "nearest" })
 }
 
-function GroupMemory({
-  group,
-  bots,
-  client,
-  groupLabels
+function GroupDetails({
+  group, bots, client, groupLabels, tasks, tab, onTabChange, onSettings, onOpenMember
 }: {
   group: BotGroup
   bots: BotDefinition[]
   client: BotClient
   groupLabels: ReadonlyMap<string, string>
+  tasks: BotTask[]
+  tab: typeof DEFAULT_BOT_VIEW.groupDetailTab
+  onTabChange(tab: typeof DEFAULT_BOT_VIEW.groupDetailTab): void
+  onSettings(): void
+  onOpenMember(bot: BotDefinition): void
 }) {
-  const [open, setOpen] = useState(false)
+  const [memoryOpen, setMemoryOpen] = useState(false)
   const [memberId, setMemberId] = useState(group.memberIds[0])
-  const members = bots.filter((bot) => group.memberIds.includes(bot.id) && !bot.deleting)
-  const member = members.find((bot) => bot.id === memberId) ?? members[0]
-  if (!member) return null
+  const memoryTrigger = useRef<HTMLButtonElement>(null)
+  const members = bots.filter(bot => group.memberIds.includes(bot.id) && !bot.deleting)
+  const member = members.find(bot => bot.id === memberId) ?? members[0]
+  const returnToDetails = () => {
+    setMemoryOpen(false)
+    requestAnimationFrame(() => memoryTrigger.current?.focus())
+  }
   return (
-    <>
-      <section className="bot-detail-section">
-        <button
-          className="text-sm text-muted-foreground hover:text-foreground"
-          aria-expanded={open}
-          onClick={() => setOpen(!open)}
-        >
-          {open ? "收起记忆" : "管理记忆"}
-        </button>
-        {open && members.length > 1 && (
-          <Select value={member.id} onValueChange={setMemberId}>
-            <SelectTrigger aria-label="查看成员记忆" className="mt-3 rounded-xl shadow-none">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {members.map((bot) => (
-                <SelectItem key={bot.id} value={bot.id}>
-                  {bot.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+    <Tabs value={tab} onValueChange={next => {
+      setMemoryOpen(false)
+      onTabChange(next as typeof tab)
+    }}>
+      <BotDetailTabs label="群聊详情导航" tabs={["details", "files", "members", "computer"]}
+        onDetails={memoryOpen ? returnToDetails : undefined} />
+      <TabsContent value="details" className="mt-0">
+        {memoryOpen && member ? (
+          <>
+            <BotMemoryNavigation onBack={returnToDetails} />
+            {members.length > 1 && (
+              <Select value={member.id} onValueChange={setMemberId}>
+                <SelectTrigger aria-label="查看成员记忆" className="mb-3 w-full rounded-xl shadow-none">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent data-bot-popup className="bot-workspace-select rounded-xl">
+                  {members.map(bot => <SelectItem key={bot.id} value={bot.id}>{bot.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            )}
+            <BotMemoryPanel key={member.id} bot={member} client={client} peers={[]}
+              groupId={group.id} groupLabels={groupLabels} />
+          </>
+        ) : (
+          <BotDetailCard label="群聊设置">
+            <BotDetailRow label="群聊设置" icon={<Settings2 size={16} aria-hidden="true" />}
+              description={`${group.memberIds.length} 位 Bot 成员`} onClick={onSettings} />
+            {member && <BotDetailRow ref={memoryTrigger} label="管理记忆" icon={<Brain size={16} aria-hidden="true" />}
+              description="成员共享记忆与本群记忆" onClick={() => setMemoryOpen(true)} />}
+          </BotDetailCard>
         )}
-      </section>
-      {open && (
-        <BotMemoryPanel
-          key={`${group.id}:${member.id}`}
-          bot={member}
-          client={client}
-          peers={[]}
-          groupId={group.id}
-          groupLabels={groupLabels}
-        />
-      )}
-    </>
+      </TabsContent>
+      <TabsContent value="files" className="mt-0">
+        <GroupFiles group={group} bots={bots} client={client} tasks={tasks} />
+      </TabsContent>
+      <TabsContent value="members" className="mt-0">
+        <BotGroupMembers group={group} bots={bots} client={client} onOpen={onOpenMember} />
+      </TabsContent>
+      <TabsContent value="computer" className="mt-0">
+        <GroupBrowser group={group} bots={bots} client={client} />
+      </TabsContent>
+    </Tabs>
   )
 }
 
@@ -246,27 +260,27 @@ function GroupBrowser({
     .map((id) => bots.find((bot) => bot.id === id))
     .filter((bot): bot is BotDefinition => Boolean(bot && !bot.deleting))
   const member = members.find((bot) => bot.id === memberId) ?? members[0]
-  if (!member)
-    return <p className="p-5 text-sm text-muted-foreground">添加群成员后即可查看工作页面。</p>
-  const scope = botGroupBrowserScope(group.id, member.id)
+  const scope = member && botGroupBrowserScope(group.id, member.id)
   return (
-    <>
-      <div className="px-5 pt-4">
-        <Select value={member.id} onValueChange={setMemberId}>
-          <SelectTrigger aria-label="查看成员浏览器" className="rounded-xl shadow-none">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent data-bot-popup className="bot-workspace-select rounded-xl">
-            {members.map((bot) => (
-              <SelectItem key={bot.id} value={bot.id}>
-                {bot.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-      <BotBrowserPanel key={scope} botId={scope} client={client} />
-    </>
+    <BotDetailCard title="工作浏览器" className="bot-computer-card">
+      {member && scope ? (
+        <>
+          <div className="bot-computer-source">
+            {members.length === 1 ? <p>{member.name}</p> : (
+              <Select value={member.id} onValueChange={setMemberId}>
+                <SelectTrigger aria-label="查看成员浏览器" className="w-full rounded-lg shadow-none">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent data-bot-popup className="bot-workspace-select rounded-xl">
+                  {members.map(bot => <SelectItem key={bot.id} value={bot.id}>{bot.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            )}
+          </div>
+          <BotBrowserPanel key={scope} botId={scope} client={client} />
+        </>
+      ) : <p className="bot-detail-empty">添加群成员后即可查看工作页面。</p>}
+    </BotDetailCard>
   )
 }
 
@@ -780,22 +794,8 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
   useEffect(() => {
     if (workPreview && !preview) dismissWorkPreview()
   }, [workPreview, preview, dismissWorkPreview])
-  const workListClient = useMemo(
-    () =>
-      selectedIm && client.works && client.im?.conversationWorks
-        ? {
-            ...client,
-            works: {
-              ...client.works,
-              list: (botId: string, cursor?: string, query?: string) =>
-                client.im!.conversationWorks!(botId, selectedIm.id, cursor, query)
-            }
-          }
-        : client,
-    [client, selectedIm?.id]
-  )
   const works = useBotWorks(
-    workListClient,
+    client,
     selected?.id,
     activeWorkId ?? preview?.workId ?? null,
     snapshot?.revision ?? 0,
@@ -815,6 +815,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
       ? loadedWork
       : null
   const activeWorkTitle = (workDeletionPending ? loadedWork : selectedWork)?.title
+  const taskParentLabel = selectedIm ? `返回群聊「${selectedIm.title}」` : `返回 ${selected?.name ?? "Bot"} 主对话`
   const desktopScheduleWork =
     client.hostId === "local" &&
     !selectedIm &&
@@ -953,11 +954,6 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
       if (workPreviewNavigation.current === intent) workPreviewNavigation.current = { preview: null }
     }
   }
-  const openRoutineDetails = useCallback(() => {
-    if (!currentBotId) return
-    dismissWorkPreview()
-    updateView({ selectedId: currentBotId, groupId: null, detailOpen: true, detailTab: "details" })
-  }, [currentBotId, dismissWorkPreview, updateView])
   // Channel cards retain their existing entry point when the Host resolves their source.
   useEffect(() => {
     if (previewWork && (previewWork.source || previewWork.audienceKey !== "desktop")) {
@@ -2392,22 +2388,17 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
             <>
               <header className="bot-chat-header bot-personal-header" data-task={Boolean(activeWorkId) || undefined}>
                 {activeWorkId ? (
-                  <>
-                    <button type="button" className="bot-task-parent" title={`返回 ${selected.name} 主对话`}
-                      aria-label={`返回 ${selected.name} 主对话`}
-                      onClick={() => {
-                        const group = snapshot?.imConversations?.find(item => item.id === selectedWork?.source?.bindingId)
-                        if (selectedIm) selectWork(null)
-                        else if (group) openImConversation(group.id)
-                        else selectWork(null)
-                      }}>
-                      <ChevronRight size={15} className="rotate-180" aria-hidden="true" />
-                      <BotAvatar color={selected.color} shape={selected.shape} size={24} animated={false} />
-                      <span>{selected.name}</span>
+                  <div className="bot-task-heading">
+                    <button type="button" className="bot-task-parent" title={taskParentLabel}
+                      aria-label={taskParentLabel} onClick={() => selectWork(null)}>
+                      <ChevronRight size={15} className="rotate-180 shrink-0" aria-hidden="true" />
+                      {selectedIm ? <UsersRound size={19} className="shrink-0" aria-hidden="true" /> :
+                        <BotAvatar color={selected.color} shape={selected.shape} size={24} animated={false} />}
+                      <span>{selectedIm?.title ?? selected.name}</span>
                     </button>
                     <span className="bot-task-header-divider" aria-hidden="true" />
                     <h2 className="bot-task-header-title" title={activeWorkTitle}>{activeWorkTitle ?? "任务"}</h2>
-                  </>
+                  </div>
                 ) : (
                 <button
                   className="bot-title-pill"
@@ -2425,6 +2416,9 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                 </button>
                 )}
                 <div className="bot-personal-header-actions">
+                {selectedWork && <BotWorkHeader key={selectedWork.id} client={client} work={selectedWork}
+                  captureWorkNavigation={captureWorkNavigation} controller={works}
+                  disabled={Boolean(selected.archived || selected.deleting)} />}
                 <BotExecutionDetailsToggle hostId={client.hostId} compact />
                 {approvalReturn?.targetThreadId === selectedThreadId && !selectedIm && (
                   <button className="bot-icon-button" aria-label="返回原交办对话" title="返回原交办对话"
@@ -2452,30 +2446,10 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                   </div>
                 )}
               {!activeWorkId && <BotWorkAttention client={client} works={[...works.priority, ...works.items.filter(item => !works.priority.some(p => p.id === item.id))]} onWork={id => selectWork(id)} />}
-              {selectedWork && (
-                <BotWorkHeader
-                  key={selectedWork.id}
-                  client={client}
-                  work={selectedWork}
-                  captureWorkNavigation={captureWorkNavigation}
-                  controller={works}
-                  disabled={Boolean(selected.archived || selected.deleting)}
-                  backLabel={selectedWork.source && !selectedWork.source.personal ? "返回群主对话" : "返回主对话"}
-                  onBack={() => {
-                    const group = snapshot?.imConversations?.find(item => item.id === selectedWork.source?.bindingId)
-                    if (selectedIm) selectWork(null)
-                    else if (group) openImConversation(group.id)
-                    else selectWork(null)
-                  }}
-                />
-              )}
               {activeWorkId && !selectedWork ? (
                 <div className="bot-empty" role="status">
                   {workDeletionPending ? (
-                    <>
-                      <p>{BOT_WORK_DELETION_PENDING_MESSAGE}</p>
-                      <button type="button" onClick={() => selectWork(null)}>返回主对话</button>
-                    </>
+                    <p>{BOT_WORK_DELETION_PENDING_MESSAGE}</p>
                   ) : (
                     <>
                       {works.error ?? "正在读取任务会话…"}
@@ -2496,7 +2470,6 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                   onOpenWork={openWork}
                   captureWorkNavigation={captureWorkNavigation}
                   onOpenWorkConversation={selectWork}
-                  onOpenRoutineDetails={openRoutineDetails}
                   onOpenBot={openPrivateMain}
                   groups={snapshot?.groups ?? []}
                   imGroups={snapshot?.imConversations ?? []}
@@ -2543,7 +2516,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                 onChange={(detailWidth) => updateView({ detailWidth })}
               />
             )}
-            <BotDetailsPane open={detailOpen} label="招乎群详情">
+            <BotDetailsPane open={detailOpen} label="招乎群详情" conversationId={activeWorkId ?? selectedIm.id}>
               <BotImConversationDetails
                 key={selectedIm.id}
                 conversation={selectedIm}
@@ -2576,7 +2549,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                 onChange={(detailWidth) => updateView({ detailWidth })}
               />
             )}
-            <BotDetailsPane open={detailOpen} label="群聊详情">
+            <BotDetailsPane open={detailOpen} label="群聊详情" conversationId={selectedGroup.id}>
               <div className="bot-detail-actions">
                 <button
                   className="bot-icon-button"
@@ -2608,91 +2581,16 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                   }
                 />
               </div>
-              <Tabs
-                value={view.groupDetailTab ?? "details"}
-                onValueChange={(tab) =>
-                  updateView({ groupDetailTab: tab as typeof view.groupDetailTab })
-                }
-              >
-                <TabsList
-                  className="bot-detail-tabs bot-group-detail-tabs h-auto bg-transparent"
-                  aria-label="群聊详情"
-                >
-                  <TabsTrigger
-                    value="details"
-                    className="font-normal data-[state=active]:shadow-none"
-                  >
-                    详情
-                  </TabsTrigger>
-                  <TabsTrigger
-                    value="files"
-                    className="font-normal data-[state=active]:shadow-none"
-                  >
-                    资料库
-                  </TabsTrigger>
-                  <TabsTrigger
-                    value="members"
-                    className="font-normal data-[state=active]:shadow-none"
-                  >
-                    成员
-                  </TabsTrigger>
-                  <TabsTrigger
-                    value="computer"
-                    className="font-normal data-[state=active]:shadow-none"
-                  >
-                    电脑
-                  </TabsTrigger>
-                </TabsList>
-                <TabsContent value="details" className="mt-0">
-                  <section className="bot-group-members text-sm text-muted-foreground">
-                    <p>
-                      {selectedGroup.memberIds.length} 位 Bot 在此协作。群内共享消息和工作资料；每位
-                      Bot 可使用共享记忆和本群记忆。
-                    </p>
-                    <button
-                      className="bot-member-add"
-                      onClick={() => openGroupEditor(selectedGroup)}
-                    >
-                      <Settings2 size={18} />
-                      群聊设置
-                    </button>
-                  </section>
-                  <GroupMemory
-                    key={selectedGroup.id}
-                    group={selectedGroup}
-                    bots={snapshot?.bots ?? []}
-                    client={client}
-                    groupLabels={memoryGroupLabels}
-                  />
-                </TabsContent>
-                <TabsContent value="members" className="mt-0">
-                  <BotGroupMembers
-                    key={`${client.hostId}:${selectedGroup.id}`}
-                    group={selectedGroup}
-                    bots={snapshot?.bots ?? []}
-                    client={client}
-                    onOpen={(bot) => openPrivateMain(bot.id)}
-                  />
-                </TabsContent>
-                <TabsContent value="files" className="mt-0">
-                  <GroupFiles
-                    group={selectedGroup}
-                    bots={snapshot?.bots ?? []}
-                    client={client}
-                    tasks={selectedGroup.memberIds.flatMap(
-                      (id) => tasksByThread.get(`group-${selectedGroup.id}-${id}`) ?? []
-                    )}
-                  />
-                </TabsContent>
-                <TabsContent value="computer" className="mt-0">
-                  <GroupBrowser
-                    key={selectedGroup.id}
-                    group={selectedGroup}
-                    bots={snapshot?.bots ?? []}
-                    client={client}
-                  />
-                </TabsContent>
-              </Tabs>
+              <GroupDetails key={selectedGroup.id}
+                group={selectedGroup} bots={snapshot?.bots ?? []} client={client}
+                groupLabels={memoryGroupLabels}
+                tasks={selectedGroup.memberIds.flatMap(id =>
+                  tasksByThread.get(`group-${selectedGroup.id}-${id}`) ?? [])}
+                tab={view.groupDetailTab ?? "details"}
+                onTabChange={groupDetailTab => updateView({ groupDetailTab })}
+                onSettings={() => openGroupEditor(selectedGroup)}
+                onOpenMember={bot => openPrivateMain(bot.id)}
+              />
             </BotDetailsPane>
           </>
         )}
@@ -2726,7 +2624,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                   onRetry={() => { void works.refresh() }}
                 />
             )}
-            <BotDetailsPane open={personalDetailOpen} label="Bot 详情">
+            <BotDetailsPane open={personalDetailOpen} label="Bot 详情" conversationId={activeWorkId ?? selected.id}>
               <div>
               <div className="bot-detail-actions">
                 <Popover>
@@ -2846,29 +2744,8 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                   if (tab === "details" || tab === "files" || tab === "computer") setDetailTab(tab)
                 }}
               >
-                <TabsList className="bot-detail-tabs h-auto bg-transparent" aria-label="Bot 详情">
-                  <TabsTrigger
-                    value="details"
-                    className="font-normal data-[state=active]:shadow-none"
-                    onClick={() => {
-                      if (detailTab === "memory") setDetailTab("details")
-                    }}
-                  >
-                    详情
-                  </TabsTrigger>
-                  <TabsTrigger
-                    value="files"
-                    className="font-normal data-[state=active]:shadow-none"
-                  >
-                    资料库
-                  </TabsTrigger>
-                  <TabsTrigger
-                    value="computer"
-                    className="font-normal data-[state=active]:shadow-none"
-                  >
-                    电脑
-                  </TabsTrigger>
-                </TabsList>
+                <BotDetailTabs label="Bot 详情导航" tabs={["details", "files", "computer"]}
+                  onDetails={detailTab === "memory" ? () => setDetailTab("details") : undefined} />
                 <TabsContent
                   value={detailTab === "memory" ? "details" : detailTab}
                   className="mt-0"
@@ -2920,35 +2797,15 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                       }}
                     />
                   ) : (
-                    <div className="bot-personal-details">
-                      <section className="bot-detail-section">
-                        <h3>职责</h3>
-                        <p>
-                          {selected.instructions ||
-                            "你可以在对话中交办工作，也可以为它设定长期职责。"}
-                        </p>
-                        <button onClick={(event) => openBotEditor(selected, event.currentTarget)}>
-                          编辑职责
-                        </button>
-                        <button
-                          ref={memoryTriggerRef}
-                          className="ml-4"
-                          onClick={() => setDetailTab("memory")}
-                        >
-                          管理记忆
-                        </button>
-                        {client.im && (
-                          <button
-                            className="ml-4"
-                            onClick={() => {
-                              setImBindingId(null)
-                              setImBot(selected)
-                            }}
-                          >
-                            招乎接入
-                          </button>
-                        )}
-                      </section>
+                    <div className="bot-detail-cards">
+                      <BotDetailCard label="Bot 设置">
+                        <BotDetailRow label="职责与设置" icon={<Settings2 size={16} aria-hidden="true" />}
+                          description={selected.instructions?.trim()} onClick={event => openBotEditor(selected, event.currentTarget)} />
+                        <BotDetailRow ref={memoryTriggerRef} label="管理记忆" icon={<Brain size={16} aria-hidden="true" />}
+                          onClick={() => setDetailTab("memory")} />
+                        {client.im && <BotDetailRow label="招乎接入" icon={<MessageCircle size={16} aria-hidden="true" />}
+                          onClick={() => { setImBindingId(null); setImBot(selected) }} />}
+                      </BotDetailCard>
                       <BotWorkPanel
                         key={`${client.hostId}:${selected.id}`}
                         client={client}
@@ -2968,6 +2825,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                         botId={selected.id}
                         client={client}
                         work={desktopScheduleWork}
+                        readOnly={Boolean(selected.archived || selected.deleting)}
                         allowCreate={
                           !activeWorkId ||
                           client.hostId !== "local" ||
@@ -2990,23 +2848,19 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                               item.workMonitor?.workId === desktopScheduleWork.id)
                         )}
                       />
-                      {!activeWorkId && <section className="bot-detail-card bot-detail-settings" aria-label="Bot 设置">
-                        <button type="button" onClick={(event) => openBotEditor(selected, event.currentTarget)}>
-                          <Settings2 size={16} aria-hidden="true" /><span>职责与设置</span><ChevronRight size={14} aria-hidden="true" />
-                        </button>
-                        <button type="button" onClick={() => setDetailTab("memory")}>
-                          <Brain size={16} aria-hidden="true" /><span>记忆</span><ChevronRight size={14} aria-hidden="true" />
-                        </button>
-                      </section>}
-                      {tasks.length > 0 && <details className="bot-detail-activity">
-                        <summary><span>最近活动{recentTasks.some(task => task.error) && <small className="bot-detail-activity-error"> · 有异常</small>}</span><ChevronRight size={13} aria-hidden="true" /></summary>
+                      {tasks.length > 0 && <details className="bot-detail-card bot-detail-activity">
+                        <summary className="bot-detail-row">
+                          <History size={16} aria-hidden="true" />
+                          <span className="bot-detail-row-copy"><span>最近活动{recentTasks.some(task => task.error) && <small className="bot-detail-activity-error"> · 有异常</small>}</span></span>
+                          <ChevronRight size={14} aria-hidden="true" />
+                        </summary>
                         {recentTasks.map((task) => (
-                            <details className="bot-detail-activity-item" key={task.id}>
-                              <summary><span>{STATE_LABELS[task.state]}</span><span>{botTaskPreview(task).replace(/\s+/g, " ").slice(0, 100)}</span></summary>
-                              <p>{botTaskPreview(task)}</p>
-                              {task.error && <small role="alert">{task.error}</small>}
-                            </details>
-                          ))}
+                          <details className="bot-detail-activity-item" key={task.id}>
+                            <summary><span>{STATE_LABELS[task.state]}</span><span>{botTaskPreview(task).replace(/\s+/g, " ").slice(0, 100)}</span></summary>
+                            <p>{botTaskPreview(task)}</p>
+                            {task.error && <small role="alert">{task.error}</small>}
+                          </details>
+                        ))}
                       </details>}
                     </div>
                   )}

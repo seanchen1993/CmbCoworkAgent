@@ -95,6 +95,7 @@ async function main() {
                     "./BotDeliveredFile",
                     "./BotBrowserPanel",
                     "./BotSchedulePanel",
+                    "./BotScheduleEditor",
                     "./BotAvatar",
                     "./BotAppearancePicker",
                     "./BotRuntimeAvatar",
@@ -410,14 +411,14 @@ async function main() {
     ])
     await page.getByRole("button", { name: "收起执行过程", exact: true }).click()
 
-    await page.getByRole("button", { name: "电脑", exact: true }).click()
+    await page.getByRole("tab", { name: "电脑", exact: true }).click()
     await page.waitForFunction(() =>
       (window as any).fixture.calls.some(
         (c: any[]) => c[0] === "browser" && c[1] === "work-work-a--bot"
       )
     )
     await page.screenshot({ animations: "disabled", path: join(artifacts, "bot-im-computer.png") })
-    await page.getByRole("button", { name: "电脑", exact: true }).click()
+    await page.getByRole("tab", { name: "详情", exact: true }).click()
     await page.screenshot({
       animations: "disabled",
       path: join(artifacts, "bot-im-group-light.png")
@@ -442,8 +443,8 @@ async function main() {
     )
     const details = page.getByLabel("招乎群详情", { exact: true })
     await details.getByRole("heading", { name: "群内任务" }).waitFor()
-    const taskHeader = page.locator(".bot-task-toolbar")
-    await taskHeader.getByRole("button", { name: "返回群主对话", exact: true }).waitFor()
+    const taskHeader = page.locator(".bot-personal-header[data-task]")
+    await taskHeader.getByRole("button", { name: "返回群聊「产品协作群」", exact: true }).waitFor()
     assert.equal(await details.getByText("返回主对话", { exact: true }).count(), 0)
     await taskHeader.getByRole("button", { name: "任务更多操作", exact: true }).click()
     await page.getByRole("button", { name: "在对话模式打开", exact: true }).click()
@@ -461,7 +462,7 @@ async function main() {
     await page.screenshot({ animations: "disabled", path: join(artifacts, "bot-im-task-ordinary-workbench.png") })
     await ordinary.getByRole("button", { name: "返回群内任务", exact: true }).click()
     await page.getByTestId("private-conversation").getByText("任务对话：演示准备清单").waitFor()
-    await taskHeader.getByRole("button", { name: "返回群主对话", exact: true }).waitFor()
+    await taskHeader.getByRole("button", { name: "返回群聊「产品协作群」", exact: true }).waitFor()
     assert.equal(await page.locator('[data-bot-row-key="im:group-a"]').getAttribute("data-selected"), "true")
     await taskHeader.getByRole("button", { name: "完成任务", exact: true }).click()
     await taskHeader.getByRole("button", { name: "继续处理", exact: true }).waitFor()
@@ -470,16 +471,16 @@ async function main() {
       path: join(artifacts, "bot-im-task-scope.png")
     })
     await page.keyboard.press("Escape")
-    await details.getByRole("button", { name: "电脑", exact: true }).click()
+    await details.getByRole("tab", { name: "电脑", exact: true }).click()
     await page.waitForFunction(() =>
       (window as any).fixture.calls.some(
         (c: any[]) => c[0] === "browser" && c[1] === "work-work-a--bot"
       )
     )
-    await details.getByRole("button", { name: "电脑", exact: true }).click()
+    await details.getByRole("tab", { name: "详情", exact: true }).click()
     await taskHeader.getByRole("button", { name: "继续处理", exact: true }).click()
     await taskHeader.getByRole("button", { name: "完成任务", exact: true }).waitFor()
-    await taskHeader.getByRole("button", { name: "返回群主对话", exact: true }).click()
+    await taskHeader.getByRole("button", { name: "返回群聊「产品协作群」", exact: true }).click()
     await page.getByLabel("产品协作群消息记录").waitFor()
     await unread("group-a").waitFor({ state: "detached" })
     await page.evaluate(() => {
@@ -497,7 +498,7 @@ async function main() {
     await page.getByLabel("产品协作群消息记录").waitFor()
     assert.equal(await page.getByTestId("private-conversation").count(), 0)
     await details.getByRole("button", { name: "前往私人主对话", exact: true }).waitFor()
-    await details.getByRole("button", { name: "记忆", exact: true }).click()
+    await details.getByRole("button", { name: "管理记忆", exact: true }).click()
     await details.getByText("团队写作格式", { exact: true }).waitFor()
     await details.getByText("演示约定", { exact: true }).waitFor()
     assert.equal(await details.getByText("私人偏好", { exact: true }).count(), 0)
@@ -505,10 +506,10 @@ async function main() {
     await details.getByText("群内 · 产品协作群", { exact: true }).waitFor()
     // Memory is a detail subview; returning keeps the same group and restores keyboard focus.
     await details.getByRole("button", { name: "返回详情", exact: true }).click()
-    await details.getByRole("button", { name: "记忆", exact: true }).waitFor()
-    await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "记忆")
+    await details.getByRole("button", { name: "管理记忆", exact: true }).waitFor()
+    await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "管理记忆")
     await page.getByLabel("产品协作群消息记录").waitFor()
-    await details.getByRole("button", { name: "记忆", exact: true }).click()
+    await details.getByRole("button", { name: "管理记忆", exact: true }).click()
     await details.getByRole("button", { name: "编辑 演示约定", exact: true }).click()
     await details.getByRole("combobox", { name: "记忆使用范围", exact: true }).click()
     await page.getByRole("option", { name: "Bot 共享", exact: true }).click()
@@ -530,7 +531,7 @@ async function main() {
     const privateDetails = page
       .getByLabel("Bot 详情", { exact: true })
       .filter({ has: page.locator(".bot-profile") })
-    await privateDetails.getByRole("heading", { name: "职责", exact: true }).waitFor()
+    await privateDetails.getByRole("region", { name: "Bot 设置", exact: true }).waitFor()
     await privateDetails.getByRole("button", { name: "管理记忆", exact: true }).click()
     await privateDetails.getByText("私人偏好", { exact: true }).waitFor()
     await privateDetails.getByText("群内 · 体验优化小组", { exact: true }).waitFor()
@@ -586,7 +587,7 @@ async function main() {
       f.bump()
     })
     await privateDetails.getByRole("button", { name: "返回详情", exact: true }).click()
-    await privateDetails.getByRole("heading", { name: "职责", exact: true }).waitFor()
+    await privateDetails.getByRole("region", { name: "Bot 设置", exact: true }).waitFor()
     await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "管理记忆")
     await page.getByTestId("private-conversation").getByText("私人主对话").waitFor()
     assert.equal(await page.getByRole("button", { name: /演示准备清单/ }).count(), 0)
@@ -600,7 +601,7 @@ async function main() {
     })
     await page.waitForFunction(() => window.innerHeight === 700)
     for (const closeWith of ["Close", "取消", "Escape"]) {
-      await privateDetails.getByRole("button", { name: "编辑职责", exact: true }).click()
+      await privateDetails.getByRole("button", { name: "职责与设置", exact: true }).click()
       const editor = page.getByRole("dialog", { name: "编辑 Bot", exact: true })
       await editor.waitFor()
       assert.equal(await editor.getByLabel("Bot 名称", { exact: true }).inputValue(), "招乎T")
@@ -620,7 +621,7 @@ async function main() {
       if (closeWith === "Escape") await page.keyboard.press("Escape")
       else await editor.getByRole("button", { name: closeWith, exact: true }).click()
       await editor.waitFor({ state: "detached" })
-      await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "编辑职责")
+      await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "职责与设置")
     }
     await app.evaluate(({ BrowserWindow }, size) => {
       BrowserWindow.getAllWindows()[0].setContentSize(size[0], size[1])
@@ -654,7 +655,7 @@ async function main() {
     await dialog.getByText("已过期测试群", { exact: true }).waitFor({ state: "detached" })
     await page.keyboard.press("Escape")
     await privateDetails
-      .locator(".bot-detail-section")
+      .getByRole("region", { name: "Bot 设置", exact: true })
       .getByRole("button", { name: "招乎接入", exact: true })
       .click()
     await page.getByRole("heading", { name: "招乎接入 · 招乎T", exact: true }).waitFor()
@@ -679,7 +680,7 @@ async function main() {
       0
     )
     assert.equal(await details.getByRole("button", { name: /演示准备清单/ }).count(), 0)
-    await details.getByRole("button", { name: "记忆", exact: true }).click()
+    await details.getByRole("button", { name: "管理记忆", exact: true }).click()
     await details.getByText("演示约定", { exact: true }).waitFor()
     await details.getByText("体验组约定", { exact: true }).waitFor()
     assert.equal(await details.getByText("私人偏好", { exact: true }).count(), 0)
@@ -690,6 +691,23 @@ async function main() {
       f.bump()
     })
     await page.getByText("接入已解除，历史消息仍可查看", { exact: true }).waitFor()
+    await details.getByRole("button", { name: "返回详情", exact: true }).click()
+    const historicRoutines = details.getByRole("region", { name: "例行任务" })
+    await historicRoutines.getByText("暂无历史例行任务", { exact: true }).waitFor()
+    await page.evaluate(() => {
+      const f = (window as any).fixture
+      f.schedules = [{ id: "archived-routine", botId: "bot", audienceKey: "im:group-b", version: 1,
+        name: "群日程历史", message: "整理本周事项", frequency: "weekly", weekday: 5, runAtTime: "17:00",
+        timezone: "Asia/Shanghai", enabled: false, nextRunAt: null }]
+      f.bump()
+    })
+    await historicRoutines.getByRole("button", { name: "查看例行任务" }).click()
+    const routineDetails = page.getByRole("dialog", { name: "例行任务详情", exact: true })
+    assert.equal(await routineDetails.getByRole("textbox", { name: "名称", exact: true }).inputValue(), "群日程历史")
+    assert.equal(await routineDetails.getByRole("textbox", { name: "名称", exact: true }).isDisabled(), true)
+    assert.equal(await routineDetails.getByRole("button", { name: /^(保存|删除)$/ }).count(), 0)
+    await routineDetails.getByRole("button", { name: "关闭详情" }).click()
+    assert.equal(await historicRoutines.getByRole("button", { name: "启用例行任务" }).count(), 0)
     await page.evaluate(() => document.documentElement.classList.add("dark"))
     await page.screenshot({
       animations: "disabled",
@@ -962,7 +980,7 @@ async function main() {
     await page.getByText("接入已解除，历史消息仍可查看", { exact: true }).waitFor()
     await page.getByRole("button", { name: "查看独立任务", exact: true }).first().click()
     await page.getByTestId("private-conversation").getByText("任务对话：演示准备清单").waitFor()
-    await page.locator(".bot-task-toolbar").getByRole("button", { name: "返回群主对话", exact: true }).click()
+    await page.locator(".bot-personal-header[data-task]").getByRole("button", { name: "返回群聊「产品协作群」", exact: true }).click()
     await page.getByLabel("产品协作群消息记录").waitFor()
     assert.equal(
       await page.locator('[data-bot-row-key="im:group-a"]').getAttribute("data-selected"),
@@ -1154,7 +1172,7 @@ async function main() {
     )
     await page.getByTestId("private-conversation").getByText("任务对话：演示准备清单").waitFor()
     assert.equal(await deletedRow.count(), 0)
-    await page.locator(".bot-task-toolbar").getByRole("button", { name: "返回群主对话", exact: true }).click()
+    await page.locator(".bot-personal-header[data-task]").getByRole("button", { name: "返回群聊「产品协作群」", exact: true }).click()
     await page
       .getByLabel("产品协作群消息记录")
       .getByText("已整理好本周的项目进展。", { exact: true })

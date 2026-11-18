@@ -1208,6 +1208,8 @@ export interface UserInputQuestion {
 export interface UserInputRequest {
   requestId: string
   threadId: string
+  /** A host-created, desktop-only choice bound to one Bot conversation operation. */
+  kind?: "bot_conversation_action"
   questions: UserInputQuestion[]
   autoResolutionMs?: number
   createdAt: string

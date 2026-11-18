@@ -338,10 +338,11 @@
   font-size: 12px;
   text-align: center;
 }
-.bot-im-profile {
-  padding-bottom: 30px;
-}
 .bot-im-profile h2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
   max-width: 100%;
   font-size: 20px;
   font-weight: 550;
@@ -353,88 +354,10 @@
   color: var(--bot-muted);
   font-size: 12px;
 }
-.bot-im-details-section {
-  margin: 0 4px 28px;
-}
-.bot-im-details-section h3 {
-  margin-bottom: 14px;
-  color: var(--bot-muted);
-  font-size: 12px;
-  font-weight: 400;
-}
-.bot-im-details-section p {
-  color: var(--bot-muted);
-  font-size: 12px;
-  line-height: 1.8;
-  margin-bottom: 10px;
-}
-.bot-im-owner {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  width: calc(100% + 16px);
-  margin: 0 -8px;
-  padding: 11px 8px;
-  border-radius: 10px;
-  text-align: left;
-}
-.bot-im-owner-copy {
-  flex: 1;
-  min-width: 0;
-}
-.bot-im-owner strong,
-.bot-im-work strong {
-  display: block;
-  font-size: 13px;
-  font-weight: 500;
-  overflow-wrap: anywhere;
-}
-.bot-im-owner small,
-.bot-im-work small {
-  display: block;
-  font-size: 11px;
-  color: var(--bot-muted);
-  margin-top: 4px;
-}
-.bot-im-owner > svg,
-.bot-im-work > svg {
-  color: var(--bot-muted);
-  flex-shrink: 0;
-}
-.bot-im-section-heading {
-  display: flex;
-  justify-content: space-between;
-  color: var(--bot-muted);
-  font-size: 12px;
-}
-.bot-im-work {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  width: 100%;
-  text-align: left;
-  padding: 13px 0;
-  border-bottom: 1px solid var(--bot-line);
-}
-.bot-im-work:hover strong {
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-.bot-im-owner:hover {
-  background: var(--bot-hover);
-}
-.bot-im-text-button[aria-expanded="true"] > svg {
-  transform: rotate(90deg);
-}
 .bot-im-text-button {
   font-size: 12px;
   margin-top: 8px;
   color: var(--bot-muted);
-}
-.bot-im-connection-section {
-  padding-top: 20px;
-  border-top: 1px solid var(--bot-line);
 }
 @container bot-sidebar (max-width: 179px) {
   .bot-im-list > h3,
@@ -452,10 +375,6 @@
   .bot-im-list {
     margin-top: 12px;
   }
-}
-
-.bot-im-details-section .bot-browser-panel {
-  padding: 16px 0 0;
 }
 
 .bot-im-transcript[hidden] {

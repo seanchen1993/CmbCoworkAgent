@@ -1,7 +1,9 @@
 import { botMemoryScopeLabel, type BotMemoryScope } from "../../../../shared/bots/memory-scope"
 import { botErrorMessage } from "@/lib/bot-error-message"
 import { useEffect, useId, useRef, useState } from "react"
-import { ArrowLeft, Check, Loader2, Pencil, Plus, Share2, Trash2, X } from "lucide-react"
+import { ArrowLeft, Check, Loader2, MoreHorizontal, Plus, Share2, Trash2, X } from "lucide-react"
+import * as Menu from "@radix-ui/react-dropdown-menu"
+import { BotDetailCard } from "./BotDetailsPane"
 import { Button } from "@/components/ui/button"
 import {
   Select,
@@ -21,6 +23,19 @@ const memoryDescriptions: Record<BotMemoryMode, string> = {
   inherit: "跟随设置中的记忆开关，仅用于此 Bot。",
   enabled: "在对话中读取和保存记忆，优先于全局设置。",
   disabled: "暂停读取和自动保存，已有记忆仍可管理。"
+}
+
+export function BotMemoryNavigation({ onBack, disabled }: { onBack(): void; disabled?: boolean }) {
+  const back = useRef<HTMLButtonElement>(null)
+  useEffect(() => { back.current?.focus() }, [])
+  return (
+    <div className="bot-memory-navigation">
+      <button ref={back} type="button" disabled={disabled} onClick={onBack}>
+        <ArrowLeft size={14} aria-hidden="true" /> 返回详情
+      </button>
+      <span>记忆管理</span>
+    </div>
+  )
 }
 
 export function BotMemoryPanel({
@@ -56,7 +71,6 @@ export function BotMemoryPanel({
   const refreshRef = useRef<() => void>(() => {})
   const lock = useRef(false)
   const mounted = useRef(true)
-  const backRef = useRef<HTMLButtonElement>(null)
   const recipients = peers.filter((bot) => bot.id !== botId && !bot.archived)
   const recipientAvailable = recipients.some((bot) => bot.id === recipient)
   const groupLabel = (id: string) => groupLabels?.get(id) ?? "原群聊（记录不可用）"
@@ -67,9 +81,6 @@ export function BotMemoryPanel({
     (editing && editing !== "new" && editing.scope?.kind === "group"
       ? editing.scope.groupId
       : undefined)
-  useEffect(() => {
-    backRef.current?.focus()
-  }, [])
   useEffect(() => {
     mounted.current = true
     let disposed = false
@@ -157,56 +168,46 @@ export function BotMemoryPanel({
       if (mounted.current) setBusy(false)
     }
   }
-  return (
-    <section className="bot-detail-section">
-      {onBack && (
-        <div className="bot-memory-navigation">
-          <button ref={backRef} type="button" disabled={busy} onClick={onBack}>
-            <ArrowLeft size={14} /> 返回详情
-          </button>
-          <span>记忆管理</span>
-        </div>
-      )}
-      <div className="bot-memory-config">
-        <div className="bot-memory-config-row">
-          <span className="font-medium">记忆配置</span>
-          <Select
-            value={memoryMode}
-            disabled={busy}
-            onValueChange={(value) => void changeMemoryMode(value as BotMemoryMode)}
-          >
-            <SelectTrigger
-              aria-label="记忆配置"
-              aria-describedby={memoryDescriptionId}
-              className="bot-memory-config-trigger h-8 w-auto gap-2 rounded-lg border-0 px-2 py-1 text-xs shadow-none"
-            >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent align="end" showScrollButtons={false}>
-              <SelectItem value="inherit">跟随全局</SelectItem>
-              <SelectItem value="enabled">开启</SelectItem>
-              <SelectItem value="disabled">关闭</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        <p id={memoryDescriptionId} className="bot-memory-config-description">
-          {memoryDescriptions[memoryMode]}
-        </p>
-      </div>
-      <div className="mb-4 flex items-center justify-between">
-        <h3 className="!mb-0">{groupId ? "记忆" : "全部记忆"}</h3>
-        <button
-          className="bot-icon-button"
-          aria-label="添加记忆"
-          disabled={busy}
-          onClick={() => edit("new")}
+  const configuration = (
+    <BotDetailCard title={groupId ? "Bot 记忆配置" : "记忆配置"} actions={
+      <Select
+        value={memoryMode}
+        disabled={busy}
+        onValueChange={(value) => void changeMemoryMode(value as BotMemoryMode)}
+      >
+        <SelectTrigger
+          aria-label="记忆配置"
+          aria-describedby={memoryDescriptionId}
+          className="bot-memory-config-trigger h-8 w-auto gap-2 rounded-lg border-0 px-2 py-1 text-xs shadow-none"
         >
-          <Plus size={16} />
-        </button>
-      </div>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent align="end" showScrollButtons={false}>
+          <SelectItem value="inherit">跟随全局</SelectItem>
+          <SelectItem value="enabled">开启</SelectItem>
+          <SelectItem value="disabled">关闭</SelectItem>
+        </SelectContent>
+      </Select>
+    }>
+      <p id={memoryDescriptionId} className="bot-detail-empty">
+        {groupId ? `适用于「${bot.name}」的私聊和所有群聊。` : memoryDescriptions[memoryMode]}
+      </p>
+    </BotDetailCard>
+  )
+  const memories = (
+    <BotDetailCard title={groupId ? "群聊可用记忆" : "全部记忆"} actions={
+      <button
+        className="bot-icon-button"
+        aria-label="添加记忆"
+        disabled={busy}
+        onClick={() => edit("new")}
+      >
+        <Plus size={16} />
+      </button>
+    }>
       {!groupId && (
         <p className="mb-3 text-xs text-muted-foreground">
-          可管理此 Bot 保留的所有记忆。群内记忆仍仅用于所属群，不会用于私聊。
+          群内记忆仅用于所属群。
         </p>
       )}
       {(error || readError) && (
@@ -285,6 +286,7 @@ export function BotMemoryPanel({
           <label className="bot-field">
             名称
             <input
+              autoFocus
               required
               maxLength={120}
               value={name}
@@ -323,44 +325,32 @@ export function BotMemoryPanel({
         entries.length ? (
           entries.map((entry) => (
             <article className="bot-task-item" key={entry.id}>
-              <div className="flex items-center justify-between gap-2">
-                <h4 className="truncate font-medium">{entry.name}</h4>
-                <div className="flex shrink-0">
-                  {recipients.length > 0 && (
-                    <button
-                      className="bot-icon-button"
-                      aria-label={`分享 ${entry.name}`}
-                      disabled={busy}
-                      onClick={() => {
-                        setSharing(entry.id)
-                        setRecipient("")
-                        setDeleting(null)
-                        setNotice(null)
-                      }}
-                    >
-                      <Share2 size={13} />
-                    </button>
-                  )}
-                  <button
-                    className="bot-icon-button"
-                    aria-label={`编辑 ${entry.name}`}
-                    disabled={busy}
-                    onClick={() => edit(entry)}
-                  >
-                    <Pencil size={13} />
-                  </button>
-                  <button
-                    className="bot-icon-button"
-                    aria-label={`删除 ${entry.name}`}
-                    disabled={busy}
-                    onClick={() => {
-                      setDeleting(entry.id)
-                      setSharing(null)
-                    }}
-                  >
-                    <Trash2 size={13} />
-                  </button>
-                </div>
+              <div className="bot-memory-entry-heading">
+                <button type="button" className="bot-memory-edit" disabled={busy} title={entry.name}
+                  aria-label={`编辑 ${entry.name}`} onClick={() => edit(entry)}>{entry.name}</button>
+                <Menu.Root>
+                  <Menu.Trigger asChild>
+                    <button type="button" className="bot-icon-button" disabled={busy}
+                      aria-label={`${entry.name}的更多操作`}><MoreHorizontal size={16} /></button>
+                  </Menu.Trigger>
+                  <Menu.Portal>
+                    <Menu.Content align="end" sideOffset={4} collisionPadding={8}
+                      data-bot-popup className="bot-workspace-menu bot-memory-menu">
+                      {recipients.length > 0 && (
+                        <Menu.Item onSelect={() => {
+                          setSharing(entry.id)
+                          setRecipient("")
+                          setDeleting(null)
+                          setNotice(null)
+                        }}><Share2 size={14} /> 分享给 Bot</Menu.Item>
+                      )}
+                      <Menu.Item className="text-destructive" onSelect={() => {
+                        setDeleting(entry.id)
+                        setSharing(null)
+                      }}><Trash2 size={14} /> 删除记忆</Menu.Item>
+                    </Menu.Content>
+                  </Menu.Portal>
+                </Menu.Root>
               </div>
               <span className="bot-memory-scope-label" title={scopeLabel(entry.scope)}>
                 {scopeLabel(entry.scope)}
@@ -447,14 +437,20 @@ export function BotMemoryPanel({
             </article>
           ))
         ) : (
-          <div className="bot-memory-empty">
-            <p>暂无记忆</p>
-            <p className="mt-1 text-xs">保存的偏好和经验会显示在这里，可随时编辑。</p>
-          </div>
+          <p className="bot-detail-empty">暂无记忆</p>
         )
       ) : (
         !error && !readError && <Loader2 className="size-4 animate-spin" />
       )}
-    </section>
+    </BotDetailCard>
+  )
+  return (
+    <>
+      {onBack && <BotMemoryNavigation onBack={onBack} disabled={busy} />}
+      <div className="bot-detail-cards bot-memory-panel">
+        {configuration}
+        {memories}
+      </div>
+    </>
   )
 }

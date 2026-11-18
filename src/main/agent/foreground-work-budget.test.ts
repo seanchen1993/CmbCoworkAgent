@@ -86,6 +86,9 @@ describe("main Bot foreground allowance", () => {
     for (const name of [
       "request_user_input",
       "bot_request_browser_help",
+      "bot_work_delete",
+      "bot_thread_delete",
+      "bot_work_unlink",
       "bot_work_send",
       "bot_work_list",
       "bot_schedule"

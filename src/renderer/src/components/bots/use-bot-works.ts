@@ -40,6 +40,11 @@ export function useBotWorks(
     loadedPages = useRef(1)
   const current = useRef({ botId, selectedId, audience })
   current.current = { botId, selectedId, audience }
+  const listPage = useCallback((id: string, cursor?: string) => {
+    if (audience === "desktop") return client.works!.list(id, cursor, query)
+    if (!client.im?.conversationWorks) throw new BotError("UNSUPPORTED_HOST", "当前主机不支持查看招乎群任务")
+    return client.im.conversationWorks(id, audience, cursor, query)
+  }, [client, audience, query])
   const load = useCallback(
     async (changed: Set<string> | null) => {
       const token = ++generation.current
@@ -54,7 +59,7 @@ export function useBotWorks(
         const readDetail =
           !!selectedId && !removed.current.has(selectedId) && (!changed || changed.has(selectedId))
         const [page, detail] = await Promise.all([
-          client.works.list(botId, undefined, query),
+          listPage(botId),
           readDetail ? client.works.get(botId, selectedId!).then(
             work => ({ work, error: null }),
             cause => {
@@ -70,7 +75,7 @@ export function useBotWorks(
           const seen = new Set<string>()
           for (let index = 1; index < loadedPages.current && nextCursor && !seen.has(nextCursor); index++) {
             seen.add(nextCursor)
-            const next = await client.works.list(botId, nextCursor, query)
+            const next = await listPage(botId, nextCursor)
             if (generation.current !== token) return
             for (const item of next.items) merged.set(item.id, item)
             nextCursor = next.nextCursor
@@ -120,7 +125,7 @@ export function useBotWorks(
         if (generation.current === token) setLoading(false)
       }
     },
-    [client, botId, selectedId, query, scope]
+    [client, botId, selectedId, query, scope, listPage]
   )
   const latestLoad = useRef(load)
   latestLoad.current = load
@@ -229,7 +234,7 @@ export function useBotWorks(
     setLoading(true)
     pending.current = (async () => {
       try {
-        const page = await client.works!.list(botId, cursor, query)
+        const page = await listPage(botId, cursor)
         if (token !== generation.current) return
         loadedPages.current++
         setItems((old) => {

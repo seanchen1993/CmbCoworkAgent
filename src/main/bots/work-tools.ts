@@ -14,7 +14,8 @@ import { parseSchedule } from "../../shared/bots/validation"
 export function createBotWorkTools(
   task: Pick<BotTask, "id" | "workId" | "mockSource"> & Partial<Pick<BotTask, "origin">>,
   getHost: () => LocalBotHost,
-  signal: AbortSignal
+  signal: AbortSignal,
+  onWaiting?: (waiting: boolean) => void
 ): DynamicStructuredTool[] {
   const taskId = task.id
   // An introduction can receive a live user submission through steering. The
@@ -205,31 +206,31 @@ export function createBotWorkTools(
     ),
     tool(
       async ({ requestKey, ...input }, config) => invoke("bot_work_unlink", config, host =>
-        host.unlinkWorkFromTool({ taskId, callId: config.toolCall!.id!, key: requestKey }, input, signal)),
+        host.unlinkWorkFromTool({ taskId, callId: config.toolCall!.id!, key: requestKey, onWaiting }, input, signal)),
       {
         name: "bot_work_unlink",
         metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
-        description: "Remove this Bot's association with the local work explicitly selected by the current desktop user. Use the workId and current version from bot_work_list. The original conversation, history and files stay available. Only use for an explicit request to remove the association. Reuse the same arguments and requestKey if the reply is lost.",
+        description: "Unlink the exact local work requested by the desktop user, keeping its conversation, history and files. Use the workId and version from bot_work_list. The tool asks in this chat if open browser pages cannot follow the conversation. Respect a cancelled choice. Reuse the same arguments and requestKey if the reply is lost.",
         schema: z.object({ requestKey: key, workId: id, expectedVersion: z.number().int().positive() }).strict()
       }
     ),
     tool(
       async ({ requestKey, ...input }, config) => invoke("bot_thread_delete", config, host =>
-        host.deleteOrdinaryThreadFromTool({ taskId, callId: config.toolCall!.id!, key: requestKey }, input, signal)),
+        host.deleteOrdinaryThreadFromTool({ taskId, callId: config.toolCall!.id!, key: requestKey, onWaiting }, input, signal)),
       {
         name: "bot_thread_delete",
         metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
-        description: "Request permanent deletion of the ordinary local conversation explicitly selected by the current desktop user. Use the exact conversation reference and expectedTitle from bot_thread_list/read. The desktop shows the actual target for confirmation; a tool argument or historical approval cannot confirm deletion. Project files are kept. Do not use for managed work; use bot_work_delete. Retry uncertain results with identical arguments and requestKey.",
+        description: "Permanently delete the ordinary local conversation explicitly selected by the current desktop user. Use its exact reference and expectedTitle from bot_thread_list/read. The tool confirms the original history in this chat. For managed work use bot_work_delete. Respect a cancelled choice. Retry uncertain results with identical arguments and requestKey.",
         schema: z.object({ requestKey: key, conversation, expectedTitle: z.string().min(1).max(4096) }).strict()
       }
     ),
     tool(
       async ({ requestKey, ...input }, config) => invoke("bot_work_delete", config, host =>
-        host.deleteWorkFromTool({ taskId, callId: config.toolCall!.id!, key: requestKey }, input, signal)),
+        host.deleteWorkFromTool({ taskId, callId: config.toolCall!.id!, key: requestKey, onWaiting }, input, signal)),
       {
         name: "bot_work_delete",
         metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
-        description: "Request permanent deletion of the exact desktop work and its task conversation explicitly selected by the current user. The desktop requires confirmation of that target. Stops only this work and waits for cleanup, keeping project files and unrelated tasks. Use bot_work_unlink to keep the conversation instead. Reuse original workId, expectedVersion and requestKey when retrying an uncertain deletion; cleanup_pending means deletion is not fully settled.",
+        description: "Permanently delete one local task and its own conversation when the current desktop user explicitly requests deletion. Resolve the target with bot_work_list; ask which task if names are ambiguous. A stop or completion request does not authorize deletion. Call once without a separate confirmation. The tool handles any scope choice in this chat. Report the actual receipt: deleted, detached (original conversation kept), cancelled, or cleanup_pending. Retry uncertain results with the original workId, expectedVersion and requestKey.",
         schema: z.object({ requestKey: key, workId: id, expectedVersion: z.number().int().positive() }).strict()
       }
     ),

@@ -155,35 +155,32 @@ describe("Bot conversation scoped consumers", () => {
     }
   )
 
-  it.each([true, false])("opens the existing routine details via the workspace when available (%s)", (inWorkspace) => {
-    const onOpenRoutineDetails = vi.fn()
+  it.each(["current", "removed", "other-bot", "other-group"] as const)("opens only the matching live routine in place (%s)", (scope) => {
     const schedule: BotSchedule = {
       id: "routine", botId: "bot", version: 1, name: "Report reminder", message: "Review the report",
       enabled: true, frequency: "daily", runAtTime: "14:25", nextRunAt: null, timezone: "UTC"
     }
+    const current = { ...schedule, version: 2, name: "Updated reminder", botId: scope === "other-bot" ? "other" : "bot",
+      audienceKey: scope === "other-group" ? "im:other" : "desktop" }
     const tree = BotConversationTools({
       client: { hostId: "local" } as BotClient, botId: "bot", conversationThreadId: "main",
-      bots: [], tasks: [], schedules: [schedule], children: null,
-      ...(inWorkspace ? { onOpenRoutineDetails } : {})
+      bots: [], tasks: [], schedules: scope === "removed" ? [] : [current], children: null
     })
     const presentTool = find(tree, ChatToolPresentationContext.Provider)!.props.value
-    const routine = presentTool({ id: "save", name: "bot_schedule", args: { action: "save" } }, {
+    const receipt = presentTool({ id: "save", name: "bot_schedule", args: { action: "save" } }, {
       content: JSON.stringify(schedule)
     })
-    const button = find(routine, "button")!
-    expect(button.props["aria-label"]).toBe("查看例行任务：Report reminder")
-    const stopPropagation = vi.fn()
-    updateBotView.mockClear()
-    button.props.onClick({ stopPropagation })
-    expect(stopPropagation).toHaveBeenCalledOnce()
-    if (inWorkspace) {
-      expect(onOpenRoutineDetails).toHaveBeenCalledOnce()
-      expect(updateBotView).not.toHaveBeenCalled()
-    } else {
-      expect(updateBotView).toHaveBeenCalledExactlyOnceWith("local", {
-        selectedId: "bot", groupId: null, detailOpen: true, detailTab: "details"
-      })
+    const button = find(receipt, "button")
+    if (scope !== "current") {
+      expect(button).toBeUndefined()
+      return
     }
+    expect(button!.props["aria-label"]).toBe("查看例行任务：Report reminder")
+    const opener = {}, stopPropagation = vi.fn()
+    button!.props.onClick({ stopPropagation, currentTarget: opener })
+    expect(stopPropagation).toHaveBeenCalledOnce()
+    expect(stateWrites).toContainEqual({ schedule: current, opener })
+    expect(updateBotView).not.toHaveBeenCalled()
   })
 
   it.each([

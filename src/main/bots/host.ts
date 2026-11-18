@@ -1234,6 +1234,10 @@ export class LocalBotHost {
     if (!this.runtime.conversationTools?.deleteWork) throw new BotError("CONFLICT", "当前主机不支持删除工作")
     return this.runtime.conversationTools.deleteWork(botId, input, source, signal, validate)
   }
+  explicitWorkDeletionRequest(taskId: string, work: BotWorkItem) {
+    this.ordinaryThreadSource(taskId)
+    return this.store.explicitWorkDeletionRequest(taskId, work)
+  }
   ordinaryThreadInputProjections(threadId: string, ids: readonly string[], row: ThreadIncarnationRow) {
     return botHistoryInputProjection(threadId, row)?.(ids) ?? new Map()
   }

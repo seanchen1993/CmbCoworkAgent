@@ -41,6 +41,7 @@ export function LinkedBotConversation({ link }: { link: BotWorkConversationResol
           work={link.work}
           onReadyChange={onReadyChange}
           bots={snapshot?.bots ?? [link.bot]}
+          imGroups={snapshot?.imConversations}
           schedules={snapshot?.schedules ?? []}
           tasks={tasks}
           collaborationPending={Boolean(snapshot?.collaborationThreads?.includes(link.work.threadId))}
@@ -51,6 +52,7 @@ export function LinkedBotConversation({ link }: { link: BotWorkConversationResol
             threadSummaries[link.work.threadId]?.hasRunningCoordinatorWorker
           )}
           client={target}
+          linkControlOwner
           onOpenBot={returnToBotMain}
           onOpenWork={(workId) => {
             void client

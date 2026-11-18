@@ -61,7 +61,9 @@ export function registerUserInputHandlers(ipcMain: IpcMain): void {
       return
     }
 
-    if (!submitUserInputResponse(response)) {
+    if (!submitUserInputResponse(response, {
+      desktopMainFrame: Boolean(event.senderFrame && event.senderFrame === event.sender.mainFrame)
+    })) {
       console.warn("[UserInput] Received response for unknown request:", response.requestId)
     }
   })

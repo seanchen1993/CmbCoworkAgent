@@ -101,6 +101,7 @@ export async function completeBotConversationTransition(
   if (commitLink) await commitLink(() => finish(request.id))
   else {
     try {
+      assertLive()
       await finish(request.id)
     } catch (error) {
       if (unlinkDraft && request.action === "unlink" && request.unexposedRef) {

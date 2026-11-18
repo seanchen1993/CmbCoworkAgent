@@ -79,8 +79,11 @@ export default Object.fromEntries(["main","preload","renderer"].map((name) => [
     const testEnv = { BOT_TEST_APP_OUT: out }
     for (const test of [
       "bots-local-work-app.spec.ts",
+      "bots-work-attention-layout-app.spec.ts",
+      "bots-details-cards-app.spec.ts",
       "bots-steer-stream-app.spec.ts",
       "bots-conversation-link-app.spec.ts",
+      "bots-conversation-actions-app.spec.ts",
       "bots-memory-app.spec.ts",
       "bots-im-dialog-browser.spec.ts",
       "bots-im-conversation-browser.spec.ts"
