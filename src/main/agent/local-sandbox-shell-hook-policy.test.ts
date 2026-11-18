@@ -6,6 +6,7 @@ import { HookHaltError } from "../hooks/halt"
 import type { HookConfig } from "../hooks/types"
 import { FailureFuseHaltError } from "./failure-fuse"
 import { LocalSandbox, type LocalSandboxOptions } from "./local-sandbox"
+import { createShellTaskMonitorTools } from "./shell-monitor-tool"
 
 const cleanup: Array<() => Promise<void>> = []
 
@@ -75,6 +76,148 @@ async function fixture(options: Partial<LocalSandboxOptions> = {}, isolateWorktr
 function respond(data: unknown): Response {
   return new Response(JSON.stringify(data), { headers: { "content-type": "application/json" } })
 }
+
+describe("shell monitor hook policy", () => {
+  it("matches each tool name in configured order and applies each hook exactly once", async () => {
+    const hooks = (["PreToolUse", "PostToolUse"] as const).flatMap((event) =>
+      [
+        ["legacy", "^task_output$"],
+        ["new", "^monitor$"],
+        ["both", "^(monitor|task_output)$"],
+        ["broad", "*"]
+      ].map(([name, matcher]) => {
+        const id = `${event}-${name}`
+        return httpHook({ id, event, matcher, url: `https://hooks.invalid/${id}` })
+      })
+    )
+    const onHookResult = vi.fn()
+    let hooksEnabled = false
+    const { sandbox, finish } = await fixture({
+      hookResolver: () => (hooksEnabled ? hooks : []),
+      onHookResult
+    })
+    const started = await sandbox.executeBackground("echo probe")
+    const taskId = started.match(/\bid: (\w+)/)?.[1] ?? ""
+    expect(taskId).not.toBe("")
+    finish()
+    await sandbox.waitForTaskOutput(taskId)
+
+    const calls: Array<{
+      id: string
+      tool: string
+      input: { task_id: string; block?: boolean; timeout?: number }
+    }> = []
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      const id = new URL(url).pathname.slice(1)
+      const { tool_name, tool_input } = JSON.parse(String(init.body))
+      calls.push({ id, tool: tool_name, input: tool_input })
+      if (id === "PreToolUse-legacy") return respond({ updatedInput: { task_id: taskId } })
+      if (id === "PreToolUse-new") return respond({ updatedInput: { block: true, timeout: 10 } })
+      if (id === "PreToolUse-both") return respond({ updatedInput: { timeout: 20 } })
+      return respond({ additionalContext: id })
+    })
+    hooksEnabled = true
+
+    const [monitor, taskOutput] = createShellTaskMonitorTools(sandbox)
+    const input = { task_id: "placeholder", block: false }
+    const monitorOutput = await monitor.invoke(input)
+    expect(monitorOutput).toMatch(/^shell\n\[Command succeeded with exit code 0/)
+    expect(monitorOutput.split("\n\n").at(-1)).toBe(
+      "[Hook context]\nPostToolUse-legacy\nPostToolUse-new\nPostToolUse-both\nPostToolUse-broad"
+    )
+    expect(calls).toEqual([
+      { id: "PreToolUse-legacy", tool: "task_output", input },
+      { id: "PreToolUse-new", tool: "monitor", input },
+      { id: "PreToolUse-both", tool: "monitor", input },
+      { id: "PreToolUse-broad", tool: "monitor", input },
+      ...["legacy", "new", "both", "broad"].map((name) => ({
+        id: `PostToolUse-${name}`,
+        tool: name === "legacy" ? "task_output" : "monitor",
+        input: { task_id: taskId, block: true, timeout: 20 }
+      }))
+    ])
+    expect(onHookResult.mock.calls.map(([, hook]) => hook.id)).toEqual(calls.map(({ id }) => id))
+    onHookResult.mockClear()
+    calls.length = 0
+
+    const legacyOutput = await taskOutput.invoke(input)
+    expect(legacyOutput).toMatch(/^shell\n\[Command succeeded with exit code 0/)
+    expect(legacyOutput.split("\n\n").at(-1)).toBe(
+      "[Hook context]\nPostToolUse-legacy\nPostToolUse-both\nPostToolUse-broad"
+    )
+    expect(calls).toEqual([
+      ...["legacy", "both", "broad"].map((name) => ({
+        id: `PreToolUse-${name}`,
+        tool: "task_output",
+        input
+      })),
+      ...["legacy", "both", "broad"].map((name) => ({
+        id: `PostToolUse-${name}`,
+        tool: "task_output",
+        input: { task_id: taskId, block: false, timeout: 20 }
+      }))
+    ])
+    expect(onHookResult.mock.calls.map(([, hook]) => hook.id)).toEqual(calls.map(({ id }) => id))
+  })
+
+  it("honors a legacy input condition and a monitor-specific block or halt", async () => {
+    const hooks = [
+      httpHook({
+        id: "monitor-pre",
+        event: "PreToolUse",
+        matcher: "^monitor$",
+        url: "https://hooks.invalid/pre"
+      }),
+      httpHook({
+        matcher: "*",
+        if: "task_output(*)",
+        url: "https://hooks.invalid/legacy-post"
+      }),
+      httpHook({
+        id: "monitor-post",
+        matcher: "^monitor$",
+        url: "https://hooks.invalid/post"
+      })
+    ]
+    const { sandbox } = await fixture({ hooks })
+    const [monitor] = createShellTaskMonitorTools(sandbox)
+    let block = true
+    const fetchHook = vi.fn(async (url: string, init: RequestInit) => {
+      const { tool_name } = JSON.parse(String(init.body))
+      if (url.endsWith("/pre") && block) {
+        return respond({ decision: "block", reason: `blocked ${tool_name}` })
+      }
+      return respond(
+        url.endsWith("/post")
+          ? { continue: false, stopReason: `halted ${tool_name}` }
+          : { additionalContext: tool_name }
+      )
+    })
+    vi.stubGlobal("fetch", fetchHook)
+
+    await expect(monitor.invoke({ task_id: "missing" })).resolves.toBe(
+      "[Hook blocked] blocked monitor"
+    )
+    expect(fetchHook).toHaveBeenCalledTimes(1)
+
+    block = false
+    await expect(monitor.invoke({ task_id: "missing" })).rejects.toMatchObject({
+      name: "HookHaltError",
+      message: "halted monitor"
+    })
+    expect(
+      fetchHook.mock.calls.map(([url, init]) => [
+        new URL(url).pathname,
+        JSON.parse(String(init.body)).tool_name
+      ])
+    ).toEqual([
+      ["/pre", "monitor"],
+      ["/pre", "monitor"],
+      ["/legacy-post", "task_output"],
+      ["/post", "monitor"]
+    ])
+  })
+})
 
 describe("shell auto-handoff hook policy", () => {
   it("uses the post-PreToolUse command to match synchronous hooks", async () => {

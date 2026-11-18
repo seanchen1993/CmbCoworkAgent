@@ -57,6 +57,8 @@ import { withFileOperation, withWorkspaceExecution } from "./file-operation-lock
 import { AUTO_COMMIT_FEATURE_ENABLED, registerWorkspaceShell } from "./shell-auto-commit-lock"
 import type { OrchestratedExecuteOptions, ToolOrchestrator } from "./tool-orchestrator"
 import {
+  SHELL_TASK_MONITOR_TOOL_NAME,
+  SHELL_TASK_OUTPUT_TOOL_NAME,
   ShellTaskMonitor,
   type ShellTaskSnapshot,
   type ShellTaskWaitOptions,
@@ -2932,6 +2934,9 @@ export class LocalSandbox
   private prepareHookContext(context: HookContext): HookContext {
     return {
       ...context,
+      ...(context.toolName === SHELL_TASK_MONITOR_TOOL_NAME && {
+        fallbackToolName: SHELL_TASK_OUTPUT_TOOL_NAME
+      }),
       abortSignal: context.abortSignal ?? this.abortSignal,
       ...(this.pluginOutputDir && !context.pluginOutputDir
         ? { pluginOutputDir: this.pluginOutputDir }
@@ -3043,10 +3048,11 @@ export class LocalSandbox
     const turnId = context.turnId ?? this._hookTurnId
     if (!turnId) return null
 
+    // Both shell output tools share the existing FailureFuse counters.
+    const toolName = context.fallbackToolName ?? context.toolName
     const parsed = LocalSandbox.parseToolResultForFailure(context.toolResult)
-    const signal = detectToolFailure(context.toolName ?? "", parsed)
+    const signal = detectToolFailure(toolName ?? "", parsed)
     const threadId = context.sessionId ?? this.runId
-    const toolName = context.toolName
     if (!signal) {
       recordToolSuccess({ threadId, turnId, toolName, toolArgs: context.toolArgs })
       return null
@@ -7161,15 +7167,33 @@ export class LocalSandbox
       (isGitCommitCommand(effectiveCommand, shellSyntax) ||
         isGitPushCommand(effectiveCommand, shellSyntax))
     ) {
-      const result = await shellFileCaptureContext.run(true, () =>
-        this.orchestrator!.execute(
-          effectiveCommand,
-          effectiveCwd,
-          this.windowsSandbox,
-          shellSyntax,
-          outsideShellSyntax
+      const signal = taskAbortController.signal
+      let termination: Promise<void> | undefined
+      const execution: OrchestratedExecuteOptions = {
+        signal,
+        rawExecute: (command, sandboxMode, cwd) =>
+          this.executeRaw(command, sandboxMode, undefined, signal, {
+            cwd,
+            waitForProcessTree: true,
+            onTermination: (pending) => {
+              termination = pending
+            }
+          })
+      }
+      const result = await shellFileCaptureContext
+        .run(true, () =>
+          this.orchestrator!.execute(
+            effectiveCommand,
+            effectiveCwd,
+            this.windowsSandbox,
+            shellSyntax,
+            outsideShellSyntax,
+            execution
+          )
         )
-      )
+        .finally(async () => {
+          await termination?.catch(() => undefined)
+        })
       if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
         this.markHarnessStageAttributionDirty()
       }
@@ -7869,15 +7893,23 @@ export class LocalSandbox
   private static spawnWindowsHandoffProcess(
     executable: string,
     argumentsText: string,
-    options: { cwd: string; env: NodeJS.ProcessEnv; windowsHide: boolean; pipeInput?: boolean },
+    options: {
+      cwd: string
+      env: NodeJS.ProcessEnv
+      windowsHide: boolean
+      pipeInput?: boolean
+      allowForegroundBreakaway?: boolean
+    },
     handoff: NonNullable<ExecuteRawOptions["handoff"]>
   ): ChildProcess {
-    const { pipeInput, ...spawnOptions } = options
-    const proc = spawn(
-      resolveWindowsBackgroundJobControllerPath(),
-      [executable, options.windowsHide ? "handoff-hidden" : "handoff-visible"],
-      { ...spawnOptions, stdio: [pipeInput ? "pipe" : "ignore", "pipe", "pipe", "pipe", "pipe"] }
-    )
+    const { pipeInput, allowForegroundBreakaway, ...spawnOptions } = options
+    const args = [executable, options.windowsHide ? "handoff-hidden" : "handoff-visible"]
+    if (handoff.isPromoted()) args.push("already-promoted")
+    else if (allowForegroundBreakaway) args.push("foreground-breakaway")
+    const proc = spawn(resolveWindowsBackgroundJobControllerPath(), args, {
+      ...spawnOptions,
+      stdio: [pipeInput ? "pipe" : "ignore", "pipe", "pipe", "pipe", "pipe"]
+    })
     const request = proc.stdio[3] as Duplex
     const status = proc.stdio[4] as Duplex
     const argumentBytes = Buffer.from(argumentsText, "utf16le")
@@ -9150,7 +9182,8 @@ export class LocalSandbox
               cwd: effectiveCwd,
               env: spawnEnv,
               windowsHide: !allowInteractiveGitAuth,
-              pipeInput: isBashOnWin
+              pipeInput: isBashOnWin,
+              allowForegroundBreakaway: true
             },
             windowsHandoff
           )
@@ -9378,11 +9411,11 @@ export class LocalSandbox
         )
         exited = true
         if (
-          (options?.background === true || options?.handoff?.isPromoted()) &&
-          this.worktreeIsolation &&
+          !isWindows &&
           !aborted &&
           !timedOut &&
-          !isWindows
+          (options?.handoff?.isPromoted() ||
+            (options?.background === true && this.worktreeIsolation))
         ) {
           killProc()
           void termination?.finally(() => collectAndResolve(code, signal as string | null))

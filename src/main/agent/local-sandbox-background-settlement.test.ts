@@ -379,20 +379,27 @@ describe("LocalSandbox background-task settlement", () => {
     expect(raw).toHaveBeenCalledTimes(1)
   })
 
-  it.each([true, false])(
-    "checks POSIX worktree descendants on a successful close only after promotion (%s)",
-    async (promoted) => {
+  it.each([
+    { promoted: true, isolated: false },
+    { promoted: false, isolated: false },
+    { promoted: true, isolated: true },
+    { promoted: false, isolated: true }
+  ])(
+    "settles POSIX descendants on successful close after promotion (promoted=$promoted, isolated=$isolated)",
+    async ({ promoted, isolated }) => {
       const root = process.cwd()
       const sandbox = new LocalSandbox({
         rootDir: root,
         runId: "posix-worktree-close",
         windowsSandbox: "none",
-        worktreeIsolation: {
-          workspaceRoot: root,
-          worktreeRoot: root,
-          commonDir: join(root, ".git"),
-          branch: "test"
-        }
+        ...(isolated && {
+          worktreeIsolation: {
+            workspaceRoot: root,
+            worktreeRoot: root,
+            commonDir: join(root, ".git"),
+            branch: "test"
+          }
+        })
       })
       const child = Object.assign(createFakeChildProcess(), {
         pid: 41,

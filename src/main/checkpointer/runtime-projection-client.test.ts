@@ -31,6 +31,7 @@ import {
   openThreadMessageHydrationDatabase,
   readThreadMessagesPage
 } from "../thread-message-hydration/page-reader"
+import { buildWorkerCheckpointHistory } from "../../renderer/src/lib/worker-checkpoint-history"
 
 const temporaryDirectories: string[] = []
 const clients: CheckpointRuntimeProjectionClient[] = []
@@ -851,6 +852,99 @@ describe("checkpoint runtime projection worker", () => {
       "additional_kwargs.cmb_internal_coordinator_notification"
     )
   })
+
+  it.each([false, true])(
+    "reconciles only lossless worker checkpoint identities (SQL fallback: %s)",
+    async (oversized) => {
+      const threadId = "worker-identity-transfer"
+      const ascii = "p".repeat(256)
+      const supplementary = "😀".repeat(128)
+      const longSource = oversized ? "x".repeat(65_536) : ascii
+      const messages = [
+        { id: "user", type: "human", content: "request" },
+        ...[
+          ["exact-ascii", ascii],
+          ["ascii-alias", ascii],
+          ["distinct-a", longSource + "a"],
+          ["distinct-b", longSource + "b"],
+          ["exact-supplementary", supplementary],
+          ["too-many-code-units", supplementary + "!"],
+          ["encoded-nul", "before\u0000after"],
+          ["encoded-surrogate", "\ud840"]
+        ].map(([id, source]) => ({
+          id: ["langchain_core", "messages", "AIMessage"],
+          kwargs: {
+            id,
+            content: id,
+            ...(oversized && { response_metadata: { ignored: "x".repeat(65_536) } }),
+            additional_kwargs: {
+              cmb_internal_provider_source_id: source,
+              cmb_internal_provider_occurrence: 1
+            }
+          }
+        })),
+        ...["exact-call", "long-call-a", "long-call-b"].map((id, index) => ({
+          id,
+          type: "tool",
+          content: id,
+          tool_call_id: index === 0 ? supplementary : supplementary + index,
+          ...(oversized && { response_metadata: { ignored: "x".repeat(65_536) } }),
+          additional_kwargs: {
+            cmb_internal_provider_source_id: "tool-source",
+            cmb_internal_provider_occurrence: 1
+          }
+        }))
+      ]
+      const { databasePath } = await seedLegacyInlineFixture({ threadId, messages })
+      const tuple = (await createClient().readLatestTuple(databasePath, threadId, "", {
+        messageLimit: 500,
+        messageByteBudget: 1024 * 1024
+      })) as {
+        checkpoint: { channel_values: { messages: unknown[] } }
+      }
+      const projected = buildWorkerCheckpointHistory(
+        tuple.checkpoint.channel_values.messages,
+        threadId
+      ).messages
+      expect(projected.map((row) => row.content)).toEqual([
+        "request",
+        "ascii-alias",
+        "distinct-a",
+        "distinct-b",
+        "exact-supplementary",
+        "too-many-code-units",
+        "encoded-nul",
+        "encoded-surrogate",
+        "exact-call",
+        "long-call-a",
+        "long-call-b"
+      ])
+      const byContent = new Map(projected.map((row) => [row.content, row]))
+      const scope = `worker-turn-${threadId}-1::`
+      for (const [content, source] of [
+        ["ascii-alias", ascii],
+        ["exact-supplementary", supplementary],
+        ["encoded-nul", "before\u0000after"],
+        ["encoded-surrogate", "\ud840"],
+        ["exact-call", "tool-source"]
+      ]) {
+        expect(byContent.get(content)).toMatchObject({
+          provider_source_id: scope + source,
+          provider_occurrence: 1,
+          worker_provider_identity: true
+        })
+      }
+      expect(byContent.get("exact-call")?.tool_call_id).toBe(supplementary)
+      for (const content of ["distinct-a", "distinct-b", "too-many-code-units"]) {
+        expect(byContent.get(content)?.id).toBe(scope + content)
+        expect(byContent.get(content)?.worker_provider_identity).toBeUndefined()
+      }
+      for (const content of ["long-call-a", "long-call-b"]) {
+        expect(byContent.get(content)?.tool_call_id).toBeUndefined()
+        expect(byContent.get(content)?.worker_provider_identity).toBeUndefined()
+      }
+    }
+  )
 
   it("rejects an external checkpoint until its snapshot schema is published", async () => {
     const directory = mkdtempSync(join(tmpdir(), "cmb-runtime-projection-missing-snapshot-"))

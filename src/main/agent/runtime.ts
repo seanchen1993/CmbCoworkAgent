@@ -5062,7 +5062,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         win.webContents.send(`approval:request:${approvalThreadId}`, req)
       }
     })
-    if (!signal?.aborted) {
+    if (!options.abortSignal?.aborted) {
       await options.interactionWaitHooks?.onWaitEnd(waitEvent)
     }
     return decision

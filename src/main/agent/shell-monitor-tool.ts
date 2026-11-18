@@ -68,20 +68,20 @@ function formatTaskSnapshot(
 
 export function createShellTaskMonitorTools(sandbox: ShellMonitorBackend) {
   const runMonitor = async (
+    toolName: (typeof SHELL_TASK_MONITOR_TOOL_NAMES)[number],
     input: z.infer<typeof monitorSchema>,
-    config: RunnableConfig | undefined,
-    defaultTimeout?: number
+    config?: RunnableConfig
   ): Promise<string> => {
     const ownerId = getShellTaskOwnerId(config)
-    const abortMessage =
-      defaultTimeout === undefined
-        ? "Task monitoring aborted: conversation was cancelled by user."
-        : "Task polling aborted: conversation was cancelled by user."
+    const legacy = toolName === SHELL_TASK_OUTPUT_TOOL_NAME
+    const defaultTimeout = legacy ? DEFAULT_TASK_OUTPUT_WAIT_MS : undefined
+    const abortMessage = legacy
+      ? "Task polling aborted: conversation was cancelled by user."
+      : "Task monitoring aborted: conversation was cancelled by user."
     const toolArgs: Record<string, unknown> = { ...input }
-    // Keep the hook identity shared so the new spelling obeys existing task_output policies.
-    const preResult = await sandbox.runPreToolUseHookForTool(SHELL_TASK_OUTPUT_TOOL_NAME, toolArgs)
+    const preResult = await sandbox.runPreToolUseHookForTool(toolName, toolArgs)
     if (preResult?.blocked || preResult?.decision === "block") {
-      const reason = preResult.stdout || preResult.reason || "task_output was blocked by a hook"
+      const reason = preResult.stdout || preResult.reason || `${toolName} was blocked by a hook`
       return `[Hook blocked] ${reason}`
     }
     if (config?.signal?.aborted) return abortMessage
@@ -120,23 +120,19 @@ export function createShellTaskMonitorTools(sandbox: ShellMonitorBackend) {
       resultText = snapshot ? formatTaskSnapshot(snapshot, "not_ready") : notFound
     }
     if (config?.signal?.aborted) return abortMessage
-    return sandbox.applyPostToolUseHookToText(
-      SHELL_TASK_OUTPUT_TOOL_NAME,
-      effectiveArgs,
-      resultText
-    )
+    return sandbox.applyPostToolUseHookToText(toolName, effectiveArgs, resultText)
   }
 
   const [monitorName, taskOutputName] = SHELL_TASK_MONITOR_TOOL_NAMES
   return [
-    tool((input, config) => runMonitor(input, config), {
+    tool((input, config) => runMonitor(monitorName, input, config), {
       name: monitorName,
       description:
         "Wait for completion of a background command started by execute and return its result. " +
         "Omit timeout to listen until the command finishes, or set block=false for a snapshot.",
       schema: monitorSchema
     }),
-    tool((input, config) => runMonitor(input, config, DEFAULT_TASK_OUTPUT_WAIT_MS), {
+    tool((input, config) => runMonitor(taskOutputName, input, config), {
       name: taskOutputName,
       description:
         "Compatibility tool for retrieving the output of a background command. " +

@@ -1,11 +1,15 @@
+export const SHELL_TASK_MONITOR_TOOL_NAME = "monitor"
 export const SHELL_TASK_OUTPUT_TOOL_NAME = "task_output"
-export const SHELL_TASK_MONITOR_TOOL_NAMES = ["monitor", SHELL_TASK_OUTPUT_TOOL_NAME] as const
+export const SHELL_TASK_MONITOR_TOOL_NAMES = [
+  SHELL_TASK_MONITOR_TOOL_NAME,
+  SHELL_TASK_OUTPUT_TOOL_NAME
+] as const
 export const SHELL_TASK_MONITOR_MAX_WAIT_MS = 600_000
 
 export function isShellTaskMonitorToolName(
   name: string | undefined
 ): name is (typeof SHELL_TASK_MONITOR_TOOL_NAMES)[number] {
-  return name === "monitor" || name === SHELL_TASK_OUTPUT_TOOL_NAME
+  return name === SHELL_TASK_MONITOR_TOOL_NAME || name === SHELL_TASK_OUTPUT_TOOL_NAME
 }
 
 export function expandShellTaskMonitorToolDenials(blocked: Set<string>): Set<string> {

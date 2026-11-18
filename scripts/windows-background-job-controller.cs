@@ -10,6 +10,7 @@ using Microsoft.Win32.SafeHandles;
 
 internal static class WindowsBackgroundJobController
 {
+    private const uint JobObjectLimitBreakawayOk = 0x00000800;
     private const uint JobObjectLimitKillOnJobClose = 0x00002000;
     private const string PowerShellBootstrapFileName =
         "background-job-controller-powershell-bootstrap.ps1";
@@ -148,10 +149,10 @@ internal static class WindowsBackgroundJobController
     [DllImport("msvcrt.dll", CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr _get_osfhandle(int fd);
 
-    private static bool SetKillOnClose(IntPtr job, bool enabled)
+    private static bool SetJobLimits(IntPtr job, uint flags)
     {
         ExtendedLimitInformation limits = new ExtendedLimitInformation();
-        limits.BasicLimitInformation.LimitFlags = enabled ? JobObjectLimitKillOnJobClose : 0;
+        limits.BasicLimitInformation.LimitFlags = flags;
         int size = Marshal.SizeOf(typeof(ExtendedLimitInformation));
         IntPtr pointer = Marshal.AllocHGlobal(size);
         try
@@ -171,7 +172,7 @@ internal static class WindowsBackgroundJobController
             return false;
         }
 
-        if (!SetKillOnClose(jobHandle, true))
+        if (!SetJobLimits(jobHandle, JobObjectLimitKillOnJobClose))
         {
             error = "SetInformationJobObject failed: " + Marshal.GetLastWin32Error();
             return false;
@@ -287,7 +288,7 @@ internal static class WindowsBackgroundJobController
         }
     }
 
-    private static int ExecuteWithHandoff(string executable, bool hidden)
+    private static int ExecuteWithHandoff(string executable, bool hidden, string initialMode)
     {
         IntPtr requestHandle = _get_osfhandle(3);
         IntPtr statusHandle = _get_osfhandle(4);
@@ -314,11 +315,15 @@ internal static class WindowsBackgroundJobController
         ProcessInformation child = new ProcessInformation();
         try
         {
-            if (!SetKillOnClose(job, true)) throw new IOException("Could not configure Windows Job");
+            // Only a direct foreground shell retains Windows' explicit child breakaway.
+            // Ordinary descendants join the job at creation, even before promotion.
+            uint foregroundLimits = initialMode == "foreground-breakaway" ? JobObjectLimitBreakawayOk : 0;
+            if (!SetJobLimits(job, JobObjectLimitKillOnJobClose | foregroundLimits))
+                throw new IOException("Could not configure Windows Job");
             child = StartContainedProcess(job, executable, commandLine, hidden);
 
             object gate = new object();
-            bool promoted = false;
+            bool promoted = initialMode == "already-promoted";
             bool finished = false;
             bool cancelled = false;
             bool cleanupDone = false;
@@ -344,6 +349,9 @@ internal static class WindowsBackgroundJobController
                             if (key == (byte)'P' && !promoted &&
                                 WaitForSingleObject(child.Process, 0) == WaitTimeout)
                             {
+                                if (foregroundLimits != 0 &&
+                                    !SetJobLimits(job, JobObjectLimitKillOnJobClose))
+                                    throw new IOException("Could not restrict promoted Windows Job");
                                 promoted = true;
                                 send((byte)'P');
                             }
@@ -375,7 +383,7 @@ internal static class WindowsBackgroundJobController
                 {
                     if (!cleanupDone) TerminateAndWait(job);
                 }
-                else if (!SetKillOnClose(job, false))
+                else if (!SetJobLimits(job, foregroundLimits))
                     throw new IOException("Could not release short command's Windows Job");
             }
             uint exitCode;
@@ -473,15 +481,18 @@ internal static class WindowsBackgroundJobController
 
     private static int Main(string[] args)
     {
-        if (args.Length != 2 || string.IsNullOrWhiteSpace(args[0]))
+        bool handoff = args.Length >= 2 && (args[1] == "handoff-hidden" || args[1] == "handoff-visible");
+        string initialMode = handoff && args.Length == 3 ? args[2] : null;
+        bool validInitialMode = initialMode == "foreground-breakaway" || initialMode == "already-promoted";
+        if ((args.Length != 2 && !validInitialMode) || string.IsNullOrWhiteSpace(args[0]))
         {
             Console.Error.WriteLine("[LocalSandbox] Background shell path is missing");
             return 126;
         }
 
-        if (args[1] == "handoff-hidden" || args[1] == "handoff-visible")
+        if (handoff)
         {
-            try { return ExecuteWithHandoff(args[0], args[1] == "handoff-hidden"); }
+            try { return ExecuteWithHandoff(args[0], args[1] == "handoff-hidden", initialMode); }
             catch (Exception error)
             {
                 Console.Error.WriteLine("[LocalSandbox] Windows Job command failed: " + error.Message);

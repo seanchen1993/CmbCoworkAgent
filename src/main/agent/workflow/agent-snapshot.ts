@@ -113,7 +113,11 @@ export function serializeWorkflowAgentSnapshotMessages(snapshot: unknown): unkno
     const keptNewestFirst: unknown[] = []
     for (let index = raw.length - 1; index >= oldestIndex; index -= 1) {
       if (budget.left <= 0) break
-      keptNewestFirst.push(boundedCloneSnapshotValue(raw[index], 0, budget))
+      const cloned = boundedCloneSnapshotValue(raw[index], 0, budget)
+      // The budget can cut through a message's role or provider tuple. Keep
+      // the newest activity, but omit a partial older row from the window.
+      if (budget.left <= 0 && keptNewestFirst.length > 0) break
+      keptNewestFirst.push(cloned)
     }
     // Carry the prompt boundary even if the message-count or byte cap removed the prompt.
     const offset = raw.length - keptNewestFirst.length

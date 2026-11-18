@@ -61,6 +61,8 @@ const _regexCache = new Map<string, RegExp | null>()
 
 export interface HookContext {
   toolName?: string
+  /** Match this legacy tool name when the hook does not match the actual name. */
+  fallbackToolName?: string
   toolArgs?: Record<string, unknown>
   toolResult?: string
   workspacePath?: string
@@ -1366,18 +1368,37 @@ function enrichContextFromHook(hook: HookConfig, context: HookContext): HookCont
   }
 }
 
+function matchingHookContext(
+  hook: HookConfig,
+  event: HookEvent,
+  context: HookContext
+): HookContext | undefined {
+  if (!hook.enabled || hook.event !== event || shouldSkipOnceHook(hook, event, context)) {
+    return undefined
+  }
+  if (
+    matchesEventMatcher(hook.matcher, event, context) &&
+    matchesIfCondition(hook.if, event, context)
+  ) {
+    return context
+  }
+  if (!context.fallbackToolName) return undefined
+  const fallbackContext = { ...context, toolName: context.fallbackToolName }
+  if (
+    matchesEventMatcher(hook.matcher, event, fallbackContext) &&
+    matchesIfCondition(hook.if, event, fallbackContext)
+  ) {
+    return fallbackContext
+  }
+  return undefined
+}
+
 export function hookMatchesRunCriteria(
   hook: HookConfig,
   event: HookEvent,
   context: HookContext
 ): boolean {
-  return (
-    hook.enabled &&
-    hook.event === event &&
-    matchesEventMatcher(hook.matcher, event, context) &&
-    matchesIfCondition(hook.if, event, context) &&
-    !shouldSkipOnceHook(hook, event, context)
-  )
+  return matchingHookContext(hook, event, context) !== undefined
 }
 
 /**
@@ -1471,7 +1492,11 @@ export async function runHooks(
   context: HookContext,
   onHookResult?: HookResultCallback
 ): Promise<HookResult | null> {
-  const matched = hooks.filter((h) => hookMatchesRunCriteria(h, event, context))
+  const matched: { hook: HookConfig; matchedContext: HookContext }[] = []
+  for (const hook of hooks) {
+    const matchedContext = matchingHookContext(hook, event, context)
+    if (matchedContext) matched.push({ hook, matchedContext })
+  }
 
   if (matched.length === 0) return null
 
@@ -1483,8 +1508,8 @@ export async function runHooks(
     let humanGateDecision:
       | { systemMessage: string; decisionSource: NonNullable<HookResult["decisionSource"]> }
       | undefined
-    for (const hook of matched) {
-      const hookContext = enrichContextFromHook(hook, context)
+    for (const { hook, matchedContext } of matched) {
+      const hookContext = enrichContextFromHook(hook, matchedContext)
       const result = applyForcedOutcome(
         await executeHook(
           hook,
@@ -1602,8 +1627,8 @@ export async function runHooks(
     const blockReasons: string[] = []
     let shouldHalt = false
     let haltReason: string | undefined
-    for (const hook of matched) {
-      const hookContext = enrichContextFromHook(hook, context)
+    for (const { hook, matchedContext } of matched) {
+      const hookContext = enrichContextFromHook(hook, matchedContext)
       const result = applyForcedOutcome(
         await executeHook(
           hook,
@@ -1650,8 +1675,8 @@ export async function runHooks(
     const messages: string[] = []
     const revisionReasons: string[] = []
     const stopReasons: string[] = []
-    for (const hook of matched) {
-      const hookContext = enrichContextFromHook(hook, context)
+    for (const { hook, matchedContext } of matched) {
+      const hookContext = enrichContextFromHook(hook, matchedContext)
       const result = applyForcedOutcome(
         await executeHook(
           hook,
@@ -1722,8 +1747,8 @@ export async function runHooks(
     const stopReasons: string[] = []
     let additionalContext: string | undefined
     let systemMessage: string | undefined
-    for (const hook of matched) {
-      const hookContext = enrichContextFromHook(hook, context)
+    for (const { hook, matchedContext } of matched) {
+      const hookContext = enrichContextFromHook(hook, matchedContext)
       const result = applyForcedOutcome(
         await executeHook(
           hook,
@@ -1795,8 +1820,8 @@ export async function runHooks(
     const stopReasons: string[] = []
     let additionalContext: string | undefined
     let systemMessage: string | undefined
-    for (const hook of matched) {
-      const hookContext = enrichContextFromHook(hook, context)
+    for (const { hook, matchedContext } of matched) {
+      const hookContext = enrichContextFromHook(hook, matchedContext)
       const result = applyForcedOutcome(
         await executeHook(
           hook,
@@ -1865,8 +1890,8 @@ export async function runHooks(
   // never be retried).
   if (event === "SessionEnd" || event === "Setup") {
     const TOTAL_TIMEOUT_MS = event === "Setup" ? 30_000 : 5_000
-    const tasks = matched.map(async (hook): Promise<HookResult> => {
-      const hookContext = enrichContextFromHook(hook, context)
+    const tasks = matched.map(async ({ hook, matchedContext }): Promise<HookResult> => {
+      const hookContext = enrichContextFromHook(hook, matchedContext)
       try {
         const rawResult = await executeHook(
           hook,
@@ -1952,8 +1977,8 @@ export async function runHooks(
   }
 
   // Notification / SessionStart: fire-and-forget
-  for (const hook of matched) {
-    const hookContext = enrichContextFromHook(hook, context)
+  for (const { hook, matchedContext } of matched) {
+    const hookContext = enrichContextFromHook(hook, matchedContext)
     executeHook(hook, buildHookEnv(event, hookContext, hook), hookContext, event, onHookResult)
       .then((rawResult) => {
         const result = applyForcedOutcome(rawResult, hook)

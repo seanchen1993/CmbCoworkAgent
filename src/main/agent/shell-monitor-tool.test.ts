@@ -37,7 +37,7 @@ function createBackend() {
 }
 
 describe("shell monitor tools", () => {
-  it("shares hooks and results while keeping the compatibility wait default", async () => {
+  it("passes each tool's name to hooks and keeps the compatibility wait default", async () => {
     const backend = createBackend()
     const [monitor, taskOutput] = createShellTaskMonitorTools(backend)
     const input = { task_id: "task" }
@@ -53,11 +53,11 @@ describe("shell monitor tools", () => {
       30_000
     ])
     expect(backend.runPreToolUseHookForTool.mock.calls).toEqual([
-      ["task_output", input],
+      ["monitor", input],
       ["task_output", input]
     ])
     expect(backend.applyPostToolUseHookToText.mock.calls.map(([name]) => name)).toEqual([
-      "task_output",
+      "monitor",
       "task_output"
     ])
     expect(backend.getTaskOutput).not.toHaveBeenCalled()
@@ -135,7 +135,7 @@ describe("shell monitor tools", () => {
     expect(backend.getTaskOutput).toHaveBeenCalledExactlyOnceWith("task", "child-invocation")
   })
 
-  it("enforces a legacy pre-hook block and propagates a legacy post-hook halt", async () => {
+  it("enforces a pre-hook block and propagates a post-hook halt", async () => {
     const backend = createBackend()
     const [monitor] = createShellTaskMonitorTools(backend)
     backend.runPreToolUseHookForTool.mockResolvedValueOnce({

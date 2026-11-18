@@ -1,5 +1,6 @@
+import { execFileSync } from "node:child_process"
 import { existsSync } from "node:fs"
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
@@ -8,7 +9,7 @@ import { ApprovalStore } from "./approval-store"
 import { FailureFuseHaltError } from "./failure-fuse"
 import { LocalSandbox } from "./local-sandbox"
 import { ToolOrchestrator } from "./tool-orchestrator"
-import type { ApprovalDecision } from "../types"
+import type { ApprovalDecision, ApprovalRequest } from "../types"
 import { HookHaltError } from "../hooks/halt"
 import type { HookEvent } from "../hooks/types"
 
@@ -133,6 +134,86 @@ describe("LocalSandbox execute handoff", () => {
     expect(treatment).toEqual({ status: "completed", result: foreground })
     expect(LocalSandbox.hasActiveBackgroundTasks(sandbox.runId)).toBe(false)
   }, 30_000)
+
+  it.skipIf(process.platform !== "win32")(
+    "keeps explicit child breakaway available until handoff",
+    async () => {
+      const { root, sandbox } = await fixture()
+      await writeFile(
+        path.join(root, "BreakawayProbe.cs"),
+        `using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class BreakawayProbe {
+    [StructLayout(LayoutKind.Sequential)]
+    struct StartupInfo {
+        public int Size;
+        public IntPtr Reserved, Desktop, Title;
+        public uint X, Y, XSize, YSize, XChars, YChars, Fill, Flags;
+        public ushort ShowWindow, ReservedCount;
+        public IntPtr ReservedPointer, Input, Output, Error;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    struct ProcessInformation {
+        public IntPtr Process, Thread;
+        public uint ProcessId, ThreadId;
+    }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool CreateProcess(string executable, StringBuilder commandLine,
+        IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags,
+        IntPtr environment, string cwd, ref StartupInfo start, out ProcessInformation child);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr handle, uint timeout);
+    public static int Run() {
+        var executable = Environment.GetEnvironmentVariable("ComSpec");
+        var start = new StartupInfo { Size = Marshal.SizeOf(typeof(StartupInfo)) };
+        ProcessInformation child;
+        const uint CreateBreakawayFromJob = 0x01000000;
+        const uint CreateNoWindow = 0x08000000;
+        if (!CreateProcess(executable, new StringBuilder("cmd.exe /d /c exit 0"),
+            IntPtr.Zero, IntPtr.Zero, false, CreateBreakawayFromJob | CreateNoWindow,
+            IntPtr.Zero, null, ref start, out child)) return Marshal.GetLastWin32Error();
+        WaitForSingleObject(child.Process, 5000);
+        CloseHandle(child.Thread);
+        CloseHandle(child.Process);
+        return 0;
+    }
+}
+`
+      )
+      await writeFile(
+        path.join(root, "probe.ps1"),
+        [
+          'Add-Type -Path "BreakawayProbe.cs" -ErrorAction Stop',
+          'while (!(Test-Path -LiteralPath "release-breakaway")) { Start-Sleep -Milliseconds 25 }',
+          "$code = [BreakawayProbe]::Run()",
+          'Write-Output "Breakaway result: $code"',
+          "exit $code"
+        ].join("\n")
+      )
+      const release = path.join(root, "release-breakaway")
+      const command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File probe.ps1"
+      await writeFile(release, "")
+      await expect(
+        sandbox.executeForTool(command, undefined, { backgroundAfterMs: 60_000 })
+      ).resolves.toMatchObject({
+        status: "completed",
+        result: { exitCode: 0, output: expect.stringContaining("Breakaway result: 0") }
+      })
+
+      await unlink(release)
+      const task = await sandbox.executeForTool(command, undefined, { backgroundAfterMs: 100 })
+      if (task.status !== "background") throw new Error(task.result.output)
+      await writeFile(release, "")
+      await expect(
+        sandbox.waitForTaskOutput(task.taskId, { timeoutMs: 15_000 })
+      ).resolves.toMatchObject({
+        status: "completed",
+        result: { exitCode: 5, output: expect.stringContaining("Breakaway result: 5") }
+      })
+    },
+    30_000
+  )
 
   it.skipIf(process.platform !== "win32" || !existsSync(windowsGitBash))(
     "preserves a short Git Bash command's deliberately detached child",
@@ -298,6 +379,48 @@ describe("LocalSandbox execute handoff", () => {
     expect(execute).not.toHaveBeenCalled()
   }, 20_000)
 
+  it.each([
+    { command: 'git commit -m "probe" -- note.txt', operation: "git_commit", result: "提交" },
+    { command: "git push", operation: "git_push", result: "推送" }
+  ])(
+    "cancels a pending explicit background $operation approval",
+    async ({ command, operation, result }) => {
+      const { root, sandbox } = await fixture()
+      execFileSync("git", ["init", "--quiet", root])
+      await writeFile(path.join(root, "note.txt"), "test")
+      const caller = new AbortController()
+      const approval = deferred<ApprovalDecision>()
+      const approve = vi.fn((request: ApprovalRequest, signal?: AbortSignal) => {
+        signal?.addEventListener(
+          "abort",
+          () => approval.resolve({ type: "reject", tool_call_id: request.id }),
+          { once: true }
+        )
+        return approval.promise
+      })
+      const rawExecute = vi.fn()
+      sandbox.setOrchestrator(new ToolOrchestrator(new ApprovalStore(), rawExecute, approve))
+
+      const pending = sandbox.executeBackground(command, undefined, undefined, caller.signal)
+      try {
+        await vi.waitFor(() => expect(approve).toHaveBeenCalledOnce(), { timeout: 10_000 })
+        expect(approve.mock.calls[0][0].operation).toBe(operation)
+        expect(LocalSandbox.cancelDetachedBackgroundTasks(sandbox.runId)).toBe(true)
+        await expect(LocalSandbox.cancelBackgroundTasksWithin(sandbox.runId, 1_000)).resolves.toBe(
+          true
+        )
+        await expect(pending).resolves.toContain("用户取消了本次" + result)
+        expect(caller.signal.aborted).toBe(false)
+        expect(LocalSandbox.hasActiveBackgroundTasks(sandbox.runId)).toBe(false)
+        expect(rawExecute).not.toHaveBeenCalled()
+      } finally {
+        approval.resolve({ type: "reject", tool_call_id: "cleanup" })
+        await pending
+      }
+    },
+    20_000
+  )
+
   it("does not retry a capped sandbox result or spawn after cancellation during bypass approval", async () => {
     let answer!: (decision: ApprovalDecision) => void
     const approve = vi.fn(
@@ -449,6 +572,83 @@ describe("LocalSandbox execute handoff", () => {
     expect(defaultRaw).not.toHaveBeenCalled()
     expect(raw).toHaveBeenCalledOnce()
   })
+
+  it.skipIf(process.platform !== "win32")(
+    "reaps descendants of a short bypass retry for an already handed-off Windows task",
+    async () => {
+      const { root, sandbox } = await fixture()
+      await writeFile(
+        path.join(root, "retry-child.cjs"),
+        [
+          'const fs = require("node:fs")',
+          'fs.writeFileSync("retry-child-pid", String(process.pid))',
+          "const timer = setInterval(() => {",
+          '  if (fs.existsSync("stop-retry-child")) process.exit(0)',
+          "}, 25)",
+          "setTimeout(() => clearInterval(timer), 10_000)"
+        ].join("\n")
+      )
+      await writeFile(
+        path.join(root, "retry.cjs"),
+        [
+          'const fs = require("node:fs")',
+          'const { spawn } = require("node:child_process")',
+          'spawn(process.execPath, ["retry-child.cjs"], { stdio: "ignore" }).unref()',
+          "const timer = setInterval(() => {",
+          '  if (fs.existsSync("retry-child-pid")) clearInterval(timer)',
+          "}, 25)"
+        ].join("\n")
+      )
+
+      const approve = vi.fn(async (request: ApprovalRequest) => ({
+        type: "approve" as const,
+        tool_call_id: request.id
+      }))
+      const orchestrator = new ToolOrchestrator(new ApprovalStore(), vi.fn(), approve, () => true)
+      const retry = orchestrator.maybeRetryOutsideSandbox.bind(orchestrator)
+      vi.spyOn(orchestrator, "maybeRetryOutsideSandbox").mockImplementation(
+        (command, cwd, _mode, result, syntax, execution) =>
+          retry(command, cwd, "unelevated", result, syntax, execution)
+      )
+      sandbox.setOrchestrator(orchestrator)
+
+      const firstExit = deferred<void>()
+      const attempts = vi
+        .spyOn(sandbox, "executeRaw")
+        .mockImplementationOnce(async (_command, _mode, _timeout, _signal, options) => {
+          const onExit = options?.handoff?.onSpawn()
+          try {
+            await firstExit.promise
+            return { output: "Permission denied", exitCode: 1, truncated: false }
+          } finally {
+            onExit?.()
+          }
+        })
+      let childPid: number | undefined
+      try {
+        const task = await sandbox.executeForTool("node retry.cjs", undefined, {
+          backgroundAfterMs: 100
+        })
+        if (task.status !== "background") throw new Error(task.result.output)
+        firstExit.resolve()
+        await expect(
+          sandbox.waitForTaskOutput(task.taskId, { timeoutMs: 15_000 })
+        ).resolves.toMatchObject({ status: "completed", result: { exitCode: 0 } })
+        expect(approve).toHaveBeenCalledOnce()
+        expect(attempts).toHaveBeenCalledTimes(2)
+        childPid = Number(await readFile(path.join(root, "retry-child-pid"), "utf8"))
+        expect(Number.isSafeInteger(childPid) && childPid > 0).toBe(true)
+        expect(() => process.kill(childPid!, 0)).toThrow("ESRCH")
+      } finally {
+        firstExit.resolve()
+        if (childPid) {
+          await writeFile(path.join(root, "stop-retry-child"), "")
+          await vi.waitFor(() => expect(() => process.kill(childPid!, 0)).toThrow("ESRCH"))
+        }
+      }
+    },
+    30_000
+  )
 
   it("uses the remaining soft process budget across attempts and skips time between spawns", async () => {
     const { sandbox } = await fixture()

@@ -15,6 +15,8 @@ import {
 } from "./runtime-projection-protocol"
 import {
   getMessageProviderTupleFromMetadata,
+  MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY,
+  MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY,
   normalizeCompleteSnapshotMessageIds
 } from "../../shared/message-role-collision"
 import {
@@ -2019,6 +2021,9 @@ const CHECKPOINT_TRANSFER_CONTENT_TEXT_LIMIT = 120_000
 const CHECKPOINT_TRANSFER_CONTENT_BLOCK_LIMIT = 80
 const CHECKPOINT_TRANSFER_BLOCK_TEXT_LIMIT = 20_000
 const CHECKPOINT_TRANSFER_TOOL_CALL_LIMIT = 50
+const CHECKPOINT_TRANSFER_IDENTITY_LIMIT = 256
+// A JSON string token uses at most six bytes per UTF-16 code unit, plus its quotes.
+const CHECKPOINT_TRANSFER_IDENTITY_TOKEN_BYTE_LIMIT = CHECKPOINT_TRANSFER_IDENTITY_LIMIT * 6 + 2
 // The SQLite tail reader never lets an individual serialized message enter V8
 // above this size. Oversized rows are projected to bounded scalar fields in SQL.
 const CHECKPOINT_TRANSFER_RAW_MESSAGE_BYTE_LIMIT = 64 * 1024
@@ -2106,14 +2111,21 @@ function boundedTransferToolArgs(value: unknown): Record<string, unknown> {
   return args
 }
 
+function boundedTransferIdentity(value: unknown): string | undefined {
+  return typeof value === "string" && value.length <= CHECKPOINT_TRANSFER_IDENTITY_LIMIT
+    ? value
+    : undefined
+}
+
 function boundedTransferToolCalls(value: unknown): unknown[] | undefined {
   if (!Array.isArray(value)) return undefined
   return value.slice(0, CHECKPOINT_TRANSFER_TOOL_CALL_LIMIT).flatMap((rawToolCall) => {
     const toolCall = objectRecord(rawToolCall)
     if (!toolCall) return []
+    const id = boundedTransferIdentity(toolCall.id)
     return [
       {
-        ...(typeof toolCall.id === "string" ? { id: toolCall.id.slice(0, 256) } : {}),
+        ...(id !== undefined ? { id } : {}),
         ...(typeof toolCall.name === "string" ? { name: toolCall.name.slice(0, 256) } : {}),
         args: boundedTransferToolArgs(toolCall.args)
       }
@@ -2130,30 +2142,30 @@ function boundedTransferCheckpointMessage(raw: unknown, index: number): unknown 
   const role = serializedMessageRole(message, kwargs)
   const rawId = kwargs.id ?? (typeof message.id === "string" ? message.id : undefined)
   const toolCalls = boundedTransferToolCalls(message.tool_calls ?? kwargs.tool_calls)
-  const toolCallId = message.tool_call_id ?? kwargs.tool_call_id
+  const toolCallId = boundedTransferIdentity(message.tool_call_id ?? kwargs.tool_call_id)
   const name = message.name ?? kwargs.name
   const status = message.status ?? kwargs.status
+  const provider =
+    boundedTransferIdentity(additionalKwargs[MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]) &&
+    (role !== "tool" || toolCallId)
+      ? getMessageProviderTupleFromMetadata(additionalKwargs)
+      : undefined
   const selectedAdditionalKwargs = {
     ...(additionalKwargs.cmb_internal_coordinator_notification === true
       ? { cmb_internal_coordinator_notification: true }
       : {}),
     ...(additionalKwargs.is_error === true ? { is_error: true } : {}),
-    ...(typeof additionalKwargs.cmb_internal_provider_source_id === "string"
-      ? {
-          cmb_internal_provider_source_id:
-            additionalKwargs.cmb_internal_provider_source_id.slice(0, 256)
-        }
-      : {}),
-    ...(typeof additionalKwargs.cmb_internal_provider_occurrence === "number"
-      ? { cmb_internal_provider_occurrence: additionalKwargs.cmb_internal_provider_occurrence }
-      : {})
+    ...(provider && {
+      [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: provider.provider_source_id,
+      [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: provider.provider_occurrence
+    })
   }
   return {
     id: typeof rawId === "string" && rawId ? rawId : `worker-snapshot-${index}`,
     type: role === "user" ? "human" : role === "assistant" ? "ai" : role,
     content: boundedTransferContent(message.content ?? kwargs.content),
     ...(toolCalls ? { tool_calls: toolCalls } : {}),
-    ...(typeof toolCallId === "string" ? { tool_call_id: toolCallId.slice(0, 256) } : {}),
+    ...(toolCallId !== undefined ? { tool_call_id: toolCallId } : {}),
     ...(typeof name === "string" ? { name: name.slice(0, 256) } : {}),
     ...(typeof status === "string" ? { status: status.slice(0, 128) } : {}),
     ...(message.is_error === true || kwargs.is_error === true ? { is_error: true } : {}),
@@ -2236,6 +2248,15 @@ class BoundedCheckpointMessageWindow {
   }
 }
 
+function boundedCheckpointIdentityJson(jsonToken: string): string {
+  // Retain the entire encoded token or omit it. JS checks the exact UTF-16 length
+  // after decoding, since SQLite's character count differs for supplementary characters.
+  return `CASE
+    WHEN length(CAST((${jsonToken}) AS BLOB)) <= ${CHECKPOINT_TRANSFER_IDENTITY_TOKEN_BYTE_LIMIT}
+      THEN json(${jsonToken})
+  END`
+}
+
 const BOUNDED_CHECKPOINT_MESSAGE_SELECT = `
   CAST(message.key AS INTEGER) AS message_index,
   CASE
@@ -2285,12 +2306,7 @@ const BOUNDED_CHECKPOINT_MESSAGE_SELECT = `
             (
               SELECT json_group_array(
                 json_object(
-                  'id', substr(
-                    CASE WHEN json_type(bounded_tool.tool_value, '$.id') = 'text'
-                      THEN json_extract(bounded_tool.tool_value, '$.id') END,
-                    1,
-                    256
-                  ),
+                  'id', ${boundedCheckpointIdentityJson("bounded_tool.tool_value -> '$.id'")},
                   'name', substr(
                     CASE WHEN json_type(bounded_tool.tool_value, '$.name') = 'text'
                       THEN json_extract(bounded_tool.tool_value, '$.name') END,
@@ -2338,16 +2354,14 @@ const BOUNDED_CHECKPOINT_MESSAGE_SELECT = `
             1,
             256
           ),
-          'tool_call_id', substr(
+          'tool_call_id', ${boundedCheckpointIdentityJson(`
             COALESCE(
               CASE WHEN json_type(message.value, '$.tool_call_id') = 'text'
-                THEN json_extract(message.value, '$.tool_call_id') END,
+                THEN message.value -> '$.tool_call_id' END,
               CASE WHEN json_type(message.value, '$.kwargs.tool_call_id') = 'text'
-                THEN json_extract(message.value, '$.kwargs.tool_call_id') END
-            ),
-            1,
-            256
-          ),
+                THEN message.value -> '$.kwargs.tool_call_id' END
+            )
+          `)},
           'name', substr(
             COALESCE(
               CASE WHEN json_type(message.value, '$.name') = 'text'
@@ -2397,21 +2411,13 @@ const BOUNDED_CHECKPOINT_MESSAGE_SELECT = `
                 THEN json('true')
               ELSE json('false')
             END,
-            'cmb_internal_provider_source_id', substr(
+            'cmb_internal_provider_source_id', ${boundedCheckpointIdentityJson(`
               CASE
                 WHEN json_type(message.value, '$.additional_kwargs') = 'object'
-                  THEN CASE
-                    WHEN json_type(message.value, '$.additional_kwargs.cmb_internal_provider_source_id') = 'text'
-                      THEN json_extract(message.value, '$.additional_kwargs.cmb_internal_provider_source_id')
-                  END
-                ELSE CASE
-                  WHEN json_type(message.value, '$.kwargs.additional_kwargs.cmb_internal_provider_source_id') = 'text'
-                    THEN json_extract(message.value, '$.kwargs.additional_kwargs.cmb_internal_provider_source_id')
-                END
-              END,
-              1,
-              256
-            ),
+                  THEN message.value -> '$.additional_kwargs.cmb_internal_provider_source_id'
+                ELSE message.value -> '$.kwargs.additional_kwargs.cmb_internal_provider_source_id'
+              END
+            `)},
             'cmb_internal_provider_occurrence', CASE
               WHEN json_type(message.value, '$.additional_kwargs') = 'object'
                 THEN CASE

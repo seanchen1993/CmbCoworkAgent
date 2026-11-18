@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest"
 import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages"
 import {
+  boundedCloneSnapshotValue,
   serializeWorkflowAgentSnapshotMessages,
-  WORKFLOW_AGENT_SNAPSHOT_MAX_MESSAGES
+  WORKFLOW_AGENT_SNAPSHOT_CONTENT_CAP,
+  WORKFLOW_AGENT_SNAPSHOT_MAX_MESSAGES,
+  WORKFLOW_AGENT_SNAPSHOT_TOTAL_CAP
 } from "../../../main/agent/workflow/agent-snapshot"
 import type { Message } from "../types"
 import { ElectronIPCTransport } from "./electron-transport"
@@ -177,6 +180,56 @@ describe("workflow complete snapshot projection", () => {
     )
     expect(live[0]).toMatchObject({ id: secondReply.id, content: "Second reply" })
     expect(restored[0].id).toBe(secondReply.id)
+  })
+
+  it("omits incomplete retry prompts and aliases at the total budget boundary", () => {
+    const transport = new ElectronIPCTransport()
+    const scope = "parent/run/0"
+    const retryPromptIndex = 1
+    const additional_kwargs = {
+      cmb_internal_provider_source_id: "source",
+      cmb_internal_provider_occurrence: 1
+    }
+    const prefix = [
+      new HumanMessage({ id: "prompt", content: "prompt" }),
+      new HumanMessage({ id: "retry", content: "retry" }),
+      new AIMessage({ id: "wire-a", content: "alias old", additional_kwargs }),
+      new AIMessage({ id: "wire-b", content: "alias new", additional_kwargs })
+    ]
+    const convert = (snapshot: unknown) =>
+      transport.convertWorkflowAgentValuesSnapshot(snapshot, scope)
+    const canonical = convert(
+      serializeWorkflowAgentSnapshotMessages({ messages: prefix, retryPromptIndex })
+    ).at(-1)!
+    const result = (id: string, length: number) =>
+      new ToolMessage({ id, content: "x".repeat(length), tool_call_id: `call-${id}` })
+    const filler = Array.from({ length: 41 }, (_, index) =>
+      result(`filler-${index}`, WORKFLOW_AGENT_SNAPSHOT_CONTENT_CAP)
+    )
+
+    for (const [partialIndex, partialBudget] of [
+      [retryPromptIndex, 50], // The serialized class name has not been copied.
+      [2, 150] // The content survives, but the provider occurrence does not.
+    ]) {
+      const budget = { left: WORKFLOW_AGENT_SNAPSHOT_TOTAL_CAP }
+      for (const message of [...prefix.slice(partialIndex + 1), ...filler, result("latest", 0)]) {
+        boundedCloneSnapshotValue(message, 0, budget)
+      }
+      const messages = [...prefix, ...filler, result("latest", budget.left - partialBudget)]
+      const bounded = serializeWorkflowAgentSnapshotMessages({ messages, retryPromptIndex })
+      for (const snapshot of [bounded, JSON.parse(JSON.stringify(bounded))]) {
+        const projected = convert(snapshot)
+        expect(projected[0].worker_snapshot_index).toBe(partialIndex + 1)
+        expect(projected.filter((message) => message.role === "assistant")).toEqual([
+          expect.objectContaining({ id: canonical.id, content: "alias new" })
+        ])
+        expect(projected.at(-1)).toMatchObject({
+          id: "latest",
+          worker_snapshot_index: messages.length - 1,
+          tool_call_id: "call-latest"
+        })
+      }
+    }
   })
 
   it("applies corrections outside the last 32 messages without duplicating the tail", () => {
