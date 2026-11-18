@@ -12,6 +12,7 @@ import {
 } from "@langchain/core/messages"
 import type { Checkpoint } from "@langchain/langgraph-checkpoint"
 import { describe, expect, it, vi } from "vitest"
+import { summaryRequestBytes } from "./context-compaction-recovery"
 import {
   buildSummaryMessage,
   createCmbSummarizationMiddleware,
@@ -432,6 +433,53 @@ describe("fork summary state", () => {
     expect(JSON.stringify(attachment.content)).toContain("data:image/png;base64,")
   })
 
+  it("keeps short completed turns when the resized retry request already fits", async () => {
+    const raw = [new HumanMessage("original"), new AIMessage("original reply")]
+    const value = checkpoint(raw, raw.length)
+    await inheritForkSummarization({ checkpoint: value, persistedMessageCount: raw.length })
+    const constraint = "Never rename the existing Foo API. REQUIRED_AFTER_FORK"
+    const fresh = new HumanMessage("continue")
+    const messages = [
+      ...raw,
+      new HumanMessage(constraint),
+      new AIMessage("Acknowledged"),
+      new HumanMessage("Please review " + "evidence ".repeat(1_000)),
+      new AIMessage("LAST_RAW_TURN"),
+      fresh
+    ]
+    const invoke = vi.fn(async (request: BaseMessage[]) => {
+      if (summaryRequestBytes(request) > 4_000) throw new Error("maximum context length")
+      expect(request[1].content).toContain(constraint)
+      expect(request[1].content).toContain("LAST_RAW_TURN")
+      return new AIMessage(constraint)
+    })
+    const middleware = createCmbSummarizationMiddleware({
+      model: { invoke } as never,
+      backend: { write: vi.fn(async () => ({ error: "archive unavailable" })) } as never,
+      maxInputTokens: 8_000,
+      summaryModelInputBudgetTokens: 8_000,
+      trimTokensToSummarize: 4_000,
+      trigger: { type: "tokens", value: 500 },
+      keep: { type: "messages", value: 1 }
+    }) as unknown as {
+      wrapModelCall: (
+        request: unknown,
+        handler: (request: { messages: BaseMessage[] }) => Promise<AIMessage>
+      ) => Promise<unknown>
+    }
+    const handler = vi.fn(async ({ messages }: { messages: BaseMessage[] }) => {
+      expect(messages[0].content).toContain(constraint)
+      expect(messages.slice(1)).toEqual([fresh])
+      return new AIMessage("done")
+    })
+    await middleware.wrapModelCall(
+      { messages, state: { ...value.channel_values, messages }, tools: [] },
+      handler
+    )
+    expect(invoke).toHaveBeenCalledTimes(2)
+    expect(handler).toHaveBeenCalledOnce()
+  })
+
   it.each([false, true])(
     "fits ordinary turns and inherited handoff after overflow (dedicated recovery model: %s)",
     async (dedicatedRecoveryModel) => {
@@ -733,6 +781,70 @@ describe("fork summary state", () => {
     expect(handler).toHaveBeenCalledTimes(2)
     expect(invoke).toHaveBeenCalledOnce()
     expect(write).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])("compacts an overflowing fork tail (whole summary overflows: %s)", async (
+    wholeOverflow
+  ) => {
+    const raw = [
+      new HumanMessage("original request"),
+      new AIMessage("covered history ".repeat(400) + "COVERED_ONLY")
+    ]
+    const value = checkpoint(raw, raw.length)
+    value.channel_values._summarizationEvent = {
+      cutoffIndex: raw.length,
+      summaryMessage: buildSummaryMessage("Inherited decision: " + "x".repeat(4_800), null, null),
+      filePath: null
+    }
+    await inheritForkSummarization({ checkpoint: value, persistedMessageCount: raw.length })
+    const recent = new AIMessage("RECENT_EVIDENCE " + "界".repeat(2_000))
+    const latest = new HumanMessage("continue this work")
+    const messages = [...raw, new HumanMessage("review evidence"), recent, latest]
+    const systemMessage = new SystemMessage("界".repeat(14_500))
+    const invoke = vi.fn(async (request: BaseMessage[]) => {
+      const prompt = String(request[1].content)
+      expect(prompt).toContain("Inherited decision")
+      expect(prompt).not.toContain("COVERED_ONLY")
+      if (prompt.includes("RECENT_EVIDENCE")) {
+        if (prompt.includes("continue this work")) {
+          return new AIMessage(
+            "Inherited decision and RECENT_EVIDENCE" + (wholeOverflow ? "界".repeat(1_600) : "")
+          )
+        }
+        return new AIMessage("Inherited decision and RECENT_EVIDENCE")
+      }
+      return new AIMessage("Inherited decision")
+    })
+    const write = vi.fn(async () => ({}))
+    const middleware = createCmbSummarizationMiddleware({
+      model: { invoke } as never,
+      backend: { write } as never,
+      maxInputTokens: 32_000,
+      postCompactionInputBudgetTokens: 27_000,
+      trigger: { type: "tokens", value: 24_000 },
+      keep: { type: "tokens", value: 3_200 }
+    }) as unknown as {
+      wrapModelCall: (
+        request: unknown,
+        handler: (request: { messages: BaseMessage[] }) => Promise<AIMessage>
+      ) => Promise<{ update: { _summarizationEvent: unknown } }>
+    }
+    const handler = vi.fn(async ({ messages }: { messages: BaseMessage[] }) => {
+      if (estimateCjkProviderTokens([systemMessage, ...messages]) > 16_000) {
+        throw new Error("maximum context length is 16000 tokens")
+      }
+      expect(messages).toHaveLength(1)
+      expect(messages[0].content).toContain("Inherited decision and RECENT_EVIDENCE")
+      return new AIMessage("done")
+    })
+    const result = await middleware.wrapModelCall({
+      messages, systemMessage, state: { ...value.channel_values, messages }, tools: []
+    }, handler)
+    const event = SummarizationEventSchema.parse(result.update._summarizationEvent)
+    expect(event.cutoffIndex).toBe(messages.length)
+    expect(event.usageStartIndex).toBe(messages.length)
+    expect(invoke).toHaveBeenCalledTimes(wholeOverflow ? 4 : 3)
+    expect(write).toHaveBeenCalledOnce()
   })
 
   it.each([

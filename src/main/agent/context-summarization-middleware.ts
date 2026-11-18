@@ -1697,7 +1697,7 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
       ]
       return true
     }
-    const reduceInheritedRequest = (budget: number): boolean => {
+    const reduceInheritedRequest = (budget: number, trimRounds: boolean): boolean => {
       const [originalHandoff, ...remaining] = attemptMessages
       const rawBudget = Math.min(trimTokensToSummarize, Math.max(128, Math.floor(budget / 2)))
       const maxChars = Math.max(128, Math.floor(budget / (remaining.length + 1)))
@@ -1716,7 +1716,8 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
       const tools = compactToolResults(remaining, rawBudget, undefined, undefined, maxChars)
       const raw = compactOversizedNonToolContent(tools.messages, budget, undefined, undefined, maxChars)
       const argumentsFit = compactSummaryToolArguments(raw.messages, maxChars)
-      const trimmed = argumentsFit.messages.length > 2 && estimateSummaryInput(argumentsFit.messages) > rawBudget
+      const trimmed = trimRounds && argumentsFit.messages.length > 2 &&
+        estimateSummaryInput(argumentsFit.messages) > rawBudget
         ? truncateOldestRoundsForRetry(argumentsFit.messages, rawBudget)
         : null
       attemptMessages = [handoff, ...(trimmed ?? argumentsFit.messages)]
@@ -1749,7 +1750,7 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
       const inputTarget = inheritedInputBudget ? inheritedInputBudget * 0.8 : undefined
       if (!preflightChecked && inputTarget && estimateSummaryInput(attemptMessages) > inputTarget) {
         // Fit the handoff and raw tail together before either is encoded as XML.
-        reduceInheritedRequest(inputTarget)
+        reduceInheritedRequest(inputTarget, true)
       }
       const conversationTranscript = renderSummaryTranscript(attemptMessages)
       const buildRequest = (transcript: string, compactInstructions = false): BaseMessage[] => [
@@ -1800,7 +1801,7 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
         // Check prompt and XML expansion once without repeatedly encoding an
         // unchanged large tail. Provider feedback can tighten the request later.
         preflightChecked = true
-        if (inputTarget && estimatedInput > inputTarget && reduceInheritedRequest(inputTarget / 2)) {
+        if (inputTarget && estimatedInput > inputTarget && reduceInheritedRequest(inputTarget / 2, true)) {
           continue
         }
       }
@@ -1864,18 +1865,19 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
         const reportedWindow = contextWindowFromError(error)
         if (reportedWindow)
           observedContextWindow = Math.min(observedContextWindow ?? Infinity, reportedWindow)
-        retryByteBudget = summaryRetryByteBudget({
+        const byteBudget = summaryRetryByteBudget({
           previousRequestBytes: requestBytes,
           configuredInputBudget: trimTokensToSummarize,
           contextWindow: observedContextWindow ?? getMaxInputTokens(activeModel),
           outputTokens: reservedOutputTokens,
           lastAttempt: attemptBudget.used === attemptLimit - 1
         })
+        retryByteBudget = byteBudget
         previousQualityIssues = []
         if (fitInheritedHandoff) {
           // Trim inherited content structurally before the serialized byte
           // fitter runs, and keep its handoff out of the old-round eviction.
-          reduceInheritedRequest(Math.min(retryByteBudget, inputTarget ?? Infinity))
+          reduceInheritedRequest(Math.min(byteBudget, inputTarget ?? Infinity), false)
         }
         const handoff = fitInheritedHandoff ? attemptMessages[0] : undefined
         const retryMessages = prepareSummaryModelRequest(
@@ -1883,13 +1885,11 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
         )
         const withHandoff = (remaining: BaseMessage[]): BaseMessage[] =>
           handoff ? [handoff, ...remaining] : remaining
-        const truncated = truncateOldestRoundsForRetry(
-          retryMessages,
-          trimTokensToSummarize,
-          (messages) =>
-            summaryRequestBytes(buildRequest(renderSummaryTranscript(withHandoff(messages)))) <=
-            retryByteBudget!
-        )
+        const fitsRequest = (messages: BaseMessage[]): boolean =>
+          summaryRequestBytes(buildRequest(renderSummaryTranscript(withHandoff(messages)))) <= byteBudget
+        const truncated = handoff && fitsRequest(retryMessages)
+          ? null
+          : truncateOldestRoundsForRetry(retryMessages, trimTokensToSummarize, fitsRequest)
         attemptMessages = withHandoff(truncated ?? retryMessages)
         let nextRequest: BaseMessage[]
         try {
@@ -2040,6 +2040,7 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
               : request.messages.length
           )
     let archiveIncomplete = previousEvent?.archiveIncomplete === true
+    const summaryAttemptBudget: SummaryAttemptBudget = { used: 0, diagnostics }
     let cutoffIndex = determineCutoffIndex(truncatedMessages, maxInputTokens)
     // DeepAgents Python refuses token-based compaction when it cannot preserve
     // any message. CmbCowork intentionally still supports summarizing one
@@ -2047,35 +2048,20 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
     // effective[0] is the synthetic previous summary, so
     // previousCutoff + 1 - 1 would not advance the raw-state cutoff at all.
     // Re-summarizing it cannot evict new history and can otherwise create a
-    // compaction loop. After a provider rejection, native sessions can recover
-    // by summarizing the whole input. Forks try shortening their handoff while
-    // keeping the raw tail.
+    // compaction loop. After a provider rejection, try keeping the fork's raw
+    // tail with a shorter handoff before compacting the whole effective input.
     const advancesStateCutoff = previousEvent == null || cutoffIndex > 1
     const noProgress = cutoffIndex <= 0 || !advancesStateCutoff
-    if (noProgress && previousEvent?.usageStartIndex === undefined) {
-      if (!rejectedRequest) {
-        try {
-          return await handler({ ...request, messages: truncatedMessages })
-        } catch (error) {
-          if (!isCmbContextOverflow(error)) throw error
-        }
+    const hasInheritedHandoff = previousEvent?.usageStartIndex !== undefined
+    if (noProgress && !rejectedRequest) {
+      try {
+        return await handler({ ...request, messages: truncatedMessages })
+      } catch (error) {
+        if (!isCmbContextOverflow(error)) throw error
+        rejectedRequest = { error }
       }
-      cutoffIndex = truncatedMessages.length
-      diagnostics?.record("force_whole_conversation", {
-        reason: "provider_overflow_within_keep_budget",
-        cutoffIndex
-      })
-    } else if (noProgress && previousEvent?.usageStartIndex !== undefined) {
-      // A fork can resume on a smaller model with a handoff too large for that
-      // window even though every raw tail message should be kept verbatim.
-      if (!rejectedRequest) {
-        try {
-          return await handler({ ...request, messages: truncatedMessages })
-        } catch (error) {
-          if (!isCmbContextOverflow(error)) throw error
-          rejectedRequest = { error }
-        }
-      }
+    }
+    if (noProgress && rejectedRequest && previousEvent?.usageStartIndex !== undefined) {
       const tail = truncatedMessages.slice(1)
       const initialUserRequest = findInitialUserRequest(truncatedMessages, request.messages)
       const lastPromptAnchor = readSummaryPromptInitialRequest(previousEvent.summaryMessage, initialUserRequest)
@@ -2087,11 +2073,16 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
         buildSummaryMessage("", previousEvent.filePath, initialUserRequest, archiveIncomplete, promptAnchor),
         ...tail
       ])
-      const attemptBudget: SummaryAttemptBudget = { used: 0, diagnostics }
       let lastOverflow = rejectedRequest.error
       let previousTarget: number | undefined
       for (let revision = 0; revision < 2; revision += 1) {
-        if (attemptBudget.used >= MAX_SUMMARY_MODEL_ATTEMPTS) break
+        // Give the first handoff rewrite room to recover from summarizer
+        // overflow. Reserve more for whole-input recovery once a rewrite
+        // has already failed to make the raw tail fit.
+        const reservedAttempts = tail.length === 0 ? 0 : revision + 1
+        const remainingAttempts = MAX_SUMMARY_MODEL_ATTEMPTS - reservedAttempts -
+          summaryAttemptBudget.used
+        if (remainingAttempts <= 0) break
         const budget = Math.min(inputBudget ?? Infinity, previousCost)
         const promptAnchor = fitInitialPromptAnchor(
           lastPromptAnchor, budget, countWrapper, revision > 0
@@ -2108,18 +2099,24 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
         )
         if (target <= 0) continue
         previousTarget = target
-        const shorter = await createSummary(
-          [previousEvent.summaryMessage],
-          resolvedModel,
-          fallbackModel,
-          attemptBudget,
-          null,
-          null,
-          request.runtime?.signal,
-          target,
-          undefined,
-          true
-        )
+        let shorter: string
+        try {
+          shorter = await createSummary(
+            [previousEvent.summaryMessage],
+            resolvedModel,
+            fallbackModel,
+            summaryAttemptBudget,
+            null,
+            null,
+            request.runtime?.signal,
+            target,
+            remainingAttempts,
+            true
+          )
+        } catch (error) {
+          if (tail.length === 0 || !isCmbContextOverflow(error)) throw error
+          break
+        }
         const summaryMessage = buildSummaryMessage(
           shorter, previousEvent.filePath, initialUserRequest, archiveIncomplete, promptAnchor
         )
@@ -2152,7 +2149,15 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
           }
         }
       }
-      throw lastOverflow
+      if (tail.length === 0) throw lastOverflow
+    }
+    if (noProgress) {
+      request.runtime?.signal?.throwIfAborted()
+      cutoffIndex = truncatedMessages.length
+      diagnostics?.record("force_whole_conversation", {
+        reason: "provider_overflow_within_keep_budget",
+        cutoffIndex
+      })
     }
 
     const messagesToSummarize = truncatedMessages.slice(0, cutoffIndex)
@@ -2160,7 +2165,8 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
     const historyMessagesToSummarize = historySourceMessages.slice(0, cutoffIndex)
     const preservedHistoryMessages = historySourceMessages.slice(cutoffIndex)
     const initialUserRequest = findInitialUserRequest(truncatedMessages, request.messages)
-    const latestUserRequest = preservedMessages.some(isRealUserMessage)
+    const forceWholeFork = noProgress && hasInheritedHandoff
+    const latestUserRequest = forceWholeFork || preservedMessages.some(isRealUserMessage)
       ? null
       : findLatestUserRequest(messagesToSummarize)
     const outerInputBudget =
@@ -2188,8 +2194,6 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
       }
     }
 
-    const summaryAttemptBudget: SummaryAttemptBudget = { used: 0, diagnostics }
-    const hasInheritedHandoff = previousEvent?.usageStartIndex !== undefined
     const lastPromptAnchor = previousEvent
       ? readSummaryPromptInitialRequest(previousEvent.summaryMessage, initialUserRequest)
       : initialUserRequest
@@ -2222,8 +2226,9 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
     let modifiedMessages = [finalSummaryMessage, ...preservedMessages]
     const modifiedTokens = countTotalTokens(modifiedMessages, request.systemMessage, request.tools)
     const estimatedModifiedTokens = Math.ceil(modifiedTokens * tokenEstimationMultiplier)
-    let needsWholeConversationRetry =
+    const initialEstimatedOverflow =
       outerInputBudget != null && estimatedModifiedTokens > outerInputBudget
+    let needsWholeConversationRetry = initialEstimatedOverflow
 
     if (!needsWholeConversationRetry) {
       try {
@@ -2245,55 +2250,56 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
     }
 
     if (needsWholeConversationRetry) {
-      const retryResult = await summarizeMessages(
-        [...messagesToSummarize, ...preservedMessages],
-        resolvedModel,
-        fallbackModel,
-        summaryAttemptBudget,
-        request.state,
-        previousEvent?.cutoffIndex,
-        truncatedMessages.length,
-        initialUserRequest,
-        // The retry summarizes the complete effective conversation, so the
-        // latest user request is already present as a structured message.
-        // Repeating it in the instruction wastes context and, for a very large
-        // request, can defeat the overflow compaction applied to that message.
-        null,
-        request.runtime?.signal,
-        owner,
-        initialOwnerSessionId,
-        // The first successful summary has already archived the summarized
-        // head. On the whole-conversation retry, append only the tail that was
-        // previously retained; otherwise the historical head is duplicated.
-        summaryResult.filePath ? preservedHistoryMessages : historySourceMessages,
-        hasInheritedHandoff
-      )
-      // The head may already be durably archived even if this best-effort tail
-      // append fails. Never discard that valid recovery pointer because a
-      // later write returned null.
-      finalFilePath = retryResult.filePath ?? finalFilePath
-      if (hasInheritedHandoff || finalFilePath) {
-        archiveIncomplete = previousEvent?.archiveIncomplete === true || !retryResult.filePath
-      }
-      finalSummaryMessage = buildSummaryMessage(
-        retryResult.summary,
-        finalFilePath,
-        initialUserRequest,
-        archiveIncomplete,
-        lastPromptAnchor
-      )
-      finalStateCutoffIndex = retryResult.stateCutoffIndex
-      modifiedMessages = [finalSummaryMessage]
+      let wholeSummary = summaryResult.summary
+      let retryEstimatedTokens = estimatedModifiedTokens
+      let estimatedOverflow = initialEstimatedOverflow
+      let providerOverflow = !initialEstimatedOverflow
+      // A forced fork compaction already summarized the complete effective
+      // input. Use its remaining attempt to shorten that handoff if needed.
+      if (!forceWholeFork) {
+        const retryResult = await summarizeMessages(
+          truncatedMessages,
+          resolvedModel,
+          fallbackModel,
+          summaryAttemptBudget,
+          request.state,
+          previousEvent?.cutoffIndex,
+          truncatedMessages.length,
+          initialUserRequest,
+          // The latest user request is already present in the complete input.
+          null,
+          request.runtime?.signal,
+          owner,
+          initialOwnerSessionId,
+          // Append only the tail when the first pass archived the head.
+          summaryResult.filePath ? preservedHistoryMessages : historySourceMessages,
+          hasInheritedHandoff
+        )
+        wholeSummary = retryResult.summary
+        finalFilePath = retryResult.filePath ?? finalFilePath
+        if (hasInheritedHandoff || finalFilePath) {
+          archiveIncomplete = previousEvent?.archiveIncomplete === true || !retryResult.filePath
+        }
+        finalSummaryMessage = buildSummaryMessage(
+          wholeSummary,
+          finalFilePath,
+          initialUserRequest,
+          archiveIncomplete,
+          lastPromptAnchor
+        )
+        finalStateCutoffIndex = retryResult.stateCutoffIndex
+        modifiedMessages = [finalSummaryMessage]
 
-      const retryEstimatedTokens = estimateOuterInputTokens(modifiedMessages)
-      const estimatedOverflow = outerInputBudget != null && retryEstimatedTokens > outerInputBudget
-      let providerOverflow = false
-      if (!estimatedOverflow) {
-        try {
-          await handler({ ...request, messages: modifiedMessages })
-        } catch (error) {
-          if (!hasInheritedHandoff || !isCmbContextOverflow(error)) throw error
-          providerOverflow = true
+        retryEstimatedTokens = estimateOuterInputTokens(modifiedMessages)
+        estimatedOverflow = outerInputBudget != null && retryEstimatedTokens > outerInputBudget
+        providerOverflow = false
+        if (!estimatedOverflow) {
+          try {
+            await handler({ ...request, messages: modifiedMessages })
+          } catch (error) {
+            if (!hasInheritedHandoff || !isCmbContextOverflow(error)) throw error
+            providerOverflow = true
+          }
         }
       }
       if (estimatedOverflow || providerOverflow) {
@@ -2315,7 +2321,7 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
           ? summaryBudget - fixedCost
           : scaledAvailable
         const targetSummaryTokens = Math.floor(providerOverflow
-          ? Math.min(available, Math.max(1, countTotalTokens([new HumanMessage(retryResult.summary)]) / 3))
+          ? Math.min(available, Math.max(1, countTotalTokens([new HumanMessage(wholeSummary)]) / 3))
           : available
         )
         if (targetSummaryTokens <= 0) {
