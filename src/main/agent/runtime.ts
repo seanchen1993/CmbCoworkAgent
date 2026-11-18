@@ -179,6 +179,8 @@ import {
   flushStrict,
   getThreadCore,
   getThreadMessageIdentityContext,
+  getThreadMessageProviderOccurrencesBeforeUser,
+  getThreadTranscriptBoundaryOrdinal,
   moveThreadMessagesAfterAnchor,
   moveThreadMessagesAfterLastNonAssistant,
   replaceThreadMessageId,
@@ -256,12 +258,15 @@ export {
 } from "./current-run-message-queue"
 export type { CurrentRunQueuedMessage } from "./current-run-message-queue"
 
-let flushTranscriptBeforeCurrentRunInjection:
-  | ((threadId: string, runToken: string) => void)
-  | null = null
+type CurrentRunTranscriptFlush = (
+  threadId: string,
+  runToken: string
+) => (userMessageId: string | undefined) => void
+
+let flushTranscriptBeforeCurrentRunInjection: CurrentRunTranscriptFlush | null = null
 
 export function setCurrentRunTranscriptFlushBeforeInjection(
-  flush: (threadId: string, runToken: string) => void
+  flush: CurrentRunTranscriptFlush
 ): void {
   flushTranscriptBeforeCurrentRunInjection = flush
 }
@@ -812,7 +817,10 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
   if (!context?.runToken) {
     throw new Error("Current-run transcript flush is missing its physical run token")
   }
-  flushTranscriptBeforeCurrentRunInjection(threadId, context.runToken)
+  const commitTranscriptInjection = flushTranscriptBeforeCurrentRunInjection(
+    threadId,
+    context.runToken
+  )
   // afterModel runs before the outer stream consumer receives the final AI
   // message. Resolve and migrate the exact provider occurrence before writing
   // the completed reply so a reused raw provider id cannot overwrite history.
@@ -843,13 +851,22 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
     ],
     32
   )
-  const durableAnchorMessageId = context.anchorMessage
-    ? resolveCurrentRunInjectionAnchorId(
-        durableMessagesBeforeCompletedAssistant,
-        context.anchorMessage
-      )
-    : undefined
-  if (context.anchorMessage && !durableAnchorMessageId) {
+  const anchor = context.anchorMessage
+  let durableAnchorMessageId: string | undefined
+  if (anchor) {
+    durableAnchorMessageId = resolveCurrentRunInjectionAnchorId(
+      durableMessagesBeforeCompletedAssistant,
+      anchor
+    )
+    if (
+      !durableAnchorMessageId &&
+      anchor.role === "user" &&
+      getThreadTranscriptBoundaryOrdinal(threadId, anchor.id) !== undefined
+    ) {
+      durableAnchorMessageId = anchor.id
+    }
+  }
+  if (anchor && !durableAnchorMessageId) {
     throw new Error("Cannot resolve current-run injection predecessor in durable transcript")
   }
   const completedAssistantIdentity = completedAssistantMessage
@@ -916,6 +933,7 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
     moveThreadMessagesAfterLastNonAssistant(threadId, transcriptMessageIds)
   }
   await flushStrict()
+  commitTranscriptInjection(messages.at(-1)?.id)
   // Persistence above is still valid if a replacement run took ownership while
   // fsync was in flight, but old-run stream events are not: they would append the
   // injected user turn after the replacement's optimistic bubble and reset its
@@ -3009,7 +3027,17 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       // summarization (injected turns should participate in context management)
       // and BEFORE humanInTheLoop (a steered message must never race a pending
       // tool-approval interrupt). See createCurrentRunMessageQueueMiddleware.
-      createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken),
+      createCurrentRunMessageQueueMiddleware(
+        currentRunMessageQueueOwnerToken,
+        (threadId, boundaryId, sourceId) => {
+          const previous = getThreadMessageProviderOccurrencesBeforeUser(threadId, boundaryId, [
+            sourceId
+          ])
+          return previous === undefined
+            ? undefined
+            : previous.find((entry) => entry.role === "assistant")?.provider_occurrence ?? 0
+        }
+      ),
       createCmbSummarizationMiddleware(mainSummarizationOptions),
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
       // Recover from malformed/truncated tool-call JSON (deepseek et al.): promote

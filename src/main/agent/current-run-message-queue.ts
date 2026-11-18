@@ -23,14 +23,16 @@
 // renderer notification (which uses BrowserWindow) is injected by runtime.ts via
 // `setCurrentRunInjectionNotifier`.
 
-import { AIMessage, HumanMessage } from "@langchain/core/messages"
+import { AIMessage, HumanMessage, type BaseMessage } from "@langchain/core/messages"
 import { createMiddleware } from "langchain"
 import { randomUUID } from "crypto"
 import type { Message } from "../types"
+import { GOAL_CONTINUATION_BOUNDARY_METADATA_KEY } from "./goals/internal-prompt"
 import {
   advanceCompletedMessageContentRoute,
   getMessageProviderOccurrence,
   getMessageProviderSourceId,
+  getMessageProviderTupleFromMetadata,
   MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY,
   MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY,
   normalizeAppendedMessageIds
@@ -507,10 +509,19 @@ async function drainCurrentRunMessagesForInjection(
   }
 }
 
+function graphAssistantProviderSourceId(message: AIMessage): string | undefined {
+  const providerSourceId = message.additional_kwargs[MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]
+  return (
+    typeof providerSourceId === "string" && providerSourceId.trim()
+      ? providerSourceId.trim()
+      : message.id?.trim() || undefined
+  )
+}
+
 function completedAssistantMessageForTranscript(
   message: AIMessage
 ): CurrentRunCompletedAssistantMessage | undefined {
-  const sourceId = typeof message.id === "string" && message.id.trim() ? message.id.trim() : undefined
+  const sourceId = graphAssistantProviderSourceId(message)
   if (typeof message.content === "string") {
     return message.content.length > 0
       ? {
@@ -533,6 +544,47 @@ function completedAssistantMessageForTranscript(
     : undefined
 }
 
+type GoalProviderOccurrenceLoader = (
+  threadId: string,
+  goalBoundaryId: string,
+  providerSourceId: string
+) => number | undefined
+
+function assignGoalGraphAssistantIdentity(
+  threadId: string,
+  messages: readonly BaseMessage[],
+  response: AIMessage,
+  loadPreviousOccurrence?: GoalProviderOccurrenceLoader
+): void {
+  const boundaryIndex = messages.findLastIndex(HumanMessage.isInstance)
+  const boundary = messages[boundaryIndex]
+  if (boundary?.additional_kwargs[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] !== true) return
+  const sourceId = graphAssistantProviderSourceId(response)
+  if (!sourceId || !boundary.id) return
+
+  const previous = loadPreviousOccurrence?.(threadId, boundary.id, sourceId)
+  let occurrence = previous
+  if (occurrence !== undefined) {
+    for (const message of messages.slice(boundaryIndex + 1)) {
+      if (!AIMessage.isInstance(message) || graphAssistantProviderSourceId(message) !== sourceId)
+        continue
+      const declared = getMessageProviderTupleFromMetadata(message.additional_kwargs)
+      occurrence = Math.max(occurrence + 1, declared?.provider_occurrence ?? 0)
+    }
+  }
+
+  response.additional_kwargs = {
+    ...response.additional_kwargs,
+    [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: sourceId,
+    ...(occurrence !== undefined && {
+      [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: occurrence + 1
+    })
+  }
+  // The graph reducer would otherwise replace an earlier assistant when the
+  // provider reuses its ID. The tuple keeps this graph slot tied to its SQLite row.
+  if (messages.some((message) => message.id === response.id)) response.id = randomUUID()
+}
+
 /** Middleware that injects steered messages into the running model loop. Wired
  * into runtime.ts's single `createDeepAgent` middleware array (before
  * summarization, so injected turns are seen by context management, and before
@@ -548,7 +600,8 @@ function completedAssistantMessageForTranscript(
  * into a foreground run can never be drained by a differently-keyed background
  * run, even though they all share this exact middleware. */
 export function createCurrentRunMessageQueueMiddleware(
-  ownerRunToken?: string
+  ownerRunToken?: string,
+  loadGoalProviderOccurrence?: GoalProviderOccurrenceLoader
 ): ReturnType<typeof createMiddleware> {
   return createMiddleware({
     name: "currentRunMessageQueue",
@@ -559,6 +612,12 @@ export function createCurrentRunMessageQueueMiddleware(
           ? request.runtime.configurable.thread_id
           : undefined
       if (threadId && ownerRunToken && AIMessage.isInstance(response)) {
+        assignGoalGraphAssistantIdentity(
+          threadId,
+          request.state?.messages ?? request.messages,
+          response,
+          loadGoalProviderOccurrence
+        )
         const completed = completedAssistantMessageForTranscript(response)
         if (completed) {
           completedAssistantMessagesByRun.set(runScopedKey(threadId, ownerRunToken), completed)

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { Worker } from "node:worker_threads"
-import { AIMessage, ToolMessage } from "@langchain/core/messages"
+import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages"
 import type { RunnableConfig } from "@langchain/core/runnables"
 import type {
   Checkpoint,
@@ -35,6 +35,11 @@ import {
 } from "../thread-message-hydration/page-reader"
 import { buildWorkerCheckpointHistory } from "../../renderer/src/lib/worker-checkpoint-history"
 import { buildToolResultAssociations } from "../../renderer/src/lib/worker-tool-result-key"
+import { GOAL_CONTINUATION_BOUNDARY_METADATA_KEY } from "../agent/goals/internal-prompt"
+import {
+  MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY,
+  MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY
+} from "../../shared/message-role-collision"
 import {
   createStreamDataSerializer,
   sanitizeCoordinatorWorkerStreamDataForRenderer
@@ -1620,6 +1625,142 @@ describe("checkpoint runtime projection worker", () => {
     repeatedDatabase.close()
     expect(Number(repeatedCount.total)).toBe(564)
   }, 30_000)
+
+  it.each([false, true])(
+    "reuses native Goal message identities on cold bootstrap (partial legacy history: %s)",
+    async (partialLegacyHistory) => {
+      const threadId = `goal-bootstrapped-${partialLegacyHistory}`
+      const marked = { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true }
+      const provider = (source: string, occurrence: number) => ({
+        [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: source,
+        [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: occurrence
+      })
+      const { databasePath } = await seedLegacyInlineFixture({
+        threadId,
+        messages: [
+          new HumanMessage({
+            id: "root",
+            content: "internal Goal setup",
+            additional_kwargs: { ...marked, cmb_visible_user_message: "/goal evidence" }
+          }).toJSON(),
+          new AIMessage({
+            id: "graph-assistant-first",
+            content: "draft from checkpoint",
+            additional_kwargs: provider("same-assistant", 1)
+          }).toJSON(),
+          new ToolMessage({
+            id: "graph-tool-first",
+            content: "first checkpoint result",
+            tool_call_id: "same-call",
+            additional_kwargs: provider("same-tool", 1)
+          }).toJSON(),
+          ...(partialLegacyHistory
+            ? [new AIMessage({ id: "legacy-only", content: "import this earlier row" }).toJSON()]
+            : []),
+          new HumanMessage({
+            id: "hidden",
+            content: "[Continuing active goal] hidden payload",
+            additional_kwargs: marked
+          }).toJSON(),
+          new AIMessage({
+            id: "graph-assistant-second",
+            content: "second checkpoint assistant",
+            additional_kwargs: provider("same-assistant", 2)
+          }).toJSON(),
+          new ToolMessage({
+            id: "graph-tool-second",
+            content: "second checkpoint result",
+            tool_call_id: "same-call",
+            additional_kwargs: provider("same-tool", 2)
+          }).toJSON(),
+          new HumanMessage({
+            id: "resume",
+            content: "internal Goal resume",
+            additional_kwargs: { ...marked, cmb_visible_user_message: "/goal resume" }
+          }).toJSON()
+        ]
+      })
+      const messageDatabasePath = createMessageDatabase(databasePath, threadId)
+      const database = new DatabaseSync(messageDatabasePath)
+      database.exec(`
+        CREATE INDEX thread_message_provider_identity
+          ON thread_messages(thread_id, provider_source_id, role, provider_occurrence);
+        CREATE TABLE thread_graph_transcript_boundaries (
+          thread_id TEXT NOT NULL,
+          graph_user_id TEXT NOT NULL,
+          ordinal INTEGER NOT NULL,
+          PRIMARY KEY(thread_id, graph_user_id)
+        );
+      `)
+      database.prepare("INSERT INTO thread_graph_transcript_boundaries VALUES (?, 'hidden', 3)")
+        .run(threadId)
+      const insert = database.prepare(`
+        INSERT INTO thread_messages (
+          thread_id, message_id, role, ordinal, provider_source_id, provider_occurrence,
+          tool_call_id, created_at, content_json, content_priority, goal_id, active_window_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 100, ?, 7, 'goal', 'window')
+      `)
+      const originals = [
+        ["root", "user", 0, null, null, null],
+        ["native-first", "assistant", 1, "same-assistant", 1, null],
+        ["native-tool-first", "tool", 2, "same-tool", 1, "same-call"],
+        ["native-second", "assistant", 4, "same-assistant", 2, null],
+        ["native-tool-second", "tool", 5, "same-tool", 2, "same-call"],
+        ...(partialLegacyHistory ? [] : [["resume", "user", 6, null, null, null] as const]),
+        ["unrelated-call-result", "tool", 50, "same-tool", 2, "different-call"]
+      ] as const
+      for (const row of originals) insert.run(threadId, ...row, JSON.stringify(row[0]))
+      database.prepare("INSERT INTO thread_message_buckets VALUES (?, ?, 52, 123)")
+        .run(threadId, originals.length)
+      const readRows = () => database.prepare(`
+        SELECT * FROM thread_messages WHERE thread_id = ? ORDER BY ordinal
+      `).all(threadId)
+      const before = readRows()
+
+      try {
+        const client = createClient()
+        const bootstrap = () =>
+          client.bootstrapLegacyTranscript(databasePath, messageDatabasePath, threadId)
+        await expect(bootstrap()).resolves.toMatchObject({
+          stats: {
+            totalMessages: partialLegacyHistory ? 7 : 6,
+            migratedMessages: partialLegacyHistory ? 2 : 0,
+            ...(partialLegacyHistory ? {} : { batches: 0 })
+          }
+        })
+        const after = readRows()
+        if (!partialLegacyHistory) {
+          expect(after).toEqual(before)
+        } else {
+          expect(after.map(({ message_id, ordinal }) => [message_id, ordinal])).toEqual([
+            ["root", 0],
+            ["native-first", 1],
+            ["native-tool-first", 2],
+            ["legacy-only", 3],
+            ["native-second", 5],
+            ["native-tool-second", 6],
+            ["resume", 7],
+            ["unrelated-call-result", 52]
+          ])
+          expect(after.find((row) => row.message_id === "resume")?.content_json).toBe(
+            '"/goal resume"'
+          )
+          expect(after.filter((row) => row.goal_id === "goal").map(({ ordinal: _, ...row }) => row))
+            .toEqual(before.map(({ ordinal: _, ...row }) => row))
+        }
+        expect(database.prepare("SELECT ordinal FROM thread_graph_transcript_boundaries").get())
+          .toMatchObject({ ordinal: partialLegacyHistory ? 4 : 3 })
+        expect(database.prepare("SELECT next_ordinal FROM thread_message_buckets").get())
+          .toMatchObject({ next_ordinal: partialLegacyHistory ? 54 : 52 })
+        expect(database.prepare("SELECT status FROM legacy_checkpoint_transcript_migrations").get())
+          .toMatchObject({ status: "complete" })
+        await expect(bootstrap()).resolves.toMatchObject({ stats: { migratedMessages: 0, batches: 0 } })
+        expect(readRows()).toEqual(after)
+      } finally {
+        database.close()
+      }
+    }
+  )
 
   it("imports one oversized legacy text message through resumable fragment transactions", async () => {
     const threadId = "legacy-oversized-message"

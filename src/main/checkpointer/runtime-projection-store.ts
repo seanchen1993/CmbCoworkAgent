@@ -3,6 +3,7 @@ import { existsSync } from "node:fs"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { ensureMessageSnapshotGeneration as migrateMessageSnapshotGeneration } from "./message-snapshot-schema"
 import { migrateLegacyMessageTimes } from "./legacy-message-times"
+import { GOAL_CONTINUATION_BOUNDARY_METADATA_KEY } from "../agent/goals/internal-prompt"
 import { isLosslessTranscriptPayload } from "../../shared/transcript-recovery-integrity"
 import { createHash, randomUUID, type Hash } from "node:crypto"
 import {
@@ -1172,10 +1173,12 @@ function hydrateRawCheckpointMessages(
 }
 
 interface DurableLegacyCheckpointMessage {
+  checkpointIndex: number
   recoveryIntegrity: number
   messageId: string
   providerSourceId: string | null
   providerOccurrence: number | null
+  declaredProviderIdentity: ReturnType<typeof getMessageProviderTupleFromMetadata>
   role: "user" | "assistant" | "system" | "tool"
   contentJson: string
   reasoning: string | null
@@ -1187,6 +1190,11 @@ interface DurableLegacyCheckpointMessage {
   createdAt: number
   estimatedBytes: number
   contentFragments: string[] | null
+}
+
+interface LegacyGraphBoundary {
+  checkpointIndex: number
+  messageId: string
 }
 
 export interface LegacyCheckpointTranscriptBootstrapResult {
@@ -1248,9 +1256,10 @@ function buildDurableLegacyCheckpointMessages(
   rawMessages: readonly unknown[],
   checkpointTs: string,
   cancellation?: Int32Array
-): DurableLegacyCheckpointMessage[] {
+): { messages: DurableLegacyCheckpointMessage[]; graphBoundaries: LegacyGraphBoundary[] } {
   const checkpointTime = Date.parse(checkpointTs)
   const baseTime = Number.isFinite(checkpointTime) ? checkpointTime : Date.now()
+  const graphBoundaries: LegacyGraphBoundary[] = []
   const candidates: Array<
     Omit<DurableLegacyCheckpointMessage, "messageId" | "providerSourceId" | "providerOccurrence"> & {
       id: string
@@ -1284,6 +1293,14 @@ function buildDurableLegacyCheckpointMessages(
         : `checkpoint-${index}`
     const rawContent = message.content ?? kwargs.content
     const visibleUserMessage = additionalKwargs.cmb_visible_user_message
+    if (
+      role === "user" &&
+      additionalKwargs[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] === true &&
+      !(typeof visibleUserMessage === "string" && visibleUserMessage.trim())
+    ) {
+      graphBoundaries.push({ checkpointIndex: index, messageId: sourceId })
+      continue
+    }
     const effectiveContent =
       role === "user" && typeof visibleUserMessage === "string" && visibleUserMessage.length > 0
         ? visibleUserMessage
@@ -1322,8 +1339,12 @@ function buildDurableLegacyCheckpointMessages(
         ? 1
         : null
     const providerTuple =
-      role === "assistant" ? getMessageProviderTupleFromMetadata(additionalKwargs) : undefined
+      role === "assistant" || role === "tool"
+        ? getMessageProviderTupleFromMetadata(additionalKwargs)
+        : undefined
     candidates.push({
+      checkpointIndex: index,
+      declaredProviderIdentity: providerTuple,
       recoveryIntegrity:
         content === rawContent &&
         !kwargs.reasoning &&
@@ -1353,11 +1374,13 @@ function buildDurableLegacyCheckpointMessages(
       contentFragments
     })
   }
-  return normalizeCompleteSnapshotMessageIds([], candidates).map((message) => ({
+  const messages = normalizeCompleteSnapshotMessageIds([], candidates).map((message) => ({
+    checkpointIndex: message.checkpointIndex,
     recoveryIntegrity: message.recoveryIntegrity,
     messageId: message.id,
     providerSourceId: message.provider_source_id ?? null,
     providerOccurrence: message.provider_occurrence ?? null,
+    declaredProviderIdentity: message.declaredProviderIdentity,
     role: message.role,
     contentJson: message.contentJson,
     reasoning: message.reasoning,
@@ -1370,6 +1393,7 @@ function buildDurableLegacyCheckpointMessages(
     estimatedBytes: message.estimatedBytes,
     contentFragments: message.contentFragments
   }))
+  return { messages, graphBoundaries }
 }
 
 function ensureLegacyTranscriptMigrationSchema(database: DatabaseSync): void {
@@ -1380,6 +1404,7 @@ function ensureLegacyTranscriptMigrationSchema(database: DatabaseSync): void {
       total_messages INTEGER NOT NULL,
       next_index INTEGER NOT NULL,
       current_fragment_index INTEGER NOT NULL DEFAULT 0,
+      reserved_ordinals_json TEXT,
       status TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     )
@@ -1392,6 +1417,159 @@ function ensureLegacyTranscriptMigrationSchema(database: DatabaseSync): void {
       "ALTER TABLE legacy_checkpoint_transcript_migrations ADD COLUMN current_fragment_index INTEGER NOT NULL DEFAULT 0"
     )
   }
+  if (!columns.some((column) => column.name === "reserved_ordinals_json")) {
+    database.exec(
+      "ALTER TABLE legacy_checkpoint_transcript_migrations ADD COLUMN reserved_ordinals_json TEXT"
+    )
+  }
+}
+
+interface LegacyDurableIdentity {
+  message_id: string
+  ordinal: number
+}
+
+function createLegacyDurableIdentityLookup(database: DatabaseSync, threadId: string) {
+  const byId = database.prepare(
+    `SELECT message_id, ordinal, provider_source_id, provider_occurrence
+     FROM thread_messages
+     WHERE thread_id = ? AND message_id = ? AND role = ?
+       AND (? != 'tool' OR tool_call_id IS ?)`
+  )
+  const byProvider = database.prepare(
+    `SELECT message_id, ordinal FROM thread_messages
+     WHERE thread_id = ? AND provider_source_id = ? AND role = ? AND provider_occurrence = ?
+       AND (? != 'tool' OR tool_call_id = ?)
+     LIMIT 2`
+  )
+
+  return (message: DurableLegacyCheckpointMessage): LegacyDurableIdentity | undefined => {
+    const exact = byId.get(
+      threadId,
+      message.messageId,
+      message.role,
+      message.role,
+      message.toolCallId
+    )
+    const declared = message.declaredProviderIdentity
+    if (!declared) return exact as LegacyDurableIdentity | undefined
+    if (
+      exact?.provider_source_id === declared.provider_source_id &&
+      exact.provider_occurrence === declared.provider_occurrence
+    ) {
+      return exact as unknown as LegacyDurableIdentity
+    }
+    if (message.role === "tool" && !message.toolCallId) return undefined
+    const candidates = byProvider.all(
+      threadId,
+      declared.provider_source_id,
+      message.role,
+      declared.provider_occurrence,
+      message.role,
+      message.toolCallId
+    )
+    return candidates.length === 1
+      ? (candidates[0] as unknown as LegacyDurableIdentity)
+      : undefined
+  }
+}
+
+function reserveLegacyTranscriptOrdinals(
+  database: DatabaseSync,
+  input: {
+    threadId: string
+    messages: readonly DurableLegacyCheckpointMessage[]
+    graphBoundaries: readonly LegacyGraphBoundary[]
+    cancellation?: Int32Array
+  },
+  findDurableIdentity: ReturnType<typeof createLegacyDurableIdentityLookup>
+): { ordinals?: Array<number | null>; reservedCount: number } {
+  const existing = input.messages.map((message, index) => {
+    if (index % LEGACY_TRANSCRIPT_BATCH_LIMIT === 0) throwIfCancelled(input.cancellation)
+    return findDurableIdentity(message)
+  })
+  const hasGraphBoundaries = Boolean(database.prepare(
+    "SELECT 1 FROM sqlite_master WHERE name = 'thread_graph_transcript_boundaries' AND type = 'table'"
+  ).get())
+  const preserveScopedOrder =
+    input.graphBoundaries.length > 0 ||
+    existing.some((row, index) => row && row.message_id !== input.messages[index].messageId) ||
+    (hasGraphBoundaries && Boolean(database.prepare(
+      "SELECT 1 FROM thread_graph_transcript_boundaries WHERE thread_id = ? LIMIT 1"
+    ).get(input.threadId)))
+  if (!preserveScopedOrder) {
+    return { reservedCount: existing.every(Boolean) ? 0 : input.messages.length }
+  }
+
+  const ordinals = input.messages.map<number | null>(() => null)
+  if (existing.every(Boolean)) return { ordinals, reservedCount: 0 }
+  const anchors = input.messages.flatMap((message, index) => {
+    const row = existing[index]
+    return row ? [{ checkpointIndex: message.checkpointIndex, ordinal: row.ordinal }] : []
+  })
+  if (hasGraphBoundaries && input.graphBoundaries.length > 0) {
+    const boundary = database.prepare(
+      `SELECT ordinal FROM thread_graph_transcript_boundaries
+       WHERE thread_id = ? AND graph_user_id = ?`
+    )
+    for (const message of input.graphBoundaries) {
+      const row = boundary.get(input.threadId, message.messageId)
+      if (typeof row?.ordinal === "number") {
+        anchors.push({ checkpointIndex: message.checkpointIndex, ordinal: row.ordinal })
+      }
+    }
+    anchors.sort((left, right) => left.checkpointIndex - right.checkpointIndex)
+  }
+
+  const gaps = new Map<number, number[]>()
+  let rightIndex = 0
+  for (const [index, message] of input.messages.entries()) {
+    if (existing[index]) continue
+    while (
+      rightIndex < anchors.length &&
+      anchors[rightIndex].checkpointIndex < message.checkpointIndex
+    ) {
+      rightIndex += 1
+    }
+    const left = anchors[rightIndex - 1]?.ordinal
+    const right = anchors[rightIndex]?.ordinal
+    // Preserve the order already trusted by durable history. A hidden graph
+    // boundary is also an anchor, even though it has no visible message row.
+    const target = right !== undefined && (left === undefined || right > left)
+      ? right
+      : left === undefined ? 0 : left + 1
+    const gap = gaps.get(target) ?? []
+    gap.push(index)
+    gaps.set(target, gap)
+  }
+
+  const groups = [...gaps].sort(([left], [right]) => left - right)
+  database.exec("CREATE TEMP TABLE legacy_transcript_shifts (ordinal INTEGER PRIMARY KEY, shift INTEGER NOT NULL)")
+  const recordShift = database.prepare(
+    "INSERT INTO legacy_transcript_shifts (ordinal, shift) VALUES (?, ?)"
+  )
+  let reservedCount = 0
+  for (const [target, indexes] of groups) {
+    for (const index of indexes) {
+      ordinals[index] = target + reservedCount
+      reservedCount += 1
+    }
+    recordShift.run(target, reservedCount)
+  }
+  for (const table of [
+    "thread_messages",
+    ...(hasGraphBoundaries ? ["thread_graph_transcript_boundaries"] : [])
+  ]) {
+    database.prepare(
+      `UPDATE ${table}
+       SET ordinal = ordinal + (
+         SELECT shift FROM legacy_transcript_shifts WHERE ordinal <= ${table}.ordinal
+         ORDER BY ordinal DESC LIMIT 1
+       )
+       WHERE thread_id = ? AND ordinal >= ?`
+    ).run(input.threadId, groups[0][0])
+  }
+  return { ordinals, reservedCount }
 }
 
 function migrateLegacyMessagesIntoDurableRows(input: {
@@ -1399,6 +1577,7 @@ function migrateLegacyMessagesIntoDurableRows(input: {
   threadId: string
   checkpointId: string
   messages: readonly DurableLegacyCheckpointMessage[]
+  graphBoundaries: readonly LegacyGraphBoundary[]
   payloadBytes: number
   cancellation?: Int32Array
 }): LegacyCheckpointTranscriptMigrationStats {
@@ -1424,16 +1603,28 @@ function migrateLegacyMessagesIntoDurableRows(input: {
 
     const existingState = database
       .prepare(
-        `SELECT checkpoint_id, total_messages, next_index, current_fragment_index, status
+        `SELECT checkpoint_id, total_messages, next_index, current_fragment_index, status,
+                reserved_ordinals_json
          FROM legacy_checkpoint_transcript_migrations
          WHERE thread_id = ?`
       )
       .get(input.threadId) as Record<string, unknown> | undefined
     const sameMigration = existingState?.checkpoint_id === input.checkpointId
-    if (sameMigration && existingState?.status === "complete") {
-      migrateLegacyMessageTimes(database, input.threadId, input.checkpointId, input.messages, () =>
+    let reservedOrdinals: Array<number | null> | undefined =
+      sameMigration && typeof existingState?.reserved_ordinals_json === "string"
+        ? (JSON.parse(existingState.reserved_ordinals_json) as Array<number | null>)
+        : undefined
+    const migrateTimes = (): void => {
+      const targets = reservedOrdinals
+        ? input.messages.filter((_message, index) => reservedOrdinals?.[index] !== null)
+        : input.messages
+      if (targets.length === 0) return
+      migrateLegacyMessageTimes(database, input.threadId, input.checkpointId, targets, () =>
         throwIfCancelled(input.cancellation)
       )
+    }
+    if (sameMigration && existingState?.status === "complete") {
+      migrateTimes()
       return {
         checkpointId: input.checkpointId,
         totalMessages: input.messages.length,
@@ -1443,6 +1634,7 @@ function migrateLegacyMessagesIntoDurableRows(input: {
       }
     }
 
+    const findDurableIdentity = createLegacyDurableIdentityLookup(database, input.threadId)
     if (!sameMigration) {
       throwIfCancelled(input.cancellation)
       database.exec("BEGIN IMMEDIATE")
@@ -1460,47 +1652,75 @@ function migrateLegacyMessagesIntoDurableRows(input: {
             payloadBytes: input.payloadBytes
           }
         }
-        const summary = database
-          .prepare(
-            `SELECT COUNT(*) AS message_count,
-                    COALESCE(MAX(ordinal), -1) + 1 AS next_ordinal
-             FROM thread_messages WHERE thread_id = ?`
-          )
-          .get(input.threadId) as { message_count: number; next_ordinal: number }
-        if (input.messages.length > 0 && Number(summary.message_count) > 0) {
+        const reservation = reserveLegacyTranscriptOrdinals(database, input, findDurableIdentity)
+        reservedOrdinals = reservation.ordinals
+        const fullyCovered = reservation.reservedCount === 0
+        if (!fullyCovered) {
+          if (!reservedOrdinals) {
+            database.prepare(
+              "UPDATE thread_messages SET ordinal = ordinal + ? WHERE thread_id = ?"
+            ).run(reservation.reservedCount, input.threadId)
+          }
+          const bucket = database
+            .prepare(
+              "SELECT message_count, next_ordinal FROM thread_message_buckets WHERE thread_id = ?"
+            )
+            .get(input.threadId)
+          const summary = bucket ?? database
+            .prepare(
+              `SELECT COUNT(*) AS message_count, COALESCE(MAX(ordinal), -1) + 1 AS next_ordinal
+               FROM thread_messages WHERE thread_id = ?`
+            )
+            .get(input.threadId)
+          const reservedPrefixEnd = Number(summary?.next_ordinal ?? 0) +
+            (bucket ? reservation.reservedCount : 0)
+          const nextOrdinal = reservedOrdinals?.reduce<number>(
+            (next, ordinal) => ordinal === null ? next : Math.max(next, ordinal + 1),
+            reservedPrefixEnd
+          ) ?? Math.max(reservedPrefixEnd, reservation.reservedCount)
           database
             .prepare(
-              `UPDATE thread_messages
-               SET ordinal = ordinal + ?
-               WHERE thread_id = ?`
+              `INSERT INTO thread_message_buckets
+               (thread_id, message_count, next_ordinal, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(thread_id) DO UPDATE SET
+                 next_ordinal = excluded.next_ordinal,
+                 updated_at = excluded.updated_at`
             )
-            .run(input.messages.length, input.threadId)
+            .run(
+              input.threadId,
+              Number(summary?.message_count ?? 0),
+              nextOrdinal,
+              Date.now()
+            )
         }
-        database
-          .prepare(
-            `INSERT INTO thread_message_buckets
-             (thread_id, message_count, next_ordinal, updated_at)
-             VALUES (?, ?, ?, ?)
-             ON CONFLICT(thread_id) DO UPDATE SET
-               message_count = excluded.message_count,
-               next_ordinal = excluded.next_ordinal,
-               updated_at = excluded.updated_at`
-          )
-          .run(
-            input.threadId,
-            Number(summary.message_count),
-            Number(summary.next_ordinal) + input.messages.length,
-            Date.now()
-          )
         database
           .prepare(
             `INSERT OR REPLACE INTO legacy_checkpoint_transcript_migrations
              (thread_id, checkpoint_id, total_messages, next_index,
-              current_fragment_index, status, updated_at)
-             VALUES (?, ?, ?, 0, 0, 'migrating', ?)`
+              current_fragment_index, status, reserved_ordinals_json, updated_at)
+             VALUES (?, ?, ?, ?, 0, ?, ?, ?)`
           )
-          .run(input.threadId, input.checkpointId, input.messages.length, Date.now())
+          .run(
+            input.threadId,
+            input.checkpointId,
+            input.messages.length,
+            fullyCovered ? input.messages.length : 0,
+            fullyCovered ? "complete" : "migrating",
+            reservedOrdinals ? JSON.stringify(reservedOrdinals) : null,
+            Date.now()
+          )
         database.exec("COMMIT")
+        if (fullyCovered) {
+          migrateTimes()
+          return {
+            checkpointId: input.checkpointId,
+            totalMessages: input.messages.length,
+            migratedMessages: 0,
+            batches: 0,
+            payloadBytes: input.payloadBytes
+          }
+        }
       } catch (error) {
         try {
           database.exec("ROLLBACK")
@@ -1556,7 +1776,7 @@ function migrateLegacyMessagesIntoDurableRows(input: {
     while (offset < input.messages.length) {
       throwIfCancelled(input.cancellation)
       const fragmentMessage = input.messages[offset]
-      if (fragmentMessage.contentFragments) {
+      if (fragmentMessage.contentFragments && reservedOrdinals?.[offset] !== null) {
         database.exec("BEGIN IMMEDIATE")
         try {
           const currentState = database
@@ -1588,32 +1808,35 @@ function migrateLegacyMessagesIntoDurableRows(input: {
 
           let insertedMessage = 0
           if (fragmentOffset === 0) {
-            const inserted = insert.run(
-              input.threadId,
-              fragmentMessage.messageId,
-              fragmentMessage.providerSourceId,
-              fragmentMessage.providerOccurrence,
-              fragmentMessage.role,
-              fragmentMessage.contentJson,
-              fragmentMessage.reasoning,
-              fragmentMessage.toolCallsJson,
-              fragmentMessage.toolCallId,
-              fragmentMessage.name,
-              fragmentMessage.status,
-              fragmentMessage.isError,
-              fragmentMessage.createdAt,
-              offset,
-              ...(hasRecoveryIntegrity ? [fragmentMessage.recoveryIntegrity] : [])
-            )
-            insertedMessage = Number(inserted.changes)
-            if (insertedMessage === 0) {
+            const existing = findDurableIdentity(fragmentMessage)
+            if (!existing) {
+              const inserted = insert.run(
+                input.threadId,
+                fragmentMessage.messageId,
+                fragmentMessage.providerSourceId,
+                fragmentMessage.providerOccurrence,
+                fragmentMessage.role,
+                fragmentMessage.contentJson,
+                fragmentMessage.reasoning,
+                fragmentMessage.toolCallsJson,
+                fragmentMessage.toolCallId,
+                fragmentMessage.name,
+                fragmentMessage.status,
+                fragmentMessage.isError,
+                fragmentMessage.createdAt,
+                reservedOrdinals?.[offset] ?? offset,
+                ...(hasRecoveryIntegrity ? [fragmentMessage.recoveryIntegrity] : [])
+              )
+              insertedMessage = Number(inserted.changes)
+            }
+            if (!reservedOrdinals && existing?.message_id === fragmentMessage.messageId) {
               moveReservedDuplicate.run(
                 offset,
                 input.threadId,
                 fragmentMessage.messageId,
                 input.messages.length
               )
-            } else {
+            } else if (insertedMessage > 0) {
               insertedFragmentMessages.add(offset)
             }
           }
@@ -1741,6 +1964,15 @@ function migrateLegacyMessagesIntoDurableRows(input: {
         for (let index = offset; index < end; index += 1) {
           throwIfCancelled(input.cancellation)
           const message = input.messages[index]
+          const plannedOrdinal = reservedOrdinals?.[index]
+          if (plannedOrdinal === null) continue
+          const existing = findDurableIdentity(message)
+          if (existing) {
+            if (!reservedOrdinals && existing.message_id === message.messageId) {
+              moveReservedDuplicate.run(index, input.threadId, message.messageId, input.messages.length)
+            }
+            continue
+          }
           const inserted = insert.run(
             input.threadId,
             message.messageId,
@@ -1755,18 +1987,10 @@ function migrateLegacyMessagesIntoDurableRows(input: {
             message.status,
             message.isError,
             message.createdAt,
-            index,
+            plannedOrdinal ?? index,
             ...(hasRecoveryIntegrity ? [message.recoveryIntegrity] : [])
           )
           insertedInBatch += Number(inserted.changes)
-          if (Number(inserted.changes) === 0) {
-            moveReservedDuplicate.run(
-              index,
-              input.threadId,
-              message.messageId,
-              input.messages.length
-            )
-          }
         }
         database
           .prepare(
@@ -1815,25 +2039,27 @@ function migrateLegacyMessagesIntoDurableRows(input: {
             payloadBytes: input.payloadBytes
           }
         }
-        const summary = database
-          .prepare(
-            `SELECT COUNT(*) AS message_count,
-                    COALESCE(MAX(ordinal), -1) + 1 AS next_ordinal
-             FROM thread_messages WHERE thread_id = ?`
-          )
-          .get(input.threadId) as { message_count: number; next_ordinal: number }
-        database
-          .prepare(
-            `UPDATE thread_message_buckets
-             SET message_count = ?, next_ordinal = ?, updated_at = ?
-             WHERE thread_id = ?`
-          )
-          .run(
-            Number(summary.message_count),
-            Number(summary.next_ordinal),
-            Date.now(),
-            input.threadId
-          )
+        if (!reservedOrdinals) {
+          const summary = database
+            .prepare(
+              `SELECT COUNT(*) AS message_count,
+                      COALESCE(MAX(ordinal), -1) + 1 AS next_ordinal
+               FROM thread_messages WHERE thread_id = ?`
+            )
+            .get(input.threadId)
+          database
+            .prepare(
+              `UPDATE thread_message_buckets
+               SET message_count = ?, next_ordinal = MAX(next_ordinal, ?), updated_at = ?
+               WHERE thread_id = ?`
+            )
+            .run(
+              Number(summary?.message_count ?? 0),
+              Number(summary?.next_ordinal ?? 0),
+              Date.now(),
+              input.threadId
+            )
+        }
         database
           .prepare(
             `UPDATE legacy_checkpoint_transcript_migrations
@@ -1852,9 +2078,7 @@ function migrateLegacyMessagesIntoDurableRows(input: {
       }
     }
 
-    migrateLegacyMessageTimes(database, input.threadId, input.checkpointId, input.messages, () =>
-      throwIfCancelled(input.cancellation)
-    )
+    migrateTimes()
     return {
       checkpointId: input.checkpointId,
       totalMessages: input.messages.length,
@@ -1993,7 +2217,7 @@ export function bootstrapLegacyCheckpointTranscript(
       payloadBytes(row.checkpoint),
       prepared.messages?.byteLength ?? serializeJsonPayload(messages).byteLength
     )
-    const durableMessages = buildDurableLegacyCheckpointMessages(
+    const durable = buildDurableLegacyCheckpointMessages(
       messages,
       row.checkpointTs,
       cancellation
@@ -2002,7 +2226,7 @@ export function bootstrapLegacyCheckpointTranscript(
       databasePath: messageDatabasePath,
       threadId,
       checkpointId: row.checkpointId,
-      messages: durableMessages,
+      ...durable,
       payloadBytes: sourceBytes,
       cancellation
     })

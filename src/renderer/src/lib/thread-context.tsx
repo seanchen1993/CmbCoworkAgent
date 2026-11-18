@@ -87,6 +87,7 @@ import {
   formatGoalEventMessage,
   getInternalGoalPromptIdentity,
   goalNoticeEventsToGoalUiEvents,
+  goalUserEventToMessage,
   hasGoalResumeUserEvent,
   isGoalResumeCommandContent,
   isVisibleCheckpointTranscriptMessage,
@@ -260,7 +261,10 @@ type LiveStreamAccumulator = {
   projectTimedMessages: TimedLiveStreamMessageProjector
   messageTimes: LiveMessageTimeMap
   lastStartedAtMs?: number
-  pendingGoalSubturnMessages: LiveStreamMessage[][]
+  pendingGoalSubturnMessages: Array<{
+    messages: LiveStreamMessage[]
+    nativeTranscriptCommitted: boolean
+  }>
 }
 
 type StreamUpdateOptions = {
@@ -643,6 +647,8 @@ export interface ThreadState {
    */
   queueAutoDrainSuppressed: boolean
   goalUi: GoalUiState
+  goalTranscriptEvents: GoalEvent[]
+  goalTranscriptPageBoundary?: Pick<Message, "id" | "created_at">
   activeTurnStartTime: number | null
   todos: Todo[]
   workspaceFiles: FileInfo[]
@@ -1017,6 +1023,7 @@ const createDefaultThreadState = (): ThreadState => ({
   queuedMessages: [],
   queueAutoDrainSuppressed: false,
   goalUi: { goal: null, events: [], lastUpdated: null },
+  goalTranscriptEvents: [],
   activeTurnStartTime: null,
   todos: [],
   workspaceFiles: [],
@@ -1567,6 +1574,7 @@ interface CustomEventData {
   workerTurn?: number
   parentThreadId?: string
   messages?: LiveStreamMessage[]
+  nativeTranscriptCommitted?: boolean
   discardedMessageIds?: string[]
   discardedPersistedMessageIds?: string[]
   restoredMessages?: Message[]
@@ -2610,7 +2618,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   )
 
   const flushLiveStreamAccumulator = useCallback(
-    (threadId: string, options: { keepActive?: boolean } = {}): LiveStreamMessage[] => {
+    (
+      threadId: string,
+      options: { keepActive?: boolean; persist?: boolean } = {}
+    ): LiveStreamMessage[] => {
       const accumulator = liveStreamAccumulatorsRef.current[threadId]
       if (!accumulator) return []
 
@@ -2678,14 +2689,16 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             )
           }
         })
-        const pendingCommits = pendingVisibleMessageCommitsRef.current[threadId] ?? []
-        pendingCommits.push(
-          ...canonicalMessagesToPersist.map((message) => ({
-            message
-          }))
-        )
-        pendingVisibleMessageCommitsRef.current[threadId] = pendingCommits
-        setPendingVisibleMessageCommitVersion((version) => version + 1)
+        if (options.persist !== false) {
+          const pendingCommits = pendingVisibleMessageCommitsRef.current[threadId] ?? []
+          pendingCommits.push(
+            ...canonicalMessagesToPersist.map((message) => ({
+              message
+            }))
+          )
+          pendingVisibleMessageCommitsRef.current[threadId] = pendingCommits
+          setPendingVisibleMessageCommitVersion((version) => version + 1)
+        }
       }
 
       if (options.keepActive) {
@@ -2727,11 +2740,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   )
 
   const flushGoalSubturnComplete = useCallback(
-    (threadId: string, messages: LiveStreamMessage[]) => {
+    (threadId: string, messages: LiveStreamMessage[], nativeTranscriptCommitted: boolean) => {
       if (messages.length > 0) {
         accumulateLiveStreamMessages(threadId, messages)
       }
-      flushLiveStreamAccumulator(threadId, { keepActive: true })
+      // Native Goal values already use the committed SQLite identities.
+      flushLiveStreamAccumulator(threadId, { keepActive: true, persist: !nativeTranscriptCommitted })
     },
     [accumulateLiveStreamMessages, flushLiveStreamAccumulator]
   )
@@ -4567,11 +4581,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         case "goal_subturn_complete":
           {
             const messages = Array.isArray(data.messages) ? data.messages : []
+            const nativeTranscriptCommitted = data.nativeTranscriptCommitted === true
             if (threadStatesRef.current[threadId]?.historyLoading) {
-              getOrCreateLiveStreamAccumulator(threadId).pendingGoalSubturnMessages.push(messages)
+              getOrCreateLiveStreamAccumulator(threadId).pendingGoalSubturnMessages.push({
+                messages,
+                nativeTranscriptCommitted
+              })
               break
             }
-            flushGoalSubturnComplete(threadId, messages)
+            flushGoalSubturnComplete(threadId, messages, nativeTranscriptCommitted)
           }
           break
         case "hook_notice":
@@ -5105,8 +5123,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               }
               const olderMessages = mergeGoalUserEventsIntoDurablePage(
                 olderDurableMessages,
-                latest.goalUi.events,
-                olderPageMessages
+                latest.goalTranscriptEvents,
+                olderPageMessages,
+                {
+                  hasEarlierMessages: page.hasMore,
+                  newerBoundary: {
+                    ordinal: cursor.beforeOrdinal,
+                    createdAt:
+                      latest.goalTranscriptPageBoundary?.id === cursor.beforeMessageId
+                        ? latest.goalTranscriptPageBoundary.created_at
+                        : latest.messages.find((message) => message.id === cursor.beforeMessageId)
+                            ?.created_at
+                  }
+                }
               )
               const pageWindows = prependThreadMessagePageWindow(
                 latest.historyPageWindows,
@@ -5141,6 +5170,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 toolCallStates: nextToolCallStates,
                 historyPageLoading: false,
                 historyHasMore: page.hasMore,
+                goalTranscriptPageBoundary: olderPageMessages.find(
+                  (message) => message.id === page.beforeMessageId
+                ),
                 historyPageCursor:
                   page.hasMore && page.beforeOrdinal !== null && page.beforeMessageId !== null
                     ? {
@@ -5941,6 +5973,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             historyPageLoading: false,
             historyHasMore: durableMessageHasMore,
             historyPageCursor: durableMessagePageCursor,
+            goalTranscriptPageBoundary: persistedThreadMessages.find(
+              (message) => message.id === durableMessagePageCursor?.beforeMessageId
+            ),
             historyPageWindows:
               visiblePersistedThreadMessages.length > 0
                 ? [createThreadMessagePageWindow(visiblePersistedThreadMessages, null)]
@@ -6162,6 +6197,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               historyPageLoading: false,
               historyHasMore: durableMessageHasMore,
               historyPageCursor: durableMessagePageCursor,
+              goalTranscriptPageBoundary: persistedThreadMessages.find(
+                (message) => message.id === durableMessagePageCursor?.beforeMessageId
+              ),
               historyPageWindows:
                 visiblePersistedThreadMessages.length > 0
                   ? [createThreadMessagePageWindow(visiblePersistedThreadMessages, null)]
@@ -6455,10 +6493,16 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       }
 
       const restoredGoalUiEvents = goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
-      const restoredPageGoalUiEvents = filterGoalEventsForDurablePage(
-        persistedThreadMessages,
-        restoredGoalUiEvents
-      )
+      const goalTranscriptPageRange = messagePageResult.succeeded
+        ? { hasEarlierMessages: durableMessageHasMore }
+        : undefined
+      if (goalEventsResult.succeeded) {
+        updateThreadState(threadId, () => ({
+          goalTranscriptEvents: restoredGoalUiEvents.filter(
+            (event) => goalUserEventToMessage(event) !== null
+          )
+        }))
+      }
       if (checkpointMessagesLoaded) {
         const persistedMessagesByIdentity = new Map(
           persistedThreadMessages.map((message) => [
@@ -6506,11 +6550,24 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         checkpointMessagesLoaded ? restoredMessages : visiblePersistedThreadMessages,
         persistedThreadMessages
       )
-      const checkpointTranscript = buildRestoredCheckpointTranscript(
-        ordinalRestoredRawMessages,
-        ordinalRestoredVisibleMessages,
-        restoredPageGoalUiEvents
-      )
+      const checkpointTranscript =
+        !checkpointMessagesLoaded && goalTranscriptPageRange
+          ? mergeGoalUserEventsIntoDurablePage(
+              visiblePersistedThreadMessages,
+              restoredGoalUiEvents,
+              persistedThreadMessages,
+              goalTranscriptPageRange
+            )
+          : buildRestoredCheckpointTranscript(
+              ordinalRestoredRawMessages,
+              ordinalRestoredVisibleMessages,
+              filterGoalEventsForDurablePage(
+                persistedThreadMessages,
+                restoredGoalUiEvents,
+                goalTranscriptPageRange
+              ),
+              goalTranscriptPageRange !== undefined
+            )
       const restoredTranscript = mergePersistedMessagesIntoTranscript(
         checkpointTranscript,
         visiblePersistedThreadMessages
@@ -6633,8 +6690,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       if (!isCurrentLoad()) return
       const pendingGoalSubturnMessages =
         liveStreamAccumulatorsRef.current[threadId]?.pendingGoalSubturnMessages.splice(0) ?? []
-      for (const pendingMessages of pendingGoalSubturnMessages) {
-        flushGoalSubturnComplete(threadId, pendingMessages)
+      for (const pending of pendingGoalSubturnMessages) {
+        flushGoalSubturnComplete(threadId, pending.messages, pending.nativeTranscriptCommitted)
       }
 
       const currentStreamData = streamDataRef.current[threadId]

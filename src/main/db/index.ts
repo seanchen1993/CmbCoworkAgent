@@ -27,6 +27,10 @@ import {
 } from "../../shared/goal-events"
 import { GOAL_CLEAR_ALIASES } from "../../shared/goal-slash"
 import {
+  GOAL_EVENT_TRANSCRIPT_ANCHOR_JOIN,
+  readGoalEventTranscriptOrdinal
+} from "../goal-event-transcript-anchor"
+import {
   buildMessageRoleCollisionId,
   buildMessageSameRoleDuplicateId,
   getMessageProviderOccurrence,
@@ -669,6 +673,19 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
   `)
 
   db.run(`
+    CREATE TABLE IF NOT EXISTS thread_graph_transcript_boundaries (
+      thread_id TEXT NOT NULL REFERENCES threads(thread_id) ON DELETE CASCADE,
+      graph_user_id TEXT NOT NULL,
+      ordinal INTEGER NOT NULL,
+      PRIMARY KEY(thread_id, graph_user_id)
+    )
+  `)
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_thread_graph_transcript_boundaries_order
+    ON thread_graph_transcript_boundaries(thread_id, ordinal)
+  `)
+
+  db.run(`
     CREATE TABLE IF NOT EXISTS legacy_checkpoint_transcript_migrations (
       thread_id TEXT PRIMARY KEY,
       checkpoint_id TEXT NOT NULL,
@@ -860,7 +877,8 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
       goal_id TEXT,
       active_window_id TEXT,
       message TEXT NOT NULL,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      transcript_message_id TEXT
     )
   `)
 
@@ -868,6 +886,9 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
   const hasGoalEventActiveWindowId = goalEventColumns.some((row) => row[1] === "active_window_id")
   if (!hasGoalEventActiveWindowId) {
     db.run("ALTER TABLE thread_goal_events ADD COLUMN active_window_id TEXT")
+  }
+  if (!goalEventColumns.some((row) => row[1] === "transcript_message_id")) {
+    db.run("ALTER TABLE thread_goal_events ADD COLUMN transcript_message_id TEXT")
   }
 
   const threadMessageColumns = db.exec("PRAGMA table_info(thread_messages)")?.[0]?.values ?? []
@@ -1455,11 +1476,14 @@ function getOrRepairThreadMessageBucket(
   // Compatibility for prerelease row-table databases. New threads reach this
   // with an empty range; upgraded databases are backfilled once at schema init.
   const stmt = database.prepare(
-    `SELECT COUNT(*) AS message_count, COALESCE(MAX(ordinal), -1) + 1 AS next_ordinal
+    `SELECT COUNT(*) AS message_count,
+       MAX(COALESCE(MAX(ordinal), -1), COALESCE((
+         SELECT MAX(ordinal) FROM thread_graph_transcript_boundaries WHERE thread_id = ?
+       ), -1)) + 1 AS next_ordinal
      FROM thread_messages
      WHERE thread_id = ?`
   )
-  stmt.bind([threadId])
+  stmt.bind([threadId, threadId])
   try {
     const row = stmt.step()
       ? (stmt.getAsObject() as { message_count?: unknown; next_ordinal?: unknown })
@@ -1500,6 +1524,42 @@ export function getThreadMessageCount(threadId: string): number {
 
 export function hasThreadMessages(threadId: string): boolean {
   return getThreadMessageCount(threadId) > 0
+}
+
+/** Reserve a durable position for a graph-only user input without adding a transcript row. */
+export function reserveThreadGraphTranscriptBoundary(threadId: string, graphUserId: string): number {
+  const database = getDb()
+  database.run("BEGIN IMMEDIATE")
+  let ordinal: number
+  try {
+    const existing = getThreadTranscriptBoundaryOrdinal(threadId, graphUserId)
+    if (existing !== undefined) {
+      database.run("COMMIT")
+      return existing
+    }
+    if (!threadExists(threadId)) {
+      throw new Error("Cannot reserve a transcript boundary without a thread")
+    }
+    const { bucket } = getOrRepairThreadMessageBucket(database, threadId)
+    ordinal = bucket.next_ordinal
+    database.run(
+      `INSERT INTO thread_graph_transcript_boundaries (thread_id, graph_user_id, ordinal)
+       VALUES (?, ?, ?)`,
+      [threadId, graphUserId, ordinal]
+    )
+    database.run(
+      `INSERT INTO thread_message_buckets (thread_id, message_count, next_ordinal, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(thread_id) DO UPDATE SET next_ordinal = excluded.next_ordinal`,
+      [threadId, bucket.message_count, ordinal + 1, bucket.updated_at]
+    )
+    database.run("COMMIT")
+  } catch (error) {
+    database.run("ROLLBACK")
+    throw error
+  }
+  saveToDisk()
+  return ordinal
 }
 
 /** Indexed identity-only lookup; queued later messages must not hide the first turn. */
@@ -4039,23 +4099,36 @@ export interface ThreadMessageIdentityContextSelector {
  * Select only identity columns: a long current turn must not evict its history
  * baseline, and resolving identities must never load historical message bodies.
  */
+export function getThreadTranscriptBoundaryOrdinal(
+  threadId: string,
+  graphUserId: string
+): number | undefined {
+  const boundary = getDb().prepare(
+    `SELECT COALESCE(
+       (SELECT ordinal FROM thread_messages
+        WHERE thread_id = ? AND message_id = ? AND role = 'user'),
+       (SELECT ordinal FROM thread_graph_transcript_boundaries
+        WHERE thread_id = ? AND graph_user_id = ?)
+     ) AS ordinal`
+  )
+  try {
+    boundary.bind([threadId, graphUserId, threadId, graphUserId])
+    if (!boundary.step()) return undefined
+    const ordinal = boundary.getAsObject().ordinal
+    return typeof ordinal === "number" ? ordinal : undefined
+  } finally {
+    boundary.free()
+  }
+}
+
 export function getThreadMessageProviderOccurrencesBeforeUser(
   threadId: string,
   userMessageId: string,
   providerSourceIds: readonly string[]
 ): Array<{ provider_source_id: string; role: Message["role"]; provider_occurrence: number }> | undefined {
+  const ordinal = getThreadTranscriptBoundaryOrdinal(threadId, userMessageId)
+  if (ordinal === undefined) return undefined
   const database = getDb()
-  const boundary = database.prepare(
-    "SELECT ordinal FROM thread_messages WHERE thread_id = ? AND message_id = ? AND role = 'user'"
-  )
-  let ordinal: number
-  try {
-    boundary.bind([threadId, userMessageId])
-    if (!boundary.step()) return undefined
-    ordinal = Number(boundary.getAsObject().ordinal)
-  } finally {
-    boundary.free()
-  }
   const results = new Map<string, { provider_source_id: string; role: Message["role"]; provider_occurrence: number }>()
   const remember = (source: string, role: Message["role"], occurrence: number): void => {
     if (!Number.isInteger(occurrence) || occurrence < 1) return
@@ -4423,9 +4496,11 @@ function mergeThreadMessageOrdinalsWithIncomingOrder(
   }
   currentIds.forEach(emit)
   if (orderedIds.every((id, index) => id === currentIds[index])) return
-  orderedIds.forEach((id, ordinal) => {
+  // Reuse the original message slots. Gaps may belong to graph-only turn
+  // boundaries or rolled-back attempts and must keep their relative position.
+  orderedIds.forEach((id, index) => {
     database.run("UPDATE thread_messages SET ordinal = ? WHERE thread_id = ? AND message_id = ?", [
-      ordinal,
+      rows[index].ordinal,
       threadId,
       id
     ])
@@ -5159,6 +5234,12 @@ function moveThreadMessageBlockAfterOrdinal(
          AND message_id NOT IN (${placeholders})`,
       [orderedIds.length, threadId, anchorOrdinal, ...orderedIds]
     )
+    database.run(
+      `UPDATE thread_graph_transcript_boundaries
+       SET ordinal = ordinal + ?
+       WHERE thread_id = ? AND ordinal > ?`,
+      [orderedIds.length, threadId, anchorOrdinal]
+    )
     orderedIds.forEach((messageId, index) => {
       database.run(
         "UPDATE thread_messages SET ordinal = ? WHERE thread_id = ? AND message_id = ?",
@@ -5240,14 +5321,14 @@ export function moveThreadMessagesAfterAnchor(
 
   const database = getDb()
   const anchorRows = getThreadMessageRows(database, threadId, [anchorId])
-  const anchor = anchorRows.get(anchorId)
-  if (!anchor) {
+  const anchorOrdinal = anchorRows.get(anchorId)?.ordinal ?? getThreadTranscriptBoundaryOrdinal(threadId, anchorId)
+  if (anchorOrdinal === undefined) {
     throw new Error(`Cannot order durable messages: anchor ${anchorId} is missing`)
   }
   return moveThreadMessageBlockAfterOrdinal(
     database,
     threadId,
-    Number(anchor.ordinal),
+    Number(anchorOrdinal),
     orderedIds,
     true
   )
@@ -6042,6 +6123,7 @@ export function deleteThread(threadId: string): void {
     database.run("DELETE FROM thread_message_fragments WHERE thread_id = ?", [threadId])
     database.run("DELETE FROM thread_message_fragment_states WHERE thread_id = ?", [threadId])
     database.run("DELETE FROM thread_messages WHERE thread_id = ?", [threadId])
+    database.run("DELETE FROM thread_graph_transcript_boundaries WHERE thread_id = ?", [threadId])
     database.run("DELETE FROM thread_message_buckets WHERE thread_id = ?", [threadId])
     database.run("DELETE FROM trusted_tool_file_preview_sources WHERE thread_id = ?", [threadId])
     database.run("DELETE FROM legacy_checkpoint_transcript_migrations WHERE thread_id = ?", [
@@ -6078,14 +6160,18 @@ export function addThreadGoalEvent(
   message: string,
   goalId?: string | null,
   createdAt = Date.now(),
-  activeWindowId?: string | null
+  activeWindowId?: string | null,
+  transcriptMessageId?: string
 ): ThreadGoalEventRow {
   const trimmed = message.trim()
   if (!trimmed) throw new Error("Goal event message cannot be empty.")
   const database = getDb()
+  const requestId = transcriptMessageId?.trim() || null
   database.run(
-    "INSERT INTO thread_goal_events (thread_id, goal_id, active_window_id, message, created_at) VALUES (?, ?, ?, ?, ?)",
-    [threadId, goalId ?? null, activeWindowId ?? null, trimmed, createdAt]
+    `INSERT INTO thread_goal_events (
+       thread_id, goal_id, active_window_id, message, created_at, transcript_message_id
+     ) VALUES (?, ?, ?, ?, ?, ?)`,
+    [threadId, goalId ?? null, activeWindowId ?? null, trimmed, createdAt, requestId]
   )
   saveToDisk()
 
@@ -6099,7 +6185,8 @@ export function addThreadGoalEvent(
       goal_id: goalId ?? null,
       active_window_id: activeWindowId ?? null,
       message: trimmed,
-      created_at: createdAt
+      created_at: createdAt,
+      ...(requestId && { transcript_message_id: requestId })
     }
   } finally {
     stmt.free()
@@ -6136,7 +6223,8 @@ export function getThreadGoalEvents(
         goal_id: row.goal_id,
         active_window_id: row.active_window_id ?? null,
         message: row.message,
-        created_at: Number(row.created_at)
+        created_at: Number(row.created_at),
+        ...(row.transcript_message_id && { transcript_message_id: row.transcript_message_id })
       })
     }
   } finally {
@@ -6189,9 +6277,10 @@ export function getThreadGoalEventsHydrationFallback(
          SELECT event_id, thread_id, goal_id, active_window_id,
                 substr(message, 1, 8192) AS message,
                 length(message) AS original_message_chars,
-                created_at
+                created_at, transcript_message_id
          FROM (
-           SELECT event_id, thread_id, goal_id, active_window_id, message, created_at
+           SELECT event_id, thread_id, goal_id, active_window_id, message, created_at,
+                  transcript_message_id
            FROM thread_goal_events
            WHERE thread_id = ?
            ORDER BY created_at DESC, event_id DESC
@@ -6203,33 +6292,23 @@ export function getThreadGoalEventsHydrationFallback(
            SELECT event_id FROM scanned ORDER BY created_at DESC, event_id DESC LIMIT ?
          ) OR (${restorePredicate})
        )
-       SELECT * FROM (
-         SELECT * FROM selected ORDER BY created_at DESC, event_id DESC LIMIT ?
-       ) ORDER BY created_at ASC, event_id ASC`
-    : `SELECT * FROM (
+       SELECT * FROM selected ORDER BY created_at DESC, event_id DESC LIMIT ?`
+    : `
          SELECT event_id, thread_id, goal_id, active_window_id,
                 substr(message, 1, 8192) AS message,
                 length(message) AS original_message_chars,
-                created_at
+                created_at, transcript_message_id
          FROM thread_goal_events
          WHERE thread_id = ?
          ORDER BY created_at DESC, event_id DESC
-         LIMIT ?
-       ) ORDER BY created_at ASC, event_id ASC`
-  const stmt = database.prepare(statementSql)
-  const activeWindowAnchorStmt = database.prepare(
-    `SELECT ordinal, message_id
-     FROM thread_messages
-     WHERE thread_id = ? AND active_window_id = ?
-     ORDER BY CASE WHEN role = 'user' THEN 0 ELSE 1 END, ordinal ASC, message_id ASC
-     LIMIT 1`
-  )
-  const goalAnchorStmt = database.prepare(
-    `SELECT ordinal, message_id
-     FROM thread_messages
-     WHERE thread_id = ? AND goal_id = ?
-     ORDER BY CASE WHEN role = 'user' THEN 0 ELSE 1 END, ordinal ASC, message_id ASC
-     LIMIT 1`
+         LIMIT ?`
+  const stmt = database.prepare(
+    `SELECT event.event_id, event.thread_id, event.goal_id, event.active_window_id,
+            event.message, event.original_message_chars, event.created_at,
+            anchor.ordinal AS transcript_ordinal, anchor.message_id AS transcript_message_id
+     FROM (${statementSql}) AS event
+     ${GOAL_EVENT_TRANSCRIPT_ANCHOR_JOIN}
+     ORDER BY event.created_at ASC, event.event_id ASC`
   )
   const restoreBindings = [
     GOAL_USER_MESSAGE_EVENT_PREFIX,
@@ -6256,27 +6335,16 @@ export function getThreadGoalEventsHydrationFallback(
         message?: unknown
         original_message_chars?: unknown
         created_at?: unknown
+        transcript_ordinal?: unknown
+        transcript_message_id?: unknown
       }
       if (typeof row.thread_id !== "string" || typeof row.message !== "string") continue
       const wasTruncated = Number(row.original_message_chars) > row.message.length
       const message = wasTruncated ? `${row.message}\n…[历史 Goal 事件已截断]` : row.message
       const eventBytes = Buffer.byteLength(message) + 160
       if (events.length > 0 && responseBytes + eventBytes > byteBudget) continue
-      let anchor: { ordinal?: unknown; message_id?: unknown } | undefined
       const activeWindowId = typeof row.active_window_id === "string" ? row.active_window_id : null
       const goalId = typeof row.goal_id === "string" ? row.goal_id : null
-      for (const [anchorStmt, identity] of [
-        [activeWindowAnchorStmt, activeWindowId],
-        [goalAnchorStmt, goalId]
-      ] as const) {
-        if (!identity) continue
-        anchorStmt.reset()
-        anchorStmt.bind([threadId, identity])
-        if (anchorStmt.step()) {
-          anchor = anchorStmt.getAsObject() as { ordinal?: unknown; message_id?: unknown }
-          break
-        }
-      }
       events.push({
         event_id: Number(row.event_id),
         thread_id: row.thread_id,
@@ -6284,18 +6352,14 @@ export function getThreadGoalEventsHydrationFallback(
         active_window_id: activeWindowId,
         message,
         created_at: Number(row.created_at),
-        transcript_ordinal: Number.isSafeInteger(Number(anchor?.ordinal))
-          ? Number(anchor?.ordinal)
-          : null,
+        transcript_ordinal: readGoalEventTranscriptOrdinal(row.transcript_ordinal),
         transcript_message_id:
-          typeof anchor?.message_id === "string" ? anchor.message_id : null
+          typeof row.transcript_message_id === "string" ? row.transcript_message_id : null
       })
       responseBytes += eventBytes
     }
   } finally {
     stmt.free()
-    activeWindowAnchorStmt.free()
-    goalAnchorStmt.free()
   }
   return events
 }

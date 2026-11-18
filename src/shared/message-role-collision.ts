@@ -714,6 +714,8 @@ export function normalizeAppendedMessageIds<T extends RoleCollisionMessage>(
     splitAssistantAfterTool?: boolean
     forceAppend?: boolean
     preserveWorkerSnapshotIdentities?: boolean
+    firstCandidateIndex?: number
+    previousProviderOccurrence?: (sourceId: string, role: string) => number | undefined
   } = {}
 ): T[] {
   const transcript = normalizeCompleteMessageIds(baselineMessages)
@@ -721,6 +723,7 @@ export function normalizeAppendedMessageIds<T extends RoleCollisionMessage>(
   const identityFor = options.preserveWorkerSnapshotIdentities
     ? completeProviderRoleIdentity
     : providerRoleIdentity
+  const firstCandidateIndex = options.firstCandidateIndex ?? 0
 
   for (const rawMessage of incomingMessages) {
     if (options.normalizeCrossRole === false && isInternalMessageIdForRole(rawMessage)) {
@@ -731,10 +734,10 @@ export function normalizeAppendedMessageIds<T extends RoleCollisionMessage>(
     const role = normalizedMessageRole(rawMessage)
     const sourceId = getMessageProviderSourceId(rawMessage)
     const identity = identityFor(rawMessage)
-    let lastUserIndex = -1
+    let lastUserIndex = firstCandidateIndex - 1
     for (let index = transcript.length - 1; index >= 0; index -= 1) {
       if (normalizedMessageRole(transcript[index]) === "user") {
-        lastUserIndex = index
+        lastUserIndex = Math.max(lastUserIndex, index)
         break
       }
     }
@@ -748,6 +751,7 @@ export function normalizeAppendedMessageIds<T extends RoleCollisionMessage>(
       candidateIndexes.indexOf(candidateIndex) + 1
 
     const canUpdateCandidate = (candidateIndex: number): boolean => {
+      if (candidateIndex < firstCandidateIndex) return false
       if (role !== "tool") return true
       const candidateToolCallId = transcript[candidateIndex].tool_call_id
       if (
@@ -800,20 +804,25 @@ export function normalizeAppendedMessageIds<T extends RoleCollisionMessage>(
     let targetIndex: number | undefined
     const hasInternalId = isInternalMessageIdForRole(rawMessage)
     const declaredProviderOccurrence = getMessageProviderOccurrence(rawMessage)
+    const previousOccurrence = options.previousProviderOccurrence?.(sourceId, role) ?? 0
+    const scopedDeclaredOccurrence =
+      declaredProviderOccurrence !== undefined && declaredProviderOccurrence > previousOccurrence
+        ? declaredProviderOccurrence
+        : undefined
     const mustAppendDeclaredOccurrence =
       !options.forceAppend &&
-      declaredProviderOccurrence !== undefined &&
+      scopedDeclaredOccurrence !== undefined &&
       !candidateIndexes.some(
-        (index) => candidateProviderOccurrence(index) === declaredProviderOccurrence
+        (index) => candidateProviderOccurrence(index) === scopedDeclaredOccurrence
       )
     if (
       !options.forceAppend &&
-      declaredProviderOccurrence !== undefined &&
+      scopedDeclaredOccurrence !== undefined &&
       !mustAppendDeclaredOccurrence
     ) {
       const occurrenceIndex = candidateIndexes.find(
         (index) =>
-          candidateProviderOccurrence(index) === declaredProviderOccurrence &&
+          candidateProviderOccurrence(index) === scopedDeclaredOccurrence &&
           canUpdateCandidate(index)
       )
       if (occurrenceIndex !== undefined) {
@@ -949,7 +958,7 @@ export function normalizeAppendedMessageIds<T extends RoleCollisionMessage>(
       let renderId = crossRoleMessage.id
       let providerOccurrence = getMessageProviderOccurrence(crossRoleMessage)
       const occupiedIds = new Set(transcript.map((candidate) => candidate.id))
-      if (candidateIndexes.length > 0) {
+      if (candidateIndexes.length > 0 || previousOccurrence > 0) {
         const highestExistingOccurrence = candidateIndexes.reduce(
           (highest, index, candidateOffset) => {
             const parsed = parseMessageSameRoleDuplicateId(transcript[index].id)
@@ -959,10 +968,9 @@ export function normalizeAppendedMessageIds<T extends RoleCollisionMessage>(
               persistedOccurrence ?? parsed?.occurrence ?? candidateOffset + 1
             )
           },
-          1
+          Math.max(1, previousOccurrence)
         )
-        const declaredOccurrence = getMessageProviderOccurrence(rawMessage)
-        providerOccurrence = declaredOccurrence ?? highestExistingOccurrence + 1
+        providerOccurrence = scopedDeclaredOccurrence ?? highestExistingOccurrence + 1
         renderId = buildAvailableProviderOccurrenceId(
           sourceId,
           role,

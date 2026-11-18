@@ -338,7 +338,7 @@ export function transformSerializedValuesMessages(
         kwargs.is_error === true ||
         kwargs.additional_kwargs?.is_error === true)
     const providerTuple =
-      type === "ai"
+      type === "ai" || type === "tool"
         ? getMessageProviderTupleFromMetadata(kwargs.additional_kwargs)
         : undefined
     const localFallbackIndex = fallbackIndexes[type]++

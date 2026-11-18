@@ -672,8 +672,9 @@ export function createStreamDataSerializer(
 
 /**
  * Retain one complete, plain current-turn snapshot while its wire payloads are
- * append/tail deltas. The array is mutated in place so bookkeeping stays O(K)
- * over the run rather than copying the accumulated turn on every graph step.
+ * append/tail deltas. Each accumulator owns its array and mutates it in place
+ * on incremental frames, so committed and provisional accumulators can consume
+ * the same frame without sharing their mutable message order.
  */
 export function createSerializedValuesMessageAccumulator(): SerializedValuesMessageAccumulator {
   let messages: unknown[] = []
@@ -691,7 +692,7 @@ export function createSerializedValuesMessageAccumulator(): SerializedValuesMess
       }
 
       if (serialized.valuesSnapshotKind === "full") {
-        messages = incoming
+        messages = [...incoming]
         valuesMessageIndexOffset = serialized.valuesMessageIndexOffset
       } else if (
         serialized.valuesSnapshotKind === "append" &&
@@ -709,7 +710,7 @@ export function createSerializedValuesMessageAccumulator(): SerializedValuesMess
         // A provenance mismatch should only be possible when a caller mixes
         // serializers. Keep the available snapshot bounded and deterministic;
         // the next conservative full frame restores completeness.
-        messages = incoming
+        messages = [...incoming]
         valuesMessageIndexOffset = serialized.valuesMessageIndexOffset
       }
       return { messages, valuesMessageIndexOffset }

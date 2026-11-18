@@ -5,7 +5,11 @@ import {
   STOP_HOOK_REVISION_PROMPT_PREFIX,
   type SerializedHookMessage
 } from "./stop-hook-context"
-import { persistedMessageFromStreamPayload, streamPayloadContentMode } from "./stream-transcript-payload"
+import {
+  getSerializedMessageRole,
+  persistedMessageFromStreamPayload,
+  streamPayloadContentMode
+} from "./stream-transcript-payload"
 import {
   selectStreamTranscriptValueSnapshots,
   rememberSelectedStreamTranscriptValueSnapshots,
@@ -21,7 +25,8 @@ import {
   createSerializedValuesMessageAccumulator,
   createStreamDataSerializer,
   sanitizeCoordinatorWorkerStreamDataForRenderer,
-  sanitizeStreamDataForRenderer
+  sanitizeStreamDataForRenderer,
+  type SerializedValuesMessageSnapshot
 } from "./stream-data-serialization"
 import {
   classifyPhysicalStreamRunFailure,
@@ -92,6 +97,8 @@ import {
   getThreadMessageProviderOccurrencesBeforeUser,
   getThreadMessagesByIds,
   getThread,
+  getThreadTranscriptBoundaryOrdinal,
+  reserveThreadGraphTranscriptBoundary,
   updateThread,
   upsertThreadMessages
 } from "../db"
@@ -353,7 +360,10 @@ import {
   isGoalBoundaryStillCurrent,
   validateGoalText
 } from "../agent/goals/goal-manager"
-import { buildGoalContinuationPromptFromHookContexts } from "../agent/goals/internal-prompt"
+import {
+  buildGoalContinuationPromptFromHookContexts,
+  GOAL_CONTINUATION_BOUNDARY_METADATA_KEY
+} from "../agent/goals/internal-prompt"
 import { goalManager, goalStore } from "../agent/goals/runtime"
 import {
   extractGoalTransportAttachmentNames,
@@ -1308,7 +1318,8 @@ function persistGoalUserMessage(
   threadId: string,
   content: string,
   goalId = goalManager.get(threadId)?.goalId ?? null,
-  activeWindowId = goalManager.get(threadId)?.activeWindowId ?? null
+  activeWindowId = goalManager.get(threadId)?.activeWindowId ?? null,
+  transcriptMessageId?: string
 ): void {
   try {
     addThreadGoalEvent(
@@ -1316,7 +1327,8 @@ function persistGoalUserMessage(
       `${GOAL_USER_MESSAGE_EVENT_PREFIX}${content}`,
       goalId,
       Date.now(),
-      activeWindowId
+      activeWindowId,
+      transcriptMessageId
     )
   } catch (error) {
     console.warn("[Goal] failed to persist goal user message:", error)
@@ -1969,7 +1981,10 @@ async function settlePhysicalAgentRun({
       {
         name: "discard-tool-call-accumulators",
         shouldRun: () => transcriptFlushSucceeded,
-        run: () => discardStreamTranscriptToolCallAccumulators(threadId, runToken)
+        run: () => {
+          discardStreamTranscriptToolCallAccumulators(threadId, runToken)
+          streamTranscriptBoundaryIds.delete(pendingStreamTranscriptKey(threadId, runToken))
+        }
       },
       {
         name: "invalidate-message-preparer",
@@ -3705,9 +3720,30 @@ interface SerializedValuesSideEffectMessage extends SerializedHookMessage {
   }
 }
 
-function extractSerializedValuesMessages(payload: unknown): unknown[] {
-  if (!payload || typeof payload !== "object") return []
-  const messages = (payload as { messages?: unknown }).messages
+const committedGoalMessageReceipts = new WeakMap<object, Record<string, unknown>>()
+
+function projectCommittedGoalMessages(messages: readonly unknown[]): readonly unknown[] {
+  let projected: unknown[] | undefined
+  messages.forEach((source, index) => {
+    if (!source || typeof source !== "object") return
+    const receipt = committedGoalMessageReceipts.get(source)
+    if (!receipt) return
+    projected ??= messages.slice()
+    projected[index] = receipt
+  })
+  return projected ?? messages
+}
+
+function replayCommittedStreamValues(
+  snapshot: SerializedValuesMessageSnapshot | undefined
+): unknown[] {
+  if (!snapshot) return []
+  const payload = sanitizeStreamDataForRenderer(
+    "values",
+    { messages: projectCommittedGoalMessages(snapshot.messages) },
+    snapshot.valuesMessageIndexOffset
+  )
+  const messages = asPlainRecord(payload)?.messages
   return Array.isArray(messages) ? messages : []
 }
 
@@ -3924,6 +3960,9 @@ const streamTranscriptToolCallAccumulators = new Map<
 
 const streamTranscriptAssistantIdentities = new Map<string, StreamTranscriptAssistantIdentity>()
 const streamTranscriptAttempts = new Map<string, ThreadMessageStreamAttempt>()
+const streamTranscriptBoundaryIds = new Map<string, string>()
+
+class StreamTranscriptSnapshotRequiredError extends Error {}
 
 function pendingStreamTranscriptKey(threadId: string, runToken: string): string {
   return `${threadId}\u0000${runToken}`
@@ -3971,6 +4010,9 @@ function discardStreamTranscriptToolCallAccumulators(threadId: string, runToken:
 
 function discardStreamTranscriptToolCallAccumulatorsForThread(threadId: string): void {
   const prefix = `${threadId}\u0000`
+  for (const key of streamTranscriptBoundaryIds.keys()) {
+    if (key.startsWith(prefix)) streamTranscriptBoundaryIds.delete(key)
+  }
   for (const key of streamTranscriptAttempts.keys()) {
     if (key.startsWith(prefix)) streamTranscriptAttempts.delete(key)
   }
@@ -3982,7 +4024,7 @@ function discardStreamTranscriptToolCallAccumulatorsForThread(threadId: string):
 function flushPendingStreamTranscriptMessages(
   threadId: string,
   runToken: string,
-  options: { throwOnError?: boolean; checkpoint?: boolean } = {}
+  options: { throwOnError?: boolean; allowWaitingForSnapshot?: boolean } = {}
 ): void {
   const pendingKey = pendingStreamTranscriptKey(threadId, runToken)
   const pending = pendingStreamTranscriptMessages.get(pendingKey)
@@ -4003,12 +4045,20 @@ function flushPendingStreamTranscriptMessages(
             getMessageProviderOccurrence(message) === pending.requiredSnapshotProviderOccurrence)
       )
       if (!hasRequiredSnapshot) {
-        throw new Error("Stream suffix is waiting for an authoritative assistant snapshot")
+        throw new StreamTranscriptSnapshotRequiredError(
+          "Stream suffix is waiting for an authoritative assistant snapshot"
+        )
       }
     }
+    const boundaryId = streamTranscriptBoundaryIds.get(pendingKey)
     const resolved = resolveStreamTranscriptFlush({
       queuedMessages: pending.messages,
       currentAssistantIdentity: streamTranscriptAssistantIdentities.get(pendingKey),
+      ...(boundaryId && {
+        boundaryOrdinal: getThreadTranscriptBoundaryOrdinal(threadId, boundaryId),
+        loadPreviousOccurrences: (sourceIds: readonly string[]) =>
+          getThreadMessageProviderOccurrencesBeforeUser(threadId, boundaryId, sourceIds)
+      }),
       loadBaselineMessages: () =>
         getThreadMessageIdentityContext(
           threadId,
@@ -4022,8 +4072,8 @@ function flushPendingStreamTranscriptMessages(
     })
     const { messages, preserveExistingOrder } = resolved
     if (messages.length === 0) return
-    let streamAttempt = options.checkpoint ? undefined : streamTranscriptAttempts.get(pendingKey)
-    if (!options.checkpoint && !streamAttempt) {
+    let streamAttempt = streamTranscriptAttempts.get(pendingKey)
+    if (!streamAttempt) {
       streamAttempt = new ThreadMessageStreamAttempt(threadId)
       streamTranscriptAttempts.set(pendingKey, streamAttempt)
     }
@@ -4038,7 +4088,9 @@ function flushPendingStreamTranscriptMessages(
           providerOccurrence: getMessageProviderOccurrence(messages[0]) ?? 1
         }
         streamTranscriptAssistantIdentities.delete(pendingKey)
-        throw new Error("Stream text delta no longer matches its durable assistant row")
+        throw new StreamTranscriptSnapshotRequiredError(
+          "Stream text delta no longer matches its durable assistant row"
+        )
       }
       persistedCount = 1
     } else {
@@ -4070,6 +4122,9 @@ function flushPendingStreamTranscriptMessages(
       requiredSnapshotProviderOccurrence:
         rejectedDeltaIdentity?.providerOccurrence ?? pending.requiredSnapshotProviderOccurrence
     })
+    if (options.allowWaitingForSnapshot && error instanceof StreamTranscriptSnapshotRequiredError) {
+      return
+    }
     if (options.throwOnError) throw error
     console.warn("[Agent] Failed to persist streamed transcript messages:", error)
   }
@@ -4111,6 +4166,9 @@ function flushPendingStreamTranscriptMessagesForThread(
   for (const runToken of owners) {
     if (!remainingOwners.has(runToken)) {
       discardStreamTranscriptToolCallAccumulators(threadId, runToken)
+      if (!isCurrentRunMessageQueueOwner(threadId, runToken)) {
+        streamTranscriptBoundaryIds.delete(pendingStreamTranscriptKey(threadId, runToken))
+      }
     }
   }
   if (firstError) {
@@ -4122,7 +4180,14 @@ function flushPendingStreamTranscriptMessagesForThread(
 
 setCurrentRunTranscriptFlushBeforeInjection((threadId, runToken) => {
   flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
-  streamTranscriptAssistantIdentities.delete(pendingStreamTranscriptKey(threadId, runToken))
+  const key = pendingStreamTranscriptKey(threadId, runToken)
+  streamTranscriptAssistantIdentities.delete(key)
+  return (userMessageId) => {
+    discardStreamTranscriptToolCallAccumulators(threadId, runToken)
+    if (userMessageId && streamTranscriptBoundaryIds.has(key)) {
+      streamTranscriptBoundaryIds.set(key, userMessageId)
+    }
+  }
 })
 
 function discardPendingStreamTranscriptMessages(threadId: string, runToken: string): string[] {
@@ -4271,7 +4336,7 @@ async function awaitPhysicalStreamRunSetup<T>({
   }
 }
 
-function persistAndForwardPhysicalRunStreamChunk(
+export function persistAndForwardPhysicalRunStreamChunk(
   window: BrowserWindow,
   channel: string,
   threadId: string,
@@ -4281,7 +4346,8 @@ function persistAndForwardPhysicalRunStreamChunk(
   payload: unknown,
   valuesMessageIndexOffset = 0,
   valuesSnapshotKind: "full" | "append" | "tail" = "full",
-  completeValuesMessages?: readonly unknown[]
+  completeValuesMessages?: readonly unknown[],
+  projectGoalValues = false
 ): string | null {
   // This fence deliberately sits immediately beside persistence and renderer
   // forwarding. A provider callback may resume after any earlier await even
@@ -4291,12 +4357,45 @@ function persistAndForwardPhysicalRunStreamChunk(
   // every chunk until a values/terminal event lets a long answer accumulate
   // thousands of deltas and makes final coalescing quadratic in output length.
   const messageId = persistStreamTranscriptChunk(threadId, runToken, mode, payload)
+  let outgoing = payload
   if (mode === "values") {
+    const runKey = pendingStreamTranscriptKey(threadId, runToken)
+    if (!streamTranscriptBoundaryIds.has(runKey)) {
+      const frameMessages = asPlainRecord(payload)?.messages
+      const messages = completeValuesMessages ?? (Array.isArray(frameMessages) ? frameMessages : [])
+      const input = messages.findLast(
+        (message) => getSerializedMessageRole(message) === "user"
+      )
+      const inputRecord = asPlainRecord(input)
+      const kwargs = asPlainRecord(inputRecord?.kwargs) ?? inputRecord
+      const boundaryId = kwargs?.id
+      if (
+        typeof boundaryId === "string" &&
+        asPlainRecord(kwargs?.additional_kwargs)?.[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] === true &&
+        getThreadTranscriptBoundaryOrdinal(threadId, boundaryId) !== undefined
+      ) {
+        streamTranscriptBoundaryIds.set(runKey, boundaryId)
+        streamTranscriptAssistantIdentities.delete(runKey)
+      }
+    }
+    flushPendingStreamTranscriptMessages(threadId, runToken, {
+      throwOnError: true,
+      allowWaitingForSnapshot: true
+    })
     // Graph values are the ordered authority for final fields. Persist them at
     // the active-run fence so delayed renderer echoes cannot restore old text,
     // and values-only finals do not depend on an unmarked renderer writeback.
+    const goalReceipts = projectGoalValues || streamTranscriptBoundaryIds.has(runKey)
+    const receipts: Array<[object, Record<string, unknown>]> = []
     const snapshots = selectStreamTranscriptValueSnapshots(payload, valuesSnapshotKind, {
       completeMessages: completeValuesMessages,
+      onResolve: goalReceipts
+        ? (source, canonical) => {
+            receipts.push([source, canonical])
+          }
+        : undefined,
+      resolveBoundaryOrdinal: (userMessageId) =>
+        getThreadTranscriptBoundaryOrdinal(threadId, userMessageId),
       loadBaselineMessages: (selectors) =>
         getThreadMessageIdentityContext(
           threadId,
@@ -4314,17 +4413,21 @@ function persistAndForwardPhysicalRunStreamChunk(
     for (const snapshot of snapshots) {
       persistStreamTranscriptChunk(threadId, runToken, "messages", snapshot, { deferFlush: true })
     }
-    flushPendingStreamTranscriptMessages(threadId, runToken, {
-      throwOnError: true,
-      checkpoint: true
-    })
-    // Values are the committed graph boundary, not part of the next failed attempt.
-    streamTranscriptAttempts.delete(pendingStreamTranscriptKey(threadId, runToken))
+    flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
+    if (goalReceipts) {
+      for (const [source, receipt] of receipts) committedGoalMessageReceipts.set(source, receipt)
+      const frame = asPlainRecord(payload)
+      if (Array.isArray(frame?.messages)) {
+        outgoing = { ...frame, messages: projectCommittedGoalMessages(frame.messages) }
+      }
+    }
+    // Commit both provisional writes and authoritative updates at this boundary.
+    discardStreamTranscriptToolCallAccumulators(threadId, runToken)
   }
   safeSendToWindow(window, channel, {
     type: "stream",
     mode,
-    data: sanitizeStreamDataForRenderer(mode, payload, valuesMessageIndexOffset),
+    data: sanitizeStreamDataForRenderer(mode, outgoing, valuesMessageIndexOffset),
     ...(mode === "values" ? { valuesSnapshotKind } : {})
   })
   return messageId
@@ -4773,7 +4876,7 @@ function clearStreamDisconnectRetry(window: BrowserWindow, channel: string): voi
   })
 }
 
-function resetFailedStreamAttempt(
+export function resetFailedStreamAttempt(
   window: BrowserWindow,
   channel: string,
   threadId: string,
@@ -5880,11 +5983,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         message,
         modelId,
         streamRequestId,
-        userMessageId,
+        userMessageId: requestedUserMessageId,
         agentMode: requestedAgentMode,
         managedExecution,
         coordinatorInternalNotification
       }: AgentInvokeParams = request
+      let userMessageId = requestedUserMessageId
       const runOwner = runExecutionContext.localRunLease?.owner ?? "desktop"
       if (!managedExecution && managedBizRetryService.blocksThread(threadId)) {
         const error = "请在决策入口操作"
@@ -5993,6 +6097,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       if (!isTrustedCoordinatorNotificationInvoke && !isWorkflowNotificationInvoke) {
         const goalCommand = parseGoalSlashCommand(message)
+        if (goalCommand.type === "set" || goalCommand.type === "resume") {
+          userMessageId = userMessageId?.trim() || uuid()
+        }
         if (goalCommand.type !== "none") {
           try {
             const controlResult = handleGoalNonStartingControlCommand({
@@ -6136,7 +6243,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
-              persistGoalUserMessage(threadId, "/goal resume", goal.goalId, goal.activeWindowId)
+              persistGoalUserMessage(
+                threadId,
+                "/goal resume",
+                goal.goalId,
+                goal.activeWindowId,
+                userMessageId
+              )
               emitGoalNotice(
                 window,
                 channel,
@@ -6221,7 +6334,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 threadId,
                 buildPersistedGoalSetUserMessage(goalCommand.displayText, transportPayload),
                 goal.goalId,
-                goal.activeWindowId
+                goal.activeWindowId,
+                userMessageId
               )
               emitGoalNotice(
                 window,
@@ -6604,6 +6718,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const runGoal = goalManager.getActive(threadId)
         runGoalId = runGoal?.goalId ?? null
         runGoalActiveWindowId = runGoal?.activeWindowId ?? null
+        if (runGoal && userMessageId) {
+          streamTranscriptBoundaryIds.set(pendingStreamTranscriptKey(threadId, runToken), userMessageId)
+        }
 
         // Abort the stream if the window is closed/destroyed
         const onWindowClosed = (): void => {
@@ -6730,7 +6847,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             type: "custom",
             data: {
               type: "goal_subturn_complete",
-              messages: latestSerializedValuesMessagesForGoalFlush
+              messages: projectCommittedGoalMessages(latestSerializedValuesMessagesForGoalFlush),
+              nativeTranscriptCommitted: true
             }
           })
           latestSerializedValuesMessagesForGoalFlush = []
@@ -8019,7 +8137,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   content: effectiveMessage,
                   additional_kwargs: {
                     [COORDINATOR_AUGMENTED_USER_MESSAGE_KEY]: true,
-                    [COORDINATOR_VISIBLE_USER_MESSAGE_KEY]: visibleTranscriptUserMessage
+                    [COORDINATOR_VISIBLE_USER_MESSAGE_KEY]: visibleTranscriptUserMessage,
+                    ...(runGoalId !== null && {
+                      [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true
+                    })
                   }
                 })
 
@@ -8280,7 +8401,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               payload,
               valuesMessageIndexOffset,
               valuesSnapshotKind,
-              completeValuesMessages
+              completeValuesMessages,
+              runGoalId !== null
             )
           }
 
@@ -8643,7 +8765,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           )
           let activeStream: AsyncIterable<unknown> = stream
           let streamDisconnectRetries = 0
-          let latestStableStreamMessages: unknown[] = []
+          const committedStreamValues = createSerializedValuesMessageAccumulator()
+          let latestStableStreamValues: SerializedValuesMessageSnapshot | undefined
           const inFlightStreamMessageIds = new Set<string>()
           const pendingMessageSideEffectPayloads = createStreamMessageSideEffectBuffer({
             getReasoningSeed: (messageId) => _reasoningByAiMessageId.get(messageId),
@@ -8671,10 +8794,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           ): Promise<void> => {
             const serializeForRun = createStreamDataSerializer({ projectMessageChunks: true })
             const valuesAccumulator = createSerializedValuesMessageAccumulator()
-            let latestValuesSnapshot = {
-              messages: [] as unknown[],
-              valuesMessageIndexOffset: 0
-            }
             const commitPendingMessageSideEffects = async (): Promise<void> => {
               for (const payload of pendingMessageSideEffectPayloads.drain()) {
                 await processChunkSideEffects("messages", payload)
@@ -8694,23 +8813,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   continue
                 }
                 await acknowledgeDeliveredCoordinatorNotificationsIfNeeded()
-                const {
-                  data: serialized,
-                  valuesMessageIndexOffset,
-                  valuesSnapshotKind
-                } = serializeForRun(mode, data)
+                const frame = serializeForRun(mode, data)
+                const { data: serialized, valuesMessageIndexOffset, valuesSnapshotKind } = frame
                 if (isContextCompactionStreamPayload(mode, serialized)) continue
-                if (mode === "values") {
-                  latestValuesSnapshot = valuesAccumulator.update({
-                    data: serialized,
-                    valuesMessageIndexOffset,
-                    valuesSnapshotKind
-                  })
-                  latestSerializedValuesMessagesForGoalFlush = latestValuesSnapshot.messages
-                  flushPendingStreamTranscriptMessages(threadId, runToken)
-                  discardStreamTranscriptToolCallAccumulators(threadId, runToken)
-                  inFlightStreamMessageIds.clear()
-                }
+                const valuesSnapshot =
+                  mode === "values" ? valuesAccumulator.update(frame) : undefined
                 // UI forwarding is the primary path. Trace / metrics / skill-evolution
                 // processing below are side effects and must never block streaming.
                 const messageId = forwardStreamChunk(
@@ -8718,8 +8825,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   serialized,
                   valuesMessageIndexOffset,
                   valuesSnapshotKind,
-                  mode === "values" ? latestValuesSnapshot.messages : undefined
+                  valuesSnapshot?.messages
                 )
+                if (valuesSnapshot) {
+                  latestStableStreamValues = committedStreamValues.update(frame)
+                  latestSerializedValuesMessagesForGoalFlush = latestStableStreamValues.messages
+                  inFlightStreamMessageIds.clear()
+                }
                 if (messageId) inFlightStreamMessageIds.add(messageId)
                 if (mode === "messages") {
                   pendingMessageSideEffectPayloads.push(serialized)
@@ -8731,24 +8843,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
               await commitPendingMessageSideEffects()
               throwIfInvokeAborted()
-              flushPendingStreamTranscriptMessages(threadId, runToken)
+              flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
               discardStreamTranscriptToolCallAccumulators(threadId, runToken)
               inFlightStreamMessageIds.clear()
             } catch (error) {
               pendingMessageSideEffectPayloads.clear()
-              latestStableStreamMessages = extractSerializedValuesMessages(
-                sanitizeStreamDataForRenderer(
-                  "values",
-                  { messages: latestValuesSnapshot.messages },
-                  latestValuesSnapshot.valuesMessageIndexOffset
-                )
-              )
               resetFailedStreamAttempt(
                 window,
                 channel,
                 threadId,
                 runToken,
-                latestStableStreamMessages,
+                replayCommittedStreamValues(latestStableStreamValues),
                 inFlightStreamMessageIds,
                 { preservePendingTranscript: abortController.signal.aborted }
               )
@@ -8818,6 +8923,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             goalContinuationInput: string,
             expectedGoal: ThreadGoal
           ): Promise<boolean> => {
+            if (!getCurrentGoalForContinuation(expectedGoal)) return false
+            const graphUserId = uuid()
+            const goalInput = new HumanMessage({
+              id: graphUserId,
+              content: goalContinuationInput,
+              additional_kwargs: { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true }
+            })
+            const runKey = pendingStreamTranscriptKey(threadId, runToken)
+            flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
+            reserveThreadGraphTranscriptBoundary(threadId, graphUserId)
+            streamTranscriptBoundaryIds.set(runKey, graphUserId)
+            streamTranscriptAssistantIdentities.delete(runKey)
             let inputCheckpointed = false
             while (true) {
               try {
@@ -8826,7 +8943,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 const goalStream = await agent.stream(
                   inputCheckpointed
                     ? null
-                    : { messages: [new HumanMessage(goalContinuationInput)] },
+                    : { messages: [goalInput] },
                   streamConfig
                 )
                 throwIfInvokeAborted()
@@ -11087,17 +11204,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           )
           let activeResumeStream: AsyncIterable<unknown> = resumeStream
           let resumeStreamDisconnectRetries = 0
-          let resumeStableStreamMessages: unknown[] = []
+          const committedResumeValues = createSerializedValuesMessageAccumulator()
+          let latestStableResumeValues: SerializedValuesMessageSnapshot | undefined
           const resumeInFlightMessageIds = new Set<string>()
           const pendingResumeMessagePayloads = createStreamMessageSideEffectBuffer()
 
           const consumeResumeStream = async (source: AsyncIterable<unknown>): Promise<void> => {
             const serializeForRun = createStreamDataSerializer({ projectMessageChunks: true })
             const valuesAccumulator = createSerializedValuesMessageAccumulator()
-            let latestValuesSnapshot = {
-              messages: [] as unknown[],
-              valuesMessageIndexOffset: 0
-            }
             const commitPendingResumeMessageSideEffects = async (): Promise<void> => {
               for (const payload of pendingResumeMessagePayloads.drain()) {
                 await resumeSubagentLifecycle.processPayload(payload)
@@ -11112,22 +11226,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 if (isCoordinatorWorkerStreamChunk(mode, data, threadId)) {
                   continue
                 }
-                const {
-                  data: serialized,
-                  valuesMessageIndexOffset,
-                  valuesSnapshotKind
-                } = serializeForRun(mode, data)
+                const frame = serializeForRun(mode, data)
+                const { data: serialized, valuesMessageIndexOffset, valuesSnapshotKind } = frame
                 if (isContextCompactionStreamPayload(mode, serialized)) continue
-                if (mode === "values") {
-                  latestValuesSnapshot = valuesAccumulator.update({
-                    data: serialized,
-                    valuesMessageIndexOffset,
-                    valuesSnapshotKind
-                  })
-                  flushPendingStreamTranscriptMessages(threadId, runToken)
-                  discardStreamTranscriptToolCallAccumulators(threadId, runToken)
-                  resumeInFlightMessageIds.clear()
-                }
+                const valuesSnapshot =
+                  mode === "values" ? valuesAccumulator.update(frame) : undefined
                 const messageId = persistAndForwardPhysicalRunStreamChunk(
                   window,
                   channel,
@@ -11138,8 +11241,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   serialized,
                   valuesMessageIndexOffset,
                   valuesSnapshotKind,
-                  mode === "values" ? latestValuesSnapshot.messages : undefined
+                  valuesSnapshot?.messages
                 )
+                if (valuesSnapshot) {
+                  latestStableResumeValues = committedResumeValues.update(frame)
+                  resumeInFlightMessageIds.clear()
+                }
                 if (messageId) resumeInFlightMessageIds.add(messageId)
                 if (mode === "messages") {
                   pendingResumeMessagePayloads.push(serialized)
@@ -11155,24 +11262,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
               await commitPendingResumeMessageSideEffects()
               throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
-              flushPendingStreamTranscriptMessages(threadId, runToken)
+              flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
               discardStreamTranscriptToolCallAccumulators(threadId, runToken)
               resumeInFlightMessageIds.clear()
             } catch (error) {
               pendingResumeMessagePayloads.clear()
-              resumeStableStreamMessages = extractSerializedValuesMessages(
-                sanitizeStreamDataForRenderer(
-                  "values",
-                  { messages: latestValuesSnapshot.messages },
-                  latestValuesSnapshot.valuesMessageIndexOffset
-                )
-              )
               resetFailedStreamAttempt(
                 window,
                 channel,
                 threadId,
                 runToken,
-                resumeStableStreamMessages,
+                replayCommittedStreamValues(latestStableResumeValues),
                 resumeInFlightMessageIds,
                 { preservePendingTranscript: abortController.signal.aborted }
               )
@@ -12232,17 +12332,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           )
           let activeIntStream: AsyncIterable<unknown> = intStream
           let intStreamDisconnectRetries = 0
-          let intStableStreamMessages: unknown[] = []
+          const committedInterruptValues = createSerializedValuesMessageAccumulator()
+          let latestStableInterruptValues: SerializedValuesMessageSnapshot | undefined
           const intInFlightMessageIds = new Set<string>()
           const pendingIntMessagePayloads = createStreamMessageSideEffectBuffer()
 
           const consumeInterruptStream = async (source: AsyncIterable<unknown>): Promise<void> => {
             const serializeForRun = createStreamDataSerializer({ projectMessageChunks: true })
             const valuesAccumulator = createSerializedValuesMessageAccumulator()
-            let latestValuesSnapshot = {
-              messages: [] as unknown[],
-              valuesMessageIndexOffset: 0
-            }
             const commitPendingInterruptMessageSideEffects = async (): Promise<void> => {
               for (const payload of pendingIntMessagePayloads.drain()) {
                 await interruptSubagentLifecycle.processPayload(payload)
@@ -12257,22 +12354,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 if (isCoordinatorWorkerStreamChunk(mode, data, threadId)) {
                   continue
                 }
-                const {
-                  data: serialized,
-                  valuesMessageIndexOffset,
-                  valuesSnapshotKind
-                } = serializeForRun(mode, data)
+                const frame = serializeForRun(mode, data)
+                const { data: serialized, valuesMessageIndexOffset, valuesSnapshotKind } = frame
                 if (isContextCompactionStreamPayload(mode, serialized)) continue
-                if (mode === "values") {
-                  latestValuesSnapshot = valuesAccumulator.update({
-                    data: serialized,
-                    valuesMessageIndexOffset,
-                    valuesSnapshotKind
-                  })
-                  flushPendingStreamTranscriptMessages(threadId, runToken)
-                  discardStreamTranscriptToolCallAccumulators(threadId, runToken)
-                  intInFlightMessageIds.clear()
-                }
+                const valuesSnapshot =
+                  mode === "values" ? valuesAccumulator.update(frame) : undefined
                 const messageId = persistAndForwardPhysicalRunStreamChunk(
                   window,
                   channel,
@@ -12283,8 +12369,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   serialized,
                   valuesMessageIndexOffset,
                   valuesSnapshotKind,
-                  mode === "values" ? latestValuesSnapshot.messages : undefined
+                  valuesSnapshot?.messages
                 )
+                if (valuesSnapshot) {
+                  latestStableInterruptValues = committedInterruptValues.update(frame)
+                  intInFlightMessageIds.clear()
+                }
                 if (messageId) intInFlightMessageIds.add(messageId)
                 if (mode === "messages") {
                   pendingIntMessagePayloads.push(serialized)
@@ -12300,24 +12390,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
               await commitPendingInterruptMessageSideEffects()
               throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
-              flushPendingStreamTranscriptMessages(threadId, runToken)
+              flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
               discardStreamTranscriptToolCallAccumulators(threadId, runToken)
               intInFlightMessageIds.clear()
             } catch (error) {
               pendingIntMessagePayloads.clear()
-              intStableStreamMessages = extractSerializedValuesMessages(
-                sanitizeStreamDataForRenderer(
-                  "values",
-                  { messages: latestValuesSnapshot.messages },
-                  latestValuesSnapshot.valuesMessageIndexOffset
-                )
-              )
               resetFailedStreamAttempt(
                 window,
                 channel,
                 threadId,
                 runToken,
-                intStableStreamMessages,
+                replayCommittedStreamValues(latestStableInterruptValues),
                 intInFlightMessageIds,
                 { preservePendingTranscript: abortController.signal.aborted }
               )
