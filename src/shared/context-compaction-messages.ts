@@ -4,6 +4,12 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined
 }
 
+export function clearCheckpointSummarizationState(channelValues: Record<string, unknown>): void {
+  delete channelValues._summarizationEvent
+  delete channelValues._summarizationSessionId
+  delete channelValues._cmbSummarizationOwner
+}
+
 function hasSummarizationSource(value: unknown): boolean {
   return asRecord(value)?.lc_source === "summarization"
 }

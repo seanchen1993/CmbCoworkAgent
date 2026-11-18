@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
+import { HumanMessage } from "@langchain/core/messages"
 import type { RunnableConfig } from "@langchain/core/runnables"
 import type {
   Checkpoint,
@@ -307,11 +308,17 @@ describe("SqlJsSaver checkpoint message integrity", () => {
     )
     const recoveredMessages = originalMessages.slice(-1_000)
     const seed = new SqlJsSaver(path)
-    await seed.put(
-      config(threadId),
-      checkpoint("cp-long", 1, originalMessages),
-      metadata
-    )
+    const original = checkpoint("cp-long", 1, originalMessages)
+    original.channel_values._summarizationEvent = {
+      cutoffIndex: 900,
+      summaryMessage: new HumanMessage({
+        content: "Summary of the first 900 messages",
+        additional_kwargs: { lc_source: "summarization" }
+      }),
+      filePath: null
+    }
+    original.channel_values._summarizationSessionId = "session_source"
+    await seed.put(config(threadId), original, metadata)
     await seed.close()
     deleteSnapshot(path, threadId, "cp-long")
 
@@ -324,12 +331,17 @@ describe("SqlJsSaver checkpoint message integrity", () => {
     })
     const tuple = await saver.getLatestTupleForDurableTailRecovery(threadId)
     expect(tuple?.checkpoint.channel_values.messages).toEqual(recoveredMessages)
+    expect(tuple?.checkpoint.channel_values._summarizationEvent).toBeUndefined()
     await saver.close()
 
     const reopened = new SqlJsSaver(path)
     const restored = await reopened.getTuple(config(threadId))
     expect(restored?.checkpoint.channel_values.messages).toHaveLength(1_000)
     expect(restored?.checkpoint.channel_values.messages).toEqual(recoveredMessages)
+    expect(restored?.checkpoint.channel_values._summarizationEvent).toBeUndefined()
+    for await (const candidate of reopened.list(config(threadId))) {
+      expect(candidate.checkpoint.channel_values._summarizationSessionId).toBeUndefined()
+    }
     await reopened.close()
   })
 
