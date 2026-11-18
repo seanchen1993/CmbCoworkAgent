@@ -36,11 +36,21 @@ it.each(["before-commit", "after-commit"])(
     const requests = new FunctionSiteReadRequests(),
       owner = sender()
     const oldId = documentIds(requests, owner)
+    const retireOld = vi.fn(), retireNew = vi.fn()
+    const registerOld = requests.captureSiteRegistration(owner)
+    registerOld({ owner: "old-site", workspace: "old", threadId: "chat",
+      current: () => true, retire: retireOld })
     await requests.run(owner, oldId(1), async () => undefined)
     owner.emit("did-start-navigation", {}, "same-url-reload", false, true)
     if (order === "after-commit") owner.emit("did-frame-navigate", {}, "url", 200, "OK", true)
     const nextId = documentIds(requests, owner)
+    requests.captureSiteRegistration(owner)({ owner: "new-site", workspace: "new", threadId: "chat",
+      current: () => true, retire: retireNew })
     if (order === "before-commit") owner.emit("did-frame-navigate", {}, "url", 200, "OK", true)
+    expect(retireOld).toHaveBeenCalledOnce()
+    expect(retireNew).not.toHaveBeenCalled()
+    expect(() => registerOld({ owner: "late", workspace: "old", threadId: "chat",
+      current: () => true, retire: retireOld })).toThrow("MODS_DISPLAY_READ_CANCELLED")
     await expect(requests.run(owner, oldId(2), async () => "old")).rejects.toThrow(
       "MODS_DISPLAY_READ_CANCELLED"
     )
@@ -52,6 +62,14 @@ it("keeps a prevented or failed navigation's surviving preload usable without re
   const requests = new FunctionSiteReadRequests(),
     owner = sender()
   const id = documentIds(requests, owner)
+  const retire = vi.fn()
+  const site = { owner: "site", workspace: "workspace", threadId: "chat",
+    current: () => true, retire }
+  requests.captureSiteRegistration(owner)(site)
+  owner.emit("did-start-navigation", {}, "child-frame", false, false)
+  owner.emit("did-frame-navigate", {}, "child-frame", 200, "OK", false)
+  owner.emit("did-start-navigation", { isMainFrame: true, isSameDocument: true })
+  owner.emit("did-navigate-in-page", {}, "hash-only", true)
   await requests.run(owner, id(1), async () => "before navigation")
   owner.emit("did-start-navigation", {}, "prevented-or-failed-url", false, true)
   owner.emit("did-fail-load", {}, -3, "ERR_ABORTED")
@@ -61,6 +79,24 @@ it("keeps a prevented or failed navigation's surviving preload usable without re
   await expect(requests.run(owner, id(2), async () => "surviving document")).resolves.toBe(
     "surviving document"
   )
+  expect(retire).not.toHaveBeenCalled()
+  expect(requests.takeSite(owner, site.threadId, site.owner)).toBe(site)
+})
+
+it("drops completed metadata after another scope retired its actual site", () => {
+  const requests = new FunctionSiteReadRequests(), owner = sender()
+  const register = requests.captureSiteRegistration(owner)
+  let current = true
+  const retireOld = vi.fn(), retireNew = vi.fn()
+  register({ owner: "old", workspace: "workspace", threadId: "chat",
+    current: () => current, retire: retireOld })
+  current = false
+  register({ owner: "new", workspace: "workspace", threadId: "chat",
+    current: () => true, retire: retireNew })
+  expect(requests.takeSite(owner, "chat", "old")).toBeUndefined()
+  owner.emit("render-process-gone")
+  expect(retireOld).not.toHaveBeenCalled()
+  expect(retireNew).toHaveBeenCalledOnce()
 })
 
 it("isolates an old preload's first lazy handshake after navigation start from the new preload", async () => {

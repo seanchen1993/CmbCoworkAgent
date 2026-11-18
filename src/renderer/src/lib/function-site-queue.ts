@@ -1,13 +1,16 @@
 import type { FunctionUiSite } from "../../../shared/mods/v2/sites"
 import { FUNCTION_MOD_RESOURCE_BUDGETS } from "../../../shared/mods/v2/resource-budgets"
 
-type Priority = "ordinary" | "background" | "visible" | "interactive"
+type Priority = "ordinary" | "background" | "prefetch" | "visible" | "interactive"
 
-export function functionSitePriority(component: FunctionUiSite, visible: boolean): Priority {
+export function functionSitePriority(component: FunctionUiSite, visible: boolean,
+  prefetchHistory = false): Priority {
   if (["ChatHeader", "AbovePrompt", "PromptHint", "SessionMode", "Spinner", "AskUserQuestion"].includes(component))
     return "interactive"
   // Transcript text takes precedence over optional elapsed-time labels during scrolling.
-  return component !== "TurnDuration" && visible ? "visible" : "background"
+  if (component !== "TurnDuration" && visible) return "visible"
+  return prefetchHistory && ["UserMessage", "AssistantMessage", "CommandOutput"].includes(component)
+    ? "prefetch" : "background"
 }
 
 /** Bounds UI-only IPC across virtualized rows; native tools and permission requests never use it. */
@@ -16,6 +19,7 @@ export function createFunctionSiteQueue() {
   let active = 0
   let activeInteractive = 0
   let activeBackground = 0
+  let activePrefetch = 0
   let refreshQueued = false
   let interactiveStreak = 0
   let visibleStreak = 0
@@ -38,10 +42,11 @@ export function createFunctionSiteQueue() {
       const interactive = activeInteractive < limits.interactive
         ? pending.findIndex((entry) => entry.priority === "interactive") : -1
       const visible = pending.findIndex((entry) => entry.priority === "visible")
-      // Speculative overscan and elapsed-time reads share one lane. During a thumb
-      // drag they often expire before publication; do not let them occupy the three
-      // slots needed by the newly visible text and composer.
+      // Text in the virtual buffer prepares ahead of fast scrolling in two lanes.
+      // Optional decorations keep their single lane, so speculative reads together
+      // leave a physical slot available for newly visible text and the composer.
       const ordinary = pending.findIndex((entry) => entry.priority === "ordinary" ||
+        (entry.priority === "prefetch" && activePrefetch < 2) ||
         (entry.priority === "background" && activeBackground < limits.background))
       const history = visible >= 0 && (visibleStreak < 2 || ordinary < 0) ? visible : ordinary
       if (interactive < 0 && history < 0) break
@@ -109,8 +114,10 @@ export function createFunctionSiteQueue() {
             active++
             const interactive = entry.priority === "interactive"
             const background = entry.priority === "background"
+            const prefetch = entry.priority === "prefetch"
             if (interactive) activeInteractive++
             if (background) activeBackground++
+            if (prefetch) activePrefetch++
             // Preserve even a late mount token: the caller must unmount it when its ticket expired.
             void (async () => work())()
               .then(resolve, reject)
@@ -118,6 +125,7 @@ export function createFunctionSiteQueue() {
                 active--
                 if (interactive) activeInteractive--
                 if (background) activeBackground--
+                if (prefetch) activePrefetch--
                 pump()
               })
           }

@@ -9,11 +9,6 @@ import type { ElectronApplication, Page } from "playwright"
 import type { SavedFlow } from "../src/shared/mods/flows/types"
 import { createModsCoreLauncher } from "./support/mods-core-packaged-launch"
 import { waitForAsyncEvidence } from "./support/async-evidence"
-import {
-  closeModsProgress,
-  openModsFlowPreset,
-  openModsProgress
-} from "./support/mods-sidebar-navigation"
 
 const root = resolve(__dirname, "..")
 const requireLocal = createRequire(join(root, "package.json"))
@@ -25,7 +20,7 @@ const artifacts = requestedArtifacts
   ? resolve(requestedArtifacts)
   : join(root, "output/legacy-plugin-project-e2e")
 const workspace = join(isolated, "workspace")
-mkdirSync(workspace, { recursive: true })
+mkdirSync(join(workspace, "legacy-project"), { recursive: true })
 mkdirSync(artifacts, { recursive: true })
 const env: Record<string, string> = {}
 for (const [key, value] of Object.entries(process.env)) {
@@ -158,9 +153,11 @@ async function main() {
   try {
     await boot()
     assert.equal(await page.evaluate(() => window.api.mods.globalEnabled()), false)
+    const releaseIntro = page.getByRole("dialog", { name: "把助手变成适合你的工作台" })
+    await releaseIntro.getByRole("button", { name: "先自己试试", exact: true }).click()
+    await releaseIntro.waitFor({ state: "hidden" })
     await page.getByRole("button", { name: "自定义设置", exact: true }).click()
     await page.getByRole("button", { name: "插件", exact: true }).click()
-    await page.getByRole("button", { name: "导入与发布", exact: true }).click()
     await page.getByText("暂无安装的插件", { exact: true }).waitFor()
     const installed = await page.evaluate(
       (bytes) => window.api.plugins.install(new Uint8Array(bytes).buffer, "legacy.zip", "local"),
@@ -256,6 +253,7 @@ async function main() {
       name: "Legacy E2E Project",
       projectCode: "LEGACYE2E",
       projectFromLean: false,
+      isTestProject: true,
       projectDir: "legacy-project",
       description: "Local regression fixture",
       systemId: "legacy",
@@ -434,10 +432,8 @@ async function main() {
         },
         { id: threadId, savedJson: JSON.stringify(saved), kind }
       )
-      let run: { id: string }
       if (kind === "feature") {
-        // Navigate the actual project surface: this catches both the chat eligibility guard
-        // and the App-level sidebar portal, which an IPC-only run cannot exercise.
+        // Open the original project conversation before exercising its trusted Flow scope.
         await page.reload()
         const back = page.getByRole("button", { name: "返回会话", exact: true })
         const projects = page.getByRole("tab", { name: "项目模式", exact: true })
@@ -450,30 +446,20 @@ async function main() {
         await guide.getByRole("button", { name: "知道了，不再提示", exact: true }).click()
         await guide.waitFor({ state: "hidden" })
         await page.getByText("Legacy feature Flow", { exact: true }).first().click()
-        const selection = await openModsFlowPreset(page)
-        await selection.selectOption(`claw:${binding.bindingRevision}`)
-        assert.equal(await selection.inputValue(), `claw:${binding.bindingRevision}`)
-        assert.equal(
-          (await page.evaluate((id) => window.api.mods.flowRuns(id), threadId)).length,
-          0
-        )
-        await closeModsProgress(page)
-        await page.locator("textarea.composer-textarea").fill("Verify legacy project Flow from UI")
-        await page.getByRole("button", { name: "发送消息", exact: true }).click()
-        run = (await waitForAsyncEvidence(
-          () => page.evaluate((id) => window.api.mods.flowRuns(id), threadId),
-          rows => rows.length > 0,
-          "legacy feature flow started through the actual UI",
-          30_000
-        ))[0]
-        await page.screenshot({ path: join(artifacts, "harness-feature-claw-flow.png") })
-      } else {
-        run = await page.evaluate(
-          ({ id, revision }) =>
-            window.api.mods.clawStart(id, revision, "Verify legacy project Flow"),
-          { id: threadId, revision: binding.bindingRevision }
-        )
+        const conversation = page.locator(`[data-chat-thread-id=${JSON.stringify(threadId)}]`)
+        const composer = conversation.locator("textarea.composer-textarea")
+        await composer.waitFor()
+        assert(await composer.isEditable())
+        await page.getByRole("button", { name: "工作目录", exact: true }).waitFor()
+        assert.equal(await page.getByRole("button", { name: "查看任务进展", exact: true }).count(), 0)
+        await page.screenshot({ path: join(artifacts, "legacy-feature-original-conversation.png") })
+        pass("Feature opens its original project conversation, with its editable composer and work directory")
       }
+      assert.equal((await page.evaluate((id) => window.api.mods.flowRuns(id), threadId)).length, 0)
+      const run = await page.evaluate(
+        ({ id, revision }) => window.api.mods.clawStart(id, revision, "Verify legacy project Flow"),
+        { id: threadId, revision: binding.bindingRevision }
+      )
       const deadline = Date.now() + 30000
       let waiting: Awaited<ReturnType<typeof window.api.mods.flowRun>>
       do {
@@ -486,17 +472,10 @@ async function main() {
       } while (Date.now() < deadline)
       assert.equal(waiting?.status, "waiting", JSON.stringify(waiting))
       assert.equal(waiting.pendingApproval?.stepId, "confirm")
-      if (kind === "feature") {
-        const progress = await openModsProgress(page)
-        const current = progress.locator(`[data-flow-run="${run.id}"]`)
-        await current.getByRole("region", { name: "人工成果确认", exact: true }).waitFor()
-        await current.getByRole("button", { name: "停止任务", exact: true }).click()
-      } else {
-        await page.evaluate(({ threadId, runId }) => window.api.mods.flowCancel(threadId, runId), {
-          threadId,
-          runId: run.id
-        })
-      }
+      await page.evaluate(({ threadId, runId }) => window.api.mods.flowCancel(threadId, runId), {
+        threadId,
+        runId: run.id
+      })
       await waitForAsyncEvidence(
         () => page.evaluate(({ threadId, runId }) => window.api.mods.flowRun(threadId, runId),
           { threadId, runId: run.id }),

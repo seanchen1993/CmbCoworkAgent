@@ -10,7 +10,8 @@ export function assertOriginalProjectWorkspaceIdle(
     [hostPath, `SELECT json_extract(p.data,'$.workspace') AS workspace FROM host_operations o
       JOIN host_projects p ON p.id=o.project_id
       WHERE o.status IN ('prepared','started','cancel_requested','succeeded','unknown')`],
-    [legacyPath, `SELECT json_extract(data,'$.workspace') AS workspace FROM legacy_operations
+    [legacyPath, `SELECT json_extract(data,'$.workspace') AS workspace,
+        json_extract(data,'$.executionWorkspace') AS executionWorkspace FROM legacy_operations
       WHERE status IN ('started','unknown')`]
   ]) {
     if (!existsSync(path)) continue
@@ -18,7 +19,11 @@ export function assertOriginalProjectWorkspaceIdle(
     try {
       for (const row of db.prepare(query).iterate()) {
         if (typeof row.workspace !== "string") throw Error("COMPOSITION_EXISTING_RUN_INVALID")
-        if (isSameWorkspacePath(row.workspace, workspace)) throw Error("COMPOSITION_WORKSPACE_BUSY")
+        if (row.executionWorkspace != null && typeof row.executionWorkspace !== "string")
+          throw Error("COMPOSITION_EXISTING_RUN_INVALID")
+        if (isSameWorkspacePath(row.workspace, workspace) ||
+          (typeof row.executionWorkspace === "string" && isSameWorkspacePath(row.executionWorkspace, workspace)))
+          throw Error("COMPOSITION_WORKSPACE_BUSY")
       }
     } finally { db.close() }
   }

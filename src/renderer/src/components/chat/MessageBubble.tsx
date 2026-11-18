@@ -3,7 +3,8 @@ import { ToolCallRenderer } from "./ToolCallRenderer"
 import { ModCards } from "./ModCards"
 import { StreamingMarkdown } from "./StreamingMarkdown"
 import { useReasoningExpansion } from "./reasoning-expansion-context"
-import { useUserMessageExpansion } from "./user-message-expansion-context"
+import { useAssistantMarkdownExpansion, useUserMessageExpansion } from "./user-message-expansion-context"
+import { MAX_STREAMING_MARKDOWN_RENDER_CHARS } from "../../lib/streaming-markdown-schedule"
 import { observeUserContentOverflow } from "./user-content-overflow"
 import { getCollapsedToolCallSummary } from "../../../../shared/tool-call-summary"
 import { parseGoalNoticeText } from "../../../../shared/goal-notice-presentation"
@@ -404,6 +405,35 @@ interface MessageBubbleProps {
 /** 用户消息折叠阈值:收起态最大高度(px)。超过才出现"显示更多"。 */
 const USER_MESSAGE_COLLAPSED_MAX_PX = 260
 
+function AssistantMessageMarkdown({
+  threadId,
+  messageId,
+  messageGeneration,
+  messageRevision,
+  children,
+  isStreaming,
+  searchBlockIndex = 0,
+  searchLocation
+}: Omit<React.ComponentProps<typeof StreamingMarkdown>, "threadId" | "expansion"> & {
+  threadId: string
+  messageId: string
+  messageGeneration: number
+  messageRevision: number
+}): React.JSX.Element {
+  const expansion = useAssistantMarkdownExpansion(
+    threadId,
+    messageId,
+    searchBlockIndex,
+    !isStreaming && children.length > MAX_STREAMING_MARKDOWN_RENDER_CHARS ? children : null,
+    messageGeneration,
+    messageRevision
+  )
+  return <StreamingMarkdown threadId={threadId} isStreaming={isStreaming}
+    searchBlockIndex={searchBlockIndex} searchLocation={searchLocation} expansion={expansion}>
+    {children}
+  </StreamingMarkdown>
+}
+
 function MessageBubbleImpl({
   messageGeneration = 0,
   messageRevision = 0,
@@ -730,13 +760,16 @@ function MessageBubbleImpl({
       return messageText(
         displayContent,
         0,
-        (safeText) => <StreamingMarkdown
+        (safeText) => <AssistantMessageMarkdown
           isStreaming={isStreaming}
           threadId={threadId}
+          messageId={message.id}
+          messageGeneration={messageGeneration}
+          messageRevision={messageRevision}
           searchLocation={searchLocation?.blockIndex === 0 ? searchLocation : undefined}
         >
           {safeText}
-        </StreamingMarkdown>
+        </AssistantMessageMarkdown>
       )
     }
 
@@ -781,15 +814,18 @@ function MessageBubbleImpl({
           return messageText(
             displayText,
             index,
-            (safeText) => <StreamingMarkdown
+            (safeText) => <AssistantMessageMarkdown
               key={index}
               isStreaming={isStreaming}
               threadId={threadId}
+              messageId={message.id}
+              messageGeneration={messageGeneration}
+              messageRevision={messageRevision}
               searchBlockIndex={index}
               searchLocation={searchLocation?.blockIndex === index ? searchLocation : undefined}
             >
               {safeText}
-            </StreamingMarkdown>
+            </AssistantMessageMarkdown>
           )
         }
         return null

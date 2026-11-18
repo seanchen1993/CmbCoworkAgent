@@ -54,7 +54,10 @@ interface Authority {
   prepareParent(projectId: string): Promise<ProjectUseParentAuthority | undefined>
   assertAdapterChange(projectId: string): void
   child(hostRunId: string): HarnessNativeFeatureBinding | undefined
-  assertChild(binding: HarnessNativeFeatureBinding): void
+  assertChild(
+    binding: HarnessNativeFeatureBinding,
+    checkParent: (parent: ProjectUseParentAuthority | undefined) => void
+  ): ProjectUseParentAuthority
 }
 let runtime: Runtime | undefined
 let authority: Authority | undefined
@@ -531,23 +534,16 @@ function projectUseScope(scope: RuntimeFunctionGrantScope, workspace: string) {
   }
   const receipt = rt.store.getProjectUseAuthorization(child.projectId)
   if (!receipt) return undefined // Historical native projects have no fabricated owner consent.
-  const parent = authority?.parent(child.projectId)
   const original = JSON.stringify(child)
-  const parentIdentity = parent?.identity
-  const assertCurrent = () => {
+  const checkCurrent = (expectedParentIdentity?: string) => {
     const currentReceipt = rt.store.getProjectUseAuthorization(child.projectId)
-    const currentParent = authority?.parent(child.projectId)
     const currentChild = authority?.child(scope.projectId)
     if (
       !receipt.enabled ||
       !currentReceipt?.enabled ||
       currentReceipt.epoch !== receipt.epoch ||
       currentReceipt.policy.reviewDigest !== receipt.policy.reviewDigest ||
-      !currentParent?.active ||
       !currentChild ||
-      currentParent.identity !== parentIdentity ||
-      currentParent.installedPluginId !== receipt.policy.plugin.pluginId ||
-      !isSameWorkspacePath(currentParent.workspace, receipt.policy.workspace) ||
       JSON.stringify(currentChild) !== original ||
       child.hostRunId !== scope.projectId ||
       scope.packageDigest !== receipt.policy.packageDigest ||
@@ -556,11 +552,29 @@ function projectUseScope(scope: RuntimeFunctionGrantScope, workspace: string) {
       JSON.stringify(child.expectedPlugin) !== JSON.stringify(receipt.policy.plugin)
     )
       fail("PROJECT_USE_AUTHORIZATION_INVALID")
-    assertInstalled(receipt.policy)
-    authority!.assertChild(child)
+    // Finish registry I/O before the final parent read, while retaining the original
+    // error order for invalid parents, unavailable sources and invalid children.
+    let sourceFailure: { error: unknown } | undefined
+    try {
+      assertInstalled(receipt.policy)
+    } catch (error) {
+      sourceFailure = { error }
+    }
+    const parent = authority!.assertChild(child, (currentParent) => {
+      if (
+        !currentParent?.active ||
+        currentParent.projectId !== child.projectId ||
+        (expectedParentIdentity !== undefined && currentParent.identity !== expectedParentIdentity) ||
+        currentParent.installedPluginId !== receipt.policy.plugin.pluginId ||
+        !isSameWorkspacePath(currentParent.workspace, receipt.policy.workspace)
+      )
+        fail("PROJECT_USE_AUTHORIZATION_INVALID")
+      if (sourceFailure) throw sourceFailure.error
+    })
+    return parent.identity
   }
-  assertCurrent()
-  return { receipt, assertCurrent }
+  const parentIdentity = checkCurrent()
+  return { receipt, assertCurrent: () => { checkCurrent(parentIdentity) } }
 }
 
 export function projectUseOwnsFeature(hostRunId: string): boolean {

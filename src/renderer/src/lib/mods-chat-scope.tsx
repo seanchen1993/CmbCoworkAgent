@@ -15,6 +15,7 @@ export const ModsChatScope = createContext<{
   retry?: () => void
   isCurrent?: () => boolean
   canShowUnboundHistory?: () => boolean
+  prefetchHistory?: boolean
   presentationCache?: FunctionSitePresentationCache | null
 } | null>(null)
 

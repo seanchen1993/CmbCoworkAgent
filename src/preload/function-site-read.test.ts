@@ -20,6 +20,21 @@ it("issues monotonic IDs in one preload namespace and sends data-only cancellati
   })
 })
 
+it("initializes a legacy mount's document without consuming or later replacing its modern sequence", async () => {
+  const invoke = vi.fn().mockResolvedValueOnce("owner").mockResolvedValueOnce({ state: "inactive" })
+  const sendSync = vi.fn(() => firstNamespace)
+  const bridge = createFunctionSiteReadBridge({ invoke, sendSync })
+  await expect(bridge.siteMount("thread", "UserMessage", "message")).resolves.toBe("owner")
+  expect(bridge.nextSiteReadId()).toBe(`${firstNamespace}:1`)
+  await bridge.siteMountOutcome("thread", "AskUserQuestion", undefined, "request")
+  expect(sendSync).toHaveBeenCalledExactlyOnceWith("mods:function-site-read-scope")
+  expect(invoke.mock.calls).toEqual([
+    ["mods:function-site-mount", { threadId: "thread", component: "UserMessage", messageId: "message" }],
+    ["mods:function-site-mount-outcome", { threadId: "thread", component: "AskUserQuestion",
+      messageId: undefined, expectedRequestId: "request" }]
+  ])
+})
+
 it.each([null, undefined, "renderer-made-up-scope", 42])(
   "rejects unavailable native scope %s",
   (scope) => {
@@ -31,12 +46,13 @@ it.each([null, undefined, "renderer-made-up-scope", 42])(
   }
 )
 
-it("preserves legacy read/render payloads without eagerly requesting a scope", async () => {
+it("keeps readId optional after lazily initializing the native document", async () => {
   const readResult = { state: "inactive" },
     renderResult = null
   const invoke = vi.fn().mockResolvedValueOnce(readResult).mockResolvedValueOnce(renderResult)
   const sendSync = vi.fn(() => firstNamespace)
   const bridge = createFunctionSiteReadBridge({ invoke, sendSync })
+  expect(sendSync).not.toHaveBeenCalled()
   await expect(
     bridge.siteRead(
       "thread",
@@ -71,7 +87,8 @@ it("preserves legacy read/render payloads without eagerly requesting a scope", a
       { threadId: "thread", owner: "owner", props: { text: "protected" }, readId: undefined }
     ]
   ])
-  expect(sendSync).not.toHaveBeenCalled()
+  expect(bridge.nextSiteReadId()).toBe(`${firstNamespace}:1`)
+  expect(sendSync).toHaveBeenCalledExactlyOnceWith("mods:function-site-read-scope")
 })
 
 it("transports the actual native-issued read ID and cancellation without a signal object", async () => {

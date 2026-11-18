@@ -45,6 +45,8 @@ let applicationEpoch: number
 let applicationEnables: number
 let directoryEpoch: number
 let parent: ProjectUseParentAuthority | undefined
+let parentReads: number
+let childAuthorityReads: number
 let directories: Map<string, boolean>
 let children: Map<string, HarnessNativeFeatureBinding>
 let resolveGrant: (input: {
@@ -91,20 +93,30 @@ beforeEach(async () => {
   applicationEnables = 0
   directoryEpoch = 1
   parent = undefined
+  parentReads = 0
+  childAuthorityReads = 0
   directories = new Map()
   children = new Map()
   configurationOnly = false
   configureProjectUseAuthority({
-    parent: (id) => (parent?.projectId === id ? parent : undefined),
+    parent: (id) => {
+      parentReads++
+      return parent?.projectId === id ? parent : undefined
+    },
     prepareParent: async (id) => (parent?.projectId === id ? parent : undefined),
     assertAdapterChange: (id) => {
       if ([...children.values()].some((binding) => binding.projectId === id))
         throw Error("已有原生需求的项目不能更换插件绑定")
     },
     child: (id) => children.get(id),
-    assertChild: (binding) => {
+    assertChild: (binding, checkParent) => {
+      childAuthorityReads++
+      const currentParent = parent?.projectId === binding.projectId ? parent : undefined
+      checkParent(currentParent)
       if (JSON.stringify(children.get(binding.hostRunId)) !== JSON.stringify(binding))
         throw Error("CHILD_CHANGED")
+      if (!currentParent) throw Error("PARENT_CHANGED")
+      return currentParent
     }
   })
   const manager = {
@@ -279,8 +291,16 @@ it("captures owner revocation for pure Host stages and rejects an absent registe
   await publish(review)
   prepared.complete()
   const binding = child(review)
+  const reads = parentReads
   const guard = captureProjectUseFeature(binding)!
+  expect(childAuthorityReads).toBe(1)
   expect(() => guard()).not.toThrow()
+  expect(childAuthorityReads).toBe(2)
+  expect(parentReads).toBe(reads)
+  const previousParent = parent!
+  parent = { ...previousParent, identity: "replacement-parent" }
+  expect(() => guard()).toThrow("PROJECT_USE_AUTHORIZATION_INVALID")
+  parent = previousParent
   revokeProjectUseAuthorization(review.projectId)
   expect(() => guard()).toThrow("PROJECT_USE_AUTHORIZATION_INVALID")
   children.delete(binding.hostRunId)

@@ -25,6 +25,34 @@ function productionExpression(file: string, select: (node: ts.Node) => boolean, 
   return runInNewContext(code, scope)
 }
 
+it("broadcasts plugin catalog invalidation even when another window was destroyed", () => {
+  const failed = vi.fn(() => { throw Error("window destroyed before send") })
+  const healthy = vi.fn()
+  const skipped = vi.fn()
+  const warn = vi.fn()
+  const liveWindow = (send: () => void) => ({
+    isDestroyed: () => false, webContents: { isDestroyed: () => false, send }
+  })
+  const notify = productionExpression(
+    "src/main/ipc/mods.ts",
+    node => ts.isPropertyAssignment(node) && node.name.getText() === "pluginCatalogChanged",
+    {
+      BrowserWindow: { getAllWindows: () => [
+        { ...liveWindow(skipped), isDestroyed: () => true },
+        { ...liveWindow(skipped), webContents: { isDestroyed: () => true, send: skipped } },
+        liveWindow(failed),
+        liveWindow(healthy)
+      ] },
+      console: { warn }
+    }
+  )
+  expect(() => notify()).not.toThrow()
+  expect(skipped).not.toHaveBeenCalled()
+  expect(failed).toHaveBeenCalledExactlyOnceWith("mods:configuration-changed")
+  expect(healthy).toHaveBeenCalledExactlyOnceWith("mods:configuration-changed")
+  expect(warn).toHaveBeenCalledOnce()
+})
+
 it("preserves native site and Pane scopes through the actual main/preload notification bridge", () => {
   let listener: ((event: object, value: unknown) => void) | undefined
   const on = vi.fn((_channel, value) => {

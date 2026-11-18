@@ -3,6 +3,14 @@ import { randomUUID } from "node:crypto"
 import { FUNCTION_MOD_RESOURCE_BUDGETS } from "../../shared/mods/v2/resource-budgets"
 
 type SiteReadSender = Pick<WebContents, "mainFrame" | "on" | "removeListener" | "isDestroyed">
+export interface FunctionSiteDocumentOwner {
+  owner: string
+  workspace: string
+  threadId: string
+  current(): boolean
+  retire(): void
+}
+
 interface Owner {
   sender: SiteReadSender
   frame: object
@@ -10,6 +18,7 @@ interface Owner {
   sequence: number
   capacity: { physical: number }
   requests: Map<string, AbortController>
+  sites: Map<string, FunctionSiteDocumentOwner>
   retire(): void
 }
 
@@ -33,6 +42,7 @@ export class FunctionSiteReadRequests {
     if (!frames) this.frameCapacities.set(sender, (frames = new WeakMap()))
     let capacity = frames.get(sender.mainFrame)
     if (!capacity) frames.set(sender.mainFrame, (capacity = { physical: 0 }))
+    let replacingDocument = false
     const owner: Owner = {
       sender,
       frame: sender.mainFrame,
@@ -40,13 +50,17 @@ export class FunctionSiteReadRequests {
       sequence: 0,
       capacity,
       requests: new Map(),
+      sites: new Map(),
       retire: () => {
         if (this.owners.get(sender) === owner) this.owners.delete(sender)
         sender.removeListener("did-start-navigation", navigate)
+        sender.removeListener("did-frame-navigate", committed)
         sender.removeListener("render-process-gone", owner.retire)
         sender.removeListener("destroyed", owner.retire)
         for (const controller of owner.requests.values())
           controller.abort(Error("MODS_DISPLAY_READ_CANCELLED"))
+        for (const site of owner.sites.values()) site.retire()
+        owner.sites.clear()
       }
     }
     const navigate = (...args: unknown[]) => {
@@ -59,13 +73,22 @@ export class FunctionSiteReadRequests {
           details.isMainFrame === false)
       )
         return
-      // A navigation can be prevented or fail. Cancel its reads, but keep this
-      // document's token/high-water mark until a new preload privately handshakes.
+      const sameDocument = args[2] === true || (details &&
+        typeof details === "object" && "isSameDocument" in details && details.isSameDocument === true)
+      if (!sameDocument) replacingDocument = true
+      // A navigation may fail. Cancel pending reads while retaining the completed
+      // sites until a replacement really commits or a new preload handshakes.
       for (const controller of owner.requests.values())
         controller.abort(Error("MODS_DISPLAY_READ_CANCELLED"))
     }
+    const committed = (_event: unknown, _url: string, _response: number, _status: string,
+      isMainFrame: boolean) => {
+      // A fresh preload may already have won before Electron announces the commit.
+      if (isMainFrame && replacingDocument) owner.retire()
+    }
     this.owners.set(sender, owner)
     sender.on("did-start-navigation", navigate)
+    sender.on("did-frame-navigate", committed)
     sender.on("render-process-gone", owner.retire)
     sender.on("destroyed", owner.retire)
     return owner
@@ -78,6 +101,31 @@ export class FunctionSiteReadRequests {
     // handshake wins regardless of whether Electron reports commit before or after it.
     this.owners.get(sender)?.retire()
     return this.owner(sender).namespace
+  }
+
+  captureSiteRegistration(sender: SiteReadSender): (site: FunctionSiteDocumentOwner) => void {
+    if (sender.isDestroyed()) throw Error("MODS_DISPLAY_READ_CANCELLED")
+    const document = this.owner(sender)
+    return site => {
+      if (this.owners.get(sender) !== document || sender.isDestroyed() ||
+        sender.mainFrame !== document.frame)
+        throw Error("MODS_DISPLAY_READ_CANCELLED")
+      if (!site.current()) throw Error("MODS_UI_SITE_CLOSED")
+      // Owner replacements and thread/configuration shutdown can retire a site without
+      // a renderer reply. Keep metadata only for slots that still belong to this document.
+      for (const [id, earlier] of document.sites)
+        if (!earlier.current()) document.sites.delete(id)
+      document.sites.set(site.owner, site)
+    }
+  }
+
+  takeSite(sender: SiteReadSender, threadId: string, owner: string): FunctionSiteDocumentOwner | undefined {
+    const document = this.owners.get(sender)
+    if (!document || sender.isDestroyed() || sender.mainFrame !== document.frame) return undefined
+    const site = document.sites.get(owner)
+    if (site?.threadId !== threadId) return undefined
+    document.sites.delete(owner)
+    return site
   }
 
   async run<T>(

@@ -47,7 +47,7 @@ import type {
 } from "../types"
 import { invalidateMutableMcpCapabilityServices } from "../mcp/capability-service"
 import { notifyHooksChanged } from "../hooks/notifications"
-import { getModsManager } from "../mods/manager"
+import { getResidentModsManager } from "../mods/manager"
 import { discoverSkills } from "../skills/discovery"
 import { parseModManifest } from "../../shared/mods/validation"
 import { resolveModFile } from "../mods/loader"
@@ -661,7 +661,8 @@ async function installPluginFromDirLocked(
     invalidateEnabledSkillsCache()
     await invalidateMutableMcpCapabilityServices("plugin:update")
     notifyHooksChanged("plugin-installed")
-    getModsManager()?.pluginsChanged()
+    // Notify the live catalog after commit. An unavailable Mods runtime has no catalog to refresh.
+    getResidentModsManager()?.pluginsChanged()
 
     return { success: true, pluginName: parsed.name, pluginId: meta.id,
       kind: parsed.modCount > 0 ? "modules" : "plugin", enabled: meta.enabled }
@@ -1155,7 +1156,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
             }
           } finally {
             if (removed.length) {
-              getModsManager()?.pluginsChanged(removed)
+              getResidentModsManager()?.pluginsChanged(removed)
               invalidateEnabledSkillsCache()
               await invalidateMutableMcpCapabilityServices("plugin:delete")
               notifyHooksChanged("plugin-deleted")
@@ -1181,7 +1182,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
       try {
         const { id, enabled } = payload
         setPluginEnabled(id, enabled)
-        getModsManager()?.pluginsChanged([id])
+        getResidentModsManager()?.pluginsChanged([id])
         invalidateEnabledSkillsCache()
         await invalidateMutableMcpCapabilityServices("plugin:setEnabled")
         notifyHooksChanged("plugin-enabled-changed")

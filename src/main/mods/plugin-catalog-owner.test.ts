@@ -27,11 +27,12 @@ afterEach(() => {
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "mods-native-catalog-"))
+  const notifyCards = vi.fn()
   const manager = new ModsManager(
     join(root, "control.sqlite"),
     () => [],
     async () => true,
-    () => {}
+    notifyCards
   )
   const previous = getModsManager()
   setModsManager(manager)
@@ -41,7 +42,7 @@ function fixture() {
   const scope = { workspace, threadId: "creator", turnId: "native-turn" }
   const runtime = manager.createRuntimeAuthority({ ...scope, signal: controller.signal })
   const binding = { ...scope, signal: controller.signal, runtimeAuthority: runtime.authority }
-  manager.bindThread(binding)
+  const unbind = manager.bindThread(binding)
   claimLocalThreadRunLease({ threadId: scope.threadId, owner: "desktop", runId: scope.turnId })
   setModDevelopmentService({
     isEnabled: (threadId, expected) => threadId === scope.threadId && expected === workspace,
@@ -59,8 +60,39 @@ function fixture() {
       throw Error("Unexpected cleanup path")
     rmSync(root, { recursive: true, force: true })
   })
-  return { manager, workspace, scope, binding, controller }
+  return { manager, workspace, scope, binding, controller, unbind, notifyCards }
 }
+
+it.each([false, true])(
+  "notifies cold display consumers and completes catalog cleanup when notification throws=%s",
+  (throws) => {
+    const f = fixture()
+    f.unbind()
+    expect(f.manager.functionUserScope(f.workspace, f.scope.threadId)).toEqual({})
+    const notified = vi.fn(() => {
+      if (throws) throw Error("window was destroyed")
+    })
+    const retired = vi.fn()
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    f.manager.attachFunctions({
+      invalidate: () => {},
+      pluginsChanged: retired,
+      pluginCatalogChanged: notified,
+      closeThread: () => {},
+      close: () => {}
+    })
+    try {
+      expect(() => f.manager.pluginsChanged(["changed"])).not.toThrow()
+      expect(notified).toHaveBeenCalledOnce()
+      expect(retired).toHaveBeenCalledExactlyOnceWith(f.workspace, ["changed"])
+      expect(notified.mock.invocationCallOrder[0]).toBeLessThan(retired.mock.invocationCallOrder[0])
+      expect(f.notifyCards).not.toHaveBeenCalled()
+      expect(warn).toHaveBeenCalledTimes(throws ? 1 : 0)
+    } finally {
+      warn.mockRestore()
+    }
+  }
+)
 
 it.each(["package-toggle", "legacy-grant-revoke"] as const)(
   "retains the original native creator owner and executes its tool exactly once across %s",

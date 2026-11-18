@@ -167,6 +167,7 @@ const entryPolicies = {
   siteMountOutcome: { operation: "retain", catalog: "guard" },
   siteRender: { operation: "retain", catalog: "guard" },
   siteUnmount: { operation: "retain", catalog: "guard" },
+  captureSiteRetirement: { operation: "direct", catalog: "direct" },
   siteAct: { operation: "retain", catalog: "guard" },
   clientAct: { operation: "retain", catalog: "guard" },
   actionCatalog: { operation: "retain", catalog: "guard" },

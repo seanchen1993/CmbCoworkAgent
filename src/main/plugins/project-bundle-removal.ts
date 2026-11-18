@@ -1,6 +1,6 @@
 import type { PluginMetadata } from "../types"
 
-/** Only exclusive component packages may follow their project's uninstall. */
+/** Only exclusive components recorded as dependency installs may follow their project. */
 export function projectBundleRemovalIds(
   targetId: string,
   plugins: readonly PluginMetadata[],
@@ -22,7 +22,7 @@ export function projectBundleRemovalIds(
           candidates.has(plugin.id) &&
           !referencedElsewhere.has(plugin.id) &&
           !dependencies.has(plugin.id) &&
-          plugin.dependencyOnly !== false
+          plugin.dependencyOnly === true
       )
       .map((plugin) => plugin.id)
   ]

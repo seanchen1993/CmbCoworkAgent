@@ -10,7 +10,13 @@ import type {
   FunctionUiNode
 } from "../../../shared/mods/v2/ui"
 import type { ModJson, ModObject } from "../../../shared/mods/types"
-import { FUNCTION_PASSIVE_DISPLAY_SITES, FUNCTION_UI_SITES, type FunctionUiSite } from "../../../shared/mods/v2/sites"
+import {
+  FUNCTION_CHAT_TRANSCRIPT_SITE_LIMIT,
+  FUNCTION_CHAT_TRANSCRIPT_SITES,
+  FUNCTION_PASSIVE_DISPLAY_SITES,
+  FUNCTION_UI_SITES,
+  type FunctionUiSite
+} from "../../../shared/mods/v2/sites"
 import { compileFunctionPlugin } from "./loader"
 import type { UserInputRequest } from "../../types"
 
@@ -605,17 +611,66 @@ it("pins a durable plugin origin while allowing UserMessage text presentation ch
   expect(rendered.nativeFallback).toBe(true)
 })
 
-it("bounds message owners and rejects oversized text without truncating it into a false complete row", async () => {
+it("rejects oversized owned message text without truncating it into a false complete row", async () => {
   const { session } = await fixture("")
-  const component = "AssistantMessage" as FunctionUiSite
-  const owners: string[] = []
-  for (let index = 0; index < 32; index++) owners.push(await session.sites.mount(component))
-  await expect(session.sites.mount(component)).rejects.toThrow("MODS_UI_SITE_LIMIT")
+  const owner = await session.sites.mount("AssistantMessage")
   await expect(
-    session.sites.render(owners[0], { text: "x".repeat(10001), isFirstOfReply: true })
+    session.sites.render(owner, { text: "x".repeat(10001), isFirstOfReply: true })
   ).rejects.toThrow("MODS_UI_SITE_PROPS")
+})
+
+it("shares one bounded owner pool across concurrent chat transcript site types", async () => {
+  const { session } = await fixture("")
+  const attempts = Array.from(
+    { length: FUNCTION_CHAT_TRANSCRIPT_SITE_LIMIT + 12 },
+    (_, index) => FUNCTION_CHAT_TRANSCRIPT_SITES[index % FUNCTION_CHAT_TRANSCRIPT_SITES.length]
+  )
+  const results = await Promise.allSettled(
+    attempts.map((component) => session.sites.mount(component))
+  )
+  const owners = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []))
+  expect(new Set(owners).size).toBe(FUNCTION_CHAT_TRANSCRIPT_SITE_LIMIT)
+  const failures = results.filter((result) => result.status === "rejected")
+  expect(failures).toHaveLength(12)
+  for (const failure of failures) expect(failure.reason.message).toBe("MODS_UI_SITE_LIMIT")
+  await expect(session.sites.mount("TurnDuration")).resolves.toEqual(expect.any(String))
+  await expect(session.sites.mount("CommandOutput")).resolves.toEqual(expect.any(String))
+  const hint = await session.sites.mount("PromptHint")
+  expect(await session.sites.mount("PromptHint")).not.toBe(hint)
+
   await session.sites.unmount(owners[0])
-  expect(await session.sites.mount(component)).not.toBe(owners[0])
+  await expect(session.sites.mount("ToolGroup")).resolves.toEqual(expect.any(String))
+  await expect(session.sites.mount("UserMessage")).rejects.toThrow("MODS_UI_SITE_LIMIT")
+})
+
+it("keeps a drawing retirement receipt scoped to the exact slot after singleton replacement", async () => {
+  const { session } = await fixture("")
+  const sites = session.sites
+  const original = await sites.mount("PromptHint")
+  const originalReceipt = sites.captureRetirement(original)
+  expect(originalReceipt?.current()).toBe(true)
+
+  const replacement = await sites.mount("PromptHint")
+  expect(originalReceipt?.current()).toBe(false)
+  originalReceipt?.retire()
+  await expect(sites.render(replacement, hint)).resolves.toMatchObject({ id: replacement })
+
+  const replacementReceipt = sites.captureRetirement(replacement)
+  expect(replacementReceipt?.current()).toBe(true)
+  replacementReceipt?.retire()
+  expect(replacementReceipt?.current()).toBe(false)
+  await expect(sites.render(replacement, hint)).rejects.toThrow("MODS_UI_SITE_CLOSED")
+})
+
+it("makes a retained drawing retirement receipt inert after its site registry closes", async () => {
+  const { session } = await fixture("")
+  const owner = await session.sites.mount("AssistantMessage")
+  const receipt = session.sites.captureRetirement(owner)
+  expect(receipt?.current()).toBe(true)
+
+  session.sites.close()
+  expect(receipt?.current()).toBe(false)
+  expect(() => receipt?.retire()).not.toThrow()
 })
 
 it("draws default content through next, preserves read-only site props and caches unchanged draws", async () => {

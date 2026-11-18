@@ -27,6 +27,8 @@ export interface CompositionWorkspaceObservation {
   readonly identity: string
 }
 
+const COMPOSITION_BUSY_TIMEOUT_MS = 5_000
+
 /** Dedicated database; the original host/legacy schemas and guards are untouched. */
 export class ProjectCompositionStore {
   private readonly db: DatabaseSync
@@ -35,7 +37,8 @@ export class ProjectCompositionStore {
   constructor(
     path: string,
     private readonly now = () => Date.now(),
-    private readonly assertWorkspaceIdle?: (workspace: string, parentProjectId: string) => void
+    private readonly assertWorkspaceIdle?: (workspace: string, parentProjectId: string) => void,
+    options: { failFastOnOpen?: boolean } = {}
   ) {
     const missing: string[] = []
     let parent = dirname(resolve(path))
@@ -48,7 +51,9 @@ export class ProjectCompositionStore {
       mkdirSync(directory)
       runtimeDirectory(directory)
     }
-    this.db = new DatabaseSync(path, { timeout: 5000 })
+    this.db = new DatabaseSync(path, {
+      timeout: options.failFastOnOpen ? 0 : COMPOSITION_BUSY_TIMEOUT_MS
+    })
     try {
       this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
         CREATE TABLE IF NOT EXISTS composition_runs (
@@ -60,6 +65,7 @@ export class ProjectCompositionStore {
         CREATE TABLE IF NOT EXISTS composition_unit_workspaces (
           workspace TEXT PRIMARY KEY, run_id TEXT NOT NULL, unit_id TEXT NOT NULL,
           directory_identity TEXT NOT NULL, directory_path TEXT NOT NULL, UNIQUE(run_id,unit_id));`)
+      if (options.failFastOnOpen) this.db.exec(`PRAGMA busy_timeout = ${COMPOSITION_BUSY_TIMEOUT_MS}`)
     } catch (error) {
       this.db.close()
       throw error
@@ -107,7 +113,11 @@ export class ProjectCompositionStore {
     return Object.freeze({ workspace: canonical, identity })
   }
   /** Wrap original host/legacy admission transactions, always before acquiring their DB locks. */
-  guardWorkspaceMutation<T>(workspace: string, work: () => T): T {
+  guardWorkspaceMutation<T>(
+    workspace: string,
+    work: () => T,
+    options: { failFastOnLock?: boolean } = {}
+  ): T {
     const check = () => {
       const active = this.db.prepare("SELECT run_id FROM composition_leases LIMIT 1").get()
       if (!active) {
@@ -150,7 +160,7 @@ export class ProjectCompositionStore {
       } finally {
         this.mutationDepth--
       }
-    })
+    }, options.failFastOnLock)
   }
   registerUnitWorkspace(runId: string, unitId: string, workspace: string): void {
     const canonical = runtimeDirectory(workspace)
@@ -206,8 +216,13 @@ export class ProjectCompositionStore {
       ? run.definition.parentProjectId
       : undefined
   }
-  private transaction<T>(work: () => T): T {
-    this.db.exec("BEGIN IMMEDIATE")
+  private transaction<T>(work: () => T, failFastOnLock = false): T {
+    if (failFastOnLock) this.db.exec("PRAGMA busy_timeout = 0")
+    try {
+      this.db.exec("BEGIN IMMEDIATE")
+    } finally {
+      if (failFastOnLock) this.db.exec(`PRAGMA busy_timeout = ${COMPOSITION_BUSY_TIMEOUT_MS}`)
+    }
     try {
       const result = work()
       this.db.exec("COMMIT")

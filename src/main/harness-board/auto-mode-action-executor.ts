@@ -1,6 +1,10 @@
 import { readInternalHarnessProject } from "./internal-project-context"
 import { getPluginSkillSearchSources, readPluginManifest } from "../plugins/manifest"
-import { withLegacyProjectSkillSource, type LegacyBoundSkillSource } from "./project-runtime/legacy-entry-gate"
+import {
+  withLegacyProjectSkillSource,
+  type LegacyBoundSkillSource,
+  type LegacyProjectWorkspaceScope
+} from "./project-runtime/legacy-entry-gate"
 import { v4 as uuid } from "uuid"
 import { getThreadCore, upsertThreadMessages } from "../db"
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
@@ -122,10 +126,11 @@ function isLocalSkillDisabled(
 async function resolveHarnessSkill(
   projectId: string,
   slashSkill: string,
-  workspace: string
+  workspace: string,
+  scope?: LegacyProjectWorkspaceScope
 ): Promise<SkillMetadata | null> {
-  return withLegacyProjectSkillSource(projectId, workspace, bound =>
-    resolveHarnessSkillFromSource(projectId, slashSkill, bound))
+  return withLegacyProjectSkillSource(projectId, workspace, (bound) =>
+    resolveHarnessSkillFromSource(projectId, slashSkill, bound), scope)
 }
 
 async function resolveHarnessSkillFromSource(projectId: string, slashSkill: string,
@@ -179,7 +184,8 @@ async function resolveHarnessSkillFromSource(projectId: string, slashSkill: stri
 async function prepareHarnessMessage(
   projectId: string,
   nextAction: ManagedRunSessionAction,
-  workspace: string
+  workspace: string,
+  scope: LegacyProjectWorkspaceScope
 ): Promise<PreparedHarnessMessage> {
   const userMessage = nextAction.userMessage.trim()
   const slashSkill = nextAction.slashSkill.trim()
@@ -196,7 +202,7 @@ async function prepareHarnessMessage(
     )
   }
   let skillBlock = ""
-  const skill = await resolveHarnessSkill(projectId, slashSkill, workspace)
+  const skill = await resolveHarnessSkill(projectId, slashSkill, workspace, scope)
   if (!skill) {
     throw new ManagedActionValidationError(
       "next_action_skill_unavailable",
@@ -384,7 +390,10 @@ export async function createAndStartManagedHarnessSession(
 export async function prepareManagedHarnessSession(
   input: CreateManagedHarnessSessionInput
 ): Promise<PreparedHarnessMessage> {
-  const prepared = await prepareHarnessMessage(input.projectId, input.nextAction, input.workspacePath)
+  const prepared = await prepareHarnessMessage(input.projectId, input.nextAction, input.workspacePath, {
+    featureId: input.featureId,
+    runId: input.runId
+  })
   // Fail before creating a thread; startup checks availability again after async grant creation.
   requireAvailableDelivery(input.delivery)
   return prepared
@@ -412,7 +421,16 @@ export async function startManagedHarnessSession(
 ): Promise<void> {
   await prepareManagedHarnessSessionGrant(input, threadId)
   try {
-    await startPreparedManagedAgentRun(prepareManagedAgentRun(threadId, prepared, input.delivery))
+    await startPreparedManagedAgentRun(prepareManagedAgentRun(threadId, prepared, input.delivery), {
+      source: "desktop",
+      legacyManagedWorkspace: {
+        projectId: input.projectId,
+        featureId: input.featureId,
+        runId: input.runId,
+        threadId,
+        workspace: input.workspacePath
+      }
+    })
   } catch (error) {
     throw new Error(
       `无法启动 ManagedRun 会话 ${threadId}：${error instanceof Error ? error.message : String(error)}`

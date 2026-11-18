@@ -3,6 +3,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, expect, it, vi } from "vitest"
 import type { ModJson } from "../../../shared/mods/types"
+import { captureDirectDisplayScope } from "../../ipc/mods-display-thread-scope"
+import { ClawStore } from "../claw-store"
 import { ModControlStore } from "../control-store"
 import { FunctionGuestRuntime } from "./guest-runtime"
 import { compileFunctionPlugin } from "./loader"
@@ -47,6 +49,20 @@ async function fixture(withObserver = false, brokenEnabled = false) {
     sources.push({ id: "observer", name: compiled.name, path: observer, enabled: true })
   }
   let protects = true
+  let applied = false
+  let direct = true
+  let usage: "chat" | "project" = "chat"
+  let incarnation = "first"
+  const captureDisplayScope = (workspace: string, threadId: string) =>
+    captureDirectDisplayScope(workspace, threadId, {
+      database: () => store,
+      read: () => ({
+        created_at: 1,
+        metadata: JSON.stringify({ workspacePath: workspace, cmb_thread_incarnation: incarnation })
+      }),
+      canonical: path => path,
+      isChild: () => false
+    })
   const guests: FunctionGuestRuntime[] = []
   const publish = vi.fn(
     async (_workspace: string, value: ModJson): Promise<ModJson> =>
@@ -65,7 +81,11 @@ async function fixture(withObserver = false, brokenEnabled = false) {
       plugins: () => sources,
       enabled: () => true,
       protects: () => protects,
-      captureSiteGuard: () => () => {},
+      captureSiteGuard: (workspace, threadId) => captureDisplayScope(workspace, threadId).assertCurrent,
+      captureDisplayScope: (workspace, threadId) =>
+        direct ? captureDisplayScope(workspace, threadId) : undefined,
+      capabilityContext: () => ({ identity: usage, usage }),
+      clawApplicable: () => applied,
       publish,
       changed() {
         /* This regression inspects returned drawings directly. */
@@ -103,12 +123,207 @@ async function fixture(withObserver = false, brokenEnabled = false) {
     sources,
     publish,
     load,
+    async selectPair(contextMeter = false, threadIds = ["thread"]) {
+      await writeFile(
+        join(broken, "mods/manifest.json"),
+        '{"apiVersion":"cmb.mods/v2","id":"broken","entry":"./register.ts"}'
+      )
+      await writeFile(join(broken, "mods/register.ts"),
+        'export function register(on) { on("ui.render", (_, event, next) => next(event)) }')
+      const capabilities = (await manager.status(workspace)).map(({ pluginId, name, digest }) => {
+        if (!digest) throw Error("Expected the exact source digest")
+        store.grant(workspace, `function:${name}`, digest, true)
+        return { pluginId, name, digest }
+      })
+      const claws = new ClawStore(store)
+      for (const threadId of threadIds) {
+        claws.apply(workspace, JSON.stringify([threadId, "legacy"]),
+          { id: "selected", name: "Selected", capabilities, builtins: { contextMeter } },
+          claws.read(workspace).revision)
+      }
+      applied = true
+      return capabilities
+    },
+    replaceThread() {
+      incarnation = "replacement"
+    },
+    setUsage(value: typeof usage) {
+      usage = value
+    },
+    setNonDirect() {
+      direct = false
+    },
     setProtection(value: boolean) {
       protects = value
       manager.invalidate(workspace)
     }
   }
 }
+
+it("reads more protected messages in a second chat than the held site limit", async () => {
+  const f = await fixture(true)
+  await f.selectPair(false, ["first", "second"])
+  const facts = { text: "PRIVATE_BODY", isFirstOfReply: true }
+  const held = await f.manager.siteMountOutcome(f.workspace, "first", "AssistantMessage")
+  if (held.state !== "mounted") throw Error("Expected a genuine owned host site")
+  const states: string[] = []
+  for (let row = 0; row < 40; row++) {
+    const outcome = await f.manager.siteRead(
+      f.workspace, "second", "AssistantMessage", facts, `row-${row}`
+    )
+    states.push(outcome.state)
+    expect(JSON.stringify(outcome)).toContain("SAFE_BODY")
+    expect(JSON.stringify(outcome)).not.toContain("PRIVATE_BODY")
+  }
+  expect(new Set(states)).toEqual(new Set(["projected"]))
+  expect(await f.manager.siteRender(f.workspace, "first", held.owner, facts)).not.toBeNull()
+  await f.manager.siteUnmount(f.workspace, "first", held.owner)
+  expect(f.load).not.toHaveBeenCalled()
+})
+
+it("rejects a host-only projection when the catalog changes during protected publication", async () => {
+  const f = await fixture(true)
+  await f.selectPair()
+  const facts = { text: "PRIVATE_BODY", isFirstOfReply: true }
+  f.publish.mockImplementationOnce(async (_workspace, value) => {
+    f.manager.pluginsChanged(join(f.workspace, "other-workspace"), ["removed"])
+    return JSON.parse(JSON.stringify(value).replaceAll("PRIVATE_BODY", "SAFE_BODY"))
+  })
+  await expect(f.manager.siteRead(f.workspace, "thread", "AssistantMessage", facts, "row"))
+    .rejects.toMatchObject({ code: "MODS_SCOPE_CHANGED" })
+  const fresh = await f.manager.siteRead(f.workspace, "thread", "AssistantMessage", facts, "row")
+  expect(fresh.state).toBe("projected")
+  expect(JSON.stringify(fresh)).toContain("SAFE_BODY")
+  expect(f.load).not.toHaveBeenCalled()
+})
+
+it.each([
+  ["before first display", false, false],
+  ["before first display", true, false],
+  ["while open", false, false],
+  ["while open", true, false],
+  ["before first display", false, true],
+  ["before first display", true, true]
+] as const)(
+  "keeps native chat text readable after disable %s with protection %s and context meter %s",
+  async (when, protects, contextMeter) => {
+    const f = await fixture(true, when === "while open")
+    f.setProtection(protects)
+    const capabilities = await f.selectPair(contextMeter)
+    if (when === "while open") {
+      expect((await f.manager.siteRead(f.workspace, "thread", "AssistantMessage",
+        { text: "PRIVATE_BODY", isFirstOfReply: true })).state).toBe("mounted")
+      expect(f.load).toHaveBeenCalledTimes(2)
+      f.sources[0].enabled = false
+      f.manager.pluginsChanged(f.workspace, ["broken"])
+      f.load.mockClear()
+      f.publish.mockClear()
+    }
+    for (const [site, facts] of [
+      ["UserMessage", { text: "PRIVATE_BODY", isExpanded: false }],
+      ["AssistantMessage", { text: "PRIVATE_BODY", isFirstOfReply: true }]
+    ] as const) {
+      const drawing = await f.manager.siteRead(f.workspace, "thread", site, facts)
+      if (protects) {
+        expect(drawing.state).toBe("mounted")
+        expect(JSON.stringify(drawing)).toContain("SAFE_BODY")
+        expect(JSON.stringify(drawing)).not.toContain("PRIVATE_BODY")
+      } else {
+        expect(drawing).toEqual({ state: "inactive", reason: "no-protection-or-functions" })
+      }
+    }
+    if (protects) expect(f.publish).toHaveBeenCalled()
+    else expect(f.publish).not.toHaveBeenCalled()
+    if (contextMeter) {
+      await expect(f.manager.siteRead(f.workspace, "thread", "AbovePrompt", {}))
+        .rejects.toMatchObject({ code: "CLAW_CAPABILITY_CHANGED" })
+      expect(f.manager.clawSelection(f.workspace, "thread")?.builtins).toEqual({
+        contextMeter: true
+      })
+    }
+    expect(f.load).not.toHaveBeenCalled()
+    expect(f.manager.clawSelection(f.workspace, "thread")?.capabilities).toEqual(capabilities)
+    await expect(f.manager.effectiveStatus(f.workspace, "thread")).rejects.toMatchObject({
+      code: "CLAW_CAPABILITY_CHANGED"
+    })
+    const nativeTurn = vi.fn()
+    await expect(f.manager.turnStep(f.workspace, "thread",
+      { turnId: "review", index: 0, messageCount: 1, model: "fixture" },
+      nativeTurn, new AbortController().signal)).rejects.toMatchObject({
+      code: "CLAW_CAPABILITY_CHANGED"
+    })
+    expect(nativeTurn).not.toHaveBeenCalled()
+  }
+)
+
+it.each([
+  "changed", "revoked", "other-unapproved", "unknown-protection",
+  "project", "non-direct", "tool-result"
+] as const)(
+  "keeps history closed when the disabled selection is %s",
+  async (condition) => {
+    const f = await fixture(true)
+    const [disabled, ready] = await f.selectPair()
+    if (condition === "changed") {
+      f.setProtection(false)
+      await writeFile(join(f.broken, "mods/register.ts"), "export function register() {}")
+    }
+    if (condition === "revoked" || condition === "other-unapproved") {
+      f.setProtection(false)
+      const source = condition === "revoked" ? disabled : ready
+      f.store.grant(f.workspace, `function:${source.name}`, source.digest, false)
+    }
+    if (condition === "unknown-protection") f.setProtection(undefined as unknown as boolean)
+    if (condition === "project") f.setUsage("project")
+    if (condition === "non-direct") f.setNonDirect()
+    const component = condition === "tool-result" ? "ToolResult" : "AssistantMessage"
+    await expect(f.manager.siteRead(f.workspace, "thread", component,
+      { text: "PRIVATE_BODY", isFirstOfReply: true },
+      component === "AssistantMessage" ? "candidate-row" : undefined)).rejects.toMatchObject({
+      code: condition === "unknown-protection"
+        ? "MODS_UI_SITE_PROTECTION_REQUIRED" : "CLAW_CAPABILITY_CHANGED"
+    })
+    expect(f.publish).not.toHaveBeenCalled()
+    expect(f.load).not.toHaveBeenCalled()
+  }
+)
+
+it.each(["thread-replaced", "source-replaced", "catalog-changed", "enable-aba"] as const)(
+  "drops the pending protected transcript when %s during catalog inspection",
+  async (change) => {
+    const f = await fixture(true)
+    await f.selectPair()
+    const entered = Promise.withResolvers<void>()
+    const finish = Promise.withResolvers<void>()
+    const status = f.manager.status.bind(f.manager)
+    vi.spyOn(f.manager, "status").mockImplementationOnce(async workspace => {
+      const available = await status(workspace)
+      entered.resolve()
+      await finish.promise
+      return available
+    })
+    const pending = f.manager.siteRead(f.workspace, "thread", "AssistantMessage",
+      { text: "PRIVATE_BODY", isFirstOfReply: true })
+    const result = pending.then(value => value, error => error)
+    await entered.promise
+    if (change === "thread-replaced") f.replaceThread()
+    if (change === "source-replaced") f.sources[0].path = f.sources[1].path
+    if (change === "catalog-changed") f.manager.pluginsChanged(f.workspace, ["broken"])
+    if (change === "enable-aba") {
+      f.sources[0].enabled = true
+      f.manager.pluginsChanged(f.workspace, ["broken"])
+      f.sources[0].enabled = false
+      f.manager.pluginsChanged(f.workspace, ["broken"])
+    }
+    finish.resolve()
+    expect(await result).toMatchObject(change === "enable-aba" ? { state: "retired" } : {
+      code: change === "thread-replaced" ? "MODS_CALL_SCOPE_CHANGED" :
+        change === "source-replaced" ? "CLAW_CAPABILITY_CHANGED" : "MODS_SCOPE_CHANGED"
+    })
+    expect(f.publish).not.toHaveBeenCalled()
+    expect(f.load).not.toHaveBeenCalled()
+  }
+)
 
 it("keeps disabled broken source diagnostics while drawing protected native messages without a guest", async () => {
   const f = await fixture()

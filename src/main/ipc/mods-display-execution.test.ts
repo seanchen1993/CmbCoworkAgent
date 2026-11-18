@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url"
 import { runInNewContext } from "node:vm"
 import ts from "typescript"
 import { afterEach, expect, it, vi } from "vitest"
-import { ModError } from "../mods/errors"
+import { compositionRecoveryError, ModError } from "../mods/errors"
 import { modCallContext } from "../mods/context"
 import { ModRuntimeAuthorities, type ModRuntimeAuthority } from "../mods/runtime-instance"
 import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../agent/thread-run-lease"
@@ -23,13 +23,16 @@ import {
   captureThreadIncarnation, matchesThreadIncarnation, type ThreadIncarnationRow
 } from "../services/thread-incarnation"
 import { encodeModJson, parseModJson } from "../../shared/mods/validation"
+import { ModFunctionError, MODS_COMPOSITION_REVIEW_REQUIRED } from "../../shared/mods/v2/contracts"
 import { nativeChildThreadReaders } from "./native-child-mods.test-helper"
 import { FunctionSiteReadRequests } from "./function-site-read-requests"
+import { createFunctionSiteReadBridge } from "../../preload/function-site-read"
 
 const channels = ["mods:function-panes", "mods:function-site-mount",
   "mods:function-site-mount-outcome", "mods:function-site-render"] as const
 const allChannels = [...channels, "mods:commands", "mods:enqueue",
-  "mods:function-site-read", "mods:function-site-read-cancel", "mods:function-site-read-scope"] as const
+  "mods:function-site-read", "mods:function-site-read-cancel", "mods:function-site-read-scope",
+  "mods:function-site-unmount"] as const
 const registries: ModRuntimeAuthorities[] = []
 afterEach(() => {
   for (const registry of registries.splice(0)) registry.close()
@@ -72,7 +75,7 @@ function fixture() {
   const source = ts.createSourceFile("mods.ts",
     readFileSync(resolve("src/main/ipc/mods.ts"), "utf8"), ts.ScriptTarget.Latest, true)
   const helperNames = new Set(["trusted", "scope", "threadScope", "readThreadWorkspacePath", "withDisplayExecution",
-    "writableScope", "writableThreadScope"])
+    "writableScope", "writableThreadScope", "withSiteOwnerDelivery"])
   const helpers: ts.FunctionDeclaration[] = []
   const handlerNodes: ts.CallExpression[] = []
   const visit = (node: ts.Node): void => {
@@ -86,8 +89,8 @@ function fixture() {
     ts.forEachChild(node, visit)
   }
   visit(source)
-  expect(helpers).toHaveLength(7)
-  expect(handlerNodes).toHaveLength(9)
+  expect(helpers).toHaveLength(8)
+  expect(handlerNodes).toHaveLength(10)
   const handlers = new Map<string, Handler>()
   const syncHandlers = new Map<string, (event: DisplayEvent & { returnValue?: unknown }) => void>()
   let row: ThreadIncarnationRow | undefined = {
@@ -130,10 +133,22 @@ function fixture() {
     queued = run
     return { job: "actual-job" }
   })
-  const siteUnmount = vi.fn(async () => undefined)
+  const retiredSites = new Set<string>()
+  const siteUnmount = vi.fn(async (_workspace: string, _threadId: string, owner: string) => {
+    retiredSites.add(owner)
+  })
+  const retireSite = vi.fn((_workspace: string, _threadId: string, owner: string) => {
+    retiredSites.add(owner)
+  })
+  const captureSiteRetirement = (workspace: string, threadId: string, owner: string) => ({
+    current: () => !retiredSites.has(owner),
+    retire: () => {
+      if (!retiredSites.has(owner)) retireSite(workspace, threadId, owner)
+    }
+  })
   const functions = {
     panes: operation, siteMount: operation, siteMountOutcome: operation, siteRender: operation,
-    siteRead: operation, siteUnmount,
+    siteRead: operation, siteUnmount, captureSiteRetirement,
     commands: nativeCommands, runCommand
   }
   const getThreadCore = vi.fn((id: string) => id === threadId ? row : undefined)
@@ -161,7 +176,8 @@ function fixture() {
     ...nativeChildThreadReaders(getThreadCore),
     manager: { workspaceKey: (workspace: string) => workspace, functionUserScope,
       commands: legacyCommands, isEnabled: () => true }, functions, queue: { enqueue },
-    ModError, functionExecutionScope, functionCallAgent, functionCallAuthority, functionCallTurn,
+    compositionRecoveryError, ModError, functionExecutionScope,
+    functionCallAgent, functionCallAuthority, functionCallTurn,
     withFunctionTransportExecution, withFunctionExecution,
     captureFunctionMarkdownFrame, withFunctionMarkdownDisplay,
     captureThreadIncarnation, matchesThreadIncarnation,
@@ -176,7 +192,7 @@ function fixture() {
       return request.returnValue
     },
     nativeCommands, legacyCommands, enqueue, runCommand, getThreadCore, getThreadRuntimeScope,
-    siteUnmount,
+    siteUnmount, retireSite,
     runQueued: () => { if (!queued) throw new Error("no actual queued callback")
       return queued(new AbortController().signal) },
     setRow: (value: ThreadIncarnationRow | undefined) => { row = value },
@@ -184,6 +200,110 @@ function fixture() {
     facts: { workspace: "/display-project", threadId, agentId: "actual-child",
       turnId: "actual-turn", userInitiated: true, leased: false, immediate: false } }
 }
+
+it.each(["render-process-gone", "destroyed", "new-document", "legacy-commit"])(
+  "retires a completed drawing owned by the old IPC document on %s",
+  async (lifecycle) => {
+    const f = fixture()
+    const readId = lifecycle === "legacy-commit" ? undefined : `${f.readNamespace(f.event)}:1`
+    const mounted = { state: "mounted", owner: "completed-owner" }
+    f.operation.mockResolvedValueOnce(mounted as never)
+    const read = f.handlers.get("mods:function-site-read")!
+    expect(await read(f.event, { ...f.input, readId })).toEqual(mounted)
+    expect(f.retireSite).not.toHaveBeenCalled()
+    if (lifecycle === "new-document" || lifecycle === "legacy-commit") {
+      const sender = f.event.sender
+      sender.emit("did-start-navigation", { isMainFrame: true })
+      expect(f.retireSite).not.toHaveBeenCalled()
+      if (lifecycle === "new-document") f.readNamespace(f.event)
+      else sender.emit("did-frame-navigate", {}, "url", 200, "OK", true)
+    } else if (lifecycle === "destroyed") f.event.sender.destroy()
+    else f.event.sender.emit("render-process-gone")
+    expect(f.retireSite).toHaveBeenCalledExactlyOnceWith(
+      f.facts.workspace, f.facts.threadId, "completed-owner"
+    )
+  }
+)
+
+it.each(["mods:function-site-mount", "mods:function-site-mount-outcome"])(
+  "retires the allocated owner if %s loses scope before delivery",
+  async (channel) => {
+    const f = fixture()
+    f.operation.mockImplementationOnce(async () => {
+      f.setRow({ created_at: 1, metadata: JSON.stringify({
+        workspacePath: f.facts.workspace, cmb_thread_incarnation: "replaced"
+      }) })
+      return (channel === "mods:function-site-mount"
+        ? "unpublished-owner"
+        : { state: "mounted", owner: "unpublished-owner" }) as never
+    })
+    await expect(f.handlers.get(channel)!(f.event, f.input))
+      .rejects.toMatchObject({ code: "MODS_CALL_SCOPE_CHANGED" })
+    expect(f.retireSite).toHaveBeenCalledExactlyOnceWith(
+      f.facts.workspace, f.facts.threadId, "unpublished-owner"
+    )
+  }
+)
+
+it("keeps a legacy mount through that preload's first modern read and releases the original scope", async () => {
+  const f = fixture()
+  const sendSync = vi.fn(() => f.readNamespace(f.event))
+  const bridge = createFunctionSiteReadBridge({
+    sendSync,
+    invoke: (channel, input) => f.handlers.get(channel)!(f.event, input)
+  })
+  f.operation.mockResolvedValueOnce("legacy-owner" as never)
+  await expect(bridge.siteMount(f.facts.threadId, "AssistantMessage")).resolves.toBe("legacy-owner")
+  const readId = bridge.nextSiteReadId()
+  expect(readId).toMatch(/:1$/)
+  f.operation.mockResolvedValueOnce({ state: "mounted", owner: "modern-owner" } as never)
+  await bridge.siteRead(f.facts.threadId, "AssistantMessage", { text: "safe" },
+    "row", undefined, undefined, undefined, readId)
+  expect(sendSync).toHaveBeenCalledExactlyOnceWith("mods:function-site-read-scope")
+  expect(f.retireSite).not.toHaveBeenCalled()
+  const unmount = f.handlers.get("mods:function-site-unmount")!
+  await unmount(f.event, { threadId: "wrong-thread", owner: "legacy-owner" })
+  expect(f.siteUnmount).not.toHaveBeenCalled()
+  f.setRow({ created_at: 1, metadata: JSON.stringify({
+    workspacePath: "/replacement-workspace", cmb_thread_incarnation: "R1"
+  }) })
+  await unmount(f.event, { threadId: f.facts.threadId, owner: "legacy-owner" })
+  expect(f.siteUnmount).toHaveBeenCalledExactlyOnceWith(
+    f.facts.workspace, f.facts.threadId, "legacy-owner"
+  )
+  f.event.sender.emit("render-process-gone")
+  expect(f.retireSite).toHaveBeenCalledExactlyOnceWith(
+    f.facts.workspace, f.facts.threadId, "modern-owner"
+  )
+})
+
+it("cleans a late legacy delivery without affecting a new document's display owner", async () => {
+  const f = fixture()
+  const entered = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>()
+  f.readNamespace(f.event)
+  f.operation.mockImplementationOnce(async () => {
+    entered.resolve()
+    await finish.promise
+    return { state: "mounted", owner: "late-old-owner" } as never
+  })
+  const legacy = f.handlers.get("mods:function-site-mount-outcome")!
+  const late = expect(legacy(f.event, f.input)).rejects.toThrow("MODS_DISPLAY_READ_CANCELLED")
+  await entered.promise
+  const readId = `${f.readNamespace(f.event)}:1`
+  f.operation.mockResolvedValueOnce({ state: "mounted", owner: "new-doc-owner" } as never)
+  await f.handlers.get("mods:function-site-read")!(f.event, { ...f.input, readId })
+  finish.resolve()
+  await late
+  expect(f.retireSite).toHaveBeenCalledExactlyOnceWith(
+    f.facts.workspace, f.facts.threadId, "late-old-owner"
+  )
+  await f.handlers.get("mods:function-site-unmount")!(f.event, {
+    threadId: f.facts.threadId, owner: "late-old-owner"
+  })
+  expect(f.siteUnmount).not.toHaveBeenCalled()
+  f.event.sender.emit("render-process-gone")
+  expect(f.retireSite).toHaveBeenLastCalledWith(f.facts.workspace, f.facts.threadId, "new-doc-owner")
+})
 
 it("keeps repeated display identity checks independent of large file-adoption history", async () => {
   const f = fixture()
@@ -212,6 +332,45 @@ it.each(channels)("enters a cold read-only native identity through actual %s", a
             f.input.expectedRequestId]
         : [f.facts.workspace, f.facts.threadId, f.input.owner, f.input.props])
   expect(currentFunctionExecution()).toBeUndefined()
+})
+
+it.each(["disabled", "changed"])(
+  "reports composition review when the actual display IPC encounters a %s selected source",
+  async (change) => {
+    const f = fixture()
+    f.operation.mockRejectedValueOnce(new ModFunctionError("CLAW_CAPABILITY_CHANGED", change))
+    await expect(f.handlers.get("mods:function-site-read")!(f.event, f.input)).rejects.toMatchObject({
+      code: MODS_COMPOSITION_REVIEW_REQUIRED,
+      message: MODS_COMPOSITION_REVIEW_REQUIRED
+    })
+    expect(f.operation).toHaveBeenCalledOnce()
+  }
+)
+
+it.each([
+  new Error("CLAW_CAPABILITY_CHANGED"),
+  { code: "CLAW_CAPABILITY_CHANGED" },
+  new ModFunctionError("MODS_SCOPE_CHANGED"),
+  new ModFunctionError("MODS_UI_SITE_PROTECTION_REQUIRED"),
+  new ModFunctionError("MODS_PLUGIN_CHANGED"),
+  new ModFunctionError("MODS_RUNTIME_LOST")
+])("preserves the original display IPC failure %s", async (failure) => {
+  const f = fixture()
+  f.operation.mockRejectedValueOnce(failure)
+  await expect(f.handlers.get("mods:function-site-read")!(f.event, f.input)).rejects.toBe(failure)
+})
+
+it("refuses to report stale composition review after the displayed thread changes", async () => {
+  const f = fixture()
+  f.operation.mockImplementationOnce(async () => {
+    f.setRow({ created_at: 1, metadata: JSON.stringify({
+      workspacePath: f.facts.workspace, cmb_thread_incarnation: "R2"
+    }) })
+    throw new ModFunctionError("CLAW_CAPABILITY_CHANGED")
+  })
+  await expect(f.handlers.get("mods:function-site-read")!(f.event, f.input)).rejects.toMatchObject({
+    code: "MODS_CALL_SCOPE_CHANGED"
+  })
 })
 
 it("keeps legacy command discovery and enters only the native catalog through display transport",
@@ -458,6 +617,6 @@ it("releases an allocated native owner when cancellation wins the final publicat
   })
   await expect(f.handlers.get("mods:function-site-read")!(f.event, { ...f.input, readId }))
     .rejects.toThrow("MODS_DISPLAY_READ_CANCELLED")
-  expect(f.siteUnmount).toHaveBeenCalledExactlyOnceWith(
+  expect(f.retireSite).toHaveBeenCalledExactlyOnceWith(
     f.facts.workspace, f.facts.threadId, "fresh-undelivered-owner")
 })

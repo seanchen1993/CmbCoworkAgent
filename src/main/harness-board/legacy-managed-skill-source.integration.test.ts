@@ -8,7 +8,7 @@ import type { BrowserWindow } from "electron"
 
 const state = vi.hoisted(() => ({ plugin: undefined as PluginMetadata | undefined,
   beforeScan: undefined as (() => void | Promise<void>) | undefined,
-  scanned: [] as string[], projectCurrent: true }))
+  scanned: [] as string[], projectCurrent: true, admittedWorkspace: undefined as string | undefined }))
 vi.mock("electron", () => ({ app: { getPath: () => tmpdir(), getName: () => "test", getVersion: () => "0" },
   BrowserWindow: { getAllWindows: () => [] }, ipcMain: { handle: () => {} }, shell: {} }))
 vi.mock("../storage", () => ({ getDisabledSkills: () => [],
@@ -49,6 +49,7 @@ let preparedFixture: ReturnType<typeof setup>
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "legacy-managed-source-"))
   state.plugin = undefined; state.beforeScan = undefined; state.scanned = []; state.projectCurrent = true
+  state.admittedWorkspace = undefined
   // Build this case's real independent package/store before the timed behavior.
   // Capture is fixture construction; prepare and every source check remain in the 5s test.
   preparedFixture = setup()
@@ -96,6 +97,16 @@ function setup() {
     packageVersion: metadata.version, packageDigest: snapshot.digest, mods: null })
   const service = new LegacyProjectRuntimeService(store, snapshots, {
     resolveThread: () => undefined,
+    captureExecutionWorkspace: async (threadId, scope, executionWorkspace) => {
+      expect(threadId).toBeUndefined()
+      const assertCurrent = () => {
+        if (scope.projectId !== "project" || scope.featureId !== "feature" ||
+          scope.runId !== "mr_retained_fixture" || state.admittedWorkspace !== executionWorkspace)
+          throw Error("LEGACY_WORKSPACE_CHANGED")
+      }
+      assertCurrent()
+      return assertCurrent
+    },
     resolvePlugin: async (projectId, requestedWorkspace) => {
       if (projectId !== "project" || runtimeDirectory(requestedWorkspace) !== runtimeDirectory(workspace))
         throw Error("REAL_PROJECT_SCOPE_CHANGED")
@@ -109,8 +120,8 @@ function setup() {
   })
   const unregister = service.register()
   cleanup = () => { unregister(); store.close() }
-  const prepare = () => prepareManagedHarnessSession({ projectId: "project", featureId: "feature",
-    runId: "managed-run", nodeId: "biz.prd", workspacePath: workspace, delivery,
+  const prepare = (workspacePath = workspace) => prepareManagedHarnessSession({ projectId: "project", featureId: "feature",
+    runId: "mr_retained_fixture", nodeId: "biz.prd", workspacePath, delivery,
     nextAction: { slashSkill: "autobiz-requirement-discuss", userMessage: "Read the original selected Skill" } })
   return { installed, workspace, snapshot, store, service, unregister, prepare }
 }
@@ -171,4 +182,35 @@ it("rejects a foreign workspace, drops its reader on unregister, and leaves unco
   expect(await withLegacyProjectSkillSource("project", f.workspace,
     async bound => bound)).toBeUndefined()
   expect(currentRuntimePluginSource()).toBeUndefined()
+})
+
+it("allows an admitted independent managed workspace to prepare the retained Skill", async () => {
+  const f = preparedFixture
+  const separate = join(root, "managed-execution")
+  mkdirSync(separate)
+  state.admittedWorkspace = runtimeDirectory(separate)
+  const prepared = await f.prepare(separate)
+  expect(parseSkillUseBlock(prepared.modelMessage)?.skillPath).toBe(
+    join(f.snapshot.root, "skills/autobiz/autobiz-requirement-discuss/SKILL.md")
+  )
+  expect(f.store.list("project")).toEqual([])
+})
+
+it("rejects a foreign managed workspace before scanning any retained Skill", async () => {
+  const foreign = join(root, "foreign")
+  mkdirSync(foreign)
+  await expect(preparedFixture.prepare(foreign)).rejects.toThrow("LEGACY_WORKSPACE_CHANGED")
+  expect(state.scanned).toEqual([])
+  expect(preparedFixture.store.list("project")).toEqual([])
+})
+
+it("rechecks independent workspace authority after the asynchronous Skill scan", async () => {
+  const f = preparedFixture
+  const separate = join(root, "managed-execution")
+  mkdirSync(separate)
+  state.admittedWorkspace = runtimeDirectory(separate)
+  state.beforeScan = () => { state.admittedWorkspace = undefined }
+  await expect(f.prepare(separate)).rejects.toThrow("LEGACY_WORKSPACE_CHANGED")
+  expect(state.scanned.length).toBeGreaterThan(0)
+  expect(f.store.list("project")).toEqual([])
 })

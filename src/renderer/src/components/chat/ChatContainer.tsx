@@ -2461,12 +2461,24 @@ export function ChatContainer({
     () => ({
       threadId,
       ...modsChatState,
+      prefetchHistory:
+        surface === "default" && !readOnly &&
+        isDevelopmentThreadMetadata(currentThread?.metadata),
       // Unbound chats need directory selection; only failed reads offer a retry.
       error: hasCurrentThread ? modsChatState.error : undefined,
       retry: currentForkWorkspacePath ? modsChatState.retry
         : hasCurrentThread ? undefined : reloadMissingThread
     }),
-    [threadId, modsChatState, hasCurrentThread, currentForkWorkspacePath, reloadMissingThread]
+    [
+      threadId,
+      modsChatState,
+      hasCurrentThread,
+      currentForkWorkspacePath,
+      reloadMissingThread,
+      surface,
+      readOnly,
+      currentThread
+    ]
   )
   const functionTurnNotices = useFunctionTurnNotices(threadId, modsChatEnabled)
   const functionPlacedRows = useFunctionPlacedRows(threadId,

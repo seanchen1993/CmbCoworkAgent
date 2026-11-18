@@ -154,6 +154,32 @@ it("hands off a real pure Mod drawing then reuses it without a guest or drawing 
   expect(f.events.filter((event) => event === "ui.render")).toHaveLength(2)
 })
 
+it("releases the exact retired guest slot when unmount rejects its old catalog revision", async () => {
+  const f = await fixture(
+    `on("ui.render", {component:"AssistantMessage"}, (_, event, next)=>next(event))`,
+    "", { noDisplayScope: true }
+  )
+  const mounts = vi.spyOn(FunctionUiSites.prototype, "mount")
+  const props = { text: "PRIVATE", isFirstOfReply: true }
+  try {
+    const old = await f.read()
+    if (old.state !== "mounted") throw Error("Expected a genuine guest site owner")
+    const sites = mounts.mock.contexts[0] as FunctionUiSites
+    const unaffected = await f.read("PRIVATE", "another-row")
+    if (unaffected.state !== "mounted") throw Error("Expected another genuine guest site owner")
+    await f.manager.siteUnmount(f.root, "another-thread", old.owner)
+    expect(await f.manager.siteRender(f.root, "thread", old.owner, props)).not.toBeNull()
+    f.manager.pluginsChanged(join(f.root, "other-workspace"), ["unrelated-removed"])
+    await expect(f.manager.siteUnmount(f.root, "thread", old.owner))
+      .rejects.toMatchObject({ code: "MODS_SCOPE_CHANGED" })
+    // The same real registry is now missing the physical slot, not just its manager alias.
+    await expect(sites.render(old.owner, props)).rejects.toMatchObject({ code: "MODS_UI_SITE_CLOSED" })
+    expect(await f.manager.siteRender(f.root, "thread", unaffected.owner, props)).not.toBeNull()
+  } finally {
+    mounts.mockRestore()
+  }
+})
+
 it("admits recent passive rows after dependency proofs reach the existing 96-entry limit", async () => {
   const f = await fixture(`on("ui.render", {component:"AssistantMessage"}, ($,e)=>
     ({type:"Text",props:{},children:[e.props.text]}))`)
@@ -819,8 +845,8 @@ it.each(["projection", "legacy", "owner-required"] as const)(
     const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
     const controller = new AbortController()
     const reason = Error("cancel during actual discovery")
-    const original = f.manager.effectiveStatus.bind(f.manager)
-    const status = vi.spyOn(f.manager, "effectiveStatus").mockImplementationOnce(async (...args) => {
+    const original = f.manager.status.bind(f.manager)
+    const status = vi.spyOn(f.manager, "status").mockImplementationOnce(async (...args) => {
       const result = await original(...args)
       expect(result.some(item => item.state === "ready")).toBe(true)
       entered.resolve()

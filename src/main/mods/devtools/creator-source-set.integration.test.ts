@@ -26,7 +26,10 @@ vi.mock("electron", () => ({
 }))
 vi.mock("../../mcp/capability-service", () => ({ invalidateMutableMcpCapabilityServices: vi.fn() }))
 vi.mock("../../hooks/notifications", () => ({ notifyHooksChanged: vi.fn() }))
-vi.mock("../manager", () => ({ getModsManager: () => undefined }))
+vi.mock("../manager", () => ({
+  getModsManager: () => undefined,
+  getResidentModsManager: () => undefined
+}))
 
 const isolation = await vi.hoisted(async () => {
   const fs = await import("node:fs/promises")

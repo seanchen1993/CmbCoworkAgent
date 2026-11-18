@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs"
 import { runInNewContext } from "node:vm"
 import { createSourceFile, isFunctionDeclaration, ScriptTarget, transpileModule } from "typescript"
 import { expect, it, vi } from "vitest"
+import { calculateProjectElapsedMs } from "./project-mode-execution-metrics"
 
 it("exports 1,020 cumulative projects in sequential 100-project batches alongside period user statistics", async () => {
   const source = createSourceFile(
@@ -40,6 +41,7 @@ it("exports 1,020 cumulative projects in sequential 100-project batches alongsid
     return {
       perProject: new Map(ids.map((id) => [id, 1])),
       lastExecutionByProject: new Map(),
+      lastExecutionEndByProject: new Map(),
       executionByFeature: new Map(),
       perProjectSuspectedTechnicalDetail: new Map(),
       perProjectDevStage: new Map(),
@@ -88,6 +90,7 @@ it("exports 1,020 cumulative projects in sequential 100-project batches alongsid
     isDashboardSuspectedTechnicalDetailAllowed: () => false,
     EMPTY_PROJECT_MODE_RUN_COST: {},
     isUserInputRequestCountComplete: () => true,
+    calculateProjectElapsedMs,
     buildStageBuckets: () => ({})
   }
   runInNewContext(compiled, context)

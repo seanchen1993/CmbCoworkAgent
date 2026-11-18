@@ -1,5 +1,18 @@
 import { expect, it } from "vitest"
-import { FunctionSiteRecovery, isTransientFunctionSiteError } from "./function-site-recovery"
+import { FunctionSiteRecovery, functionSiteErrorCode, functionSiteUnavailableMessage,
+  isTransientFunctionSiteError } from "./function-site-recovery"
+
+it("presents explicit host unavailability as a notice without retrying or guessing causes", () => {
+  for (const code of ["MODS_DISABLED", "MODS_COMPOSITION_REVIEW_REQUIRED"]) {
+    const cause = new Error(`Error invoking remote method 'mods:function-site-read': Error: ${code}`)
+    expect(functionSiteUnavailableMessage(functionSiteErrorCode(cause))).toBeTruthy()
+    expect(isTransientFunctionSiteError(cause)).toBe(false)
+  }
+  for (const code of [undefined, "MODS_SCOPE_CHANGED", "MODS_PLUGIN_CHANGED",
+    "MODS_RUNTIME_SOURCE_CHANGED", "MODS_HOST_TIMEOUT", "MODS_RUNTIME_LOST",
+    "MODS_GRANT_REVOKED", "MODS_DISABLED_UNKNOWN", "CLAW_CAPABILITY_CHANGED"])
+    expect(functionSiteUnavailableMessage(code)).toBeUndefined()
+})
 
 it("matches exact lifecycle codes including Electron envelopes without broad fallback", () => {
   for (const code of [

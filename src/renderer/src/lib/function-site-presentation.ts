@@ -7,6 +7,7 @@ import type { ModObject } from "../../../shared/mods/types"
 import {
   FUNCTION_PASSIVE_DISPLAY_SITES,
   FUNCTION_UI_SITES,
+  functionSiteProps,
   type FunctionUiSite
 } from "../../../shared/mods/v2/sites"
 import type { FunctionPaneSnapshot, FunctionUiElement } from "../../../shared/mods/v2/ui"
@@ -37,6 +38,7 @@ interface Measurement extends PresentationBudgetRecord {
 export interface FunctionSitePresentation {
   tree?: FunctionUiElement
   nativeContent?: FunctionNativeContent
+  inactiveHistory?: true
   hostMessage?: ModObject
   hostMessagePreview?: { tail: string; omittedCharacters: number }
   messageViewport?: FunctionMessageViewport
@@ -47,6 +49,7 @@ export interface FunctionSitePresentation {
 interface Entry extends PresentationBudgetRecord {
   component: FunctionUiSite
   hostKey?: string
+  inactiveHistoryRow?: string
   presentation: FunctionSitePresentation
   bytes: number
   expires: number
@@ -334,7 +337,7 @@ export class FunctionSitePresentationCache {
   ): FunctionSiteProgressLease | null {
     if (!key || !rowIdentity || rowIdentity.length > 2048 || !this.authorized()) return null
     const entry = this.entries.get(key)
-    if (!entry || !entry.valid || !entry.queryable || entry.leaseToken ||
+    if (!entry || !entry.valid || !entry.queryable || entry.leaseToken || entry.inactiveHistoryRow ||
       !["AssistantMessage", "ToolGroup"].includes(entry.component) ||
       entry.token !== cached.identity || entry.presentation !== cached.presentation || !cached.current() ||
       entry.expires <= Date.now()) return null
@@ -460,6 +463,46 @@ export class FunctionSitePresentationCache {
     this.store(key, component, tree, snapshot.nativeContent, height, current, width)
   }
 
+  /** Retain an exact native drawing after the caller received and displayed inactive. */
+  saveInactiveHistory(
+    key: string | null,
+    rowIdentity: string | undefined,
+    component: FunctionUiSite,
+    input: ModObject,
+    current: () => boolean,
+    geometry?: FunctionSiteGeometry
+  ): void {
+    if (!key || !rowIdentity || rowIdentity.length > 2048 || !current() || !this.authorized() ||
+      (component !== "UserMessage" && component !== "AssistantMessage")) return
+    let props: ModObject
+    try {
+      props = functionSiteProps(component, input)
+    } catch {
+      return
+    }
+    this.store(key, component, { type: "engine", ref: 0 },
+      { component, entries: [{ ref: 0, props }] }, geometry?.height ?? 0, current,
+      geometry?.width ?? 0, { inactiveHistoryRow: rowIdentity })
+  }
+
+  /** A fresh drawing or failed read retires the old history at every measured width. */
+  discardInactiveHistory(rowIdentity: string | undefined): void {
+    if (!rowIdentity) return
+    let changed: Set<string> | undefined
+    for (const [key, entry] of this.entries) {
+      if (entry.inactiveHistoryRow !== rowIdentity) continue
+      this.remove(key, entry)
+      const measurement = this.measurements.get(key)
+      if (measurement) this.removeMeasurement(key, measurement)
+      changed ??= new Set()
+      changed.add(key)
+    }
+    if (changed) {
+      this.releaseEmptyMetadata()
+      this.notify(changed)
+    }
+  }
+
   /** Protected passive data may outlive its DOM row, never its host capability decision. */
   saveData(
     key: string | null,
@@ -487,9 +530,7 @@ export class FunctionSitePresentationCache {
       height,
       current,
       width,
-      hostKey,
-      data.hostMessage,
-      messageViewport
+      { hostKey, hostMessage: data.hostMessage, messageViewport }
     )
   }
 
@@ -501,9 +542,12 @@ export class FunctionSitePresentationCache {
     height: number,
     current: () => boolean,
     width: number,
-    hostKey?: string,
-    hostMessage?: ModObject,
-    messageViewport?: FunctionMessageViewport
+    { hostKey, hostMessage, messageViewport, inactiveHistoryRow }: {
+      hostKey?: string
+      hostMessage?: ModObject
+      messageViewport?: FunctionMessageViewport
+      inactiveHistoryRow?: string
+    } = {}
   ): void {
     if (!budget.canRetain() || !current() || !this.authorized()) return
     const preview = hostMessage && typeof hostMessage.text === "string"
@@ -513,6 +557,7 @@ export class FunctionSitePresentationCache {
     const presentation: FunctionSitePresentation = {
       ...(tree ? { tree: structuredClone(tree) } : {}),
       ...(nativeContent ? { nativeContent: structuredClone(nativeContent) } : {}),
+      ...(inactiveHistoryRow ? { inactiveHistory: true as const } : {}),
       ...(hostMessage ? { hostMessage: structuredClone(preview?.omittedCharacters
         ? { ...hostMessage, text: preview.head } : hostMessage) } : {}),
       ...(preview?.omittedCharacters ? { hostMessagePreview: {
@@ -523,7 +568,8 @@ export class FunctionSitePresentationCache {
       width: Number.isFinite(width) ? Math.max(0, Math.min(100000, width)) : 0
     }
     const measureBytes = () =>
-      RECORD_BYTES + (key.length + (hostKey?.length ?? 0) + JSON.stringify(presentation).length) * 2
+      RECORD_BYTES + (key.length + (hostKey?.length ?? 0) + (inactiveHistoryRow?.length ?? 0) +
+        JSON.stringify(presentation).length) * 2
     let bytes = measureBytes()
     // Escaped code/control characters may exceed the byte cap below the character
     // threshold. Start with protected head/tail fragments, then use the same shrink loop.
@@ -563,6 +609,7 @@ export class FunctionSitePresentationCache {
       token: {},
       component,
       ...(hostKey ? { hostKey } : {}),
+      ...(inactiveHistoryRow ? { inactiveHistoryRow } : {}),
       presentation,
       bytes,
       expires: Date.now() + MAX_AGE_MS,

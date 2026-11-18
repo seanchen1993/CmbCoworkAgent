@@ -256,6 +256,7 @@ interface FunctionConnection {
   stopAndDrain?(): Promise<void>
 }
 interface SessionEntry {
+  admissionReservation?: object
   desktopClients?: Map<string, NativeDesktopBinding>
   desktopObservers?: Promise<void>
   desktopObserverCount?: number
@@ -304,6 +305,9 @@ interface FunctionOperationScope {
   entry?: SessionEntry
   release?: () => void
   recoverable?: boolean
+}
+interface RuntimeReservation {
+  closedBuild?: SessionEntry
 }
 interface FunctionEndingEntry {
   entry: SessionEntry
@@ -617,7 +621,7 @@ export class FunctionModsManager {
   private readonly nativeEpochs = new Map<string, number>()
   private readonly sessions = new Map<string, SessionEntry>()
   private readonly platformHub: PlatformCapabilityHub
-  private readonly runtimeReservations = new Map<string, object>()
+  private readonly runtimeReservations = new Map<string, RuntimeReservation>()
   private readonly pendingSessionBuilds = new Map<string, {
     epoch: number
     promise: Promise<SessionEntry>
@@ -2389,7 +2393,7 @@ export class FunctionModsManager {
   }
 
   /** Admission owns the freed slot before any waiting request can observe it as available. */
-  private async acquireRuntimeSlot(key: string): Promise<object> {
+  private async acquireRuntimeSlot(key: string): Promise<RuntimeReservation> {
     if (this.runtimeReservations.has(key)) throw new ModFunctionError("MODS_RUNTIME_SESSION_BUSY")
     if (this.sessions.has(key) || this.runtimeOccupancy() < 6) return this.reserveRuntimeSlot(key)
     const pending = this.capacityReclaim
@@ -2397,14 +2401,14 @@ export class FunctionModsManager {
     const probe = [...this.sessions.values()].find(entry =>
       JSON.stringify([entry.workspace, entry.threadId]) !== key && !this.pureProbeBlocker(entry))
     if (!probe) throw new ModFunctionError("MODS_SESSION_CAPACITY")
-    let reservation: object | undefined
+    let reservation: RuntimeReservation | undefined
     const reclaim = this.retirePureProbe(probe).then(() => { reservation = this.reserveRuntimeSlot(key) })
     this.capacityReclaim = reclaim
     try { await reclaim; return reservation! }
     finally { if (this.capacityReclaim === reclaim) this.capacityReclaim = undefined }
   }
 
-  private reserveRuntimeSlot(key: string): object {
+  private reserveRuntimeSlot(key: string): RuntimeReservation {
     if (this.runtimeReservations.has(key)) throw new ModFunctionError("MODS_RUNTIME_SESSION_BUSY")
     if (!this.sessions.has(key) && this.runtimeOccupancy() >= 6)
       throw new ModFunctionError("MODS_SESSION_CAPACITY")
@@ -3445,10 +3449,26 @@ export class FunctionModsManager {
     return this.inspectEffectiveStatus(workspace, threadId)
   }
 
-  private async inspectEffectiveStatus(workspace: string, threadId: string): Promise<FunctionPluginStatus[]> {
+  private selectedSourceFacts(selection: ClawProfile) {
+    const plugins = this.host.plugins()
+    return selection.capabilities.map(({ pluginId }) => {
+      const source = plugins.find(item => item.id === pluginId)
+      return source ? [source.id, source.path, source.enabled !== false] as const : null
+    })
+  }
+
+  private async inspectEffectiveStatus(
+    workspace: string,
+    threadId: string,
+    mode?: "native-transcript"
+  ): Promise<FunctionPluginStatus[]> {
     const epoch = this.epoch(workspace)
     const usage = this.capabilityContext(workspace, threadId)
     const selection = this.clawSelection(workspace, threadId)
+    const nativeSelection = mode === "native-transcript" && usage.usage === "chat" &&
+      !currentRuntimePluginSource() && !this.development?.activeFor(workspace, threadId)
+      ? selection : null
+    const originalSources = nativeSelection && this.selectedSourceFacts(nativeSelection)
     const available = await this.status(workspace)
     if (this.closed || epoch !== this.epoch(workspace) ||
       usage.identity !== this.capabilityContext(workspace, threadId).identity)
@@ -3466,8 +3486,6 @@ export class FunctionModsManager {
         return resolveClawComponents(item.components, undefined, usage.usage).length > 0
       })
     }
-    const issues = this.clawSelectionIssues(workspace, selection, available, usage.usage)
-    if (issues.length) throw new ModFunctionError("CLAW_CAPABILITY_CHANGED", issues.join("；"))
     const selected = selection.capabilities.flatMap((capability) =>
       available.filter(
         (item) =>
@@ -3476,6 +3494,32 @@ export class FunctionModsManager {
           capability.digest === item.digest
       )
     )
+    const disabled = nativeSelection ? selected.filter(item => item.state === "disabled") : []
+    const currentSources = nativeSelection && disabled.length > 0
+      ? this.selectedSourceFacts(nativeSelection)
+      : null
+    const confirmedDisabled = currentSources &&
+      JSON.stringify(originalSources) === JSON.stringify(currentSources) &&
+      disabled.every(item => {
+        const grant = this.functionSourceGrant(workspace, item.name, undefined, item.pluginId)
+        return grant?.enabled && grant.digest === item.digest &&
+          currentSources.some(source => source?.[0] === item.pluginId && source[2] === false)
+      })
+    const displayScope = confirmedDisabled && !this.development?.activeFor(workspace, threadId)
+      ? this.host.captureDisplayScope?.(workspace, threadId)
+      : undefined
+    // Only this validation view accepts the disabled sources. No guest is selected for display.
+    const validation = displayScope
+      ? available.map(item => disabled.includes(item) ? { ...item, state: "ready" as const } : item)
+      : available
+    const issues = this.clawSelectionIssues(workspace, selection, validation, usage.usage)
+    if (issues.length) throw new ModFunctionError("CLAW_CAPABILITY_CHANGED", issues.join("；"))
+    if (displayScope) {
+      // A disabled selection cannot start a partial guest graph. Keep ordinary history readable
+      // through native display under the current host policy; execution still uses strict status.
+      displayScope.assertCurrent()
+      return []
+    }
     if (selection.builtins?.contextMeter) selected.push(contextMeterStatus())
     return selected
   }
@@ -3821,8 +3865,11 @@ export class FunctionModsManager {
     this.invalidateCatalog(workspace)
   }
 
+  private pluginCatalogRevision = 0
+
   /** Known disabled or uninstalled sources cannot be new participants in a loaded session. */
   pluginsChanged(workspace: string, changedPluginIds?: readonly string[]): void {
+    this.pluginCatalogRevision++
     this.installedPluginInventory = undefined
     const plugins = this.host.plugins()
     const ids = new Set(changedPluginIds)
@@ -4241,6 +4288,9 @@ export class FunctionModsManager {
       if (request.threadId === threadId) request.valid = false
     for (const [key, entry] of this.sessions) {
       if (entry.threadId !== threadId) continue
+      const reservation = this.runtimeReservations.get(key)
+      if (reservation && reservation === entry.admissionReservation)
+        reservation.closedBuild = entry
       for (const check of entry.completionChecks)
         check.abort(new ModFunctionError("MODS_SCOPE_CHANGED"))
       entry.freshness.close("session-closed")
@@ -4408,7 +4458,69 @@ export class FunctionModsManager {
     if (failures.length) throw new AggregateError(failures, "MODS_RESOURCE_CLEANUP_PENDING")
   }
 
-  private async session(workspace: string, threadId: string, registrationOnly = false): Promise<SessionEntry> {
+  private async waitForClosedReadRuntime(workspace: string, threadId: string,
+    signal?: AbortSignal): Promise<(() => void) | undefined> {
+    const key = JSON.stringify([workspace, threadId])
+    const reservation = this.runtimeReservations.get(key)
+    if (!reservation || currentRuntimePluginSource() ||
+      !["siteRead", "siteMount", "siteMountOutcome", "commands", "hasEventHandler"]
+        .includes(String(this.operations.getStore()?.method))) return
+    const context = this.host.capabilityContext?.(workspace, threadId)
+    if (context?.usage !== "chat" || context.projectId) return
+    const scope = this.host.clawScope?.(threadId)
+    if (this.host.clawScope && (!scope || scope.threadId !== threadId)) return
+    const contextIdentity = context.identity
+    const retired = reservation.closedBuild
+    const drain = retired && this.entryDrains.get(retired)
+    if (!retired || !drain || retired.workspace !== workspace || retired.threadId !== threadId ||
+      retired.admissionReservation !== reservation || retired.runtimeSourceToken) return
+    const epoch = this.epoch(workspace), catalog = this.pluginCatalogRevision
+    const protection = this.host.protects?.(workspace)
+    const bindingIdentity = scope?.identity ?? JSON.stringify([threadId, "legacy"])
+    const bindingRevision = new ClawStore(this.store).selection(workspace, bindingIdentity).revision
+    const selection = encodeModJson(this.clawSelection(workspace, threadId))
+    const assertCurrent = () => {
+      signal?.throwIfAborted()
+      this.host.assertThread?.(workspace, threadId)
+      this.assertEndAdmission(workspace, threadId)
+      const current = this.host.capabilityContext?.(workspace, threadId)
+      const currentScope = this.host.clawScope?.(threadId)
+      if (this.closed || !this.host.enabled(workspace) || this.epoch(workspace) !== epoch ||
+        this.pluginCatalogRevision !== catalog || this.host.protects?.(workspace) !== protection ||
+        current?.usage !== "chat" || current.projectId || current.identity !== contextIdentity ||
+        (this.host.clawScope && currentScope?.identity !== bindingIdentity) ||
+        new ClawStore(this.store).selection(workspace, bindingIdentity).revision !== bindingRevision ||
+        encodeModJson(this.clawSelection(workspace, threadId)) !== selection)
+        throw new ModFunctionError("MODS_SCOPE_CHANGED")
+    }
+    assertCurrent()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let aborted: (() => void) | undefined
+    try {
+      // This caller waits only for the closed construction that owns this exact token.
+      // Timeout/cancellation detaches the read without claiming or cancelling old work.
+      await Promise.race([
+        Promise.all([drain, retired.activity.whenSettled()]),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new ModFunctionError("MODS_RUNTIME_SESSION_BUSY")), 5000)
+          aborted = () => reject(signal?.reason)
+          signal?.addEventListener("abort", aborted, { once: true })
+          if (signal?.aborted) aborted()
+        })
+      ])
+      assertCurrent()
+      if (this.retiringEntries.has(retired))
+        throw new ModFunctionError("MODS_RESOURCE_CLEANUP_PENDING")
+      this.releaseRuntimeSlot(key, reservation, retired)
+      return assertCurrent
+    } finally {
+      clearTimeout(timer)
+      if (aborted) signal?.removeEventListener("abort", aborted)
+    }
+  }
+
+  private async session(workspace: string, threadId: string, registrationOnly = false,
+    signal?: AbortSignal): Promise<SessionEntry> {
     if (this.runtimeReceiptError) throw new ModFunctionError("MODS_RUNTIME_RECEIPTS_UNAVAILABLE")
     this.assertEndAdmission(workspace, threadId)
     if (this.closed || !this.host.enabled(workspace)) throw new ModFunctionError("MODS_DISABLED")
@@ -4416,7 +4528,7 @@ export class FunctionModsManager {
       throw new ModFunctionError("MODS_CONFIG_RELOAD_STOPPED", "MODS_CONFIG_RELOAD_STOPPED: 当前组合已停用，请在插件参数中明确重新加载。")
     const key = JSON.stringify([workspace, threadId])
     const retirement = this.probeRetirements.get(key)
-    if (retirement) { await retirement; return this.session(workspace, threadId, registrationOnly) }
+    if (retirement) { await retirement; return this.session(workspace, threadId, registrationOnly, signal) }
     const entry = this.sessions.get(key)
     if (this.endingEntries.has(key)) {
       if (!entry?.session?.hasCompletedStartup) throw new ModFunctionError("MODS_SESSION_ENDING")
@@ -4447,12 +4559,22 @@ export class FunctionModsManager {
       throw new ModFunctionError("MODS_CONFIG_RELOAD_STOPPED",
         "MODS_CONFIG_RELOAD_STOPPED: 组件运行已停止。请先核对未完成操作的结果，再到插件参数明确重新加载当前组合。")
     }
+    if (this.runtimeReservations.has(key)) {
+      const readCurrent = await this.waitForClosedReadRuntime(workspace, threadId, signal)
+      if (readCurrent) {
+        readCurrent()
+        // A different fresh reader may already own the replacement or its construction.
+        const reopened = await this.session(workspace, threadId, registrationOnly, signal)
+        readCurrent()
+        return reopened
+      }
+    }
     let pending = this.pendingSessionBuilds.get(key)
     if (pending && pending.epoch !== this.epoch(workspace)) {
       // Catalog changes cancel the previous generation. New callers await its physical
       // cleanup, but must never adopt its rejected initialization or replay its effects.
       await pending.promise.catch(() => {})
-      return this.session(workspace, threadId, registrationOnly)
+      return this.session(workspace, threadId, registrationOnly, signal)
     }
     if (!pending) {
       pending = { epoch: this.epoch(workspace), owner: this.operations.getStore(),
@@ -4586,7 +4708,7 @@ export class FunctionModsManager {
     let reservation = this.runtimeReservations.get(key)
     if (!previous && reservation && reservation !== prepared?.capacityReservation)
       throw new ModFunctionError("MODS_RUNTIME_SESSION_BUSY")
-    let admission: object | undefined
+    let admission: RuntimeReservation | undefined
     if (!privateBuild && !reservation) {
       admission = await this.acquireRuntimeSlot(key)
       reservation = admission
@@ -4603,6 +4725,7 @@ export class FunctionModsManager {
         (!privateBuild && this.reloadControl.error(workspace, threadId)))
         throw new ModFunctionError("MODS_SCOPE_CHANGED")
       const entry: SessionEntry = {
+        ...(admission ? { admissionReservation: admission } : {}),
         constructionOwner: this.operations.getStore(),
         ...(runtimeSourceToken ? { runtimeSourceToken } : {}),
         ...(assertRuntimeSourceContent ? { assertRuntimeSourceContent } : {}),
@@ -7642,6 +7765,20 @@ export class FunctionModsManager {
       if (outcome.state !== "mounted") return outcome
       try {
         signal?.throwIfAborted()
+        if (projectionEnabled && prepared && !hostMessage &&
+          this.hostOnlySites.owns(workspace, threadId, component, outcome.owner)) {
+          const native = this.captureNativeDisplayAdmission(
+            workspace, threadId, component, false, true, outcome.owner
+          )
+          if (native) {
+            // The completed mount proved there is no guest drawing for this transcript row.
+            // Release its temporary slot before publishing via the native passive pipeline.
+            await this.siteUnmount(workspace, threadId, outcome.owner)
+            return { state: "projected", snapshot: await this.displayProjection.readPrepared(
+              workspace, component, prepared, native, true, signal
+            ) }
+          }
+        }
         const snapshot = await this.siteRender(workspace, threadId, outcome.owner, props, signal)
         signal?.throwIfAborted()
         if (snapshot) {
@@ -7679,6 +7816,10 @@ export class FunctionModsManager {
         return { state: "retired" }
       } catch (error) {
         await this.siteUnmount(workspace, threadId, outcome.owner).catch(() => {})
+        if (this.hostOnlySites.owns(workspace, threadId, component, outcome.owner)) {
+          try { this.hostOnlySites.retireOwner(outcome.owner) }
+          catch { /* Preserve the original display failure. */ }
+        }
         throw error
       }
     }
@@ -7689,7 +7830,7 @@ export class FunctionModsManager {
   }
 
   private captureNativeDisplayAdmission(workspace: string, threadId: string, component: FunctionUiSite,
-    hostMessage = false, requireDisplayScope = true):
+    hostMessage = false, requireDisplayScope = true, hostOnlyOwner?: string):
     (FunctionNativeDisplayAdmission & { native: boolean; entry?: SessionEntry;
       expectedRefs: ModObject[] }) | undefined {
     const rollout = this.displayRollout.snapshot()
@@ -7701,6 +7842,13 @@ export class FunctionModsManager {
       !this.host.captureSiteGuard ||
       (requireDisplayScope && !this.host.captureDisplayScope?.(workspace, threadId)))
       return undefined
+    const hostOnly = hostOnlyOwner !== undefined
+    if (hostOnly && (!protects || currentRuntimePluginSource() ||
+      (component !== "UserMessage" && component !== "AssistantMessage") ||
+      !this.hostOnlySites.owns(workspace, threadId, component, hostOnlyOwner))) return undefined
+    const transcriptScope = hostOnly ? this.capabilityContext(workspace, threadId) : undefined
+    if (transcriptScope && transcriptScope.usage !== "chat") return undefined
+    const catalogRevision = this.pluginCatalogRevision
     const captured = this.host.captureSiteGuard(workspace, threadId)
     const key = JSON.stringify([workspace, threadId])
     const stopped = Boolean(this.reloadControl.error(workspace, threadId))
@@ -7709,7 +7857,7 @@ export class FunctionModsManager {
     const emptyHost = entry?.hostSourceBound && entry.loaded &&
       entry.session?.plugins.length === 0 && entry.snapshots.size === 0
     const expectedRefs: ModObject[] = []
-    if (!hostMessage && enabled && !stopped &&
+    if (!hostOnly && !hostMessage && enabled && !stopped &&
       (entry?.session?.plugins.length || this.hasSources(workspace, threadId))) {
       // Discovery and startup retain their original admission. Only a current loaded graph
       // can prove the absence of display handlers without evaluating an unknown matcher.
@@ -7734,6 +7882,7 @@ export class FunctionModsManager {
       this.assertEndAdmission(workspace, threadId)
       if (this.closed || this.epoch(workspace) !== epoch ||
         this.host.enabled(workspace) !== enabled || this.host.protects?.(workspace) !== protects ||
+        (hostOnly && this.pluginCatalogRevision !== catalogRevision) ||
         Boolean(this.reloadControl.error(workspace, threadId)) !== stopped ||
         this.sessions.get(key) !== entry)
         throw new ModFunctionError("MODS_SCOPE_CHANGED")
@@ -7750,6 +7899,9 @@ export class FunctionModsManager {
     }
     const assertCurrent = () => {
       assertIdentity()
+      if (transcriptScope &&
+        this.capabilityContext(workspace, threadId).identity !== transcriptScope.identity)
+        throw new ModFunctionError("MODS_SCOPE_CHANGED")
       if (entry?.loaded && enabled && !stopped && !emptyHost) {
         entry.assertRuntimeSourceContent?.()
         for (const snapshot of entry.snapshots.values()) {
@@ -7764,7 +7916,8 @@ export class FunctionModsManager {
     // No await or publication follows route qualification before the public display
     // operation's full entry fence. Do not scan the same source twice in that region.
     assertIdentity()
-    return { version: JSON.stringify([rollout.epoch, epoch, enabled, protects, stopped, runtime ?? null]),
+    return { version: JSON.stringify([rollout.epoch, epoch, enabled, protects, stopped, runtime ?? null,
+      hostOnly ? catalogRevision : null]),
       assertCurrent, assertIdentity, native, entry, expectedRefs }
   }
 
@@ -7844,10 +7997,11 @@ export class FunctionModsManager {
       const actual = this.host.protects?.(workspace)
       if (!legacyProtection && typeof actual !== "boolean")
         throw new ModFunctionError("MODS_UI_SITE_PROTECTION_REQUIRED")
-      return Boolean(actual)
+      return actual
     }
     const enabled = this.host.enabled(workspace)
-    const protects = readProtection()
+    const protection = readProtection()
+    const protects = Boolean(protection)
     if (!enabled && !protects) return { state: "inactive", reason: "mods-disabled" }
     // A stopped guest cannot execute again, but the original application remains usable.
     // Protected content still passes through the native-only publication pipeline.
@@ -7857,12 +8011,15 @@ export class FunctionModsManager {
     const request = { workspace, threadId, valid: true }
     const epoch = this.epoch(workspace)
     const captured = this.host.captureSiteGuard?.(workspace, threadId)
+    let transcriptCatalogRevision: number | undefined
     const assertCurrent = () => {
       captured?.()
       this.host.assertThread?.(workspace, threadId)
       this.assertEndAdmission(workspace, threadId)
       if (!request.valid || this.closed || this.epoch(workspace) !== epoch ||
-        this.host.enabled(workspace) !== enabled || readProtection() !== protects ||
+        this.host.enabled(workspace) !== enabled || readProtection() !== protection ||
+        (transcriptCatalogRevision !== undefined &&
+          transcriptCatalogRevision !== this.pluginCatalogRevision) ||
         Boolean(this.reloadControl.error(workspace, threadId)) !== stopped)
         throw new ModFunctionError("MODS_SCOPE_CHANGED")
       if (retained) {
@@ -7893,7 +8050,12 @@ export class FunctionModsManager {
       // Its presence alone must not turn every ordinary transcript slot into a retired site.
       // Recheck current authority unless this exact resident has actual loaded functions.
       if (hasFunctions && !this.sessions.get(key)?.session?.plugins.length) {
-        const available = await this.effectiveStatus(workspace, threadId)
+        const nativeTranscript = typeof protection === "boolean" && !retained &&
+          (component === "UserMessage" || component === "AssistantMessage")
+        if (nativeTranscript) transcriptCatalogRevision = this.pluginCatalogRevision
+        const available = nativeTranscript
+          ? await this.inspectEffectiveStatus(workspace, threadId, "native-transcript")
+          : await this.effectiveStatus(workspace, threadId)
         assertCurrent()
         signal?.throwIfAborted()
         if (available.some(item => item.state === "invalid")) return { state: "retired" }
@@ -7908,7 +8070,7 @@ export class FunctionModsManager {
         delivered = true
         return { state: "mounted", owner }
       }
-      const entry = await this.session(workspace, threadId)
+      const entry = await this.session(workspace, threadId, false, signal)
       assertCurrent()
       signal?.throwIfAborted()
       if (this.sessions.get(key) !== entry || entry.session!.plugins.length === 0)
@@ -7989,7 +8151,27 @@ export class FunctionModsManager {
       await route.entry.session!.sites.unmount(owner)
     } finally {
       if (this.siteOwners.get(owner) === route) this.siteOwners.delete(owner)
+      // A stale route still owns this exact slot. Close its local drawing without running hooks.
+      try { route.entry.session?.sites.retire(owner) }
+      catch { /* Preserve the original read or unmount failure. */ }
     }
+  }
+
+  /** Main IPC may retire a drawing after its originating document or scope is gone. */
+  captureSiteRetirement(workspace: string, threadId: string, owner: string) {
+    const hostOnly = this.hostOnlySites.captureRetirement(workspace, threadId, owner)
+    const route = this.siteOwners.get(owner)
+    const guest = route?.workspace === workspace && route.threadId === threadId
+      ? route.entry.session?.sites.captureRetirement(owner) : undefined
+    const slot = hostOnly ?? guest
+    if (!slot) return undefined
+    const captured = route && new WeakRef(route)
+    return { current: slot.current, retire: () => {
+      const original = captured?.deref()
+      if (original && this.siteOwners.get(owner) === original) this.siteOwners.delete(owner)
+      try { slot.retire() }
+      catch { /* The local slot was removed before its drawing was closed. */ }
+    } }
   }
 
   async siteAct(

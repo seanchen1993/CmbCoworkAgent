@@ -12,7 +12,6 @@ import { AuthoringVersionRepository } from "./authoring-version-repository"
 import { analyzeDevelopmentSource } from "./development-analysis"
 import { AuthoringCompileError } from "./authoring-compile-diagnostics"
 import { AuthoringValidationError } from "./authoring-validation-result"
-import { DevelopmentCandidateError } from "./development-candidate-diagnostics"
 import { CreatorRequestBudgets, creatorModelSummary, type CreatorModelObservation } from "./creator-request-budget"
 import { issueCreatorModelAccounting } from "./creator-model-accounting"
 import type { CreatorReuseService, CreatorReuseApproval } from "./creator-reuse"
@@ -785,6 +784,9 @@ export class ModDevelopmentService {
           stagingGuard()
         } catch (error) {
           stagingGuard()
+          const { DevelopmentCandidateError } = await import("./development-candidate-diagnostics")
+          stagingGuard()
+          sourceGuard()
           throw new DevelopmentCandidateError(
             error,
             { id, revision, digest: record.sourceDigest },

@@ -7,6 +7,7 @@ import { ChatSearchContext } from "./ChatSearchContext"
 import { Check, Copy } from "lucide-react"
 import {
   memo,
+  useCallback,
   useMemo,
   useState,
   type ComponentProps,
@@ -30,6 +31,7 @@ interface StreamingMarkdownProps {
   threadId?: string
   searchBlockIndex?: number
   searchLocation?: ChatSearchLocation
+  expansion?: { expanded: boolean; onChange(expanded: boolean): void }
 }
 
 function MarkdownCodeBlock({
@@ -217,11 +219,17 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
   isStreaming = false,
   threadId,
   searchBlockIndex = 0,
-  searchLocation
+  searchLocation,
+  expansion
 }: StreamingMarkdownProps): React.JSX.Element {
   const text = useStreamingMarkdownText(children, isStreaming)
   const [expandedText, setExpandedText] = useState<string | null>(null)
-  const isExpanded = !isStreaming && expandedText === text
+  const isExpanded = !isStreaming && (expansion?.expanded ?? expandedText === text)
+  const changeExpansion = expansion?.onChange
+  const setExpanded = useCallback((expanded: boolean) => {
+    if (changeExpansion) changeExpansion(expanded)
+    else setExpandedText(expanded ? text : null)
+  }, [changeExpansion, text])
 
   // Per-token parent renders reuse this tree until the throttle fires. Extremely
   // long live answers use two bounded fragments: the stable head remains memoized
@@ -250,7 +258,7 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
                 data-chat-search-ignore
                 type="button"
                 className="mb-3 rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground hover:bg-muted/70"
-                onClick={() => setExpandedText(null)}
+                onClick={() => setExpanded(false)}
               >
                 收起长内容
               </button>
@@ -277,7 +285,7 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
                 data-chat-search-expand-markdown
                 aria-expanded={false}
                 className="ml-2 underline underline-offset-2 hover:text-foreground"
-                onClick={() => setExpandedText(text)}
+                onClick={() => setExpanded(true)}
               >
                 展开全文
               </button>
@@ -293,7 +301,7 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
         </>
       )
     },
-    [text, isStreaming, isExpanded, threadId, searchLocation]
+    [text, isStreaming, isExpanded, threadId, searchLocation, setExpanded]
   )
 
   return (

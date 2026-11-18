@@ -10,7 +10,7 @@ export class ProjectWorkspaceModeGuard {
     private readonly lockDatabasePath: string
   ) {}
 
-  run<T>(mode: "host" | "legacy", workspace: string, work: () => T): T {
+  run<T>(mode: "host" | "legacy", workspace: string, work: () => T, executionWorkspace?: string): T {
     mkdirSync(dirname(this.lockDatabasePath), { recursive: true })
     const lock = new DatabaseSync(this.lockDatabasePath, { timeout: 5000 })
     try {
@@ -18,6 +18,8 @@ export class ProjectWorkspaceModeGuard {
       lock.exec("BEGIN IMMEDIATE")
       try {
         this.assertNoOppositeBinding(mode, workspace)
+        if (executionWorkspace && executionWorkspace !== workspace)
+          this.assertNoOppositeBinding(mode, executionWorkspace)
         const result = work()
         lock.exec("COMMIT")
         return result
@@ -35,12 +37,16 @@ export class ProjectWorkspaceModeGuard {
     if (!existsSync(path)) return
     const database = new DatabaseSync(path, { readOnly: true, timeout: 5000 })
     try {
-      const table = mode === "host" ? "legacy_bindings" : "host_projects"
+      const query = mode === "host"
+        ? `SELECT json_extract(data,'$.workspace') AS workspace FROM legacy_bindings
+           UNION SELECT json_extract(data,'$.executionWorkspace') AS workspace FROM legacy_operations
+           WHERE status IN ('started','unknown') AND json_type(data,'$.executionWorkspace') IS NOT NULL`
+        : "SELECT json_extract(data,'$.workspace') AS workspace FROM host_projects"
       const key = (value: string) =>
         process.platform === "win32" ? resolve(value).toLowerCase() : resolve(value)
       const target = key(workspace)
       for (const row of database
-        .prepare(`SELECT json_extract(data,'$.workspace') AS workspace FROM ${table}`)
+        .prepare(query)
         .iterate()) {
         if (typeof row.workspace !== "string") throw Error("PROJECT_WORKSPACE_BINDING_INVALID")
         if (key(row.workspace) === target) throw Error("PROJECT_WORKSPACE_MODE_CONFLICT")

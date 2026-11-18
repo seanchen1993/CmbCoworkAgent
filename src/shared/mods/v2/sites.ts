@@ -44,8 +44,17 @@ export type FunctionSiteReadOutcome =
   | { state: "projected"; snapshot: import("./display-snapshot").FunctionDisplaySnapshot }
   | { state: "mounted"; owner: string; snapshot: import("./ui").FunctionPaneSnapshot }
   | Exclude<FunctionSiteMountOutcome, { state: "mounted" }>
+export const FUNCTION_CHAT_TRANSCRIPT_SITES: readonly FunctionUiSite[] = [
+  "UserMessage",
+  "AssistantMessage",
+  "ToolUse",
+  "ToolResult",
+  "ToolGroup"
+]
+// Keep the original combined budget available to dense histories of any one row type.
+export const FUNCTION_CHAT_TRANSCRIPT_SITE_LIMIT = 160
 export const FUNCTION_DURATION_SITE_LIMIT = 32
-// Each retained job can show a result and an error block; other transcript sites stay at 32.
+// Each retained job can show a result and an error block.
 export const FUNCTION_COMMAND_OUTPUT_SITE_LIMIT = MOD_COMMAND_HISTORY_LIMIT * 2
 
 export function functionUiSite(value: unknown): FunctionUiSite {

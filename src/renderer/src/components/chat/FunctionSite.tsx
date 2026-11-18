@@ -1,9 +1,9 @@
 import { validateFunctionDisplaySnapshot, type FunctionDisplaySnapshot } from "../../../../shared/mods/v2/display-snapshot"
 import { FunctionDisplayContent } from "./FunctionDisplayContent"
 import { functionMessageTextMode } from "../../../../shared/mods/v2/host-message"
-import { useModsChatScope, useModsChatReady, useModsChatLoadError, useModsChatCurrent,
+import { ModsChatScope, useModsChatScope, useModsChatReady, useModsChatLoadError, useModsChatCurrent,
   useModsChatPresentationCache } from "../../lib/mods-chat-scope"
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type SyntheticEvent } from "react"
+import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type SyntheticEvent } from "react"
 import type { ModJson, ModObject } from "../../../../shared/mods/types"
 import { isModSiteChangeScope, modUiChangeAffects } from "../../../../shared/mods/types"
 import {
@@ -31,7 +31,7 @@ import { captureFunctionMessageViewport, type FunctionMessageViewport } from "..
 import { observeFunctionSiteVisibility } from "../../lib/function-site-visibility"
 import { retainsFunctionSitePresentation } from "../../lib/function-site-transition"
 import { FunctionSiteRecovery, functionSiteErrorCode,
-  isTransientFunctionSiteError } from "../../lib/function-site-recovery"
+  functionSiteUnavailableMessage, isTransientFunctionSiteError } from "../../lib/function-site-recovery"
 import { validateFunctionNativeContent } from "../../../../shared/mods/v2/engine"
 import { functionInlineLabel, functionInlineTree, functionNativeHint,
   functionNativeProps } from "../../lib/function-native-content"
@@ -179,7 +179,8 @@ export function FunctionSite(props: Parameters<typeof FunctionSiteSurface>[0] &
         typeof props.facts.text === "string" && !props.facts.text.trim()} />}
     </section> : enabled ? (
     <FunctionSiteSurface key={JSON.stringify([props.threadId, props.component,
-      props.messageId, props.expectedRequestId, props.presentationId])} {...props} />
+      props.messageId, props.expectedRequestId, props.presentationId])} {...props}
+      retainInactiveHistory={props.allowUnboundHistory} />
   ) : (
     <section
       data-function-site={props.component}
@@ -194,6 +195,13 @@ export function FunctionSite(props: Parameters<typeof FunctionSiteSurface>[0] &
   )
 }
 
+interface InactiveFunctionSite {
+  ticket: FunctionSiteTicket
+  inputKey: string
+  inputRevision: number
+  history?: { input: ModObject; current(): boolean }
+}
+
 function FunctionSiteSurface({
   threadId,
   component,
@@ -203,6 +211,7 @@ function FunctionSiteSurface({
   facts,
   fallback,
   renderNative,
+  retainInactiveHistory,
   onHint,
   onCustom,
   onExpansion,
@@ -219,6 +228,7 @@ function FunctionSiteSurface({
   facts: ModObject
   fallback?: ReactNode
   renderNative?(props: ModObject): ReactNode
+  retainInactiveHistory?: boolean
   onHint?(text: string | null): void
   onCustom?(custom: boolean): void
   onExpansion?(expanded: boolean): void
@@ -226,6 +236,14 @@ function FunctionSiteSurface({
   onModeLabel?(label: ReactNode): void
   className?: string
 }): React.JSX.Element {
+  const chatScope = useContext(ModsChatScope)
+  const prefetchHistory = retainInactiveHistory === true && chatScope?.threadId === threadId &&
+    chatScope.prefetchHistory === true
+  const prefetchHistoryRef = useRef(prefetchHistory)
+  useLayoutEffect(() => {
+    prefetchHistoryRef.current = prefetchHistory
+    functionSiteQueue.refresh()
+  }, [prefetchHistory])
   const [frame, setFrame] = useState<{
     snapshot: FunctionPaneSnapshot
     ticket: FunctionSiteTicket
@@ -245,9 +263,11 @@ function FunctionSiteSurface({
   } | null>(null)
   const projectionRef = useRef(projection)
   const scopeCurrent = useModsChatCurrent(threadId)
-  const [inactive, setInactive] = useState<{ ticket: FunctionSiteTicket; inputKey: string; inputRevision: number } | null>(null)
+  const [inactive, setInactive] = useState<InactiveFunctionSite | null>(null)
+  const inactiveRef = useRef<InactiveFunctionSite | null>(null)
   const [error, setError] = useState("")
   const [failureCode, setFailureCode] = useState("")
+  const displayUnavailable = Boolean(functionSiteUnavailableMessage(failureCode))
   const [reading, setReading] = useState(false)
   const [initialDurationDeferred, setInitialDurationDeferred] = useState(false)
   const [showReading, setShowReading] = useState(false)
@@ -295,11 +315,17 @@ function FunctionSiteSurface({
     presentationController.reset()
   }
   const [presentationRevision, setPresentationRevision] = useState(0)
+  const messageTextSite = component === "UserMessage" || component === "AssistantMessage"
+  const retainNativeHistory = messageTextSite && retainInactiveHistory === true && Boolean(renderNative)
+  const retainNativeHistoryRef = useRef(retainNativeHistory)
   const presentationPlan = presentationController.plan({ component, cache: presentationCache,
     key: presentationKey, row: presentationRow, input, inputKey, epoch: prefixEpoch,
     width: viewportWidth, renderer: renderNative, canRetain: Boolean(renderNative || fallback === undefined),
     current: scopeCurrent })
-  const cachedPresentation = presentationPlan.selection?.cached
+  const selection = presentationPlan.selection
+  const cachedPresentation = selection?.cached.presentation.inactiveHistory &&
+    (!retainNativeHistory || selection.kind === "pending-progress")
+    ? undefined : selection?.cached
   const cachedPresentationKey = presentationPlan.selection?.key ?? presentationKey
   const cachedRenderer = presentationPlan.selection ? presentationPlan.selection.renderer : renderNative
   const cachedViewportWidth = presentationPlan.selection?.width ?? viewportWidth
@@ -383,6 +409,7 @@ function FunctionSiteSurface({
       presentationKeyRef.current = presentationKey
       cachedPresentationRef.current = progressLease.current?.lease ?? cachedPresentation
       rendererRef.current = renderNative
+      retainNativeHistoryRef.current = retainNativeHistory
       canRetainRef.current = canRetain
       frameRef.current = snapshot ? frame : null
       projectionRef.current = projected
@@ -512,6 +539,28 @@ function FunctionSiteSurface({
     presentationCache.save(presentationKeyRef.current, component, current.snapshot,
       bounds.height, current.presentationCurrent, bounds.width)
   }, [presentationCache, component])
+  useLayoutEffect(() => {
+    const node = section.current
+    const history = inactive?.history
+    if (!node || !history || !inactive.ticket.current() || !presentationCache ||
+      !retainNativeHistory || inactive.inputKey !== inputVersion.current.key) return
+    const current = () => currentLayout() && inactiveRef.current === inactive &&
+      retainNativeHistoryRef.current && inactive.ticket.current() &&
+      inactive.inputRevision === inputVersion.current.revision &&
+      inactive.inputKey === inputVersion.current.key && scopeCurrent() && history.current()
+    let geometry: FunctionSiteGeometry | undefined
+    const stop = observeFunctionSiteGeometry(node, (value) => {
+      if (!current()) return
+      geometry = value
+      presentationCache.measure(presentationKeyRef.current, component, value)
+    })
+    return () => {
+      stop()
+      if (!current()) return
+      presentationCache.saveInactiveHistory(presentationKeyRef.current, presentationRow, component,
+        history.input, history.current, geometry)
+    }
+  }, [component, inactive, presentationCache, presentationRow, retainNativeHistory, scopeCurrent])
   useEffect(() => {
     if (!reading) {
       setShowReading(false)
@@ -524,7 +573,8 @@ function FunctionSiteSurface({
   }, [reading])
   const hint = component === "PromptHint" && snapshot ?
     functionNativeHint(snapshot.tree, snapshot.nativeContent) : null
-  const isInactive = Boolean(inactive?.inputRevision === inputRevision && inactive.ticket.current())
+  const isInactive = Boolean(scopeCurrent() &&
+    inactive?.inputRevision === inputRevision && inactive.ticket.current())
   const inlineMode = component === "SessionMode" && snapshot && functionInlineTree(snapshot.tree)
   const modeLabel = useMemo(() => {
     if (component !== "SessionMode") return null
@@ -656,6 +706,14 @@ function FunctionSiteSurface({
       ownerRef.current = null
       if (previous) void window.api.mods.siteUnmount(threadId, previous).catch(() => {})
     }
+    const updateInactive = (value: InactiveFunctionSite | null): void => {
+      if (inactiveRef.current === value) return
+      inactiveRef.current = value
+      setInactive(value)
+    }
+    const discardInactiveHistory = (): void => {
+      if (messageTextSite) presentationCache?.discardInactiveHistory(presentationRow)
+    }
     const invalidate = (): void => {
       cancelTimer()
       lifetime.invalidate()
@@ -665,7 +723,7 @@ function FunctionSiteSurface({
       setFrame(null)
       projectionRef.current = null
       setProjection(null)
-      setInactive(null)
+      updateInactive(null)
     }
     const schedule = (delay = 0): void => {
       if (stopped || sourceRetiring) return
@@ -694,6 +752,7 @@ function FunctionSiteSurface({
       const capturedInputRevision = inputVersion.current.revision
       const capturedEpoch = prefixLineage.current.epoch
       const capturedRenderer = rendererRef.current
+      const capturedStaticHistory = retainNativeHistoryRef.current
       const presentationCurrent = presentationCache?.capture(component, presentationKeyRef.current, presentationRow)
       pendingPrefix.current = { key: capturedInputKey, epoch: capturedEpoch }
       const current = (): boolean => running === attempt && ticket.current() && !hidden() && !sourceRetiring && (
@@ -719,7 +778,7 @@ function FunctionSiteSurface({
         }
       }
       // Read geometry only for cold admission, never for each appended token/redraw.
-      const queuePriority = () => functionSitePriority(component, siteVisibility.visible())
+      const queuePriority = () => functionSitePriority(component, siteVisibility.visible(), prefetchHistoryRef.current)
       try {
         // Keep admission and its first drawing in one fair queue job. Requeueing a mounted
         // owner behind every other cold mount needlessly delayed the first readable message.
@@ -743,7 +802,8 @@ function FunctionSiteSurface({
           // host-message replacement is ready; an owned render cannot accept it.
           if (!owner || hostMessage) {
             const projectionReadCurrent = presentationCache?.captureProjectionRead()
-            const outcome = typeof window.api.mods.siteRead === "function"
+            const nativeRead = typeof window.api.mods.siteRead === "function"
+            const outcome = nativeRead
               ? await readFunctionSite(window.api.mods, {
                   threadId, component, props: capturedInput, presentationId, messageId,
                   expectedRequestId, ownerRequired: ownerRequired || undefined
@@ -758,7 +818,14 @@ function FunctionSiteSurface({
             if (outcome.state === "inactive") {
               releaseProgressLease()
               recovery.reset()
-              setInactive({ ticket, inputKey: capturedInputKey, inputRevision: capturedInputRevision })
+              const history = nativeRead && capturedStaticHistory && retainNativeHistoryRef.current &&
+                presentationCurrent && capturedInputRevision === inputVersion.current.revision &&
+                capturedInputKey === inputVersion.current.key &&
+                (outcome.reason === "mods-disabled" || outcome.reason === "no-protection-or-functions")
+                ? { input: capturedInput, current: presentationCurrent } : undefined
+              if (!history) discardInactiveHistory()
+              updateInactive({ ticket, inputKey: capturedInputKey,
+                inputRevision: capturedInputRevision, history })
               setFrame(null)
               projectionRef.current = null
               setProjection(null)
@@ -766,6 +833,8 @@ function FunctionSiteSurface({
               releaseOwner()
               return
             }
+            discardInactiveHistory()
+            updateInactive(null)
             if (outcome.state === "retired") {
               remount()
               return
@@ -792,7 +861,6 @@ function FunctionSiteSurface({
               setProjection(nextProjection)
               setFrame(null)
               releaseOwner()
-              setInactive(null)
               setError("")
               return
             }
@@ -824,13 +892,15 @@ function FunctionSiteSurface({
           setFrame(nextFrame)
           projectionRef.current = null
           setProjection(null)
-          setInactive(null)
+          updateInactive(null)
           setError("")
         } else {
           remount()
         }
       } catch (cause) {
         if (current()) {
+          discardInactiveHistory()
+          updateInactive(null)
           releaseProgressLease()
           if (projectionRef.current) {
             presentationCache?.invalidateKey(presentationKeyRef.current, true, presentationRow)
@@ -838,7 +908,15 @@ function FunctionSiteSurface({
           }
           const code = functionSiteErrorCode(cause)
           setFailureCode(code ?? "")
-          if (code === "MODS_UI_QUESTION_STALE" || code === "MODS_SCOPE_CHANGED" ||
+          const unavailableMessage = functionSiteUnavailableMessage(code)
+          if (unavailableMessage) {
+            presentationCache?.invalidateKey(presentationKeyRef.current, true, presentationRow)
+            invalidate()
+            releaseOwner()
+            queued = false
+            recovery.failed(false)
+            setError(unavailableMessage)
+          } else if (code === "MODS_UI_QUESTION_STALE" || code === "MODS_SCOPE_CHANGED" ||
             code === "MODS_CALL_SCOPE_CHANGED") {
             invalidate()
             releaseOwner()
@@ -1144,7 +1222,7 @@ function FunctionSiteSurface({
   }
 
   const blockStaleInteraction = (event: React.SyntheticEvent): void => {
-    const currentInactive = inactive?.ticket.current() &&
+    const currentInactive = scopeCurrent() && inactive?.ticket.current() &&
       inactive.inputRevision === inputVersion.current.revision
     const currentFrame = frame?.ticket.current() &&
       frame.inputRevision === inputVersion.current.revision
@@ -1299,14 +1377,19 @@ function FunctionSiteSurface({
           ["UserMessage", "AssistantMessage"].includes(component) &&
           typeof facts.text === "string" && !facts.text.trim()} />)}
       {error && (
-        <div role="alert" className="text-destructive">
+        <div role={displayUnavailable ? "status" : "alert"}
+          className={displayUnavailable ? "text-muted-foreground" : "text-destructive"}>
           <span>{error}</span>
-          {["MODS_RUNTIME_LOST", "MODS_HOST_TIMEOUT", "MODS_HOST_EXITED", "MODS_CONFIG_RELOAD_STOPPED"].includes(failureCode)
+          {displayUnavailable
+            ? <button type="button" className="ml-2 underline"
+                onClick={() => openClawRecovery(threadId)}>查看灵件配置</button>
+            : ["MODS_RUNTIME_LOST", "MODS_HOST_TIMEOUT", "MODS_HOST_EXITED", "MODS_CONFIG_RELOAD_STOPPED"].includes(failureCode)
             ? <button type="button" className="ml-2 underline"
                 onClick={() => openClawRecovery(threadId)}>查看恢复选项</button>
             : <button type="button" className="ml-2 underline" disabled={reading}
                 onClick={() => retryRef.current()}>重新读取界面</button>}
-          {failureCode && <details className="text-xs"><summary>技术信息</summary>{failureCode}</details>}
+          {failureCode && !displayUnavailable &&
+            <details className="text-xs"><summary>技术信息</summary>{failureCode}</details>}
         </div>
       )}
     </section>

@@ -100,6 +100,12 @@ export function projectRuntimeRecoveryMessage(error: string): string | undefined
     return "此工作目录仍有未结算的操作或工作树。请先在原任务中停止并核对结果，再更新步骤；不会自动重放或删除这些资源。"
   if (error.includes("PROJECT_LEGACY_RUNTIME_UNAVAILABLE"))
     return "项目运行记录暂时无法读取，不能核实先前的执行状态，项目执行已暂停。普通聊天仍可使用。请重启应用后更新记录；如仍失败，请将问题详情交给维护者修复。"
+  if (error.includes("LEGACY_RECOVERY_REVIEW_CHANGED"))
+    return "已查看的执行记录发生变化。请更新执行记录，重新核对后确认。"
+  if (error.includes("LEGACY_EXECUTION_WORKSPACE_NOT_REGISTERED"))
+    return "此执行目录未登记到当前项目特性或托管会话。请核对项目的会话工作区后重试。"
+  if (/LEGACY_(?:RECOVERY_THREAD_CHANGED|WORKSPACE_CHANGED|SCOPE_CHANGED)/.test(error))
+    return "原会话或工作目录已变化。请核对项目、会话和原目录，确认当前配置后重试。"
   if (error.includes("PROJECT_WORKSPACE_MODE_CONFLICT"))
     return "此工作目录已用于另一种项目运行方式。请继续使用已绑定的项目，或为新项目选择另一个目录；如需保留旧成果，请使用明确的导入入口核对，不会自动合并状态。"
   return undefined

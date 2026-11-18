@@ -1,5 +1,5 @@
 import AdmZip from "adm-zip"
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from "node:fs"
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 import { afterAll, beforeAll, expect, it, vi } from "vitest"
@@ -219,4 +219,110 @@ it("uninstalls all exclusive bundle files even if the project's runtime declarat
   }
   expect(storage.getPlugins().some(item => item.name === "vendor-native-fixture")).toBe(true)
   expect(native()).toBeDefined()
+})
+
+it("keeps an unmarked standalone plugin reused by a project source set", async () => {
+  const bundle = resolve("resources/native-compositions/autobiz-lean")
+  const legacyId = "legacy-standalone-install"
+  const name = "autobiz-lean-knowledge"
+  const pluginPath = join(storage.getPluginsDir(), name)
+  const rootSkill = [
+    "---",
+    "name: legacy-skill",
+    "description: Independently installed skill",
+    "---",
+    "A skill installed before the upgrade.",
+    ""
+  ].join("\n")
+  const date = "2026-01-01T00:00:00.000Z"
+
+  // Model a pre-upgrade local installation. Its root Skill made the mixed package
+  // installable before Mods, and its registry record had no dependency-only field.
+  cpSync(join(bundle, "providers", "knowledge"), pluginPath, { recursive: true })
+  writeFileSync(join(pluginPath, "SKILL.md"), rootSkill)
+  storage.upsertPlugin({
+    id: legacyId,
+    name,
+    path: pluginPath,
+    version: "1.0.0",
+    description: "",
+    author: "",
+    origin: "local",
+    enabled: true,
+    skillCount: 1,
+    mcpServerCount: 0,
+    hookCount: 0,
+    createdAt: date,
+    updatedAt: date
+  })
+
+  const zip = new AdmZip()
+  zip.addLocalFolder(bundle, "portable-project")
+  zip.addFile("portable-project/providers/knowledge/SKILL.md", Buffer.from(rootSkill))
+  const bytes = zip.toBuffer()
+  const result = await handlers.get("plugins:install")!(null, {
+    fileName: "portable.zip",
+    requireMods: "capabilities",
+    buffer: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+  })
+  expect(result, JSON.stringify(result)).toMatchObject({ success: true, pluginName: "autobiz-lean" })
+  const project = storage.getPlugins().find((item) => item.id === result.pluginId)!
+  expect(project.bundleDependencyIds).toContain(legacyId)
+  expect(storage.getPlugins().find((item) => item.id === legacyId)?.dependencyOnly).toBeUndefined()
+  const newDependencies = storage.getPlugins().filter((item) =>
+    item.id !== legacyId && project.bundleDependencyIds?.includes(item.id)
+  )
+  expect(newDependencies).toHaveLength(2)
+  expect(newDependencies.every((item) => item.dependencyOnly === true)).toBe(true)
+
+  expect(await handlers.get("plugins:delete")!(null, project.id)).toEqual({ success: true })
+  expect(storage.getPlugins().find((item) => item.id === legacyId)).toMatchObject({ name, enabled: true })
+  expect(readFileSync(join(pluginPath, "SKILL.md"), "utf8")).toBe(rootSkill)
+  for (const item of [project, ...newDependencies]) {
+    expect(storage.getPlugins().some((plugin) => plugin.id === item.id)).toBe(false)
+    expect(existsSync(item.path)).toBe(false)
+  }
+}, 120000)
+
+it("commits ordinary plugin operations and refreshes their catalogs when optional Mods failed", async () => {
+  const { setModsManager, setModsUnavailable } = await import("../mods/manager")
+  const { DEFAULT_MOD_POLICY } = await import("../mods/policy")
+  const mcp = await import("../mcp/capability-service")
+  const hooks = await import("../hooks/notifications")
+  const refreshMcp = vi.spyOn(mcp, "invalidateMutableMcpCapabilityServices")
+  const notifyHooks = vi.spyOn(hooks, "notifyHooksChanged")
+  const name = "ordinary-plugin-during-mods-recovery"
+
+  setModsUnavailable("MODS_CONTROL_RECOVERY_REQUIRED", DEFAULT_MOD_POLICY, () => true)
+  try {
+    const zip = new AdmZip()
+    zip.addFile("plugin.json", Buffer.from(JSON.stringify({ name, version: "1.0.0" })))
+    zip.addFile("hooks/hooks.json", Buffer.from(originalHooks))
+    const bytes = zip.toBuffer()
+    const installed = await handlers.get("plugins:install")!(null, {
+      fileName: `${name}.zip`,
+      buffer: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+    })
+    expect(installed).toMatchObject({ success: true, pluginName: name, enabled: true })
+    const plugin = storage.getPlugins().find((item) => item.id === installed.pluginId)!
+    expect(existsSync(plugin.path)).toBe(true)
+    expect(refreshMcp).toHaveBeenLastCalledWith("plugin:update")
+    expect(notifyHooks).toHaveBeenLastCalledWith("plugin-installed")
+
+    expect(await handlers.get("plugins:setEnabled")!(null, { id: plugin.id, enabled: false }))
+      .toEqual({ success: true })
+    expect(storage.getPlugins().find((item) => item.id === plugin.id)?.enabled).toBe(false)
+    expect(refreshMcp).toHaveBeenLastCalledWith("plugin:setEnabled")
+    expect(notifyHooks).toHaveBeenLastCalledWith("plugin-enabled-changed")
+
+    expect(await handlers.get("plugins:delete")!(null, plugin.id)).toEqual({ success: true })
+    expect(storage.getPlugins().some((item) => item.id === plugin.id)).toBe(false)
+    expect(existsSync(plugin.path)).toBe(false)
+    expect(refreshMcp).toHaveBeenLastCalledWith("plugin:delete")
+    expect(notifyHooks).toHaveBeenLastCalledWith("plugin-deleted")
+  } finally {
+    setModsManager(undefined)
+    refreshMcp.mockRestore()
+    notifyHooks.mockRestore()
+  }
 })

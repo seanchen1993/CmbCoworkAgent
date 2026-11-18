@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs"
 import ts from "typescript"
 import { tmpdir } from "node:os"
 import { afterEach, expect, it, vi } from "vitest"
+import type { IpcMain, IpcMainInvokeEvent } from "electron"
+import { registerClawHandlers } from "../../ipc/mods-claw"
 import { ModControlStore } from "../control-store"
 import { FunctionModsManager } from "./manager"
 import { FunctionGuestRuntime } from "./guest-runtime"
@@ -16,6 +18,7 @@ import type { ClawProfile } from "../../../shared/mods/claw"
 import type { FunctionSessionAppendTicket } from "./session-append-ticket"
 import type { FunctionSessionAppendInput } from "../../../shared/mods/v2/session-append"
 import type { FunctionGuest } from "../../../shared/mods/v2/contracts"
+import { FUNCTION_DISPLAY_PROTOCOL } from "./display-rollout"
 
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -165,6 +168,353 @@ async function fixture(startup = "", hooks = "") {
     path
   }
 }
+
+async function applyDuringLoading(initial: "discovery" | "startup" = "discovery") {
+  const f = await fixture(initial === "startup" ? "await $.session.messages()" : "",
+    'on("prompt.edit",($,e,next)=>next(e))')
+  const context = { usage: "chat" as "chat" | "project", identity: "ordinary-original" }
+  const host = (f.manager as unknown as {
+    host: ConstructorParameters<typeof FunctionModsManager>[1]
+  }).host
+  host.capabilityContext = () => context
+  host.protects = () => true
+  const handlers = new Map<string, (...args: unknown[]) => Promise<unknown>>()
+  registerClawHandlers(
+    { handle: (key, fn) => handlers.set(key, fn) } as unknown as IpcMain,
+    {
+      store: f.store,
+      isEnabled: () => true,
+      closeFunctionThread: (threadId) => f.manager.closeThread(threadId)
+    } as unknown as ModsManager,
+    f.manager,
+    {
+      scope: () => f.root,
+      applicable: () => true,
+      context: () => context,
+      assertIdle: () => { if (f.state.busy) throw Error("ACTUAL_TASK_BUSY") },
+      changed: () => {}
+    }
+  )
+  const [source] = await f.manager.status(f.root)
+  if (!source.digest) throw Error("FIXTURE_COMPILED_DIGEST_REQUIRED")
+  const claw = new ClawStore(f.store)
+  const profile = { id: "chosen", name: "Chosen", capabilities: [{
+    pluginId: source.pluginId, name: source.name, digest: source.digest
+  }] }
+  claw.write(f.root, { revision: 0, profiles: [profile], active: null }, 0)
+  const loading = Promise.withResolvers<void>()
+  const draining = Promise.withResolvers<void>()
+  f.state.loadGate = loading.promise
+  f.state.gate = draining.promise
+  const opening = (initial === "startup" ? f.manager.commands(f.root, "ordinary")
+    : f.manager.hasEventHandler(f.root, "ordinary", "prompt.edit")).catch(error => error)
+  await vi.waitFor(() => expect(f.state.loads).toBe(1))
+  const apply = () => handlers.get("mods:claw-change")!({} as IpcMainInvokeEvent, {
+    threadId: "ordinary", mutation: { kind: "apply", id: "chosen", workspace: f.root,
+      revision: 1, bindingRevision: 0 }
+  })
+  return { ...f, context, host, loading, draining, opening, apply }
+}
+
+it.each(["siteRead", "commands", "prompt-edit-support"])(
+  "waits for the exact old runtime after applying Claw before %s enters its fresh guest", async method => {
+    const f = await applyDuringLoading()
+    try {
+      await f.apply()
+      f.loading.resolve()
+      expect(await f.opening).toBeInstanceOf(Error)
+      await vi.waitFor(() => expect(f.state.drains).toBe(1))
+      let completed = false
+      const reading = (method === "siteRead"
+        ? f.manager.siteRead(f.root, "ordinary", "UserMessage", {
+          text: "history", isExpanded: false, origin: { kind: "unclassified" }
+        })
+        : method === "commands"
+          ? f.manager.commands(f.root, "ordinary")
+          : f.manager.hasEventHandler(f.root, "ordinary", "prompt.edit"))
+        .then(value => { completed = true; return value })
+      const result = reading.catch(error => error)
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(completed).toBe(false)
+      expect(f.state.loads).toBe(1)
+      f.draining.resolve()
+      expect(await result).not.toBeInstanceOf(Error)
+      expect(f.state.loads).toBe(2)
+      expect(f.starts("ordinary")).toBe(method === "prompt-edit-support" ? undefined : 1)
+      expect(f.manager.runtimeSessions()).toMatchObject({ reserved: 0, retiring: 0 })
+    } finally {
+      f.loading.resolve()
+      f.draining.resolve()
+      await f.opening
+    }
+  }
+)
+
+it("coalesces concurrent ordinary display discovery after the old Claw guest drains", async () => {
+  const f = await applyDuringLoading()
+  try {
+    await f.apply()
+    f.loading.resolve()
+    await f.opening
+    await vi.waitFor(() => expect(f.state.drains).toBe(1))
+    const reads = [
+      f.manager.commands(f.root, "ordinary"),
+      f.manager.hasEventHandler(f.root, "ordinary", "prompt.edit"),
+      f.manager.siteRead(f.root, "ordinary", "UserMessage", {
+        text: "history", isExpanded: false, origin: { kind: "unclassified" }
+      })
+    ]
+    f.draining.resolve()
+    const results = await Promise.all(reads)
+    expect(results[1]).toBe(true)
+    expect(f.state.loads).toBe(2)
+    expect(f.starts("ordinary")).toBe(1)
+  } finally {
+    f.loading.resolve()
+    f.draining.resolve()
+    await f.opening
+  }
+})
+
+it("reuses a replacement that finished while another original read was resuming", async () => {
+  const f = await applyDuringLoading()
+  const resume = Promise.withResolvers<void>()
+  const observed = Promise.withResolvers<void>()
+  try {
+    await f.apply()
+    f.loading.resolve()
+    await f.opening
+    await vi.waitFor(() => expect(f.state.drains).toBe(1))
+    const internals = f.manager as unknown as {
+      waitForClosedReadRuntime(workspace: string, threadId: string): Promise<(() => void) | undefined>
+    }
+    const wait = internals.waitForClosedReadRuntime.bind(internals)
+    const waitingReads = vi.spyOn(internals, "waitForClosedReadRuntime")
+      .mockImplementationOnce(async (...args) => {
+      const current = await wait(...args)
+      observed.resolve()
+      await resume.promise
+      return current
+    })
+    const slow = f.manager.commands(f.root, "ordinary")
+    const caught = slow.catch(error => error)
+    const quick = f.manager.commands(f.root, "ordinary")
+    await vi.waitFor(() => expect(waitingReads).toHaveBeenCalledTimes(2))
+    f.draining.resolve()
+    await observed.promise
+    expect((await quick).length).toBe(1)
+    expect(f.state.loads).toBe(2)
+    resume.resolve()
+    expect(await caught).not.toBeInstanceOf(Error)
+    expect(f.state.loads).toBe(2)
+    expect(f.starts("ordinary")).toBe(1)
+  } finally {
+    resume.resolve()
+    f.loading.resolve()
+    f.draining.resolve()
+    await f.opening
+  }
+})
+
+it.each(["scope", "identity", "project", "disabled", "catalog", "selection", "selection-ABA"])(
+  "rejects %s changes during an ordinary Claw retirement wait without loading another guest", async change => {
+    const f = await applyDuringLoading()
+    try {
+      await f.apply()
+      f.loading.resolve()
+      await f.opening
+      await vi.waitFor(() => expect(f.state.drains).toBe(1))
+      const waiting = f.manager.commands(f.root, "ordinary").catch(error => error)
+      await new Promise(resolve => setTimeout(resolve, 10))
+      if (change === "scope") f.state.threadCurrent = false
+      if (change === "identity") f.context.identity = "different-incarnation"
+      if (change === "project") f.context.usage = "project"
+      if (change === "disabled") f.state.enabled = false
+      if (change === "catalog") f.manager.pluginsChanged(f.root)
+      if (change === "selection" || change === "selection-ABA") {
+        const store = new ClawStore(f.store), identity = JSON.stringify(["ordinary", "legacy"])
+        store.apply(f.root, identity, null, 2)
+        if (change === "selection-ABA") store.apply(f.root, identity, store.read(f.root).profiles[0], 3)
+        f.manager.closeThread("ordinary")
+      }
+      f.draining.resolve()
+      const result = await waiting
+      expect(result).toBeInstanceOf(Error)
+      expect(f.state.loads).toBe(1)
+    } finally {
+      f.loading.resolve()
+      f.draining.resolve()
+      await f.opening
+    }
+  }
+)
+
+it("retains failed physical retirement and never retries the old or new guest", async () => {
+  const f = await applyDuringLoading()
+  try {
+    await f.apply()
+    f.loading.resolve()
+    await f.opening
+    await vi.waitFor(() => expect(f.state.drains).toBe(1))
+    f.state.failDrain = true
+    const waiting = f.manager.commands(f.root, "ordinary").catch(error => error)
+    f.draining.resolve()
+    expect(await waiting).toBeInstanceOf(Error)
+    await expect(f.manager.commands(f.root, "ordinary")).rejects.toThrow("EXIT_UNCONFIRMED")
+    expect(f.manager.runtimeSessions()).toMatchObject({ reserved: 1, retiring: 1 })
+    expect(f.state.loads).toBe(1)
+    expect(f.state.drains).toBe(1)
+  } finally {
+    f.loading.resolve()
+    f.draining.resolve()
+    await f.opening
+  }
+})
+
+it("cancels only the waiting display caller while its predecessor keeps its physical reservation", async () => {
+  const f = await applyDuringLoading()
+  try {
+    await f.apply()
+    f.loading.resolve()
+    await f.opening
+    await vi.waitFor(() => expect(f.state.drains).toBe(1))
+    const cancelled = new AbortController()
+    const reading = f.manager.siteRead(f.root, "ordinary", "UserMessage", {
+      text: "history", isExpanded: false, origin: { kind: "unclassified" }
+    },
+      undefined, undefined, undefined, FUNCTION_DISPLAY_PROTOCOL, false, cancelled.signal)
+      .catch(error => error)
+    await new Promise(resolve => setTimeout(resolve, 10))
+    cancelled.abort(new Error("DISPLAY_CANCELLED"))
+    expect(await reading).toMatchObject({ message: "DISPLAY_CANCELLED" })
+    expect(f.manager.runtimeSessions()).toMatchObject({ reserved: 1, retiring: 1 })
+    expect(f.state.loads).toBe(1)
+    f.draining.resolve()
+    await vi.waitFor(() => expect(f.manager.runtimeSessions()).toMatchObject({ reserved: 0 }))
+    expect((await f.manager.commands(f.root, "ordinary")).length).toBe(1)
+    expect(f.state.loads).toBe(2)
+  } finally {
+    f.loading.resolve()
+    f.draining.resolve()
+    await f.opening
+  }
+})
+
+it("keeps ordinary display behind an old startup's real native finally after VM exit", async () => {
+  const f = await applyDuringLoading("startup")
+  const hostRead = Promise.withResolvers<void>()
+  try {
+    f.state.readGate = hostRead.promise
+    f.loading.resolve()
+    await vi.waitFor(() => expect(f.state.reading).toBe(true))
+    await f.apply()
+    f.draining.resolve()
+    await vi.waitFor(() => expect(f.state.drains).toBe(1))
+    let completed = false
+    const reading = f.manager.commands(f.root, "ordinary").then(value => {
+      completed = true
+      return value
+    })
+    const result = reading.catch(error => error)
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(completed).toBe(false)
+    expect(f.state.loads).toBe(1)
+    expect(f.manager.runtimeSessions()).toMatchObject({ reserved: 1 })
+    hostRead.resolve()
+    expect(await f.opening).toBeInstanceOf(Error)
+    expect(await result).not.toBeInstanceOf(Error)
+    expect(f.state.loads).toBe(2)
+    expect(f.manager.runtimeSessions()).toMatchObject({ reserved: 0, retiring: 0 })
+  } finally {
+    f.loading.resolve()
+    f.draining.resolve()
+    hostRead.resolve()
+    await f.opening
+  }
+})
+
+it("keeps the existing project Claw apply and busy error semantics", async () => {
+  const f = await applyDuringLoading()
+  try {
+    f.context.usage = "project"
+    f.context.identity = "original-project"
+    await f.apply()
+    f.loading.resolve()
+    await f.opening
+    await vi.waitFor(() => expect(f.state.drains).toBe(1))
+    await expect(f.manager.commands(f.root, "ordinary"))
+      .rejects.toMatchObject({ code: "MODS_RUNTIME_SESSION_BUSY" })
+    expect(f.manager.runtimeSessions()).toMatchObject({ reserved: 1, retiring: 1 })
+    expect(f.state.loads).toBe(1)
+  } finally {
+    f.loading.resolve()
+    f.draining.resolve()
+    await f.opening
+  }
+})
+
+it("rejects actually busy Claw application before retiring or changing its original binding", async () => {
+  const f = await applyDuringLoading()
+  try {
+    f.state.busy = true
+    await expect(f.apply()).rejects.toThrow("ACTUAL_TASK_BUSY")
+    expect(new ClawStore(f.store).selection(f.root, JSON.stringify(["ordinary", "legacy"])))
+      .toEqual({ revision: 0, profile: null })
+    expect(f.state.drains).toBe(0)
+    f.loading.resolve()
+    expect(await f.opening).toBe(true)
+    expect(f.state.loads).toBe(1)
+  } finally {
+    f.loading.resolve()
+    f.draining.resolve()
+    await f.opening
+  }
+})
+
+it("never waits on or releases a retirement receipt from another reservation generation", async () => {
+  const f = await applyDuringLoading()
+  try {
+    await f.apply()
+    f.loading.resolve()
+    await f.opening
+    await vi.waitFor(() => expect(f.state.drains).toBe(1))
+    const internals = f.manager as unknown as {
+      retiringEntries: Set<{ admissionReservation?: object }>
+    }
+    for (const entry of internals.retiringEntries) entry.admissionReservation = {}
+    await expect(f.manager.commands(f.root, "ordinary"))
+      .rejects.toMatchObject({ code: "MODS_RUNTIME_SESSION_BUSY" })
+    expect(f.state.loads).toBe(1)
+    expect(f.manager.runtimeSessions()).toMatchObject({ reserved: 1, retiring: 1 })
+  } finally {
+    f.loading.resolve()
+    f.draining.resolve()
+    await f.opening
+  }
+})
+
+it("bounds only the new ordinary read's wait while preserving the unconfirmed predecessor", async () => {
+  const f = await applyDuringLoading()
+  try {
+    await f.apply()
+    f.loading.resolve()
+    await f.opening
+    await vi.waitFor(() => expect(f.state.drains).toBe(1))
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+    const reading = f.manager.commands(f.root, "ordinary").catch(error => error)
+    await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1))
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(await reading).toMatchObject({ code: "MODS_RUNTIME_SESSION_BUSY" })
+    expect(vi.getTimerCount()).toBe(0)
+    expect(f.state.loads).toBe(1)
+    expect(f.manager.runtimeSessions()).toMatchObject({ reserved: 1, retiring: 1 })
+  } finally {
+    vi.useRealTimers()
+    f.loading.resolve()
+    f.draining.resolve()
+    await f.opening
+  }
+})
 
 it("retires generated stage and prepare owners before admitting two actual parallel child VMs", async () => {
   const f = await fixture()

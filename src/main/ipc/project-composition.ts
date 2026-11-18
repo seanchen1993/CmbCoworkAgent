@@ -194,8 +194,27 @@ export function registerProjectCompositionHandlers(ipc: IpcMain, deps: Dependenc
       .join("\n\n")
   }
   const databasePath = () => join(getOpenworkDir(), "project-compositions", "state.sqlite")
-  function compositionStore(): ProjectCompositionStore {
-    return (store ??= new ProjectCompositionStore(databasePath(), undefined, deps.assertWorkspaceIdle))
+  function compositionStore(options?: { failFastOnOpen: boolean }): ProjectCompositionStore {
+    return (store ??= new ProjectCompositionStore(
+      databasePath(), undefined, deps.assertWorkspaceIdle, options
+    ))
+  }
+
+  function guardThreadRunAdmission<T>(workspace: string, work: () => T): T {
+    try {
+      // Keep the same transaction and owner, without blocking the main thread on another writer.
+      return compositionStore({ failFastOnOpen: true })
+        .guardWorkspaceMutation(workspace, work, { failFastOnLock: true })
+    } catch (error) {
+      if (error instanceof Error && "errcode" in error && typeof error.errcode === "number") {
+        // Extended SQLite result codes keep SQLITE_BUSY (5) or SQLITE_LOCKED (6) in the low byte.
+        const primaryCode = error.errcode & 0xff
+        if (primaryCode === 5 || primaryCode === 6) {
+          throw Error("COMPOSITION_ADMISSION_BUSY: 项目组合状态正在更新，请稍后重试。", { cause: error })
+        }
+      }
+      throw error
+    }
   }
 
   function composition(): ProjectCompositionService {
@@ -920,5 +939,5 @@ export function registerProjectCompositionHandlers(ipc: IpcMain, deps: Dependenc
       }
     }
   )
-  return { service: composition, store: compositionStore }
+  return { service: composition, store: compositionStore, guardThreadRunAdmission }
 }

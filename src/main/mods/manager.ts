@@ -1842,6 +1842,7 @@ export class ModsManager {
       assertOriginal: () => void): Promise<void>
     invalidate(workspace: string): void
     pluginsChanged?(workspace: string, changedPluginIds?: readonly string[]): void
+    pluginCatalogChanged?(): void
     invalidateAll?(): void
     closeThread(threadId: string): void
     closeThreadAndWait?(threadId: string): Promise<void>
@@ -3281,6 +3282,12 @@ export class ModsManager {
       for (const id of changed)
         this.pluginSourceEpochs.set(id, (this.pluginSourceEpochs.get(id) ?? 0) + 1)
     } else this.unknownPluginSourceEpoch++
+    // Cold history rows can hold passive drawings without a runtime binding.
+    try {
+      this.functionLifecycle?.pluginCatalogChanged?.()
+    } catch (error) {
+      console.warn("[Mods] Plugin catalog notification failed:", error)
+    }
     for (const [workspace] of this.settings) {
       // Settings/protection remain pinned. Existing guest grants and source generations
       // still expire immediately, while the next native boundary discovers the new chain.
@@ -5846,7 +5853,7 @@ export function getModsManager(): ModsManager | undefined {
   return manager
 }
 
-/** Shutdown only drains a live manager. There is nothing to drain after an initialization failure. */
+/** Cleanup and catalog notifications need only a live manager; admission uses getModsManager. */
 export function getResidentModsManager(): ModsManager | undefined {
   return manager
 }

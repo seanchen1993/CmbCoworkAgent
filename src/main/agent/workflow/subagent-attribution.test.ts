@@ -97,6 +97,13 @@ async function runChild(options: {
     : undefined
   let firstWriteContext: AdoptionContext | undefined
   let laterWriteContext: AdoptionContext | undefined
+  function snapshotWriteContext(threadId: string): AdoptionContext | undefined {
+    const context = contexts.get(threadId)
+    if (!context) return undefined
+    const { harnessDeployUnitSnapshot, ...data } = context
+    // Preserve the in-flight snapshot alongside the data captured at the tool call.
+    return { ...structuredClone(data), harnessDeployUnitSnapshot }
+  }
   const deps: WorkflowSubagentDeps = {
     parentThreadId,
     defaultModelId: "test",
@@ -108,7 +115,12 @@ async function runChild(options: {
         (async function* () {
           options.beforeFirstWrite?.()
           // The first tool can write before the stream observes any Skill read.
-          firstWriteContext = structuredClone(contexts.get(threadId))
+          firstWriteContext = snapshotWriteContext(threadId)
+          if (options.withTrace) {
+            expect(firstWriteContext?.harnessDeployUnitSnapshot).toBe(
+              contexts.get(threadId)?.harnessDeployUnitSnapshot
+            )
+          }
           const messages: AIMessage[] = []
           if (options.readOwnSkill) {
             messages.push(
@@ -130,7 +142,7 @@ async function runChild(options: {
               }
             ]
           }
-          laterWriteContext = structuredClone(contexts.get(threadId))
+          laterWriteContext = snapshotWriteContext(threadId)
           messages.push(new AIMessage({ id: "done", content: "done" }))
           yield ["values", { messages }]
         })()

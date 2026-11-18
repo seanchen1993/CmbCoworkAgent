@@ -220,7 +220,7 @@ export function registerProjectRuntimeHandlers(
     const raw = getThreadRuntimeScope(threadId)?.metadata
     const metadata = typeof raw === "string" ? JSON.parse(raw) : raw
     return typeof metadata?.workspacePath === "string"
-      ? compositions.store().guardWorkspaceMutation(metadata.workspacePath, work)
+      ? compositions.guardThreadRunAdmission(metadata.workspacePath, work)
       : work()
   })
   projectAuthoringSessions.setChanged((threadId) => {

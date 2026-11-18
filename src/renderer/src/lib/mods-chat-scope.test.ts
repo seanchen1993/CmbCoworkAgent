@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs"
 import { runInNewContext } from "node:vm"
 import ts from "typescript"
+import { isDevelopmentThreadMetadata } from "../../../shared/mods/development-scope"
 import { afterEach, expect, it, vi } from "vitest"
 const hooks = vi.hoisted(() => ({ index: 0, rendering: false, rerender: false, slots: [] as unknown[],
   effects: [] as Array<() => void>, rollbacks: [] as Array<() => void>, cleanups: [] as Array<() => void> }))
@@ -316,11 +317,32 @@ it("the real ChatContainer provider carries revocation, error and retry contract
   const modsChatState = { enabled: false, ready: false, error: "denied", retry, isCurrent }
   const loadThreads = vi.fn(async () => {})
   const context = { threadId: "thread", modsChatState, hasCurrentThread: true,
-    currentForkWorkspacePath: "workspace", reloadMissingThread: () => { void loadThreads() } }
+    currentForkWorkspacePath: "workspace", reloadMissingThread: () => { void loadThreads() },
+    surface: "default", readOnly: false,
+    currentThread: { metadata: { agentMode: "normal" } as Record<string, unknown> },
+    isDevelopmentThreadMetadata }
   const read = () => runInNewContext(ts.transpileModule(`(${callback})()`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 }
-  }).outputText, context) as typeof modsChatState
+  }).outputText, context) as typeof modsChatState & { prefetchHistory: boolean }
   expect(read()).toMatchObject(modsChatState)
+  expect(read().prefetchHistory).toBe(true)
+  context.readOnly = true
+  expect(read().prefetchHistory).toBe(false)
+  context.readOnly = false
+  context.surface = "harness-project"
+  expect(read().prefetchHistory).toBe(false)
+  context.surface = "default"
+  for (const metadata of [
+    { harnessFeature: { projectId: "p", slug: "feature" } },
+    { harnessProjectSession: { projectId: "p", kind: "discussion" } },
+    { hostProjectRuntime: { projectId: "p" } },
+    { parentThreadId: "parent" },
+    { remoteState: "historical" }
+  ]) {
+    context.currentThread.metadata = { agentMode: "normal", ...metadata }
+    expect(read().prefetchHistory).toBe(false)
+  }
+  context.currentThread.metadata = { agentMode: "normal" }
   expect(read().isCurrent).toBe(isCurrent)
   expect(read().retry).toBe(retry)
   context.currentForkWorkspacePath = ""

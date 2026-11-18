@@ -21,7 +21,9 @@ import { join } from "path"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 
 const modsChanges = vi.hoisted(() => vi.fn())
-vi.mock("../mods/manager", () => ({ getModsManager: () => ({ pluginsChanged: modsChanges }) }))
+vi.mock("../mods/manager", () => ({
+  getResidentModsManager: () => ({ pluginsChanged: modsChanges })
+}))
 
 vi.mock("electron", () => ({
   app: {

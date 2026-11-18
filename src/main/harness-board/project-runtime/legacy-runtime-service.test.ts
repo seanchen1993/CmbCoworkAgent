@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { BrowserWindow } from "electron"
@@ -19,7 +19,7 @@ import { classifyManagedAgentFailure } from "../../agent/managed-agent-failure"
 import { ModControlStore } from "../../mods/control-store"
 import { compileFunctionPlugin } from "../../mods/v2/loader"
 import { createLegacyModsRuntime, registerLegacyModsRuntime } from "./legacy-mods-runtime"
-import { LegacyOperationStore } from "./legacy-operation-store"
+import { LegacyBindingGenerationError, LegacyOperationStore, legacyRecoveryRevision } from "./legacy-operation-store"
 import { HostPackageSnapshots } from "./package-snapshots"
 import { hostProjectFixture } from "./host-fixtures.test-helper"
 import { assertLegacyProjectEntry } from "./legacy-entry-gate"
@@ -32,6 +32,8 @@ import {
 } from "../../../shared/project-runtime"
 import { runtimeDigest } from "./safe-files"
 import { registerProjectCapabilityRunAdmission } from "../../agent/agent-run-admission"
+// Production registers the workflow owner before the first project run.
+import "../../agent/workflow/run-manager"
 
 const cleanups: Array<() => void> = []
 afterEach(() => cleanups.splice(0).forEach((run) => run()))
@@ -63,7 +65,7 @@ it("retains the original legacy result as unknown when selected capability clean
     terminalCode: "project_capability_cleanup_unconfirmed"
   })
 })
-function fixture() {
+function fixture(dependencies: Partial<import("./legacy-runtime-service").LegacyRuntimeDependencies> = {}) {
   const root = mkdtempSync(join(tmpdir(), "legacy-runtime-service-"))
   const workspace = join(root, "MixedCaseWorkspace"),
     pluginRoot = join(root, "installed")
@@ -96,7 +98,8 @@ function fixture() {
     {
       resolveThread: (id) => (id === "ordinary" ? undefined : { ...thread }),
       resolvePlugin: async () => plugin,
-      assertProjectIdle
+      assertProjectIdle,
+      ...dependencies
     }
   )
   const unregister = service.register()
@@ -107,6 +110,122 @@ function fixture() {
   })
   return { service, store, thread, workspace, pluginRoot, plugin, assertProjectIdle }
 }
+
+it("uses the original thread's separate repository without changing its retained plugin root", async () => {
+  const assertWorkspace = vi.fn()
+  const captureExecutionWorkspace = vi.fn(async () => assertWorkspace)
+  const f = fixture({ captureExecutionWorkspace })
+  const repository = join(f.workspace, "feature-repository")
+  mkdirSync(repository)
+  f.thread.workspace = repository
+  await f.service.enable("project", f.workspace)
+  await f.service.withBoundSkillSource("project", repository, async (source) => {
+    expect(source?.plugin.path).not.toBe(f.pluginRoot)
+    await source?.assertCurrent()
+  }, { featureId: "feature" })
+  expect(captureExecutionWorkspace).toHaveBeenCalledWith(
+    undefined, { projectId: "project", featureId: "feature" }, repository, undefined
+  )
+  registerAgentRunImplementation(async (_request, _delivery, context) => {
+    const source = currentRuntimePluginSource()
+    expect(source?.workspace).toBe(repository)
+    assertLegacyProjectEntry("project", "feature", repository, source)
+    expect(context.verifyResolvedThread?.({ workspacePath: f.workspace, metadata: {} }))
+      .toBe("LEGACY_WORKSPACE_CHANGED")
+    expect(context.verifyResolvedThread?.({ workspacePath: repository, metadata: {} })).toBeNull()
+    context.onRunTerminated?.({ outcome: "success", code: "old_execution" })
+  })
+  await (await startAgentRun({
+    threadId: "legacy", message: "existing project session", streamRequestId: "separate"
+  }, delivery)).completion
+  expect(f.service.operations("project")[0]).toMatchObject({
+    workspace: f.workspace, executionWorkspace: repository, status: "succeeded"
+  })
+  expect(captureExecutionWorkspace).toHaveBeenCalledWith("legacy", f.thread, repository, undefined)
+  expect(assertWorkspace).toHaveBeenCalled()
+})
+
+it.each(["fork-override", "managed-override"])(
+  "preserves the original %s for an unbound project but requires authority when retaining its version",
+  async (directory) => {
+    const f = fixture()
+    f.thread.workspace = join(f.workspace, directory)
+    mkdirSync(f.thread.workspace)
+    const body = vi.fn(async () => {})
+    registerAgentRunImplementation(body)
+    const request = { threadId: "legacy", message: "old project", streamRequestId: "ordinary" }
+    await (await startAgentRun(request, delivery)).completion
+    expect(body).toHaveBeenCalledOnce()
+    await f.service.enable("project", f.workspace)
+    await expect(startAgentRun(request, delivery))
+      .rejects.toThrow("LEGACY_EXECUTION_WORKSPACE_NOT_REGISTERED")
+    expect(body).toHaveBeenCalledOnce()
+    expect(f.service.operations("project")).toEqual([])
+  }
+)
+
+it("isolates a live ledger read failure only for projects with a trusted negative index", async () => {
+  const isKnownUnbound = vi.fn((projectId: string) => projectId === "unbound")
+  const f = fixture({ isKnownUnbound })
+  const body = vi.fn(async () => {})
+  registerAgentRunImplementation(body)
+  const get = vi.spyOn(f.store, "getBinding").mockImplementation(() => { throw Error("broken ledger") })
+  f.thread.projectId = "unbound"
+  await (await startAgentRun({ threadId: "legacy", message: "available" }, delivery)).completion
+  expect(body).toHaveBeenCalledOnce()
+  get.mockImplementationOnce(() => { throw new LegacyBindingGenerationError() })
+  await expect(startAgentRun({ threadId: "legacy", message: "mismatched binding" }, delivery))
+    .rejects.toThrow("PROJECT_LEGACY_RUNTIME_UNAVAILABLE")
+  f.thread.projectId = "bound-or-unknown"
+  await expect(startAgentRun({ threadId: "legacy", message: "unavailable" }, delivery))
+    .rejects.toThrow("PROJECT_LEGACY_RUNTIME_UNAVAILABLE")
+  expect(body).toHaveBeenCalledOnce()
+  get.mockRestore()
+})
+
+it("checks resource settlement, renderer ownership, original thread and directory before manual recovery", async () => {
+  const assertResources = vi.fn()
+  const assertBinding = vi.fn()
+  const authorizeRecovery = vi.fn(async () => ({ assertCurrent: assertResources }))
+  const f = fixture({
+    authorizeRecovery, assertProjectBindingCurrent: assertBinding, captureExecutionWorkspace: async () => () => {}
+  })
+  const repository = join(f.workspace, "other-repository")
+  mkdirSync(repository)
+  f.thread.workspace = repository
+  await f.service.enable("project", f.workspace)
+  registerAgentRunImplementation(async () => {})
+  const request = { threadId: "legacy", message: "interrupted", streamRequestId: "original" }
+  await (await startAgentRun(request, delivery)).completion
+  const record = f.service.operations("project")[0]
+  const review = {
+    projectId: "project", operationId: record.operationId, expectedRevision: legacyRecoveryRevision(record),
+    checkedOriginalResult: true as const
+  }
+  const approval = vi.fn()
+  assertResources.mockImplementationOnce(() => { throw Error("PROJECT_WORKFLOW_BUSY") })
+  await expect(f.service.reconcile(review, approval)).rejects.toThrow("PROJECT_WORKFLOW_BUSY")
+  expect(authorizeRecovery).toHaveBeenLastCalledWith(record, [f.workspace, repository])
+  approval.mockImplementationOnce(() => { throw Error("PROJECT_UNTRUSTED_SENDER") })
+  await expect(f.service.reconcile(review, approval)).rejects.toThrow("PROJECT_UNTRUSTED_SENDER")
+  f.thread.incarnation = "replaced"
+  await expect(f.service.reconcile(review, approval)).rejects.toThrow("LEGACY_RECOVERY_THREAD_CHANGED")
+  f.thread.incarnation = "original"
+  const renamed = repository + "-old"
+  renameSync(repository, renamed)
+  mkdirSync(repository)
+  await expect(f.service.reconcile(review, approval)).rejects.toThrow("LEGACY_WORKSPACE_CHANGED")
+  rmdirSync(repository)
+  renameSync(renamed, repository)
+  expect(f.service.inspect(record.operationId)?.status).toBe("unknown")
+  const [first, repeated] = await Promise.all([
+    f.service.reconcile(review, approval), f.service.reconcile(review, approval)
+  ])
+  expect(first).toEqual(repeated)
+  expect(first).toMatchObject({ status: "reconciled", businessStateValidity: "unknown" })
+  await expect(startAgentRun(request, delivery)).rejects.toThrow("LEGACY_OPERATION_ALREADY_RECORDED")
+  expect(() => f.service.disable("project")).not.toThrow()
+})
 
 it("leaves unconfigured original threads unchanged and pins opted-in original runs", async () => {
   const setup = fixture()

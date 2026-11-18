@@ -1,22 +1,44 @@
-import { createContext, useContext, useLayoutEffect, useMemo, useState } from "react"
+import { createContext, useCallback, useContext, useLayoutEffect, useMemo, useState } from "react"
+import { presentationInputDigest } from "../../lib/presentation-input-digest"
 
 interface UserMessageExpansionChoice {
   generation: number
   contentKey: string
   expanded: boolean
+  ownerMessageKey?: string
 }
 
 const MAX_SAVED_USER_MESSAGE_CHOICES = 500
 export const userMessageExpansionKey = (threadId: string, messageId: string): string =>
   JSON.stringify([threadId, messageId])
 
-/** Only explicit user choices survive virtual row recycling; they never alter message content. */
+export const assistantMarkdownExpansionKey = (
+  threadId: string,
+  messageId: string,
+  blockIndex: number
+): string => JSON.stringify([threadId, messageId, "assistant-markdown", blockIndex])
+
+export function assistantMarkdownContentKey(text: string): string {
+  // JSON preserves lone UTF-16 surrogates that TextEncoder would map to the same bytes.
+  return presentationInputDigest(JSON.stringify(text))
+}
+
+/** Only explicit choices survive virtual row recycling; they never alter message content. */
 export class UserMessageExpansionStore extends Map<string, UserMessageExpansionChoice> {
   latestRevision = 0
 
+  forgetChoice(key: string, revision: number): void {
+    if (revision < this.latestRevision) return
+    this.latestRevision = revision
+    this.delete(key)
+  }
+
   discardMessages(threadId: string, messageIds: ReadonlySet<string>, revision: number): void {
     this.latestRevision = Math.max(this.latestRevision, revision)
-    for (const id of messageIds) this.delete(userMessageExpansionKey(threadId, id))
+    const discarded = new Set(Array.from(messageIds, (id) => userMessageExpansionKey(threadId, id)))
+    for (const [key, choice] of this) {
+      if (discarded.has(choice.ownerMessageKey ?? key)) this.delete(key)
+    }
   }
 }
 
@@ -62,6 +84,51 @@ export function rememberUserMessageExpansion(
   choices.delete(messageKey)
   choices.set(messageKey, choice)
   if (choices.size > MAX_SAVED_USER_MESSAGE_CHOICES) choices.delete(choices.keys().next().value!)
+}
+
+export function useAssistantMarkdownExpansion(
+  threadId: string,
+  messageId: string,
+  blockIndex: number,
+  text: string | null,
+  snapshotGeneration: number,
+  revision: number
+): { expanded: boolean; onChange(expanded: boolean): void } | undefined {
+  const choices = useContext(UserMessageExpansionContext)
+  const key = assistantMarkdownExpansionKey(threadId, messageId, blockIndex)
+  const cached = choices?.get(key)
+  const hasChoice = cached !== undefined
+  const contentKey = useMemo(
+    () => (text !== null && hasChoice ? assistantMarkdownContentKey(text) : ""),
+    [text, hasChoice]
+  )
+  const { generation, expanded } = readUserMessageExpansion(
+    choices,
+    key,
+    contentKey,
+    snapshotGeneration,
+    revision
+  )
+  const [, setRenderRevision] = useState(0)
+  useLayoutEffect(() => {
+    if (text === null || !cached || !choices || revision < choices.latestRevision) return
+    if (choices.get(key) === cached &&
+      (cached.generation !== generation || cached.contentKey !== contentKey))
+      choices.delete(key)
+  }, [cached, choices, contentKey, generation, key, revision, text])
+  const onChange = useCallback((next: boolean) => {
+    if (!choices || text === null || revision < choices.latestRevision) return
+    if (next) {
+      rememberUserMessageExpansion(choices, key, {
+        generation,
+        contentKey: contentKey || assistantMarkdownContentKey(text),
+        expanded: true,
+        ownerMessageKey: userMessageExpansionKey(threadId, messageId)
+      }, revision)
+    } else choices.forgetChoice(key, revision)
+    setRenderRevision((value) => value + 1)
+  }, [choices, contentKey, generation, key, messageId, revision, text, threadId])
+  return choices && text !== null ? { expanded, onChange } : undefined
 }
 
 export function useUserMessageExpansion(

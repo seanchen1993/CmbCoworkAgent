@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
+  assistantMarkdownContentKey,
+  assistantMarkdownExpansionKey,
   readUserMessageExpansion,
   rememberUserMessageExpansion,
   UserMessageExpansionStore,
@@ -107,5 +109,65 @@ describe("explicit user message expansion survives virtual row recycling", () =>
     expect(choices.size).toBe(500)
     expect(choices.has("9499")).toBe(false)
     expect(choices.has("9500")).toBe(true)
+  })
+})
+
+describe("assistant Markdown choices share the bounded message expansion store", () => {
+  it("keeps pieces, roles and threads separate and requires the same displayed text", () => {
+    const choices = new UserMessageExpansionStore()
+    const ownerMessageKey = userMessageExpansionKey("thread", "message")
+    const first = assistantMarkdownExpansionKey("thread", "message", 0)
+    const second = assistantMarkdownExpansionKey("thread", "message", 1)
+    const otherThread = assistantMarkdownExpansionKey("other", "message", 0)
+    const prefix = "Same prefix".repeat(4000), suffix = "Same suffix".repeat(4000)
+    const original = assistantMarkdownContentKey(prefix + "original" + suffix)
+    const redacted = assistantMarkdownContentKey(prefix + "redacted" + suffix)
+    expect(original).toHaveLength(64)
+    expect(redacted).not.toBe(original)
+    expect(assistantMarkdownContentKey("\ud800")).not.toBe(assistantMarkdownContentKey("\ufffd"))
+    rememberUserMessageExpansion(choices, first, {
+      ownerMessageKey,
+      contentKey: original,
+      expanded: true,
+      generation: 3
+    }, 3)
+    expect(readUserMessageExpansion(choices, first, original, 3, 3).expanded).toBe(true)
+    expect(readUserMessageExpansion(choices, first, redacted, 3, 3).expanded).toBe(false)
+    for (const key of [ownerMessageKey, second, otherThread])
+      expect(readUserMessageExpansion(choices, key, original, 3, 3).expanded).toBe(false)
+  })
+
+  it("discards every Markdown block for the retired attempt without reviving a stale choice", () => {
+    const choices = new UserMessageExpansionStore()
+    const ownerMessageKey = userMessageExpansionKey("thread", "message")
+    const first = assistantMarkdownExpansionKey("thread", "message", 0)
+    const second = assistantMarkdownExpansionKey("thread", "message", 2)
+    const otherThread = assistantMarkdownExpansionKey("other", "message", 0)
+    const contentKey = assistantMarkdownContentKey("Assistant reply")
+    const choice = { ownerMessageKey, contentKey, expanded: true, generation: 0 }
+    for (const key of [ownerMessageKey, first, second])
+      rememberUserMessageExpansion(choices, key, choice)
+    rememberUserMessageExpansion(choices, otherThread, {
+      ...choice,
+      ownerMessageKey: userMessageExpansionKey("other", "message")
+    })
+    choices.discardMessages("thread", new Set(["message"]), 1)
+    rememberUserMessageExpansion(choices, first, choice, 0)
+    expect([...choices.keys()]).toEqual([otherThread])
+    expect(readUserMessageExpansion(choices, first, contentKey, 1, 1).expanded).toBe(false)
+  })
+
+  it("does not let an older render reopen a newly collapsed assistant reply", () => {
+    const choices = new UserMessageExpansionStore()
+    const key = assistantMarkdownExpansionKey("thread", "message", 0)
+    const contentKey = assistantMarkdownContentKey("Assistant reply")
+    const opened = { generation: 3, contentKey, expanded: true }
+    rememberUserMessageExpansion(choices, key, opened, 3)
+    choices.forgetChoice(key, 4)
+    rememberUserMessageExpansion(choices, key, opened, 3)
+    expect(readUserMessageExpansion(choices, key, contentKey, 3, 4).expanded).toBe(false)
+    rememberUserMessageExpansion(choices, key, opened, 4)
+    choices.forgetChoice(key, 3)
+    expect(readUserMessageExpansion(choices, key, contentKey, 3, 4).expanded).toBe(true)
   })
 })

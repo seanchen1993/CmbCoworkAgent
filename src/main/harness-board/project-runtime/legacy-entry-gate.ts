@@ -14,8 +14,14 @@ export interface LegacyBoundSkillSource {
   /** Recheck the same durable binding, source bytes and current installed owner. */
   assertCurrent(): Promise<void>
 }
+export interface LegacyProjectWorkspaceScope {
+  featureId: string
+  runId?: string
+  projectSessionKind?: string
+}
 type LegacySkillSourceReader = <T>(projectId: string, workspace: string,
-  work: (source: LegacyBoundSkillSource | undefined) => Promise<T>) => Promise<T>
+  work: (source: LegacyBoundSkillSource | undefined) => Promise<T>,
+  scope?: LegacyProjectWorkspaceScope) => Promise<T>
 let skillSourceReader: LegacySkillSourceReader | undefined
 export function registerLegacyProjectEntryGate(next: LegacyGate,
   readSkillSource?: LegacySkillSourceReader): () => void {
@@ -32,8 +38,9 @@ export function registerLegacyProjectEntryGate(next: LegacyGate,
 
 /** Main-process preparation only; supplies no runtime token, grant or execution authority. */
 export function withLegacyProjectSkillSource<T>(projectId: string, workspace: string,
-  work: (source: LegacyBoundSkillSource | undefined) => Promise<T>): Promise<T> {
-  return skillSourceReader ? skillSourceReader(projectId, workspace, work) : work(undefined)
+  work: (source: LegacyBoundSkillSource | undefined) => Promise<T>,
+  scope?: LegacyProjectWorkspaceScope): Promise<T> {
+  return skillSourceReader ? skillSourceReader(projectId, workspace, work, scope) : work(undefined)
 }
 /** Applies only to explicitly enabled project bindings; never changes unconfigured projects. */
 export function assertLegacyProjectEntry(

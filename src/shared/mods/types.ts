@@ -181,6 +181,8 @@ export interface ModWorkspaceStatus {
   diagnostics: ModDiagnostic[]
   policy?: { id: string; digest: string; required: boolean }
   recovery?: string
+  /** A known optional deployment permits explicit opt-out while its control store recovers. */
+  recoveryCanDisable?: boolean
 }
 
 export interface ModAuditEntry {

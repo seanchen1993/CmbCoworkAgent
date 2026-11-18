@@ -187,6 +187,14 @@ export interface AgentRunExecutionContext {
     workspacePath: string | undefined
     metadata: Record<string, unknown>
   }) => string | null
+  /** Main-only proof for a newly created managed session, before its session link is published. */
+  legacyManagedWorkspace?: {
+    projectId: string
+    featureId: string
+    runId: string
+    threadId: string
+    workspace: string
+  }
   allowForeignOwnerGoalControl?: boolean
   trustedExplicitSkill?: SkillUseBlockMetadata
   allowTrustedTransportSkillMarker?: boolean

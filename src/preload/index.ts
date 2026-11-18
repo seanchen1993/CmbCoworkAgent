@@ -3465,10 +3465,8 @@ const api = {
       ipcRenderer.on("mods:markdown-preview-invalidated", listener)
       return () => ipcRenderer.removeListener("mods:markdown-preview-invalidated", listener)
     },
-    siteMount: (threadId: string, component: import("../shared/mods/v2/sites").FunctionUiSite, messageId?: string): Promise<string | null> =>
-      ipcRenderer.invoke("mods:function-site-mount", { threadId, component, messageId }),
-    siteMountOutcome: (threadId: string, component: import("../shared/mods/v2/sites").FunctionUiSite, messageId?: string, expectedRequestId?: string): Promise<import("../shared/mods/v2/sites").FunctionSiteMountOutcome> =>
-      ipcRenderer.invoke("mods:function-site-mount-outcome", { threadId, component, messageId, expectedRequestId }),
+    siteMount: functionSiteReads.siteMount,
+    siteMountOutcome: functionSiteReads.siteMountOutcome,
     nextSiteReadId: functionSiteReads.nextSiteReadId,
     cancelSiteRead: functionSiteReads.cancelSiteRead,
     siteRender: functionSiteReads.siteRender,
@@ -3514,6 +3512,7 @@ const api = {
     approveFunction: (threadId: string, pluginId: string, digest: string, expectedWorkspace?: string): Promise<void> => ipcRenderer.invoke("mods:approve-function", { threadId, pluginId, digest, ...(expectedWorkspace !== undefined ? { expectedWorkspace } : {}) }),
     revokeFunction: (threadId: string, name: string, expectedWorkspace?: string): Promise<void> => ipcRenderer.invoke("mods:revoke-function", { threadId, name, ...(expectedWorkspace !== undefined ? { expectedWorkspace } : {}) }),
     status: (threadId: string): Promise<ModWorkspaceStatus> => ipcRenderer.invoke("mods:status", threadId),
+    recoveryStatus: (): Promise<ModWorkspaceStatus | null> => ipcRenderer.invoke("mods:recovery-status"),
     configure: (threadId: string, enabled: boolean, outputPolicy: boolean, expectedWorkspace?: string): Promise<void> =>
       ipcRenderer.invoke("mods:configure", { threadId, enabled, outputPolicy, ...(expectedWorkspace !== undefined ? { expectedWorkspace } : {}) }),
     approve: (threadId: string, pluginId: string, digest: string, expectedWorkspace?: string): Promise<void> =>
@@ -5229,7 +5228,9 @@ const api = {
     legacyProjects: {
       view: (projectId: string) => ipcRenderer.invoke("project-runtime:legacy-view", projectId),
       enable: (projectId: string) => ipcRenderer.invoke("project-runtime:legacy-enable", projectId),
-      disable: (projectId: string) => ipcRenderer.invoke("project-runtime:legacy-disable", projectId)
+      disable: (projectId: string) => ipcRenderer.invoke("project-runtime:legacy-disable", projectId),
+      reconcile: (input: import("../shared/project-runtime/legacy-operations").LegacyProjectRecoveryInput) =>
+        ipcRenderer.invoke("project-runtime:legacy-reconcile", input)
     },
     onManagedRunChanged: (callback: (event: ManagedRunChangeEvent) => void): (() => void) => {
       const handler = (_event: unknown, payload: ManagedRunChangeEvent): void => callback(payload)

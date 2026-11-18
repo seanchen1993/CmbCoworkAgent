@@ -14,10 +14,13 @@ export class ModError extends Error {
 }
 
 /** Keep admission closed while exposing a stable recovery hint across Electron's error boundary. */
-export function compositionRecoveryError(error: unknown): unknown {
+export function compositionRecoveryError(
+  error: unknown,
+  context: "submit" | "display" = "submit"
+): unknown {
   if (!(error instanceof ModFunctionError) || error.code !== "CLAW_CAPABILITY_CHANGED") return error
   const result = new ModError(MODS_COMPOSITION_REVIEW_REQUIRED)
-  result.message += `: ${MODS_COMPOSITION_REVIEW_MESSAGE}`
+  if (context === "submit") result.message += `: ${MODS_COMPOSITION_REVIEW_MESSAGE}`
   return result
 }
 

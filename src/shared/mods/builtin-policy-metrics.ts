@@ -40,7 +40,7 @@ export type BuiltinLegacyMetrics =
       executions: Array<{
         operationId: string
         threadId: string
-        status: "started" | "succeeded" | "failed" | "cancelled" | "unknown"
+        status: import("../project-runtime/legacy-operations").LegacyProjectOperation["status"]
         startedAt: number
         settledAt: number | null
         durationMs: number | null
@@ -52,6 +52,7 @@ export type BuiltinLegacyMetrics =
         failed: number
         cancelled: number
         unknown: number
+        reconciled?: number
       }
       observedExecutionSpanMs: number | null
       totalSettledExecutionMs: number | null

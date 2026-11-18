@@ -4,14 +4,14 @@ import { projectBundleRemovalIds } from "./project-bundle-removal"
 
 const plugin = (id: string, dependencyOnly?: boolean) => ({ id, dependencyOnly }) as PluginMetadata
 
-it("removes exclusive source-set components, including legacy unmarked bundle components", () => {
+it("removes only exclusive source-set components with recorded dependency ownership", () => {
   expect(
     projectBundleRemovalIds(
       "project",
       [plugin("project"), plugin("rules", true), plugin("old")],
       new Map([["project", ["rules", "old", "rules", "project"]]])
     )
-  ).toEqual(["project", "rules", "old"])
+  ).toEqual(["project", "rules"])
 })
 
 it("preserves independently installed, shared and project packages", () => {

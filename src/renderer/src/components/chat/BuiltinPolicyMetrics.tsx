@@ -54,7 +54,7 @@ export function BuiltinOriginalProjectMetrics({ value }: { value?: BuiltinLegacy
           <p>
             执行中 {value.counts.started} 次，结束 {value.counts.succeeded} 次，失败{" "}
             {value.counts.failed} 次， 停止 {value.counts.cancelled} 次，结果待核对{" "}
-            {value.counts.unknown} 次。
+            {value.counts.unknown} 次，已人工核对 {value.counts.reconciled ?? 0} 次。
           </p>
           <p>
             已知执行时间：

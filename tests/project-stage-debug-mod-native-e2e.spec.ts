@@ -89,6 +89,9 @@ async function open() {
   await page.evaluate(() => {
     ;(window as unknown as { __name: unknown }).__name = (value: unknown) => value
   })
+  const releaseIntro = page.getByRole("dialog", { name: "把助手变成适合你的工作台" })
+  await releaseIntro.getByRole("button", { name: "先自己试试", exact: true }).click()
+  await releaseIntro.waitFor({ state: "hidden" })
 }
 async function showCreator(emptyAuthorThreadId?: string) {
   const workspace = page.getByRole("dialog", { name: "插件创作工作区", exact: true })

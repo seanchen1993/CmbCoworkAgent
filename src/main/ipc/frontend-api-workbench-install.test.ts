@@ -13,7 +13,7 @@ vi.mock("electron", () => ({
 }))
 vi.mock("../mcp/capability-service", () => ({ invalidateMutableMcpCapabilityServices: vi.fn() }))
 vi.mock("../hooks/notifications", () => ({ notifyHooksChanged: vi.fn() }))
-vi.mock("../mods/manager", () => ({ getModsManager: () => undefined }))
+vi.mock("../mods/manager", () => ({ getResidentModsManager: () => undefined }))
 
 type Handler = (event: unknown, ...args: unknown[]) => Promise<PluginInstallResult>
 const handlers = new Map<string, Handler>()

@@ -1200,6 +1200,7 @@ interface CustomAPI {
     approveFunction(threadId: string, pluginId: string, digest: string, expectedWorkspace?: string): Promise<void>
     revokeFunction(threadId: string, name: string, expectedWorkspace?: string): Promise<void>
     status(threadId: string): Promise<import("../shared/mods/types").ModWorkspaceStatus>
+    recoveryStatus(): Promise<import("../shared/mods/types").ModWorkspaceStatus | null>
     configure(threadId: string, enabled: boolean, outputPolicy: boolean, expectedWorkspace?: string): Promise<void>
     approve(threadId: string, pluginId: string, digest: string, expectedWorkspace?: string): Promise<void>
     revoke(threadId: string, modId: string, expectedWorkspace?: string): Promise<void>

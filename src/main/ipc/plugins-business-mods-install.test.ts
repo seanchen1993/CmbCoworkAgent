@@ -17,7 +17,7 @@ vi.mock("electron", () => ({
 }))
 vi.mock("../mcp/capability-service", () => ({ invalidateMutableMcpCapabilityServices: vi.fn() }))
 vi.mock("../hooks/notifications", () => ({ notifyHooksChanged: vi.fn() }))
-vi.mock("../mods/manager", () => ({ getModsManager: () => undefined }))
+vi.mock("../mods/manager", () => ({ getResidentModsManager: () => undefined }))
 const compile = vi.hoisted(() => vi.fn())
 vi.mock("../mods/v2/loader", async (original) => {
   const actual = await original<typeof import("../mods/v2/loader")>()

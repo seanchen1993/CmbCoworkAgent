@@ -18,7 +18,7 @@ vi.mock("electron", () => ({
 }))
 vi.mock("../mcp/capability-service", () => ({ invalidateMutableMcpCapabilityServices: vi.fn() }))
 vi.mock("../hooks/notifications", () => ({ notifyHooksChanged: vi.fn() }))
-vi.mock("../mods/manager", () => ({ getModsManager: () => undefined }))
+vi.mock("../mods/manager", () => ({ getResidentModsManager: () => undefined }))
 
 let owned: string
 let plugins: typeof import("./plugins")

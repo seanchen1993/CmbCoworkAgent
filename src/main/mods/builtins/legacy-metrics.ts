@@ -33,10 +33,7 @@ export function projectLegacyExecutionMetrics(
   operations: readonly LegacyProjectOperation[],
   managedRun?: ManagedRunSnapshot
 ): BuiltinLegacyMetrics {
-  const fixedBinding =
-    binding?.projectId === projectId && isSameWorkspacePath(scope.workspace, binding.workspace)
-      ? binding
-      : undefined
+  const fixedBinding = binding?.projectId === projectId ? binding : undefined
   const managed =
     managedRun?.projectId === projectId &&
     managedRun.featureId === featureId &&
@@ -46,7 +43,6 @@ export function projectLegacyExecutionMetrics(
     )
       ? managedRun
       : undefined
-  if (!fixedBinding && !managed) return { state: "unavailable" }
   const timestamp = (value: string | undefined) =>
     value ? Date.parse(`${value.replace(" ", "T")}+08:00`) : NaN
   const managedDuration = managed?.completedAt
@@ -61,11 +57,14 @@ export function projectLegacyExecutionMetrics(
             operation.featureId === featureId &&
             operation.installedPluginId === fixedBinding?.installedPluginId &&
             operation.packageDigest === fixedBinding?.packageDigest &&
-            isSameWorkspacePath(operation.workspace, scope.workspace)
+            isSameWorkspacePath(operation.workspace, fixedBinding?.workspace) &&
+            isSameWorkspacePath(operation.executionWorkspace ?? operation.workspace, scope.workspace)
         )
         .map((operation) => [operation.operationId, operation])
     ).values()
   ]
+  if (!managed && !matched.length && !isSameWorkspacePath(scope.workspace, fixedBinding?.workspace))
+    return { state: "unavailable" }
   const executions = matched
     .slice(0, 100)
     .map((operation) => ({
@@ -76,6 +75,7 @@ export function projectLegacyExecutionMetrics(
       settledAt: operation.settledAt,
       durationMs:
         operation.status !== "unknown" &&
+        operation.status !== "reconciled" &&
         operation.status !== "started" &&
         operation.settledAt !== null &&
         operation.settledAt >= operation.startedAt
@@ -83,7 +83,7 @@ export function projectLegacyExecutionMetrics(
           : null,
       source: "original-runtime-ledger" as const
     }))
-  const counts = { started: 0, succeeded: 0, failed: 0, cancelled: 0, unknown: 0 }
+  const counts = { started: 0, succeeded: 0, failed: 0, cancelled: 0, unknown: 0, reconciled: 0 }
   executions.forEach((row) => counts[row.status]++)
   const intervals = executions
     .filter((row) => row.durationMs !== null)

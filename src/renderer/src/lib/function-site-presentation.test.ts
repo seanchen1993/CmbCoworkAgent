@@ -39,6 +39,72 @@ const key = (id = "message", text = "raw", width = 800) =>
 
 afterEach(() => vi.useRealTimers())
 
+it("retains static inactive history only as an exact passive drawing", () => {
+  const cache = new FunctionSitePresentationCache(() => true)
+  const row = "assistant-row", facts = { text: "raw", isFirstOfReply: true }
+  const geometry = { height: 104, width: 700, layoutWidth: 760 }
+  const admission = cache.capture("AssistantMessage", key(), row)
+  cache.saveInactiveHistory(key(), row, "ToolResult", facts, admission, geometry)
+  expect(cache.read(key())).toBeNull()
+  cache.saveInactiveHistory(key(), row, "AssistantMessage", { text: "invalid" }, admission, geometry)
+  expect(cache.read(key())).toBeNull()
+  cache.measure(key(), "AssistantMessage", geometry)
+  cache.saveInactiveHistory(key(), row, "AssistantMessage", facts, admission, geometry)
+  facts.text = "replaced"
+  const retained = cache.read(key())!
+  expect(retained.presentation).toMatchObject({
+    inactiveHistory: true, height: 104, width: 700,
+    nativeContent: { entries: [{ props: { text: "raw" } }] }
+  })
+  expect(cache.measuredHeight(key(), 760)).toBe(104)
+  expect(cache.read(key("message", "replaced"))).toBeNull()
+  expect(cache.consumeProgress(key(), retained, row)).toBeNull()
+  cache.invalidate()
+})
+
+it("retires every width of inactive history while preserving the fresh drawing admission", () => {
+  const cache = new FunctionSitePresentationCache(() => true)
+  const row = "assistant-row", facts = { text: "raw", isFirstOfReply: true }
+  const anotherWidth = key("message", "raw", 900)
+  const listener = vi.fn()
+  cache.subscribe(listener, anotherWidth)
+  for (const id of [key(), anotherWidth])
+    cache.saveInactiveHistory(id, row, "AssistantMessage", facts, cache.capture("AssistantMessage", id, row))
+  cache.save(key("other"), "AssistantMessage", drawing(), 30, cache.capture("AssistantMessage"))
+  const fresh = cache.capture("AssistantMessage", key(), row)
+  cache.discardInactiveHistory(row)
+  expect(cache.read(key())).toBeNull()
+  expect(cache.read(anotherWidth)).toBeNull()
+  expect(cache.read(key("other"))).not.toBeNull()
+  expect(listener).toHaveBeenCalled()
+  cache.save(key(), "AssistantMessage", drawing(), 30, fresh)
+  expect(cache.read(key())?.presentation.inactiveHistory).toBeUndefined()
+  cache.invalidate()
+})
+
+it.each(["authority", "view", "expiry", "budget"] as const)(
+  "does not retain inactive history past its %s boundary", reason => {
+    vi.useFakeTimers()
+    let current = true
+    const before = budget.stats().bytes
+    const cache = new FunctionSitePresentationCache(() => current)
+    const save = (id: string) => cache.saveInactiveHistory(
+      key(id), id, "AssistantMessage", { text: "raw", isFirstOfReply: true },
+      cache.capture("AssistantMessage", key(id), id)
+    )
+    save("message")
+    const retained = cache.read(key())!
+    if (reason === "authority") current = false
+    if (reason === "view") cache.releaseView()
+    if (reason === "expiry") vi.advanceTimersByTime(120001)
+    if (reason === "budget") for (let index = 0; index < 100; index++) save(String(index))
+    expect(retained.current()).toBe(false)
+    expect(cache.read(key())).toBeNull()
+    cache.invalidate()
+    expect(budget.stats().bytes).toBeLessThanOrEqual(before)
+  }
+)
+
 it("consumes a cached row without copying, renewing or retaining its exact-key admission", () => {
   vi.useFakeTimers()
   const cache = new FunctionSitePresentationCache(() => true)

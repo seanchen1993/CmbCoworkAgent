@@ -18,7 +18,6 @@ import {
 } from "../../mods/devtools/development-dependency-prepare"
 import { z } from "zod"
 import { getModDevelopmentService } from "../../mods/devtools/development-service"
-import { developmentCatalogPage } from "../../mods/devtools/development-catalog"
 import {
   AUTHORING_TEMPLATE_KINDS,
   createAuthoringTemplate
@@ -42,7 +41,7 @@ import {
 import { PROJECT_ACTION_LOCK_PATH } from "../../../shared/project-runtime/action-bindings"
 import { ModFunctionError } from "../../../shared/mods/v2/contracts"
 import { FunctionUserConfigDeclarationError } from "../../../shared/mods/v2/user-config"
-import { DevelopmentCandidateError } from "../../mods/devtools/development-candidate-diagnostics"
+import type { DevelopmentCandidateError } from "../../mods/devtools/development-candidate-diagnostics"
 import { CREATOR_REQUEST_LIMITS } from "../../mods/devtools/creator-request-budget"
 import {
   AUTHORING_BUNDLE_LIMITS,
@@ -206,19 +205,19 @@ export function createModAuthoringTool(input: {
     async (args) => {
       let inspectDraft: (() => CurrentAuthoringDraft) | undefined
       let inspectProjectDraft: (() => CurrentAuthoringDraft) | undefined
+      const service = getModDevelopmentService()
+      const assertTurn = () => {
+        signal.throwIfAborted()
+        if (
+          !lease ||
+          lease.owner !== "desktop" ||
+          !ownsLease?.() ||
+          !service?.isCreatorMode(threadId, workspace)
+        )
+          throw Error("DEVELOPMENT_TURN_CHANGED")
+        assertCreator?.()
+      }
       try {
-        const service = getModDevelopmentService()
-        const assertTurn = () => {
-          signal.throwIfAborted()
-          if (
-            !lease ||
-            lease.owner !== "desktop" ||
-            !ownsLease?.() ||
-            !service?.isCreatorMode(threadId, workspace)
-          )
-            throw Error("DEVELOPMENT_TURN_CHANGED")
-          assertCreator?.()
-        }
         assertTurn()
         service!.claimAuthoringBudget?.(threadId, lease!.runId, "operation")
         const id = () => {
@@ -623,12 +622,22 @@ export function createModAuthoringTool(input: {
             }
             break
           }
-          case "catalog":
-            result = args.catalogSection === "project-dependencies"
-              ? developmentDependencyCatalogPage({ mainDirectory: __dirname,
-                  assetPath: args.assetPath, cursor: args.cursor, expectedDigest: args.sourceDigest })
-              : developmentCatalogPage(args.catalogSection, args.cursor, args.query)
+          case "catalog": {
+            if (args.catalogSection === "project-dependencies") {
+              result = developmentDependencyCatalogPage({
+                mainDirectory: __dirname,
+                assetPath: args.assetPath,
+                cursor: args.cursor,
+                expectedDigest: args.sourceDigest
+              })
+            } else {
+              const { developmentCatalogPage } =
+                await import("../../mods/devtools/development-catalog")
+              assertTurn()
+              result = developmentCatalogPage(args.catalogSection, args.cursor, args.query)
+            }
             break
+          }
           case "list":
             result = service!.status(threadId)
             break
@@ -788,7 +797,20 @@ export function createModAuthoringTool(input: {
         }
         assertTurn()
         return JSON.stringify({ ok: true, result })
-      } catch (error) {
+      } catch (failure) {
+        let error = failure
+        let candidateError: DevelopmentCandidateError | undefined
+        if (error instanceof Error && error.name === "DevelopmentCandidateError") {
+          try {
+            const diagnostics = await import("../../mods/devtools/development-candidate-diagnostics")
+            if (error instanceof diagnostics.DevelopmentCandidateError) {
+              assertTurn()
+              candidateError = error
+            }
+          } catch (cause) {
+            error = cause
+          }
+        }
         const rawCode =
           error instanceof ModFunctionError
             ? error.code
@@ -906,15 +928,15 @@ export function createModAuthoringTool(input: {
               }
             : {}),
           ...(missingFields.length ? { missingFields } : {}),
-          ...(error instanceof DevelopmentCandidateError
+          ...(candidateError
             ? {
-                target: error.target,
-                diagnostics: error.diagnostics,
+                target: candidateError.target,
+                diagnostics: candidateError.diagnostics,
                 repair: {
                   attempt: candidateAttempts,
                   maxAttempts: CREATOR_REQUEST_LIMITS.candidates,
                   remaining: null,
-                  canRetry: error.repairable,
+                  canRetry: candidateError.repairable,
                   previousVersionPreserved: true
                 }
               }
@@ -968,8 +990,8 @@ export function createModAuthoringTool(input: {
               ? "依赖未解决或契约不匹配。先按 repair.discovery 读真实动作和不匹配原因，按 sourceCatalog 读取真实sourceId；原样复用用dependency_prepare(sourceId)一次保存/检查/准备并结束本轮等待原生确认，无需逐页抄源码或手填摘要。定制仍可save完整源码再check/request_reuse。确认后重读目录并保留原Hooks、知识、配置和检查继续编译。无需先执行 Function trial；禁止猜identity、自动授权或删减业务检查。"
             : args.action === "dependency_save" && code.startsWith("DEVELOPMENT_DEPENDENCY_")
               ? "固定依赖源码未保存。用catalog(catalogSection:project-dependencies,assetPath:sourceId)核对真实sourceId/sourceDigest；assetPath仅sourceId，不能是文件或本机路径。源码变化须重新核对摘要，不能自动重放未知保存结果；原生安装和授权仍须另行确认。"
-            : error instanceof DevelopmentCandidateError
-              ? error.diagnostics[0].hint
+            : candidateError
+              ? candidateError.diagnostics[0].hint
               : args.action === "project_patch" && ["DEVELOPMENT_INPUT", "DEVELOPMENT_ID_REQUIRED",
                   "DEVELOPMENT_REVISION_REQUIRED", "PROJECT_DRAFT_REVISION_CHANGED", "PROJECT_DRAFT_SOURCE_CHANGED",
                   "AUTHORING_SOURCE_INVALID", "AUTHORING_SOURCE_PATH", "AUTHORING_SOURCE_TEXT",

@@ -107,17 +107,21 @@ describe("original project workspace admission", () => {
   })
   it("fences legacy execution and uncertain results including Windows path aliases", () => {
     const f = fixture()
+    const executionWorkspace = join(f.root, "execution")
     for (const status of ["started", "unknown"]) {
       const db = new DatabaseSync(f.legacy)
       db.exec("DELETE FROM legacy_operations")
       db.prepare("INSERT INTO legacy_operations VALUES (?,?)").run(
         status,
-        JSON.stringify({ workspace: f.workspace })
+        JSON.stringify({ workspace: f.workspace, executionWorkspace })
       )
       db.close()
       const alias =
         process.platform === "win32" ? f.workspace.replaceAll("\\", "/").toUpperCase() : f.workspace
       expect(() => assertOriginalProjectWorkspaceIdle(alias, f.host, f.legacy)).toThrow(
+        "COMPOSITION_WORKSPACE_BUSY"
+      )
+      expect(() => assertOriginalProjectWorkspaceIdle(executionWorkspace, f.host, f.legacy)).toThrow(
         "COMPOSITION_WORKSPACE_BUSY"
       )
     }

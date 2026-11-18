@@ -1,3 +1,5 @@
+import { MODS_COMPOSITION_REVIEW_REQUIRED } from "../../../shared/mods/v2/contracts"
+
 const transientCodes = new Set([
   "MODS_DEVELOPMENT_APPLYING",
   "MODS_ENTRY_EXPIRED",
@@ -17,6 +19,14 @@ export function functionSiteErrorCode(cause: unknown): string | undefined {
 
 export function isTransientFunctionSiteError(cause: unknown): boolean {
   return transientCodes.has(functionSiteErrorCode(cause) ?? "")
+}
+
+/** These host decisions pause display; they never authorize native fallback or a retry. */
+export function functionSiteUnavailableMessage(code: string | undefined): string | undefined {
+  if (code === MODS_COMPOSITION_REVIEW_REQUIRED)
+    return "此会话引用的灵件已停用或发生变化，暂时无法显示相关内容。"
+  if (code === "MODS_DISABLED") return "灵件当前未启用，相关内容暂时无法显示。"
+  return undefined
 }
 
 /** External notifications may request reads, but cannot replenish autonomous retry credit. */

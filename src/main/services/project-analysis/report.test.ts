@@ -278,7 +278,7 @@ describe("private report storage", () => {
     )!
     const dir = join(base, "project-analysis", owner, "reports", doc.summary.id)
     rmSync(dir, { recursive: true })
-    symlinkSync(root(), dir)
+    symlinkSync(root(), dir, process.platform === "win32" ? "junction" : "dir")
     expect(() => a.read(doc.summary.id)).toThrow("不存在")
   })
 })

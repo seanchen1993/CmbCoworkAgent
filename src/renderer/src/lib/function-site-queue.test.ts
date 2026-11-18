@@ -87,6 +87,46 @@ it("leaves three physical slots for visible text when overscan cannot finish", a
   expect(started).toHaveLength(9)
 })
 
+it("prepares offscreen transcript text in two bounded lanes while reserving visible capacity", async () => {
+  const queue = createFunctionSiteQueue()
+  const gate = Promise.withResolvers<void>()
+  const started: string[] = []
+  const read = (name: string, component: Parameters<typeof functionSitePriority>[0], visible = false) =>
+    queue.run(() => true, async () => { started.push(name); await gate.promise },
+      () => functionSitePriority(component, visible, true))
+  const pending = [
+    ...Array.from({ length: 5 }, (_, index) => read(`message-${index}`, "AssistantMessage")),
+    read("duration", "TurnDuration"), read("visible", "UserMessage", true)
+  ]
+  expect(started).toEqual(["message-0", "message-1", "duration", "visible"])
+  gate.resolve()
+  await Promise.all(pending)
+})
+
+it("reclassifies queued prefetch text before starting another cold row", async () => {
+  const queue = createFunctionSiteQueue()
+  const gate = Promise.withResolvers<void>()
+  const started: string[] = []
+  let visible = false
+  const busy = Array.from({ length: 4 }, () => queue.run(() => true, () => gate.promise))
+  const first = queue.run(() => true, async () => { started.push("old") },
+    () => functionSitePriority("AssistantMessage", false, true))
+  const next = queue.run(() => true, async () => { started.push("now-visible") },
+    () => functionSitePriority("AssistantMessage", visible, true))
+  visible = true
+  gate.resolve()
+  await Promise.all([...busy, first, next])
+  expect(started).toEqual(["now-visible", "old"])
+})
+
+it("keeps unqualified and optional history reads in their existing background lane", () => {
+  expect(functionSitePriority("AssistantMessage", false)).toBe("background")
+  expect(functionSitePriority("UserMessage", false, false)).toBe("background")
+  expect(functionSitePriority("ToolResult", false, true)).toBe("background")
+  expect(functionSitePriority("TurnDuration", true, true)).toBe("background")
+  expect(functionSitePriority("ChatHeader", false, true)).toBe("interactive")
+})
+
 it("promotes newly visible rows and demotes rows scrolled away while waiting", async () => {
   const queue = createFunctionSiteQueue()
   let release!: () => void

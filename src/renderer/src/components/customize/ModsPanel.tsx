@@ -55,7 +55,8 @@ const InstalledPluginFlowDefinition = lazy(() =>
 )
 
 async function readWorkspaceStatus(threadId: string | null): Promise<ModWorkspaceStatus | null> {
-  if (!threadId) return null
+  if (!threadId) return typeof window.api.mods.recoveryStatus === "function"
+    ? window.api.mods.recoveryStatus() : null
   try {
     return await window.api.mods.status(threadId)
   } catch (error) {
@@ -454,6 +455,7 @@ export function ModsSettings({
       if (
         workspace.status === "fulfilled" &&
         workspace.value &&
+        !workspace.value.recovery &&
         workspaceHint !== undefined &&
         normalizeWorkspacePathKey(workspace.value.workspace) !==
           normalizeWorkspacePathKey(workspaceHint)
@@ -465,14 +467,18 @@ export function ModsSettings({
         setInstalled(plugins.value)
         setInstalledAccount(account)
       }
-      if (enabled.status === "fulfilled") setGlobalEnabled(enabled.value)
+      const recovery = workspace.status === "fulfilled" && workspace.value?.recovery
+        ? workspace.value : undefined
+      const configured = recovery ? recovery.globalEnabled
+        : enabled.status === "fulfilled" ? enabled.value : undefined
+      if (configured !== undefined) setGlobalEnabled(configured)
       if (currentUsage.status === "fulfilled") setUsage(currentUsage.value ?? null)
       setUsageReadFailed(currentUsage.status === "rejected")
-      setGlobalLoaded(enabled.status === "fulfilled")
+      setGlobalLoaded(configured !== undefined)
       setStatus(workspace.status === "fulfilled" ? workspace.value : null)
       const failures = [
         plugins.status === "rejected" && "无法读取已添加的灵件",
-        enabled.status === "rejected" && "无法读取 灵件总开关状态",
+        configured === undefined && "无法读取 灵件总开关状态",
         workspace.status === "rejected" && "无法读取项目灵件状态"
       ].filter(Boolean)
       setReadFailed(failures.length > 0)
@@ -1036,7 +1042,22 @@ export function ModsSettings({
       )}
       {status?.recovery && (
         <div role="alert" className="space-y-2 text-destructive">
-          <p>无法读取灵件的权限设置，工具操作已暂停。请关闭应用并联系管理员恢复设置。</p>
+          <p>
+            {status.recoveryCanDisable
+              ? !globalLoaded
+                ? "无法确认灵件开关状态，普通会话尚未恢复。可尝试关闭灵件，关闭成功后才能继续使用普通会话。"
+                : globalEnabled
+                ? "无法读取灵件的权限设置。可在下方更多设置中关闭灵件，恢复普通会话；重新启用前需恢复设置。"
+                : "灵件已关闭，普通会话可继续使用。重新启用灵件前，请联系管理员恢复设置。"
+              : "无法读取灵件的权限设置，工具操作已暂停。请关闭应用并联系管理员恢复设置。"}
+          </p>
+          {status.recoveryCanDisable && !globalLoaded && (
+            <Button variant="outline" disabled={blocked} onClick={() => void run(async () => {
+              await window.api.mods.configureGlobal(false)
+            })}>
+              关闭灵件并恢复普通会话
+            </Button>
+          )}
           <details className="text-xs">
             <summary className="cursor-pointer">技术详情</summary>
             <p className="mt-2">
@@ -1056,7 +1077,8 @@ export function ModsSettings({
             <input
               type="checkbox"
               checked={globalEnabled}
-              disabled={blocked || !globalLoaded}
+              disabled={blocked || !globalLoaded || Boolean(status?.recovery &&
+                (!status.recoveryCanDisable || !globalEnabled))}
               onChange={(event) =>
                 void run(async () => {
                   const value = await window.api.mods.configureGlobal(event.target.checked)

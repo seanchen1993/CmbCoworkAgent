@@ -2,7 +2,8 @@ import { developmentNativeComponentId } from "../mods/v2/development-native-auth
 import type { FunctionSiteReadRequest, FunctionSiteRenderRequest,
   FunctionSiteReadCancellation } from "../../shared/mods/v2/display-read-protocol"
 import { captureThreadDirectoryChange } from "../services/thread-directory-change"
-import { FunctionSiteReadRequests } from "./function-site-read-requests"
+import { FunctionSiteReadRequests, type FunctionSiteDocumentOwner } from "./function-site-read-requests"
+import type { FunctionSiteMountOutcome, FunctionSiteReadOutcome } from "../../shared/mods/v2/sites"
 import { ModApprovalInbox, registerModApprovalInbox } from "./mods-approval-inbox"
 import { projectDependencyImpact, summarizeProjectDependencyImpact } from "../mods/devtools/project-dependency-impact"
 import { createDesktopGitInspectionProvider } from "../mods/v2/platform-git-desktop"
@@ -110,7 +111,7 @@ import {
   getWindowsSandboxMode
 } from "../storage"
 import { getModsManager, ModsManager, setModsManager, setModsUnavailable } from "../mods/manager"
-import { ModError, modErrorCode } from "../mods/errors"
+import { compositionRecoveryError, ModError, modErrorCode } from "../mods/errors"
 import { installPluginFromDir } from "./plugins"
 import { CreatorProjectDeliveries } from "../mods/devtools/creator-project-delivery"
 import { CreatorSourceSets } from "../mods/devtools/creator-source-set"
@@ -296,18 +297,21 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   } catch (error) {
     const code = error instanceof ModError ? modErrorCode(error) : "MODS_CONTROL_RECOVERY_REQUIRED"
     setModsUnavailable(code, deployment, getModsGlobalEnabledState)
-    ipcMain.handle("mods:status", (event) => {
+    const recoveryStatus = (event: IpcMainInvokeEvent) => {
       trusted(event)
       return {
         workspace: "",
-        globalEnabled: false,
+        globalEnabled: getModsGlobalEnabledState(),
         enabled: false,
         outputPolicy: true,
         mods: [],
         diagnostics: [],
-        recovery: code
+        recovery: code,
+        recoveryCanDisable: deployment?.required === false
       }
-    })
+    }
+    ipcMain.handle("mods:status", recoveryStatus)
+    ipcMain.handle("mods:recovery-status", recoveryStatus)
     ipcMain.handle("mods:chat-display-capability", (event,
       input?: { threadId: string; expectedWorkspace: string | null }) => {
       trusted(event)
@@ -319,11 +323,24 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     })
     ipcMain.handle("mods:global-enabled", (event) => {
       trusted(event)
+      // This is the effective runtime capability. Settings read the persisted value via status.
       return false
     })
-    ipcMain.handle("mods:configure-global", (event) => {
+    ipcMain.handle("mods:configure-global", (event, enabled: boolean) => {
       trusted(event)
-      throw new ModError(code)
+      if (typeof enabled !== "boolean") throw new ModError("MODS_SETTINGS_INVALID")
+      // Only a known optional deployment may recover ordinary chat by explicit opt-out.
+      // Required or unreadable policy, and every attempt to enable, still fail closed.
+      if (enabled || deployment?.required !== false) throw new ModError(code)
+      const value = setModsGlobalEnabled(false)
+      const owner = window()
+      try {
+        if (owner && !owner.isDestroyed() && !owner.webContents.isDestroyed())
+          owner.webContents.send("mods:configuration-changed")
+      } catch (notificationError) {
+        console.warn("[Mods] Could not notify the window after disabling recovery mode:", notificationError)
+      }
+      return value
     })
     ipcMain.handle("mods:function-unlocked", (event) => {
       trusted(event)
@@ -1406,14 +1423,16 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     canRun: scope => manager.isEnabled(scope.workspace),
     context: threadId => {
       const workspace = writableThreadScope(threadId)
-      const thread = getThreadCore(threadId)!
+      const thread = getThreadRuntimeScope(threadId)!
       const incarnation = captureThreadIncarnation(thread)
       const assertCurrent = () => {
-        if (writableThreadScope(threadId) !== workspace ||
-          !matchesThreadIncarnation(getThreadCore(threadId), incarnation))
+        if (writableThreadScope(threadId) !== workspace) throw Error("DEVELOPMENT_SCOPE_CHANGED")
+        const current = getThreadRuntimeScope(threadId)
+        if (!current || !matchesThreadIncarnation(current, incarnation))
           throw Error("DEVELOPMENT_SCOPE_CHANGED")
-        const current = getThreadCore(threadId)!
-        const metadata = typeof current.metadata === "string" ? JSON.parse(current.metadata) : current.metadata
+        // Authoring identity never consumes or replaces the potentially large file history.
+        const metadata =
+          typeof current.metadata === "string" ? JSON.parse(current.metadata) : current.metadata
         if (!isDevelopmentThreadMetadata(metadata ?? {}))
           throw Error("DEVELOPMENT_ORDINARY_LOCAL_THREAD_REQUIRED")
       }
@@ -2120,6 +2139,16 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       editorNavigation.invalidate()
       functions.pluginsChanged(workspace, ids)
     },
+    pluginCatalogChanged: () => {
+      for (const owner of BrowserWindow.getAllWindows()) {
+        try {
+          if (!owner.isDestroyed() && !owner.webContents.isDestroyed())
+            owner.webContents.send("mods:configuration-changed")
+        } catch (error) {
+          console.warn("[Mods] Could not notify a window of the plugin catalog change:", error)
+        }
+      }
+    },
     invalidateAll: () => { editorNavigation.invalidate(); functions.invalidateAll() },
     prepareEnd: (reason, threadId) => functions.prepareEnd(reason, threadId),
     closeThread: (threadId) => {
@@ -2295,7 +2324,14 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       turnId: facts.turnId, runtimeAuthority: facts.runtimeAuthority,
       userInitiated: false, leased: false, immediate: true }, () =>
       withFunctionMarkdownDisplay({ epoch: markdownFrame.epoch, assertCurrent: assertDisplay }, async () => {
-      const value = await run(workspace)
+      let value: T
+      try {
+        value = await run(workspace)
+      } catch (error) {
+        const review = compositionRecoveryError(error, "display")
+        if (review !== error) assertDisplay()
+        throw review
+      }
       assertDisplay()
       return value
     }))
@@ -2719,6 +2755,39 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     functions.placedRevealAck(workspace, input.threadId, ack)
     check()
   })
+  async function withSiteOwnerDelivery<T extends string | null | FunctionSiteMountOutcome | FunctionSiteReadOutcome>(
+    event: IpcMainInvokeEvent,
+    threadId: string,
+    draw: (workspace: string, signal?: AbortSignal) => Promise<T>,
+    read?: { readId?: unknown }
+  ): Promise<T> {
+    trusted(event)
+    const register = siteReadRequests.captureSiteRegistration(event.sender)
+    let site: FunctionSiteDocumentOwner | undefined
+    const retire = () => site?.retire()
+    const render = (signal?: AbortSignal) => withDisplayExecution(event, threadId, async workspace => {
+      const result = await draw(workspace, signal)
+      const owner = typeof result === "string" ? result : result?.state === "mounted"
+        ? result.owner : undefined
+      if (owner) {
+        const receipt = functions.captureSiteRetirement(workspace, threadId, owner)
+        if (!receipt) throw new ModError("MODS_UI_SITE_CLOSED")
+        site = { owner, workspace, threadId, ...receipt }
+      }
+      return result
+    })
+    try {
+      const result = read
+        ? await siteReadRequests.run(event.sender, read.readId, render, async () => { retire() })
+        : await render()
+      if (site) register(site)
+      return result
+    } catch (error) {
+      retire()
+      throw error
+    }
+  }
+
   ipcMain.handle(
     "mods:function-site-mount",
     (
@@ -2728,7 +2797,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         component: import("../../shared/mods/v2/sites").FunctionUiSite
         messageId?: string
       }
-    ) => withDisplayExecution(event, input?.threadId, workspace =>
+    ) => withSiteOwnerDelivery(event, input?.threadId, workspace =>
       functions.siteMount(workspace, input.threadId, input.component, input.messageId))
   )
   ipcMain.handle(
@@ -2738,7 +2807,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       component: import("../../shared/mods/v2/sites").FunctionUiSite
       messageId?: string
       expectedRequestId?: string
-    }) => withDisplayExecution(event, input?.threadId, workspace =>
+    }) => withSiteOwnerDelivery(event, input?.threadId, workspace =>
       functions.siteMountOutcome(workspace, input.threadId, input.component,
         input.messageId, input.expectedRequestId))
   )
@@ -2759,22 +2828,13 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       )))
     }
   )
-  ipcMain.handle("mods:function-site-read", (event, input: FunctionSiteReadRequest) => {
-    trusted(event)
-    let mounted: { workspace: string; owner: string } | undefined
-    return siteReadRequests.run(event.sender, input?.readId, signal =>
-      withDisplayExecution(event, input?.threadId, async workspace => {
-        const outcome = await functions.siteRead(workspace, input.threadId, input.component,
+  ipcMain.handle("mods:function-site-read", (event, input: FunctionSiteReadRequest) =>
+    withSiteOwnerDelivery(event, input?.threadId, (workspace, signal) =>
+      functions.siteRead(workspace, input.threadId, input.component,
           parseModJson(encodeModJson(input.props)) as ModObject, input.presentationId,
           input.messageId, input.expectedRequestId, input.protocol, input.ownerRequired === true,
-          ...(signal ? [signal] as const : []))
-        if (outcome.state === "mounted") mounted = { workspace, owner: outcome.owner }
-        return outcome
-      }), async () => {
-        if (mounted) await functions.siteUnmount(mounted.workspace, input.threadId, mounted.owner)
-          .catch(() => {})
-      })
-  })
+          ...(signal ? [signal] as const : [])), { readId: input?.readId })
+  )
   ipcMain.on("mods:function-site-read-scope", event => {
     try {
       trusted(event)
@@ -2790,8 +2850,13 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   })
   ipcMain.handle(
     "mods:function-site-unmount",
-    (event, input: { threadId: string; owner: string }) =>
-      functions.siteUnmount(scope(event, input?.threadId), input.threadId, input.owner)
+    async (event, input: { threadId: string; owner: string }) => {
+      trusted(event)
+      const site = siteReadRequests.takeSite(event.sender, input?.threadId, input?.owner)
+      if (!site) return
+      try { await functions.siteUnmount(site.workspace, site.threadId, site.owner) }
+      finally { site.retire() }
+    }
   )
   ipcMain.handle(
     "mods:function-site-act",
@@ -3003,6 +3068,10 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     writableScope(event, input?.threadId)
     if (typeof input.id !== "string") throw new ModError("MODS_JOB_UNAVAILABLE")
     queue.cancel(input.threadId, input.id)
+  })
+  ipcMain.handle("mods:recovery-status", (event) => {
+    trusted(event)
+    return null
   })
   ipcMain.handle("mods:status", async (event, threadId: string) => {
     const workspace = scope(event, threadId)

@@ -14,7 +14,11 @@ import { ModControlStore } from "../mods/control-store"
 import type { FunctionModsManager } from "../mods/v2/manager"
 import { configureProjectUseRuntime } from "../harness-board/project-use-authorization"
 import { ProjectCompositionStore } from "../harness-board/project-runtime/composition-store"
-import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "../agent/thread-run-lease"
+import {
+  claimLocalThreadRunLease,
+  getLocalThreadRunLease,
+  releaseLocalThreadRunLease
+} from "../agent/thread-run-lease"
 import { HostUserInputStore } from "../services/host-user-input-store"
 import { configureHostUserInputPersistence } from "../services/user-input"
 
@@ -315,7 +319,7 @@ it("admits ordinary chat with an existing composition store and an unreadable Ho
       .toBe(true)
     releaseLocalThreadRunLease("chat", "desktop", "plain")
 
-    seed.create({
+    const { run } = seed.create({
       apiVersion: "devclaw.project-composition/v1",
       parentProjectId: "parent",
       workspace,
@@ -324,13 +328,63 @@ it("admits ordinary chat with an existing composition store and an unreadable Ho
     }, "request")
     expect(() => claimLocalThreadRunLease({ threadId: "chat", owner: "desktop", runId: "leased" }))
       .toThrow("COMPOSITION_WORKSPACE_BUSY")
+    const sharedStore = state.composition!.store()
+    expect(sharedStore.withWorkspaceOwner(run.id, () =>
+      sharedStore.guardWorkspaceMutation(workspace, () =>
+        claimLocalThreadRunLease({ threadId: "chat", owner: "mods", runId: "owned" })
+      )
+    ).acquired).toBe(true)
     expect(claimLocalThreadRunLease({ threadId: "unrelated", owner: "desktop", runId: "other" }).acquired)
       .toBe(true)
     expect(state.hostStoreOpened).not.toHaveBeenCalled()
   } finally {
     releaseLocalThreadRunLease("chat", "desktop", "leased")
+    releaseLocalThreadRunLease("chat", "mods", "owned")
     releaseLocalThreadRunLease("unrelated", "desktop", "other")
     seed.close()
+  }
+})
+
+it("returns a retryable admission error without waiting for a cold or warm composition writer", async () => {
+  const root = mkdtempSync(join(canonicalTmpdir(), "composition-admission-contention-"))
+  templateRoots.push(root)
+  state.dataRoot = root
+  state.threadWorkspaces = { chat: root }
+  state.registerComposition = (await vi.importActual<typeof import("./project-composition")>(
+    "./project-composition"
+  )).registerProjectCompositionHandlers
+
+  const directory = join(root, "project-compositions")
+  mkdirSync(directory)
+  const writer = new DatabaseSync(join(directory, "state.sqlite"))
+  const claim = () => claimLocalThreadRunLease({
+    threadId: "chat",
+    owner: "desktop",
+    runId: "run"
+  })
+  function checkConcurrentWriter(): void {
+    writer.exec("BEGIN IMMEDIATE")
+    try {
+      const start = performance.now()
+      expect(claim).toThrow("COMPOSITION_ADMISSION_BUSY")
+      expect(performance.now() - start).toBeLessThan(1_000)
+      expect(getLocalThreadRunLease("chat")).toBeUndefined()
+    } finally {
+      writer.exec("ROLLBACK")
+    }
+    expect(claim().acquired).toBe(true)
+    expect(releaseLocalThreadRunLease("chat", "desktop", "run")).toBe(true)
+  }
+
+  try {
+    nativeHandlers()
+    // Lock the old journal mode before the store's first WAL/schema setup.
+    checkConcurrentWriter()
+    // The shared store is now open in WAL mode. Race its outer BEGIN IMMEDIATE.
+    checkConcurrentWriter()
+  } finally {
+    releaseLocalThreadRunLease("chat", "desktop", "run")
+    writer.close()
   }
 })
 

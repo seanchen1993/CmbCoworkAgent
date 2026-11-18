@@ -57,6 +57,12 @@ export class FunctionHostOnlySites {
     return this.owners.has(owner)
   }
 
+  owns(workspace: string, threadId: string, component: FunctionUiSite, owner: string): boolean {
+    const site = this.owners.get(owner)
+    return site?.component === component && site.entry.workspace === workspace &&
+      site.entry.threadId === threadId
+  }
+
   workspaces(): string[] {
     return [...new Set([...this.entries.values()].map((entry) => entry.workspace))]
   }
@@ -220,10 +226,27 @@ export class FunctionHostOnlySites {
   retireOwner(owner: string): void {
     const entry = this.owners.get(owner)?.entry
     if (!entry) return
-    entry.sites.retire(owner)
-    this.owners.delete(owner)
-    entry.owners.delete(owner)
-    this.releaseEmpty(entry)
+    try {
+      entry.sites.retire(owner)
+    } finally {
+      this.owners.delete(owner)
+      entry.owners.delete(owner)
+      this.releaseEmpty(entry)
+    }
+  }
+
+  captureRetirement(workspace: string, threadId: string, owner: string) {
+    const route = this.owners.get(owner)
+    if (!route || route.entry.workspace !== workspace || route.entry.threadId !== threadId)
+      return undefined
+    const slot = route.entry.sites.captureRetirement(owner)
+    if (!slot) return undefined
+    const captured = new WeakRef(route)
+    return { current: slot.current, retire: () => {
+      const original = captured.deref()
+      if (original && this.owners.get(owner) === original) this.retireOwner(owner)
+      else slot.retire()
+    } }
   }
 
   private releaseEmpty(entry: HostOnlyEntry): void {

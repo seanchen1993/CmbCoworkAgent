@@ -2,7 +2,7 @@ import { prepareMarketCommand, persistMarketRuntimeDirectory } from "../services
 import { HARNESS_NAME_PATTERN } from "../../shared/harness-name"
 import { buildNativeDiscussionContext } from "./native-discussion-context"
 import { prepareProjectUseCreation, prepareProjectUseUpdate,
-  revokeProjectUseAuthorization } from "./project-use-authorization"
+  revokeProjectUseAuthorization, type ProjectUseParentAuthority } from "./project-use-authorization"
 import {
   nativeHarnessPlugin, initializeNativeHarnessProject, createNativeHarnessFeature,
   observeDurableNativeHarnessProject, readNativeHarnessFeature, nativeHarnessProjectDetail, nativeHarnessRunDetail,
@@ -71,6 +71,7 @@ import {
   resolveKnowledgeDepositionPath,
   resolveProjectKnowledgeBases
 } from "../services/knowledge-base-manager"
+import { knowledgeDirectory } from "../services/knowledge-base-state"
 import type { KnowledgeDepositionWorkspace } from "../../shared/knowledge-base-types"
 import { harnessNotifications } from "./notifications"
 import { startOwnedHookCommand } from "../hooks/owned-command"
@@ -2049,9 +2050,11 @@ export async function prepareHarnessProjectUseParent(projectId: string) {
 
 /** Exact child ownership; callers cannot authorize a parent directory or another Feature. */
 export function assertHarnessProjectUseChild(
-  binding: import("../../shared/harness-board-types").HarnessNativeFeatureBinding
-): void {
+  binding: import("../../shared/harness-board-types").HarnessNativeFeatureBinding,
+  checkParent?: (parent: ProjectUseParentAuthority | undefined) => void
+) {
   const parent = readHarnessProjectUseParent(binding.projectId)
+  checkParent?.(parent)
   if (!parent?.active || parent.installedPluginId !== binding.installedPluginId)
     throw Error("HARNESS_NATIVE_PROJECT_CHANGED")
   const project = nativeProjectAuthorityById.get(binding.projectId)
@@ -2059,6 +2062,7 @@ export function assertHarnessProjectUseChild(
   const plugin = getPlugins().find(item => item.id === binding.installedPluginId)
   if (!plugin?.enabled || plugin.name !== binding.expectedPlugin.name ||
     plugin.version !== binding.expectedPlugin.version) throw Error("PROJECT_PLUGIN_UNAVAILABLE")
+  return parent
 }
 
 /** Normal native conversations keep the original configured repository directory. */
@@ -2071,14 +2075,14 @@ export async function prepareHarnessFeatureThreadSession(projectId: string, feat
   }
   const binding = readNativeHarnessFeature(projectId, featureId)
   if (!binding) throw Error("HARNESS_NATIVE_FEATURE_MISSING")
-  assertHarnessProjectUseChild(binding)
-  const parent = readHarnessProjectUseParent(projectId)!
+  const parent = assertHarnessProjectUseChild(binding)
   const directoryIdentity = runtimeDirectoryIdentity(binding.repositoryWorkspace)
   const assertCurrent = () => {
-    if (readHarnessProjectUseParent(projectId)?.identity !== parent.identity ||
-      runtimeDirectoryIdentity(binding.repositoryWorkspace) !== directoryIdentity)
-      throw Error("HARNESS_NATIVE_BINDING_CHANGED")
-    assertHarnessProjectUseChild(binding)
+    assertHarnessProjectUseChild(binding, (currentParent) => {
+      if (currentParent?.identity !== parent.identity ||
+        runtimeDirectoryIdentity(binding.repositoryWorkspace) !== directoryIdentity)
+        throw Error("HARNESS_NATIVE_BINDING_CHANGED")
+    })
   }
   const launchStage = readNativeHarnessFeatureStage(projectId, featureId)
   assertCurrent()
@@ -2861,6 +2865,30 @@ export async function prepareHarnessKnowledgeDeposition(
   const project = (await readProjectStore()).projects.find((item) => item.projectId === projectId)
   if (!project) throw new Error("项目不存在")
   return prepareKnowledgeDeposition(project.knowledgeBaseIds ?? [], targetId)
+}
+
+export async function captureHarnessKnowledgeDepositionWorkspace(
+  projectId: string,
+  workspace: string
+): Promise<() => void> {
+  const workspaceChanged = () => {
+    throw Error("PROJECT_HOST_LEGACY_EXECUTION_WORKSPACE_NOT_REGISTERED: 请核对项目绑定的知识库写目录。")
+  }
+  const project = await requireProject(projectId)
+  const ids = project.knowledgeBaseIds ?? []
+  const target = ids.find((id) => isSameWorkspacePath(knowledgeDirectory(id, "write"), workspace))
+  if (!target || !isSameWorkspacePath(await resolveKnowledgeDepositionPath(ids, target), workspace))
+    return workspaceChanged()
+  const assertCurrent = () => {
+    const file = readRuntimeScopedFile(getOpenworkDir(), "harness-board-projects.json",
+      HARNESS_PROJECT_STORE_MAX_BYTES)
+    if (!file.bytes) return workspaceChanged()
+    const store = normalizeProjectStore(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(file.bytes)))
+    const matches = store.projects.filter((item) => item.projectId === projectId)
+    if (matches.length !== 1 || !matches[0].knowledgeBaseIds?.includes(target)) workspaceChanged()
+  }
+  assertCurrent()
+  return assertCurrent
 }
 
 function resolveArtifactAccumulationConfig(

@@ -17,17 +17,25 @@ import {
   type FlowRuntimeAdmission
 } from "../../mods/flows/runtime-admission"
 import { DEFAULT_PLUGIN_HOOKS_PATH, readPluginManifest } from "../../plugins/manifest"
-import { LegacyOperationStore } from "./legacy-operation-store"
+import {
+  LegacyOperationStore,
+  LegacyBindingGenerationError,
+  legacyOperationOwner,
+  legacyRecoveryRevision,
+  readLegacyRecoveryInput
+} from "./legacy-operation-store"
+import type { LegacyProjectOperation } from "../../../shared/project-runtime/legacy-operations"
 import { HostPackageSnapshots } from "./package-snapshots"
 import {
   readRuntimeScopedFile,
   runtimeDigest,
   runtimeDirectory,
+  runtimeDirectoryIdentity,
   runtimeRelativePath
 } from "./safe-files"
 import { hostStateError } from "./host-state-protocol"
 import { registerLegacyProjectEntryGate, LEGACY_PROJECT_SESSION_SCOPE,
-  type LegacyBoundSkillSource } from "./legacy-entry-gate"
+  type LegacyBoundSkillSource, type LegacyProjectWorkspaceScope } from "./legacy-entry-gate"
 import { captureLegacyMods } from "./legacy-mods-runtime"
 import { readRuntimeRequiredHooks } from "../../plugins/runtime-required-hooks"
 import { packageUsesSharedMods } from "./package-preflight"
@@ -40,19 +48,32 @@ import {
   projectRuntimeInputIdentity
 } from "../project-action-runtime"
 
-export interface LegacyResolvedThread {
+export interface LegacyResolvedThread extends LegacyProjectWorkspaceScope {
   projectId: string
-  featureId: string
   workspace: string
   incarnation: string
 }
 export interface LegacyRuntimeDependencies {
   /** Read the real durable thread binding; never accept project/feature identity from request text. */
   resolveThread(threadId: string): LegacyResolvedThread | undefined
+  /** A trusted negative index can preserve original admission when the optional ledger fails. */
+  isKnownUnbound?(projectId: string): boolean
+  /** Distinguish deleted history from a reused or unbound live thread during manual recovery. */
+  threadExists?(threadId: string): boolean
+  captureExecutionWorkspace?(
+    threadId: string | undefined,
+    scope: LegacyProjectWorkspaceScope & { projectId: string },
+    workspace: string,
+    managed: AgentRunExecutionContext["legacyManagedWorkspace"]
+  ): Promise<() => void>
   /** Validate project membership/workspace, then return the real currently installed enabled plugin. */
   resolvePlugin(projectId: string, workspace: string): Promise<PluginMetadata>
   /** Synchronous final fence: include original agent and Flow leases, not just this ledger. */
   assertProjectIdle(projectId: string, workspace: string): void
+  authorizeRecovery?(
+    operation: LegacyProjectOperation,
+    workspaces: readonly string[]
+  ): Promise<{ assertCurrent(): void }>
   /** Original main-process project/installed UUID authority. Snapshot bytes remain independently pinned. */
   assertInstalledSourceCurrent?(
     projectId: string,
@@ -82,6 +103,19 @@ export class LegacyProjectRuntimeService {
     private readonly snapshots: HostPackageSnapshots,
     private readonly deps: LegacyRuntimeDependencies
   ) {}
+
+  private getAdmissionBinding(projectId: string) {
+    try {
+      const binding = this.store.getBinding(projectId)
+      if (!binding && this.store.protectsProject(projectId)) throw Error("PROJECT_LEGACY_BINDING_MISSING")
+      return binding
+    } catch (cause) {
+      if (cause instanceof LegacyBindingGenerationError) throw cause
+      if (!this.store.protectsProject(projectId) && this.deps.isKnownUnbound?.(projectId))
+        return undefined
+      throw Error("PROJECT_LEGACY_RUNTIME_UNAVAILABLE", { cause })
+    }
+  }
 
   async enable(projectId: string, workspaceInput: string) {
     return withSnapshotRetention([this.snapshots.root], async () => {
@@ -132,7 +166,7 @@ export class LegacyProjectRuntimeService {
     })
   }
   get(projectId: string) {
-    return this.store.getBinding(projectId)
+    return this.getAdmissionBinding(projectId)
   }
   listImportSources() {
     return this.store.listBindings().map(source => ({ projectId: source.projectId,
@@ -169,22 +203,32 @@ export class LegacyProjectRuntimeService {
   }
   /** Prepare exact native Skill paths before an Agent exists, without admitting a run. */
   async withBoundSkillSource<T>(projectId: string, workspaceInput: string,
-    work: (source: LegacyBoundSkillSource | undefined) => Promise<T>): Promise<T> {
-    const binding = this.store.getBinding(projectId)
+    work: (source: LegacyBoundSkillSource | undefined) => Promise<T>,
+    scope?: LegacyProjectWorkspaceScope): Promise<T> {
+    const binding = this.getAdmissionBinding(projectId)
     if (!binding) return work(undefined)
     this.store.assertNotFrozen(projectId)
+    const separateWorkspace = !isSameWorkspacePath(resolve(workspaceInput), binding.workspace)
+    if (separateWorkspace && !scope) hostStateError("LEGACY_WORKSPACE_CHANGED")
     const workspace = runtimeDirectory(workspaceInput)
-    if (workspace !== binding.workspace) hostStateError("LEGACY_WORKSPACE_CHANGED")
+    const workspaceIdentity = runtimeDirectoryIdentity(workspace)
+    const assertWorkspaceAuthority = separateWorkspace && scope
+      ? await this.deps.captureExecutionWorkspace?.(undefined, { ...scope, projectId }, workspace, undefined)
+      : undefined
+    if (separateWorkspace && !assertWorkspaceAuthority) hostStateError("LEGACY_WORKSPACE_CHANGED")
     return withSnapshotRetention([this.snapshots.root], async () => {
       const assertBinding = () => {
         this.store.assertNotFrozen(projectId)
         if (JSON.stringify(this.store.getBinding(projectId)) !== JSON.stringify(binding))
           hostStateError("LEGACY_RUN_SCOPE_CHANGED")
-        this.deps.assertInstalledSourceCurrent?.(projectId, workspace, binding.installedPluginId)
-        this.deps.assertProjectBindingCurrent?.(projectId, workspace, binding.installedPluginId)
+        if (runtimeDirectoryIdentity(workspace) !== workspaceIdentity)
+          hostStateError("LEGACY_WORKSPACE_CHANGED")
+        assertWorkspaceAuthority?.()
+        this.deps.assertInstalledSourceCurrent?.(projectId, binding.workspace, binding.installedPluginId)
+        this.deps.assertProjectBindingCurrent?.(projectId, binding.workspace, binding.installedPluginId)
       }
       assertBinding()
-      const installed = await this.deps.resolvePlugin(projectId, workspace)
+      const installed = await this.deps.resolvePlugin(projectId, binding.workspace)
       assertBinding()
       if (!installed.enabled || installed.id !== binding.installedPluginId)
         hostStateError("PLUGIN_UNAVAILABLE")
@@ -200,7 +244,7 @@ export class LegacyProjectRuntimeService {
       const snapshot = readSnapshot()
       const assertCurrent = async () => {
         assertBinding()
-        const latest = await this.deps.resolvePlugin(projectId, workspace)
+        const latest = await this.deps.resolvePlugin(projectId, binding.workspace)
         assertBinding()
         if (JSON.stringify([latest.id, latest.path, latest.name, latest.version, latest.enabled]) !== installedIdentity)
           hostStateError("PACKAGE_IDENTITY_MISMATCH")
@@ -215,7 +259,10 @@ export class LegacyProjectRuntimeService {
   }
   disable(projectId: string): void {
     const binding = this.store.getBinding(projectId)
-    if (!binding) return
+    if (!binding) {
+      this.store.refreshOptInIndex()
+      return
+    }
     this.deps.assertProjectIdle(projectId, binding.workspace)
     this.store.disable(projectId)
   }
@@ -225,6 +272,41 @@ export class LegacyProjectRuntimeService {
   /** Pure observation. In particular, a finished managed wrapper is not a business result proof. */
   inspect(operationId: string) {
     return this.store.get(operationId)
+  }
+  async reconcile(raw: unknown, assertApprovalCurrent: () => void) {
+    const input = readLegacyRecoveryInput(raw)
+    const operation = this.store.get(input.operationId)
+    if (!operation || operation.projectId !== input.projectId)
+      hostStateError("LEGACY_RECOVERY_REVIEW_CHANGED")
+    if (operation.reconciliation?.reviewedRevision === input.expectedRevision) return operation
+    if (operation.status !== "unknown" || legacyRecoveryRevision(operation) !== input.expectedRevision)
+      hostStateError("LEGACY_RECOVERY_REVIEW_CHANGED")
+    if (!this.deps.authorizeRecovery || !this.deps.assertProjectBindingCurrent)
+      hostStateError("LEGACY_RECOVERY_AUTHORITY_REQUIRED")
+    const workspace = operation.executionWorkspace ?? operation.workspace
+    const workspaceIdentity = runtimeDirectoryIdentity(workspace)
+    const projectIdentity = workspace === operation.workspace
+      ? workspaceIdentity : runtimeDirectoryIdentity(operation.workspace)
+    const resources = await this.deps.authorizeRecovery(operation, [...new Set([operation.workspace, workspace])])
+    return this.store.reconcile(input, () => {
+      assertApprovalCurrent()
+      this.deps.assertProjectBindingCurrent!(operation.projectId, operation.workspace, operation.installedPluginId)
+      const thread = this.deps.resolveThread(operation.threadId)
+      if (
+        (thread && (thread.incarnation !== operation.threadIncarnation ||
+          thread.projectId !== operation.projectId ||
+          (thread.featureId || LEGACY_PROJECT_SESSION_SCOPE) !== operation.featureId ||
+          !isSameWorkspacePath(thread.workspace, workspace))) ||
+        (!thread && this.deps.threadExists?.(operation.threadId) !== false)
+      ) hostStateError("LEGACY_RECOVERY_THREAD_CHANGED")
+      if (
+        runtimeDirectoryIdentity(workspace) !== workspaceIdentity ||
+        runtimeDirectoryIdentity(operation.workspace) !== projectIdentity ||
+        (operation.executionWorkspaceIdentity && operation.executionWorkspaceIdentity !== workspaceIdentity)
+      ) hostStateError("LEGACY_WORKSPACE_CHANGED")
+      this.deps.assertProjectIdle(operation.projectId, workspace)
+      resources.assertCurrent()
+    })
   }
   recoverInterrupted() {
     return this.store.recoverInterrupted()
@@ -239,7 +321,7 @@ export class LegacyProjectRuntimeService {
     try {
       stopFlow = registerFlowRuntimeAdmission((request) => {
         const thread = this.deps.resolveThread(request.threadId)
-        if (!thread || !this.store.getBinding(thread.projectId)) return undefined
+        if (!thread || !this.getAdmissionBinding(thread.projectId)) return undefined
         if (!isSameWorkspacePath(resolve(request.workspace), runtimeDirectory(thread.workspace)))
           hostStateError("LEGACY_WORKSPACE_CHANGED")
         return this.admit(
@@ -280,7 +362,7 @@ export class LegacyProjectRuntimeService {
         })
       })
       stopGate = registerLegacyProjectEntryGate((projectId, featureId, workspace, source) => {
-        const binding = this.store.getBinding(projectId)
+        const binding = this.getAdmissionBinding(projectId)
         if (!binding) return
         this.store.assertNotFrozen(projectId)
         if (
@@ -297,11 +379,14 @@ export class LegacyProjectRuntimeService {
         if (
           !operation ||
           operation.status !== "started" ||
+          operation.projectId !== projectId ||
+          operation.featureId !== featureId ||
+          !isSameWorkspacePath(operation.executionWorkspace ?? operation.workspace, source.workspace) ||
           operation.threadId !== source.threadId ||
           operation.threadIncarnation !== source.incarnationKey
         )
           hostStateError("LEGACY_RUN_SCOPE_CHANGED")
-      }, (projectId, workspace, work) => this.withBoundSkillSource(projectId, workspace, work))
+      }, (projectId, workspace, work, scope) => this.withBoundSkillSource(projectId, workspace, work, scope))
     } catch (error) {
       stopAdmission()
       stopFlow()
@@ -320,13 +405,20 @@ export class LegacyProjectRuntimeService {
   ): Promise<AgentRunAdmission | undefined> {
     const thread = this.deps.resolveThread(request.threadId)
     if (!thread) return undefined
-    const binding = this.store.getBinding(thread.projectId)
+    const binding = this.getAdmissionBinding(thread.projectId)
     if (!binding) return undefined
     this.store.assertNotFrozen(thread.projectId)
     const featureId = thread.featureId || LEGACY_PROJECT_SESSION_SCOPE
     if (incoming.pluginSourceSnapshot) hostStateError("LEGACY_SOURCE_CONFLICT")
-    if (runtimeDirectory(thread.workspace) !== binding.workspace)
-      hostStateError("LEGACY_WORKSPACE_CHANGED")
+    const workspace = runtimeDirectory(thread.workspace)
+    const workspaceIdentity = runtimeDirectoryIdentity(workspace)
+    const independentWorkspace = !isSameWorkspacePath(workspace, binding.workspace)
+    const assertWorkspaceAuthority = independentWorkspace
+      ? await this.deps.captureExecutionWorkspace?.(request.threadId, thread, workspace,
+        incoming.legacyManagedWorkspace)
+      : undefined
+    if (independentWorkspace && !assertWorkspaceAuthority)
+      hostStateError("LEGACY_EXECUTION_WORKSPACE_NOT_REGISTERED")
     const installed = await this.deps.resolvePlugin(thread.projectId, binding.workspace)
     if (!installed.enabled || installed.id !== binding.installedPluginId)
       hostStateError("PLUGIN_UNAVAILABLE")
@@ -349,6 +441,9 @@ export class LegacyProjectRuntimeService {
       incoming.signal?.throwIfAborted()
       if (JSON.stringify(this.deps.resolveThread(request.threadId)) !== JSON.stringify(thread))
         hostStateError("LEGACY_THREAD_CHANGED")
+      if (runtimeDirectoryIdentity(workspace) !== workspaceIdentity)
+        hostStateError("LEGACY_WORKSPACE_CHANGED")
+      assertWorkspaceAuthority?.()
       this.deps.assertInstalledSourceCurrent?.(
         binding.projectId,
         binding.workspace,
@@ -362,6 +457,11 @@ export class LegacyProjectRuntimeService {
       : undefined
     if (JSON.stringify(mods?.identity ?? null) !== JSON.stringify(binding.mods))
       hostStateError("LEGACY_MODS_BINDING_CHANGED")
+    const executionMods = mods && workspace !== binding.workspace
+      ? await captureLegacyMods(installed, snapshot.root, workspace) : undefined
+    if (executionMods && mods && (executionMods.identity.modId !== mods.identity.modId ||
+        executionMods.identity.digest !== mods.identity.digest))
+      hostStateError("LEGACY_MODS_BINDING_CHANGED")
     assertThread()
     incoming.signal?.throwIfAborted()
     const declaredContext = readPackageExtensionContract(snapshot.root)?.context
@@ -369,7 +469,7 @@ export class LegacyProjectRuntimeService {
       hostStateError("LEGACY_CONTEXT_PROVIDER_REQUIRED")
     const contextInput = declaredContext
       ? {
-          workspace: binding.workspace,
+          workspace,
           installedPluginId: binding.installedPluginId,
           packageId: binding.packageId,
           pluginDigest: binding.packageDigest,
@@ -392,6 +492,9 @@ export class LegacyProjectRuntimeService {
       projectId: binding.projectId,
       featureId,
       workspace: binding.workspace,
+      ...(independentWorkspace ? { executionWorkspace: workspace } : {}),
+      executionWorkspaceIdentity: workspaceIdentity,
+      owner: legacyOperationOwner,
       installedPluginId: binding.installedPluginId,
       packageDigest: binding.packageDigest,
       threadId: request.threadId,
@@ -415,7 +518,7 @@ export class LegacyProjectRuntimeService {
         projectId: thread.projectId,
         featureId,
         operationId: admitted.operation.operationId,
-        workspace: binding.workspace,
+        workspace,
         packageDigest: binding.packageDigest,
         stageId: "legacy-owned",
         requiredHooks: readRuntimeRequiredHooks(
@@ -435,6 +538,7 @@ export class LegacyProjectRuntimeService {
       () => {
         this.snapshots.read(binding.packageDigest)
         mods?.assertCurrent()
+        executionMods?.assertCurrent()
         this.deps.assertProjectBindingCurrent?.(
           binding.projectId,
           binding.workspace,
@@ -445,6 +549,7 @@ export class LegacyProjectRuntimeService {
       () => {
         assertThread()
         mods?.assertAuthorityCurrent()
+        executionMods?.assertAuthorityCurrent()
         if (hasMcp) {
           const operation = this.store.get(admitted.operation.operationId)
           if (
@@ -478,6 +583,7 @@ export class LegacyProjectRuntimeService {
           binding.installedPluginId
         )
         mods?.assertCurrent()
+        executionMods?.assertCurrent()
         assertContextCurrent()
       } catch {
         this.store.settle(admitted.ticket, "unknown", "legacy_runtime_inputs_changed")
@@ -505,11 +611,12 @@ export class LegacyProjectRuntimeService {
             assertThread()
             if (
               !resolved.workspacePath ||
-              !isSameWorkspacePath(resolve(resolved.workspacePath), binding.workspace)
+              !isSameWorkspacePath(resolve(resolved.workspacePath), workspace)
             )
               return "LEGACY_WORKSPACE_CHANGED"
             this.snapshots.read(binding.packageDigest)
             mods?.assertCurrent()
+            executionMods?.assertCurrent()
             assertContextCurrent()
             return incoming.verifyResolvedThread?.(resolved) ?? null
           } catch {

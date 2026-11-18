@@ -8,6 +8,8 @@ import {
   functionSiteProps,
   functionUiSite,
   isFunctionDockedSite,
+  FUNCTION_CHAT_TRANSCRIPT_SITES,
+  FUNCTION_CHAT_TRANSCRIPT_SITE_LIMIT,
   FUNCTION_DURATION_SITE_LIMIT,
   FUNCTION_COMMAND_OUTPUT_SITE_LIMIT,
   FUNCTION_PASSIVE_DISPLAY_SITES,
@@ -127,24 +129,21 @@ export class FunctionUiSites {
       if (messageId !== undefined && (component !== "UserMessage" ||
         typeof messageId !== "string" || !messageId || messageId.length > 512))
         throw new ModFunctionError("MODS_UI_SITE_PROPS")
-      if (
-        [
-          "TurnDuration",
-          "UserMessage",
-          "AssistantMessage",
-          "CommandOutput",
-          "ToolUse",
-          "ToolResult",
-          "ToolGroup"
-        ].includes(component)
-      ) {
-        if (
-          [...this.slots.values()].filter((entry) => entry.component === component).length >=
-          (component === "CommandOutput"
-            ? FUNCTION_COMMAND_OUTPUT_SITE_LIMIT
-            : FUNCTION_DURATION_SITE_LIMIT)
-        )
-          throw new ModFunctionError("MODS_UI_SITE_LIMIT")
+      const transcript = FUNCTION_CHAT_TRANSCRIPT_SITES.includes(component)
+      let limit: number | undefined
+      if (transcript) limit = FUNCTION_CHAT_TRANSCRIPT_SITE_LIMIT
+      else if (component === "TurnDuration") limit = FUNCTION_DURATION_SITE_LIMIT
+      else if (component === "CommandOutput") limit = FUNCTION_COMMAND_OUTPUT_SITE_LIMIT
+      if (limit !== undefined) {
+        let occupied = 0
+        for (const entry of this.slots.values()) {
+          const sharesBudget = transcript
+            ? FUNCTION_CHAT_TRANSCRIPT_SITES.includes(entry.component)
+            : entry.component === component
+          if (sharesBudget) occupied++
+        }
+        // Slot admission and insertion share the same synchronous section across all row types.
+        if (occupied >= limit) throw new ModFunctionError("MODS_UI_SITE_LIMIT")
       } else {
         const previous = [...this.slots.values()].find((entry) => entry.component === component)
         if (previous) await this.unmount(previous.owner)
@@ -238,6 +237,19 @@ export class FunctionUiSites {
     if (!site) return
     this.slots.delete(owner)
     site.drawings.close()
+  }
+
+  captureRetirement(owner: string): { current(): boolean; retire(): void } | undefined {
+    const site = this.slots.get(owner)
+    if (!site) return undefined
+    // A document can outlive the thread/runtime whose drawing it once displayed.
+    const registry = new WeakRef(this)
+    const slot = new WeakRef(site)
+    const current = () => {
+      const exact = slot.deref()
+      return exact !== undefined && registry.deref()?.slots.get(owner) === exact
+    }
+    return { current, retire: () => { if (current()) registry.deref()?.retire(owner) } }
   }
 
   invalidate(components?: ReadonlySet<string>, sdkRedraw = false): void {

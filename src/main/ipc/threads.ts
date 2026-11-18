@@ -4016,8 +4016,10 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       ReturnType<typeof coordinatorWorkerManager.prepareThreadRetirement> | undefined
     let coordinatorRetirement: CoordinatorWorkerDirectoryRetirement | undefined
     let deletionDatabase: ReturnType<typeof getDb> | undefined
-    const modsEnd = getModsManager()?.prepareFunctionEnd("clear", threadId)
+    let modsEnd: ReturnType<NonNullable<ReturnType<typeof getModsManager>>["prepareFunctionEnd"]>
+      | undefined
     try {
+      modsEnd = getModsManager()?.prepareFunctionEnd("clear", threadId)
       deletionDatabase = getDb()
       // Fallback workspace capture BEFORE cancelAndWait (which settles and
       // removes the active entry): if the thread's metadata lost its

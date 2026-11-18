@@ -201,9 +201,13 @@ async function legacy(browser: Browser) {
     browser,
     `
     import{LegacyProjectRuntimePanel}from'./src/renderer/src/components/harness-board/LegacyProjectRuntimePanel';
-    const pending=[];window.api={harnessBoard:{legacyProjects:Object.fromEntries(['view','enable','disable'].map(kind=>[kind,id=>new Promise((resolve,reject)=>{calls.push([kind,id]);pending.push({kind,id,resolve,reject})})]))}};
-    window.finish=(id,enabled,unknown=false)=>{for(let i=pending.length-1;i>=0;i--)if(pending[i].id===id){pending.splice(i,1)[0].resolve({binding:enabled?{packageVersion:'1.0.0'}:null,
-      operations:unknown?[{operationId:'op',threadId:'old-thread',featureId:'feature',status:'unknown',startedAt:1,terminalCode:null}]:[]})}};
+    const pending=[];window.api={harnessBoard:{legacyProjects:Object.fromEntries(['view','enable','disable','reconcile'].map(kind=>[kind,input=>new Promise((resolve,reject)=>{
+      const id=kind==='reconcile'?input.projectId:input;calls.push([kind,id,input]);pending.push({kind,id,resolve,reject})
+    })]))}};
+    window.finish=(id,enabled,unknown=false,reconciled=false)=>{for(let i=pending.length-1;i>=0;i--)if(pending[i].id===id){pending.splice(i,1)[0].resolve({binding:enabled?{packageVersion:'1.0.0'}:null,
+      operations:unknown||reconciled?[{operationId:'op',threadId:'old-thread',featureId:'feature',status:unknown?'unknown':'reconciled',
+        workspace:'C:/project',executionWorkspace:'C:/separate-repository',startedAt:1,terminalCode:null,
+        ...(unknown?{recoveryRevision:'a'.repeat(64)}:{reconciliation:{reviewedAt:2,actor:'desktop-user'}})}]:[]})}};
     window.show=id=>root.render(<React.StrictMode><LegacyProjectRuntimePanel projectId={id}/></React.StrictMode>);window.show('A');
   `
   )
@@ -236,6 +240,20 @@ async function legacy(browser: Browser) {
     0
   )
   await page.screenshot({ path: resolve(output, "legacy-unknown.png"), fullPage: true })
+  await page.getByRole("button", { name: "核对上次执行结果" }).click()
+  await page.getByText("执行目录 C:/separate-repository", { exact: true }).waitFor()
+  await page.getByRole("button", { name: "取消", exact: true }).click()
+  assert.deepEqual(await page.evaluate(() =>
+    (window as unknown as EntryFixtureWindow).calls.filter((row) => row[0] === "reconcile")), [])
+  await page.getByRole("button", { name: "核对上次执行结果" }).click()
+  await page.getByRole("button", { name: "确认已核对并解除暂停" }).dblclick()
+  assert.deepEqual(await page.evaluate(() =>
+    (window as unknown as EntryFixtureWindow).calls.filter((row) => row[0] === "reconcile")), [
+    ["reconcile", "B", { projectId: "B", operationId: "op", expectedRevision: "a".repeat(64), checkedOriginalResult: true }]
+  ])
+  await page.evaluate(() => (window as unknown as EntryFixtureWindow).finish("B", true, false, true))
+  await page.getByText(/已人工核对 · 业务结果仍未知/).waitFor()
+  assert.equal(await page.getByRole("button", { name: "恢复使用已安装版本" }).isEnabled(), true)
   await page.close()
 }
 

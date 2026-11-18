@@ -41,7 +41,7 @@ async function main() {
       import {useLayoutEffect} from "react";
       import {ModsChatScope} from ${JSON.stringify(resolve("src/renderer/src/lib/mods-chat-scope.tsx"))};
       import {useFunctionTurnNotices} from ${JSON.stringify(resolve("src/renderer/src/lib/use-function-turn-notices.ts"))};
-      import {FunctionSite} from 'C:/ai/CmbCoworkAgent-mods-v2/src/renderer/src/components/chat/FunctionSite.tsx';
+      import {FunctionSite} from ${JSON.stringify(resolve("src/renderer/src/components/chat/FunctionSite.tsx"))};
       import {FunctionMessageText} from ${JSON.stringify(resolve("src/renderer/src/components/chat/FunctionMessageText.tsx"))};
       { crypto.randomUUID ??= ()=>'recovery-'+Math.random().toString(16).slice(2); const cards=new Set(),configs=new Set(),calls=[],owners=new Map();
       let sequence=0, stage='render',failure='',remaining=0,hold='render',releases=[],redacted=false,action=false,hidden=false,quietAct=false,rejectAct=false,rollbackClick=false,inactiveMode=false;
@@ -162,9 +162,13 @@ async function main() {
     await page.waitForTimeout(100)
     assert.equal(await page.getByText("user original", { exact: true }).count(), 1)
     assert.equal(await reads(), beforeRecords)
-    assert.equal(await page.evaluate("window.recovery.calls.filter(c=>c[0]==='notices').length"), beforeNotices + 40)
+    assert.equal(
+      await page.evaluate("window.recovery.calls.filter(c=>c[0]==='notices').length"),
+      beforeNotices + 1,
+      "a synchronous record burst should trigger one notices read"
+    )
     await page.evaluate("window.recovery.release()")
-    pass("record notifications update the real notices reader without clearing or querying message drawings")
+    pass("record notifications coalesce into one notices read without clearing or querying message drawings")
     const beforeScoped = await reads()
     const beforeScopedMounts = await page.evaluate("window.recovery.calls.filter(c=>c[0]==='mount').length")
     await page.evaluate("window.recovery.hold('render');window.recovery.emit('site-invalidated:unrelated')")

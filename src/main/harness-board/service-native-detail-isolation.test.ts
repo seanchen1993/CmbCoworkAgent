@@ -237,11 +237,26 @@ it("keeps a captured Host owner live during an unrelated project save", async ()
     original.lifecycle = { ...original.lifecycle, status: "archived" }
     await writeFile(file, JSON.stringify(stored))
     expect(assertCurrent).toThrow("PROJECT_USE_AUTHORIZATION_INVALID")
-    await writeFile(file, snapshot)
+    const installed = state.plugins[0]
+    state.plugins[0] = { ...installed, enabled: false }
+    try {
+      expect(assertCurrent).toThrow("PROJECT_USE_AUTHORIZATION_INVALID")
+      await writeFile(file, snapshot)
+      expect(assertCurrent).toThrow("PROJECT_USE_SOURCE_CHANGED")
+    } finally {
+      state.plugins[0] = installed
+    }
   } finally {
     release.resolve()
     await saving
   }
+  expect(assertCurrent).not.toThrow()
+  const retainedRepository = repository + "-retained"
+  await rename(repository, retainedRepository)
+  await mkdir(repository)
+  expect(assertCurrent).toThrow("HARNESS_NATIVE_PROJECT_CHANGED")
+  await rename(repository, repository + "-replacement")
+  await rename(retainedRepository, repository)
   expect(assertCurrent).not.toThrow()
 })
 

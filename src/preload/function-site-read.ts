@@ -4,7 +4,7 @@ import {
   type FunctionSiteReadRequest,
   type FunctionSiteRenderRequest
 } from "../shared/mods/v2/display-read-protocol"
-import type { FunctionSiteReadOutcome } from "../shared/mods/v2/sites"
+import type { FunctionSiteMountOutcome, FunctionSiteReadOutcome, FunctionUiSite } from "../shared/mods/v2/sites"
 import type { FunctionPaneSnapshot } from "../shared/mods/v2/ui"
 
 interface SiteReadIpc {
@@ -12,25 +12,49 @@ interface SiteReadIpc {
   sendSync(channel: string): unknown
 }
 
+interface SiteMountBridge {
+  siteMount(threadId: string, component: FunctionUiSite, messageId?: string): Promise<string | null>
+  siteMountOutcome(
+    threadId: string, component: FunctionUiSite, messageId?: string, expectedRequestId?: string
+  ): Promise<FunctionSiteMountOutcome>
+}
+
 /** IDs are local to one preload lifetime; no AbortSignal crosses contextBridge. */
-export function createFunctionSiteReadBridge(ipc: SiteReadIpc): Required<FunctionSiteReadApi> {
+export function createFunctionSiteReadBridge(
+  ipc: SiteReadIpc
+): Required<FunctionSiteReadApi> & SiteMountBridge {
   let namespace: string | undefined
   let sequence = 0
+  const ensureDocument = (): string => {
+    if (namespace === undefined) {
+      const value = ipc.sendSync("mods:function-site-read-scope")
+      if (typeof value !== "string" || !/^[a-f0-9-]{36}$/.test(value))
+        throw Error("MODS_DISPLAY_READ_SCOPE_INVALID")
+      namespace = value
+    }
+    return namespace
+  }
   return {
     nextSiteReadId(): string {
-      if (namespace === undefined) {
-        const value = ipc.sendSync("mods:function-site-read-scope")
-        if (typeof value !== "string" || !/^[a-f0-9-]{36}$/.test(value))
-          throw Error("MODS_DISPLAY_READ_SCOPE_INVALID")
-        namespace = value
-      }
+      const current = ensureDocument()
       if (sequence >= Number.MAX_SAFE_INTEGER) throw Error("MODS_DISPLAY_READ_ID_EXHAUSTED")
-      return `${namespace}:${++sequence}`
+      return `${current}:${++sequence}`
+    },
+    async siteMount(threadId, component, messageId) {
+      ensureDocument()
+      return ipc.invoke("mods:function-site-mount", { threadId, component, messageId }) as
+        Promise<string | null>
+    },
+    async siteMountOutcome(threadId, component, messageId, expectedRequestId) {
+      ensureDocument()
+      return ipc.invoke("mods:function-site-mount-outcome", {
+        threadId, component, messageId, expectedRequestId
+      }) as Promise<FunctionSiteMountOutcome>
     },
     cancelSiteRead(readId: string): Promise<void> {
       return ipc.invoke("mods:function-site-read-cancel", { readId }).then(() => undefined)
     },
-    siteRead(
+    async siteRead(
       threadId,
       component,
       props,
@@ -40,6 +64,7 @@ export function createFunctionSiteReadBridge(ipc: SiteReadIpc): Required<Functio
       ownerRequired,
       readId
     ): Promise<FunctionSiteReadOutcome> {
+      ensureDocument()
       return ipc.invoke("mods:function-site-read", {
         threadId,
         component,
