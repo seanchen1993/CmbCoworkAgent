@@ -850,32 +850,57 @@ describe("fork summary state", () => {
   })
 
   it.each([
-    { summaryLimit: 1_200, trailingTool: false, longLatest: false, previousCorrection: false },
-    { summaryLimit: 1_250, trailingTool: false, longLatest: false, previousCorrection: false },
-    { summaryLimit: 1_200, trailingTool: true, longLatest: false, previousCorrection: false },
-    { summaryLimit: 1_200, trailingTool: true, longLatest: true, previousCorrection: false },
-    { summaryLimit: 4_000, trailingTool: true, longLatest: false, previousCorrection: true }
+    { scenario: "a 1200-character summary limit", summaryLimit: 1_200 },
+    { scenario: "a 1250-character summary limit", summaryLimit: 1_250 },
+    { scenario: "a trailing tool result", summaryLimit: 1_200, trailingTool: true },
+    { scenario: "a long request followed by a tool result", summaryLimit: 1_200, trailingTool: true, longLatest: true },
+    { scenario: "an earlier correction before a tool result", summaryLimit: 4_000, trailingTool: true, previousCorrection: true },
+    {
+      scenario: "an earlier correction before two tool results",
+      summaryLimit: 4_000, trailingTool: true, previousCorrection: true, toolCount: 2
+    },
+    {
+      scenario: "a runtime profile with a smaller gateway window",
+      summaryLimit: 3_584, trailingTool: true, previousCorrection: true, toolCount: 2, runtimeBudget: true
+    }
   ])(
-    "reuses a $summaryLimit-character budget (tool: $trailingTool, long request: $longLatest, correction: $previousCorrection)",
-    async ({ summaryLimit, trailingTool, longLatest, previousCorrection }) => {
+    "preserves fork context with $scenario",
+    async ({
+      summaryLimit,
+      trailingTool = false,
+      longLatest = false,
+      previousCorrection = false,
+      toolCount = 1,
+      runtimeBudget = false
+    }) => {
       const raw = [new HumanMessage("original request"), new AIMessage("original answer")]
       const value = checkpoint(raw, raw.length)
       value.channel_values._summarizationEvent = {
         cutoffIndex: raw.length,
         filePath: null,
-        summaryMessage: buildSummaryMessage("界".repeat(30_000), null, null)
+        summaryMessage: buildSummaryMessage("界".repeat(runtimeBudget ? 15_000 : 30_000), null, null)
       }
       await inheritForkSummarization({ checkpoint: value, persistedMessageCount: raw.length })
       const requirement = "EXACT_CURRENT_TASK_REQUIREMENT_1234"
       const correction = "ACTIVE_CORRECTION_DO_NOT_RENAME_ROOT_731"
+      const toolCalls = Array.from({ length: toolCount }, (_, index) => ({
+        id: `read-${index}`,
+        name: "read",
+        args: {
+          file: `evidence-${index}.txt`,
+          ...(toolCount > 1 && { previous: "分析".repeat(10) })
+        }
+      }))
       const tail = trailingTool
         ? [
-            new HumanMessage(longLatest ? requirement + " " + "more details ".repeat(340) : requirement),
-            new AIMessage({
-              content: "",
-              tool_calls: [{ id: "read-1", name: "read", args: { file: "evidence.txt" } }]
-            }),
-            new ToolMessage({ content: "界".repeat(1_000), tool_call_id: "read-1" })
+            new HumanMessage(
+              longLatest ? requirement + " " + "more details ".repeat(340) : requirement
+            ),
+            new AIMessage({ content: "", tool_calls: toolCalls }),
+            ...toolCalls.map(({ id }) => new ToolMessage({
+              content: "界".repeat(runtimeBudget || toolCount === 1 ? 1_000 : 400),
+              tool_call_id: id
+            }))
           ]
         : [
             new HumanMessage("review evidence"),
@@ -889,10 +914,14 @@ describe("fork summary state", () => {
           : []),
         ...tail
       ]
-      const systemMessage = new SystemMessage("界".repeat(15_400))
+      const systemMessage = new SystemMessage("界".repeat(runtimeBudget ? 3_334 : 15_400))
+      const contextError = (): Error => new Error(runtimeBudget
+        ? "This model's maximum context length is 4096 tokens"
+        : "maximum context length")
       const invoke = vi.fn(async (request: BaseMessage[]) => {
-        const length = request.reduce((total, message) => total + String(message.content).length, 0)
-        if (length > summaryLimit) throw new Error("maximum context length")
+        const size = runtimeBudget ? estimateCjkProviderTokens(request) :
+          request.reduce((total, message) => total + String(message.content).length, 0)
+        if (size > summaryLimit) throw contextError()
         const retained = [requirement, correction].filter((text) =>
           request.some((message) => String(message.content).includes(text))
         )
@@ -901,10 +930,19 @@ describe("fork summary state", () => {
       const middleware = createCmbSummarizationMiddleware({
         model: { invoke } as never,
         backend: { write: vi.fn(async () => ({})) } as never,
-        maxInputTokens: 32_000,
-        postCompactionInputBudgetTokens: 27_000,
-        trigger: { type: "tokens", value: 500 },
-        keep: { type: "tokens", value: 3_200 }
+        maxInputTokens: runtimeBudget ? 8_192 : 32_000,
+        postCompactionInputBudgetTokens: runtimeBudget ? 6_680 : 27_000,
+        trigger: { type: "tokens", value: runtimeBudget ? 6_144 : 500 },
+        keep: { type: "tokens", value: runtimeBudget ? 819 : 3_200 },
+        // These are the runtime budgets for an 8,192-token profile with 512 output tokens.
+        ...(runtimeBudget && {
+          overflowModel: { invoke } as never,
+          summaryMaxOutputTokens: 512,
+          overflowMaxOutputTokens: 512,
+          summaryModelInputBudgetTokens: 6_680,
+          trimTokensToSummarize: 5_324,
+          toolTokenLimitBeforeEvict: 6_000
+        })
       }) as unknown as {
         wrapModelCall: (
           request: unknown,
@@ -914,9 +952,8 @@ describe("fork summary state", () => {
       const result = await middleware.wrapModelCall({
         messages, systemMessage, state: { ...value.channel_values, messages }, tools: []
       }, async ({ messages }) => {
-        if (estimateCjkProviderTokens([systemMessage, ...messages]) > 16_000) {
-          throw new Error("maximum context length")
-        }
+        if (estimateCjkProviderTokens([systemMessage, ...messages]) > (runtimeBudget ? 3_584 : 16_000))
+          throw contextError()
         expect(messages).toHaveLength(1)
         expect(messages[0].content).toContain("Earlier decision and next step")
         if (trailingTool) expect(messages[0].content).toContain(requirement)

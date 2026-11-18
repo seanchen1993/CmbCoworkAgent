@@ -1716,7 +1716,7 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
       ]
       return true
     }
-    const reduceInheritedRequest = (budget: number, trimRounds: boolean): boolean => {
+    const reduceInheritedRequest = (budget: number): boolean => {
       const [originalHandoff, ...remaining] = attemptMessages
       const rawBudget = Math.min(trimTokensToSummarize, Math.max(128, Math.floor(budget / 2)))
       const maxChars = Math.max(128, Math.floor(budget / (remaining.length + 1)))
@@ -1735,13 +1735,8 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
       const tools = compactToolResults(remaining, rawBudget, undefined, undefined, maxChars)
       const raw = compactOversizedNonToolContent(tools.messages, budget, undefined, undefined, maxChars)
       const argumentsFit = compactSummaryToolArguments(raw.messages, maxChars)
-      const trimmed = trimRounds && argumentsFit.messages.length > 2 &&
-        estimateSummaryInput(argumentsFit.messages) > rawBudget
-        ? truncateOldestRoundsForRetry(argumentsFit.messages, rawBudget)
-        : null
-      attemptMessages = [handoff, ...(trimmed ?? argumentsFit.messages)]
-      return resizedAnchors || resizedHandoff || trimmed !== null || tools.modified ||
-        raw.modified || argumentsFit.modified
+      attemptMessages = [handoff, ...argumentsFit.messages]
+      return resizedAnchors || resizedHandoff || tools.modified || raw.modified || argumentsFit.modified
     }
     const estimateSummaryInput = (content: BaseMessage[]): number =>
       countTotalTokens(content) + content.reduce((extra, message) => {
@@ -1759,26 +1754,39 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
       if (fitInheritedHandoff) {
         const contentBudget = Math.min(byteBudget, inputTarget ?? Infinity)
         if (preferCompleteTranscript && compactRequestBytes() <= byteBudget) return false
-        reduceInheritedRequest(contentBudget, false)
+        reduceInheritedRequest(contentBudget)
         if (preferCompleteTranscript) {
           const currentBytes = compactRequestBytes()
           if (currentBytes <= byteBudget) return false
-          const previous = {
+          const saveFit = () => ({
             messages: attemptMessages,
             initialRequest: attemptInitialRequest,
             latestRequest: attemptLatestRequest,
             inheritedCharLimit
+          })
+          const restoreFit = (fit: ReturnType<typeof saveFit>): void => {
+            attemptMessages = fit.messages
+            attemptInitialRequest = fit.initialRequest
+            attemptLatestRequest = fit.latestRequest
+            inheritedCharLimit = fit.inheritedCharLimit
+          }
+          const previous = saveFit()
+          const tryFit = (budget: number): boolean => {
+            restoreFit(previous)
+            return reduceInheritedRequest(budget) && compactRequestBytes() <= byteBudget
           }
           // Text caps are measured in characters. Use the actual wire size to
           // try retaining every round when multibyte content filled the budget.
           const smallerBudget = Math.floor(contentBudget * byteBudget / currentBytes)
-          if (reduceInheritedRequest(smallerBudget, false) && compactRequestBytes() <= byteBudget) {
+          if (tryFit(smallerBudget)) return false
+          // Several tool results can still exceed the proportional estimate.
+          // Check the content floor before evicting a complete round.
+          if (tryFit(0)) {
+            const minimum = saveFit()
+            if (!tryFit(Math.floor(smallerBudget / 2))) restoreFit(minimum)
             return false
           }
-          attemptMessages = previous.messages
-          attemptInitialRequest = previous.initialRequest
-          attemptLatestRequest = previous.latestRequest
-          inheritedCharLimit = previous.inheritedCharLimit
+          restoreFit(previous)
         }
       }
       const handoff = fitInheritedHandoff ? attemptMessages[0] : undefined
@@ -1821,7 +1829,7 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
       if (!preflightChecked && retryByteBudget === undefined &&
           inputTarget && estimateSummaryInput(attemptMessages) > inputTarget) {
         // Fit the handoff and raw tail together before either is encoded as XML.
-        reduceInheritedRequest(inputTarget, true)
+        reduceInheritedRequest(inputTarget)
       }
       const buildRequest = (transcript: string, compactInstructions = false): BaseMessage[] => [
         new SystemMessage({
@@ -1881,7 +1889,7 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
         // unchanged large tail. Provider feedback can tighten the request later.
         preflightChecked = true
         if (retryByteBudget === undefined && inputTarget && estimatedInput > inputTarget &&
-            reduceInheritedRequest(inputTarget / 2, true)) {
+            reduceInheritedRequest(inputTarget / 2)) {
           continue
         }
       }
