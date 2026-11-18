@@ -1360,8 +1360,8 @@ function RequirementConversationSession({
   ])
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
-      <div className="min-h-0 flex-1 overflow-x-auto overflow-y-hidden bg-background">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-grid-subtle">
+      <div className="min-h-0 flex-1 overflow-x-auto overflow-y-hidden bg-grid-subtle">
         <div
           className={cn(
             "grid h-full min-h-0 gap-x-[0.5px]",
@@ -1380,7 +1380,7 @@ function RequirementConversationSession({
 
           <main
             className={cn(
-              "min-h-0 min-w-0 flex-col border-x border-border/60 bg-background",
+              "min-h-0 min-w-0 flex-col border-x border-border/60 bg-grid-subtle",
               functionWorkspaceOpen ? "hidden" : "flex"
             )}
           >

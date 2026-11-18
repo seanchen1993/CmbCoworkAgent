@@ -453,6 +453,37 @@
   background-image: none;
 }
 
+@keyframes requirement-quick-start-sparkle {
+  0%,
+  100% {
+    transform: rotate(0deg) scale(1);
+    opacity: 0.82;
+  }
+  45% {
+    transform: rotate(-8deg) scale(1.08);
+    opacity: 1;
+  }
+  60% {
+    transform: rotate(7deg) scale(1.18);
+    opacity: 1;
+  }
+}
+
+.requirement-quick-start-icon {
+  transform-origin: center;
+  animation: requirement-quick-start-sparkle 2.4s ease-in-out infinite;
+}
+
+.group:hover .requirement-quick-start-icon {
+  animation-duration: 0.8s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .requirement-quick-start-icon {
+    animation: none;
+  }
+}
+
 /* A literal white surface is legacy light-theme intent, never a dark canvas. */
 .dark .bg-white,
 .dark [class*="data-[state=active]:bg-white"][data-state="active"] {

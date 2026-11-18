@@ -83,7 +83,7 @@ export function RequirementHistoryView({
 
   return (
     <TooltipProvider delayDuration={180}>
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-grid-subtle">
         <div className="min-h-0 flex-1 overflow-hidden px-5 py-4 lg:px-7">
           <div className="mx-auto flex h-full min-h-0 w-full max-w-[2200px] flex-col">
             <header className="mb-4 flex flex-wrap items-center gap-3">

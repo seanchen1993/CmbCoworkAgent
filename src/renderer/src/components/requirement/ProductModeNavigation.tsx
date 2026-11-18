@@ -94,9 +94,9 @@ export function ProductModeNavigation({
             size="sm"
             variant="outline"
             onClick={() => window.dispatchEvent(new Event(REQUIREMENT_QUICK_START_EVENT))}
-            className="h-8 rounded-lg border-[#e4c8ad] bg-[#fdf8f3] px-3.5 text-xs text-[#a96736] shadow-sm hover:border-[#c99366] hover:bg-[#f8eee4] hover:text-[#92562b]"
+            className="group h-8 rounded-lg border-[#e4c8ad] bg-[#fdf8f3] px-3.5 text-xs text-[#a96736] shadow-sm hover:border-[#c99366] hover:bg-[#f8eee4] hover:text-[#92562b]"
           >
-            <Sparkles className="size-3.5" />
+            <Sparkles className="requirement-quick-start-icon size-3.5" />
             快速开始一个新任务
           </Button>
         </div>
