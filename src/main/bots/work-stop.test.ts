@@ -280,6 +280,8 @@ describe("explicit Bot work Stop", () => {
     const f = await fixture()
     const first = f.stop()
     expect(f.stop().version).toBe(first.version)
+    expect(f.host.workStatusContext(f.source.id).items.find(item => item.workId === f.work.id))
+      .toMatchObject({ version: first.version, dispatchStopped: true, execution: { businessState: "active" } })
     expect(() => f.host.stopWorkFromTool({ ...f.command, callId: "retry" }, f.work.id, f.work.version)).not.toThrow()
     await vi.waitFor(() => expect(f.store.getTask(f.task.id).state).toBe("cancelled"))
     expect(() => f.host.sendWork({ ...f.command, callId: "missing-version", key: "missing-version" }, f.work.id, "继续报告"))

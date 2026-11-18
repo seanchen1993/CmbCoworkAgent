@@ -67,6 +67,7 @@ describe("work Runtime tools", () => {
     f.store.delegate(other.task.id, reviewer.id, "Other private request", "other")
     const prepare = vi.spyOn(f.db, "prepare")
     const page = await f.host.workHistory(f.source.id, { workId: work.id, cursor: "older-page" })
+    expect(page.work.version).toBe(f.store.getWork(f.bot.id, work.id).version)
     expect(page.delegations).toEqual({ items: [{ taskId: first.id, recipient: "Reviewer", turnState: "cancelled", createdAt: first.createdAt }], hasMore: false })
     const lookups = prepare.mock.calls.filter(([sql]) => sql.includes("SELECT id,bot_id,state,created_at"))
     expect(lookups).toHaveLength(2)

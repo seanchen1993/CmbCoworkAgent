@@ -1,4 +1,3 @@
-import { parseSkillUseBlock } from "../src/main/agent/skill-lifecycle/marker"
 /**
  * Opt-in routing evaluation through the real Electron App, Runtime and selected
  * model. Each case has a fresh Bot and synthetic workspace. No decision stubs,
@@ -24,7 +23,7 @@ import { waitForBotAppState } from "./support/bot-app-state"
 import { botTestAppOutput } from "./support/bot-test-app"
 import { selectedBotRoutingModel } from "./support/bot-routing-model"
 import { createBotExperimentArchive, experimentSha256 } from "./support/bot-experiment-archive.mjs"
-import { installSlashSkillFixture, slashSkillRequest, slashSkillRevisionRequest, verifySlashSkillResult, verifySlashSkillRevision } from "./support/bot-slash-skill-fixture"
+import { installSlashSkillFixture, slashSkillRequest, slashSkillRevisionRequest, slashSkillSelection, verifySlashSkillResult, verifySlashSkillRevision } from "./support/bot-slash-skill-fixture"
 
 type Route = "inline" | "independent" | "continue" | "background"
 type Case = {
@@ -32,13 +31,28 @@ type Case = {
   label: string
   preferred: Route
   files?: Record<string, string>
+  skill?: typeof slashSkillSelection
   message: (directory: string) => string
   verify?: (directory: string, result: any, data: any) => Promise<void> | void
 }
-function assertNodeTests(output: string, minimum: number) {
+function assertNodeTests(output: string, minimum: number): number {
   assert.match(output, /(?:#|ℹ) fail 0/)
   const count = Number(output.match(/(?:#|ℹ) tests (\d+)/)?.[1])
   assert.ok(count >= minimum, `expected at least ${minimum} actual tests, got ${count}`)
+  return count
+}
+function assertRevisionDispatch(
+  result: { mainToolCalls?: Array<{ name: string; args: { workId?: string; expectedVersion?: number } }>; toolErrors: unknown[] },
+  workId: string,
+  expectedVersion?: number
+) {
+  assert.ok(result.mainToolCalls, "record the main Bot's revision calls")
+  const mutations = result.mainToolCalls.filter(call =>
+    ["bot_work_send", "bot_work_continue", "bot_work_create"].includes(call.name))
+  assert.deepEqual(mutations.map(call => call.name), ["bot_work_send"], "accept the revision with one send to the existing task")
+  assert.equal(mutations[0].args.workId, workId)
+  assert.equal(mutations[0].args.expectedVersion, expectedVersion, "only reopening requires the observed work version")
+  assert.deepEqual(result.toolErrors, [], "a revision against the unchanged snapshot must succeed on its first attempt")
 }
 const eventFiles = {
   "活动约束.md":
@@ -75,6 +89,7 @@ const cases: Case[] = [
   },
   {
     id: "slash-skill-natural",
+    skill: slashSkillSelection,
     label: "仅斜杠选技能，不要求独立任务，观察实际读取与交办顺序",
     preferred: "independent",
     files: {
@@ -87,6 +102,7 @@ const cases: Case[] = [
   },
   {
     id: "slash-skill",
+    skill: slashSkillSelection,
     label: "主 Bot 斜杠技能选择、独立任务激活及文件回传",
     preferred: "independent",
     files: {
@@ -198,7 +214,7 @@ const cases: Case[] = [
       assert.equal(payable(1000, 20), 800)
       assert.equal(payable(999, 15), 849)
       assert.equal(payable(1000, 100), 0)
-      assertNodeTests(execFileSync(process.execPath, ["--test", "discount.test.mjs"], {
+      result.verifiedNodeTests = assertNodeTests(execFileSync(process.execPath, ["--test", "discount.test.mjs"], {
         cwd: dir, encoding: "utf8"
       }), 4)
       assert.ok(result.tools.includes("execute"), "must actually run verification")
@@ -232,7 +248,11 @@ const cases: Case[] = [
       ] as const)
         assert.equal(report.discrepancies.find((d: any) => d.id === id)?.deltaCents, delta)
       const output = execFileSync(process.execPath, ["--test"], { cwd: dir, encoding: "utf8" })
-      assertNodeTests(output, 8)
+      result.verifiedNodeTests = assertNodeTests(output, 8)
+      result.verifiedCliTotals = {
+        orderTotalCents: report.orderTotalCents,
+        paymentTotalCents: report.paymentTotalCents
+      }
       assert.ok(result.tools.includes("execute"), "must execute tests, not only describe them")
     }
   },
@@ -276,9 +296,10 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
   const reportPath = join(out, "artifacts", `routing-${Date.now()}.json`)
   const results: any[] = []
   const initialization = { cancelledIntroductionQuestions: [] as string[] }
-  let activeTurn: { id: string; label: string; preferred: Route; message: string } | undefined
+  let activeTurn: { id: string; label: string; preferred: Route; message: string; selectedSkill?: string } | undefined
   const mainPrefixes = new Map<string, { system: string; tools: string; messages: any[] }>()
   const wire = {
+    reviewRequests: [] as string[][],
     reportPrefixChecks: [] as Array<{
       systemUnchanged: boolean; toolsUnchanged: boolean; toolChoice: unknown;
       systemSha256: string; toolsSha256: string; reusedHistoryMessages: number
@@ -308,8 +329,10 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
         .join("\n")
       const create = (body.tools ?? []).some((t: any) => t.function?.name === "bot_work_create")
       const latestInput = (body.messages ?? []).findLast((m: any) => m.role === "user" && !(typeof m.content === "string" && m.content.trimStart().startsWith("<bot_reply_reminder>")))
-      const inputText = typeof latestInput?.content === "string" ? latestInput.content : JSON.stringify(latestInput?.content ?? "")
+      const inputText = typeof latestInput?.content === "string" ? latestInput.content
+        : (latestInput?.content ?? []).map((part: any) => part.text ?? "").join("\n")
       const role = system.includes("ALREADY inside independent task") ? "executor"
+        : inputText.includes('<bot_runtime_context event="task_result_review">') ? "review"
         : inputText.includes('<bot_runtime_context event="task_result">') ? "report"
         : system.includes("## Choose the destination before doing the work") ? "communication"
         : create ? "other-main" : "other"
@@ -337,11 +360,10 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
           })
         }
       }
-      if (role === "communication") {
-        const latestUser = (body.messages ?? []).findLast((m: any) => m.role === "user" && !(typeof m.content === "string" && m.content.trimStart().startsWith("<bot_reply_reminder>")))
-        wire.communicationRequests.push({ at: Date.now(), choice: body.tool_choice, user: typeof latestUser?.content === "string"
-          ? latestUser.content : (latestUser?.content ?? []).map((p: any) => p.text ?? "").join("\n") })
-      }
+      if (role === "review")
+        wire.reviewRequests.push((body.tools ?? []).map((tool: any) => tool.function.name))
+      if (role === "communication")
+        wire.communicationRequests.push({ at: Date.now(), choice: body.tool_choice, user: inputText })
       // One actual system prompt/tool set per role, never headers or credentials.
       // All conversations in this harness are synthetic and isolated.
       wire.firstRequestByRole[role] ??= {
@@ -489,15 +511,40 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
     const turn = async (
       bot: any,
       test: Pick<Case, "id" | "label" | "preferred">,
-      message: string
+      message: string,
+      selection?: ReturnType<typeof slashSkillSelection>
     ) => {
       const before = await snapshot(bot)
       const oldIds = new Set(before.messages.map((m: any) => m.id))
       const oldTasks = new Set(before.tasks.map((t: any) => t.id))
-      activeTurn = { id: test.id, label: test.label, preferred: test.preferred, message }
+      activeTurn = { id: test.id, label: test.label, preferred: test.preferred, message, selectedSkill: selection?.name }
       await archive.checkpoint(report(), `case:${test.id}`)
-      const start = Date.now()
-      const task = await send(bot.id, message)
+      let start = Date.now()
+      let task
+      if (selection) {
+        // Exercise the picker itself so the Host receives the trusted selection alongside the text.
+        if (!(await page.locator(".bots-workspace").isVisible()))
+          await page.getByText("Bots", { exact: true }).first().click()
+        await page.getByText(bot.name, { exact: true }).first().click()
+        const chat = page.locator(`[data-chat-thread-id="${bot.threadId}"]`)
+        const editor = chat.locator('[data-bot-composer] textarea, [data-bot-composer] [role="textbox"][contenteditable="true"]').last()
+        await editor.fill("/" + selection.name)
+        await chat.getByRole("listbox").getByText(selection.name, { exact: true }).click()
+        await editor.fill(message)
+        start = Date.now()
+        await chat.locator('button[type="submit"]').last().click()
+        await waitForBotAppState(page, async ({ botId, text, start }) =>
+          (await (window as any).api.bots.snapshot()).tasks.some((t: any) =>
+            t.botId === botId && t.origin.kind === "user" && t.createdAt >= start && t.message === text
+          ), { botId: bot.id, text: message, start }, { timeout: 30000 })
+        task = (await snapshot(bot)).tasks.find((t: any) =>
+          !oldTasks.has(t.id) && t.threadId === bot.threadId && t.origin.kind === "user" && t.message === message)
+        assert.ok(task, "the main Bot must accept the skill draft from the composer")
+        assert.equal(task.origin.explicitSkill?.name, selection.name)
+        assert.equal(await realpath(task.origin.explicitSkill.path), await realpath(selection.path))
+      } else {
+        task = await send(bot.id, message)
+      }
       let responsiveness: { overlapObserved: boolean; reply?: string; seconds?: number; exactFormat: boolean } | undefined
       if (["browser-lookup", "event-plan", "background-plan", "reconcile", "code-fix", "reconciliation-cli"].includes(test.id) ||
           (test.id === "slash-skill-natural" && process.env.BOT_ROUTING_PROBE_RESPONSIVENESS === "1")) {
@@ -587,11 +634,20 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
       }
       const data = await snapshot(bot)
       const messages = data.messages.filter((m: any) => !oldIds.has(m.id))
-      const calls = messages.flatMap((m: any) => m.tool_calls ?? [])
-      const tools = calls.map((c: any) => c.name)
       const tasks = data.tasks.filter((t: any) => !oldTasks.has(t.id))
+      // Foreground dispatch, the parallel user question and result review share one thread.
+      const otherRequests = new Set(tasks.filter((t: any) => t.threadId === task.threadId && t.id !== task.id).map((t: any) => t.requestId))
+      const startIndex = messages.findIndex((m: any) => m.id === task.requestId)
+      assert.ok(startIndex >= 0, "the tested user request must appear in main history")
+      const nextIndex = messages.findIndex((m: any, i: number) => i > startIndex && otherRequests.has(m.id))
+      const mainMessages = messages.slice(startIndex, nextIndex < 0 ? undefined : nextIndex)
+      const calls = mainMessages.flatMap((m: any) => m.tool_calls ?? [])
+      const tools = calls.map((c: any) => c.name)
+      const skillReceiptIndex = mainMessages.findIndex((m: any) => m.role === "tool" && m.name === "bot_skill_dispatch")
+      const resultTasks = tasks.filter((t: any) => t.origin.kind === "work_result" && t.state === "completed")
+      const publications = resultTasks.filter((t: any) => !t.origin.review || t.origin.review.phase === "publish")
       const allTools = [
-        ...calls,
+        ...messages.flatMap((m: any) => m.tool_calls ?? []),
         ...data.workMessages.flatMap((ms: any[]) => ms.flatMap((m) => m.tool_calls ?? []))
       ]
       const background =
@@ -608,6 +664,7 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
               ? "background"
               : "inline"
       const mainTask = data.tasks.find((t: any) => t.id === task.id)
+      const mainRequests = wire.communicationRequests.filter(r => r.at >= start && r.user.includes(message))
       const result = {
         ...test,
         actual,
@@ -618,12 +675,13 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
         mainSeconds: mainTask
           ? +((mainTask.updatedAt - mainTask.createdAt) / 1000).toFixed(1)
           : undefined,
-        mainModelRequests: wire.communicationRequests.filter(r => r.at >= start && r.user.includes(parseSkillUseBlock(message)?.rest ?? message)).length || null,
+        mainModelRequests: mainRequests.length || null,
         finishesDispatchBatch: calls.some((c: any) => c.args?.finishTurn === true || c.name === "bot_skill_dispatch"),
-        mainToolChoices: wire.communicationRequests.filter(r => r.at >= start && r.user.includes(parseSkillUseBlock(message)?.rest ?? message)).map(r => r.choice),
+        mainToolChoices: mainRequests.map(r => r.choice),
+        selectedSkill: selection?.name,
         dispatchSeconds: data.works.length && !before.works.length
           ? +((data.works[0].createdAt - start) / 1000).toFixed(1) : undefined,
-        budgetHandoff: messages.some(
+        budgetHandoff: mainMessages.some(
           (m: any) =>
             m.role === "tool" &&
             typeof m.content === "string" &&
@@ -632,18 +690,20 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
         message,
         tools: [...new Set(allTools.map((c: any) => c.name))],
         mainTools: tools,
+        ...(["revision", "reopen"].includes(test.id) || test.id.startsWith("slash-skill") ? {
+          mainToolCalls: calls.map((call: any) => ({ name: call.name, args: call.args }))
+        } : {}),
         ...(test.id.startsWith("slash-skill") ? {
-          mainAcknowledgements: messages.slice(0, messages.findIndex((m: any) => tasks.some((t: any) => t.id !== task.id && t.threadId === task.threadId && t.requestId === m.id)))
+          mainAcknowledgements: mainMessages
             .filter((m: any) => m.role === "assistant" && typeof m.content === "string" && m.content.trim())
-            .map((m: any) => ({ text: m.content, afterDispatch: messages.findIndex((v: any) => v.role === "tool" && v.name === "bot_skill_dispatch") < messages.indexOf(m) })),
-          mainToolCalls: calls.map((call: any) => ({ name: call.name, args: call.args })),
+            .map((m: any) => ({ text: m.content, afterDispatch: skillReceiptIndex >= 0 && skillReceiptIndex < mainMessages.indexOf(m) })),
           workToolCalls: data.workMessages.map((ms: any[], index: number) => ({
             threadId: data.works[index].threadId,
             calls: ms.flatMap((m: any) => m.tool_calls ?? [])
               .map((call: any) => ({ name: call.name, args: call.args }))
           }))
         } : {}),
-        toolErrors: messages
+        toolErrors: mainMessages
           .filter((m: any) => m.role === "tool" && (m.is_error || m.status === "error"))
           .map((m: any) => ({ tool: m.name, content: m.content })),
         reply: messages
@@ -654,13 +714,13 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
         workspaces: data.works.map((w: any) => w.workspace),
         states: tasks.map((t: any) => ({
           kind: t.origin.kind,
+          reviewPhase: t.origin.review?.phase,
           state: t.state,
           workId: t.workId,
           error: t.error
         })),
-        reportCount: tasks.filter(
-          (t: any) => t.origin.kind === "work_result" && t.state === "completed"
-        ).length,
+        reviewCount: resultTasks.filter((t: any) => t.origin.review?.phase === "review").length,
+        reportCount: publications.length,
         backgroundReportCount: tasks.filter(
           (t: any) => t.origin.kind === "notification" && t.state === "completed"
         ).length,
@@ -696,6 +756,9 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
       )
       if (actual === "independent" || actual === "continue") {
         assert.ok(result.reportCount > 0, "task result must return to parent")
+        for (const publication of publications.filter((t: any) => t.origin.review))
+          assert.ok(messages.some((m: any) => m.role === "assistant" && typeof m.content === "string" &&
+            m.content.includes(`#bot-history/${publication.origin.workId}/`)), "published result must link to its own task")
         assert.ok(result.reply.trim(), "result notification must contain readable text")
         assert.doesNotMatch(
           result.reply,
@@ -724,9 +787,11 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
           }),
         "路由验收 · " + test.label
       )
+      // Opening a Bot starts its introduction. Settle that fixture setup before measuring the first skill submission.
+      if (test.skill) await page.evaluate(id => (window as any).api.bots.open(id), bot.id)
       await settle(bot.id, true)
       try {
-        const { result, data } = await turn(bot, test, test.message(directory))
+        const { result, data } = await turn(bot, test, test.message(directory), test.skill?.(directory))
         await archive.checkpoint(report(), `verify:${test.id}`)
         await test.verify?.(directory, result, data)
         result.validation = "passed"
@@ -760,7 +825,7 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
           })
           const reselection = await turn(bot,
             { id: "slash-skill-reselect", label: "再次选择技能，恢复已完成的原任务而非新建", preferred: "continue" },
-            slashSkillRevisionRequest(directory))
+            slashSkillRevisionRequest, slashSkillSelection(directory))
           await verifySlashSkillRevision(directory, reselection.result, data.works[0].id, true)
           assert.equal(reselection.result.mainModelRequests, 1)
           assert.deepEqual(reselection.result.mainTools, ["bot_skill_dispatch"])
@@ -783,6 +848,7 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
             "revision must execute in the existing task"
           )
           assert.deepEqual(follow.result.workIds, [work.id])
+          assertRevisionDispatch(follow.result, work.id)
           assert.match(
             await readFile(join(directory, "plan.md"), "utf8"),
             /16[:：]00|四点|下午\s*4/
@@ -803,7 +869,7 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
           status.result.validation = "passed"
           await save()
           const current = status.data.works[0]
-          await page.evaluate(async (input) => (window as any).api.bots.works.lifecycle(input), {
+          const completed = await page.evaluate(async (input) => (window as any).api.bots.works.lifecycle(input), {
             botId: bot.id,
             workId: work.id,
             expectedVersion: current.version,
@@ -821,6 +887,7 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
             "reopening must send work to the same task"
           )
           assert.deepEqual(reopened.result.workIds, [work.id])
+          assertRevisionDispatch(reopened.result, work.id, completed.version)
           assert.equal(reopened.data.works[0].threadId, work.threadId)
           assert.equal(reopened.data.works[0].workspace.path, work.workspace.path)
           assert.equal(reopened.data.works[0].state, "active")
@@ -876,6 +943,11 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
     assert.ok(wire.guided > 0, "actual main model request must include routing guidance")
     assert.equal(wire.mainPlanner, 0, "communication turns must not inherit the execution planner")
     assert.equal(wire.mainBrowserTools, 0, "communication turns must not be offered browser tools")
+    if (results.some(r => r.reviewCount > 0))
+      assert.ok(wire.reviewRequests.length > 0, "capture the real result-review request")
+    const reviewTools = new Set(["bot_work_result_read", "bot_work_result_select_files", "bot_work_result_keep_service", "bot_work_result_continue"])
+    for (const offered of wire.reviewRequests)
+      assert.ok(offered.length && offered.every(name => reviewTools.has(name)), "result review may only access scoped result tools")
     for (const check of wire.reportPrefixChecks) {
       assert.ok(check.systemUnchanged, "result reporting must retain the main Bot system prefix")
       assert.ok(check.toolsUnchanged, "result reporting must retain the main Bot tool schemas")

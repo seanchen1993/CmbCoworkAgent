@@ -1,0 +1,50 @@
+{
+  "runId": "20261118T063741Z-8e7ffa58",
+  "sampledAt": "2026-11-18T06:43:44.779290+00:00",
+  "cases": [
+    {
+      "bot": "路由验收 · 仅斜杠选技能，不要求独立任务，观察实际读取与交办顺序",
+      "tasks": [
+        {
+          "kind": "introduction",
+          "state": "cancelled",
+          "selectedSkill": null,
+          "createdAtMS": 1794983865073,
+          "updatedAtMS": 1794983956111
+        },
+        {
+          "kind": "user",
+          "state": "cancelled",
+          "selectedSkill": "slash-prd-fixture",
+          "createdAtMS": 1794983865821,
+          "updatedAtMS": 1794983956209
+        }
+      ],
+      "onboardingQuestions": [
+        "你现在想让我先做哪类事？"
+      ]
+    },
+    {
+      "bot": "路由验收 · 主 Bot 斜杠技能选择、独立任务激活及文件回传",
+      "tasks": [
+        {
+          "kind": "introduction",
+          "state": "waiting_user",
+          "selectedSkill": null,
+          "createdAtMS": 1794983956319,
+          "updatedAtMS": 1794983961526
+        },
+        {
+          "kind": "user",
+          "state": "queued",
+          "selectedSkill": "slash-prd-fixture",
+          "createdAtMS": 1794983956599,
+          "updatedAtMS": 1794983956599
+        }
+      ],
+      "onboardingQuestions": [
+        "你希望我先帮你做哪一类事情？"
+      ]
+    }
+  ]
+}

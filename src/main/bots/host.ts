@@ -1015,6 +1015,13 @@ export class LocalBotHost {
     try { runtime = this.runtime.workRuntimeStatus?.(work) } catch { /* Unknown is not idle. */ }
     return projectBotWorkStatus(work, runtime, runs.length > 0, runs.find(run => run.browserHelp)?.browserHelp?.instruction)
   }
+  private workStatusForModel(work: BotWorkSummary) {
+    return {
+      version: work.version,
+      ...(work.dispatchStopped ? { dispatchStopped: true } : {}),
+      execution: this.workExecutionStatus(work)
+    }
+  }
   featureTasks(scope: FeatureScope, options?: FeatureTaskQuery) {
     return this.featureStore.taskRows(scope, options).map((row) => {
       const { ordinal, attentionThreadId, ...rest } = row
@@ -1144,8 +1151,7 @@ export class LocalBotHost {
       items: [...works.values()].slice(0, 8).map((work) => ({
         workId: work.id,
         title: work.title,
-        version: work.version,
-        execution: this.workExecutionStatus(work)
+        ...this.workStatusForModel(work)
       })),
       ...(projects.length
         ? {
@@ -1274,7 +1280,7 @@ export class LocalBotHost {
     const result = await this.runtime.workHistory.query(work, input)
     // History hydration is async: sample status afterwards, after rechecking audience authority.
     const current = this.historyTarget(taskId, input.workId)
-    return { ...result, delegations: this.store.workDelegations(work.botId, work.id), work: { ...result.work, execution: this.workExecutionStatus(current) } }
+    return { ...result, delegations: this.store.workDelegations(work.botId, work.id), work: { ...result.work, ...this.workStatusForModel(current) } }
   }
   workExchange(taskId: string, workId: string, delegationTaskId: string) {
     const work = this.historyTarget(taskId, workId)

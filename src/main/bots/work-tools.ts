@@ -428,7 +428,7 @@ export function createBotWorkTools(
         name: "bot_work_send",
         metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
         description:
-          "Continue an existing task asynchronously, including small corrections to its output files. Use this instead of editing the files in the main chat, so task history and status stay accurate. Use the exact same-audience task ID from a receipt or list; retain its workspace. Give a short correction; the host also supplies the original current request and applied user corrections. Resolve references without rewriting the assignment. Clarify ambiguous targets. Active work needs only this tool. A request to revise completed work authorizes reopening that same task first, then sending the revision. Inside the task itself, execute directly. A queued receipt is not success; results return automatically.",
+          "Send a new instruction or file correction to the exact same-audience conversation task in its original workspace. Identify it from the current snapshot or look it up if unclear. For active work with dispatch open omit expectedVersion, even when lastExecution.state is completed. To revise completed or explicitly stopped work at the user's request, send once with its current version as expectedVersion: the host reopens and enqueues atomically. Give a short correction; the host supplies the original request and applied user corrections. Inside the task itself, execute directly. A queued receipt confirms acceptance; results return automatically.",
         schema: z.object({
           requestKey: key,
           finishTurn,
@@ -440,7 +440,7 @@ export function createBotWorkTools(
             .positive()
             .optional()
             .describe(
-              "Current work version when the user explicitly asks to resume/revise completed or stopped work. Omit for ordinary active-work follow-ups."
+              "Supply only for businessState=completed or dispatchStopped=true. Copy version from the current task snapshot or bot_work_list/read after an explicit request to revise or resume that task."
             ),
           message: z
             .string()
@@ -513,7 +513,7 @@ export function createBotWorkTools(
           description:
             action === "complete"
               ? "Mark the exact work completed only on the current user's explicit completion instruction. The host refuses pending work, collaboration, background commands, or completing the currently executing source work. A model result alone is not business completion."
-              : "Continue the exact work only on the user's explicit instruction, preserving its history. From the original desktop main chat, this can resume an interrupted result review on the same evidence and remaining budget. The receipt's continued field is false when the work and its review stay in their previous states. It does not rerun interrupted or unknown effects. Send a new explicit execution instruction separately if needed.",
+              : "Reopen the exact work when the user requests a lifecycle change without a new execution instruction. From the original desktop main chat this can also resume an interrupted result review on the same evidence and remaining budget. For a new correction or assignment use bot_work_send directly. The receipt's continued field is false when the work and its review stay in their previous states. This does not rerun interrupted or unknown effects.",
           schema: z.object({
             requestKey: key,
             workId: id,

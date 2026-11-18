@@ -80,7 +80,7 @@ describe("Bot asynchronous assignment guidance", () => {
     expect(prompt).not.toContain("available browser-help tool")
     expect(prompt).toContain("businessState=active does not mean running")
     expect(prompt).toContain("revisions use bot_work_send")
-    expect(prompt).toContain("bot_work_continue first")
+    expect(prompt).not.toContain("bot_work_continue first")
     expect(prompt).not.toContain("check each requested acceptance criterion")
   })
 

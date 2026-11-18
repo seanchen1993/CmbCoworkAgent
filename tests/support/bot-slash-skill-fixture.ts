@@ -2,8 +2,6 @@ import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
-import { formatSkillUseBlock } from "../../src/shared/skill-use-block"
-import { getQueuedBotMessageInput } from "../../src/renderer/src/lib/queued-message-content"
 
 const name = "slash-prd-fixture"
 const skillDirectory = (root: string) => join(root, "profile", "skills", name)
@@ -42,20 +40,15 @@ appendFileSync(${JSON.stringify(join(root, "skill-lifecycle.jsonl"))},JSON.strin
   ))
 }
 
-export function slashSkillRequest(directory: string, explicitTask = true) {
-  // The same composition as selecting a slash command in the Bot composer.
-  return getQueuedBotMessageInput({ id: "fixture-slash", created_at: new Date(), updated_at: new Date(), text:
-    `请使用我选择的技能，${explicitTask ? "创建独立任务，" : ""}工作目录 ${directory}。综合需求.md、约束.md、现有接口.md生成 prd.md，执行技能的校验并把文件交给我。资料都是虚构的，不联网，也不发送外部消息。`,
-    skillName: name, skillBlock: formatSkillUseBlock({ name, path: join(skillDirectory(dirname(directory)), "SKILL.md") })
-  }).message
+export function slashSkillSelection(directory: string) {
+  return { name, path: join(skillDirectory(dirname(directory)), "SKILL.md") }
 }
 
-export function slashSkillRevisionRequest(directory: string) {
-  return getQueuedBotMessageInput({ id: "fixture-reselect", created_at: new Date(), updated_at: new Date(),
-    text: "继续刚才那份 PRD，借期改为28天，其他规则不变。按我选择的技能更新原文件、校验并交给我。",
-    skillName: name, skillBlock: formatSkillUseBlock({ name, path: join(skillDirectory(dirname(directory)), "SKILL.md") })
-  }).message
+export function slashSkillRequest(directory: string, explicitTask = true) {
+  return `请使用我选择的技能，${explicitTask ? "创建独立任务，" : ""}工作目录 ${directory}。综合需求.md、约束.md、现有接口.md生成 prd.md，执行技能的校验并把文件交给我。资料都是虚构的，不联网，也不发送外部消息。`
 }
+
+export const slashSkillRevisionRequest = "继续刚才那份 PRD，借期改为28天，其他规则不变。按我选择的技能更新原文件、校验并交给我。"
 
 export async function verifySlashSkillResult(directory: string, result: any, data: any, requireIndependent = true) {
   if (requireIndependent)

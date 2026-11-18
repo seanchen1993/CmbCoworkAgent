@@ -2102,7 +2102,7 @@ export class BotStore {
     if (work.conversation && work.conversation.state !== "bound")
       throw new BotError("CONFLICT", "任务会话正在关联或已解除，不能发送；请返回原对话核对。")
     if (work.state === "completed" && expectedVersion === undefined)
-      throw new BotError("CONFLICT", "工作已完成，请先继续处理")
+      throw new BotError("CONFLICT", "工作已完成。如需修改，请使用当前任务版本发送补充要求。")
     if (work.userControl)
       throw new BotError("CONFLICT", "任务由用户接管，归还控制权后才能继续自动派工")
   }
