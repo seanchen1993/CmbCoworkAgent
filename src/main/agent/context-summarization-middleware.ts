@@ -1748,15 +1748,38 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
         const text = typeof message.content === "string" ? message.content : ""
         return extra + Buffer.byteLength(text) - text.length
       }, 0)
+    const preferCompleteTranscript = fitInheritedHandoff && messages.length > 1
     const trimMessagesForRetry = (
       byteBudget: number,
       inputTarget: number | undefined,
-      buildRequest: (transcript: string) => BaseMessage[]
+      buildRequest: (transcript: string, compactInstructions?: boolean) => BaseMessage[]
     ): boolean => {
+      const compactRequestBytes = (): number =>
+        summaryRequestBytes(buildRequest(renderSummaryTranscript(attemptMessages), true))
       if (fitInheritedHandoff) {
-        // Resize content before dropping old rounds, and keep the handoff
-        // outside the round eviction.
-        reduceInheritedRequest(Math.min(byteBudget, inputTarget ?? Infinity), false)
+        const contentBudget = Math.min(byteBudget, inputTarget ?? Infinity)
+        if (preferCompleteTranscript && compactRequestBytes() <= byteBudget) return false
+        reduceInheritedRequest(contentBudget, false)
+        if (preferCompleteTranscript) {
+          const currentBytes = compactRequestBytes()
+          if (currentBytes <= byteBudget) return false
+          const previous = {
+            messages: attemptMessages,
+            initialRequest: attemptInitialRequest,
+            latestRequest: attemptLatestRequest,
+            inheritedCharLimit
+          }
+          // Text caps are measured in characters. Use the actual wire size to
+          // try retaining every round when multibyte content filled the budget.
+          const smallerBudget = Math.floor(contentBudget * byteBudget / currentBytes)
+          if (reduceInheritedRequest(smallerBudget, false) && compactRequestBytes() <= byteBudget) {
+            return false
+          }
+          attemptMessages = previous.messages
+          attemptInitialRequest = previous.initialRequest
+          attemptLatestRequest = previous.latestRequest
+          inheritedCharLimit = previous.inheritedCharLimit
+        }
       }
       const handoff = fitInheritedHandoff ? attemptMessages[0] : undefined
       const retryMessages = prepareSummaryModelRequest(
@@ -1764,8 +1787,11 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
       )
       const withHandoff = (remaining: BaseMessage[]): BaseMessage[] =>
         handoff ? [handoff, ...remaining] : remaining
-      const fitsRequest = (messages: BaseMessage[]): boolean =>
-        summaryRequestBytes(buildRequest(renderSummaryTranscript(withHandoff(messages)))) <= byteBudget
+      const fitsRequest = (messages: BaseMessage[]): boolean => {
+        const transcript = renderSummaryTranscript(withHandoff(messages))
+        return summaryRequestBytes(buildRequest(transcript)) <= byteBudget ||
+          (preferCompleteTranscript && summaryRequestBytes(buildRequest(transcript, true)) <= byteBudget)
+      }
       const truncated = handoff && fitsRequest(retryMessages)
         ? null
         : truncateOldestRoundsForRetry(retryMessages, trimTokensToSummarize, fitsRequest)
@@ -1845,7 +1871,9 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
       const summaryMessages =
         retryByteBudget === undefined
           ? buildRequest(conversationTranscript)
-          : fitSummaryRequestToBytes(conversationTranscript, retryByteBudget, buildRequest)
+          : fitSummaryRequestToBytes(
+              conversationTranscript, retryByteBudget, buildRequest, preferCompleteTranscript
+            )
       const requestBytes = summaryRequestBytes(summaryMessages)
       const estimatedInput = fitInheritedHandoff ? estimateSummaryInput(summaryMessages) : 0
       if (!preflightChecked) {
@@ -1942,7 +1970,8 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
           nextRequest = fitSummaryRequestToBytes(
             renderSummaryTranscript(attemptMessages),
             retryByteBudget,
-            buildRequest
+            buildRequest,
+            preferCompleteTranscript
           )
         } catch (fittingError) {
           attemptBudget.diagnostics?.record("recovery_budget_exhausted", {

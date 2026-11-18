@@ -850,13 +850,14 @@ describe("fork summary state", () => {
   })
 
   it.each([
-    { summaryLimit: 1_200, trailingTool: false, longLatest: false },
-    { summaryLimit: 1_250, trailingTool: false, longLatest: false },
-    { summaryLimit: 1_200, trailingTool: true, longLatest: false },
-    { summaryLimit: 1_200, trailingTool: true, longLatest: true }
+    { summaryLimit: 1_200, trailingTool: false, longLatest: false, previousCorrection: false },
+    { summaryLimit: 1_250, trailingTool: false, longLatest: false, previousCorrection: false },
+    { summaryLimit: 1_200, trailingTool: true, longLatest: false, previousCorrection: false },
+    { summaryLimit: 1_200, trailingTool: true, longLatest: true, previousCorrection: false },
+    { summaryLimit: 4_000, trailingTool: true, longLatest: false, previousCorrection: true }
   ])(
-    "reuses a $summaryLimit-character budget (tool: $trailingTool, long request: $longLatest)",
-    async ({ summaryLimit, trailingTool, longLatest }) => {
+    "reuses a $summaryLimit-character budget (tool: $trailingTool, long request: $longLatest, correction: $previousCorrection)",
+    async ({ summaryLimit, trailingTool, longLatest, previousCorrection }) => {
       const raw = [new HumanMessage("original request"), new AIMessage("original answer")]
       const value = checkpoint(raw, raw.length)
       value.channel_values._summarizationEvent = {
@@ -866,6 +867,7 @@ describe("fork summary state", () => {
       }
       await inheritForkSummarization({ checkpoint: value, persistedMessageCount: raw.length })
       const requirement = "EXACT_CURRENT_TASK_REQUIREMENT_1234"
+      const correction = "ACTIVE_CORRECTION_DO_NOT_RENAME_ROOT_731"
       const tail = trailingTool
         ? [
             new HumanMessage(longLatest ? requirement + " " + "more details ".repeat(340) : requirement),
@@ -880,17 +882,21 @@ describe("fork summary state", () => {
             new AIMessage("界".repeat(1_000)),
             new HumanMessage("Continue")
           ]
-      const messages = [...raw, ...tail]
+      const messages = [
+        ...raw,
+        ...(previousCorrection
+          ? [new HumanMessage(correction), new AIMessage("Please give approval.")]
+          : []),
+        ...tail
+      ]
       const systemMessage = new SystemMessage("界".repeat(15_400))
       const invoke = vi.fn(async (request: BaseMessage[]) => {
         const length = request.reduce((total, message) => total + String(message.content).length, 0)
         if (length > summaryLimit) throw new Error("maximum context length")
-        const includesRequirement = request.some((message) =>
-          String(message.content).includes(requirement)
+        const retained = [requirement, correction].filter((text) =>
+          request.some((message) => String(message.content).includes(text))
         )
-        return new AIMessage(
-          "Earlier decision and next step" + (includesRequirement ? " " + requirement : "")
-        )
+        return new AIMessage(["Earlier decision and next step", ...retained].join(" "))
       })
       const middleware = createCmbSummarizationMiddleware({
         model: { invoke } as never,
@@ -914,11 +920,12 @@ describe("fork summary state", () => {
         expect(messages).toHaveLength(1)
         expect(messages[0].content).toContain("Earlier decision and next step")
         if (trailingTool) expect(messages[0].content).toContain(requirement)
+        if (previousCorrection) expect(messages[0].content).toContain(correction)
         return new AIMessage("done")
       })
       expect(SummarizationEventSchema.parse(result.update._summarizationEvent).cutoffIndex)
         .toBe(messages.length)
-      expect(invoke).toHaveBeenCalledTimes(summaryLimit === 1_200 ? 5 : 4)
+      expect(invoke).toHaveBeenCalledTimes(previousCorrection ? 3 : summaryLimit === 1_200 ? 5 : 4)
     }
   )
 

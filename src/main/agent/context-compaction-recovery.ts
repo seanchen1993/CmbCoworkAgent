@@ -83,10 +83,15 @@ function excerptBuffer(buffer: Buffer, bytes: number): string {
 export function fitSummaryRequestToBytes(
   transcript: string,
   byteBudget: number,
-  build: (transcript: string, compactInstructions: boolean) => BaseMessage[]
+  build: (transcript: string, compactInstructions: boolean) => BaseMessage[],
+  preferCompleteTranscript = false
 ): BaseMessage[] {
   const complete = build(transcript, false)
   if (summaryRequestBytes(complete) <= byteBudget) return complete
+  if (preferCompleteTranscript) {
+    const compact = build(transcript, true)
+    if (summaryRequestBytes(compact) <= byteBudget) return compact
+  }
   const compactInstructions = summaryRequestBytes(build("", false)) > byteBudget / 2
   const transcriptBuffer = Buffer.from(transcript)
   const excerpt = (bytes: number): BaseMessage[] => {
