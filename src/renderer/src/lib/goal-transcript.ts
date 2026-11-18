@@ -388,6 +388,35 @@ function durableMessageOrdinal(message: Message): number | null {
 export interface GoalTranscriptPageRange {
   hasEarlierMessages: boolean
   newerBoundary?: { ordinal: number; createdAt?: Date }
+  forwardAnchor?: Pick<Message, "ordinal" | "created_at">
+}
+
+export type GoalTranscriptPageExtent =
+  | { kind: "backward"; boundary: NonNullable<GoalTranscriptPageRange["newerBoundary"]> }
+  | { kind: "target" }
+  | { kind: "forward"; anchor?: GoalTranscriptPageRange["forwardAnchor"] }
+
+export function getGoalTranscriptPageRange(
+  durableMessages: readonly Message[],
+  hasMore: boolean,
+  extent?: GoalTranscriptPageExtent
+): GoalTranscriptPageRange {
+  const last = durableMessages.at(-1)
+  // A target ends at its anchor. A partial forward page leaves events at or
+  // after its last row to the next page, which starts just after that anchor.
+  const endsAtLastRow = extent?.kind === "target" || (extent?.kind === "forward" && hasMore)
+  return {
+    hasEarlierMessages: extent?.kind === "forward" || hasMore,
+    ...(extent?.kind === "forward" && { forwardAnchor: extent.anchor }),
+    ...(extent?.kind === "backward" && { newerBoundary: extent.boundary }),
+    ...(endsAtLastRow &&
+      last && {
+        newerBoundary: {
+          ordinal: (durableMessageOrdinal(last) ?? Number.POSITIVE_INFINITY) + 1,
+          createdAt: last.created_at
+        }
+      })
+  }
 }
 
 /** Carry durable ordinals onto checkpoint rows whose reconstructed timestamps are not reliable. */
@@ -428,8 +457,9 @@ export function filterGoalEventsForDurablePage(
   const upperOrdinal = pageRange
     ? (pageRange.newerBoundary?.ordinal ?? Number.POSITIVE_INFINITY)
     : Math.max(...ordinals) + 1
+  const olderOrdinal = pageRange?.forwardAnchor?.ordinal
   const minimumTime = pageRange?.hasEarlierMessages
-    ? durableMessages[0]?.created_at.getTime()
+    ? (pageRange.forwardAnchor?.created_at ?? durableMessages[0]?.created_at)?.getTime()
     : Number.NEGATIVE_INFINITY
   const newerTime = pageRange?.newerBoundary?.createdAt?.getTime()
   const maximumKnownTime = durableMessages.at(-1)?.created_at.getTime()
@@ -445,7 +475,13 @@ export function filterGoalEventsForDurablePage(
     }
     if (durableCommands.hasEquivalent(message)) return true
     const ordinal = durableMessageOrdinal(message)
-    if (ordinal !== null) return ordinal >= minimum && ordinal < upperOrdinal
+    if (ordinal !== null) {
+      return (
+        ordinal >= minimum &&
+        ordinal < upperOrdinal &&
+        (olderOrdinal === undefined || ordinal > olderOrdinal)
+      )
+    }
     if (!pageRange || minimumTime === undefined) return false
     const eventTime = new Date(event.created_at).getTime()
     if (!Number.isFinite(eventTime) || eventTime < minimumTime) return false
@@ -471,20 +507,40 @@ export function mergeGoalUserEventsIntoDurablePage(
     return durableMessages
   }
   const eligible = filterGoalEventsForDurablePage(pageBoundaryMessages, goalEvents, pageRange)
-  const durableUserMessageIds = new Set(
-    durableMessages.filter((message) => message.role === "user").map((message) => message.id)
+  if (eligible.length === 0) return durableMessages
+  const userMessagesById = new Map(
+    durableMessages
+      .filter((message) => message.role === "user")
+      .map((message) => [message.id, message])
   )
-  const extras = eligible
-    .filter(
-      (event) =>
-        !event.transcript_message_id || !durableUserMessageIds.has(event.transcript_message_id)
-    )
-    .map(goalUserEventToMessage)
-    .filter(
-      (message): message is Message =>
-        message !== null && (pageRange !== undefined || durableMessageOrdinal(message) !== null)
-    )
-  return insertPageGoalMessages(durableMessages, extras)
+  const sidecarIds = new Set<string>()
+  const extras: Message[] = []
+  for (const event of eligible) {
+    const message = goalUserEventToMessage(event)
+    if (!message || (!pageRange && durableMessageOrdinal(message) === null)) continue
+    sidecarIds.add(message.id)
+    if (!event.transcript_message_id || !userMessagesById.has(event.transcript_message_id)) {
+      const existing = userMessagesById.get(message.id)
+      extras.push(
+        existing &&
+          existing.content === message.content &&
+          existing.ordinal === message.ordinal &&
+          existing.created_at.getTime() === message.created_at.getTime() &&
+          existing.goal_id === message.goal_id &&
+          existing.active_window_id === message.active_window_id
+          ? existing
+          : message
+      )
+    }
+  }
+  const base = durableMessages.some((message) => sidecarIds.has(message.id))
+    ? durableMessages.filter((message) => !sidecarIds.has(message.id))
+    : durableMessages
+  const merged = insertPageGoalMessages(base, extras)
+  return merged.length === durableMessages.length &&
+    merged.every((message, index) => message === durableMessages[index])
+    ? durableMessages
+    : merged
 }
 
 function insertPageGoalMessages(messages: Message[], extras: readonly Message[]): Message[] {

@@ -46,6 +46,11 @@ import {
   createTurnCompletionGateMiddleware,
   type TurnCompletionRecoveryCallback
 } from "./turn-completion-integrity"
+import {
+  GOAL_CONTINUATION_BOUNDARY_METADATA_KEY,
+  GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY
+} from "./goals/internal-prompt"
+import { goalManager } from "./goals/runtime"
 import { getProjectThreadDataDirectory } from "./context-history-path"
 import {
   withSubagentSessionCapture,
@@ -138,7 +143,7 @@ import {
   humanInTheLoopMiddleware,
   tool as lcTool
 } from "langchain"
-import { HumanMessage, ToolMessage } from "@langchain/core/messages"
+import { HumanMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages"
 import {
   patchConfig,
   raceWithSignal,
@@ -270,6 +275,43 @@ export function setCurrentRunTranscriptFlushBeforeInjection(
 ): void {
   flushTranscriptBeforeCurrentRunInjection = flush
 }
+
+/** Stage the graph input. The main-stream values fence owns its SQLite reservation. */
+export function createPhysicalGoalGateRecoveryMessage(
+  threadId: string,
+  runToken: string | undefined,
+  messages: readonly BaseMessage[],
+  prompt: string
+): HumanMessage {
+  const parent = messages.findLast(HumanMessage.isInstance)
+  if (
+    !parent?.id ||
+    parent.additional_kwargs[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] !== true ||
+    !runToken ||
+    !isCurrentRunMessageQueueOwner(threadId, runToken) ||
+    !goalManager.getActive(threadId)
+  ) {
+    return new HumanMessage(prompt)
+  }
+
+  // The graph can produce another repair while the consumer is still
+  // processing the previous gate frame. Carry its known durable ancestor.
+  const durableParentId =
+    getThreadTranscriptBoundaryOrdinal(threadId, parent.id) !== undefined
+      ? parent.id
+      : parent.additional_kwargs[GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]
+  if (typeof durableParentId !== "string" || !durableParentId) return new HumanMessage(prompt)
+
+  return new HumanMessage({
+    content: prompt,
+    id: randomUUID(),
+    additional_kwargs: {
+      [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true,
+      [GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]: durableParentId
+    }
+  })
+}
+
 import { ToolOrchestrator } from "./tool-orchestrator"
 import { classifyCommandConcurrency, isReadOnlyShellCommand } from "./exec-policy"
 import type { WindowsShellKind } from "./windows-safe-commands"
@@ -3021,7 +3063,14 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       createTurnCompletionGateMiddleware({
         ownerRunToken: currentRunMessageQueueOwnerToken,
         todoGateEnabled: mainTodosEnabled && turnCompletionTodoGateEnabled,
-        onRecovery: onTurnCompletionRecovery
+        onRecovery: onTurnCompletionRecovery,
+        createRecoveryMessage: (threadId, messages, prompt) =>
+          createPhysicalGoalGateRecoveryMessage(
+            threadId,
+            currentRunMessageQueueOwnerToken,
+            messages,
+            prompt
+          )
       }),
       // Inject user messages steered into the running turn. Placed BEFORE
       // summarization (injected turns should participate in context management)

@@ -1050,11 +1050,30 @@ export interface UpsertThreadMessagesOptions {
   preserveExistingOrder?: boolean
 }
 
+type ThreadMessageTimes = Pick<ThreadMessageRow, "created_at" | "start_at" | "end_at">
+
+function restoreThreadMessageTimes(
+  preimage: ThreadMessageTimes,
+  live: ThreadMessageTimes | undefined,
+  written: ThreadMessageTimes
+): ThreadMessageTimes {
+  return {
+    created_at: live && live.created_at !== written.created_at
+      ? live.created_at
+      : preimage.created_at,
+    start_at: live && live.start_at !== written.start_at ? live.start_at : preimage.start_at,
+    end_at: live && live.end_at !== written.end_at ? live.end_at : preimage.end_at
+  }
+}
+
 /** Undo only rows written since the last graph values boundary, using resolved DB ids.
  * Each preimage is read once; ordinary text suffix flushes keep their bounded append path.
  */
 export class ThreadMessageStreamAttempt {
   private readonly before = new Map<string, ThreadMessageRow | null>()
+  private readonly renamedIds = new Map<string, string>()
+  private readonly originalIds = new Map<string, string>()
+  private readonly writtenTimes = new Map<string, ThreadMessageTimes>()
 
   constructor(private readonly threadId: string) {}
 
@@ -1066,8 +1085,8 @@ export class ThreadMessageStreamAttempt {
       this.before.set(messageId, null)
       return
     }
-    // Fold pre-existing fragments into the preimage once, preserving every other
-    // column (including ordinal, timestamps, authority and recovery integrity).
+    // Fold pre-existing fragments into the preimage once so restoring the row
+    // preserves text without keeping a second fragment journal.
     const content = parseMessageContent(row.content_json)
     const suffix =
       typeof content === "string"
@@ -1079,16 +1098,39 @@ export class ThreadMessageStreamAttempt {
     })
   }
 
+  recordRename(fromId: string, toId: string): void {
+    const originalId = this.originalIds.get(fromId) ?? fromId
+    this.originalIds.delete(fromId)
+    this.originalIds.set(toId, originalId)
+    this.renamedIds.set(originalId, toId)
+    const times = this.writtenTimes.get(fromId)
+    if (times) {
+      this.writtenTimes.delete(fromId)
+      this.writtenTimes.set(toId, times)
+    }
+  }
+
+  recordWrittenTimes(
+    messageId: string,
+    previous: ThreadMessageTimes,
+    times: ThreadMessageTimes
+  ): void {
+    const preimage = this.before.get(this.originalIds.get(messageId) ?? messageId)
+    if (!preimage) return
+    const lastWrite = this.writtenTimes.get(messageId) ?? preimage
+    Object.assign(preimage, restoreThreadMessageTimes(preimage, previous, lastWrite))
+    this.writtenTimes.set(messageId, times)
+  }
+
   rollback(): { discardedMessageIds: string[]; restoredMessages: Message[] } {
     const discardedMessageIds: string[] = []
     const restoredMessages: Message[] = []
     if (this.before.size === 0) return { discardedMessageIds, restoredMessages }
     const database = getDb()
-    database.run("BEGIN")
-    try {
+    database.withImmediateWriteTransaction(() => {
+      const currentRows = getThreadMessageRows(database, this.threadId, [...this.before.keys()])
       let removedCount = 0
-      for (const [id, row] of this.before) {
-        const existed = getThreadMessageRows(database, this.threadId, [id]).has(id)
+      for (const id of this.before.keys()) {
         database.run(
           "DELETE FROM thread_message_fragments WHERE thread_id = ? AND message_id = ?",
           [this.threadId, id]
@@ -1101,16 +1143,29 @@ export class ThreadMessageStreamAttempt {
           this.threadId,
           id
         ])
+      }
+      for (const [id, row] of this.before) {
+        const current = currentRows.get(id)
         if (row) {
-          const columns = Object.keys(row)
+          const renamedId = this.renamedIds.get(id)
+          const live = (renamedId ? currentRows.get(renamedId) : undefined) ?? current
+          const written = this.writtenTimes.get(live?.message_id ?? id) ?? row
+          // Bootstrap can rebase ordinals and fill legacy timestamps after a
+          // value is staged. Undo the attempt's fields without undoing that work.
+          const restored = {
+            ...row,
+            ...restoreThreadMessageTimes(row, live, written),
+            ordinal: live?.ordinal ?? row.ordinal
+          }
+          const columns = Object.keys(restored)
           database.run(
             `INSERT INTO thread_messages (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
-            Object.values(row)
+            Object.values(restored)
           )
-          if (!existed) removedCount -= 1
-          restoredMessages.push(threadMessageRowToMessage(row))
+          if (!current) removedCount -= 1
+          restoredMessages.push(threadMessageRowToMessage(restored))
         } else {
-          if (existed) removedCount += 1
+          if (current) removedCount += 1
           discardedMessageIds.push(id)
         }
       }
@@ -1120,12 +1175,11 @@ export class ThreadMessageStreamAttempt {
         "UPDATE thread_message_buckets SET message_count = MAX(0, message_count - ?), updated_at = ? WHERE thread_id = ?",
         [removedCount, Date.now(), this.threadId]
       )
-      database.run("COMMIT")
-    } catch (error) {
-      database.run("ROLLBACK")
-      throw error
-    }
+    })
     this.before.clear()
+    this.renamedIds.clear()
+    this.originalIds.clear()
+    this.writtenTimes.clear()
     saveToDisk()
     return { discardedMessageIds, restoredMessages }
   }
@@ -4641,13 +4695,14 @@ export function appendThreadMessageTextDelta(
   streamAttempt?: ThreadMessageStreamAttempt
 ): boolean {
   const messageId = typeof message.id === "string" ? message.id.trim() : ""
+  const content = message.content
   const providerSourceId = message.provider_source_id?.trim()
   const providerOccurrence = getMessageProviderOccurrence(message)
   if (
     !messageId ||
     message.role !== "assistant" ||
-    typeof message.content !== "string" ||
-    !message.content ||
+    typeof content !== "string" ||
+    !content ||
     !providerSourceId ||
     providerOccurrence === undefined ||
     message.tool_call_id ||
@@ -4659,86 +4714,87 @@ export function appendThreadMessageTextDelta(
   }
 
   const database = getDb()
-  const stmt = database.prepare(
-    `SELECT
-       m.role,
-       m.provider_source_id,
-       m.provider_occurrence,
-       m.tool_calls_json,
-       m.tool_call_id,
-       m.content_priority,
-       m.recovery_integrity,
-       tail.fragment_id AS tail_fragment_id,
-       tail.content_text AS tail_content_text,
-       COALESCE(
-         s.total_chars,
-         CASE
-           WHEN json_type(m.content_json) = 'text'
-             THEN length(json_extract(m.content_json, '$'))
-           ELSE -1
-         END
-       ) AS total_chars
-     FROM thread_messages AS m
-     LEFT JOIN thread_message_fragment_states AS s
-       ON s.thread_id = m.thread_id AND s.message_id = m.message_id
-     LEFT JOIN thread_message_fragments AS tail
-       ON tail.fragment_id = (
-         SELECT MAX(candidate.fragment_id)
-         FROM thread_message_fragments AS candidate
-         WHERE candidate.thread_id = m.thread_id AND candidate.message_id = m.message_id
-       )
-     WHERE m.thread_id = ? AND m.message_id = ?`
-  )
-  stmt.bind([threadId, messageId])
-  let row:
-    | {
-        role?: unknown
-        provider_source_id?: unknown
-        provider_occurrence?: unknown
-        tool_calls_json?: unknown
-        tool_call_id?: unknown
-        content_priority?: unknown
-        recovery_integrity?: unknown
-        tail_fragment_id?: unknown
-        tail_content_text?: unknown
-        total_chars?: unknown
-      }
-    | undefined
-  try {
-    if (stmt.step()) row = stmt.getAsObject()
-  } finally {
-    stmt.free()
-  }
-  const totalChars = Number(row?.total_chars)
-  if (
-    row?.role !== "assistant" ||
-    row.provider_source_id !== providerSourceId ||
-    Number(row.provider_occurrence) !== providerOccurrence ||
-    row.tool_calls_json !== null ||
-    row.tool_call_id !== null ||
-    Number(row.content_priority ?? 0) > 0 ||
-    !Number.isSafeInteger(totalChars) ||
-    totalChars < 0
-  ) {
-    return false
-  }
-
-  const remainingChars = Math.max(0, THREAD_MESSAGE_TEXT_LIMIT - totalChars)
-  streamAttempt?.capture(messageId)
-  const delta = message.content.slice(0, remainingChars)
-  if (delta.length !== message.content.length && row.recovery_integrity !== 0) {
-    database.run(
-      "UPDATE thread_messages SET recovery_integrity = 0 WHERE thread_id = ? AND message_id = ?",
-      [threadId, messageId]
+  const result = database.withImmediateWriteTransaction(() => {
+    const stmt = database.prepare(
+      `SELECT
+         m.role,
+         m.provider_source_id,
+         m.provider_occurrence,
+         m.tool_calls_json,
+         m.tool_call_id,
+         m.content_priority,
+         m.recovery_integrity,
+         tail.fragment_id AS tail_fragment_id,
+         tail.content_text AS tail_content_text,
+         COALESCE(
+           s.total_chars,
+           CASE
+             WHEN json_type(m.content_json) = 'text'
+               THEN length(json_extract(m.content_json, '$'))
+             ELSE -1
+           END
+         ) AS total_chars
+       FROM thread_messages AS m
+       LEFT JOIN thread_message_fragment_states AS s
+         ON s.thread_id = m.thread_id AND s.message_id = m.message_id
+       LEFT JOIN thread_message_fragments AS tail
+         ON tail.fragment_id = (
+           SELECT MAX(candidate.fragment_id)
+           FROM thread_message_fragments AS candidate
+           WHERE candidate.thread_id = m.thread_id AND candidate.message_id = m.message_id
+         )
+       WHERE m.thread_id = ? AND m.message_id = ?`
     )
-  }
-  if (!delta) return true
-  const updatedTotalChars = totalChars + delta.length
-  const tailFragmentId = Number(row?.tail_fragment_id)
-  const tailContentText = typeof row?.tail_content_text === "string" ? row.tail_content_text : ""
-  let deltaOffset = 0
-  database.run("BEGIN")
-  try {
+    stmt.bind([threadId, messageId])
+    let row:
+      | {
+          role?: unknown
+          provider_source_id?: unknown
+          provider_occurrence?: unknown
+          tool_calls_json?: unknown
+          tool_call_id?: unknown
+          content_priority?: unknown
+          recovery_integrity?: unknown
+          tail_fragment_id?: unknown
+          tail_content_text?: unknown
+          total_chars?: unknown
+        }
+      | undefined
+    try {
+      if (stmt.step()) row = stmt.getAsObject()
+    } finally {
+      stmt.free()
+    }
+    const totalChars = Number(row?.total_chars)
+    if (
+      row?.role !== "assistant" ||
+      row.provider_source_id !== providerSourceId ||
+      Number(row.provider_occurrence) !== providerOccurrence ||
+      row.tool_calls_json !== null ||
+      row.tool_call_id !== null ||
+      Number(row.content_priority ?? 0) > 0 ||
+      !Number.isSafeInteger(totalChars) ||
+      totalChars < 0
+    ) {
+      return "rejected"
+    }
+
+    const remainingChars = Math.max(0, THREAD_MESSAGE_TEXT_LIMIT - totalChars)
+    const delta = content.slice(0, remainingChars)
+    const updateRecovery = delta.length !== content.length && row.recovery_integrity !== 0
+    if (!delta && !updateRecovery) return "unchanged"
+    streamAttempt?.capture(messageId)
+    if (updateRecovery) {
+      database.run(
+        "UPDATE thread_messages SET recovery_integrity = 0 WHERE thread_id = ? AND message_id = ?",
+        [threadId, messageId]
+      )
+    }
+    if (!delta) return "updated"
+    const updatedTotalChars = totalChars + delta.length
+    const tailFragmentId = Number(row?.tail_fragment_id)
+    const tailContentText = typeof row?.tail_content_text === "string" ? row.tail_content_text : ""
+    let deltaOffset = 0
     if (
       Number.isSafeInteger(tailFragmentId) &&
       tailFragmentId > 0 &&
@@ -4781,17 +4837,10 @@ export function appendThreadMessageTextDelta(
          updated_at = excluded.updated_at`,
       [threadId, messageId, updatedTotalChars, Date.now()]
     )
-    database.run("COMMIT")
-  } catch (error) {
-    try {
-      database.run("ROLLBACK")
-    } catch {
-      // Preserve the original transaction error.
-    }
-    throw error
-  }
-  saveToDisk()
-  return true
+    return "updated"
+  })
+  if (result === "updated") saveToDisk()
+  return result !== "rejected"
 }
 
 export function upsertThreadMessages(
@@ -4801,81 +4850,80 @@ export function upsertThreadMessages(
 ): number {
   if (messages.length === 0) return 0
   const database = getDb()
-  if (!threadExists(threadId)) return 0
-  const persistedBaselineMessages = options.preserveExistingOrder
-    ? undefined
-    : getThreadMessages(threadId)
+  const changed = database.withImmediateWriteTransaction(() => {
+    if (!threadExists(threadId)) return 0
+    const persistedBaselineMessages = options.preserveExistingOrder
+      ? undefined
+      : getThreadMessages(threadId)
 
-  const aliasedMessages = applyThreadMessageIdAliases(database, threadId, messages)
-  const collisionCandidateMessages = aliasedMessages.map((message) => {
-    const messageId = typeof message.id === "string" ? message.id.trim() : ""
-    return messageId === message.id ? message : { ...message, id: messageId }
-  })
-  const collisionBaselineRows = getThreadMessageRows(
-    database,
-    threadId,
-    collisionCandidateMessages.flatMap((message) => {
-      const sourceId = getMessageRoleCollisionSourceId(message)
-      return [message.id, sourceId, buildMessageRoleCollisionId(sourceId, message.role)]
+    const aliasedMessages = applyThreadMessageIdAliases(database, threadId, messages)
+    const collisionCandidateMessages = aliasedMessages.map((message) => {
+      const messageId = typeof message.id === "string" ? message.id.trim() : ""
+      return messageId === message.id ? message : { ...message, id: messageId }
     })
-  )
-  const collisionBaselines = [...collisionBaselineRows.values()].flatMap((row) => {
-    const hasRecoverableAliasCollision = collisionCandidateMessages.some((message) => {
-      if (message.id !== row.message_id || message.role === row.role) return false
-      const aliasSourceId = findAliasSourceForCanonicalCollision(threadId, row.message_id, row.role)
-      if (!aliasSourceId) return false
-      return !getThreadMessageRows(database, threadId, [aliasSourceId]).has(aliasSourceId)
+    const collisionBaselineRows = getThreadMessageRows(
+      database,
+      threadId,
+      collisionCandidateMessages.flatMap((message) => {
+        const sourceId = getMessageRoleCollisionSourceId(message)
+        return [message.id, sourceId, buildMessageRoleCollisionId(sourceId, message.role)]
+      })
+    )
+    const collisionBaselines = [...collisionBaselineRows.values()].flatMap((row) => {
+      const hasRecoverableAliasCollision = collisionCandidateMessages.some((message) => {
+        if (message.id !== row.message_id || message.role === row.role) return false
+        const aliasSourceId = findAliasSourceForCanonicalCollision(threadId, row.message_id, row.role)
+        if (!aliasSourceId) return false
+        return !getThreadMessageRows(database, threadId, [aliasSourceId]).has(aliasSourceId)
+      })
+      return hasRecoverableAliasCollision
+        ? []
+        : [
+            {
+              id: row.message_id,
+              role: row.role,
+              ...(row.provider_source_id ? { provider_source_id: row.provider_source_id } : {}),
+              ...(row.provider_occurrence ? { provider_occurrence: row.provider_occurrence } : {})
+            }
+          ]
     })
-    return hasRecoverableAliasCollision
-      ? []
-      : [
-          {
-            id: row.message_id,
-            role: row.role,
-            ...(row.provider_source_id ? { provider_source_id: row.provider_source_id } : {}),
-            ...(row.provider_occurrence ? { provider_occurrence: row.provider_occurrence } : {})
-          }
-        ]
-  })
-  const baselineIds = new Set(collisionBaselines.map((message) => message.id))
-  for (const row of getThreadMessageProviderOccurrenceRows(
-    database,
-    threadId,
-    collisionCandidateMessages
-  )) {
-    if (baselineIds.has(row.message_id)) continue
-    baselineIds.add(row.message_id)
-    collisionBaselines.push(threadMessageRowToMessage(row))
-  }
-  const coalescedCollisionCandidates = coalesceNormalizedThreadMessages(
-    collisionCandidateMessages,
-    Date.now()
-  )
-  const collisionNormalizedMessages = normalizeCompleteSnapshotMessageIds(
-    collisionBaselines,
-    coalescedCollisionCandidates
-  )
-  const normalizedMessages = coalesceNormalizedThreadMessages(
-    applyThreadMessageIdAliases(database, threadId, collisionNormalizedMessages),
-    Date.now()
-  )
-  if (normalizedMessages.length === 0) return 0
+    const baselineIds = new Set(collisionBaselines.map((message) => message.id))
+    for (const row of getThreadMessageProviderOccurrenceRows(
+      database,
+      threadId,
+      collisionCandidateMessages
+    )) {
+      if (baselineIds.has(row.message_id)) continue
+      baselineIds.add(row.message_id)
+      collisionBaselines.push(threadMessageRowToMessage(row))
+    }
+    const coalescedCollisionCandidates = coalesceNormalizedThreadMessages(
+      collisionCandidateMessages,
+      Date.now()
+    )
+    const collisionNormalizedMessages = normalizeCompleteSnapshotMessageIds(
+      collisionBaselines,
+      coalescedCollisionCandidates
+    )
+    const normalizedMessages = coalesceNormalizedThreadMessages(
+      applyThreadMessageIdAliases(database, threadId, collisionNormalizedMessages),
+      Date.now()
+    )
+    if (normalizedMessages.length === 0) return 0
 
-  let changed = 0
-  const { bucket: messageBucket, create: createMessageBucket } = getOrRepairThreadMessageBucket(
-    database,
-    threadId
-  )
-  let messageCount = Math.max(0, Number(messageBucket.message_count) || 0)
-  let nextOrdinal = Math.max(0, Number(messageBucket.next_ordinal) || 0)
-  const existingRows = getThreadMessageRows(
-    database,
-    threadId,
-    normalizedMessages.map((message) => message.id)
-  )
+    const { bucket: messageBucket, create: createMessageBucket } = getOrRepairThreadMessageBucket(
+      database,
+      threadId
+    )
+    let messageCount = Math.max(0, Number(messageBucket.message_count) || 0)
+    let nextOrdinal = Math.max(0, Number(messageBucket.next_ordinal) || 0)
+    const existingRows = getThreadMessageRows(
+      database,
+      threadId,
+      normalizedMessages.map((message) => message.id)
+    )
 
-  database.run("BEGIN")
-  try {
+    let changed = 0
     if (createMessageBucket) {
       database.run(
         `INSERT INTO thread_message_buckets (
@@ -4918,6 +4966,7 @@ export function upsertThreadMessages(
                WHERE thread_id = ? AND message_id = ?`,
               [aliasSourceId, threadId, normalized.id]
             )
+            options.streamAttempt?.recordRename(normalized.id, aliasSourceId)
             existingRows.delete(normalized.id)
             existing = undefined
             changed++
@@ -5094,6 +5143,11 @@ export function upsertThreadMessages(
             normalized.id
           ]
         )
+        options.streamAttempt?.recordWrittenTimes(normalized.id, existing, {
+          created_at: nextCreatedAt,
+          start_at: nextStartAt,
+          end_at: nextEndAt
+        })
         database.run(
           "DELETE FROM thread_message_fragments WHERE thread_id = ? AND message_id = ?",
           [threadId, normalized.id]
@@ -5159,16 +5213,8 @@ export function upsertThreadMessages(
     if (changed > 0 && options.touchThreadUpdatedAt === true) {
       database.run("UPDATE threads SET updated_at = ? WHERE thread_id = ?", [Date.now(), threadId])
     }
-    database.run("COMMIT")
-  } catch (error) {
-    try {
-      database.run("ROLLBACK")
-    } catch {
-      // Preserve the original transaction error.
-    }
-    throw error
-  }
-
+    return changed
+  })
   if (changed > 0) saveToDisk()
   return changed
 }
@@ -5215,54 +5261,41 @@ function moveThreadMessageBlockAfterOrdinal(
 
   const { bucket, create: createBucket } = getOrRepairThreadMessageBucket(database, threadId)
 
-  database.run("BEGIN")
-  try {
-    if (createBucket) {
-      database.run(
-        `INSERT INTO thread_message_buckets (
-           thread_id, message_count, next_ordinal, updated_at
-         ) VALUES (?, ?, ?, ?)`,
-        [threadId, bucket.message_count, bucket.next_ordinal, bucket.updated_at]
-      )
-    }
-    // One indexed range update makes room. The moved block is excluded so a
-    // 20k-row transcript never becomes 20k JS objects or 20k UPDATE calls.
+  if (createBucket) {
     database.run(
-      `UPDATE thread_messages
-       SET ordinal = ordinal + ?
-       WHERE thread_id = ? AND ordinal > ?
-         AND message_id NOT IN (${placeholders})`,
-      [orderedIds.length, threadId, anchorOrdinal, ...orderedIds]
+      `INSERT INTO thread_message_buckets (
+         thread_id, message_count, next_ordinal, updated_at
+       ) VALUES (?, ?, ?, ?)`,
+      [threadId, bucket.message_count, bucket.next_ordinal, bucket.updated_at]
     )
-    database.run(
-      `UPDATE thread_graph_transcript_boundaries
-       SET ordinal = ordinal + ?
-       WHERE thread_id = ? AND ordinal > ?`,
-      [orderedIds.length, threadId, anchorOrdinal]
-    )
-    orderedIds.forEach((messageId, index) => {
-      database.run(
-        "UPDATE thread_messages SET ordinal = ? WHERE thread_id = ? AND message_id = ?",
-        [anchorOrdinal + index + 1, threadId, messageId]
-      )
-    })
-    database.run(
-      `UPDATE thread_message_buckets
-       SET next_ordinal = next_ordinal + ?, updated_at = ?
-       WHERE thread_id = ?`,
-      [orderedIds.length, Date.now(), threadId]
-    )
-    database.run("COMMIT")
-  } catch (error) {
-    try {
-      database.run("ROLLBACK")
-    } catch {
-      // Preserve the original transaction error.
-    }
-    throw error
   }
-
-  saveToDisk()
+  // One indexed range update makes room. The moved block is excluded so a
+  // 20k-row transcript never becomes 20k JS objects or 20k UPDATE calls.
+  database.run(
+    `UPDATE thread_messages
+     SET ordinal = ordinal + ?
+     WHERE thread_id = ? AND ordinal > ?
+       AND message_id NOT IN (${placeholders})`,
+    [orderedIds.length, threadId, anchorOrdinal, ...orderedIds]
+  )
+  database.run(
+    `UPDATE thread_graph_transcript_boundaries
+     SET ordinal = ordinal + ?
+     WHERE thread_id = ? AND ordinal > ?`,
+    [orderedIds.length, threadId, anchorOrdinal]
+  )
+  orderedIds.forEach((messageId, index) => {
+    database.run(
+      "UPDATE thread_messages SET ordinal = ? WHERE thread_id = ? AND message_id = ?",
+      [anchorOrdinal + index + 1, threadId, messageId]
+    )
+  })
+  database.run(
+    `UPDATE thread_message_buckets
+     SET next_ordinal = next_ordinal + ?, updated_at = ?
+     WHERE thread_id = ?`,
+    [orderedIds.length, Date.now(), threadId]
+  )
   return true
 }
 
@@ -5280,25 +5313,29 @@ export function moveThreadMessagesAfterLastNonAssistant(
   if (orderedIds.length === 0) return false
 
   const database = getDb()
-  const placeholders = orderedIds.map(() => "?").join(", ")
-  const anchorStmt = database.prepare(
-    `SELECT ordinal FROM thread_messages
-     WHERE thread_id = ? AND role != 'assistant'
-       AND message_id NOT IN (${placeholders})
-     ORDER BY ordinal DESC, created_at DESC, message_id DESC
-     LIMIT 1`
-  )
-  anchorStmt.bind([threadId, ...orderedIds])
-  let anchorOrdinal: number | undefined
-  try {
-    if (anchorStmt.step()) {
-      anchorOrdinal = Number((anchorStmt.getAsObject() as { ordinal?: unknown }).ordinal)
+  const moved = database.withImmediateWriteTransaction(() => {
+    const placeholders = orderedIds.map(() => "?").join(", ")
+    const anchorStmt = database.prepare(
+      `SELECT ordinal FROM thread_messages
+       WHERE thread_id = ? AND role != 'assistant'
+         AND message_id NOT IN (${placeholders})
+       ORDER BY ordinal DESC, created_at DESC, message_id DESC
+       LIMIT 1`
+    )
+    anchorStmt.bind([threadId, ...orderedIds])
+    let anchorOrdinal: number | undefined
+    try {
+      if (anchorStmt.step()) {
+        anchorOrdinal = Number((anchorStmt.getAsObject() as { ordinal?: unknown }).ordinal)
+      }
+    } finally {
+      anchorStmt.free()
     }
-  } finally {
-    anchorStmt.free()
-  }
-  if (anchorOrdinal === undefined || !Number.isFinite(anchorOrdinal)) return false
-  return moveThreadMessageBlockAfterOrdinal(database, threadId, anchorOrdinal, orderedIds)
+    if (anchorOrdinal === undefined || !Number.isFinite(anchorOrdinal)) return false
+    return moveThreadMessageBlockAfterOrdinal(database, threadId, anchorOrdinal, orderedIds)
+  })
+  if (moved) saveToDisk()
+  return moved
 }
 
 /**
@@ -5320,18 +5357,23 @@ export function moveThreadMessagesAfterAnchor(
   if (!anchorId || orderedIds.length === 0) return false
 
   const database = getDb()
-  const anchorRows = getThreadMessageRows(database, threadId, [anchorId])
-  const anchorOrdinal = anchorRows.get(anchorId)?.ordinal ?? getThreadTranscriptBoundaryOrdinal(threadId, anchorId)
-  if (anchorOrdinal === undefined) {
-    throw new Error(`Cannot order durable messages: anchor ${anchorId} is missing`)
-  }
-  return moveThreadMessageBlockAfterOrdinal(
-    database,
-    threadId,
-    Number(anchorOrdinal),
-    orderedIds,
-    true
-  )
+  const moved = database.withImmediateWriteTransaction(() => {
+    const anchorRows = getThreadMessageRows(database, threadId, [anchorId])
+    const anchorOrdinal =
+      anchorRows.get(anchorId)?.ordinal ?? getThreadTranscriptBoundaryOrdinal(threadId, anchorId)
+    if (anchorOrdinal === undefined) {
+      throw new Error(`Cannot order durable messages: anchor ${anchorId} is missing`)
+    }
+    return moveThreadMessageBlockAfterOrdinal(
+      database,
+      threadId,
+      Number(anchorOrdinal),
+      orderedIds,
+      true
+    )
+  })
+  if (moved) saveToDisk()
+  return moved
 }
 
 export function replaceThreadMessageId(
@@ -5354,124 +5396,119 @@ export function replaceThreadMessageId(
   if (fromId === toId) return true
 
   const database = getDb()
-  const rows = getThreadMessageRows(database, threadId, [fromId, toId])
-  const source = rows.get(fromId)
-  const target = rows.get(toId)
-  if (role && source && source.role !== role) {
-    console.warn(
-      `[DB] Refusing to remember message id alias with mismatched source role for thread ${threadId}: ` +
-        `${fromId} (${source.role}) -> ${toId} (${role})`
-    )
-    return false
-  }
-  if (role && target && target.role !== role && !source) {
-    console.warn(
-      `[DB] Refusing to remember message id alias with mismatched target role for thread ${threadId}: ` +
-        `${fromId} (${role}) -> ${toId} (${target.role})`
-    )
-    return false
-  }
-  if (source && target && source.role !== target.role) {
-    console.warn(
-      `[DB] Refusing to merge message id alias across roles for thread ${threadId}: ` +
-        `${fromId} (${source.role}) -> ${toId} (${target.role})`
-    )
-    return false
-  }
-  const storedProviderSourceId = (row: ThreadMessageRow | undefined): string | undefined => {
-    if (!row) return undefined
-    const explicitSourceId = row.provider_source_id?.trim()
-    if (explicitSourceId) return explicitSourceId
-    const inferredSourceId = getMessageProviderSourceId({ id: row.message_id, role: row.role })
-    return inferredSourceId !== row.message_id ? inferredSourceId : undefined
-  }
-  const sourceProviderSourceId = storedProviderSourceId(source)
-  const targetProviderSourceId = storedProviderSourceId(target)
-  const effectiveSourceProviderSourceId =
-    sourceProviderSourceId ??
-    (source && targetProviderSourceId === source.message_id ? source.message_id : undefined)
-  const effectiveTargetProviderSourceId =
-    targetProviderSourceId ??
-    (target && sourceProviderSourceId === target.message_id ? target.message_id : undefined)
-  const sourceProviderOccurrence = source
-    ? getMessageProviderOccurrence({
-        id: source.message_id,
-        provider_occurrence: source.provider_occurrence ?? undefined,
-        role: source.role
-      })
-    : undefined
-  const targetProviderOccurrence = target
-    ? getMessageProviderOccurrence({
-        id: target.message_id,
-        provider_occurrence: target.provider_occurrence ?? undefined,
-        role: target.role
-      })
-    : undefined
-  const effectiveSourceProviderOccurrence =
-    sourceProviderOccurrence ?? (source && effectiveSourceProviderSourceId ? 1 : undefined)
-  const effectiveTargetProviderOccurrence =
-    targetProviderOccurrence ?? (target && effectiveTargetProviderSourceId ? 1 : undefined)
-  if (
-    source &&
-    target &&
-    ((effectiveSourceProviderSourceId &&
-      effectiveTargetProviderSourceId &&
-      effectiveSourceProviderSourceId !== effectiveTargetProviderSourceId) ||
-      (effectiveSourceProviderOccurrence !== undefined &&
-        effectiveTargetProviderOccurrence !== undefined &&
-        effectiveSourceProviderOccurrence !== effectiveTargetProviderOccurrence))
-  ) {
-    console.warn(
-      `[DB] Refusing to merge different provider message occurrences for thread ${threadId}: ` +
-        `${fromId} -> ${toId}`
-    )
-    return false
-  }
-  if (
-    source &&
-    target &&
-    isAssistantToolCallToTextAlias(
-      {
-        role: source.role,
-        content: parseMessageContent(source.content_json),
-        tool_calls: parseToolCalls(source.tool_calls_json)
-      },
-      {
-        role: target.role,
-        content: parseMessageContent(target.content_json),
-        tool_calls: parseToolCalls(target.tool_calls_json)
-      }
-    )
-  ) {
-    console.warn(
-      `[DB] Refusing to merge assistant tool-call message into text answer for thread ${threadId}: ` +
-        `${fromId} -> ${toId}`
-    )
-    return false
-  }
-  if (
-    source &&
-    !target &&
-    (role === "assistant" || source.role === "assistant") &&
-    source.role === "assistant" &&
-    hasUsefulToolCalls(parseToolCalls(source.tool_calls_json))
-  ) {
-    console.warn(
-      `[DB] Refusing to rename assistant tool-call message to unresolved alias target for thread ${threadId}: ` +
-        `${fromId} -> ${toId}`
-    )
-    return false
-  }
+  const result = database.withImmediateWriteTransaction(() => {
+    const rows = getThreadMessageRows(database, threadId, [fromId, toId])
+    const source = rows.get(fromId)
+    const target = rows.get(toId)
+    if (role && source && source.role !== role) {
+      console.warn(
+        `[DB] Refusing to remember message id alias with mismatched source role for thread ${threadId}: ` +
+          `${fromId} (${source.role}) -> ${toId} (${role})`
+      )
+      return false
+    }
+    if (role && target && target.role !== role && !source) {
+      console.warn(
+        `[DB] Refusing to remember message id alias with mismatched target role for thread ${threadId}: ` +
+          `${fromId} (${role}) -> ${toId} (${target.role})`
+      )
+      return false
+    }
+    if (source && target && source.role !== target.role) {
+      console.warn(
+        `[DB] Refusing to merge message id alias across roles for thread ${threadId}: ` +
+          `${fromId} (${source.role}) -> ${toId} (${target.role})`
+      )
+      return false
+    }
+    const storedProviderSourceId = (row: ThreadMessageRow | undefined): string | undefined => {
+      if (!row) return undefined
+      const explicitSourceId = row.provider_source_id?.trim()
+      if (explicitSourceId) return explicitSourceId
+      const inferredSourceId = getMessageProviderSourceId({ id: row.message_id, role: row.role })
+      return inferredSourceId !== row.message_id ? inferredSourceId : undefined
+    }
+    const sourceProviderSourceId = storedProviderSourceId(source)
+    const targetProviderSourceId = storedProviderSourceId(target)
+    const effectiveSourceProviderSourceId =
+      sourceProviderSourceId ??
+      (source && targetProviderSourceId === source.message_id ? source.message_id : undefined)
+    const effectiveTargetProviderSourceId =
+      targetProviderSourceId ??
+      (target && sourceProviderSourceId === target.message_id ? target.message_id : undefined)
+    const sourceProviderOccurrence = source
+      ? getMessageProviderOccurrence({
+          id: source.message_id,
+          provider_occurrence: source.provider_occurrence ?? undefined,
+          role: source.role
+        })
+      : undefined
+    const targetProviderOccurrence = target
+      ? getMessageProviderOccurrence({
+          id: target.message_id,
+          provider_occurrence: target.provider_occurrence ?? undefined,
+          role: target.role
+        })
+      : undefined
+    const effectiveSourceProviderOccurrence =
+      sourceProviderOccurrence ?? (source && effectiveSourceProviderSourceId ? 1 : undefined)
+    const effectiveTargetProviderOccurrence =
+      targetProviderOccurrence ?? (target && effectiveTargetProviderSourceId ? 1 : undefined)
+    if (
+      source &&
+      target &&
+      ((effectiveSourceProviderSourceId &&
+        effectiveTargetProviderSourceId &&
+        effectiveSourceProviderSourceId !== effectiveTargetProviderSourceId) ||
+        (effectiveSourceProviderOccurrence !== undefined &&
+          effectiveTargetProviderOccurrence !== undefined &&
+          effectiveSourceProviderOccurrence !== effectiveTargetProviderOccurrence))
+    ) {
+      console.warn(
+        `[DB] Refusing to merge different provider message occurrences for thread ${threadId}: ` +
+          `${fromId} -> ${toId}`
+      )
+      return false
+    }
+    if (
+      source &&
+      target &&
+      isAssistantToolCallToTextAlias(
+        {
+          role: source.role,
+          content: parseMessageContent(source.content_json),
+          tool_calls: parseToolCalls(source.tool_calls_json)
+        },
+        {
+          role: target.role,
+          content: parseMessageContent(target.content_json),
+          tool_calls: parseToolCalls(target.tool_calls_json)
+        }
+      )
+    ) {
+      console.warn(
+        `[DB] Refusing to merge assistant tool-call message into text answer for thread ${threadId}: ` +
+          `${fromId} -> ${toId}`
+      )
+      return false
+    }
+    if (
+      source &&
+      !target &&
+      (role === "assistant" || source.role === "assistant") &&
+      source.role === "assistant" &&
+      hasUsefulToolCalls(parseToolCalls(source.tool_calls_json))
+    ) {
+      console.warn(
+        `[DB] Refusing to rename assistant tool-call message to unresolved alias target for thread ${threadId}: ` +
+          `${fromId} -> ${toId}`
+      )
+      return false
+    }
 
-  const aliasRole = source?.role ?? target?.role ?? role ?? fromAlias.role ?? toAlias.role
-  rememberThreadMessageIdAlias(threadId, requestedFromId, toId, aliasRole)
-  if (fromId !== requestedFromId) {
-    rememberThreadMessageIdAlias(threadId, fromId, toId, aliasRole)
-  }
-  if (!source) return true
+    const aliasRole = source?.role ?? target?.role ?? role ?? fromAlias.role ?? toAlias.role
+    if (!source) return { aliasRole, changed: false }
 
-  database.run("BEGIN")
-  try {
     if (!target) {
       const providerSourceId =
         source.provider_source_id ?? getMessageProviderSourceId({ id: fromId, role: source.role })
@@ -5614,17 +5651,15 @@ export function replaceThreadMessageId(
         [threadId, fromId, toId]
       )
     }
-    database.run("COMMIT")
-  } catch (error) {
-    try {
-      database.run("ROLLBACK")
-    } catch {
-      // Preserve the original transaction error.
-    }
-    throw error
-  }
+    return { aliasRole, changed: true }
+  })
+  if (!result) return false
 
-  saveToDisk()
+  rememberThreadMessageIdAlias(threadId, requestedFromId, toId, result.aliasRole)
+  if (fromId !== requestedFromId) {
+    rememberThreadMessageIdAlias(threadId, fromId, toId, result.aliasRole)
+  }
+  if (result.changed) saveToDisk()
   return true
 }
 

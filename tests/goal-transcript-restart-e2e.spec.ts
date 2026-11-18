@@ -19,6 +19,7 @@ const callId = "goal-reused-call"
 const expectedAssistantText = [
   "checking first",
   "first verified",
+  "first revision",
   "checking second",
   "second verified"
 ]
@@ -41,6 +42,7 @@ interface FixtureWindow {
       setGoalSettings(settings: { evaluatorModelId: string }): Promise<void>
     }
     routing: { setMode(mode: string): Promise<void> }
+    hooks: { create(config: Record<string, unknown>): Promise<unknown> }
     sandbox: { setMode(mode: string): Promise<void>; setYoloMode(value: boolean): Promise<void> }
     workspace: { set(id: string, workspace: string): Promise<void> }
     threads: {
@@ -62,6 +64,7 @@ async function main(): Promise<void> {
 
   let executions = 0
   let evaluations = 0
+  let revisionsRequested = 0
   const seenEvidence: boolean[] = []
   const serverErrors: string[] = []
   const pageErrors: string[] = []
@@ -70,12 +73,27 @@ async function main(): Promise<void> {
       let raw = ""
       for await (const data of request) raw += data
       const body = JSON.parse(raw)
+      if (request.url === "/stop-hook") {
+        const requestRevision =
+          revisionsRequested === 0 &&
+          body.stop_context?.assistantResponse?.includes("first verified")
+        if (requestRevision) revisionsRequested++
+        response.writeHead(200, { "content-type": "application/json" })
+        response.end(
+          JSON.stringify(
+            requestRevision
+              ? { decision: "block", reason: "Add the requested first-file verification revision" }
+              : { continue: true }
+          )
+        )
+        return
+      }
       const messages = JSON.stringify(body.messages)
       if (messages.includes("strict evaluator for an autonomous coding agent goal")) {
         evaluations++
         assert.ok(evaluations <= 2, "one evaluation per Goal subturn")
         const done = evaluations === 2
-        assert.ok(messages.includes(done ? "second verified" : "first verified"))
+        assert.ok(messages.includes(done ? "second verified" : "first revision"))
         const verdict = {
           verdict: done ? "complete" : "continue",
           reason: done ? "Both evidence files were read" : "Read the second evidence file next",
@@ -101,11 +119,15 @@ async function main(): Promise<void> {
       }
 
       const index = executions++
-      assert.ok(index < 4 && body.stream, "two streamed tool cycles")
-      const isToolCall = index % 2 === 0
-      const file = index < 2 ? "first.txt" : "second.txt"
-      if (index >= 2) assert.ok(messages.includes("[Continuing active goal]"))
-      if (!isToolCall) {
+      assert.ok(
+        index < expectedAssistantText.length && body.stream,
+        "two tool cycles and one revision"
+      )
+      const isToolCall = index === 0 || index === 3
+      const file = index < 3 ? "first.txt" : "second.txt"
+      if (index === 2) assert.ok(messages.includes("[[CMBDEVCLAW_STOP_HOOK_REVISION]]"))
+      if (index >= 3) assert.ok(messages.includes("[Continuing active goal]"))
+      if (index === 1 || index === 4) {
         seenEvidence.push(
           messages.includes(index === 1 ? "GOAL_FIRST_EVIDENCE" : "GOAL_SECOND_EVIDENCE")
         )
@@ -221,7 +243,7 @@ async function main(): Promise<void> {
     assert.equal(await chat.getByText("OK", { exact: true }).count(), 2)
     assert.deepEqual(
       stored.map(({ role }) => role),
-      ["user", "assistant", "tool", "assistant", "assistant", "tool", "assistant"]
+      ["user", "assistant", "tool", "assistant", "assistant", "assistant", "tool", "assistant"]
     )
     assert.deepEqual(
       stored.filter(({ role }) => role === "assistant").map(({ content }) => content),
@@ -230,7 +252,7 @@ async function main(): Promise<void> {
     assert.equal(new Set(stored.map(({ id }) => id)).size, stored.length)
     const results = stored.filter(({ role }) => role === "tool")
     assert.equal(results[0].tool_call_id, stored[1].tool_calls?.[0]?.id)
-    assert.equal(results[1].tool_call_id, stored[4].tool_calls?.[0]?.id)
+    assert.equal(results[1].tool_call_id, stored[5].tool_calls?.[0]?.id)
     assert.match(JSON.stringify(results[0].content), /GOAL_FIRST_EVIDENCE/)
     assert.match(JSON.stringify(results[1].content), /GOAL_SECOND_EVIDENCE/)
   }
@@ -267,6 +289,12 @@ async function main(): Promise<void> {
         await api.routing.setMode("pinned")
         await api.sandbox.setMode("none")
         await api.sandbox.setYoloMode(true)
+        await api.hooks.create({
+          event: "Stop",
+          type: "http",
+          url: `http://127.0.0.1:${port}/stop-hook`,
+          enabled: true
+        })
         const thread = await api.threads.create({
           title,
           workspacePath: workspace,
@@ -334,8 +362,9 @@ async function main(): Promise<void> {
     const lastAnswer = orderedRows.findIndex((row) => row.includes("second verified"))
     const resume = orderedRows.findIndex((row) => row.includes("继续 Goal"))
     assert.ok(lastAnswer >= 0 && resume > lastAnswer, "the unanchored resume stays after the Goal")
-    assert.equal(executions, 4)
+    assert.equal(executions, expectedAssistantText.length)
     assert.equal(evaluations, 2)
+    assert.equal(revisionsRequested, 1)
     assert.deepEqual(
       seenEvidence,
       [true, true],
@@ -343,10 +372,20 @@ async function main(): Promise<void> {
     )
     assert.deepEqual(serverErrors, [])
     assert.deepEqual(pageErrors, [])
-    console.log("PASS Goal continuation, repeated provider IDs, cold SQLite order and tool status")
+    console.log(
+      "PASS Goal continuation and Stop revision, repeated IDs, cold order and tool status"
+    )
   } catch (error) {
     await page?.screenshot({ path: path.join(output, "failure.png") }).catch(() => undefined)
-    console.error({ output, executions, evaluations, seenEvidence, serverErrors, pageErrors })
+    console.error({
+      output,
+      executions,
+      evaluations,
+      revisionsRequested,
+      seenEvidence,
+      serverErrors,
+      pageErrors
+    })
     throw error
   } finally {
     await app?.close().catch(() => undefined)

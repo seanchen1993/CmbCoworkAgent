@@ -27,7 +27,10 @@ import { AIMessage, HumanMessage, type BaseMessage } from "@langchain/core/messa
 import { createMiddleware } from "langchain"
 import { randomUUID } from "crypto"
 import type { Message } from "../types"
-import { GOAL_CONTINUATION_BOUNDARY_METADATA_KEY } from "./goals/internal-prompt"
+import {
+  GOAL_CONTINUATION_BOUNDARY_METADATA_KEY,
+  GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY
+} from "./goals/internal-prompt"
 import {
   advanceCompletedMessageContentRoute,
   getMessageProviderOccurrence,
@@ -562,10 +565,26 @@ function assignGoalGraphAssistantIdentity(
   const sourceId = graphAssistantProviderSourceId(response)
   if (!sourceId || !boundary.id) return
 
-  const previous = loadPreviousOccurrence?.(threadId, boundary.id, sourceId)
-  let occurrence = previous
+  let occurrence = loadPreviousOccurrence?.(threadId, boundary.id, sourceId)
+  let scopeIndex = boundaryIndex
+  const parentBoundaryId = boundary.additional_kwargs[GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]
+  if (occurrence === undefined && typeof parentBoundaryId === "string") {
+    // The graph may start the repair model before the IPC values consumer
+    // records the new boundary. Its trusted parent already has durable order.
+    const parentIndex = messages.findIndex(
+      (message, index) =>
+        index < boundaryIndex &&
+        message.id === parentBoundaryId &&
+        HumanMessage.isInstance(message) &&
+        message.additional_kwargs[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] === true
+    )
+    if (parentIndex >= 0) {
+      occurrence = loadPreviousOccurrence?.(threadId, parentBoundaryId, sourceId)
+      scopeIndex = parentIndex
+    }
+  }
   if (occurrence !== undefined) {
-    for (const message of messages.slice(boundaryIndex + 1)) {
+    for (const message of messages.slice(scopeIndex + 1)) {
       if (!AIMessage.isInstance(message) || graphAssistantProviderSourceId(message) !== sourceId)
         continue
       const declared = getMessageProviderTupleFromMetadata(message.additional_kwargs)

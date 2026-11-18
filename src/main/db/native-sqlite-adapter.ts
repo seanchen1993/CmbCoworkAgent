@@ -174,6 +174,25 @@ export class NativeSqliteAdapter {
     return this
   }
 
+  /** Admit the writer before a read can pin a WAL snapshot. Transaction
+   * control uses no row-count query, including on a read-only early return. */
+  withImmediateWriteTransaction<T>(operation: () => T): T {
+    this.assertOpen()
+    this.native.exec("BEGIN IMMEDIATE")
+    try {
+      const result = operation()
+      this.native.exec("COMMIT")
+      return result
+    } catch (error) {
+      try {
+        this.native.exec("ROLLBACK")
+      } catch {
+        // Preserve the original transaction error.
+      }
+      throw error
+    }
+  }
+
   /**
    * sql.js-compatible row count for the most recent run(): the number of rows
    * affected by the last completed INSERT/UPDATE/DELETE on this connection.

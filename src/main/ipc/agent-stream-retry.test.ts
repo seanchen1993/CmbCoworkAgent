@@ -135,6 +135,40 @@ it("rolls back provisional rows and partially persisted values before replaying 
       { messages: stable.messages },
       stable.valuesMessageIndexOffset
     ) as { messages: unknown[] }
+    const streamError = new Error("model stream disconnected")
+    db.getDb().run(`
+      CREATE TEMP TRIGGER block_draft_rollback BEFORE DELETE ON thread_messages
+      WHEN OLD.message_id = 'draft'
+      BEGIN
+        SELECT RAISE(ABORT, 'injected rollback failure');
+      END
+    `)
+    try {
+      let rollbackFailure: unknown
+      try {
+        resetFailedStreamAttempt(
+          window, channel, threadId, runToken, replay.messages, inFlight, { streamError }
+        )
+      } catch (error) {
+        rollbackFailure = error
+      }
+      expect(rollbackFailure).toBeInstanceOf(AggregateError)
+      expect(rollbackFailure).toMatchObject({
+        cause: streamError,
+        errors: [streamError, expect.objectContaining({ message: "injected rollback failure" })]
+      })
+      expect(db.getThreadMessages(threadId).map(({ id }) => id)).toContain("draft")
+      const resume = vi.fn()
+      await expect(
+        retryStreamAfterDisconnect(
+          rollbackFailure, 0, window, channel, signal, "test", "test", resume
+        )
+      ).rejects.toBe(rollbackFailure)
+      expect(resume).not.toHaveBeenCalled()
+    } finally {
+      db.getDb().run("DROP TRIGGER block_draft_rollback")
+    }
+
     resetFailedStreamAttempt(window, channel, threadId, runToken, replay.messages, inFlight)
     expect(db.getThreadMessages(threadId)).toEqual(stableRows)
     expect(db.getThreadMessageCount(threadId)).toBe(stableRows.length)

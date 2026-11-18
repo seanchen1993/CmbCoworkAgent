@@ -12,7 +12,10 @@
 
 import { AIMessage, HumanMessage, type BaseMessage } from "@langchain/core/messages"
 import { addMessages } from "@langchain/langgraph"
-import { GOAL_CONTINUATION_BOUNDARY_METADATA_KEY } from "../src/main/agent/goals/internal-prompt.ts"
+import {
+  GOAL_CONTINUATION_BOUNDARY_METADATA_KEY,
+  GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY
+} from "../src/main/agent/goals/internal-prompt.ts"
 import {
   queueCurrentRunMessage as queueOwnedCurrentRunMessage,
   deleteCurrentRunQueuedMessage,
@@ -1064,6 +1067,30 @@ async function testGoalContinuationPreservesNewGraphSlotsForReusedProviderIds():
     6,
     "successive same-provider calls preserve distinct occurrences"
   )
+
+  const gate = new HumanMessage({
+    id: "goal-completion-gate",
+    content: "Internal verification requested a repair",
+    additional_kwargs: {
+      [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true,
+      [GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]: boundary.id
+    }
+  })
+  const repairMessages = addMessages(addMessages(reduced, next), gate)
+  const repair = await runWrappedModelCall(
+    new AIMessage({ id: "provider-id", content: "verified repair" }),
+    rt(T1),
+    RUN1,
+    repairMessages,
+    (threadId, boundaryId, sourceId) =>
+      boundaryId === gate.id ? undefined : loadPriorOccurrences(threadId, boundaryId, sourceId)
+  )
+  assertEqual(
+    repair.additional_kwargs[MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY],
+    7,
+    "a graph-started repair derives the next occurrence before IPC records its boundary"
+  )
+  assertEqual(addMessages(repairMessages, repair).length, 6, "repair appends after its hidden prompt")
 }
 
 async function testAfterModelSkipsWhenToolCalls(): Promise<void> {

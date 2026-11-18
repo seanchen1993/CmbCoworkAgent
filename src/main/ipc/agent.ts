@@ -362,7 +362,8 @@ import {
 } from "../agent/goals/goal-manager"
 import {
   buildGoalContinuationPromptFromHookContexts,
-  GOAL_CONTINUATION_BOUNDARY_METADATA_KEY
+  GOAL_CONTINUATION_BOUNDARY_METADATA_KEY,
+  GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY
 } from "../agent/goals/internal-prompt"
 import { goalManager, goalStore } from "../agent/goals/runtime"
 import {
@@ -4178,6 +4179,47 @@ function flushPendingStreamTranscriptMessagesForThread(
   return remainingOwners.size === 0
 }
 
+/** Give one internal Goal input an ordinal before its first provider chunk. */
+export function createPhysicalRunHiddenUserMessage(
+  threadId: string,
+  runToken: string,
+  signal: AbortSignal,
+  goalBoundary: Pick<ThreadGoal, "goalId" | "activeWindowId"> | null | undefined,
+  fields: { content: string; id?: string; additional_kwargs?: HumanMessage["additional_kwargs"] }
+): HumanMessage {
+  throwIfPhysicalStreamRunIsInactive(threadId, runToken, signal)
+  const activeGoal = goalBoundary ? goalManager.getActive(threadId) : null
+  if (
+    !isGoalBoundaryStillCurrent(
+      activeGoal?.goalId,
+      goalBoundary?.goalId,
+      activeGoal?.activeWindowId,
+      goalBoundary?.activeWindowId
+    )
+  ) {
+    return new HumanMessage(fields)
+  }
+
+  flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
+  const graphUserId = uuid()
+  reserveThreadGraphTranscriptBoundary(threadId, graphUserId)
+  // The previous graph stream has finished. Only the new input belongs to
+  // the next attempt, so retire the prior journal and cached identities.
+  discardStreamTranscriptToolCallAccumulators(threadId, runToken)
+  streamTranscriptBoundaryIds.set(pendingStreamTranscriptKey(threadId, runToken), graphUserId)
+
+  const additionalKwargs = { ...fields.additional_kwargs }
+  delete additionalKwargs[COORDINATOR_VISIBLE_USER_MESSAGE_KEY]
+  return new HumanMessage({
+    content: fields.content,
+    id: graphUserId,
+    additional_kwargs: {
+      ...additionalKwargs,
+      [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true
+    }
+  })
+}
+
 setCurrentRunTranscriptFlushBeforeInjection((threadId, runToken) => {
   flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
   const key = pendingStreamTranscriptKey(threadId, runToken)
@@ -4336,6 +4378,54 @@ async function awaitPhysicalStreamRunSetup<T>({
   }
 }
 
+function adoptGraphTranscriptBoundaryFromValues(
+  threadId: string,
+  runToken: string,
+  payload: unknown,
+  completeValuesMessages?: readonly unknown[]
+): void {
+  const runKey = pendingStreamTranscriptKey(threadId, runToken)
+  const currentBoundaryId = streamTranscriptBoundaryIds.get(runKey)
+  const frameMessages = asPlainRecord(payload)?.messages
+  const changedMessages = Array.isArray(frameMessages) ? frameMessages : []
+  const messages = currentBoundaryId ? changedMessages : completeValuesMessages ?? changedMessages
+  const input = messages.findLast((message) => getSerializedMessageRole(message) === "user")
+  const inputRecord = asPlainRecord(input)
+  const kwargs = asPlainRecord(inputRecord?.kwargs) ?? inputRecord
+  const boundaryId = kwargs?.id
+  const additionalKwargs = asPlainRecord(kwargs?.additional_kwargs)
+  if (
+    typeof boundaryId !== "string" ||
+    boundaryId === currentBoundaryId ||
+    additionalKwargs?.[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] !== true
+  ) {
+    return
+  }
+
+  const parentId = additionalKwargs[GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]
+  const gateInput = typeof parentId === "string" && Boolean(parentId)
+  if (currentBoundaryId && !gateInput) return
+  const ordinal = getThreadTranscriptBoundaryOrdinal(threadId, boundaryId)
+  if (ordinal === undefined) {
+    if (
+      !gateInput ||
+      !goalManager.getActive(threadId) ||
+      getThreadTranscriptBoundaryOrdinal(threadId, parentId) === undefined
+    ) {
+      return
+    }
+    // Repairs are injected inside the graph. Consume the preceding model's
+    // frames on their original boundary before assigning a durable position.
+    flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
+    reserveThreadGraphTranscriptBoundary(threadId, boundaryId)
+  } else if (currentBoundaryId) {
+    const currentOrdinal = getThreadTranscriptBoundaryOrdinal(threadId, currentBoundaryId)
+    if (currentOrdinal !== undefined && ordinal < currentOrdinal) return
+  }
+  streamTranscriptBoundaryIds.set(runKey, boundaryId)
+  streamTranscriptAssistantIdentities.delete(runKey)
+}
+
 export function persistAndForwardPhysicalRunStreamChunk(
   window: BrowserWindow,
   channel: string,
@@ -4360,24 +4450,7 @@ export function persistAndForwardPhysicalRunStreamChunk(
   let outgoing = payload
   if (mode === "values") {
     const runKey = pendingStreamTranscriptKey(threadId, runToken)
-    if (!streamTranscriptBoundaryIds.has(runKey)) {
-      const frameMessages = asPlainRecord(payload)?.messages
-      const messages = completeValuesMessages ?? (Array.isArray(frameMessages) ? frameMessages : [])
-      const input = messages.findLast(
-        (message) => getSerializedMessageRole(message) === "user"
-      )
-      const inputRecord = asPlainRecord(input)
-      const kwargs = asPlainRecord(inputRecord?.kwargs) ?? inputRecord
-      const boundaryId = kwargs?.id
-      if (
-        typeof boundaryId === "string" &&
-        asPlainRecord(kwargs?.additional_kwargs)?.[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] === true &&
-        getThreadTranscriptBoundaryOrdinal(threadId, boundaryId) !== undefined
-      ) {
-        streamTranscriptBoundaryIds.set(runKey, boundaryId)
-        streamTranscriptAssistantIdentities.delete(runKey)
-      }
-    }
+    adoptGraphTranscriptBoundaryFromValues(threadId, runToken, payload, completeValuesMessages)
     flushPendingStreamTranscriptMessages(threadId, runToken, {
       throwOnError: true,
       allowWaitingForSnapshot: true
@@ -4876,6 +4949,16 @@ function clearStreamDisconnectRetry(window: BrowserWindow, channel: string): voi
   })
 }
 
+class StreamTranscriptRollbackError extends AggregateError {
+  constructor(rollbackError: unknown, streamError?: unknown) {
+    super(
+      streamError === undefined ? [rollbackError] : [streamError, rollbackError],
+      "Failed to roll back provisional stream transcript",
+      { cause: streamError ?? rollbackError }
+    )
+  }
+}
+
 export function resetFailedStreamAttempt(
   window: BrowserWindow,
   channel: string,
@@ -4883,7 +4966,7 @@ export function resetFailedStreamAttempt(
   runToken: string,
   stableMessages: unknown[],
   inFlightMessageIds: Set<string>,
-  options: { preservePendingTranscript?: boolean } = {}
+  options: { preservePendingTranscript?: boolean; streamError?: unknown } = {}
 ): void {
   if (options.preservePendingTranscript) {
     inFlightMessageIds.clear()
@@ -4895,9 +4978,15 @@ export function resetFailedStreamAttempt(
     inFlightMessageIds.clear()
     return
   }
-  const rollback = streamTranscriptAttempts
-    .get(pendingStreamTranscriptKey(threadId, runToken))
-    ?.rollback()
+  const attempt = streamTranscriptAttempts.get(pendingStreamTranscriptKey(threadId, runToken))
+  let rollback: ReturnType<ThreadMessageStreamAttempt["rollback"]> | undefined
+  try {
+    rollback = attempt?.rollback()
+  } catch (rollbackError) {
+    // Terminal cleanup must not flush buffers from the failed attempt again.
+    discardPendingStreamTranscriptMessages(threadId, runToken)
+    throw new StreamTranscriptRollbackError(rollbackError, options.streamError)
+  }
   discardStreamTranscriptToolCallAccumulators(threadId, runToken)
   const discardedMessageIds = [
     ...new Set([
@@ -4937,6 +5026,7 @@ export async function retryStreamAfterDisconnect<T>(
   resume: () => Promise<AsyncIterable<T>>,
   isActive: () => boolean = () => true
 ): Promise<StreamDisconnectRetryResult<T>> {
+  if (error instanceof StreamTranscriptRollbackError) throw error
   let retryError = error
   let nextRetries = retries
 
@@ -8125,35 +8215,53 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             })
           }
 
+          const augmentedUserFields = {
+            id: userMessageId,
+            content: effectiveMessage,
+            additional_kwargs: {
+              [COORDINATOR_AUGMENTED_USER_MESSAGE_KEY]: true,
+              [COORDINATOR_VISIBLE_USER_MESSAGE_KEY]: visibleTranscriptUserMessage
+            }
+          }
           const userHumanMessage = isCoordinatorNotificationTurn
             ? undefined
-            : effectiveMessage === message
-              ? new HumanMessage({
-                  id: userMessageId,
-                  content: effectiveMessage
-                })
+            : isWorkflowNotificationTurn
+              ? createPhysicalRunHiddenUserMessage(
+                  threadId,
+                  runToken,
+                  abortController.signal,
+                  runGoal,
+                  augmentedUserFields
+                )
               : new HumanMessage({
                   id: userMessageId,
                   content: effectiveMessage,
-                  additional_kwargs: {
-                    [COORDINATOR_AUGMENTED_USER_MESSAGE_KEY]: true,
-                    [COORDINATOR_VISIBLE_USER_MESSAGE_KEY]: visibleTranscriptUserMessage,
-                    ...(runGoalId !== null && {
-                      [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true
-                    })
-                  }
+                  ...(effectiveMessage !== message && {
+                    additional_kwargs: {
+                      ...augmentedUserFields.additional_kwargs,
+                      ...(runGoalId !== null && {
+                        [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true
+                      })
+                    }
+                  })
                 })
+
+          const coordinatorNotificationInput = coordinatorNotificationHumanMessage
+            ? createPhysicalRunHiddenUserMessage(
+                threadId,
+                runToken,
+                abortController.signal,
+                isCoordinatorNotificationTurn ? runGoal : null,
+                {
+                  content: coordinatorNotificationHumanMessage,
+                  additional_kwargs: { [COORDINATOR_INTERNAL_NOTIFICATION_MESSAGE_KEY]: true }
+                }
+              )
+            : undefined
 
           const humanMessages: BaseMessage[] = [
             ...durableRuntimeTail.messages,
-            coordinatorNotificationHumanMessage
-              ? new HumanMessage({
-                  content: coordinatorNotificationHumanMessage,
-                  additional_kwargs: {
-                    [COORDINATOR_INTERNAL_NOTIFICATION_MESSAGE_KEY]: true
-                  }
-                })
-              : undefined,
+            coordinatorNotificationInput,
             userHumanMessage
           ].filter((message): message is BaseMessage => message !== undefined)
           let currentTurnUserMessageForEvidence =
@@ -8855,7 +8963,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 runToken,
                 replayCommittedStreamValues(latestStableStreamValues),
                 inFlightStreamMessageIds,
-                { preservePendingTranscript: abortController.signal.aborted }
+                {
+                  preservePendingTranscript: abortController.signal.aborted,
+                  streamError: error
+                }
               )
               latestSerializedValuesMessagesForGoalFlush = []
               throw error
@@ -8867,7 +8978,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             error: unknown,
             label: string
           ): Promise<boolean> => {
-            if (isHookHaltError(error)) throw error
+            if (isHookHaltError(error) || error instanceof StreamTranscriptRollbackError) throw error
             if (!isRetryableApiError(error) || remainingCandidates.length === 0) {
               return false
             }
@@ -8924,17 +9035,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             expectedGoal: ThreadGoal
           ): Promise<boolean> => {
             if (!getCurrentGoalForContinuation(expectedGoal)) return false
-            const graphUserId = uuid()
-            const goalInput = new HumanMessage({
-              id: graphUserId,
-              content: goalContinuationInput,
-              additional_kwargs: { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true }
-            })
-            const runKey = pendingStreamTranscriptKey(threadId, runToken)
-            flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
-            reserveThreadGraphTranscriptBoundary(threadId, graphUserId)
-            streamTranscriptBoundaryIds.set(runKey, graphUserId)
-            streamTranscriptAssistantIdentities.delete(runKey)
+            const goalInput = createPhysicalRunHiddenUserMessage(
+              threadId,
+              runToken,
+              abortController.signal,
+              expectedGoal,
+              { content: goalContinuationInput }
+            )
             let inputCheckpointed = false
             while (true) {
               try {
@@ -9048,8 +9155,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 runRevision: async (revisionPrompt) => {
                   if (!agent)
                     throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+                  const revisionInput = createPhysicalRunHiddenUserMessage(
+                    threadId,
+                    runToken,
+                    abortController.signal,
+                    runGoal,
+                    { content: revisionPrompt }
+                  )
                   const revisionStream = await agent.stream(
-                    { messages: [new HumanMessage(revisionPrompt)] },
+                    { messages: [revisionInput] },
                     streamConfig
                   )
                   await consumeStreamWithSideEffects(revisionStream)
@@ -11274,7 +11388,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 runToken,
                 replayCommittedStreamValues(latestStableResumeValues),
                 resumeInFlightMessageIds,
-                { preservePendingTranscript: abortController.signal.aborted }
+                {
+                  preservePendingTranscript: abortController.signal.aborted,
+                  streamError: error
+                }
               )
               throw error
             }
@@ -11353,8 +11470,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               runRevision: async (revisionPrompt) => {
                 if (!resumeAgentRuntime)
                   throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+                const revisionInput = createPhysicalRunHiddenUserMessage(
+                  threadId,
+                  runToken,
+                  abortController.signal,
+                  boundaryGoal,
+                  { content: revisionPrompt }
+                )
                 const revisionStream = await resumeAgentRuntime.stream(
-                  { messages: [new HumanMessage(revisionPrompt)] },
+                  { messages: [revisionInput] },
                   resumeStreamConfig
                 )
                 await consumeResumeStream(revisionStream)
@@ -12402,7 +12526,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 runToken,
                 replayCommittedStreamValues(latestStableInterruptValues),
                 intInFlightMessageIds,
-                { preservePendingTranscript: abortController.signal.aborted }
+                {
+                  preservePendingTranscript: abortController.signal.aborted,
+                  streamError: error
+                }
               )
               throw error
             }
@@ -12474,8 +12601,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               runRevision: async (revisionPrompt) => {
                 if (!intAgentRuntime)
                   throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+                const revisionInput = createPhysicalRunHiddenUserMessage(
+                  threadId,
+                  runToken,
+                  abortController.signal,
+                  boundaryGoal,
+                  { content: revisionPrompt }
+                )
                 const revisionStream = await intAgentRuntime.stream(
-                  { messages: [new HumanMessage(revisionPrompt)] },
+                  { messages: [revisionInput] },
                   interruptStreamConfig
                 )
                 await consumeInterruptStream(revisionStream)

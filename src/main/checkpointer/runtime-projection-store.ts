@@ -1277,15 +1277,8 @@ function buildDurableLegacyCheckpointMessages(
     const kwargs = objectRecord(message.kwargs) ?? {}
     const additionalKwargs =
       objectRecord(message.additional_kwargs) ?? objectRecord(kwargs.additional_kwargs) ?? {}
-    if (additionalKwargs.cmb_internal_coordinator_notification === true) continue
 
     const role = serializedMessageRole(message, kwargs)
-    const reasoning =
-      role === "assistant"
-        ? (normalizeTranscriptReasoning(
-            extractVisibleReasoning(message, TRANSCRIPT_REASONING_MAX_CHARS)
-          ) ?? null)
-        : null
     const rawIdValue = kwargs.id ?? (typeof message.id === "string" ? message.id : undefined)
     const sourceId =
       typeof rawIdValue === "string" && rawIdValue.trim()
@@ -1301,6 +1294,13 @@ function buildDurableLegacyCheckpointMessages(
       graphBoundaries.push({ checkpointIndex: index, messageId: sourceId })
       continue
     }
+    if (additionalKwargs.cmb_internal_coordinator_notification === true) continue
+    const reasoning =
+      role === "assistant"
+        ? (normalizeTranscriptReasoning(
+            extractVisibleReasoning(message, TRANSCRIPT_REASONING_MAX_CHARS)
+          ) ?? null)
+        : null
     const effectiveContent =
       role === "user" && typeof visibleUserMessage === "string" && visibleUserMessage.length > 0
         ? visibleUserMessage

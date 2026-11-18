@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import * as db from "./index"
 import type { Message } from "../types"
@@ -33,7 +34,244 @@ const message = (id: string, content: string, extra: Partial<Message> = {}): Mes
   ...extra
 })
 
+function addEarlierLegacyRow(worker: DatabaseSync, threadId: string): void {
+  worker.exec("BEGIN IMMEDIATE")
+  for (const table of ["thread_messages", "thread_graph_transcript_boundaries"]) {
+    worker.prepare(`UPDATE ${table} SET ordinal = ordinal + 1 WHERE thread_id = ? AND ordinal > 0`)
+      .run(threadId)
+  }
+  worker.prepare(`
+    INSERT INTO thread_messages (thread_id, message_id, role, content_json, created_at, ordinal)
+    VALUES (?, 'legacy', 'assistant', '"legacy"', 9, 1)
+  `).run(threadId)
+  worker.prepare(`
+    UPDATE thread_message_buckets
+    SET message_count = message_count + 1, next_ordinal = next_ordinal + 1
+    WHERE thread_id = ?
+  `).run(threadId)
+  worker.exec("COMMIT")
+}
+
+function insertLegacyRowBeforeWriterAdmission<T>(threadId: string, operation: () => T): T {
+  const main = db.getDb()
+  const worker = new DatabaseSync(storage.path)
+  const transaction = main.withImmediateWriteTransaction.bind(main)
+  const admission = vi.spyOn(main, "withImmediateWriteTransaction")
+    .mockImplementationOnce((write) => {
+      addEarlierLegacyRow(worker, threadId)
+      return transaction(write)
+    })
+  try {
+    return operation()
+  } finally {
+    admission.mockRestore()
+    worker.close()
+  }
+}
+
 describe("durable stream attempt rollback", () => {
+  it("does not let a checkpoint writer invalidate rollback after its first read", () => {
+    const id = "writer-admission-rollback"
+    db.createThread(id)
+    const stable = message("stable", "complete")
+    db.upsertThreadMessages(id, [stable])
+    const attempt = new db.ThreadMessageStreamAttempt(id)
+    db.upsertThreadMessages(
+      id,
+      [{ ...stable, content: "provisional", content_mode: "snapshot" }, message("draft", "new")],
+      { preserveExistingOrder: true, streamAttempt: attempt }
+    )
+
+    const main = db.getDb()
+    const worker = new DatabaseSync(storage.path, { timeout: 0 })
+    const run = main.run.bind(main)
+    let workerError: unknown
+    let attemptedWrite = false
+    const runSpy = vi.spyOn(main, "run").mockImplementation((sql, bindings) => {
+      if (!attemptedWrite && sql.startsWith("DELETE FROM thread_message_fragments")) {
+        attemptedWrite = true
+        try {
+          worker.prepare("UPDATE thread_messages SET start_at = 3 WHERE thread_id = ?").run(id)
+        } catch (error) {
+          workerError = error
+        }
+      }
+      return run(sql, bindings)
+    })
+    try {
+      expect(attempt.rollback()).toMatchObject({ discardedMessageIds: ["draft"] })
+      expect(attemptedWrite).toBe(true)
+      expect(workerError).toMatchObject({ errcode: 5 })
+      expect(db.getThreadMessages(id)).toMatchObject([{ id: "stable", content: "complete" }])
+      expect(db.getThreadMessageCount(id)).toBe(1)
+    } finally {
+      runSpy.mockRestore()
+      worker.close()
+    }
+  })
+
+  it("reads the current identity before appending after a checkpoint write", () => {
+    const id = "writer-admission-append"
+    db.createThread(id)
+    const draft = message("draft", "start", {
+      provider_source_id: "draft",
+      provider_occurrence: 1
+    })
+    db.upsertThreadMessages(id, [draft])
+
+    const main = db.getDb()
+    const worker = new DatabaseSync(storage.path)
+    const transaction = main.withImmediateWriteTransaction.bind(main)
+    const admission = vi.spyOn(main, "withImmediateWriteTransaction")
+      .mockImplementationOnce((write) => {
+        worker.prepare(`
+          UPDATE thread_messages SET provider_occurrence = 2
+          WHERE thread_id = ? AND message_id = 'draft'
+        `).run(id)
+        return transaction(write)
+      })
+    try {
+      expect(db.appendThreadMessageTextDelta(id, { ...draft, content: " stale suffix" })).toBe(false)
+      expect(db.getThreadMessages(id)).toMatchObject([{ content: "start", provider_occurrence: 2 }])
+    } finally {
+      admission.mockRestore()
+      worker.close()
+    }
+  })
+
+  it("reads checkpoint-rebased bucket values before persisting a new stream row", () => {
+    const id = "writer-admission-upsert"
+    db.createThread(id)
+    db.upsertThreadMessages(id, [message("root", "prompt", { role: "user" })])
+
+    const written = insertLegacyRowBeforeWriterAdmission(id, () =>
+      db.upsertThreadMessages(id, [message("answer", "reply")], {
+        preserveExistingOrder: true,
+        streamAttempt: new db.ThreadMessageStreamAttempt(id)
+      })
+    )
+    expect(written).toBe(1)
+    expect(db.getThreadMessages(id).map(({ id, ordinal }) => [id, ordinal])).toEqual([
+      ["root", 0],
+      ["legacy", 1],
+      ["answer", 2]
+    ])
+    expect(db.getThreadMessageCount(id)).toBe(3)
+  })
+
+  it.each(["visible", "hidden", "latest non-assistant"] as const)(
+    "places the steered block after its rebased %s boundary",
+    (anchor) => {
+      const id = `writer-admission-splice-${anchor}`
+      db.createThread(id)
+      db.upsertThreadMessages(id, [message("root", "prompt", { role: "user" })])
+      if (anchor === "hidden") {
+        db.reserveThreadGraphTranscriptBoundary(id, "anchor")
+      } else {
+        db.upsertThreadMessages(id, [message("anchor", "predecessor", { role: "tool" })])
+      }
+      db.upsertThreadMessages(id, [message("side", "side"), message("steer", "steered")])
+
+      const move = () =>
+        anchor === "latest non-assistant"
+          ? db.moveThreadMessagesAfterLastNonAssistant(id, ["steer"])
+          : db.moveThreadMessagesAfterAnchor(id, "anchor", ["steer"])
+      expect(insertLegacyRowBeforeWriterAdmission(id, move)).toBe(true)
+      expect(db.getThreadMessages(id).map(({ id, ordinal }) => [id, ordinal])).toEqual([
+        ["root", 0],
+        ["legacy", 1],
+        ...(anchor === "hidden" ? [] : [["anchor", 2]]),
+        ["steer", 3],
+        ["side", 4]
+      ])
+      expect(move()).toBe(false)
+    }
+  )
+
+  it("merges a canonical alias at the earliest rebased ordinal", () => {
+    const id = "writer-admission-alias"
+    db.createThread(id)
+    db.upsertThreadMessages(id, [
+      message("root", "prompt", { role: "user" }),
+      message("source", "same reply"),
+      message("target", "same reply")
+    ])
+    const merged = insertLegacyRowBeforeWriterAdmission(id, () =>
+      db.replaceThreadMessageId(id, "source", "target", "assistant")
+    )
+    expect(merged).toBe(true)
+    expect(db.getThreadMessages(id).map(({ id, ordinal }) => [id, ordinal])).toEqual([
+      ["root", 0],
+      ["legacy", 1],
+      ["target", 2]
+    ])
+    expect(db.getThreadMessageCount(id)).toBe(3)
+  })
+
+  it.each([false, true])(
+    "keeps legacy ordinals and timestamps after rolling back a staged row (renamed: %s)",
+    (renamed) => {
+      const id = `worker-rebase-${renamed}`
+      db.createThread(id)
+      const stable = message("stable", "complete")
+      db.upsertThreadMessages(id, [message("root", "prompt", { role: "user" }), stable])
+      if (renamed) expect(db.replaceThreadMessageId(id, "stable", "canonical", "assistant")).toBe(true)
+      const originalId = renamed ? "canonical" : "stable"
+      const before = db.getThreadMessages(id)
+      const attempt = new db.ThreadMessageStreamAttempt(id)
+      const staged = renamed
+        ? message("canonical", "provisional user", { role: "user" })
+        : { ...stable, content: "provisional", content_mode: "snapshot" as const }
+      db.upsertThreadMessages(id, [staged, message("draft", "provisional reply")], {
+        preserveExistingOrder: true,
+        streamAttempt: attempt
+      })
+      if (renamed) {
+        expect(db.getThreadMessages(id)).toContainEqual(
+          expect.objectContaining({ id: "stable", content: "complete", ordinal: 1 })
+        )
+      }
+
+      const worker = new DatabaseSync(storage.path)
+      try {
+        addEarlierLegacyRow(worker, id)
+        worker.prepare(`
+          UPDATE thread_messages SET created_at = 10, start_at = 10, end_at = 11
+          WHERE thread_id = ? AND message_id = 'stable'
+        `).run(id)
+      } finally {
+        worker.close()
+      }
+
+      if (!renamed) {
+        db.upsertThreadMessages(
+          id,
+          [{ ...stable, content: "second provisional", content_mode: "snapshot" }],
+          { preserveExistingOrder: true, streamAttempt: attempt }
+        )
+      }
+
+      const rolledBack = attempt.rollback()
+      const restored = {
+        ...before[1],
+        id: originalId,
+        ordinal: 2,
+        created_at: new Date(10),
+        start_at: new Date(10),
+        end_at: new Date(11)
+      }
+      expect(rolledBack.restoredMessages).toEqual([restored])
+      expect(db.getThreadMessages(id)).toEqual([
+        before[0],
+        expect.objectContaining({ id: "legacy", ordinal: 1 }),
+        restored
+      ])
+      expect(db.getThreadMessageCount(id)).toBe(3)
+      db.upsertThreadMessages(id, [message("next", "next")], { preserveExistingOrder: true })
+      expect(db.getThreadMessages(id).at(-1)?.ordinal).toBeGreaterThan(2)
+    }
+  )
+
   it("keeps another thread and a committed earlier attempt intact across repeated failures", () => {
     for (const id of ["attempts", "other-thread"]) db.createThread(id)
     const first = message("same", "completed", {
