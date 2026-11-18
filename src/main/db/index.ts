@@ -4189,6 +4189,19 @@ export function withThreadMessageIdentitySnapshot<T>(operation: () => T): T {
   return getDb().withReadSnapshot(operation)
 }
 
+export function hasUnresolvedLegacyTranscriptSlots(threadId: string): boolean {
+  const stmt = getDb().prepare(
+    `SELECT 1 FROM legacy_checkpoint_transcript_slots
+     WHERE thread_id = ? AND provider_source_id IS NULL LIMIT 1`
+  )
+  try {
+    stmt.bind([threadId])
+    return stmt.step()
+  } finally {
+    stmt.free()
+  }
+}
+
 export function getThreadMessageProviderOccurrencesBeforeUser(
   threadId: string,
   userMessageId: string,
@@ -4229,10 +4242,19 @@ function readThreadMessageProviderOccurrencesBeforeUser(
        SELECT message_id AS provider_source_id, role, 1 AS occurrence
        FROM thread_messages
        WHERE thread_id = ? AND message_id IN (${placeholders}) AND ordinal < ?
-         AND provider_source_id IS NULL`
+         AND provider_source_id IS NULL
+       UNION ALL
+       SELECT provider_source_id, role, MAX(provider_occurrence) AS occurrence
+       FROM legacy_checkpoint_transcript_slots
+       WHERE thread_id = ? AND provider_source_id IN (${placeholders}) AND ordinal < ?
+       GROUP BY provider_source_id, role`
     )
     try {
-      stmt.bind([threadId, ...batch, ordinal, threadId, ...batch, ordinal])
+      stmt.bind([
+        threadId, ...batch, ordinal,
+        threadId, ...batch, ordinal,
+        threadId, ...batch, ordinal
+      ])
       while (stmt.step()) {
         const row = stmt.getAsObject()
         remember(String(row.provider_source_id), row.role as Message["role"], Number(row.occurrence))

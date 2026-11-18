@@ -20,6 +20,7 @@ import {
   getThreadMessageProviderOccurrencesBeforeUser,
   getThreadMessages,
   getThreadTranscriptBoundaryOrdinal,
+  hasUnresolvedLegacyTranscriptSlots,
   initializeDatabase,
   moveThreadMessagesAfterAnchor,
   reserveThreadGraphTranscriptBoundary,
@@ -57,14 +58,14 @@ afterEach(async () => {
   rmSync(directory, { recursive: true, force: true })
 })
 
-async function checkpoint(messages: BaseMessage[]): Promise<void> {
-  const saver = new SqlJsSaver(checkpointPath)
+async function checkpoint(messages: BaseMessage[], id = checkpointId): Promise<void> {
+  const saver = new SqlJsSaver(checkpointPath, undefined, { maxRootCheckpoints: 3 })
   try {
     await saver.put(
       { configurable: { thread_id: threadId, checkpoint_ns: "" } },
       {
         v: 1,
-        id: checkpointId,
+        id,
         ts: new Date().toISOString(),
         channel_values: { messages },
         channel_versions: { messages: 1 },
@@ -370,6 +371,128 @@ describe("legacy checkpoint transcript slots", () => {
       expect(slots()).toEqual([])
     }
   )
+
+  it.each([false, true])(
+    "keeps pending Goal occurrences distinct from a new live turn (upgraded=%s)",
+    async (upgraded) => {
+      const source = "shared-provider"
+      persist([visibleUser("root"), assistant(source, "previous reply")])
+      reserveThreadGraphTranscriptBoundary(threadId, "hidden")
+      await checkpoint([
+        hiddenGoalInput(),
+        new AIMessage({
+          id: source,
+          content: "old pending reply",
+          additional_kwargs: {
+            [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: source,
+            [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: 2
+          }
+        })
+      ])
+      pauseAtCommittedBatch(() => migrationState()?.status === "migrating")
+      expect(durableOrder()).toEqual([
+        ["root", 0],
+        [source, 1]
+      ])
+      expect(slots()).toEqual([{ message_index: 0, ordinal: 3 }])
+      expect(hasUnresolvedLegacyTranscriptSlots(threadId)).toBe(false)
+      expect(getThreadMessageProviderOccurrencesBeforeUser(threadId, "hidden", [source])).toEqual([
+        { provider_source_id: source, role: "assistant", provider_occurrence: 1 }
+      ])
+
+      if (upgraded) {
+        // An older app reserved only ordinals. Replay the actual checkpoint to
+        // restore the tuple while keeping the visible-message import paused.
+        observer
+          .prepare(
+            `UPDATE legacy_checkpoint_transcript_slots
+             SET provider_source_id = NULL, role = NULL, provider_occurrence = NULL
+             WHERE thread_id = ?`
+          )
+          .run(threadId)
+        expect(hasUnresolvedLegacyTranscriptSlots(threadId)).toBe(true)
+        pauseAtCommittedBatch(() => !hasUnresolvedLegacyTranscriptSlots(threadId))
+        expect(hasUnresolvedLegacyTranscriptSlots(threadId)).toBe(false)
+        expect(durableOrder()).toEqual([
+          ["root", 0],
+          [source, 1]
+        ])
+      }
+
+      reserveThreadGraphTranscriptBoundary(threadId, "new-hidden")
+      const previous = getThreadMessageProviderOccurrencesBeforeUser(threadId, "new-hidden", [source])
+      expect(previous).toEqual([
+        { provider_source_id: source, role: "assistant", provider_occurrence: 2 }
+      ])
+      const occurrence = previous![0].provider_occurrence + 1
+      upsertThreadMessages(
+        threadId,
+        [
+          {
+            id: buildMessageSameRoleDuplicateId(source, "assistant", occurrence),
+            provider_source_id: source,
+            provider_occurrence: occurrence,
+            role: "assistant",
+            content: "new live reply",
+            created_at: new Date()
+          }
+        ],
+        { preserveExistingOrder: true }
+      )
+      expect(bootstrap().stats.migratedMessages).toBe(1)
+      expect(getThreadMessages(threadId)).toMatchObject([
+        { content: "root", ordinal: 0 },
+        { content: "previous reply", ordinal: 1 },
+        { content: "old pending reply", provider_occurrence: 2, ordinal: 3 },
+        { content: "new live reply", provider_occurrence: 3, ordinal: 5 }
+      ])
+      expect(getThreadMessageProviderOccurrencesBeforeUser(threadId, "new-hidden", [source])).toEqual(
+        previous
+      )
+      expect(slots()).toEqual([])
+    }
+  )
+
+  it("recovers the reserved checkpoint even when a newer compacted head omits its reply", async () => {
+    const source = "shared-provider"
+    const reply = (occurrence: number, content: string) =>
+      new AIMessage({
+        id: source,
+        content,
+        additional_kwargs: {
+          [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: source,
+          [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: occurrence
+        }
+      })
+    persist([visibleUser("root"), assistant(source, "first reply")])
+    reserveThreadGraphTranscriptBoundary(threadId, "hidden")
+    await checkpoint([hiddenGoalInput(), reply(2, "old pending reply")])
+    pauseAtCommittedBatch(() => migrationState()?.status === "migrating")
+    expect(slots()).toEqual([{ message_index: 0, ordinal: 3 }])
+
+    reserveThreadGraphTranscriptBoundary(threadId, "new-hidden")
+    const newestCheckpointId = `${checkpointId}-newer`
+    await checkpoint(
+      [
+        new HumanMessage({
+          id: "new-hidden",
+          content: "[Continuing active goal] Continue",
+          additional_kwargs: { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true }
+        }),
+        reply(3, "new checkpoint reply")
+      ],
+      newestCheckpointId
+    )
+
+    expect(bootstrap().stats.checkpointId).toBe(newestCheckpointId)
+    expect(getThreadMessages(threadId)).toMatchObject([
+      { content: "root", ordinal: 0 },
+      { content: "first reply", ordinal: 1 },
+      { content: "old pending reply", provider_occurrence: 2, ordinal: 3 },
+      { content: "new checkpoint reply", provider_occurrence: 3, ordinal: 5 }
+    ])
+    expect(slots()).toEqual([])
+  })
 })
 
 it("reads the boundary and provider occurrences in a single WAL snapshot", async () => {

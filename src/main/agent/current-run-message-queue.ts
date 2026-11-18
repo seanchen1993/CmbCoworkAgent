@@ -23,7 +23,7 @@
 // renderer notification (which uses BrowserWindow) is injected by runtime.ts via
 // `setCurrentRunInjectionNotifier`.
 
-import { AIMessage, HumanMessage, type BaseMessage } from "@langchain/core/messages"
+import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages"
 import { createMiddleware } from "langchain"
 import { randomUUID } from "crypto"
 import type { Message } from "../types"
@@ -282,6 +282,12 @@ function currentRunInjectionAnchorForMessage(value: unknown): CurrentRunInjectio
 const currentRunMessageQueues = new Map<string, CurrentRunQueuedMessage[]>()
 const currentRunMessageQueueOwners = new Map<string, string>()
 const completedAssistantMessagesByRun = new Map<string, CurrentRunCompletedAssistantMessage>()
+type GoalGraphProviderRole = "assistant" | "tool"
+type GoalGraphProviderOccurrences = Map<string, Partial<Record<GoalGraphProviderRole, number>>>
+const goalGraphOccurrencesByThread = new Map<
+  string,
+  { runToken: string; boundaries: Map<string, GoalGraphProviderOccurrences> }
+>()
 const VISIBLE_USER_MESSAGE_KEY = "cmb_visible_user_message"
 // A renderer can withdraw a handoff while its async UserPromptSubmit/skill hooks
 // are still running, before queueCurrentRunMessage has inserted anything. Keep a
@@ -361,6 +367,9 @@ export function setCurrentRunMessageQueueOwner(threadId: string, runToken: strin
   if (pendingRoute && pendingRoute.runToken !== runToken) {
     completedAssistantRoutes.delete(threadId)
   }
+  if (currentRunMessageQueueOwners.get(threadId) !== runToken) {
+    goalGraphOccurrencesByThread.delete(threadId)
+  }
   currentRunMessageQueueOwners.set(threadId, runToken)
 }
 
@@ -416,6 +425,7 @@ export function clearCurrentRunMessageQueue(threadId: string, runToken?: string)
   }
   currentRunMessageQueues.delete(threadId)
   currentRunMessageQueueOwners.delete(threadId)
+  goalGraphOccurrencesByThread.delete(threadId)
   injectedMessageIds.delete(threadId)
   withdrawnMessageIds.delete(threadId)
   completedAssistantRoutes.delete(threadId)
@@ -553,8 +563,110 @@ type GoalProviderOccurrenceLoader = (
   providerSourceId: string
 ) => number | undefined
 
+function rememberGoalGraphProviderOccurrences(
+  threadId: string,
+  runToken: string,
+  messages: readonly BaseMessage[]
+): boolean {
+  if (!isCurrentRunMessageQueueOwner(threadId, runToken)) return false
+  const boundaryIndex = messages.findLastIndex(HumanMessage.isInstance)
+  const boundary = messages[boundaryIndex]
+  if (
+    !boundary?.id ||
+    boundary.additional_kwargs[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] !== true
+  ) {
+    return false
+  }
+
+  let scope = goalGraphOccurrencesByThread.get(threadId)
+  if (!scope) {
+    scope = { runToken, boundaries: new Map() }
+    goalGraphOccurrencesByThread.set(threadId, scope)
+  }
+  const parentId = boundary.additional_kwargs[GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]
+  const remember = (id: string, end: number): void => {
+    if (scope.boundaries.has(id)) return
+    const occurrences: GoalGraphProviderOccurrences = new Map()
+    for (let index = 0; index < end; index += 1) {
+      const message = messages[index]
+      const role = AIMessage.isInstance(message)
+        ? "assistant"
+        : ToolMessage.isInstance(message)
+          ? "tool"
+          : undefined
+      if (!role) continue
+      const declared = getMessageProviderTupleFromMetadata(message.additional_kwargs)
+      if (!declared) continue
+      const source = occurrences.get(declared.provider_source_id) ?? {}
+      source[role] = Math.max(source[role] ?? 0, declared.provider_occurrence)
+      occurrences.set(declared.provider_source_id, source)
+    }
+    scope.boundaries.set(id, occurrences)
+  }
+  if (typeof parentId === "string" && !scope.boundaries.has(parentId)) {
+    const parentIndex = messages.findIndex(
+      (message, index) =>
+        index < boundaryIndex &&
+        message.id === parentId &&
+        HumanMessage.isInstance(message) &&
+        message.additional_kwargs[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] === true
+    )
+    if (parentIndex >= 0) remember(parentId, parentIndex)
+  }
+  remember(boundary.id, boundaryIndex)
+  return true
+}
+
+function getGoalGraphProviderOccurrences(
+  threadId: string,
+  runToken: string,
+  boundaryId: string
+): GoalGraphProviderOccurrences | undefined {
+  const scope = goalGraphOccurrencesByThread.get(threadId)
+  return scope?.runToken === runToken ? scope.boundaries.get(boundaryId) : undefined
+}
+
+interface PreviousGoalProviderOccurrence {
+  provider_source_id: string
+  role: Message["role"]
+  provider_occurrence: number
+}
+
+/** The checkpoint can know an older provider identity before SQLite's legacy worker imports it. */
+export function mergeCurrentRunGoalProviderOccurrences(
+  threadId: string,
+  runToken: string,
+  boundaryId: string,
+  sourceIds: readonly string[],
+  durable: readonly PreviousGoalProviderOccurrence[] | undefined
+): readonly PreviousGoalProviderOccurrence[] | undefined {
+  if (durable === undefined) return undefined
+  const graph = getGoalGraphProviderOccurrences(threadId, runToken, boundaryId)
+  if (!graph?.size) return durable
+
+  const keyFor = (sourceId: string, role: Message["role"]): string =>
+    JSON.stringify([sourceId, role])
+  const occurrences = new Map(
+    durable.map((entry) => [keyFor(entry.provider_source_id, entry.role), entry])
+  )
+  for (const sourceId of sourceIds) {
+    const previous = graph.get(sourceId)
+    if (!previous) continue
+    for (const role of ["assistant", "tool"] as const) {
+      const occurrence = previous[role]
+      if (occurrence === undefined) continue
+      const key = keyFor(sourceId, role)
+      if ((occurrences.get(key)?.provider_occurrence ?? 0) < occurrence) {
+        occurrences.set(key, { provider_source_id: sourceId, role, provider_occurrence: occurrence })
+      }
+    }
+  }
+  return [...occurrences.values()]
+}
+
 function assignGoalGraphAssistantIdentity(
   threadId: string,
+  runToken: string,
   messages: readonly BaseMessage[],
   response: AIMessage,
   loadPreviousOccurrence?: GoalProviderOccurrenceLoader
@@ -567,6 +679,7 @@ function assignGoalGraphAssistantIdentity(
 
   let occurrence = loadPreviousOccurrence?.(threadId, boundary.id, sourceId)
   let scopeIndex = boundaryIndex
+  let scopeId = boundary.id
   const parentBoundaryId = boundary.additional_kwargs[GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]
   if (occurrence === undefined && typeof parentBoundaryId === "string") {
     // The graph may start the repair model before the IPC values consumer
@@ -581,9 +694,12 @@ function assignGoalGraphAssistantIdentity(
     if (parentIndex >= 0) {
       occurrence = loadPreviousOccurrence?.(threadId, parentBoundaryId, sourceId)
       scopeIndex = parentIndex
+      scopeId = parentBoundaryId
     }
   }
   if (occurrence !== undefined) {
+    const graph = getGoalGraphProviderOccurrences(threadId, runToken, scopeId)
+    occurrence = Math.max(occurrence, graph?.get(sourceId)?.assistant ?? 0)
     for (const message of messages.slice(scopeIndex + 1)) {
       if (!AIMessage.isInstance(message) || graphAssistantProviderSourceId(message) !== sourceId)
         continue
@@ -620,20 +736,38 @@ function assignGoalGraphAssistantIdentity(
  * run, even though they all share this exact middleware. */
 export function createCurrentRunMessageQueueMiddleware(
   ownerRunToken?: string,
-  loadGoalProviderOccurrence?: GoalProviderOccurrenceLoader
+  loadGoalProviderOccurrence?: GoalProviderOccurrenceLoader,
+  prepareGoalProviderHistory?: (threadId: string) => Promise<void> | undefined
 ): ReturnType<typeof createMiddleware> {
   return createMiddleware({
     name: "currentRunMessageQueue",
     wrapModelCall: async (request, handler) => {
-      const response = await handler(request)
       const threadId =
         typeof request.runtime?.configurable?.thread_id === "string"
           ? request.runtime.configurable.thread_id
           : undefined
+      const messages = request.state?.messages ?? request.messages
+      // Record before the handler can emit the first raw delta.
+      if (
+        threadId &&
+        ownerRunToken &&
+        rememberGoalGraphProviderOccurrences(threadId, ownerRunToken, messages)
+      ) {
+        const preparation = prepareGoalProviderHistory?.(threadId)
+        if (preparation) {
+          await preparation
+          request.runtime?.signal?.throwIfAborted()
+          if (!isCurrentRunMessageQueueOwner(threadId, ownerRunToken)) {
+            throw new DOMException("Superseded Goal turn", "AbortError")
+          }
+        }
+      }
+      const response = await handler(request)
       if (threadId && ownerRunToken && AIMessage.isInstance(response)) {
         assignGoalGraphAssistantIdentity(
           threadId,
-          request.state?.messages ?? request.messages,
+          ownerRunToken,
+          messages,
           response,
           loadGoalProviderOccurrence
         )

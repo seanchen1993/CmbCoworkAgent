@@ -85,6 +85,7 @@ import {
   type ModelRetryHooks,
   type FetchErrorInfo
 } from "../agent/runtime"
+import { mergeCurrentRunGoalProviderOccurrences } from "../agent/current-run-message-queue"
 import type { CheckpointMetadata } from "@langchain/langgraph-checkpoint"
 import {
   addThreadGoalEvent,
@@ -4023,6 +4024,21 @@ function discardStreamTranscriptToolCallAccumulatorsForThread(threadId: string):
   }
 }
 
+function loadPreviousRunProviderOccurrences(
+  threadId: string,
+  runToken: string,
+  boundaryId: string,
+  sourceIds: readonly string[]
+) {
+  return mergeCurrentRunGoalProviderOccurrences(
+    threadId,
+    runToken,
+    boundaryId,
+    sourceIds,
+    getThreadMessageProviderOccurrencesBeforeUser(threadId, boundaryId, sourceIds)
+  )
+}
+
 function flushPendingStreamTranscriptMessages(
   threadId: string,
   runToken: string,
@@ -4060,7 +4076,7 @@ function flushPendingStreamTranscriptMessages(
         ...(boundaryId && {
           boundaryOrdinal: getThreadTranscriptBoundaryOrdinal(threadId, boundaryId),
           loadPreviousOccurrences: (sourceIds: readonly string[]) =>
-            getThreadMessageProviderOccurrencesBeforeUser(threadId, boundaryId, sourceIds)
+            loadPreviousRunProviderOccurrences(threadId, runToken, boundaryId, sourceIds)
         }),
         loadBaselineMessages: () =>
           getThreadMessageIdentityContext(
@@ -4484,7 +4500,7 @@ export function persistAndForwardPhysicalRunStreamChunk(
             }))
           ),
         loadPreviousTurnOccurrences: (userMessageId, sourceIds) =>
-          getThreadMessageProviderOccurrencesBeforeUser(threadId, userMessageId, sourceIds)
+          loadPreviousRunProviderOccurrences(threadId, runToken, userMessageId, sourceIds)
       })
     )
     rememberSelectedStreamTranscriptValueSnapshots(payload, snapshots)

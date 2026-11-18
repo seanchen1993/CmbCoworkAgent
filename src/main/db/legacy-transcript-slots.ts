@@ -8,10 +8,30 @@ export function ensureLegacyTranscriptSlots(database: NativeSqliteAdapter): void
       checkpoint_id TEXT NOT NULL,
       message_index INTEGER NOT NULL,
       ordinal INTEGER NOT NULL,
+      provider_source_id TEXT,
+      role TEXT,
+      provider_occurrence INTEGER,
       PRIMARY KEY (thread_id, checkpoint_id, message_index)
     );
     CREATE INDEX IF NOT EXISTS idx_legacy_checkpoint_transcript_slots_ordinal
       ON legacy_checkpoint_transcript_slots(thread_id, ordinal)
+  `)
+  const slotColumns =
+    database.exec("PRAGMA table_info(legacy_checkpoint_transcript_slots)")[0]?.values ?? []
+  for (const [name, type] of [
+    ["provider_source_id", "TEXT"],
+    ["role", "TEXT"],
+    ["provider_occurrence", "INTEGER"]
+  ]) {
+    if (!slotColumns.some((column) => column[1] === name)) {
+      database.exec(`ALTER TABLE legacy_checkpoint_transcript_slots ADD COLUMN ${name} ${type}`)
+    }
+  }
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_legacy_checkpoint_transcript_slots_provider
+      ON legacy_checkpoint_transcript_slots(
+        thread_id, provider_source_id, role, ordinal, provider_occurrence
+      );
   `)
   const columns =
     database.exec("PRAGMA table_info(legacy_checkpoint_transcript_migrations)")[0]?.values ?? []

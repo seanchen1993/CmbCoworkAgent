@@ -304,3 +304,198 @@ it.each([
     }
   }
 )
+
+it("assigns one live Goal occurrence while an older checkpoint reply still awaits bootstrap", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cmb-goal-recovery-occurrence-"))
+  const checkpointPath = join(directory, "checkpoint.sqlite")
+  storage.path = join(directory, "threads.sqlite")
+  const threadId = "goal-with-missing-earlier-reply"
+  const runToken = "physical-run"
+  const signal = new AbortController().signal
+  const providerId = "reused-provider"
+  const provider = (occurrence: number) => ({
+    [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: providerId,
+    [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: occurrence
+  })
+  await db.initializeDatabase()
+  try {
+    db.createThread(threadId)
+    const goal = goalManager.set(threadId, "Report the result")
+    setCurrentRunMessageQueueOwner(threadId, runToken)
+    const user = new HumanMessage({ id: "user", content: "/goal Report the result" })
+    const previous = new AIMessage({
+      id: providerId,
+      content: "Durable reply",
+      additional_kwargs: provider(1)
+    })
+    db.upsertThreadMessages(threadId, [
+      { id: user.id!, role: "user", content: String(user.content), created_at: new Date() },
+      {
+        id: previous.id!,
+        role: "assistant",
+        content: String(previous.content),
+        created_at: new Date(),
+        provider_source_id: providerId,
+        provider_occurrence: 1
+      }
+    ])
+    const earlier = createPhysicalRunHiddenUserMessage(threadId, runToken, signal, goal, {
+      content: "Earlier continuation"
+    })
+    const missing = new AIMessage({
+      id: "checkpoint-only-reply",
+      content: "Recovered reply",
+      additional_kwargs: provider(2)
+    })
+    const saved = [user, previous, earlier, missing]
+    const saver = new SqlJsSaver(checkpointPath)
+    try {
+      await saver.put(
+        { configurable: { thread_id: threadId, checkpoint_ns: "" } },
+        {
+          v: 1,
+          id: "checkpoint-awaiting-legacy-bootstrap",
+          ts: new Date().toISOString(),
+          channel_values: { messages: saved },
+          channel_versions: { messages: 1 },
+          versions_seen: {}
+        },
+        { source: "loop", step: 1, parents: {} }
+      )
+    } finally {
+      await saver.close()
+    }
+
+    const current = createPhysicalRunHiddenUserMessage(threadId, runToken, signal, goal, {
+      content: "Current continuation"
+    })
+    const graph = addMessages(saved, [current])
+    const serialize = createStreamDataSerializer({ projectMessageChunks: true })
+    const values = createSerializedValuesMessageAccumulator()
+    const forward = (mode: "values" | "messages", payload: unknown) => {
+      const frame = serialize(mode, payload)
+      const snapshot = mode === "values" ? values.update(frame) : undefined
+      persistAndForwardPhysicalRunStreamChunk(
+        window,
+        "agent:test",
+        threadId,
+        runToken,
+        signal,
+        mode,
+        frame.data,
+        frame.valuesMessageIndexOffset,
+        frame.valuesSnapshotKind,
+        snapshot?.messages,
+        true
+      )
+    }
+    forward("values", { messages: graph })
+    const middleware = createCurrentRunMessageQueueMiddleware(
+      runToken,
+      (scope, boundaryId, source) => {
+        const previous = db.getThreadMessageProviderOccurrencesBeforeUser(scope, boundaryId, [
+          source
+        ])
+        return previous?.find((entry) => entry.role === "assistant")?.provider_occurrence
+      }
+    )
+    const wrapModelCall = middleware.wrapModelCall as unknown as (
+      request: { runtime: { configurable: { thread_id: string } }; messages: typeof graph },
+      handler: () => Promise<AIMessage>
+    ) => Promise<AIMessage>
+    let reply: AIMessage
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+    try {
+      reply = await wrapModelCall(
+        { runtime: { configurable: { thread_id: threadId } }, messages: graph },
+        async () => {
+          forward("messages", [
+            new AIMessageChunk({ id: providerId, content: "Live reply" }),
+            { checkpoint_ns: "model:fixture" }
+          ])
+          await vi.advanceTimersByTimeAsync(250)
+          expect(db.getThreadMessages(threadId).at(-1)).toMatchObject({
+            content: "Live reply",
+            provider_occurrence: 3
+          })
+          return new AIMessage({ id: providerId, content: "Live reply" })
+        }
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(reply.additional_kwargs).toMatchObject(provider(3))
+    forward("values", { messages: addMessages(graph, [reply]) })
+    expect(db.getThreadMessages(threadId).map(({ content }) => content)).toEqual([
+      user.content,
+      previous.content,
+      reply.content
+    ])
+
+    const restored = bootstrapLegacyCheckpointTranscript(
+      checkpointPath,
+      storage.path,
+      threadId,
+      "",
+      new SharedArrayBuffer(4)
+    )
+    expect(restored.stats.migratedMessages).toBe(1)
+    expect(db.getThreadMessages(threadId).map(({ content, provider_occurrence }) => [
+      content,
+      provider_occurrence
+    ])).toEqual([
+      [user.content, undefined],
+      [previous.content, 1],
+      [missing.content, 2],
+      [reply.content, 3]
+    ])
+  } finally {
+    clearCurrentRunMessageQueue(threadId, runToken)
+    await db.closeDatabase()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+it("prepares upgraded Goal history before the provider runs and respects its physical owner", async () => {
+  const threadId = "goal-with-upgraded-provider-history"
+  const runToken = "originating-owner"
+  let finishPreparation!: () => void
+  const prepare = vi.fn(
+    () =>
+      new Promise<void>((resolve) => {
+        finishPreparation = resolve
+      })
+  )
+  const handler = vi.fn(async () => new AIMessage({ id: "reply", content: "Result" }))
+  const boundary = new HumanMessage({
+    id: "goal-boundary",
+    content: "Continuation",
+    additional_kwargs: { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true }
+  })
+  const middleware = createCurrentRunMessageQueueMiddleware(runToken, undefined, prepare)
+  const wrapModelCall = middleware.wrapModelCall as unknown as (
+    request: { runtime: { configurable: { thread_id: string } }; messages: HumanMessage[] },
+    handler: () => Promise<AIMessage>
+  ) => Promise<AIMessage>
+  const request = {
+    runtime: { configurable: { thread_id: threadId } },
+    messages: [boundary]
+  }
+  setCurrentRunMessageQueueOwner(threadId, runToken)
+  try {
+    const initial = wrapModelCall(request, handler)
+    expect(prepare).toHaveBeenCalledWith(threadId)
+    expect(handler).not.toHaveBeenCalled()
+    finishPreparation()
+    await initial
+    expect(handler).toHaveBeenCalledTimes(1)
+
+    const superseded = wrapModelCall(request, handler)
+    setCurrentRunMessageQueueOwner(threadId, "replacement-owner")
+    finishPreparation()
+    await expect(superseded).rejects.toMatchObject({ name: "AbortError" })
+    expect(handler).toHaveBeenCalledTimes(1)
+  } finally {
+    clearCurrentRunMessageQueue(threadId)
+  }
+})

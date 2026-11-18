@@ -20,6 +20,7 @@ import {
 } from "deepagents"
 import { withModelResponseDiagnostics } from "./model-response-diagnostics"
 import {
+  getDbPath,
   getThreadCheckpointPath,
   deleteThreadCheckpoint,
   getEnabledSkillsSources,
@@ -67,6 +68,7 @@ import {
   type ToolRunnableConfig
 } from "@langchain/core/tools"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
+import { bootstrapLegacyCheckpointTranscriptInWorker } from "../checkpointer/runtime-projection-client"
 import { recoverMainCheckpointMessages } from "./checkpoint-message-recovery"
 import {
   LocalSandbox,
@@ -186,6 +188,7 @@ import {
   getThreadMessageIdentityContext,
   getThreadMessageProviderOccurrencesBeforeUser,
   getThreadTranscriptBoundaryOrdinal,
+  hasUnresolvedLegacyTranscriptSlots,
   moveThreadMessagesAfterAnchor,
   moveThreadMessagesAfterLastNonAssistant,
   replaceThreadMessageId,
@@ -308,6 +311,22 @@ export function createPhysicalGoalGateRecoveryMessage(
     additional_kwargs: {
       [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true,
       [GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]: durableParentId
+    }
+  })
+}
+
+/** An upgraded ordinal-only migration must recover its identities before a Goal model streams. */
+function prepareLegacyGoalProviderHistory(threadId: string): Promise<void> | undefined {
+  if (!hasUnresolvedLegacyTranscriptSlots(threadId)) return undefined
+  return bootstrapLegacyCheckpointTranscriptInWorker(
+    getThreadCheckpointPath(threadId),
+    getDbPath(),
+    threadId
+  ).then(({ stats }) => {
+    // No checkpoint ID means there is no recoverable source. An orphaned
+    // ordinal-only marker alone should not keep future Goal turns blocked.
+    if (stats.checkpointId !== null && hasUnresolvedLegacyTranscriptSlots(threadId)) {
+      throw new Error("Goal 历史仍在恢复，请稍后继续。")
     }
   })
 }
@@ -3085,7 +3104,8 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
           return previous === undefined
             ? undefined
             : previous.find((entry) => entry.role === "assistant")?.provider_occurrence ?? 0
-        }
+        },
+        prepareLegacyGoalProviderHistory
       ),
       createCmbSummarizationMiddleware(mainSummarizationOptions),
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
