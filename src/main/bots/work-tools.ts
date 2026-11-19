@@ -22,6 +22,8 @@ export function createBotWorkTools(
   // Host still checks that authority on invocation, including for introductions.
   const ordinaryConversationTools = !task.workId && !task.mockSource &&
     (task.origin?.kind === "user" || task.origin?.kind === "introduction" || task.origin?.kind === "work_result")
+  const workManagement = ordinaryConversationTools || (!task.workId && task.mockSource?.transport === "im" &&
+    (task.origin?.kind === "mock" || task.origin?.kind === "user" || task.origin?.kind === "work_result"))
   const key = z.string().trim().min(1).max(160)
   const id = z.string().trim().min(1).max(160)
   const workspaceSelection = z.discriminatedUnion("kind", [
@@ -236,7 +238,7 @@ export function createBotWorkTools(
       {
         name: "bot_work_delete",
         metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
-        description: "Permanently delete one local task and its own conversation when the current desktop user explicitly requests deletion. Resolve the target with bot_work_list; ask which task if names are ambiguous. A stop or completion request does not authorize deletion. Call once without a separate confirmation. The tool handles any scope choice in this chat. Report the actual receipt: deleted, detached (original conversation kept), cancelled, or cleanup_pending. Retry uncertain results with the original workId, expectedVersion and requestKey.",
+        description: "Permanently delete one task in this conversation and its own thread when the current user explicitly requests deletion. Resolve the target with bot_work_list; ask which task if names are ambiguous. A stop or completion request does not authorize deletion. Call once without a separate confirmation. The tool handles any scope choice in this chat. Report the actual receipt: deleted, detached (original conversation kept), cancelled, or cleanup_pending. Retry uncertain results with the original workId, expectedVersion and requestKey.",
         schema: z.object({ requestKey: key, workId: id, expectedVersion: z.number().int().positive() }).strict()
       }
     ),
@@ -278,7 +280,7 @@ export function createBotWorkTools(
         schema: z.object({
           cursor: z.string().max(1024).optional(),
           query: z.string().max(160).optional(),
-          ...(ordinaryConversationTools ? { priorOperation: botWorkOperationQuery.optional() } : {})
+          ...(workManagement ? { priorOperation: botWorkOperationQuery.optional() } : {})
         })
       }
     ),
@@ -555,7 +557,8 @@ export function createBotWorkTools(
       // Completion notifications report an existing run; they do not carry a
       // new user Stop request. Keep the Host authority check as the final guard.
       (task.origin?.kind !== "notification" || entry.name !== "bot_work_stop") &&
-      (ordinaryConversationTools || !(entry.name.startsWith("bot_thread_") || entry.name === "bot_work_unlink" || entry.name === "bot_work_delete")) &&
+      (ordinaryConversationTools || !(entry.name.startsWith("bot_thread_") || entry.name === "bot_work_unlink")) &&
+      (workManagement || entry.name !== "bot_work_delete") &&
       (!task.workId || !["bot_work_create", "bot_work_projects", "bot_work_rename", "bot_work_stop"].includes(entry.name)) &&
       (!task.mockSource ||
         task.mockSource.transport === "im" ||

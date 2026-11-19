@@ -168,7 +168,7 @@ describe("Bot automatic memory verification", () => {
         expect(memory.list("a")).toHaveLength(approved ? 1 : 0)
         expect(fixture.verify.mock.calls[0][0][0].content).toContain("memory curation agent")
         expect(fixture.verify.mock.calls[1][0][0].content).toContain(
-          "Audit proposed private long-term memory"
+          "Audit proposed long-term memory"
         )
       } finally {
         await maintainer.close()
@@ -405,6 +405,32 @@ describe("Bot automatic memory verification", () => {
 })
 
 describe("Bot memory extraction wiring", () => {
+  it("extracts and commits to the originating group and preserves private, shared and other-group entries", async () => {
+    const root = mkdtempSync(join(tmpdir(), "bot-memory-group-scope-"))
+    const memory = new BotMemoryService(root)
+    const own = memory.writeInContext("a", { name: "Format", content: "Group A" }, { groupId: "one" })
+    const other = memory.writeInContext("a", { name: "Format", content: "Group B" }, { groupId: "two" })
+    const personal = memory.write("a", { name: "Format", content: "Private" })
+    const shared = memory.write("a", { name: "Format", content: "Shared", scope: { kind: "shared" } })
+    const maintainer = createBotMemoryMaintainer(memory, () => true)
+    try {
+      fixture.extraction.mockImplementation(async options => options.apply([preference]))
+      maintainer.enqueue({ ...turn, groupId: "one", editVersion: memory.editVersion("a") })
+      await tick()
+      expect(fixture.extraction).toHaveBeenCalledWith(expect.objectContaining({ allowedFilenames: [own.id + ".md"] }))
+      expect(memory.list("a").find(item => item.name === preference.name)?.scope).toEqual({ kind: "group", groupId: "one" })
+      const original = memory.list("a")
+      for (const entry of [other, personal, shared]) {
+        memory.applySummary("a", memory.editVersion("a"), [{ ...preference, action: "update", filename: entry.id + ".md" }], "one")
+      }
+      expect(memory.list("a")).toEqual(original)
+    } finally {
+      await maintainer.close()
+      await memory.close()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it("passes only private filenames into extraction, keeping shared and group references out", async () => {
     const root = mkdtempSync(join(tmpdir(), "bot-memory-extraction-scope-"))
     const memory = new BotMemoryService(root)

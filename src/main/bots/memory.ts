@@ -18,6 +18,7 @@ import { botIdentifier, parseBotMemoryScope } from "../../shared/bots/validation
 import type { MemoryOperation } from "../memory/summarizer"
 
 import {
+  botMemoryOwnedBy,
   botMemoryVisible,
   type BotMemoryContext,
   type BotMemoryScope
@@ -185,7 +186,8 @@ export class BotMemoryService {
   applySummary(
     botId: string,
     expectedEditVersion: number,
-    operations: readonly MemoryOperation[]
+    operations: readonly MemoryOperation[],
+    groupId?: string
   ): void {
     if (
       this.stopping ||
@@ -193,9 +195,7 @@ export class BotMemoryService {
       this.editVersion(botId) !== expectedEditVersion
     )
       return
-    const before = this.list(botId).filter(
-        (entry) => (entry.scope?.kind ?? "private") === "private"
-      ),
+    const before = this.list(botId).filter(entry => botMemoryOwnedBy(entry, groupId)),
       known = new Map(before.map((item) => [`${item.id}.md`, item]))
     let committed = false
     try {
@@ -213,7 +213,8 @@ export class BotMemoryService {
         const saved = this.persist(botId, {
           ...(prior ? { id: prior.id, expectedVersion: prior.version } : {}),
           name,
-          content
+          content,
+          ...(groupId ? { scope: { kind: "group" as const, groupId } } : {})
         })
         known.set(`${saved.id}.md`, saved)
         committed = true

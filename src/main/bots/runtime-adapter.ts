@@ -164,7 +164,9 @@ function literalBotSkillMarker(text: string): string {
 function memoryUserText(task: Pick<BotTask, "message" | "origin" | "workId">, prepared = task.message): string {
   // A Hook rewrite is usable execution context, but not reliable evidence of
   // what the user personally stated. Do not infer preservation from substrings.
-  if (task.origin.kind !== "user" || prepared !== task.message) return ""
+  if (prepared !== task.message) return ""
+  if (task.origin.kind === "mock") return task.message
+  if (task.origin.kind !== "user") return ""
   const reference = task.origin.replyTo
   // A skill handoff can carry a quote from the main chat without a reply ID
   // in this work. Exclude that quote from memory evidence only.
@@ -1099,7 +1101,7 @@ export function createLocalBotRunPort(
                   memoryContext
                 )
               : []
-          const memoryEditVersion = mock ? 0 : memory.editVersion(bot.id)
+          const memoryEditVersion = simulated ? 0 : memory.editVersion(bot.id)
           const groupId = botTaskGroupId(task)
           if (groupId)
             stopQuestionCapture = subscribePendingUserInput((request) => {
@@ -1886,7 +1888,7 @@ export function createLocalBotRunPort(
                     : undefined,
                 additionalTools: [...resultTools, ...(mock
                     ? [
-                        ...createBotWorkTools(task, getHost, signal),
+                        ...createBotWorkTools(task, getHost, signal, waiting),
                         ...scopedMemoryTools(),
                         ...(!simulated
                           ? [
@@ -2275,10 +2277,9 @@ export function createLocalBotRunPort(
               }
             }
             if (
-              !mock &&
-              !memoryContext.groupId &&
+              (!mock ? !memoryContext.groupId : mock.source.transport === "im") &&
               isBotMemoryEnabled(bot) &&
-              (task.origin.kind === "user" ||
+              (task.origin.kind === "user" || task.origin.kind === "mock" ||
                 (task.origin.kind === "introduction" && supplementalMessages.size > 0)) &&
               !signal.aborted
             ) {
@@ -2286,13 +2287,14 @@ export function createLocalBotRunPort(
                 ...[...supplementalMessages.values()].map(entry => entry.userText)]
                 .filter(text => text.trim()).join("\n\n")
               if (userText) summaries.enqueue({
+                ...(memoryContext.groupId ? { groupId: memoryContext.groupId } : {}),
                 botId: bot.id,
                 botVersion: bot.version,
                 threadId: task.threadId,
                 modelRef: bot.modelRef,
                 editVersion: memoryEditVersion,
                 userText,
-                conversation: `${task.origin.kind === "user" ? `USER:\n${acceptedMessage}\n` : ""}${[...supplementalMessages.values()].map((entry) => `\nUSER:\n${entry.message}`).join("")}\nASSISTANT:\n${splitBotInlineReasoning(finalText ?? "").body}`
+                conversation: `${task.origin.kind === "user" || task.origin.kind === "mock" ? `USER:\n${acceptedMessage}\n` : ""}${[...supplementalMessages.values()].map((entry) => `\nUSER:\n${entry.message}`).join("")}\nASSISTANT:\n${splitBotInlineReasoning(finalText ?? "").body}`
               })
             }
             return {

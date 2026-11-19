@@ -1657,20 +1657,20 @@ describe("Bot schedule tool contract", () => {
     } })
   })
 
+  it.each([true, false])("exposes the main conversation routine contract to IM (personal=%s)", personal => {
+    const mockSource = { transport: "im" as const, ...(personal ? { personal: true as const } : {}), bindingId: "binding", grantVersion: 1,
+      conversationId: "conversation", audienceKey: personal ? "desktop" : "im:binding", eventId: "event",
+      messageId: "message", senderId: "sender" }
+    const { schedule } = fixture({ kind: "mock", bindingId: "binding", eventId: "event" }, [], { mockSource })
+    expect(convertToOpenAITool(schedule).function).toEqual(convertToOpenAITool(fixture().schedule).function)
+  })
+
   it.each([
     {
       surface: "desktop task",
       origin: { kind: "user" },
       source: { threadId: "work-thread", workId: "work" }
     },
-    {
-      surface: "personal IM in the shared main thread",
-      origin: { kind: "mock", bindingId: "binding", eventId: "event" },
-      source: { mockSource: {
-        transport: "im", personal: true, bindingId: "binding", grantVersion: 1,
-        conversationId: "dm", audienceKey: "desktop", eventId: "event", messageId: "message", senderId: "owner"
-      } }
-    }
   ] as const)("keeps the original once routine and rejects desktop-only fields in $surface", async ({ origin, source }) => {
     const { schedule, save, saveFollowUp, saveWorkSchedule } = fixture(origin, [], source)
     const contract = convertToOpenAITool(schedule).function

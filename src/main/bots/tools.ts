@@ -867,10 +867,11 @@ export function createBotScheduleTools(
   getHost: () => LocalBotHost,
   signal: AbortSignal
 ): DynamicStructuredTool[] {
-  const desktopMain = !task.mockSource && !task.workId && task.threadId === bot.threadId &&
+  const localMain = !task.mockSource && !task.workId && task.threadId === bot.threadId &&
     (task.origin.kind === "user" || task.origin.kind === "introduction" || task.origin.kind === "work_result")
-  const groupMain = task.mockSource?.transport === "im" && !task.mockSource.personal && !task.workId &&
-    (task.origin.kind === "mock" || task.origin.kind === "work_result")
+  const imMain = task.mockSource?.transport === "im" && !task.workId &&
+    ["mock", "user", "work_result"].includes(task.origin.kind)
+  const scheduleMain = localMain || imMain
   // Model-facing receipts identify the skill by name. Its installation path stays on the host.
   const receipt = (schedule: BotSchedule) =>
     schedule.explicitSkill ? { ...schedule, explicitSkill: { name: schedule.explicitSkill.name } } : schedule
@@ -883,8 +884,8 @@ export function createBotScheduleTools(
           if (task.origin.kind === "work_result") throw new Error("结果回合不能创建或更改例行任务。")
           const host = getHost()
           if (input.action === "recover") {
-            if (!desktopMain || !config.toolCall?.id)
-              throw new Error("只能从原桌面主对话核对例行回执")
+            if (!scheduleMain || !config.toolCall?.id)
+              throw new Error("请在发起例行任务的主对话中核对回执")
             if (input.id && input.priorOperation?.targetId && input.id !== input.priorOperation.targetId)
               throw new Error("例行标识与原操作目标不一致")
             return JSON.stringify(host.desktopOperationReceipts(task.id, {
@@ -904,9 +905,9 @@ export function createBotScheduleTools(
                 (item) =>
                   item.botId === bot.id &&
                   (!task.workId || item.workId === task.workId) &&
-                  (!(item.desktopWork || item.workMonitor || item.fixedReminder) || (task.workId && item.workId === task.workId) || (groupMain && item.fixedReminder) ||
-                    (desktopMain &&
-                      (task.origin.kind === "user" || host.hasDirectUserRequest(task.id)))) &&
+                  (!(item.desktopWork || item.workMonitor || item.fixedReminder) || (task.workId && item.workId === task.workId) ||
+                    (scheduleMain &&
+                      (imMain || task.origin.kind === "user" || host.hasDirectUserRequest(task.id)))) &&
                   (item.audienceKey ?? "desktop") === (task.mockSource?.audienceKey ?? "desktop")
               ) : []
           if (input.action === "list") return JSON.stringify(schedules.map(receipt))
@@ -922,7 +923,7 @@ export function createBotScheduleTools(
           const prior = input.id ? schedules.find((item) => item.id === input.id) : undefined
           const managedPrior = Boolean(prior?.desktopWork || prior?.workMonitor || prior?.fixedReminder)
           const callId = config.toolCall?.id
-          const editId = desktopMain && input.action === "save" &&
+          const editId = scheduleMain && input.action === "save" &&
             input.workId === undefined && (!prior || managedPrior)
             ? input.id : undefined
           const toolEdit = editId && callId && input.requestKey ? {
@@ -962,7 +963,7 @@ export function createBotScheduleTools(
             // Like DSH schedule_create.after_seconds, resolve relative time in the Host.
             // The admitted request timestamp also keeps retries from moving the deadline.
             ...(input.afterSeconds !== undefined
-              ? { runAt: new Date((groupMain ? task.createdAt : host.desktopScheduleRequestTime(task.id)) + input.afterSeconds * 1_000).toISOString() }
+              ? { runAt: new Date((imMain ? task.createdAt : host.desktopScheduleRequestTime(task.id)) + input.afterSeconds * 1_000).toISOString() }
               : {}),
             frequency: input.afterSeconds !== undefined ? "once" :
               input.frequency ?? prior?.frequency ?? (input.kind === "fixed_reminder" ? "once" : undefined),
@@ -978,11 +979,11 @@ export function createBotScheduleTools(
           const followUp = input.kind === "fixed_reminder"
             ? parseBotFixedReminder({ kind: input.kind, expiresAt: input.expiresAt })
             : input.workMonitor ? parseBotWorkScheduleMonitor(input.workMonitor) : undefined
-          if (desktopMain && (followUp || input.workId !== undefined)) {
-            if (!config.toolCall?.id || !input.requestKey)
+          if (scheduleMain && (followUp || input.workId !== undefined)) {
+            if (!config.toolCall?.id || (!imMain && !input.requestKey))
               throw new Error("此例行任务需要可重试的当前请求标识")
             const source = toolEdit?.source ??
-              { taskId: task.id, callId: config.toolCall.id, key: botIdentifier(input.requestKey) }
+              { taskId: task.id, callId: config.toolCall.id, key: botIdentifier(input.requestKey ?? config.toolCall.id) }
             if (input.workId !== undefined)
               return JSON.stringify(receipt(host.saveDesktopWorkScheduleFromTool(bot.id, schedule, botIdentifier(input.workId), source)))
             if (followUp)
@@ -990,11 +991,6 @@ export function createBotScheduleTools(
           }
           const scopedSource = task.mockSource?.transport === "im" || task.workId ? task.id : undefined
           const callIdForSave = config.toolCall?.id
-          if (groupMain && followUp) {
-            if (!callIdForSave) throw new Error("缺少例行操作回执")
-            return JSON.stringify(host.saveDesktopScheduleFollowUp(bot.id, schedule, followUp,
-              { taskId: task.id, callId: callIdForSave, key: callIdForSave }, edit))
-          }
           if (prior || !callIdForSave)
             return JSON.stringify(receipt(scopedSource ? host.saveSchedule(bot.id, schedule, edit, scopedSource) :
               host.saveSchedule(bot.id, schedule, edit)))
@@ -1028,18 +1024,17 @@ export function createBotScheduleTools(
         metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
         description:
           "Manage routines only when the current user explicitly asks. Create with save without id. Edit or remove by exact ID from list." +
-          (desktopMain ? "" : " Routines need standalone authorized instructions.") +
+          (scheduleMain ? "" : " Routines need standalone authorized instructions.") +
           " Include a timezone in runAt. Daily/weekly use HH:mm (weekday 0=Sunday), interval minimum 5 minutes. Missed intervals coalesce. Report success only after a save receipt." +
-          (desktopMain
-            ? ' For an existing-work follow-up or fixed reminder, choose exactly one mode. To check recorded task progress without running it, set workMonitor with the exact workId from bot_work_list. For one check, set frequency=once, either runAt or afterSeconds, and workMonitor={workId, mode:"report"}. Confirm an observation only when the save receipt contains workMonitor. report checks at each scheduled time, change reports progress changes, new_result reports a new execution result, until_work_completed reports once when the user marks the work complete. To execute authorized work later, set top-level workId and complete standalone instructions in message. For exact reminders set kind=fixed_reminder with the reminder text and requested frequency. For a one-time reminder use either runAt or afterSeconds. This only repeats that text and never checks task status or executes its instructions. Do not substitute execution routines for unavailable PR, file or service checks. Use a stable requestKey within the current turn for these three modes. Optional expiresAt must include a timezone. For a lost reply from an earlier desktop user turn, use recover with the known schedule id or priorOperation sourceRequestId, then recheck its exact receiptId if needed. Recover only reads existing receipts, including removed routines. If no exact operation can be confirmed, check the list or ask. Do not save a second routine as a retry.'
-            : " For a one-time routine, set frequency=once and runAt." +
-              (groupMain ? " Use kind=fixed_reminder for exact text reminders, including recurring ones. For future execution in an existing task in this group, supply its workId. Otherwise each execution reuses the routine's own background conversation." : "")),
+          (scheduleMain
+            ? ' For an existing-work follow-up or fixed reminder, choose exactly one mode. To check recorded task progress without running it, set workMonitor with the exact workId from bot_work_list. For one check, set frequency=once, either runAt or afterSeconds, and workMonitor={workId, mode:"report"}. Confirm an observation only when the save receipt contains workMonitor. report checks at each scheduled time, change reports progress changes, new_result reports a new execution result, until_work_completed reports once when the user marks the work complete. To execute authorized work later, set top-level workId and complete standalone instructions in message. For exact reminders set kind=fixed_reminder with the reminder text and requested frequency. For a one-time reminder use either runAt or afterSeconds. This only repeats that text and never checks task status or executes its instructions. Do not substitute execution routines for unavailable PR, file or service checks. Use a stable requestKey within the current turn for these three modes. Optional expiresAt must include a timezone. For a lost reply from an earlier user turn in this conversation, use recover with the known schedule id or priorOperation sourceRequestId, then recheck its exact receiptId if needed. Recover only reads existing receipts, including removed routines. If no exact operation can be confirmed, check the list or ask. Do not save a second routine as a retry.'
+            : " For a one-time routine, set frequency=once and runAt."),
         schema: z.object({
-          action: z.enum(desktopMain ? ["list", "save", "remove", "recover"] : ["list", "save", "remove"]),
+          action: z.enum(scheduleMain ? ["list", "save", "remove", "recover"] : ["list", "save", "remove"]),
           id: z
             .string()
             .describe(
-              `Existing routine ID returned by list${desktopMain ? " or recover" : ""}. Omit when creating. Never use the routine name as its ID.`
+              `Existing routine ID returned by list${scheduleMain ? " or recover" : ""}. Omit when creating. Never use the routine name as its ID.`
             )
             .optional(),
           name: z.string().max(120).optional(),
@@ -1047,13 +1042,13 @@ export function createBotScheduleTools(
             .string()
             .max(30_000)
             .describe(
-              desktopMain
+              scheduleMain
                 ? "Execution routines use standalone authorized instructions. Fixed reminders use exact text to repeat. For work observations omit this field, since workMonitor selects the recorded task state."
                 : "Standalone instructions for the future run, including required inputs, acceptance conditions and delivery/silence policy. Omit only when keeping an existing routine's instructions unchanged."
             )
             .optional(),
           frequency: z.enum(["once", "daily", "weekly", "interval"]).optional(),
-          ...(desktopMain ? {
+          ...(scheduleMain ? {
             afterSeconds: z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
               .describe("For a one-time relative request such as in five minutes, supply 300 here instead of calculating runAt. Measured from this user request; cannot combine with other timing fields.").optional(),
             kind: z.literal("fixed_reminder").describe("Deliver the exact message at each scheduled time without running an agent.").optional(),
@@ -1066,16 +1061,12 @@ export function createBotScheduleTools(
             }).strict().describe('Read recorded task state without executing work. For one check use frequency=once, either runAt or afterSeconds, and mode="report".').optional(),
             requestKey: z.string().max(128).optional(),
             priorOperation: botScheduleOperationQuery.optional()
-          } : groupMain ? {
-            afterSeconds: z.number().int().positive().max(315360000).optional(),
-            kind: z.literal("fixed_reminder").optional(),
-            workId: z.string().min(1).max(128).optional()
           } : {}),
           runAt: z.string().optional(),
           runAtTime: z.string().optional(),
           weekday: z.number().int().optional(),
           intervalMinutes: z.number().int().optional(),
-          enabled: (desktopMain
+          enabled: (scheduleMain
             ? z.boolean().describe("Set false for an explicit pause. Omit when only editing other fields.")
             : z.boolean()).optional()
         }).strict()

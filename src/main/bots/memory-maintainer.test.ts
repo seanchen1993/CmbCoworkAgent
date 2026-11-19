@@ -47,6 +47,27 @@ describe("Bot background memory batches", () => {
     ])
     await maintainer.close()
   })
+  it("coalesces supplements only inside the same private chat or group", async () => {
+    const received: BotMemoryBatch[] = []
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const maintainer = new BotMemoryMaintainer(async incoming => {
+      received.push(incoming)
+      if (received.length === 1) await gate
+    })
+    maintainer.enqueue(batch("same-bot", "first"))
+    await tick()
+    maintainer.enqueue({ ...batch("same-bot", "A1"), groupId: "a" })
+    maintainer.enqueue(batch("same-bot", "private"))
+    maintainer.enqueue({ ...batch("same-bot", "B1"), groupId: "b" })
+    maintainer.enqueue({ ...batch("same-bot", "A2"), groupId: "a" })
+    release()
+    await tick()
+    expect(received.slice(1).map(({ groupId, userText }) => [groupId, userText]))
+      .toEqual([["a", "A1\n\nA2"], [undefined, "private"], ["b", "B1"]])
+    await maintainer.close()
+  })
+
   it("bounds conversation size and aborts the active request without starting pending work", async () => {
     const received: BotMemoryBatch[] = [],
       signals: AbortSignal[] = []

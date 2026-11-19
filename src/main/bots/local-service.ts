@@ -347,7 +347,7 @@ export function getLocalBotHost(): LocalBotHost {
         }),
         scheduleObservationPublication: {
           persist: (bot, publication) => {
-            if (publication.reminder && bot.threadId !== publication.threadId) {
+            if (bot.threadId !== publication.threadId) {
               const task = store.getTask(publication.taskId)
               const meta = JSON.parse(getThreadCore(publication.threadId)?.metadata || "{}")
               if (task.mockSource?.transport !== "im" || task.mockSource.personal || task.workId ||
@@ -356,11 +356,9 @@ export function getLocalBotHost(): LocalBotHost {
                   meta.botMockBindingId !== task.mockSource.bindingId || meta.botMockGrantVersion !== task.mockSource.grantVersion ||
                   meta.botAudienceKey !== task.mockSource.audienceKey ||
                   meta.botMockConversationId !== task.mockSource.conversationId)
-                throw new BotError("CONFLICT", "固定提醒的原群聊身份已变化")
+                throw new BotError("CONFLICT", "例行任务的原群聊身份已变化")
               return persistScheduledBotResultMessage(publication)
             }
-            if (bot.threadId !== publication.threadId)
-              throw new BotError("CONFLICT", "工作观察的原对话身份已变化")
             const thread = getThreadCore(bot.threadId)
             if (!thread) prepareBotThread(bot)
             else {

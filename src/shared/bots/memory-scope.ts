@@ -28,6 +28,12 @@ export function botMemoryVisible(
   )
 }
 
+/** Only memories owned by this audience may be used as automatic update targets. */
+export function botMemoryOwnedBy(memory: Pick<BotMemory, "scope">, groupId?: string): boolean {
+  const scope = memory.scope
+  return groupId ? scope?.kind === "group" && scope.groupId === groupId : (scope?.kind ?? "private") === "private"
+}
+
 export function botMemoryScopeLabel(scope?: BotMemoryScope): string {
   return scope?.kind === "shared" ? "Bot 共享" : scope?.kind === "group" ? "群内" : "仅私聊"
 }

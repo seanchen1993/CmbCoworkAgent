@@ -11,6 +11,7 @@ const COLLAPSED_SCHEDULE_COUNT = 4
 export function BotSchedulePanel({
   botId,
   schedules,
+  groupId,
   client,
   work,
   allowCreate = true,
@@ -18,6 +19,7 @@ export function BotSchedulePanel({
   emptyMessage = "暂无例行任务"
 }: {
   botId: string
+  groupId?: string
   schedules: BotSchedule[]
   client: BotClient
   work?: { id: string; title: string }
@@ -169,6 +171,7 @@ export function BotSchedulePanel({
           client={client}
           botId={botId}
           target={editing}
+          groupId={groupId}
           work={work}
           readOnly={readOnly}
           onClose={() => setEditing(null)}

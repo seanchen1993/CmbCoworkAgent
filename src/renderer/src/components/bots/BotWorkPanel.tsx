@@ -130,7 +130,7 @@ export function BotWorkPanel({
       setGoal("")
       setDirectoryPath("")
       if (isNavigationCurrent?.() === false || !trigger || createButton.current !== trigger) return
-      if (onPreview && !groupId) onPreview(receipt.work, trigger)
+      if (onPreview) onPreview(receipt.work, trigger)
       else onSelect(receipt.work.id)
     } catch (cause) {
       if (isCurrentAudience()) setError(botErrorMessage(cause))
@@ -349,7 +349,7 @@ export function BotWorkPanel({
                 {work.activity?.unread && <span className="bot-work-unread" role="img" aria-label="未读" />}
                 <ChevronRight size={14} className="bot-work-row-chevron" aria-hidden="true" />
               </button>
-              {onPreview && !work.source && <button type="button" className="bot-icon-button bot-work-preview-action"
+              {onPreview && <button type="button" className="bot-icon-button bot-work-preview-action"
                 aria-label={`预览任务：${work.title}`} title="预览任务"
                 onClick={event => onPreview(work, event.currentTarget)}><Eye size={14} /></button>}
             </div>

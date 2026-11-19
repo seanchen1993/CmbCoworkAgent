@@ -217,22 +217,26 @@ export function createBotConversationTools(
       const host = getHost(), service = deleteConversation
       assertLive()
       if (!service) throw new BotError("CONFLICT", "原会话清理服务尚未就绪。")
+      const run = host.workToolSource(source.taskId)
+      const audience = run.mockSource?.audienceKey ?? "desktop"
       const prior = host.workDeletionRecord(botId, input.workId)
       if (prior?.phase === "deleted") {
-        const target = captureBotWorkDeletionTarget(host, botId, input.workId, input.expectedVersion)
+        const target = captureBotWorkDeletionTarget(host, botId, input.workId, input.expectedVersion, audience)
         return removeBotWork(host, target, async () => { throw new BotError("CONFLICT", "已删除工作不可重复清理。") }, assertLive, source)
       }
       const work = host.getWork(botId, input.workId)
+      if (run.mockSource && work.conversation?.origin === "existing")
+        throw new BotError("CONFLICT", "这个任务关联了已有普通会话，请在 App 私聊中处理原会话。")
       if (!prior && work.conversation?.origin === "existing" &&
           (work.conversation.state === "detaching" || work.conversation.state === "detached") &&
           host.conversationLinks.unlinkReceipt(work, input.expectedVersion, source))
         return unlink(botId, input, source, signal, assertLive)
-      const target = captureBotWorkDeletionTarget(host, botId, input.workId, input.expectedVersion)
+      const target = captureBotWorkDeletionTarget(host, botId, input.workId, input.expectedVersion, audience)
       const linked = !prior && work.conversation?.origin === "existing"
       const direct = linked ? undefined : host.explicitWorkDeletionRequest(source.taskId, work)
       if (!direct) {
         const pages = linked && hasOpenPages(work)
-        const choice = await conversationChoice(host.getBot(botId).threadId, source, signal, {
+        const choice = await conversationChoice(run.threadId, source, signal, {
           id: "delete_work", header: "任务处理",
           question: linked
             ? `「${target.title}」关联了普通会话「${getThreadCore(target.threadId)?.title || "未命名会话"}」。要保留原会话，还是连同聊天记录一起删除？`
@@ -242,7 +246,7 @@ export function createBotConversationTools(
             { label: "连同原会话删除", description: "删除任务和原会话的聊天记录，无法恢复。" },
             { label: "取消", description: "" }
           ] : [{ label: "保留任务", description: "" }, { label: "删除任务", description: "" }]
-        })
+        }, run.mockSource?.transport === "im" && !linked ? "im" : "desktop")
         if (choice === "仅解除关联") return unlink(botId, input, source, signal, assertLive, pages)
         if (choice !== (linked ? "连同原会话删除" : "删除任务")) return { state: "cancelled" }
       }

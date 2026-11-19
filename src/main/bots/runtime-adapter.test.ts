@@ -1343,6 +1343,14 @@ describe("Bot Runtime integration", () => {
       })
     ).not.toBeNull()
     lease.release()
+    expect(fixture.summary).not.toHaveBeenCalled()
+    const userMessage: BotTask = { ...incoming, id: "direct-message", origin: { kind: "user" }, message: "本群周报使用表格" }
+    const userLease = port(work, { source, threadId: work.threadId, threadInitialized: true, label: "Group" })
+      .acquire(bot, userMessage, work)!
+    try {
+      await expect(userLease.execute(new AbortController().signal, vi.fn())).resolves.toMatchObject({ state: "completed" })
+      expect(fixture.summary).toHaveBeenCalledWith(expect.objectContaining({ groupId: source.bindingId, userText: userMessage.message }))
+    } finally { userLease.release() }
   })
 
   it("runs owner IM with local capabilities and preserves the native main thread", async () => {

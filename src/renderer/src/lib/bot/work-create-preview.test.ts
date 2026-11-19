@@ -50,7 +50,7 @@ function workspaceFixture() {
   const view = { detailTab: "details", detailOpen: true }
   const workspace = (name: string, dependencies: Record<string, unknown> = {}) =>
     handler("BotsWorkspace.tsx", "BotWorkspaceForHost", name, {
-      canPreviewWork: true, currentBotId: "bot", client: { hostId: "local" }, detailOpen: false,
+      canPreviewWork: true, currentBotId: "bot", currentImId: null, selectedIm: null, client: { hostId: "local" }, detailOpen: false,
       useAppStore: { getState: () => appState }, useCallback: (fn: unknown) => fn,
       workPreviewReturn, workPreviewNavigation, approvalNavigation, setWorkPreview,
       view, updateView: (patch: Partial<typeof view>) => Object.assign(view, patch),
@@ -208,7 +208,7 @@ describe("task creation and skill assignment keep the main Bot chat", () => {
 
     if (arrival.previews) {
       expect(setWorkPreview).toHaveBeenCalledExactlyOnceWith({
-        hostId: "local", botId: "bot", workId: "created", title: "新任务"
+        hostId: "local", botId: "bot", audience: "desktop", workId: "created", title: "新任务"
       })
     } else {
       expect(setWorkPreview).not.toHaveBeenCalled()
@@ -284,8 +284,8 @@ describe("task creation and skill assignment keep the main Bot chat", () => {
     const n = navigation()
     n.openWork("channel")
     n.openWork(null)
-    expect(n.selectWork.mock.calls).toEqual([["channel"], [null]])
-    expect(n.openWorkPreview).not.toHaveBeenCalled()
+    expect(n.selectWork.mock.calls).toEqual([[null]])
+    expect(n.openWorkPreview).toHaveBeenCalledExactlyOnceWith("channel", n.trigger, "任务")
     const resource = navigation(false)
     resource.openWork("existing")
     expect(resource.selectWork).toHaveBeenCalledExactlyOnceWith("existing")

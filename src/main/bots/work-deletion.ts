@@ -1,3 +1,4 @@
+import { isLocalBotWork } from "../../shared/bots/work"
 import { BotError } from "../../shared/bots/contracts"
 import type { BotConversationToolSource } from "../../shared/bots/thread-history"
 import { getThreadCore } from "../db"
@@ -18,6 +19,7 @@ export interface BotWorkDeletionIdentity {
   threadId: string
   version: number
   incarnation: ThreadIncarnation | null
+  audienceKey?: string
 }
 
 export interface BotWorkDeletionTarget extends BotWorkDeletionIdentity {
@@ -40,11 +42,12 @@ export function captureBotWorkDeletionTarget(
   host: LocalBotHost,
   botId: string,
   workId: string,
-  expectedVersion: number
+  expectedVersion: number,
+  audienceKey = "desktop"
 ): BotWorkDeletionTarget {
   const saved = host.workDeletionRecord(botId, workId)
   if (saved?.phase === "deleted") {
-    if (saved.version !== expectedVersion)
+    if (saved.version !== expectedVersion || (saved.audienceKey ?? "desktop") !== audienceKey)
       throw new BotError("CONFLICT", "任务版本已变化，请核对原删除结果。")
     return { ...saved, title: "已删除的工作" }
   }
@@ -52,17 +55,17 @@ export function captureBotWorkDeletionTarget(
   if (work.version !== expectedVersion && saved?.version !== expectedVersion)
     throw new BotError("CONFLICT", "任务已变化，请刷新后重新确认。")
   if (
-    work.source ||
-    work.audienceKey !== "desktop" ||
+    !isLocalBotWork(work) || work.audienceKey !== audienceKey ||
     (work.conversation?.state === "detached" && !saved)
   )
-    throw new BotError("CONFLICT", "只能删除本 Bot 仍管理的桌面工作。")
+    throw new BotError("CONFLICT", "只能删除当前会话中仍由此 Bot 管理的任务。")
   const row = getThreadCore(work.threadId)
   const target = saved ?? {
     botId,
     workId,
     threadId: work.threadId,
     version: expectedVersion,
+    audienceKey,
     incarnation: row ? captureThreadIncarnation(row) : null
   }
   if (row) {
@@ -97,7 +100,7 @@ export function removeBotWork(
 ) {
   assertLive()
   // Recheck the exact row shown by the confirmation before establishing the durable fence.
-  const latest = captureBotWorkDeletionTarget(host, target.botId, target.workId, target.version)
+  const latest = captureBotWorkDeletionTarget(host, target.botId, target.workId, target.version, target.audienceKey)
   if (
     latest.threadId !== target.threadId ||
     JSON.stringify(latest.incarnation) !== JSON.stringify(target.incarnation)

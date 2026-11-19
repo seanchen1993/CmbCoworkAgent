@@ -1,0 +1,72 @@
+tests
+Test Files  3 failed | 5 passed (8)
+Tests  34 failed | 277 passed (311)
+Duration  56.37s (transform 7.26s, setup 0ms, collect 17.99s, tests 68.99s, environment 1ms, prepare 912ms)
+
+unit2
+Test Files  3 failed | 7 passed (10)
+Tests  3 failed | 553 passed (556)
+Duration  78.71s (transform 5.58s, setup 0ms, collect 11.18s, tests 120.79s, environment 1ms, prepare 520ms)
+
+fast
+Test Files  1 failed | 3 passed (4)
+Tests  1 failed | 5 passed | 299 skipped (305)
+Duration  2.73s (transform 1.59s, setup 0ms, collect 4.08s, tests 323ms, environment 0ms, prepare 220ms)
+
+wider
+Test Files  1 failed | 8 passed (9)
+Tests  1 failed | 792 passed (793)
+Duration  38.66s (transform 3.66s, setup 0ms, collect 9.04s, tests 66.35s, environment 1ms, prepare 371ms)
+
+scope
+Test Files  1 failed (1)
+Tests  1 failed | 161 skipped (162)
+Duration  3.44s (transform 1.40s, setup 0ms, collect 2.84s, tests 224ms, environment 0ms, prepare 59ms)
+
+scope2
+Test Files  1 passed (1)
+Tests  2 passed | 161 skipped (163)
+Duration  6.35s (transform 2.09s, setup 0ms, collect 4.17s, tests 1.81s, environment 0ms, prepare 55ms)
+
+final
+Test Files  1 failed | 13 passed (14)
+Tests  1 failed | 1107 passed (1108)
+Duration  87.64s (transform 10.61s, setup 0ms, collect 19.23s, tests 171.83s, environment 1ms, prepare 600ms)
+
+regression
+Test Files  15 passed (15)
+Tests  1120 passed (1120)
+Duration  75.56s (transform 4.75s, setup 0ms, collect 10.75s, tests 127.05s, environment 1ms, prepare 527ms)
+
+lastscope
+Test Files  1 failed | 1 passed (2)
+Tests  3 failed | 3 passed | 520 skipped (526)
+Duration  5.20s (transform 1.44s, setup 0ms, collect 3.34s, tests 3.44s, environment 0ms, prepare 134ms)
+
+groupdelete
+Test Files  1 passed (1)
+Tests  4 passed | 52 skipped (56)
+Duration  2.50s (transform 790ms, setup 0ms, collect 1.34s, tests 768ms, environment 0ms, prepare 54ms)
+
+broad
+Test Files  16 passed (16)
+Tests  1140 passed (1140)
+Duration  78.94s (transform 5.14s, setup 0ms, collect 12.34s, tests 133.46s, environment 1ms, prepare 544ms)
+
+Final Electron checks
+PASS: three identically named tasks, each preview reads only its own original thread
+PASS: Bot 设置 / 任务 / 例行任务 / 最近活动 (273px)
+PASS: fifth routine receipt opens its live schedule, restores focus, saves edits and removes exactly that schedule after inline confirmation
+PASS: search and focus, completed tasks, preview and open, create, settings, memory, binding and activity
+PASS: Bot 设置 / 任务 / 例行任务 / 最近活动 (213px)
+PASS: 群聊设置 / 群内任务 / 例行任务 (213px)
+PASS: App group settings and member memories, IM scoped actions and return to private chat
+READY: private chat and both groups are open for manual testing on the isolated profile
+
+Final typecheck (exit 0)
+> cmbdevclaw@1.5.7 typecheck
+> npm run typecheck:node && npm run typecheck:web
+> cmbdevclaw@1.5.7 typecheck:node
+> tsc --noEmit -p tsconfig.node.json --composite false
+> cmbdevclaw@1.5.7 typecheck:web
+> tsc --noEmit -p tsconfig.web.json --composite false

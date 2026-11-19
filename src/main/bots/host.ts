@@ -866,10 +866,10 @@ export class LocalBotHost {
     const assertSource = () => {
       assertLive()
       if (source) {
-        const task = this.ordinaryThreadSource(source.taskId)
-        const bot = this.getBot(task.botId)
-        if (task.botId !== target.botId || task.threadId !== bot.threadId || bot.archived)
-          throw new BotError("CONFLICT", "只能在桌面主对话中删除当前 Bot 的工作。")
+        const task = this.workToolSource(source.taskId)
+        if (!this.store.isWorkManagementTurn(task) || task.botId !== target.botId ||
+            (target.audienceKey ?? "desktop") !== (task.mockSource?.audienceKey ?? "desktop"))
+          throw new BotError("CONFLICT", "请在任务所属的主对话中删除任务。")
       }
     }
     assertSource()
@@ -1223,7 +1223,7 @@ export class LocalBotHost {
     return task
   }
   desktopOperationReceipts(taskId: string, query: BotDesktopOperationQuery) {
-    this.ordinaryThreadSource(taskId)
+    this.workToolSource(taskId)
     return this.store.desktopOperationReceipts(taskId, query)
   }
   async ordinaryThreads(taskId: string, input: BotThreadListInput) {
@@ -1276,12 +1276,19 @@ export class LocalBotHost {
     return this.runtime.conversationTools.deleteThread(botId, input, source, signal, validate)
   }
   async deleteWorkFromTool(source: BotConversationToolSource, input: BotWorkUnlinkInput, signal: AbortSignal) {
-    const { botId, validate } = this.conversationToolAuthority(source, signal)
+    const validate = () => {
+      signal.throwIfAborted()
+      const task = this.workToolSource(source.taskId)
+      if (!this.store.isWorkManagementTurn(task) || !source.callId || !source.key.trim())
+        throw new BotError("CONFLICT", "请从任务所属会话发起删除。")
+      return task.botId
+    }
+    const botId = validate()
     if (!this.runtime.conversationTools?.deleteWork) throw new BotError("CONFLICT", "当前主机不支持删除工作")
     return this.runtime.conversationTools.deleteWork(botId, input, source, signal, validate)
   }
   explicitWorkDeletionRequest(taskId: string, work: BotWorkItem) {
-    this.ordinaryThreadSource(taskId)
+    this.workToolSource(taskId)
     return this.store.explicitWorkDeletionRequest(taskId, work)
   }
   ordinaryThreadInputProjections(threadId: string, ids: readonly string[], row: ThreadIncarnationRow) {
@@ -2060,8 +2067,8 @@ export class LocalBotHost {
     workId: string,
     source: BotConversationToolSource
   ): BotSchedule {
-    this.workToolSource(source.taskId)
-    return this.saveSchedule(botId, input, undefined, undefined, { workId, source })
+    const task = this.workToolSource(source.taskId)
+    return this.saveSchedule(botId, input, undefined, task.mockSource ? task.id : undefined, { workId, source })
   }
 
   async saveSelectedSkillSchedule(source: BotWorkDispatchSource, input: BotScheduleInput, workId?: string,
@@ -2069,7 +2076,6 @@ export class LocalBotHost {
     const task = this.workToolSource(source.taskId)
     const selected = this.skillForDispatch(task, source)
     if (workId && target) throw new BotError("CONFLICT", "定时续办会沿用原任务的目录")
-    if (target && task.mockSource) throw new BotError("CONFLICT", "招乎例行可沿用本群任务目录，或使用默认目录")
     if (target && !this.runtime.workspaces) throw new BotError("CONFLICT", "当前主机不支持指定工作目录")
     const workspace = target ? await this.runtime.workspaces!.resolve(task.botId, target) : undefined
     this.workToolSource(source.taskId)

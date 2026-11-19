@@ -369,7 +369,8 @@ export interface BotScheduleInput {
   enabled: boolean
 }
 export interface BotDesktopWorkScheduleBinding {
-  workId: string
+  imConversationId?: string
+  workId?: string
   operationId: string
 }
 export interface BotScheduleEditInput {
@@ -389,6 +390,8 @@ export interface BotSchedule extends BotScheduleInput {
   workId?: string
   /** This schedule created the work once and reuses it for every execution. */
   dedicatedWork?: true
+  /** A group routine created in the App is bound to its persisted work source. */
+  groupWorkSchedule?: true
   explicitSkill?: import("./skill-selection").BotSkillSelection
   /** New skill routines return formal files through their originating Bot. */
   delivery?: import("./work").BotResultDelivery

@@ -42,6 +42,7 @@ type ObservationEdit = NonNullable<BotScheduleEditInput["workMonitor"]>
 function ObservationFields({
   botId,
   client,
+  groupId,
   original,
   value,
   disabled,
@@ -49,6 +50,7 @@ function ObservationFields({
 }: {
   botId: string
   client: BotClient
+  groupId?: string
   original: BotWorkScheduleMonitor
   value: ObservationEdit
   disabled: boolean
@@ -56,12 +58,12 @@ function ObservationFields({
 }) {
   const [choosing, setChoosing] = useState(false)
   const [title, setTitle] = useState(original.lastSuccessful?.title ?? "当前任务")
-  const directory = useBotWorks(client, choosing ? botId : undefined, null, 0)
+  const directory = useBotWorks(client, choosing ? botId : undefined, null, 0, groupId)
   const tasks = [
     ...new Map([...directory.priority, ...directory.items].map((work) => [work.id, work])).values()
   ].filter(
     (work) =>
-      !work.source &&
+      (groupId ? work.source?.transport === "im" && work.source.bindingId === groupId : !work.source || work.source.personal === true) &&
       !work.deletionPending &&
       !work.deletionCommitted &&
       (!work.conversation || work.conversation.state === "bound")
@@ -166,6 +168,7 @@ export function BotScheduleEditor({
   target,
   botId,
   client,
+  groupId,
   work,
   readOnly = false,
   onClose
@@ -173,6 +176,7 @@ export function BotScheduleEditor({
   target: BotScheduleEditorTarget
   botId: string
   client: BotClient
+  groupId?: string
   work?: { id: string; title: string }
   readOnly?: boolean
   onClose(): void
@@ -248,12 +252,13 @@ export function BotScheduleEditor({
       if (!Number.isFinite(expires.getTime())) throw new Error("请选择有效的失效时间")
       return client.saveSchedule(botId, input, { ...existing, expiresAt: expires.toISOString() })
     }
-    if (!work) return client.saveSchedule(botId, input, undefined)
-    const fingerprint = JSON.stringify([work.id, input])
+    if (!work && !groupId) return client.saveSchedule(botId, input, undefined)
+    const fingerprint = JSON.stringify([groupId, work?.id, input])
     if (creation.current?.fingerprint !== fingerprint)
       creation.current = { fingerprint, operationId: crypto.randomUUID() }
     return client.saveSchedule(botId, input, undefined, {
-      workId: work.id,
+      ...(work ? { workId: work.id } : {}),
+      ...(groupId ? { imConversationId: groupId } : {}),
       operationId: creation.current.operationId
     })
   }
@@ -355,6 +360,7 @@ export function BotScheduleEditor({
                 <ObservationFields
                   botId={botId}
                   client={client}
+                  groupId={groupId}
                   original={editing.workMonitor}
                   value={observation}
                   disabled={busy}

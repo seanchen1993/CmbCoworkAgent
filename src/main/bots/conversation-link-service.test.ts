@@ -388,7 +388,7 @@ describe("trusted local conversation handshake", () => {
     } finally { listenBotConversationTransitions(window, false) }
   })
 
-  it("directly deletes a uniquely named native task without asking again or stopping its caller", async () => {
+  it.each(["desktop", "dm", "group", "group-confirm"] as const)("deletes the original native task through %s without stopping its caller", async surface => {
     const x = fixture(true), requests: BotConversationTransitionRequest[] = []
     const window = Object.assign(new EventEmitter(), { id: 66, mainFrame: {}, isDestroyed: () => false,
       send: (channel: string, request: BotConversationTransitionRequest) => { if (channel === "bots:conversation:transition") requests.push(request) }
@@ -398,13 +398,45 @@ describe("trusted local conversation handshake", () => {
     const service = vi.fn()
     setBotConversationDeletionService(service)
     try {
-      const task = x.host.send({ botId: x.bot.id, requestId: "delete work", message: "帮我把「Pending work」这个任务删掉吧。" })
+      const message = surface === "group-confirm" ? "删除刚才那项任务" : "帮我把「Pending work」这个任务删掉吧。"
+      let groupId: string | undefined
+      const task = (() => {
+        if (surface === "desktop") return x.host.send({ botId: x.bot.id, requestId: "delete work", message })
+        const kind = surface === "dm" ? "dm" : "group"
+        const now = new Date().toISOString(), expiresAt = new Date(Date.now() + 60_000).toISOString()
+        const route = x.host.registerImBinding("realm", "owner", { id: "channel", botId: x.bot.id, kind, label: kind,
+          version: 1, state: "active", conversationKey: "channel", createdAt: now, expiresAt })
+        x.host.imChannel.importImBinding({ id: route.id, botId: x.bot.id, kind, label: kind, channelKey: "channel", version: 1 })
+        x.host.setImOnline(x.bot.id, route.id, true)
+        const ingress = x.host.imGateway.receive("realm", "owner", {
+          route: { bindingId: "channel", botId: x.bot.id, kind, label: kind, version: 1, senderId: "owner" },
+          event: { schemaVersion: 1, eventId: "delete", platformMessageId: "delete-message", principalId: "owner",
+            conversationKey: "channel", conversationSeq: 1, message: { type: "text", text: message }, occurredAt: now,
+            redelivered: false, lease: { id: "lease", expiresAt } }
+        })
+        x.host.imGateway.settle(ingress.id, "active", undefined, Date.parse(expiresAt))
+        const admitted = x.host.acceptImEvent({ bindingId: route.id, eventId: ingress.id, messageId: "delete-message",
+          senderId: "owner", text: message, mentionsBotIds: [x.bot.id] })
+        x.host.imGateway.settle(ingress.id, "active", admitted.taskId!)
+        if (kind === "group") groupId = route.id
+        return x.store.getTask(admitted.taskId!)
+      })()
       await vi.waitFor(() => expect(x.host.workToolSource(task.id).id).toBe(task.id))
       x.host.recordPreparedInput(task.id, task.id, task.message)
-      const created = await x.host.createWork({ botId: x.bot.id, operationId: "delete-pending", title: "Pending work", goal: "Pending" })
+      const created = await x.host.createWork({ botId: x.bot.id, imConversationId: groupId, operationId: "delete-pending", title: "Pending work", goal: "Pending" })
       const input = { workId: created.work.id, expectedVersion: created.work.version }
       const source = { taskId: task.id, callId: "work-delete-call", key: "work-delete-key" }
       const result = x.host.deleteWorkFromTool(source, input, new AbortController().signal)
+      if (surface === "group-confirm") {
+        await vi.waitFor(() => expect(getPendingUserInputForThread(task.threadId)).toBeTruthy())
+        const request = getPendingUserInputForThread(task.threadId)!
+        const question = request.questions[0], optionIndex = question.options.findIndex(option => option.label === "删除任务")
+        expect(request.kind).not.toBe("bot_conversation_action")
+        expect(requests).toHaveLength(0)
+        expect(submitUserInputResponse({ requestId: request.requestId, answers: {
+          [question.id]: { type: "option", questionId: question.id, optionIndex, ...question.options[optionIndex] }
+        } })).toBe(true)
+      }
       await vi.waitFor(() => expect(requests).toHaveLength(1))
       expect(getPendingUserInputForThread(x.bot.threadId)).toBeNull()
       expect(x.host.workDeletionRecord(x.bot.id, created.work.id)).toBeUndefined()

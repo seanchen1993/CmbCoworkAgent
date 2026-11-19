@@ -292,10 +292,17 @@ export class BotMockChannelStore {
     if (this.db.getRowsModified()) this.changed()
   }
   /** Only BotStore's admitted local-user command (or its tool-created child) grants this. */
+  private isAppGroupScheduleOccurrence(task: BotTask): boolean {
+    if (task.origin.kind !== "schedule" || !task.workId || !task.mockSource || task.origin.sourceTaskId) return false
+    return !!this.rows(`SELECT 1 FROM bot_schedules WHERE id=? AND bot_id=?
+      AND json_extract(payload,'$.groupWorkSchedule')=1 AND json_extract(payload,'$.workId')=?
+      AND json_extract(payload,'$.audienceKey')=?`, [task.origin.scheduleId, task.botId, task.workId, task.mockSource.audienceKey]).length
+  }
   authorizeLocalContinuation(task: BotTask): void {
     if (this.transport !== "im" || task.mockSource?.transport !== "im") return
     if (
       task.origin.kind === "user" ||
+      this.isAppGroupScheduleOccurrence(task) ||
       (task.origin.kind === "work" &&
         this.rows("SELECT 1 FROM bot_im_local_execution WHERE task_id=?", [
           task.origin.sourceTaskId
@@ -499,7 +506,8 @@ export class BotMockChannelStore {
         task.threadId !== work.threadId ||
         (task.origin.kind !== "user" &&
           task.origin.kind !== "mock" &&
-          task.origin.kind !== "work") ||
+          task.origin.kind !== "work" && !(task.origin.kind === "schedule" && !task.origin.sourceTaskId &&
+            this.rows("SELECT 1 FROM bot_im_local_execution WHERE task_id=?", [task.id]).length)) ||
         work.audienceKey !== source.audienceKey ||
         (source.personal
           ? Boolean(work.source)

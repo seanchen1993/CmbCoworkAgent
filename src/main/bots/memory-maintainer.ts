@@ -1,6 +1,7 @@
 import { SingleFlightBatchCoalescer } from "../agent/run-settlement-fence"
 
 export interface BotMemoryBatch {
+  groupId?: string
   botId: string
   /** Prevent a delayed summary from crossing a Bot settings change. */
   botVersion?: number
@@ -16,7 +17,7 @@ const MAX_CONVERSATION = 12_000
 const compact = (text: string): string =>
   text.length <= MAX_CONVERSATION ? text : `${text.slice(0, 4000)}\n[…]\n${text.slice(-7900)}`
 
-/** One model request globally, one bounded pending batch per Bot. No polling or retained turn history. */
+/** One model request globally, one bounded pending batch per Bot and memory scope. No polling or retained turn history. */
 export class BotMemoryMaintainer {
   private readonly abort = new AbortController()
   private running: Promise<void> = Promise.resolve()
@@ -40,7 +41,7 @@ export class BotMemoryMaintainer {
       "memory",
       new Map([
         [
-          batch.botId,
+          JSON.stringify([batch.botId, batch.groupId]),
           { ...batch, conversation: compact(batch.conversation), userText: compact(batch.userText) }
         ]
       ]),

@@ -97,14 +97,14 @@ export function verifyWorkDeletionThread(
 ): void {
   const link = work.conversation
   if (
-    work.source ||
-    work.audienceKey !== "desktop" ||
+    !isLocalBotWork(work) ||
     (link &&
       (link.ref.kind !== "local_thread" ||
         link.ref.threadId !== work.threadId ||
         !matchesThreadIncarnation(row, link.ref.incarnation)))
   )
     throw new BotError("CONFLICT", "待删除工作与原会话身份不一致。")
+  if (work.source) verifyWorkThreadMetadata(work, metadata)
   if (metadata.botLocalConversation === true) {
     verifyWorkConversationThread(work, row, metadata)
     return
@@ -116,8 +116,8 @@ export function verifyWorkDeletionThread(
     metadata.botId === work.botId &&
     metadata.botWorkId === work.id &&
     metadata.botHostId === "local" &&
-    metadata.botAudienceKey === "desktop" &&
-    metadata.botMockBindingId == null &&
+    metadata.botAudienceKey === work.audienceKey &&
+    (metadata.botMockBindingId ?? null) === (work.source?.bindingId ?? null) &&
     metadata.botGroupId == null &&
     metadata.botWorkOrigin == null &&
     typeof metadata.workspacePath === "string" &&

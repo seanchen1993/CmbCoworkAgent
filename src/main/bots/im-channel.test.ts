@@ -296,6 +296,72 @@ describe("authenticated IM on the existing Bot host", () => {
     expect(messages.join(" ")).not.toContain("private")
   })
 
+  it("keeps same-name task deletion and routine observations within the private chat or the originating group", async () => {
+    const f = fixture(undefined, undefined, () => false)
+    const routes = [await f.binding("dm"), await f.binding(), await f.binding()]
+    const title = "同名周报"
+    const surfaces: Array<{ work: ReturnType<BotStore["getWork"]>; parent: BotTask }> = []
+    for (const route of routes) {
+      const groupId = botImScopeId("realm", "owner", route.id)
+      const { work } = f.store.createWork({ botId: f.bot.id, operationId: "new-" + groupId, title,
+        goal: "Prepare weekly report", ...(route.kind === "group" ? { imConversationId: groupId } : {}) })
+      const message = "删除任务「同名周报」"
+      await f.service.receive(f.event(route, "delete-" + groupId, message))
+      const parent = f.store.recentTasks().find(task => task.origin.kind === "mock" && task.mockSource?.bindingId === groupId)!
+      f.store.transition(parent.id, "running")
+      f.store.recordPreparedInput(parent.id, message)
+      surfaces.push({ work, parent: f.store.getTask(parent.id) })
+    }
+    for (const { work, parent } of surfaces) {
+      expect(createBotWorkTools(parent, () => f.host, new AbortController().signal).some(tool => tool.name === "bot_work_delete")).toBe(true)
+      expect(f.store.listWorks(f.bot.id, undefined, title, work.audienceKey).items.map(item => item.id)).toEqual([work.id])
+      expect(f.store.explicitWorkDeletionRequest(parent.id, work)).toBe(parent.id)
+      const save = (target: string) => f.store.saveSchedule(f.bot.id, { name: title, frequency: "once", enabled: true,
+        runAt: "2099-01-01T10:00:00Z", message: "查看周报状态" }, "2099-01-01T10:00:00Z", undefined, parent.id,
+        undefined, { input: { workId: target, mode: "report" }, source: { taskId: parent.id, callId: "watch-" + target, key: "watch-" + target } })
+      for (const { work: foreign } of surfaces.filter(item => item.work.id !== work.id)) {
+        expect(f.store.explicitWorkDeletionRequest(parent.id, foreign)).toBeUndefined()
+        expect(() => save(foreign.id)).toThrow()
+        expect(() => f.store.beginWorkDeletion({ botId: f.bot.id, workId: foreign.id, threadId: foreign.threadId,
+          audienceKey: foreign.audienceKey, version: foreign.version, incarnation: null },
+          { taskId: parent.id, callId: "wrong-" + foreign.id, key: "wrong-" + foreign.id })).toThrow()
+        expect(f.store.workDeletionRecord(f.bot.id, foreign.id)).toBeUndefined()
+      }
+      const monitor = save(work.id)
+      expect(monitor.audienceKey).toBe(work.audienceKey)
+      f.store.fireSchedule(monitor, null, true)
+      expect(f.store.pendingScheduledWorkPublications().filter(item => item.observedWorkId === work.id)
+        .map(item => item.threadId)).toEqual([parent.threadId])
+    }
+    const { parent, work } = surfaces[1]
+    const stopping = f.store.beginWorkDeletion({ botId: f.bot.id, workId: work.id, threadId: work.threadId,
+      audienceKey: work.audienceKey, version: work.version, incarnation: null },
+      { taskId: parent.id, callId: "delete", key: "delete" })
+    f.store.advanceWorkDeletion(f.store.advanceWorkDeletion(stopping, "ready"), "deleted")
+    for (const { work: candidate } of surfaces)
+      expect(f.store.listWorks(f.bot.id, undefined, title, candidate.audienceKey).items.map(item => item.id))
+        .toEqual(candidate.id === work.id ? [] : [candidate.id])
+  })
+
+  it("fires a routine created in the App group panel on its own task and returns the result only to that group", async () => {
+    const f = fixture(async task => ({ state: "completed", result: task.origin.kind === "schedule" ? "已生成本群周报" : "例行结果已整理" }))
+    const route = await f.binding(), other = await f.binding()
+    const groupId = botImScopeId("realm", "owner", route.id)
+    const routine = f.store.saveSchedule(f.bot.id, { name: "同名周报", message: "整理周报", enabled: true,
+      frequency: "once", runAt: "2099-01-01T10:00:00Z" }, "2099-01-01T10:00:00Z", undefined, undefined,
+      { imConversationId: groupId, operationId: "app-group-routine" })
+    f.store.fireSchedule(routine, null)
+    f.host.resume()
+    await eventually(() => f.calls.some(task => task.origin.kind === "schedule" && f.store.getTask(task.id).state === "completed"))
+    const execution = f.calls.find(task => task.origin.kind === "schedule")!
+    expect(execution.workId).toBe(routine.workId)
+    expect(execution.mockSource?.bindingId).toBe(groupId)
+    await eventually(() => f.client.submitReply.mock.calls.some(([reply]) => reply.conversationKey === route.conversationKey))
+    expect(f.client.submitReply.mock.calls.every(([reply]) => reply.conversationKey === route.conversationKey)).toBe(true)
+    expect(f.service.history(f.bot.id, other.id).items).toEqual([])
+    expect(f.errors).toEqual([])
+  })
+
   it("creates desktop work in an empty bound group, executes once and returns results only there", async () => {
     const resolve = vi.fn(async () => ({ kind: "directory" as const, path: "/projects/report" }))
     const f = fixture(undefined, undefined, () => true, { resolve, projects: async () => ({ items: [], nextCursor: null }) })
@@ -2327,7 +2393,7 @@ describe("authenticated IM on the existing Bot host", () => {
         } else if (origin.kind === "user" && task.message === "observe") {
           const watch = () => f.store.saveSchedule(task.botId, scheduleInput, "2030-01-01T00:10:00Z", undefined, undefined, undefined,
             { input: { workId, mode: "new_result" }, source })
-          if (group) expect(watch).toThrow("原任务不属于当前桌面 Bot")
+          if (group) expect(watch).toThrow("原任务不属于当前会话")
           else watch()
         }
         return { state: "completed", result: "Handled" }

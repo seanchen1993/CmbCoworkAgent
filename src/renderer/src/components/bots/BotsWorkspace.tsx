@@ -757,6 +757,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
     botId: string
     workId: string
     title: string
+    audience: string
   } | null>(null)
   const workPreviewReturn = useRef<BotWorkPreviewReturn | null>(null)
   // Keep an identity even with no open preview so dismissing a newer preview invalidates older navigation.
@@ -786,10 +787,10 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
     })
     return () => { unsubscribe(); workPreviewNavigation.current = { preview: null } }
   }, [])
-  const canPreviewWork = client.hostId === "local" && !selectedIm && !selectedGroup &&
+  const canPreviewWork = client.hostId === "local" && !selectedGroup &&
     !newChat && !activeWorkId
   const preview = canPreviewWork && workPreview?.hostId === client.hostId &&
-    workPreview.botId === selected?.id ? workPreview : null
+    workPreview.audience === (selectedIm?.id ?? "desktop") && workPreview.botId === selected?.id ? workPreview : null
   const personalDetailOpen = detailOpen
   useEffect(() => {
     if (workPreview && !preview) dismissWorkPreview()
@@ -803,7 +804,8 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
   )
   const loadedWork = activeWorkId && works.selected?.id === activeWorkId ? works.selected : null
   const workDeletionPending = isWorkDeletionPending(loadedWork)
-  const previewWork = preview && works.selected?.id === preview.workId ? works.selected : null
+  const previewWork = preview && works.selected?.id === preview.workId &&
+    works.selected.audienceKey === (selectedIm ? `im:${selectedIm.id}` : "desktop") ? works.selected : null
   const selectedWork =
     loadedWork &&
     !loadedWork.deletionCommitted &&
@@ -915,18 +917,17 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
     const previous = workPreviewReturn.current
     // Switching between previews keeps the position of the original details.
     const container = !previous && detailOpen
-      ? profileMenuTrigger.current?.closest<HTMLElement>(".bot-details-content")
+      ? (trigger ?? profileMenuTrigger.current)?.closest<HTMLElement>(".bot-details-content")
       : null
     workPreviewReturn.current = {
       trigger,
       scroll: previous?.scroll ?? (container ? { container, top: container.scrollTop } : undefined)
     }
-    setWorkPreview({ hostId: client.hostId, botId: currentBotId, workId, title })
-  }, [canPreviewWork, client.hostId, currentBotId, detailOpen])
+    setWorkPreview({ hostId: client.hostId, botId: currentBotId, workId, title, audience: currentImId ?? "desktop" })
+  }, [canPreviewWork, client.hostId, currentBotId, currentImId, detailOpen])
   const openWork = useCallback((workId: string | null) => {
     if (!workId || !canPreviewWork) { selectWork(workId); return }
     const work = [...works.priority, ...works.items].find(item => item.id === workId)
-    if (work?.source) { selectWork(workId); return }
     openWorkPreview(workId, detailTriggerRef.current, work?.title ?? "任务")
   }, [canPreviewWork, selectWork, openWorkPreview, works.items, works.priority])
   const closeWorkPreview = () => {
@@ -938,6 +939,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
   }
   const openPreviewConversation = async () => {
     if (!preview || !previewWork || workPreviewNavigation.current.preview === preview) return
+    if (selectedIm) { selectWork(previewWork.id); return }
     const intent = { preview }
     workPreviewNavigation.current = intent
     const isCurrent = () => workPreviewNavigation.current === intent &&
@@ -954,12 +956,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
       if (workPreviewNavigation.current === intent) workPreviewNavigation.current = { preview: null }
     }
   }
-  // Channel cards retain their existing entry point when the Host resolves their source.
-  useEffect(() => {
-    if (previewWork && (previewWork.source || previewWork.audienceKey !== "desktop")) {
-      selectWork(previewWork.id)
-    }
-  }, [previewWork, selectWork])
+
   const togglePersonalDetail = () => {
     dismissWorkPreview()
     setDetailOpen(!personalDetailOpen)
@@ -2360,7 +2357,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                 setImBot(selected)
               }}
               onMain={() => openPrivateMain(selected.id)}
-              onWork={(id) => openImWork(selected.id, id)}
+              onWork={openWork}
             />
           ) : selectedGroup ? (
             <BotGroupConversation
@@ -2507,6 +2504,27 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
             </div>
           )}
         </main>
+            {preview && selected && (
+                <BotWorkPreview
+                  key={JSON.stringify([preview.hostId, preview.botId, preview.audience, preview.workId])}
+                  title={preview.title}
+                  work={previewWork?.deletionCommitted ? null : previewWork}
+                  activeTask={previewWork ? tasksByThread.get(previewWork.threadId)?.findLast((task) =>
+                    !task.injectedInto && (task.state === "running" || task.state === "waiting_user")) : undefined}
+                  directoryError={previewWork?.deletionCommitted ? "任务已删除。" : works.error}
+                  backLabel={detailOpen && detailTab === "details" ? "返回任务列表" : "关闭任务预览"}
+                  onBack={closeWorkPreview}
+                  onOpen={() => void openPreviewConversation()}
+                  onOpenMain={selectedIm ? closeWorkPreview : previewWork?.parentThreadId === selected.threadId ? () => {
+                    dismissWorkPreview()
+                    if (previewWork.resultPublicationId) useChatSourceNavigation.getState().request({
+                      threadId: selected.threadId, messageId: previewWork.resultPublicationId, ordinal: 0
+                    })
+                    openBotMain(selected.id)
+                  } : undefined}
+                  onRetry={() => { void works.refresh() }}
+                />
+            )}
         {!newChat && selectedIm && selected && (
           <>
             {detailOpen && (
@@ -2533,6 +2551,8 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                 onMain={() => openPrivateMain(selected.id)}
                 onWork={(id) => openImWork(selected.id, id)}
                 controller={works}
+                captureWorkNavigation={captureWorkNavigation}
+                onPreview={canPreviewWork ? (work, trigger) => openWorkPreview(work.id, trigger, work.title) : undefined}
                 selectedWork={selectedWork}
                 workOpen={Boolean(activeWorkId)}
                 onBack={() => selectWork(null)}
@@ -2603,27 +2623,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                 onChange={(detailWidth) => updateView({ detailWidth })}
               />
             )}
-            {preview && (
-                <BotWorkPreview
-                  key={JSON.stringify([preview.hostId, preview.botId, preview.workId])}
-                  title={preview.title}
-                  work={previewWork?.deletionCommitted ? null : previewWork}
-                  activeTask={previewWork ? tasksByThread.get(previewWork.threadId)?.findLast((task) =>
-                    !task.injectedInto && (task.state === "running" || task.state === "waiting_user")) : undefined}
-                  directoryError={previewWork?.deletionCommitted ? "任务已删除。" : works.error}
-                  backLabel={detailOpen && detailTab === "details" ? "返回任务列表" : "关闭任务预览"}
-                  onBack={closeWorkPreview}
-                  onOpen={() => void openPreviewConversation()}
-                  onOpenMain={previewWork?.parentThreadId === selected.threadId ? () => {
-                    dismissWorkPreview()
-                    if (previewWork.resultPublicationId) useChatSourceNavigation.getState().request({
-                      threadId: selected.threadId, messageId: previewWork.resultPublicationId, ordinal: 0
-                    })
-                    openBotMain(selected.id)
-                  } : undefined}
-                  onRetry={() => { void works.refresh() }}
-                />
-            )}
+
             <BotDetailsPane open={personalDetailOpen} label="Bot 详情" conversationId={activeWorkId ?? selected.id}>
               <div>
               <div className="bot-detail-actions">
@@ -2814,10 +2814,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                         selected={selectedWork}
                         onSelect={selectWork}
                         captureWorkNavigation={captureWorkNavigation}
-                        onPreview={canPreviewWork ? (work, trigger) => {
-                          if (work.source) selectWork(work.id)
-                          else openWorkPreview(work.id, trigger, work.title)
-                        } : undefined}
+                        onPreview={canPreviewWork ? (work, trigger) => openWorkPreview(work.id, trigger, work.title) : undefined}
                         disabled={Boolean(selected.archived || selected.deleting)}
                       />
                       <BotSchedulePanel

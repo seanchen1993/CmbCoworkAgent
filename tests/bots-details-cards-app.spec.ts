@@ -53,7 +53,20 @@ function seed(database: string) {
       imConversationId: route.id, title: "核对群内演示时间", goal: "确认演示排期。" })
     store.transition(groupTask.id, "running")
     store.transition(groupTask.id, "completed")
-    return { bot, work: works[0], finished, group, imTitle, groupWork }
+    const routeB = store.imGateway.register("test", "owner", {
+      ...route.binding, id: "group-binding-b", label: "资料协作群", peerLabel: "资料协作群", conversationKey: "group-b"
+    })
+    store.im.importImBinding({ id: routeB.id, botId: bot.id, kind: "group", label: "资料协作群",
+      channelKey: botImScopeId("test", "owner", "group-b"), version: 1 })
+    const sameName = [undefined, route.id, routeB.id].map((imConversationId, index) => {
+      const marker = ["个人核对结论", "设计组核对结论", "资料组核对结论"][index]
+      const { work, task } = store.createWork({ botId: bot.id, operationId: "isolation-" + index,
+        title: "同名周报", goal: marker, imConversationId })
+      store.transition(task.id, "running")
+      store.transition(task.id, "completed")
+      return { id: work.id, threadId: work.threadId, marker }
+    })
+    return { bot, work: works[0], finished, group, imTitle, groupWork, sameName }
   } finally {
     db.close()
   }
@@ -126,7 +139,7 @@ async function main() {
   try {
     await mkdir(join(profile, "bots"), { recursive: true })
     await mkdir(artifacts, { recursive: true })
-    const { bot, work, finished, group, imTitle, groupWork } = seed(join(profile, "bots", "control.sqlite"))
+    const { bot, work, finished, group, imTitle, groupWork, sameName } = seed(join(profile, "bots", "control.sqlite"))
     const env = Object.fromEntries(["PATH", "HOME", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT"]
       .filter(key => process.env[key]).map(key => [key, process.env[key]!]))
     app = await _electron.launch({
@@ -141,6 +154,14 @@ async function main() {
     page.setDefaultTimeout(12_000)
     await page.setViewportSize({ width: 1280, height: 800 })
     await page.getByText("新任务", { exact: true }).first().waitFor()
+    await page.evaluate(async ({ id, works }) => {
+      for (const work of works) {
+        await window.api.bots.open(id, work.id)
+        await window.api.threads.appendMessages(work.threadId, [{
+          id: "answer-" + work.id, role: "assistant", content: work.marker + "已完成", created_at: new Date()
+        }])
+      }
+    }, { id: bot.id, works: sameName })
     const fifthRoutine = await page.evaluate(async ({ id, threadId }) => {
       const api = window.api
       await api.bots.open(id)
@@ -163,6 +184,33 @@ async function main() {
     const pane = page.getByRole("complementary", { name: "Bot 详情" })
     const tasks = pane.getByRole("region", { name: "任务", exact: true })
     const settings = pane.getByRole("region", { name: "Bot 设置" })
+    for (const [index, current] of sameName.entries()) {
+      if (index) await sidebar.getByRole("button", { name: "招乎群聊：" + (index === 1 ? imTitle : "资料协作群") }).click()
+      const targetPane = index ? page.getByRole("complementary", { name: "招乎群详情" }) : pane
+      const row = targetPane.locator('[data-work-id="' + current.id + '"]')
+      await row.hover()
+      assert.equal(await targetPane.getByText("同名周报", { exact: true }).count(), 1)
+      await targetPane.getByRole("button", { name: "预览任务：同名周报" }).click()
+      const preview = page.getByRole("region", { name: "任务预览" })
+      await preview.getByText(current.marker + "已完成", { exact: true }).waitFor()
+      for (const foreign of sameName.filter(w => w !== current)) {
+        assert.equal(await targetPane.locator('[data-work-id="' + foreign.id + '"]').count(), 0)
+        assert.ok(!(await preview.innerText()).includes(foreign.marker))
+      }
+      await preview.screenshot({ path: join(artifacts, "scope-preview-" + index + ".png") })
+      if (index === 1) {
+        await preview.getByRole("button", { name: "打开聊天", exact: true }).click()
+        const back = page.getByRole("button", { name: "返回群聊「" + imTitle + "」" })
+        await back.waitFor()
+        await page.locator("main").getByText(current.marker + "已完成", { exact: true }).first().waitFor()
+        await back.click()
+        await targetPane.getByRole("button", { name: "前往私人主对话" }).waitFor()
+      } else {
+        await preview.getByRole("button", { name: /返回任务列表|关闭任务预览/ }).click()
+      }
+    }
+    await sidebar.getByText(bot.name, { exact: true }).first().click()
+    console.log("PASS: three identically named tasks, each preview reads only its own original thread")
     const search = tasks.getByRole("button", { name: "搜索任务" })
     const taskRow = tasks.locator('[data-work-id="' + work.id + '"]')
     await taskRow.waitFor()
@@ -380,7 +428,7 @@ async function main() {
     await groupTasks.getByText(groupWork.title, { exact: true }).waitFor()
     assert.equal(await groupTasks.getByText(work.title, { exact: true }).count(), 0)
     await checkCards(im, ["群聊设置", "群内任务", "例行任务"], join(artifacts, "bot-details-im-group.png"))
-    await im.getByText("在招乎群里 @Bot，告诉它要定期做什么。", { exact: true }).waitFor()
+    await im.getByText("在群里安排一项定期工作，或点击 + 创建。", { exact: true }).waitFor()
     await im.getByRole("button", { name: "添加任务" }).click()
     await im.getByPlaceholder("留空使用本群默认目录").waitFor()
     const groupWorkName = im.getByRole("textbox", { name: "任务名称" })
@@ -395,7 +443,15 @@ async function main() {
     await taskHeader.screenshot({ path: join(artifacts, "group-work-header.png"), animations: "disabled" })
     await groupReturn.click()
     await im.getByRole("button", { name: "前往私人主对话" }).waitFor()
-    assert.equal(await im.getByRole("button", { name: "创建例行任务" }).count(), 0)
+    await im.getByRole("button", { name: "创建例行任务" }).click()
+    const groupRoutine = page.getByRole("dialog", { name: "创建例行任务" })
+    await groupRoutine.getByRole("textbox", { name: "名称", exact: true }).fill("本群周报日程")
+    await groupRoutine.getByRole("textbox", { name: "工作内容" }).fill("整理本群周报")
+    await groupRoutine.getByRole("button", { name: /保存|创建/ }).last().click()
+    await im.getByText("本群周报日程", { exact: true }).waitFor()
+    const createdRoutine = await page.evaluate(async () => (await window.api.bots.snapshot()).schedules.find(s => s.name === "本群周报日程"))
+    assert.equal(createdRoutine?.audienceKey, groupWork.audienceKey)
+    assert.ok(createdRoutine?.workId)
     await im.getByRole("button", { name: "管理记忆", exact: true }).click()
     await im.getByRole("button", { name: "返回详情" }).click()
     await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "管理记忆")
@@ -407,6 +463,11 @@ async function main() {
     await im.getByRole("button", { name: "前往私人主对话" }).click()
     await settings.getByRole("button", { name: "职责与设置" }).waitFor()
     console.log("PASS: App group settings and member memories, IM scoped actions and return to private chat")
+    if (process.argv.includes("--keep-open")) {
+      await page.bringToFront()
+      console.log("READY: private chat and both groups are open for manual testing on the isolated profile")
+      await app.waitForEvent("close", { timeout: 0 })
+    }
   } finally {
     await app?.close()
     await rm(dir, { recursive: true, force: true })

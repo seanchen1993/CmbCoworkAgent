@@ -13,7 +13,9 @@ export function matchesBoundBotWorkThreadSummary(thread: Thread, work: BotWorkIt
     new Date(thread.created_at).getTime() === link.ref.incarnation.legacyCreatedAt &&
     metadata?.botLocalConversation === true && metadata.botHostId === "local" &&
     metadata.botId === work.botId && metadata.botWorkId === work.id &&
-    metadata.botAudienceKey === "desktop" && metadata.botWorkOrigin === link.origin
+    metadata.botAudienceKey === work.audienceKey && (metadata.botMockBindingId ?? null) === (work.source?.bindingId ?? null) &&
+    (!work.source || (metadata.botMockConversationId === work.source.conversationId && metadata.botMockGrantVersion === work.source.grantVersion)) &&
+    metadata.botWorkOrigin === link.origin
 }
 
 /** A work can open from the Bot task list without being in the first sidebar page. */

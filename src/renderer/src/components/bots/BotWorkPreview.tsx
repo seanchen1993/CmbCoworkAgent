@@ -20,7 +20,7 @@ import { parseBotMessageReply, projectBotReplyInput } from "../../../../shared/b
 import { BOT_ROUTINE_SILENT, isBotRoutineSilent } from "../../../../shared/bots/routine-silence"
 import { botContinuationTaskId } from "../../../../shared/bots/task-continuation"
 import type { BotMessageOrigin, BotTask } from "../../../../shared/bots/contracts"
-import type { BotWorkItem } from "../../../../shared/bots/work"
+import { isLocalBotWork, type BotWorkItem } from "../../../../shared/bots/work"
 import { isVisibleTranscriptMessage, mergeCheckpointAuthorityTranscriptMessages } from "../../../../shared/checkpoint-transcript"
 import { projectVisibleChatSearchContent } from "../../../../shared/chat-search-visible-content"
 import { projectCoordinatorTranscriptNoise } from "../../../../shared/internal-notification-turn"
@@ -258,7 +258,11 @@ function useBotWorkPreviewActivity(threadId: string | null, task: ActivePreviewT
 function matchesPreviewThread(thread: Thread | null, work: BotWorkItem): boolean {
   if (!thread || thread.thread_id !== work.threadId) return false
   const metadata = thread.metadata
-  if (!metadata || metadata.botGroupId != null || metadata.botMockBindingId != null) return false
+  if (!metadata || metadata.botGroupId != null) return false
+  if ((metadata.botMockBindingId ?? null) !== (work.source?.bindingId ?? null)) return false
+  if (work.source && (metadata.botMockConversationId !== work.source.conversationId ||
+      metadata.botMockGrantVersion !== work.source.grantVersion || metadata.botAudienceKey !== work.audienceKey ||
+      (metadata.botMockTransport != null && metadata.botMockTransport !== "im"))) return false
   const link = work.conversation
   if (link) {
     return link.ref.kind === "local_thread" && matchesBotThreadDraftRef(thread, link.ref) &&
@@ -266,7 +270,7 @@ function matchesPreviewThread(thread: Thread | null, work: BotWorkItem): boolean
   }
   return metadata.botId === work.botId && metadata.botWorkId === work.id &&
     metadata.botHostId === "local" &&
-    (metadata.botAudienceKey == null || metadata.botAudienceKey === "desktop")
+    (metadata.botAudienceKey ?? "desktop") === work.audienceKey
 }
 
 type History = {
@@ -306,10 +310,10 @@ export function BotWorkPreview({
   const [retry, setRetry] = useState(0)
   const link = work?.conversation
   const deletionPending = isWorkDeletionPending(work)
-  const canRead = Boolean(work?.threadInitialized && !work.source && work.audienceKey === "desktop" &&
+  const canRead = Boolean(work?.threadInitialized && isLocalBotWork(work) &&
     !deletionPending && !work.deletionCommitted && (!link || link.state === "bound"))
   const owner = canRead && work
-    ? JSON.stringify([work.botId, work.id, work.threadId, link?.ref])
+    ? JSON.stringify([work.botId, work.id, work.threadId, work.audienceKey, work.source?.grantVersion, link?.ref])
     : null
   const visibleHistory = history?.owner === owner ? history : null
   const task = activeTask && activeTask.threadId === work?.threadId &&

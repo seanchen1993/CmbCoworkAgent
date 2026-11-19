@@ -546,6 +546,8 @@ export function BotImConversationDetails({
   onManage,
   onMain,
   onWork,
+  onPreview,
+  captureWorkNavigation,
   controller,
   selectedWork,
   workOpen,
@@ -561,6 +563,8 @@ export function BotImConversationDetails({
   onManage(): void
   onMain(): void
   onWork(id: string): void
+  onPreview?: React.ComponentProps<typeof BotWorkPanel>["onPreview"]
+  captureWorkNavigation?: React.ComponentProps<typeof BotWorkPanel>["captureWorkNavigation"]
   controller: ReturnType<typeof useBotWorks>
   selectedWork: BotWorkItem | null
   workOpen: boolean
@@ -614,6 +618,8 @@ export function BotImConversationDetails({
                 client={client}
                 botId={bot.id}
                 controller={controller}
+                onPreview={onPreview}
+                captureWorkNavigation={captureWorkNavigation}
                 selected={selectedWork}
                 onSelect={(id) => (id ? onWork(id) : onBack())}
                 onBack={onBack}
@@ -626,10 +632,10 @@ export function BotImConversationDetails({
               <BotSchedulePanel
                 botId={bot.id}
                 client={client}
-                allowCreate={false}
+                groupId={conversation.id}
                 readOnly={conversation.state !== "active" || Boolean(bot.archived || bot.deleting)}
                 emptyMessage={conversation.state === "active" && !bot.archived && !bot.deleting
-                  ? "在招乎群里 @Bot，告诉它要定期做什么。" : "暂无历史例行任务"}
+                  ? "在群里安排一项定期工作，或点击 + 创建。" : "暂无历史例行任务"}
                 schedules={schedules.filter(
                   (item) => item.botId === bot.id && item.audienceKey === `im:${conversation.id}`
                 )}

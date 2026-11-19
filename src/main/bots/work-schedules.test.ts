@@ -291,7 +291,7 @@ describe("desktop work schedules", () => {
       message: "Set another schedule"
     })
     f.store.transition(inWork.id, "running")
-    expect(() => save(inWork.id, "child-call")).toThrow("桌面主对话")
+    expect(() => save(inWork.id, "child-call")).toThrow("所属的主对话")
     f.store.settle(inWork.id, "completed", null)
     const edited = f.store.saveSchedule(
       f.bot.id,

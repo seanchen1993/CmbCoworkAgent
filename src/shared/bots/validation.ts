@@ -273,9 +273,11 @@ export function parseBotDesktopWorkScheduleBinding(
 ): BotDesktopWorkScheduleBinding | undefined {
   if (input === undefined) return undefined
   const item = record(input)
-  if (Object.keys(item).some((key) => key !== "workId" && key !== "operationId"))
+  if (Object.keys(item).some((key) => !["workId", "operationId", "imConversationId"].includes(key)))
     throw new BotError("INVALID_INPUT", "工作例行参数无效")
-  return { workId: botIdentifier(item.workId), operationId: botIdentifier(item.operationId) }
+  return { operationId: botIdentifier(item.operationId),
+    ...(item.imConversationId !== undefined ? { imConversationId: botIdentifier(item.imConversationId) } : {}),
+    ...(item.workId !== undefined || item.imConversationId === undefined ? { workId: botIdentifier(item.workId) } : {}) }
 }
 
 export function parseBotWorkScheduleMonitor(input: unknown): BotWorkScheduleMonitorInput {
