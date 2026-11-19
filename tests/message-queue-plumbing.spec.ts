@@ -1609,7 +1609,7 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   const forkBoundaryHelperStart = agentIpc.indexOf("async function markLatestForkBoundary(")
   const forkBoundaryHelperBody = agentIpc.slice(
     forkBoundaryHelperStart,
-    forkBoundaryHelperStart + 2800
+    agentIpc.indexOf("async function markLatestForkBoundaryBestEffort(", forkBoundaryHelperStart)
   )
   assertIncludes(
     forkBoundaryHelperBody,
@@ -1660,8 +1660,8 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     )
   }
   assert(
-    forkBoundaryCallIndexes.length === 7,
-    `all terminal boundary calls are physical-run scoped: got ${forkBoundaryCallIndexes.length}`
+    forkBoundaryCallIndexes.length === 3,
+    `all completion boundary calls are physical-run scoped: got ${forkBoundaryCallIndexes.length}`
   )
   for (const index of forkBoundaryCallIndexes) {
     const callBody = agentIpc.slice(index, index + 380)
@@ -1672,6 +1672,20 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
       "fork boundary call carries its controller"
     )
   }
+  const settlementStart = agentIpc.indexOf("async function settlePhysicalAgentRun({")
+  const settlement = agentIpc.slice(settlementStart, settlementStart + 8_000)
+  assertSourceOrder(
+    settlement,
+    'name: "flush-stream-transcript"',
+    'name: "persist-interrupted-fork-boundary"',
+    "interrupted forks see all transcript rows committed by settlement"
+  )
+  assertSourceOrder(
+    settlement,
+    'name: "persist-interrupted-fork-boundary"',
+    'name: "release-active-controller"',
+    "interrupted forks are marked under the originating controller"
+  )
 
   const completionBoundaryMarker = 'source: "agent_run_complete"'
   const completionBoundaryIndexes: number[] = []

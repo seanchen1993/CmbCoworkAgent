@@ -45,6 +45,7 @@ import {
   isRestorableConversationTranscriptMessage,
   isVisibleTranscriptMessage
 } from "../../shared/checkpoint-transcript"
+import type { ForkDurableTailReference } from "../../shared/checkpoint-forkability"
 import { projectCoordinatorTranscriptNoise } from "../../shared/internal-notification-turn"
 import { cleanUserAttachmentContentForDisplay } from "../../shared/user-attachment-display"
 import { isFunctionPluginPromptOrigin, type FunctionPluginPromptOrigin } from
@@ -76,7 +77,7 @@ import {
   isSubagentTranscriptBlobRef,
   SUBAGENT_TRANSCRIPT_STARTUP_BUCKET_LIMIT
 } from "../../shared/subagent-transcript-storage"
-import { createHash } from "crypto"
+import { createHash, randomUUID } from "crypto"
 import {
   attachFreshThreadIncarnation,
   captureThreadIncarnation,
@@ -608,7 +609,29 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
       start_at INTEGER,
       end_at INTEGER,
       ordinal INTEGER NOT NULL,
+      fork_replay_key TEXT,
       PRIMARY KEY(thread_id, message_id)
+    )
+  `)
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS thread_fork_replay_names (
+      thread_id TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      source_key TEXT NOT NULL,
+      PRIMARY KEY(thread_id, source_id, source_key)
+    )
+  `)
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_thread_fork_replay_names_key
+      ON thread_fork_replay_names(thread_id, source_key)
+  `)
+  db.run(`
+    CREATE TABLE IF NOT EXISTS thread_fork_replay_merges (
+      thread_id TEXT NOT NULL,
+      source_key TEXT NOT NULL,
+      target_key TEXT NOT NULL,
+      PRIMARY KEY(thread_id, source_key)
     )
   `)
 
@@ -926,6 +949,13 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
     // NULL deliberately leaves pre-upgrade rows uncertified; no history scan.
     db.run("ALTER TABLE thread_messages ADD COLUMN recovery_integrity INTEGER")
   }
+  if (!threadMessageColumns.some((row) => row[1] === "fork_replay_key")) {
+    db.run("ALTER TABLE thread_messages ADD COLUMN fork_replay_key TEXT")
+  }
+  db.run(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_messages_fork_replay_key
+      ON thread_messages(thread_id, fork_replay_key) WHERE fork_replay_key IS NOT NULL
+  `)
   const hasThreadMessageContentPriority = threadMessageColumns.some(
     (row) => row[1] === "content_priority"
   )
@@ -1057,6 +1087,7 @@ interface ThreadMessageRow {
   start_at: number | null
   end_at: number | null
   ordinal: number
+  fork_replay_key: string | null
 }
 
 interface ThreadMessageBucketRow {
@@ -1118,13 +1149,40 @@ export class ThreadMessageStreamAttempt {
     const database = getDb()
     database.run("BEGIN")
     try {
-      let removedCount = 0
+      const rowKeys = [...this.before.values()].flatMap((row) =>
+        row?.fork_replay_key ? [row.fork_replay_key] : []
+      )
+      const liveByKey = getThreadMessageRows(database, this.threadId, rowKeys, "fork_replay_key")
+      const preimages = new Map<string, ThreadMessageRow | null>()
+      const seenKeys = new Set<string>()
       for (const [id, row] of this.before) {
+        const key = row?.fork_replay_key
+        if (key && seenKeys.has(key)) continue
+        if (key) seenKeys.add(key)
+        const live = key ? liveByKey.get(key) : undefined
+        const destination = live ? this.before.get(live.message_id) : undefined
+        if (row && live && live.message_id !== id &&
+            (destination === undefined || destination?.fork_replay_key === key)) {
+          // An independent reconciliation moved this row. Restore the earliest
+          // content at its current ID, keeping the canonical identity intact.
+          preimages.set(live.message_id, {
+            ...row,
+            message_id: live.message_id,
+            provider_source_id: live.provider_source_id,
+            provider_occurrence: live.provider_occurrence
+          })
+        } else {
+          preimages.set(id, row)
+        }
+      }
+      let removedCount = 0
+      const removedKeys = new Set<string>()
+      for (const [id, row] of preimages) {
         const current = getThreadMessageRows(database, this.threadId, [id]).get(id)
         if (current?.function_row_json != null ||
             hasFunctionConversationProjectionMarker(database, this.threadId, id))
           throw Error("MODS_CONVERSATION_PROJECTION_CONFLICT")
-        const existed = !!current
+        if (current?.fork_replay_key) removedKeys.add(current.fork_replay_key)
         database.run(
           "DELETE FROM thread_message_fragments WHERE thread_id = ? AND message_id = ?",
           [this.threadId, id]
@@ -1138,17 +1196,32 @@ export class ThreadMessageStreamAttempt {
           id
         ])
         if (row) {
-          const columns = Object.keys(row)
-          database.run(
-            `INSERT INTO thread_messages (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
-            Object.values(row)
-          )
-          if (!existed) removedCount -= 1
-          restoredMessages.push(threadMessageRowToMessage(row))
+          if (!current) removedCount -= 1
         } else {
-          if (existed) removedCount += 1
+          if (current) removedCount += 1
           discardedMessageIds.push(id)
         }
+      }
+      // A rename may have moved a saved row key to another captured ID.
+      // Remove all attempt rows before restoring any stable keys.
+      for (const row of preimages.values()) {
+        if (!row) continue
+        const columns = Object.keys(row)
+        database.run(
+          `INSERT INTO thread_messages (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
+          Object.values(row)
+        )
+        if (row.fork_replay_key) removedKeys.delete(row.fork_replay_key)
+        restoredMessages.push(threadMessageRowToMessage(row))
+      }
+      for (const key of removedKeys) {
+        database.run(
+          `DELETE FROM thread_fork_replay_names AS alias
+           WHERE alias.thread_id = ? AND alias.source_key = ?
+           AND NOT EXISTS (SELECT 1 FROM thread_messages WHERE thread_id = ? AND fork_replay_key = ?)
+           AND NOT EXISTS (SELECT 1 FROM thread_fork_replay_merges WHERE thread_id = ? AND source_key = ?)`,
+          [this.threadId, key, this.threadId, key, this.threadId, key]
+        )
       }
       // Keep next_ordinal monotonic. Other messages (for example injected user
       // input) can have arrived since this attempt began and must stay intact.
@@ -1584,7 +1657,8 @@ export function applyThreadMessageStreamAuthority(
 function getThreadMessageRows(
   database: NativeSqliteAdapter,
   threadId: string,
-  messageIds: readonly string[]
+  messageIds: readonly string[],
+  column: "message_id" | "fork_replay_key" = "message_id"
 ): Map<string, ThreadMessageRow> {
   const rows = new Map<string, ThreadMessageRow>()
   const uniqueIds = Array.from(new Set(messageIds.filter(Boolean)))
@@ -1594,13 +1668,14 @@ function getThreadMessageRows(
     const batch = uniqueIds.slice(offset, offset + maxIdsPerQuery)
     const placeholders = batch.map(() => "?").join(", ")
     const stmt = database.prepare(
-      `SELECT * FROM thread_messages WHERE thread_id = ? AND message_id IN (${placeholders})`
+      `SELECT * FROM thread_messages WHERE thread_id = ? AND ${column} IN (${placeholders})`
     )
     stmt.bind([threadId, ...batch])
     try {
       while (stmt.step()) {
         const row = stmt.getAsObject() as unknown as ThreadMessageRow
-        if (typeof row.message_id === "string") rows.set(row.message_id, row)
+        const key = row[column]
+        if (typeof key === "string") rows.set(key, row)
       }
     } finally {
       stmt.free()
@@ -1713,6 +1788,35 @@ export function isFirstThreadUserMessage(threadId: string, messageId?: string): 
     // Legacy callers do not always supply an ID. Only a single persisted user
     // message proves this is the initial turn; otherwise keep the heuristic.
     return !stmt.step()
+  } finally {
+    stmt.free()
+  }
+}
+
+/** Use the first durable reply to distinguish a recorded exchange from a cancelled input. */
+export function getFirstThreadRepliedUserMessageIdentity(
+  threadId: string
+): { id: string; createdAt: number; providerSourceId?: string; providerOccurrence?: number } | undefined {
+  const stmt = getDb().prepare(
+    `SELECT message_id, created_at, provider_source_id, provider_occurrence FROM thread_messages
+     WHERE thread_id = ? AND role = 'user'
+       AND (ordinal, created_at, message_id) < (
+         SELECT ordinal, created_at, message_id FROM thread_messages
+         WHERE thread_id = ? AND role = 'assistant'
+         ORDER BY ordinal ASC, created_at ASC, message_id ASC LIMIT 1
+       )
+     ORDER BY ordinal DESC, created_at DESC, message_id DESC LIMIT 1`
+  )
+  try {
+    stmt.bind([threadId, threadId])
+    if (!stmt.step()) return undefined
+    const row = stmt.getAsObject()
+    return {
+      id: String(row.message_id),
+      createdAt: Number(row.created_at),
+      ...(typeof row.provider_source_id === "string" && { providerSourceId: row.provider_source_id }),
+      ...(typeof row.provider_occurrence === "number" && { providerOccurrence: row.provider_occurrence })
+    }
   } finally {
     stmt.free()
   }
@@ -4243,6 +4347,113 @@ export function getUserMessagePromptOrigin(
   finally { statement.free() }
 }
 
+/** Bind the checkpoint to the current row before its display ID can change. */
+export function captureThreadForkReplay(
+  threadId: string,
+  ids: readonly string[]
+): Array<{ id: string; key: string }> | undefined {
+  if (ids.length === 0) return undefined
+  const database = getDb()
+  const keys = new Map<string, string>()
+  database.run("BEGIN IMMEDIATE")
+  try {
+    for (let offset = 0; offset < ids.length; offset += 250) {
+      const batch = ids.slice(offset, offset + 250)
+      const placeholders = batch.map(() => "?").join(", ")
+      database.run(
+        `UPDATE thread_messages SET fork_replay_key = lower(hex(randomblob(16)))
+         WHERE thread_id = ? AND message_id IN (${placeholders}) AND role <> 'user'
+           AND fork_replay_key IS NULL`,
+        [threadId, ...batch]
+      )
+      const rows = database.exec(
+        `SELECT message_id, fork_replay_key FROM thread_messages
+         WHERE thread_id = ? AND message_id IN (${placeholders}) AND role <> 'user'`,
+        [threadId, ...batch]
+      )[0]?.values ?? []
+      for (const [id, key] of rows) {
+        if (typeof id === "string" && typeof key === "string") keys.set(id, key)
+      }
+    }
+    database.run("COMMIT")
+  } catch (error) {
+    database.run("ROLLBACK")
+    throw error
+  }
+  if (!ids.every((id) => keys.has(id))) return undefined
+  return ids.map((id) => ({ id, key: keys.get(id)! }))
+}
+
+/** Resolve an exact saved row key or match the payload proven by old graph input. */
+export function getThreadMessagesForForkReplay(
+  threadId: string,
+  references: readonly ForkDurableTailReference[],
+  matchesDigest: (message: Message, digest: string) => boolean
+): Message[] | undefined {
+  const database = getDb()
+  const directIds = references.flatMap((ref) => "digest" in ref ? [ref.id] : [])
+  const directKeys = references.flatMap((ref) => "key" in ref ? [ref.key] : [])
+  const byId = getThreadMessageRows(database, threadId, directIds)
+  const byKey = getThreadMessageRows(database, threadId, directKeys, "fork_replay_key")
+  const aliases = new Map<number, string[]>()
+  const unresolved = references.flatMap((ref, index) =>
+    "key" in ref && byKey.has(ref.key) ? [] : [{ ref, index }]
+  )
+  for (let offset = 0; offset < unresolved.length; offset += 125) {
+    const batch = unresolved.slice(offset, offset + 125)
+    const placeholders = batch.map(() => "(?, ?, ?)").join(", ")
+    const limit = batch.length * 8 + 1
+    const rows = database.exec(
+      `WITH RECURSIVE requested(position, id, key) AS (VALUES ${placeholders}),
+       lineage(position, key) AS (
+         SELECT position, key FROM requested WHERE key IS NOT NULL
+         UNION
+         SELECT requested.position, alias.source_key FROM requested
+         JOIN thread_fork_replay_names AS alias ON alias.thread_id = ? AND alias.source_id = requested.id
+         WHERE requested.key IS NULL
+         UNION
+         SELECT lineage.position, merge.target_key FROM lineage
+         JOIN thread_fork_replay_merges AS merge ON merge.thread_id = ? AND merge.source_key = lineage.key
+         WHERE NOT EXISTS (
+           SELECT 1 FROM thread_messages WHERE thread_id = ? AND fork_replay_key = lineage.key
+         )
+       )
+       SELECT lineage.position, lineage.key FROM lineage
+       JOIN thread_messages AS live ON live.thread_id = ? AND live.fork_replay_key = lineage.key
+       LIMIT ?`,
+      [...batch.flatMap(({ ref, index }) => [index, ref.id, "key" in ref ? ref.key : null]),
+        threadId, threadId, threadId, threadId, limit]
+    )[0]?.values ?? []
+    if (rows.length >= limit) return undefined
+    for (const [position, key] of rows) {
+      if (typeof position !== "number" || typeof key !== "string") continue
+      const matches = aliases.get(position) ?? []
+      matches.push(key)
+      aliases.set(position, matches)
+    }
+  }
+  const linkedRows = getThreadMessageRows(database, threadId, [...aliases.values()].flat(), "fork_replay_key")
+  const rowsById = new Map<string, ThreadMessageRow>()
+  for (const row of [...byId.values(), ...byKey.values(), ...linkedRows.values()]) {
+    if (row.role !== "user") rowsById.set(row.message_id, row)
+  }
+  const messages = threadMessageRowsToMessages(database, threadId, [...rowsById.values()])
+  const byMessageId = new Map(messages.map((message) => [message.id, message]))
+  const replay = new Map<string, Message>()
+  for (const [index, ref] of references.entries()) {
+    const direct = "key" in ref ? byKey.get(ref.key) : byId.get(ref.id)
+    const candidates = new Set([direct?.message_id])
+    for (const key of aliases.get(index) ?? []) candidates.add(linkedRows.get(key)?.message_id)
+    const matches = [...candidates].flatMap((id) => {
+      const message = id ? byMessageId.get(id) : undefined
+      return message && (!("digest" in ref) || matchesDigest(message, ref.digest)) ? [message] : []
+    })
+    if (matches.length !== 1) return undefined
+    replay.set(matches[0].id, matches[0])
+  }
+  return [...replay.values()]
+}
+
 export interface ThreadMessageIdentityContextSelector {
   messageId?: string
   providerSourceId?: string
@@ -5672,9 +5883,11 @@ function upsertThreadMessagesCore(
           if (!sourceRows.has(aliasSourceId)) {
             options.streamAttempt?.capture(normalized.id)
             options.streamAttempt?.capture(aliasSourceId)
+            const replayKey = recordForkMessageLineage(database, threadId, existing)
             database.run(
-              "UPDATE thread_messages SET message_id = ? WHERE thread_id = ? AND message_id = ?",
-              [aliasSourceId, threadId, normalized.id]
+              `UPDATE thread_messages SET message_id = ?, fork_replay_key = ?
+               WHERE thread_id = ? AND message_id = ?`,
+              [aliasSourceId, replayKey, threadId, normalized.id]
             )
             database.run(
               `UPDATE thread_message_fragments
@@ -6190,6 +6403,32 @@ export function moveThreadMessagesAfterAnchor(
   )
 }
 
+function recordForkMessageLineage(
+  database: NativeSqliteAdapter,
+  threadId: string,
+  source: ThreadMessageRow,
+  target?: ThreadMessageRow
+): string {
+  const sourceKey = source.fork_replay_key ?? randomUUID()
+  // A merge keeps the identity of the existing destination row. Carry the
+  // source key only when renaming that row into an unused ID.
+  const targetKey = target ? target.fork_replay_key ?? randomUUID() : sourceKey
+  if (sourceKey !== targetKey) {
+    // Keep each merge hop. An attempt rollback can make its source live again.
+    database.run(
+      `INSERT INTO thread_fork_replay_merges (thread_id, source_key, target_key) VALUES (?, ?, ?)
+       ON CONFLICT(thread_id, source_key) DO UPDATE SET target_key = excluded.target_key`,
+      [threadId, sourceKey, targetKey]
+    )
+  }
+  database.run(
+    `INSERT OR IGNORE INTO thread_fork_replay_names (thread_id, source_id, source_key)
+     VALUES (?, ?, ?)`,
+    [threadId, source.message_id, sourceKey]
+  )
+  return targetKey
+}
+
 export function replaceThreadMessageId(
   threadId: string,
   fromMessageId: string,
@@ -6332,6 +6571,7 @@ export function replaceThreadMessageId(
 
   database.run("BEGIN")
   try {
+    const replayKey = recordForkMessageLineage(database, threadId, source, target)
     if (!target) {
       const providerSourceId =
         source.provider_source_id ?? getMessageProviderSourceId({ id: fromId, role: source.role })
@@ -6341,9 +6581,9 @@ export function replaceThreadMessageId(
         null
       database.run(
         `UPDATE thread_messages
-         SET message_id = ?, provider_source_id = ?, provider_occurrence = ?
+         SET message_id = ?, provider_source_id = ?, provider_occurrence = ?, fork_replay_key = ?
          WHERE thread_id = ? AND message_id = ?`,
-        [toId, providerSourceId, providerOccurrence, threadId, fromId]
+        [toId, providerSourceId, providerOccurrence, replayKey, threadId, fromId]
       )
       database.run(
         `UPDATE thread_message_fragments
@@ -6417,7 +6657,7 @@ export function replaceThreadMessageId(
         `UPDATE thread_messages
          SET provider_source_id = ?, provider_occurrence = ?, role = ?, content_json = ?, reasoning = ?, tool_calls_json = ?, tool_call_id = ?, name = ?, status = ?,
              is_error = ?, content_priority = ?, goal_id = ?, active_window_id = ?, created_at = ?, start_at = ?,
-             end_at = ?, ordinal = ?, recovery_integrity = ?, stream_authority = ?
+             end_at = ?, ordinal = ?, recovery_integrity = ?, stream_authority = ?, fork_replay_key = ?
          WHERE thread_id = ? AND message_id = ?`,
         [
           mergedProviderSourceId,
@@ -6453,6 +6693,7 @@ export function replaceThreadMessageId(
             ? 1
             : 0,
           sourceAuthority | targetAuthority,
+          replayKey,
           threadId,
           toId
         ]
@@ -7128,6 +7369,8 @@ export function deleteThread(threadId: string): void {
     database.run("DELETE FROM thread_message_fragments WHERE thread_id = ?", [threadId])
     database.run("DELETE FROM thread_message_fragment_states WHERE thread_id = ?", [threadId])
     database.run("DELETE FROM thread_messages WHERE thread_id = ?", [threadId])
+    database.run("DELETE FROM thread_fork_replay_names WHERE thread_id = ?", [threadId])
+    database.run("DELETE FROM thread_fork_replay_merges WHERE thread_id = ?", [threadId])
     database.run("DELETE FROM thread_message_buckets WHERE thread_id = ?", [threadId])
     database.run("DELETE FROM trusted_tool_file_preview_sources WHERE thread_id = ?", [threadId])
     database.run("DELETE FROM legacy_checkpoint_transcript_migrations WHERE thread_id = ?", [

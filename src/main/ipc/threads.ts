@@ -16,6 +16,7 @@ import {
   copyThreadSubagentManifestRowsPage,
   getDb,
   getThreadCore,
+  getFirstThreadRepliedUserMessageIdentity,
   getThreadHydrationCore,
   getThreadValuesJson,
   getThreadValuesJsonPage,
@@ -117,9 +118,11 @@ import type { CoordinatorWorkerDirectoryRetirement } from "../agent/coordinator-
 import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
 import { isAgentOutputStyle } from "../../shared/agent-output-style"
 import { deleteTaskMmdThread } from "../agent/task-mmd/storage"
+import { inheritForkSummarization } from "../agent/fork-summarization"
 import {
   deleteProjectThreadDataDirectory,
-  getProjectThreadDataDirectory
+  getProjectThreadDataDirectory,
+  getProjectThreadDataDirectoryReadCandidates
 } from "../agent/context-history-path"
 import { generateTitle } from "../services/title-generator"
 import { generateProjectThreadTitle } from "../services/project-thread-title"
@@ -178,13 +181,23 @@ import {
   describeCheckpointForkability,
   FORK_BOUNDARY_MARKER_VERSION,
   FORK_BOUNDARY_THREAD_METADATA_KEY,
+  FORK_DURABLE_TAIL_KEY,
+  MAX_FORK_DURABLE_TAIL_MESSAGES,
   getCheckpointId,
   getForkBoundaryMarker,
   getCheckpointThreadId,
+  getOldestForkBoundaryMarkerIndex,
   isForkableCheckpointForMessage,
+  isUserInterruptedForkBoundary,
+  readForkBoundaryMarker,
+  readForkDurableTail,
+  readInterruptedTurnUserId,
   toForkabilityError
 } from "../../shared/checkpoint-forkability"
-import type { LegacyForkFallbackMode } from "../../shared/checkpoint-forkability"
+import type {
+  ForkCheckpointListOptions,
+  LegacyForkFallbackMode
+} from "../../shared/checkpoint-forkability"
 import {
   captureThreadMutationLease,
   requireThreadMutationLease,
@@ -212,7 +225,11 @@ import {
   type CheckpointMetadata,
   type CheckpointTuple
 } from "@langchain/langgraph-checkpoint"
-import { persistedMessageToRuntimeMessage } from "./thread-runtime-tail"
+import {
+  materializeSavedForkTails,
+  replayForkDurableTail,
+  UnsafeForkTailError
+} from "./thread-runtime-tail"
 import {
   isThreadMessageHydrationWorkerUnavailable,
   readThreadMessagesPageInWorker
@@ -467,8 +484,6 @@ async function assertCanPersistExplicitNormalMode(
 
 const TOOL_CALL_ARGS_LIMIT = 1200
 const TOOL_RESULT_CONTENT_LIMIT = 4000
-const MAX_FORK_DURABLE_TAIL_MESSAGES = 1_000
-const MAX_FORK_DURABLE_TAIL_BYTES = 8 * 1024 * 1024
 const FORK_MESSAGE_COPY_BATCH_SIZE = 128
 const FORK_SUBAGENT_BUCKET_PAGE_SIZE = 32
 const FORK_SUBAGENT_MESSAGE_PAGE_SIZE = 128
@@ -866,7 +881,7 @@ function findDurableForkTailMessages(
     provider_source_id?: string
     provider_occurrence?: number
   }[]
-): Message[] {
+): { messages: Message[]; exceedsLimit: boolean } {
   const recentVisibleMessages = visibleMessages.slice(-32)
   const recentIds = Array.from(
     new Set(
@@ -924,66 +939,17 @@ function findDurableForkTailMessages(
             limit: MAX_FORK_DURABLE_TAIL_MESSAGES
           })
           if (page.hasMore) {
-            throw new Error("当前会话尾部消息过多，无法安全物化到 fork checkpoint。")
+            throw new UnsafeForkTailError("当前会话尾部消息过多，无法安全物化到 fork checkpoint。")
           }
           return page.messages
         })()
-  if (persistedMessages.length > MAX_FORK_DURABLE_TAIL_MESSAGES) {
-    throw new Error("当前会话尾部消息过多，无法安全物化到 fork checkpoint。")
-  }
-  return findMessagesAfterCheckpointVisibleIds(
-    persistedMessages.filter(isForkVisiblePersistedMessage),
-    visibleMessages
-  )
-}
-
-function appendDurableTailToCheckpoint(
-  checkpoint: Checkpoint,
-  durableTail: readonly Message[]
-): Checkpoint {
-  if (durableTail.length === 0) return checkpoint
-  if (durableTail.length > MAX_FORK_DURABLE_TAIL_MESSAGES) {
-    throw new Error("当前会话尾部消息过多，无法安全物化到 fork checkpoint。")
-  }
-  const serializedTail = JSON.stringify(durableTail)
-  if (Buffer.byteLength(serializedTail, "utf8") > MAX_FORK_DURABLE_TAIL_BYTES) {
-    throw new Error("当前会话尾部数据过大，无法安全物化到 fork checkpoint。")
-  }
-
-  const runtimeTail = durableTail.map((message) => persistedMessageToRuntimeMessage(message))
-  if (runtimeTail.some((message) => message === null)) {
-    throw new Error("当前会话尾部包含无法安全恢复的工具消息，暂时不能 fork。")
-  }
-
-  const forkCheckpoint = copyCheckpoint(checkpoint)
-  const checkpointMessages = getCheckpointChannelMessages(forkCheckpoint) ?? []
-  forkCheckpoint.channel_values = {
-    ...forkCheckpoint.channel_values,
-    messages: [
-      ...checkpointMessages,
-      ...runtimeTail.filter((message): message is NonNullable<typeof message> => message !== null)
-    ]
-  }
-  return forkCheckpoint
-}
-
-function updateForkBoundaryTailMetadata(
-  tuple: CheckpointTuple,
-  lastVisibleMessageId: string,
-  durableTailMessageCount: number
-): CheckpointMetadata | undefined {
-  const marker = getForkBoundaryMarker(tuple)
-  if (!marker) return tuple.metadata
-
   return {
-    ...tuple.metadata,
-    cmb_fork_boundary: {
-      ...marker,
-      lastVisibleMessageId,
-      durableTailReplayed: true,
-      durableTailMessageCount
-    }
-  } as CheckpointMetadata
+    messages: findMessagesAfterCheckpointVisibleIds(
+      persistedMessages.filter(isForkVisiblePersistedMessage),
+      visibleMessages
+    ),
+    exceedsLimit: persistedMessages.length > MAX_FORK_DURABLE_TAIL_MESSAGES
+  }
 }
 
 function normalizeForkBoundaryMetadataForCheckpoint(
@@ -1011,47 +977,72 @@ function normalizeForkBoundaryMetadataForCheckpoint(
 
 function materializeLatestForkTuple(
   sourceThreadId: string,
-  tuples: readonly CheckpointTuple[],
-  options: { omitUnsafeLatest?: boolean } = {}
-): CheckpointTuple[] {
-  if (tuples.length === 0) return []
-
+  tuples: CheckpointTuple[],
+  options: {
+    omitUnsafeLatest?: boolean
+    allowPersistedBoundary?: boolean
+    allowLegacyLatestFallback?: boolean
+    legacyCheckpointIds?: ReadonlySet<string>
+  } = {}
+): {
+  tuples: CheckpointTuple[]
+  unsafeLatestCheckpointId?: string
+  keptPersistedBoundary?: boolean
+} {
   const latestTuple = tuples[0]
-  // A native conversation checkpoint already has an exact persisted consumption receipt.
-  // Later notes and unfinished native output remain on the source side of this boundary.
-  if (latestTuple.checkpoint.channel_values.cmbFunctionConversation !== undefined) return [...tuples]
-  const initialTranscript = deriveCheckpointTranscriptIndex(latestTuple.checkpoint)
-  const durableTail = findDurableForkTailMessages(sourceThreadId, initialTranscript.visibleMessages)
-  if (durableTail.length === 0) return [...tuples]
+  if (!latestTuple) return { tuples }
+  // Native checkpoints already have a persisted consumption receipt.
+  if (latestTuple.checkpoint.channel_values.cmbFunctionConversation !== undefined)
+    return { tuples }
+  const hasSavedReplay = readForkDurableTail(latestTuple.metadata) !== undefined
 
-  let checkpoint: Checkpoint
+  let keptPersistedBoundary = false
   try {
-    checkpoint = appendDurableTailToCheckpoint(latestTuple.checkpoint, durableTail)
-  } catch (error) {
-    if (options.omitUnsafeLatest) {
-      console.warn("[Threads] Omitting unsafe latest fork checkpoint:", error)
-      return [...tuples.slice(1)]
+    const initialTranscript = deriveCheckpointTranscriptIndex(latestTuple.checkpoint)
+    const { messages, exceedsLimit } = findDurableForkTailMessages(
+      sourceThreadId,
+      initialTranscript.visibleMessages
+    )
+    let durableTail = messages
+    const nextUserIndex = durableTail.findIndex((message) => message.role === "user")
+    if (nextUserIndex >= 0) {
+      const hasPersistedBoundary =
+        getForkBoundaryMarker(latestTuple) ||
+        (options.legacyCheckpointIds?.has(getCheckpointId(latestTuple)) ??
+          options.allowLegacyLatestFallback)
+      if (hasPersistedBoundary) {
+        if (!options.allowPersistedBoundary) {
+          throw new UnsafeForkTailError("当前会话存在未写入 checkpoint 的新一轮消息，请选择已完成的分叉点。")
+        }
+        // Keep already-durable replies from the selected turn. Stop at the next
+        // user submission even when its subsequent output exceeds replay limits.
+        durableTail = durableTail.slice(0, nextUserIndex)
+        keptPersistedBoundary = true
+      }
     }
-    throw error
-  }
-  const transcript = deriveCheckpointTranscriptIndex(checkpoint)
-  const lastVisibleMessageId = transcript.visibleMessageIds.at(-1)
-  if (!lastVisibleMessageId) {
-    throw new Error("当前会话尾部没有可用于 fork 的可见消息。")
-  }
+    if (exceedsLimit && !keptPersistedBoundary && (!hasSavedReplay || !options.allowPersistedBoundary)) {
+      throw new UnsafeForkTailError("当前会话尾部消息过多，无法安全物化到 fork checkpoint。")
+    }
+    if (hasSavedReplay) {
+      // materializeSavedForkTails already replayed the proven rows, if they
+      // could be resolved. Additional durable rows belong outside this cutoff.
+      return { tuples, keptPersistedBoundary: keptPersistedBoundary || durableTail.length > 0 || exceedsLimit }
+    }
+    if (durableTail.length === 0) return { tuples, keptPersistedBoundary }
 
-  return [
-    {
-      ...latestTuple,
-      checkpoint,
-      metadata: updateForkBoundaryTailMetadata(
-        latestTuple,
-        lastVisibleMessageId,
-        durableTail.length
-      )
-    },
-    ...tuples.slice(1)
-  ]
+    return {
+      keptPersistedBoundary,
+      tuples: [replayForkDurableTail(latestTuple, durableTail), ...tuples.slice(1)]
+    }
+  } catch (error) {
+    if (keptPersistedBoundary && error instanceof UnsafeForkTailError) {
+      return { tuples, keptPersistedBoundary }
+    }
+    if (!options.omitUnsafeLatest || !(error instanceof UnsafeForkTailError)) throw error
+    console.warn("[Threads] Omitting unsafe latest fork checkpoint:", error.message)
+    // Its persisted marker still separates historical legacy checkpoints from recent ones.
+    return { tuples, unsafeLatestCheckpointId: getCheckpointId(latestTuple) }
+  }
 }
 
 function isAgentMode(value: unknown): value is "normal" | "coordinator" | "workflow" {
@@ -1320,11 +1311,6 @@ function assertForkableTuple(
     throw new Error(toForkabilityError(forkability.unstableReason))
 }
 
-interface ForkBoundaryMarkerContext {
-  hasAnyForkBoundaryMarker: boolean
-  selectedHasNewerForkBoundaryMarker: boolean
-}
-
 function resolveLegacyForkFallbackMode(input: {
   hasThreadForkBoundaryMarkerEra: boolean
   hasAnyForkBoundaryMarker: boolean
@@ -1344,11 +1330,14 @@ function allowsLegacyHistoricalForkFallback(input: {
   )
 }
 
-async function getForkBoundaryMarkerContext(
+async function listRootForkTuples(
   checkpointer: SqlJsSaver,
-  threadId: string,
-  selectedCheckpointId?: string
-): Promise<ForkBoundaryMarkerContext> {
+  threadId: string
+): Promise<{
+  tuples: CheckpointTuple[]
+  legacyCheckpointIds?: ReadonlySet<string>
+  interruptedTurnUserId?: string
+}> {
   const tuples: CheckpointTuple[] = []
   for await (const tuple of checkpointer.list({
     configurable: { thread_id: threadId, checkpoint_ns: "" }
@@ -1356,21 +1345,17 @@ async function getForkBoundaryMarkerContext(
     tuples.push(tuple)
   }
 
-  const markerIndexes = tuples.flatMap((tuple, index) =>
-    getForkBoundaryMarker(tuple) ? [index] : []
-  )
-  const hasAnyForkBoundaryMarker = markerIndexes.length > 0
-  const oldestForkBoundaryMarkerIndex =
-    markerIndexes.length > 0 ? markerIndexes[markerIndexes.length - 1] : -1
-  const selectedIndex = selectedCheckpointId
-    ? tuples.findIndex((tuple) => getCheckpointId(tuple) === selectedCheckpointId)
-    : -1
-  const selectedHasNewerForkBoundaryMarker =
-    selectedIndex >= 0 &&
-    oldestForkBoundaryMarkerIndex >= 0 &&
-    selectedIndex > oldestForkBoundaryMarkerIndex
-
-  return { hasAnyForkBoundaryMarker, selectedHasNewerForkBoundaryMarker }
+  const legacyCheckpointIds = await checkpointer.getLegacyForkCheckpointIds(threadId)
+  if (legacyCheckpointIds !== undefined) return { tuples, legacyCheckpointIds }
+  const oldest = tuples[getOldestForkBoundaryMarkerIndex(tuples)]
+  const marker = oldest ? getForkBoundaryMarker(oldest) : null
+  const interruptedTurnUserId =
+    oldest &&
+    isUserInterruptedForkBoundary(marker) &&
+    !readInterruptedTurnUserId(oldest.checkpoint, marker)
+      ? await checkpointer.getForkTurnUserId(threadId, getCheckpointId(oldest))
+      : undefined
+  return { tuples, interruptedTurnUserId }
 }
 
 function buildForkMetadata(input: {
@@ -1434,27 +1419,6 @@ interface ForkCheckpointHistoryEntry {
   checkpoint: CheckpointTuple["checkpoint"]
   metadata: CheckpointMetadata
   parentCheckpointId?: string
-}
-
-const FORK_PRIVATE_SUMMARIZATION_STATE_KEYS = [
-  "_summarizationEvent",
-  "_summarizationSessionId",
-  "_cmbSummarizationOwner"
-] as const
-
-function copyCheckpointWithoutSourceSummarizationState(
-  checkpoint: CheckpointTuple["checkpoint"]
-): CheckpointTuple["checkpoint"] {
-  const copied = copyCheckpoint(checkpoint)
-  const channelValues = copied.channel_values
-  if (!channelValues || typeof channelValues !== "object" || Array.isArray(channelValues)) {
-    return copied
-  }
-
-  for (const key of FORK_PRIVATE_SUMMARIZATION_STATE_KEYS) {
-    delete (channelValues as Record<string, unknown>)[key]
-  }
-  return copied
 }
 
 function fallbackForkCheckpointMetadata(): CheckpointMetadata {
@@ -1532,18 +1496,15 @@ function buildForkCheckpointHistory(input: {
     const parentCheckpointId = getTupleParentCheckpointId(tuple)
     const sourceCheckpoint =
       checkpointId === input.selectedCheckpointId ? input.selectedCheckpoint : tuple.checkpoint
+    const metadata = {
+      ...(checkpointId === input.selectedCheckpointId
+        ? input.selectedMetadata
+        : tuple.metadata ?? fallbackForkCheckpointMetadata())
+    }
+    delete (metadata as unknown as Record<string, unknown>)[FORK_DURABLE_TAIL_KEY]
     return {
-      // A fork owns a new app-managed artifact directory. Keeping the source
-      // event would leave its effective prompt pointing at the source thread's
-      // absolute history path (and potentially expose history appended after
-      // the fork boundary). The raw messages remain in the checkpoint, while
-      // referenced evicted tool payloads are copied into the target directory
-      // before commit, so the target can continue independently.
-      checkpoint: copyCheckpointWithoutSourceSummarizationState(sourceCheckpoint),
-      metadata:
-        checkpointId === input.selectedCheckpointId
-          ? input.selectedMetadata
-          : (tuple.metadata ?? fallbackForkCheckpointMetadata()),
+      checkpoint: copyCheckpoint(sourceCheckpoint),
+      metadata,
       ...(parentCheckpointId ? { parentCheckpointId } : {})
     }
   })
@@ -1553,7 +1514,7 @@ function buildForkCheckpointHistory(input: {
 function selectForkCheckpointHistoryTuples(input: {
   listedTuples: CheckpointTuple[]
   selectedCheckpointId: string
-  legacyFallbackMode: LegacyForkFallbackMode
+  forkableSummariesById: ReadonlyMap<string, ForkableCheckpoint>
 }): CheckpointTuple[] {
   const selectedIndex = input.listedTuples.findIndex(
     (tuple) => getCheckpointId(tuple) === input.selectedCheckpointId
@@ -1561,15 +1522,12 @@ function selectForkCheckpointHistoryTuples(input: {
   // 从 selectedIndex 到数组末尾（即从选中 checkpoint 到最旧的方向，降序）
   const selectedToOldestDesc =
     selectedIndex >= 0 ? input.listedTuples.slice(selectedIndex) : input.listedTuples
-  const forkableSummariesById = buildForkableCheckpointSummaryMap(input.listedTuples, {
-    activeRun: false,
-    pendingApproval: false,
-    legacyFallbackMode: input.legacyFallbackMode
-  })
   return selectedToOldestDesc
     .filter((tuple) => {
       const checkpointId = getCheckpointId(tuple)
-      return checkpointId === input.selectedCheckpointId || forkableSummariesById.has(checkpointId)
+      return (
+        checkpointId === input.selectedCheckpointId || input.forkableSummariesById.has(checkpointId)
+      )
     })
     .reverse()
 }
@@ -1799,69 +1757,60 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
             throw Error("MODS_CONVERSATION_THREAD_CHANGED")
         }
         assertSource()
-        const forkSource = await (async () => {
-          const sourceTuple = await sourceSaver.getTuple({
-            configurable: {
-              thread_id: sourceThreadId,
-              checkpoint_ns: "",
-              ...(explicitCheckpointId ? { checkpoint_id: explicitCheckpointId } : {})
-            }
-          })
-          const markerContext = sourceTuple
-            ? await getForkBoundaryMarkerContext(
-                sourceSaver,
-                sourceThreadId,
-                getCheckpointId(sourceTuple)
-              )
-            : { hasAnyForkBoundaryMarker: false, selectedHasNewerForkBoundaryMarker: false }
-          const listedTuples: CheckpointTuple[] = []
-          if (sourceTuple) {
-            for await (const tuple of sourceSaver.list({
-              configurable: { thread_id: sourceThreadId, checkpoint_ns: "" }
-            })) {
-              listedTuples.push(tuple)
-            }
-          }
-          return { tuple: sourceTuple, markerContext, listedTuples }
-        })()
+        if (explicitCheckpointId &&
+          !(await sourceSaver.hasCheckpoint(sourceThreadId, explicitCheckpointId)))
+          throw new Error("当前会话还没有可 fork 的 checkpoint。")
+        const { tuples: rawListedTuples, legacyCheckpointIds, interruptedTurnUserId } =
+          await listRootForkTuples(sourceSaver, sourceThreadId)
         assertSource()
-        const sourceTuple = forkSource.tuple
+        const selectedIndex = explicitCheckpointId
+          ? rawListedTuples.findIndex(
+              (candidate) => getCheckpointId(candidate) === explicitCheckpointId
+            )
+          : 0
+        const sourceTuple = rawListedTuples[selectedIndex]
         if (!sourceTuple) throw new Error("当前会话还没有可 fork 的 checkpoint。")
-        const selectedCheckpointId = getCheckpointId(sourceTuple)
-        const rawListedTuples =
-          forkSource.listedTuples.length > 0 ? forkSource.listedTuples : [sourceTuple]
-        const selectedIsLatestCheckpoint =
-          rawListedTuples.length > 0 && getCheckpointId(rawListedTuples[0]) === selectedCheckpointId
-        const listedTuples = materializeLatestForkTuple(sourceThreadId, rawListedTuples, {
-          omitUnsafeLatest: Boolean(explicitCheckpointId && !selectedIsLatestCheckpoint)
-        })
-        const tuple =
-          listedTuples.find((candidate) => getCheckpointId(candidate) === selectedCheckpointId) ??
-          sourceTuple
+        const oldestMarkerIndex = getOldestForkBoundaryMarkerIndex(rawListedTuples)
         const legacyFallbackMode = resolveLegacyForkFallbackMode({
           hasThreadForkBoundaryMarkerEra,
-          hasAnyForkBoundaryMarker: forkSource.markerContext.hasAnyForkBoundaryMarker
+          hasAnyForkBoundaryMarker: oldestMarkerIndex >= 0
         })
-        assertForkableTuple(tuple, {
-          allowLegacyLatestFallback:
-            !explicitCheckpointId &&
-            !hasThreadForkBoundaryMarkerEra &&
-            !forkSource.markerContext.hasAnyForkBoundaryMarker,
-          allowLegacyHistoricalFallback:
-            !!explicitCheckpointId &&
-            !getForkBoundaryMarker(tuple) &&
-            allowsLegacyHistoricalForkFallback({
-              mode: legacyFallbackMode,
-              selectedHasNewerForkBoundaryMarker:
-                forkSource.markerContext.selectedHasNewerForkBoundaryMarker
-            })
-        })
-
+        const selectedIsLatestCheckpoint = selectedIndex === 0
+        const {
+          tuples: listedTuples,
+          unsafeLatestCheckpointId,
+          keptPersistedBoundary
+        } = materializeLatestForkTuple(
+          sourceThreadId,
+          materializeSavedForkTails(sourceThreadId, rawListedTuples),
+          {
+            omitUnsafeLatest: !selectedIsLatestCheckpoint,
+            allowPersistedBoundary: !!explicitCheckpointId || !!explicitMessageId,
+            allowLegacyLatestFallback: legacyFallbackMode === "all",
+            legacyCheckpointIds
+          }
+        )
+        const tuple = listedTuples[selectedIndex]
         const checkpointId = getCheckpointId(tuple)
+        assertForkableTuple(tuple, {
+          allowLegacyLatestFallback: !explicitCheckpointId && legacyFallbackMode === "all",
+          allowLegacyHistoricalFallback:
+            legacyCheckpointIds?.has(checkpointId) ??
+            (!!explicitCheckpointId &&
+              !getForkBoundaryMarker(tuple) &&
+              allowsLegacyHistoricalForkFallback({
+                mode: legacyFallbackMode,
+                selectedHasNewerForkBoundaryMarker:
+                    oldestMarkerIndex >= 0 && selectedIndex > oldestMarkerIndex
+              }))
+        })
         const forkableSummariesById = buildForkableCheckpointSummaryMap(listedTuples, {
           activeRun: false,
           pendingApproval: false,
-          legacyFallbackMode
+          legacyFallbackMode,
+          legacyCheckpointIds,
+          interruptedTurnUserId,
+          unsafeLatestCheckpointId
         })
         if (explicitMessageId) {
           const messageTarget = describeCheckpointMessageForkTarget(
@@ -1939,7 +1888,7 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
             const sourceHistoryTuples = selectForkCheckpointHistoryTuples({
               listedTuples,
               selectedCheckpointId: checkpointId,
-              legacyFallbackMode
+              forkableSummariesById
             })
             const checkpointHistory = buildForkCheckpointHistory({
               sourceHistoryTuples: sourceHistoryTuples.length > 0 ? sourceHistoryTuples : [tuple],
@@ -2054,6 +2003,42 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
               assertCurrent: assertForkCurrent
             })
             assertForkCurrent()
+            if (!hasConversation) {
+              let durableUserHead: ReturnType<typeof getFirstThreadRepliedUserMessageIdentity> | null = null
+              const readDurableUserHead = () => {
+                if (durableUserHead === null) {
+                  durableUserHead = getFirstThreadRepliedUserMessageIdentity(sourceThreadId)
+                }
+                return durableUserHead
+              }
+              const savedMessageCount = new Map(rawListedTuples.map(({ checkpoint }) => [
+                checkpoint.id, getCheckpointChannelMessages(checkpoint)?.length ?? 0
+              ]))
+              let sourceArchiveDirectories: Promise<string[]> | undefined
+              const readSourceArchiveDirectories = workspacePath
+                ? () => sourceArchiveDirectories ??=
+                    getProjectThreadDataDirectoryReadCandidates(workspacePath, sourceThreadId).then(
+                      (directories) => [
+                        ...directories.map((directory) => path.join(directory, "conversation_history")),
+                        path.join(workspacePath, ".cmbdevclaw", "conversation_history")
+                      ]
+                    )
+                : undefined
+              for (const { checkpoint } of checkpointHistory) {
+                const isSelected = checkpoint.id === checkpointId
+                // The synthetic latest tail must not make an invalid persisted cutoff valid.
+                await inheritForkSummarization({
+                  checkpoint,
+                  readDurableUserHead,
+                  readSourceArchiveDirectories,
+                  persistedMessageCount: savedMessageCount.get(checkpoint.id) ?? 0,
+                  ...(isSelected &&
+                    targetWorkspacePath && {
+                      archiveTarget: { workspacePath: targetWorkspacePath, threadId: targetThreadId }
+                    })
+                })
+              }
+            }
             targetSaver = new SqlJsSaver(getThreadCheckpointPath(targetThreadId), undefined, {
               maxRootCheckpoints: Math.max(1, checkpointHistory.length),
               maxRootForkBoundaryCheckpoints: Math.max(0, checkpointHistory.length)
@@ -2066,6 +2051,13 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
               assertCurrent: assertForkCurrent
             })
             assertForkCurrent()
+            if (!nativeImport) {
+              const copiedLegacyIds = checkpointHistory
+                .filter(({ metadata }) => !readForkBoundaryMarker(metadata))
+                .map(({ checkpoint }) => checkpoint.id)
+              if (copiedLegacyIds.length > 0)
+                await targetSaver.recordCopiedLegacyForkCheckpointIds(targetThreadId, copiedLegacyIds)
+            }
             await targetSaver.flushStrict()
             assertForkCurrent()
             if (!nativeImport) {
@@ -2105,7 +2097,7 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
               sourceThreadId,
               targetThreadId,
               forkCheckpoint,
-              isLatestCheckpointFork: selectedIsLatestCheckpoint
+              isLatestCheckpointFork: selectedIsLatestCheckpoint && !keptPersistedBoundary
             })
             await flushDbStrict()
             assertSource()
@@ -2179,37 +2171,37 @@ async function listForkableCheckpoints(threadId: string): Promise<ForkableCheckp
     const activeRun = await isThreadForkBusy({ threadId: sourceThreadId, workspacePath, agentMode })
     const pendingApproval = hasPendingApprovalForThread(sourceThreadId)
     return withCheckpointer(sourceThreadId, async (sourceSaver) => {
-      const tuples: CheckpointTuple[] = []
-      for await (const tuple of sourceSaver.list({
-        configurable: { thread_id: sourceThreadId, checkpoint_ns: "" }
-      })) {
-        tuples.push(tuple)
-      }
+      const { tuples, legacyCheckpointIds, interruptedTurnUserId } =
+        await listRootForkTuples(sourceSaver, sourceThreadId)
       const hasAnyForkBoundaryMarker = tuples.some((tuple) => Boolean(getForkBoundaryMarker(tuple)))
       const legacyFallbackMode = resolveLegacyForkFallbackMode({
         hasThreadForkBoundaryMarkerEra:
           sourceMetadata[FORK_BOUNDARY_THREAD_METADATA_KEY] === FORK_BOUNDARY_MARKER_VERSION,
         hasAnyForkBoundaryMarker
       })
-      return buildVisibleForkableCheckpointList(
-        materializeLatestForkTuple(sourceThreadId, tuples, { omitUnsafeLatest: true }),
-        {
-          activeRun,
-          pendingApproval,
-          legacyFallbackMode
+      const materialized = materializeLatestForkTuple(
+        sourceThreadId, materializeSavedForkTails(sourceThreadId, tuples), {
+        omitUnsafeLatest: true,
+        allowPersistedBoundary: true,
+        allowLegacyLatestFallback: legacyFallbackMode === "all",
+        legacyCheckpointIds
         }
       )
+      return buildVisibleForkableCheckpointList(materialized.tuples, {
+        activeRun,
+        pendingApproval,
+        legacyFallbackMode,
+        legacyCheckpointIds,
+        interruptedTurnUserId,
+        unsafeLatestCheckpointId: materialized.unsafeLatestCheckpointId
+      })
     })
   })
 }
 
 function buildForkableCheckpointSummaryMap(
   tuples: CheckpointTuple[],
-  options: {
-    activeRun: boolean
-    pendingApproval: boolean
-    legacyFallbackMode: LegacyForkFallbackMode
-  }
+  options: ForkCheckpointListOptions
 ): Map<string, ForkableCheckpoint> {
   return new Map(
     buildVisibleForkableCheckpointList(tuples, options).map((summary) => [
@@ -2576,25 +2568,31 @@ export async function resolveForkCheckpointForMessage(
     const activeRun = await isThreadForkBusy({ threadId: sourceThreadId, workspacePath, agentMode })
     const pendingApproval = hasPendingApprovalForThread(sourceThreadId)
     return withCheckpointer(sourceThreadId, async (sourceSaver) => {
-      const tuples: CheckpointTuple[] = []
-      for await (const tuple of sourceSaver.list({
-        configurable: { thread_id: sourceThreadId, checkpoint_ns: "" }
-      })) {
-        tuples.push(tuple)
-      }
+      const { tuples, legacyCheckpointIds, interruptedTurnUserId } =
+        await listRootForkTuples(sourceSaver, sourceThreadId)
       const hasAnyForkBoundaryMarker = tuples.some((tuple) => Boolean(getForkBoundaryMarker(tuple)))
       const legacyFallbackMode = resolveLegacyForkFallbackMode({
         hasThreadForkBoundaryMarkerEra:
           sourceMetadata[FORK_BOUNDARY_THREAD_METADATA_KEY] === FORK_BOUNDARY_MARKER_VERSION,
         hasAnyForkBoundaryMarker
       })
-      const materializedTuples = materializeLatestForkTuple(sourceThreadId, tuples, {
-        omitUnsafeLatest: true
-      })
+      const { tuples: materializedTuples, unsafeLatestCheckpointId } = materializeLatestForkTuple(
+        sourceThreadId,
+        materializeSavedForkTails(sourceThreadId, tuples),
+        {
+          omitUnsafeLatest: true,
+          allowPersistedBoundary: true,
+          allowLegacyLatestFallback: legacyFallbackMode === "all",
+          legacyCheckpointIds
+        }
+      )
       const forkableSummariesById = buildForkableCheckpointSummaryMap(materializedTuples, {
         activeRun,
         pendingApproval,
-        legacyFallbackMode
+        legacyFallbackMode,
+        legacyCheckpointIds,
+        interruptedTurnUserId,
+        unsafeLatestCheckpointId
       })
       for (const tuple of materializedTuples) {
         const listedSummary = forkableSummariesById.get(getCheckpointId(tuple))

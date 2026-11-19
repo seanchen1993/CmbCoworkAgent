@@ -23,6 +23,21 @@ import { sqliteFileSize } from "../utils/sqlite-durable-file"
 import { ensureCheckpointRuntimeProjectionInWorker, readPreparedNativeDataInWorker } from "./runtime-projection-client"
 import type { PreparedNativeDataSource, PreparedNativeDataFacts } from "./runtime-projection-protocol"
 import { preparedNativeSourcePlanDigest, preparedNativeSnapshotRowDigest, preparedNativeStorageBytesDigest } from "./function-conversation-canonical-display-worker"
+
+import { clearCheckpointSummarizationState } from "../../shared/context-compaction-messages"
+import {
+  applyForkReplayMessages,
+  buildVisibleForkableCheckpointList,
+  FORK_DURABLE_TAIL_KEY,
+  isCompletedLegacyGraphCheckpoint,
+  isLegacyCheckpointBeforeTurn,
+  isUserInterruptedForkBoundary,
+  readForkBoundaryMarker,
+  readForkDurableTail,
+  readInterruptedTurnUserId
+} from "../../shared/checkpoint-forkability"
+import { getCheckpointGraphInputUserId } from "../../shared/checkpoint-transcript"
+import { readGraphInputForkReplay } from "./fork-replay-proof"
 import {
   buildCheckpointRuntimeProjection,
   CHECKPOINT_RUNTIME_PROJECTION_VERSION
@@ -941,7 +956,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     return true
   }
 
-  private pruneAllCheckpointNamespaces(database: NativeSqliteAdapter): void {
+  private async pruneAllCheckpointNamespaces(database: NativeSqliteAdapter): Promise<void> {
     const namespaces = database.exec(
       `SELECT thread_id, checkpoint_ns FROM checkpoints GROUP BY thread_id, checkpoint_ns`
     )
@@ -949,16 +964,16 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       const threadId = typeof row[0] === "string" ? row[0] : String(row[0] ?? "")
       const checkpointNs = typeof row[1] === "string" ? row[1] : String(row[1] ?? "")
       if (!threadId) continue
-      this.pruneOldCheckpoints(threadId, checkpointNs, database)
+      await this.pruneOldCheckpoints(threadId, checkpointNs, database)
     }
   }
 
-  private compactOversizedLiveDatabase(
+  private async compactOversizedLiveDatabase(
     database: NativeSqliteAdapter,
     liveSize: number
-  ): boolean {
+  ): Promise<boolean> {
     try {
-      this.pruneAllCheckpointNamespaces(database)
+      await this.pruneAllCheckpointNamespaces(database)
       this.pruneAllUnreachableMessageSnapshots(database)
       const freelistResult = database.exec("PRAGMA freelist_count")
       const freePages = Number(freelistResult[0]?.values[0]?.[0] ?? 0)
@@ -1010,7 +1025,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       }
     }
 
-    const compacted = this.compactOversizedLiveDatabase(this.db, beforeBytes)
+    const compacted = await this.compactOversizedLiveDatabase(this.db, beforeBytes)
     return {
       attempted: true,
       compacted,
@@ -1543,6 +1558,11 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       ...preparedCheckpoint.channel_values,
       messages: buildExternalMessagesReference(messages.length)
     }
+    if (!recovered.complete) {
+      // A bounded recovery replaces the raw prefix, so old summary offsets no
+      // longer refer to the messages that summary covers.
+      clearCheckpointSummarizationState(preparedCheckpoint.channel_values)
+    }
     const [[messageType, serializedMessages], [checkpointType, serializedCheckpoint]] =
       await Promise.all([
         this.serde.dumpsTyped(messages),
@@ -1625,6 +1645,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       deltaBytes: 0,
       snapshotGeneration: recoveryGeneration
     }
+    if (!recovered.complete) clearCheckpointSummarizationState(checkpoint.channel_values)
     this.rememberHydratedCheckpointMessages(
       checkpointMessageCacheKey(row.thread_id, row.checkpoint_ns, row.checkpoint_id),
       hydrated
@@ -1735,14 +1756,14 @@ export class SqlJsSaver extends BaseCheckpointSaver {
    * Delete old checkpoints (and their writes) beyond the retention limit.
    * Keeps the most recent N checkpoints per (thread_id, checkpoint_ns).
    */
-  private pruneOldCheckpoints(
+  private async pruneOldCheckpoints(
     threadId: string,
     checkpointNs: string,
     database: NativeSqliteAdapter | null = this.db
-  ): void {
+  ): Promise<void> {
     if (!database) return
     if (checkpointNs === "") {
-      this.pruneRootCheckpoints(threadId, database)
+      await this.pruneRootCheckpoints(threadId, database)
       return
     }
 
@@ -1796,14 +1817,582 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     }
   }
 
-  private pruneRootCheckpoints(threadId: string, database: NativeSqliteAdapter): void {
+  private forkArchiveBoundaryCache?: {
+    threadId: string
+    checkpointId: string
+    stamp: string
+    excludedLegacyIds?: ReadonlySet<string>
+    verifiedLegacyIds?: ReadonlySet<string>
+    enrichedMetadata?: Uint8Array
+  }
+
+  private forkArchiveMarkerCache = new Map<string, { revision: string; stamp: string; eligible: boolean }>()
+  private checkedGraphForkInputs = new Set<string>()
+
+  private async loadRootCheckpointTranscript(
+    threadId: string,
+    id: string,
+    type: string,
+    data: string | Uint8Array
+  ): Promise<Checkpoint> {
+    const checkpoint = (await this.serde.loadsTyped(type, data)) as Checkpoint
+    if (isExternalMessagesReference(checkpoint.channel_values.messages)) {
+      const snapshot = await this.loadCheckpointMessages(threadId, "", id)
+      checkpoint.channel_values.messages = snapshot.messages
+    }
+    return checkpoint
+  }
+
+  /** Retain the graph input replay IDs and payload digests before that row ages out. */
+  private async preserveRootGraphForkReplays(
+    threadId: string,
+    database: NativeSqliteAdapter
+  ): Promise<void> {
+    const inputs =
+      database.exec(
+        `SELECT child.checkpoint_id, child.parent_checkpoint_id, snapshot.generation,
+              parent_snapshot.generation
+       FROM checkpoints AS child INDEXED BY idx_checkpoints_fork_scan
+       JOIN checkpoints AS parent ON parent.thread_id = child.thread_id
+         AND parent.checkpoint_ns = '' AND parent.checkpoint_id = child.parent_checkpoint_id
+       LEFT JOIN checkpoint_message_snapshots AS snapshot ON snapshot.thread_id = child.thread_id
+         AND snapshot.checkpoint_ns = '' AND snapshot.checkpoint_id = child.checkpoint_id
+       LEFT JOIN checkpoint_message_snapshots AS parent_snapshot ON parent_snapshot.thread_id = parent.thread_id
+         AND parent_snapshot.checkpoint_ns = '' AND parent_snapshot.checkpoint_id = parent.checkpoint_id
+       WHERE child.thread_id = ? AND child.checkpoint_ns = '' AND child.fork_boundary_marker = 0
+         AND child.parent_checkpoint_id IS NOT NULL
+         AND CASE WHEN json_valid(CAST(child.metadata AS TEXT))
+           THEN json_extract(CAST(child.metadata AS TEXT), '$.source') = 'input' ELSE 0 END
+         AND CASE WHEN json_valid(CAST(parent.metadata AS TEXT))
+           THEN json_type(CAST(parent.metadata AS TEXT), '$.${FORK_DURABLE_TAIL_KEY}') IS NULL
+           ELSE 0 END
+       ORDER BY COALESCE(child.checkpoint_ts, child.checkpoint_id) DESC, child.checkpoint_id DESC`,
+        [threadId]
+      )[0]?.values ?? []
+    const checked = new Set<string>()
+    for (const [id, parentId, generation, originalParentGeneration] of inputs) {
+      if (typeof id !== "string" || typeof parentId !== "string") continue
+      const key = JSON.stringify([threadId, id, generation, originalParentGeneration])
+      if (this.checkedGraphForkInputs.has(key)) {
+        checked.add(key)
+        continue
+      }
+      try {
+        const [inputType, inputData] =
+          database.exec(
+            "SELECT type, checkpoint FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?",
+            [threadId, id]
+          )[0]?.values[0] ?? []
+        if (typeof inputData !== "string" && !(inputData instanceof Uint8Array)) continue
+        const input = (await this.serde.loadsTyped(
+          String(inputType ?? "json"),
+          inputData
+        )) as Checkpoint
+        const evidence = readGraphInputForkReplay(input)
+        if (evidence.length === 0) {
+          checked.add(key)
+          continue
+        }
+        const [parentType, parentData, parentMetadata, pending, parentGeneration] =
+          database.exec(
+            `SELECT type, checkpoint, metadata,
+                EXISTS (SELECT 1 FROM writes WHERE thread_id = ? AND checkpoint_ns = ''
+                  AND checkpoint_id = ?),
+                (SELECT generation FROM checkpoint_message_snapshots
+                 WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?)
+         FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?`,
+            [threadId, parentId, threadId, parentId, threadId, parentId]
+          )[0]?.values[0] ?? []
+        if (
+          !(typeof parentData === "string" || parentData instanceof Uint8Array) ||
+          !(typeof parentMetadata === "string" || parentMetadata instanceof Uint8Array)
+        )
+          continue
+        const type = String(parentType ?? "json")
+        const metadata = (await this.serde.loadsTyped(type, parentMetadata)) as CheckpointMetadata
+        if (readForkDurableTail(metadata)) continue
+        const checkpoint = await this.loadRootCheckpointTranscript(
+          threadId,
+          parentId,
+          type,
+          parentData
+        )
+        const replay = applyForkReplayMessages(
+          {
+            config: {
+              configurable: { thread_id: threadId, checkpoint_ns: "", checkpoint_id: parentId }
+            },
+            checkpoint,
+            metadata,
+            ...(pending === 1 && { pendingWrites: [["", "", null]] })
+          },
+          evidence.map(({ message }) => message)
+        )
+        if (
+          !replay ||
+          buildVisibleForkableCheckpointList([replay], {
+            activeRun: false,
+            pendingApproval: false,
+            legacyFallbackMode: "all"
+          }).length === 0
+        ) {
+          continue
+        }
+        const [encodedType, encoded] = await this.serde.dumpsTyped({
+          ...metadata,
+          [FORK_DURABLE_TAIL_KEY]: evidence.map(({ id, digest }) => ({ id, digest }))
+        })
+        if (encodedType !== type) continue
+        database.run(
+          `UPDATE checkpoints SET metadata = ?
+         WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?
+           AND type IS ? AND metadata = ? AND checkpoint = ?
+           AND (SELECT generation FROM checkpoint_message_snapshots
+                WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?) IS ?
+           AND EXISTS (SELECT 1 FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ''
+             AND checkpoint_id = ? AND parent_checkpoint_id = ? AND checkpoint = ?)`,
+          [
+            encoded,
+            threadId,
+            parentId,
+            parentType ?? null,
+            parentMetadata,
+            parentData,
+            threadId,
+            parentId,
+            parentGeneration ?? null,
+            threadId,
+            id,
+            parentId,
+            inputData
+          ]
+        )
+        this.forkArchiveMarkerCache.delete(threadId + "\u0000" + parentId)
+      } catch (error) {
+        if (
+          error instanceof MissingCheckpointMessageSnapshotError ||
+          error instanceof CheckpointMessageSnapshotRecoveryError ||
+          error instanceof SyntaxError
+        ) {
+          checked.add(key)
+        }
+        console.warn("[SqlJsSaver] Could not preserve graph replay evidence:", id, error)
+      }
+    }
+    this.checkedGraphForkInputs = checked
+  }
+
+  private async readForkArchiveMarkerEligibility(
+    database: NativeSqliteAdapter,
+    threadId: string,
+    dataVersion: unknown
+  ): Promise<Map<string, { stamp: string; eligible: boolean }>> {
+    const rows = database.exec(
+      `SELECT cp.checkpoint_id, snapshot.generation, cp.rowid
+       FROM checkpoints AS cp INDEXED BY idx_checkpoints_fork_scan
+       LEFT JOIN checkpoint_message_snapshots AS snapshot
+         ON snapshot.thread_id = cp.thread_id AND snapshot.checkpoint_ns = ''
+        AND snapshot.checkpoint_id = cp.checkpoint_id
+       WHERE cp.thread_id = ? AND cp.checkpoint_ns = '' AND cp.fork_boundary_marker = 1`,
+      [threadId]
+    )[0]?.values ?? []
+    const eligibility = new Map<string, { stamp: string; eligible: boolean }>()
+    const nextCache: typeof this.forkArchiveMarkerCache = new Map()
+    for (const [id, generation, rowId] of rows) {
+      if (typeof id !== "string") continue
+      const key = threadId + "\u0000" + id
+      const revision = JSON.stringify([rowId, generation, dataVersion])
+      const cached = this.forkArchiveMarkerCache.get(key)
+      if (cached?.revision === revision) {
+        eligibility.set(id, cached)
+        nextCache.set(key, cached)
+        continue
+      }
+      const [encodedType, encodedMetadata] = database.exec(
+        "SELECT type, metadata FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?",
+        [threadId, id]
+      )[0]?.values[0] ?? []
+      const stamp = this.forkArchiveBoundaryStamp(encodedMetadata, generation, rowId, dataVersion)
+      let eligible = true
+      try {
+        const type = typeof encodedType === "string" ? encodedType : "json"
+        if (typeof encodedMetadata === "string" || encodedMetadata instanceof Uint8Array) {
+          const metadata = await this.serde.loadsTyped(type, encodedMetadata) as CheckpointMetadata
+          if (
+            isUserInterruptedForkBoundary(readForkBoundaryMarker(metadata)) &&
+            !readForkDurableTail(metadata)
+          ) {
+            const data = database.exec(
+              "SELECT checkpoint FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?",
+              [threadId, id]
+            )[0]?.values[0]?.[0]
+            if (typeof data === "string" || data instanceof Uint8Array) {
+              const checkpoint = await this.loadRootCheckpointTranscript(threadId, id, type, data)
+              eligible = buildVisibleForkableCheckpointList([{
+                config: { configurable: { thread_id: threadId, checkpoint_ns: "", checkpoint_id: id } },
+                checkpoint,
+                metadata
+              }], { activeRun: false, pendingApproval: false }).length > 0
+            }
+          }
+        }
+        nextCache.set(key, { revision, stamp, eligible })
+      } catch {
+        // Preserve the marker for this write and try to verify it next time.
+      }
+      eligibility.set(id, { stamp, eligible })
+    }
+    this.forkArchiveMarkerCache = nextCache
+    return eligibility
+  }
+
+  private readLegacyForkCheckpointIds(
+    database: NativeSqliteAdapter,
+    threadId: string
+  ): ReadonlySet<string> | undefined {
+    const encoded = database.exec(
+      "SELECT checkpoint_ids FROM checkpoint_legacy_fork_candidates WHERE thread_id = ?",
+      [threadId]
+    )[0]?.values[0]?.[0]
+    return typeof encoded === "string" ? new Set<string>(JSON.parse(encoded)) : undefined
+  }
+
+  async getLegacyForkCheckpointIds(threadId: string): Promise<ReadonlySet<string> | undefined> {
+    await this.initialize()
+    if (!this.db) throw new Error("Database not initialized")
+    return this.readLegacyForkCheckpointIds(this.db, threadId)
+  }
+
+  async captureLegacyForkCheckpointIds(
+    threadId: string,
+    beforeTurnUserId?: string | null,
+    ownsRun: () => boolean = () => true,
+    materialize: (tuples: CheckpointTuple[]) => CheckpointTuple[] = (tuples) => tuples
+  ): Promise<void> {
+    await this.initialize()
+    if (!this.db) throw new Error("Database not initialized")
+    const database = this.db
+    if (this.readLegacyForkCheckpointIds(database, threadId) !== undefined) return
+    const hasMarker = database.exec(
+      `SELECT 1 FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ''
+       AND fork_boundary_marker = 1 LIMIT 1`,
+      [threadId]
+    )[0]?.values.length
+    if (hasMarker) return
+    await this.preserveRootGraphForkReplays(threadId, database)
+
+    const tuples: CheckpointTuple[] = []
+    if (ownsRun()) {
+      const ids = database.exec(
+        `SELECT checkpoint_id FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ''
+         ORDER BY COALESCE(checkpoint_ts, checkpoint_id) DESC, checkpoint_id DESC`,
+        [threadId]
+      )[0]?.values ?? []
+      for (const [id] of ids) {
+        if (!ownsRun()) return
+        if (typeof id !== "string") continue
+        try {
+          const tuple = await this.getTuple({
+            configurable: { thread_id: threadId, checkpoint_ns: "", checkpoint_id: id }
+          })
+          if (
+            tuple &&
+            (beforeTurnUserId === null
+              ? isCompletedLegacyGraphCheckpoint(
+                  tuple.checkpoint, tuple.metadata?.source, (tuple.pendingWrites?.length ?? 0) > 0
+                )
+              : !beforeTurnUserId || isLegacyCheckpointBeforeTurn(tuple.checkpoint, beforeTurnUserId))
+          ) {
+            tuples.push(tuple)
+          }
+        } catch (error) {
+          console.warn("[SqlJsSaver] Could not verify legacy fork checkpoint:", id, error)
+        }
+      }
+    }
+    const checkpointIds = buildVisibleForkableCheckpointList(materialize(tuples), {
+      activeRun: false,
+      pendingApproval: false,
+      legacyFallbackMode: "all"
+    }).map(({ checkpointId }) => checkpointId)
+    if (!ownsRun()) return
+    // Store only forkable snapshots. Unsettled legacy checkpoints must not
+    // compete with them for the archive quota while the first marked run writes.
+    database.run(
+      `INSERT OR IGNORE INTO checkpoint_legacy_fork_candidates (thread_id, checkpoint_ids)
+       SELECT ?, ? WHERE NOT EXISTS (
+         SELECT 1 FROM checkpoints
+         WHERE thread_id = ? AND checkpoint_ns = '' AND fork_boundary_marker = 1
+       )`,
+      [threadId, JSON.stringify(checkpointIds), threadId]
+    )
+  }
+
+  async recordCopiedLegacyForkCheckpointIds(
+    threadId: string,
+    checkpointIds: readonly string[]
+  ): Promise<void> {
+    await this.initialize()
+    if (!this.db) throw new Error("Database not initialized")
+    this.db.run(
+      `INSERT OR IGNORE INTO checkpoint_legacy_fork_candidates (thread_id, checkpoint_ids)
+       VALUES (?, ?)`,
+      [threadId, JSON.stringify(checkpointIds)]
+    )
+  }
+
+  async getForkTurnUserId(threadId: string, checkpointId: string): Promise<string | undefined> {
+    await this.initialize()
+    if (!this.db) throw new Error("Database not initialized")
+    return this.readForkTurnUserId(this.db, threadId, checkpointId)
+  }
+
+  private async readForkTurnUserId(
+    database: NativeSqliteAdapter,
+    threadId: string,
+    checkpointId: string
+  ): Promise<string | undefined> {
+    const readHeader = database.prepare(
+      `SELECT parent_checkpoint_id, type, metadata FROM checkpoints
+       WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?`
+    )
+    let id: string | null = checkpointId
+    try {
+      const visited = new Set<string>()
+      while (id && !visited.has(id) && visited.size < MAX_CHECKPOINT_MESSAGE_SNAPSHOT_DEPTH) {
+        visited.add(id)
+        readHeader.bind([threadId, id])
+        if (!readHeader.step()) return undefined
+        const row = readHeader.getAsObject() as unknown as Pick<
+          CheckpointRow,
+          "parent_checkpoint_id" | "type" | "metadata"
+        >
+        readHeader.reset()
+        const metadata = await this.serde.loadsTyped(row.type ?? "json", row.metadata) as CheckpointMetadata
+        if (id !== checkpointId && readForkBoundaryMarker(metadata)) return undefined
+        if (metadata.source === "input") {
+          const payload = database.exec(
+            "SELECT checkpoint FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?",
+            [threadId, id]
+          )[0]?.values[0]?.[0]
+          if (typeof payload !== "string" && !(payload instanceof Uint8Array)) return undefined
+          const checkpoint = await this.serde.loadsTyped(row.type ?? "json", payload) as Checkpoint
+          if (checkpoint.channel_values.__start__ != null) {
+            return getCheckpointGraphInputUserId(checkpoint)
+          }
+        }
+        id = row.parent_checkpoint_id
+      }
+      return undefined
+    } catch {
+      // The origin is optional fork proof. Older records can be unreadable
+      // even when the checkpoint that the graph will resume is intact.
+      console.warn(`[SqlJsSaver] Cannot read fork turn origin at checkpoint ${id}`)
+      return undefined
+    } finally {
+      readHeader.free()
+    }
+  }
+
+  private forkArchiveBoundaryStamp(
+    metadata: unknown,
+    generation: unknown,
+    rowId: unknown,
+    dataVersion: unknown
+  ): string {
+    const encoded =
+      typeof metadata === "string"
+        ? metadata
+        : metadata instanceof Uint8Array
+          ? Buffer.from(metadata).toString("utf8")
+          : ""
+    // Inline checkpoints have no snapshot generation. `put` replaces the
+    // SQLite row, and data_version detects changes by another connection.
+    return JSON.stringify([generation, rowId, dataVersion, encoded])
+  }
+
+  private async readRootForkArchiveBoundary(
+    threadId: string,
+    database: NativeSqliteAdapter,
+    dataVersion: unknown
+  ): Promise<SqlJsSaver["forkArchiveBoundaryCache"]> {
+    const stmt = database.prepare(
+      `SELECT cp.checkpoint_id, cp.type, cp.metadata, snapshot.generation,
+              COALESCE(cp.checkpoint_ts, cp.checkpoint_id) AS sort_key, cp.rowid AS row_id
+       FROM checkpoints AS cp
+       LEFT JOIN checkpoint_message_snapshots AS snapshot
+         ON snapshot.thread_id = cp.thread_id AND snapshot.checkpoint_ns = cp.checkpoint_ns
+        AND snapshot.checkpoint_id = cp.checkpoint_id
+       WHERE cp.thread_id = ? AND cp.checkpoint_ns = '' AND cp.fork_boundary_marker = 1
+       ORDER BY COALESCE(cp.checkpoint_ts, cp.checkpoint_id), cp.checkpoint_id LIMIT 1`
+    )
+    let row: Pick<CheckpointRow, "checkpoint_id" | "type" | "metadata"> & {
+      generation?: string
+      sort_key: string
+      row_id: number
+    }
+    try {
+      stmt.bind([threadId])
+      if (!stmt.step()) return undefined
+      row = stmt.getAsObject() as typeof row
+    } finally {
+      stmt.free()
+    }
+    const stamp = this.forkArchiveBoundaryStamp(row.metadata, row.generation, row.row_id, dataVersion)
+    const cached = this.forkArchiveBoundaryCache
+    if (
+      cached?.threadId === threadId &&
+      cached.checkpointId === row.checkpoint_id &&
+      cached.stamp === stamp
+    ) {
+      return cached
+    }
+    let excludedLegacyIds: Set<string> | undefined
+    let verifiedLegacyIds: Set<string> | undefined
+    let enrichedMetadata: Uint8Array | undefined
+    try {
+      const type = row.type ?? "json"
+      const metadata = (await this.serde.loadsTyped(type, row.metadata)) as CheckpointMetadata
+      const marker = readForkBoundaryMarker(metadata)
+      const interrupted = isUserInterruptedForkBoundary(marker)
+      let userId: string | undefined
+      if (marker && interrupted) {
+        const data = database.exec(
+          "SELECT checkpoint FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?",
+          [threadId, row.checkpoint_id]
+        )[0]?.values[0]?.[0]
+        if (!(typeof data === "string" || data instanceof Uint8Array)) return undefined
+        const checkpoint = await this.loadRootCheckpointTranscript(
+          threadId,
+          row.checkpoint_id,
+          type,
+          data
+        )
+        const existingUserId = readInterruptedTurnUserId(checkpoint, marker)
+        userId =
+          existingUserId ??
+          readInterruptedTurnUserId(
+            checkpoint,
+            marker,
+            await this.readForkTurnUserId(database, threadId, row.checkpoint_id)
+          )
+        if (userId && !existingUserId) {
+          const [encodedType, encoded] = await this.serde.dumpsTyped({
+            ...metadata,
+            cmb_fork_boundary: { ...marker, turnUserMessageId: userId }
+          })
+          if (encodedType !== type) return undefined
+          enrichedMetadata = encoded
+        }
+      }
+      if (marker) {
+        if (userId) excludedLegacyIds = new Set()
+        verifiedLegacyIds = new Set()
+        const siblings =
+          database.exec(
+            `SELECT cp.checkpoint_id, cp.type, cp.checkpoint, cp.metadata,
+                  EXISTS (SELECT 1 FROM writes WHERE thread_id = cp.thread_id
+                    AND checkpoint_ns = '' AND checkpoint_id = cp.checkpoint_id)
+           FROM checkpoints AS cp
+           WHERE cp.thread_id = ? AND cp.checkpoint_ns = '' AND cp.fork_boundary_marker = 0
+             AND (COALESCE(cp.checkpoint_ts, cp.checkpoint_id), cp.checkpoint_id) < (?, ?)`,
+            [threadId, row.sort_key, row.checkpoint_id]
+          )[0]?.values ?? []
+        for (const [id, type, data, encodedMetadata, hasPendingWrites] of siblings) {
+          if (typeof id !== "string" || !(typeof data === "string" || data instanceof Uint8Array))
+            continue
+          try {
+            const codec = typeof type === "string" ? type : "json"
+            const candidate = await this.loadRootCheckpointTranscript(threadId, id, codec, data)
+            if (typeof encodedMetadata !== "string" && !(encodedMetadata instanceof Uint8Array))
+              continue
+            const candidateMetadata = (await this.serde.loadsTyped(
+              codec,
+              encodedMetadata
+            )) as CheckpointMetadata
+            const pending = hasPendingWrites === 1
+            const verifiedReplay = !!readForkDurableTail(candidateMetadata)
+            if (userId) {
+              if (!isLegacyCheckpointBeforeTurn(candidate, userId)) {
+                excludedLegacyIds?.add(id)
+                continue
+              }
+            } else if (
+              interrupted &&
+              !isCompletedLegacyGraphCheckpoint(candidate, candidateMetadata.source, pending)
+            ) {
+              continue
+            }
+            if (
+              !pending &&
+              (verifiedReplay ||
+                buildVisibleForkableCheckpointList(
+                  [
+                    {
+                      config: {
+                        configurable: { thread_id: threadId, checkpoint_ns: "", checkpoint_id: id }
+                      },
+                      checkpoint: candidate,
+                      metadata: candidateMetadata
+                    }
+                  ],
+                  { activeRun: false, pendingApproval: false, legacyFallbackMode: "all" }
+                ).length > 0)
+            ) {
+              verifiedLegacyIds.add(id)
+            }
+          } catch {
+            // Retention does not discard a checkpoint when its origin is unreadable.
+          }
+        }
+      }
+    } catch (error) {
+      console.warn("[SqlJsSaver] Could not read interrupted turn origin for retention:", error)
+    }
+    const boundary = {
+      threadId,
+      checkpointId: row.checkpoint_id,
+      stamp,
+      excludedLegacyIds,
+      verifiedLegacyIds,
+      enrichedMetadata
+    }
+    this.forkArchiveBoundaryCache = boundary
+    return boundary
+  }
+
+  private async pruneRootCheckpoints(
+    threadId: string,
+    database: NativeSqliteAdapter
+  ): Promise<void> {
     let transactionStarted = false
     try {
+      if (this.maxRootForkBoundaryCheckpoints > 0) {
+        await this.preserveRootGraphForkReplays(threadId, database)
+      }
+      let legacyIds = this.maxRootForkBoundaryCheckpoints > 0
+        ? this.readLegacyForkCheckpointIds(database, threadId)
+        : undefined
+      const dataVersion = this.maxRootForkBoundaryCheckpoints > 0
+        ? database.exec("PRAGMA data_version")[0]?.values[0]?.[0]
+        : undefined
+      const boundary = this.maxRootForkBoundaryCheckpoints > 0 && legacyIds === undefined
+        ? await this.readRootForkArchiveBoundary(threadId, database, dataVersion)
+        : undefined
+      const markerEligibility = this.maxRootForkBoundaryCheckpoints > 0
+        ? await this.readForkArchiveMarkerEligibility(database, threadId, dataVersion)
+        : undefined
       // The retention snapshot and its deletes must share one writer
       // transaction. Otherwise another saver can commit a new checkpoint after
       // keepIds is computed and the stale NOT IN set will delete that new row.
       database.run("BEGIN IMMEDIATE")
       transactionStarted = true
+      const transactionDataVersion = markerEligibility
+        ? database.exec("PRAGMA data_version")[0]?.values[0]?.[0]
+        : undefined
+      if (this.maxRootForkBoundaryCheckpoints > 0 && legacyIds === undefined) {
+        legacyIds = this.readLegacyForkCheckpointIds(database, threadId)
+      }
       const result = database.exec(
         `WITH RECURSIVE snapshot_sizes AS MATERIALIZED (
            SELECT checkpoint_id, parent_checkpoint_id, LENGTH(COALESCE(suffix, '')) AS payload_bytes
@@ -1837,16 +2426,24 @@ export class SqlJsSaver extends BaseCheckpointSaver {
                 checkpoint.fork_boundary_marker,
                 LENGTH(COALESCE(checkpoint.checkpoint, '')) +
                   LENGTH(COALESCE(checkpoint.metadata, '')) +
-                  COALESCE(message_payload.payload_bytes, 0) AS payload_bytes
+                  COALESCE(message_payload.payload_bytes, 0) AS payload_bytes,
+                snapshot.generation,
+                CASE WHEN checkpoint.fork_boundary_marker = 1 THEN checkpoint.metadata END,
+                checkpoint.rowid
          FROM checkpoints AS checkpoint
          LEFT JOIN message_payload
            ON message_payload.root_checkpoint_id = checkpoint.checkpoint_id
+         LEFT JOIN checkpoint_message_snapshots AS snapshot
+           ON snapshot.thread_id = checkpoint.thread_id
+          AND snapshot.checkpoint_ns = checkpoint.checkpoint_ns
+          AND snapshot.checkpoint_id = checkpoint.checkpoint_id
          WHERE checkpoint.thread_id = ? AND checkpoint.checkpoint_ns = ''
          ORDER BY COALESCE(checkpoint.checkpoint_ts, checkpoint.checkpoint_id) DESC,
                   checkpoint.checkpoint_id DESC`,
         [threadId, threadId, threadId]
       )
-      const rows = (result[0]?.values ?? []).map((row) => ({
+      const rawRows = result[0]?.values ?? []
+      const rows = rawRows.map((row) => ({
         checkpoint_id: typeof row[0] === "string" ? row[0] : String(row[0] ?? ""),
         fork_boundary_marker: typeof row[1] === "number" ? row[1] : Number(row[1] ?? 0),
         payload_bytes: typeof row[2] === "number" ? row[2] : Number(row[2] ?? 0)
@@ -1862,14 +2459,55 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         if (row.checkpoint_id) keepIds.add(row.checkpoint_id)
       }
 
-      const hasAnyForkBoundary = rows.some((row) => row.fork_boundary_marker === 1)
-      let seenForkBoundary = false
+      // Use the same boundary as the fork picker, including markers in the live window.
+      // Unmarked rows between explicit markers are not legacy fork points.
+      const oldestMarkerIndex = rows.reduce(
+        (oldestIndex, row, index) => (row.fork_boundary_marker === 1 ? index : oldestIndex),
+        -1
+      )
+      const markerRow = rawRows[oldestMarkerIndex]
+      if (
+        this.maxRootForkBoundaryCheckpoints > 0 && legacyIds === undefined &&
+        (rows[oldestMarkerIndex]?.checkpoint_id !== boundary?.checkpointId ||
+          (boundary && markerRow && boundary.stamp !== this.forkArchiveBoundaryStamp(
+            markerRow[4], markerRow[3], markerRow[5], transactionDataVersion
+          )))
+      ) {
+        // The oldest marker changed while reading its transcript. Retry with
+        // that marker on the next write rather than pruning with stale proof.
+        database.run("ROLLBACK")
+        transactionStarted = false
+        return
+      }
       let archivedCount = 0
       let archivedBytes = 0
 
-      for (const row of rows.slice(this.maxRootCheckpoints)) {
-        const isForkBoundary = row.fork_boundary_marker === 1
-        const isLegacyCandidate = !isForkBoundary && (!hasAnyForkBoundary || seenForkBoundary)
+      const archiveRows = rows.slice(this.maxRootCheckpoints).map((row, offset) => ({
+        row, index: offset + this.maxRootCheckpoints
+      }))
+      if (boundary?.verifiedLegacyIds?.size) {
+        const preferred = (row: RootCheckpointRetentionRow): number =>
+          row.fork_boundary_marker === 1 || boundary.verifiedLegacyIds?.has(row.checkpoint_id) ? 1 : 0
+        archiveRows.sort((a, b) => preferred(b.row) - preferred(a.row))
+      }
+      for (const { row, index } of archiveRows) {
+        const markerStatus = markerEligibility?.get(row.checkpoint_id)
+        const [, , , generation, metadata, rowId] = rawRows[index]
+        if (
+          markerEligibility && row.fork_boundary_marker === 1 &&
+          markerStatus?.stamp !== this.forkArchiveBoundaryStamp(
+            metadata, generation, rowId, transactionDataVersion
+          )
+        ) {
+          this.forkArchiveMarkerCache.delete(threadId + "\u0000" + row.checkpoint_id)
+          database.run("ROLLBACK")
+          transactionStarted = false
+          return
+        }
+        const isForkBoundary = row.fork_boundary_marker === 1 && markerStatus?.eligible !== false
+        const isLegacyCandidate = legacyIds?.has(row.checkpoint_id) ??
+          (row.fork_boundary_marker !== 1 &&
+            index > oldestMarkerIndex && !boundary?.excludedLegacyIds?.has(row.checkpoint_id))
         if (isForkBoundary || isLegacyCandidate) {
           const nextBytes = archivedBytes + Math.max(0, row.payload_bytes)
           if (
@@ -1881,13 +2519,30 @@ export class SqlJsSaver extends BaseCheckpointSaver {
             archivedBytes = nextBytes
           }
         }
-        if (isForkBoundary) seenForkBoundary = true
       }
 
       if (keepIds.size >= rows.length) {
         database.run("COMMIT")
         transactionStarted = false
         return
+      }
+      if (legacyIds === undefined && boundary?.enrichedMetadata && keepIds.has(boundary.checkpointId)) {
+        // Keep the recovered origin before retention drops the linked input.
+        database.run(
+          `UPDATE checkpoints SET metadata = ?
+           WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?`,
+          [boundary.enrichedMetadata, threadId, boundary.checkpointId]
+        )
+      }
+      if (
+        legacyIds === undefined && boundary?.verifiedLegacyIds?.size &&
+        !keepIds.has(boundary.checkpointId)
+      ) {
+        database.run(
+          `INSERT OR IGNORE INTO checkpoint_legacy_fork_candidates (thread_id, checkpoint_ids)
+           VALUES (?, ?)`,
+          [threadId, JSON.stringify([...boundary.verifiedLegacyIds].filter((id) => keepIds.has(id)))]
+        )
       }
       const placeholders = Array.from(keepIds, () => "?").join(", ")
       const params = [threadId, ...keepIds]
@@ -2093,6 +2748,25 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         return undefined
       })
     } finally { releaseLifetime() }
+  }
+
+  async hasCheckpoint(threadId: string, checkpointId: string, checkpointNs = ""): Promise<boolean> {
+    const release = await this.acquireCheckpointNamespace(threadId, checkpointNs)
+    try {
+      await this.initialize()
+      if (!this.db) throw new Error("Database not initialized")
+      const stmt = this.db.prepare(
+        "SELECT 1 FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?"
+      )
+      try {
+        stmt.bind([threadId, checkpointNs, checkpointId])
+        return stmt.step()
+      } finally {
+        stmt.free()
+      }
+    } finally {
+      release()
+    }
   }
 
   async getTuple(config: RunnableConfig): Promise<CheckpointTuple | undefined> {
@@ -3667,7 +4341,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       this.checkpointMessageWriteStates.delete(namespaceKey)
     }
 
-    this.pruneOldCheckpoints(thread_id, checkpoint_ns, database)
+    await this.pruneOldCheckpoints(thread_id, checkpoint_ns, database)
     if (shouldPruneMessageSnapshots) {
       this.pruneUnreachableMessageSnapshots(thread_id, checkpoint_ns, database)
     }
@@ -3809,6 +4483,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       }
       database.run("COMMIT")
       transactionStarted = false
+      this.forkArchiveMarkerCache.delete(row.thread_id + "\u0000" + row.checkpoint_id)
       return nextMetadata
     } catch (error) {
       if (transactionStarted) {
@@ -3938,6 +4613,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     this.db.run(`DELETE FROM writes WHERE thread_id = ?`, [threadId])
     this.db.run(`DELETE FROM checkpoint_message_snapshots WHERE thread_id = ?`, [threadId])
     this.db.run(`DELETE FROM checkpoint_runtime_projections WHERE thread_id = ?`, [threadId])
+    this.db.run(`DELETE FROM checkpoint_legacy_fork_candidates WHERE thread_id = ?`, [threadId])
 
     const cachePrefix = `${threadId}\u0000`
     for (const key of this.checkpointMessageWriteStates.keys()) {

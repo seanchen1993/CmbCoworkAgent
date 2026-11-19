@@ -23,10 +23,13 @@ export function checkpointStorageSchemaNeedsMaintenance(database: NativeSqliteAd
   const tables = new Set((database.exec(`SELECT name FROM sqlite_master WHERE type='table'`)[0]?.values ?? [])
     .map(row => String(row[0])))
   if (!["checkpoints", "writes", "checkpoint_message_snapshots", "checkpoint_runtime_projections",
-    "checkpoint_schema_migrations"].every(name => tables.has(name))) return true
+    "checkpoint_schema_migrations", "checkpoint_legacy_fork_candidates"]
+    .every(name => tables.has(name))) return true
   const columns = new Set((database.exec("PRAGMA table_info(checkpoints)")[0]?.values ?? [])
     .map(row => String(row[1])))
   if (!columns.has("checkpoint_ts") || !columns.has("fork_boundary_marker")) return true
+  if (!database.exec("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_checkpoints_fork_scan'")[0]?.values.length)
+    return true
   const markers = database.exec("SELECT migration_id FROM checkpoint_schema_migrations")[0]?.values ?? []
   const applied = new Set(markers.map(row => row[0]))
   if (![CHECKPOINT_SCHEMA_MIGRATION_ID, MESSAGE_SNAPSHOT_GENERATION_MIGRATION,
@@ -41,6 +44,15 @@ export function checkpointStorageMaintenanceBytes(database: NativeSqliteAdapter)
     (SELECT COALESCE(SUM(length(CAST(checkpoint AS BLOB))),0) FROM checkpoints) +
     (SELECT COALESCE(SUM(length(CAST(suffix AS BLOB))),0) FROM checkpoint_message_snapshots)`)
   return Number(rows[0]?.values[0]?.[0] ?? 0)
+}
+
+function ensureLegacyForkSchema(database: NativeSqliteAdapter): void {
+  database.run(`CREATE TABLE IF NOT EXISTS checkpoint_legacy_fork_candidates (
+    thread_id TEXT PRIMARY KEY NOT NULL,
+    checkpoint_ids TEXT NOT NULL
+  )`)
+  database.run(`CREATE INDEX IF NOT EXISTS idx_checkpoints_fork_scan
+    ON checkpoints (thread_id, checkpoint_ns, fork_boundary_marker, checkpoint_id, parent_checkpoint_id)`)
 }
 
 export function applyCheckpointStorageSchemaMaintenance(database: NativeSqliteAdapter,
@@ -64,6 +76,7 @@ export function applyCheckpointStorageSchemaMaintenance(database: NativeSqliteAd
         migrationStarted = false
         ensureMessageSnapshotGeneration(database)
         ensureCheckpointTimestamps(database)
+        ensureLegacyForkSchema(database)
         return
       }
 
@@ -125,6 +138,7 @@ export function applyCheckpointStorageSchemaMaintenance(database: NativeSqliteAd
   }
   ensureMessageSnapshotGeneration(database)
   ensureCheckpointTimestamps(database)
+  ensureLegacyForkSchema(database)
 }
 
 /** The same base layout is published by inline empty setup and the dedicated cold worker. */

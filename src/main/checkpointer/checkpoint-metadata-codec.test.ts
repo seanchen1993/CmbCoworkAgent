@@ -2,7 +2,8 @@ import { DatabaseSync } from "node:sqlite"
 import { afterEach, expect, it, vi } from "vitest"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { prepareCheckpointMetadataBackfill } from "./checkpoint-metadata-codec"
-import { publishCheckpointStorageSchema, applyCheckpointStorageSchemaMaintenance }
+import { publishCheckpointStorageSchema, applyCheckpointStorageSchemaMaintenance,
+  checkpointStorageSchemaNeedsMaintenance }
   from "./checkpoint-storage-schema"
 
 const databases: NativeSqliteAdapter[] = []
@@ -19,6 +20,20 @@ const codec = {
   async dumpsTyped(): Promise<[string, Uint8Array]> { throw Error("unused") },
   async loadsTyped() { return { cmb_fork_boundary: { stable: true } } }
 }
+
+it("adds the fork scan index and candidate table to an otherwise upgraded checkpoint database", () => {
+  const db = fixture("original")
+  applyCheckpointStorageSchemaMaintenance(db, [])
+  db.run("DROP INDEX idx_checkpoints_fork_scan")
+  db.run("DROP TABLE checkpoint_legacy_fork_candidates")
+  expect(checkpointStorageSchemaNeedsMaintenance(db)).toBe(true)
+
+  applyCheckpointStorageSchemaMaintenance(db, [])
+
+  expect(checkpointStorageSchemaNeedsMaintenance(db)).toBe(false)
+  expect(db.exec("SELECT metadata FROM checkpoints INDEXED BY idx_checkpoints_fork_scan")[0].values)
+    .toEqual([["original"]])
+})
 
 it("retains only fixed metadata descriptors and preserves the original encoded body", async () => {
   const payload = "encoded:" + "x".repeat(2 * 1024 * 1024), db = fixture(payload)
