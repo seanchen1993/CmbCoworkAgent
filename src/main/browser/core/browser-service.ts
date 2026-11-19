@@ -187,6 +187,7 @@ interface BrowserSession {
   consoleEntries: BrowserConsoleEntry[]
   nextConsoleEntryId: number
   viewportRevision: number
+  viewportId: string | null
   userZoomFactor: number
   deviceScaleFactor: number
   deviceViewport: BrowserDeviceViewport | null
@@ -567,6 +568,10 @@ export class BrowserService {
 
     const existingSession = this.activeSession
     const session = this.ensureActiveSession(sessionId, options.workspacePath)
+    if (options.viewportId && options.viewportId !== session.viewportId) {
+      session.viewportId = options.viewportId
+      session.viewportRevision = 0
+    }
     if (!session.isAttached) {
       window.contentView.addChildView(session.view)
       session.isAttached = true
@@ -753,6 +758,9 @@ export class BrowserService {
   async setViewport(update: BrowserViewportUpdate): Promise<BrowserState> {
     const session = this.getActiveSession()
     if (!session || !Number.isSafeInteger(update.revision)) return this.getState()
+    // A hidden/unmounted BrowserPanel can still have an IPC update in flight. Do not
+    // let it overwrite the bounds of the panel that replaced it.
+    if (update.viewportId !== session.viewportId) return this.getState()
     if (update.revision <= session.viewportRevision) return this.getState()
     session.viewportRevision = update.revision
     this.setBounds(update.bounds, update.visible, false)
@@ -1052,6 +1060,7 @@ export class BrowserService {
       consoleEntries: [],
       nextConsoleEntryId: 1,
       viewportRevision: 0,
+      viewportId: null,
       userZoomFactor: 1,
       deviceScaleFactor: 1,
       deviceViewport: null

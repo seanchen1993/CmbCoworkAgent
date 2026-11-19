@@ -271,6 +271,7 @@ export function BrowserPanel({
   const lastBrowserViewVisibleRef = useRef<boolean | null>(null)
   const lastDeviceMetricsRef = useRef("")
   const boundsSyncRevisionRef = useRef(0)
+  const viewportIdRef = useRef(crypto.randomUUID())
   const hasVisibleBoundsRef = useRef(false)
   const isSessionCreatedRef = useRef(false)
   const isInitialBrowserPageRef = useRef(true)
@@ -361,6 +362,7 @@ export function BrowserPanel({
     const revision = ++boundsSyncRevisionRef.current
     void window.api.browser
       .setViewport({
+        viewportId: viewportIdRef.current,
         revision,
         bounds: lastBoundsRef.current,
         visible: lastBrowserViewVisibleRef.current ?? false,
@@ -516,7 +518,7 @@ export function BrowserPanel({
     if (layoutVisible) hasVisibleBoundsRef.current = true
     const revision = ++boundsSyncRevisionRef.current
     void window.api.browser
-      .setViewport({ revision, bounds, visible, metrics })
+      .setViewport({ viewportId: viewportIdRef.current, revision, bounds, visible, metrics })
       .then((nextState) => {
         if (revision !== boundsSyncRevisionRef.current) return
         applyBrowserState(nextState)
@@ -549,7 +551,7 @@ export function BrowserPanel({
     }
 
     window.api.browser
-      .attach({ workspacePath, visible: false })
+      .attach({ workspacePath, visible: false, viewportId: viewportIdRef.current })
       .then((nextState) => {
         if (cancelled) return
         applyBrowserState(nextState)

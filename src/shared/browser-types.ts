@@ -17,6 +17,8 @@ export interface BrowserRecordingEnvironment {
 }
 
 export interface BrowserViewportUpdate {
+  /** Identifies the mounted panel that owns this viewport update. */
+  viewportId: string
   revision: number
   bounds: BrowserBounds
   visible: boolean
@@ -118,6 +120,8 @@ export interface BrowserNavigateOptions {
 export interface BrowserAttachOptions extends BrowserNavigateOptions {
   initialUrl?: string | null
   visible?: boolean
+  /** Replaces the previous mounted panel as the owner of viewport updates. */
+  viewportId?: string
 }
 
 export interface BrowserScreenshotResult {
