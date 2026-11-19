@@ -10,7 +10,11 @@ import { join, resolve } from "node:path"
 import { _electron, type ElectronApplication } from "playwright"
 import type { WebContents } from "electron"
 import recorded from "./fixtures/reused-provider-live-stream.json"
-import { createStreamDataSerializer } from "../src/main/ipc/stream-data-serialization"
+import { projectDisplayMessageId } from "../src/main/display-message-identity"
+import {
+  createStreamDataSerializer,
+  sanitizeCoordinatorWorkerStreamDataForRenderer
+} from "../src/main/ipc/stream-data-serialization"
 import { STREAM_MESSAGE_CONTENT_MODE_KEY } from "../src/shared/stream-message-wire-mode"
 
 interface Fixture {
@@ -39,8 +43,21 @@ const artifacts = resolve(root, process.env.TEAM_OUTPUT_ARTIFACT_DIR || "output/
 mkdirSync(artifacts, { recursive: true })
 const title = "Agent Team output regression"
 const draft = "Earlier draft moved to final answer. ".repeat(4).trim()
-function wire(content: string, id: string, kind = "AIMessage") {
+function wire(content: string, id: string | undefined, kind = "AIMessage") {
   return { id: ["langchain_core", "messages", kind], kwargs: { id, content } }
+}
+function providerWire(content: string, id: string | undefined, sourceId = "team-e2e-provider") {
+  const message = wire(content, id)
+  return {
+    ...message,
+    kwargs: {
+      ...message.kwargs,
+      additional_kwargs: {
+        cmb_internal_provider_source_id: sourceId,
+        cmb_internal_provider_occurrence: 1
+      }
+    }
+  }
 }
 function frame(prefix: string, count = 40) {
   return [
@@ -50,7 +67,7 @@ function frame(prefix: string, count = 40) {
     )
   ]
 }
-function toolFrame(corrected = false) {
+function toolFrame(corrected = false, callId = "read-call") {
   return [
     wire("Tool request", "tool-user", "HumanMessage"),
     {
@@ -58,7 +75,7 @@ function toolFrame(corrected = false) {
       kwargs: {
         id: "tool-call",
         content: corrected ? "Tool draft fixed" : draft,
-        tool_calls: [{ id: "read-call", name: "read_file", args: { path: "file.txt" } }]
+        tool_calls: [{ id: callId, name: "read_file", args: { path: "file.txt" } }]
       }
     },
     {
@@ -66,12 +83,28 @@ function toolFrame(corrected = false) {
       kwargs: {
         id: "tool-result",
         content: "Tool result",
-        tool_call_id: "read-call",
+        tool_call_id: callId,
         name: "read_file"
       }
     },
     wire("Worker tool final", "tool-final")
   ]
+}
+function identifiedToolFrame(callId: string, corrected = false) {
+  return toolFrame(corrected, callId).map((message, index) =>
+    index === 0
+      ? message
+      : {
+          ...message,
+          kwargs: {
+            ...message.kwargs,
+            additional_kwargs: {
+              cmb_internal_provider_source_id: message.kwargs.id,
+              cmb_internal_provider_occurrence: 1
+            }
+          }
+        }
+  )
 }
 async function until(check: () => Promise<boolean>, label: string) {
   const deadline = Date.now() + 20_000
@@ -106,6 +139,7 @@ async function main() {
   let app: ElectronApplication | undefined
   const results: string[] = []
   const errors: string[] = []
+  const longCallId = "long-" + "x".repeat(300)
   const packaged = process.env.TEAM_OUTPUT_PACKAGED_EXE
   try {
     app = await _electron.launch({
@@ -172,7 +206,13 @@ async function main() {
           }
         }
       },
-      [frame("A"), toolFrame()]
+      [
+        frame("A"),
+        toolFrame(),
+        identifiedToolFrame(projectDisplayMessageId(longCallId, "tool-call")),
+        toolFrame(false, projectDisplayMessageId(longCallId, "tool-call")),
+        identifiedToolFrame("alias-read")
+      ]
     )
     await page.waitForFunction(() =>
       Boolean(
@@ -199,7 +239,7 @@ async function main() {
     await app.evaluate((_electron, id) => {
       const state = (globalThis as unknown as MainGlobal).teamFixture
       state.threadId = id
-      state.workers = [0, 1].map((i) => ({
+      state.workers = state.history.map((_, i) => ({
         worker_id: `worker-${i}`,
         worker_thread_id: `${id}__worker__${i}`,
         parent_thread_id: id,
@@ -274,13 +314,23 @@ async function main() {
         )
       }, event)
     }
-    const send = async (messages: unknown[]) =>
-      emit({
+    const send = async (messages: unknown[]) => {
+      const { data, valuesMessageIndexOffset, valuesSnapshotKind } = serialize("values", {
+        messages
+      })
+      await emit({
         type: "stream",
         mode: "values",
         workerTurn: 1,
-        ...serialize("values", { messages })
+        valuesSnapshotKind,
+        data: sanitizeCoordinatorWorkerStreamDataForRenderer(
+          "values",
+          data,
+          valuesMessageIndexOffset
+        )
       })
+      return valuesSnapshotKind
+    }
     await send(frame("A"))
     assert.equal(await rows.count(), 41)
     const corrected = frame("A")
@@ -299,10 +349,25 @@ async function main() {
     await send(corrected)
     await page.getByText("Tail fixed", { exact: true }).waitFor()
     results.push("tail values correction remains visible over longer checkpoint text")
+
+    const sharedPrefix = corrected.slice(0, -1)
+    await send([...sharedPrefix, providerWire("Team alias initial", "row-39")])
+    await page.getByText("Team alias initial", { exact: true }).waitFor()
+    const latestAlias = providerWire("Team alias corrected", "late-alias")
+    await send([...sharedPrefix, providerWire("Team alias initial", "early-alias"), latestAlias])
+    await page.getByText("Team alias corrected", { exact: true }).waitFor()
+    assert.equal(await rows.count(), 41)
+    assert.equal(await page.getByText("Team alias initial", { exact: true }).count(), 0)
+    results.push("worker aliases update one visible row across serialized live frames")
+    const saved = [
+      ...sharedPrefix,
+      providerWire("Team checkpoint alias draft", "checkpoint-a"),
+      providerWire("Team alias corrected", "checkpoint-b")
+    ]
     await app.evaluate((_electron, corrected) => {
       const state = (globalThis as unknown as MainGlobal).teamFixture
       state.history[0] = corrected
-    }, corrected)
+    }, saved)
     await page.getByRole("button", { name: "返回", exact: true }).click()
     await open(1)
     assert.equal(await rows.filter({ hasText: "Corrected" }).count(), 0)
@@ -346,6 +411,106 @@ async function main() {
     assert.equal(await rows.filter({ hasText: "Worker tool final" }).count(), 0)
     assert.equal(await page.getByText("Active second answer", { exact: true }).count(), 1)
     results.push("late previous-turn clear and delta update one slot without duplicating messages")
+
+    await page.getByRole("button", { name: "返回", exact: true }).click()
+    await open(2)
+    const appendedLongCall = identifiedToolFrame(longCallId, true)
+    await send(appendedLongCall.slice(0, 2))
+    const toolRow = rows.filter({ hasText: "Tool draft fixed" })
+    // The live frame has not reached the result. Its request must use the
+    // completed checkpoint result rather than changing the card to interrupted.
+    await toolRow.getByText("OK", { exact: true }).waitFor()
+    await toolRow.getByRole("button", { name: "读取文件: file.txt", exact: true }).click()
+    await toolRow.getByText("Tool result", { exact: true }).waitFor()
+    appendedLongCall[2].kwargs.content = "Appended long tool result"
+    assert.equal(await send(appendedLongCall), "append")
+    await toolRow.getByText("Appended long tool result", { exact: true }).waitFor()
+    const completeLongCall = identifiedToolFrame(longCallId, true)
+    completeLongCall[2].kwargs.content = "Corrected long tool result"
+    assert.equal(await send(completeLongCall), "full")
+    await toolRow.getByText("Corrected long tool result", { exact: true }).waitFor()
+    assert.equal(await toolRow.getByText("Appended long tool result", { exact: true }).count(), 0)
+    assert.equal(await rows.count(), 3)
+    results.push("long tool IDs keep checkpoint, append, and full live results on the same card")
+
+    await page.getByRole("button", { name: "返回", exact: true }).click()
+    await open(4)
+    const [prompt, call, toolResult, answer] = identifiedToolFrame("alias-read", true)
+    const sparseCall = {
+      ...call,
+      kwargs: {
+        ...call.kwargs,
+        id: "sparse-call-alias",
+        content: "Sparse call correction",
+        tool_calls: []
+      }
+    }
+    await send([prompt, call, sparseCall, toolResult, answer])
+    const sparseRow = rows.filter({ hasText: "Sparse call correction" })
+    await sparseRow.getByText("OK", { exact: true }).waitFor()
+    if (!(await sparseRow.getByText("Tool result", { exact: true }).isVisible())) {
+      await sparseRow.getByRole("button", { name: "读取文件: file.txt", exact: true }).click()
+    }
+    await sparseRow.getByText("Tool result", { exact: true }).waitFor()
+    assert.equal(await rows.count(), 3)
+    results.push("a sparse ToolCall alias preserves the already executed tool result")
+
+    await emit({
+      type: "stream",
+      mode: "messages",
+      workerTurn: 1,
+      data: [{ ...toolResult, kwargs: { ...toolResult.kwargs, id: "replayed-tool-result" } }, {}]
+    })
+    await emit({
+      type: "stream",
+      mode: "messages",
+      workerTurn: 1,
+      data: [
+        wire(" continues", answer.kwargs.id, "AIMessageChunk"),
+        { [STREAM_MESSAGE_CONTENT_MODE_KEY]: "delta" }
+      ]
+    })
+    await page.getByText("Worker tool final continues", { exact: true }).waitFor()
+    assert.equal(await rows.count(), 3)
+    results.push("a replayed ToolMessage preserves the active reply across a subsequent delta")
+
+    await emit({
+      type: "stream",
+      mode: "messages",
+      workerTurn: 1,
+      data: [
+        {
+          ...toolResult,
+          kwargs: { ...toolResult.kwargs, id: "corrected-tool-result", content: "Corrected output" }
+        },
+        {}
+      ]
+    })
+    await sparseRow.getByText("Corrected output", { exact: true }).waitFor()
+    await emit({
+      type: "stream",
+      mode: "messages",
+      workerTurn: 1,
+      data: [
+        wire(" after correction", answer.kwargs.id, "AIMessageChunk"),
+        { [STREAM_MESSAGE_CONTENT_MODE_KEY]: "delta" }
+      ]
+    })
+    await page.getByText("Worker tool final continues after correction", { exact: true }).waitFor()
+    assert.equal(await rows.count(), 3)
+    results.push("a tool result correction updates the card while the same reply keeps streaming")
+
+    await page.getByRole("button", { name: "返回", exact: true }).click()
+    await open(3)
+    const legacyLongCall = toolFrame(true, longCallId)
+    await send(legacyLongCall.slice(0, 2))
+    await toolRow.getByText("OK", { exact: true }).waitFor()
+    assert.equal(await send(legacyLongCall), "append")
+    await toolRow.getByRole("button", { name: "读取文件: file.txt", exact: true }).click()
+    await toolRow.getByText("Tool result", { exact: true }).waitFor()
+    assert.equal(await rows.count(), 3)
+    results.push("legacy append with a long ID reuses the checkpoint result")
+
     await page.getByRole("button", { name: "返回", exact: true }).click()
     await page
       .getByRole("button", { name: /打开工具流/ })
@@ -380,8 +545,39 @@ async function main() {
       .nth(0)
       .click()
     await page.getByText("Corrected", { exact: true }).waitFor()
+    await page.getByText("Team alias corrected", { exact: true }).waitFor()
+    assert.equal(await page.getByText("Team checkpoint alias draft", { exact: true }).count(), 0)
     assert.equal(await rows.count(), 41)
     results.push("completed worker reload reads corrected checkpoint once")
+    const identicalProse = "Both independent worker messages share this answer"
+    await app.evaluate(
+      (_electron, checkpointMessage) => {
+        const state = (globalThis as unknown as MainGlobal).teamFixture
+        state.history[0].push(checkpointMessage)
+      },
+      providerWire(identicalProse, undefined, "saved-independent-message")
+    )
+    await page.getByRole("button", { name: "返回", exact: true }).click()
+    await page
+      .getByRole("button", { name: /打开工具流/ })
+      .nth(0)
+      .click()
+    await page.getByText(identicalProse, { exact: true }).waitFor()
+    await send([
+      providerWire(identicalProse, "live-independent-message", "live-independent-source")
+    ])
+    await until(
+      () =>
+        rows
+          .filter({ hasText: identicalProse })
+          .count()
+          .then((count) => count === 2),
+      "same prose from distinct explicit checkpoint and live identities"
+    )
+    assert.equal(await rows.count(), 43)
+    results.push(
+      "idless checkpoint and live rows with the same prose preserve both explicit identities"
+    )
     await page.screenshot({ path: join(artifacts, "team-worker-fixed.png") })
     assert.deepEqual(errors, [])
     const result = { results, errors, stressMs, packaged: Boolean(packaged) }

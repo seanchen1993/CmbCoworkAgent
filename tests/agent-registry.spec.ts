@@ -833,10 +833,7 @@ function testStripCustomModelPrefix(): void {
 }
 
 function testExecuteAvailabilityGatesBackgroundExecPrompt(): void {
-  // The runtime omits the background-exec (build/install/test) guidance for any
-  // runtime whose execute tool is removed. The predicate is
-  // `!blockedToolNamesForAccess(access).has("execute")`. Lock which accesses
-  // remove execute (→ no guidance) vs keep it (→ guidance retained).
+  // Background-exec guidance requires both the execute and result tools.
   const removesExecute = (access: Parameters<typeof blockedToolNamesForAccess>[0]): boolean =>
     blockedToolNamesForAccess(access).has("execute")
 
@@ -855,14 +852,24 @@ function testExecuteAvailabilityGatesBackgroundExecPrompt(): void {
     !removesExecute({ workload: "write", ownedFiles: [], workspacePath: "/tmp/ws" }),
     "whole-workspace write worker keeps execute"
   )
+  for (const denied of ["task_output", "monitor"]) {
+    const blocked = blockedToolNamesForAccess({ disallowedTools: [denied], shellAccess: "full" })
+    assert(
+      blocked.has("monitor") && blocked.has("task_output") && !blocked.has("execute"),
+      `registry denies both result tools for ${denied} and keeps foreground execute`
+    )
+  }
 
   // Wiring: the runtime derives executeToolAvailable from blockedToolNamesForAccess
   // and forwards it to getSystemPrompt, which gates the section on the flag.
   assert(
     RUNTIME_SRC.includes("const executeToolAvailable =") &&
       RUNTIME_SRC.includes('!runtimeBlockedToolNames.has("execute")') &&
-      RUNTIME_SRC.includes('blockedToolNamesForAccess(options.filesystemAccess).has("execute")'),
-    "runtime computes execute availability from the access policy"
+      RUNTIME_SRC.includes('!runtimeBlockedToolNames.has("monitor")') &&
+      RUNTIME_SRC.includes("blockedToolNamesForAccess(options.filesystemAccess)") &&
+      RUNTIME_SRC.includes('!blockedFilesystemTools?.has("execute")') &&
+      RUNTIME_SRC.includes('!blockedFilesystemTools?.has("monitor")'),
+    "runtime computes background-exec availability from both tool permissions"
   )
   assert(
     RUNTIME_SRC.includes("executeToolAvailable && !isReadOnlyRuntime"),
@@ -1474,7 +1481,7 @@ function testReadOnlyShellGate(): void {
   // what turns on the post-hook gate for them. LocalSandbox ORs the context with
   // the instance flag.
   assert(
-    RUNTIME_SRC.includes("readOnlyShellExecutionContext.run(true, () => handler(request))"),
+    RUNTIME_SRC.includes("readOnlyShellExecutionContext.run(true, runExecute)"),
     "task read-only guard runs execute inside the read-only execution context"
   )
   assert(
@@ -1946,6 +1953,7 @@ function testAllowlistBlocksNonFsSideEffectTools(): void {
   const ws2 = makeWorkspace({
     "nob.md": `---\nname: nob\ntools: Read, Grep\n---\nbody`,
     "den.md": `---\nname: den\ntools: Read, Bash\ndisallowedTools: task_output\n---\nbody`,
+    "den-monitor.md": `---\nname: den-monitor\ntools: Read, Bash\ndisallowedTools: monitor\n---\nbody`,
     "qb.md": `---\nname: qb\ntools: Read, Bash(git:*)\n---\nbody`
   })
   try {
@@ -1959,6 +1967,11 @@ function testAllowlistBlocksNonFsSideEffectTools(): void {
     assert(
       den.disallowedTools.includes("task_output"),
       "explicit disallowedTools: task_output wins over the execute→task_output grant"
+    )
+    const denMonitor = profs.find((p) => p.name === "den-monitor")!
+    assert(
+      denMonitor.disallowedTools.includes("task_output"),
+      "explicit disallowedTools: monitor names the same tool family"
     )
     const qb = profs.find((p) => p.name === "qb")!
     assert(

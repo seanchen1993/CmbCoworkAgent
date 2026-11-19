@@ -11,7 +11,7 @@ import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { _electron, type ElectronApplication } from "playwright"
-import { AIMessage } from "@langchain/core/messages"
+import { AIMessage, HumanMessage } from "@langchain/core/messages"
 import { serializeWorkflowAgentSnapshotMessages } from "../src/main/agent/workflow/agent-snapshot"
 
 interface Fixture {
@@ -293,8 +293,60 @@ async function main(): Promise<void> {
 
     await send(corrected)
     await page.getByText("Corrected earlier answer", { exact: true }).waitFor()
-    const terminal = JSON.parse(JSON.stringify(corrected)) as typeof corrected
-    terminal[0].kwargs.content = "Authoritative completed answer"
+    const providerMessage = (id: string, content: string) =>
+      new AIMessage({
+        id,
+        content,
+        additional_kwargs: {
+          cmb_internal_provider_source_id: "workflow-e2e-provider",
+          cmb_internal_provider_occurrence: 1
+        }
+      })
+    const withAliases = (draftId: string, finalId: string, content: string) => [
+      ...serializeWorkflowAgentSnapshotMessages({
+        messages: [
+          providerMessage(draftId, "Earlier workflow alias draft"),
+          providerMessage(finalId, content)
+        ]
+      })!,
+      ...corrected.slice(1)
+    ]
+    await send(withAliases("first-alias", "second-alias", "Live workflow alias"))
+    const liveAlias = rows.filter({ hasText: "Live workflow alias" })
+    await liveAlias.waitFor()
+    const aliasId = await liveAlias.getAttribute("data-workflow-agent-stream-message-id")
+    assert.equal(await rows.count(), 40)
+    assert.equal(await rows.filter({ hasText: "Earlier workflow alias draft" }).count(), 0)
+    await send(withAliases("second-alias", "first-alias", "Reordered workflow alias"))
+    const reorderedAlias = rows.filter({ hasText: "Reordered workflow alias" })
+    await reorderedAlias.waitFor()
+    assert.equal(
+      await reorderedAlias.getAttribute("data-workflow-agent-stream-message-id"),
+      aliasId
+    )
+    results.push("live workflow aliases retain one row and stable identity when reordered")
+
+    const retryFrame = serializeWorkflowAgentSnapshotMessages({
+      messages: [
+        new HumanMessage({ id: "initial-prompt", content: "Start workflow" }),
+        providerMessage("turn-one", "First workflow reply"),
+        new HumanMessage({ id: "structured-retry", content: "Submit structured output" }),
+        providerMessage("turn-two", "Second workflow reply")
+      ]
+    })!
+    await send(retryFrame)
+    const firstReply = rows.filter({ hasText: "First workflow reply" })
+    const secondReply = rows.filter({ hasText: "Second workflow reply" })
+    await firstReply.waitFor()
+    await secondReply.waitFor()
+    assert.equal(await rows.count(), 4)
+    assert.notEqual(
+      await firstReply.getAttribute("data-workflow-agent-stream-message-id"),
+      await secondReply.getAttribute("data-workflow-agent-stream-message-id")
+    )
+    results.push("workflow replies with the same provider tuple remain distinct after a retry turn")
+
+    const terminal = withAliases("sidecar-a", "sidecar-b", "Authoritative completed answer")
     writeFileSync(sidecars[0], JSON.stringify({ snapshotMessages: terminal }))
     await app.evaluate(
       ({ BrowserWindow }, finished) => {
@@ -320,11 +372,18 @@ async function main(): Promise<void> {
       }
     )
     await page.getByText("Authoritative completed answer", { exact: true }).waitFor()
+    assert.equal(
+      await rows
+        .filter({ hasText: "Authoritative completed answer" })
+        .getAttribute("data-workflow-agent-stream-message-id"),
+      aliasId
+    )
     assert.equal(await rows.filter({ hasText: "A response 0" }).count(), 1)
     await page.reload({ waitUntil: "domcontentloaded" })
     await page.getByText(title, { exact: true }).first().click()
     await open(0)
     await page.getByText("Authoritative completed answer", { exact: true }).waitFor()
+    assert.equal(await rows.filter({ hasText: "Earlier workflow alias draft" }).count(), 0)
     assert.equal(await rows.count(), 40)
     results.push(
       "completion and renderer reload read the authoritative sidecar without duplicated rows"
