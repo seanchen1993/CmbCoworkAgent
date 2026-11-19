@@ -1,3 +1,4 @@
+import { ProjectPluginDevelopmentGuide } from "@/components/customize/ProjectPluginDevelopmentGuide"
 import { canReadPluginSource } from "../../../../shared/market-source-access"
 import type { ManagedRunModelSelection } from "../../../../shared/managed-run-model"
 import { RepositoryBranchHint, RepositoryPathsField } from "./RepositoryPathField"
@@ -3050,6 +3051,10 @@ function ProjectFormDialog({
                   <span className="text-status-warning">{selectedAdapterMessage}</span>
                 )}
               </label>
+              <ProjectPluginDevelopmentGuide
+                entry="project"
+                disabled={creating || workspaceValidating}
+              />
               <KnowledgeBaseSelector
                 items={knowledgeBases?.knowledgeBases ?? []}
                 selectedIds={form.knowledgeBaseIds ?? []}
@@ -3282,6 +3287,7 @@ function ProjectEditDialog({
                   <span className="text-status-warning">{selectedAdapterMessage}</span>
                 )}
               </label>
+              <ProjectPluginDevelopmentGuide entry="project" disabled={saving} />
               <KnowledgeBaseSelector
                 items={knowledgeBases?.knowledgeBases ?? []}
                 selectedIds={form.knowledgeBaseIds ?? []}

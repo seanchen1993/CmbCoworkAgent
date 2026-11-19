@@ -145,7 +145,6 @@ import {
 } from "./ChatSearchOverlay"
 import { chatScrollSessionStore, type ChatScrollSessionAnchor } from "./chat-scroll-session-store"
 import { WelcomeSkills } from "./WelcomeSkills"
-import { ProjectPluginSkillShortcut } from "./ProjectPluginSkillShortcut"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
 import { AgentGitCommitDialog, type AgentCommitOutcome } from "./AgentGitCommitDialog"
@@ -8331,23 +8330,6 @@ export function ChatContainer({
             >
               <GitChangeNotice threadId={threadId} />
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
-                {surface === "default" && !harnessFeatureBinding && !readOnly && (
-                  <ProjectPluginSkillShortcut
-                    threadId={threadId}
-                    disabled={historyLoading || effectiveComposerControlsDisabled}
-                    requiresReplacement={(skill) =>
-                      selectedBuiltinBrowser ||
-                      (selectedSkill !== null && selectedSkill.path !== skill.path)
-                    }
-                    selectSkill={(skill) => {
-                      setSelectedSkill(skill)
-                      setSelectedBuiltinBrowser(false)
-                      slashResetSelection()
-                      requestAnimationFrame(() => inputRef.current?.focus())
-                    }}
-                    openSkillSettings={() => setShowCustomizeView(true, "skills")}
-                  />
-                )}
                 <ChatScrollToBottomButton
                   visible={chatScrollUiState.mode === "detached"}
                   hasUnread={chatScrollUiState.hasUnread}

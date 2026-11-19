@@ -8,6 +8,7 @@ import { _electron } from "playwright"
 
 interface ShortcutFixture {
   selectThread: (threadId: string) => void
+  openView: (view: string) => void
   hasPendingInstall: () => boolean
   finishInstall: () => void
   clearInstalled: () => void
@@ -42,10 +43,14 @@ async function main(): Promise<void> {
             path: "fixture-store",
             namespace: "shortcut-fixture"
           }))
-          builder.onLoad({ filter: /.*/, namespace: "shortcut-fixture" }, () => ({
+          builder.onLoad({ filter: /^fixture-store$/, namespace: "shortcut-fixture" }, () => ({
             contents: `
             import { create } from "zustand"
-            export const useAppStore = create(() => ({
+            export const useAppStore = create((set) => ({
+              bumpPluginVersion: () => {},
+              setShowCustomizeView: (show, tab) => { if (show) set({mainView: tab}) },
+              selectThread: (threadId) => set({currentThreadId: threadId, mainView: "thread"}),
+              setMainView: (mainView) => set({mainView}),
               accountRevision: 0,
               currentThreadId: null,
               mainView: "thread",
@@ -79,10 +84,32 @@ async function main(): Promise<void> {
     page.setDefaultTimeout(10_000)
     page.on("pageerror", (error) => console.error(error))
     await page.addScriptTag({ content: bundle.outputFiles[0].text })
-    const shortcut = page.getByRole("button", { name: "开发项目模式插件" })
+    const development = page.getByRole("button", { name: "开发项目模式插件", exact: true })
+    const draft = page.getByRole("textbox", { name: "消息草稿" })
     const copy = page.getByRole("button", { name: "复制导航配置" })
-    await copy.waitFor()
-    await shortcut.waitFor({ state: "hidden" })
+    const startDevelopment = page.getByRole("button", { name: "开始开发", exact: true })
+    const guide = page.getByRole("dialog", { name: "开发项目模式插件" })
+    const install = guide.getByRole("button", { name: "安装技能" })
+    const original = "继续这个会话的草稿 @spec.md"
+    await draft.fill(original)
+    await page.getByLabel("草稿附件").setInputFiles({
+      name: "spec.md",
+      mimeType: "text/markdown",
+      buffer: Buffer.from("# specification")
+    })
+    await page.evaluate(() => window.shortcutFixture.openView("plugins"))
+    await development.waitFor({ state: "hidden" })
+    await page.evaluate(() => {
+      window.shortcutFixture.publish(true)
+      window.shortcutFixture.loadCatalog()
+    })
+    await development.waitFor()
+
+    await page.evaluate(() => window.shortcutFixture.selectThread("new"))
+    await development.waitFor({ state: "hidden" })
+    assert.equal(await draft.inputValue(), original)
+
+    await page.evaluate(() => window.shortcutFixture.openView("market"))
     await copy.click()
     assert.deepEqual(
       JSON.parse(await page.evaluate(() => window.shortcutFixture.readClipboard())),
@@ -92,61 +119,52 @@ async function main(): Promise<void> {
         }
       }
     )
-    await shortcut.waitFor({ state: "hidden" })
-    await page.evaluate(() => {
-      // A manifest check starts while the existing skill catalog request is finishing.
-      window.shortcutFixture.publish(true)
-      window.shortcutFixture.loadCatalog()
-    })
-    await shortcut.waitFor()
-    await page.getByText("当前会话导航", { exact: true }).waitFor()
-    await page.evaluate(() => window.shortcutFixture.setAdministrator(false))
-    await copy.waitFor({ state: "hidden" })
-    await shortcut.waitFor()
-    await page.evaluate(() => window.shortcutFixture.selectThread("history"))
-    await page.getByText("历史消息").waitFor()
-    await shortcut.waitFor()
+    await startDevelopment.waitFor()
+    await page.evaluate(() => window.shortcutFixture.openView("other-market"))
+    await startDevelopment.waitFor({ state: "hidden" })
 
-    const textarea = page.getByRole("textbox", { name: "消息草稿" })
-    const draft = "继续这个会话的草稿 @spec.md"
-    await textarea.fill(draft)
-    const attachment = page.getByLabel("草稿附件")
-    await attachment.setInputFiles({
-      name: "spec.md",
-      mimeType: "text/markdown",
-      buffer: Buffer.from("# spec")
-    })
-    await shortcut.click()
-    const install = page.getByRole("dialog").getByRole("button", { name: "安装并使用" })
+    await page.evaluate(() => window.shortcutFixture.openView("harness"))
+    const name = page.getByRole("textbox", { name: "项目名称" })
+    const adapter = page.getByRole("combobox", { name: "插件选择" })
+    await name.fill("未保存的项目")
+    await adapter.selectOption("installed-adapter")
+    await development.click()
     await install.click()
     await page.waitForFunction(() => window.shortcutFixture.hasPendingInstall())
     await page.evaluate(() => window.shortcutFixture.finishInstall())
-    await page.getByText("project-plugin-author", { exact: true }).waitFor()
-    assert.equal(await textarea.inputValue(), draft)
-    assert.equal(
-      await attachment.evaluate((element: HTMLInputElement) => element.files?.[0]?.name),
-      "spec.md"
-    )
-    assert.equal(await page.getByLabel("发送次数").textContent(), "0")
+    await guide.getByText(/在普通会话的技能列表中选择/).waitFor()
+    await page.keyboard.press("Escape")
+    await guide.waitFor({ state: "hidden" })
+    assert.equal(await name.inputValue(), "未保存的项目")
+    assert.equal(await adapter.inputValue(), "installed-adapter")
 
-    await page.evaluate(() => {
-      window.shortcutFixture.clearInstalled()
-      window.shortcutFixture.selectThread("another")
-    })
-    await shortcut.click()
-    await install.click()
-    await page.waitForFunction(() => window.shortcutFixture.hasPendingInstall())
-    await page.evaluate(() => {
-      window.shortcutFixture.selectThread("different")
-      window.shortcutFixture.finishInstall()
-    })
-    await page.getByRole("dialog").waitFor({ state: "hidden" })
-    assert.equal(await page.getByLabel("技能").textContent(), "")
+    await page.evaluate(() => window.shortcutFixture.selectThread("new"))
+    assert.equal(await draft.inputValue(), original)
+    assert.equal(await page.getByLabel("已附加文件").textContent(), "spec.md")
+    await development.waitFor({ state: "hidden" })
 
+    await page.evaluate(() => window.shortcutFixture.openView("market"))
+    await startDevelopment.click()
+    await guide.getByText(/在普通会话的技能列表中选择/).waitFor()
+    await page.keyboard.press("Escape")
+
+    await page.evaluate(() => window.shortcutFixture.openView("workspace-plugins"))
+    const workspaceGuide = page.getByTitle("开发项目模式插件")
+    await workspaceGuide.hover()
+    await workspaceGuide.click()
+    await workspaceGuide.waitFor({ state: "hidden" })
+    await development.click()
+    await guide.getByText(/在普通会话的技能列表中选择/).waitFor()
+    await page.keyboard.press("Escape")
     await page.evaluate(() => window.shortcutFixture.publish(false))
-    await shortcut.waitFor({ state: "hidden" })
-    await page.getByText("当前会话导航", { exact: true }).waitFor({ state: "hidden" })
-    await copy.waitFor({ state: "hidden" })
+    await development.waitFor({ state: "hidden" })
+    await page.evaluate(() => window.shortcutFixture.openView("market"))
+    await startDevelopment.waitFor({ state: "hidden" })
+    await page.evaluate(() => window.shortcutFixture.openView("harness"))
+    await development.waitFor({ state: "hidden" })
+    await name.waitFor()
+    await page.evaluate(() => window.shortcutFixture.openView("workspace-plugins"))
+    await workspaceGuide.waitFor({ state: "hidden" })
     console.log("Market skill shortcut browser regression passed")
   } finally {
     await app.close()

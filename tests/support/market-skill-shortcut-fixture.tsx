@@ -1,7 +1,11 @@
 /* eslint-disable react-refresh/only-export-components -- standalone browser fixture */
 import { useState } from "react"
 import { createRoot } from "react-dom/client"
-import { ProjectPluginSkillShortcut } from "../../src/renderer/src/components/chat/ProjectPluginSkillShortcut"
+import { Dialog, DialogContent, DialogTitle } from "../../src/renderer/src/components/ui/dialog"
+import {
+  ProjectPluginDevelopmentGuide,
+  ProjectPluginManagementLink
+} from "../../src/renderer/src/components/customize/ProjectPluginDevelopmentGuide"
 import { MarketSkillShortcutAction } from "../../src/renderer/src/components/customize/MarketPanel/MarketSkillShortcutAction"
 import { useAppStore } from "../../src/renderer/src/lib/store"
 import type { SkillMetadata } from "../../src/renderer/src/types"
@@ -28,6 +32,7 @@ const catalogListeners = new Set<() => void>()
 let administrator = true
 let clipboard = ""
 let installed = false
+const drafts = new Map<string, { text?: string; skill?: string; attachment?: string }>()
 let releaseInstall: (() => void) | null = null
 
 Object.defineProperty(navigator, "clipboard", {
@@ -65,7 +70,8 @@ Object.assign(window, {
     }
   },
   shortcutFixture: {
-    selectThread: (threadId: string) => useAppStore.setState({ currentThreadId: threadId }),
+    selectThread: (threadId: string) => useAppStore.getState().selectThread(threadId),
+    openView: (view: string) => useAppStore.getState().setMainView(view),
     hasPendingInstall: () => Boolean(releaseInstall),
     finishInstall: () => {
       releaseInstall?.()
@@ -92,44 +98,75 @@ Object.assign(window, {
 useAppStore.setState({ currentThreadId: "new", mainView: "thread" })
 
 function Composer({ threadId }: { threadId: string }) {
-  const [selected, setSelected] = useState<SkillMetadata | null>(null)
-  const [sends, setSends] = useState(0)
+  const draft = drafts.get(threadId)
   return (
-    <form
-      onSubmit={(event) => {
-        event.preventDefault()
-        setSends((count) => count + 1)
-      }}
-    >
-      {threadId === "history" && <p>历史消息</p>}
-      <ProjectPluginSkillShortcut
-        threadId={threadId}
-        disabled={false}
-        selectSkill={setSelected}
-        requiresReplacement={() => selected !== null}
-        openSkillSettings={() => {}}
+    <form onSubmit={(event) => event.preventDefault()}>
+      <textarea
+        aria-label="消息草稿"
+        defaultValue={draft?.text ?? ""}
+        onChange={(event) =>
+          drafts.set(threadId, { ...drafts.get(threadId), text: event.target.value })
+        }
       />
-      <textarea aria-label="消息草稿" />
-      <input type="file" aria-label="草稿附件" />
-      <output aria-label="技能">{selected?.name ?? ""}</output>
-      <output aria-label="发送次数">{sends}</output>
+      <input
+        type="file"
+        aria-label="草稿附件"
+        onChange={(event) => {
+          drafts.set(threadId, {
+            ...drafts.get(threadId),
+            attachment: event.target.files?.[0]?.name
+          })
+        }}
+      />
+      <output aria-label="已附加文件">{draft?.attachment ?? ""}</output>
+      <output aria-label="技能">{draft?.skill ?? ""}</output>
     </form>
+  )
+}
+
+function ProjectForm() {
+  const [name, setName] = useState("")
+  const [adapterId, setAdapterId] = useState("")
+  return (
+    <Dialog open>
+      <DialogContent>
+        <DialogTitle>新建项目</DialogTitle>
+        <input
+          aria-label="项目名称"
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+        />
+        <select
+          aria-label="插件选择"
+          value={adapterId}
+          onChange={(event) => setAdapterId(event.target.value)}
+        >
+          <option value="">请选择</option>
+          <option value="installed-adapter">已有插件</option>
+        </select>
+        <ProjectPluginDevelopmentGuide entry="project" />
+      </DialogContent>
+    </Dialog>
   )
 }
 
 function Fixture() {
   const threadId = useAppStore((state) => state.currentThreadId) ?? "new"
+  const view = useAppStore((state) => String(state.mainView))
   useAppStore((state) => state.accountRevision)
-  return (
-    <>
+  if (view === "plugins") return <ProjectPluginDevelopmentGuide entry="plugins" />
+  if (view === "harness") return <ProjectForm />
+  if (view === "market" || view === "other-market") {
+    return (
       <MarketSkillShortcutAction
-        itemId={target.itemId}
+        itemId={view === "market" ? target.itemId : "other"}
         marketName={target.marketName}
         canCopy={administrator}
       />
-      <Composer key={threadId} threadId={threadId} />
-    </>
-  )
+    )
+  }
+  if (view === "workspace-plugins") return <ProjectPluginManagementLink />
+  return <Composer key={threadId} threadId={threadId} />
 }
 
 createRoot(document.getElementById("root")!).render(<Fixture />)

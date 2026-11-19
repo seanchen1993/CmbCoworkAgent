@@ -1,3 +1,4 @@
+import { ProjectPluginDevelopmentGuide } from "@/components/customize/ProjectPluginDevelopmentGuide"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { useMarketSkillShortcut } from "@/lib/market-skill-shortcut"
@@ -35,7 +36,12 @@ export function MarketSkillShortcutAction({
 
   return (
     <>
-      {isPublished && <span className="text-xs text-muted-foreground">当前会话导航</span>}
+      {isPublished && (
+        <>
+          <span className="text-xs text-muted-foreground">当前开发技能</span>
+          <ProjectPluginDevelopmentGuide entry="market" />
+        </>
+      )}
       {canCopy && (
         <Button type="button" variant="outline" size="sm" onClick={() => void copyConfig()}>
           复制导航配置
