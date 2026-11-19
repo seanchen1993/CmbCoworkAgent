@@ -84,7 +84,7 @@ export function ProjectPluginSkillShortcut(props: Props): React.JSX.Element | nu
       const result = await (install ? api.install(intent.selection) : api.resolve(intent.selection))
       if (request.current !== sequence || !canApply(intent)) return
       if (!result.ok) {
-        if (result.code === "changed" || result.code === "forbidden") {
+        if (result.code === "changed") {
           setDialog(null)
           void refreshMarketSkillShortcut(intent.accountRevision, true)
         } else if (install) {

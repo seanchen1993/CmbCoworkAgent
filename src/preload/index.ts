@@ -154,8 +154,7 @@ import type {
   MarketSkillShortcutBinding,
   MarketSkillShortcutResult,
   MarketSkillShortcutSelection,
-  MarketSkillShortcutSkillState,
-  MarketSkillShortcutUpdate
+  MarketSkillShortcutSkillState
 } from "../shared/market-skill-shortcut"
 import { UserInfoConfig } from "../main/storage"
 import type {
@@ -2394,8 +2393,6 @@ const api = {
   marketSkillShortcut: {
     get: (): Promise<MarketSkillShortcutResult<MarketSkillShortcutBinding>> =>
       ipcRenderer.invoke("marketSkillShortcut:get"),
-    set: (input: MarketSkillShortcutUpdate): Promise<MarketSkillShortcutResult<MarketSkillShortcutBinding>> =>
-      ipcRenderer.invoke("marketSkillShortcut:set", input),
     resolve: (selection: MarketSkillShortcutSelection): Promise<
       MarketSkillShortcutResult<MarketSkillShortcutSkillState<SkillMetadata>>
     > => ipcRenderer.invoke("marketSkillShortcut:resolve", selection),

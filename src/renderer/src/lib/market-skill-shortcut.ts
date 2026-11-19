@@ -54,15 +54,6 @@ export function refreshMarketSkillShortcut(accountRevision: number, force = fals
   return promise
 }
 
-export function applyMarketSkillShortcutBinding(
-  accountRevision: number,
-  binding: MarketSkillShortcutBinding
-): void {
-  if (useAppStore.getState().accountRevision !== accountRevision) return
-  pending = null
-  publish(accountRevision, binding)
-}
-
 export function useMarketSkillShortcut() {
   const accountRevision = useAppStore((state) => state.accountRevision)
   const binding = useSyncExternalStore(

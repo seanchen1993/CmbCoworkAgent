@@ -9,6 +9,7 @@ import type { MarketSkillShortcutBinding } from "../../src/shared/market-skill-s
 
 const target = {
   itemId: "fixture-item",
+  marketName: "fixture-market-name",
   name: "项目插件开发助手",
   description: "用于编写项目模式插件。",
   skillName: "project-plugin-author"
@@ -21,37 +22,24 @@ const skill: SkillMetadata = {
   version: "1",
   path: "/skills/project-plugin-author/SKILL.md"
 }
-let binding: MarketSkillShortcutBinding = {
-  canManage: true,
-  revision: "initial",
-  assignedItemId: null,
-  target: null
-}
+let binding: MarketSkillShortcutBinding = { revision: "initial", target: null }
+let administrator = true
+let clipboard = ""
 let installed = false
 let releaseInstall: (() => void) | null = null
+
+Object.defineProperty(navigator, "clipboard", {
+  value: {
+    writeText: async (text: string) => {
+      clipboard = text
+    }
+  }
+})
 
 Object.assign(window, {
   api: {
     marketSkillShortcut: {
       get: async () => ({ ok: true, value: binding }),
-      set: async ({
-        itemId,
-        enabled,
-        revision
-      }: {
-        itemId: string
-        enabled: boolean
-        revision: string
-      }) => {
-        if (revision !== binding.revision) return { ok: false, code: "changed" }
-        binding = {
-          ...binding,
-          revision: revision + "-next",
-          assignedItemId: enabled ? itemId : null,
-          target: enabled ? target : null
-        }
-        return { ok: true, value: binding }
-      },
       resolve: async () => ({
         ok: true,
         value: installed ? { kind: "available", skill } : { kind: "missing" }
@@ -75,12 +63,13 @@ Object.assign(window, {
     clearInstalled: () => {
       installed = false
     },
+    readClipboard: () => clipboard,
+    publish: (enabled: boolean) => {
+      binding = { revision: binding.revision + "-next", target: enabled ? target : null }
+      window.dispatchEvent(new Event("online"))
+    },
     setAdministrator: (allowed: boolean) => {
-      binding = {
-        ...binding,
-        canManage: allowed,
-        assignedItemId: allowed ? (binding.target?.itemId ?? null) : null
-      }
+      administrator = allowed
       useAppStore.setState((state) => ({ accountRevision: state.accountRevision + 1 }))
     }
   }
@@ -115,12 +104,13 @@ function Composer({ threadId }: { threadId: string }) {
 
 function Fixture() {
   const threadId = useAppStore((state) => state.currentThreadId) ?? "new"
+  useAppStore((state) => state.accountRevision)
   return (
     <>
       <MarketSkillShortcutAction
         itemId={target.itemId}
-        marketName={target.skillName}
-        label={target.name}
+        marketName={target.marketName}
+        canCopy={administrator}
       />
       <Composer key={threadId} threadId={threadId} />
     </>

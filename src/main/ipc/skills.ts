@@ -6,14 +6,12 @@ import {
   getMarketShortcutSession,
   marketShortcutChanged,
   marketShortcutResult,
-  updateMarketShortcutBinding,
   verifyMarketShortcutTarget
 } from "../services/market-skill-shortcut"
 import type {
   MarketSkillShortcutSelection,
   MarketSkillShortcutSkillState,
-  MarketSkillShortcutTarget,
-  MarketSkillShortcutUpdate
+  MarketSkillShortcutTarget
 } from "../../shared/market-skill-shortcut"
 import {
   readContentFile,
@@ -1856,9 +1854,6 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("marketSkillShortcut:get", () =>
     marketShortcutResult(() => getMarketShortcutBinding())
   )
-  ipcMain.handle("marketSkillShortcut:set", (_event, input: MarketSkillShortcutUpdate) =>
-    marketShortcutResult(() => updateMarketShortcutBinding(input))
-  )
   ipcMain.handle("marketSkillShortcut:resolve", (_event, selection: MarketSkillShortcutSelection) =>
     marketShortcutResult(async () => {
       const session = getMarketShortcutSession()
@@ -1875,7 +1870,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
       const existing = await readMarketShortcutSkill(target)
       if (!session.isCurrent()) marketShortcutChanged()
       if (existing.kind !== "missing") return existing
-      const bundle = await fetchMarketShortcutPackage(session, selection, target)
+      const bundle = await fetchMarketShortcutPackage(session, target)
       await verifyMarketShortcutTarget(session, selection)
       const result = await uploadSkill(
         { ...bundle, options: { origin: "market" } },

@@ -11,6 +11,8 @@ interface ShortcutFixture {
   hasPendingInstall: () => boolean
   finishInstall: () => void
   clearInstalled: () => void
+  readClipboard: () => string
+  publish: (enabled: boolean) => void
   setAdministrator: (allowed: boolean) => void
 }
 declare global {
@@ -77,11 +79,24 @@ async function main(): Promise<void> {
     page.on("pageerror", (error) => console.error(error))
     await page.addScriptTag({ content: bundle.outputFiles[0].text })
     const shortcut = page.getByRole("button", { name: "开发项目模式插件" })
-    const tag = page.getByRole("button", { name: "设为会话导航" })
-    await tag.waitFor()
+    const copy = page.getByRole("button", { name: "复制导航配置" })
+    await copy.waitFor()
     await shortcut.waitFor({ state: "hidden" })
-    await tag.click()
-    await page.getByRole("dialog").getByRole("button", { name: "确认" }).click()
+    await copy.click()
+    assert.deepEqual(
+      JSON.parse(await page.evaluate(() => window.shortcutFixture.readClipboard())),
+      {
+        conversationShortcuts: {
+          projectPluginCreation: { itemId: "fixture-item", marketName: "fixture-market-name" }
+        }
+      }
+    )
+    await shortcut.waitFor({ state: "hidden" })
+    await page.evaluate(() => window.shortcutFixture.publish(true))
+    await shortcut.waitFor()
+    await page.getByText("当前会话导航", { exact: true }).waitFor()
+    await page.evaluate(() => window.shortcutFixture.setAdministrator(false))
+    await copy.waitFor({ state: "hidden" })
     await shortcut.waitFor()
     await page.evaluate(() => window.shortcutFixture.selectThread("history"))
     await page.getByText("历史消息").waitFor()
@@ -123,12 +138,10 @@ async function main(): Promise<void> {
     await page.getByRole("dialog").waitFor({ state: "hidden" })
     assert.equal(await page.getByLabel("技能").textContent(), "")
 
-    const remove = page.getByRole("button", { name: "撤下会话导航" })
-    await remove.click()
-    await page.getByRole("dialog").getByRole("button", { name: "确认" }).click()
+    await page.evaluate(() => window.shortcutFixture.publish(false))
     await shortcut.waitFor({ state: "hidden" })
-    await page.evaluate(() => window.shortcutFixture.setAdministrator(false))
-    await tag.waitFor({ state: "hidden" })
+    await page.getByText("当前会话导航", { exact: true }).waitFor({ state: "hidden" })
+    await copy.waitFor({ state: "hidden" })
     console.log("Market skill shortcut browser regression passed")
   } finally {
     await app.close()

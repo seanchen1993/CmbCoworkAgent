@@ -125,8 +125,7 @@ import type {
   MarketSkillShortcutBinding,
   MarketSkillShortcutResult,
   MarketSkillShortcutSelection,
-  MarketSkillShortcutSkillState,
-  MarketSkillShortcutUpdate
+  MarketSkillShortcutSkillState
 } from "../shared/market-skill-shortcut"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
@@ -1836,7 +1835,6 @@ interface CustomAPI {
   }
   marketSkillShortcut: {
     get: () => Promise<MarketSkillShortcutResult<MarketSkillShortcutBinding>>
-    set: (input: MarketSkillShortcutUpdate) => Promise<MarketSkillShortcutResult<MarketSkillShortcutBinding>>
     resolve: (selection: MarketSkillShortcutSelection) => Promise<
       MarketSkillShortcutResult<MarketSkillShortcutSkillState<SkillMetadata>>
     >

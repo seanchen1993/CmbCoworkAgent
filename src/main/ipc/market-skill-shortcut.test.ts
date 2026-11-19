@@ -1,129 +1,86 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { createHash } from "node:crypto"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { IpcMain } from "electron"
 import AdmZip from "adm-zip"
+import type { IpcMain } from "electron"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import {
-  PROJECT_PLUGIN_SKILL_SHORTCUT_SLOT as slot,
-  type MarketSkillShortcutBinding
+import type {
+  MarketSkillShortcutBinding,
+  MarketSkillShortcutConfig,
+  MarketSkillShortcutResult
 } from "../../shared/market-skill-shortcut"
+
+const { fetchManifest } = vi.hoisted(() => ({ fetchManifest: vi.fn() }))
 
 vi.mock("electron", () => ({
   app: {},
   BrowserWindow: { getAllWindows: () => [] },
   shell: {}
 }))
+vi.mock("../updater/checker", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../updater/checker")>()),
+  fetchLatestJson: fetchManifest
+}))
 
-const selection = { itemId: "market-417", revision: "rev-1" }
-const marketName = "market-plugin-listing"
-const update = { ...selection, marketName, enabled: false }
-const basePath = "/api/trajectories/marketplace"
-const candidate = {
-  itemId: selection.itemId,
-  name: "市场显示名",
-  description: "开发项目模式插件",
+const target = {
+  itemId: "market-417",
+  marketName: "market-plugin-listing",
   skillName: "project-plugin-author"
 }
+const listedItem = {
+  id: target.itemId,
+  name: target.marketName,
+  chinese_name: "市场显示名",
+  description: "开发项目模式插件",
+  version: "1.0"
+}
+const basePath = "/api/trajectories/marketplace"
 const markdown = "---\nname: project-plugin-author\n---\n\nTest skill\n"
 
-describe("market skill shortcut IPC", () => {
+describe("published market skill shortcut IPC", () => {
   let home: string
   let handlers: Map<string, (event: unknown, input?: unknown) => Promise<unknown>>
-  let binding: MarketSkillShortcutBinding
+  let config: MarketSkillShortcutConfig | null | undefined
+  let items: object[]
   let afterDownload: (() => void) | undefined
   let bundle: { content: string | ArrayBuffer; format: "zip" | "md" }
-  let allowWrite: boolean
-  let scopedList: boolean
-  let listedMarker: boolean
-  let downloadItemId: string
   let fetchStub: ReturnType<typeof vi.fn<typeof fetch>>
 
   beforeEach(async () => {
     home = await mkdtemp(join(tmpdir(), "cmb-market-shortcut-"))
     vi.stubEnv("CMB_COWORK_AGENT_HOME", home)
     vi.stubEnv("VITE_API_BASE_URL", "https://market.example")
+    vi.stubEnv("VITE_UPDATE_SERVER_URL", "https://updates.example")
     vi.resetModules()
-    binding = {
-      revision: selection.revision,
-      target: candidate,
-      canManage: true,
-      assignedItemId: candidate.itemId
-    }
+    config = target
+    items = [listedItem]
     afterDownload = undefined
     bundle = { content: markdown, format: "md" }
-    allowWrite = true
-    scopedList = true
-    listedMarker = true
-    downloadItemId = selection.itemId
+    fetchManifest.mockReset().mockImplementation(async () => ({
+      conversationShortcuts: { projectPluginCreation: config }
+    }))
+
     const storage = await import("../storage")
-    storage.upsertUserInfoConfig({ ystId: "admin", ystAccessToken: "fixture-token" })
+    storage.upsertUserInfoConfig({
+      sapId: "80123456",
+      ystId: "fixture-user",
+      pathName: "部门A/小组"
+    })
     fetchStub = vi.fn<typeof fetch>(async (input, init) => {
       const url = new URL(String(input))
-      expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer fixture-token")
-      expect(init?.redirect).toBe("error")
-      expect(url.searchParams.get("conversationShortcut")).toBe(slot)
-      if (url.pathname === `${basePath}/download/skill/${marketName}`) {
-        expect(url.searchParams.get("itemId")).toBe(candidate.itemId)
-        expect(url.searchParams.get("shortcutRevision")).toBe(selection.revision)
+      expect(init?.method ?? "GET").toBe("GET")
+      expect(url.search).toBe("")
+      if (url.pathname === `${basePath}/download/skill/${target.marketName}`) {
         afterDownload?.()
         return new Response(bundle.content, {
-          headers: {
-            "Content-Disposition": `attachment; filename="package.${bundle.format}"`,
-            "X-Marketplace-Item-Id": downloadItemId
-          }
+          headers: { "Content-Disposition": `attachment; filename="package.${bundle.format}"` }
         })
-      }
-      if (init?.method === "PUT") {
-        expect(url.pathname).toBe(`${basePath}/skill/${marketName}`)
-        if (!allowWrite) return new Response(null, { status: 403 })
-        const body = init.body as FormData
-        expect(body.get("resource_type")).toBe("skill")
-        expect(body.get("name")).toBe(marketName)
-        expect(body.get("shortcut_revision")).toBe(binding.revision)
-        expect(body.get("item_id")).toBe(candidate.itemId)
-        expect(body.has("description")).toBe(false)
-        const mark = JSON.parse(String(body.get("extra_json")))
-        expect(mark).toEqual({
-          conversationShortcut: mark.conversationShortcut === null ? null : slot
-        })
-        const enabled = mark.conversationShortcut === slot
-        binding = {
-          ...binding,
-          revision: binding.revision + "-next",
-          target: enabled ? candidate : null,
-          assignedItemId: enabled ? candidate.itemId : null
-        }
-        return new Response(null, { status: 204 })
       }
       expect(url.pathname).toBe(`${basePath}/list/skill`)
       return Response.json({
         type: "skill",
-        items: binding.target
-          ? [
-              {
-                id: binding.target.itemId,
-                name: marketName,
-                chinese_name: binding.target.name,
-                description: binding.target.description,
-                filename: `package.${bundle.format}`,
-                extra_json: JSON.stringify(
-                  listedMarker ? { conversationShortcut: slot, grayOrgs: ["fixture"] } : {}
-                )
-              }
-            ]
-          : [],
-        ...(scopedList
-          ? {
-              shortcut: {
-                slot,
-                revision: binding.revision,
-                canManage: binding.canManage,
-                assignedItemId: binding.assignedItemId,
-                skillName: binding.target?.skillName
-              }
-            }
-          : {})
+        items: items.map((item) => ({ filename: `package.${bundle.format}`, ...item }))
       })
     })
     vi.stubGlobal("fetch", fetchStub)
@@ -143,122 +100,150 @@ describe("market skill shortcut IPC", () => {
     await rm(home, { recursive: true, force: true })
   })
 
-  const call = (
-    handlers: Map<string, (event: unknown, input?: unknown) => Promise<unknown>>,
-    operation: string,
-    input?: unknown
-  ) => handlers.get(`marketSkillShortcut:${operation}`)!({}, input)
+  function call(operation: string, input?: unknown): Promise<unknown> {
+    return handlers.get(`marketSkillShortcut:${operation}`)!({}, input)
+  }
 
-  it("hides an unassigned target and rejects outdated or unauthorized writes", async () => {
-    await expect(call(handlers, "set", { ...update, revision: "old" })).resolves.toMatchObject({
-      ok: false,
-      code: "changed"
-    })
-    allowWrite = false
-    await expect(call(handlers, "set", update)).resolves.toMatchObject({
-      ok: false,
-      code: "forbidden"
-    })
-    allowWrite = true
-    await expect(call(handlers, "set", update)).resolves.toMatchObject({
-      ok: true,
-      value: { target: null, assignedItemId: null }
-    })
-    await expect(call(handlers, "get")).resolves.toMatchObject({
-      ok: true,
-      value: { target: null }
-    })
-    await expect(call(handlers, "resolve", selection)).resolves.toMatchObject({
-      ok: false,
-      code: "changed"
-    })
+  async function selection() {
+    const result = (await call("get")) as MarketSkillShortcutResult<MarketSkillShortcutBinding>
+    if (!result.ok || !result.value.target) throw new Error("Expected a published skill target")
+    return { itemId: result.value.target.itemId, revision: result.value.revision }
+  }
+
+  function installedDirectory(): string {
+    return join(home, "skills", target.skillName)
+  }
+
+  it("keeps an absent or cleared configuration hidden and skips the market list", async () => {
+    for (const unconfigured of [undefined, null]) {
+      config = unconfigured
+      await expect(call("get")).resolves.toMatchObject({ ok: true, value: { target: null } })
+    }
+    expect(fetchManifest).toHaveBeenCalledWith("https://updates.example", "cmbdevclaw-latest.json")
+    expect(fetchStub).not.toHaveBeenCalled()
+    expect(handlers.has("marketSkillShortcut:set")).toBe(false)
   })
 
-  it("sets the marker on an existing skill record and reloads the scoped list", async () => {
-    binding = { ...binding, target: null, assignedItemId: null }
-    await expect(call(handlers, "set", { ...update, enabled: true })).resolves.toMatchObject({
+  it("uses the configured selftest manifest instead of the production manifest", async () => {
+    const { getUpdateChannelConfigPath } = await import("../updater/channel-config")
+    await writeFile(
+      getUpdateChannelConfigPath(),
+      JSON.stringify({
+        enabled: true,
+        channel: "selftest",
+        baseUrl: "https://updates-selftest.example",
+        manifestFile: "cmbdevclaw-latest.selftest.json",
+        expiresAt: new Date(Date.now() + 60_000).toISOString()
+      })
+    )
+    await expect(call("get")).resolves.toMatchObject({
+      ok: true,
+      value: { target: { itemId: target.itemId } }
+    })
+    expect(fetchManifest).toHaveBeenCalledWith(
+      "https://updates-selftest.example",
+      "cmbdevclaw-latest.selftest.json"
+    )
+  })
+
+  it("uses the manifest pointer and reuses ordinary market visibility rules", async () => {
+    config = { itemId: target.itemId, marketName: target.marketName }
+    items = [
+      {
+        ...listedItem,
+        extra_json: JSON.stringify({ grayUserIds: ["123456"], grayOrgs: ["部门B"] })
+      }
+    ]
+    await expect(call("get")).resolves.toMatchObject({
       ok: true,
       value: {
-        assignedItemId: candidate.itemId,
-        target: { itemId: candidate.itemId, name: candidate.name }
+        target: {
+          itemId: target.itemId,
+          name: listedItem.chinese_name,
+          skillName: target.marketName
+        }
       }
     })
-    expect(fetchStub.mock.calls.map(([, init]) => init?.method ?? "GET")).toEqual([
-      "GET",
-      "PUT",
-      "GET"
-    ])
+
+    const storage = await import("../storage")
+    storage.upsertUserInfoConfig({ sapId: "80234567", ystId: "other", pathName: "部门C/小组" })
+    await expect(call("get")).resolves.toMatchObject({ ok: true, value: { target: null } })
   })
 
-  it("rejects an old list response or an unmarked item before sending a write", async () => {
-    scopedList = false
-    await expect(call(handlers, "get")).resolves.toMatchObject({ ok: false, code: "unavailable" })
-    await expect(call(handlers, "set", update)).resolves.toMatchObject({
+  it("hides missing market IDs, mismatched names, and ambiguous names without a hash", async () => {
+    items = []
+    await expect(call("get")).resolves.toMatchObject({ ok: true, value: { target: null } })
+    items = [{ ...listedItem, name: "another-name" }]
+    await expect(call("get")).resolves.toMatchObject({ ok: true, value: { target: null } })
+    items = [listedItem, { ...listedItem, id: "another-id" }]
+    await expect(call("get")).resolves.toMatchObject({ ok: true, value: { target: null } })
+  })
+
+  it("uses the configured hash to verify bytes when the market download name is ambiguous", async () => {
+    items = [listedItem, { ...listedItem, id: "another-id" }]
+    config = { ...target, sha256: "0".repeat(64) }
+    await expect(call("install", await selection())).resolves.toMatchObject({
       ok: false,
-      code: "unavailable"
+      code: "unavailable",
+      error: expect.stringContaining("SHA-256")
     })
-    scopedList = true
-    listedMarker = false
-    await expect(call(handlers, "get")).resolves.toMatchObject({ ok: false, code: "unavailable" })
-    expect(fetchStub.mock.calls.every(([, init]) => init?.method !== "PUT")).toBe(true)
+    await expect(readFile(join(installedDirectory(), "SKILL.md"))).rejects.toMatchObject({
+      code: "ENOENT"
+    })
+
+    config = { ...target, sha256: createHash("sha256").update(markdown).digest("hex") }
+    await expect(call("install", await selection())).resolves.toMatchObject({
+      ok: true,
+      value: { kind: "available", skill: { name: target.skillName } }
+    })
   })
 
-  it("requires market-side admin permission even when the request contains a valid item and revision", async () => {
-    binding = { ...binding, canManage: false, assignedItemId: null }
-    await expect(call(handlers, "set", { ...update, enabled: true })).resolves.toMatchObject({
-      ok: false,
-      code: "forbidden"
-    })
-    expect(fetchStub).toHaveBeenCalledTimes(1)
-  })
-
-  it("installs the verified item and returns the exact root despite different market display name", async () => {
-    await expect(call(handlers, "resolve", selection)).resolves.toEqual({
+  it("installs the exact root despite its different market name and preserves disabled state", async () => {
+    const chosen = await selection()
+    await expect(call("resolve", chosen)).resolves.toEqual({
       ok: true,
       value: { kind: "missing" }
     })
-    const result = {
+    const available = {
       ok: true,
-      value: { kind: "available", skill: { id: candidate.skillName, name: candidate.skillName } }
+      value: { kind: "available", skill: { id: target.skillName, name: target.skillName } }
     }
-    await expect(call(handlers, "install", selection)).resolves.toMatchObject(result)
+    await expect(call("install", chosen)).resolves.toMatchObject(available)
     const source = await readFile(
-      join(home, "skills", candidate.skillName, ".cmb-market-shortcut-source.json"),
+      join(installedDirectory(), ".cmb-market-shortcut-source.json"),
       "utf8"
     )
-    expect(JSON.parse(source)).toEqual({ itemId: candidate.itemId })
-    await expect(call(handlers, "resolve", selection)).resolves.toMatchObject(result)
+    expect(JSON.parse(source)).toEqual({ itemId: target.itemId })
+    await expect(call("resolve", chosen)).resolves.toMatchObject(available)
+
     const storage = await import("../storage")
-    storage.setDisabledSkills([candidate.skillName])
-    await expect(call(handlers, "resolve", selection)).resolves.toEqual({
+    storage.setDisabledSkills([target.skillName])
+    await expect(call("resolve", chosen)).resolves.toEqual({
       ok: true,
       value: { kind: "disabled" }
     })
   })
 
-  it("keeps a ZIP's resources and records the verified item instead of a bundled source marker", async () => {
+  it("keeps ZIP resources and records the configured ID instead of a bundled source marker", async () => {
     const zip = new AdmZip()
     zip.addFile("root/SKILL.md", Buffer.from(markdown))
     zip.addFile("root/resources/example.txt", Buffer.from("bundle resource"))
-    zip.addFile(
-      "root/.cmb-market-shortcut-source.json",
-      Buffer.from(JSON.stringify({ itemId: "impostor" }))
-    )
+    zip.addFile("root/.cmb-market-shortcut-source.json", Buffer.from('{"itemId":"impostor"}'))
     bundle = { format: "zip", content: new Uint8Array(zip.toBuffer()).buffer }
-    await expect(call(handlers, "install", selection)).resolves.toMatchObject({
+    await expect(call("install", await selection())).resolves.toMatchObject({
       ok: true,
-      value: { kind: "available", skill: { id: candidate.skillName } }
+      value: { kind: "available", skill: { id: target.skillName } }
     })
-    const root = join(home, "skills", candidate.skillName)
+    const root = installedDirectory()
     await expect(readFile(join(root, "resources", "example.txt"), "utf8")).resolves.toBe(
       "bundle resource"
     )
     await expect(readFile(join(root, ".cmb-market-shortcut-source.json"), "utf8")).resolves.toBe(
-      JSON.stringify({ itemId: candidate.itemId })
+      JSON.stringify({ itemId: target.itemId })
     )
   })
 
-  it("links an older protected market install after matching the authorized content", async () => {
+  it("links an older protected market install after matching the published package", async () => {
     await expect(
       handlers.get("skills:upload")!(
         {},
@@ -269,16 +254,13 @@ describe("market skill shortcut IPC", () => {
         }
       )
     ).resolves.toMatchObject({ success: true })
-    await expect(call(handlers, "install", selection)).resolves.toMatchObject({
+    await expect(call("install", await selection())).resolves.toMatchObject({
       ok: true,
-      value: { kind: "available", skill: { id: candidate.skillName } }
+      value: { kind: "available", skill: { id: target.skillName } }
     })
-    expect(
-      fetchStub.mock.calls.filter(([url]) => String(url).includes("/download/skill/"))
-    ).toHaveLength(1)
   })
 
-  it("preserves a same-name local skill when its source cannot be verified", async () => {
+  it("preserves a same-name local skill when its market source cannot be verified", async () => {
     await expect(
       handlers.get("skills:upload")!(
         {},
@@ -288,52 +270,35 @@ describe("market skill shortcut IPC", () => {
         }
       )
     ).resolves.toMatchObject({ success: true })
-    await expect(call(handlers, "install", selection)).resolves.toMatchObject({
+    await expect(call("install", await selection())).resolves.toMatchObject({
       ok: true,
       value: { kind: "failed", error: expect.stringContaining("已存在") }
     })
-    await expect(
-      readFile(join(home, "skills", candidate.skillName, "SKILL.md"), "utf8")
-    ).resolves.toBe(markdown)
+    await expect(readFile(join(installedDirectory(), "SKILL.md"), "utf8")).resolves.toBe(markdown)
   })
 
-  it("rejects the legacy download if the service returns no validated item ID", async () => {
-    downloadItemId = ""
-    await expect(call(handlers, "install", selection)).resolves.toMatchObject({
-      ok: false,
-      code: "changed"
-    })
-    await expect(
-      readFile(join(home, "skills", candidate.skillName, "SKILL.md"))
-    ).rejects.toMatchObject({ code: "ENOENT" })
-  })
-
-  it("cancels before installing when the target changes during download", async () => {
-    afterDownload = () => {
-      binding = { ...binding, revision: "rev-2", target: null, assignedItemId: null }
-    }
-    await expect(call(handlers, "install", selection)).resolves.toMatchObject({
-      ok: false,
-      code: "changed"
-    })
-    await expect(
-      readFile(join(home, "skills", candidate.skillName, "SKILL.md"))
-    ).rejects.toMatchObject({ code: "ENOENT" })
-  })
-
-  it("discards an authenticated result when the account switches mid-request", async () => {
-    const storage = await import("../storage")
-    afterDownload = () =>
-      storage.upsertUserInfoConfig({
-        ystId: "another-user",
-        ystAccessToken: "different-token"
+  it.each(["removed", "version changed"])(
+    "stops installation when the published target is %s during download",
+    async (change) => {
+      const chosen = await selection()
+      afterDownload = () => {
+        if (change === "removed") config = null
+        else items = [{ ...listedItem, version: "2.0" }]
+      }
+      await expect(call("install", chosen)).resolves.toMatchObject({ ok: false, code: "changed" })
+      await expect(readFile(join(installedDirectory(), "SKILL.md"))).rejects.toMatchObject({
+        code: "ENOENT"
       })
-    await expect(call(handlers, "install", selection)).resolves.toMatchObject({
-      ok: false,
-      code: "changed"
+    }
+  )
+
+  it("discards a download when the account switches mid-request", async () => {
+    const storage = await import("../storage")
+    const chosen = await selection()
+    afterDownload = () => storage.upsertUserInfoConfig({ ystId: "another-user" })
+    await expect(call("install", chosen)).resolves.toMatchObject({ ok: false, code: "changed" })
+    await expect(readFile(join(installedDirectory(), "SKILL.md"))).rejects.toMatchObject({
+      code: "ENOENT"
     })
-    await expect(
-      readFile(join(home, "skills", candidate.skillName, "SKILL.md"))
-    ).rejects.toMatchObject({ code: "ENOENT" })
   })
 })

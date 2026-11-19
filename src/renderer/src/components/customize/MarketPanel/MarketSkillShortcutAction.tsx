@@ -1,123 +1,46 @@
-import { useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
+import { useMarketSkillShortcut } from "@/lib/market-skill-shortcut"
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle
-} from "@/components/ui/dialog"
-import {
-  applyMarketSkillShortcutBinding,
-  refreshMarketSkillShortcut,
-  useMarketSkillShortcut
-} from "@/lib/market-skill-shortcut"
-import { useAppStore } from "@/lib/store"
-import { isMarketSkillShortcutKey } from "../../../../../shared/market-skill-shortcut"
+  parseMarketSkillShortcutConfig,
+  type ConversationShortcutsConfig
+} from "../../../../../shared/market-skill-shortcut"
 
 export function MarketSkillShortcutAction({
   itemId,
   marketName,
-  label
+  canCopy
 }: {
   itemId: string
   marketName: string
-  label: string
+  canCopy: boolean
 }): React.JSX.Element | null {
-  const { accountRevision, binding } = useMarketSkillShortcut()
-  const mounted = useRef(false)
-  const [confirmation, setConfirmation] = useState<{
-    revision: string
-    remove: boolean
-    description: string
-  } | null>(null)
-  const [saving, setSaving] = useState(false)
-  useEffect(() => {
-    mounted.current = true
-    return () => {
-      mounted.current = false
-    }
-  }, [])
+  const { binding } = useMarketSkillShortcut()
+  const config = parseMarketSkillShortcutConfig({ itemId, marketName })
+  if (!config) return null
 
-  if (!binding?.canManage || !isMarketSkillShortcutKey(itemId)) return null
-  const remove = binding.assignedItemId === itemId
-  const currentTargetName = binding.target?.name
-  const action = remove ? "撤下会话导航" : "设为会话导航"
+  const target = binding?.target
+  const isPublished = target?.itemId === config.itemId && target.marketName === config.marketName
+  if (!canCopy && !isPublished) return null
 
-  function confirmAction(): void {
-    if (!binding) return
-    const description = remove
-      ? `撤下「${label}」后，普通会话将隐藏这个入口。`
-      : binding.assignedItemId
-        ? `将${currentTargetName ? `「${currentTargetName}」` : "当前目标"}替换为「${label}」。`
-        : `在普通会话中添加指向「${label}」的入口。`
-    setConfirmation({ revision: binding.revision, remove, description })
-  }
-
-  async function save(): Promise<void> {
-    if (!confirmation || saving) return
-    setSaving(true)
+  async function copyConfig(): Promise<void> {
+    const conversationShortcuts: ConversationShortcutsConfig = { projectPluginCreation: config }
     try {
-      const result = await window.api.marketSkillShortcut.set({
-        itemId,
-        marketName,
-        enabled: !confirmation.remove,
-        revision: confirmation.revision
-      })
-      if (useAppStore.getState().accountRevision !== accountRevision) return
-      if (result.ok) {
-        applyMarketSkillShortcutBinding(accountRevision, result.value)
-        toast.success(confirmation.remove ? "已撤下会话导航" : "已设置会话导航")
-        if (mounted.current) setConfirmation(null)
-      } else {
-        if (result.code === "changed" || result.code === "forbidden") {
-          if (mounted.current) setConfirmation(null)
-          void refreshMarketSkillShortcut(accountRevision, true)
-        }
-        toast.error(result.error)
-      }
+      await navigator.clipboard.writeText(JSON.stringify({ conversationShortcuts }, null, 2))
+      toast.success("已复制导航配置，请合并到发布清单")
     } catch {
-      if (useAppStore.getState().accountRevision === accountRevision) {
-        toast.error("暂时无法更新会话导航，请稍后重试")
-      }
-    } finally {
-      if (mounted.current) setSaving(false)
+      toast.error("复制导航配置失败，请重试")
     }
   }
 
   return (
     <>
-      <Button type="button" variant="outline" size="sm" onClick={confirmAction}>
-        {action}
-      </Button>
-      <Dialog
-        open={Boolean(confirmation)}
-        onOpenChange={(open) => {
-          if (!open && !saving) setConfirmation(null)
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{confirmation?.remove ? "撤下会话导航" : "设为会话导航"}</DialogTitle>
-            <DialogDescription>{confirmation?.description}</DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={saving}
-              onClick={() => setConfirmation(null)}
-            >
-              取消
-            </Button>
-            <Button type="button" disabled={saving} onClick={() => void save()}>
-              {saving ? "正在保存…" : "确认"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {isPublished && <span className="text-xs text-muted-foreground">当前会话导航</span>}
+      {canCopy && (
+        <Button type="button" variant="outline" size="sm" onClick={() => void copyConfig()}>
+          复制导航配置
+        </Button>
+      )}
     </>
   )
 }
