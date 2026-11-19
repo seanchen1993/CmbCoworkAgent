@@ -1,11 +1,29 @@
+import { dirname, join } from "node:path"
 import { getMcpConnectors, upsertMcpConnector } from "../../storage"
 import { type BrowserCdpConfig } from "../../../shared/browser-types"
 import { getCurrentBrowserCdpPort } from "./browser-cdp"
 
 const PLAYWRIGHT_MCP_NAME = "In-app-browser"
-const MANAGED_PLAYWRIGHT_MCP_COMMAND = "npx"
 const MANAGED_PLAYWRIGHT_MCP_LAZY_LOAD = false
-const MANAGED_PLAYWRIGHT_MCP_VERSION = "0.0.82"
+const ELECTRON_RUN_AS_NODE_ENV = "ELECTRON_RUN_AS_NODE"
+
+/**
+ * Resolve the CLI from the dependency bundled with the app. Resolving the
+ * exported package entry first avoids relying on the non-exported `cli.js`
+ * subpath while still working from app.asar in packaged Electron builds.
+ */
+export function resolveBundledPlaywrightMcpCliPath(): string {
+  return join(dirname(require.resolve("@playwright/mcp")), "cli.js")
+}
+
+function buildManagedPlaywrightMcpEnv(
+  existingEnv?: Record<string, string>
+): Record<string, string> {
+  return {
+    ...existingEnv,
+    [ELECTRON_RUN_AS_NODE_ENV]: "1"
+  }
+}
 
 function findManagedPlaywrightMcpConnector() {
   return getMcpConnectors().find(
@@ -15,11 +33,14 @@ function findManagedPlaywrightMcpConnector() {
 
 function buildPlaywrightMcpArgs(cdpPort: number): string[] {
   return [
-    "-y",
-    "--prefer-offline",
-    `@playwright/mcp@${MANAGED_PLAYWRIGHT_MCP_VERSION}`,
+    resolveBundledPlaywrightMcpCliPath(),
     `--cdp-endpoint=http://127.0.0.1:${cdpPort}`
   ]
+}
+
+function buildDisabledPlaywrightMcpArgs(existingArgs?: string[]): string[] {
+  const cdpEndpoint = existingArgs?.find((arg) => arg.startsWith("--cdp-endpoint="))
+  return [resolveBundledPlaywrightMcpCliPath(), ...(cdpEndpoint ? [cdpEndpoint] : [])]
 }
 
 function sameArgs(left: string[], right: string[]): boolean {
@@ -34,8 +55,9 @@ function isManagedPlaywrightMcpConnectorSynced(
   return (
     existing.kind === "stdio" &&
     existing.enabled === options.enabled &&
-    existing.command?.trim() === MANAGED_PLAYWRIGHT_MCP_COMMAND &&
+    existing.command?.trim() === process.execPath &&
     sameArgs(existing.args ?? [], options.args) &&
+    existing.env?.[ELECTRON_RUN_AS_NODE_ENV] === "1" &&
     (existing.lazyLoad ?? MANAGED_PLAYWRIGHT_MCP_LAZY_LOAD) === MANAGED_PLAYWRIGHT_MCP_LAZY_LOAD
   )
 }
@@ -45,15 +67,15 @@ export async function autoRegisterPlaywrightMcpConnector(cdpPort: number | null)
 
   if (cdpPort === null) {
     if (!existing) return
-    const nextArgs = existing.args ?? []
+    const nextArgs = buildDisabledPlaywrightMcpArgs(existing.args)
     if (isManagedPlaywrightMcpConnectorSynced(existing, { enabled: false, args: nextArgs })) return
     upsertMcpConnector({
       id: existing.id,
       name: PLAYWRIGHT_MCP_NAME,
       kind: "stdio",
-      command: MANAGED_PLAYWRIGHT_MCP_COMMAND,
+      command: process.execPath,
       args: nextArgs,
-      env: existing.env,
+      env: buildManagedPlaywrightMcpEnv(existing.env),
       enabled: false,
       lazyLoad: MANAGED_PLAYWRIGHT_MCP_LAZY_LOAD
     })
@@ -67,9 +89,9 @@ export async function autoRegisterPlaywrightMcpConnector(cdpPort: number | null)
     id: existing?.id,
     name: PLAYWRIGHT_MCP_NAME,
     kind: "stdio",
-    command: MANAGED_PLAYWRIGHT_MCP_COMMAND,
+    command: process.execPath,
     args: nextArgs,
-    env: existing?.env,
+    env: buildManagedPlaywrightMcpEnv(existing?.env),
     enabled: true,
     lazyLoad: MANAGED_PLAYWRIGHT_MCP_LAZY_LOAD
   })
@@ -85,7 +107,7 @@ export async function syncPlaywrightMcpConnectorForBrowserCdpConfig(
     if (!existing) {
       return { invalidateCapabilities: false }
     }
-    const nextArgs = existing.args ?? []
+    const nextArgs = buildDisabledPlaywrightMcpArgs(existing.args)
     if (isManagedPlaywrightMcpConnectorSynced(existing, { enabled: false, args: nextArgs })) {
       return { invalidateCapabilities: false }
     }
@@ -94,9 +116,9 @@ export async function syncPlaywrightMcpConnectorForBrowserCdpConfig(
       id: existing.id,
       name: PLAYWRIGHT_MCP_NAME,
       kind: "stdio",
-      command: MANAGED_PLAYWRIGHT_MCP_COMMAND,
+      command: process.execPath,
       args: nextArgs,
-      env: existing.env,
+      env: buildManagedPlaywrightMcpEnv(existing.env),
       enabled: false,
       lazyLoad: MANAGED_PLAYWRIGHT_MCP_LAZY_LOAD
     })
@@ -115,9 +137,9 @@ export async function syncPlaywrightMcpConnectorForBrowserCdpConfig(
       id: existing?.id,
       name: PLAYWRIGHT_MCP_NAME,
       kind: "stdio",
-      command: MANAGED_PLAYWRIGHT_MCP_COMMAND,
+      command: process.execPath,
       args: nextArgs,
-      env: existing?.env,
+      env: buildManagedPlaywrightMcpEnv(existing?.env),
       enabled: true,
       lazyLoad: MANAGED_PLAYWRIGHT_MCP_LAZY_LOAD
     })
