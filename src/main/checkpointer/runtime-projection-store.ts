@@ -33,8 +33,6 @@ import {
 } from "./runtime-projection-protocol"
 import {
   buildAvailableProviderOccurrenceId,
-  getMessageProviderOccurrence,
-  getMessageProviderSourceId,
   getMessageProviderTupleFromMetadata,
   MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY,
   MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY,

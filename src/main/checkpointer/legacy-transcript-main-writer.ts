@@ -269,7 +269,7 @@ const text = (value: unknown): string => {
   return value
 }
 const nullableText = (value: unknown): string | null => (value === null ? null : text(value))
-function entries(value: unknown, minimum = 0, maximum = limits.rowsPerBatch): unknown[] {
+function entries(value: unknown, minimum = 0, maximum: number = limits.rowsPerBatch): unknown[] {
   if (
     !Array.isArray(value) ||
     types.isProxy(value) ||
@@ -373,7 +373,7 @@ function order(value: unknown, totalMessages: number): LegacyTranscriptOrder {
         provider_occurrence: integer(declared.provider_occurrence)
       } }) }
   })
-  const graphBoundaries = entries(plan.graphBoundaries, 1, maximum).map((raw) => {
+  const graphBoundaries = entries(plan.graphBoundaries, 0, maximum).map((raw) => {
     const item = object(raw, ["checkpointIndex", "messageId"])
     bytes += 16
     return { checkpointIndex: integer(item.checkpointIndex), messageId: identityText(item.messageId) }
@@ -893,9 +893,21 @@ function timingPage(
     )
   return { nextIndex: command.index + command.entries.length, complete: command.complete }
 }
+function hasGraphBoundary(actor: Actor): boolean {
+  return hasTable(actor.database, "thread_graph_transcript_boundaries") && Boolean(row(
+    actor.database, "SELECT 1 FROM thread_graph_transcript_boundaries WHERE thread_id=? LIMIT 1",
+    [actor.threadId]
+  ))
+}
+
 function apply(actor: Actor, command: LegacyTranscriptWriteCommand): LegacyTranscriptWriteResult {
-  if (command.kind === "read-state")
-    return { marker: readMarker(actor), ordinary: noNativeOwner(actor) }
+  if (command.kind === "read-state") {
+    const marker = readMarker(actor)
+    const ordinary = noNativeOwner(actor)
+    return { marker, ordinary, ...(!marker && ordinary && hasGraphBoundary(actor) && {
+      hasGraphBoundary: true
+    }) }
+  }
   if (command.kind === "reserve") {
     const old = readMarker(actor)
     bindSource(actor, command.checkpointId, command.totalMessages)
@@ -903,6 +915,8 @@ function apply(actor: Actor, command: LegacyTranscriptWriteCommand): LegacyTrans
       requireMarker(actor, command)
       return progress(actor)
     }
+    if (!command.order?.graphBoundaries.length && Boolean(command.order) !== hasGraphBoundary(actor))
+      fail("LEGACY_TRANSCRIPT_WRITE_SOURCE_CHANGED")
     const database = actor.database
     const existingBucket = command.order ? row(database,
       "SELECT message_count,next_ordinal FROM thread_message_buckets WHERE thread_id=?",

@@ -97,8 +97,10 @@ function marker(value: unknown): LegacyTranscriptMarker | null {
 }
 function readState(value: unknown): LegacyTranscriptReadState {
   const ordinary = own(value, "ordinary")
+  const hasGraphBoundary = own(value, "hasGraphBoundary")
   if (typeof ordinary !== "boolean") fail()
-  return { ordinary, marker: marker(own(value, "marker")) }
+  if (hasGraphBoundary !== undefined && typeof hasGraphBoundary !== "boolean") fail()
+  return { ordinary, marker: marker(own(value, "marker")), hasGraphBoundary }
 }
 function progress(value: unknown): LegacyTranscriptWriteProgress {
   const fragmentOwned = own(value, "fragmentOwned")
@@ -348,7 +350,7 @@ export class LegacyTranscriptWorkerDriver {
         current.checkpointId === source.checkpointId &&
         current.totalMessages === totalMessages
       if (!source.complete) {
-        const order = !current && source.graphBoundaries.length > 0 ? {
+        const order = !current && (source.graphBoundaries.length > 0 || state.hasGraphBoundary) ? {
           graphBoundaries: source.graphBoundaries,
           messages: source.messages.map(({ checkpointIndex, messageId, role, toolCallId,
             providerSourceId, providerOccurrence, declaredProviderIdentity }) => ({

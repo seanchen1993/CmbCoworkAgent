@@ -1945,10 +1945,14 @@ describe("checkpoint runtime projection worker", () => {
     expect(Number(repeatedCount.total)).toBe(564)
   }, 30_000)
 
-  it.each([false, true])(
-    "reuses native Goal message identities on cold bootstrap (partial legacy history: %s)",
-    async (partialLegacyHistory) => {
-      const threadId = `goal-bootstrapped-${partialLegacyHistory}`
+  it.each([
+    { partialLegacyHistory: false, hasCheckpointBoundary: true },
+    { partialLegacyHistory: true, hasCheckpointBoundary: true },
+    { partialLegacyHistory: true, hasCheckpointBoundary: false }
+  ])(
+    "reuses native Goal identities on cold bootstrap (partial: $partialLegacyHistory, anchor in checkpoint: $hasCheckpointBoundary)",
+    async ({ partialLegacyHistory, hasCheckpointBoundary }) => {
+      const threadId = `goal-bootstrapped-${partialLegacyHistory}-${hasCheckpointBoundary}`
       const marked = { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true }
       const provider = (source: string, occurrence: number) => ({
         [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: source,
@@ -1976,11 +1980,11 @@ describe("checkpoint runtime projection worker", () => {
           ...(partialLegacyHistory
             ? [new AIMessage({ id: "legacy-only", content: "import this earlier row" }).toJSON()]
             : []),
-          new HumanMessage({
+          ...(hasCheckpointBoundary ? [new HumanMessage({
             id: "hidden",
             content: "[Continuing active goal] hidden payload",
             additional_kwargs: marked
-          }).toJSON(),
+          }).toJSON()] : []),
           new AIMessage({
             id: "graph-assistant-second",
             content: "second checkpoint assistant",
@@ -2055,7 +2059,7 @@ describe("checkpoint runtime projection worker", () => {
             ["root", 0],
             ["native-first", 1],
             ["native-tool-first", 2],
-            ["legacy-only", 3],
+            ["legacy-only", hasCheckpointBoundary ? 3 : 4],
             ["native-second", 5],
             ["native-tool-second", 6],
             ["resume", 7],
@@ -2071,7 +2075,7 @@ describe("checkpoint runtime projection worker", () => {
           )
         }
         expect(database.prepare("SELECT ordinal FROM thread_graph_transcript_boundaries").get())
-          .toMatchObject({ ordinal: partialLegacyHistory ? 4 : 3 })
+          .toMatchObject({ ordinal: partialLegacyHistory && hasCheckpointBoundary ? 4 : 3 })
         expect(database.prepare("SELECT next_ordinal FROM thread_message_buckets").get())
           .toMatchObject({ next_ordinal: partialLegacyHistory ? 54 : 52 })
         expect(database.prepare("SELECT status FROM legacy_checkpoint_transcript_migrations").get())

@@ -107,6 +107,8 @@ export interface LegacyTranscriptReadState {
   readonly marker: LegacyTranscriptMarker | null
   /** Current DB discovery fact only; every write repeats scope/native-owner checks. */
   readonly ordinary: boolean
+  /** A compacted checkpoint can omit a Goal boundary already recorded in the transcript. */
+  readonly hasGraphBoundary?: boolean
 }
 
 export function legacyTranscriptWriteRowBytes(row: LegacyTranscriptWriteRow): number {
