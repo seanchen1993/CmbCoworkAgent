@@ -82,11 +82,11 @@ async function runWrappedModelCall(
   runtime: ReturnType<typeof rt>,
   runToken?: string,
   messages: BaseMessage[] = [],
-  loadGoalProviderOccurrence?: Parameters<typeof createCurrentRunMessageQueueMiddleware>[1]
+  loadGoalProviderOccurrence?: Parameters<typeof createCurrentRunMessageQueueMiddleware>[2]
 ): Promise<AIMessage> {
   const ownerToken = runToken ?? (runtime.configurable?.thread_id === T2 ? RUN2 : RUN1)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const mw = createCurrentRunMessageQueueMiddleware(ownerToken, loadGoalProviderOccurrence) as any
+  const mw = createCurrentRunMessageQueueMiddleware(ownerToken, undefined, loadGoalProviderOccurrence) as any
   return await mw.wrapModelCall({ runtime, messages }, async () => response)
 }
 

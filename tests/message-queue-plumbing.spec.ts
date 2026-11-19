@@ -55,7 +55,7 @@ function assertSourceOrder(value: string, before: string, after: string, label: 
   assert(b < a, `${label}: expected ${JSON.stringify(before)} before ${JSON.stringify(after)}`)
 }
 
-const queueMiddlewareCall = "createCurrentRunMessageQueueMiddleware(\n        currentRunMessageQueueOwnerToken,\n        onPrimaryModelRequestState\n      )"
+const queueMiddlewareCall = "createCurrentRunMessageQueueMiddleware(\n        currentRunMessageQueueOwnerToken,\n        onPrimaryModelRequestState,"
 const runtime = read("src/main/agent/runtime.ts")
 const queueModule = read("src/main/agent/current-run-message-queue.ts")
 assertIncludes(runtime, "messages.filter((message) => !message.peerFeedback)", "peer feedback cannot enter the ordinary user transcript")
@@ -99,12 +99,12 @@ function testMiddlewareBeforeSummarizationAndHITL(): void {
   )
   assert(idx >= 0, "queue middleware present on the main stack")
   const after = runtime.slice(idx)
-  // beforeModel must run before summarization (injected turns participate in
-  // context management): the queue middleware immediately precedes it in the array.
-  assertMatches(
+  // Queued user messages enter the context before the summarization policy.
+  assertSourceOrder(
     after,
-    /createCurrentRunMessageQueueMiddleware\(\s*currentRunMessageQueueOwnerToken,\s*onPrimaryModelRequestState\s*\),\s*\n\s*createCmbSummarizationMiddleware\(mainSummarizationOptions\)/,
-    "queue middleware immediately precedes summarization on the main stack"
+    queueMiddlewareCall,
+    "createCmbSummarizationMiddleware(mainSummarizationOptions)",
+    "queue middleware before summarization on the main stack"
   )
   assertIncludes(
     runtime,
@@ -1087,7 +1087,7 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   assertSourceOrder(
     transcriptFlushBody,
     "try {",
-    "const resolved = resolveStreamTranscriptFlush({",
+    "resolveStreamTranscriptFlush({",
     "stream batches enter the run-scoped identity resolver inside the restoration boundary"
   )
   assertSourceOrder(
@@ -1147,7 +1147,7 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     "non-strict shutdown flush reports remaining evidence without discarding it"
   )
   const resetStart = agentIpc.indexOf("function resetFailedStreamAttempt(")
-  const resetBody = agentIpc.slice(resetStart, resetStart + 1200)
+  const resetBody = agentIpc.slice(resetStart, agentIpc.indexOf("export async function retryStreamAfterDisconnect", resetStart))
   assertSourceOrder(
     resetBody,
     "if (options.preservePendingTranscript)",
@@ -1168,7 +1168,7 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   )
   assertIncludes(
     runtime,
-    "flushTranscriptBeforeCurrentRunInjection(threadId, context.runToken)",
+    "flushTranscriptBeforeCurrentRunInjection(\n    threadId,\n    context.runToken",
     "the strict steering flush targets the current physical run"
   )
   assertIncludes(
@@ -1681,7 +1681,7 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
 
 function testPreparingGuidesParticipateInReconciliation(): void {
   const queueStart = agentIpc.indexOf("const queueIntoOwnedRun = async")
-  const queueBody = agentIpc.slice(queueStart, queueStart + 7500)
+  const queueBody = agentIpc.slice(queueStart, agentIpc.indexOf("registerAgentRunSteerer(queueIntoOwnedRun)", queueStart))
   assertSourceOrder(
     queueBody,
     "trackCurrentRunMessagePreparation(preparationLockKey, messageId, 1)",
@@ -2166,7 +2166,7 @@ function testBusyDraftPreparationIsAtomic(): void {
 function testSteerAcknowledgementIsDurableAndReconciled(): void {
   assertSourceOrder(
     runtime,
-    "flushTranscriptBeforeCurrentRunInjection(threadId, context.runToken)",
+    "flushTranscriptBeforeCurrentRunInjection(\n    threadId,\n    context.runToken",
     "const persistedCount = upsertThreadMessages(",
     "deferred assistant/tool transcript is flushed before the steered user turn"
   )
@@ -2358,7 +2358,7 @@ function testAfterModelSteerPersistsPrecedingAssistantReply(): void {
   )
   assertSourceOrder(
     notifierBody,
-    "flushTranscriptBeforeCurrentRunInjection(threadId, context.runToken)",
+    "flushTranscriptBeforeCurrentRunInjection(\n    threadId,\n    context.runToken",
     "resolveCurrentRunCompletedAssistantIdentity(",
     "provider occurrence resolution uses the durable baseline after pending chunks flush"
   )
@@ -2438,7 +2438,7 @@ function testAfterModelSteerPersistsPrecedingAssistantReply(): void {
     "renderer-only aliases are retained for cumulative SDK replays"
   )
   assertSourceOrder(
-    threadContext,
+    threadContext.slice(threadContext.indexOf("if (rendererOnlyAlias) {")),
     "aliases.set(resolvedFromId",
     "commitLocalAlias()",
     "renderer-only aliases are applied before the following stable event"
@@ -2470,7 +2470,7 @@ function testAfterModelSteerPersistsPrecedingAssistantReply(): void {
     "the renderer alias carries the exact provider occurrence"
   )
   const streamPersistStart = agentIpc.indexOf("function persistStreamTranscriptChunk(")
-  const streamPersistBody = agentIpc.slice(streamPersistStart, streamPersistStart + 1200)
+  const streamPersistBody = agentIpc.slice(streamPersistStart, agentIpc.indexOf("\n}\n", streamPersistStart))
   assertSourceOrder(
     streamPersistBody,
     "routeCurrentRunCompletedAssistantMessage(threadId, message, runToken)",

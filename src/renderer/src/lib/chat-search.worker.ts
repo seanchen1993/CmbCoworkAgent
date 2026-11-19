@@ -87,9 +87,10 @@ self.onmessage = (event: MessageEvent<Request>): void => {
       const projected = projectChatSearchPlan(plan)
       const units = documentUnits(projected)
       const nextUnits = retainedUnits - documentUnits(documents.get(pending.id) ?? []) + units
-      // One transient validation document may coexist with the 4 Mi-character search corpus.
+      // Folded preview aliases can add one projection of the same bounded corpus.
+      // One transient validation document may coexist with that corpus.
       if (
-        nextUnits > 4 * 1024 * 1024 + CHAT_SEARCH_INPUT_LIMIT ||
+        nextUnits > 2 * (4 * 1024 * 1024 + CHAT_SEARCH_INPUT_LIMIT) ||
         (!documents.has(pending.id) && documents.size >= 501)
       )
         throw new Error("Search cache budget exceeded")

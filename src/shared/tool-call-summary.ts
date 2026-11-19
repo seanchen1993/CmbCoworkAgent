@@ -89,7 +89,9 @@ export interface CollapsedToolCallLike {
 
 /** Exact text mounted in a completed tool card while its details are folded. */
 export function getCollapsedToolCallSummary(toolCall: CollapsedToolCallLike): string {
-  const label = COLLAPSED_TOOL_LABELS[toolCall.name] ?? toolCall.name
+  const label = Object.hasOwn(COLLAPSED_TOOL_LABELS, toolCall.name)
+    ? COLLAPSED_TOOL_LABELS[toolCall.name]
+    : toolCall.name
   const args = toolCall.args ?? {}
   let parameter = ""
   const rawPath = args.path ?? args.file_path

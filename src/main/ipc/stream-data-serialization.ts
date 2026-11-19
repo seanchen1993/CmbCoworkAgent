@@ -5,6 +5,7 @@ import {
   readStreamMessageWireMode,
   type StreamMessageWireMode
 } from "../../shared/stream-message-wire-mode"
+import { NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY } from "../../shared/graph-transcript-boundary"
 import { GOAL_CONTINUATION_BOUNDARY_METADATA_KEY } from "../agent/goals/internal-prompt"
 import { isWorkflowPlumbingTranscriptContent } from "../../shared/checkpoint-transcript"
 import { MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY } from "../../shared/message-role-collision"
@@ -231,13 +232,14 @@ function messageRecord(message: unknown): Record<string, unknown> | undefined {
   return asRecord(record.kwargs) ?? record
 }
 
-/** Hidden Goal inputs own a durable boundary. Same-task Bot feedback stays in the current turn. */
+/** Hidden Goal inputs and notification turns own a durable boundary. Same-task Bot feedback stays in the current turn. */
 export function isStreamUserTurnBoundary(message: unknown): boolean {
   if (!isHumanMessage(message)) return false
   const record = messageRecord(message)
   const metadata = asRecord(record?.additional_kwargs)
   if (metadata?.cmb_internal_bot_feedback === true) return false
   return metadata?.[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] === true ||
+    metadata?.[NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY] === true ||
     !isWorkflowPlumbingTranscriptContent(record?.content)
 }
 

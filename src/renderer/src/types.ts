@@ -285,6 +285,8 @@ export interface Message {
   botHistoryDeliveryScope?: import("../../shared/bots/file-delivery").BotHistoryDeliveryScope
   /** Durable transcript order. Present on messages read from thread_messages pages. */
   ordinal?: number
+  /** A rendered Goal event occupies the position immediately before its durable anchor. */
+  transcript_anchor_message_id?: string
   provider_source_id?: string
   provider_occurrence?: number
   /** Renderer-only provenance for Team worker content; absent for partial fragments. */
@@ -301,6 +303,7 @@ export interface Message {
   worker_provider_wire_ids?: readonly string[]
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
+  content_preview_notice?: string
   content_priority?: number
   // A bounded in-flight projection keeps the stream responsive while retaining
   // enough identity to reconcile it with a later lossless snapshot.

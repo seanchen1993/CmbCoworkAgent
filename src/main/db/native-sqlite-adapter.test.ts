@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os"
 import { dirname, join } from "path"
 import { afterEach, describe, expect, it } from "vitest"
-import { openNativeSqliteDatabase } from "./native-sqlite-adapter"
+import { findNativeSqliteRecoverySource, openNativeSqliteDatabase } from "./native-sqlite-adapter"
 import {
   forgetRegisteredSqliteQuarantineArtifact,
   listRegisteredSqliteQuarantineArtifacts
@@ -25,6 +25,15 @@ afterEach(() => {
 })
 
 describe("NativeSqliteAdapter", () => {
+  it("ignores a stale over-budget backup when the small live source is valid", () => {
+    const path = temporaryDatabasePath("live.sqlite")
+    const live = new DatabaseSync(path)
+    live.exec("CREATE TABLE checks (id INTEGER)")
+    live.close()
+    writeFileSync(path + ".bak", Buffer.alloc(9 * 1024 * 1024))
+    expect(findNativeSqliteRecoverySource(path, 8 * 1024 * 1024)).toBe(path)
+  })
+
   it("defers checkpoint maintenance without losing the atomic deletion or connection policy", () => {
     const path = temporaryDatabasePath("deletion.sqlite")
     const { database } = openNativeSqliteDatabase(path, "DeletionTest")

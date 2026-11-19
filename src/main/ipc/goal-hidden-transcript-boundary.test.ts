@@ -1,4 +1,5 @@
 import { AIMessage, AIMessageChunk, HumanMessage, ToolMessage } from "@langchain/core/messages"
+import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons"
 import { addMessages } from "@langchain/langgraph"
 import type { BrowserWindow } from "electron"
 import { mkdtempSync, readFileSync, rmSync } from "node:fs"
@@ -9,6 +10,7 @@ import {
   TURN_COMPLETION_GATE_MARKER_PREFIX,
   WORKFLOW_NOTIFICATION_MARKER_PREFIX
 } from "../../shared/checkpoint-transcript"
+import { NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY } from "../../shared/graph-transcript-boundary"
 import {
   buildMessageRoleCollisionId,
   buildMessageSameRoleDuplicateId,
@@ -29,7 +31,7 @@ import {
   GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY
 } from "../agent/goals/internal-prompt"
 import { goalManager } from "../agent/goals/runtime"
-import { createPhysicalGoalGateRecoveryMessage } from "../agent/runtime"
+import { createPhysicalScopedGateRecoveryMessage } from "../agent/runtime"
 import { bootstrapLegacyCheckpointTranscript } from "../checkpointer/runtime-projection-store"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import * as db from "../db"
@@ -59,13 +61,13 @@ const window = {
   webContents: { isDestroyed: () => false, send: vi.fn() }
 } as unknown as BrowserWindow
 
-it("routes each physical hidden Goal input through the durable boundary helper", () => {
+it("routes physical hidden inputs through the durable boundary helper", () => {
   const agentSource = readFileSync(join(__dirname, "agent.ts"), "utf8")
   expect(agentSource).toMatch(
     /: isWorkflowNotificationTurn\s+\? createPhysicalRunHiddenUserMessage\(/
   )
   expect(agentSource).toMatch(
-    /const coordinatorNotificationInput = coordinatorNotificationHumanMessage\s+\? createPhysicalRunHiddenUserMessage\(/
+    /const coordinatorNotificationInput = coordinatorNotificationFields\s+\? isCoordinatorNotificationTurn\s+\? createPhysicalRunHiddenUserMessage\(/
   )
   expect(agentSource).toContain("const goalInput = createPhysicalRunHiddenUserMessage(")
   expect(
@@ -73,11 +75,9 @@ it("routes each physical hidden Goal input through the durable boundary helper",
   ).toHaveLength(3)
   const runtimeSource = readFileSync(join(__dirname, "../agent/runtime.ts"), "utf8")
   expect(runtimeSource).toMatch(
-    /createRecoveryMessage: \(threadId, messages, prompt\) =>\s+createPhysicalGoalGateRecoveryMessage\(/
+    /createRecoveryMessage: \(threadId, messages, prompt\) =>\s+createPhysicalScopedGateRecoveryMessage\(/
   )
-  expect(agentSource).toContain(
-    "adoptGraphTranscriptBoundaryFromValues(threadId, runToken, payload, completeValuesMessages)"
-  )
+  expect(agentSource).toMatch(/adoptGraphTranscriptBoundaryFromValues\(\s*threadId,/)
 })
 
 it.each([
@@ -86,6 +86,25 @@ it.each([
     fields: {
       content: `${COORDINATOR_NOTIFICATION_PROMPT_PREFIX} Worker finished`,
       additional_kwargs: { cmb_internal_coordinator_notification: true }
+    }
+  },
+  {
+    kind: "ordinary Team notification",
+    notification: true,
+    fields: {
+      content: COORDINATOR_NOTIFICATION_PROMPT_PREFIX + " Worker finished",
+      additional_kwargs: { cmb_internal_coordinator_notification: true }
+    }
+  },
+  {
+    kind: "ordinary Workflow notification",
+    notification: true,
+    fields: {
+      content: WORKFLOW_NOTIFICATION_MARKER_PREFIX + "workflow-fixture]] Workflow finished",
+      additional_kwargs: {
+        cmb_coordinator_augmented_user_message: true,
+        cmb_visible_user_message: WORKFLOW_NOTIFICATION_TURN_PROMPT
+      }
     }
   },
   {
@@ -105,8 +124,8 @@ it.each([
     fields: { content: `${TURN_COMPLETION_GATE_MARKER_PREFIX}todo]] Finish the remaining work` }
   }
 ])(
-  "keeps a hidden Goal $kind boundary through stream replay and checkpoint import",
-  async ({ kind, fields }) => {
+  "keeps a hidden $kind boundary through stream replay and checkpoint import",
+  async ({ kind, fields, notification }) => {
     const directory = mkdtempSync(join(tmpdir(), "cmb-hidden-goal-boundary-"))
     const checkpointPath = join(directory, "checkpoint.sqlite")
     storage.path = join(directory, "threads.sqlite")
@@ -116,16 +135,18 @@ it.each([
     await db.initializeDatabase()
     try {
       db.createThread(threadId)
-      const goal = goalManager.set(threadId, "Report the result")
+      const goal = notification ? undefined : goalManager.set(threadId, "Report the result")
       setCurrentRunMessageQueueOwner(threadId, runToken)
-      const userContent = "/goal Report the result"
+      const userContent = notification ? "Report the result" : "/goal Report the result"
       const user = new HumanMessage({
         id: "user",
         content: userContent,
-        additional_kwargs: {
-          [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true,
-          cmb_visible_user_message: userContent
-        }
+        additional_kwargs: goal
+          ? {
+              [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true,
+              cmb_visible_user_message: userContent
+            }
+          : {}
       })
       db.upsertThreadMessages(threadId, [
         { id: "user", role: "user", content: userContent, created_at: new Date() }
@@ -133,21 +154,22 @@ it.each([
 
       let serialize = createStreamDataSerializer({ projectMessageChunks: true })
       let values = createSerializedValuesMessageAccumulator()
-      const forwardValues = (messages: unknown[]) => {
+      const forwardValues = (messages: unknown[], owner = runToken, resumeNotification = false) => {
         const frame = serialize("values", { messages })
         const snapshot = values.update(frame)
         persistAndForwardPhysicalRunStreamChunk(
           window,
           "agent:test",
           threadId,
-          runToken,
+          owner,
           signal,
           "values",
           frame.data,
           frame.valuesMessageIndexOffset,
           frame.valuesSnapshotKind,
           snapshot.messages,
-          true
+          Boolean(goal),
+          resumeNotification
         )
       }
       const providerId = "fixed-provider-id"
@@ -177,12 +199,21 @@ it.each([
 
       const gateInput = kind === "completion gate"
       const hidden = gateInput
-        ? createPhysicalGoalGateRecoveryMessage(threadId, runToken, history, fields.content)
-        : createPhysicalRunHiddenUserMessage(threadId, runToken, signal, goal, fields)
+        ? createPhysicalScopedGateRecoveryMessage(threadId, runToken, history, fields.content)
+        : createPhysicalRunHiddenUserMessage(
+            threadId,
+            runToken,
+            signal,
+            goal,
+            fields,
+            notification ? "notification" : "goal"
+          )
       expect(hidden.id).toBeDefined()
       expect(hidden.id).not.toBe(fields.id)
       expect(hidden.additional_kwargs).toMatchObject({
-        [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true,
+        [notification
+          ? NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY
+          : GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true,
         ...(kind === "coordinator" && { cmb_internal_coordinator_notification: true }),
         ...(kind === "workflow" && { cmb_coordinator_augmented_user_message: true }),
         ...(gateInput && { [GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]: user.id })
@@ -212,31 +243,60 @@ it.each([
         request: { runtime: { configurable: { thread_id: string } }; messages: typeof graph },
         handler: () => Promise<AIMessage>
       ) => Promise<AIMessage>
-      const newResponse = await wrapModelCall(
-        { runtime: { configurable: { thread_id: threadId } }, messages: graph },
-        async () => new AIMessage({ id: providerId, content: "Result verified" })
-      )
-      expect(newResponse.id).not.toBe(previousCall.id)
-      expect(newResponse.additional_kwargs).toMatchObject(provider(3))
+      const namespace = "model_request:fixture"
+      const executionId = "cmb-notification-assistant:" + namespace
+      const forwardChunk = (content: string, id?: string) => {
+        const chunk = serialize("messages", [
+          new AIMessageChunk({ id, content }),
+          { langgraph_checkpoint_ns: namespace }
+        ])
+        return persistAndForwardPhysicalRunStreamChunk(
+          window,
+          "agent:test",
+          threadId,
+          runToken,
+          signal,
+          "messages",
+          chunk.data
+        )
+      }
+      // The first token can precede an ID. A different provider ID may appear
+      // on the completed message, but both have the registered execution ID.
+      const runModel = () =>
+        wrapModelCall(
+          { runtime: { configurable: { thread_id: threadId } }, messages: graph },
+          async () => {
+            if (notification) {
+              expect(forwardChunk("", "wire-opening-id")).toBeNull()
+              expect(forwardChunk("Result ")).toBe(executionId)
+              expect(forwardChunk("verified", "wire-content-id")).toBe(executionId)
+            }
+            return new AIMessage({ id: providerId, content: "Result verified" })
+          }
+        )
+      const newResponse = notification
+        ? await AsyncLocalStorageProviderSingleton.runWithConfig(
+            { metadata: { langgraph_checkpoint_ns: namespace } },
+            runModel
+          )
+        : await runModel()
+      if (notification) {
+        expect(newResponse.id).toBe(executionId)
+        expect(newResponse.additional_kwargs).toMatchObject({
+          [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: executionId,
+          [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: 1
+        })
+      } else {
+        expect(newResponse.id).not.toBe(previousCall.id)
+        expect(newResponse.additional_kwargs).toMatchObject(provider(3))
+      }
       // A graph-owned recovery may enter the model before IPC consumes its
       // frame. The earlier durable parent allows occurrence assignment first.
       forwardValues(graph)
       expect(db.getThreadTranscriptBoundaryOrdinal(threadId, hidden.id!)).toBe(4)
       const updated = addMessages(graph, [newResponse])
       expect(updated).toHaveLength(6)
-      const chunk = serialize("messages", [
-        new AIMessageChunk({ id: providerId, content: newResponse.content }),
-        { checkpoint_ns: "model:fixture" }
-      ])
-      persistAndForwardPhysicalRunStreamChunk(
-        window,
-        "agent:test",
-        threadId,
-        runToken,
-        signal,
-        "messages",
-        chunk.data
-      )
+      if (!notification) forwardChunk(String(newResponse.content), providerId)
       forwardValues(updated)
       const persisted = db.getThreadMessages(threadId)
       expect(persisted.map(({ content, ordinal }) => [content, ordinal])).toEqual([
@@ -247,8 +307,8 @@ it.each([
         [newResponse.content, 5]
       ])
       expect(persisted.at(-1)).toMatchObject({
-        provider_source_id: providerId,
-        provider_occurrence: 3
+        provider_source_id: notification ? executionId : providerId,
+        provider_occurrence: notification ? 1 : 3
       })
       serialize = createStreamDataSerializer({ projectMessageChunks: true })
       values = createSerializedValuesMessageAccumulator()
@@ -296,10 +356,35 @@ it.each([
         [newResponse.content, 6]
       ])
 
-      goalManager.pause(threadId)
-      const inactive = createPhysicalRunHiddenUserMessage(threadId, runToken, signal, goal, fields)
-      expect(inactive.additional_kwargs).toEqual(fields.additional_kwargs ?? {})
-      expect(inactive.id).toBe(fields.id)
+      if (notification) {
+        const resumedRun = "resumed-approval"
+        setCurrentRunMessageQueueOwner(threadId, resumedRun)
+        try {
+          const restoredGraph = [...history, missingReply, hidden, newResponse]
+          const checkpoint = db.getThreadMessages(threadId)
+          for (const resumesCheckpoint of [false, true]) {
+            serialize = createStreamDataSerializer({ projectMessageChunks: true })
+            values = createSerializedValuesMessageAccumulator()
+            forwardValues(restoredGraph, resumedRun, resumesCheckpoint)
+            expect(db.getThreadMessages(threadId)).toEqual(checkpoint)
+          }
+        } finally {
+          clearCurrentRunMessageQueue(threadId, resumedRun)
+        }
+      }
+
+      if (goal) {
+        goalManager.pause(threadId)
+        const inactive = createPhysicalRunHiddenUserMessage(
+          threadId,
+          runToken,
+          signal,
+          goal,
+          fields
+        )
+        expect(inactive.additional_kwargs).toEqual(fields.additional_kwargs ?? {})
+        expect(inactive.id).toBe(fields.id)
+      }
     } finally {
       clearCurrentRunMessageQueue(threadId, runToken)
       await db.closeDatabase()
@@ -411,22 +496,26 @@ it.each([
         expect(bootstrap().stats.migratedMessages).toBe(2)
         // A compacted model input cannot supply the older occurrence. SQLite
         // must recover it even from rows without persisted provider metadata.
-        expect(db.getThreadMessageProviderOccurrencesBeforeUser(threadId, earlier.id!, [providerId]))
-          .not.toContainEqual(expect.objectContaining({
+        expect(
+          db.getThreadMessageProviderOccurrencesBeforeUser(threadId, earlier.id!, [providerId])
+        ).not.toContainEqual(
+          expect.objectContaining({
             role: "assistant",
             provider_occurrence: historyOccurrence
-          }))
+          })
+        )
       }
       const current = createPhysicalRunHiddenUserMessage(threadId, runToken, signal, goal, {
         content: "Current continuation"
       })
       if (compacted) {
-        expect(db.getThreadMessageProviderOccurrencesBeforeUser(threadId, current.id!, [providerId]))
-          .toContainEqual({
-            provider_source_id: providerId,
-            role: "assistant",
-            provider_occurrence: historyOccurrence
-          })
+        expect(
+          db.getThreadMessageProviderOccurrencesBeforeUser(threadId, current.id!, [providerId])
+        ).toContainEqual({
+          provider_source_id: providerId,
+          role: "assistant",
+          provider_occurrence: historyOccurrence
+        })
       }
       const graph = addMessages(compacted ? [user] : saved, [current])
       const serialize = createStreamDataSerializer({ projectMessageChunks: true })
@@ -546,7 +635,7 @@ it.each([
   }
 )
 
-it("prepares upgraded Goal history before the provider runs and respects its physical owner", async () => {
+it.each([false, true])("prepares provider history and respects the run owner (Goal turn=%s)", async (goalTurn) => {
   const threadId = "goal-with-upgraded-provider-history"
   const runToken = "originating-owner"
   let finishPreparation!: () => void
@@ -560,7 +649,7 @@ it("prepares upgraded Goal history before the provider runs and respects its phy
   const boundary = new HumanMessage({
     id: "goal-boundary",
     content: "Continuation",
-    additional_kwargs: { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true }
+    ...(goalTurn && { additional_kwargs: { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true } })
   })
   const middleware = createCurrentRunMessageQueueMiddleware(runToken, undefined, undefined, prepare)
   const wrapModelCall = middleware.wrapModelCall as unknown as (
@@ -574,7 +663,7 @@ it("prepares upgraded Goal history before the provider runs and respects its phy
   setCurrentRunMessageQueueOwner(threadId, runToken)
   try {
     const initial = wrapModelCall(request, handler)
-    expect(prepare).toHaveBeenCalledWith(threadId)
+    expect(prepare).toHaveBeenCalledWith(threadId, goalTurn)
     expect(handler).not.toHaveBeenCalled()
     finishPreparation()
     await initial

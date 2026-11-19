@@ -83,7 +83,7 @@ function matchesCompletedRouteMergeTarget(full: unknown, candidate: unknown): bo
   )
 }
 
-function isCompletedRouteValuePrefix(full: unknown, candidate: unknown, key?: string): boolean {
+export function isCompletedRouteValuePrefix(full: unknown, candidate: unknown, key?: string): boolean {
   if (sameCompletedRouteValue(full, candidate)) return true
   if (typeof full === "string" && typeof candidate === "string") {
     return key === "type" ||
@@ -455,15 +455,26 @@ export function buildAvailableProviderOccurrenceId(
  * normalizeAppendedMessageIds instead so repeated chunks still update one row.
  */
 export function normalizeCompleteMessageIds<T extends RoleCollisionMessage>(
-  messages: readonly T[]
+  messages: readonly T[],
+  preserveUserTurnBoundaries = false,
+  startsHiddenTurn?: (message: T) => boolean
 ): T[] {
   const crossRoleNormalized = normalizeMessageRoleCollisionIds([], messages)
   const occurrenceByIdentity = new Map<string, number>()
-  const renderIdByProviderOccurrence = new Map<string, string>()
+  const slotsByProviderOccurrence = new Map<string, {
+    renderId: string; turn: number; declaredAs: number; toolCallId?: string
+  }>()
+  const currentTurnOccurrences = new Map<string, number>()
   const occupiedIds = new Set<string>()
+  let turn = 0
 
   return crossRoleNormalized.map((message) => {
     const role = normalizedMessageRole(message)
+    const hiddenTurn = preserveUserTurnBoundaries && startsHiddenTurn?.(message)
+    if (preserveUserTurnBoundaries && (role === "user" || hiddenTurn)) {
+      turn += 1
+      currentTurnOccurrences.clear()
+    }
     const sourceId = getMessageProviderSourceId(message)
     const providerIdentity = completeProviderRoleIdentity(message)
     // Separate explicitly identified results for different calls even when a
@@ -474,12 +485,22 @@ export function normalizeCompleteMessageIds<T extends RoleCollisionMessage>(
         : providerIdentity
     const declaredOccurrence = getMessageProviderOccurrence(message)
     const highestOccurrence = occurrenceByIdentity.get(identity) ?? 0
-    const occurrence = declaredOccurrence ?? highestOccurrence + 1
+    let occurrence = declaredOccurrence ?? highestOccurrence + 1
+    const toolCallId = preserveUserTurnBoundaries && role === "tool" ? message.tool_call_id : undefined
+    if (preserveUserTurnBoundaries && declaredOccurrence !== undefined) {
+      const requestedKey = `${identity}\u0000${declaredOccurrence}`
+      const claim = JSON.stringify([requestedKey, toolCallId ?? null])
+      const prior = slotsByProviderOccurrence.get(requestedKey)
+      occurrence = currentTurnOccurrences.get(claim) ??
+        (prior && (prior.turn !== turn || prior.declaredAs !== declaredOccurrence || prior.toolCallId !== toolCallId)
+          ? highestOccurrence + 1 : declaredOccurrence)
+      currentTurnOccurrences.set(claim, occurrence)
+    }
     occurrenceByIdentity.set(identity, Math.max(highestOccurrence, occurrence))
     const occurrenceIdentity = `${identity}\u0000${occurrence}`
     const existingRenderId =
       declaredOccurrence !== undefined
-        ? renderIdByProviderOccurrence.get(occurrenceIdentity)
+        ? slotsByProviderOccurrence.get(occurrenceIdentity)?.renderId
         : undefined
     if (existingRenderId) {
       return {
@@ -498,7 +519,8 @@ export function normalizeCompleteMessageIds<T extends RoleCollisionMessage>(
       renderId = buildAvailableProviderOccurrenceId(sourceId, role, occurrence, occupiedIds)
     }
     occupiedIds.add(renderId)
-    renderIdByProviderOccurrence.set(occurrenceIdentity, renderId)
+    slotsByProviderOccurrence.set(occurrenceIdentity, { renderId, turn,
+      declaredAs: declaredOccurrence ?? occurrence, toolCallId })
     const shouldPersistOccurrence = declaredOccurrence !== undefined || occurrence > 1
     return (
       renderId === message.id &&

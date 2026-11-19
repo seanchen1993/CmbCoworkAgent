@@ -36,6 +36,7 @@ const MESSAGE_PREFIX_SENTINEL_COUNT = 24
 const MESSAGE_PREFIX_TAIL_WINDOW = 16
 const MESSAGE_PREFIX_MIN_SHARED_TAIL = 4
 const CHECKPOINT_SCHEMA_MIGRATION_ID = "checkpoint-columns-and-fork-boundary-v1"
+const CHECKPOINT_LINEAGE_SPAN = 128
 import type { RunnableConfig } from "@langchain/core/runnables"
 import {
   BaseCheckpointSaver,
@@ -105,6 +106,7 @@ export interface CheckpointMessageRecoveryContext {
   requiresExactRecovery: boolean
   /** Durable transcript rows after this checkpoint must not be folded into it. */
   checkpointTs: string
+  transcriptRevision?: string
 }
 
 export interface CheckpointMessageRecoveryResult {
@@ -193,12 +195,17 @@ interface CheckpointForkBoundaryBackfill {
 interface ExternalMessagesReference {
   [EXTERNAL_MESSAGES_MARKER]: true
   messageCount: number
+  transcriptRevision?: string
 }
 
-function buildExternalMessagesReference(messageCount: number): ExternalMessagesReference {
+function buildExternalMessagesReference(
+  messageCount: number,
+  transcriptRevision?: string
+): ExternalMessagesReference {
   return {
     [EXTERNAL_MESSAGES_MARKER]: true,
-    messageCount
+    messageCount,
+    ...(transcriptRevision ? { transcriptRevision } : {})
   }
 }
 
@@ -794,6 +801,44 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       )
     `)
 
+    this.db.run(`CREATE TABLE IF NOT EXISTS checkpoint_lineage (
+      thread_id TEXT NOT NULL, checkpoint_ns TEXT NOT NULL, checkpoint_id TEXT NOT NULL,
+      parent_checkpoint_id TEXT, conflicting_parent INTEGER NOT NULL DEFAULT 0,
+      lineage_depth INTEGER, ancestor_span_id TEXT, ancestor_span_depth INTEGER,
+      PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+    )`)
+    const lineageColumns = this.db.exec("PRAGMA table_info(checkpoint_lineage)")[0]?.values ?? []
+    for (const [name, type] of [
+      ["lineage_depth", "INTEGER"], ["ancestor_span_id", "TEXT"], ["ancestor_span_depth", "INTEGER"]
+    ]) {
+      if (!lineageColumns.some((column) => column[1] === name))
+        this.db.run(`ALTER TABLE checkpoint_lineage ADD COLUMN ${name} ${type}`)
+    }
+    this.db.run(`CREATE INDEX IF NOT EXISTS checkpoint_lineage_conflicts
+      ON checkpoint_lineage(thread_id, checkpoint_ns, lineage_depth) WHERE conflicting_parent = 1`)
+    this.db.run(`INSERT INTO checkpoint_lineage
+      (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, lineage_depth)
+      SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
+        CASE WHEN parent_checkpoint_id IS NULL THEN 0 END FROM checkpoints WHERE 1
+      ON CONFLICT(thread_id, checkpoint_ns, checkpoint_id) DO UPDATE SET conflicting_parent = 1
+      WHERE checkpoint_lineage.parent_checkpoint_id IS NOT excluded.parent_checkpoint_id`)
+    const recordLineage = `INSERT INTO checkpoint_lineage
+      (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, lineage_depth, ancestor_span_id, ancestor_span_depth)
+      SELECT NEW.thread_id, NEW.checkpoint_ns, NEW.checkpoint_id, NEW.parent_checkpoint_id, COALESCE(parent.lineage_depth + 1, 0),
+        CASE WHEN parent.lineage_depth % ${CHECKPOINT_LINEAGE_SPAN} = 0 THEN parent.checkpoint_id ELSE parent.ancestor_span_id END,
+        CASE WHEN parent.lineage_depth % ${CHECKPOINT_LINEAGE_SPAN} = 0 THEN parent.lineage_depth ELSE parent.ancestor_span_depth END
+      FROM (SELECT 1) LEFT JOIN checkpoint_lineage AS parent ON parent.thread_id = NEW.thread_id
+        AND parent.checkpoint_ns = NEW.checkpoint_ns AND parent.checkpoint_id = NEW.parent_checkpoint_id
+      WHERE 1
+      ON CONFLICT(thread_id, checkpoint_ns, checkpoint_id) DO UPDATE SET conflicting_parent = 1
+      WHERE checkpoint_lineage.parent_checkpoint_id IS NOT excluded.parent_checkpoint_id;`
+    this.db.run(`CREATE TRIGGER IF NOT EXISTS checkpoint_lineage_insert AFTER INSERT ON checkpoints
+      BEGIN ${recordLineage} END`)
+    this.db.run(`CREATE TRIGGER IF NOT EXISTS checkpoint_lineage_parent_update
+      AFTER UPDATE OF parent_checkpoint_id, checkpoint_id ON checkpoints
+      WHEN NEW.parent_checkpoint_id IS NOT OLD.parent_checkpoint_id OR NEW.checkpoint_id IS NOT OLD.checkpoint_id
+      BEGIN ${recordLineage} END`)
+
     this.db.run(`
       CREATE TABLE IF NOT EXISTS writes (
         thread_id TEXT NOT NULL,
@@ -1189,6 +1234,9 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       hasPendingSends ||
       this.checkpointHasPendingWrites(row, database) ||
       this.hasPendingWriteIntent(row.thread_id, row.checkpoint_ns)
+    const reference = (checkpoint.channel_values as Record<string, unknown>).messages
+    const transcriptRevision = isExternalMessagesReference(reference) &&
+      typeof reference.transcriptRevision === "string" ? reference.transcriptRevision : undefined
     let recovered: CheckpointMessageRecoveryResult | null
     try {
       recovered = await recover({
@@ -1199,7 +1247,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         expectedMessageCount,
         hasInterrupt,
         requiresExactRecovery,
-        checkpointTs: checkpoint.ts
+        checkpointTs: checkpoint.ts,
+        ...(transcriptRevision ? { transcriptRevision } : {})
       })
     } catch (error) {
       console.warn("[SqlJsSaver] Checkpoint message recovery source failed:", error)
@@ -1226,7 +1275,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     const preparedCheckpoint = { ...checkpoint }
     preparedCheckpoint.channel_values = {
       ...preparedCheckpoint.channel_values,
-      messages: buildExternalMessagesReference(messages.length)
+      messages: buildExternalMessagesReference(messages.length,
+        recovered.complete ? transcriptRevision : randomUUID())
     }
     if (!recovered.complete) {
       // A bounded recovery replaces the raw prefix, so old summary offsets no
@@ -2715,7 +2765,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
   private async putUnlocked(
     config: RunnableConfig,
     checkpoint: Checkpoint,
-    metadata: CheckpointMetadata
+    metadata: CheckpointMetadata,
+    restoreThread = false
   ): Promise<RunnableConfig> {
     await this.initialize()
     if (!this.db) throw new Error("Database not initialized")
@@ -2748,7 +2799,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
 
     if (Array.isArray(messages)) {
       externalMessageCount = messages.length
-      const previous = this.checkpointMessageWriteStates.get(namespaceKey)
+      const previous = restoreThread ? undefined : this.checkpointMessageWriteStates.get(namespaceKey)
       if (
         previous?.hasExternalSnapshot &&
         previous.snapshotGeneration &&
@@ -2766,7 +2817,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       const suffix = messages.slice(messageSnapshotPrefixLength)
       preparedCheckpoint.channel_values = {
         ...preparedCheckpoint.channel_values,
-        messages: buildExternalMessagesReference(messages.length)
+        messages: buildExternalMessagesReference(messages.length, randomUUID())
       }
       serializedMessageSuffix = await this.serde.dumpsTyped(suffix)
 
@@ -2831,6 +2882,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       try {
         database.run("BEGIN IMMEDIATE")
         transactionStarted = true
+        if (restoreThread) this.clearCheckpointRows(database, thread_id)
 
         if (messageSnapshotParentCheckpointId) {
           const parentResult = database.exec(
@@ -2959,6 +3011,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       }
     }
 
+    if (restoreThread) this.clearCheckpointCaches(thread_id)
     if (Array.isArray(messages)) {
       this.checkpointMessageWriteStates.set(namespaceKey, {
         checkpointId: checkpoint.id,
@@ -3218,16 +3271,12 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     }
   }
 
-  async deleteThread(threadId: string): Promise<void> {
-    await this.initialize()
-    if (!this.db) throw new Error("Database not initialized")
+  private clearCheckpointRows(database: NativeSqliteAdapter, threadId: string): void {
+    for (const table of ["checkpoints", "writes", "checkpoint_message_snapshots", "checkpoint_runtime_projections", "checkpoint_legacy_fork_candidates"])
+      database.run(`DELETE FROM ${table} WHERE thread_id = ?`, [threadId])
+  }
 
-    this.db.run(`DELETE FROM checkpoints WHERE thread_id = ?`, [threadId])
-    this.db.run(`DELETE FROM writes WHERE thread_id = ?`, [threadId])
-    this.db.run(`DELETE FROM checkpoint_message_snapshots WHERE thread_id = ?`, [threadId])
-    this.db.run(`DELETE FROM checkpoint_runtime_projections WHERE thread_id = ?`, [threadId])
-    this.db.run(`DELETE FROM checkpoint_legacy_fork_candidates WHERE thread_id = ?`, [threadId])
-
+  private clearCheckpointCaches(threadId: string): void {
     const cachePrefix = `${threadId}\u0000`
     for (const key of this.checkpointMessageWriteStates.keys()) {
       if (key.startsWith(cachePrefix)) this.checkpointMessageWriteStates.delete(key)
@@ -3235,7 +3284,44 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     for (const key of this.hydratedCheckpointMessages.keys()) {
       if (key.startsWith(cachePrefix)) this.hydratedCheckpointMessages.delete(key)
     }
+  }
 
+  async restoreThreadCheckpoint(threadId: string, snapshot?: CheckpointTuple): Promise<void> {
+    const checkpointNs = snapshot?.config.configurable?.checkpoint_ns ?? ""
+    const release = await this.acquireCheckpointNamespace(threadId, checkpointNs)
+    try {
+      if (!snapshot?.metadata) {
+        await this.deleteThread(threadId)
+        return
+      }
+      await this.putUnlocked({
+        ...snapshot.config,
+        configurable: {
+          ...snapshot.config.configurable,
+          thread_id: threadId,
+          checkpoint_ns: checkpointNs,
+          checkpoint_id: snapshot.parentConfig?.configurable?.checkpoint_id
+        }
+      }, snapshot.checkpoint, snapshot.metadata, true)
+    } finally {
+      release()
+    }
+  }
+
+  async deleteThread(threadId: string): Promise<void> {
+    await this.initialize()
+    const database = this.db
+    if (!database) throw new Error("Database not initialized")
+    database.run("BEGIN IMMEDIATE")
+    try {
+      this.clearCheckpointRows(database, threadId)
+      database.run("DELETE FROM checkpoint_lineage WHERE thread_id = ?", [threadId])
+      database.run("COMMIT")
+    } catch (error) {
+      database.run("ROLLBACK")
+      throw error
+    }
+    this.clearCheckpointCaches(threadId)
   }
 
   /**

@@ -1,9 +1,9 @@
 import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown"
 import type { PluggableList } from "unified"
 import rehypeHighlight from "rehype-highlight"
-import remarkGfm from "remark-gfm"
 import remarkWindowsFileLinks from "@/lib/remark-windows-file-links"
 import type { ChatSearchLocation } from "../../../../shared/chat-search-types"
+import { CHAT_MARKDOWN_REMARK_PLUGINS, markChatMarkdownSearchNavigation } from "../../../../shared/markdown-visible-text"
 import { ChatSearchContext } from "./ChatSearchContext"
 import { Check, Copy } from "lucide-react"
 import {
@@ -90,14 +90,13 @@ function MarkdownCodeBlock({
 
 // Hoisted to module scope so the prop identities stay stable across renders
 // (recreating these every render makes react-markdown redo work and churns GC).
-const REMARK_PLUGINS = [remarkGfm, remarkWindowsFileLinks]
-const BOT_REMARK_PLUGINS = [remarkGfm, remarkWindowsFileLinks, remarkBotFileLinks]
-const REHYPE_PLUGINS = [rehypeHighlight]
-// While streaming we skip syntax highlighting (the expensive rehype pass) and
-// reuse a single empty array identity so react-markdown doesn't see a new prop.
-const NO_REHYPE_PLUGINS: typeof REHYPE_PLUGINS = []
-const BOT_TRANSCRIPT_REHYPE_PLUGINS = [rehypeHighlight, rehypeBotTranscript]
-const BOT_STREAM_REHYPE_PLUGINS = [rehypeBotTranscript]
+const REMARK_PLUGINS = [...CHAT_MARKDOWN_REMARK_PLUGINS, remarkWindowsFileLinks]
+const REHYPE_PLUGINS = [rehypeHighlight, markChatMarkdownSearchNavigation]
+// Streaming skips the expensive syntax-highlighting pass.
+const STREAMING_REHYPE_PLUGINS = [markChatMarkdownSearchNavigation]
+const BOT_REMARK_PLUGINS = [...REMARK_PLUGINS, remarkBotFileLinks]
+const BOT_TRANSCRIPT_REHYPE_PLUGINS = [...REHYPE_PLUGINS, rehypeBotTranscript]
+const BOT_STREAM_REHYPE_PLUGINS = [...STREAMING_REHYPE_PLUGINS, rehypeBotTranscript]
 
 // react-markdown's default URL sanitizer treats a Windows drive letter and
 // custom local schemes as unsafe protocols (for example, `C:/repo/a.ts` and
@@ -213,7 +212,7 @@ const MarkdownFragment = memo(function MarkdownFragment({
   const inlineMentions = useContext(BotInlineMentionsContext)
   const renderCodeBlock = useMemo(
     () =>
-      ({
+      function RenderMarkdownCode({
         rawCode,
         language,
         className,
@@ -223,15 +222,17 @@ const MarkdownFragment = memo(function MarkdownFragment({
         language: string | null
         className?: string
         children: ReactNode
-      }) => (
-        <MarkdownCodeBlock
-          code={rawCode.replace(/\n$/, "")}
-          language={language}
-          className={className}
-        >
-          {children}
-        </MarkdownCodeBlock>
-      ),
+      }) {
+        return (
+          <MarkdownCodeBlock
+            code={rawCode.replace(/\n$/, "")}
+            language={language}
+            className={className}
+          >
+            {children}
+          </MarkdownCodeBlock>
+        )
+      },
     []
   )
   const components = useMarkdownFilePreviewComponents({
@@ -289,7 +290,7 @@ const MarkdownFragment = memo(function MarkdownFragment({
               ? BOT_STREAM_REHYPE_PLUGINS
               : BOT_TRANSCRIPT_REHYPE_PLUGINS
             : isStreaming
-              ? NO_REHYPE_PLUGINS
+              ? STREAMING_REHYPE_PLUGINS
               : REHYPE_PLUGINS
         }
         components={mentionComponents}

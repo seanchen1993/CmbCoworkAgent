@@ -40,6 +40,7 @@ function loadThreadDeletionHandler({
     cancelLegacySubagentTranscriptMigration: noop,
     cancelSubagentTranscriptStartupRead: noop,
     cancelLegacyCheckpointTranscriptBootstrap: noop,
+    checkpointHydrationOperations: new Map<string, Set<AbortController>>(),
     getAgentModeFromMetadata: () => "normal",
     threadDeletionMetadata: () => ({}),
     assertScopedBotWorkThreadDeletion: () => false,
@@ -387,7 +388,17 @@ describe("threads:get hydration contract", () => {
     expect(handler).toContain("limit: 128")
     expect(handler).toContain("byteBudget: 1024 * 1024")
     expect(handler).toContain("checkpoint: bootstrap.runtimeTuple")
-    expect(handler).toContain("`thread-hydration:${event.sender.id}`")
+    expect(handler).toContain("hydration.workerKey")
+    expect(handler.indexOf("beginCheckpointHydration(event.sender.id, normalizedThreadId, options)")).toBeLessThan(
+      handler.indexOf("await withThreadRunMutationLock(normalizedThreadId")
+    )
+    expect(handler.indexOf("getThreadRowLifetime(normalizedThreadId)")).toBeLessThan(
+      handler.indexOf("await withThreadRunMutationLock(normalizedThreadId")
+    )
+    expect(handler.indexOf("if (!isCurrent()) return null")).toBeLessThan(
+      handler.indexOf("return bootstrapLegacyCheckpointTranscriptInWorker(")
+    )
+    expect(handler).toContain("getThreadRowLifetime(normalizedThreadId) === lifetime")
     expect(handler).not.toContain("withCheckpointer")
     expect(handler).not.toContain("readLatestCheckpointTupleInWorker")
     expect(handler).not.toContain("getLatestCheckpoint(")
@@ -413,7 +424,10 @@ describe("threads:get hydration contract", () => {
 
     expect(start).toBeGreaterThanOrEqual(0)
     expect(handler).toContain("readLatestCheckpointRuntimeTupleInWorker")
-    expect(handler).toContain("`thread-hydration:${event.sender.id}`")
+    expect(handler).toContain("beginCheckpointHydration(event.sender.id, normalizedThreadId, options)")
+    expect(handler).toContain("hydration.workerKey")
+    expect(source).toContain('options?.requestScope === "foreground-hydration"')
+    expect(source).toContain("foreground ? `thread-hydration:${owner}` : `thread-background:${owner}:${threadId}`")
     expect(handler).toContain("isCheckpointRuntimeProjectionCancelled(e)")
     expect(handler).toContain("throw e")
     expect(handler).not.toMatch(

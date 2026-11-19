@@ -6,6 +6,7 @@ import type { BotGroupInputControl } from "@/components/bots/BotGroupMentionInpu
 import { parseBotMessageMentions } from "../../../../shared/bots/message-mentions"
 import type { BotDefinition, BotMessageReply } from "../../../../shared/bots/contracts"
 import { parseBotMessageReply } from "../../../../shared/bots/message-reply"
+import { finishThreadSearchNavigation, isCurrentThreadSearchNavigation, useThreadSearch, type DurableSearchNavigation } from "@/lib/thread-search-navigation"
 import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { IDLE_MODEL_OUTSIDE_HOURS_MESSAGE } from "../../../../shared/idle-model-service-window"
 import { IDLE_MODEL_SAP_REQUIRED_MESSAGE } from "../../../../shared/model-catalog"
@@ -216,6 +217,8 @@ import {
 } from "@/features/mentions/atFileAttachments"
 import { MentionFileChip } from "@/features/mentions/MentionFileChip"
 import { DEFAULT_IM_CHANNEL_ID } from "../../../../shared/im-gateway-contract"
+import { GOAL_USER_EVENT_MESSAGE_ID_PREFIX } from "../../../../shared/goal-events"
+import { findThreadMessageGapTailStart } from "@/lib/thread-message-pages"
 import { splitGoalTransportPayload } from "../../../../shared/goal-slash"
 import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
 import {
@@ -256,7 +259,11 @@ import {
   classifyGuidedMessage
 } from "@/lib/queued-message-content"
 import { findEnabledSkillSelection, getSkillMetadataId, isSkillDisabled } from "@/lib/skill-ids"
-import { formatGoalEventMessage, isVisibleCheckpointTranscriptMessage } from "@/lib/goal-transcript"
+import {
+  excludeDuplicateGoalSidecars,
+  formatGoalEventMessage,
+  isVisibleCheckpointTranscriptMessage
+} from "@/lib/goal-transcript"
 import { buildGoalPanelViewModel, goalVerdictTone } from "@/lib/goal-panel-view"
 import { buildLatestChatReportBatch, type ChatReportBatch } from "@/lib/chat-report-batch"
 import {
@@ -1200,6 +1207,7 @@ function getThreadDisplayBaseline(messages: readonly Message[], contentVersion: 
     cached.sourceLength === messages.length &&
     cached.sourceTailSnapshot &&
     sourceTail &&
+    sourceTail.role !== "user" &&
     cached.sourceTailSnapshot.id === sourceTail.id &&
     cached.sourceTailSnapshot.role === sourceTail.role &&
     cached.sourceTailSnapshot.tool_call_id === sourceTail.tool_call_id
@@ -1226,7 +1234,8 @@ function getThreadDisplayBaseline(messages: readonly Message[], contentVersion: 
     }
   }
   const baseline = filterCoordinatorNoiseMessages(
-    messages.filter(isVisibleCheckpointTranscriptMessage).map(cleanUserAttachmentMarkupForDisplay)
+    excludeDuplicateGoalSidecars(messages.filter(isVisibleCheckpointTranscriptMessage))
+      .map(cleanUserAttachmentMarkupForDisplay)
   )
   threadDisplayBaselineCache.set(messages, {
     contentVersion,
@@ -1863,6 +1872,7 @@ export function ChatContainer({
   const durableMessageWindowGenerationRef = useRef(0)
   const chatViewMountedRef = useRef(false)
   const [searchOpen, setSearchOpen] = useState(false)
+  const navigation = useThreadSearch((state) => state.navigation?.result.threadId === threadId ? state.navigation : null)
   const [searchReveal, setSearchReveal] = useState<ChatSearchReveal | null>(null)
   const searchIndexerRef = useRef<ReturnType<typeof createChatSearchIndexer> | null>(null)
   const searchLocalCorpus = useCallback((corpus: ChatSearchCorpus, query: string) => {
@@ -2398,9 +2408,13 @@ export function ChatContainer({
     historyLoading,
     historyPageLoading,
     historyHasMore,
+    historyPageWindows,
+    historyWindowRevision,
     historyWindowGap,
     historyMessageTotal,
     historyConversationPresence,
+    historyRestorationPending,
+    historyRestorationFailed,
     historyLoadedMessageCount,
     scheduledTaskId,
     modelRetry,
@@ -2422,6 +2436,7 @@ export function ChatContainer({
     loadReleasedMessageWindow,
     restoreLatestMessageWindow,
     cancelMessageWindowLoad,
+    retryHistoryRestoration,
     removeLocalMessage,
     addQueuedMessage,
     prependQueuedMessage,
@@ -3900,9 +3915,21 @@ export function ChatContainer({
       displayMessagesStructureVersion
     ]
   )
+  const historyGapBeforeRawMessageId = useMemo(() => {
+    if (!historyWindowGap) return undefined
+    return threadMessages[findThreadMessageGapTailStart(threadMessages, historyWindowGap)]?.id ?? null
+  }, [historyWindowGap, threadMessages])
   const historyGapBeforeVisibleMessageId = useMemo(() => {
-    if (!historyWindowGap) return null
-    const boundaryIndex = displayMessageProjection.indexById.get(historyWindowGap.beforeMessageId)
+    const beforeMessageId = historyGapBeforeRawMessageId
+    if (!beforeMessageId) return null
+    let boundaryIndex = displayMessageProjection.indexById.get(beforeMessageId)
+    if (boundaryIndex === undefined) {
+      const tailStart = resolveChatSearchContiguousTailStart(
+        threadMessages, threadDisplayBaseline, beforeMessageId
+      )
+      const boundary = threadDisplayBaseline[tailStart]
+      boundaryIndex = boundary && displayMessageProjection.indexById.get(boundary.id)
+    }
     if (boundaryIndex === undefined) return null
     const visibleBoundaryIndex = visibleMessageIndexes.find((index) => index >= boundaryIndex)
     return visibleBoundaryIndex === undefined
@@ -3912,7 +3939,9 @@ export function ChatContainer({
     displayMessageProjection.indexById,
     displayMessages,
     displayMessagesStructureVersion,
-    historyWindowGap,
+    historyGapBeforeRawMessageId,
+    threadDisplayBaseline,
+    threadMessages,
     visibleMessageIndexes
   ])
   const lastVisibleMessageIndex = visibleMessageIndexes[visibleMessageIndexes.length - 1]
@@ -3947,6 +3976,7 @@ export function ChatContainer({
       const plan = createChatSearchPlan(message.role, verifiedReply?.message ?? message.content, {
         stripThink: hasVisibleReasoning || (searchBodyOnly && message.role === "assistant")
       })
+      plan.truncated ||= Boolean(message.content_preview_notice)
       if (!searchBodyOnly) appendChatSearchToolSummaries(plan, message.tool_calls ?? [])
       // Keep the source slices only; joining them would allocate a second corpus on the UI thread.
       const textUnits = plan.segments.reduce((sum, segment) => sum + segment.raw.length + 1, 0)
@@ -3969,9 +3999,11 @@ export function ChatContainer({
     rawMessages: readonly Message[]
     indexById: ReadonlyMap<string, number>
     buildDocument: typeof buildSearchDocument
-    gapBeforeMessageId: string | null
+    gapBeforeMessageId: string | null | undefined
     contentVersion: number
     startIndex: number
+    contiguousTailStartIndex: number
+    truncated: boolean
     textUnits: number
     documents: ChatSearchDocument[]
     documentIndexById: Map<string, number>
@@ -4003,7 +4035,7 @@ export function ChatContainer({
         cached.rawMessages === threadMessages &&
         cached.indexById === displayMessageProjection.indexById &&
         cached.buildDocument === buildSearchDocument &&
-        cached.gapBeforeMessageId === (historyWindowGap?.beforeMessageId ?? null)
+        cached.gapBeforeMessageId === historyGapBeforeRawMessageId
       if (cached && stableIdentityMatches && cached.contentVersion !== messagesContentVersion) {
         let requiresRebuild = false
         let textUnits = cached.textUnits
@@ -4013,7 +4045,8 @@ export function ChatContainer({
           const cachedDocumentIndex = cached.documentIndexById.get(changedMessage.id)
           const baselineIndex = cached.baselineIndexLookup.findFirstIndex(changedMessage.id)
           const belongsToCachedWindow =
-            baselineIndex >= cached.startIndex && baselineIndex < threadDisplayBaseline.length
+            baselineIndex >= 0 && (baselineIndex >= Math.max(cached.startIndex, cached.contiguousTailStartIndex) ||
+              changedMessage.id.startsWith(GOAL_USER_EVENT_MESSAGE_ID_PREFIX))
           if (cachedDocumentIndex === undefined) {
             if (
               belongsToCachedWindow &&
@@ -4029,7 +4062,7 @@ export function ChatContainer({
           }
           const nextDocument = buildSearchDocument(
             changedMessage,
-            displayMessageProjection.indexById.get(changedMessage.id) ?? baselineIndex
+            nextDocuments[cachedDocumentIndex].sortIndex ?? baselineIndex
           )
           if (!nextDocument) {
             requiresRebuild = true
@@ -4040,14 +4073,10 @@ export function ChatContainer({
             chatSearchDocumentUnits(nextDocuments[cachedDocumentIndex])
           nextDocuments[cachedDocumentIndex] = nextDocument
         }
-        if (requiresRebuild) {
+        if (requiresRebuild || textUnits > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT) {
           stableSearchDocumentsRef.current = null
           cached = null
         } else {
-          while (nextDocuments.length > 1 && textUnits > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT) {
-            const removed = nextDocuments.shift()
-            if (removed) textUnits -= chatSearchDocumentUnits(removed)
-          }
           cached.documents = nextDocuments
           cached.documentIndexById = new Map(
             nextDocuments.map((document, index) => [document.messageId, index] as const)
@@ -4063,45 +4092,48 @@ export function ChatContainer({
         cached.rawMessages !== threadMessages ||
         cached.indexById !== displayMessageProjection.indexById ||
         cached.buildDocument !== buildSearchDocument ||
-        cached.gapBeforeMessageId !== (historyWindowGap?.beforeMessageId ?? null)
+        cached.gapBeforeMessageId !== historyGapBeforeRawMessageId
       ) {
         // The durable search API covers the complete persisted transcript. Keep the renderer-side
         // corpus bounded to the already-visible recent page so opening search after paging through a
         // very long task cannot synchronously stringify and index the entire hydrated history.
         const documents: ChatSearchDocument[] = []
         let textUnits = 0
-        // A resident gap makes the in-memory array non-contiguous. Index only the latest side of
-        // that gap locally; durable results provide the omitted prefix in database order. Otherwise
-        // merging "old resident prefix + durable gap + latest tail" could advertise a false order.
-        const contiguousTailStartIndex = resolveChatSearchContiguousTailStart(
-          threadMessages,
-          threadDisplayBaseline,
-          historyWindowGap?.beforeMessageId ?? null
-        )
-        const startIndex = Math.max(
-          contiguousTailStartIndex,
-          threadDisplayBaseline.length - CHAT_LOCAL_SEARCH_HISTORY_LIMIT
-        )
-        for (
-          let messageIndex = threadDisplayBaseline.length - 1;
-          messageIndex >= startIndex;
-          messageIndex -= 1
-        ) {
-          await yieldIfNeeded()
+        // The durable scanner supplies the detached prefix. Goal sidecars only have a
+        // local rendered representation, so keep them searchable on either side of the gap.
+        const contiguousTailStartIndex = historyGapBeforeRawMessageId === null
+          ? threadDisplayBaseline.length
+          : resolveChatSearchContiguousTailStart(
+              threadMessages, threadDisplayBaseline, historyGapBeforeRawMessageId ?? null
+            )
+        const startIndex = Math.max(0, threadDisplayBaseline.length - CHAT_LOCAL_SEARCH_HISTORY_LIMIT)
+        const addDocument = (messageIndex: number): boolean => {
           const message = threadDisplayBaseline[messageIndex]
           const sortIndex = displayMessageProjection.indexById.get(message.id)
-          if (sortIndex === undefined) continue
-          const document = buildSearchDocument(message, sortIndex)
-          if (!document) continue
-          if (
-            documents.length > 0 &&
-            textUnits + chatSearchDocumentUnits(document) > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT
-          ) {
-            break
-          }
+          if (sortIndex === undefined) return true
+          const detached = messageIndex < contiguousTailStartIndex
+          const document = buildSearchDocument(message, detached ? message.ordinal ?? sortIndex : sortIndex)
+          if (!document) return true
+          if (documents.length >= CHAT_LOCAL_SEARCH_HISTORY_LIMIT ||
+              textUnits + chatSearchDocumentUnits(document) > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT) return false
           documents.push(document)
           textUnits += chatSearchDocumentUnits(document)
-          if (textUnits >= CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT) break
+          return true
+        }
+        let truncated = false
+        for (let index = threadDisplayBaseline.length - 1; index >= 0; index -= 1) {
+          if (!threadDisplayBaseline[index].id.startsWith(GOAL_USER_EVENT_MESSAGE_ID_PREFIX)) continue
+          await yieldIfNeeded()
+          if (!addDocument(index)) {
+            truncated = true
+            break
+          }
+        }
+        for (let index = threadDisplayBaseline.length - 1;
+            index >= Math.max(startIndex, contiguousTailStartIndex); index -= 1) {
+          if (threadDisplayBaseline[index].id.startsWith(GOAL_USER_EVENT_MESSAGE_ID_PREFIX)) continue
+          await yieldIfNeeded()
+          if (!addDocument(index)) break
         }
         stableDocuments = documents.sort(
           (left, right) => (left.sortIndex ?? 0) - (right.sortIndex ?? 0)
@@ -4112,9 +4144,11 @@ export function ChatContainer({
           rawMessages: threadMessages,
           indexById: displayMessageProjection.indexById,
           buildDocument: buildSearchDocument,
-          gapBeforeMessageId: historyWindowGap?.beforeMessageId ?? null,
+          gapBeforeMessageId: historyGapBeforeRawMessageId,
           contentVersion: messagesContentVersion,
           startIndex,
+          contiguousTailStartIndex,
+          truncated,
           textUnits,
           documents: stableDocuments,
           documentIndexById: new Map(
@@ -4207,7 +4241,7 @@ export function ChatContainer({
         }
       }
       const corpus = boundChatSearchCorpus({
-        truncated: dynamicCache?.truncated,
+        truncated: stableSearchDocumentsRef.current?.truncated || dynamicCache?.truncated,
         stableDocuments: stableDocuments ?? [],
         dynamicDocuments: dynamicCache?.documents ?? [],
         dynamicMessageIds: liveDisplayProjection.messageIds
@@ -4240,7 +4274,7 @@ export function ChatContainer({
       displayMessagesContentVersion,
       liveDisplayProjection,
       liveDisplayMessages,
-      historyWindowGap,
+      historyGapBeforeRawMessageId,
       messagesContentVersion,
       threadMessages,
       threadDisplayBaseline
@@ -4397,6 +4431,7 @@ export function ChatContainer({
     })
     return indexById
   }, [displayMessages, displayMessagesStructureVersion, visibleMessageIndexes])
+  const [releasedHistoryRevealRevision, setReleasedHistoryRevealRevision] = useState(0)
   const isMessageVirtualizationEnabled = shouldVirtualizeChatMessageList(
     visibleMessageIndexes.length
   )
@@ -4549,8 +4584,18 @@ export function ChatContainer({
       }),
     []
   )
+  const consumedSearchNavigation = useRef<number | null>(null)
+  const [consumedSearchNavigationId, setConsumedSearchNavigationId] = useState<number | null>(null)
+  const historyNavigationAttempt = useRef<number | null>(null)
+  const cancelActiveSearchNavigation = useCallback(() => {
+    const command = useThreadSearch.getState().navigation
+    if (command?.result.threadId === threadId) finishThreadSearchNavigation(command.id)
+  }, [threadId])
 
+  const hasTargetedHistoryWindow = historyPageWindows.some((window) =>
+    window.reloadCursor && "targetMessageId" in window.reloadCursor)
   const scrollToConversationBottom = useCallback((): void => {
+    cancelActiveSearchNavigation()
     const revealGeneration = durableMessageWindowGenerationRef.current + 1
     durableMessageWindowGenerationRef.current = revealGeneration
     setPendingDurableRevealMessageId(null)
@@ -4562,7 +4607,7 @@ export function ChatContainer({
     dispatchChatScrollEvent({ type: "RETURN_TO_BOTTOM" })
 
     void (async () => {
-      if (historyWindowGap || historyPageLoading) {
+      if (historyWindowGap || historyPageLoading || hasTargetedHistoryWindow) {
         const restored = await restoreLatestMessageWindow()
         if (
           !chatViewMountedRef.current ||
@@ -4585,12 +4630,15 @@ export function ChatContainer({
       dispatchChatScrollEvent({ type: "RETURN_TO_BOTTOM" })
     })()
   }, [
+    cancelActiveSearchNavigation,
     cancelMessageWindowLoad,
     dispatchChatScrollEvent,
+    hasTargetedHistoryWindow,
     historyPageLoading,
     historyWindowGap,
     restoreLatestMessageWindow,
     setPendingDurableRevealMessageId,
+    threadId,
     waitForTranscriptCommit
   ])
 
@@ -4600,6 +4648,11 @@ export function ChatContainer({
     return () => {
       chatViewMountedRef.current = false
       durableMessageWindowGenerationRef.current += 1
+      const consumed = consumedSearchNavigation.current
+      if (consumed !== null && isCurrentThreadSearchNavigation(consumed)) {
+        finishThreadSearchNavigation(consumed)
+        cancelMessageWindowLoad()
+      }
       const state = chatScrollStateRef.current
       if (state?.threadId === threadId) {
         const viewport = getViewport()
@@ -4633,7 +4686,7 @@ export function ChatContainer({
         bottomScrollFrameRef.current = null
       }
     }
-  }, [getViewport, threadId])
+  }, [cancelMessageWindowLoad, getViewport, threadId])
   const searchDurableMessages = useCallback(
     (query: string, options: DurableChatSearchOptions): Promise<DurableChatSearchPage> => {
       return window.api.threads.searchMessages(threadId, query, {
@@ -4643,9 +4696,42 @@ export function ChatContainer({
     },
     [threadId, searchBodyOnly]
   )
+  const navigationReady =
+    !historyLoading &&
+    !historyRestorationPending &&
+    historyConversationPresence !== "unknown" &&
+    Boolean(scrollParent)
+  const externalNavigation: DurableSearchNavigation | undefined =
+    navigation?.result.navigation === "exact" &&
+    (consumedSearchNavigationId === navigation.id || (navigationReady && !historyRestorationFailed))
+    ? { ...navigation, target: navigation.result.target } : undefined
+  useEffect(() => {
+    if (!navigation) return
+    const isNewAttempt = historyNavigationAttempt.current !== navigation.id
+    historyNavigationAttempt.current = navigation.id
+    if (
+      navigation.result.navigation === "exact" && historyRestorationFailed &&
+      !historyRestorationPending
+    ) {
+      if (isNewAttempt) retryHistoryRestoration()
+      else finishThreadSearchNavigation(navigation.id, "无法恢复会话历史，请重新搜索")
+      return
+    }
+    if (!navigationReady) return
+    if (navigation.result.navigation === "threadOnly") {
+      chatRootRef.current?.querySelector<HTMLElement>("textarea")?.focus()
+      finishThreadSearchNavigation(navigation.id)
+    }
+  }, [navigation, navigationReady, historyRestorationFailed, historyRestorationPending, retryHistoryRestoration])
+
   const revealDurableMessage = useCallback(
-    async (match: Pick<DurableChatSearchMatch, "messageId" | "ordinal">): Promise<void> => {
-      if (!shouldHydrateDurableSearchMatch(match.messageId, visibleMessageIndexById)) {
+    async (match: Pick<DurableChatSearchMatch, "messageId" | "ordinal" | "externalNavigation">): Promise<void> => {
+      const request = match.externalNavigation
+      if (request) {
+        consumedSearchNavigation.current = request.id
+        setConsumedSearchNavigationId(request.id)
+      }
+      if (!request && !shouldHydrateDurableSearchMatch(match.messageId, visibleMessageIndexById)) {
         // The overlay's common reveal path mounts/centers this resident virtual row immediately.
         return
       }
@@ -4654,7 +4740,20 @@ export function ChatContainer({
       pendingChatSessionAnchorRef.current = null
       setPendingDurableRevealMessageId(match.messageId)
       dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
-      const loaded = await loadMessageWindowAround(match)
+      pendingBottomScrollEffectRef.current = null
+      if (bottomScrollFrameRef.current !== null) {
+        cancelAnimationFrame(bottomScrollFrameRef.current)
+        bottomScrollFrameRef.current = null
+      }
+      const loaded = await loadMessageWindowAround(match, request ? async (residentMessageIds) => {
+        const resolved = await window.api.threads.searchTargetWindow({
+          ...request.result, target: request.target, residentMessageIds
+        })
+        return chatViewMountedRef.current &&
+          durableMessageWindowGenerationRef.current === revealGeneration &&
+          isCurrentThreadSearchNavigation(request.id) && resolved.status === "resolved"
+          ? resolved : null
+      } : undefined)
       if (
         !chatViewMountedRef.current ||
         durableMessageWindowGenerationRef.current !== revealGeneration
@@ -4712,6 +4811,7 @@ export function ChatContainer({
     }
     const cancelPendingHistoryAnchorFromUserGesture = (): void => {
       pendingChatSessionAnchorRef.current = null
+      cancelActiveSearchNavigation()
       invalidateDurableMessageReveal()
       const anchor = pendingDurableHistoryAnchorRef.current
       if (!anchor) return
@@ -4845,12 +4945,13 @@ export function ChatContainer({
       window.removeEventListener("pointercancel", cancelScrollbarPointerIntent, true)
       window.removeEventListener("blur", cancelScrollbarPointerIntent)
     }
-  }, [dispatchChatScrollEvent, invalidateDurableMessageReveal, scrollParent])
+  }, [cancelActiveSearchNavigation, dispatchChatScrollEvent, invalidateDurableMessageReveal, scrollParent])
 
   const scrollToMessageById = useCallback(
     (messageId: string, virtualBehavior: "smooth" | "auto" = "smooth"): void => {
       const index = visibleMessageIndexById.get(messageId)
       if (index === undefined) return
+      cancelActiveSearchNavigation()
       invalidateDurableMessageReveal()
       dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
       const targetElement = contentMessageRefs.current.get(messageId)
@@ -4867,16 +4968,18 @@ export function ChatContainer({
       }
       virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: virtualBehavior, offset: -topInset })
     },
-    [dispatchChatScrollEvent, getViewport, invalidateDurableMessageReveal, visibleMessageIndexById]
+    [cancelActiveSearchNavigation, dispatchChatScrollEvent, getViewport, invalidateDurableMessageReveal, visibleMessageIndexById]
   )
   const revealMessage = useCallback(
     (messageId: string): void => {
       const index = visibleMessageIndexById.get(messageId)
       if (index === undefined) return
-      invalidateDurableMessageReveal()
-      dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+      if (pendingDurableSearchRevealIdRef.current !== messageId) {
+        invalidateDurableMessageReveal()
+        dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+      }
       const targetElement = contentMessageRefs.current.get(messageId)
-      if (targetElement) return
+      if (targetElement?.isConnected) return
       virtuosoRef.current?.scrollToIndex({ index, align: "center", behavior: "auto" })
     },
     [dispatchChatScrollEvent, invalidateDurableMessageReveal, visibleMessageIndexById]
@@ -4965,9 +5068,10 @@ export function ChatContainer({
     [surface, replySource, jumpToBotReply, readOnly, composerReadOnly, setDraftBotReplyTo]
   )
   const handleScrollToQuestion = useCallback((): void => {
+    cancelActiveSearchNavigation()
     invalidateDurableMessageReveal()
     dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
-  }, [dispatchChatScrollEvent, invalidateDurableMessageReveal])
+  }, [cancelActiveSearchNavigation, dispatchChatScrollEvent, invalidateDurableMessageReveal])
 
   const handleInitialVirtualItemsRendered = useCallback((): void => {
     if (historyLoading) return
@@ -5051,15 +5155,40 @@ export function ChatContainer({
 
   useLayoutEffect(() => {
     const messageId = pendingDurableSearchRevealIdRef.current
-    if (!messageId || historyPageLoading) return
+    if (!messageId || historyPageLoading || !scrollParent) return
     const index = visibleMessageIndexById.get(messageId)
-    if (index === undefined) {
-      setPendingDurableRevealMessageId(null)
-      return
+    if (index === undefined) return
+    // A replacement window has its own measurement cache. Keep the seek
+    // alive across its first height measurements until the real row mounts.
+    const deadline = performance.now() + 3_000
+    let frame = 0
+    let previousHeight = -1
+    let previousTop = -1
+    const seek = () => {
+      if (pendingDurableSearchRevealIdRef.current !== messageId) return
+      if (performance.now() >= deadline) {
+        setPendingDurableRevealMessageId(null)
+        return
+      }
+      const { scrollHeight, scrollTop } = scrollParent
+      if (!contentMessageRefs.current.get(messageId)?.isConnected &&
+          (scrollHeight !== previousHeight || scrollTop !== previousTop)) {
+        previousHeight = scrollHeight
+        previousTop = scrollTop
+        virtuosoRef.current?.scrollToIndex({ index, align: "center", behavior: "auto" })
+      }
+      frame = requestAnimationFrame(seek)
     }
-    setPendingDurableRevealMessageId(null)
-    virtuosoRef.current?.scrollToIndex({ index, align: "center", behavior: "auto" })
-  }, [historyPageLoading, setPendingDurableRevealMessageId, visibleMessageIndexById])
+    frame = requestAnimationFrame(seek)
+    return () => cancelAnimationFrame(frame)
+  }, [
+    historyPageLoading,
+    historyWindowRevision,
+    releasedHistoryRevealRevision,
+    scrollParent,
+    setPendingDurableRevealMessageId,
+    visibleMessageIndexById
+  ])
 
   useLayoutEffect(() => {
     const anchor = pendingChatSessionAnchorRef.current
@@ -5209,7 +5338,7 @@ export function ChatContainer({
     const revealGeneration = durableMessageWindowGenerationRef.current + 1
     durableMessageWindowGenerationRef.current = revealGeneration
     pendingChatSessionAnchorRef.current = null
-    setPendingDurableRevealMessageId(targetMessageId)
+    setPendingDurableRevealMessageId(null)
     dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
     try {
       const loaded = await loadReleasedMessageWindow()
@@ -5224,6 +5353,8 @@ export function ChatContainer({
         toast.error("继续加载中间消息失败，请稍后重试")
         return
       }
+      setPendingDurableRevealMessageId(loaded.revealMessageId)
+      if (loaded.revealMessageId) setReleasedHistoryRevealRevision((revision) => revision + 1)
       await waitForTranscriptCommit()
     } catch (error) {
       if (
@@ -5375,7 +5506,7 @@ export function ChatContainer({
   // only one ChatContainer is mounted per panel (keyed + conditionally rendered).
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
-      if (useAppStore.getState().showCustomizeView) return
+      if (useAppStore.getState().showCustomizeView || useThreadSearch.getState().open || event.shiftKey || event.altKey || event.isComposing) return
       if (!((event.ctrlKey || event.metaKey) && (event.key === "f" || event.key === "F"))) return
       const root = chatRootRef.current
       if (!root || root.offsetParent === null) return
@@ -8640,13 +8771,25 @@ export function ChatContainer({
         onCancelLocalSearch={cancelLocalSearch}
         searchLocalCorpus={searchLocalCorpus}
         onRevealSearchContext={setSearchReveal}
-        open={searchOpen}
-        onClose={closeSearch}
+        externalNavigation={externalNavigation}
+        onExternalNavigationFinished={(id, success) => {
+          if (!isCurrentThreadSearchNavigation(id)) return
+          setSearchOpen(true)
+          finishThreadSearchNavigation(id, success === false ? "命中内容已变化，或无法定位。请重新搜索" : "")
+        }}
+        open={searchOpen || Boolean(externalNavigation)}
+        onClose={() => {
+          if (externalNavigation) finishThreadSearchNavigation(externalNavigation.id)
+          closeSearch()
+        }}
         getViewport={getViewport}
         getSearchCorpus={getSearchCorpus}
         onRevealMessage={revealMessage}
         searchDurableMessages={searchDurableMessages}
         onRevealDurableMessage={revealDurableMessage}
+        onDurableRevealFinished={(messageId) => {
+          if (pendingDurableSearchRevealIdRef.current === messageId) setPendingDurableRevealMessageId(null)
+        }}
         onCancelDurableReveal={invalidateDurableMessageReveal}
         recomputeKey={searchRecomputeKey}
       />
@@ -8861,10 +9004,11 @@ export function ChatContainer({
                   >
                     <ChatToolPresentationContext.Provider value={presentInlineQuestion}>
                       <ChatMessageVirtualList
+                        historyWindowRevision={historyWindowRevision}
                         historyReady={!historyLoading && !historyPageLoading}
                         canAnimateMessages={chatScrollUiState.mode === "following"}
                         messageAttempts={streamData.messageAttempts}
-                        searchReveal={searchOpen ? searchReveal : null}
+                        searchReveal={searchOpen || externalNavigation ? searchReveal : null}
                         messages={displayMessages}
                         visibleMessageIndexes={visibleMessageIndexes}
                         lastUserMessageIndex={lastUserMessageIndex}
@@ -8874,6 +9018,7 @@ export function ChatContainer({
                         historyPageLoading={historyPageLoading}
                         historyRemainingCount={historyRemainingCount}
                         historyGapBeforeMessageId={historyGapBeforeVisibleMessageId}
+                        showReleasedHistoryAtEnd={Boolean(historyWindowGap && !historyGapBeforeVisibleMessageId)}
                         canLoadReleasedHistory={Boolean(historyWindowGap?.reloadTargetMessageId)}
                         onLoadReleasedHistoryWindow={loadReleasedHistoryWindow}
                         onRestoreLatestHistoryWindow={scrollToConversationBottom}
@@ -8905,7 +9050,11 @@ export function ChatContainer({
                         virtuosoRef={virtuosoRef}
                         navigatorVirtualRangeRef={virtualRangeRef}
                         initialTopMostItemIndex={
-                          chatScrollUiState.mode === "initializing" ||
+                          pendingDurableSearchRevealIdRef.current &&
+                          visibleMessageIndexById.has(pendingDurableSearchRevealIdRef.current)
+                            ? { index: visibleMessageIndexById.get(pendingDurableSearchRevealIdRef.current)!,
+                                align: "center", behavior: "auto" }
+                            : chatScrollUiState.mode === "initializing" ||
                           chatScrollUiState.mode === "following"
                             ? { index: "LAST", align: "end", behavior: "auto" }
                             : undefined
@@ -9303,7 +9452,7 @@ export function ChatContainer({
               ) : (
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
                 <ChatScrollToBottomButton
-                  visible={chatScrollUiState.mode === "detached"}
+                  visible={chatScrollUiState.mode === "detached" || hasTargetedHistoryWindow}
                   hasUnread={chatScrollUiState.hasUnread}
                   unreadCount={chatScrollUiState.unreadCount}
                   onScrollToBottom={scrollToConversationBottom}

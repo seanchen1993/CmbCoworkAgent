@@ -35,6 +35,7 @@ export function createDehydratedThreadStatePatch(retainedUi?: {
     messages: [] as never[],
     messagesContentVersion: 0,
     goalUi: { goal: null, events: [] as never[], lastUpdated: null },
+    searchGoalEvents: [] as never[],
     todos: [] as never[],
     workspaceFiles: [] as never[],
     subagents: [] as never[],

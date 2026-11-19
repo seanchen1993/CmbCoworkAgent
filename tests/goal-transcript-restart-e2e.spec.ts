@@ -383,7 +383,10 @@ async function main(): Promise<void> {
         .prepare(
           `INSERT INTO legacy_checkpoint_transcript_migrations
              (thread_id, checkpoint_id, total_messages, next_index, status, updated_at)
-           VALUES (?, ?, ?, ?, 'complete', ?)`
+           VALUES (?, ?, ?, ?, 'complete', ?)
+           ON CONFLICT(thread_id) DO UPDATE SET checkpoint_id = excluded.checkpoint_id,
+             total_messages = excluded.total_messages, next_index = excluded.next_index,
+             status = 'complete', updated_at = excluded.updated_at`
         )
         .run(historyThreadId, "fixture-history", historyRowCount, historyRowCount, Date.now())
       historyEventId = insertEvent.run(

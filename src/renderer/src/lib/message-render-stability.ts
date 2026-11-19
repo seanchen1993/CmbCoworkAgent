@@ -55,6 +55,7 @@ export function areMessageRenderFieldsEqual(
     left.reasoning === right.reasoning &&
     areStructuredValuesEqual(left.botHistoryInputOrigin, right.botHistoryInputOrigin) &&
     areStructuredValuesEqual(left.botHistoryDeliveryScope, right.botHistoryDeliveryScope) &&
+    left.content_preview_notice === right.content_preview_notice &&
     areStructuredValuesEqual(left.content, right.content) &&
     areToolCallsEqual(left.tool_calls, right.tool_calls)
   )

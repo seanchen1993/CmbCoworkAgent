@@ -22,8 +22,10 @@ import { recoverMainCheckpointMessages } from "../agent/checkpoint-message-recov
 import { readThreadMessagesPage } from "../thread-message-hydration/page-reader"
 import { readThreadHydrationProjection } from "../thread-metadata-hydration/reader"
 import { bootstrapLegacyCheckpointTranscript } from "./runtime-projection-store"
-import { migrateLegacyMessageTimes } from "./legacy-message-times"
+import { hasPendingLegacyMessageTimes, migrateLegacyMessageTimes } from "./legacy-message-times"
 import { SqlJsSaver } from "./sqljs-saver"
+import { persistedMessageToRuntimeMessage } from "../ipc/persisted-runtime-message"
+import { GOAL_USER_EVENT_MESSAGE_ID_PREFIX, GOAL_USER_MESSAGE_EVENT_PREFIX } from "../../shared/goal-events"
 
 const TS = "2026-09-01T00:00:20.000Z"
 const START = "2026-09-01T00:00:00.000Z"
@@ -131,6 +133,28 @@ function bootstrap(path: string) {
     new SharedArrayBuffer(4)
   )
 }
+
+it("continues backward pages from a live anchor after saved ordinals move", () => {
+  threadDb.upsertThreadMessages("thread", [
+    message("first", "user", "needle"),
+    message("adjacent", "assistant", "needle"),
+    { ...message("anchor", "user", "needle"), goal_id: "preserved-goal", active_window_id: "goal-window" }
+  ])
+  const event = threadDb.addThreadGoalEvent(
+    "thread", `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal keep the archived prompt`, "preserved-goal", 1, "goal-window", "anchor"
+  )
+  const goalId = `${GOAL_USER_EVENT_MESSAGE_ID_PREFIX}${event.event_id}`
+  const initial = page({ limit: 1 })
+  expect(initial.messages.map((row) => row.id)).toEqual(["anchor"])
+  const cursor = { limit: 1, beforeOrdinal: initial.beforeOrdinal!, beforeMessageId: initial.beforeMessageId! }
+  reader.exec("UPDATE thread_messages SET ordinal = ordinal + 1")
+  expect(page(cursor).messages.map((row) => row.id)).toEqual(["adjacent"])
+  expect(threadDb.getThreadMessagesPage("thread", cursor).messages.map((row) => row.id)).toEqual(["adjacent"])
+  expect(threadDb.searchThreadMessages("thread", "needle", cursor).matches.map((row) => row.messageId))
+    .toEqual(["adjacent"])
+  expect(page({ targetMessageId: "adjacent", residentMessageIds: ["anchor", goalId, "missing"] }).residentOrdinals)
+    .toEqual([["anchor", (initial.beforeOrdinal ?? 0) + 1], [goalId, (initial.beforeOrdinal ?? 0) + 1, "anchor"], ["missing", null]])
+})
 
 describe("checkpoint recovery storage provenance", () => {
   it("round-trips image blocks through durable storage, repair, and a second reopen", async () => {
@@ -383,6 +407,150 @@ describe("legacy checkpoint timing migration", () => {
     expect(page().messages.every((m) => !m.start_at && !m.end_at)).toBe(true)
   })
 
+  it.each(["named", "positional"])("checks %s timing when the first checkpoint contains only a suffix",
+    async (mode) => {
+    threadDb.upsertThreadMessages("thread", [
+      message("older-reply", "assistant", "first persisted reply"),
+      message("tail-reply", "assistant", "last persisted reply")
+    ])
+    threadDb.updateThread("thread", {
+      thread_values: JSON.stringify(mode === "named"
+        ? { messageTimes: {
+            "older-reply": { start_at: START, end_at: END },
+            "tail-reply": { start_at: END, end_at: TS }
+          } }
+        : { messageTimeOrder: [{ start_at: START, end_at: END }, { start_at: END, end_at: TS }] })
+    })
+    const path = await seedCheckpoint([
+      new AIMessage({ id: "tail-reply", content: "last persisted reply" }),
+      new HumanMessage({ id: "new-question", content: "imported question" })
+    ], { legacy: true })
+    bootstrap(path)
+    const messages = page().messages
+    expect(messages.map((row) => row.id)).toEqual(["older-reply", "tail-reply", "new-question"])
+    expect(messages.map((row) => row.start_at?.toISOString())).toEqual(
+      mode === "named" ? [START, END, undefined] : [undefined, undefined, undefined])
+    expect(reader.prepare("SELECT applied_checkpoint_id FROM thread_legacy_message_times").get()
+      ?.applied_checkpoint_id).toBe(mode === "named" ? "cp" : null)
+  })
+
+  it("rechecks a timing archive already marked applied by an older reader", async () => {
+    threadDb.upsertThreadMessages("thread", [
+      message("older-reply", "assistant"),
+      { ...message("tail-reply", "assistant"), start_at: new Date(END), end_at: new Date(TS) }
+    ])
+    threadDb.updateThread("thread", {
+      thread_values: JSON.stringify({ messageTimes: {
+        "older-reply": { start_at: START, end_at: END },
+        "tail-reply": { start_at: END, end_at: TS }
+      } })
+    })
+    reader.exec(`UPDATE thread_legacy_message_times
+      SET applied_checkpoint_id = 'cp', applied_context = NULL WHERE thread_id = 'thread'`)
+    const path = await seedCheckpoint([new AIMessage({ id: "tail-reply", content: "tail-reply" })], { legacy: true })
+    expect(hasPendingLegacyMessageTimes(reader, "thread", "cp")).toBe(true)
+    bootstrap(path)
+    expect(page().messages.map((row) => row.start_at?.toISOString())).toEqual([START, END])
+    expect(hasPendingLegacyMessageTimes(reader, "thread", "cp")).toBe(false)
+    expect(reader.prepare("SELECT applied_checkpoint_id, applied_context FROM thread_legacy_message_times").get())
+      .toEqual({ applied_checkpoint_id: "cp", applied_context: expect.any(String) })
+  })
+
+  it("audits the changed durable membership when a checkpoint keeps its ID", async () => {
+    threadDb.upsertThreadMessages("thread", [message("tail-reply", "assistant")])
+    threadDb.updateThread("thread", {
+      thread_values: JSON.stringify({ messageTimes: {
+        "older-reply": { start_at: START, end_at: END },
+        "tail-reply": { start_at: END, end_at: TS }
+      } })
+    })
+    const tail = new AIMessage({ id: "tail-reply", content: "tail-reply" })
+    const path = await seedCheckpoint([tail], { legacy: true })
+    bootstrap(path)
+    expect(hasPendingLegacyMessageTimes(reader, "thread", "cp")).toBe(false)
+    const source = new SqlJsSaver(path)
+    const restored = new AIMessage({ id: "older-reply", content: "older-reply" })
+    const [type, payload] = await source.serde.dumpsTyped(checkpoint([restored, tail]))
+    await source.close()
+    const checkpointDb = new DatabaseSync(path)
+    try {
+      checkpointDb.prepare("UPDATE checkpoints SET type = ?, checkpoint = ? WHERE checkpoint_id = 'cp'")
+        .run(type, payload)
+    } finally {
+      checkpointDb.close()
+    }
+    bootstrap(path)
+    expect(page().messages.map((row) => [row.id, row.start_at?.toISOString()]))
+      .toEqual([["older-reply", START], ["tail-reply", END]])
+    expect(hasPendingLegacyMessageTimes(reader, "thread", "cp")).toBe(false)
+  })
+
+  it("preserves the original positional archive after a proven append to an interrupted copy", async () => {
+    const originalCount = 70
+    const original = Array.from({ length: originalCount }, (_, index) =>
+      new AIMessage({ id: `time-${index}`, content: `old replay ${index}` }))
+    threadDb.updateThread("thread", { thread_values: JSON.stringify({
+      messageTimeOrder: Array.from({ length: originalCount }, () => ({ start_at: START, end_at: END }))
+    }) })
+    const path = await seedCheckpoint(original, { legacy: true })
+    reader.exec(`CREATE TRIGGER stop_original_copy BEFORE INSERT ON thread_messages WHEN NEW.message_id = 'time-65'
+      BEGIN SELECT RAISE(ABORT, 'interrupted positional archive'); END;`)
+    expect(() => bootstrap(path)).toThrow("interrupted positional archive")
+    reader.exec("DROP TRIGGER stop_original_copy")
+    const saver = new SqlJsSaver(path)
+    const [type, payload] = await saver.serde.dumpsTyped(checkpoint([
+      ...original, new AIMessage({ id: "appended", content: "new replay" })
+    ]))
+    await saver.close()
+    const source = new DatabaseSync(path)
+    try {
+      source.prepare("UPDATE checkpoints SET type = ?, checkpoint = ?").run(type, payload)
+    } finally {
+      source.close()
+    }
+    expect(bootstrap(path).stats.searchProjectionState).toBe("complete")
+    expect(page().messages.map((row) => row.start_at?.toISOString()))
+      .toEqual([...Array.from({ length: originalCount }, () => START), undefined])
+    expect(hasPendingLegacyMessageTimes(reader, "thread", "cp")).toBe(false)
+  })
+
+  it("preserves an unpublished positional time archive across a proven provider revision", async () => {
+    const assistant = (id: string, content: string) => persistedMessageToRuntimeMessage({
+      id, role: "assistant", content, created_at: new Date(TS),
+      provider_source_id: "stable-provider", provider_occurrence: 1
+    })
+    threadDb.updateThread("thread", { thread_values: JSON.stringify({
+      messageTimeOrder: [{ start_at: START, end_at: END }]
+    }) })
+    const path = await seedCheckpoint([assistant("temporary", "old provisional")], { legacy: true })
+    const row = reader.prepare(`SELECT created_at, json_extract(metadata, '$.cmb_thread_incarnation') AS token
+      FROM threads WHERE thread_id = 'thread'`).get()
+    const guarded = () => bootstrapLegacyCheckpointTranscript(
+      path, state.databasePath, "thread", "", new SharedArrayBuffer(4), {
+        incarnation: { token: typeof row?.token === "string" ? row.token : null, legacyCreatedAt: Number(row?.created_at) }
+      }
+    )
+    expect(guarded().stats.searchProjectionState).toBe("complete")
+    expect(page().messages[0].start_at).toBeUndefined()
+    const saver = new SqlJsSaver(path)
+    const [type, payload] = await saver.serde.dumpsTyped(checkpoint([
+      assistant("temporary", "updated provisional"),
+      assistant("canonical", "updated provisional and final reply"),
+      new HumanMessage({ id: "later", content: "following history" })
+    ]))
+    await saver.close()
+    const source = new DatabaseSync(path)
+    try {
+      source.prepare("UPDATE checkpoints SET type = ?, checkpoint = ?").run(type, payload)
+    } finally {
+      source.close()
+    }
+    expect(guarded().stats.searchProjectionState).toBe("complete")
+    expect(bootstrap(path).stats.searchProjectionState).toBe("complete")
+    expect(page().messages.map((item) => [item.id, item.start_at?.toISOString(), item.end_at?.toISOString()]))
+      .toEqual([["temporary", START, END], ["later", undefined, undefined]])
+  })
+
   it("preserves existing durable times and ignores invalid/backward legacy times", async () => {
     threadDb.upsertThreadMessages("thread", [
       { ...message("a", "assistant"), start_at: new Date(START), end_at: new Date(END) }
@@ -442,13 +610,25 @@ describe("legacy checkpoint timing migration", () => {
       providerSourceId: null,
       providerOccurrence: null
     }))
-    let checks = 0
-    expect(() =>
-      migrateLegacyMessageTimes(reader, "thread", "cp", targets, () => {
-        checks += 1
-        if (checks === 3) throw new Error("cancelled")
-      })
-    ).toThrow("cancelled")
+    const execute = reader.exec.bind(reader)
+    let committed = false
+    const exec = vi.spyOn(reader, "exec").mockImplementation((sql) => {
+      execute(sql)
+      if (sql === "COMMIT") committed = true
+    })
+    try {
+      expect(() =>
+        migrateLegacyMessageTimes(reader, "thread", "cp", targets, () => {
+          if (committed) throw new Error("cancelled")
+        })
+      ).toThrow("cancelled")
+    } finally {
+      exec.mockRestore()
+    }
+    const partial = Number(reader.prepare("SELECT COUNT(*) AS count FROM thread_messages WHERE end_at = ?")
+      .get(Date.parse(END))?.count ?? 0)
+    expect(partial).toBeGreaterThan(0)
+    expect(partial).toBeLessThan(messages.length)
     expect(
       reader.prepare("SELECT applied_checkpoint_id FROM thread_legacy_message_times").get()
         ?.applied_checkpoint_id
@@ -488,6 +668,37 @@ describe("legacy checkpoint timing migration", () => {
     expect(page().messages[0].start_at?.toISOString()).toBe(END)
   })
 
+  it("bounds timing repairs by the size of the rows SQLite rewrites", () => {
+    const messages = Array.from({ length: 20 }, (_, i) => ({
+      ...message(`long-${i}`, "assistant"),
+      content: "x".repeat(116_000)
+    }))
+    threadDb.upsertThreadMessages("thread", messages)
+    threadDb.updateThread("thread", {
+      thread_values: JSON.stringify({
+        messageTimes: Object.fromEntries(messages.map((row) =>
+          [row.id, { start_at: START, end_at: END }]))
+      })
+    })
+    const targets = messages.map((row) => ({
+      messageId: row.id,
+      providerSourceId: null,
+      providerOccurrence: null
+    }))
+    const exec = vi.spyOn(reader, "exec")
+    try {
+      migrateLegacyMessageTimes(reader, "thread", "cp", targets, () => {})
+      expect(exec.mock.calls.filter(([sql]) => sql === "COMMIT").length).toBeGreaterThanOrEqual(3)
+      expect(reader.prepare(`SELECT count(*) AS count FROM thread_messages
+        WHERE start_at = ? AND end_at = ? AND octet_length(content_json) > 100000`)
+        .get(Date.parse(START), Date.parse(END))?.count).toBe(messages.length)
+      expect(reader.prepare("SELECT applied_checkpoint_id FROM thread_legacy_message_times").get()
+        ?.applied_checkpoint_id).toBe("cp")
+    } finally {
+      exec.mockRestore()
+    }
+  })
+
   it("archives new timing values even when the previous values were null or invalid JSON", () => {
     for (const previous of [null, "invalid"]) {
       reader.prepare("UPDATE threads SET thread_values = ?").run(previous)
@@ -514,24 +725,31 @@ describe("legacy checkpoint timing migration", () => {
         )
       })
     })
-    let checks = 0
-    migrateLegacyMessageTimes(
-      reader,
-      "thread",
-      "cp",
-      messages.map((m) => ({ messageId: m.id, providerSourceId: null, providerOccurrence: null })),
-      () => {
-        checks += 1
-        if (checks === 3) {
-          threadDb.deleteThread("thread")
-          threadDb.createThread("thread")
-          reader
-            .prepare("UPDATE threads SET created_at = ? WHERE thread_id = 'thread'")
-            .run(oldCreatedAt)
-          threadDb.upsertThreadMessages("thread", messages)
-        }
+    const execute = reader.exec.bind(reader)
+    let recreated = false
+    const exec = vi.spyOn(reader, "exec").mockImplementation((sql) => {
+      if (!recreated && sql === "BEGIN IMMEDIATE") {
+        recreated = true
+        threadDb.deleteThread("thread")
+        threadDb.createThread("thread")
+        reader.prepare("UPDATE threads SET created_at = ? WHERE thread_id = 'thread'")
+          .run(oldCreatedAt)
+        threadDb.upsertThreadMessages("thread", messages)
       }
-    )
+      execute(sql)
+    })
+    try {
+      migrateLegacyMessageTimes(
+        reader,
+        "thread",
+        "cp",
+        messages.map((m) => ({ messageId: m.id, providerSourceId: null, providerOccurrence: null })),
+        () => {}
+      )
+    } finally {
+      exec.mockRestore()
+    }
+    expect(recreated).toBe(true)
     expect(
       reader
         .prepare(

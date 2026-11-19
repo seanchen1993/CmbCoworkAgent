@@ -1,8 +1,8 @@
-import { isGoalClearAlias } from "./goal-slash"
-import { projectMarkdownVisibleText } from "./markdown-visible-text"
+import { isGoalClearAlias, isGoalResumeDisplayText } from "./goal-slash"
+import { projectMarkdownVisibleText, type MarkdownSearchProjection } from "./markdown-visible-text"
 import { buildStreamingMarkdownPreview } from "./streaming-markdown-preview"
-import { projectGoalNoticeVisibleText } from "./goal-notice-presentation"
-import { SKILL_USE_TAG_NAME } from "./skill-use-block"
+import { getSystemNoticePresentation, projectGoalNoticeVisibleText, systemNoticeBlockText } from "./goal-notice-presentation"
+import { parseSkillUseBlock } from "./skill-use-block"
 import { createChatSearchPlan } from "./chat-search-plan"
 import {
   BOT_BROWSER_PROMPT_PREFIX,
@@ -11,8 +11,6 @@ import {
   stripBuiltinBrowserInstructions
 } from "./user-input-transport"
 
-const SKILL_OPEN = `<${SKILL_USE_TAG_NAME}>`
-const SKILL_CLOSE = `</${SKILL_USE_TAG_NAME}>`
 const LEGACY_BROWSER_PREFIX =
   "使用内置浏览器 browser_*工具。仅当当前模型支持图片识别/视觉输入时，才允许调用截图工具；否则不要调用截图工具，改用 DOM 快照、文本、locator、evaluate 等非视觉方式："
 
@@ -22,20 +20,11 @@ interface ChatSearchProjectionOptions {
   includeFoldedContent?: boolean
 }
 
-function projectSystemNoticeSearchText(text: string): string {
-  const clean = text.replace(/^●\s*/, "").replace(/^(?:✓|Ⅱ)\s*/, "")
-  const goalNotice = projectGoalNoticeVisibleText(text)
-  if (goalNotice) return goalNotice
-  return projectMarkdownVisibleText(clean)
-}
-
-function unescapeXml(value: string): string {
-  return value
-    .replace(/&apos;/g, "'")
-    .replace(/&quot;/g, '"')
-    .replace(/&gt;/g, ">")
-    .replace(/&lt;/g, "<")
-    .replace(/&amp;/g, "&")
+function projectSystemNoticeSearchText(text: string, trackSource = false): MarkdownSearchProjection {
+  const notice = getSystemNoticePresentation(text)
+  const goalNotice = projectGoalNoticeVisibleText(notice.text)
+  if (goalNotice) return { text: goalNotice, truncated: false }
+  return projectMarkdownVisibleText(notice.text, trackSource)
 }
 
 function parseUserTransportText(content: string): {
@@ -43,23 +32,9 @@ function parseUserTransportText(content: string): {
   skillName: string
   browserSelected: boolean
 } {
-  let visibleText = content
-  let skillName = ""
-  const closeAt = visibleText.lastIndexOf(SKILL_CLOSE)
-  const openAt = closeAt < 0 ? -1 : visibleText.lastIndexOf(SKILL_OPEN, closeAt)
-  if (
-    openAt >= 0 &&
-    closeAt > openAt &&
-    visibleText.slice(closeAt + SKILL_CLOSE.length).trim() === ""
-  ) {
-    const block = visibleText.slice(openAt, closeAt + SKILL_CLOSE.length)
-    const name = block.match(/<name>\s*([^<]*)\s*<\/name>/)?.[1]
-    const path = block.match(/<path>\s*([^<]*)\s*<\/path>/)?.[1]
-    if (name && path) {
-      skillName = unescapeXml(name).trim()
-      visibleText = visibleText.slice(0, openAt).trimEnd()
-    }
-  }
+  const skill = parseSkillUseBlock(content)
+  let visibleText = skill?.rest ?? content
+  const skillName = skill?.skillName ?? ""
 
   let browserSelected = false
   const wrappedText = stripBuiltinBrowserInstructions(visibleText)
@@ -85,6 +60,7 @@ function parseUserTransportText(content: string): {
 }
 
 function projectGoalUserText(content: string): string | null {
+  if (isGoalResumeDisplayText(content)) return "继续 Goal\n从上次暂停处继续推进目标"
   const lines = content
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -94,8 +70,7 @@ function projectGoalUserText(content: string): string | null {
   if (!match) return null
   const rest = (match[1] ?? "").trim()
   const normalized = rest.toLowerCase()
-  if (normalized === "resume") return "继续 Goal\n从上次暂停处继续推进目标"
-  if (!rest || ["status", "pause"].includes(normalized) || isGoalClearAlias(normalized)) {
+  if (!rest || ["status", "pause", "resume"].includes(normalized) || isGoalClearAlias(normalized)) {
     return null
   }
 
@@ -139,24 +114,26 @@ export function projectVisibleChatSearchContentWithMetadata(
   content: unknown,
   options: ChatSearchProjectionOptions = {}
 ): { text: string; truncated: boolean } {
+  if (role === "system" && !options.includeFoldedContent) {
+    const text = Array.isArray(content) ? content.map(systemNoticeBlockText).filter(Boolean).join("\n") : content
+    return projectSystemNoticeSearchText(typeof text === "string" ? text : "")
+  }
   if (options.includeFoldedContent) {
     const plan = createChatSearchPlan(role, content)
+    const segments = plan.segments.map((segment) => projectChatSearchFragment(role, segment.raw))
     return {
-      text: plan.segments.map((segment) => projectChatSearchFragment(role, segment.raw)).join("\n"),
-      truncated: plan.truncated
+      text: segments.map((segment) => segment.text).join("\n"),
+      truncated: plan.truncated || segments.some((segment) => segment.truncated)
     }
   }
   if (!Array.isArray(content)) {
     const text = typeof content === "string" ? content : ""
-    if (role === "system") return { text: projectSystemNoticeSearchText(text), truncated: false }
     if (role !== "user") {
       const bounded = buildStreamingMarkdownPreview(text)
+      const parts = [bounded.head, bounded.tail].filter(Boolean).map((text) => projectMarkdownVisibleText(text))
       return {
-        text: [bounded.head, bounded.tail]
-          .filter(Boolean)
-          .map(projectMarkdownVisibleText)
-          .join("\n"),
-        truncated: bounded.omittedCharacters > 0
+        text: parts.map((part) => part.text).join("\n"),
+        truncated: bounded.omittedCharacters > 0 || parts.some((part) => part.truncated)
       }
     }
     const projected = parseUserTransportText(text).visibleText
@@ -167,8 +144,6 @@ export function projectVisibleChatSearchContentWithMetadata(
     if (!block || typeof block !== "object") return []
     const record = block as Record<string, unknown>
     if (record.type === "text" && typeof record.text === "string") return [record.text]
-    // MessageBubble only renders `content` fallbacks for system notices.
-    if (role === "system" && typeof record.content === "string") return [record.content]
     return []
   })
   if (role !== "user") {
@@ -188,13 +163,13 @@ export function projectVisibleChatSearchContentWithMetadata(
 }
 
 /** A source fragment has already passed the message-wide admission budget. */
-export function projectChatSearchFragment(role: string, text: string): string {
-  if (role === "system") return projectSystemNoticeSearchText(text)
+export function projectChatSearchFragment(role: string, text: string, trackSource = false): MarkdownSearchProjection {
+  if (role === "system") return projectSystemNoticeSearchText(text, trackSource)
   if (role === "user") {
     const visible = parseUserTransportText(text).visibleText
-    return projectGoalUserText(visible) ?? visible
+    return { text: projectGoalUserText(visible) ?? visible, truncated: false }
   }
-  return projectMarkdownVisibleText(text)
+  return projectMarkdownVisibleText(text, trackSource)
 }
 
 export function projectChatSearchUserBlocks(blocks: readonly string[]): string {

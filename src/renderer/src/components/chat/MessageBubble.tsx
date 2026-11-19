@@ -12,7 +12,7 @@ import { ToolCallRenderer } from "./ToolCallRenderer"
 import { StreamingMarkdown } from "./StreamingMarkdown"
 import { useReasoningExpansion } from "./reasoning-expansion-context"
 import { getCollapsedToolCallSummary } from "../../../../shared/tool-call-summary"
-import { parseGoalNoticeText } from "../../../../shared/goal-notice-presentation"
+import { getSystemNoticePresentation, parseGoalNoticeText, systemNoticeBlockText } from "../../../../shared/goal-notice-presentation"
 import { stripThinkBlocksForDisplay } from "../../../../shared/think-block-display"
 import {
   beginOpenResourcePreviewIntent,
@@ -76,7 +76,7 @@ import { getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
 import { DurationShow } from "./DurationShow"
 import { formatMessageTimeLabel, getAssistantStartTime } from "@/lib/message-bubble-timing"
 import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
-import { isGoalClearAlias } from "../../../../shared/goal-slash"
+import { isGoalClearAlias, isGoalResumeDisplayText } from "../../../../shared/goal-slash"
 import { isImRemoteControlTranscriptMessageId } from "../../../../shared/im-remote-transcript"
 import { isResultlessCompletedToolCall } from "@/lib/tool-call-display-state"
 import { normalizeVisibleReasoningText } from "@/lib/message-display-visibility"
@@ -157,8 +157,7 @@ function parseGoalUserControlMessage(text: string): {
   description: string
   tone: "resume"
 } | null {
-  const normalized = text.trim().replace(/\s+/g, " ").toLowerCase()
-  if (normalized !== "/goal resume") return null
+  if (!isGoalResumeDisplayText(text)) return null
   return {
     label: "继续 Goal",
     description: "从上次暂停处继续推进目标",
@@ -288,66 +287,7 @@ function getToolStatusMeta(status: ToolCallStatus): { label: string; className: 
   }
 }
 
-function getSystemNoticePresentation(text: string): {
-  icon: React.JSX.Element
-  text: string
-  tone: "success" | "warning" | "info"
-} {
-  const cleanText = text.replace(/^●\s*/, "")
-  const isGoalNotice =
-    cleanText.startsWith("Goal ") ||
-    cleanText.startsWith("继续 Goal") ||
-    cleanText.startsWith("当前没有 active goal") ||
-    cleanText.startsWith("没有可继续的 goal") ||
-    cleanText.startsWith("请写明 goal 目标") ||
-    cleanText.startsWith("附件和显式技能不会用于 /goal 控制命令") ||
-    cleanText.startsWith("该 /goal 命令") ||
-    cleanText.startsWith("当前线程正在运行") ||
-    cleanText.startsWith("你发送了新消息，active goal 已暂停")
-
-  if (cleanText.startsWith("✓ Goal 已完成")) {
-    return {
-      icon: <Check className="size-4" />,
-      text: cleanText.replace(/^✓\s*/, ""),
-      tone: "success"
-    }
-  }
-
-  if (
-    cleanText.startsWith("Goal 已暂停") ||
-    cleanText.startsWith("Ⅱ Goal 已暂停") ||
-    cleanText.startsWith("Goal 等待补充信息") ||
-    cleanText.startsWith("你发送了新消息，active goal 已暂停")
-  ) {
-    return {
-      icon: <Flag className="size-4" />,
-      text: cleanText.replace(/^Ⅱ\s*/, ""),
-      tone: "warning"
-    }
-  }
-
-  if (isGoalNotice) {
-    return {
-      icon: <Flag className="size-4" />,
-      text: cleanText.replace(/^Ⅱ\s*/, ""),
-      tone: "info"
-    }
-  }
-
-  return {
-    icon: <Info className="size-4" />,
-    text: cleanText,
-    tone: "info"
-  }
-}
-
-function GoalNoticeBody({
-  text,
-  threadId
-}: {
-  text: string
-  threadId?: string
-}): React.JSX.Element {
+function GoalNoticeBody({ text, threadId }: { text: string; threadId?: string }): React.JSX.Element {
   const parsed = parseGoalNoticeText(text)
   if (!parsed) {
     return (
@@ -639,22 +579,33 @@ function MessageBubbleImpl({
     return null
   }
 
+  const previewNotice = message.content_preview_notice ? (
+    <div data-chat-search-ignore className="mt-2 text-xs text-muted-foreground">
+      {message.content_preview_notice}
+    </div>
+  ) : null
+
   if (isSystem) {
-    const text = extractMessagePlainText(message.content).trim()
+    const text = Array.isArray(message.content)
+      ? message.content.map(systemNoticeBlockText).filter(Boolean).join("\n")
+      : message.content
     if (!text) return null
     const notice = getSystemNoticePresentation(text)
+    if (!notice.text) return null
+    const Icon = notice.tone === "success" ? Check : notice.goal ? Flag : Info
     return (
       <div className="my-3 flex justify-center">
         <div className={`liquid-glass-notice liquid-glass-notice--${notice.tone}`}>
           <div className="relative z-[1] flex items-start gap-3">
             <span className="liquid-glass-notice__icon" aria-hidden="true">
-              {notice.icon}
+              <Icon className="size-4" />
             </span>
             <div
               data-chat-search-text
               className="liquid-glass-notice__body min-w-0 text-[15px] leading-7 [&_p]:my-0 [&_strong]:font-semibold"
             >
               <GoalNoticeBody text={notice.text} threadId={threadId} />
+              {previewNotice}
             </div>
           </div>
         </div>
@@ -674,25 +625,27 @@ function MessageBubbleImpl({
   const renderGoalUserSetContent = (
     goalMessage: NonNullable<typeof goalUserSetMessage>
   ): React.ReactNode => (
-    <div data-chat-search-text className="space-y-2 text-left">
-      <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+    <div data-chat-search-text data-chat-search-block-index={0} data-chat-search-source-start={0}
+      data-chat-search-source-end={typeof message.content === "string" ? message.content.length : undefined}
+      className="space-y-2 text-left">
+      <div data-chat-search-block className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
         <span className="flex size-6 items-center justify-center rounded-full bg-background-interactive shadow-sm ring-1 ring-border">
           <Flag className="size-3.5 text-sky-600" />
         </span>
         <span>设为 Goal</span>
       </div>
-      <div className="whitespace-pre-wrap text-[15px] leading-7 text-foreground/95 break-all">
+      <div data-chat-search-block className="whitespace-pre-wrap text-[15px] leading-7 text-foreground/95 break-all">
         {goalMessage.objective}
       </div>
       {(goalMessage.attachments || goalMessage.skillName) && (
         <div className="flex flex-wrap gap-1.5 pt-0.5">
           {goalMessage.attachments && (
-            <span className="rounded-full border border-border bg-background-interactive/85 px-2 py-0.5 text-[11px] text-muted-foreground">
+            <span data-chat-search-block className="rounded-full border border-border bg-background-interactive/85 px-2 py-0.5 text-[11px] text-muted-foreground">
               附件：{goalMessage.attachments}
             </span>
           )}
           {goalMessage.skillName && (
-            <span className="rounded-full border border-border bg-background-interactive/85 px-2 py-0.5 text-[11px] text-muted-foreground">
+            <span data-chat-search-block className="rounded-full border border-border bg-background-interactive/85 px-2 py-0.5 text-[11px] text-muted-foreground">
               技能：{goalMessage.skillName}
             </span>
           )}
@@ -704,13 +657,15 @@ function MessageBubbleImpl({
   const renderGoalUserControlContent = (
     goalMessage: NonNullable<typeof goalUserControlMessage>
   ): React.ReactNode => (
-    <div data-chat-search-text className="flex items-center gap-2 text-left">
+    <div data-chat-search-text data-chat-search-block-index={0} data-chat-search-source-start={0}
+      data-chat-search-source-end={typeof message.content === "string" ? message.content.length : undefined}
+      className="flex items-center gap-2 text-left">
       <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-background-interactive text-primary shadow-[0_6px_18px_rgba(0,0,0,0.10)] ring-1 ring-border">
         <PlayCircle className="size-4" />
       </span>
       <span className="min-w-0">
-        <span className="block text-sm font-semibold text-foreground">{goalMessage.label}</span>
-        <span className="block text-xs text-muted-foreground">{goalMessage.description}</span>
+        <span data-chat-search-block className="block text-sm font-semibold text-foreground">{goalMessage.label}</span>
+        <span data-chat-search-block className="block text-xs text-muted-foreground">{goalMessage.description}</span>
       </span>
     </div>
   )
@@ -821,7 +776,8 @@ function MessageBubbleImpl({
     return renderedBlocks.length > 0 ? renderedBlocks : null
   }
 
-  const content = renderContent()
+  const messageContent = renderContent()
+  const content = previewNotice ? <>{messageContent}{previewNotice}</> : messageContent
   const displayToolCalls = message.tool_calls?.map(normalizeToolCallForDisplay)
   const shouldShowAssistantActions =
     showAssistantMeta && !isLoading && Boolean(content || hasToolCalls)

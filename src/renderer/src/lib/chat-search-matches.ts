@@ -1,5 +1,7 @@
 import type { ChatSearchLocation, ChatSearchPlan } from "../../../shared/chat-search-types"
 import { findChatSearchLocations, projectChatSearchPlan } from "../../../shared/chat-search-index"
+import { THREAD_SEARCH_QUERY_LIMIT } from "../../../shared/thread-search-types"
+import { GOAL_USER_EVENT_MESSAGE_ID_PREFIX } from "../../../shared/goal-events"
 
 export interface ChatSearchDocument {
   messageId: string
@@ -38,7 +40,10 @@ export function chatSearchDocumentUnits(document: ChatSearchDocument): number {
 /** Stable and live documents share one retention budget, including live overrides. */
 export function boundChatSearchCorpus(corpus: ChatSearchCorpus): ChatSearchCorpus {
   const documents = [...corpus.stableDocuments.filter((doc) => !corpus.dynamicMessageIds.has(doc.messageId)),
-    ...corpus.dynamicDocuments].sort((a, b) => (b.sortIndex ?? 0) - (a.sortIndex ?? 0))
+    ...corpus.dynamicDocuments].sort((a, b) =>
+    Number(b.messageId.startsWith(GOAL_USER_EVENT_MESSAGE_ID_PREFIX)) -
+    Number(a.messageId.startsWith(GOAL_USER_EVENT_MESSAGE_ID_PREFIX)) ||
+    (b.sortIndex ?? 0) - (a.sortIndex ?? 0))
   const retained = new Set<ChatSearchDocument>()
   let units = 0
   for (const document of documents) {
@@ -64,15 +69,16 @@ export function findChatSearchMatches(
   rawQuery: string,
   maxMatches = Number.POSITIVE_INFINITY
 ): ChatSearchMatch[] {
-  const query = rawQuery.trim().toLowerCase()
+  const trimmedQuery = rawQuery.trim()
+  const query = trimmedQuery.toLowerCase()
   const boundedMaxMatches = Math.max(0, Math.floor(maxMatches))
-  if (!query || boundedMaxMatches === 0) return []
+  if (!query || trimmedQuery.length > THREAD_SEARCH_QUERY_LIMIT || boundedMaxMatches === 0) return []
 
   const matches: ChatSearchMatch[] = []
   for (const document of documents) {
     if (document.plan) {
       const locations = findChatSearchLocations(
-        projectChatSearchPlan(document.plan), query, boundedMaxMatches - matches.length
+        projectChatSearchPlan(document.plan), trimmedQuery, boundedMaxMatches - matches.length
       )
       locations.forEach((location, occurrenceIndex) => matches.push({
         messageId: document.messageId, occurrenceIndex, location, sortIndex: document.sortIndex
@@ -154,8 +160,8 @@ export function createChatSearchMatcher(
   let visibleStableMatches: readonly ChatSearchMatch[] = stableMatches
 
   return (corpus, query) => {
-    const normalizedQuery = query.trim().toLowerCase()
-    if (!normalizedQuery) return []
+    const normalizedQuery = query.trim()
+    if (!normalizedQuery || normalizedQuery.length > THREAD_SEARCH_QUERY_LIMIT) return []
 
     if (
       corpus.stableDocuments !== previousStableDocuments ||

@@ -57,7 +57,7 @@ export function botTaskPreview(task: BotTask): string {
     }
     return projectMarkdownVisibleText(
       projectVisibleChatSearchContent("user", cleanUserAttachmentContentForDisplay(text))
-    )
+    ).text
       .replace(/\s+/g, " ")
       .trim()
   }
@@ -71,7 +71,7 @@ export function botTaskPreview(task: BotTask): string {
     if (appendix >= 0) text = text.slice(0, appendix)
     text = `${task.origin.fromBotName ?? "其他 Bot"}：${text}`
   }
-  return projectMarkdownVisibleText(text)
+  return projectMarkdownVisibleText(text).text
 }
 
 /** Private conversation controls must never display or cancel a member's group work. */

@@ -29,21 +29,7 @@ export {
   skillUseDisplayLabel,
   stripSkillUseBlockForDisplay
 } from "../../../../shared/skill-use-block"
-
-const TAG_NAME = "CMBDEVCLAW-SKILL-USE-V1"
-
-/**
- * Reverse of escapeXml, but also tolerant of `&quot;` / `&apos;` so any future
- * producer that escapes more aggressively still round-trips cleanly.
- */
-function unescapeXml(s: string): string {
-  return s
-    .replace(/&apos;/g, "'")
-    .replace(/&quot;/g, '"')
-    .replace(/&gt;/g, ">")
-    .replace(/&lt;/g, "<")
-    .replace(/&amp;/g, "&")
-}
+import { parseSkillUseBlock as parseSharedSkillUseBlock } from "../../../../shared/skill-use-block"
 
 /**
  * Locate the trailing `<CMBDEVCLAW-SKILL-USE-V1>…</CMBDEVCLAW-SKILL-USE-V1>`
@@ -63,35 +49,6 @@ function unescapeXml(s: string): string {
 export function parseSkillUseBlock(
   content: string
 ): { skillName: string; skillPath: string; rest: string } | null {
-  const openTag = `<${TAG_NAME}>`
-  const closeTag = `</${TAG_NAME}>`
-  const closeAt = content.lastIndexOf(closeTag)
-  if (closeAt < 0) return null
-  const openAt = content.lastIndexOf(openTag, closeAt)
-  if (openAt < 0) return null
-
-  // Strict tail check: real protocol blocks are always at the very end (we only
-  // ever append, no trailing payload follows). If anything non-whitespace sits
-  // after the close tag, this is user-authored prose that happens to mention
-  // the tag — leaving it alone is safer than swallowing the user's text.
-  const tailAfterClose = content.slice(closeAt + closeTag.length)
-  if (tailAfterClose.trim() !== "") return null
-
-  const block = content.slice(openAt, closeAt + closeTag.length)
-  const nameMatch = block.match(/<name>\s*([^<]*)\s*<\/name>/)
-  const pathMatch = block.match(/<path>\s*([^<]*)\s*<\/path>/)
-  // Both <name> and <path> are required. Our generator always emits both, so a
-  // block that's missing either is almost certainly user-authored prose that
-  // happens to contain `<name>` or the outer tag — refuse to recognise it as
-  // a real protocol block to avoid swallowing the user's text.
-  if (!nameMatch || !pathMatch) return null
-
-  const skillName = unescapeXml(nameMatch[1]).trim()
-  const skillPath = unescapeXml(pathMatch[1]).trim()
-  if (!skillName || !skillPath) return null
-
-  // Preserve everything before the tag (user text + attachments). The tail
-  // check above guarantees nothing meaningful follows the close tag.
-  const rest = content.slice(0, openAt).replace(/\s+$/, "")
-  return { skillName, skillPath, rest }
+  const parsed = parseSharedSkillUseBlock(content)
+  return parsed ? { skillName: parsed.skillName, skillPath: parsed.skillPath, rest: parsed.rest } : null
 }

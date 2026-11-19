@@ -1009,7 +1009,7 @@ export class BotStore {
 
   private activityPreview(preview: string, speaker?: string): string {
     const line =
-      projectMarkdownVisibleText(projectVisibleChatSearchContent("user", preview.slice(0, 4000)))
+      projectMarkdownVisibleText(projectVisibleChatSearchContent("user", preview.slice(0, 4000))).text
         .split(/\r?\n/)
         .find((value) => value.trim())
         ?.trim() ?? ""

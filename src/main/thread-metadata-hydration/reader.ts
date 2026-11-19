@@ -1,4 +1,6 @@
 import type { DatabaseSync } from "node:sqlite"
+import { matchesThreadIncarnationSnapshot } from "../../shared/thread-incarnation"
+import { THREAD_SEARCH_IDENTITY_CHECK_SQL, THREAD_SEARCH_IDENTITY_SQL } from "../thread-search/reader"
 import {
   isVisibleGoalUserEventMessage,
   isStaleCheckpointBoundaryNoticeMessage
@@ -20,6 +22,8 @@ import type {
 } from "./protocol"
 import type { ThreadGitMetadataProjection } from "./protocol"
 import { THREAD_METADATA_HYDRATION_CANCELLED } from "./protocol"
+import { THREAD_SUMMARY_METADATA_SQL } from "./summary-sql"
+import { THREAD_LIST_PRIORITY_KEYS } from "../../shared/thread-directory-metadata"
 
 interface ThreadProjectionRow {
   thread_id?: unknown
@@ -61,47 +65,6 @@ const THREAD_LIST_SMALL_OBJECT_KEYS = new Set([
   // plain local threads.
   "imDeliveryContext"
 ])
-const THREAD_LIST_PRIORITY_KEYS = [
-  // Remote IM session identity: the sidebar and chat banner classify threads by
-  // these, so they must lead the priority queue — priority keys consume the
-  // per-row char budget in array order, and a large known key later would
-  // otherwise starve them and degrade remote inbox / Feature sessions to plain
-  // local threads.
-  "targetKind",
-  "remoteState",
-  "remoteThread",
-  "remoteReadOnly",
-  "imDeliveryContext",
-  "botId",
-  "botHostId",
-  "botWorkId",
-  "botAudienceKey",
-  "botLocalConversation",
-  "botWorkOrigin",
-  "botMockBindingId",
-  "botGroupId",
-  "workspacePath",
-  "harnessFeature",
-  "harnessProjectSession",
-  "harnessProjectName",
-  "projectName",
-  "agentMode",
-  "coordinatorMode",
-  "subagentsEnabled",
-  "model",
-  "routingState",
-  "memoryEnabled",
-  "outputStyle",
-  "conciseModeEnabled",
-  "isWorktree",
-  "worktreeBranch",
-  "worktreeBaseBranch",
-  "gitRoot",
-  "gitContext",
-  "scheduledTaskId",
-  "isHeartbeat",
-  "title"
-] as const
 const MAX_GOAL_EVENT_MESSAGE_BYTES = 128 * 1024
 const THREAD_LIST_PAGE_MAX_ROWS = 128
 const THREAD_LIST_PAGE_MAX_BYTES = 512 * 1024
@@ -402,19 +365,28 @@ export function readThreadHydrationProjection(
   const startedAt = performance.now()
   const cancellation = new Int32Array(request.cancellationBuffer)
   throwIfCancelled(cancellation)
+  const search = request.search
+  if (search) {
+    const row = database.prepare(
+      search.includeSummary ? THREAD_SEARCH_IDENTITY_SQL : THREAD_SEARCH_IDENTITY_CHECK_SQL
+    ).get(request.threadId)
+    throwIfCancelled(cancellation)
+    const matches = row && !row.oversized_token && matchesThreadIncarnationSnapshot({
+      token: typeof row.token === "string" && row.token ? row.token : null,
+      legacyCreatedAt: Number(row.created_at)
+    }, search.incarnation)
+    if (!row || !matches || (search.includeSummary && typeof row.summary_metadata !== "string")) {
+      return { thread: null, stats: stats(startedAt, 0, 0) }
+    }
+    const thread = rowToThread({ ...row, thread_id: request.threadId, metadata: row.summary_metadata },
+      cancellation, true)
+    const admitted = thread && Buffer.byteLength(JSON.stringify(thread)) <= 32 * 1024
+    return { thread: admitted ? thread : null, stats: stats(startedAt, admitted ? 1 : 0, 0) }
+  }
   const row = database
     .prepare(
       `SELECT thread_id, created_at, updated_at,
-              CASE
-                WHEN metadata IS NULL THEN NULL
-                WHEN json_valid(metadata) THEN json_remove(
-                  metadata,
-                  '$.llmFileHistory',
-                  '$.llmModifiedFiles',
-                  '$.llmRecentlyRevertedFiles'
-                )
-                ELSE '{}'
-              END AS metadata,
+              ${THREAD_SUMMARY_METADATA_SQL} AS metadata,
               status, title,
               '{}' AS hydration_values
        FROM threads
@@ -549,25 +521,15 @@ export function readThreadSummaryPage(
   if (hasUpdatedCursor !== hasIdCursor) {
     throw new Error("Thread summary page cursor requires updated time and thread id together")
   }
-  const metadataProjection = `CASE
-    WHEN metadata IS NULL THEN NULL
-    WHEN json_valid(metadata) THEN json_remove(
-      metadata,
-      '$.llmFileHistory',
-      '$.llmModifiedFiles',
-      '$.llmRecentlyRevertedFiles'
-    )
-    ELSE '{}'
-  END`
   const statement = database.prepare(
     hasUpdatedCursor
-      ? `SELECT thread_id, created_at, updated_at, ${metadataProjection} AS metadata,
+      ? `SELECT thread_id, created_at, updated_at, ${THREAD_SUMMARY_METADATA_SQL} AS metadata,
                 status, title
          FROM threads
          WHERE updated_at < ? OR (updated_at = ? AND thread_id < ?)
          ORDER BY updated_at DESC, thread_id DESC
          LIMIT ?`
-      : `SELECT thread_id, created_at, updated_at, ${metadataProjection} AS metadata,
+      : `SELECT thread_id, created_at, updated_at, ${THREAD_SUMMARY_METADATA_SQL} AS metadata,
                 status, title
          FROM threads
          ORDER BY updated_at DESC, thread_id DESC

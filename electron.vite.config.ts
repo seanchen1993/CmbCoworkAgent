@@ -1,4 +1,5 @@
 import { resolve } from "path"
+import { createRequire } from "node:module"
 import { readFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, realpathSync, statSync } from "fs"
 import { defineConfig } from "electron-vite"
 import react from "@vitejs/plugin-react"
@@ -7,6 +8,7 @@ import { mirrorRequiredDirectorySync } from "./src/main/build/directory-mirror"
 // import {app} from "electron"
 
 const pkg = JSON.parse(readFileSync("./package.json", "utf-8"))
+const requireDependency = createRequire(import.meta.url)
 
 // Plugin to copy resources to output
 function copyResources(): { name: string; closeBundle: () => void } {
@@ -97,6 +99,13 @@ export default defineConfig({
   main: {
     // Bundle all dependencies into the main process
     build: {
+      externalizeDeps: {
+        exclude: [
+          "decode-named-character-reference", "micromark-util-decode-numeric-character-reference",
+          "micromark", "micromark-extension-gfm",
+          "remark-gfm", "remark-parse", "remark-rehype", "unified"
+        ]
+      },
       lib: {
         entry: {
           index: "src/main/bootstrap.ts",
@@ -126,6 +135,8 @@ export default defineConfig({
     },
     resolve: {
       alias: {
+        // Both dev and built Web Workers need the decoder without DOM dependencies.
+        "decode-named-character-reference": requireDependency.resolve("decode-named-character-reference"),
         "@": resolve("src/renderer/src"),
         "@renderer": resolve("src/renderer/src")
       }

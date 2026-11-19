@@ -5,11 +5,18 @@ import {
 } from "../../../shared/checkpoint-transcript"
 import {
   formatGoalUserEventMessage,
+  GOAL_COMMAND_MATCH_WINDOW_MS,
   GOAL_USER_MESSAGE_EVENT_PREFIX,
-  isVisibleGoalUserEventMessage
+  GOAL_USER_EVENT_MESSAGE_ID_PREFIX,
+  isVisibleGoalUserEventMessage,
+  legacyGoalStartContent,
+  normalizedGoalCommandContent,
+  readGoalPromptXmlText as extractXmlBlock,
+  sameGoalCommandScope
 } from "../../../shared/goal-events"
 import { splitGoalTransportPayload } from "../../../shared/goal-slash"
 import { getMessageProviderOccurrenceIdentity } from "../../../shared/message-role-collision"
+import { compareTranscriptPositions } from "../../../shared/thread-message-order"
 import { isInternalGoalPromptMessage, type GoalNoticeEvent } from "./goal-notice-messages"
 
 export function isGoalTranscriptArtifact(message: Pick<Message, "role" | "content">): boolean {
@@ -74,7 +81,8 @@ export function goalUserEventToMessage(event: GoalEvent): Message | null {
 
   const createdAt = toGoalEventDate(event.created_at)
   return {
-    id: `goal-user-event-${event.event_id}`,
+    id: `${GOAL_USER_EVENT_MESSAGE_ID_PREFIX}${event.event_id}`,
+    ...(event.transcript_message_id ? { transcript_anchor_message_id: event.transcript_message_id } : {}),
     ...(Number.isSafeInteger(event.transcript_ordinal) &&
     (event.transcript_ordinal ?? -1) >= 0
       ? { ordinal: event.transcript_ordinal as number }
@@ -87,15 +95,6 @@ export function goalUserEventToMessage(event: GoalEvent): Message | null {
     start_at: createdAt,
     end_at: createdAt
   }
-}
-
-function unescapeXmlText(text: string): string {
-  return text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
-}
-
-function extractXmlBlock(content: string, tag: string): string | null {
-  const match = new RegExp(`<${tag}>\\s*([\\s\\S]*?)\\s*</${tag}>`).exec(content)
-  return match ? unescapeXmlText(match[1].trim()) : null
 }
 
 export function isGoalResumeCommandContent(content: string): boolean {
@@ -149,14 +148,6 @@ function isGoalSetCommandMessage(message: Message): boolean {
   return !isGoalResumeCommandMessage(message)
 }
 
-function normalizedGoalCommandContent(content: string): string {
-  const { commandText } = splitGoalTransportPayload(content)
-  return commandText
-    .replace(/(?:^|\n)\s*启动附件：[^\n]*(?=\n|$)/g, "")
-    .replace(/(?:^|\n)\s*显式技能：[^\n]*(?=\n|$)/g, "")
-    .trim()
-}
-
 function createGoalPromptFallbackMessage(rawMessage: Message): Message | null {
   if (!isInternalGoalPromptMessage(rawMessage) || typeof rawMessage.content !== "string") {
     return null
@@ -164,14 +155,13 @@ function createGoalPromptFallbackMessage(rawMessage: Message): Message | null {
 
   const content = rawMessage.content.trimStart()
   const isContinuation = content.startsWith("[Continuing active goal]")
-  const objective = extractXmlBlock(content, "untrusted_objective")
   const goalId = extractXmlBlock(content, "goal_id")
   const activeWindowId = extractXmlBlock(content, "active_window_id")
   const createdAt = rawMessage.start_at ?? rawMessage.created_at
   return {
     id: `${isContinuation ? "goal-continue-prompt" : "goal-start-prompt"}-${rawMessage.id}`,
     role: "user",
-    content: isContinuation ? "/goal resume" : objective ? `/goal ${objective}` : "/goal",
+    content: isContinuation ? "/goal resume" : (legacyGoalStartContent(rawMessage.role, content) ?? "/goal"),
     goal_id: goalId ?? rawMessage.goal_id,
     active_window_id: activeWindowId ?? rawMessage.active_window_id,
     created_at: createdAt,
@@ -235,17 +225,13 @@ export const sameGoalCommandMessage = (left: Message, right: Message): boolean =
   if (normalizedGoalCommandContent(left.content) !== normalizedGoalCommandContent(right.content)) {
     return false
   }
-  if (left.active_window_id && right.active_window_id) {
-    return left.active_window_id === right.active_window_id
-  }
-  if (left.goal_id && right.goal_id) return left.goal_id === right.goal_id
-
-  const leftTime = left.created_at?.getTime?.() ?? 0
-  const rightTime = right.created_at?.getTime?.() ?? 0
-  return Math.abs(leftTime - rightTime) <= 5_000
+  return sameGoalCommandScope(
+    { activeWindowId: left.active_window_id ?? null, goalId: left.goal_id ?? null,
+      time: left.created_at?.getTime?.() ?? 0 },
+    { activeWindowId: right.active_window_id ?? null, goalId: right.goal_id ?? null,
+      time: right.created_at?.getTime?.() ?? 0 }
+  )
 }
-
-const GOAL_COMMAND_MATCH_WINDOW_MS = 5_000
 
 interface GoalCommandTimeBucket {
   min: number
@@ -388,7 +374,7 @@ function durableMessageOrdinal(message: Message): number | null {
 export interface GoalTranscriptPageRange {
   hasEarlierMessages: boolean
   newerBoundary?: { ordinal: number; createdAt?: Date }
-  forwardAnchor?: Pick<Message, "ordinal" | "created_at">
+  forwardAnchor?: Partial<Pick<Message, "ordinal" | "created_at">>
 }
 
 export type GoalTranscriptPageExtent =
@@ -417,6 +403,38 @@ export function getGoalTranscriptPageRange(
         }
       })
   }
+}
+
+function rebaseGoalEventOrdinals(
+  events: readonly GoalEvent[], pageBoundaryMessages: readonly Message[]
+): GoalEvent[] {
+  const ordinals = new Map(pageBoundaryMessages.map((message) => [message.id, durableMessageOrdinal(message)]))
+  return events.map((event) => {
+    const ordinal = event.transcript_message_id ? ordinals.get(event.transcript_message_id) : null
+    return typeof ordinal === "number" && event.transcript_ordinal !== ordinal
+      ? { ...event, transcript_ordinal: ordinal }
+      : event
+  })
+}
+
+/** Admit only Goal positions backed by the current target snapshot. */
+export function resolveGoalEventsForTargetPage(
+  events: readonly GoalEvent[], rawPage: readonly Message[],
+  residentAnchors: ReadonlyMap<string, string>, explicitGoal?: GoalEvent
+): GoalEvent[] {
+  const rawIds = new Set(rawPage.map((message) => message.id))
+  const resolved: GoalEvent[] = []
+  for (const event of events) {
+    if (explicitGoal?.event_id === event.event_id) {
+      resolved.push(explicitGoal)
+    } else {
+      const anchorId = residentAnchors.get(`${GOAL_USER_EVENT_MESSAGE_ID_PREFIX}${event.event_id}`) ??
+        event.transcript_message_id
+      if (anchorId && rawIds.has(anchorId)) resolved.push({ ...event, transcript_message_id: anchorId })
+      if (!anchorId && event.transcript_ordinal == null) resolved.push(event)
+    }
+  }
+  return resolved
 }
 
 /** Carry durable ordinals onto checkpoint rows whose reconstructed timestamps are not reliable. */
@@ -464,16 +482,15 @@ export function filterGoalEventsForDurablePage(
   const newerTime = pageRange?.newerBoundary?.createdAt?.getTime()
   const maximumKnownTime = durableMessages.at(-1)?.created_at.getTime()
   const durableCommands = new GoalCommandDuplicateIndex(durableMessages)
-  const durableUserMessageIds = new Set(
-    durableMessages.filter((message) => message.role === "user").map((message) => message.id)
-  )
-  return goalEvents.filter((event) => {
+  const durableMessageIds = new Set(durableMessages.map((message) => message.id))
+  return rebaseGoalEventOrdinals(goalEvents, durableMessages).filter((event) => {
     const message = goalUserEventToMessage(event)
     if (!message) return true
-    if (event.transcript_message_id && durableUserMessageIds.has(event.transcript_message_id)) {
+    if (event.transcript_message_id && durableMessageIds.has(event.transcript_message_id)) {
       return true
     }
     if (durableCommands.hasEquivalent(message)) return true
+    if (event.transcript_message_id) return false
     const ordinal = durableMessageOrdinal(message)
     if (ordinal !== null) {
       return (
@@ -498,7 +515,8 @@ export function mergeGoalUserEventsIntoDurablePage(
   durableMessages: Message[],
   goalEvents: readonly GoalEvent[],
   pageBoundaryMessages: readonly Message[] = durableMessages,
-  pageRange?: GoalTranscriptPageRange
+  pageRange?: GoalTranscriptPageRange,
+  otherVisibleMessages: readonly Message[] = []
 ): Message[] {
   if (
     goalEvents.length === 0 ||
@@ -509,10 +527,13 @@ export function mergeGoalUserEventsIntoDurablePage(
   const eligible = filterGoalEventsForDurablePage(pageBoundaryMessages, goalEvents, pageRange)
   if (eligible.length === 0) return durableMessages
   const userMessagesById = new Map(
-    durableMessages
+    [...durableMessages, ...otherVisibleMessages]
       .filter((message) => message.role === "user")
       .map((message) => [message.id, message])
   )
+  const otherCommands = new GoalCommandDuplicateIndex(otherVisibleMessages.filter(
+    (message) => !message.id.startsWith(GOAL_USER_EVENT_MESSAGE_ID_PREFIX)
+  ))
   const sidecarIds = new Set<string>()
   const extras: Message[] = []
   for (const event of eligible) {
@@ -520,6 +541,7 @@ export function mergeGoalUserEventsIntoDurablePage(
     if (!message || (!pageRange && durableMessageOrdinal(message) === null)) continue
     sidecarIds.add(message.id)
     if (!event.transcript_message_id || !userMessagesById.has(event.transcript_message_id)) {
+      if (otherCommands.hasEquivalent(message)) continue
       const existing = userMessagesById.get(message.id)
       extras.push(
         existing &&
@@ -543,7 +565,7 @@ export function mergeGoalUserEventsIntoDurablePage(
     : merged
 }
 
-function insertPageGoalMessages(messages: Message[], extras: readonly Message[]): Message[] {
+export function insertPageGoalMessages(messages: Message[], extras: readonly Message[]): Message[] {
   if (extras.length === 0) return messages
   const commands = new GoalCommandDuplicateIndex(messages)
   const byOrdinal: Array<{ message: Message; position: number; sourceIndex: number }> = []
@@ -586,6 +608,23 @@ function insertPageGoalMessages(messages: Message[], extras: readonly Message[])
   return merged
 }
 
+/** Reconcile pages that were projected before their canonical commands became resident. */
+export function excludeDuplicateGoalSidecars(messages: Message[]): Message[] {
+  if (!messages.some((message) => message.id.startsWith(GOAL_USER_EVENT_MESSAGE_ID_PREFIX))) {
+    return messages
+  }
+  const durableUsers = messages.filter((message) =>
+    message.role === "user" && !message.id.startsWith(GOAL_USER_EVENT_MESSAGE_ID_PREFIX)
+  )
+  const commands = new GoalCommandDuplicateIndex(durableUsers)
+  const userIds = new Set(durableUsers.map((message) => message.id))
+  return messages.filter((message) => {
+    if (!message.id.startsWith(GOAL_USER_EVENT_MESSAGE_ID_PREFIX)) return true
+    const anchorId = message.transcript_anchor_message_id
+    return !(anchorId && userIds.has(anchorId)) && !commands.hasEquivalent(message)
+  })
+}
+
 function insertMessagesByTimePreservingCheckpointOrder(
   checkpointMessages: Message[],
   extraMessages: readonly Message[],
@@ -613,9 +652,7 @@ function insertMessagesByTimePreservingCheckpointOrder(
         )
       })
       .sort((left, right) => {
-        const difference =
-          (durableMessageOrdinal(left.message) as number) -
-          (durableMessageOrdinal(right.message) as number)
+        const difference = compareTranscriptPositions(left.message, right.message)
         return difference || left.sourceIndex - right.sourceIndex
       })
     if (eligible.length === 0) return checkpointMessages
@@ -626,7 +663,7 @@ function insertMessagesByTimePreservingCheckpointOrder(
       while (
         checkpointOrdinal !== null &&
         extraIndex < eligible.length &&
-        (durableMessageOrdinal(eligible[extraIndex].message) as number) <= checkpointOrdinal
+        compareTranscriptPositions(eligible[extraIndex].message, checkpoint) <= 0
       ) {
         merged.push(eligible[extraIndex].message)
         extraIndex += 1

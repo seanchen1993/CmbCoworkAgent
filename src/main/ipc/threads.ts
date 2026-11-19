@@ -8,6 +8,7 @@ import {
   findBotWorkThreadOwner,
   verifyWorkConversationThread
 } from "../bots/conversation-link-authority"
+import { cancelSearchBackfill, registerSearchBackfillBusyCheck } from "../thread-search/coverage"
 import { getCapturedSubagentSession, subagentExportKey } from "../services/subagent-session-capture"
 import type { SubagentExportTarget as ExportScope } from "../../shared/subagent-session-export"
 import { formatHookDateTime } from "../../shared/hook-time"
@@ -21,6 +22,8 @@ import { v4 as uuid } from "uuid"
 import {
   copyThreadSubagentManifestRowsPage,
   getThreadCore,
+  getThreadRowLifetime,
+  searchThreadMessages,
   getDb,
   getFirstThreadRepliedUserMessageIdentity,
   getThreadHydrationCore,
@@ -33,7 +36,6 @@ import {
   getThreadMessagesAfterAnyId,
   getThreadMessagesByIds,
   getThreadMessagesPage,
-  searchThreadMessages,
   getThreadSubagentManifestAt,
   getThreadSubagentBucketIdPage,
   getThreadSubagentManifestForwardPage,
@@ -127,6 +129,7 @@ import {
   hasExternalThreadRunOwner,
   isExternallyManagedThreadRunBusy
 } from "../services/thread-external-run-busy"
+import { searchDurableThreadMessagesInWorker } from "../thread-search/durable-message-search-client"
 import { threadMetadataMatchesGroupSelector } from "../services/thread-group-selector"
 import type {
   ForkableCheckpoint,
@@ -189,7 +192,9 @@ import type {
 } from "../../shared/checkpoint-forkability"
 import {
   captureThreadMutationLease,
+  isThreadPublicationPending,
   requireThreadMutationLease,
+  stageThreadPublication,
   ThreadMutationLeaseExpiredError,
   withThreadMutationLeaseLock,
   withThreadRunMutationLock
@@ -1806,138 +1811,141 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
       const targetWorkspacePath =
         typeof targetMetadata.workspacePath === "string" ? targetMetadata.workspacePath : null
 
-      let targetSaver: SqlJsSaver | null = null
-      let rowCreated = false
-      try {
-        const checkpointMetadata = normalizeForkBoundaryMetadataForCheckpoint(
-          tuple.metadata ?? fallbackForkCheckpointMetadata(),
-          forkCheckpoint
-        )
-        const sourceHistoryTuples = selectForkCheckpointHistoryTuples({
-          listedTuples,
-          selectedCheckpointId: checkpointId,
-          forkableSummariesById
-        })
-        const checkpointHistory = buildForkCheckpointHistory({
-          sourceHistoryTuples: sourceHistoryTuples.length > 0 ? sourceHistoryTuples : [tuple],
-          selectedCheckpointId: checkpointId,
-          selectedCheckpoint: forkCheckpoint,
-          selectedMetadata: checkpointMetadata
-        })
-        await copyForkLargeToolResults({
-          checkpoints: checkpointHistory.map((entry) => entry.checkpoint),
-          sourceThreadId,
-          sourceWorkspacePath: workspacePath,
-          targetThreadId,
-          targetWorkspacePath
-        })
-        let durableUserHead: ReturnType<typeof getFirstThreadRepliedUserMessageIdentity> | null = null
-        const readDurableUserHead = () => {
-          if (durableUserHead === null) {
-            durableUserHead = getFirstThreadRepliedUserMessageIdentity(sourceThreadId)
-          }
-          return durableUserHead
-        }
-        const savedMessageCount = new Map(rawListedTuples.map(({ checkpoint }) => [
-          checkpoint.id, getCheckpointChannelMessages(checkpoint)?.length ?? 0
-        ]))
-        let sourceArchiveDirectories: Promise<string[]> | undefined
-        const readSourceArchiveDirectories = workspacePath
-          ? () => sourceArchiveDirectories ??=
-              getProjectThreadDataDirectoryReadCandidates(workspacePath, sourceThreadId).then(
-                (directories) => [
-                  ...directories.map((directory) => path.join(directory, "conversation_history")),
-                  path.join(workspacePath, ".cmbdevclaw", "conversation_history")
-                ]
-              )
-          : undefined
-        for (const { checkpoint } of checkpointHistory) {
-          const isSelected = checkpoint.id === checkpointId
-          // The synthetic latest tail must not make an invalid persisted cutoff valid.
-          await inheritForkSummarization({
-            checkpoint,
-            readDurableUserHead,
-            readSourceArchiveDirectories,
-            persistedMessageCount: savedMessageCount.get(checkpoint.id) ?? 0,
-            ...(isSelected &&
-              targetWorkspacePath && {
-                archiveTarget: { workspacePath: targetWorkspacePath, threadId: targetThreadId }
-              })
+      const finishPublication = stageThreadPublication(targetThreadId)
+      return withThreadRunMutationLock(targetThreadId, async () => {
+        let targetSaver: SqlJsSaver | null = null
+        let rowCreated = false
+        try {
+          const checkpointMetadata = normalizeForkBoundaryMetadataForCheckpoint(
+            tuple.metadata ?? fallbackForkCheckpointMetadata(),
+            forkCheckpoint
+          )
+          const sourceHistoryTuples = selectForkCheckpointHistoryTuples({
+            listedTuples,
+            selectedCheckpointId: checkpointId,
+            forkableSummariesById
           })
-        }
-        targetSaver = new SqlJsSaver(getThreadCheckpointPath(targetThreadId), undefined, {
-          maxRootCheckpoints: Math.max(1, checkpointHistory.length),
-          maxRootForkBoundaryCheckpoints: Math.max(0, checkpointHistory.length)
-        })
-        await putForkCheckpointHistory({
-          targetSaver,
-          targetThreadId,
-          entries: checkpointHistory
-        })
-        // Only approved candidates were copied. Preserve their legacy provenance
-        // even when the graph input used to prove it was not a fork boundary.
-        const copiedLegacyIds = checkpointHistory
-          .filter(({ metadata }) => !readForkBoundaryMarker(metadata))
-          .map(({ checkpoint }) => checkpoint.id)
-        if (copiedLegacyIds.length > 0) {
-          await targetSaver.recordCopiedLegacyForkCheckpointIds(targetThreadId, copiedLegacyIds)
-        }
-        await targetSaver.flushStrict()
-        await targetSaver.close()
-        targetSaver = null
-        await verifyForkCheckpointPersisted(targetThreadId, forkCheckpoint.id)
+          const checkpointHistory = buildForkCheckpointHistory({
+            sourceHistoryTuples: sourceHistoryTuples.length > 0 ? sourceHistoryTuples : [tuple],
+            selectedCheckpointId: checkpointId,
+            selectedCheckpoint: forkCheckpoint,
+            selectedMetadata: checkpointMetadata
+          })
+          await copyForkLargeToolResults({
+            checkpoints: checkpointHistory.map((entry) => entry.checkpoint),
+            sourceThreadId,
+            sourceWorkspacePath: workspacePath,
+            targetThreadId,
+            targetWorkspacePath
+          })
+          let durableUserHead: ReturnType<typeof getFirstThreadRepliedUserMessageIdentity> | null = null
+          const readDurableUserHead = () => {
+            if (durableUserHead === null) {
+              durableUserHead = getFirstThreadRepliedUserMessageIdentity(sourceThreadId)
+            }
+            return durableUserHead
+          }
+          const savedMessageCount = new Map(rawListedTuples.map(({ checkpoint }) => [
+            checkpoint.id, getCheckpointChannelMessages(checkpoint)?.length ?? 0
+          ]))
+          let sourceArchiveDirectories: Promise<string[]> | undefined
+          const readSourceArchiveDirectories = workspacePath
+            ? () => sourceArchiveDirectories ??=
+                getProjectThreadDataDirectoryReadCandidates(workspacePath, sourceThreadId).then(
+                  (directories) => [
+                    ...directories.map((directory) => path.join(directory, "conversation_history")),
+                    path.join(workspacePath, ".cmbdevclaw", "conversation_history")
+                  ]
+                )
+            : undefined
+          for (const { checkpoint } of checkpointHistory) {
+            const isSelected = checkpoint.id === checkpointId
+            // The synthetic latest tail must not make an invalid persisted cutoff valid.
+            await inheritForkSummarization({
+              checkpoint,
+              readDurableUserHead,
+              readSourceArchiveDirectories,
+              persistedMessageCount: savedMessageCount.get(checkpoint.id) ?? 0,
+              ...(isSelected &&
+                targetWorkspacePath && {
+                  archiveTarget: { workspacePath: targetWorkspacePath, threadId: targetThreadId }
+                })
+            })
+          }
+          targetSaver = new SqlJsSaver(getThreadCheckpointPath(targetThreadId), undefined, {
+            maxRootCheckpoints: Math.max(1, checkpointHistory.length),
+            maxRootForkBoundaryCheckpoints: Math.max(0, checkpointHistory.length)
+          })
+          await putForkCheckpointHistory({
+            targetSaver,
+            targetThreadId,
+            entries: checkpointHistory
+          })
+          // Only approved candidates were copied. Preserve their legacy provenance
+          // even when the graph input used to prove it was not a fork boundary.
+          const copiedLegacyIds = checkpointHistory
+            .filter(({ metadata }) => !readForkBoundaryMarker(metadata))
+            .map(({ checkpoint }) => checkpoint.id)
+          if (copiedLegacyIds.length > 0) {
+            await targetSaver.recordCopiedLegacyForkCheckpointIds(targetThreadId, copiedLegacyIds)
+          }
+          await targetSaver.flushStrict()
+          await targetSaver.close()
+          targetSaver = null
+          await verifyForkCheckpointPersisted(targetThreadId, forkCheckpoint.id)
 
-        const row = await withSubagentTranscriptContentMutationLock(async () => {
-          dbCreateThread(targetThreadId, targetMetadata)
-          rowCreated = true
-          const updated = dbUpdateThread(targetThreadId, {
-            thread_values: JSON.stringify(filteredThreadValues)
+          const row = await withSubagentTranscriptContentMutationLock(async () => {
+            dbCreateThread(targetThreadId, targetMetadata)
+            rowCreated = true
+            const updated = dbUpdateThread(targetThreadId, {
+              thread_values: JSON.stringify(filteredThreadValues)
+            })
+            if (!updated) throw new Error("Forked thread row was not created.")
+            advanceSubagentTranscriptReferenceEpoch()
+            return updated
           })
-          if (!updated) throw new Error("Forked thread row was not created.")
-          advanceSubagentTranscriptReferenceEpoch()
-          return updated
-        })
-        await copyForkedSubagentTranscriptsPaged({
-          sourceThreadId,
-          targetThreadId,
-          transcriptIndex
-        })
-        await copyForkedThreadMessages({
-          sourceThreadId,
-          targetThreadId,
-          sourceRow,
-          visibleMessages: transcriptIndex.visibleMessages,
-          checkpointMessages: getCheckpointChannelMessages(forkCheckpoint)
-        })
-        // Fork history is still visible, but legacy unmarked attachment receipts
-        // in the copied prefix cannot become deliveries of a later Bot owner.
-        targetMetadata[BOT_FORK_DELIVERY_BOUNDARY] = getThreadMessageOrdinalBoundary(targetThreadId)
-        const saved = dbUpdateThread(targetThreadId, { metadata: JSON.stringify(targetMetadata) })
-        if (!saved) throw new Error("Forked thread delivery boundary could not be persisted.")
-        copyForkedGoalStateForCheckpoint({
-          sourceThreadId,
-          targetThreadId,
-          forkCheckpoint,
-          isLatestCheckpointFork: selectedIsLatestCheckpoint && !keptPersistedBoundary
-        })
-        await flushDbStrict()
-        return {
-          thread: serializeThreadRow({ ...row, metadata: saved.metadata, updated_at: saved.updated_at }),
-          sourceThreadId,
-          sourceCheckpointId: checkpointId,
-          sourceCheckpointNs: ""
-        }
-      } catch (error) {
-        if (targetSaver) {
-          try {
-            await targetSaver.close()
-          } catch (closeError) {
-            console.warn("[Threads] Failed to close fork target saver:", closeError)
+          await copyForkedSubagentTranscriptsPaged({
+            sourceThreadId,
+            targetThreadId,
+            transcriptIndex
+          })
+          await copyForkedThreadMessages({
+            sourceThreadId,
+            targetThreadId,
+            sourceRow,
+            visibleMessages: transcriptIndex.visibleMessages,
+            checkpointMessages: getCheckpointChannelMessages(forkCheckpoint)
+          })
+          // Fork history is still visible, but legacy unmarked attachment receipts
+          // in the copied prefix cannot become deliveries of a later Bot owner.
+          targetMetadata[BOT_FORK_DELIVERY_BOUNDARY] = getThreadMessageOrdinalBoundary(targetThreadId)
+          const saved = dbUpdateThread(targetThreadId, { metadata: JSON.stringify(targetMetadata) })
+          if (!saved) throw new Error("Forked thread delivery boundary could not be persisted.")
+          copyForkedGoalStateForCheckpoint({
+            sourceThreadId,
+            targetThreadId,
+            forkCheckpoint,
+            isLatestCheckpointFork: selectedIsLatestCheckpoint && !keptPersistedBoundary
+          })
+          await flushDbStrict()
+          return {
+            thread: serializeThreadRow({ ...row, metadata: saved.metadata, updated_at: saved.updated_at }),
+            sourceThreadId,
+            sourceCheckpointId: checkpointId,
+            sourceCheckpointNs: "" as const
           }
+        } catch (error) {
+          if (targetSaver) {
+            try {
+              await targetSaver.close()
+            } catch (closeError) {
+              console.warn("[Threads] Failed to close fork target saver:", closeError)
+            }
+          }
+          await cleanupFailedFork(targetThreadId, { rowCreated, workspacePath: targetWorkspacePath })
+          throw error
         }
-        await cleanupFailedFork(targetThreadId, { rowCreated, workspacePath: targetWorkspacePath })
-        throw error
-      }
+      }).finally(finishPublication)
     })
   )
 }
@@ -2983,6 +2991,38 @@ function hasBotWorkMetadata(metadata: Record<string, unknown>): boolean {
 }
 
 export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService {
+  const checkpointHydrations = new Map<number, AbortController>()
+  const checkpointHydrationOperations = new Map<string, Set<AbortController>>()
+  function beginCheckpointHydration(
+    owner: number,
+    threadId: string,
+    options?: ThreadHydrationOptions
+  ) {
+    const controller = new AbortController()
+    const active = checkpointHydrationOperations.get(threadId) ?? new Set<AbortController>()
+    active.add(controller)
+    checkpointHydrationOperations.set(threadId, active)
+    const foreground = options?.requestScope === "foreground-hydration"
+    if (foreground) {
+      checkpointHydrations.get(owner)?.abort()
+      checkpointHydrations.set(owner, controller)
+    }
+    return {
+      controller,
+      isCurrent: () => !controller.signal.aborted,
+      finish() {
+        active.delete(controller)
+        if (!active.size) checkpointHydrationOperations.delete(threadId)
+        if (checkpointHydrations.get(owner) === controller) checkpointHydrations.delete(owner)
+      },
+      workerKey: foreground ? `thread-hydration:${owner}` : `thread-background:${owner}:${threadId}`
+    }
+  }
+
+  registerSearchBackfillBusyCheck((threadId, metadata) =>
+    hasActiveAgentRun(threadId) || hasPendingApprovalForThread(threadId) ||
+    isExternallyManagedThreadRunBusy(threadId, metadata) || workflowRunManager.isActive(threadId) ||
+    coordinatorWorkerManager.hasRunningWorkersForThread(threadId))
   // Read a bounded page of task summaries. The renderer incrementally builds the
   // directory so Electron never structured-clones an unbounded task table.
   ipcMain.handle("threads:list-page", async (event, options?: ThreadSummaryPageOptions) => {
@@ -3083,7 +3123,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
   ipcMain.handle(
     "threads:search-messages",
     async (
-      _event,
+      event,
       {
         threadId,
         query,
@@ -3117,7 +3157,11 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
         for (const [id, origin] of read?.(ids) ?? []) if (origin.replyTo) result.set(id, origin.replyTo)
         return result
       } : undefined
-      return searchThreadMessages(threadId, query, options, replies)
+      if (replies) return searchThreadMessages(threadId, query, options, replies)
+      const lifetime = getThreadRowLifetime(threadId)
+      const page = await searchDurableThreadMessagesInWorker(event.sender.id, threadId, query, options)
+      if (getThreadRowLifetime(threadId) !== lifetime) throw new Error("Thread search superseded")
+      return page
     }
   )
 
@@ -3914,6 +3958,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
         dbDeleteThread(threadId)
       }
       clearTrustedToolFilePreviewSourcesForThread(threadId, previewScopeKeys)
+      void cancelSearchBackfill(threadId)
       forgetLegacySubagentTranscriptMigration(threadId)
       // Detach the deleted task from its shared physical workspace watcher so
       // subscriber lists and per-change IPC fan-out cannot grow forever.
@@ -4060,6 +4105,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
     // behind until deletion or a later idempotent retry.
     cancelLegacySubagentTranscriptMigration(threadId)
     cancelSubagentTranscriptStartupRead(threadId)
+    for (const controller of checkpointHydrationOperations.get(threadId) ?? []) controller.abort()
     cancelLegacyCheckpointTranscriptBootstrap(threadId)
     return withThreadMutationLeaseLock(lease, async (threadRow) => {
       const metadata = threadDeletionMetadata(threadRow)
@@ -4252,15 +4298,25 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
   // Renderer hydration needs only small runtime channels (todos, interrupts,
   // etc.). Keep the full latest-checkpoint API above for worker/fork callers
   // that intentionally need channel_values.messages.
-  ipcMain.handle("threads:latest-checkpoint-runtime-state", async (event, threadId: string) => {
+  ipcMain.handle("threads:latest-checkpoint-runtime-state", async (event, threadId: string, options?: ThreadHydrationOptions) => {
+    const normalizedThreadId = assertValidCheckpointThreadId(threadId)
+    const hydration = beginCheckpointHydration(event.sender.id, normalizedThreadId, options)
     try {
-      const normalizedThreadId = assertValidCheckpointThreadId(threadId)
-      return await readLatestCheckpointRuntimeTupleInWorker(
-        getThreadCheckpointPath(normalizedThreadId),
-        normalizedThreadId,
-        "",
-        `thread-hydration:${event.sender.id}`
-      )
+      const lifetime = getThreadRowLifetime(normalizedThreadId)
+      if (lifetime === null) return null
+      const isCurrent = () =>
+        hydration.isCurrent() && getThreadRowLifetime(normalizedThreadId) === lifetime
+      const result = await withThreadRunMutationLock(normalizedThreadId, async () => {
+        if (!isCurrent()) return null
+        return readLatestCheckpointRuntimeTupleInWorker(
+          getThreadCheckpointPath(normalizedThreadId),
+          normalizedThreadId,
+          "",
+          hydration.workerKey,
+          hydration.controller.signal
+        )
+      })
+      return isCurrent() ? result : null
     } catch (e) {
       if (isCheckpointRuntimeProjectionCancelled(e)) return null
       console.warn("Failed to get latest thread checkpoint runtime state:", e)
@@ -4269,6 +4325,8 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
       // interrupts and other runtime channels instead of silently treating a
       // transient read failure as an authoritative empty runtime state.
       throw e
+    } finally {
+      hydration.finish()
     }
   })
 
@@ -4279,16 +4337,24 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
   // enters Electron main or the renderer hydration path.
   ipcMain.handle(
     "threads:bootstrap-legacy-checkpoint-transcript",
-    async (event, threadId: string) => {
+    async (event, threadId: string, options?: ThreadHydrationOptions) => {
+      const normalizedThreadId = assertValidCheckpointThreadId(threadId)
+      const hydration = beginCheckpointHydration(event.sender.id, normalizedThreadId, options)
       try {
-        const normalizedThreadId = assertValidCheckpointThreadId(threadId)
-        const bootstrap = await bootstrapLegacyCheckpointTranscriptInWorker(
-          getThreadCheckpointPath(normalizedThreadId),
-          getDbPath(),
-          normalizedThreadId,
-          "",
-          `thread-hydration:${event.sender.id}`
-        )
+        const checkpointPath = getThreadCheckpointPath(normalizedThreadId)
+        if (isThreadPublicationPending(normalizedThreadId)) return null
+        const lifetime = getThreadRowLifetime(normalizedThreadId)
+        if (lifetime === null) return null
+        const isCurrent = () =>
+          hydration.isCurrent() && getThreadRowLifetime(normalizedThreadId) === lifetime
+        const bootstrap = await withThreadRunMutationLock(normalizedThreadId, async () => {
+          if (!isCurrent()) return null
+          return bootstrapLegacyCheckpointTranscriptInWorker(
+            checkpointPath, getDbPath(), normalizedThreadId, "", hydration.workerKey,
+            hydration.controller.signal
+          )
+        })
+        if (!bootstrap || !isCurrent()) return null
         const pageOptions = {
           limit: 128,
           byteBudget: 1024 * 1024,
@@ -4308,6 +4374,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
           await new Promise<void>((resolve) => setImmediate(resolve))
           page = await readThreadMessagesPageInWorker(normalizedThreadId, pageOptions)
         }
+        if (!isCurrent()) return null
         return {
           checkpoint: bootstrap.runtimeTuple,
           page: await desktopHistoryPage(event, normalizedThreadId, page),
@@ -4317,6 +4384,8 @@ export function registerThreadHandlers(ipcMain: IpcMain): ThreadDeletionService 
         if (isCheckpointRuntimeProjectionCancelled(error)) return null
         console.warn("Failed to bootstrap legacy checkpoint transcript:", error)
         return null
+      } finally {
+        hydration.finish()
       }
     }
   )

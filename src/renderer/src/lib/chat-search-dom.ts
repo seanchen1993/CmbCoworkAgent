@@ -3,7 +3,7 @@ import { chatSearchLocationKey, type ChatSearchLocation } from "../../../shared/
 
 const MAX_DOM_TEXT = 256 * 1024
 const MAX_DOM_NODES = 8192
-const blocks = "p,pre,li,h1,h2,h3,h4,h5,h6,blockquote,tr"
+const blocks = "p,pre,li,h1,h2,h3,h4,h5,h6,blockquote,tr,[data-chat-search-block]"
 
 /** Build a bounded map across inline elements, preserving block separators. */
 export function mapChatSearchDom(
@@ -33,8 +33,9 @@ export function mapChatSearchDom(
     if (!value) continue
     const block = parent.closest(blocks)
     if (entries.length && block !== previousBlock) {
-      parts.push("\n\n")
-      length += 2
+      const separator = block?.hasAttribute("data-chat-search-block") ? "\n" : "\n\n"
+      parts.push(separator)
+      length += separator.length
     }
     previousBlock = block
     const text = value.slice(0, Math.max(0, MAX_DOM_TEXT - length))

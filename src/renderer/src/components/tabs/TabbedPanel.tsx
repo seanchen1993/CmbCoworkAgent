@@ -1,3 +1,4 @@
+import { cancelThreadSearchNavigation, useThreadSearch } from "@/lib/thread-search-navigation"
 import { useAppStore } from "@/lib/store"
 import { useBotConversationLink } from "@/components/bots/use-bot-conversation-link"
 import { LinkedBotConversation } from "@/components/bots/LinkedBotConversation"
@@ -94,6 +95,15 @@ export function TabbedPanel({
   const openFiles = useThreadStateSelector(threadId, (state) => state.openFiles) ?? []
   const pendingApproval = useThreadStateSelector(threadId, (state) => state.pendingApproval)
   const setActiveTab = useThreadActions(threadId)?.setActiveTab
+  const navigation = useThreadSearch((state) => state.navigation)
+  const lastSearchNavigation = useRef<number | null>(null)
+  useEffect(() => {
+    if (navigation?.result.threadId !== threadId || !setActiveTab) return
+    if (lastSearchNavigation.current !== navigation.id) {
+      lastSearchNavigation.current = navigation.id
+      if (activeTab !== "agent") setActiveTab("agent")
+    } else if (activeTab !== "agent") cancelThreadSearchNavigation()
+  }, [navigation, threadId, activeTab, setActiveTab])
   const lastAutoFocusedApprovalIdRef = useRef<string | null>(null)
 
   useEffect(() => {
