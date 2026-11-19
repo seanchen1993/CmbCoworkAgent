@@ -2,10 +2,7 @@
 import { useState } from "react"
 import { createRoot } from "react-dom/client"
 import { Dialog, DialogContent, DialogTitle } from "../../src/renderer/src/components/ui/dialog"
-import {
-  ProjectPluginDevelopmentGuide,
-  ProjectPluginWorkspaceShortcut
-} from "../../src/renderer/src/components/customize/ProjectPluginDevelopmentGuide"
+import { ProjectPluginDevelopmentGuide } from "../../src/renderer/src/components/customize/ProjectPluginDevelopmentGuide"
 import { MarketSkillShortcutAction } from "../../src/renderer/src/components/customize/MarketPanel/MarketSkillShortcutAction"
 import { useAppStore } from "../../src/renderer/src/lib/store"
 import type { SkillMetadata } from "../../src/renderer/src/types"
@@ -194,7 +191,7 @@ function Fixture() {
       />
     )
   }
-  if (view === "workspace-plugins") return <ProjectPluginWorkspaceShortcut />
+  if (view === "workspace-plugins") return <ProjectPluginDevelopmentGuide entry="workspace" />
   return <Composer key={threadId} threadId={threadId} />
 }
 

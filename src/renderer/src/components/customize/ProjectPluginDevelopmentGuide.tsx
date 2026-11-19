@@ -20,14 +20,14 @@ type Status = "checking" | "missing" | "available" | "disabled"
 
 export function ProjectPluginDevelopmentGuide({
   entry,
-  disabled,
-  startInWorkspace
+  disabled
 }: {
   entry: "plugins" | "project" | "market" | "workspace"
   disabled?: boolean
-  startInWorkspace?: (skill: SkillMetadata, isCurrent: () => boolean) => Promise<boolean>
 }): React.JSX.Element | null {
   const { accountRevision, binding } = useMarketSkillShortcut()
+  const { getThreadActions } = useThreadContext()
+  const opensNewThread = entry !== "project"
   const request = useRef(0)
   const [open, setOpen] = useState(false)
   const [status, setStatus] = useState<Status>("checking")
@@ -46,6 +46,32 @@ export function ProjectPluginDevelopmentGuide({
   if (!binding || !target) return null
   const selection = { itemId: target.itemId, revision: binding.revision }
 
+  async function openDevelopmentThread(
+    skill: SkillMetadata,
+    isCurrent: () => boolean
+  ): Promise<boolean> {
+    let workspacePath = await window.api.workspace.get()
+    if (!isCurrent()) return false
+    if (!workspacePath) {
+      const selected = await window.api.file.selectDirectory({ title: "选择插件开发工作区" })
+      if (!isCurrent() || selected.canceled || !selected.filePaths[0]) return false
+      workspacePath = selected.filePaths[0]
+    }
+
+    const accountRevision = useAppStore.getState().accountRevision
+    const thread = await window.api.threads.create({
+      workspacePath,
+      title: PROJECT_PLUGIN_SKILL_SHORTCUT_LABEL
+    })
+    const state = useAppStore.getState()
+    if (state.accountRevision !== accountRevision) return false
+    state.addThreadSummary(thread)
+    getThreadActions(thread.thread_id).setDraftSkill(skill)
+    if (!isCurrent()) return false
+    await state.selectThread(thread.thread_id)
+    return true
+  }
+
   async function check(install: boolean): Promise<void> {
     const sequence = ++request.current
     const origin = useAppStore.getState()
@@ -54,7 +80,7 @@ export function ProjectPluginDevelopmentGuide({
       return (
         sequence === request.current &&
         state.accountRevision === accountRevision &&
-        (!startInWorkspace ||
+        (!opensNewThread ||
           (state.currentThreadId === origin.currentThreadId &&
             state.mainView === origin.mainView &&
             state.showCustomizeView === origin.showCustomizeView))
@@ -81,9 +107,9 @@ export function ProjectPluginDevelopmentGuide({
       } else if (result.value.kind === "failed") {
         setError(result.value.error)
         setOpen(true)
-      } else if (result.value.kind === "available" && startInWorkspace) {
+      } else if (result.value.kind === "available" && opensNewThread) {
         setStatus("available")
-        const opened = await startInWorkspace(result.value.skill, isCurrent)
+        const opened = await openDevelopmentThread(result.value.skill, isCurrent)
         if (opened && sequence === request.current) setOpen(false)
       } else {
         setStatus(result.value.kind)
@@ -99,6 +125,41 @@ export function ProjectPluginDevelopmentGuide({
     }
   }
 
+  const iconOnly = entry === "workspace"
+  const trigger = (
+    <Button
+      type="button"
+      variant={iconOnly ? "ghost" : entry === "project" ? "link" : "outline"}
+      size={iconOnly ? "icon" : "sm"}
+      className={
+        iconOnly
+          ? "mr-2 size-7 shrink-0 text-muted-foreground"
+          : entry === "project"
+            ? "h-auto justify-start p-0 text-xs"
+            : undefined
+      }
+      title={iconOnly ? PROJECT_PLUGIN_SKILL_SHORTCUT_LABEL : undefined}
+      aria-label={iconOnly ? PROJECT_PLUGIN_SKILL_SHORTCUT_LABEL : undefined}
+      disabled={disabled || busy}
+      onClick={
+        opensNewThread
+          ? () => {
+              setStatus("checking")
+              void check(false)
+            }
+          : undefined
+      }
+    >
+      {iconOnly ? (
+        <CircleHelp className="size-4" aria-hidden />
+      ) : entry === "market" ? (
+        "开始开发"
+      ) : (
+        PROJECT_PLUGIN_SKILL_SHORTCUT_LABEL
+      )}
+    </Button>
+  )
+
   return (
     <Dialog
       open={open}
@@ -113,35 +174,7 @@ export function ProjectPluginDevelopmentGuide({
         }
       }}
     >
-      {entry === "workspace" ? (
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="mr-2 size-7 shrink-0 text-muted-foreground"
-          title={PROJECT_PLUGIN_SKILL_SHORTCUT_LABEL}
-          aria-label={PROJECT_PLUGIN_SKILL_SHORTCUT_LABEL}
-          disabled={busy}
-          onClick={() => {
-            setStatus("checking")
-            void check(false)
-          }}
-        >
-          <CircleHelp className="size-4" aria-hidden />
-        </Button>
-      ) : (
-        <DialogTrigger asChild>
-          <Button
-            type="button"
-            size="sm"
-            variant={entry === "project" ? "link" : "outline"}
-            className={entry === "project" ? "h-auto justify-start p-0 text-xs" : undefined}
-            disabled={disabled}
-          >
-            {entry === "market" ? "开始开发" : PROJECT_PLUGIN_SKILL_SHORTCUT_LABEL}
-          </Button>
-        </DialogTrigger>
-      )}
+      {opensNewThread ? trigger : <DialogTrigger asChild>{trigger}</DialogTrigger>}
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{PROJECT_PLUGIN_SKILL_SHORTCUT_LABEL}</DialogTitle>
@@ -151,10 +184,10 @@ export function ProjectPluginDevelopmentGuide({
           {status === "disabled"
             ? "此技能已停用，可在技能设置中启用。"
             : status === "available"
-              ? startInWorkspace
+              ? opensNewThread
                 ? "选择工作目录后，打开已选中该技能的新会话。"
                 : "在普通会话的技能列表中选择「" + target.skillName + "」，即可开始开发。"
-              : startInWorkspace
+              : opensNewThread
                 ? "安装后将在最近使用的工作目录打开新会话，并选中此技能。"
                 : "安装后，可以从普通会话的技能列表中选择此技能。"}
         </p>
@@ -166,13 +199,13 @@ export function ProjectPluginDevelopmentGuide({
         {(busy ||
           status === "missing" ||
           (status === "checking" && error) ||
-          (status === "available" && startInWorkspace)) && (
+          (status === "available" && opensNewThread)) && (
           <DialogFooter>
             <Button type="button" disabled={busy} onClick={() => void check(status === "missing")}>
               {busy
                 ? "正在处理…"
                 : status === "missing"
-                  ? startInWorkspace
+                  ? opensNewThread
                     ? "安装并开始"
                     : "安装技能"
                   : status === "available"
@@ -183,37 +216,5 @@ export function ProjectPluginDevelopmentGuide({
         )}
       </DialogContent>
     </Dialog>
-  )
-}
-
-export function ProjectPluginWorkspaceShortcut(): React.JSX.Element {
-  const { getThreadActions } = useThreadContext()
-
-  return (
-    <ProjectPluginDevelopmentGuide
-      entry="workspace"
-      startInWorkspace={async (skill, isCurrent) => {
-        let workspacePath = await window.api.workspace.get()
-        if (!isCurrent()) return false
-        if (!workspacePath) {
-          const selected = await window.api.file.selectDirectory({ title: "选择插件开发工作区" })
-          if (!isCurrent() || selected.canceled || !selected.filePaths[0]) return false
-          workspacePath = selected.filePaths[0]
-        }
-
-        const accountRevision = useAppStore.getState().accountRevision
-        const thread = await window.api.threads.create({
-          workspacePath,
-          title: PROJECT_PLUGIN_SKILL_SHORTCUT_LABEL
-        })
-        const state = useAppStore.getState()
-        if (state.accountRevision !== accountRevision) return false
-        state.addThreadSummary(thread)
-        getThreadActions(thread.thread_id).setDraftSkill(skill)
-        if (!isCurrent()) return false
-        await state.selectThread(thread.thread_id)
-        return true
-      }}
-    />
   )
 }

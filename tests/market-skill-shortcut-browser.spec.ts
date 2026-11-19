@@ -148,28 +148,32 @@ async function main(): Promise<void> {
     await guide.waitFor({ state: "hidden" })
     assert.equal(await name.inputValue(), "未保存的项目")
     assert.equal(await adapter.inputValue(), "installed-adapter")
+    assert.deepEqual(await page.evaluate(() => window.shortcutFixture.createdWorkspaces()), [])
 
     await page.evaluate(() => window.shortcutFixture.selectThread("new"))
     assert.equal(await draft.inputValue(), original)
     assert.equal(await page.getByLabel("已附加文件").textContent(), "spec.md")
     await development.waitFor({ state: "hidden" })
 
-    await page.evaluate(() => window.shortcutFixture.openView("market"))
-    await startDevelopment.click()
-    await guide.getByText(/在普通会话的技能列表中选择/).waitFor()
-    await page.keyboard.press("Escape")
-
-    await page.evaluate(() => window.shortcutFixture.openView("workspace-plugins"))
     const workspaceGuide = page.getByTitle("开发项目模式插件")
-    await workspaceGuide.hover()
-    await workspaceGuide.click()
-    await page.locator('form[data-thread="dev-1"]').waitFor()
-    assert.equal(
-      await page.getByLabel("技能", { exact: true }).textContent(),
-      "project-plugin-author"
-    )
-    assert.equal(await draft.inputValue(), "")
+    for (const [index, { view, button }] of [
+      { view: "market", button: startDevelopment },
+      { view: "plugins", button: development },
+      { view: "workspace-plugins", button: workspaceGuide }
+    ].entries()) {
+      await page.evaluate((view) => window.shortcutFixture.openView(view), view)
+      await button.hover()
+      await button.click()
+      await page.locator('form[data-thread="dev-' + (index + 1) + '"]').waitFor()
+      assert.equal(
+        await page.getByLabel("技能", { exact: true }).textContent(),
+        "project-plugin-author"
+      )
+      assert.equal(await draft.inputValue(), "")
+    }
     assert.deepEqual(await page.evaluate(() => window.shortcutFixture.createdWorkspaces()), [
+      "/recent",
+      "/recent",
       "/recent"
     ])
     await page.evaluate(() => window.shortcutFixture.selectThread("new"))
@@ -186,31 +190,34 @@ async function main(): Promise<void> {
       return button && !button.hasAttribute("disabled")
     })
     assert.deepEqual(await page.evaluate(() => window.shortcutFixture.createdWorkspaces()), [
+      "/recent",
+      "/recent",
       "/recent"
     ])
 
     await page.evaluate(() => {
       window.shortcutFixture.setWorkspaces(null, "/chosen")
       window.shortcutFixture.clearInstalled()
+      window.shortcutFixture.openView("market")
     })
-    await workspaceGuide.click()
+    await startDevelopment.click()
     await guide.getByRole("button", { name: "安装并开始" }).click()
     await page.waitForFunction(() => window.shortcutFixture.hasPendingInstall())
     await page.evaluate(() => window.shortcutFixture.finishInstall())
-    await page.locator('form[data-thread="dev-2"]').waitFor()
+    await page.locator('form[data-thread="dev-4"]').waitFor()
     assert.equal(
       await page.getByLabel("技能", { exact: true }).textContent(),
       "project-plugin-author"
     )
     assert.deepEqual(await page.evaluate(() => window.shortcutFixture.createdWorkspaces()), [
       "/recent",
+      "/recent",
+      "/recent",
       "/chosen"
     ])
 
     await page.evaluate(() => window.shortcutFixture.openView("plugins"))
-    await development.click()
-    await guide.getByText(/在普通会话的技能列表中选择/).waitFor()
-    await page.keyboard.press("Escape")
+    await development.waitFor()
     await page.evaluate(() => window.shortcutFixture.publish(false))
     await development.waitFor({ state: "hidden" })
     await page.evaluate(() => window.shortcutFixture.openView("market"))
