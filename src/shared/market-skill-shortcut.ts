@@ -5,6 +5,7 @@ export interface MarketSkillShortcutConfig {
   marketName: string
   skillName?: string
   sha256?: string
+  allowSourceForAll?: boolean
 }
 
 export interface ConversationShortcutsConfig {
@@ -62,14 +63,22 @@ function isMarketName(value: unknown): value is string {
 
 export function parseMarketSkillShortcutConfig(value: unknown): MarketSkillShortcutConfig | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null
-  const { itemId, marketName, skillName, sha256 } = value as Record<string, unknown>
+  const { itemId, marketName, skillName, sha256, allowSourceForAll } = value as Record<string, unknown>
   if (
     !isMarketSkillShortcutKey(itemId) ||
     !isMarketName(marketName) ||
     (skillName !== undefined && !isMarketName(skillName)) ||
-    (sha256 !== undefined && (typeof sha256 !== "string" || !/^[a-f\d]{64}$/i.test(sha256)))
+    (sha256 !== undefined && (typeof sha256 !== "string" || !/^[a-f\d]{64}$/i.test(sha256))) ||
+    (allowSourceForAll !== undefined && typeof allowSourceForAll !== "boolean") ||
+    (allowSourceForAll === true && !sha256)
   ) {
     return null
   }
-  return { itemId, marketName, skillName, sha256: sha256?.toLowerCase() }
+  return {
+    itemId,
+    marketName,
+    skillName,
+    sha256: sha256?.toLowerCase(),
+    ...(allowSourceForAll === true ? { allowSourceForAll } : {})
+  }
 }

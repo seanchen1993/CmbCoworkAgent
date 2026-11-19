@@ -1,6 +1,5 @@
 import {
   canReadPluginSource,
-  type MarketSourceAccess,
   type MarketSourceIdentity
 } from "../../shared/market-source-access"
 import { refreshMarketSkillCatalog } from "../services/market-skill-catalog"
@@ -510,7 +509,10 @@ const ORIGINAL_UPLOAD_MARKER = ".cmb-original-upload.json"
 type MarketShortcutSkillState = MarketSkillShortcutSkillState<SkillMetadata>
 
 interface VerifiedShortcutUpload {
-  target: MarketSkillShortcutTarget & { sourceAccess?: MarketSourceAccess }
+  target: MarketSkillShortcutTarget & {
+    allowSourceForAll: boolean
+    canLinkExistingOriginal: boolean
+  }
   isCurrent: () => boolean
 }
 
@@ -592,7 +594,7 @@ async function linkMatchingMarketSkill(
     if (
       protectedRoot !== skillDir &&
       (protectedRoot ||
-        !shortcut.target.sourceAccess ||
+        !shortcut.target.canLinkExistingOriginal ||
         !(await fs.lstat(path.join(skillDir, ORIGINAL_UPLOAD_MARKER))).isFile())
     ) {
       return false
@@ -1697,11 +1699,11 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
     }
 
     try {
-      const sourceAccess = shortcut
-        ? shortcut.target.sourceAccess
-        : options.origin === "market"
+      const sourceAccess =
+        options.origin === "market" && !shortcut
           ? await resolveMarketSourceAccess("skill", options.marketplace, buffer)
           : undefined
+      const canWriteOriginal = Boolean(shortcut?.target.allowSourceForAll || sourceAccess)
       const marketItemId = shortcut?.target.itemId ?? options.marketplace?.id
       const sourceItemId =
         (shortcut || sourceAccess) && isMarketSkillShortcutKey(marketItemId)
@@ -1709,7 +1711,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           : undefined
       const markInstalledSkill = async (skillDir: string): Promise<void> => {
         if (shortcut && !shortcut.isCurrent()) marketShortcutChanged()
-        if (options.origin === "market" && !sourceAccess) protectMarketDirectory(skillDir)
+        if (options.origin === "market" && !canWriteOriginal) protectMarketDirectory(skillDir)
         else await fs.writeFile(path.join(skillDir, ORIGINAL_UPLOAD_MARKER), "{}")
         if (sourceItemId) {
           await fs.writeFile(

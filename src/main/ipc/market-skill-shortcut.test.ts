@@ -366,49 +366,49 @@ describe("published market skill shortcut IPC", () => {
     expect(catalogRequests()).toHaveLength(2)
   })
 
-  it.each([
-    { access: "owner", identity: { user_id: "80123456 / Owner / Dept" }, format: "md" },
-    {
-      access: "whitelist",
-      identity: { extra_json: JSON.stringify({ sourceAccessUserIds: ["fixture-user"] }) },
-      format: "zip"
+  it.each(["md", "zip"] as const)(
+    "opens a hash-pinned %s package for eligible users with a publisher opt-in",
+    async (format) => {
+      if (format === "zip") {
+        const zip = new AdmZip()
+        zip.addFile("skill/SKILL.md", Buffer.from(markdown))
+        zip.addFile("skill/resources/example.txt", Buffer.from("example"))
+        bundle = { format, content: new Uint8Array(zip.toBuffer()).buffer }
+      }
+      const bytes = typeof bundle.content === "string"
+        ? Buffer.from(bundle.content)
+        : Buffer.from(bundle.content)
+      config = {
+        ...target,
+        allowSourceForAll: true,
+        sha256: createHash("sha256").update(bytes).digest("hex")
+      }
+      const chosen = await selection()
+      await expect(call("install", chosen)).resolves.toMatchObject({
+        ok: true,
+        value: { kind: "available" }
+      })
+      const skillPath = join(installedDirectory(), "SKILL.md")
+      await expect(skillCall("read", skillPath)).resolves.toMatchObject({
+        success: true, content: markdown
+      })
+      const changed = markdown + "\nLocal edits to the open package\n"
+      await expect(skillCall("write", { skillPath, content: changed })).resolves.toMatchObject({
+        success: true
+      })
+      await expect(skillCall("exportForMarket", skillPath)).resolves.toMatchObject({ success: true })
+      await expect(skillCall("write", {
+        skillPath: join(installedDirectory(), ".cmb-market-shortcut-source.json"),
+        content: "{}"
+      })).resolves.toMatchObject({ success: false })
+      await expect(call("resolve", chosen)).resolves.toMatchObject({
+        ok: true,
+        value: { kind: "available" }
+      })
+      await expect(readFile(skillPath, "utf8")).resolves.toBe(changed)
+      expect(catalogRequests()).toHaveLength(1)
     }
-  ] as const)("preserves $access source editing and export on $format shortcut installs", async ({
-    identity,
-    format
-  }) => {
-    items = [{ ...listedItem, ...identity }]
-    if (format === "zip") {
-      const zip = new AdmZip()
-      zip.addFile("skill/SKILL.md", Buffer.from(markdown))
-      zip.addFile("skill/resources/example.txt", Buffer.from("example"))
-      bundle = { format, content: new Uint8Array(zip.toBuffer()).buffer }
-    }
-    const chosen = await selection()
-    await expect(call("install", chosen)).resolves.toMatchObject({
-      ok: true,
-      value: { kind: "available" }
-    })
-    const skillPath = join(installedDirectory(), "SKILL.md")
-    await expect(skillCall("read", skillPath)).resolves.toMatchObject({
-      success: true, content: markdown
-    })
-    const changed = markdown + "\nAuthor's edits\n"
-    await expect(skillCall("write", { skillPath, content: changed })).resolves.toMatchObject({
-      success: true
-    })
-    await expect(skillCall("exportForMarket", skillPath)).resolves.toMatchObject({ success: true })
-    await expect(skillCall("write", {
-      skillPath: join(installedDirectory(), ".cmb-market-shortcut-source.json"),
-      content: "{}"
-    })).resolves.toMatchObject({ success: false })
-    await expect(call("resolve", chosen)).resolves.toMatchObject({
-      ok: true,
-      value: { kind: "available" }
-    })
-    await expect(readFile(skillPath, "utf8")).resolves.toBe(changed)
-    expect(catalogRequests()).toHaveLength(1)
-  })
+  )
 
   it.each([
     { hasReceipt: false, edited: false, expected: "available" },
@@ -442,6 +442,72 @@ describe("published market skill shortcut IPC", () => {
     await expect(skillCall("read", skillPath)).resolves.toMatchObject({ success: true })
     await expect(skillCall("exportForMarket", skillPath)).resolves.toMatchObject({ success: true })
     await expect(readFile(skillPath, "utf8")).resolves.toBe(edited ? changed : markdown)
+  })
+
+  it("does not authorize a new editable install from an old whitelist snapshot", async () => {
+    items = [{
+      ...listedItem,
+      extra_json: JSON.stringify({ sourceAccessUserIds: ["fixture-user"] })
+    }]
+    const chosen = await selection()
+    items = [listedItem] // The market revoked access; the stock catalog has not refreshed.
+    await expect(call("install", chosen)).resolves.toMatchObject({
+      ok: true,
+      value: { kind: "available" }
+    })
+    const skillPath = join(installedDirectory(), "SKILL.md")
+    await expect(skillCall("read", skillPath)).resolves.toMatchObject({ success: false })
+    await expect(skillCall("write", { skillPath, content: markdown })).resolves.toMatchObject({
+      success: false
+    })
+    await expect(skillCall("exportForMarket", skillPath)).resolves.toMatchObject({ success: false })
+    expect(catalogRequests()).toHaveLength(1)
+  })
+
+  it("requires the publisher to pin the open package and rejects different bytes", async () => {
+    config = { ...target, allowSourceForAll: true }
+    await refreshCatalog()
+    await expect(call("get")).resolves.toMatchObject({ ok: true, value: { target: null } })
+
+    config = { ...target, allowSourceForAll: true, sha256: "0".repeat(64) }
+    await expect(call("install", await selection())).resolves.toMatchObject({
+      ok: false, code: "unavailable"
+    })
+    await expect(readFile(join(installedDirectory(), "SKILL.md"))).rejects.toMatchObject({
+      code: "ENOENT"
+    })
+  })
+
+  it("rejects an install when the release manifest withdraws the source opt-in", async () => {
+    const sha256 = createHash("sha256").update(markdown).digest("hex")
+    config = { ...target, sha256, allowSourceForAll: true }
+    const chosen = await selection()
+    afterDownload = () => { config = { ...target, sha256 } }
+    await expect(call("install", chosen)).resolves.toMatchObject({ ok: false, code: "changed" })
+    await expect(readFile(join(installedDirectory(), "SKILL.md"))).rejects.toMatchObject({
+      code: "ENOENT"
+    })
+  })
+
+  it("keeps the ordinary catalog request free of the shortcut timeout", async () => {
+    await refreshCatalog()
+    let finish!: (response: Response) => void
+    fetchStub.mockImplementationOnce((_input, init) => {
+      expect(init?.signal).toBeUndefined()
+      return new Promise((resolve) => { finish = resolve })
+    })
+
+    const slowCatalog = refreshCatalog()
+    try {
+      await expect(call("get")).resolves.toMatchObject({
+        ok: true,
+        value: { target: { itemId: target.itemId } }
+      })
+    } finally {
+      finish(Response.json({ items: [listedItem] }))
+      await slowCatalog
+    }
+    expect(catalogRequests()).toHaveLength(2)
   })
 
   it("does not grant source access when the stock catalog revokes it during download", async () => {

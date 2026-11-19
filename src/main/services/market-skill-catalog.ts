@@ -29,7 +29,6 @@ function publishCatalog(next: typeof snapshot): void {
 async function fetchCatalog(): Promise<MarketSkillCatalogPage> {
   try {
     const response = await fetch(marketSkillUrl("/list/skill"), {
-      signal: AbortSignal.timeout(10_000),
       headers: { "Content-Type": "application/json" }
     })
     if (!response.ok) {
@@ -52,8 +51,8 @@ async function fetchCatalog(): Promise<MarketSkillCatalogPage> {
   }
 }
 
-// Only the existing market catalog readers call this. Shortcuts can wait for a
-// request already in progress, but cannot start a catalog fetch themselves.
+// Only the existing market catalog readers request the list. Shortcuts can
+// read a completed snapshot while a slow market request is still in progress.
 export function refreshMarketSkillCatalog(): Promise<MarketSkillCatalogPage> {
   pending ??= fetchCatalog().finally(() => {
     pending = undefined
@@ -61,7 +60,6 @@ export function refreshMarketSkillCatalog(): Promise<MarketSkillCatalogPage> {
   return pending
 }
 
-export async function readMarketSkillCatalog(): Promise<readonly unknown[]> {
-  await pending?.catch(() => undefined)
+export function readMarketSkillCatalog(): readonly unknown[] {
   return snapshot?.items ?? []
 }

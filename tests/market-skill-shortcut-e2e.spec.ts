@@ -17,7 +17,7 @@ const originTitle = "Original shortcut draft"
 const entry = "开发项目模式插件"
 const markdown =
   "---\nname: " + name + "\ndescription: Development fixture\n---\n\nFixture instructions.\n"
-const user = { sapId: "shortcut-e2e", ystId: "e2e-shortcut", userName: "E2E Author" }
+const user = { sapId: "shortcut-e2e", ystId: "e2e-shortcut", userName: "E2E User" }
 const basePath = "/api/trajectories/marketplace"
 
 async function build(output: string, baseUrl: string): Promise<void> {
@@ -76,6 +76,7 @@ async function main(): Promise<void> {
                 projectPluginCreation: {
                   itemId: "shortcut-e2e-item",
                   marketName: name,
+              allowSourceForAll: true,
                   sha256: createHash("sha256").update(markdown).digest("hex")
                 }
               }
@@ -92,7 +93,7 @@ async function main(): Promise<void> {
               id: "shortcut-e2e-item",
               name,
               chinese_name: label,
-              user_id: "shortcut-e2e / E2E Author",
+              user_id: "another-author / E2E Publisher",
               filename: name + ".md",
               description: "Development fixture",
               version: "1.0.0"
@@ -214,7 +215,7 @@ async function main(): Promise<void> {
     )
     assert.equal(exported.success, true)
     console.log(
-      "PASS plugin management installs editable source and opens a draft in the latest workspace"
+      "PASS plugin management installs the publisher-approved editable source and opens a draft in the latest workspace"
     )
 
     await page.getByText(originTitle, { exact: true }).first().click()

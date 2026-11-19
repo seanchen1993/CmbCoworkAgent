@@ -3,7 +3,7 @@ import {
   canCurrentUserViewMarketItem,
   buildUploaderIdCandidates
 } from "../../shared/market-item-visibility"
-import { getMarketSourceAccess, type MarketSourceAccess } from "../../shared/market-source-access"
+import { getMarketSourceAccess } from "../../shared/market-source-access"
 import { marketSkillUrl, readMarketSkillCatalog } from "./market-skill-catalog"
 import { userIdentityKey } from "../../shared/user-identity"
 import {
@@ -25,7 +25,8 @@ const EMPTY_BINDING = { revision: "unavailable", target: null } as const
 type ListedTarget = MarketSkillShortcutTarget & {
   filename: string
   sha256?: string
-  sourceAccess?: MarketSourceAccess
+  allowSourceForAll: boolean
+  canLinkExistingOriginal: boolean
 }
 type ListedBinding = Omit<MarketSkillShortcutBinding, "target"> & { target: ListedTarget | null }
 
@@ -82,8 +83,7 @@ export async function getMarketShortcutBinding(
   if (!session.isCurrent()) marketShortcutChanged()
   if (!config) return EMPTY_BINDING
 
-  const items = (await readMarketSkillCatalog()).map(record)
-  if (!session.isCurrent()) marketShortcutChanged()
+  const items = readMarketSkillCatalog().map(record)
   const byId = items.filter((item) => item?.id === config.itemId)
   const item = byId[0]
   if (byId.length !== 1 || !item || item.name !== config.marketName) return EMPTY_BINDING
@@ -101,11 +101,15 @@ export async function getMarketShortcutBinding(
     return EMPTY_BINDING
   }
 
-  const sourceAccess = uniqueName ? getMarketSourceAccess(marketIdentity, session.user) : undefined
+  const allowSourceForAll = config.allowSourceForAll === true
+  // Cached authorization is only a hint for linking bytes already readable
+  // locally. New originals require a publisher opt-in tied to a verified hash.
+  const canLinkExistingOriginal =
+    allowSourceForAll || (uniqueName && Boolean(getMarketSourceAccess(marketIdentity, session.user)))
   const filename = typeof item.filename === "string" ? item.filename : ""
   const label = typeof item.chinese_name === "string" ? item.chinese_name.trim().slice(0, 256) : ""
   const revision = createHash("sha256")
-    .update(JSON.stringify([config, filename, item.version, item.updated_at, sourceAccess]))
+    .update(JSON.stringify([config, filename, item.version, item.updated_at, canLinkExistingOriginal]))
     .digest("hex")
   return {
     revision,
@@ -117,7 +121,8 @@ export async function getMarketShortcutBinding(
       description: typeof item.description === "string" ? item.description.slice(0, 4_096) : "",
       skillName: config.skillName ?? config.marketName,
       sha256: config.sha256,
-      sourceAccess
+      allowSourceForAll,
+      canLinkExistingOriginal
     }
   }
 }
