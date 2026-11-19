@@ -23,6 +23,7 @@ const source = createSourceFile(
 const names = [
   "resolveKnowledgeRequestScope",
   "getKnowledgeConstraintFields",
+  "fetchKnowledgeOrgGroups",
   "fetchKnowledgeActiveDetails",
   "fetchKnowledgeUserDetails",
   "fetchKnowledgeRecentConstraintFileDetails",
@@ -128,7 +129,9 @@ function fixture() {
       ]),
     fetchKnowledgeActiveList: fetchUpdates,
     fetchKnowledgeUserDetailList: fetchUserDetails,
+    fetchKnowledgeOrgDistribution: vi.fn(async () => []),
     api: {} as {
+      fetchKnowledgeOrgGroups: (id: string, opts?: { upperOrgLv1?: string[] }) => Promise<unknown>
       fetchKnowledgeUserDetails: (opts?: { upperOrgLv1?: string[] }) => Promise<unknown>
       fetchKnowledgeActiveDetails: (opts?: { upperOrgLv1?: string[] }) => Promise<unknown>
       fetchKnowledgeRecentConstraintFiles: (opts?: { upperOrgLv1?: string[] }) => Promise<unknown>
@@ -177,6 +180,24 @@ describe("knowledge detail scope and query reuse", () => {
     })
     await expect(f.api.fetchKnowledgeReadReaders(file, opts)).rejects.toThrow("access denied")
     expect(f.query).toHaveBeenCalledTimes(4)
+  })
+  it("checks room permission before a drilldown, including forged IDs and empty scopes", async () => {
+    const f = fixture()
+    await f.api.fetchKnowledgeOrgGroups("2")
+    expect(f.fetchKnowledgeOrgDistribution).toHaveBeenCalledWith("http://kb.test", ["2"], undefined)
+    f.fetchKnowledgeOrgDistribution.mockClear()
+    await expect(f.api.fetchKnowledgeOrgGroups("2", { upperOrgLv1: ["甲室"] })).rejects.toThrow(
+      "当前范围"
+    )
+    await expect(f.api.fetchKnowledgeOrgGroups("")).rejects.toThrow("当前范围")
+    f.access.admin = false
+    await expect(f.api.fetchKnowledgeOrgGroups("2")).rejects.toThrow("当前范围")
+    await expect(f.api.fetchKnowledgeOrgGroups("2", { upperOrgLv1: ["乙室"] })).rejects.toThrow(
+      "当前范围"
+    )
+    expect(f.fetchKnowledgeOrgDistribution).not.toHaveBeenCalled()
+    await f.api.fetchKnowledgeOrgGroups("1")
+    expect(f.fetchKnowledgeOrgDistribution).toHaveBeenCalledWith("http://kb.test", ["1"], undefined)
   })
   it.each(["fetchKnowledgeActiveDetails", "fetchKnowledgeUserDetails"] as const)(
     "%s shares room mapping and never sends null for denied or unmapped scopes",

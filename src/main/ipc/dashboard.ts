@@ -174,6 +174,11 @@ import {
 } from "./dashboard-knowledge-commit-rate"
 import type { DashboardKnowledgeCommitRate } from "../../shared/dashboard-knowledge-commit-rate"
 import { fetchKnowledgeActiveList } from "./dashboard-knowledge-active-details"
+import {
+  demoKnowledgeActiveCount,
+  demoKnowledgeOrgs,
+  demoKnowledgePeople
+} from "./dashboard-knowledge-demo"
 import { fetchKnowledgeUserDetailList } from "./dashboard-knowledge-user-details"
 import {
   fetchKnowledgeFileReaders,
@@ -185,6 +190,7 @@ import {
   fetchKnowledgeProjectAggregates,
   emptyKnowledgeAccumulation,
   fetchKnowledgeAccumulation,
+  fetchKnowledgeOrgDistribution,
   parseKnowledgeDistribution,
   resolveKnowledgeOverviewScope
 } from "./dashboard-knowledge-overview"
@@ -193,6 +199,7 @@ import type {
   KnowledgeActiveDetails,
   KnowledgeFileReaders,
   KnowledgeProjectStats,
+  KnowledgeOrgItem,
   KnowledgeReadDetails,
   KnowledgeReadFileRef,
   KnowledgeRecentConstraintFiles,
@@ -14801,6 +14808,14 @@ async function fetchKnowledgeRecentConstraintFiles(
   return { fileCount, complete }
 }
 
+function getDemoKnowledgeRoomIds(): Map<string, string> {
+  const mapping = getKnowledgeRoomOrgIds()
+  for (const room of makeMockOrgOptions()) {
+    if (room !== DASHBOARD_UNCLASSIFIED_ORG && !mapping.has(room)) mapping.set(room, `demo-${room}`)
+  }
+  return mapping
+}
+
 function resolveKnowledgeRequestScope(opts: OrgFilterOptions | undefined) {
   const access = import.meta.env.DEV
     ? getDashboardAccessContext()
@@ -14812,7 +14827,7 @@ function resolveKnowledgeRequestScope(opts: OrgFilterOptions | undefined) {
       ownRoom: access.upperOrgLv1,
       unclassifiedRoom: DASHBOARD_UNCLASSIFIED_ORG
     },
-    getKnowledgeRoomOrgIds
+    import.meta.env.DEV ? getDemoKnowledgeRoomIds : getKnowledgeRoomOrgIds
   )
 }
 
@@ -14822,7 +14837,7 @@ async function fetchKnowledgeActiveDetails(
   const scope = resolveKnowledgeRequestScope(opts)
   if (scope.unavailableReason) return { items: [], unavailableReason: scope.unavailableReason }
   if (import.meta.env.DEV) {
-    const count = Math.round(25 * (scope.orgIds ? Math.min(1, scope.orgIds.length / 3) : 1))
+    const count = demoKnowledgeActiveCount(scope.orgIds)
     return {
       items: Array.from({ length: count }, (_, i) => ({
         filePath: `LF3918/03_Backend_Services/services/demo/local_rules_${i + 1}.md`,
@@ -14849,26 +14864,32 @@ async function fetchKnowledgeUserDetails(
   const scope = resolveKnowledgeRequestScope(opts)
   if (scope.unavailableReason) return { items: [], unavailableReason: scope.unavailableReason }
   if (import.meta.env.DEV) {
-    const rooms = normalizeUpperOrgLv1List(opts?.upperOrgLv1)
-    const mockRooms = rooms.length ? rooms : ["演示开发一室", "演示开发二室", "演示开发三室"]
-    return {
-      items: mockRooms.flatMap((roomName, roomIndex) =>
-        Array.from({ length: 12 }, (_, i) => ({
-          userName: `演示用户${roomIndex * 12 + i + 1}`,
-          roomName,
-          totalNum: 420 - (roomIndex % 3) * 40 - i * 11,
-          abandonedNum: (i + roomIndex) % 5,
-          recentNum: 216 - (roomIndex % 3) * 20 - i * 9,
-          updateActiveNum: Math.max(0, 96 - (roomIndex % 3) * 10 - i * 7),
-          readActiveNum: i % 3 === 0 ? 0 : 60 - i * 4
-        }))
-      )
-    }
+    return { items: demoKnowledgePeople(getDemoKnowledgeRoomIds(), scope.orgIds) }
   }
   const url = (import.meta.env.VITE_KNOWLEDGE_OVERVIEW_BASE_URL as string | undefined)?.trim() ?? ""
   return {
     items: await fetchKnowledgeUserDetailList(url, scope.orgIds, getDashboardRequestSignal())
   }
+}
+
+async function fetchKnowledgeOrgGroups(
+  roomId: string,
+  opts: OrgFilterOptions | undefined
+): Promise<KnowledgeOrgItem[]> {
+  const scope = resolveKnowledgeRequestScope(opts)
+  if (
+    typeof roomId !== "string" ||
+    !roomId.trim() ||
+    scope.unavailableReason ||
+    (scope.orgIds && !scope.orgIds.includes(roomId))
+  ) {
+    throw new Error("当前范围内无法查看该室的组分布")
+  }
+  if (import.meta.env.DEV) {
+    return demoKnowledgeOrgs(demoKnowledgePeople(getDemoKnowledgeRoomIds(), [roomId]), true)
+  }
+  const url = (import.meta.env.VITE_KNOWLEDGE_OVERVIEW_BASE_URL as string | undefined)?.trim() ?? ""
+  return fetchKnowledgeOrgDistribution(url, [roomId], getDashboardRequestSignal())
 }
 
 async function fetchKnowledgeOverviewAccumulation(
@@ -14879,40 +14900,31 @@ async function fetchKnowledgeOverviewAccumulation(
     return { ...emptyKnowledgeAccumulation(), unavailableReason: scope.unavailableReason }
   }
   if (import.meta.env.DEV) {
-    const scale = scope.orgIds ? Math.min(1, scope.orgIds.length / 3) : 1
-    const distribution = (rows: Array<[string | null, number]>) =>
-      parseKnowledgeDistribution(
-        rows.map(([name, value]) => ({ name, value: Math.round(value * scale) }))
-      )
+    const people = demoKnowledgePeople(getDemoKnowledgeRoomIds(), scope.orgIds)
+    const systems = ["LF39.18", "LF39.05", "LF39.03", "LB47.02", "LA64.06", null]
     return {
       totals: {
-        totalNum: Math.round(806 * scale),
-        abandonedNum: 0,
-        activeNum: Math.round(25 * scale)
+        totalNum: people.reduce((sum, row) => sum + row.totalNum, 0),
+        abandonedNum: people.reduce((sum, row) => sum + row.abandonedNum, 0),
+        activeNum: demoKnowledgeActiveCount(scope.orgIds)
       },
-      users: distribution(
-        [
-          114, 110, 97, 91, 70, 52, 38, 26, 22, 22, 18, 18, 18, 17, 16, 13, 9, 8, 7, 7, 6, 6, 5, 5,
-          3, 2, 2, 2, 1, 1
-        ].map((value, index) => ["用户" + (index + 1), value])
+      users: parseKnowledgeDistribution(
+        people.map((row) => ({ name: row.userName, value: row.totalNum }))
       ),
-      orgs: distribution([
-        [null, 805],
-        ["零售基础客群经营开发室(成都)", 1]
-      ]),
-      systems: distribution([
-        [null, 287],
-        ["LF39.18", 182],
-        ["LF39.05", 151],
-        ["LF39.03", 132],
-        ["LB47.02", 32],
-        ["LA64.06", 22]
-      ]),
+      orgs: demoKnowledgeOrgs(people, !!scope.orgRoom),
+      orgRoom: scope.orgRoom,
+      systems: parseKnowledgeDistribution(
+        people.map((row, index) => ({
+          name: systems[index % systems.length],
+          value: row.totalNum
+        }))
+      ),
       errors: {}
     }
   }
   const url = (import.meta.env.VITE_KNOWLEDGE_OVERVIEW_BASE_URL as string | undefined)?.trim() ?? ""
-  return fetchKnowledgeAccumulation(url, scope.orgIds, getDashboardRequestSignal())
+  const data = await fetchKnowledgeAccumulation(url, scope.orgIds, getDashboardRequestSignal())
+  return { ...data, orgRoom: scope.orgRoom }
 }
 
 /** 技能修改采纳率。只看时间范围和室，不受「来源」「仅精益项目」「仅本期新建」影响。 */
@@ -16348,6 +16360,19 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchKnowledgeOverviewAccumulation(opts) }
       } catch (e) {
         logDashboardRequestError("knowledgeAccumulation", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:knowledgeOrgGroups",
+    async (_, roomId: string, opts: OrgFilterOptions | undefined) => {
+      try {
+        return { success: true, data: await fetchKnowledgeOrgGroups(roomId, opts) }
+      } catch (e) {
+        logDashboardRequestError("knowledgeOrgGroups", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

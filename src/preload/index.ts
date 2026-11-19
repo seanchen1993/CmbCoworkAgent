@@ -29,6 +29,7 @@ import type {
 } from "../shared/managed-run-schedule"
 import type {
   KnowledgeAccumulationData,
+  KnowledgeOrgItem,
   KnowledgeActiveDetails,
   KnowledgeFileReaders,
   KnowledgeProjectStats,
@@ -4060,6 +4061,17 @@ const api = {
       error?: string
       cancelled?: boolean
     }> => ipcRenderer.invoke("dashboard:knowledgeAccumulation", opts),
+    knowledgeOrgGroups: (
+      roomId: string,
+      opts?: {
+        upperOrgLv1?: string | string[] | null
+      }
+    ): Promise<{
+      success: boolean
+      data?: KnowledgeOrgItem[]
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeOrgGroups", roomId, opts),
     knowledgeUserDetails: (opts?: {
       upperOrgLv1?: string | string[] | null
     }): Promise<{
