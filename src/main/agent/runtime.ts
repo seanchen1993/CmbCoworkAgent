@@ -1,3 +1,4 @@
+import { NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY } from "../../shared/graph-transcript-boundary"
 import { createStageUsageMiddleware } from "./trace/stage-usage-middleware"
 import {
   createSubagentLifecycleMiddleware,
@@ -287,19 +288,23 @@ export function setCurrentRunTranscriptFlushBeforeInjection(
 }
 
 /** Stage the graph input. The main-stream values fence owns its SQLite reservation. */
-export function createPhysicalGoalGateRecoveryMessage(
+export function createPhysicalScopedGateRecoveryMessage(
   threadId: string,
   runToken: string | undefined,
   messages: readonly BaseMessage[],
   prompt: string
 ): HumanMessage {
   const parent = messages.findLast(HumanMessage.isInstance)
+  const goalBoundary =
+    parent?.additional_kwargs[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] === true &&
+    Boolean(goalManager.getActive(threadId))
+  const notificationBoundary =
+    parent?.additional_kwargs[NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY] === true
   if (
     !parent?.id ||
-    parent.additional_kwargs[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] !== true ||
+    (!goalBoundary && !notificationBoundary) ||
     !runToken ||
-    !isCurrentRunMessageQueueOwner(threadId, runToken) ||
-    !goalManager.getActive(threadId)
+    !isCurrentRunMessageQueueOwner(threadId, runToken)
   ) {
     return new HumanMessage(prompt)
   }
@@ -316,14 +321,15 @@ export function createPhysicalGoalGateRecoveryMessage(
     content: prompt,
     id: randomUUID(),
     additional_kwargs: {
-      [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true,
+      ...(goalBoundary && { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true }),
+      ...(notificationBoundary && { [NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY]: true }),
       [GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]: durableParentId
     }
   })
 }
 
-/** An upgraded ordinal-only migration must recover its identities before a Goal model streams. */
-function prepareLegacyGoalProviderHistory(threadId: string): Promise<void> | undefined {
+/** An upgraded ordinal-only migration must recover its identities before a scoped model turn streams. */
+function prepareLegacyScopedProviderHistory(threadId: string): Promise<void> | undefined {
   if (!hasUnresolvedLegacyTranscriptSlots(threadId)) return undefined
   return bootstrapLegacyCheckpointTranscriptInWorker(
     getThreadCheckpointPath(threadId),
@@ -333,7 +339,7 @@ function prepareLegacyGoalProviderHistory(threadId: string): Promise<void> | und
     // No checkpoint ID means there is no recoverable source. An orphaned
     // ordinal-only marker alone should not keep future Goal turns blocked.
     if (stats.checkpointId !== null && hasUnresolvedLegacyTranscriptSlots(threadId)) {
-      throw new Error("Goal 历史仍在恢复，请稍后继续。")
+      throw new Error("会话历史仍在恢复，请稍后继续。")
     }
   })
 }
@@ -3112,7 +3118,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
         todoGateEnabled: mainTodosEnabled && turnCompletionTodoGateEnabled,
         onRecovery: onTurnCompletionRecovery,
         createRecoveryMessage: (threadId, messages, prompt) =>
-          createPhysicalGoalGateRecoveryMessage(
+          createPhysicalScopedGateRecoveryMessage(
             threadId,
             currentRunMessageQueueOwnerToken,
             messages,
@@ -3133,7 +3139,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
             ? undefined
             : previous.find((entry) => entry.role === "assistant")?.provider_occurrence ?? 0
         },
-        prepareLegacyGoalProviderHistory
+        prepareLegacyScopedProviderHistory
       ),
       createCmbSummarizationMiddleware(mainSummarizationOptions),
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),

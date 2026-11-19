@@ -30,6 +30,7 @@ import {
   ToolMessage,
   type BaseMessage
 } from "@langchain/core/messages"
+import { getConfig } from "@langchain/langgraph"
 import { createMiddleware } from "langchain"
 import { randomUUID } from "crypto"
 import type { Message } from "../types"
@@ -40,9 +41,10 @@ import {
 } from "../../shared/checkpoint-transcript"
 import { isSerializedSummarizationMessage } from "../../shared/context-compaction-messages"
 import {
-  GOAL_CONTINUATION_BOUNDARY_METADATA_KEY,
-  GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY
-} from "./goals/internal-prompt"
+  hasScopedGraphTranscriptBoundary,
+  NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY
+} from "../../shared/graph-transcript-boundary"
+import { GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY } from "./goals/internal-prompt"
 import {
   advanceCompletedMessageContentRoute,
   getMessageProviderOccurrence,
@@ -295,11 +297,15 @@ function currentRunInjectionAnchorForMessage(value: unknown): CurrentRunInjectio
 const currentRunMessageQueues = new Map<string, CurrentRunQueuedMessage[]>()
 const currentRunMessageQueueOwners = new Map<string, string>()
 const completedAssistantMessagesByRun = new Map<string, CurrentRunCompletedAssistantMessage>()
-type GoalGraphProviderRole = "assistant" | "tool"
-type GoalGraphProviderOccurrences = Map<string, Partial<Record<GoalGraphProviderRole, number>>>
-const goalGraphOccurrencesByThread = new Map<
+type ScopedGraphProviderRole = "assistant" | "tool"
+type ScopedGraphProviderOccurrences = Map<string, Partial<Record<ScopedGraphProviderRole, number>>>
+const scopedGraphOccurrencesByThread = new Map<
   string,
-  { runToken: string; boundaries: Map<string, GoalGraphProviderOccurrences> }
+  {
+    runToken: string
+    boundaries: Map<string, ScopedGraphProviderOccurrences>
+    notificationExecutions: Set<string>
+  }
 >()
 const VISIBLE_USER_MESSAGE_KEY = "cmb_visible_user_message"
 // A renderer can withdraw a handoff while its async UserPromptSubmit/skill hooks
@@ -381,7 +387,7 @@ export function setCurrentRunMessageQueueOwner(threadId: string, runToken: strin
     completedAssistantRoutes.delete(threadId)
   }
   if (currentRunMessageQueueOwners.get(threadId) !== runToken) {
-    goalGraphOccurrencesByThread.delete(threadId)
+    scopedGraphOccurrencesByThread.delete(threadId)
   }
   currentRunMessageQueueOwners.set(threadId, runToken)
 }
@@ -438,7 +444,7 @@ export function clearCurrentRunMessageQueue(threadId: string, runToken?: string)
   }
   currentRunMessageQueues.delete(threadId)
   currentRunMessageQueueOwners.delete(threadId)
-  goalGraphOccurrencesByThread.delete(threadId)
+  scopedGraphOccurrencesByThread.delete(threadId)
   injectedMessageIds.delete(threadId)
   withdrawnMessageIds.delete(threadId)
   completedAssistantRoutes.delete(threadId)
@@ -570,16 +576,16 @@ function completedAssistantMessageForTranscript(
     : undefined
 }
 
-type GoalProviderOccurrenceLoader = (
+type GraphProviderOccurrenceLoader = (
   threadId: string,
-  goalBoundaryId: string,
+  boundaryId: string,
   providerSourceId: string
 ) => number | undefined
 
-function collectPreviousGoalGraphProviderOccurrences(
+function collectPreviousScopedGraphProviderOccurrences(
   messages: readonly BaseMessage[],
   end: number
-): GoalGraphProviderOccurrences {
+): ScopedGraphProviderOccurrences {
   const candidates: Array<ReturnType<typeof getCheckpointTranscriptMessageIdentity>> = []
   for (let index = 0; index < end; index += 1) {
     const message = messages[index]
@@ -600,7 +606,7 @@ function collectPreviousGoalGraphProviderOccurrences(
     const visibleUserMessage = metadata[VISIBLE_USER_MESSAGE_KEY]
     if (
       role === "user" &&
-      metadata[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] === true &&
+      hasScopedGraphTranscriptBoundary(metadata) &&
       !(typeof visibleUserMessage === "string" && visibleUserMessage.trim())
     ) {
       continue
@@ -620,7 +626,7 @@ function collectPreviousGoalGraphProviderOccurrences(
     )
   }
 
-  const occurrences: GoalGraphProviderOccurrences = new Map()
+  const occurrences: ScopedGraphProviderOccurrences = new Map()
   for (const message of normalizeCompleteSnapshotMessageIds([], candidates)) {
     const { role } = message
     if (role !== "assistant" && role !== "tool") continue
@@ -633,7 +639,7 @@ function collectPreviousGoalGraphProviderOccurrences(
   return occurrences
 }
 
-function rememberGoalGraphProviderOccurrences(
+function rememberScopedGraphProviderOccurrences(
   threadId: string,
   runToken: string,
   messages: readonly BaseMessage[]
@@ -643,20 +649,21 @@ function rememberGoalGraphProviderOccurrences(
   const boundary = messages[boundaryIndex]
   if (
     !boundary?.id ||
-    boundary.additional_kwargs[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] !== true
+    !hasScopedGraphTranscriptBoundary(boundary.additional_kwargs)
   ) {
     return false
   }
 
-  let scope = goalGraphOccurrencesByThread.get(threadId)
+  if (!isCurrentRunMessageQueueOwner(threadId, runToken)) return false
+  let scope = scopedGraphOccurrencesByThread.get(threadId)
   if (!scope) {
-    scope = { runToken, boundaries: new Map() }
-    goalGraphOccurrencesByThread.set(threadId, scope)
+    scope = { runToken, boundaries: new Map(), notificationExecutions: new Set() }
+    scopedGraphOccurrencesByThread.set(threadId, scope)
   }
   const parentId = boundary.additional_kwargs[GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]
   const remember = (id: string, end: number): void => {
     if (scope.boundaries.has(id)) return
-    scope.boundaries.set(id, collectPreviousGoalGraphProviderOccurrences(messages, end))
+    scope.boundaries.set(id, collectPreviousScopedGraphProviderOccurrences(messages, end))
   }
   if (typeof parentId === "string" && !scope.boundaries.has(parentId)) {
     const parentIndex = messages.findIndex(
@@ -664,7 +671,7 @@ function rememberGoalGraphProviderOccurrences(
         index < boundaryIndex &&
         message.id === parentId &&
         HumanMessage.isInstance(message) &&
-        message.additional_kwargs[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] === true
+        hasScopedGraphTranscriptBoundary(message.additional_kwargs)
     )
     if (parentIndex >= 0) remember(parentId, parentIndex)
   }
@@ -672,31 +679,31 @@ function rememberGoalGraphProviderOccurrences(
   return true
 }
 
-function getGoalGraphProviderOccurrences(
+function getScopedGraphProviderOccurrences(
   threadId: string,
   runToken: string,
   boundaryId: string
-): GoalGraphProviderOccurrences | undefined {
-  const scope = goalGraphOccurrencesByThread.get(threadId)
+): ScopedGraphProviderOccurrences | undefined {
+  const scope = scopedGraphOccurrencesByThread.get(threadId)
   return scope?.runToken === runToken ? scope.boundaries.get(boundaryId) : undefined
 }
 
-interface PreviousGoalProviderOccurrence {
+interface PreviousGraphProviderOccurrence {
   provider_source_id: string
   role: Message["role"]
   provider_occurrence: number
 }
 
 /** The checkpoint can know an older provider identity before SQLite's legacy worker imports it. */
-export function mergeCurrentRunGoalProviderOccurrences(
+export function mergeCurrentRunGraphProviderOccurrences(
   threadId: string,
   runToken: string,
   boundaryId: string,
   sourceIds: readonly string[],
-  durable: readonly PreviousGoalProviderOccurrence[] | undefined
-): readonly PreviousGoalProviderOccurrence[] | undefined {
+  durable: readonly PreviousGraphProviderOccurrence[] | undefined
+): readonly PreviousGraphProviderOccurrence[] | undefined {
   if (durable === undefined) return undefined
-  const graph = getGoalGraphProviderOccurrences(threadId, runToken, boundaryId)
+  const graph = getScopedGraphProviderOccurrences(threadId, runToken, boundaryId)
   if (!graph?.size) return durable
 
   const keyFor = (sourceId: string, role: Message["role"]): string =>
@@ -719,18 +726,60 @@ export function mergeCurrentRunGoalProviderOccurrences(
   return [...occurrences.values()]
 }
 
-function assignGoalGraphAssistantIdentity(
+interface NotificationAssistantIdentity {
+  stableId: string
+  providerSourceId: string
+  providerOccurrence: number
+}
+
+/** The graph model node and its token callbacks share the same execution namespace. */
+export function getCurrentRunNotificationAssistantIdentity(
+  threadId: string,
+  runToken: string,
+  namespace: unknown
+): NotificationAssistantIdentity | undefined {
+  const scope = scopedGraphOccurrencesByThread.get(threadId)
+  if (
+    typeof namespace !== "string" ||
+    scope?.runToken !== runToken ||
+    !scope.notificationExecutions.has(namespace)
+  ) {
+    return undefined
+  }
+  const stableId = "cmb-notification-assistant:" + namespace
+  return { stableId, providerSourceId: stableId, providerOccurrence: 1 }
+}
+
+function registerNotificationModelExecution(
+  threadId: string,
+  runToken: string,
+  messages: readonly BaseMessage[]
+): NotificationAssistantIdentity | undefined {
+  const latestUser = messages.findLast(HumanMessage.isInstance)
+  if (latestUser?.additional_kwargs[NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY] !== true) {
+    return undefined
+  }
+  const namespace = getConfig()?.metadata?.langgraph_checkpoint_ns
+  const scope = scopedGraphOccurrencesByThread.get(threadId)
+  if (typeof namespace !== "string" || !namespace || scope?.runToken !== runToken) {
+    return undefined
+  }
+  scope.notificationExecutions.add(namespace)
+  return getCurrentRunNotificationAssistantIdentity(threadId, runToken, namespace)
+}
+
+function assignScopedGraphAssistantIdentity(
   threadId: string,
   runToken: string,
   messages: readonly BaseMessage[],
   response: AIMessage,
-  loadPreviousOccurrence?: GoalProviderOccurrenceLoader
+  loadPreviousOccurrence?: GraphProviderOccurrenceLoader
 ): void {
   const boundaryIndex = messages.findLastIndex(HumanMessage.isInstance)
   const boundary = messages[boundaryIndex]
-  if (boundary?.additional_kwargs[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] !== true) return
+  if (!boundary?.id || !hasScopedGraphTranscriptBoundary(boundary.additional_kwargs)) return
   const sourceId = graphAssistantProviderSourceId(response)
-  if (!sourceId || !boundary.id) return
+  if (!sourceId) return
 
   let occurrence = loadPreviousOccurrence?.(threadId, boundary.id, sourceId)
   let scopeIndex = boundaryIndex
@@ -744,7 +793,7 @@ function assignGoalGraphAssistantIdentity(
         index < boundaryIndex &&
         message.id === parentBoundaryId &&
         HumanMessage.isInstance(message) &&
-        message.additional_kwargs[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] === true
+        hasScopedGraphTranscriptBoundary(message.additional_kwargs)
     )
     if (parentIndex >= 0) {
       occurrence = loadPreviousOccurrence?.(threadId, parentBoundaryId, sourceId)
@@ -753,7 +802,7 @@ function assignGoalGraphAssistantIdentity(
     }
   }
   if (occurrence !== undefined) {
-    const graph = getGoalGraphProviderOccurrences(threadId, runToken, scopeId)
+    const graph = getScopedGraphProviderOccurrences(threadId, runToken, scopeId)
     occurrence = Math.max(occurrence, graph?.get(sourceId)?.assistant ?? 0)
     for (const message of messages.slice(scopeIndex + 1)) {
       if (!AIMessage.isInstance(message) || graphAssistantProviderSourceId(message) !== sourceId)
@@ -791,8 +840,8 @@ function assignGoalGraphAssistantIdentity(
  * run, even though they all share this exact middleware. */
 export function createCurrentRunMessageQueueMiddleware(
   ownerRunToken?: string,
-  loadGoalProviderOccurrence?: GoalProviderOccurrenceLoader,
-  prepareGoalProviderHistory?: (threadId: string) => Promise<void> | undefined
+  loadGraphProviderOccurrence?: GraphProviderOccurrenceLoader,
+  prepareScopedProviderHistory?: (threadId: string) => Promise<void> | undefined
 ): ReturnType<typeof createMiddleware> {
   return createMiddleware({
     name: "currentRunMessageQueue",
@@ -806,26 +855,39 @@ export function createCurrentRunMessageQueueMiddleware(
       if (
         threadId &&
         ownerRunToken &&
-        rememberGoalGraphProviderOccurrences(threadId, ownerRunToken, messages)
+        rememberScopedGraphProviderOccurrences(threadId, ownerRunToken, messages)
       ) {
-        const preparation = prepareGoalProviderHistory?.(threadId)
+        const preparation = prepareScopedProviderHistory?.(threadId)
         if (preparation) {
           await preparation
           request.runtime?.signal?.throwIfAborted()
           if (!isCurrentRunMessageQueueOwner(threadId, ownerRunToken)) {
-            throw new DOMException("Superseded Goal turn", "AbortError")
+            throw new DOMException("Superseded scoped graph turn", "AbortError")
           }
         }
       }
+      const notificationIdentity =
+        threadId && ownerRunToken
+          ? registerNotificationModelExecution(threadId, ownerRunToken, messages)
+          : undefined
       const response = await handler(request)
       if (threadId && ownerRunToken && AIMessage.isInstance(response)) {
-        assignGoalGraphAssistantIdentity(
-          threadId,
-          ownerRunToken,
-          messages,
-          response,
-          loadGoalProviderOccurrence
-        )
+        if (notificationIdentity) {
+          response.id = notificationIdentity.stableId
+          response.additional_kwargs = {
+            ...response.additional_kwargs,
+            [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: notificationIdentity.providerSourceId,
+            [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: notificationIdentity.providerOccurrence
+          }
+        } else {
+          assignScopedGraphAssistantIdentity(
+            threadId,
+            ownerRunToken,
+            messages,
+            response,
+            loadGraphProviderOccurrence
+          )
+        }
         const completed = completedAssistantMessageForTranscript(response)
         if (completed) {
           completedAssistantMessagesByRun.set(runScopedKey(threadId, ownerRunToken), completed)
