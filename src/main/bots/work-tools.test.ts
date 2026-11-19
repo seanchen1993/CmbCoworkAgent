@@ -9,7 +9,14 @@ import { filterTaskSubagentTools } from "../agent/runtime-tool-catalog"
 import { buildBotPrompt } from "./prompt"
 
 const validation = vi.hoisted(() => ({ check: vi.fn(async () => null as string | null) }))
-vi.mock("../agent/standard-thread-turn", () => ({ validateExplicitSkillReference: validation.check }))
+vi.mock("../agent/standard-thread-turn", async () => {
+  const { requestedBotSkill } = await import("./named-skill")
+  return { validateExplicitSkillReference: validation.check, resolveNamedBotSkill: async (input: { name?: string; request: string }) => {
+    const name = requestedBotSkill(input.request, ["fixture"], input.name)
+    if (name !== "fixture") throw new Error("技能不可用")
+    return { name, path: "/skills/fixture/SKILL.md" }
+  } }
+})
 import { formatSkillUseBlock } from "../agent/skill-lifecycle/marker"
 const selection = formatSkillUseBlock({ name: "fixture", path: "/skills/fixture/SKILL.md" })
 const hosts: LocalBotHost[] = [],
@@ -42,7 +49,7 @@ function fixture(history?: BotRunPort["workHistory"], messageOrThreads: string |
           signal.addEventListener("abort", () => resolve({ state: "completed" }), { once: true })
         )
     })
-  })
+  }, undefined, undefined, input => input.runAt ?? null)
   hosts.push(host)
   const source = host.send({
     botId: bot.id,
@@ -384,6 +391,36 @@ describe("work Runtime tools", () => {
     const other = f.store.create({ name: "Other", instructions: "", color: "#168bea", modelRef: null })
     const privateWork = f.store.createWork({ botId: other.id, operationId: "other", title: "Other", goal: "Private" })
     expect((await call("other", privateWork.work.id) as any).status).toBe("error")
+    expect(f.store.listWorks(f.bot.id).items).toHaveLength(1)
+  })
+  it.each(["create", "continue", "schedule"] as const)("binds a typed skill to the admitted %s without changing the user's picker history", async destination => {
+    const f = fixture(undefined, "用 fixture 技能生成文档")
+    await tick()
+    const existing = destination === "continue" ? f.store.createWork({ botId: f.bot.id, operationId: "prev", title: "文档", goal: "原文" }) : undefined
+    const args = { title: "文档", ...(existing ? { workId: existing.work.id } : {}),
+      ...(destination === "schedule" ? { delivery: { requiredFiles: ["日报.md"], confirmBeforeSending: true },
+        schedule: { frequency: "once", runAt: "2099-01-01T08:00:00Z", message: "编写日报" } } : {}) }
+    const tool = createBotWorkTools(f.source, () => f.host, new AbortController().signal).find(t => t.name === "bot_skill_dispatch")!
+    const call = async (id: string) => {
+      const response = await tool.invoke({ type: "tool_call", id, name: tool.name, args }) as any
+      expect(response.status, response.content).not.toBe("error")
+      return JSON.parse(response.content).receipt
+    }
+    const receipt = await call("first")
+    const replay = await call("replay")
+    expect(f.store.getTask(f.source.id).origin).not.toHaveProperty("explicitSkill")
+    if (destination === "schedule") {
+      expect(receipt.schedule).toMatchObject({ skillName: "fixture", enabled: true })
+      expect(replay.schedule.id).toBe(receipt.schedule.id)
+      expect(f.store.recentTasks().some(t => t.origin.kind === "schedule")).toBe(false)
+      const [saved] = f.store.schedules()
+      expect(saved.delivery).toEqual(args.delivery)
+    } else {
+      expect(receipt.task.origin.sourceContext.namedSkill.requestId).toBe(f.source.requestId)
+      expect(f.store.workInputContext(receipt.task.id)?.explicitSkill).toEqual({ name: "fixture", path: "/skills/fixture/SKILL.md" })
+      expect(replay.task.id).toBe(receipt.task.id)
+      if (existing) expect(receipt.work.id).toBe(existing.work.id)
+    }
     expect(f.store.listWorks(f.bot.id).items).toHaveLength(1)
   })
   it("rejects an invalid skill or missing selection before creating work", async () => {

@@ -89,6 +89,10 @@ export class SkillLifecycleRegistry {
     return this.entries.filter(entry => entry.name === name).map(entry => this.toMatch(entry))
   }
 
+  names(): string[] {
+    return [...new Set(this.entries.map(entry => entry.name))]
+  }
+
   resolveExplicit(input: {
     skillName?: string | null
     skillPath?: string | null

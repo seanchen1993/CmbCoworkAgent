@@ -472,6 +472,35 @@ it("allows optional evidence reads without any private model invocation", async 
   expect(f.invoke).not.toHaveBeenCalled()
 })
 
+it.each(["ordinary", "other-output", "large", "missing", "available"] as const)(
+  "passes only authorized small independent-review evidence (%s)", async condition => {
+    const ref = { sourceTaskId: "exec", callId: "formal", fileIndex: 0 }
+    const file = { name: "report.md", filePath: "/workspace/report.md",
+      attachmentPath: "/workspace/.bot-deliveries/version/report.md", size: condition === "large" ? 100_000 : 10 }
+    const host = { workResultReview: () => ({ ...context(), services: { items: [] },
+      delivery: { review: condition === "ordinary" ? undefined : "independent",
+        requiredFiles: [condition === "other-output" ? "requested.md" : file.name] },
+      defaultAttachments: [ref], evidence: [{ taskId: "exec", threadId: work.threadId, deliveries: [{ ...ref, file }] }] })
+    } as unknown as LocalBotHost
+    claimLocalThreadRunLease({ threadId: task.threadId, owner: "bot", runId: task.id })
+    const access = createWorkResultEvidenceAccess(host, bot, task, new AbortController().signal)
+    const evidence = { kind: "snapshot" as const, id: "authorized-id", label: file.name, fileId: "logical-id", reference: ref }
+    const list = vi.spyOn(access.reader, "list").mockReturnValue({ items: [evidence] })
+    const read = vi.spyOn(access.reader, "read").mockResolvedValue(condition === "missing"
+      ? { status: "unavailable", evidence, reason: "missing_version" }
+      : { status: "ok", evidence, text: "retained contents", truncated: false })
+    if (condition === "available" || condition === "missing") {
+      const result = await access.readIndependentFile()
+      expect(result).toMatchObject(condition === "available" ? { status: "ok", text: "retained contents", truncated: false }
+        : { status: "unavailable", reason: "missing_version" })
+      expect(read).toHaveBeenCalledExactlyOnceWith(evidence.id, { signal: expect.any(AbortSignal) })
+    } else {
+      expect(await access.readIndependentFile()).toBeUndefined()
+      expect(list).not.toHaveBeenCalled()
+      expect(read).not.toHaveBeenCalled()
+    }
+  })
+
 
 it("deduplicates delivered filenames pointing at the current final message, preserving other evidence", () => {
   const href = botWorkHistoryHref({ workId: work.id, messageId: "final", incarnation: "model-supplied" })

@@ -203,7 +203,7 @@ export type BotTaskOrigin =
       /** Host-captured source references, scoped to the original conversation. */
       sourceMessageIds?: string[]
       /** New dispatches opt in to original-input delivery. Older tasks keep their original contract. */
-      sourceContext?: { version: 1; references: BotMessageReply[]; routingNoteLength?: number }
+      sourceContext?: { version: 1; references: BotMessageReply[]; routingNoteLength?: number; namedSkill?: import("./work").BotNamedSkill }
       /** Legacy forwarded turns kept the Bot's brief separate from the user message. */
       instructionSummary?: string
     }
@@ -271,6 +271,7 @@ export type BotTaskOrigin =
       sourceTaskId?: string
       /** Snapshot of the skill selected when this occurrence was scheduled. */
       explicitSkill?: import("./skill-selection").BotSkillSelection
+      delivery?: import("./work").BotResultDelivery
       observation?: import("./schedule-observation").BotScheduledWorkObservation
       fixedReminder?: import("./schedule-observation").BotScheduledFixedReminder
     }
@@ -389,6 +390,8 @@ export interface BotSchedule extends BotScheduleInput {
   /** This schedule created the work once and reuses it for every execution. */
   dedicatedWork?: true
   explicitSkill?: import("./skill-selection").BotSkillSelection
+  /** New skill routines return formal files through their originating Bot. */
+  delivery?: import("./work").BotResultDelivery
   /** Execution stays on this exact local work; no channel source is inherited. */
   desktopWork?: true
   workUnavailable?: true

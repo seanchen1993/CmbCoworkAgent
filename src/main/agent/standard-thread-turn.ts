@@ -42,6 +42,7 @@ import { IdleModelServiceHoursError } from "../../shared/idle-model-service-wind
 import { activateSkillLifecycle, formatSkillHookContext } from "./skill-lifecycle/activation"
 import { parseSkillUseBlock, type ParsedSkillUseBlock } from "./skill-lifecycle/marker"
 import { SkillLifecycleRegistry, type SkillLifecycleMatch } from "./skill-lifecycle/registry"
+import { requestedBotSkill } from "../bots/named-skill"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import { resolveModel, type RoutingContext, type RoutingResult } from "../routing"
 import { getAgentModeFromMetadata, type AgentMode } from "./coordinator-mode"
@@ -408,9 +409,13 @@ export async function validateExplicitSkillReference(
   return skill ? null : `显式选择的技能不存在、已禁用或不在当前可用范围：${input.name}`
 }
 
-/** IM has a slash name but no desktop picker path. Never guess between installations. */
-export async function resolveBotRoutineSkill(name: string, allowedSkillNames?: readonly string[]) {
+/** Resolve names within the current Bot catalog; only the host supplies the installation path. */
+export async function resolveNamedBotSkill(input: { name: string } | { name?: string; request: string; original?: string },
+  allowedSkillNames?: readonly string[]) {
   const registry = await buildSkillLifecycleRegistryForHooks({ projectMode: false }, allowedSkillNames)
+  const names = "request" in input ? registry?.names() ?? [] : []
+  const name = "request" in input ? requestedBotSkill(input.request, names, input.name) : input.name
+  if ("request" in input && input.original !== undefined) requestedBotSkill(input.original, names, name)
   const matches = registry?.exactNameMatches(name).filter(skill => !isDisabledSkillMatch(skill)) ?? []
   if (matches.length !== 1) throw new Error(matches.length
     ? `存在多个同名技能「${name}」，请先确认唯一的安装项。`

@@ -17,6 +17,7 @@ import { isBinaryExtension } from "../ipc/plugin-file-gates"
 const MAX_RESULT_TEXT_RECORDS = 3
 const REVIEW_FIRST_BATCH_SNAPSHOTS = 8
 const REVIEW_RESERVED_COMMANDS = 4
+const MAX_INLINE_REVIEW_FILE_BYTES = 64 * 1024
 type ReviewCommandEvidence = Extract<BotResultEvidence, { kind: "text" }> & { readinessCandidate: boolean; failed: boolean }
 
 function assertLease(task: BotTask, signal: AbortSignal) {
@@ -281,9 +282,29 @@ export function createWorkResultEvidenceAccess(
     return includeWorkResultAnswers(latest, previous)
   }
   const selection: { attachments?: BotWorkResultAttachmentReference[] } = {}
+  // One small formal output gives an explicitly requested second reviewer first-hand
+  // evidence without a catalogue round trip. Other files stay available through the tools.
+  const readIndependentFile = async () => {
+    if (original.delivery?.review !== "independent" || !original.defaultAttachments.length) return
+    const required = original.delivery.requiredFiles
+    const candidate = original.defaultAttachments.find(ref => {
+      const execution = original.evidence.find(item => item.taskId === ref.sourceTaskId)
+      const file = execution?.deliveries.find(item => item.callId === ref.callId && item.fileIndex === ref.fileIndex)?.file
+      return file && file.size <= MAX_INLINE_REVIEW_FILE_BYTES && (!required?.length || required.includes(file.name))
+    })
+    if (!candidate) return
+    const item = reader.list(undefined, 2).items.find(({ kind, reference }) => kind === "snapshot" &&
+      reference.sourceTaskId === candidate.sourceTaskId && reference.callId === candidate.callId &&
+      reference.fileIndex === candidate.fileIndex)
+    if (!item) return
+    const read = await reader.read(item.id, { signal })
+    return read.status === "ok"
+      ? { name: item.label, evidenceId: item.id, status: read.status, text: read.text, truncated: read.truncated }
+      : { name: item.label, evidenceId: item.id, status: read.status, reason: read.reason }
+  }
   // Historical ready services are not automatically dependencies of this report.
   const serviceIds = new Set<string>()
-  return { current, reader, commandReferences, inspectedCommands, serviceIds, selection, referenceKey, readProcess }
+  return { current, reader, commandReferences, inspectedCommands, serviceIds, selection, referenceKey, readProcess, readIndependentFile }
 }
 
 export async function publishWorkResult(

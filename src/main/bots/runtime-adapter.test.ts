@@ -8565,6 +8565,7 @@ it.each([false, true])("uses the normal parent result turn and its final receipt
     : metadata()) }))
   const result = { work: linked, incarnation: verifiedWorkResultThread(linked).incarnation,
     requests: [{ id: "original", text: "Prepare report" }], outcome: { state: "completed", text: "Report created", truncated: false },
+    retainedFiles: { names: ["report.md"], hasMore: false },
     requestsOmitted: true, remainingRepairs: 2, services: { items: [], truncated: false } }
   fixture.resultContext.mockReturnValueOnce(result).mockReturnValue(continued ? undefined : result)
   const returned: BotTask = { ...task, origin: { kind: "work_result", workId: linked.id,
@@ -8575,7 +8576,7 @@ it.each([false, true])("uses the normal parent result turn and its final receipt
   expect(fixture.start).toHaveBeenCalledTimes(1)
   const [request, , context] = fixture.start.mock.calls[0]
   expect(JSON.parse(request.message)).toMatchObject({ kind: "host_work_result", requests: result.requests,
-    requestsOmitted: true, outcome: result.outcome })
+    requestsOmitted: true, outcome: result.outcome, retainedFiles: result.retainedFiles })
   expect(context.remotePolicy?.allowedToolNames).toBeUndefined()
   expect(context.botTurnContext?.event).toBe("task_result_review")
   expect(context.additionalTools).toEqual(expect.arrayContaining([{ name: "bot_work_result_continue" }, "works"]))

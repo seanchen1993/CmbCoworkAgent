@@ -26,6 +26,9 @@ async function main() {
     socket: WebSocket | undefined
   let passed = false
   let releaseOrdinaryTurn: (() => void) | undefined
+  const incomplete = "清单已有需求范围，尚缺验收条件。"
+  const completed = "群任务检查完成：需求范围和验收条件均已补齐。"
+  const groupSummary = "群任务结果：清单和验收条件已整理。"
   const sendFrame = (peer: WebSocket, type: string, payload: unknown, commandId?: string) =>
     peer.send(
       JSON.stringify({
@@ -125,9 +128,7 @@ async function main() {
         .flatMap((m: any) => (m.tool_calls ?? []).map((c: any) => c.function?.name))
       const tools = (body.tools ?? []).map((t: any) => t.function?.name)
       requests.push({ user, used, tools })
-      const reporting = tools.includes("bot_work_result_read") ||
-        /<bot_runtime_context event="task_result(?:_review)?">/.test(user) ||
-        all.includes("An independent task returned a host-recorded result")
+      const reporting = /<bot_runtime_context event="task_result(?:_review)?">/.test(user)
       const heldSteer = !reporting && user.startsWith("STEER_HOLD_")
       if (heldSteer || (!reporting && user.startsWith("LIVE_ORDINARY_HOLD"))) {
         await new Promise<void>((done) => {
@@ -138,10 +139,21 @@ async function main() {
       let reply = "本地测试已就绪。",
         call: { name: string; args: any } | undefined
       if (reporting) {
-        reply = "群任务结果：需求清单已整理。"
+        assert.ok(!all.includes("PRIVATE_SECRET"), "the group Bot may only receive its group's context")
+        if (user.includes(completed)) reply = groupSummary
+        else if (user.includes("STEER_AFTER_BOUNDARY")) reply = "已按两次补充完成任务。"
+        else if (user.includes(incomplete)) {
+          if (!used.includes("bot_work_result_continue"))
+            call = { name: "bot_work_result_continue", args: { gap: "需求清单缺少验收条件", instruction: "在原清单补齐各项验收条件。" } }
+        } else {
+          assert.ok(user.includes("群任务检查完成"), "the group Bot must receive the worker's actual conclusion")
+          reply = "群任务结果：需求清单已整理。"
+        }
       } else if (all.includes("You are ALREADY inside independent task")) {
         assert.ok(!all.includes("PRIVATE_SECRET"), "task must not inherit private history")
-        reply = "群任务检查完成：需求清单已整理。"
+        if (user.includes("在原清单补齐各项验收条件")) reply = completed
+        else if (user.includes("LIVE_WORK_GOAL")) reply = incomplete
+        else reply = "群任务检查完成：需求清单已整理。"
       } else if (user.includes("LIVE_TO_IM")) {
         if (!used.includes("bot_send_message"))
           call = {
@@ -149,7 +161,7 @@ async function main() {
             args: {
               groupId,
               groupSource: "zhaohu",
-              content: "LIVE_IM_BRIEF 请沿用群内讨论创建一个独立任务整理需求清单。"
+              content: "LIVE_IM_BRIEF 请沿用群内讨论整理需求清单，列出需求范围和验收条件。"
             }
           }
         else reply = "已交办到招乎群，后续结果留在该群。"
@@ -181,7 +193,7 @@ async function main() {
               requestKey: "local-group-work",
               finishTurn: true,
               title: "群内需求清单",
-              goal: "LIVE_WORK_GOAL 整理群内需求清单，只回复正文。",
+              goal: "LIVE_WORK_GOAL 整理群内需求清单，列出需求范围和验收条件，只回复正文。",
               contextMessageIds: []
             }
           }
@@ -518,17 +530,26 @@ async function main() {
       .getByRole("button", { name: "已交办到招乎群 · 产品协作群", exact: true })
       .waitFor({ timeout: 60000 })
     await wait(
-      () => replies.some((r) => JSON.stringify(r).includes("群任务检查完成")),
-      "work report delivered through WS"
+      () => replies.some((r) => r.message.content === groupSummary),
+      "parent summary delivered through WS"
     )
     assert.ok(replies.every((r) => r.conversationKey === binding.conversationKey))
     await idle()
+    assert.equal(replies.filter(r => r.message.content === groupSummary).length, 1)
+    assert.ok(!replies.some(r => r.message.content.includes(incomplete) || r.message.content.includes(completed)),
+      "neither worker reply should be published to the group")
+    const workTurns = await page.evaluate(async () => (await (window as any).api.bots.snapshot()).tasks
+      .filter((t: any) => t.origin.kind === "work" && (t.message.includes("LIVE_WORK_GOAL") ||
+        (t.origin.dispatch === "repair" && t.message.includes("在原清单补齐各项验收条件")))))
+    assert.equal(workTurns.length, 2, "the original execution and exactly one follow-up must run")
+    assert.ok(workTurns[0].workId && workTurns[0].workId === workTurns[1].workId)
+    assert.equal(workTurns[0].threadId, workTurns[1].threadId)
     await page.getByRole("button", { name: "已交办到招乎群 · 产品协作群", exact: true }).click()
     await page.getByRole("button").filter({ hasText: "群内需求清单" }).last().click()
     await page.locator(".bot-personal-header[data-task]").getByRole("button", { name: "返回群聊「产品协作群」", exact: true }).waitFor()
     await page
       .locator(".bots-conversation")
-      .getByText("群任务检查完成：需求清单已整理。", { exact: true })
+      .getByText(completed, { exact: true })
       .waitFor()
     await page.screenshot({ path: join(out, "artifacts/group-app-work.png") })
     await page.locator(".bot-personal-header[data-task]").getByRole("button", { name: "返回群聊「产品协作群」", exact: true }).click()
@@ -538,7 +559,8 @@ async function main() {
       "stage: selected Zhaohu group -> real Runtime -> WS delivery -> work -> return group/private"
     )
     // The same App/IPC/Runtime/WS path now covers initial, budget and failure feedback.
-    assert.equal(requests.filter(r => r.user.includes("LIVE_IM_BRIEF") && r.tools.includes("bot_work_create")).length, 1)
+    const mainCalls = (marker: string) => requests.filter(r => r.user.includes(marker) && r.user.includes('<bot_runtime_context event="user_request">'))
+    assert.equal(mainCalls("LIVE_IM_BRIEF").length, 1)
     assert.equal(replies.filter(r => r.message.content === "我来核对数据，整理好后发给你。").length, 1)
     const inject = (id: string, text: string, sequence: number) => sendFrame(socket!, "BOT_EVENT", {
       event: { schemaVersion: 1, eventId: id, platformMessageId: id, principalId: "local-owner",
@@ -548,13 +570,13 @@ async function main() {
     })
     const beforeBudget = replies.length
     inject("budget-event", "LIVE_BUDGET 核对数据并整理结果。", 2)
-    await wait(() => replies.slice(beforeBudget).some(r => r.message.content.includes("群任务检查完成")), "budget work result")
+    await wait(() => replies.slice(beforeBudget).some(r => r.message.content === "群任务结果：需求清单已整理。"), "budget work result")
     await idle()
     const budgetReplies = replies.slice(beforeBudget)
     assert.equal(budgetReplies.filter(r => r.message.content === "我来核对数据，整理好后发给你。").length, 1)
     assert.ok(!JSON.stringify(budgetReplies).includes("Foreground execution budget"))
     assert.ok(!JSON.stringify(budgetReplies).includes("bot-foreground-continuation"))
-    assert.equal(requests.filter(r => r.user.includes("LIVE_BUDGET") && r.tools.includes("bot_work_create")).length, 6)
+    assert.equal(mainCalls("LIVE_BUDGET").length, 6)
     await page.getByRole("button", { name: "已交办到招乎群 · 产品协作群", exact: true }).click()
     const visible = await page.locator(".bots-conversation").innerText()
     assert.ok(!visible.includes("执行遇到问题"), "budget handoff is not a user-facing error")
@@ -582,19 +604,19 @@ async function main() {
     await page.screenshot({ path: join(out, "artifacts/feedback-real-error.png") })
     const beforeFinding = replies.length
     inject("finding-event", "LIVE_FINDING 核对数据，继续处理发现的问题。", 4)
-    await wait(() => replies.slice(beforeFinding).some(r => r.message.content.includes("群任务检查完成")), "findings work result")
+    await wait(() => replies.slice(beforeFinding).some(r => r.message.content === "群任务结果：需求清单已整理。"), "findings work result")
     await idle()
     const findingReplies = replies.slice(beforeFinding)
     assert.equal(findingReplies.filter(r => r.message.content === "我来核对数据，整理好后发给你。").length, 1)
     assert.equal(findingReplies.filter(r => r.message.content === "输入有 24 行，其中 3 行重复。").length, 1)
-    assert.equal(requests.filter(r => r.user.includes("LIVE_FINDING") && r.tools.includes("bot_work_create")).length, 2)
+    assert.equal(mainCalls("LIVE_FINDING").length, 2)
     await page.locator(".bots-conversation").getByText("输入有 24 行，其中 3 行重复。", { exact: true }).waitFor()
     await page.screenshot({ path: join(out, "artifacts/feedback-findings.png") })
     console.log("PASS: unified App/IM acknowledgement; 4 executed probes, 1 nonexecuted continuation; accepted receipt skips post-dispatch model; real failure and new findings stay visible")
     await writeFile(join(out, "artifacts/feedback-validation.json"), JSON.stringify({
       mode: "controlled-model-real-electron-local-ws", normalDispatchModelCalls: 1,
       budgetMainModelCalls: 6, openingDeliveries: budgetReplies.filter(r => r.message.content === "我来核对数据，整理好后发给你。").length,
-      resultDeliveries: budgetReplies.filter(r => r.message.content.includes("群任务检查完成")).length,
+      resultDeliveries: budgetReplies.filter(r => r.message.content === "群任务结果：需求清单已整理。").length,
       realFailureDelivered: true, laterFindingDelivered: true, errors
     }, null, 2))
     if (process.env.BOT_FEEDBACK_ONLY === "1") { assert.deepEqual(errors, []); passed = true; return }

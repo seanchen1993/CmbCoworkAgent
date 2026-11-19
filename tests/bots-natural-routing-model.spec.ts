@@ -137,7 +137,7 @@ async function main() {
     {
       name: "completed-follow-up",
       message: "刚才完成的读书会计划再改一下，时间改为下午四点。",
-      expected: ["bot_work_continue", "bot_work_send"],
+      expected: ["bot_work_send"],
       history: prior(true)
     },
     {
@@ -260,6 +260,8 @@ async function main() {
         if (name === "bot_work_send" || name === "bot_work_continue") {
           assert.equal(args.workId, work.id, test.name + ": must use original work")
           assert.equal(args.workspace, undefined)
+          if (name === "bot_work_send" && test.name === "completed-follow-up")
+            assert.equal(args.expectedVersion, work.version, "reopen and revise against the observed task version")
         }
         messages.push({
           role: "tool",
@@ -269,9 +271,10 @@ async function main() {
       }
     }
     assert.ok(finalText.trim(), test.name + ": must finish with a user-visible response")
+    const mutations = actions.filter(action => action !== "bot_work_read")
     assert.deepEqual(
-      actions,
-      test.allowDirect && !actions.length ? [] : test.expected,
+      mutations,
+      test.allowDirect && !mutations.length ? [] : test.expected,
       test.name + ": synthetic reply: " + finalText.slice(0, 600)
     )
     console.log(

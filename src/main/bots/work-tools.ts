@@ -6,7 +6,7 @@ import type { LocalBotHost } from "./host"
 import { MAIN_TURN_ONLY_TOOL_METADATA_KEY } from "../agent/runtime-tool-catalog"
 import { getHookAgentIdFromRequest } from "../hooks/execution-context"
 import type { BotTask } from "../../shared/bots/contracts"
-import { BOT_SKILL_DISPATCH_TOOL, selectedMainBotSkill } from "../agent/bot-skill-dispatch"
+import { BOT_SKILL_DISPATCH_TOOL } from "../agent/bot-skill-dispatch"
 import { botWorkOperationQuery } from "./desktop-operation"
 import { parseSchedule } from "../../shared/bots/validation"
 
@@ -322,19 +322,13 @@ export function createBotWorkTools(
       }
     ),
     ...(!task.workId ? [tool(
-      async ({ workId, workQuery, title, goal, workspace, projectQuery, contextMessageIds, schedule, delivery: requirements }, config) =>
+      async ({ skillName, workId, workQuery, title, goal, workspace, projectQuery, contextMessageIds, schedule, delivery: requirements }, config) =>
         invoke(BOT_SKILL_DISPATCH_TOOL, config, async host => {
-          const source = host.workToolSource(taskId)
-          const selected = selectedMainBotSkill(source)
-          if (!selected) throw new Error("当前主对话没有通过 / 选择技能")
-          const { validateExplicitSkillReference } = await import("../agent/standard-thread-turn")
-          const problem = await validateExplicitSkillReference(selected, undefined,
-            host.getBot(source.botId).allowedSkillNames ?? undefined, true)
-          if (problem) throw new Error(problem)
+          const command = await host.skillDispatchSource(taskId, config.toolCall!.id!, skillName)
+          command.delivery = requirements
           signal.throwIfAborted()
           const admitted = host.workToolSource(taskId)
           const inputFileIds = admitted.origin.kind === "user" ? admitted.origin.allowedInputFileIds ?? [] : []
-          const command = { taskId, callId: config.toolCall!.id!, key: `skill:${source.requestId}`, delivery: requirements }
           if (workId && workQuery) throw new Error("请只指定任务 ID 或任务名称")
           if (workQuery) {
             const page = host.workTargets(taskId, undefined, workQuery)
@@ -365,19 +359,20 @@ export function createBotWorkTools(
                 timing.runAtTime !== undefined || timing.weekday !== undefined || timing.intervalMinutes !== undefined))
               throw new Error("相对时间只能用于一次日程，不能同时指定执行时间")
             const input = parseSchedule({ ...timing, name: title, enabled: true,
-              ...(afterSeconds === undefined ? {} : { runAt: new Date(host.desktopScheduleRequestTime(taskId) + afterSeconds * 1000).toISOString() }) })
+              ...(afterSeconds === undefined ? {} : { runAt: new Date((admitted.mockSource ? admitted.createdAt : host.desktopScheduleRequestTime(taskId)) + afterSeconds * 1000).toISOString() }) })
             const saved = await host.saveSelectedSkillSchedule(command, input, workId, workspace)
             return { schedule: { id: saved.id, name: saved.name, enabled: saved.enabled, nextRunAt: saved.nextRunAt,
               timezone: saved.timezone, workId: saved.workId, skillName: saved.explicitSkill?.name } }
           }
-          return host.createWork({ botId: source.botId, operationId: command.callId,
+          return host.createWork({ botId: admitted.botId, operationId: command.callId,
             title, goal: goal || title, contextMessageIds, workspace, ...(inputFileIds.length ? { inputFileIds } : {}) }, command)
         }),
       {
         name: BOT_SKILL_DISPATCH_TOOL,
         metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
-        description: "Route a host-confirmed / skill selection in the main Bot. For future or recurring work supply schedule and title; the host saves the skill and starts work only when due. Otherwise dispatch now. For a revision or continuation reuse the existing workId or workQuery. For new work use a short title and the user's explicit workspace, or omit for the default; use projectQuery for a named project. Do not read inputs, infer paths or open the skill here. The host acknowledges acceptance and ends the main turn.",
+        description: "Delegate work when the user selected a / skill or explicitly asked to use a named installed skill. For typed requests copy skillName from the user's current instruction. Answer questions about a skill in chat. For ordinary assignments use the usual task tools. For future or recurring work supply schedule and title; otherwise dispatch now. For revisions reuse workId or workQuery. Supply the requested workspace or projectQuery directly: the host resolves it and the executor inspects inputs and reads the skill. The host acknowledges acceptance once.",
         schema: z.object({
+          skillName: z.string().trim().min(1).max(256).optional().describe("Exact skill name the user asked to run. Omit for a desktop / selection."),
           workId: id.optional(),
           delivery,
           workQuery: z.string().trim().min(1).max(160).optional(),

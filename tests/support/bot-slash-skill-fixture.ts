@@ -3,15 +3,15 @@ import { createHash } from "node:crypto"
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 
-const name = "slash-prd-fixture"
-const skillDirectory = (root: string) => join(root, "profile", "skills", name)
+export const prdFixtureSkillName = process.env.BOT_ROUTING_NEUTRAL_PRD_NAME === "1" ? "requirement-to-prd" : "slash-prd-fixture"
+const skillDirectory = (root: string) => join(root, "profile", "skills", prdFixtureSkillName)
 
 /** An installed, disposable skill with real lifecycle hooks and an executable resource. */
 export async function installSlashSkillFixture(root: string) {
   const directory = skillDirectory(root)
   await mkdir(directory, { recursive: true })
   await writeFile(join(directory, "SKILL.md"), `---
-name: ${name}
+name: ${prdFixtureSkillName}
 description: 把虚构需求与约束整理为 PRD，并执行本地校验、交付文件。
 ---
 读取用户工作目录中的需求.md、约束.md、现有接口.md。完成以下步骤：
@@ -41,7 +41,7 @@ appendFileSync(${JSON.stringify(join(root, "skill-lifecycle.jsonl"))},JSON.strin
 }
 
 export function slashSkillSelection(directory: string) {
-  return { name, path: join(skillDirectory(dirname(directory)), "SKILL.md") }
+  return { name: prdFixtureSkillName, path: join(skillDirectory(dirname(directory)), "SKILL.md") }
 }
 
 export function slashSkillRequest(directory: string, explicitTask = true) {
@@ -49,6 +49,19 @@ export function slashSkillRequest(directory: string, explicitTask = true) {
 }
 
 export const slashSkillRevisionRequest = "继续刚才那份 PRD，借期改为28天，其他规则不变。按我选择的技能更新原文件、校验并交给我。"
+
+export async function verifyPrdArtifact(directory: string, loanDays = 14) {
+  const text = await readFile(join(directory, "prd.md"), "utf8")
+  assert.match(text, /^# PRD/)
+  assert.match(text, /SKILL_PRD_OK/)
+  assert.match(text, new RegExp(`\\b${loanDays}\\b`))
+  assert.match(text, /3/)
+  const receipt = JSON.parse(await readFile(join(directory, ".skill-receipt.json"), "utf8"))
+  assert.equal(await realpath(receipt.cwd), await realpath(directory))
+  assert.equal(receipt.verified, true)
+  assert.equal(receipt.sha256, createHash("sha256").update(text).digest("hex"))
+  return receipt
+}
 
 export async function verifySlashSkillResult(directory: string, result: any, data: any, requireIndependent = true) {
   if (requireIndependent)
@@ -64,15 +77,7 @@ export async function verifySlashSkillResult(directory: string, result: any, dat
   assert.equal(data.works.length, result.actual === "independent" ? 1 : 0)
   const work = data.works[0]
   if (work) assert.equal(await realpath(work.workspace.path), await realpath(directory))
-  const text = await readFile(join(directory, "prd.md"), "utf8")
-  assert.match(text, /^# PRD/)
-  assert.match(text, /SKILL_PRD_OK/)
-  assert.match(text, /14/)
-  assert.match(text, /3/)
-  const receipt = JSON.parse(await readFile(join(directory, ".skill-receipt.json"), "utf8"))
-  assert.equal(await realpath(receipt.cwd), await realpath(directory))
-  assert.equal(receipt.verified, true)
-  assert.equal(receipt.sha256, createHash("sha256").update(text).digest("hex"))
+  const receipt = await verifyPrdArtifact(directory)
   const lifecycle = (await readFile(join(dirname(directory), "skill-lifecycle.jsonl"), "utf8"))
     .trim().split("\n").map(line => JSON.parse(line))
   const executorThreadId = work?.threadId ?? data.tasks.find((task: any) => task.origin.kind === "user")?.threadId

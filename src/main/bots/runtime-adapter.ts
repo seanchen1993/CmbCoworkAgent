@@ -1310,8 +1310,15 @@ export function createLocalBotRunPort(
                 next.bindings.size ? Object.fromEntries(next.bindings) : undefined, Object.fromEntries(next.forwarded))
             applyReplyFiles(next, record)
           }
+          const scheduledDelivery = task.origin.kind === "schedule" && task.origin.explicitSkill ? task.origin.delivery : undefined
+          const armParentDelivery = () => {
+            if (reviewOwned || !work || simulated || process.env.CMB_BOT_WORK_RESULT_REVIEW === "0") return
+            const identity = verifiedWorkResultThread(getHost().getWork(bot.id, work.id))
+            reviewOwned = getHost().armWorkResultReview(task.id, identity.incarnation, true)
+          }
           const captureDeliveredFiles = (files: BotDeliveredFile[], callId: string, _content?: string, selectedPaths?: readonly BotSelectedLocalFile[], selectedPeers?: readonly BotSelectedPeerFile[], disposition?: { interim?: boolean; selectionReason?: string }): BotFileCaptureReceipt | void => {
-            if (!reviewOwned && task.origin.kind === "work" && task.origin.delivery)
+            if (scheduledDelivery) armParentDelivery()
+            if (!reviewOwned && (scheduledDelivery || (task.origin.kind === "work" && task.origin.delivery)))
               throw new BotError("CONFLICT", "原会话的交付条件已变化，附件保留在任务中。")
             const heldForReview = reviewOwned
             if (reviewOwned) {
@@ -1516,6 +1523,8 @@ export function createLocalBotRunPort(
               ? JSON.stringify({
                   kind: "host_work_result",
                   delivery: resultContext.delivery,
+                  retainedFiles: resultContext.retainedFiles,
+                  independentFile: resultContext.delivery?.review === "independent" ? await resultAccess?.readIndependentFile() : undefined,
                   missingRequestedFiles: resultContext.missingFiles,
                   selectionReason: resultContext.selectionReason,
                   combinedResults: resultContext.combinedResults,
@@ -1546,6 +1555,7 @@ export function createLocalBotRunPort(
           const promptMemories = isBotMemoryEnabled(bot) ? memory.forPrompt(bot.id, memoryContext) : []
           const eventContext =
             (communication ? buildBotTurnContext(task, promptMemories, undefined, Boolean(resultContext)) : "") +
+            (resultContext?.selectionReason ? "\n\nThe worker flagged a version choice. Automatic attachment selection is on hold. If the requested version is identifiable, use bot_work_result_select_files with its exact evidenceId before replying. Otherwise explain the outstanding choice; do not describe an attachment as delivered." : "") +
             (communication && !reporting && !resultContext ? `\n\nWorking directory for short local actions: ${JSON.stringify(workspacePath)}` : "") +
             (workInputs ? botWorkInputPrompt(workInputs) : "") +
             (task.origin.kind === "work" && task.origin.delivery?.confirmBeforeSending
@@ -1642,7 +1652,7 @@ export function createLocalBotRunPort(
               },
               createManagedTransportAgentRunDelivery({
                 mirror(threadId, event) {
-                  if (reviewOwned && !signal.aborted && threadId === task.threadId &&
+                  if ((reviewOwned || scheduledDelivery) && !signal.aborted && threadId === task.threadId &&
                       event.type === "turn-messages") {
                     for (const message of event.messages) {
                       if (message.role === "tool" && message.tool_call_id &&
@@ -1744,12 +1754,7 @@ export function createLocalBotRunPort(
                     const forwardedFollowUp = task.origin.kind === "work" && task.origin.dispatch === "follow_up"
                     const assigned = forwardedFollowUp || (task.origin.kind === "work" && task.origin.dispatch === "create") ||
                       (task.origin.kind === "user" && (task.requestId === `work-start-${work?.id}` || work?.resultReviewState))
-                    if (!reviewOwned && work && assigned && (!mock || mock.source.transport === "im") &&
-                        process.env.CMB_BOT_WORK_RESULT_REVIEW !== "0") {
-                      const current = getHost().getWork(bot.id, work.id)
-                      const identity = verifiedWorkResultThread(current)
-                      reviewOwned = getHost().armWorkResultReview(task.id, identity.incarnation, true)
-                    }
+                    if (assigned) armParentDelivery()
                     // A Hook rewrite does not carry a verified mapping to the original selection.
                     // Keep selected identities out of the user text, memory, and attachment receipt.
                     const mentionContext = !mock && body === message
@@ -1760,10 +1765,13 @@ export function createLocalBotRunPort(
                       ...(mentionContext ? { extraSystemPrompt: mentionContext } : {})
                     }
                   }
-                } : task.origin.kind === "schedule" && work && !mock ? {
+                } : task.origin.kind === "schedule" && work && (!mock || scheduledDelivery) ? {
                   onUserPromptPrepared: (body: string, receipt?: { internalGoalInput: true }) => {
-                    if (!receipt?.internalGoalInput)
+                    if (!receipt?.internalGoalInput) {
                       getHost().recordPreparedInput(task.id, task.id, body)
+                      if (scheduledDelivery?.requiredFiles?.length || scheduledDelivery?.review || scheduledDelivery?.confirmBeforeSending)
+                        armParentDelivery()
+                    }
                     return undefined
                   }
                 } : {}),

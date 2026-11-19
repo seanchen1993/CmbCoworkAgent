@@ -74,37 +74,64 @@ describe("private work result settlement", () => {
     return { ...f, ...child }
   }
 
-  it("publishes the exact worker reply while the main chat runs; explicit review waits for that chat", () => {
-    for (const independent of [false, true]) {
-      const f = dispatched(independent ? { review: "independent" } : {})
-      f.store.settle(f.task.id, "completed", null, "The answer is 11")
-      f.store.flushReplies()
-      const foreground = f.store.enqueue({ botId: f.bot.id, requestId: "chat", message: "Hello" })
-      f.store.transition(foreground.id, "running")
-      const next = f.store.nextQueued([f.bot.threadId], true, false, true)
-      if (independent) expect(next?.origin.kind).not.toBe("work_result")
-      else {
-        expect(next?.origin).toMatchObject({ kind: "work_result", review: { phase: "publish" } })
-        f.store.transition(next!.id, "running")
-        expect(f.store.getWorkResultPublication(next!.id)?.summary).toBe("The answer is 11")
-        expect(f.store.getTask(foreground.id).state).toBe("running")
-      }
-    }
+  it.each([false, true])("queues a parent reply behind active user input (independent check=%s)", independent => {
+    const f = dispatched(independent ? { review: "independent" } : {})
+    const foreground = f.store.enqueue({ botId: f.bot.id, requestId: "chat", message: "Hello" })
+    f.store.transition(foreground.id, "running")
+    f.store.settle(f.task.id, "completed", null, "Worker log: 7 + 4 = 11")
+    f.store.flushReplies()
+    expect(notices(f.store)).toHaveLength(0)
+    expect(f.store.getTask(foreground.id).state).toBe("running")
+    f.store.settle(foreground.id, "completed", null, "Hello!")
+    const report = privateReview(f.store)
+    expect(report.threadId).toBe(f.bot.threadId)
+    expect(report.injectedInto).toBeFalsy()
+    expect(f.store.getWorkResultReview(report.id)?.outcome.text).toBe("Worker log: 7 + 4 = 11")
+    f.store.commitWorkResultReview(report.id, null, [], [], undefined, { messageId: "parent-final", finalText: "全天共 11 件。" })
+    f.store.settle(report.id, "completed", null, "全天共 11 件。")
+    f.store.settle(f.task.id, "completed", null, "duplicate worker callback")
+    f.store.flushReplies()
+    const packets = notices(f.store).filter(item => item.origin.kind === "work_result" && item.origin.review?.phase === "publish")
+    expect(packets).toHaveLength(1)
+    f.store.transition(packets[0].id, "running")
+    expect(f.store.getWorkResultPublication(packets[0].id)).toMatchObject({ summary: "全天共 11 件。", responseMessageId: "parent-final" })
+  })
+
+  it("bounds the parent's receipt preview while delivering every current file with its reply", () => {
+    const f = dispatched({})
+    const files = Array.from({ length: 20 }, (_, i) => ({
+      name: `part-${i}.md`, filePath: `/work/part-${i}.md`, attachmentPath: `/saved/part-${i}.md`, size: 8
+    }))
+    for (let i = 0; i < files.length; i += 8)
+      f.store.recordWorkResultEvidence(f.task.id, { callId: `batch-${i}`, files: files.slice(i, i + 8), assistantMessageId: `card-${i}` })
+    f.store.settle(f.task.id, "completed", null, "20 parts")
+    const report = privateReview(f.store)
+    const preview = f.store.getWorkResultReview(report.id)!.retainedFiles
+    expect(preview.names.length).toBeGreaterThan(0)
+    expect(preview.names.length).toBeLessThan(files.length)
+    expect(preview.hasMore).toBe(true)
+    expect(preview.names.every(name => files.some(file => file.name === name))).toBe(true)
+    const result = f.store.commitWorkResultReview(report.id, null, [], [], undefined, { messageId: "parent-final", finalText: "20 份材料已整理好。" })
+    expect(result.state).toBe("publish")
+    if (result.state === "publish") expect(result.publication.attachments.map(a => a.file)).toEqual(files)
   })
 
   it("respects a declined confirmation after restart and never queues the frozen file", () => {
     const f = dispatched({ confirmBeforeSending: true })
     f.store.settle(f.task.id, "completed", null, "private preview")
+    const report = privateReview(f.store)
+    f.store.commitWorkResultReview(report.id, null, [], [], undefined, { messageId: "private", finalText: "私有的汇报预览" })
+    f.store.settle(report.id, "completed", null)
     f.store.flushReplies()
-    const confirmation = notices(f.store)[0]
+    const confirmation = notices(f.store).find(item => item.origin.kind === "work_result" && item.origin.review?.phase === "confirm")!
     f.store.transition(confirmation.id, "running")
     const reopened = new BotStore(f.db)
-    expect(reopened.pendingResultConfirmation(confirmation.id)?.summary).toBe("private preview")
+    expect(reopened.pendingResultConfirmation(confirmation.id)?.summary).toBe("私有的汇报预览")
     reopened.resolveResultConfirmation(confirmation.id, false)
     expect(() => reopened.resolveResultConfirmation(confirmation.id, true)).toThrow()
     reopened.settle(confirmation.id, "completed", null)
     reopened.flushReplies()
-    expect(notices(reopened)).toHaveLength(1)
+    expect(notices(reopened).some(item => item.origin.kind === "work_result" && item.origin.review?.phase === "publish")).toBe(false)
   })
 
   it("routes a missing mandatory file to review and withholds unresolved candidate versions", () => {
@@ -146,11 +173,14 @@ describe("private work result settlement", () => {
     const final = changed ? { ...draft, attachmentPath: "/saved/v2/report.md", size: 12 } : draft
     f.store.recordWorkResultEvidence(f.task.id, { callId: "end", files: [final], assistantMessageId: "final-message" })
     f.store.settle(f.task.id, "completed", null, "Final report")
+    const report = privateReview(f.store)
+    f.store.commitWorkResultReview(report.id, null, [], [], undefined, { messageId: "parent-final", finalText: "正式报告已完成。" })
+    f.store.settle(report.id, "completed", null)
     f.store.flushReplies()
     const delivery = notices(f.store).find(item => item.state === "queued")!
     f.store.transition(delivery.id, "running")
     expect(f.store.getWorkResultPublication(delivery.id)?.attachments.map(item => item.file)).toEqual(changed ? [final] : [])
-    expect(notices(f.store)).toHaveLength(2)
+    expect(notices(f.store).filter(item => item.origin.kind === "work_result" && item.origin.review?.phase === "publish")).toHaveLength(2)
   })
 
   it("combines only sibling tasks from the same request in one reviewed result", () => {

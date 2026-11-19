@@ -386,6 +386,7 @@ export type BotWorkScheduleCreation = BotDesktopWorkScheduleBinding | {
   workId?: string
   source: BotConversationToolSource
   explicitSkill?: BotSkillSelection
+  delivery?: BotWorkDispatchSource["delivery"]
   workspace?: BotWorkWorkspace
 }
 
@@ -1951,6 +1952,7 @@ export class BotStore {
       input.goal,
       ids,
       ...(source?.delivery ? [{ delivery: source.delivery }] : []),
+      ...(source?.namedSkill ? [{ namedSkill: source.namedSkill }] : []),
       ...(input.workspace ? [input.workspace] : []),
       ...(input.imConversationId ? [input.imConversationId] : []),
       ...(input.inputFileIds?.length ? [{ inputFileIds: parseBotInputFileIds(input.inputFileIds) }] : []),
@@ -2078,7 +2080,8 @@ export class BotStore {
                   dispatch: "create",
                   ...(attachments.ids.length ? { inputFileIds: attachments.ids } : {}),
                   sourceMessageIds: this.workSourceMessageIds(this.getTask(source.taskId), ids),
-                  sourceContext: { version: 1, references: context, ...(assignment !== goal ? { routingNoteLength: goal.length } : {}) }
+                  sourceContext: { version: 1, references: context, ...(source.namedSkill ? { namedSkill: source.namedSkill } : {}),
+                    ...(assignment !== goal ? { routingNoteLength: goal.length } : {}) }
                 }
               : { kind: "user" },
             mockSource
@@ -2116,6 +2119,7 @@ export class BotStore {
           workId,
           message,
           ...(source.delivery ? [{ delivery: source.delivery }] : []),
+          ...(source.namedSkill ? [{ namedSkill: source.namedSkill }] : []),
           ...(expectedVersion === undefined ? [] : [expectedVersion]),
           ...(inputFileIds.length ? [{ inputFileIds: parseBotInputFileIds(inputFileIds) }] : [])
         ])
@@ -2191,7 +2195,8 @@ export class BotStore {
               dispatch: "follow_up",
               ...(attachments.ids.length ? { inputFileIds: attachments.ids } : {}),
               sourceMessageIds: this.workSourceMessageIds(task),
-              sourceContext: { version: 1, references: [], ...(assignment !== note ? { routingNoteLength: note.length } : {}) }
+              sourceContext: { version: 1, references: [], ...(source.namedSkill ? { namedSkill: source.namedSkill } : {}),
+                ...(assignment !== note ? { routingNoteLength: note.length } : {}) }
             },
             task.mockSource
           )
@@ -2202,20 +2207,21 @@ export class BotStore {
     })
   }
   /** Reopen + enqueue atomically. A rejected assignment must not reopen completed work. */
-  private skillRouteFingerprint(workId: string, message: string, inputFileIds: readonly string[], delivery?: BotWorkDispatchSource["delivery"]) {
-    return createHash("sha256").update(JSON.stringify([workId, message, ...(inputFileIds.length ? [inputFileIds] : []), ...(delivery ? [{ delivery }] : [])])).digest("hex")
+  private skillRouteFingerprint(workId: string, message: string, inputFileIds: readonly string[], { delivery, namedSkill }: BotWorkDispatchSource) {
+    return createHash("sha256").update(JSON.stringify([workId, message, ...(inputFileIds.length ? [inputFileIds] : []),
+      ...(delivery ? [{ delivery }] : []), ...(namedSkill ? [{ namedSkill }] : [])])).digest("hex")
   }
   skillRouteReceipt(source: BotWorkDispatchSource, workId: string, message: string, inputFileIds: readonly string[]) {
     this.assertWorkAudience(this.getTask(source.taskId), workId)
     return this.workCommandReceipt<{ work: BotWorkItem; task: BotTask }>(`skill-route:${source.taskId}:${source.callId}`,
-      this.skillRouteFingerprint(workId, message, inputFileIds, source.delivery), source)
+      this.skillRouteFingerprint(workId, message, inputFileIds, source), source)
   }
   continueSkillWork(source: BotWorkDispatchSource, workId: string, message: string,
     inputFileIds: readonly string[] = [], pinnedInputs?: ReadonlyMap<string, string>) {
     return this.transaction(() => {
       const task = this.getTask(source.taskId)
       this.assertWorkAudience(task, workId)
-      const fingerprint = this.skillRouteFingerprint(workId, message, inputFileIds, source.delivery)
+      const fingerprint = this.skillRouteFingerprint(workId, message, inputFileIds, source)
       return this.workCommand(`skill-route:${source.taskId}:${source.callId}`, fingerprint, () => {
         const callSuffix = createHash("sha256").update(source.callId).digest("hex")
         const work = this.getWork(task.botId, workId)
@@ -2933,6 +2939,22 @@ export class BotStore {
     return [...new Set([...ids, ...contextIds])]
   }
 
+  namedSkillRequest(run: BotTask) {
+    if (run.workId || (run.mockSource && run.mockSource.transport !== "im") || !this.hasWorkUserRequest(run.id))
+      throw new BotError("CONFLICT", "技能交办需要主对话的当前用户请求")
+    const injected = this.injectedUserRequestId(run)
+    const task = injected ? this.getTask(injected) : run
+    if (task.origin.kind !== "user" && !(task.mockSource?.transport === "im" && task.origin.kind === "mock"))
+      throw new BotError("CONFLICT", "当前消息没有用户指定的技能")
+    const row = this.rows("SELECT state,origin_json,mock_source_json,prepared_input,input_preparation_required FROM bot_tasks WHERE id=?", [task.id])[0]
+    const admitted = this.inputProjection(row)
+    if (admitted === null) throw new BotError("CONFLICT", "当前用户请求尚未获准执行")
+    const body = (text: string) => cleanUserAttachmentContentForDisplay(this.replyInputBody(text, task.origin)).replace(/^📎[^\n]*(?:\n|$)/gm, "").trim()
+    const original = body(task.message)
+    const request = admitted === undefined ? original : body(admitted)
+    return { requestId: task.requestId, request, ...(original === request ? {} : { original }) }
+  }
+
   /** Resolve only captured source IDs; never infer context from the newest chat messages. */
   workInputContext(taskId: string, messageIndex = 0, offset = 0, assignmentId = taskId) {
     const owner = this.getTask(taskId)
@@ -2978,7 +3000,10 @@ export class BotStore {
         // Match the main Bot's composer trust boundary. Parse the complete input
         // before paging: a slash selection can follow a very long request. Neither
         // model-written routing notes nor historical references select a skill.
-        if (!row.mock_source_json && origin.kind === "user") {
+        const namedSkill = task.origin.sourceContext.namedSkill
+        if (namedSkill?.requestId === id) {
+          selections.set(id, { name: namedSkill.name, path: namedSkill.path })
+        } else if (!row.mock_source_json && origin.kind === "user") {
           if (origin.explicitSkill) selections.set(id, origin.explicitSkill)
           else {
             const selected = parseSkillUseBlock(text)
@@ -3845,10 +3870,11 @@ export class BotStore {
     const origin = task.origin
     // A desktop routine's admitted instruction is result evidence, not a user
     // request or attachment grant. Preserve it separately from the mutable schedule.
-    if (origin.kind === "schedule" && task.workId && !task.mockSource) {
+    if (origin.kind === "schedule" && task.workId && (!task.mockSource || (origin.delivery && task.mockSource.transport === "im"))) {
       if (task.state !== "queued" && !ACTIVE_STATES.includes(task.state as (typeof ACTIVE_STATES)[number]))
         throw new BotError("CONFLICT", "例行执行已停止")
-      if (body !== null) this.db.run("UPDATE bot_tasks SET prepared_input=? WHERE id=?", [body, taskId])
+      if (body !== null) this.db.run("UPDATE bot_tasks SET prepared_input=?,work_review_prepared=? WHERE id=?",
+        [body, Number(Boolean(origin.delivery && origin.explicitSkill)), taskId])
       return
     }
     if (!tracksBotInputPreparation(task)) return
@@ -7123,12 +7149,14 @@ export class BotStore {
         if (!sources.length || sources.some(id => !matchesBotWorkAudience(work, this.getTask(id).mockSource))) return false
         authorityTaskId = sources[sources.length - 1]
         if (sources.length > 1) sourceTaskIds = sources.length > 8 ? [sources[0], ...sources.slice(-7)] : sources
+      } else if (task.origin.kind === "schedule") {
+        if (!unified || !task.origin.explicitSkill || !task.origin.delivery) return false
       } else if (task.origin.kind !== "user" ||
           (!continuing && !explicitDesktopExecution && task.requestId !== `work-start-${work.id}`)) return false
       const instruction = this.preparedReviewInput(authorityTaskId, unified, true)?.trim()
       if (!instruction) return false
       const delivery = unified ? admittedWorkDelivery(instruction, {
-        ...continuing?.delivery, ...(task.origin.kind === "work" ? task.origin.delivery : undefined)
+        ...continuing?.delivery, ...(task.origin.kind === "work" || task.origin.kind === "schedule" ? task.origin.delivery : undefined)
       }) : undefined
       const recorded = this.rows("SELECT work_review_request_id FROM bot_tasks WHERE id=?", [task.id])[0]?.work_review_request_id
       if (recorded) return prior?.requestTaskId === recorded
@@ -7679,8 +7707,11 @@ export class BotStore {
           output: string; exitCode: number | null; truncated: boolean; cancelled: boolean; unknown: boolean
         }
       }))
+    const retained = [...this.retainedWorkReviewAttachments(work, review, BOT_WORK_RESULT_DEFAULT_ATTACHMENT_LIMIT + 1)]
+    const preview = retained.slice(0, BOT_WORK_RESULT_DEFAULT_ATTACHMENT_LIMIT)
     return {
       work, delivery: review.delivery, selectionReason: review.selectionReason,
+      retainedFiles: { names: preview.map(item => item.file.name), hasMore: retained.length > preview.length },
       missingFiles: review.delivery?.requiredFiles?.length ? this.missingWorkResultFiles(work, review) : undefined,
       combinedResults: this.combinedEvidence(work, review).map(member => ({ title: member.work.title,
         state: member.outcome.state, selectionReason: member.review.selectionReason,
@@ -7692,7 +7723,7 @@ export class BotStore {
       executionSupplementRequestIds: processSupplements(execution.id), previousProcesses, earlierForegroundCommandIds,
       incarnation: review.incarnation, requests, requestsOmitted, outcome,
       remainingRepairs: review.deliveryOnly || settlingForServices ? 0 : BOT_WORK_RESULT_REPAIR_LIMIT - review.repairs,
-      defaultAttachments: [...this.retainedWorkReviewAttachments(work, review, BOT_WORK_RESULT_DEFAULT_ATTACHMENT_LIMIT)].map(
+      defaultAttachments: preview.map(
         ({ sourceTaskId, callId, fileIndex }) => ({ sourceTaskId, callId, fileIndex })
       ),
       evidence, currentScopeIds,
@@ -7927,6 +7958,12 @@ export class BotStore {
     responseMessageId?: string,
     serviceIds?: string[]
   ) {
+    // The parent supplies the wording. A normal handoff still carries every
+    // current formal file, even when the bounded model input only names a subset.
+    if (responseMessageId && review.delivery) {
+      const attachments = [...this.retainedWorkReviewAttachments(work, review)].reverse()
+      return this.queueWorkReviewPublication(work, review, { kind, summary, attachments }, undefined, responseMessageId, serviceIds)
+    }
     const attachments: BotWorkResultAttachment[] = []
     const moreAttachments = this.collectWorkReviewPublicationAttachments(
       work, review, attachments, responseMessageId ? BOT_WORK_RESULT_DEFAULT_ATTACHMENT_LIMIT : BOT_WORK_RESULT_INTERRUPTED_ATTACHMENT_LIMIT)
@@ -8456,6 +8493,11 @@ export class BotStore {
       this.retireWorkResultReview(task.workId)
       return true
     }
+    if (task.origin.kind === "schedule" && silentFinal && task.state === "completed" &&
+        !review.delivery?.requiredFiles?.length && !this.workResultExecutionEvidence(task).deliveries.length) {
+      this.retireWorkResultReview(work.id)
+      return false
+    }
     const text = result && !isBotRoutineSilent(result) ? result : review.outcome?.text ??
       task.error ?? "本轮没有可确认的结果，请查看原任务。"
     const finalMessageId = silentFinal
@@ -8479,7 +8521,7 @@ export class BotStore {
       updated.phase = review.deliveryOnly ? "settled" : "interrupted"
     }
     this.saveWorkResultReview(work.id, updated)
-    this.noteWorkActivity(work.id, updated.phase === "waiting" && !review.deliveryOnly ? "等待核查成果" : "已有成果待核验", false)
+    this.noteWorkActivity(work.id, updated.phase === "waiting" && !review.deliveryOnly ? "等待主 Bot 汇报" : "已有成果待核验", false)
     return true
   }
 
@@ -8565,19 +8607,6 @@ export class BotStore {
         this.saveWorkResultReview(work.id, review)
         for (const member of others) this.saveWorkResultReview(member.work.id, { ...member.review, phase: "settled" })
       }
-      if (review.delivery && !review.deliveryOnly && background === "settled") {
-        const files = [...this.retainedWorkReviewAttachments(work, review)]
-        const names = new Set(files.map(item => item.file.name))
-        const missing = review.delivery.requiredFiles?.filter(name => !names.has(name))
-        if (!review.delivery.review && !missing?.length && !review.selectionReason) {
-          const summary = outcome.text + (outcome.truncated ? "\n\n完整内容可在原任务查看。" : "")
-          this.queueWorkReviewPublication(work, review, {
-            kind: outcome.state === "completed" ? "reported" : "blocked", summary, attachments: files.reverse()
-          })
-          this.saveWorkResultReview(work.id, { ...review, phase: "settled" })
-          continue
-        }
-      }
       if (this.newerWorkReviewUser(work, review)) continue
       if (review.deliveryOnly && !review.reviewTaskId) {
         const reported = outcome.state === "completed" && background === "settled" &&
@@ -8605,7 +8634,7 @@ export class BotStore {
       const id = `work-result-review-${review.requestTaskId}-${review.attempts + 1}`
       this.db.run(`INSERT INTO bot_reply_outbox(task_id,target_bot_id,message,origin_json) VALUES (?,?,?,?)
         ON CONFLICT(task_id) DO UPDATE SET blocked=0,origin_json=excluded.origin_json`,
-        [id, work.botId, "核查原任务成果", JSON.stringify(origin)])
+        [id, work.botId, "整理原任务结果", JSON.stringify(origin)])
     }
   }
 
@@ -9716,6 +9745,7 @@ export class BotStore {
             ...(prior?.dedicatedWork ? { dedicatedWork: true } : {}),
             ...(prior?.explicitSkill || toolExecution?.explicitSkill
               ? { explicitSkill: prior?.explicitSkill ?? toolExecution?.explicitSkill } : {}),
+            ...(prior?.delivery || toolExecution?.delivery ? { delivery: prior?.delivery ?? toolExecution?.delivery } : {}),
             ...(!input.enabled && prior?.workUnavailable ? { workUnavailable: true } : {})
           }),
           id: prior?.id ?? randomUUID(),
@@ -9743,7 +9773,8 @@ export class BotStore {
       }
       if (!execution && !followUpRequest && !toolEdit) return save()
       const fingerprint = toolEdit?.fingerprint ?? createHash("sha256").update(JSON.stringify(execution
-        ? [execution.workId, input, ...(toolExecution?.explicitSkill ? [toolExecution.explicitSkill, toolExecution.workspace] : [])]
+        ? [execution.workId, input, ...(toolExecution?.explicitSkill ? [toolExecution.explicitSkill, toolExecution.workspace] : []),
+          ...(toolExecution?.delivery && Object.keys(toolExecution.delivery).length ? [toolExecution.delivery] : [])]
         : [followUpRequest?.input, existing?.id, input])).digest("hex")
       const command = toolSource ? `tool:${toolSource.taskId}:${toolSource.callId}`
         : execution && "operationId" in execution
@@ -9800,6 +9831,8 @@ export class BotStore {
   }
 
   private pendingWorkSchedule(schedule: BotSchedule): boolean {
+    if (schedule.delivery && schedule.workId &&
+        ["executing", "waiting", "checking"].includes(this.workResultReview(schedule.workId)?.phase ?? "")) return true
     // Keep recursion on exact receipt identities. Unary + preserves the family expression index lookup.
     return this.rows(`WITH RECURSIVE occurrence AS (
         SELECT id,work_id FROM bot_tasks WHERE work_id=? AND bot_id=?
@@ -9909,6 +9942,7 @@ export class BotStore {
               kind: "schedule",
               scheduleId: latest.id,
               ...(latest.explicitSkill ? { explicitSkill: latest.explicitSkill } : {}),
+              ...(latest.delivery ? { delivery: latest.delivery } : {}),
               ...(source ? { sourceTaskId: source.id } : {}),
               ...(latest.workMonitor ? {
                 observation: { ...latest.workMonitor, scheduledAt: latest.nextRunAt! }

@@ -53,7 +53,7 @@ import {
   resolveStandardTurnRouting,
   prepareStandardThreadRuntimeFactory
 } from "./standard-thread-turn"
-import { prepareStandardUserPrompt, resolveBotRoutineSkill, validateExplicitSkillReference } from "./standard-thread-turn"
+import { prepareStandardUserPrompt, resolveNamedBotSkill, validateExplicitSkillReference } from "./standard-thread-turn"
 import { createHookScope } from "../hooks/scope"
 import { createSkillUseTracker } from "./skill-lifecycle/tracker"
 import { extractErrorDetail } from "./failover"
@@ -135,10 +135,14 @@ describe("original submit body receipt", () => {
         writeFileSync(join(dir, "daily", "SKILL.md"), "---\nname: daily\ndescription: Run a daily check\n---\nRead the inputs.")
       }
       skillRoots.mockResolvedValue([sources[0]])
-      await expect(resolveBotRoutineSkill("daily", ["daily"])).resolves.toEqual({ name: "daily", path: join(sources[0], "daily", "SKILL.md") })
-      await expect(resolveBotRoutineSkill("daily", [])).rejects.toThrow("可用范围")
+      const selected = { name: "daily", path: join(sources[0], "daily", "SKILL.md") }
+      await expect(resolveNamedBotSkill({ name: "daily" }, ["daily"])).resolves.toEqual(selected)
+      await expect(resolveNamedBotSkill({ request: "用 daily 技能生成文件" }, ["daily"])).resolves.toEqual(selected)
+      await expect(resolveNamedBotSkill({ request: "用 daily 技能生成文件", original: "查看报告" }, ["daily"])).rejects.toThrow("明确要求")
+      await expect(resolveNamedBotSkill({ name: "daily", request: "使用 daily" }, [])).rejects.toThrow("可用范围")
       skillRoots.mockResolvedValue(sources)
-      await expect(resolveBotRoutineSkill("daily", ["daily"])).rejects.toThrow("多个同名技能")
+      await expect(resolveNamedBotSkill({ name: "daily" }, ["daily"])).rejects.toThrow("多个同名技能")
+      await expect(resolveNamedBotSkill({ request: "用 daily 处理" }, ["daily"])).rejects.toThrow("多个同名技能")
     } finally {
       skillRoots.mockResolvedValue([])
       rmSync(root, { recursive: true, force: true })

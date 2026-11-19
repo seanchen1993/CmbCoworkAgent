@@ -224,15 +224,16 @@ function fixture(
 }
 
 describe("authenticated IM on the existing Bot host", () => {
-  it.each(["dm", "group"] as const)("holds both files and final text until authenticated %s publication, once", async kind => {
+  it.each((["dm", "group"] as const).flatMap(kind => [false, true].map(confirm => ({ kind, confirm }))))(
+    "delivers the parent summary and staged file exactly once to the originating $kind (approval=$confirm)", async ({ kind, confirm }) => {
     const f = fixture(undefined, undefined, () => false)
     const binding = await f.binding(kind), foreign = await f.binding("group")
-    await f.service.receive(f.event(binding, "source", "Send report.md after I approve"))
+    await f.service.receive(f.event(binding, "source", confirm ? "Send report.md after I approve" : "Send report.md"))
     const parent = f.store.recentTasks().find(t => t.origin.kind === "mock" && !!t.mockSource)!
     f.store.transition(parent.id, "running")
     f.store.recordPreparedInput(parent.id, parent.message)
     const { work, task } = f.store.createWork({ botId: f.bot.id, operationId: "report", title: "Report", goal: "Write report" },
-      { taskId: parent.id, key: "report", callId: "report", delivery: { confirmBeforeSending: true, requiredFiles: ["report.md"] } })
+      { taskId: parent.id, key: "report", callId: "report", delivery: { confirmBeforeSending: confirm, requiredFiles: ["report.md"] } })
     f.store.transition(parent.id, "completed")
     f.store.transition(task.id, "running")
     f.store.recordPreparedInput(task.id, task.message)
@@ -242,15 +243,27 @@ describe("authenticated IM on the existing Bot host", () => {
     f.store.settle(task.id, "completed", null, "Final report", [file])
     f.store.flushReplies()
     const publications = () => f.store.recentTasks().filter(t => t.origin.kind === "work_result")
-    const waiting = publications().find(t => t.origin.kind === "work_result" && t.origin.review?.phase === "confirm")!
-    expect(waiting.threadId).toBe(work.threadId)
+    const report = publications().find(t => t.origin.kind === "work_result" && t.origin.review?.phase === "review")!
+    expect(report.threadId).toBe(parent.threadId)
     expect(f.store.im.fileStatuses(f.bot.id, work.threadId, "formal")).toEqual([])
     expect(f.service.history(f.bot.id, binding.id).items.some(i => i.text === "Final report")).toBe(false)
-    f.store.transition(waiting.id, "running")
-    expect(f.store.pendingResultConfirmation(waiting.id)?.attachments.map(a => a.file.name)).toEqual(["report.md"])
-    f.store.resolveResultConfirmation(waiting.id, true)
-    f.store.settle(waiting.id, "completed", null)
+    f.store.transition(report.id, "running")
+    expect(f.store.getWorkResultReview(report.id)).toMatchObject({ outcome: { text: "Final report" }, retainedFiles: { names: ["report.md"] } })
+    const finalText = "本周报告已整理好，详见附件。"
+    f.store.commitWorkResultReview(report.id, null, [], [], undefined, { messageId: "parent-reply", finalText })
+    f.store.settle(report.id, "completed", null, finalText)
     f.store.flushReplies()
+    if (confirm) {
+      const waiting = publications().find(t => t.origin.kind === "work_result" && t.origin.review?.phase === "confirm")!
+      expect(waiting.threadId).toBe(work.threadId)
+      f.store.transition(waiting.id, "running")
+      expect(f.store.pendingResultConfirmation(waiting.id)).toMatchObject({ summary: finalText, attachments: [{ file }] })
+      expect(f.service.history(f.bot.id, binding.id).items.some(i => i.text === finalText)).toBe(false)
+      expect(f.store.im.fileStatuses(f.bot.id, work.threadId, "formal")).toEqual([])
+      f.store.resolveResultConfirmation(waiting.id, true)
+      f.store.settle(waiting.id, "completed", null)
+      f.store.flushReplies()
+    }
     const delivery = publications().find(t => t.origin.kind === "work_result" && t.origin.review?.phase === "publish")!
     expect(delivery.threadId).toBe(parent.threadId)
     f.store.transition(delivery.id, "running")
@@ -260,7 +273,9 @@ describe("authenticated IM on the existing Bot host", () => {
     expect(f.store.publishedWorkDelivery(f.store.getWork(f.bot.id, work.id))).toMatchObject({
       files: [{ name: "report.md", imState: "pending" }], fileCount: 1
     })
-    expect(f.service.history(f.bot.id, binding.id).items.filter(i => i.text === "Final report")).toHaveLength(1)
+    const messages = f.service.history(f.bot.id, binding.id).items.map(i => i.text)
+    expect(messages).not.toContain("Final report")
+    expect(messages.filter(text => text === finalText)).toHaveLength(1)
     expect(f.service.history(f.bot.id, foreign.id).items).toHaveLength(0)
   })
 
@@ -1372,6 +1387,52 @@ describe("authenticated IM on the existing Bot host", () => {
     expect(f.store.schedules()[0].enabled).toBe(false)
     expect(f.calls.filter(t => t.origin.kind === "schedule")).toHaveLength(1)
     expect(f.errors).toEqual([])
+  })
+
+  it.each(["dm", "group"] as const)("keeps a named skill and its schedule in the originating IM %s", async kind => {
+    const skill = { name: "daily", path: "/fixture/daily/SKILL.md" }
+    const catalog = vi.spyOn(await import("../agent/standard-thread-turn"), "resolveNamedBotSkill")
+      .mockImplementation(async input => {
+        expect(input).toMatchObject({ name: "daily", request: expect.stringContaining("使用 daily") })
+        return skill
+      })
+    try {
+      const f = fixture(async (task, host, signal) => {
+        if (task.origin.kind === "schedule") {
+          expect(task.origin.explicitSkill).toEqual(skill)
+          return { state: "completed", result: "例行已核对" }
+        }
+        if (task.origin.kind === "work") {
+          expect(host.workInputContext(task.id)?.explicitSkill).toEqual(skill)
+          return { state: "completed", result: "已核对" }
+        }
+        if (task.origin.kind !== "mock") return { state: "completed", result: "核对结果" }
+        const tool = createBotWorkTools(task, () => host, signal).find(t => t.name === "bot_skill_dispatch")!
+        const runLater = task.message.includes("稍后")
+        const response = await tool.invoke({ type: "tool_call", name: tool.name, id: task.requestId, args: {
+          skillName: "daily", title: "核对", ...(runLater ? { schedule: { frequency: "once", afterSeconds: 300, message: "使用 daily 核对" } } : {})
+        } }) as { content: string; status: string }
+        expect(response.status, response.content).not.toBe("error")
+        return { state: "completed", result: "已受理" }
+      }, undefined, undefined, undefined, undefined, 2, undefined, { persist() {}, async announce() {} })
+      const binding = await f.binding(kind)
+      await f.binding("group")
+      await f.service.receive(f.event(binding, "named-now", "使用 daily 核对"))
+      await eventually(() => f.calls.some(t => t.origin.kind === "work" && f.store.getTask(t.id).state === "completed"))
+      await f.service.receive(f.event(binding, "named-later", "稍后使用 daily 再核对"))
+      await eventually(() => f.store.schedules().length === 1)
+      const [saved] = f.store.schedules()
+      expect(saved.explicitSkill).toEqual(skill)
+      expect(saved.audienceKey).toBe(f.calls[0].mockSource!.audienceKey)
+      expect(f.calls.some(t => t.origin.kind === "schedule")).toBe(false)
+      f.store.fireSchedule(saved, null)
+      f.host.resume()
+      await eventually(() => f.calls.some(t => t.origin.kind === "schedule" && f.store.getTask(t.id).state === "completed"))
+      expect(f.calls.filter(t => t.workId).every(t =>
+        f.store.getWork(f.bot.id, t.workId!).parentThreadId === f.calls[0].threadId)).toBe(true)
+      expect(f.client.submitReply.mock.calls.every(([r]) => r.conversationKey === binding.conversationKey)).toBe(true)
+      expect(f.errors).toEqual([])
+    } finally { catalog.mockRestore() }
   })
 
   it("delivers recurring fixed reminder text to its original IM group without acquiring a worker", async () => {

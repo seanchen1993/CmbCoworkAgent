@@ -243,7 +243,7 @@ function createBotFileTools(
     .object({
       ...(receiptWorkId && mode === "private" ? {
         interim: z.boolean().optional().describe("Use only for an early draft explicitly requested by the user."),
-        selectionReason: z.string().trim().min(1).max(600).optional().describe("Explain an unresolved version choice. Retain the candidates for the parent to select.")
+        selectionReason: z.string().trim().min(1).max(600).optional().describe("Only for an unresolved choice between candidate file versions. The host withholds all candidates until the parent explicitly chooses. Omit for normal staging, independent review, and approval to release an already chosen file.")
       } : {}),
       files: z.array(resolveHistoricalDelivery
         ? z.union([filePath, z.object({
@@ -506,7 +506,7 @@ function createBotFileTools(
           mode === "return"
             ? "Verify existing workspace files and retain their current bytes for the automatic private reply to the delegating Bot. This does not publish attachments or deliver files to the user. Use this for internal drafts and results; the caller owns public delivery. Use bot_deliver_files only for an explicitly authorized public group attachment. Use workspace-relative paths for current files, retaining subdirectories. For a host-verified peer receipt, pass its exact absolute filePath or attachmentPath to privately forward the retained version and its logical identity. The receipt preserves this version but is not proof of content correctness. Never return a directory, another Bot's private file or an unverified path."
             : desktopWorkDelivery
-            ? "Stage files privately from this task for the host to deliver. Calling this tool does not send anything to the requester. Use it before returning, including when the user requires review or approval. The host will request release approval once if needed. Use workspace-relative paths or exact retained references. The receipt pins the bytes. Mark an explicitly requested early version with interim."
+            ? "Stage the requested deliverables privately for the host. Keep inputs, logs and supporting evidence in the task unless the requester also asks to receive them. Stage before returning, including when review or approval is required. The host requests release approval once if needed. Use workspace-relative paths or exact retained references. The receipt pins the bytes. Mark an explicitly requested early version with interim."
             : "Deliver actual completed or useful partial files as attachments that can be opened and saved. Screenshots and images can be sent by path without a vision model. Use workspace-relative paths, retaining subdirectories; this verifies existence, ownership and metadata. Each public attachment retains its sent bytes separately from the editable workspace original. The host includes verified references in automatic private collaboration replies and verifies declared outputFiles before completion. Never deliver a directory or an unverified path. The receipt confirms local handoff, not delivery confirmation from an external IM platform. If deliveryScope is returned, it identifies where files were retained and whether onward publication is still pending. " +
               (publicGroup
                 ? "This publishes to the current shared group. When the user requested a summary with these files, include it in content so the text and attachments are delivered together. Ordinary assistant text is private and is not published. Set content to an empty string for a file-only delivery. Only current workspace files are eligible; other Bots' private files are rejected. For a host-verified peer receipt, pass its exact absolute filePath or attachmentPath to deliver that retained version without another copy; relative paths select current workspace content."
@@ -1002,8 +1002,8 @@ export function createBotScheduleTools(
           const skillName = task.mockSource?.transport === "im" && task.origin.kind === "mock"
             ? /^\s*\/(?:技能\s+)?([\p{L}\p{N}_.-]+)(?=$|[\s，。,:：])/u.exec(task.message)?.[1]
             : undefined
-          const skill = skillName ? await (await import("../agent/standard-thread-turn")).resolveBotRoutineSkill(
-            skillName, bot.allowedSkillNames ?? undefined) : task.origin.kind === "user" && task.workId ? task.origin.explicitSkill : undefined
+          const skill = skillName ? await (await import("../agent/standard-thread-turn")).resolveNamedBotSkill(
+            { name: skillName }, bot.allowedSkillNames ?? undefined) : task.origin.kind === "user" && task.workId ? task.origin.explicitSkill : undefined
           signal.throwIfAborted()
           return JSON.stringify(receipt(host.saveSchedule(bot.id, schedule, undefined, scopedSource, {
             source: { taskId: task.id, callId: callIdForSave, key: input.requestKey ?? callIdForSave },

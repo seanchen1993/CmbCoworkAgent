@@ -15,7 +15,7 @@ import { chmod, cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "no
 import { createServer } from "node:http"
 import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { Readable } from "node:stream"
 import { pipeline } from "node:stream/promises"
 import { _electron } from "playwright"
@@ -23,7 +23,8 @@ import { waitForBotAppState } from "./support/bot-app-state"
 import { botTestAppOutput } from "./support/bot-test-app"
 import { selectedBotRoutingModel } from "./support/bot-routing-model"
 import { createBotExperimentArchive, experimentSha256 } from "./support/bot-experiment-archive.mjs"
-import { installSlashSkillFixture, slashSkillRequest, slashSkillRevisionRequest, slashSkillSelection, verifySlashSkillResult, verifySlashSkillRevision } from "./support/bot-slash-skill-fixture"
+import { parseBotWorkAttachmentHref } from "../src/shared/bots/work-history"
+import { installSlashSkillFixture, prdFixtureSkillName, slashSkillRequest, slashSkillRevisionRequest, slashSkillSelection, verifyPrdArtifact, verifySlashSkillResult, verifySlashSkillRevision } from "./support/bot-slash-skill-fixture"
 
 type Route = "inline" | "independent" | "continue" | "background"
 type Case = {
@@ -32,6 +33,7 @@ type Case = {
   preferred: Route
   files?: Record<string, string>
   skill?: typeof slashSkillSelection
+  naturalSkill?: boolean
   message: (directory: string) => string
   verify?: (directory: string, result: any, data: any) => Promise<void> | void
 }
@@ -65,6 +67,53 @@ const reconciliationInputs = {
   "orders.csv": 'id,amount,note\nA,120.00,book\nB,80.00,book\nC,250.00,"card,blue"\nD,50.00,book\n',
   "payments.csv": "id,paid\nA,100.00\nA,20.00\nB,80.00\nC,200.00\nX,30.00\n"
 }
+const prdInputs = {
+  "需求.md": "虚构图书借阅：每人最多同时借3本，借期14天，归还后才能再次借出。\n",
+  "约束.md": "只做内部使用，不收罚款，逾期提醒。不要扩展采购或支付。\n",
+  "现有接口.md": "已有查询图书库存接口，申请、归还和提醒功能待实现。\n"
+}
+async function verifyNaturalPrd(sourceDirectory: string, result: any, data: any) {
+  assert.equal(result.selectedSkill, undefined)
+  assert.equal(result.actual, result.id === "named-revision" ? "continue" : "independent")
+  assert.equal(data.works.length, 1)
+  // The user identified the input directory, not the executor's workspace.
+  const receipt = await verifyPrdArtifact(data.works[0].workspace.path, result.id === "named-revision" ? 21 : 14)
+  const calls = result.workToolCalls[0].calls
+  assert.ok(calls.some((c: any) => c.name === "execute" && JSON.stringify(c.args).includes("verify.mjs")))
+  assert.ok(calls.some((c: any) => c.name === "bot_deliver_files"))
+  assert.equal(result.reportCount, 1)
+  assert.match(result.reply, /\[prd\.md\]\(#bot-history\//i)
+  assert.equal(result.returnedPrdSha256, receipt.sha256, "the parent's attachment must open the verified version")
+  result.skillValidation = { scriptVerified: true, sha256: receipt.sha256, artifact: "prd.md", resultReported: true }
+  assert.ok(!result.toolErrors.some((e: any) => e.tool === "bot_skill_dispatch"), "first skill dispatch must not require recovery")
+  if (result.id === "lending-requirements") {
+    assert.ok(!result.mainTools.includes("bot_skill_dispatch"), "the request did not name a skill")
+    return
+  }
+  assert.ok(result.mainTools.includes("bot_skill_dispatch"), "observe a first-pass named skill handoff")
+  assert.ok(!result.mainTools.some((tool: string) => ["bot_work_create", "bot_work_send"].includes(tool)))
+  assert.equal(result.mainAcknowledgements.length, 1)
+  assert.ok(!result.mainToolChoices.some((choice: any) => choice?.function?.name === "bot_skill_dispatch"), "plain text must keep autonomous routing")
+  const hooks = (await readFile(join(dirname(sourceDirectory), "skill-lifecycle.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line))
+  const workerHooks = hooks.filter(h => h.sessionId === data.works[0].threadId)
+  assert.ok(["PreSkillUse", "PostSkillUse"].every(event => workerHooks.some(h => h.event === event && h.trigger === "skill_select")))
+  assert.ok(!hooks.some(h => data.tasks.some((t: any) => !t.workId && t.threadId === h.sessionId)))
+  result.skillValidation.workerActivationVerified = true
+  if (result.id === "named-schedule") {
+    const schedule = data.schedules[0]
+    const occurrences = data.tasks.filter((t: any) => t.origin.kind === "schedule")
+    assert.equal(data.schedules.length, 1)
+    assert.equal(occurrences.length, 1)
+    assert.equal(occurrences[0].workId, schedule.workId)
+    assert.equal(occurrences[0].origin.explicitSkill.name, prdFixtureSkillName)
+    assert.ok(!data.tasks.some((t: any) => t.origin.kind === "work"), "saving the schedule must not also dispatch immediate work")
+  } else {
+    const receipt = data.tasks.find((t: any) => t.origin.kind === "work" && t.requestId &&
+      t.origin.dispatch === (result.id === "named-revision" ? "follow_up" : "create") && t.origin.sourceContext?.namedSkill?.name === prdFixtureSkillName)
+    assert.ok(receipt, "host must retain the named skill for this worker assignment")
+    if (result.id === "named-revision") assert.match(await readFile(join(data.works[0].workspace.path, "prd.md"), "utf8"), /21\s*天/)
+  }
+}
 let browserFixtureUrl = ""
 const cases: Case[] = [
   {
@@ -74,7 +123,7 @@ const cases: Case[] = [
     verify: async (dir, result) => {
       assert.equal(result.actual, "independent")
       assert.ok(result.reviewCount > 0, "independent review requested at admission")
-      assert.ok(result.tools.includes("bot_work_result_read"), "the main reviewer must inspect actual evidence")
+      assert.ok(result.reviewedFixtureFiles.includes("total.md"), "the independent reviewer must receive the actual retained figures")
       assert.match(await readFile(join(dir, "total.md"), "utf8"), /11|十一/)
       assert.match(result.reply, /11|十一/)
     }
@@ -83,10 +132,17 @@ const cases: Case[] = [
     id: "delivery-confirm", label: "复核后等本人批准再发送", preferred: "independent",
     files: { "counts.txt": "上午 7 件，下午 4 件。" },
     message: dir => `在工作目录 ${dir} 读 counts.txt，算好全天总数，生成 approval.md。请主 Bot 独立复核文件。发前务必先让我本人确认，确认后再把结果和附件发回。`,
-    verify: async (dir, result) => {
+    verify: async (dir, result, data) => {
       assert.ok(result.reviewCount > 0)
       assert.equal(result.confirmCount, 1, "one answered host release confirmation")
       assert.equal(result.reportCount, 1, "one final publication after human confirmation")
+      assert.ok(result.reviewedFixtureFiles.includes("approval.md"), "the reviewer must see the formal document before the owner is asked")
+      assert.doesNotMatch(result.reply, /\[counts\.txt\]\(#bot-history\//, "a source file is not a requested deliverable")
+      const released = data.messages.findLast((m: any) => m.role === "assistant" && typeof m.content === "string" &&
+        m.content.includes("[approval.md](#bot-history/"))
+      assert.ok(released, "the approved text must be the message carrying the formal attachment")
+      assert.doesNotMatch(released.content, /等[您你].{0,8}(?:确认|批准).{0,6}再发|确认后我再发|需要我现在发布|是否(?:确认|同意)(?:发送|发布)/u,
+        "the released message must not ask for the same release a second time")
       assert.match(await readFile(join(dir, "approval.md"), "utf8"), /11|十一/)
       assert.match(result.reply, /approval\.md/)
     }
@@ -112,15 +168,47 @@ const cases: Case[] = [
     }
   },
   {
+    id: "document-inputs", label: "材料准备", preferred: "inline", naturalSkill: true,
+    message: () => "你这里把需求整理成 PRD 的技能，需要我准备哪几个输入文件？我只想知道文件名。",
+    verify: (_dir, result, data) => {
+      assert.equal(result.selectedSkill, undefined)
+      assert.equal(result.actual, "inline")
+      assert.equal(data.works.length, 0)
+      for (const filename of Object.keys(prdInputs)) assert.ok(result.reply.includes(filename))
+      assert.ok(!result.tools.some((name: string) => ["write_file", "edit_file", "bot_deliver_files"].includes(name)))
+    }
+  },
+  {
+    id: "named-skill-help", label: "点名咨询输入", preferred: "inline", naturalSkill: true,
+    message: () => `使用 ${prdFixtureSkillName} 技能需要准备哪些材料？只告诉我文件名，这次不用生成文档。`,
+    verify: (_dir, result, data) => {
+      assert.equal(result.actual, "inline")
+      assert.equal(data.works.length, 0)
+      assert.ok(!result.mainTools.includes("bot_skill_dispatch"))
+      for (const name of Object.keys(prdInputs)) assert.ok(result.reply.includes(name))
+    }
+  },
+  {
+    id: "named-schedule", label: "定时需求文档", preferred: "independent", naturalSkill: true, files: prdInputs,
+    message: dir => `安排一次例行，从现在起30秒后使用 ${prdFixtureSkillName} 技能，在工作目录 ${dir} 读取材料生成并校验 prd.md，完成后把文件发给我。`,
+    verify: verifyNaturalPrd
+  },
+  {
+    id: "library-brief", label: "借阅需求", preferred: "independent", naturalSkill: true, files: prdInputs,
+    message: dir => `用 ${prdFixtureSkillName} 技能，把 ${dir} 里的材料整理成 prd.md，校验后把文件发给我。`,
+    verify: verifyNaturalPrd
+  },
+  {
+    id: "lending-requirements", label: "借阅规则", preferred: "independent", naturalSkill: true, files: prdInputs,
+    message: dir => `把 ${dir} 里的需求、约束和接口说明整理成一份产品需求文档 prd.md，检查完把文件发给我。`,
+    verify: verifyNaturalPrd
+  },
+  {
     id: "slash-skill-natural",
     skill: slashSkillSelection,
     label: "仅斜杠选技能，不要求独立任务，观察实际读取与交办顺序",
     preferred: "independent",
-    files: {
-      "需求.md": "虚构图书借阅：每人最多同时借3本，借期14天，归还后才能再次借出。\n",
-      "约束.md": "只做内部使用，不收罚款，逾期提醒。不要扩展采购或支付。\n",
-      "现有接口.md": "已有查询图书库存接口，申请、归还和提醒功能待实现。\n"
-    },
+    files: prdInputs,
     message: (directory) => slashSkillRequest(directory, false),
     verify: (directory, result, data) => verifySlashSkillResult(directory, result, data, false)
   },
@@ -129,11 +217,7 @@ const cases: Case[] = [
     skill: slashSkillSelection,
     label: "主 Bot 斜杠技能选择、独立任务激活及文件回传",
     preferred: "independent",
-    files: {
-      "需求.md": "虚构图书借阅：每人最多同时借3本，借期14天，归还后才能再次借出。\n",
-      "约束.md": "只做内部使用，不收罚款，逾期提醒。不要扩展采购或支付。\n",
-      "现有接口.md": "已有查询图书库存接口，申请、归还和提醒功能待实现。\n"
-    },
+    files: prdInputs,
     message: slashSkillRequest,
     verify: verifySlashSkillResult
   },
@@ -314,7 +398,11 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
   const out = botTestAppOutput()
   const root = await mkdtemp(join(tmpdir(), "bot-routing-cases-"))
   await chmod(root, 0o700)
-  if (!process.env.BOT_ROUTING_CASE || process.env.BOT_ROUTING_CASE.split(",").some(id => id.startsWith("slash-skill")))
+  const selected = process.env.BOT_ROUTING_CASE
+    ? cases.filter(c => process.env.BOT_ROUTING_CASE!.split(",").includes(c.id))
+    : cases
+  assert.ok(selected.length, "unknown case")
+  if (selected.some(test => test.skill || test.naturalSkill))
     await installSlashSkillFixture(root)
   await archive.configure({ model: config.model, out, workspace: root, apiKey: config.apiKey })
   const reportPath = join(out, "artifacts", `routing-${Date.now()}.json`)
@@ -322,6 +410,8 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
   const initialization = { cancelledIntroductionQuestions: [] as string[] }
   let activeTurn: { id: string; label: string; preferred: Route; message: string; selectedSkill?: string } | undefined
   const mainPrefixes = new Map<string, { system: string; tools: string; messages: any[] }>()
+  const reviewedFixtureFiles = new Map<string, Set<string>>()
+  const deliveryInputs = new Map<string, { requiredFiles?: string[]; stagedFiles?: string[]; selectionReason?: string }>()
   const wire = {
     reviewRequests: [] as string[][],
     reportPrefixChecks: [] as Array<{
@@ -336,6 +426,7 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
     }>
   }
   // Transparent forwarding: no prompt/tool rewriting and no model decisions mocked.
+  let providerPaymentRequired = false
   const relay = createServer(async (req, res) => {
     try {
       if (req.method === "GET" && req.url === "/browser-fixture") {
@@ -388,8 +479,21 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
           })
         }
       }
-      if (role === "review")
+      if (role === "review") {
         wire.reviewRequests.push((body.tools ?? []).map((tool: any) => tool.function.name))
+        const line = inputText.split("\n").find(part => part.startsWith('{"kind":"host_work_result"'))
+        const returned = line && JSON.parse(line)
+        const evidence = returned?.independentFile
+        if (returned && activeTurn?.id.startsWith("delivery-")) deliveryInputs.set(activeTurn.id, {
+          requiredFiles: returned.delivery?.requiredFiles, stagedFiles: returned.retainedFiles?.names, selectionReason: returned.selectionReason
+        })
+        if (activeTurn && evidence?.status === "ok" && !evidence.truncated &&
+            /7|七/.test(evidence.text) && /4|四/.test(evidence.text) && /11|十一/.test(evidence.text)) {
+          const files = reviewedFixtureFiles.get(activeTurn.id) ?? new Set<string>()
+          files.add(evidence.name)
+          reviewedFixtureFiles.set(activeTurn.id, files)
+        }
+      }
       if (role === "communication")
         wire.communicationRequests.push({ at: Date.now(), choice: body.tool_choice, user: inputText })
       // One actual system prompt/tool set per role, never headers or credentials.
@@ -419,6 +523,7 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
         body: raw,
         signal: AbortSignal.timeout(180000)
       })
+      if (response.status === 402) providerPaymentRequired = true
       assert.ok(response.body)
       res.writeHead(response.status, {
         "content-type": response.headers.get("content-type") ?? "application/json"
@@ -504,6 +609,7 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
         const state = await api.bots.snapshot()
         return {
           works,
+          schedules: state.schedules.filter((s: any) => s.botId === bot.id),
           tasks: state.tasks.filter((t: any) => t.botId === bot.id),
           backgroundActive: state.backgroundThreads.includes(bot.threadId),
           messages: await api.threads.getMessages(bot.threadId),
@@ -558,7 +664,7 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
     }
     const turn = async (
       bot: any,
-      test: Pick<Case, "id" | "label" | "preferred">,
+      test: Pick<Case, "id" | "label" | "preferred" | "naturalSkill">,
       message: string,
       selection?: ReturnType<typeof slashSkillSelection>
     ) => {
@@ -644,6 +750,13 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
         }
       }
       await settle(bot.id, false, oldTasks)
+      if (test.id === "named-schedule") {
+        const saved = await snapshot(bot)
+        assert.equal(saved.schedules.length, 1, "a timed skill must first save the routine")
+        await waitForBotAppState(page, async id => (await (window as any).api.bots.snapshot()).tasks.some((t: any) =>
+          t.botId === id && t.origin.kind === "schedule" && t.workId), bot.id, { timeout: 90000 })
+        await settle(bot.id, false, oldTasks)
+      }
       if (test.id === "background-command") {
         const launched = await snapshot(bot)
         const acceptedBackground =
@@ -738,10 +851,10 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
         message,
         tools: [...new Set(allTools.map((c: any) => c.name))],
         mainTools: tools,
-        ...(["revision", "reopen"].includes(test.id) || test.id.startsWith("slash-skill") ? {
+        ...(["revision", "reopen"].includes(test.id) || test.id.startsWith("slash-skill") || test.naturalSkill ? {
           mainToolCalls: calls.map((call: any) => ({ name: call.name, args: call.args }))
         } : {}),
-        ...(test.id.startsWith("slash-skill") ? {
+        ...(test.id.startsWith("slash-skill") || test.naturalSkill ? {
           mainAcknowledgements: mainMessages
             .filter((m: any) => m.role === "assistant" && typeof m.content === "string" && m.content.trim())
             .map((m: any) => ({ text: m.content, afterDispatch: skillReceiptIndex >= 0 && skillReceiptIndex < mainMessages.indexOf(m) })),
@@ -770,9 +883,12 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
         confirmCount: resultTasks.filter((t: any) => t.origin.review?.phase === "confirm").length,
         reviewCount: resultTasks.filter((t: any) => t.origin.review?.phase === "review").length,
         reportCount: publications.length,
+        reviewedFixtureFiles: [...(reviewedFixtureFiles.get(test.id) ?? [])],
+        ...(deliveryInputs.has(test.id) ? { deliveryInput: deliveryInputs.get(test.id) } : {}),
         backgroundReportCount: tasks.filter(
           (t: any) => t.origin.kind === "notification" && t.state === "completed"
         ).length,
+        returnedPrdSha256: undefined as string | undefined,
         responsiveness,
         error: undefined as string | undefined,
         validation: "observed"
@@ -805,6 +921,7 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
       )
       if (actual === "independent" || actual === "continue") {
         assert.ok(result.reportCount > 0, "task result must return to parent")
+        assert.ok(result.reviewCount > 0, "the originating Bot must compose the final reply")
         for (const publication of publications.filter((t: any) => t.origin.review))
           assert.ok(messages.some((m: any) => m.role === "assistant" && typeof m.content === "string" &&
             m.content.includes(`#bot-history/${publication.origin.workId}/`)), "published result must link to its own task")
@@ -815,13 +932,23 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
           "result must not expose attempted tool calls"
         )
       }
+      if (test.naturalSkill && data.works.length) {
+        const link = [...result.reply.matchAll(/\[prd\.md\]\((#bot-history\/[^)\s]+)\)/gi)].at(-1)?.[1]
+        const attachment = link && parseBotWorkAttachmentHref(link)
+        assert.ok(attachment, "the parent reply must include a retained PRD attachment")
+        const { callId, fileIndex, ...history } = attachment
+        const filePath = await page.evaluate(async ({ botId, history, callId, fileIndex }) => {
+          const api = (window as any).api.bots
+          const target = await api.works.resolveSource(botId, history)
+          const file = await api.authorizeDeliveredFile({ threadId: target.threadId, assistantMessageId: target.messageId, callId, fileIndex })
+          return file.filePath
+        }, { botId: bot.id, history, callId, fileIndex })
+        result.returnedPrdSha256 = experimentSha256(await readFile(filePath))
+      }
       return { result, data }
     }
-    const selected = process.env.BOT_ROUTING_CASE
-      ? cases.filter((c) => process.env.BOT_ROUTING_CASE!.split(",").includes(c.id))
-      : cases
-    assert.ok(selected.length, "unknown case")
     for (const test of selected) {
+      const firstResultIndex = results.length
       const directory = join(root, test.id)
       await mkdir(directory)
       for (const [name, text] of Object.entries(test.files ?? {}))
@@ -837,7 +964,7 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
         "路由验收 · " + test.label
       )
       // Opening a Bot starts its introduction. Settle that fixture setup before measuring the first skill submission.
-      if (test.skill) await page.evaluate(id => (window as any).api.bots.open(id), bot.id)
+      if (test.skill || test.naturalSkill) await page.evaluate(id => (window as any).api.bots.open(id), bot.id)
       await settle(bot.id, true)
       try {
         const { result, data } = await turn(bot, test, test.message(directory), test.skill?.(directory))
@@ -845,6 +972,14 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
         await test.verify?.(directory, result, data)
         result.validation = "passed"
         await save()
+        if (test.id === "library-brief") {
+          const next = await turn(bot, { id: "named-revision", label: "文字点名修改原 PRD", preferred: "continue", naturalSkill: true },
+            `继续刚才那份 PRD，用 ${prdFixtureSkillName} 技能把借期改成21天，校验后把更新的 prd.md 发给我。`)
+          await verifyNaturalPrd(directory, next.result, next.data)
+          assert.deepEqual(next.result.workIds, [data.works[0].id])
+          next.result.validation = "passed"
+          await save()
+        }
         if (test.id === "slash-skill-natural" && process.env.BOT_ROUTING_PROBE_RESPONSIVENESS === "1") {
           assert.equal(result.responsiveness?.overlapObserved, true, "the worker must still be running while the main chat answers")
           if (!(await page.locator(".bots-workspace").isVisible()))
@@ -882,8 +1017,13 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
           reselection.result.validation = "passed"
           await save()
         }
-        if (["event-plan", "background-plan"].includes(test.id) && data.works.length === 1) {
-          const work = data.works[0]
+        if (["event-plan", "background-plan"].includes(test.id) && data.works.length > 0) {
+          const deliveredIds = new Set(result.states.filter((state: any) =>
+            state.kind === "work" && state.state === "completed").map((state: any) => state.workId))
+          const delivered = data.works.filter((item: any) => deliveredIds.has(item.id))
+          assert.equal(delivered.length, 1, "identify the original plan's producer before continuing")
+          const [work] = delivered
+          const initialIds = result.workIds.slice().sort()
           assert.equal(work.workspace.path, await realpath(directory))
           assert.equal(work.state, "active", "reply is not business completion")
           const follow = await turn(
@@ -896,7 +1036,7 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
             "continue",
             "revision must execute in the existing task"
           )
-          assert.deepEqual(follow.result.workIds, [work.id])
+          assert.deepEqual(follow.result.workIds.slice().sort(), initialIds)
           assertRevisionDispatch(follow.result, work.id)
           assert.match(
             await readFile(join(directory, "plan.md"), "utf8"),
@@ -909,7 +1049,7 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
             { id: "status", label: "查进度不重启执行", preferred: "inline" },
             "这份方案现在还在运行吗？只查看实际状态告诉我，不用继续改。"
           )
-          assert.deepEqual(status.result.workIds, [work.id])
+          assert.deepEqual(status.result.workIds.slice().sort(), initialIds)
           assert.ok(
             !status.result.mainTools.some((t: string) =>
               ["bot_work_create", "bot_work_send", "bot_work_continue"].includes(t)
@@ -917,7 +1057,7 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
           )
           status.result.validation = "passed"
           await save()
-          const current = status.data.works[0]
+          const current = status.data.works.find((item: any) => item.id === work.id)!
           const completed = await page.evaluate(async (input) => (window as any).api.bots.works.lifecycle(input), {
             botId: bot.id,
             workId: work.id,
@@ -935,11 +1075,12 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
             "continue",
             "reopening must send work to the same task"
           )
-          assert.deepEqual(reopened.result.workIds, [work.id])
+          assert.deepEqual(reopened.result.workIds.slice().sort(), initialIds)
           assertRevisionDispatch(reopened.result, work.id, completed.version)
-          assert.equal(reopened.data.works[0].threadId, work.threadId)
-          assert.equal(reopened.data.works[0].workspace.path, work.workspace.path)
-          assert.equal(reopened.data.works[0].state, "active")
+          const resumedWork = reopened.data.works.find((item: any) => item.id === work.id)!
+          assert.equal(resumedWork.threadId, work.threadId)
+          assert.equal(resumedWork.workspace.path, work.workspace.path)
+          assert.equal(resumedWork.state, "active")
           assert.match(
             await readFile(join(directory, "plan.md"), "utf8"),
             /17[:：]00|五点|下午\s*5/
@@ -969,8 +1110,9 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
         if (activeTurn) {
           results.push({ ...activeTurn, error: message, validation: "failed" })
           activeTurn = undefined
-        } else if (last && (last.id === test.id || ["event-plan", "background-plan"].includes(test.id))) {
+        } else if (last && results.length > firstResultIndex) {
           last.error = message
+          last.validation = "failed"
         } else results.push({ id: test.id, label: test.label, error: message, validation: "failed" })
         await save()
         console.error("FAIL", test.id, message.slice(0, 180))
@@ -984,6 +1126,10 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
           await page
             .evaluate(async (id) => (window as any).api.bots.cancel(id), task.id)
             .catch(() => {})
+        if (providerPaymentRequired) {
+          await archive.checkpoint(report(), "provider:payment-required")
+          throw new Error("Model service returned HTTP 402. Remaining cases were not run.")
+        }
       }
       await save()
     }

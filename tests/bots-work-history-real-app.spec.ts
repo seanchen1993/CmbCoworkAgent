@@ -7,7 +7,7 @@ import { tmpdir } from "node:os"
 import { _electron } from "playwright"
 import { selectedBotRoutingModel } from "./support/bot-routing-model"
 import { botTestAppOutput } from "./support/bot-test-app"
-import { waitForBotAppState } from "./support/bot-app-state"
+import { settleBotTestIntroduction, waitForBotAppState } from "./support/bot-app-state"
 import { parseBotWorkHistoryHref } from "../src/shared/bots/work-history"
 
 type ApiWindow = Window & { api: any; __name?: (value: unknown) => unknown }
@@ -106,6 +106,7 @@ async function main() {
       { config: model, workspace }
     )
     await page.reload()
+    await settleBotTestIntroduction(page, setup.bot.id)
     await app.evaluate(({ BrowserWindow }) => {
       const window = BrowserWindow.getAllWindows()[0]
       window.setSize(1440, 940)
@@ -281,7 +282,6 @@ async function main() {
       animations: "disabled"
     })
     await page.locator(`[data-work-id="${linked.work.id}"]`).click()
-    await page.getByRole("button", { name: "打开聊天", exact: true }).click()
     await ready(threadId)
     await taskOptions.click()
     await page.getByRole("button", { name: "解除任务关联", exact: true }).waitFor()

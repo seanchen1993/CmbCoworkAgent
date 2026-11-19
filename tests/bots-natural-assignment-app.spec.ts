@@ -1,4 +1,4 @@
-import { waitForBotAppState } from "./support/bot-app-state"
+import { settleBotTestIntroduction, waitForBotAppState } from "./support/bot-app-state"
 /** Opt-in real-model App journey. Only synthetic text tasks in a disposable local profile. */
 import assert from "node:assert/strict"
 import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
@@ -34,7 +34,7 @@ async function main() {
       const body = JSON.parse(raw)
       wire.push({
         delegationGuidance: (body.messages ?? []).some((m: any) =>
-          m.role === "system" && JSON.stringify(m.content).includes("prefer bot_work_create when available")),
+          m.role === "system" && JSON.stringify(m.content).includes("start an asynchronous independent task before inspecting inputs")),
         canCreate: (body.tools ?? []).some((t: any) => t.function?.name === "bot_work_create")
       })
       const response = await fetch(config.baseUrl.replace(/\/+$/, "") + "/chat/completions", {
@@ -96,9 +96,9 @@ async function main() {
         modelRef: null
       })
     }, { ...config, baseUrl: `http://127.0.0.1:${address.port}/v1`, apiKey: "local-relay-only" })
-    // Sending a real user message ends/steers onboarding through beta's ordinary path.
     await page.getByText("Bots", { exact: true }).first().click()
     await page.getByText("自然交办验收", { exact: true }).first().click()
+    await settleBotTestIntroduction(page, bot.id)
     const composer = () => page.locator(".bots-conversation").locator('textarea, [role="textbox"][contenteditable="true"]').last()
     const send = async (message: string) => {
       await composer().click()
@@ -124,7 +124,8 @@ async function main() {
           const tasks = (await api.bots.snapshot()).tasks.filter((t: any) => t.botId === botId)
           return (
             tasks.filter((t: any) => t.workId).length >= minimum &&
-            tasks.filter((t: any) => t.origin.kind === "work_result").length >= minimum &&
+            tasks.filter((t: any) => t.origin.kind === "work_result" &&
+              (!t.origin.review || t.origin.review.phase === "publish")).length >= minimum &&
             !tasks.some((t: any) => ["queued", "running", "waiting_user"].includes(t.state))
           )
         },
@@ -176,7 +177,8 @@ async function main() {
           return {
             rows: (await api.bots.snapshot()).tasks.filter(
               (t: any) =>
-                t.botId === botId && t.origin.kind === "work_result" && t.origin.workId === workId
+                t.botId === botId && t.origin.kind === "work_result" && t.origin.workId === workId &&
+                (!t.origin.review || t.origin.review.phase === "publish")
             ),
             messages: await api.threads.getMessages(threadId)
           }
@@ -210,17 +212,14 @@ async function main() {
       [work.id]
     )
     const row = page.locator(".bot-work-row").filter({ hasText: work.title })
-    const preview = page.getByRole("region", { name: "任务预览", exact: true })
     const previewDraft = "查看任务时保留这条未发送草稿。"
     await composer().fill(previewDraft)
     await row.click()
-    await preview.getByText(/四点|4[:：]00|16[:：]00|下午\s*4/).first().waitFor()
+    await page.locator('[data-chat-thread-id="' + work.threadId + '"]').waitFor()
+    await page.locator(".bots-conversation").getByRole("button", { name: /主对话$/ }).first().click()
     await page.locator('[data-chat-thread-id="' + bot.threadId + '"]').waitFor()
-    assert.equal(await composer().inputValue(), previewDraft)
-    await preview.getByRole("button", { name: "返回任务列表", exact: true }).click()
-    await preview.waitFor({ state: "hidden" })
+    assert.equal(await composer().evaluate(el => el instanceof HTMLTextAreaElement ? el.value : el.textContent), previewDraft)
     await row.click()
-    await preview.getByRole("button", { name: "打开任务", exact: true }).click()
     await page.locator('[data-chat-thread-id="' + work.threadId + '"]').waitFor()
     const messages = await page.evaluate(
       async (id) => (window as any).api.threads.getMessages(id),
@@ -232,11 +231,10 @@ async function main() {
           m.role === "assistant" && /四点|4[:：]00|16[:：]00|下午4/.test(JSON.stringify(m.content))
       )
     )
-    await page.getByRole("button", { name: "任务详情与操作", exact: true }).click()
-    await page.getByRole("button", { name: "完成任务", exact: true }).click()
-    await page.getByRole("button", { name: "任务详情与操作", exact: true }).click()
+    const complete = page.getByRole("button", { name: "完成任务", exact: true })
+    if (!await complete.isVisible()) await page.getByRole("button", { name: "任务更多操作", exact: true }).click()
+    await complete.click()
     await page.getByRole("button", { name: "继续处理", exact: true }).waitFor()
-    await page.keyboard.press("Escape")
     await page
       .locator(".bots-conversation")
       .getByRole("button", { name: /主对话$/ })
@@ -280,7 +278,6 @@ async function main() {
     )
     assert.equal(thread.metadata.workspacePath, work.workspace.path)
     await row.click()
-    await preview.getByRole("button", { name: "打开任务", exact: true }).click()
     await page.locator('[data-chat-thread-id="' + work.threadId + '"]').waitFor()
     const delivery = page.locator(
       '[data-chat-thread-id="' +

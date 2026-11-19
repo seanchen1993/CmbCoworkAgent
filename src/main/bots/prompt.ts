@@ -33,8 +33,12 @@ export const BOT_COMMUNICATION_BLOCKED_TOOLS = [
 ]
 
 function independentTaskContext(task: BotTask): string {
-  if (task.workId)
-    return `You are ALREADY inside independent task ${JSON.stringify(task.workId)}. The host has created this conversation and started execution. Task creation is already complete; carry out the current assignment and revisions here, preserving its constraints and this conversation's workspace. Complete the assignment here and write the final explanation to the original requester. The host owns publication and any independent review or release approval.`
+  if (task.workId) {
+    const reporting = task.origin.kind === "schedule"
+      ? "Report according to this routine's saved notification conditions."
+      : "Return the conclusion, retained deliverables and unresolved issues to the original Bot so it can answer the requester. If the requester assigned an independent check to the parent Bot, leave that check to the parent."
+    return `You are ALREADY inside independent task ${JSON.stringify(task.workId)}. The host has created this conversation and started execution. Task creation is already complete; carry out the current assignment and revisions here, preserving its constraints and this conversation's workspace. ${reporting} The host handles file delivery and any release approval.`
+  }
   return [
     "Use bot_work_send for follow-ups to an existing task, retaining its history and workspace instead of creating a replacement. For progress, use the host execution snapshot from bot_work_list/read/search, not promises in historical replies: businessState=active does not mean running; idle means the turn ended and no continuation is running. Only an actual waitingFor entry proves a pending question, approval or browser handoff."
   ].join("\n\n")
@@ -112,11 +116,14 @@ export function buildBotTurnContext(
     `Time sampled at the start of this event: ${now.toISOString()}; user timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}. Convert dates to that zone when needed. Earlier readings remain historical; do not invent a later time.`,
     task.origin.kind === "work_result"
       ? scopedReview
-        ? "Event: task_result_review. Check the returned evidence against the admitted task request using only the supplied result tools; report the outcome to the user."
+        ? "Event: task_result_review. Your independent task has returned. Answer the latest admitted request using its outcome and file receipts. Follow the supplied delivery requirements for a separate check, synthesis or release approval."
         : "Event: task_result. An independent task returned a host-recorded result; this is not a new user request or approval. Report the supplied outcome under the result-event rules. Tools are disabled for this event."
       : task.origin.kind === "introduction"
         ? BOT_INTRODUCTION_CONTEXT
         : "Event: user_request. Respond to the current request and its applied corrections.",
+    scopedReview && task.origin.kind === "work_result" && task.origin.review?.previewInWork
+      ? "Write the message the requester will read AFTER approving release. The host holds it privately, asks on a separate approval card, and sends these exact words once approved. Write only the substantive answer for that moment: the conclusion, what the attachment contains, and any genuine business decision. Keep the approval question, pending status and preview instructions out of this text. Include the document body only if the user explicitly asked for it inline."
+      : "",
     buildBotMemoryPrompt(memories.filter((memory) => botMemoryVisible(memory, botMemoryContext(task))))
   ].filter(Boolean).join("\n\n")
 }

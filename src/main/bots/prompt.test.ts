@@ -80,7 +80,8 @@ describe("Bot asynchronous assignment guidance", () => {
     expect(BOT_COMMUNICATION_PROMPT).toContain("Browser operations always belong to the executing task")
     expect(prompt).not.toContain("available browser-help tool")
     expect(prompt).toContain("businessState=active does not mean running")
-    expect(BOT_COMMUNICATION_PROMPT).toContain("Use bot_work_send on the original task")
+    expect(BOT_COMMUNICATION_PROMPT).toContain("use bot_skill_dispatch, including for revisions to an existing task")
+    expect(BOT_COMMUNICATION_PROMPT).toContain("Send other revisions to the original task with bot_work_send")
     expect(prompt).not.toContain("bot_work_continue first")
     expect(prompt).not.toContain("check each requested acceptance criterion")
   })
@@ -100,6 +101,11 @@ describe("Bot asynchronous assignment guidance", () => {
     expect(event).toContain("Event: task_result")
     expect(event).toContain("Tools are disabled for this event")
     expect(event).toContain("2026-11-17T01:00:00.000Z")
+    const held: BotTask = { ...returned, origin: { ...report,
+      review: { phase: "review", requestTaskId: "source", attempt: 1, previewInWork: true } } }
+    expect(buildBotPrompt(bot, held, "/workspace")).toBe(buildBotPrompt(bot, source, "/workspace"))
+    expect(buildBotTurnContext(held, [], undefined, true)).toContain("AFTER approving release")
+    expect(buildBotTurnContext(returned, [], undefined, true)).not.toContain("AFTER approving release")
   })
   const noDispatch: Array<[string, BotTask]> = [
     ["report", { ...task, origin: report }],
@@ -136,7 +142,12 @@ describe("Bot asynchronous assignment guidance", () => {
       expect(prompt).not.toContain(preference)
       expect(prompt).toContain("ALREADY inside independent task")
       expect(prompt).toContain("carry out the current assignment and revisions here")
+      expect(prompt).toContain("to the original Bot so it can answer the requester")
     }
+    const routine = buildBotPrompt(bot, { ...source, workId: "work",
+      origin: { kind: "schedule", scheduleId: "scheduled-check" } }, "/selected")
+    expect(routine).toContain("this routine's saved notification conditions")
+    expect(routine).not.toContain("to the original Bot so it can answer the requester")
   })
 })
 
@@ -145,7 +156,7 @@ describe("Bot first conversation", () => {
     const prompt = buildBotPrompt(bot, task, "/private")
     expect(prompt).toContain("Honor a user-designated project or directory")
     expect(prompt).toMatch(/an input path alone does not designate a project/i)
-    expect(BOT_COMMUNICATION_PROMPT).toContain("Use bot_work_send on the original task")
+    expect(BOT_COMMUNICATION_PROMPT).toContain("Send other revisions to the original task with bot_work_send")
     expect(BOT_COMMUNICATION_PROMPT).toContain("Browser operations always belong to the executing task")
 
   })

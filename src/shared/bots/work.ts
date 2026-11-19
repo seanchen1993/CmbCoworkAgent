@@ -97,6 +97,11 @@ export interface BotWorkDispatchSource {
   callId: string
   key: string
   delivery?: BotResultDelivery
+  /** Resolved by the host only when the current user asks to run a named skill. */
+  namedSkill?: BotNamedSkill
+}
+export type BotNamedSkill = import("./skill-selection").BotSkillSelection & {
+  requestId: string
 }
 export interface CreateBotWorkInput {
   botId: string

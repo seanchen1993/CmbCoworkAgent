@@ -644,13 +644,14 @@ it.each([
 ] as const)("keeps personal IM delivery exact when a result review resumes ($previousState, different=$differentSnapshot, mixed=$mixed, other=$otherState, route=$routeChange)", ({
   previousState, differentSnapshot, queuesFile, mixed = false, otherState = "unknown" as const, routeChange
 }) => {
-  // The interruption and final publication can share a timestamp.
-  const now = Date.now() + 1_000
+  let now = Date.now()
   const { db, store, bot, start } = fixture(() => now)
   const bindingId = bindPersonalIm(store, bot.id)
   const otherRealm = "other-realm"
   const otherBindingId = routeChange === "other" ? bindPersonalIm(store, bot.id, otherRealm) : undefined
   if (otherBindingId) bindPersonalIm(store, bot.id)
+  // Both publications share a timestamp after the routes were actually activated.
+  now = Date.now()
   if (previousState === "pending") store.im.setAllOffline()
 
   const { work, task } = start()

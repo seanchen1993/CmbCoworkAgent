@@ -2,6 +2,7 @@ import { botPublicationLease } from "./work-result-settlement"
 import type { BotWorkDispatchSource } from "../../shared/bots/work"
 import { createHash } from "node:crypto"
 import { selectedMainBotSkill } from "../agent/bot-skill-dispatch"
+import { admittedWorkDelivery } from "./work-result-settlement"
 import { lstat, realpath, rm, stat } from "node:fs/promises"
 import type {
   BotConversationToolsPort,
@@ -794,10 +795,34 @@ export class LocalBotHost {
     const work = this.store.getWork(botId, workId)
     return { ...work, execution: this.workExecutionStatus(work) }
   }
+  async skillDispatchSource(taskId: string, callId: string, name?: string): Promise<BotWorkDispatchSource> {
+    const task = this.workToolSource(taskId)
+    const allowed = this.getBot(task.botId).allowedSkillNames ?? undefined
+    const skills = await import("../agent/standard-thread-turn")
+    const picked = selectedMainBotSkill(task)
+    if (picked) {
+      if (name && name !== picked.name) throw new BotError("CONFLICT", "交办的技能与本次选择不一致")
+      const problem = await skills.validateExplicitSkillReference(picked, undefined, allowed, true)
+      if (problem) throw new BotError("CONFLICT", problem)
+      return { taskId, callId, key: `skill:${task.requestId}` }
+    }
+    const input = this.store.namedSkillRequest(task)
+    const skill = await skills.resolveNamedBotSkill({ ...input, name }, allowed)
+    if (this.store.namedSkillRequest(this.workToolSource(taskId)).requestId !== input.requestId)
+      throw new BotError("CONFLICT", "用户请求已更新，请按最新要求处理")
+    return { taskId, callId, key: `skill:${input.requestId}`, namedSkill: { ...skill, requestId: input.requestId } }
+  }
+
+  private skillForDispatch(task: BotTask, source: BotWorkDispatchSource) {
+    const skill = source.namedSkill ?? selectedMainBotSkill(task)
+    if (!skill) throw new BotError("CONFLICT", "当前请求没有指定要执行的技能")
+    return skill
+  }
+
   /** One accepted assignment, retaining the existing task's workspace and source/audience checks. */
   continueSkillWork(source: BotWorkDispatchSource, workId: string, message: string) {
     const task = this.workToolSource(source.taskId)
-    if (!selectedMainBotSkill(task)) throw new BotError("CONFLICT", "当前主对话没有通过 / 选择技能")
+    this.skillForDispatch(task, source)
     const receipt = this.store.continueSkillWork(source, workId, message)
     this.changed()
     this.steerUserMessage(receipt.task)
@@ -807,7 +832,7 @@ export class LocalBotHost {
   async continueSkillWorkWithFiles(source: BotWorkDispatchSource, workId: string,
     message: string, inputFileIds: readonly string[]) {
     const task = this.workToolSource(source.taskId)
-    if (!selectedMainBotSkill(task)) throw new BotError("CONFLICT", "当前主对话没有通过 / 选择技能")
+    this.skillForDispatch(task, source)
     return this.withVerifiedWorkInputs(source, workId, inputFileIds,
       () => this.store.skillRouteReceipt(source, workId, message, inputFileIds),
       pins => this.store.continueSkillWork(source, workId, message, inputFileIds, pins),
@@ -2039,17 +2064,18 @@ export class LocalBotHost {
     return this.saveSchedule(botId, input, undefined, undefined, { workId, source })
   }
 
-  async saveSelectedSkillSchedule(source: BotConversationToolSource, input: BotScheduleInput, workId?: string,
+  async saveSelectedSkillSchedule(source: BotWorkDispatchSource, input: BotScheduleInput, workId?: string,
     target?: CreateBotWorkInput["workspace"]): Promise<BotSchedule> {
     const task = this.workToolSource(source.taskId)
-    const selected = selectedMainBotSkill(task)
-    if (!selected) throw new BotError("CONFLICT", "当前请求没有选择技能，未保存日程")
+    const selected = this.skillForDispatch(task, source)
     if (workId && target) throw new BotError("CONFLICT", "定时续办会沿用原任务的目录")
+    if (target && task.mockSource) throw new BotError("CONFLICT", "招乎例行可沿用本群任务目录，或使用默认目录")
     if (target && !this.runtime.workspaces) throw new BotError("CONFLICT", "当前主机不支持指定工作目录")
     const workspace = target ? await this.runtime.workspaces!.resolve(task.botId, target) : undefined
     this.workToolSource(source.taskId)
-    return this.saveSchedule(task.botId, input, undefined, undefined, {
-      source, workId, explicitSkill: { name: selected.name, path: selected.path }, workspace
+    return this.saveSchedule(task.botId, input, undefined, task.mockSource ? task.id : undefined, {
+      source, workId, explicitSkill: { name: selected.name, path: selected.path }, workspace,
+      delivery: admittedWorkDelivery(this.store.namedSkillRequest(task).request, source.delivery ?? {})
     })
   }
 

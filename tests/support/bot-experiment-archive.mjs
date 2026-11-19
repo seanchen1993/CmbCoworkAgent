@@ -26,6 +26,8 @@ const fingerprintFiles = [
   "src/renderer/src/lib/bot-work-receipt.ts",
   "src/main/bots/host.ts",
   "src/main/bots/store.ts",
+  "src/main/bots/named-skill.ts",
+  "src/main/agent/skill-lifecycle/registry.ts",
   "src/main/agent/standard-thread-turn.ts",
   "src/main/agent/current-run-message-queue.ts",
   "src/main/ipc/agent.ts",

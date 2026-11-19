@@ -10,7 +10,7 @@ import { pipeline } from "node:stream/promises"
 import { _electron } from "playwright"
 import { selectedBotRoutingModel } from "./support/bot-routing-model"
 import { botTestAppOutput } from "./support/bot-test-app"
-import { waitForBotAppState } from "./support/bot-app-state"
+import { settleBotTestIntroduction } from "./support/bot-app-state"
 import { splitBotInlineReasoning } from "../src/shared/bots/inline-reasoning"
 import { extractVisibleText } from "../src/main/agent/turn-completion-integrity"
 import { OPENING_REPLY_REMINDER } from "../src/main/agent/opening-reply-reminder"
@@ -32,7 +32,7 @@ async function main() {
       for await (const chunk of req) raw += chunk
       const body = JSON.parse(raw)
       const messages = body.messages ?? []
-      const lastUser = messages.findLastIndex((m: any) => m.role === "user")
+      const lastUser = messages.findLastIndex((m: any) => m.role === "user" && !JSON.stringify(m.content).includes("<bot_reply_reminder>"))
       wireRequests.push({
         test: activeCase,
         priorToolCalls: messages
@@ -40,7 +40,7 @@ async function main() {
           .reduce((n: number, m: any) => n + (m.tool_calls?.length ?? 0), 0),
         reminder: messages.some(
           (m: any) =>
-            m.role === "system" && JSON.stringify(m.content).includes(OPENING_REPLY_REMINDER)
+            m.role === "user" && JSON.stringify(m.content).includes(OPENING_REPLY_REMINDER)
         )
       })
       const upstream = await fetch(model.baseUrl.replace(/\/+$/, "") + "/chat/completions", {
@@ -146,15 +146,7 @@ async function main() {
         apiKey: "test-relay-no-upstream-secret"
       }
     )
-    await waitForBotAppState(
-      page,
-      async () =>
-        !(await window.api.bots.snapshot()).tasks.some((t) =>
-          ["queued", "running", "waiting_user"].includes(t.state)
-        ),
-      undefined,
-      { timeout: 240000 }
-    )
+    await settleBotTestIntroduction(page, bot.id)
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1440, 940))
     await page.getByText("Bots", { exact: true }).first().click()
     await page.getByText("首回复实测", { exact: true }).first().click()
@@ -279,11 +271,12 @@ async function main() {
         assert.ok(toolIndex >= 0, "substantive work must really call tools")
         if (firstTextIndex <= toolIndex)
           assert.ok(visibleWhileRunning, "user must see the update while work continues")
-        else
+        else if (result.requests.some(r => r.priorToolCalls >= 2))
           assert.ok(
             result.requests.some((r) => r.priorToolCalls >= 2 && r.reminder),
             "a missed opening must reach the real model's next request; report it separately from an opening reply"
           )
+        else console.log("OBSERVED: completed before the two-call reminder threshold", name)
       } else assert.equal(tools.length, 0, "a simple question should not need tools")
       return assistant
         .map((m) => splitBotInlineReasoning(extractVisibleText(m.content)).body)

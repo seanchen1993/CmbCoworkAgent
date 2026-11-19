@@ -444,7 +444,8 @@ describe("Bot messages during a user run", () => {
     // the injected request must not need another runtime to receive its routing contract.
     const prompt = buildBotPrompt(f.bot, intro, "/private") + (await import("../agent/bot-communication-prompt")).BOT_COMMUNICATION_PROMPT
     expect(buildBotTurnContext(intro)).toContain("If a real user message arrives, prioritize it immediately")
-    expect(prompt).toContain("Use bot_work_send on the original task")
+    expect(prompt).toContain("use bot_skill_dispatch, including for revisions to an existing task")
+    expect(prompt).toContain("Send other revisions to the original task with bot_work_send")
     f.host.onSteeringReady(intro.id)
     f.wait(true)
     const child = f.host.send({ botId: f.bot.id, requestId: "first-user", message: "Fix the CSV project in /projects/export, test and deliver it" })
