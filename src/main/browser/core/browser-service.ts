@@ -54,7 +54,10 @@ const MAX_BROWSER_ZOOM_FACTOR = 5
 const BROWSER_PROFILE_PARTITION = "persist:cmbdevclaw-browser-profile"
 const BROWSER_SERVICE_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[BrowserService]`
 const MAX_EXTRACTED_IFRAME_LINKS = 100
-const VIEWPORT_SYNC_TIMEOUT_MS = 2_000
+// Opening and laying out BrowserPanel can take noticeably longer on Windows,
+// especially on the first replay while Electron is creating the target. Keep
+// this handshake long enough for the renderer's stabilized viewport syncs.
+const VIEWPORT_SYNC_TIMEOUT_MS = 10_000
 const configuredDownloadSessions = new WeakSet<Session>()
 
 function safeDownloadFileName(fileName: string): string {
@@ -210,6 +213,14 @@ function normalizeZoomFactor(value: number): number {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function isAbortedNavigationError(error: unknown): boolean {
+  if (typeof error === "object" && error !== null) {
+    const candidate = error as { code?: unknown; errno?: unknown }
+    if (candidate.code === "ERR_ABORTED" || candidate.errno === -3) return true
+  }
+  return /\bERR_ABORTED\b/u.test(formatError(error))
 }
 
 function sameSiteForElectron(
@@ -763,7 +774,8 @@ export class BrowserService {
       this.pendingDeviceViewport &&
       session.deviceViewport &&
       session.deviceViewport.width === this.pendingDeviceViewport.width &&
-      session.deviceViewport.height === this.pendingDeviceViewport.height
+      session.deviceViewport.height === this.pendingDeviceViewport.height &&
+      Math.abs(session.deviceViewport.scale - this.pendingDeviceViewport.scale) < 0.001
     ) {
       this.pendingDeviceViewport = undefined
     }
@@ -776,7 +788,14 @@ export class BrowserService {
     const deadline = Date.now() + VIEWPORT_SYNC_TIMEOUT_MS
     while (Date.now() < deadline) {
       const current = this.getActiveSession()?.deviceViewport
-      if (current && current.width === viewport.width && current.height === viewport.height) return
+      if (
+        current &&
+        current.width === viewport.width &&
+        current.height === viewport.height &&
+        Math.abs(current.scale - viewport.scale) < 0.001
+      ) {
+        return
+      }
       await new Promise<void>((resolve) => setTimeout(resolve, 25))
     }
     throw new Error("设备预览设置未在回放开始前完成同步")
@@ -812,6 +831,10 @@ export class BrowserService {
       await session.view.webContents.loadURL(url)
       recordScriptNavigation(url, "explicit")
     } catch (error) {
+      // A following navigate call or an HTTP redirect can cancel the previous
+      // load. Electron rejects loadURL with ERR_ABORTED even though the next
+      // navigation is healthy, so do not flash that transient cancellation.
+      if (isAbortedNavigationError(error)) return this.getState()
       const message = formatError(error)
       session.error = message
       console.error(`${BROWSER_SERVICE_LOG_PREFIX} Navigation failed for ${sessionId}: ${message}.`)
@@ -1109,9 +1132,10 @@ export class BrowserService {
     })
     webContents.on("did-navigate", (_event, url) => {
       session.error = undefined
-      // Chromium persists page zoom by origin in the profile partition. Reset a zoom
-      // inherited from an earlier device preview once navigation is no longer scaled.
-      if (session.deviceScaleFactor === 1) this.applyEffectiveZoom(session)
+      // Chromium stores page zoom per origin. Every cross-origin navigation can
+      // therefore replace the active device-preview zoom with that origin's saved
+      // value, so restore the session's effective zoom for scaled and unscaled views.
+      this.applyEffectiveZoom(session)
       const permissionError = getUrlPermissionError(url, session.workspacePath)
       if (permissionError) {
         session.error = permissionError
