@@ -132,6 +132,9 @@ export async function fetchKnowledgeOrgDistribution(
     : null
   const raw = await requestKnowledgeSection(baseUrl, "org-distribution", parent, signal, request)
   const items = parseKnowledgeDistribution(raw, roomId ? "group" : "room")
+  if (roomId && items.some((item) => item.id === roomId)) {
+    throw new Error("组分布接口返回了室汇总，未返回有效的组分布")
+  }
   return orgIds && !roomId ? items.filter((item) => item.id && orgIds.includes(item.id)) : items
 }
 

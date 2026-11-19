@@ -2737,6 +2737,15 @@ interface CustomAPI {
       error?: string
       cancelled?: boolean
     }>
+    knowledgeRoomPeople: (
+      roomId: string,
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{
+      success: boolean
+      data?: KnowledgeUserDetails
+      error?: string
+      cancelled?: boolean
+    }>
     knowledgeUserDetails: (opts?: { upperOrgLv1?: string | string[] | null }) => Promise<{
       success: boolean
       data?: KnowledgeUserDetails

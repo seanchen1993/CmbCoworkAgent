@@ -7,7 +7,7 @@ import {
   type KnowledgeOrgItem,
   type KnowledgeRoom
 } from "../../../../../shared/dashboard-knowledge-overview"
-import { useKnowledgeDetails, type KnowledgePeopleState } from "../use-knowledge-details"
+import { useKnowledgeDetails } from "../use-knowledge-details"
 
 const COLORS = ["#3b82f6", "#14b8a6", "#8b5cf6", "#f59e0b", "#f97316", "#94a3b8"]
 const distributionColor = (index: number): string =>
@@ -180,7 +180,6 @@ type OrgProps = Pick<
 > & {
   rooms: string[]
   initialRoom?: KnowledgeRoom
-  people: KnowledgePeopleState
 }
 
 const title = "部门分布情况"
@@ -212,15 +211,30 @@ function RoomDistribution({
   loading,
   error,
   retry,
-  people,
   returnToRooms
 }: OrgProps & { room: KnowledgeRoom; returnToRooms?: () => void }): React.JSX.Element {
-  const [group, setGroup] = useState<KnowledgeOrgItem | null>(null)
-  const load = useCallback(
+  // undefined is the initial view. Returning from a group keeps its room's data loaded.
+  const [group, setGroup] = useState<KnowledgeOrgItem | null>()
+  const loadGroups = useCallback(
     (scope: string[]) => window.api.dashboard.knowledgeOrgGroups(room.id, { upperOrgLv1: scope }),
     [room.id]
   )
-  const groups = useKnowledgeDetails(!initialRoom, rooms, "dashboard:knowledgeOrgGroups", load)
+  const groups = useKnowledgeDetails(
+    !initialRoom,
+    rooms,
+    "dashboard:knowledgeOrgGroups",
+    loadGroups
+  )
+  const loadPeople = useCallback(
+    (scope: string[]) => window.api.dashboard.knowledgeRoomPeople(room.id, { upperOrgLv1: scope }),
+    [room.id]
+  )
+  const people = useKnowledgeDetails(
+    group !== undefined,
+    rooms,
+    "dashboard:knowledgeRoomPeople",
+    loadPeople
+  )
   const members = useMemo(() => {
     if (!group) return []
     return (people.data?.items ?? [])
@@ -229,7 +243,7 @@ function RoomDistribution({
           ? row.roomId === room.id
           : row.roomName
             ? normalizeRoomName(row.roomName) === normalizeRoomName(room.name)
-            : !!initialRoom
+            : true // The detail endpoint was queried with this room's ID.
         if (!sameRoom) return false
         if (group.id != null) return row.groupId === group.id
         return !row.groupId && !row.groupName && (row.groupId === null || row.groupName === null)
@@ -239,7 +253,7 @@ function RoomDistribution({
           b.totalNum - a.totalNum ||
           a.userName.localeCompare(b.userName, "zh-CN", { numeric: true })
       )
-  }, [people.data, room, initialRoom, group])
+  }, [people.data, room, group])
   const crumbClass =
     "min-w-0 truncate text-left text-primary hover:underline focus-visible:ring-2 focus-visible:ring-ring"
   const trail = (
@@ -292,8 +306,6 @@ function RoomDistribution({
       />
     )
   }
-  const memberError =
-    people.error ?? (people.data?.unavailableReason ? "当前范围无法查看人员明细" : null)
   return (
     <section aria-label={title} className={cardClass}>
       <div className="flex items-center justify-between gap-2 text-xs font-medium">
@@ -301,9 +313,9 @@ function RoomDistribution({
         <span className="text-[10px] font-normal text-muted-foreground">知识沉淀总数</span>
       </div>
       {trail}
-      {people.loading || memberError ? (
+      {people.loading || people.error ? (
         <>
-          <Status loading={people.loading} error={memberError} />
+          <Status loading={people.loading} error={people.error} />
           {people.error && (
             <button
               type="button"
