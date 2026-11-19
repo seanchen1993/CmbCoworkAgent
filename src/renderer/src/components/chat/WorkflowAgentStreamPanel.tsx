@@ -239,12 +239,9 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
   const convertedMessages = useMemo(
     () =>
       workflowAgentFocusView && focusSnapshot
-        ? transport.convertWorkflowAgentValuesSnapshot(
-            focusSnapshot,
-            `wfagent:${workflowAgentFocusView.runId}:${workflowAgentFocusView.agentIndex}`
-          )
+        ? transport.convertWorkflowAgentValuesSnapshot(focusSnapshot, messageWindowFocusKey)
         : [],
-    [transport, focusSnapshot, workflowAgentFocusView]
+    [transport, focusSnapshot, workflowAgentFocusView, messageWindowFocusKey]
   )
   const [projectMessages] = useState(createWorkflowAgentMessageProjector)
   const fullMessages = useMemo(

@@ -559,12 +559,27 @@ function testClearOnEveryRunExit(): void {
     "export async function cancelAndWaitForAgentThreadRun("
   )
   assert(foregroundDeleteStart >= 0, "foreground thread deletion helper exists")
-  const foregroundDeleteBody = agentIpc.slice(foregroundDeleteStart, foregroundDeleteStart + 900)
+  const foregroundDeleteBody = agentIpc.slice(
+    foregroundDeleteStart,
+    agentIpc.indexOf("async function waitForReplacedRunToSettle", foregroundDeleteStart)
+  )
   assertSourceOrder(
     foregroundDeleteBody,
     "controller.abort()",
-    "return waitForReplacedRunToSettle(threadId)",
+    "waitForReplacedRunToSettle(threadId)",
     "thread deletion aborts and bounded-waits for its foreground run"
+  )
+  assertSourceOrder(
+    foregroundDeleteBody,
+    "LocalSandbox.cancelBackgroundTasksWithin(",
+    "if (!controller) return (await shellSettlement)",
+    "thread deletion waits for detached Bash even when no foreground run is active"
+  )
+  assertSourceOrder(
+    threadsIpc,
+    'if (runOutcome === "shell_timed_out")',
+    "clearToolConcurrencyLocksForThread(threadId)",
+    "thread deletion stops on a shell settlement timeout before tearing down its runtime"
   )
   const deletedRuntimeStart = agentIpc.indexOf("export function disposeDeletedAgentThreadRuntime(")
   assert(deletedRuntimeStart >= 0, "deleted-thread runtime cleanup exists")

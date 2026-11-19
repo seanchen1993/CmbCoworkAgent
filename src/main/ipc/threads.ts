@@ -76,6 +76,7 @@ import {
 } from "../storage"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import { workflowRunManager } from "../agent/workflow/run-manager"
+import { LocalSandbox } from "../agent/local-sandbox"
 import {
   commitWorkflowThreadDisposal,
   deleteWorkflowRunsForThread,
@@ -110,7 +111,10 @@ import { makeHookResultCallback } from "../hooks/result-callback"
 import { stopWatching } from "../services/workspace-watcher"
 import { assertThreadDeletionWorkspace, isThreadDeletionBusy } from "./thread-deletion-busy"
 import { checkpointWalInBackground } from "../db/wal-checkpoint"
-import { isExternallyManagedThreadRunBusy } from "../services/thread-external-run-busy"
+import {
+  hasExternalThreadRunOwner,
+  isExternallyManagedThreadRunBusy
+} from "../services/thread-external-run-busy"
 import { threadMetadataMatchesGroupSelector } from "../services/thread-group-selector"
 import type {
   ForkableCheckpoint,
@@ -3553,11 +3557,25 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
   const deletingThreads = new Map<string, Promise<void>>()
 
+  const assertNoExternalThreadRunOwner = (
+    threadId: string,
+    metadata: Record<string, unknown>,
+    requireIdle?: boolean
+  ): void => {
+    if (hasExternalThreadRunOwner(threadId, metadata)) {
+      throw new Error(
+        requireIdle ? "会话仍在运行，已跳过该会话。" : "会话仍在运行或有待处理结果，已停止删除。"
+      )
+    }
+  }
+
   const performThreadDeletion = async (
     event: IpcMainInvokeEvent,
     threadId: string,
-    groupGuard?: ThreadDeleteOptions["groupGuard"]
+    metadata: Record<string, unknown>,
+    options?: ThreadDeleteOptions
   ): Promise<void> => {
+    const { groupGuard, requireIdle } = options ?? {}
     console.log("[Threads] Deleting thread:", threadId)
 
     // ThreadId-keyed run-store tombstone FIRST, before any await: launches and
@@ -3599,13 +3617,14 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         console.warn("[Threads] Workflow cancel on delete failed:", error)
       }
       const window = BrowserWindow.fromWebContents(event.sender)
-      try {
-        const foregroundOutcome = await cancelAndWaitForAgentThreadRun(threadId, window)
-        if (foregroundOutcome === "timed_out") {
-          console.warn("[Threads] Timed out waiting for foreground run cleanup during delete")
-        }
-      } catch (error) {
-        console.warn("[Threads] Foreground run cancel on delete failed:", error)
+      // An external owner can start while the workflow cancellation is settling.
+      assertNoExternalThreadRunOwner(threadId, metadata, requireIdle)
+      const runOutcome = await cancelAndWaitForAgentThreadRun(threadId, window)
+      if (runOutcome === "shell_timed_out") {
+        throw new Error("Shell 任务仍在退出，已停止删除。请稍后重试。")
+      }
+      if (runOutcome === "timed_out") {
+        console.warn("[Threads] Timed out waiting for foreground run cleanup during delete")
       }
       // Drop the thread's tool-concurrency locks so the module-level map
       // doesn't keep one idle lock per deleted thread for the process lifetime.
@@ -3902,24 +3921,31 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         ) {
           throw new Error("会话已变更或已移出分组，请重新确认。")
         }
-        if (options?.requireIdle) {
-          if (
-            await isThreadDeletionBusy(threadId, {
-              hasActiveRun: hasActiveAgentRun,
-              isAborting: isActiveAgentRunAborting,
-              waitForSettlement: waitForActiveAgentRunToSettle,
-              hasExternalRun: (id) => isExternallyManagedThreadRunBusy(id, metadata),
-              hasWorkflowRun: (id) => workflowRunManager.isActive(id),
-              hasWorkerRun: (id) => coordinatorWorkerManager.hasRunningWorkersForThread(id)
-            })
-          ) {
-            throw new Error("会话仍在运行，已跳过该会话。")
-          }
-        }
         while (deletingThreads.has(threadId)) {
           await deletingThreads.get(threadId)?.catch(() => undefined)
         }
-        const deletion = performThreadDeletion(event, threadId, options?.groupGuard)
+        if (options?.requireIdle) {
+          const hasBackgroundShell = (id: string): boolean =>
+            LocalSandbox.hasActiveBackgroundTasks(id, { includeChildRuns: true })
+          const busy = await isThreadDeletionBusy(threadId, {
+            hasActiveRun: hasActiveAgentRun,
+            isAborting: isActiveAgentRunAborting,
+            waitForSettlement: waitForActiveAgentRunToSettle,
+            hasExternalRun: (id) => isExternallyManagedThreadRunBusy(id, metadata),
+            hasWorkflowRun: (id) => workflowRunManager.isActive(id),
+            hasWorkerRun: (id) => coordinatorWorkerManager.hasRunningWorkersForThread(id),
+            hasBackgroundShell
+          })
+          // A shell can hand off while the idle guard resolves. Recheck before blocking starts.
+          if (busy || hasBackgroundShell(threadId)) {
+            throw new Error("会话仍在运行，已跳过该会话。")
+          }
+        }
+        assertNoExternalThreadRunOwner(threadId, metadata, options?.requireIdle)
+        const releaseShellBlock = LocalSandbox.blockNewBackgroundTasks(threadId)
+        const deletion = performThreadDeletion(event, threadId, metadata, options).finally(
+          releaseShellBlock
+        )
         deletingThreads.set(threadId, deletion)
         try {
           await deletion

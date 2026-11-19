@@ -128,25 +128,43 @@ describe("action stationarity", () => {
     })
   })
 
-  it("gives legitimate blocking task_output polling a higher halt threshold", async () => {
-    const cases = [
-      { task_id: "background-1" },
-      { task_id: "background-2", block: true },
-      { task_id: "background-3", timeout: 1000 },
-      { task_id: "background-4", timeout: 600_000 }
-    ]
+  it.each(["monitor", "task_output"])(
+    "gives legitimate blocking %s calls a higher halt threshold",
+    async (name) => {
+      const cases = [
+        { task_id: "background-1" },
+        { task_id: "background-2", block: true },
+        { task_id: "background-3", timeout: 1000 },
+        { task_id: "background-4", timeout: 600_000 }
+      ]
 
-    for (const [caseIndex, args] of cases.entries()) {
-      const middleware = createActionStationarityMiddleware()
-      const response = toolResponse("task_output", args)
-      const prompts: string[] = []
-      for (let index = 0; index < ACTION_STATIONARITY_HALT_THRESHOLD + 4; index += 1) {
-        await expect(
-          callMiddleware(middleware, `blocking-task-output-${caseIndex}`, response, prompts)
-        ).resolves.toBeInstanceOf(AIMessage)
+      for (const [caseIndex, args] of cases.entries()) {
+        const middleware = createActionStationarityMiddleware()
+        const response = toolResponse(name, args)
+        const prompts: string[] = []
+        for (let index = 0; index < ACTION_STATIONARITY_HALT_THRESHOLD + 4; index += 1) {
+          await expect(
+            callMiddleware(middleware, `blocking-${name}-${caseIndex}`, response, prompts)
+          ).resolves.toBeInstanceOf(AIMessage)
+        }
+        expect(prompts).toContainEqual(expect.stringContaining("后台任务的阻塞监听"))
       }
-      expect(prompts).toContainEqual(expect.stringContaining("阻塞式后台任务轮询"))
     }
+  )
+
+  it("counts consecutive monitor and task_output aliases as the same action", async () => {
+    const middleware = createActionStationarityMiddleware()
+    const threadId = "task-monitor-aliases"
+    const args = { task_id: "task", block: false }
+    for (let index = 1; index < ACTION_STATIONARITY_HALT_THRESHOLD; index += 1) {
+      const toolName = index % 2 === 0 ? "monitor" : "task_output"
+      await callMiddleware(middleware, threadId, toolResponse(toolName, args))
+    }
+    await expect(
+      callMiddleware(middleware, threadId, toolResponse("monitor", args))
+    ).rejects.toMatchObject({
+      decision: { action: "halt", count: ACTION_STATIONARITY_HALT_THRESHOLD, toolName: "monitor" }
+    })
   })
 
   it("eventually halts repeated blocking task_output polling", async () => {

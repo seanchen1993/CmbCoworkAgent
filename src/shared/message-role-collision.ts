@@ -6,6 +6,7 @@ export interface RoleCollisionMessage {
   type?: string
   provider_source_id?: string
   provider_occurrence?: number
+  worker_provider_identity?: boolean
   content?: unknown
   tool_call_id?: string
 }
@@ -238,7 +239,7 @@ export function advanceCompletedMessageContentRoute(
 
 export function getMessageProviderTupleFromMetadata(
   metadata: Record<string, unknown> | undefined
-): Pick<RoleCollisionMessage, "provider_source_id" | "provider_occurrence"> | undefined {
+): Required<Pick<RoleCollisionMessage, "provider_source_id" | "provider_occurrence">> | undefined {
   const providerSourceId = metadata?.[MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]
   const providerOccurrence = metadata?.[MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]
   if (
@@ -371,6 +372,13 @@ function providerRoleIdentity(message: RoleCollisionMessage): string {
   return collisionIdentity(getMessageProviderSourceId(message), normalizedMessageRole(message))
 }
 
+function completeProviderRoleIdentity(message: RoleCollisionMessage): string {
+  const identity = providerRoleIdentity(message)
+  // A worker's declared tuple and an occurrence inferred from the same raw ID
+  // are distinct in one ordered frame. Exact-ID adoption happens before normalization.
+  return message.worker_provider_identity ? `explicit-worker\u0000${identity}` : identity
+}
+
 export function getMessageProviderOccurrenceIdentity(message: RoleCollisionMessage): string {
   return `${providerRoleIdentity(message)}\u0000${getMessageProviderOccurrence(message) ?? 1}`
 }
@@ -424,7 +432,7 @@ export function buildAvailableProviderOccurrenceId(
   sourceId: string,
   role: string,
   occurrence: number,
-  occupiedIds: ReadonlySet<string>
+  occupiedIds: Pick<ReadonlySet<string>, "has">
 ): string {
   const primaryId =
     occurrence === 1
@@ -457,7 +465,13 @@ export function normalizeCompleteMessageIds<T extends RoleCollisionMessage>(
   return crossRoleNormalized.map((message) => {
     const role = normalizedMessageRole(message)
     const sourceId = getMessageProviderSourceId(message)
-    const identity = providerRoleIdentity(message)
+    const providerIdentity = completeProviderRoleIdentity(message)
+    // Separate explicitly identified results for different calls even when a
+    // provider reuses its source and occurrence. Keep legacy inference intact.
+    const identity =
+      role === "tool" && message.provider_source_id?.trim() && message.tool_call_id
+        ? `${providerIdentity}\u0000${message.tool_call_id}`
+        : providerIdentity
     const declaredOccurrence = getMessageProviderOccurrence(message)
     const highestOccurrence = occurrenceByIdentity.get(identity) ?? 0
     const occurrence = declaredOccurrence ?? highestOccurrence + 1
@@ -699,10 +713,17 @@ export function normalizeAppendedMessageIds<T extends RoleCollisionMessage>(
     normalizeCrossRole?: boolean
     splitAssistantAfterTool?: boolean
     forceAppend?: boolean
+    preserveWorkerSnapshotIdentities?: boolean
+    firstCandidateIndex?: number
+    previousProviderOccurrence?: (sourceId: string, role: string) => number | undefined
   } = {}
 ): T[] {
   const transcript = normalizeCompleteMessageIds(baselineMessages)
   const normalized: T[] = []
+  const identityFor = options.preserveWorkerSnapshotIdentities
+    ? completeProviderRoleIdentity
+    : providerRoleIdentity
+  const firstCandidateIndex = options.firstCandidateIndex ?? 0
 
   for (const rawMessage of incomingMessages) {
     if (options.normalizeCrossRole === false && isInternalMessageIdForRole(rawMessage)) {
@@ -712,24 +733,25 @@ export function normalizeAppendedMessageIds<T extends RoleCollisionMessage>(
     }
     const role = normalizedMessageRole(rawMessage)
     const sourceId = getMessageProviderSourceId(rawMessage)
-    const identity = providerRoleIdentity(rawMessage)
-    let lastUserIndex = -1
+    const identity = identityFor(rawMessage)
+    let lastUserIndex = firstCandidateIndex - 1
     for (let index = transcript.length - 1; index >= 0; index -= 1) {
       if (normalizedMessageRole(transcript[index]) === "user") {
-        lastUserIndex = index
+        lastUserIndex = Math.max(lastUserIndex, index)
         break
       }
     }
 
     const candidateIndexes: number[] = []
     for (let index = 0; index < transcript.length; index += 1) {
-      if (providerRoleIdentity(transcript[index]) === identity) candidateIndexes.push(index)
+      if (identityFor(transcript[index]) === identity) candidateIndexes.push(index)
     }
     const candidateProviderOccurrence = (candidateIndex: number): number =>
       getMessageProviderOccurrence(transcript[candidateIndex]) ??
       candidateIndexes.indexOf(candidateIndex) + 1
 
     const canUpdateCandidate = (candidateIndex: number): boolean => {
+      if (candidateIndex < firstCandidateIndex) return false
       if (role !== "tool") return true
       const candidateToolCallId = transcript[candidateIndex].tool_call_id
       if (
@@ -782,21 +804,28 @@ export function normalizeAppendedMessageIds<T extends RoleCollisionMessage>(
     let targetIndex: number | undefined
     const hasInternalId = isInternalMessageIdForRole(rawMessage)
     const declaredProviderOccurrence = getMessageProviderOccurrence(rawMessage)
+    const previousOccurrence = options.previousProviderOccurrence?.(sourceId, role) ?? 0
+    const scopedDeclaredOccurrence =
+      declaredProviderOccurrence !== undefined && declaredProviderOccurrence > previousOccurrence
+        ? declaredProviderOccurrence
+        : undefined
     const mustAppendDeclaredOccurrence =
       !options.forceAppend &&
-      declaredProviderOccurrence !== undefined &&
+      scopedDeclaredOccurrence !== undefined &&
       !candidateIndexes.some(
-        (index) => candidateProviderOccurrence(index) === declaredProviderOccurrence
+        (index) => candidateProviderOccurrence(index) === scopedDeclaredOccurrence
       )
     if (
       !options.forceAppend &&
-      declaredProviderOccurrence !== undefined &&
+      scopedDeclaredOccurrence !== undefined &&
       !mustAppendDeclaredOccurrence
     ) {
       const occurrenceIndex = candidateIndexes.find(
-        (index) => candidateProviderOccurrence(index) === declaredProviderOccurrence
+        (index) =>
+          candidateProviderOccurrence(index) === scopedDeclaredOccurrence &&
+          canUpdateCandidate(index)
       )
-      if (occurrenceIndex !== undefined && canUpdateCandidate(occurrenceIndex)) {
+      if (occurrenceIndex !== undefined) {
         targetIndex = occurrenceIndex
       }
     }
@@ -840,7 +869,8 @@ export function normalizeAppendedMessageIds<T extends RoleCollisionMessage>(
       if (
         exactIndex >= 0 &&
         adoptedProviderSourceId &&
-        adoptedProviderSourceId !== rawMessage.id.trim() &&
+        (adoptedProviderSourceId !== rawMessage.id.trim() ||
+          transcript[exactIndex].worker_provider_identity) &&
         !crossedToolBoundary &&
         canUpdateCandidate(exactIndex)
       ) {
@@ -914,7 +944,10 @@ export function normalizeAppendedMessageIds<T extends RoleCollisionMessage>(
               ...rawMessage,
               id: renderId,
               ...(providerSourceId ? { provider_source_id: providerSourceId } : {}),
-              ...(providerOccurrence ? { provider_occurrence: providerOccurrence } : {})
+              ...(providerOccurrence ? { provider_occurrence: providerOccurrence } : {}),
+              ...(transcript[targetIndex].worker_provider_identity && {
+                worker_provider_identity: true
+              })
             } as T)
       transcript[targetIndex] = { ...transcript[targetIndex], ...message, id: renderId }
     } else {
@@ -925,7 +958,7 @@ export function normalizeAppendedMessageIds<T extends RoleCollisionMessage>(
       let renderId = crossRoleMessage.id
       let providerOccurrence = getMessageProviderOccurrence(crossRoleMessage)
       const occupiedIds = new Set(transcript.map((candidate) => candidate.id))
-      if (candidateIndexes.length > 0) {
+      if (candidateIndexes.length > 0 || previousOccurrence > 0) {
         const highestExistingOccurrence = candidateIndexes.reduce(
           (highest, index, candidateOffset) => {
             const parsed = parseMessageSameRoleDuplicateId(transcript[index].id)
@@ -935,10 +968,9 @@ export function normalizeAppendedMessageIds<T extends RoleCollisionMessage>(
               persistedOccurrence ?? parsed?.occurrence ?? candidateOffset + 1
             )
           },
-          1
+          Math.max(1, previousOccurrence)
         )
-        const declaredOccurrence = getMessageProviderOccurrence(rawMessage)
-        providerOccurrence = declaredOccurrence ?? highestExistingOccurrence + 1
+        providerOccurrence = scopedDeclaredOccurrence ?? highestExistingOccurrence + 1
         renderId = buildAvailableProviderOccurrenceId(
           sourceId,
           role,

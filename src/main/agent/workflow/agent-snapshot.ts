@@ -16,14 +16,29 @@
  *    is spent, so the recent activity the user is looking at always survives.
  */
 
-export const WORKFLOW_AGENT_SNAPSHOT_CONTENT_CAP = 24_000
+import { createHash } from "node:crypto"
+import { MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY } from "../../../shared/message-role-collision"
+import {
+  WORKFLOW_AGENT_SNAPSHOT_CONTENT_CAP,
+  WORKFLOW_PRECEDING_PROMPT_INDEX_KEY
+} from "../../../shared/workflow-agent-snapshot"
+
+export { WORKFLOW_AGENT_SNAPSHOT_CONTENT_CAP }
 export const WORKFLOW_AGENT_SNAPSHOT_MAX_MESSAGES = 400
 export const WORKFLOW_AGENT_SNAPSHOT_TOTAL_CAP = 1_000_000
 const WORKFLOW_AGENT_SNAPSHOT_MAX_DEPTH = 12
 const WORKFLOW_AGENT_SNAPSHOT_MAX_ARRAY = 2_000
+const WORKFLOW_IDENTITY_PREFIX = "cmb-workflow-id:sha256:"
+
+type SnapshotField = "message" | "metadata" | "tool-calls" | "tool-call" | "identity"
 
 interface SnapshotBudget {
   left: number
+}
+
+export interface WorkflowAgentDisplaySnapshot {
+  messages: readonly unknown[]
+  retryPromptIndex?: number
 }
 
 function truncateString(value: string): string {
@@ -34,6 +49,35 @@ function truncateString(value: string): string {
     : value
 }
 
+function snapshotField(parent: SnapshotField | undefined, key: string): SnapshotField | undefined {
+  if (parent === "message") {
+    if (key === "kwargs") return "message"
+    if (key === "additional_kwargs") return "metadata"
+    if (key === "tool_call_id" || key === "id") return "identity"
+  }
+  if (parent === "message" || parent === "metadata") {
+    if (key === "tool_calls" || key === "tool_call_chunks") return "tool-calls"
+  }
+  if (parent === "metadata" && key === MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY) return "identity"
+  if (parent === "tool-call" && key === "id") return "identity"
+  return undefined
+}
+
+function boundIdentity(value: string): string {
+  if (
+    value.length <= WORKFLOW_AGENT_SNAPSHOT_CONTENT_CAP &&
+    !value.startsWith(WORKFLOW_IDENTITY_PREFIX)
+  ) {
+    return value
+  }
+  // Hash UTF-16 code units in bounded chunks, including lone surrogates.
+  const hash = createHash("sha256")
+  for (let start = 0; start < value.length; start += 4096) {
+    hash.update(value.slice(start, start + 4096), "utf16le")
+  }
+  return WORKFLOW_IDENTITY_PREFIX + hash.digest("hex")
+}
+
 /** Recursively copy a serialized message value, truncating over-long strings in place,
  * capping array length + nesting depth, and decrementing a shared TOTAL char budget so
  * the whole payload is bounded regardless of breadth. Honors `toJSON` (LangChain
@@ -42,11 +86,12 @@ function truncateString(value: string): string {
 export function boundedCloneSnapshotValue(
   value: unknown,
   depth: number,
-  budget: SnapshotBudget
+  budget: SnapshotBudget,
+  field?: SnapshotField
 ): unknown {
   if (budget.left <= 0) return undefined
   if (typeof value === "string") {
-    const capped = truncateString(value)
+    const capped = field === "identity" ? boundIdentity(value) : truncateString(value)
     budget.left -= capped.length
     return capped
   }
@@ -57,7 +102,12 @@ export function boundedCloneSnapshotValue(
   if (depth >= WORKFLOW_AGENT_SNAPSHOT_MAX_DEPTH) return undefined
   const serializable = value as { toJSON?: unknown }
   if (typeof serializable.toJSON === "function") {
-    return boundedCloneSnapshotValue((serializable.toJSON as () => unknown)(), depth + 1, budget)
+    return boundedCloneSnapshotValue(
+      (serializable.toJSON as () => unknown)(),
+      depth + 1,
+      budget,
+      field
+    )
   }
   if (Array.isArray(value)) {
     // The container itself costs budget: a tree of empty arrays has no leaf chars and would
@@ -72,7 +122,14 @@ export function boundedCloneSnapshotValue(
     const out: unknown[] = []
     for (const item of capped) {
       if (budget.left <= 0) break
-      out.push(boundedCloneSnapshotValue(item, depth + 1, budget))
+      out.push(
+        boundedCloneSnapshotValue(
+          item,
+          depth + 1,
+          budget,
+          field === "tool-calls" ? "tool-call" : undefined
+        )
+      )
     }
     return out
   }
@@ -86,7 +143,7 @@ export function boundedCloneSnapshotValue(
     if (!Object.prototype.hasOwnProperty.call(record, key)) continue
     if (budget.left <= 0) break
     budget.left -= key.length
-    out[key] = boundedCloneSnapshotValue(record[key], depth + 1, budget)
+    out[key] = boundedCloneSnapshotValue(record[key], depth + 1, budget, snapshotField(field, key))
   }
   return out
 }
@@ -98,26 +155,38 @@ export function boundedCloneSnapshotValue(
  * (the recent activity always survives). Never throws. */
 export function serializeWorkflowAgentSnapshotMessages(snapshot: unknown): unknown[] | undefined {
   if (typeof snapshot !== "object" || snapshot === null) return undefined
-  const raw = (snapshot as { messages?: unknown }).messages
+  const { messages: raw, retryPromptIndex } = snapshot as Partial<WorkflowAgentDisplaySnapshot>
   if (!Array.isArray(raw) || raw.length === 0) return undefined
-  const trimmed =
-    raw.length > WORKFLOW_AGENT_SNAPSHOT_MAX_MESSAGES
-      ? raw.slice(raw.length - WORKFLOW_AGENT_SNAPSHOT_MAX_MESSAGES)
-      : raw
-  // Absolute index of trimmed[0] in the FULL (pre-tail-slice) list. Stamp each kept message with its
-  // absolute position so the renderer's stable fallback key (for messages with NO provider id) does
-  // not drift as the tail window slides — otherwise React reuses the wrong bubble and tool results /
-  // scroll positions misalign. Mirrors the main chat's annotateWorkerSnapshotIndexForRenderer.
-  const sliceOffset = raw.length - trimmed.length
+  const oldestIndex = Math.max(0, raw.length - WORKFLOW_AGENT_SNAPSHOT_MAX_MESSAGES)
   const budget: SnapshotBudget = { left: WORKFLOW_AGENT_SNAPSHOT_TOTAL_CAP }
   try {
     const keptNewestFirst: unknown[] = []
-    for (let index = trimmed.length - 1; index >= 0; index -= 1) {
+    for (let index = raw.length - 1; index >= oldestIndex; index -= 1) {
       if (budget.left <= 0) break
-      const cloned = boundedCloneSnapshotValue(trimmed[index], 0, budget)
-      keptNewestFirst.push(annotateSnapshotIndexForRenderer(cloned, sliceOffset + index))
+      const cloned = boundedCloneSnapshotValue(raw[index], 0, budget, "message")
+      // The budget can cut through a message's role or provider tuple. Keep
+      // the newest activity, but omit a partial older row from the window.
+      if (budget.left <= 0 && keptNewestFirst.length > 0) break
+      keptNewestFirst.push(cloned)
     }
-    return keptNewestFirst.reverse()
+    // Carry the prompt boundary even if the message-count or byte cap removed the prompt.
+    const offset = raw.length - keptNewestFirst.length
+    const precedingPromptIndex =
+      typeof retryPromptIndex === "number" &&
+      Number.isSafeInteger(retryPromptIndex) &&
+      retryPromptIndex > 0 &&
+      retryPromptIndex < offset
+        ? retryPromptIndex
+        : undefined
+    return keptNewestFirst
+      .reverse()
+      .map((message, index) =>
+        annotateSnapshotIndexForRenderer(
+          message,
+          offset + index,
+          index === 0 ? precedingPromptIndex : undefined
+        )
+      )
   } catch {
     return undefined
   }
@@ -132,7 +201,11 @@ const WORKER_SNAPSHOT_INDEX_MESSAGE_KEY = "cmb_worker_snapshot_index"
  * additional_kwargs.cmb_worker_snapshot_index. The arg is a fresh bounded-clone, so we build new
  * wrappers (no source mutation) and spend only a few extra chars per message (negligible vs the
  * display cap). Non-object clones (shouldn't happen for messages) pass through untouched. */
-function annotateSnapshotIndexForRenderer(cloned: unknown, absoluteIndex: number): unknown {
+function annotateSnapshotIndexForRenderer(
+  cloned: unknown,
+  absoluteIndex: number,
+  precedingPromptIndex: number | undefined
+): unknown {
   if (!cloned || typeof cloned !== "object" || Array.isArray(cloned)) return cloned
   const record = cloned as Record<string, unknown>
   const kwargs =
@@ -151,7 +224,10 @@ function annotateSnapshotIndexForRenderer(cloned: unknown, absoluteIndex: number
       ...kwargs,
       additional_kwargs: {
         ...additionalKwargs,
-        [WORKER_SNAPSHOT_INDEX_MESSAGE_KEY]: absoluteIndex
+        [WORKER_SNAPSHOT_INDEX_MESSAGE_KEY]: absoluteIndex,
+        ...(precedingPromptIndex !== undefined && {
+          [WORKFLOW_PRECEDING_PROMPT_INDEX_KEY]: precedingPromptIndex
+        })
       }
     }
   }

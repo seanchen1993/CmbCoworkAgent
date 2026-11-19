@@ -20,6 +20,7 @@ import { getCustomSkillsDir, getPlugins } from "../storage"
 
 import { AsyncLocalStorage } from "node:async_hooks"
 import { spawn, execFile, type ChildProcess } from "node:child_process"
+import type { Duplex } from "node:stream"
 import { createHash, randomUUID } from "node:crypto"
 import {
   constants as fsConstants,
@@ -53,7 +54,15 @@ import {
 } from "./markdown-placeholders"
 import { replace } from "./replace"
 import { withFileOperation, withWorkspaceExecution } from "./file-operation-lock"
-import type { ToolOrchestrator } from "./tool-orchestrator"
+import { AUTO_COMMIT_FEATURE_ENABLED, registerWorkspaceShell } from "./shell-auto-commit-lock"
+import type { OrchestratedExecuteOptions, ToolOrchestrator } from "./tool-orchestrator"
+import {
+  ShellTaskMonitor,
+  type ShellTaskSnapshot,
+  type ShellTaskWaitOptions,
+  type ShellTaskWaitResult
+} from "./shell-task-monitor"
+import { getLocalThreadRunLease, type LocalThreadRunOwner } from "./thread-run-lease"
 import {
   assessCommandSafety,
   classifyCommandConcurrency,
@@ -79,9 +88,19 @@ import {
 import { getWindowsSandboxMode } from "../storage"
 import { homedir, userInfo } from "node:os"
 import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
-import type { HookContext, HookResultCallback } from "../hooks/runner"
+import {
+  hookMatchesRunCriteria,
+  postToolUseHookAffectsResult,
+  type HookContext,
+  type HookResultCallback
+} from "../hooks/runner"
 import { runHooksEnriched } from "../hooks/required-skill"
-import { detectToolFailure, hasFailureFired, markFailureFired } from "../hooks/tool-failure"
+import {
+  detectToolFailure,
+  hasFailureFired,
+  markFailureFired,
+  type ToolFailureSignal
+} from "../hooks/tool-failure"
 import { isHookHaltError, throwIfHookHalt } from "../hooks/halt"
 import { mergeUpdatedInput } from "../hooks/updated-input"
 import {
@@ -94,6 +113,7 @@ import {
   shouldSendFailureFuseNotice,
   throwIfFailureFuseHalt,
   type FailureFuseDecision,
+  type FailureFuseMode,
   type FailureFuseNoticeCallback
 } from "./failure-fuse"
 import type { HookScopeController } from "../hooks/scope"
@@ -410,6 +430,8 @@ export interface LocalSandboxOptions {
   abortSignal?: AbortSignal
   /** Logical thread/run owner used for background-task cancellation and hook/session identity. */
   runId?: string
+  /** Parent conversation that must wait for this child runtime's shell tasks during deletion. */
+  shellParentThreadId?: string
   /** Physical run owner used only for Windows ACL ref-counting and cleanup. */
   aclOwnerId?: string
   /** Absolute app-managed directory backing DeepAgents' logical /large_tool_results path. */
@@ -476,6 +498,12 @@ export interface LocalSandboxOptions {
 interface ExecuteRawOptions {
   background?: boolean
   cwd?: string
+  /** A command started with foreground semantics that may be handed off to its task. */
+  handoff?: {
+    onSpawn: (requestPromotion?: () => void) => (() => void) | undefined
+    onPromote: () => void
+    isPromoted: () => boolean
+  }
   /** Background teardown waits for residual descendants before releasing ownership. */
   waitForProcessTree?: boolean
   /** Internal background lifecycle hook: receives the process-tree termination promise. */
@@ -494,7 +522,59 @@ interface ExecuteRawOptions {
  * because it hit BACKGROUND_ABSOLUTE_MAX_MS — distinct from a foreground
  * timeout so it does NOT trigger the sandbox-escape retry path.
  */
-type LocalExecuteResponse = ExecuteResponse & { capReached?: boolean }
+type LocalExecuteResponse = ExecuteResponse & { capReached?: boolean; cancelled?: true }
+
+interface ShellTaskScope {
+  threadId: string
+  shellParentThreadId?: string
+  ownerId?: string
+  threadRunOwner: LocalThreadRunOwner
+}
+
+interface BackgroundShellTask extends ShellTaskScope {
+  id: string
+  aclOwnerId: string
+  command: string
+  cwd: string
+  startedAt: number
+  completed: boolean
+  settled: boolean
+  partialOutput: string
+  partialTruncated: boolean
+  lastOutputAt: number
+  abortController: AbortController
+  monitor: ShellTaskMonitor
+  halt?: { turnId: string | symbol; error: Error }
+  result?: LocalExecuteResponse
+  completion?: Promise<void>
+  termination?: Promise<void>
+}
+
+interface PendingBackgroundStart extends ShellTaskScope {
+  detached: boolean
+  abortController: AbortController
+  settled: Promise<void>
+}
+
+interface ToolShellExecution {
+  task: BackgroundShellTask
+  handoff?: ExecuteRawOptions["handoff"]
+  processSignal: AbortSignal
+  onCommandResult: () => void
+}
+
+interface ExecutePostHookPolicy {
+  scopedHooks: HookConfig[]
+  matchedHooks: HookConfig[]
+  failureFuseMode: FailureFuseMode
+  requiresForeground: boolean
+}
+
+type ToolShellResult =
+  | { status: "completed"; result: ExecuteResponse }
+  | { status: "background"; taskId: string; output: string }
+
+const SHELL_TASK_HARD_CAP = Symbol("shell task hard cap")
 
 type Utf8Inspection =
   | { kind: "ascii" | "valid" | "invalid" }
@@ -681,6 +761,7 @@ export class LocalSandbox
   readonly id: string
   /** Logical run/thread identifier for background-task cancellation and hooks. */
   readonly runId: string
+  private readonly shellParentThreadId?: string
   /** Physical ACL owner; distinct from logical runId during foreground replacement. */
   readonly aclOwnerId: string
 
@@ -721,6 +802,7 @@ export class LocalSandbox
   private readonly _requestHumanGate?: LocalSandboxOptions["requestHumanGate"]
   private readonly _humanGateThreadId: string
   private readonly _hookTurnId?: string
+  private readonly shellTaskTurnFallback = Symbol("shell task turn")
   /** Physical directory backing DeepAgents' logical /large_tool_results files. */
   private readonly _largeToolResultsDir: string
   /** Thread-scoped directory containing host-issued editable workflow scripts. */
@@ -1986,6 +2068,7 @@ export class LocalSandbox
 
     this.id = `local-sandbox-${randomUUID().slice(0, 8)}`
     this.runId = options.runId ?? this.id
+    this.shellParentThreadId = options.shellParentThreadId
     this.aclOwnerId = options.aclOwnerId ?? this.runId
     this.timeout = options.timeout ?? 60_000 // 1 minute default
     this.maxOutputBytes = options.maxOutputBytes ?? 100_000 // ~100KB default
@@ -2893,10 +2976,10 @@ export class LocalSandbox
     }
   }
 
-  private async runHooks(event: HookEvent, context: HookContext): Promise<HookResult | null> {
-    const hookContext: HookContext = {
+  private prepareHookContext(context: HookContext): HookContext {
+    return {
       ...context,
-      abortSignal: this.abortSignal,
+      abortSignal: context.abortSignal ?? this.abortSignal,
       ...(this.pluginOutputDir && !context.pluginOutputDir
         ? { pluginOutputDir: this.pluginOutputDir }
         : {}),
@@ -2932,9 +3015,41 @@ export class LocalSandbox
         : {}),
       turnId: context.turnId ?? this._hookTurnId
     }
+  }
 
-    const hooks = this.resolveHooks(event, hookContext)
-    let result = await runHooksEnriched(hooks, event, hookContext, this._onHookResult)
+  private captureExecutePostHookPolicy(context: HookContext): ExecutePostHookPolicy {
+    const hookContext = this.prepareHookContext(context)
+    const scopedHooks = this.resolveHooks("PostToolUse", hookContext).slice()
+    const matchedHooks = scopedHooks
+      .filter((hook) => hookMatchesRunCriteria(hook, "PostToolUse", hookContext))
+      .map((hook) => ({ ...hook }))
+    const failureFuseMode = getFailureFuseMode()
+    return {
+      scopedHooks,
+      matchedHooks,
+      failureFuseMode,
+      requiresForeground:
+        failureFuseMode === "debug" ||
+        matchedHooks.some((hook) => postToolUseHookAffectsResult(hook, hookContext))
+    }
+  }
+
+  private async runHooks(
+    event: HookEvent,
+    context: HookContext,
+    {
+      executePostPolicy,
+      failureSignal
+    }: { executePostPolicy?: ExecutePostHookPolicy; failureSignal?: ToolFailureSignal } = {}
+  ): Promise<HookResult | null> {
+    const hookContext = this.prepareHookContext(context)
+    const hooks = executePostPolicy?.scopedHooks ?? this.resolveHooks(event, hookContext)
+    let result = await runHooksEnriched(
+      executePostPolicy?.matchedHooks ?? hooks,
+      event,
+      hookContext,
+      this._onHookResult
+    )
     if (result) {
       this._hookScope?.activatePersistentHooks(hooks)
     }
@@ -2944,26 +3059,37 @@ export class LocalSandbox
     // a throw-path failure already caught by toolErrorMiddleware does not
     // re-trigger here.
     if (event === "PostToolUse" && context.toolResult) {
-      const failureFuseDecision = this.recordFailureFuseDecisionFromResult(hookContext)
+      const signal =
+        failureSignal ??
+        detectToolFailure(
+          hookContext.toolName ?? "",
+          LocalSandbox.parseToolResultForFailure(context.toolResult)
+        )
+      const failureFuseDecision = this.recordFailureFuseDecisionFromResult(
+        hookContext,
+        signal,
+        executePostPolicy?.failureFuseMode
+      )
       if (shouldSendFailureFuseNotice(failureFuseDecision)) {
         this._onFailureFuseNotice?.(failureFuseDecision)
       }
       result = LocalSandbox.mergeFailureFuseWarning(result, failureFuseDecision)
-      this.maybeFirePostToolUseFailureFromResult(hookContext)
+      if (signal) this.maybeFirePostToolUseFailureFromResult(hookContext, signal)
       if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
     }
     return result
   }
 
-  private recordFailureFuseDecisionFromResult(context: HookContext): FailureFuseDecision | null {
-    if (!context.toolResult) return null
+  private recordFailureFuseDecisionFromResult(
+    context: HookContext,
+    signal: ToolFailureSignal | null,
+    failureFuseMode?: FailureFuseMode
+  ): FailureFuseDecision | null {
     const turnId = context.turnId ?? this._hookTurnId
     if (!turnId) return null
 
-    const parsed = LocalSandbox.parseToolResultForFailure(context.toolResult)
-    const signal = detectToolFailure(context.toolName ?? "", parsed)
-    const threadId = context.sessionId ?? this.runId
     const toolName = context.toolName
+    const threadId = context.sessionId ?? this.runId
     if (!signal) {
       recordToolSuccess({ threadId, turnId, toolName, toolArgs: context.toolArgs })
       return null
@@ -2980,14 +3106,14 @@ export class LocalSandbox
       toolCallId,
       toolArgs: context.toolArgs,
       signal,
-      mode: getFailureFuseMode()
+      mode: failureFuseMode ?? getFailureFuseMode()
     })
   }
 
-  private maybeFirePostToolUseFailureFromResult(context: HookContext): void {
-    const parsed = LocalSandbox.parseToolResultForFailure(context.toolResult)
-    const signal = detectToolFailure(context.toolName ?? "", parsed)
-    if (!signal) return
+  private maybeFirePostToolUseFailureFromResult(
+    context: HookContext,
+    signal: ToolFailureSignal
+  ): void {
     const toolCallId = (context.toolArgs?.tool_call_id ??
       context.toolArgs?.tool_use_id ??
       "") as string
@@ -2996,6 +3122,7 @@ export class LocalSandbox
 
     const failureContext: HookContext = {
       ...context,
+      workspaceLockDeadline: undefined,
       toolResult: JSON.stringify({
         error: signal.message,
         error_type: signal.errorType,
@@ -3044,13 +3171,17 @@ export class LocalSandbox
 
   private async runPreToolUseHook(
     toolName: string,
-    toolArgs: Record<string, unknown>
+    toolArgs: Record<string, unknown>,
+    abortSignal?: AbortSignal,
+    workspaceLockDeadline?: number
   ): Promise<HookResult | null> {
     const context: HookContext = {
       toolName,
       toolArgs,
       workspacePath: this.workingDir,
-      sessionId: this.runId
+      sessionId: this.runId,
+      abortSignal,
+      workspaceLockDeadline
     }
     const preResult = await this.runHooks("PreToolUse", context)
     throwIfHookHalt("PreToolUse", preResult, `${toolName} was stopped by a PreToolUse hook`)
@@ -3059,23 +3190,32 @@ export class LocalSandbox
 
   async runPreToolUseHookForTool(
     toolName: string,
-    toolArgs: Record<string, unknown>
+    toolArgs: Record<string, unknown>,
+    abortSignal?: AbortSignal,
+    workspaceLockDeadline?: number
   ): Promise<HookResult | null> {
-    return this.runPreToolUseHook(toolName, toolArgs)
+    return this.runPreToolUseHook(toolName, toolArgs, abortSignal, workspaceLockDeadline)
   }
 
   async applyPostToolUseHookToText(
     toolName: string,
     toolArgs: Record<string, unknown>,
-    toolResult: string
+    toolResult: string,
+    failureSignal?: ToolFailureSignal,
+    hookOptions?: Pick<HookContext, "abortSignal" | "workspaceLockDeadline">
   ): Promise<string> {
-    const postResult = await this.runHooks("PostToolUse", {
-      toolName,
-      toolArgs,
-      toolResult,
-      workspacePath: this.workingDir,
-      sessionId: this.runId
-    })
+    const postResult = await this.runHooks(
+      "PostToolUse",
+      {
+        toolName,
+        toolArgs,
+        toolResult,
+        workspacePath: this.workingDir,
+        sessionId: this.runId,
+        ...hookOptions
+      },
+      { failureSignal }
+    )
     throwIfHookHalt("PostToolUse", postResult, `${toolName} was stopped by a PostToolUse hook`)
     const feedback = LocalSandbox.formatPostHookTextFeedback(postResult)
     return feedback ? `${toolResult}\n\n${feedback}` : toolResult
@@ -5814,6 +5954,10 @@ export class LocalSandbox
 
   /** Track all active child processes for cleanup on app quit. */
   private static readonly activeProcesses = new Set<ChildProcess>()
+  private static readonly windowsHandoffControls = new WeakMap<
+    ChildProcess,
+    { started: Promise<void>; readyToCollect: Promise<void>; terminate: () => Promise<void> }
+  >()
   private static readonly activeProcessTerminations = new WeakMap<
     ChildProcess,
     { promise: Promise<void>; waitForProcessTree: boolean }
@@ -5848,6 +5992,8 @@ export class LocalSandbox
     exited: () => boolean,
     waitForProcessTree = false
   ): Promise<void> {
+    const windowsControl = LocalSandbox.windowsHandoffControls.get(proc)
+    if (windowsControl) return windowsControl.terminate()
     const requireProcessTree = waitForProcessTree || LocalSandbox.applicationShutdownStarted
     const previous = LocalSandbox.activeProcessTerminations.get(proc)
     if (previous?.waitForProcessTree || (previous && !requireProcessTree)) {
@@ -6149,6 +6295,18 @@ export class LocalSandbox
    * @param runId — the agent run that is ending.
    */
   static async revokeGrantedAclsForRun(runId: string): Promise<void> {
+    if (process.platform === "win32") {
+      const completions: Promise<void>[] = []
+      for (const task of LocalSandbox.backgroundTasks.values()) {
+        if (task.aclOwnerId === runId && !task.settled && task.completion) {
+          completions.push(task.completion)
+        }
+      }
+      // Turn cleanup and workflow teardown release the ACL lease. A handed-off
+      // process still uses those permissions until its physical cleanup finishes.
+      if (completions.length > 0) await Promise.allSettled(completions)
+    }
+
     const runDirs = LocalSandbox._runAclDirs.get(runId)
     if (!runDirs || runDirs.size === 0) {
       LocalSandbox._runAclDirs.delete(runId)
@@ -6684,71 +6842,201 @@ export class LocalSandbox
   private static readonly BACKGROUND_ABSOLUTE_MAX_MS = 7_200_000
 
   /** Active background tasks (static — shared across instances so tasks survive re-creation). */
-  private static backgroundTasks = new Map<
-    string,
-    {
-      id: string
-      threadId: string
-      command: string
-      cwd: string
-      startedAt: number
-      completed: boolean
-      /** True only after executeRaw and any observed process-tree termination settle. */
-      settled: boolean
-      outputChunks: string[]
-      /** Live partial-output buffer, populated via onData while !completed. */
-      partialOutput: string
-      /** True once partialOutput hit the maxOutputBytes cap and stopped growing. */
-      partialTruncated: boolean
-      /** Timestamp of the most recent onData chunk (for idle detection). */
-      lastOutputAt: number
-      abortController: AbortController
-      result?: LocalExecuteResponse
-      /** Lifecycle fence: resolves after execution and any observed termination settle. */
-      completion?: Promise<void>
-      /** Physical process-tree termination reported by executeRaw after a kill. */
-      termination?: Promise<void>
-    }
+  private static backgroundTasks = new Map<string, BackgroundShellTask>()
+  private static readonly pendingBackgroundTaskStarts = new Set<PendingBackgroundStart>()
+  private static readonly activeBackgroundThreads = new Set<string>()
+  private static readonly closingBackgroundThreads = new Set<string>()
+  private static readonly backgroundShellListeners = new Set<
+    (change: { threadId: string; active: boolean }) => void
   >()
-  private static readonly pendingBackgroundTaskStarts = new Set<{
-    abortController: AbortController
-    settled: Promise<void>
-  }>()
 
-  private static beginBackgroundTaskStart(): {
+  static onBackgroundShellChange(
+    listener: (change: { threadId: string; active: boolean }) => void
+  ): () => void {
+    LocalSandbox.backgroundShellListeners.add(listener)
+    return () => LocalSandbox.backgroundShellListeners.delete(listener)
+  }
+
+  private static notifyBackgroundShellChange(threadId: string): void {
+    const active = LocalSandbox.hasActiveBackgroundTasks(threadId, { threadRunOwner: "desktop" })
+    if (active === LocalSandbox.activeBackgroundThreads.has(threadId)) return
+    if (active) LocalSandbox.activeBackgroundThreads.add(threadId)
+    else LocalSandbox.activeBackgroundThreads.delete(threadId)
+
+    for (const listener of LocalSandbox.backgroundShellListeners) {
+      try {
+        listener({ threadId, active })
+      } catch (error) {
+        console.warn("[LocalSandbox] Background shell listener failed:", error)
+      }
+    }
+  }
+
+  static blockNewBackgroundTasks(threadId: string): () => void {
+    LocalSandbox.closingBackgroundThreads.add(threadId)
+    return () => LocalSandbox.closingBackgroundThreads.delete(threadId)
+  }
+
+  private static shellBelongsToThread(
+    task: ShellTaskScope,
+    threadId: string,
+    includeChildRuns: boolean
+  ): boolean {
+    return (
+      task.threadId === threadId || (includeChildRuns && task.shellParentThreadId === threadId)
+    )
+  }
+
+  private beginBackgroundTaskStart(
+    ownerId: string | undefined,
+    detached: boolean,
+    signal?: AbortSignal
+  ): {
     abortController: AbortController
+    scope: ShellTaskScope
+    blockedByAutoCommit?: Promise<void>
+    releaseWorkspace?: () => void
     finish: () => void
   } | null {
-    if (LocalSandbox.applicationShutdownStarted) return null
+    if (
+      LocalSandbox.applicationShutdownStarted ||
+      LocalSandbox.closingBackgroundThreads.has(this.runId) ||
+      (this.shellParentThreadId !== undefined &&
+        LocalSandbox.closingBackgroundThreads.has(this.shellParentThreadId)) ||
+      signal?.aborted
+    ) {
+      return null
+    }
 
+    const workspaceShell = AUTO_COMMIT_FEATURE_ENABLED
+      ? registerWorkspaceShell(this.workingDir)
+      : undefined
     const abortController = new AbortController()
+    const onAbort = (): void => abortController.abort(signal?.reason)
+    signal?.addEventListener("abort", onAbort, { once: true })
     let resolveSettled!: () => void
-    const pending = {
+    // A new transport may claim the thread while this shell is starting or detached.
+    const currentLease =
+      getLocalThreadRunLease(this.runId) ??
+      (this.shellParentThreadId ? getLocalThreadRunLease(this.shellParentThreadId) : undefined)
+    const scope: ShellTaskScope = {
+      threadId: this.runId,
+      shellParentThreadId: this.shellParentThreadId,
+      ownerId,
+      threadRunOwner: currentLease?.owner ?? "desktop"
+    }
+    const pending: PendingBackgroundStart = {
+      ...scope,
+      detached,
       abortController,
       settled: new Promise<void>((resolve) => {
         resolveSettled = resolve
       })
     }
     LocalSandbox.pendingBackgroundTaskStarts.add(pending)
+    if (detached) LocalSandbox.notifyBackgroundShellChange(this.runId)
 
     let finished = false
     return {
       abortController,
+      scope,
+      blockedByAutoCommit: workspaceShell?.blockedByAutoCommit,
+      releaseWorkspace: workspaceShell?.release,
       finish: () => {
         if (finished) return
         finished = true
+        signal?.removeEventListener("abort", onAbort)
         LocalSandbox.pendingBackgroundTaskStarts.delete(pending)
         resolveSettled()
+        if (detached) LocalSandbox.notifyBackgroundShellChange(this.runId)
       }
     }
   }
 
   private static backgroundStartCancelledMessage(): string {
-    return "Background task was not started because the application is shutting down."
+    return LocalSandbox.applicationShutdownStarted
+      ? "Background task was not started because the application is shutting down."
+      : "Background task was cancelled before it started."
+  }
+
+  private createBackgroundTask(
+    command: string,
+    cwd: string,
+    abortController: AbortController,
+    scope: ShellTaskScope
+  ): BackgroundShellTask {
+    const now = Date.now()
+    return {
+      id: randomUUID().replaceAll("-", ""),
+      ...scope,
+      aclOwnerId: this.aclOwnerId,
+      command,
+      cwd,
+      startedAt: now,
+      completed: false,
+      settled: false,
+      partialOutput: "",
+      partialTruncated: false,
+      lastOutputAt: now,
+      abortController,
+      monitor: new ShellTaskMonitor()
+    }
+  }
+
+  private appendBackgroundOutput(task: BackgroundShellTask, text: string): void {
+    task.lastOutputAt = Date.now()
+    if (task.partialTruncated) return
+    const remaining = this.maxOutputBytes - task.partialOutput.length
+    task.partialOutput += text.slice(0, remaining)
+    task.partialTruncated = text.length > remaining
+  }
+
+  private static publishBackgroundResult(
+    task: BackgroundShellTask,
+    result: LocalExecuteResponse
+  ): void {
+    if (task.completed) return
+    task.result = result
+    task.completed = true
+    task.monitor.publish()
+  }
+
+  private static createBackgroundCapResult(task: BackgroundShellTask): LocalExecuteResponse {
+    return {
+      output:
+        "Background task reached its 2-hour runtime limit.\n\n" +
+        (task.partialOutput || "<no output>"),
+      exitCode: 124,
+      truncated: task.partialTruncated,
+      capReached: true
+    }
+  }
+
+  private static async settleBackgroundTask(task: BackgroundShellTask): Promise<void> {
+    await task.termination?.catch(() => undefined)
+    task.settled = true
+    LocalSandbox.notifyBackgroundShellChange(task.threadId)
+    // Keep result access after completion, and ownership until the process tree is idle.
+    const expiryTimer = setTimeout(
+      () => {
+        if (LocalSandbox.backgroundTasks.get(task.id) === task) {
+          LocalSandbox.backgroundTasks.delete(task.id)
+        }
+      },
+      10 * 60 * 1000
+    )
+    expiryTimer.unref?.()
+  }
+
+  private static backgroundTaskStartedMessage(id: string): string {
+    return (
+      "Background task started (id: " + id + "). Use monitor with this id to wait for its result."
+    )
   }
 
   private async requestHumanGateForExecute(
-    result: HookResult | null
+    result: HookResult | null,
+    signal = this.abortSignal
   ): Promise<{ release: () => void } | undefined> {
     if (result?.decision !== "human_gate") return undefined
     const fallbackReason = "decision=human_gate 仅支持当前项目绑定插件的 PreToolUse(execute) Hook"
@@ -6779,7 +7067,7 @@ export class LocalSandbox
       hookPluginId: result.decisionSource.pluginId,
       harnessPluginId: this.pluginId,
       message: result.systemMessage ?? "",
-      abortSignal: this.abortSignal
+      abortSignal: signal
     })
   }
 
@@ -6788,31 +7076,66 @@ export class LocalSandbox
    * The command runs asynchronously with a long timeout.
    * Use `getTaskOutput(taskId)` to retrieve the result or check progress.
    */
-  async executeBackground(command: string, cwd?: string): Promise<string> {
-    const pendingStart = LocalSandbox.beginBackgroundTaskStart()
+  async executeBackground(
+    command: string,
+    cwd?: string,
+    ownerId?: string,
+    callerSignal = this.abortSignal
+  ): Promise<string> {
+    const pendingStart = this.beginBackgroundTaskStart(ownerId, true, callerSignal)
     if (!pendingStart) return LocalSandbox.backgroundStartCancelledMessage()
+    const { abortController, scope, blockedByAutoCommit, releaseWorkspace, finish } = pendingStart
+    let registered = false
     try {
-      return await this.executeBackgroundAfterStart(command, cwd, pendingStart.abortController)
+      if (blockedByAutoCommit) {
+        await LocalSandbox.raceWithAbort(blockedByAutoCommit, abortController.signal)
+      }
+      return await this.executeBackgroundAfterStart(
+        command,
+        cwd,
+        abortController,
+        scope,
+        (completion) => {
+          registered = true
+          if (releaseWorkspace) void completion.then(releaseWorkspace, releaseWorkspace)
+          finish()
+        }
+      )
+    } catch (error) {
+      if (!registered && abortController.signal.aborted && LocalSandbox.isAbortError(error)) {
+        return LocalSandbox.backgroundStartCancelledMessage()
+      }
+      throw error
     } finally {
-      pendingStart.finish()
+      if (!registered) releaseWorkspace?.()
+      finish()
     }
   }
 
   private async executeBackgroundAfterStart(
     command: string,
     cwd: string | undefined,
-    taskAbortController: AbortController
+    taskAbortController: AbortController,
+    scope: ShellTaskScope,
+    register: (completion: Promise<void>) => void
   ): Promise<string> {
     const requestedCwd = this.resolveExecutionCwd(cwd)
     const toolArgs = { command, run_in_background: true as const, cwd: requestedCwd }
-    const preResult = await this.runPreToolUseHookForTool("execute", toolArgs)
+    const preResult = await this.runPreToolUseHookForTool(
+      "execute",
+      toolArgs,
+      taskAbortController.signal
+    )
     if (taskAbortController.signal.aborted) {
       return LocalSandbox.backgroundStartCancelledMessage()
     }
     if (preResult?.blocked || preResult?.decision === "block") {
       return `[Hook blocked] ${preResult.stdout || preResult.reason || "execute was blocked by a hook"}`
     }
-    const humanGateLease = await this.requestHumanGateForExecute(preResult)
+    const humanGateLease = await this.requestHumanGateForExecute(
+      preResult,
+      taskAbortController.signal
+    )
     let leaseTransferred = false
     try {
       return await this.executeBackgroundAfterPreToolUse(
@@ -6821,6 +7144,8 @@ export class LocalSandbox
         toolArgs,
         preResult,
         taskAbortController,
+        scope,
+        register,
         (completion) => {
           leaseTransferred = true
           void completion.finally(humanGateLease?.release)
@@ -6837,6 +7162,8 @@ export class LocalSandbox
     toolArgs: { command: string; run_in_background: true; cwd: string },
     preResult: HookResult | null,
     taskAbortController: AbortController,
+    scope: ShellTaskScope,
+    register: (completion: Promise<void>) => void,
     transferHumanGateLease: (completion: Promise<void>) => void
   ): Promise<string> {
     const updatedArgs = LocalSandbox.mergeUpdatedInput(toolArgs, preResult?.updatedInput)
@@ -6906,15 +7233,33 @@ export class LocalSandbox
       (isGitCommitCommand(effectiveCommand, shellSyntax) ||
         isGitPushCommand(effectiveCommand, shellSyntax))
     ) {
-      const result = await shellFileCaptureContext.run(true, () =>
-        this.orchestrator!.execute(
-          effectiveCommand,
-          effectiveCwd,
-          this.windowsSandbox,
-          shellSyntax,
-          outsideShellSyntax
+      const signal = taskAbortController.signal
+      let termination: Promise<void> | undefined
+      const execution: OrchestratedExecuteOptions = {
+        signal,
+        rawExecute: (command, sandboxMode, cwd) =>
+          this.executeRaw(command, sandboxMode, undefined, signal, {
+            cwd,
+            waitForProcessTree: true,
+            onTermination: (pending) => {
+              termination = pending
+            }
+          })
+      }
+      const result = await shellFileCaptureContext
+        .run(true, () =>
+          this.orchestrator!.execute(
+            effectiveCommand,
+            effectiveCwd,
+            this.windowsSandbox,
+            shellSyntax,
+            outsideShellSyntax,
+            execution
+          )
         )
-      )
+        .finally(async () => {
+          await termination?.catch(() => undefined)
+        })
       return result.output || (result.exitCode === 0 ? "操作成功" : "操作失败")
     }
 
@@ -6935,24 +7280,13 @@ export class LocalSandbox
     if (taskAbortController.signal.aborted) {
       return LocalSandbox.backgroundStartCancelledMessage()
     }
-    const taskId = randomUUID().slice(0, 8)
-    const task = {
-      id: taskId,
-      threadId: this.runId,
-      command: effectiveCommand,
-      cwd: effectiveCwd,
-      startedAt: Date.now(),
-      completed: false as boolean,
-      settled: false,
-      outputChunks: [] as string[],
-      partialOutput: "",
-      partialTruncated: false,
-      lastOutputAt: Date.now(),
-      abortController: taskAbortController,
-      result: undefined as LocalExecuteResponse | undefined,
-      completion: undefined as Promise<void> | undefined,
-      termination: undefined as Promise<void> | undefined
-    }
+    const task = this.createBackgroundTask(
+      effectiveCommand,
+      effectiveCwd,
+      taskAbortController,
+      scope
+    )
+    const taskId = task.id
     LocalSandbox.backgroundTasks.set(taskId, task)
 
     // Fire and forget — don't await. Uses extended timeout for background execution.
@@ -6966,24 +7300,7 @@ export class LocalSandbox
       {
         background: true,
         cwd: effectiveCwd,
-        // Live partial-output buffer (separate from the final authoritative
-        // output appended to outputChunks/result on completion). Caps at
-        // maxOutputBytes; once exceeded it stops growing and marks truncated.
-        onData: (text: string) => {
-          task.lastOutputAt = Date.now()
-          if (task.partialTruncated) return
-          const remaining = this.maxOutputBytes - task.partialOutput.length
-          if (remaining <= 0) {
-            task.partialTruncated = true
-            return
-          }
-          if (text.length > remaining) {
-            task.partialOutput += text.slice(0, remaining)
-            task.partialTruncated = true
-          } else {
-            task.partialOutput += text
-          }
-        },
+        onData: (text) => this.appendBackgroundOutput(task, text),
         // Cancellation/timeout must settle the whole process tree before any
         // thread-owned data can be deleted, regardless of worktree isolation.
         waitForProcessTree: true,
@@ -7011,7 +7328,18 @@ export class LocalSandbox
                 effectiveCwd,
                 this.windowsSandbox,
                 rawResult,
-                outsideShellSyntax
+                outsideShellSyntax,
+                {
+                  signal: taskAbortController.signal,
+                  rawExecute: (command, sandboxMode, cwd) =>
+                    this.executeRaw(command, sandboxMode, undefined, taskAbortController.signal, {
+                      cwd,
+                      waitForProcessTree: true,
+                      onTermination: (termination) => {
+                        task.termination = termination
+                      }
+                    })
+                }
               )
               .catch((err) => {
                 console.warn(
@@ -7022,10 +7350,7 @@ export class LocalSandbox
               })
           : rawResult
         if (task.completed) return
-        task.result = result
-        // Append final output to chunks for completeness
-        if (result.output) task.outputChunks.push(result.output)
-        task.completed = true
+        LocalSandbox.publishBackgroundResult(task, result)
         console.log(
           `[LocalSandbox] background task ${taskId} completed: exitCode=${result.exitCode}`
         )
@@ -7033,40 +7358,20 @@ export class LocalSandbox
       .catch((err) => {
         // Guard: if already completed (e.g. cancelled via cancelBackgroundTasks), don't overwrite.
         if (task.completed) return
-        task.result = {
-          output: `Error: ${err instanceof Error ? err.message : String(err)}`,
+        LocalSandbox.publishBackgroundResult(task, {
+          output: "Error: " + (err instanceof Error ? err.message : String(err)),
           exitCode: 1,
           truncated: false
-        }
-        task.completed = true
-        console.log(`[LocalSandbox] background task ${taskId} errored: ${err}`)
+        })
       })
-      .finally(async () => {
-        // executeRaw can resolve before a platform-specific process-tree kill
-        // promise settles. Keep destructive-operation guards closed until both
-        // ownership signals have reached a terminal state.
-        await task.termination?.catch(() => undefined)
-        task.settled = true
-
-        // Keep the result available for task_output, but never expire the only
-        // ownership record before the command is deletion-safe. Checking object
-        // identity also prevents a rare reused task id from deleting its successor.
-        const expiryTimer = setTimeout(
-          () => {
-            if (LocalSandbox.backgroundTasks.get(taskId) !== task) return
-            LocalSandbox.backgroundTasks.delete(taskId)
-            console.log(`[LocalSandbox] background task ${taskId} expired, cleaned up`)
-          },
-          10 * 60 * 1000
-        )
-        expiryTimer.unref?.()
-      })
+      .finally(() => LocalSandbox.settleBackgroundTask(task))
     transferHumanGateLease(completion)
     // Always retain completion. Ordinary (non-worktree) background commands
     // also need a deletion-safe ownership fence after cancellation.
     task.completion = completion
+    register(completion)
 
-    const startedMessage = `Background task started (id: ${taskId}). Use task_output tool with this id to check results later.`
+    const startedMessage = LocalSandbox.backgroundTaskStartedMessage(taskId)
     try {
       return await this.applyPostToolUseHookToText(
         "execute",
@@ -7076,15 +7381,14 @@ export class LocalSandbox
     } catch (error) {
       if (isHookHaltError(error) || isFailureFuseHaltError(error)) {
         taskAbortController.abort()
-        task.completed = true
         const reason = isFailureFuseHaltError(error)
           ? "failure fuse halted the turn"
           : "PostToolUse halted the turn"
-        task.result = {
+        LocalSandbox.publishBackgroundResult(task, {
           output: `Background task ${taskId} cancelled because ${reason}.`,
           exitCode: 130,
           truncated: false
-        }
+        })
       }
       throw error
     }
@@ -7094,20 +7398,40 @@ export class LocalSandbox
    * Retrieve a background task's current status and output.
    * When still running, returns elapsed time and command info so the agent can report progress.
    */
-  getTaskOutput(taskId: string): {
-    completed: boolean
-    output?: string
-    exitCode?: number | null
-    elapsedSeconds?: number
-    command?: string
-    cwd?: string
-    partialOutput?: string
-    partialTruncated?: boolean
-    idleSeconds?: number
-    capReached?: boolean
-  } | null {
-    const task = LocalSandbox.backgroundTasks.get(taskId)
+  getTaskOutput(taskId: string, ownerId?: string): ShellTaskSnapshot | null {
+    const task = this.getOwnedBackgroundTask(taskId, ownerId)
     if (!task) return null
+    this.throwTaskHaltForCurrentTurn(task)
+    return LocalSandbox.snapshotBackgroundTask(task)
+  }
+
+  async waitForTaskOutput(
+    taskId: string,
+    { ownerId, ...options }: ShellTaskWaitOptions & { ownerId?: string } = {}
+  ): Promise<ShellTaskWaitResult> {
+    const task = this.getOwnedBackgroundTask(taskId, ownerId)
+    if (!task) return { status: "missing" }
+    const status = await task.monitor.wait(options)
+    if (status === "aborted") return { status }
+    this.throwTaskHaltForCurrentTurn(task)
+    return { status, result: LocalSandbox.snapshotBackgroundTask(task) }
+  }
+
+  private getOwnedBackgroundTask(
+    taskId: string,
+    ownerId?: string
+  ): BackgroundShellTask | undefined {
+    const task = LocalSandbox.backgroundTasks.get(taskId)
+    return task?.threadId === this.runId && task.ownerId === ownerId ? task : undefined
+  }
+
+  private throwTaskHaltForCurrentTurn(task: BackgroundShellTask): void {
+    if (task.halt?.turnId === (this._hookTurnId ?? this.shellTaskTurnFallback)) {
+      throw task.halt.error
+    }
+  }
+
+  private static snapshotBackgroundTask(task: BackgroundShellTask): ShellTaskSnapshot {
     const elapsedSeconds = Math.round((Date.now() - task.startedAt) / 1000)
     if (!task.completed) {
       return {
@@ -7125,62 +7449,112 @@ export class LocalSandbox
       output: task.result?.output,
       exitCode: task.result?.exitCode,
       elapsedSeconds,
-      capReached: task.result?.capReached
+      capReached: task.result?.capReached,
+      ...(task.result?.cancelled && { cancelled: task.result.cancelled }),
+      truncated: task.result?.truncated,
+      ...(task.halt && { stopReason: task.halt.error.message })
     }
   }
 
-  /**
-   * Cancel all running background tasks for a given thread (conversation).
-   * Called when the user explicitly stops the current conversation.
-   */
-  static cancelBackgroundTasks(threadId: string): void {
-    LocalSandbox.cancelBackgroundTasksForThread(threadId)
+  /** Cancel registered tasks and pending starts owned by this thread. */
+  static cancelBackgroundTasks(
+    threadId: string,
+    { threadRunOwner }: { threadRunOwner?: LocalThreadRunOwner } = {}
+  ): void {
+    LocalSandbox.cancelBackgroundTasksMatching({ threadId, threadRunOwner })
   }
 
-  /**
-   * Read-only ownership check for detached commands that outlive their foreground
-   * agent turn. A completed result may already be visible through task_output while
-   * its physical process tree is still settling, so only `settled` makes it idle.
-   */
-  static hasActiveBackgroundTasks(threadId: string): boolean {
+  /** The desktop shell Stop control only affects detached desktop commands. */
+  static cancelDetachedBackgroundTasks(threadId: string): boolean {
+    return (
+      LocalSandbox.cancelBackgroundTasksMatching({
+        threadId,
+        detachedPendingOnly: true,
+        threadRunOwner: "desktop"
+      }).length > 0
+    )
+  }
+
+  /** Deletion also considers child runtimes and tracked foreground shell invocations. */
+  static hasActiveBackgroundTasks(
+    threadId: string,
+    {
+      includeChildRuns = false,
+      threadRunOwner
+    }: { includeChildRuns?: boolean; threadRunOwner?: LocalThreadRunOwner } = {}
+  ): boolean {
+    const matches = (task: ShellTaskScope): boolean =>
+      (threadRunOwner === undefined || task.threadRunOwner === threadRunOwner) &&
+      LocalSandbox.shellBelongsToThread(task, threadId, includeChildRuns)
+    for (const pending of LocalSandbox.pendingBackgroundTaskStarts) {
+      if ((pending.detached || includeChildRuns) && matches(pending)) return true
+    }
     for (const task of LocalSandbox.backgroundTasks.values()) {
-      if (task.threadId === threadId && !task.settled) return true
+      if (!task.settled && matches(task)) return true
     }
     return false
   }
 
-  /** Workflow worktree teardown must not inspect/delete a checkout while one of
-   * its background commands is still unwinding. Ordinary callers may keep using
-   * the void wrapper above; lifecycle cleanup awaits this stronger variant. */
+  /** Isolated checkout teardown waits for both process ownership and pending starts. */
   static async cancelBackgroundTasksAndWait(threadId: string): Promise<void> {
-    const completions = LocalSandbox.cancelBackgroundTasksForThread(threadId)
-    await Promise.allSettled(completions)
+    await Promise.allSettled(LocalSandbox.cancelBackgroundTasksMatching({ threadId }))
+  }
+
+  static async cancelOwnedBackgroundTasksAndWait(threadId: string, ownerId: string): Promise<void> {
+    await Promise.allSettled(LocalSandbox.cancelBackgroundTasksMatching({ threadId, ownerId }))
+  }
+
+  static cancelBackgroundTasksWithin(
+    threadId: string,
+    timeoutMs: number,
+    { includeChildRuns = false }: { includeChildRuns?: boolean } = {}
+  ): Promise<boolean> {
+    return LocalSandbox.waitForPromisesWithin(
+      LocalSandbox.cancelBackgroundTasksMatching({ threadId, includeChildRuns }),
+      timeoutMs
+    )
   }
 
   /** Prevent late background starts, cancel every detached task, and wait bounded. */
   static async cancelAllBackgroundTasksAndWait(timeoutMs = 5_000): Promise<boolean> {
     LocalSandbox.beginApplicationShutdown()
-    const pendingStarts = Array.from(LocalSandbox.pendingBackgroundTaskStarts)
-    for (const pending of pendingStarts) {
-      pending.abortController.abort()
-    }
-    const completions = LocalSandbox.cancelBackgroundTasksForThread()
-    const settled = await LocalSandbox.waitForPromisesWithin(
-      [...pendingStarts.map((pending) => pending.settled), ...completions],
-      timeoutMs
-    )
+    const completions = LocalSandbox.cancelBackgroundTasksMatching({})
+    const settled = await LocalSandbox.waitForPromisesWithin(completions, timeoutMs)
     if (!settled) {
       console.warn(
-        `[LocalSandbox] Timed out waiting for ${pendingStarts.length} pending start(s) and detached task cleanup during shutdown`
+        `[LocalSandbox] Timed out waiting for ${LocalSandbox.pendingBackgroundTaskStarts.size} pending start(s) and detached task cleanup during shutdown`
       )
     }
     return settled
   }
 
-  private static cancelBackgroundTasksForThread(threadId?: string): Promise<void>[] {
+  private static cancelBackgroundTasksMatching({
+    threadId,
+    ownerId,
+    includeChildRuns = false,
+    detachedPendingOnly = false,
+    threadRunOwner
+  }: {
+    threadId?: string
+    ownerId?: string
+    includeChildRuns?: boolean
+    detachedPendingOnly?: boolean
+    threadRunOwner?: LocalThreadRunOwner
+  }): Promise<void>[] {
+    const matches = (task: ShellTaskScope): boolean =>
+      (threadId === undefined ||
+        LocalSandbox.shellBelongsToThread(task, threadId, includeChildRuns)) &&
+      (ownerId === undefined || ownerId === task.ownerId) &&
+      (threadRunOwner === undefined || task.threadRunOwner === threadRunOwner)
+
     const completions: Promise<void>[] = []
+    for (const pending of LocalSandbox.pendingBackgroundTaskStarts) {
+      if (!matches(pending) || (detachedPendingOnly && !pending.detached)) continue
+      pending.abortController.abort()
+      completions.push(pending.settled)
+    }
     for (const [taskId, task] of LocalSandbox.backgroundTasks) {
-      if (threadId !== undefined && task.threadId !== threadId) continue
+      if (!matches(task) || task.settled) continue
       if (!task.completed) {
         console.log(
           `[LocalSandbox] cancelling background task ${taskId} (command: ${task.command}) for thread ${task.threadId}`
@@ -7188,12 +7562,12 @@ export class LocalSandbox
         task.abortController.abort()
         // Mark as completed immediately to prevent zombie entries if the
         // process kill path doesn't trigger the .then/.catch callbacks.
-        task.completed = true
-        task.result = task.result ?? {
+        LocalSandbox.publishBackgroundResult(task, {
           output: "Task cancelled by user.",
           exitCode: 130,
-          truncated: false
-        }
+          truncated: false,
+          cancelled: true
+        })
       }
       if (task.termination) completions.push(task.termination)
       if (task.completion) completions.push(task.completion)
@@ -7202,6 +7576,142 @@ export class LocalSandbox
   }
 
   async execute(command: string, cwd?: string): Promise<ExecuteResponse> {
+    return this.executeWithHooks(command, cwd)
+  }
+
+  /** Own execution through completion, with an optional soft deadline for background handoff. */
+  async executeForTool(
+    command: string,
+    cwd: string | undefined,
+    {
+      ownerId,
+      backgroundAfterMs,
+      signal = this.abortSignal
+    }: {
+      ownerId?: string
+      backgroundAfterMs?: number
+      signal?: AbortSignal
+    }
+  ): Promise<ToolShellResult> {
+    const pendingStart = this.beginBackgroundTaskStart(ownerId, false, signal)
+    if (!pendingStart) {
+      return { status: "completed", result: LocalSandbox.createAbortedExecuteResponse() }
+    }
+    const { abortController, scope, blockedByAutoCommit, releaseWorkspace, finish } = pendingStart
+    const task = this.createBackgroundTask(
+      command,
+      this.resolveExecutionCwd(cwd),
+      abortController,
+      scope
+    )
+    const processController = new AbortController()
+    const abortProcess = (): void => processController.abort(abortController.signal.reason)
+    abortController.signal.addEventListener("abort", abortProcess, { once: true })
+    if (abortController.signal.aborted) abortProcess()
+
+    let promoted = false
+    let foregroundBudgetMs = backgroundAfterMs ?? 0
+    let foregroundTimer: ReturnType<typeof setTimeout> | undefined
+    let capTimer: ReturnType<typeof setTimeout> | undefined
+    const clearForegroundTimer = (): void => {
+      clearTimeout(foregroundTimer)
+      foregroundTimer = undefined
+    }
+    const onCommandResult = (): void => {
+      clearForegroundTimer()
+      clearTimeout(capTimer)
+    }
+
+    let returnHandoff!: (result: ToolShellResult) => void
+    const handedOff =
+      backgroundAfterMs === undefined
+        ? undefined
+        : new Promise<ToolShellResult>((resolve) => {
+            returnHandoff = resolve
+          })
+    const promote = (): void => {
+      if (abortController.signal.aborted || LocalSandbox.applicationShutdownStarted) return
+      promoted = true
+      LocalSandbox.backgroundTasks.set(task.id, task)
+      finish()
+      LocalSandbox.notifyBackgroundShellChange(task.threadId)
+      returnHandoff({
+        status: "background",
+        taskId: task.id,
+        output: LocalSandbox.backgroundTaskStartedMessage(task.id)
+      })
+    }
+    const onSpawn = (requestPromotion = promote): (() => void) | undefined => {
+      if (processController.signal.aborted) return
+      if (capTimer === undefined) {
+        task.startedAt = task.lastOutputAt = Date.now()
+        capTimer = setTimeout(
+          () => processController.abort(SHELL_TASK_HARD_CAP),
+          LocalSandbox.BACKGROUND_ABSOLUTE_MAX_MS
+        )
+      }
+      if (promoted) return
+      const startedAt = performance.now()
+      foregroundTimer = setTimeout(requestPromotion, Math.max(0, foregroundBudgetMs))
+      return () => {
+        foregroundBudgetMs -= performance.now() - startedAt
+        clearForegroundTimer()
+      }
+    }
+
+    const run = (): Promise<ExecuteResponse> =>
+      this.executeWithHooks(command, cwd, {
+        task,
+        handoff: handedOff
+          ? { onSpawn, onPromote: promote, isPromoted: () => promoted }
+          : undefined,
+        processSignal: processController.signal,
+        onCommandResult
+      })
+    const execution = blockedByAutoCommit
+      ? LocalSandbox.raceWithAbort(blockedByAutoCommit, processController.signal).then(run, () =>
+          LocalSandbox.createAbortedExecuteResponse()
+        )
+      : run()
+    const completion = execution
+      .then(
+        (result) => LocalSandbox.publishBackgroundResult(task, result),
+        (error: unknown) => {
+          if (
+            promoted &&
+            !task.completed &&
+            (isHookHaltError(error) || isFailureFuseHaltError(error))
+          ) {
+            task.halt = { turnId: this._hookTurnId ?? this.shellTaskTurnFallback, error }
+          }
+          LocalSandbox.publishBackgroundResult(task, {
+            output: "Error: " + (error instanceof Error ? error.message : String(error)),
+            exitCode: 1,
+            truncated: false
+          })
+        }
+      )
+      .finally(async () => {
+        onCommandResult()
+        abortController.signal.removeEventListener("abort", abortProcess)
+        if (promoted) await LocalSandbox.settleBackgroundTask(task)
+        else if (task.termination) await task.termination.catch(() => undefined)
+        releaseWorkspace?.()
+        finish()
+      })
+    task.completion = completion
+
+    const completed = execution
+      .finally(() => completion)
+      .then((result): ToolShellResult => ({ status: "completed", result }))
+    return handedOff ? Promise.race([handedOff, completed]) : completed
+  }
+
+  private async executeWithHooks(
+    command: string,
+    cwd?: string,
+    toolExecution?: ToolShellExecution
+  ): Promise<ExecuteResponse> {
     if (!command || typeof command !== "string") {
       return {
         output: "Error: Shell tool expects a non-empty command string.",
@@ -7214,10 +7724,12 @@ export class LocalSandbox
       `[LocalSandbox] execute: hasOrchestrator=${!!this.orchestrator} sandbox=${this.windowsSandbox}`
     )
 
-    // PreToolUse hook
+    const signal = toolExecution?.task.abortController.signal
+    if (signal?.aborted) return LocalSandbox.createAbortedExecuteResponse()
     const requestedCwd = this.resolveExecutionCwd(cwd)
     const requestedArgs = { command, cwd: requestedCwd }
-    const preResult = await this.runPreToolUseHook("execute", requestedArgs)
+    const preResult = await this.runPreToolUseHook("execute", requestedArgs, signal)
+    if (signal?.aborted) return LocalSandbox.createAbortedExecuteResponse()
     if (preResult?.blocked || preResult?.decision === "block") {
       return {
         output: `[Hook blocked] ${preResult.stdout || "execute was blocked by a hook"}`,
@@ -7225,9 +7737,16 @@ export class LocalSandbox
         truncated: false
       }
     }
-    const humanGateLease = await this.requestHumanGateForExecute(preResult)
+    const humanGateLease = await this.requestHumanGateForExecute(preResult, signal)
     try {
-      return await this.executeAfterPreToolUse(command, requestedCwd, requestedArgs, preResult)
+      if (signal?.aborted) return LocalSandbox.createAbortedExecuteResponse()
+      return await this.executeAfterPreToolUse(
+        command,
+        requestedCwd,
+        requestedArgs,
+        preResult,
+        toolExecution
+      )
     } finally {
       humanGateLease?.release()
     }
@@ -7237,7 +7756,8 @@ export class LocalSandbox
     command: string,
     requestedCwd: string,
     requestedArgs: { command: string; cwd: string },
-    preResult: HookResult | null
+    preResult: HookResult | null,
+    toolExecution?: ToolShellExecution
   ): Promise<ExecuteResponse> {
     const updatedArgs = LocalSandbox.mergeUpdatedInput(requestedArgs, preResult?.updatedInput)
     const effectiveCommand =
@@ -7324,46 +7844,89 @@ export class LocalSandbox
       }
     }
 
-    // If an orchestrator is configured, delegate to it for approval + sandbox retry.
-    // The orchestrator calls back into executeRaw() for actual execution.
-    if (this.orchestrator) {
-      const result = await shellFileCaptureContext.run(true, () =>
-        this.orchestrator!.execute(
-          effectiveCommand,
-          effectiveCwd,
-          this.windowsSandbox,
-          shellSyntax,
-          outsideShellSyntax
-        )
-      )
-      // Adoption tracking: react to agent rm/mv of generated files (side-effect
-      // only, never throws). Only successful commands act (exitCode === 0).
-      recordAdoptionShellFileOps(effectiveCommand, effectiveCwd, result.exitCode)
-      this.recordShellReadTelemetry(effectiveCommand, effectiveCwd, result, shellSyntax)
-      const postResult = await this.runHooks("PostToolUse", {
-        toolName: "execute",
-        toolArgs: { command: effectiveCommand, cwd: effectiveCwd },
-        toolResult: LocalSandbox.formatExecuteResultForHook(result),
-        workspacePath: this.workingDir,
-        sessionId: this.runId
-      })
-      return LocalSandbox.applyPostHookToExecResult(result, postResult)
-    }
-
-    const result = await shellFileCaptureContext.run(true, () =>
-      this.executeRaw(effectiveCommand, undefined, undefined, undefined, {
-        cwd: effectiveCwd
-      })
-    )
-    recordAdoptionShellFileOps(effectiveCommand, effectiveCwd, result.exitCode)
-    this.recordShellReadTelemetry(effectiveCommand, effectiveCwd, result, shellSyntax)
-    const postResult = await this.runHooks("PostToolUse", {
+    const task = toolExecution?.task
+    const foregroundOnly =
+      toolExecution?.handoff &&
+      (isGitCommitCommand(effectiveCommand, shellSyntax) ||
+        isGitPushCommand(effectiveCommand, shellSyntax) ||
+        (outsideShellSyntax !== shellSyntax &&
+          (isGitCommitCommand(effectiveCommand, outsideShellSyntax) ||
+            isGitPushCommand(effectiveCommand, outsideShellSyntax))) ||
+        (this.worktreeIsolation && containsGitAddCommand(effectiveCommand)))
+    const postHookContext: HookContext = {
       toolName: "execute",
       toolArgs: { command: effectiveCommand, cwd: effectiveCwd },
-      toolResult: LocalSandbox.formatExecuteResultForHook(result),
       workspacePath: this.workingDir,
-      sessionId: this.runId
-    })
+      sessionId: this.runId,
+      ...(task && { abortSignal: task.abortController.signal })
+    }
+    // An execute that can hand off must keep the same hook policy through completion.
+    // A newly enabled synchronous hook applies starting with the next invocation.
+    const postHookPolicy =
+      toolExecution?.handoff && !foregroundOnly
+        ? this.captureExecutePostHookPolicy(postHookContext)
+        : undefined
+    let execution: OrchestratedExecuteOptions | undefined
+    if (task && toolExecution) {
+      task.command = effectiveCommand
+      task.cwd = effectiveCwd
+      // The invocation owns cancellation and process settlement even when Git or a hook
+      // requires the tool to stay in the foreground.
+      const processHandoff =
+        foregroundOnly || postHookPolicy?.requiresForeground ? undefined : toolExecution.handoff
+      execution = {
+        signal: toolExecution.processSignal,
+        rawExecute: (command, sandboxMode, cwd) =>
+          this.executeRaw(command, sandboxMode, undefined, toolExecution.processSignal, {
+            cwd,
+            handoff: processHandoff,
+            waitForProcessTree: true,
+            onData: (text) => this.appendBackgroundOutput(task, text),
+            onTermination: (termination) => {
+              task.termination = termination
+            }
+          })
+      }
+    }
+    if (task?.abortController.signal.aborted) return LocalSandbox.createAbortedExecuteResponse()
+
+    // Keep the normal approval, telemetry, and PostToolUse chain on the same execution promise.
+    const executeCommand = () =>
+      shellFileCaptureContext.run(true, () =>
+        this.orchestrator
+          ? this.orchestrator.execute(
+              effectiveCommand,
+              effectiveCwd,
+              this.windowsSandbox,
+              shellSyntax,
+              outsideShellSyntax,
+              execution
+            )
+          : execution
+            ? execution.rawExecute(effectiveCommand, undefined, effectiveCwd)
+            : this.executeRaw(effectiveCommand, undefined, undefined, undefined, {
+                cwd: effectiveCwd
+              })
+      )
+    let result: LocalExecuteResponse
+    try {
+      result = await executeCommand()
+    } catch (error) {
+      if (execution?.signal.reason !== SHELL_TASK_HARD_CAP || !task) throw error
+      result = LocalSandbox.createBackgroundCapResult(task)
+    } finally {
+      toolExecution?.onCommandResult()
+    }
+    if (execution?.signal.reason === SHELL_TASK_HARD_CAP && task) {
+      result = LocalSandbox.createBackgroundCapResult(task)
+    }
+    recordAdoptionShellFileOps(effectiveCommand, effectiveCwd, result.exitCode)
+    this.recordShellReadTelemetry(effectiveCommand, effectiveCwd, result, shellSyntax)
+    const postResult = await this.runHooks(
+      "PostToolUse",
+      { ...postHookContext, toolResult: LocalSandbox.formatExecuteResultForHook(result) },
+      { executePostPolicy: postHookPolicy }
+    )
     return LocalSandbox.applyPostHookToExecResult(result, postResult)
   }
 
@@ -7393,6 +7956,142 @@ export class LocalSandbox
    * Called directly by the orchestrator after approval is granted,
    * or as fallback when no orchestrator is configured.
    */
+  private static trackShellHandoffProcess(
+    proc: ChildProcess,
+    handoff?: ExecuteRawOptions["handoff"]
+  ): void {
+    if (!handoff) return
+    let onExit: (() => void) | undefined
+    const stop = (): void => {
+      onExit?.()
+      onExit = undefined
+    }
+    proc.once("spawn", () => {
+      onExit = handoff.onSpawn()
+    })
+    if (process.platform === "win32") proc.once("exit", stop)
+    proc.once("close", stop)
+    proc.once("error", stop)
+  }
+
+  private static quoteWindowsChildArgument(argument: string): string {
+    // Match libuv's native argv quoting. cmd.exe uses a separate verbatim path.
+    return argument && !/[ \t"]/.test(argument)
+      ? argument
+      : `"${argument.replace(/(\\*)"/g, '$1$1\\"').replace(/\\+$/, "$&$&")}"`
+  }
+
+  private static spawnWindowsHandoffProcess(
+    executable: string,
+    argumentsText: string,
+    options: {
+      cwd: string
+      env: NodeJS.ProcessEnv
+      windowsHide: boolean
+      pipeInput?: boolean
+      allowForegroundBreakaway?: boolean
+    },
+    handoff: NonNullable<ExecuteRawOptions["handoff"]>
+  ): ChildProcess {
+    const { pipeInput, allowForegroundBreakaway, ...spawnOptions } = options
+    const args = [executable, options.windowsHide ? "handoff-hidden" : "handoff-visible"]
+    if (handoff.isPromoted()) args.push("already-promoted")
+    else if (allowForegroundBreakaway) args.push("foreground-breakaway")
+    const proc = spawn(resolveWindowsBackgroundJobControllerPath(), args, {
+      ...spawnOptions,
+      stdio: [pipeInput ? "pipe" : "ignore", "pipe", "pipe", "pipe", "pipe"]
+    })
+    const request = proc.stdio[3] as Duplex
+    const status = proc.stdio[4] as Duplex
+    const argumentBytes = Buffer.from(argumentsText, "utf16le")
+    const length = Buffer.alloc(4)
+    length.writeUInt32LE(argumentBytes.length)
+    let finishStartup!: () => void
+    const started = new Promise<void>((resolve) => {
+      finishStartup = resolve
+    })
+    let stopTiming: (() => void) | undefined
+    let finishControl!: () => void
+    const readyToCollect = new Promise<void>((resolve) => {
+      finishControl = () => {
+        finishStartup()
+        stopTiming?.()
+        stopTiming = undefined
+        resolve()
+      }
+    })
+    let finished = false
+    let forceStop: ReturnType<typeof setTimeout> | undefined
+    const settled = new Promise<void>((resolve) => {
+      const settle = (): void => {
+        finished = true
+        clearTimeout(forceStop)
+        resolve()
+      }
+      proc.once("exit", settle)
+      proc.once("error", settle)
+    })
+    let stopping = false
+    LocalSandbox.windowsHandoffControls.set(proc, {
+      started,
+      readyToCollect,
+      terminate: () => {
+        if (!finished && !stopping) {
+          stopping = true
+          if (request.writable) {
+            // A broken launch or control pipe can leave the helper unresponsive.
+            // Windows closes its kill-on-close Job handle if we force it down.
+            forceStop = setTimeout(() => proc.kill(), LocalSandbox.IO_DRAIN_TIMEOUT_MS)
+            request.write("C", (error) => {
+              if (error) proc.kill()
+            })
+          } else proc.kill()
+        }
+        return settled
+      }
+    })
+    status.on("data", (messages: Buffer) => {
+      for (const code of messages) {
+        if (code === 83) {
+          finishStartup()
+          stopTiming = handoff.onSpawn(() => {
+            if (request.writable) request.write("P")
+          })
+        } else if (code === 80) handoff.onPromote()
+        else if (code === 69) finishControl()
+      }
+    })
+    const controlClosed = (): void => finishControl()
+    status.once("error", controlClosed)
+    status.once("close", controlClosed)
+    status.once("end", controlClosed)
+    request.once("error", () => proc.kill())
+    proc.once("error", finishControl)
+    request.write(Buffer.concat([length, argumentBytes]))
+    return proc
+  }
+
+  private static collectAfterWindowsHandoffControl(proc: ChildProcess, collect: () => void): void {
+    const control = LocalSandbox.windowsHandoffControls.get(proc)
+    if (control) void control.readyToCollect.then(collect)
+    else collect()
+  }
+
+  private static shellProcessTimeout(
+    proc: ChildProcess,
+    handoff: ExecuteRawOptions["handoff"],
+    timeoutMs: number,
+    onTimeout: () => void
+  ): ReturnType<typeof setTimeout> | undefined {
+    const control = LocalSandbox.windowsHandoffControls.get(proc)
+    if (handoff && !control) return
+    // The hard cap starts at the real Windows command launch. Keep a separate
+    // bound while the controller is starting and its launch status is pending.
+    const timer = setTimeout(onTimeout, timeoutMs)
+    if (control) void control.started.then(() => clearTimeout(timer))
+    return timer
+  }
+
   private static isBackgroundExecution(
     timeoutMs?: number,
     overrideAbortSignal?: AbortSignal,
@@ -7662,17 +8361,29 @@ export class LocalSandbox
       this._shellFileTelemetry &&
       !backgroundExecution &&
       shellFileCaptureContext.getStore() === true
-    const runCommand = (): Promise<LocalExecuteResponse> =>
-      this.runWithShellFileCapture(command, effectiveCwd, captureFileEffects, shellSyntax, () =>
-        this.executeRawUnserialized(
-          command,
-          sandboxModeOverride,
-          timeoutMs,
-          overrideAbortSignal,
-          effectiveCwd,
-          options
-        )
+    const executeAttempt = (attemptOptions?: ExecuteRawOptions): Promise<LocalExecuteResponse> =>
+      this.executeRawUnserialized(
+        command,
+        sandboxModeOverride,
+        timeoutMs,
+        overrideAbortSignal,
+        effectiveCwd,
+        attemptOptions
       )
+    const runCommand = (): Promise<LocalExecuteResponse> =>
+      this.runWithShellFileCapture(command, effectiveCwd, captureFileEffects, shellSyntax, () => {
+        if (!options?.handoff) return executeAttempt(options)
+        let termination: Promise<void> | undefined
+        return executeAttempt({
+          ...options,
+          onTermination: (pending) => {
+            termination = pending
+            options.onTermination?.(pending)
+          }
+        }).finally(async () => {
+          await termination?.catch(() => undefined)
+        })
+      })
     const commandConcurrency = classifyCommandConcurrency(command)
     const signal = overrideAbortSignal ?? this.abortSignal
     // Classify the effective post-hook command here, including unsandboxed
@@ -7855,7 +8566,8 @@ export class LocalSandbox
           "unelevated",
           timeoutMs,
           overrideAbortSignal,
-          executionCwd
+          executionCwd,
+          options
         )
       }
     }
@@ -8201,12 +8913,22 @@ export class LocalSandbox
         console.log(`[LocalSandbox] sandbox cwd: ${sandboxWorkspaceRoot}`)
         console.log(`[LocalSandbox] command cwd: ${executionCwd}`)
 
-        const proc = spawn(this.codexExePath, sandboxArgs, {
+        const spawnOptions = {
           cwd: sandboxWorkspaceRoot,
           env: sandboxEnv,
-          stdio: ["ignore", "pipe", "pipe"],
           windowsHide: true
-        })
+        }
+        const proc = options?.handoff
+          ? LocalSandbox.spawnWindowsHandoffProcess(
+              this.codexExePath,
+              sandboxArgs.map(LocalSandbox.quoteWindowsChildArgument).join(" "),
+              spawnOptions,
+              options.handoff
+            )
+          : spawn(this.codexExePath, sandboxArgs, {
+              ...spawnOptions,
+              stdio: ["ignore", "pipe", "pipe"]
+            })
 
         console.log(`[LocalSandbox] spawned pid=${proc.pid} at +${Date.now() - execStartMs}ms`)
         if (!proc.pid) {
@@ -8226,18 +8948,23 @@ export class LocalSandbox
         }
 
         const cmdTimeout = timeoutMs ?? this.timeout
-        const timeoutId = setTimeout(() => {
-          if (resolved || timedOut || aborted) return
-          console.log(`[LocalSandbox] timeout: pid=${proc.pid}, killing after ${cmdTimeout}ms`)
-          timedOut = true
-          killProc()
-          drainTimerId = setTimeout(() => {
-            console.log(
-              `[LocalSandbox] drain timeout: pid=${proc.pid}, force-resolving after ${LocalSandbox.IO_DRAIN_TIMEOUT_MS}ms`
-            )
-            collectAndResolve(null, "SIGKILL")
-          }, LocalSandbox.IO_DRAIN_TIMEOUT_MS)
-        }, cmdTimeout)
+        const timeoutId = LocalSandbox.shellProcessTimeout(
+          proc,
+          options?.handoff,
+          cmdTimeout,
+          () => {
+            if (resolved || timedOut || aborted) return
+            console.log(`[LocalSandbox] timeout: pid=${proc.pid}, killing after ${cmdTimeout}ms`)
+            timedOut = true
+            killProc()
+            drainTimerId = setTimeout(() => {
+              console.log(
+                `[LocalSandbox] drain timeout: pid=${proc.pid}, force-resolving after ${LocalSandbox.IO_DRAIN_TIMEOUT_MS}ms`
+              )
+              collectAndResolve(null, "SIGKILL")
+            }, LocalSandbox.IO_DRAIN_TIMEOUT_MS)
+          }
+        )
 
         const abortHandler = (): void => {
           if (resolved || timedOut || aborted) return
@@ -8372,7 +9099,9 @@ export class LocalSandbox
           )
           exited = true
           windowsExitTimerId = setTimeout(() => {
-            collectAndResolve(code, signal as string | null)
+            LocalSandbox.collectAfterWindowsHandoffControl(proc, () =>
+              collectAndResolve(code, signal as string | null)
+            )
           }, 500)
         })
 
@@ -8381,7 +9110,9 @@ export class LocalSandbox
             `[LocalSandbox] event=close pid=${proc.pid} code=${code} signal=${signal} at +${Date.now() - execStartMs}ms resolved=${resolved}`
           )
           exited = true
-          collectAndResolve(code, signal as string | null)
+          LocalSandbox.collectAfterWindowsHandoffControl(proc, () =>
+            collectAndResolve(code, signal as string | null)
+          )
         })
 
         proc.on("error", (err) => {
@@ -8457,6 +9188,8 @@ export class LocalSandbox
 
       if (
         isElevatedSandbox &&
+        !effectiveAbortSignal?.aborted &&
+        !result.capReached &&
         result.exitCode !== 0 &&
         sandboxModeOverride !== "unelevated" &&
         !LocalSandbox.isGitInteractiveAuthCommand(command) &&
@@ -8553,30 +9286,52 @@ export class LocalSandbox
           : shellBase === "cmd"
             ? "cmd"
             : "stdin"
-      const proc = useWindowsBackgroundJob
-        ? spawn(resolveWindowsBackgroundJobControllerPath(), [shell, windowsBackgroundShellKind], {
-            cwd: effectiveCwd,
-            env: spawnEnv,
-            stdio: ["pipe", "pipe", "pipe"],
-            detached: false,
-            windowsHide: !allowInteractiveGitAuth
-          })
-        : isBashOnWin
-          ? spawn(shell, [], {
+      const windowsHandoff = isWindows ? options?.handoff : undefined
+      const proc = windowsHandoff
+        ? LocalSandbox.spawnWindowsHandoffProcess(
+            shell,
+            isBashOnWin
+              ? ""
+              : /^(?:.*\\)?cmd(?:\.exe)?$/i.test(shell)
+                ? `/d /s /c "${command}"`
+                : `-c ${LocalSandbox.quoteWindowsChildArgument(command)}`,
+            {
               cwd: effectiveCwd,
               env: spawnEnv,
-              stdio: ["pipe", "pipe", "pipe"],
-              detached: false,
-              windowsHide: !allowInteractiveGitAuth
-            })
-          : spawn(command, {
-              shell,
-              cwd: effectiveCwd,
-              env: spawnEnv,
-              stdio: ["ignore", "pipe", "pipe"],
-              detached: !isWindows,
-              windowsHide: !allowInteractiveGitAuth
-            })
+              windowsHide: !allowInteractiveGitAuth,
+              pipeInput: isBashOnWin,
+              allowForegroundBreakaway: true
+            },
+            windowsHandoff
+          )
+        : useWindowsBackgroundJob
+          ? spawn(
+              resolveWindowsBackgroundJobControllerPath(),
+              [shell, windowsBackgroundShellKind],
+              {
+                cwd: effectiveCwd,
+                env: spawnEnv,
+                stdio: ["pipe", "pipe", "pipe"],
+                detached: false,
+                windowsHide: !allowInteractiveGitAuth
+              }
+            )
+          : isBashOnWin
+            ? spawn(shell, [], {
+                cwd: effectiveCwd,
+                env: spawnEnv,
+                stdio: ["pipe", "pipe", "pipe"],
+                detached: false,
+                windowsHide: !allowInteractiveGitAuth
+              })
+            : spawn(command, {
+                shell,
+                cwd: effectiveCwd,
+                env: spawnEnv,
+                stdio: ["ignore", "pipe", "pipe"],
+                detached: !isWindows,
+                windowsHide: !allowInteractiveGitAuth
+              })
 
       if ((isBashOnWin || useWindowsBackgroundJob) && proc.stdin) {
         proc.stdin.on("error", () => {
@@ -8593,6 +9348,7 @@ export class LocalSandbox
         console.warn(`[LocalSandbox] WARNING: spawn returned no pid — process may not have started`)
       }
       LocalSandbox.activeProcesses.add(proc)
+      if (!windowsHandoff) LocalSandbox.trackShellHandoffProcess(proc, options?.handoff)
 
       let windowsExitTimerId: ReturnType<typeof setTimeout> | null = null
       let timedOut = false
@@ -8613,7 +9369,7 @@ export class LocalSandbox
       }
 
       const cmdTimeout = timeoutMs ?? this.timeout
-      const timeoutId = setTimeout(() => {
+      const timeoutId = LocalSandbox.shellProcessTimeout(proc, options?.handoff, cmdTimeout, () => {
         if (resolved || timedOut || aborted) return
         timedOut = true
         killProc()
@@ -8622,7 +9378,7 @@ export class LocalSandbox
         drainTimerId = setTimeout(() => {
           collectAndResolve(null, "SIGKILL")
         }, LocalSandbox.IO_DRAIN_TIMEOUT_MS)
-      }, cmdTimeout)
+      })
 
       const abortHandler = (): void => {
         if (resolved || timedOut || aborted) return
@@ -8637,7 +9393,7 @@ export class LocalSandbox
         effectiveAbortSignal.addEventListener("abort", abortHandler, { once: true })
       }
 
-      proc.stdout.on("data", (chunk: Buffer) => {
+      proc.stdout?.on("data", (chunk: Buffer) => {
         if (!firstDataAt) {
           firstDataAt = Date.now()
           console.log(
@@ -8651,7 +9407,7 @@ export class LocalSandbox
         if (totalBytes >= this.maxOutputBytes) byteCapReached = true
       })
 
-      proc.stderr.on("data", (chunk: Buffer) => {
+      proc.stderr?.on("data", (chunk: Buffer) => {
         if (!firstDataAt) {
           firstDataAt = Date.now()
           console.log(
@@ -8759,7 +9515,9 @@ export class LocalSandbox
           )
           exited = true
           windowsExitTimerId = setTimeout(() => {
-            collectAndResolve(code, signal as string | null)
+            LocalSandbox.collectAfterWindowsHandoffControl(proc, () =>
+              collectAndResolve(code, signal as string | null)
+            )
           }, 500)
         })
       }
@@ -8770,17 +9528,19 @@ export class LocalSandbox
         )
         exited = true
         if (
-          options?.background === true &&
-          this.worktreeIsolation &&
+          !isWindows &&
           !aborted &&
           !timedOut &&
-          !isWindows
+          (options?.handoff?.isPromoted() ||
+            (options?.background === true && this.worktreeIsolation))
         ) {
           killProc()
           void termination?.finally(() => collectAndResolve(code, signal as string | null))
           return
         }
-        collectAndResolve(code, signal as string | null)
+        LocalSandbox.collectAfterWindowsHandoffControl(proc, () =>
+          collectAndResolve(code, signal as string | null)
+        )
       })
 
       proc.on("error", (err) => {

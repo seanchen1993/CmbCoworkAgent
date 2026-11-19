@@ -56,20 +56,23 @@ export interface ThreadMessagePageWindow {
   firstMessageId: string
   lastMessageId: string
   reloadCursor: ThreadMessagePageReloadCursor | null
+  beforeCreatedAt?: Date
 }
 
 const THREAD_MESSAGE_PAGE_WINDOW_LIMIT = 2_048
 
 export function createThreadMessagePageWindow(
   messages: readonly Message[],
-  reloadCursor: ThreadMessagePageReloadCursor | null
+  reloadCursor: ThreadMessagePageReloadCursor | null,
+  beforeCreatedAt?: Date
 ): ThreadMessagePageWindow {
   const first = messages[0]
   const last = messages.at(-1)
   return {
     firstMessageId: first?.id ?? "",
     lastMessageId: last?.id ?? "",
-    reloadCursor: reloadCursor ? { ...reloadCursor } : null
+    reloadCursor: reloadCursor ? { ...reloadCursor } : null,
+    ...(beforeCreatedAt && { beforeCreatedAt })
   }
 }
 

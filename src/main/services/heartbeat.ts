@@ -437,6 +437,7 @@ async function executeHeartbeat(): Promise<void> {
       extraSystemPrompt: heartbeatContext,
       enableAgentsPrompt: false,
       noSchedulerTool: true,
+      autoBackgroundHandoff: false,
       abortSignal: controller.signal
     })
 

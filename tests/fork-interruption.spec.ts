@@ -15,14 +15,40 @@ async function readProjectFile(path: string): Promise<string> {
   return (await readFile(resolve(PROJECT_ROOT, path), "utf8")).replace(/\r\n/g, "\n")
 }
 
+function readPhysicalRunSettlement(source: string): string {
+  const start = source.indexOf("async function settlePhysicalAgentRun({")
+  const end = source.indexOf("\n}\n", start)
+  assert(start >= 0 && end > start, "physical run settlement must be defined")
+  return source.slice(start, end)
+}
+
 async function testAbortPathsMarkStableForkBoundary(): Promise<void> {
   const source = await readProjectFile("src/main/ipc/agent.ts")
-  const interruptedMarkerCalls = source.match(/source: "agent_run_interrupted"/g)?.length ?? 0
-
+  const interruptedPaths = source.match(/interruptedForkBoundary = \{\s*turnId:/g) ?? []
   assert.equal(
-    interruptedMarkerCalls,
+    interruptedPaths.length,
     4,
     "normal and throwing invoke aborts plus resume and interrupt aborts must retain markers"
+  )
+  for (const kind of ["invoke", "resume", "interrupt"]) {
+    assert.match(
+      source,
+      new RegExp(`await settlePhysicalAgentRun\\(\\{\\s*kind: "${kind}",[\\s\\S]{0,220}interruptedForkBoundary,`),
+      `${kind} must forward the interruption boundary to settlement`
+    )
+  }
+
+  const settlement = readPhysicalRunSettlement(source)
+  const flush = settlement.indexOf('name: "flush-stream-transcript"')
+  const marker = settlement.indexOf('name: "persist-interrupted-fork-boundary"')
+  const release = settlement.indexOf('name: "release-active-controller"')
+  assert(
+    flush >= 0 && marker > flush && release > marker,
+    "settlement must flush, mark the boundary, then release its active controller"
+  )
+  assert(
+    settlement.slice(marker, release).includes('source: "agent_run_interrupted"'),
+    "settlement must persist the interrupted marker"
   )
   assert.match(
     source,
@@ -189,7 +215,7 @@ async function testStoppedStreamSyncsDurableTranscript(): Promise<void> {
   )
   assert.match(
     source,
-    /if \(data\.isLoading && !wasLoading\) \{[\s\S]*durableTranscriptSyncSeqRef\.current\[threadId\]/,
+    /if \(data\.isLoading && !wasLoading\) \{[\s\S]*durableTranscriptSyncGateRef\.current\.begin\(threadId\)[\s\S]*durableTranscriptSyncGateRef\.current\.finish\(threadId, invalidation\)/,
     "starting a new stream should cancel any delayed durable transcript sync from the previous turn"
   )
   assert.match(
@@ -225,7 +251,7 @@ async function testDurableSyncThreadLifecycleBoundaries(): Promise<void> {
   )
   assert.match(
     source,
-    /updateThreadState\(threadId, \(state\) => \{[\s\S]*durableTranscriptSyncSeqRef\.current\[threadId\] !== seq[\s\S]*return mergeState\(state\)/,
+    /updateThreadState\(threadId, \(state\) => \{[\s\S]*!durableTranscriptSyncGateRef\.current\.isCurrent\(threadId, seq\)[\s\S]*return mergeState\(state\)/,
     "a deferred durable transcript updater should reject superseded sync generations"
   )
   assert.match(
@@ -235,12 +261,12 @@ async function testDurableSyncThreadLifecycleBoundaries(): Promise<void> {
   )
   assert.match(
     source,
-    /if \(data\.isLoading && !wasLoading\) \{[\s\S]*durableTranscriptSyncSeqRef\.current\[threadId\]/,
+    /if \(data\.isLoading && !wasLoading\) \{[\s\S]*durableTranscriptSyncGateRef\.current\.begin\(threadId\)[\s\S]*durableTranscriptSyncGateRef\.current\.finish\(threadId, invalidation\)/,
     "starting a new stream on the same thread should cancel stale durable transcript syncs"
   )
   assert.match(
     source,
-    /delete durableTranscriptSyncSeqRef\.current\[threadId\]/,
+    /const durableSyncInvalidation = durableTranscriptSyncGateRef\.current\.begin\(threadId\)\s*durableTranscriptSyncGateRef\.current\.finish\(threadId, durableSyncInvalidation\)/,
     "thread cleanup should drop durable transcript sync sequence state"
   )
 }
@@ -255,7 +281,7 @@ async function testTerminalAndCancelledRunsFlushDurableTranscript(): Promise<voi
   )
   const successfulStreamFlushes =
     source.match(
-      /await commitPending(?:Resume|Interrupt)?MessageSideEffects\(\)[\s\S]{0,240}flushPendingStreamTranscriptMessages\(threadId, runToken\)/g
+      /await commitPending(?:Resume|Interrupt)?MessageSideEffects\(\)[\s\S]{0,240}flushPendingStreamTranscriptMessages\(threadId, runToken, \{ throwOnError: true \}\)/g
     )?.length ?? 0
   assert(
     successfulStreamFlushes >= 3,
@@ -267,13 +293,11 @@ async function testTerminalAndCancelledRunsFlushDurableTranscript(): Promise<voi
     "user cancellation should flush already queued transcript chunks before aborting"
   )
 
-  const cleanupFlushes =
-    source.match(
-      /flushPendingStreamTranscriptMessages\(threadId, runToken\)[\s\S]{0,1200}resolve(?:Active|Resume|Interrupt)RunSettled\(\)/g
-    )?.length ?? 0
-  assert(
-    cleanupFlushes >= 3,
-    "invoke, resume, and interrupt finally cleanup should flush transcript before marking the run settled"
+  const settlement = readPhysicalRunSettlement(source)
+  assert.match(
+    settlement,
+    /name: "flush-stream-transcript"[\s\S]*flushPendingStreamTranscriptMessages\(threadId, runToken, \{ throwOnError: true \}\)[\s\S]*resolveSettlement,/,
+    "shared finally cleanup must flush the run-scoped transcript before settling the run"
   )
 }
 

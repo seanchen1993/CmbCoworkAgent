@@ -3,7 +3,11 @@ import fsPromises from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { withFileOperation, withWorkspaceExecution } from "./file-operation-lock"
+import {
+  withFileOperation,
+  withWorkspaceExecution,
+  WorkspaceExecutionLockUnavailableError
+} from "./file-operation-lock"
 
 const roots: string[] = []
 async function fixture() {
@@ -221,7 +225,32 @@ describe("shared file resources", () => {
     await Promise.all([command, file])
   })
 
-  it.each(["file", "workspace"])(
+  it("limits queued workspace admission and never runs expired work after release", async () => {
+    const root = await fixture()
+    const entered = deferred()
+    const release = deferred()
+    const holder = withWorkspaceExecution(root, "write", async () => {
+      entered.resolve()
+      await release.promise
+    })
+    const operation = vi.fn(async () => undefined)
+    await entered.promise
+    try {
+      for (const timeout of [0, 50]) {
+        await expect(
+          withWorkspaceExecution(root, "write", operation, undefined, performance.now() + timeout)
+        ).rejects.toBeInstanceOf(WorkspaceExecutionLockUnavailableError)
+      }
+      expect(operation).not.toHaveBeenCalled()
+    } finally {
+      release.resolve()
+      await holder
+    }
+    await withWorkspaceExecution(root, "write", operation, undefined, 0)
+    expect(operation).toHaveBeenCalledOnce()
+  })
+
+  it.each(["file", "workspace", "bounded workspace"])(
     "cancels a queued %s waiter and leaves the holder intact",
     async (kind) => {
       const root = await fixture()
@@ -231,7 +260,13 @@ describe("shared file resources", () => {
       const run = (fn: () => Promise<void>, signal?: AbortSignal) =>
         kind === "file"
           ? withFileOperation(root, join(root, "a"), "write", fn, signal)
-          : withWorkspaceExecution(root, "write", fn, signal)
+          : withWorkspaceExecution(
+              root,
+              "write",
+              fn,
+              signal,
+              kind === "bounded workspace" ? performance.now() + 5000 : undefined
+            )
       const holder = run(async () => {
         started.resolve()
         await release.promise

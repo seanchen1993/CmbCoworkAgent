@@ -8,7 +8,8 @@ function idleRuntime() {
     waitForSettlement: vi.fn(async () => "settled"),
     hasExternalRun: vi.fn(() => false),
     hasWorkflowRun: vi.fn(() => false),
-    hasWorkerRun: vi.fn(() => false)
+    hasWorkerRun: vi.fn(() => false),
+    hasBackgroundShell: vi.fn(() => false)
   }
 }
 
@@ -36,14 +37,17 @@ describe("deletion runtime guard", () => {
     expect(runtime.hasWorkerRun).toHaveBeenCalledWith("idle")
   })
 
-  it.each(["hasActiveRun", "hasExternalRun", "hasWorkflowRun", "hasWorkerRun"] as const)(
-    "protects a live owner: %s",
-    async (owner) => {
-      const runtime = idleRuntime()
-      runtime[owner].mockReturnValue(true)
-      await expect(isThreadDeletionBusy("live", runtime)).resolves.toBe(true)
-    }
-  )
+  it.each([
+    "hasActiveRun",
+    "hasExternalRun",
+    "hasWorkflowRun",
+    "hasWorkerRun",
+    "hasBackgroundShell"
+  ] as const)("protects a live owner: %s", async (owner) => {
+    const runtime = idleRuntime()
+    runtime[owner].mockReturnValue(true)
+    await expect(isThreadDeletionBusy("live", runtime)).resolves.toBe(true)
+  })
 
   it("rechecks all owners after an abort settles", async () => {
     const runtime = idleRuntime()
@@ -53,6 +57,23 @@ describe("deletion runtime guard", () => {
     runtime.hasActiveRun.mockReturnValueOnce(true)
     runtime.hasWorkerRun.mockReturnValue(true)
     await expect(isThreadDeletionBusy("worker", runtime)).resolves.toBe(true)
+  })
+
+  it("keeps an unsettled shell protected after the foreground run stops", async () => {
+    const runtime = idleRuntime()
+    const foreground = Promise.withResolvers<string>()
+    runtime.hasActiveRun.mockReturnValueOnce(true)
+    runtime.isAborting.mockReturnValue(true)
+    runtime.waitForSettlement.mockReturnValueOnce(foreground.promise)
+
+    const pendingDeletion = isThreadDeletionBusy("detached-shell", runtime)
+    runtime.hasBackgroundShell.mockReturnValue(true)
+    foreground.resolve("settled")
+
+    await expect(pendingDeletion).resolves.toBe(true)
+    expect(runtime.hasBackgroundShell).toHaveBeenCalledWith("detached-shell")
+    runtime.hasBackgroundShell.mockReturnValue(false)
+    await expect(isThreadDeletionBusy("detached-shell", runtime)).resolves.toBe(false)
   })
 
   it("keeps timed-out or replaced runs protected", async () => {
