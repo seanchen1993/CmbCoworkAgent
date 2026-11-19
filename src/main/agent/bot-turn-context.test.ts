@@ -1,4 +1,4 @@
-import { AIMessage, HumanMessage, type BaseMessage } from "@langchain/core/messages"
+import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages"
 import { BaseChatModel } from "@langchain/core/language_models/chat_models"
 import { MemorySaver } from "@langchain/langgraph"
 import { createAgent, createMiddleware, tool } from "langchain"
@@ -119,15 +119,22 @@ describe("Bot event context and reporting boundary", () => {
     const read = vi.fn(async () => "verified")
     const write = vi.fn(async () => "changed")
     const model = new Model([
-      new AIMessage({ content: "", tool_calls: [
+      new AIMessage({ content: "Let me check which tools I can use.", tool_calls: [
         { id: "attempt", name: "write_file", args: {} }, { id: "evidence", name: "bot_work_result_read", args: {} }
       ] }),
       new AIMessage("Checked")
     ])
-    await createAgent({ model, tools: [
+    const result = await createAgent({ model, tools: [
       tool(write, { name: "write_file", description: "Write", schema: z.object({}) }),
       tool(read, { name: "bot_work_result_read", description: "Read", schema: z.object({}) })
-    ], middleware: [createBotResultReportMiddleware(true)] }).invoke({ messages: [input("review", "Check the result")] })
+    ], middleware: [createBotResultReportMiddleware(true)] }).invoke({ messages: [
+      appendBotTurnContext(input("review", "Check the result"), context("task_result_review", "Evidence available"))!
+    ] })
+    const event = model.calls[0].find(HumanMessage.isInstance)
+    expect(event?.content).toContain('<bot_runtime_context event="task_result">')
+    expect(result.messages.find(m => ToolMessage.isInstance(m) && m.tool_call_id === "attempt"))
+      .toMatchObject({ status: "error", content: expect.stringContaining("bot_work_result_read") })
+    expect(result.messages.filter(AIMessage.isInstance).map(m => m.content)).toEqual(["", "Checked"])
     expect(write).not.toHaveBeenCalled()
     expect(read).toHaveBeenCalledTimes(1)
     expect(model.bindings[0].names).toEqual(["write_file", "bot_work_result_read"])

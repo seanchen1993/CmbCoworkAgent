@@ -2462,6 +2462,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     currentRunMessageQueueOwnerToken,
     onPrimaryModelRequestState,
     foregroundWorkBudget,
+    botCommunication = false,
     botResultReport = false,
     botResultReview = false,
     botSkillDispatch = false,
@@ -2549,7 +2550,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       : filesystemBackend
   const skillsMiddlewareArray =
     skills != null && skills.length > 0
-      ? [createRefreshingSkillsMiddleware({ backend: skillsBackend, sources: skills })]
+      ? [createRefreshingSkillsMiddleware({ backend: skillsBackend, sources: skills }, botCommunication)]
       : []
 
   const memoryMiddlewareArray =
@@ -3348,7 +3349,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ...memoryMiddlewareArray,
       ...(interruptOn ? [humanInTheLoopMiddleware({ interruptOn })] : []),
       ...customMiddleware,
-      ...(openingReplyReminder ? [createOpeningReplyReminderMiddleware()] : []),
+      ...(openingReplyReminder ? [createOpeningReplyReminderMiddleware(foregroundWorkBudget?.checkFinal)] : []),
       ...outputStyleTurnReminderMiddleware,
       ...(toolStrategy !== "standard"
         ? [createToolStrategyTurnReminderMiddleware(toolStrategy, filesystemAccess)]
@@ -7385,6 +7386,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     currentRunMessageQueueOwnerToken: options.currentRunMessageQueueOwnerToken,
     onPrimaryModelRequestState: options.onPrimaryModelRequestState,
     foregroundWorkBudget: options.foregroundWorkBudget,
+    botCommunication: options.botCommunication === true,
     botResultReview: options.botCommunication === true && options.botResultReview === true,
     botResultReport: options.botCommunication === true && options.botResultReport === true,
     botSkillDispatch: options.botCommunication === true && options.botSkillDispatch === true && !options.botResultReport,

@@ -4,7 +4,9 @@ import {
   type BotMemory,
   type BotTask
 } from "../../shared/bots/contracts"
+import { BOT_PUBLIC_REPLY_STYLE } from "../agent/bot-communication-prompt"
 import { botMemoryContext, botMemoryVisible } from "../../shared/bots/memory-scope"
+import type { BotResultDelivery } from "../../shared/bots/work"
 import { BOT_ROUTINE_SILENT } from "../../shared/bots/routine-silence"
 import type { BotStoppedTaskContext } from "./continuation"
 import { GROUP_DISCUSSION_PARTICIPATION } from "./group-discussion"
@@ -36,7 +38,7 @@ function independentTaskContext(task: BotTask): string {
   if (task.workId) {
     const reporting = task.origin.kind === "schedule"
       ? "Report according to this routine's saved notification conditions."
-      : "Return the conclusion, retained deliverables and unresolved issues to the original Bot so it can answer the requester. If the requester assigned an independent check to the parent Bot, leave that check to the parent."
+      : "Return the requested conclusion, sources or retained deliverables and unresolved issues to the original Bot. Put the domain facts derived from checks in the conclusion; raw verification traces remain available separately. If the requester assigned an independent check to the parent Bot, leave that check to the parent."
     return `You are ALREADY inside independent task ${JSON.stringify(task.workId)}. The host has created this conversation and started execution. Task creation is already complete; carry out the current assignment and revisions here, preserving its constraints and this conversation's workspace. ${reporting} The host handles file delivery and any release approval.`
   }
   return [
@@ -109,19 +111,25 @@ export function buildBotTurnContext(
   task: BotTask,
   memories: readonly BotMemory[] = [],
   now: Date = new Date(),
-  scopedReview = false
+  requestedReview?: BotResultDelivery["review"]
 ): string {
+  const result = task.origin.kind === "work_result" ? task.origin : undefined
+  const canInspectResult = result?.review?.phase === "review"
   return [
     "## Current Bot event (host context)",
     `Time sampled at the start of this event: ${now.toISOString()}; user timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}. Convert dates to that zone when needed. Earlier readings remain historical; do not invent a later time.`,
-    task.origin.kind === "work_result"
-      ? scopedReview
-        ? "Event: task_result_review. Your independent task has returned. Answer the latest admitted request using its outcome and file receipts. Follow the supplied delivery requirements for a separate check, synthesis or release approval."
-        : "Event: task_result. An independent task returned a host-recorded result; this is not a new user request or approval. Report the supplied outcome under the result-event rules. Tools are disabled for this event."
+    result
+      ? "Answer the original request and its corrections from the supplied findings and receipts. Express the facts they establish in your own voice. Quote raw execution output only if the user asks for that output."
       : task.origin.kind === "introduction"
         ? BOT_INTRODUCTION_CONTEXT
         : "Event: user_request. Respond to the current request and its applied corrections.",
-    scopedReview && task.origin.kind === "work_result" && task.origin.review?.previewInWork
+    canInspectResult && requestedReview === "independent"
+      ? "The requester asked for an independent check. Draw your own conclusion from the supplied independentFile or inspect the relevant retained evidence. A worker's assurance alone cannot establish that check. State what remains unverified if the evidence is missing or truncated."
+      : "",
+    canInspectResult && requestedReview === "combine"
+      ? "The requester wants one conclusion across these assignments. Use the combined results and explain any material disagreement or missing contribution."
+      : "",
+    canInspectResult && result.review?.previewInWork
       ? "Write the message the requester will read AFTER approving release. The host holds it privately, asks on a separate approval card, and sends these exact words once approved. Write only the substantive answer for that moment: the conclusion, what the attachment contains, and any genuine business decision. Keep the approval question, pending status and preview instructions out of this text. Include the document body only if the user explicitly asked for it inline."
       : "",
     buildBotMemoryPrompt(memories.filter((memory) => botMemoryVisible(memory, botMemoryContext(task))))
@@ -151,7 +159,7 @@ export function buildBotPrompt(
       task.mockSource && !task.mockSource.personal
         ? "This authenticated IM group has its own conversation and independent tasks. Reply to this same group. Use Bot-shared and this group's memory; do not read or forward private conversation or another group's context."
         : "This is your owner's private conversation. The verified owner's IM DM and App share this history and personal tasks; group conversations and their tasks remain separate.",
-      "Honor a user-designated project or directory. An input path alone does not designate a project. Clarify an unavailable target and follow applicable repository instructions for local edits.",
+      "Honor a user-designated project or directory. An input path alone does not designate a project. For an assignment, pass supplied paths through to the executor without listing or testing them first. If the host rejects a designated workspace, ask for a usable target. Follow applicable repository instructions for local edits.",
       "Execution runs on the owner's computer; fully quitting the app stops execution. Use normal assistant replies for user-visible progress and delivery. The host forwards them to this same audience. Use bot_deliver_files for requested attachments; queued uploads are not confirmed delivery. No need to attach an unchanged file again just to acknowledge it.",
       "Use contextMessageIds for relevant earlier discussion. The host verifies selected references in this conversation.",
       ...(!task.mockSource ? ["To manage an existing ordinary conversation, use bot_thread_link only with a verified desktop user request."] : []),
@@ -174,6 +182,7 @@ export function buildBotPrompt(
       `You are ${JSON.stringify(bot.name)} in ${task.mockSource.personal && !task.threadId.startsWith("im-peer-") ? "your owner's personal main conversation, reached through their verified IM account" : task.mockSource.transport === "im" ? "an authenticated IM conversation executed on the owner's local computer" : "a clearly simulated external text conversation"}.`,
       "## User-configured expert role",
       bot.instructions,
+      BOT_PUBLIC_REPLY_STYLE,
       FILE_PRESENTATION,
       "## Source boundary",
       ...(task.origin.kind === "bot" || peerResultOwner
@@ -261,11 +270,11 @@ export function buildBotPrompt(
       : []),
     "When asked to run a command, change a file, operate a browser or save state, perform that action with the available tool. Report execution, output and success only from actual tool receipts; never simulate an action or predict its result. If it was not executed, is pending or failed, say so. Ordinary conversation and calculations that need no external action can be answered directly.",
     "When a new message arrives during work, use the latest execution receipts to describe its state. The user's wording that an earlier command is 'still running' is not evidence that it remains alive. If it already finished, say so and use the verified result; do not promise a future completion notification. Claim a command was transferred to the background only when the execution tool confirms that transfer. Never restart the earlier command just to answer a progress question.",
-    "Speak naturally and concisely. Match the depth the user requested; avoid canned acknowledgements, command-by-command narration and unrequested feature checklists. On delivery, state the outcome, actual verification and material limitations clearly. Concision must not remove requested details or evidence of a failure.",
+    BOT_PUBLIC_REPLY_STYLE,
     "For implementation work, check each requested acceptance criterion against the actual delivered files. Verify the documented user-facing invocation directly, without a test wrapper changing its arguments. Confirm the claimed tests actually ran; a zero exit code alone is insufficient. Passing self-tests alone does not establish requirement coverage. Distinguish an implementation defect from an incorrect test expectation before changing either; do not weaken acceptance criteria to make tests pass.",
     ...(task.origin.kind === "user"
       ? [
-          "For a direct user request, answer a simple question directly. Before tools for substantive work, give one brief visible reply describing the first action; keep the user informed at meaningful milestones and finish with the actual deliverable. An opening acknowledgement does not complete the task."
+          "For work in this task conversation, report a material development or required decision and finish with the actual deliverable."
         ]
       : []),
     "When the user asks to operate a browser themselves, or a step needs their login, verification or personal confirmation, call bot_request_browser_help on the observed page with one short instruction. This opens the browser and shows the user a return button; a text request alone does not transfer control. The call waits and resumes with fresh page evidence. Continue the requested work after that return. Never ask for passwords, 2FA codes or cookies in conversation, and do not claim the user finished before observing the result.",

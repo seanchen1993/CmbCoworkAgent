@@ -188,6 +188,20 @@ it("does not expose deletion unless the direct-user adapter explicitly enables i
   expect(tools().map((tool) => tool.name)).toContain("bot_forget")
 })
 
+it.each([{}, { groupId: "g" }])("keeps the user catalog on result turns without allowing memory deletion in %j", async (context) => {
+  const entry = memory.writeInContext(bot.id, { name: "Local fact", content: "Keep this fact" }, context)
+  const signal = new AbortController().signal
+  const user = createBotMemoryTools(bot, memory, signal, true, context)
+  const report = createBotMemoryTools(bot, memory, signal, "schema-only", context)
+  expect(report.map((item) => item.name)).toEqual(user.map((item) => item.name))
+  const receipt = await report.find((item) => item.name === "bot_forget")!.invoke({
+    type: "tool_call", id: "result-delete", name: "bot_forget",
+    args: { id: entry.id, expectedVersion: entry.version }
+  })
+  expect(receipt).toMatchObject({ status: "error", tool_call_id: "result-delete" })
+  expect(memory.list(bot.id)).toContainEqual(expect.objectContaining({ id: entry.id, version: entry.version }))
+})
+
 it("preserves disabled, missing and conflicting memory operations as error ToolMessages", async () => {
   const entry = memory.write("a", { name: "Preference", content: "Original" })
   const all = tools()

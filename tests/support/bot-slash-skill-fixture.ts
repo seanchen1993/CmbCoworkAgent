@@ -71,7 +71,8 @@ export async function verifySlashSkillResult(directory: string, result: any, dat
   assert.equal(result.mainModelRequests, 1, "no second main-model acknowledgement")
   assert.deepEqual(result.mainToolChoices, [{ type: "function", function: { name: "bot_skill_dispatch" } }])
   assert.equal(result.mainAcknowledgements.length, 1)
-  assert.equal(result.mainAcknowledgements[0].text, "已新建任务，我会按所选技能处理，结果发回这里。")
+  assert.match(result.mainAcknowledgements[0].text, /PRD|需求|借阅|借书|图书/i)
+  assert.ok(result.mainAcknowledgements[0].text.length <= 160)
   assert.equal(result.mainAcknowledgements[0].afterDispatch, true)
   assert.equal(result.budgetHandoff, false)
   assert.equal(data.works.length, result.actual === "independent" ? 1 : 0)
@@ -107,7 +108,8 @@ export async function verifySlashSkillRevision(directory: string, result: any, w
   assert.deepEqual(result.workIds, [workId])
   if (selectedAgain) {
     assert.equal(result.mainModelRequests, 1, "continuing a skill task needs no second acknowledgement call")
-    assert.deepEqual(result.mainAcknowledgements.map((item: any) => item.text), ["我会在原任务中继续处理，结果发回这里。"])
+    assert.equal(result.mainAcknowledgements.length, 1)
+    assert.match(result.mainAcknowledgements[0].text, /原|上次|刚才|继续|接着|改|更新|借期/)
     assert.equal(result.mainAcknowledgements[0].afterDispatch, true)
   }
   const text = await readFile(join(directory, "prd.md"), "utf8")

@@ -1400,15 +1400,25 @@ describe("Bot Runtime integration", () => {
         {
           id: "opening",
           role: "assistant",
-          content: "我先检查。",
+          content: "我先检查。\nLet me run the pipeline.\n我用 finishTurn 结束本轮。",
           reasoning: "PRIVATE_THINKING",
-          tool_calls: [{}]
+          tool_calls: [{ name: "execute", args: { command: "echo ready" } }]
         }
       ]
     }
+    fixture.mirror.mockClear()
+    mirror(bot.threadId, { type: "message-delta", id: "draft", content: "Let me check." })
+    mirror(bot.threadId, { type: "custom", data: { type: "coordinator_ai_snapshot_message", assistantMessage: { id: "draft", content: "Let me check." } } })
+    expect(fixture.mirror).not.toHaveBeenCalled()
+    const final = { type: "turn-messages", messages: [{ role: "assistant", id: "result", content: "今日有两条异常。" }] }
+    mirror(bot.threadId, final)
+    expect(fixture.mirror).toHaveBeenCalledWith(bot.threadId, final)
     mirror(bot.threadId, progress)
-    expect(fixture.imOpening).toHaveBeenCalledWith(incoming.id, "我先检查。")
+    expect(fixture.imOpening).not.toHaveBeenCalled()
     fixture.imOpening.mockClear()
+    mirror(bot.threadId, { ...progress, messages: [
+      { ...progress.messages[0], tool_calls: [{ name: "bot_work_create", args: {} }] }
+    ] })
     mirror("other-thread", progress)
     mirror(bot.threadId, { ...progress, type: "full-messages" })
     mirror(bot.threadId, {
@@ -1681,8 +1691,9 @@ describe("Bot Runtime integration", () => {
     expect(context.remotePolicy?.disableMcpTools).not.toBe(true)
     expect(context.botCommunication).toBe(true)
     expect(context.botTurnContext?.event).toBe("task_result")
-    expect(context.botTurnContext?.text).toContain("An independent task returned a host-recorded result")
-    expect(context.extraSystemPrompt).not.toContain("An independent task returned")
+    expect(context.botTurnContext?.text).toContain("supplied findings and receipts")
+    expect(fixture.memoryTools).toHaveBeenCalledWith(expect.objectContaining({ id: bot.id }), expect.anything(), expect.any(AbortSignal), "schema-only", {})
+    expect(context.extraSystemPrompt).not.toContain("supplied findings and receipts")
     expect(context.extraSystemPrompt).not.toContain("Independent task execution snapshot")
     expect((await import("../agent/bot-communication-prompt")).BOT_COMMUNICATION_PROMPT).toContain("bot_work_send")
     expect(fixture.memorySnapshot).toHaveBeenCalledOnce()
@@ -4669,7 +4680,7 @@ describe("Bot Runtime integration", () => {
       expect(prompt).not.toContain("Use normal assistant replies")
     } else expect(prompt).toContain("Use normal assistant replies")
     if (origin.kind !== "user" && origin.kind !== "introduction") {
-    expect(prompt).toContain("Match the depth the user requested")
+    expect(prompt).toContain("requested format and level of detail take priority")
     expect(prompt).toContain("check each requested acceptance criterion")
     expect(prompt).toContain("without a test wrapper changing its arguments")
     expect(prompt).toContain("Confirm the claimed tests actually ran")

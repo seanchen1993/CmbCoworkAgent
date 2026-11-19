@@ -24,6 +24,8 @@ import { botTestAppOutput } from "./support/bot-test-app"
 import { selectedBotRoutingModel } from "./support/bot-routing-model"
 import { createBotExperimentArchive, experimentSha256 } from "./support/bot-experiment-archive.mjs"
 import { parseBotWorkAttachmentHref } from "../src/shared/bots/work-history"
+import { splitBotInlineReasoning } from "../src/shared/bots/inline-reasoning"
+import { acceptedBotDispatch, hasOutstandingBotRequest } from "../src/main/agent/bot-dispatch-feedback"
 import { installSlashSkillFixture, prdFixtureSkillName, slashSkillRequest, slashSkillRevisionRequest, slashSkillSelection, verifyPrdArtifact, verifySlashSkillResult, verifySlashSkillRevision } from "./support/bot-slash-skill-fixture"
 
 type Route = "inline" | "independent" | "continue" | "background"
@@ -33,6 +35,7 @@ type Case = {
   preferred: Route
   files?: Record<string, string>
   skill?: typeof slashSkillSelection
+  instructions?: string
   naturalSkill?: boolean
   message: (directory: string) => string
   verify?: (directory: string, result: any, data: any) => Promise<void> | void
@@ -115,7 +118,87 @@ async function verifyNaturalPrd(sourceDirectory: string, result: any, data: any)
   }
 }
 let browserFixtureUrl = ""
+const logFixture = {
+  "service.log": "08:12 batch=b1 code=EMPTY_BATCH itemCount=0\n09:27 key=day.csv code=NoSuchKey status=404\n",
+  "batch.mjs": "export function validateBatch(items) { if (items.length === 0) throw new Error('EMPTY_BATCH') }\n"
+}
+function publishedLogReply(
+  result: { reportCount: number },
+  data: { messages: Array<{ role: string; content: unknown; tool_calls?: unknown[] }> }
+) {
+  assert.equal(result.reportCount, 1)
+  const final = data.messages.findLast(m => m.role === "assistant" && !m.tool_calls?.length && typeof m.content === "string" && m.content.trim())
+  assert.ok(final && typeof final.content === "string", "the parent must publish an answer")
+  const text = splitBotInlineReasoning(final.content).body
+  assert.doesNotMatch(text, /review scope|in my own voice|let me (?:verify|check|compose)|requires structured input|bot_work_result_/, "internal narration in the published answer")
+  assert.doesNotMatch(text, /任务可以结束|要我把.{1,45}整理成一份/, "a resolved question should end with the requested answer")
+  return text
+}
 const cases: Case[] = [
+  {
+    id: "ops-log-triage", label: "自然语言排查当日服务异常", preferred: "independent",
+    files: {
+      "errors.json": JSON.stringify({ service: "orders_demo", code: "E_EMPTY_BATCH", count: 2 }),
+      "batches.mjs": 'export function validateBatch(orders) { if (!orders.length) throw new Error("E_EMPTY_BATCH") }'
+    },
+    message: dir => `服务 orders_demo 今天有异常日志，分析日志给出原因和修复建议。代码地址：${dir}`,
+    verify: (_dir, result, data) => {
+      assert.doesNotMatch(result.message, /ops-log-triage|技能/)
+      assert.deepEqual(result.mainTools, ["bot_work_create"], "dispatch the matching outcome before any foreground probe")
+      assert.equal(result.budgetHandoff, false)
+      assert.equal(result.mainModelRequests, 1)
+      assert.equal(data.works.length, 1)
+      assert.equal(result.mainAcknowledgements.length, 1)
+      assert.ok(result.mainAcknowledgements[0].afterDispatch)
+      assert.ok(result.mainAcknowledgements[0].text.length <= 80)
+      assert.doesNotMatch(result.mainAcknowledgements[0].text, /finishTurn|pipeline|Let me|预算/i)
+      const worker = data.workMessages[0]
+      assert.ok(worker.some((m: any) => m.tool_calls?.some((c: any) =>
+        c.name === "read_file" && JSON.stringify(c.args).includes("ops-log-triage/SKILL.md"))))
+      assert.ok(worker.some((m: any) => m.role === "tool" && m.name === "execute" && !m.is_error &&
+        String(m.content).includes("OPS_CHECK:orders_demo:E_EMPTY_BATCH:2")), "the worker ran the skill resource")
+      assert.equal(result.reportCount, 1)
+      const reply = publishedLogReply(result, data)
+      assert.match(reply, /E_EMPTY_BATCH/)
+      assert.match(reply, /空批|空(?:数组|列表)|批次.{0,14}(?:为空|为零|为 0)|!orders\.length/)
+      assert.doesNotMatch(reply, /OPS_CHECK:/, "report the business error, not the skill script's success marker")
+    }
+  },
+  {
+    id: "delivery-log-cause", label: "日志汇报保留错误码、原因和建议", preferred: "independent",
+    files: logFixture,
+    message: dir => `请用独立任务检查 ${dir} 的 service.log 和 batch.mjs，告诉我第一条异常的错误码、触发原因和调用方应该怎么处理。`,
+    verify: (_dir, result, data) => {
+      const reply = publishedLogReply(result, data)
+      assert.match(reply, /EMPTY_BATCH/)
+      assert.match(reply, /空|为\s*0|等于\s*0/)
+      assert.match(reply, /校验|跳过|检查|拦截|判断|判空|验证|过滤|提前返回/)
+      assert.doesNotMatch(reply, /read_file|工具权限|工具不可用/)
+    }
+  },
+  {
+    id: "delivery-log-gap", label: "证据不足时说明还缺哪条记录", preferred: "independent",
+    files: { "service.log": logFixture["service.log"] },
+    message: dir => `请用独立任务核对 ${dir} 的 service.log。NoSuchKey 可以证明 day.csv 被删除了吗？给出这条记录能支持的判断及还需要什么证据。`,
+    verify: (_dir, result, data) => {
+      const reply = publishedLogReply(result, data)
+      assert.match(reply, /NoSuchKey/)
+      assert.match(reply, /不能|无法|不足|不代表|并不|未能|不可|仅(?:能|说明|表明)|只能|并非/)
+      assert.match(reply, /审计|操作记录|删除记录|操作日志|版本|DeleteObject/i)
+      assert.doesNotMatch(reply, /read_file|工具权限|工具不可用/)
+    }
+  },
+  {
+    id: "delivery-log-method", label: "用户询问方法时给出实际工具名", preferred: "independent",
+    files: { "service.log": logFixture["service.log"] },
+    message: dir => `请让独立任务用 read_file 读取 ${dir}/service.log。告诉我第一条错误码，以及实际用了哪个工具读取文件。`,
+    verify: (_dir, result, data) => {
+      assert.ok(data.workMessages.flat().some((m: any) => m.role === "tool" && m.name === "read_file" && !m.is_error && m.status !== "error"))
+      const reply = publishedLogReply(result, data)
+      assert.match(reply, /EMPTY_BATCH/)
+      assert.match(reply, /\bread_file\b/)
+    }
+  },
   {
     id: "delivery-review", label: "主 Bot 复核正式附件后交付", preferred: "independent",
     files: { "counts.txt": "上午 7 件，下午 4 件。" },
@@ -393,6 +476,33 @@ const cases: Case[] = [
   }
 ]
 
+const diagnostic = cases.find(c => c.id === "ops-log-triage")!
+const colleagueVoice = "用中文协助用户，像一起值班的同事，说话简洁。我的习惯是在接下工作和汇报结果时称对方为“搭档”。"
+cases.push({
+  ...diagnostic, id: "ops-log-colleague", label: "同一异常用值班搭档口吻答复", instructions: colleagueVoice,
+  verify: async (dir, result, data) => {
+    await diagnostic.verify!(dir, result, data)
+    assert.match(result.mainAcknowledgements[0].text, /搭档/)
+    assert.match(publishedLogReply(result, data), /搭档/)
+  }
+}, {
+  id: "separate-answer", label: "交办后回答另一道独立问题", preferred: "independent",
+  message: () => "给我开一个任务，用一句话写一则周五读书会通知，写好发回。同时请你现在单独回答另一个问题：19 加 23 是多少？不要把算术交给写通知的人。",
+  verify: (_dir, result, data) => {
+    assert.equal(data.works.length, 1)
+    assert.equal(result.reportCount, 1)
+    assert.match(result.mainAcknowledgements.map((m: any) => m.text).join(" "), /42|四十二/)
+    assert.match(publishedLogReply(result, data), /读书会/)
+  }
+}, {
+  id: "style-format", label: "用户指定格式优先于默认语气", preferred: "inline", instructions: colleagueVoice,
+  message: () => "请用一个英文单词回答 2 加 3 等于多少，只写那个词。",
+  verify: (_dir, result, data) => {
+    const answer = data.messages.findLast((m: any) => m.role === "assistant" && typeof m.content === "string" && m.content.trim())
+    assert.match(splitBotInlineReasoning(answer.content).body.trim(), /^five[.!]?$/i)
+    assert.equal(result.mainTools.length, 0)
+  }
+})
 async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchive>>) {
   const config = await selectedBotRoutingModel()
   const out = botTestAppOutput()
@@ -404,6 +514,21 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
   assert.ok(selected.length, "unknown case")
   if (selected.some(test => test.skill || test.naturalSkill))
     await installSlashSkillFixture(root)
+  if (selected.some(test => test.id.startsWith("ops-log-"))) {
+    const directory = join(root, "profile", "skills", "ops-log-triage")
+    await mkdir(directory, { recursive: true })
+    await writeFile(join(directory, "SKILL.md"), [
+      "---", "name: ops-log-triage", "description: 排查指定服务的当日异常日志，结合代码给出异常原因和修复建议。", "---",
+      "用 node 执行本技能目录的 inspect.mjs，传入用户提供的数据目录。脚本读取本地合成日志，输出服务、错误码和次数。",
+      "E_EMPTY_BATCH 表示调用方传入了空批次。按脚本的回执给出次数、原因及调用方建议。"
+    ].join("\n"))
+    await writeFile(join(directory, "inspect.mjs"), [
+      'import { readFileSync } from "node:fs"',
+      'import { join } from "node:path"',
+      'const e = JSON.parse(readFileSync(join(process.argv[2], "errors.json"), "utf8"))',
+      'console.log(["OPS_CHECK", e.service, e.code, e.count].join(":"))'
+    ].join("\n"))
+  }
   await archive.configure({ model: config.model, out, workspace: root, apiKey: config.apiKey })
   const reportPath = join(out, "artifacts", `routing-${Date.now()}.json`)
   const results: any[] = []
@@ -446,9 +571,10 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
       const latestInput = (body.messages ?? []).findLast((m: any) => m.role === "user" && !(typeof m.content === "string" && m.content.trimStart().startsWith("<bot_reply_reminder>")))
       const inputText = typeof latestInput?.content === "string" ? latestInput.content
         : (latestInput?.content ?? []).map((part: any) => part.text ?? "").join("\n")
+      const resultEvent = /<bot_runtime_context event="task_result(?:_review)?">/.test(inputText)
+      const resultLine = resultEvent && inputText.split("\n").find(part => part.startsWith('{"kind":"host_work_result"'))
       const role = system.includes("ALREADY inside independent task") ? "executor"
-        : inputText.includes('<bot_runtime_context event="task_result_review">') ? "review"
-        : inputText.includes('<bot_runtime_context event="task_result">') ? "report"
+        : resultLine ? "review" : resultEvent ? "report"
         : ['user_request', 'introduction'].some(event => inputText.includes(`<bot_runtime_context event="${event}">`)) ? "communication"
         : create ? "other-main" : "other"
       const botIdentity = (body.messages ?? []).filter((m: any) => m.role === "system")
@@ -481,8 +607,7 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
       }
       if (role === "review") {
         wire.reviewRequests.push((body.tools ?? []).map((tool: any) => tool.function.name))
-        const line = inputText.split("\n").find(part => part.startsWith('{"kind":"host_work_result"'))
-        const returned = line && JSON.parse(line)
+        const returned = resultLine && JSON.parse(resultLine)
         const evidence = returned?.independentFile
         if (returned && activeTurn?.id.startsWith("delivery-")) deliveryInputs.set(activeTurn.id, {
           requiredFiles: returned.delivery?.requiredFiles, stagedFiles: returned.retainedFiles?.names, selectionReason: returned.selectionReason
@@ -804,7 +929,12 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
       const mainMessages = messages.slice(startIndex, nextIndex < 0 ? undefined : nextIndex)
       const calls = mainMessages.flatMap((m: any) => m.tool_calls ?? [])
       const tools = calls.map((c: any) => c.name)
-      const skillReceiptIndex = mainMessages.findIndex((m: any) => m.role === "tool" && m.name === "bot_skill_dispatch")
+      const lastBatch = mainMessages.findLast((m: any) => m.role === "assistant" && m.tool_calls?.length)?.tool_calls
+      const receipts = new Map(mainMessages.filter((m: any) => m.role === "tool").map((m: any) => [m.tool_call_id, m]))
+      const dispatchReceiptIndex = mainMessages.findIndex((m: any) => {
+        const call = m.role === "tool" && calls.find((c: any) => c.id === m.tool_call_id)
+        return call && acceptedBotDispatch(call.name, call.args, m)
+      })
       const resultTasks = tasks.filter((t: any) => t.origin.kind === "work_result" && t.state === "completed")
       const publications = resultTasks.filter((t: any) => !t.origin.review || t.origin.review.phase === "publish")
       const allTools = [
@@ -837,7 +967,8 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
           ? +((mainTask.updatedAt - mainTask.createdAt) / 1000).toFixed(1)
           : undefined,
         mainModelRequests: mainRequests.length || null,
-        finishesDispatchBatch: calls.some((c: any) => c.args?.finishTurn === true || c.name === "bot_skill_dispatch"),
+        finishesDispatchBatch: Boolean(lastBatch?.every((c: any) => !hasOutstandingBotRequest(c.args ?? {}, message) &&
+          acceptedBotDispatch(c.name, c.args, receipts.get(c.id)))),
         mainToolChoices: mainRequests.map(r => r.choice),
         selectedSkill: selection?.name,
         dispatchSeconds: data.works.length && !before.works.length
@@ -851,13 +982,13 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
         message,
         tools: [...new Set(allTools.map((c: any) => c.name))],
         mainTools: tools,
-        ...(["revision", "reopen"].includes(test.id) || test.id.startsWith("slash-skill") || test.naturalSkill ? {
+        ...(["revision", "reopen"].includes(test.id) || test.id.startsWith("ops-log-") || test.id.startsWith("slash-skill") || test.naturalSkill ? {
           mainToolCalls: calls.map((call: any) => ({ name: call.name, args: call.args }))
         } : {}),
-        ...(test.id.startsWith("slash-skill") || test.naturalSkill ? {
+        ...(test.id.startsWith("slash-skill") || test.naturalSkill || test.id.startsWith("ops-log-") || test.id === "separate-answer" ? {
           mainAcknowledgements: mainMessages
             .filter((m: any) => m.role === "assistant" && typeof m.content === "string" && m.content.trim())
-            .map((m: any) => ({ text: m.content, afterDispatch: skillReceiptIndex >= 0 && skillReceiptIndex < mainMessages.indexOf(m) })),
+            .map((m: any) => ({ text: m.content, afterDispatch: dispatchReceiptIndex >= 0 && dispatchReceiptIndex < mainMessages.indexOf(m) })),
           workToolCalls: data.workMessages.map((ms: any[], index: number) => ({
             threadId: data.works[index].threadId,
             calls: ms.flatMap((m: any) => m.tool_calls ?? [])
@@ -949,22 +1080,21 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
     }
     for (const test of selected) {
       const firstResultIndex = results.length
-      const directory = join(root, test.id)
+      const directory = join(root, test.id === "ops-log-colleague" ? "billing-service-source" : test.id === "ops-log-triage" ? "order-service-source" : test.id)
       await mkdir(directory)
       for (const [name, text] of Object.entries(test.files ?? {}))
         await writeFile(join(directory, name), text)
       const bot = await page.evaluate(
-        async (name) =>
+        async ({ name, instructions }) =>
           (window as any).api.bots.create({
-            name,
-            instructions: "用中文协助用户完成日常工作，按要求交付结果。",
+            name, instructions,
             color: "#168bea",
             modelRef: null
           }),
-        "路由验收 · " + test.label
+        { name: "路由验收 · " + test.label, instructions: test.instructions ?? "用中文协助用户完成日常工作，按要求交付结果。" }
       )
       // Opening a Bot starts its introduction. Settle that fixture setup before measuring the first skill submission.
-      if (test.skill || test.naturalSkill) await page.evaluate(id => (window as any).api.bots.open(id), bot.id)
+      if (test.skill || test.naturalSkill || test.id.startsWith("ops-log-")) await page.evaluate(id => (window as any).api.bots.open(id), bot.id)
       await settle(bot.id, true)
       try {
         const { result, data } = await turn(bot, test, test.message(directory), test.skill?.(directory))
@@ -987,7 +1117,7 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
           await page.getByText(bot.name, { exact: true }).first().click()
           await page.locator(".bot-work-row").filter({ hasText: data.works[0].title }).first().waitFor()
           await page.locator(`[data-chat-thread-id="${bot.threadId}"]`)
-            .getByText("已新建任务，我会按所选技能处理，结果发回这里。", { exact: true }).waitFor()
+            .getByText(result.mainAcknowledgements[0].text, { exact: true }).waitFor()
           await page.screenshot({ path: join(archive.directory, "slash-skill-main-return.png") })
           await page.getByRole("button", { name: "进入任务：" + data.works[0].title, exact: true }).first().click()
           await page.locator(`[data-chat-thread-id="${data.works[0].threadId}"]`).waitFor()

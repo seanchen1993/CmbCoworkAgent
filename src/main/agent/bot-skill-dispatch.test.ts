@@ -51,7 +51,7 @@ describe("main Bot explicit skill dispatch", () => {
     expect(canSteerBotTask(main("旧请求"), main("补充"))).toBe(true)
   })
   it.each([
-    { success: true, dispatch: "create" as const, args: { title: "PRD" }, reply: "已新建任务，我会按所选技能处理，结果发回这里。" },
+    { success: true, dispatch: "create" as const, args: { title: "PRD" }, reply: "我来处理这件事，结果发回这里。" },
     { success: true, dispatch: "follow_up" as const, args: { workId: "work" }, reply: "我会在原任务中继续处理，结果发回这里。" },
     { success: true, dispatch: "follow_up" as const, args: { workQuery: "原 PRD" }, reply: "我会在原任务中继续处理，结果发回这里。" },
     { success: false, dispatch: "create" as const, args: { title: "PRD" }, reply: "目录不存在，请提供有效目录。" }

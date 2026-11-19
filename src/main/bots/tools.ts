@@ -1184,7 +1184,7 @@ export function createBotMemoryTools(
   bot: BotDefinition,
   memory: BotMemoryService,
   signal: AbortSignal,
-  allowDelete = false,
+  deleteAccess: boolean | "schema-only" = false,
   context: BotMemoryContext = {}
 ): DynamicStructuredTool[] {
   const check = () => {
@@ -1279,11 +1279,12 @@ export function createBotMemoryTools(
         })
       }
     ),
-    ...(allowDelete
+    ...(deleteAccess
       ? [
           tool(
             async ({ id, expectedVersion }, config) =>
               run("bot_forget", config.toolCall?.id, () => {
+                if (deleteAccess !== true) throw new Error("仅可在用户提出删除请求时移除记忆")
                 assertParentBot(config)
                 memory.removeInContext(bot.id, id, expectedVersion, context)
                 return { removed: true, id }

@@ -40,7 +40,12 @@ export function createBotWorkTools(
     requiredFiles: z.array(z.string().trim().min(1).max(240)).max(64).optional().describe("Explicitly required attachment filenames, without directories."),
     allowInterim: z.boolean().optional().describe("The user explicitly asked for a draft delivery before the final version.")
   }).strict().optional().describe("Original user's delivery requirements. Ordinary worker self-checks do not need independent review.")
-  const finishTurn = z.boolean().optional().describe("Set true when this batch contains all requested dispatches and no immediate answer or decision remains. The host verifies every receipt, keeps the initial acknowledgement and ends the main turn without another announcement. Omit when further planning is needed.")
+  const remainingRequest = z.string().trim().optional().describe("Only if the user also asked for another immediate answer or destination, copy that separate instruction verbatim from their message. A paraphrase is ignored. Returning the assigned result or attachment to this chat is already included; omit this field.")
+  const confirmation = z.object({
+    kind: z.enum(["new", "continue", "scheduled"]),
+    text: z.string()
+  }).optional().catch(undefined).describe("One short sentence as this Bot would say it to the user, honoring its configured tone and form of address and the user's requested language. Say what business outcome you will provide. A revision identifies the original item; for a schedule include {nextRun} for the host-confirmed time. No process narration, execution claims or technical controls. Published only on matching acceptance.")
+  const finding = z.string().optional().describe("Optional single short, user-facing fact already established by an earlier tool in this turn. Omit for plans, progress, acceptance or routing details.")
   const conversation = z.object({
     kind: z.literal("local_thread"),
     threadId: z.string().min(1).max(256),
@@ -137,7 +142,7 @@ export function createBotWorkTools(
             }
           ),
           tool(
-            async ({ finishTurn: _finishTurn, ...input }, config) =>
+            async ({ remainingRequest: _remainingRequest, finding: _finding, confirmation: _confirmation, ...input }, config) =>
               invoke("bot_feature_update", config, async (host) =>
                 (await import("./feature-command")).runBotFeatureCommand(host, taskId, input)
               ),
@@ -148,7 +153,9 @@ export function createBotWorkTools(
                 "Work on an existing project-mode Feature. follow tracks only; session opens a native project conversation for message; continue sends a correction to the existing threadId from bot_feature_read: it joins this conversation's owned running turn at a safe boundary, or starts the next turn when idle. manage starts native automated Feature stages ONLY when requested, optionally from an available idle project thread. stop(runId) stops automatic progression; interrupt(threadId) stops the current turn. Pick the unambiguous session or ask. Reuse requestKey for retries.",
               schema: z.object({
                 action: z.enum(["follow", "session", "continue", "manage", "stop", "interrupt", "complete", "reopen"]),
-                finishTurn,
+                remainingRequest,
+                finding,
+                confirmation,
                 expectedVersion: z.number().int().positive().optional().describe("For complete/reopen, use version from bot_work_list and an explicit user instruction."),
                 projectId: id,
                 slug: id,
@@ -375,6 +382,8 @@ export function createBotWorkTools(
         description: "Delegate work when the user selected a / skill or explicitly asked to use a named installed skill. For typed requests copy skillName from the user's current instruction. Answer questions about a skill in chat. For ordinary assignments use the usual task tools. For future or recurring work supply schedule and title; otherwise dispatch now. For revisions reuse workId or workQuery. Supply the requested workspace or projectQuery directly: the host resolves it and the executor inspects inputs and reads the skill. The host acknowledges acceptance once.",
         schema: z.object({
           skillName: z.string().trim().min(1).max(256).optional().describe("Exact skill name the user asked to run. Omit for a desktop / selection."),
+          finding,
+          confirmation,
           workId: id.optional(),
           delivery,
           workQuery: z.string().trim().min(1).max(160).optional(),
@@ -419,10 +428,12 @@ export function createBotWorkTools(
         name: "bot_work_create",
         metadata: { [MAIN_TURN_ONLY_TOOL_METADATA_KEY]: true },
         description:
-          "Start an independent task for one substantive outcome. Provide its short goal, designated workspace and any delivery conditions (including a separate review or human approval). The host forwards the admitted request and selected context. Reuse requestKey after a lost reply.",
+          "Start one independent task for a substantive outcome. Call directly when the requested work matches a skill description; put that skill's name in the goal. The host forwards the original input paths and validates a designated workspace on creation. The executor inspects the inputs. Include delivery conditions such as separate review or human approval. Reuse requestKey after a lost reply.",
         schema: z.object({
           requestKey: key,
-          finishTurn,
+          remainingRequest,
+          finding,
+          confirmation,
           delivery,
           inputFileIds: inputFiles,
           title: z.string().trim().min(1).max(160),
@@ -460,7 +471,9 @@ export function createBotWorkTools(
           "Send a new instruction or file correction to the exact same-audience conversation task in its original workspace. Identify it from the current snapshot or look it up if unclear. For active work with dispatch open omit expectedVersion, even when lastExecution.state is completed. To revise completed or explicitly stopped work at the user's request, send once with its current version as expectedVersion: the host reopens and enqueues atomically. Give a short correction; the host supplies the original request and applied user corrections. Inside the task itself, execute directly. A queued receipt confirms acceptance; results return automatically.",
         schema: z.object({
           requestKey: key,
-          finishTurn,
+          remainingRequest,
+          finding,
+          confirmation,
           workId: id,
           delivery,
           inputFileIds: inputFiles,
@@ -604,7 +617,7 @@ export function createBotWorkResultTools(
         return read
       }), {
         name: "bot_work_result_read", metadata,
-        description: "When needed, inspect this returned task's retained files, command receipts or process/question-answer history. Catalogue lists scoped evidence IDs; evidence reads one ID; process reads bounded original process and answers. No arbitrary path or task ID is accepted. Missing/truncated evidence is not proof of failure. Reads do not rerun work or grant user permission.",
+        description: 'Inspect retained evidence from this returned task. Use {"kind":"catalogue"} to list evidence IDs, {"kind":"evidence","evidenceId":"…"} to read a listed item, or {"kind":"process"} for recorded steps and answers. Missing or truncated evidence leaves that fact unverified. Reads do not rerun work or grant permission.',
         schema: z.discriminatedUnion("kind", [
           z.object({ kind: z.literal("catalogue"), cursor: z.string().max(2048).optional() }).strict(),
           z.object({ kind: z.literal("evidence"), evidenceId: z.string().regex(/^[a-f0-9]{64}$/),

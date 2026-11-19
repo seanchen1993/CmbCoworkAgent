@@ -28,7 +28,7 @@ describe("main Bot foreground allowance", () => {
     expect(blocked.status).toBe("success")
     expect(JSON.parse(blocked.content)).toMatchObject({ kind: "bot-foreground-continuation", executed: false, reason: "foreground_budget" })
     expect(blocked.content).toContain("has NOT run")
-    expect(budget.checkFinal()).toContain("remaining assignment")
+    expect(budget.checkFinal()).toContain("bot_work_create")
     // Rejected/invalid dispatches cannot masquerade as a background handoff.
     budget.afterTool(
       "bot_work_create",

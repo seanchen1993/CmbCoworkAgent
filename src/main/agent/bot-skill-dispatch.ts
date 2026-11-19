@@ -28,7 +28,7 @@ export function botSkillDispatchInput(input: string, selection: BotSkillDispatch
     "Honor an explicitly designated directory or project; omit workspace for the default. " +
     "Do not read the skill or business files, run commands, plan the implementation or repeat the original request in the goal. " +
     "The host supplies the original request and activates the selected skill in the task. " +
-    "After successful acceptance the host acknowledges once and ends this turn. If dispatch fails, explain the actual blocker briefly; never claim it started.\n</bot_skill_dispatch>"
+    "Supply the brief business confirmation in your own voice in the tool's confirmation field. After successful acceptance the host acknowledges once and ends this turn. If dispatch fails, explain the actual blocker briefly; never claim it started.\n</bot_skill_dispatch>"
 }
 
 /** Stable schemas, forced destination call, and a host gate before hooks or filesystem access. */

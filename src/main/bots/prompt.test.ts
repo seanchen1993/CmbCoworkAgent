@@ -75,8 +75,8 @@ describe("Bot asynchronous assignment guidance", () => {
   ] as const)("guides %s user assignments without forcing a split", (_name, source) => {
     const prompt = buildBotPrompt(bot, source, "/workspace")
     expect(prompt).toContain("persistent Bot")
-    expect(BOT_COMMUNICATION_PROMPT).toContain("The host supplies the original request")
-    expect(BOT_COMMUNICATION_PROMPT).toContain("Dispatch a concise goal")
+    expect(BOT_COMMUNICATION_PROMPT).toContain("original request and selected context travel with the task")
+    expect(BOT_COMMUNICATION_PROMPT).toContain("The independent task reads the skill and performs its checks.")
     expect(BOT_COMMUNICATION_PROMPT).toContain("Browser operations always belong to the executing task")
     expect(prompt).not.toContain("available browser-help tool")
     expect(prompt).toContain("businessState=active does not mean running")
@@ -98,14 +98,22 @@ describe("Bot asynchronous assignment guidance", () => {
     const returned = { ...source, origin: report }
     expect(buildBotPrompt(bot, returned, "/workspace")).toBe(buildBotPrompt(bot, source, "/workspace"))
     const event = buildBotTurnContext(returned, [], new Date("2026-11-17T01:00:00Z"))
-    expect(event).toContain("Event: task_result")
-    expect(event).toContain("Tools are disabled for this event")
+    expect(event).toContain("supplied findings and receipts")
     expect(event).toContain("2026-11-17T01:00:00.000Z")
     const held: BotTask = { ...returned, origin: { ...report,
       review: { phase: "review", requestTaskId: "source", attempt: 1, previewInWork: true } } }
     expect(buildBotPrompt(bot, held, "/workspace")).toBe(buildBotPrompt(bot, source, "/workspace"))
-    expect(buildBotTurnContext(held, [], undefined, true)).toContain("AFTER approving release")
-    expect(buildBotTurnContext(returned, [], undefined, true)).not.toContain("AFTER approving release")
+    expect(buildBotTurnContext(held)).toContain("AFTER approving release")
+    expect(buildBotTurnContext(returned)).not.toContain("AFTER approving release")
+  })
+  it.each([task, imTurn])("only briefs the parent on a separate check or synthesis when requested", source => {
+    const returned: BotTask = { ...source, origin: { ...report,
+      review: { phase: "review", requestTaskId: "source", attempt: 1 } } }
+    const ordinary = buildBotTurnContext(returned)
+    expect(ordinary).toContain("supplied findings and receipts")
+    expect(ordinary).not.toMatch(/independent check|combined results|task_result_review/)
+    expect(buildBotTurnContext(returned, [], undefined, "independent")).toContain("supplied independentFile")
+    expect(buildBotTurnContext(returned, [], undefined, "combine")).toContain("combined results")
   })
   const noDispatch: Array<[string, BotTask]> = [
     ["report", { ...task, origin: report }],
@@ -142,12 +150,12 @@ describe("Bot asynchronous assignment guidance", () => {
       expect(prompt).not.toContain(preference)
       expect(prompt).toContain("ALREADY inside independent task")
       expect(prompt).toContain("carry out the current assignment and revisions here")
-      expect(prompt).toContain("to the original Bot so it can answer the requester")
+      expect(prompt).toContain("retained deliverables and unresolved issues to the original Bot")
     }
     const routine = buildBotPrompt(bot, { ...source, workId: "work",
       origin: { kind: "schedule", scheduleId: "scheduled-check" } }, "/selected")
     expect(routine).toContain("this routine's saved notification conditions")
-    expect(routine).not.toContain("to the original Bot so it can answer the requester")
+    expect(routine).not.toContain("retained deliverables and unresolved issues to the original Bot")
   })
 })
 

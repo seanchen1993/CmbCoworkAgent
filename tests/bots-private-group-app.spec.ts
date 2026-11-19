@@ -1,9 +1,12 @@
 /** Full built Electron App: real UI, preload, IPC, SQLite, Runtime and IM WebSocket.
- * Only the model and gateway endpoints are localhost fixtures. Never uses user data. */
+ * The gateway is local. BOT_STYLE_REAL_IM runs two additional synthetic requests through the selected real model. */
 import assert from "node:assert/strict"
 import { createServer } from "node:http"
 import { createRequire } from "node:module"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { Readable } from "node:stream"
+import { pipeline } from "node:stream/promises"
+import { selectedBotRoutingModel } from "./support/bot-routing-model"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { _electron, type Page } from "playwright"
@@ -15,19 +18,25 @@ async function main() {
   const root = resolve("."),
     out = botTestAppOutput()
   const dir = await mkdtemp(join(tmpdir(), "bot-group-app-"))
+  const realModel = process.env.BOT_STYLE_REAL_IM === "1" ? await selectedBotRoutingModel() : undefined
+  let useRealModel = false
   const binary = createRequire(import.meta.url)("electron") as string
   const errors: string[] = [],
     replies: any[] = [],
     requests: any[] = []
   let app: Awaited<ReturnType<typeof _electron.launch>> | undefined, page: Page | undefined
-  let binding: any,
+  let binding: any, dmBinding: any,
     groupId = "",
     appGroupId = "",
     socket: WebSocket | undefined
   let passed = false
   let releaseOrdinaryTurn: (() => void) | undefined
+  let releaseToolFrame: (() => void) | undefined
   const incomplete = "清单已有需求范围，尚缺验收条件。"
   const completed = "群任务检查完成：需求范围和验收条件均已补齐。"
+  const dataResult = "这 24 行数据中有 3 行重复。"
+  const dataConfirmation = "我来核对这份数据，查好发到这里。"
+  const findingConfirmation = "输入有 24 行，其中 3 行重复。 我来核对其余数据。"
   const groupSummary = "群任务结果：清单和验收条件已整理。"
   const sendFrame = (peer: WebSocket, type: string, payload: unknown, commandId?: string) =>
     peer.send(
@@ -77,7 +86,7 @@ async function main() {
           peer,
           "BOT_BINDING_RESULT",
           {
-            items: binding && body.botId === binding.botId ? [binding] : [],
+            items: [binding, dmBinding].filter(item => item && item.botId === body.botId),
             before: null
           },
           frame.commandId
@@ -116,11 +125,21 @@ async function main() {
       for await (const chunk of req) raw += chunk
       const body = JSON.parse(raw),
         messages = body.messages ?? []
+      if (useRealModel && realModel) {
+        const response = await fetch(realModel.baseUrl.replace(/\/+$/, "") + "/chat/completions", {
+          method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + realModel.apiKey },
+          body: JSON.stringify({ ...body, model: realModel.model }), signal: AbortSignal.timeout(120000)
+        })
+        assert.ok(response.body)
+        res.writeHead(response.status, { "content-type": response.headers.get("content-type") ?? "application/json" })
+        await pipeline(Readable.fromWeb(response.body as any), res)
+        return
+      }
       const text = (x: unknown) => (typeof x === "string" ? x : JSON.stringify(x))
       const all = JSON.stringify(messages)
       let index = -1
       messages.forEach((m: any, i: number) => {
-        if (m.role === "user" && !text(m.content).trimStart().startsWith("<bot_reply_reminder>")) index = i
+        if (m.role === "user" && !/^(?:<bot_reply_reminder>|\[\[CMB_TURN_COMPLETION_GATE_V1:)/.test(text(m.content).trimStart())) index = i
       })
       const user = text(messages[index]?.content ?? "")
       const used = messages
@@ -138,7 +157,9 @@ async function main() {
       }
       let reply = "本地测试已就绪。",
         call: { name: string; args: any } | undefined
-      if (reporting) {
+      if (messages.some((m: any) => m.role === "system" && text(m.content).includes("You are a memory curation agent."))) {
+        reply = JSON.stringify({ operations: [], memory_md: "" })
+      } else if (reporting) {
         assert.ok(!all.includes("PRIVATE_SECRET"), "the group Bot may only receive its group's context")
         if (user.includes(completed)) reply = groupSummary
         else if (user.includes("STEER_AFTER_BOUNDARY")) reply = "已按两次补充完成任务。"
@@ -146,14 +167,14 @@ async function main() {
           if (!used.includes("bot_work_result_continue"))
             call = { name: "bot_work_result_continue", args: { gap: "需求清单缺少验收条件", instruction: "在原清单补齐各项验收条件。" } }
         } else {
-          assert.ok(user.includes("群任务检查完成"), "the group Bot must receive the worker's actual conclusion")
-          reply = "群任务结果：需求清单已整理。"
+          assert.ok(user.includes(dataResult), "the Bot must receive the worker's actual conclusion")
+          reply = dataResult
         }
       } else if (all.includes("You are ALREADY inside independent task")) {
         assert.ok(!all.includes("PRIVATE_SECRET"), "task must not inherit private history")
         if (user.includes("在原清单补齐各项验收条件")) reply = completed
         else if (user.includes("LIVE_WORK_GOAL")) reply = incomplete
-        else reply = "群任务检查完成：需求清单已整理。"
+        else reply = dataResult
       } else if (user.includes("LIVE_TO_IM")) {
         if (!used.includes("bot_send_message"))
           call = {
@@ -168,14 +189,25 @@ async function main() {
       } else if (user.includes("LIVE_FINDING")) {
         if (!used.length) call = { name: "execute", args: { command: "echo rows24_duplicates3" } }
         else if (!used.includes("bot_work_create")) call = { name: "bot_work_create", args: {
-          requestKey: "finding-work", finishTurn: true, title: "重复行检查", goal: "继续核对数据并回复结果。", contextMessageIds: []
+          requestKey: "finding-work", finishTurn: true, confirmation: { kind: "new", text: "我来核对其余数据。" }, finding: "输入有 24 行，其中 3 行重复。", title: "重复行检查", goal: "继续核对数据并回复结果。", contextMessageIds: []
         } }
         else throw Error("A dispatch with findings must not need another confirmation model call")
+      } else if (user.includes("LIVE_LATE_TOOL")) {
+        if (!used.includes("execute")) call = { name: "execute", args: { command: "echo 3" } }
+        else reply = "核对结果为 3。"
+      } else if (user.includes("LIVE_OWNER_DM")) {
+        if (used.includes("bot_work_create")) throw Error("Unexpected second DM acknowledgement")
+        call = { name: "bot_work_create", args: {
+          requestKey: "owner-dm-work", confirmation: { kind: "new", text: dataConfirmation }, title: "本人数据核对",
+          goal: "核对数据并回复结果。", contextMessageIds: []
+        } }
       } else if (user.includes("LIVE_BUDGET")) {
         const continuation = messages.slice(index + 1).some((m: any) => m.role === "tool" && text(m.content).includes('"kind":"bot-foreground-continuation"'))
         if (used.includes("bot_work_create")) throw Error("Budget continuation must not repeat acknowledgement")
-        call = continuation ? { name: "bot_work_create", args: {
-          requestKey: "budget-work", finishTurn: true, title: "数据核对", goal: "核对数据，只回复结果。", contextMessageIds: []
+        const retry = messages.slice(index + 1).some((m: any) => m.role === "user" && text(m.content).includes("[[CMB_TURN_COMPLETION_GATE_V1:"))
+        if (continuation && !retry) reply = "任务已派发。我用 finishTurn: true 结束本轮。"
+        else call = continuation ? { name: "bot_work_create", args: {
+          requestKey: "budget-work", confirmation: { kind: "new", text: dataConfirmation }, title: "数据核对", goal: "核对数据，只回复结果。", contextMessageIds: []
         } } : { name: "execute", args: { command: `echo feedback_probe_${used.length}` } }
       } else if (user.includes("LIVE_DISPATCH_FAIL")) {
         if (!used.includes("bot_work_create")) call = { name: "bot_work_create", args: {
@@ -230,7 +262,8 @@ async function main() {
       let opening = call && used.length === 0 &&
         (user.includes("LIVE_IM_BRIEF") || user.includes("LIVE_BUDGET") || user.includes("LIVE_DISPATCH_FAIL") || user.includes("LIVE_FINDING"))
         ? "我来核对数据，整理好后发给你。" : undefined
-      if (call?.name === "bot_work_create" && user.includes("LIVE_FINDING")) opening = "输入有 24 行，其中 3 行重复。"
+      if (call && (user.includes("LIVE_BUDGET") || user.includes("LIVE_FINDING")))
+        opening = "先确认服务健康。\nLet me check the pipeline.\n我以 finishTurn: true 结束本轮。"
       const fn = call
         ? {
             id: `call-${requests.length}`,
@@ -244,6 +277,10 @@ async function main() {
           res.write(
             `data: ${JSON.stringify({ id: responseId, object: "chat.completion.chunk", choices: [{ index: 0, delta, finish_reason }] })}\n\n`
           )
+        if (fn && user.includes("LIVE_LATE_TOOL")) {
+          frame({ content: "INTERNAL_DRAFT_BEFORE_TOOL" }, null)
+          await new Promise<void>(done => { releaseToolFrame = done })
+        }
         frame(fn ? { ...(opening ? { content: opening } : {}), tool_calls: [{ index: 0, ...fn }] } : { content: reply }, null)
         frame({}, fn ? "tool_calls" : "stop")
         res.end("data: [DONE]\n\n")
@@ -267,7 +304,8 @@ async function main() {
       }
     } catch (error) {
       errors.push(String(error))
-      res.writeHead(500).end("local-fixture-error")
+      if (!res.headersSent) res.writeHead(500)
+      if (!res.destroyed && !res.writableEnded) res.end("local-fixture-error")
     }
   })
   await new Promise<void>((done) => model.listen(0, "127.0.0.1", done))
@@ -473,8 +511,8 @@ async function main() {
         senderId: "local-owner"
       }
     })
-    const wait = async (predicate: () => boolean, label: string) => {
-      const deadline = Date.now() + 60000
+    const wait = async (predicate: () => boolean, label: string, timeout = 60000) => {
+      const deadline = Date.now() + timeout
       while (!predicate()) {
         if (Date.now() > deadline) throw Error("Timed out: " + label)
         await new Promise((done) => setTimeout(done, 100))
@@ -520,6 +558,30 @@ async function main() {
       await page!.keyboard.insertText(" " + text)
       await settle()
     }
+    const lateDraft = "INTERNAL_DRAFT_BEFORE_TOOL"
+    await page.evaluate(marker => {
+      const state = { seen: false, observer: undefined as MutationObserver | undefined }
+      state.observer = new MutationObserver(() => {
+        if (document.querySelector(".bots-conversation")?.textContent?.includes(marker)) state.seen = true
+      })
+      state.observer.observe(document.body, { subtree: true, characterData: true, childList: true })
+      ;(window as any).__botReplyProbe = state
+    }, lateDraft)
+    await fill("LIVE_LATE_TOOL 运行一个简单计算")
+    await send()
+    await wait(() => Boolean(releaseToolFrame), "provider sent content before tool identity")
+    try {
+      await page.waitForTimeout(250)
+    } finally {
+      releaseToolFrame?.()
+    }
+    await page.locator(".bots-conversation").getByText("核对结果为 3。", { exact: true }).waitFor()
+    await idle()
+    assert.equal(await page.evaluate(() => {
+      const probe = (window as any).__botReplyProbe
+      probe.observer.disconnect()
+      return probe.seen
+    }), false, "unclassified provider prose must never flash in the App")
     await fill("PRIVATE_SECRET 这是私聊内容，请勿转到任何群。")
     await send()
     await idle()
@@ -545,7 +607,7 @@ async function main() {
     assert.ok(workTurns[0].workId && workTurns[0].workId === workTurns[1].workId)
     assert.equal(workTurns[0].threadId, workTurns[1].threadId)
     await page.getByRole("button", { name: "已交办到招乎群 · 产品协作群", exact: true }).click()
-    await page.getByRole("button").filter({ hasText: "群内需求清单" }).last().click()
+    await page.getByRole("button", { name: "进入任务：群内需求清单", exact: true }).click()
     await page.locator(".bot-personal-header[data-task]").getByRole("button", { name: "返回群聊「产品协作群」", exact: true }).waitFor()
     await page
       .locator(".bots-conversation")
@@ -561,26 +623,28 @@ async function main() {
     // The same App/IPC/Runtime/WS path now covers initial, budget and failure feedback.
     const mainCalls = (marker: string) => requests.filter(r => r.user.includes(marker) && r.user.includes('<bot_runtime_context event="user_request">'))
     assert.equal(mainCalls("LIVE_IM_BRIEF").length, 1)
-    assert.equal(replies.filter(r => r.message.content === "我来核对数据，整理好后发给你。").length, 1)
-    const inject = (id: string, text: string, sequence: number) => sendFrame(socket!, "BOT_EVENT", {
+    assert.equal(replies.filter(r => r.message.content === "我来处理「群内需求清单」，结果发回这里。").length, 1)
+    const inject = (id: string, text: string, sequence: number, target = binding) => sendFrame(socket!, "BOT_EVENT", {
       event: { schemaVersion: 1, eventId: id, platformMessageId: id, principalId: "local-owner",
-        conversationKey: binding.conversationKey, conversationSeq: sequence, message: { type: "text", text },
+        conversationKey: target.conversationKey, conversationSeq: sequence, message: { type: "text", text },
         occurredAt: new Date().toISOString(), lease: { id: `${id}-lease`, expiresAt: new Date(Date.now() + 90000).toISOString() }, redelivered: false },
-      route: { bindingId: binding.id, botId: bots.service.id, kind: "group", label: binding.label, version: 1, senderId: "local-owner" }
+      route: { bindingId: target.id, botId: bots.service.id, kind: target.kind, label: target.label, version: 1, senderId: "local-owner" }
     })
     const beforeBudget = replies.length
     inject("budget-event", "LIVE_BUDGET 核对数据并整理结果。", 2)
-    await wait(() => replies.slice(beforeBudget).some(r => r.message.content === "群任务结果：需求清单已整理。"), "budget work result")
+    await wait(() => replies.slice(beforeBudget).some(r => r.message.content === dataResult), "budget work result")
     await idle()
     const budgetReplies = replies.slice(beforeBudget)
-    assert.equal(budgetReplies.filter(r => r.message.content === "我来核对数据，整理好后发给你。").length, 1)
+    assert.deepEqual(budgetReplies.map(r => r.message.content), [dataConfirmation, dataResult])
+    assert.doesNotMatch(JSON.stringify(budgetReplies), /finishTurn|Let me check|先确认服务健康/)
     assert.ok(!JSON.stringify(budgetReplies).includes("Foreground execution budget"))
     assert.ok(!JSON.stringify(budgetReplies).includes("bot-foreground-continuation"))
-    assert.equal(mainCalls("LIVE_BUDGET").length, 6)
+    assert.equal(mainCalls("LIVE_BUDGET").length, 7)
     await page.getByRole("button", { name: "已交办到招乎群 · 产品协作群", exact: true }).click()
     const visible = await page.locator(".bots-conversation").innerText()
     assert.ok(!visible.includes("执行遇到问题"), "budget handoff is not a user-facing error")
     assert.ok(!visible.includes("Foreground execution budget"))
+    assert.doesNotMatch(visible, /finishTurn|Let me check|先确认服务健康/)
     await page.screenshot({ path: join(out, "artifacts/feedback-budget.png") })
     const beforeFailure = replies.length
     inject("failed-event", "LIVE_DISPATCH_FAIL 请在指定目录处理。", 3)
@@ -604,21 +668,85 @@ async function main() {
     await page.screenshot({ path: join(out, "artifacts/feedback-real-error.png") })
     const beforeFinding = replies.length
     inject("finding-event", "LIVE_FINDING 核对数据，继续处理发现的问题。", 4)
-    await wait(() => replies.slice(beforeFinding).some(r => r.message.content === "群任务结果：需求清单已整理。"), "findings work result")
+    await wait(() => replies.slice(beforeFinding).some(r => r.message.content === dataResult), "findings work result")
     await idle()
     const findingReplies = replies.slice(beforeFinding)
-    assert.equal(findingReplies.filter(r => r.message.content === "我来核对数据，整理好后发给你。").length, 1)
-    assert.equal(findingReplies.filter(r => r.message.content === "输入有 24 行，其中 3 行重复。").length, 1)
+    assert.deepEqual(findingReplies.map(r => r.message.content), [findingConfirmation, dataResult])
+    assert.doesNotMatch(JSON.stringify(findingReplies), /finishTurn|Let me check|先确认服务健康/)
     assert.equal(mainCalls("LIVE_FINDING").length, 2)
-    await page.locator(".bots-conversation").getByText("输入有 24 行，其中 3 行重复。", { exact: true }).waitFor()
+    await page.locator(".bots-conversation").getByText(findingConfirmation, { exact: true }).waitFor()
     await page.screenshot({ path: join(out, "artifacts/feedback-findings.png") })
     console.log("PASS: unified App/IM acknowledgement; 4 executed probes, 1 nonexecuted continuation; accepted receipt skips post-dispatch model; real failure and new findings stay visible")
+    dmBinding = { ...binding, id: "local-owner-dm-binding", kind: "dm", conversationKey: "local-private", peerLabel: "本人" }
+    await app.evaluate(async (_, id) => (globalThis as any).__handoffApp.service.list(id), bots.service.id)
+    const beforeDm = replies.length
+    inject("owner-dm-event", "LIVE_OWNER_DM 核对数据并整理结果。", 1, dmBinding)
+    await wait(() => replies.slice(beforeDm).some(r => r.message.content === dataResult), "owner DM receives result")
+    await idle()
+    const dmReplies = replies.slice(beforeDm)
+    assert.deepEqual(dmReplies.map(r => r.message.content), [dataConfirmation, dataResult])
+    assert.ok(dmReplies.every(r => r.conversationKey === dmBinding.conversationKey))
+    assert.equal(mainCalls("LIVE_OWNER_DM").length, 1)
     await writeFile(join(out, "artifacts/feedback-validation.json"), JSON.stringify({
       mode: "controlled-model-real-electron-local-ws", normalDispatchModelCalls: 1,
-      budgetMainModelCalls: 6, openingDeliveries: budgetReplies.filter(r => r.message.content === "我来核对数据，整理好后发给你。").length,
-      resultDeliveries: budgetReplies.filter(r => r.message.content === "群任务结果：需求清单已整理。").length,
+      budgetMainModelCalls: mainCalls("LIVE_BUDGET").length, openingDeliveries: budgetReplies.filter(r => r.message.content === dataConfirmation).length,
+      appDraftFlashed: false, appLookup: "核对结果为 3。",
+      group: budgetReplies.map(r => r.message.content), ownerDm: dmReplies.map(r => r.message.content),
+      finding: findingReplies.map(r => r.message.content),
+      resultDeliveries: budgetReplies.filter(r => r.message.content === dataResult).length,
       realFailureDelivered: true, laterFindingDelivered: true, errors
     }, null, 2))
+    if (realModel) {
+      await page.evaluate(async id => {
+        const bots = (window as any).api.bots
+        const current = (await bots.snapshot()).bots.find((item: any) => item.id === id)
+        await bots.update({ ...current, expectedVersion: current.version, instructions: "你是值班同事，接下工作和最终汇报时都以“搭档”称呼对方。答复简短、务实。" })
+      }, bots.service.id)
+      const liveResults: Array<{ channel: string; messages: string[]; firstMs?: number; resultMs?: number; failure?: string }> = []
+      const evidence = join(out, "artifacts", `im-style-${Date.now()}.json`)
+      const firstLiveReply = replies.length
+      useRealModel = true
+      try {
+        for (const target of [dmBinding, binding]) {
+          const entry: (typeof liveResults)[number] = { channel: target.kind, messages: [] }
+          liveResults.push(entry)
+          const start = Date.now(), before = replies.length
+          const delivered = () => replies.slice(before).filter(r => r.conversationKey === target.conversationKey)
+          const question = `请新开一个任务，核对 orders_${target.kind} 今天的两条异常摘录：09:15 batch=a size=0 E_EMPTY_BATCH；11:20 batch=b size=0 E_EMPTY_BATCH。规则是 size 为零就拒绝该批次。请告诉我几次、触发原因及调用方的修复建议，直接在这里回复。仅依据消息中的摘录，无需读取本地文件或运行命令。`
+          inject(`real-log-${target.kind}`, question, target.kind === "dm" ? 2 : 5, target)
+          try {
+            await wait(() => delivered().length > 0, `${target.kind} accepted`, 120000)
+            entry.firstMs = Date.now() - start
+            assert.ok(delivered()[0].message.content.length <= 160, "first delivery should only confirm acceptance")
+            await wait(() => delivered().length >= 2, `${target.kind} result`, 150000)
+            entry.resultMs = Date.now() - start
+            await idle()
+          } catch (error) {
+            entry.failure = String(error)
+          } finally {
+            entry.messages = delivered().map(r => r.message.content)
+          }
+        }
+        for (const response of replies.slice(firstLiveReply)) {
+          const otherService = response.conversationKey === dmBinding.conversationKey ? "orders_group" : "orders_dm"
+          assert.ok(!response.message.content.includes(otherService), "reply delivered outside original conversation")
+        }
+        for (const entry of liveResults) {
+          assert.ok(!entry.failure, entry.channel + ": " + entry.failure)
+          assert.equal(entry.messages.length, 2, "one acceptance and one result on the source route")
+          assert.match(entry.messages[1], /E_EMPTY_BATCH/)
+          assert.match(entry.messages[1], /2|两/)
+          assert.match(entry.messages[1], /过滤|跳过|校验|非空|检查/)
+          assert.doesNotMatch(entry.messages.join("\n"), /finishTurn|bot_work_|review scope|Let me check|前台预算/i)
+          assert.match(entry.messages[0], /搭档/, entry.channel + " acceptance should honor the configured address")
+          assert.match(entry.messages[1], /搭档/, entry.channel + " result should honor the configured address")
+        }
+      } finally {
+        useRealModel = false
+        await writeFile(evidence, JSON.stringify({ model: realModel.model, gateway: "loopback", results: liveResults }, null, 2))
+        console.log("Real IM reply evidence:", evidence)
+      }
+    }
     if (process.env.BOT_FEEDBACK_ONLY === "1") { assert.deepEqual(errors, []); passed = true; return }
     await page.getByRole("button", { name: "前往私人主对话", exact: true }).click()
     await page.getByText("私人助手", { exact: true }).first().click()
@@ -909,6 +1037,7 @@ async function main() {
       )
       console.log("Failure diagnostics:", dir)
     }
+    releaseToolFrame?.()
     await app?.close().catch(() => {})
     for (const peer of gateway.clients) peer.terminate()
     await new Promise<void>((done) => gateway.close(() => done()))

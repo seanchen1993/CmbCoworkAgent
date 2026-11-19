@@ -23,27 +23,59 @@ function readDispatchReceipt(name: string, result: unknown): Record<string, unkn
   return undefined
 }
 
-/** Use the accepted task's origin, including name lookups and replayed receipts. */
-function skillDispatchAcknowledgement(result: unknown): string {
-  const receipt = readDispatchReceipt(BOT_SKILL_DISPATCH_TOOL, result)
-  if (isSavedBotSkillSchedule(receipt?.schedule)) {
-    const { name, nextRunAt, timezone } = receipt.schedule
-    let next = nextRunAt
+/** Invalid optional display text never invalidates an otherwise accepted task. */
+function shortHandoffText(value: unknown, limit: number): string | undefined {
+  if (typeof value !== "string") return
+  const text = value.trim()
+  if (text && text.length <= limit && !/[\r\n\u2028\u2029]|\b(?:finishTurn|remainingRequest|bot_[a-z]\w*)\b/iu.test(text)) return text
+  return undefined
+}
+
+type HandoffKind = "new" | "continue" | "scheduled"
+
+/** Presentation never chooses the actual destination, status or next run time. */
+function acceptedConfirmation(
+  call: NonNullable<AIMessage["tool_calls"]>[number],
+  result: ToolMessage,
+  english: boolean
+): string {
+  const receipt = readDispatchReceipt(call.name, result)!
+  const schedule = isSavedBotSkillSchedule(receipt.schedule) ? receipt.schedule : undefined
+  const origin = record(receipt.task) && record(receipt.task.origin) ? receipt.task.origin : undefined
+  let kind: HandoffKind | undefined
+  if (schedule) kind = "scheduled"
+  else if (call.name === "bot_work_send" || origin?.dispatch === "follow_up" ||
+      (call.name === "bot_feature_update" && call.args.action === "continue")) kind = "continue"
+  else if (call.name === "bot_work_create" || origin?.dispatch === "create" ||
+      call.name === "bot_feature_update") kind = "new"
+
+  let next = schedule?.nextRunAt
+  if (schedule) {
     try {
-      next = new Date(nextRunAt).toLocaleString("zh-CN", { timeZone: timezone, month: "numeric", day: "numeric",
-        hour: "2-digit", minute: "2-digit", hour12: false })
-    } catch { /* An older host may have a timezone unknown to this runtime. */ }
-    return `已安排「${name}」，下次执行时间是 ${next}，结果会发回这里。`
+      next = new Date(schedule.nextRunAt).toLocaleString(english ? "en-US" : "zh-CN", {
+        timeZone: schedule.timezone, month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false
+      })
+    } catch { /* Use the host's ISO time if the local runtime does not recognize its timezone. */ }
   }
-  const origin = record(receipt?.task) ? receipt.task.origin : undefined
-  if (record(origin) && origin.kind === "work") {
-    if (origin.dispatch === "create")
-      return "已新建任务，我会按所选技能处理，结果发回这里。"
-    if (origin.dispatch === "follow_up")
-      return "我会在原任务中继续处理，结果发回这里。"
+  const draft = call.args.confirmation
+  if (kind && record(draft) && draft.kind === kind) {
+    const text = shortHandoffText(draft.text, 160)
+    // A stale client or model can propose a receipt for a different operation, leak controls,
+    // or claim a later lifecycle state. Fall back to the native facts for the whole sentence.
+    if (text && !/[<>]|https?:\/\/|(?:前台预算|后台代理|执行预算|工具调用|已(?:经)?(?:完成|生成|发出|交付|发送|在运行|开始执行)|正在运行)|\b(?:foreground budget|tool call|already (?:running|finished|sent)|has (?:finished|completed)|I(?:'ve| have) (?:finished|sent|completed))\b/iu.test(text) &&
+        !/[。！？!?]\s*\S/u.test(text) && !/\.\s+[\p{Lu}]/u.test(text) &&
+        (next ? text.split("{nextRun}").length === 2 : !text.includes("{nextRun}"))) {
+      return next ? text.replace("{nextRun}", next) : text
+    }
   }
-  // Legacy receipts without an origin cannot prove whether this is a new task.
-  return "我会按所选技能处理，结果发回这里。"
+  if (schedule) return english ? `Scheduled “${schedule.name}”. Next run: ${next}.` :
+    `已安排「${schedule.name}」，下次执行时间是 ${next}。`
+  const subject = record(receipt.work) ? shortHandoffText(receipt.work.title, 64) : undefined
+  if (kind === "continue") return english
+    ? "I'll update the original task and send the result here."
+    : subject ? `我会接着处理原任务「${subject}」，结果发回这里。` : "我会在原任务中继续处理，结果发回这里。"
+  if (subject) return english ? `I'll take care of “${subject}” and send the result here.` : `我来处理「${subject}」，结果发回这里。`
+  return english ? "I'll take care of this and send the result here." : "我来处理这件事，结果发回这里。"
 }
 
 /** Native receipts only. A reopened business task or a starting/failed Feature is not accepted execution. */
@@ -96,6 +128,21 @@ export function acceptedBotDispatch(name: string, args: unknown, result: unknown
   return false
 }
 
+/** The assigned reply already returns to its source. Only a distinct, user-authored
+ * instruction can keep the foreground turn open after native acceptance. */
+export function hasOutstandingBotRequest(args: Record<string, unknown>, userText: string): boolean {
+  if (args.finishTurn === false) return true // Historical in-flight tool calls.
+  if (!nonempty(args.remainingRequest)) return false
+  const normalize = (text: string) => text.normalize("NFKC").replace(/\s+/gu, " ").trim().toLowerCase()
+  const quote = normalize(args.remainingRequest).replace(/^[“「"]|[”」"]$/gu, "")
+  const source = normalize(userText)
+  if (!quote || source === quote || !source.includes(quote)) return false
+  // Returning the outcome to this chat is part of the native receipt.
+  const replyHere = /^(?:请)?(?:直接)?(?:在这里|在群里|在本群|在本对话中?|在此)?(?:回复|答复|发回|发到)(?:这里|本群|群里|给我)?(?:即可|就行)?[。.!！]?$/u
+  const replyHereEnglish = /^(?:please )?(?:reply|respond|report back|send (?:it|the result)(?: back)?) (?:right )?(?:here|in this (?:chat|group|conversation))[.!]?$/u
+  return !replyHere.test(quote) && !replyHereEnglish.test(quote)
+}
+
 /** Bounded by the latest visible request; a new steer or internal result always needs a fresh model turn. */
 export function botDispatchFeedback(
   messages: readonly BaseMessage[]
@@ -111,9 +158,8 @@ export function botDispatchFeedback(
   const assistant = messages[callIndex]
   if (!AIMessage.isInstance(assistant) || !assistant.tool_calls?.length) return
   const calls = assistant.tool_calls
-  // The model explicitly closes its dispatch batch. Without this flag it may
-  // still owe another destination, an immediate answer or a clarification.
-  if (!calls.some((call) => call.args.finishTurn === true || call.name === BOT_SKILL_DISPATCH_TOOL) || results.size !== calls.length) return
+  // A verified dispatch is terminal unless the caller still owes another step.
+  if (results.size !== calls.length) return
   if (
     !calls.every(
       (call) => call.id && acceptedBotDispatch(call.name, call.args, results.get(call.id))
@@ -122,13 +168,18 @@ export function botDispatchFeedback(
     return
   const state = currentBotReplyState(messages)
   if (!state?.requestMessageId || state.internalInput) return undefined
-  const skillCall = calls.find(call => call.name === BOT_SKILL_DISPATCH_TOOL)
+  if (calls.some(call => hasOutstandingBotRequest(call.args, state.requestText))) return
+  const english = !/\p{Script=Han}/u.test(state.requestText) && /[A-Za-z]{2}/u.test(state.requestText)
+  const first = calls[0]
+  const acknowledgement = state.opening || (calls.length === 1
+    ? acceptedConfirmation(first, results.get(first.id!)!, english)
+    : english ? `I'll take care of these ${calls.length} items and send the results here.` : `这 ${calls.length} 项工作我接下了，结果会发到这里。`)
+  const finding = state.hasEvidence ? calls.map(call => shortHandoffText(call.args.finding, 120)).find(Boolean) : undefined
   return {
     requestMessageId: state.requestMessageId,
     hadOpening: !!state.opening,
-    ...(state.followup ? { followup: state.followup } : {}),
-    acknowledgement: state.opening || (skillCall
-      ? skillDispatchAcknowledgement(results.get(skillCall.id!)) : "我会继续处理，结果会发回这里。")
+    ...(finding ? { followup: state.opening ? finding : `${finding} ${acknowledgement}` } : {}),
+    acknowledgement
   }
 }
 
@@ -145,12 +196,12 @@ export function createBotDispatchFeedbackMiddleware(
         onFeedback(feedback)
         if (!feedback) return undefined
         return {
-          ...(!feedback.hadOpening
+          ...(!feedback.hadOpening || feedback.followup
             ? {
                 messages: [
                   new AIMessage({
                     id: `bot-dispatch-${randomUUID()}`,
-                    content: feedback.acknowledgement,
+                    content: feedback.followup ?? feedback.acknowledgement,
                     response_metadata: { finish_reason: "stop" }
                   })
                 ]

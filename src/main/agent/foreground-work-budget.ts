@@ -52,7 +52,7 @@ const COORDINATION = new Set([
   "bot_delegate"
 ])
 const NOTICE =
-  "Foreground execution budget reached. This tool has NOT run. Keep the main chat available: hand the remaining assignment to bot_work_create, or continue its existing task/Feature. Include the user's goal and constraints, selected workspace, completed findings and exact command receipts; do not repeat completed actions or restart an accepted background command. Use finishTurn: true on the final dispatch batch. Keep the same assistant voice; do not mention budgets, internal errors or handing the user to another agent. If already acknowledged, do not add another acknowledgement. Do not poll or work around this boundary with another tool."
+  "Foreground execution budget reached. This tool has NOT run. Call bot_work_create or continue the existing task/Feature now. Pass its goal, constraints, workspace and any already verified findings and command receipts. Do not repeat completed actions or restart an accepted command. Call without accompanying text. The host acknowledges the accepted task and ends the turn."
 
 export function createForegroundWorkBudget(options: {
   yieldCommand(): void

@@ -68,8 +68,8 @@ async function main() {
       calls.push({ tools: used, lastUser: user.slice(0, 200) })
       let reply = "本机专家可以持续讨论并修改文字或文件。",
         call: { name: string; args: Record<string, unknown> } | undefined
-      const reporting = user.includes('<bot_runtime_context event="task_result">')
-      if (user.includes('<bot_runtime_context event="task_result_review">') || user.startsWith('{"kind":"host_work_result"')) {
+      const reporting = /<bot_runtime_context event="task_result(?:_review)?">/.test(user)
+      if (reporting && user.startsWith('{"kind":"host_work_result"')) {
         const envelope = JSON.parse(user.split("\n\n<bot_runtime_context")[0])
         assert.equal(envelope.kind, "host_work_result")
         assert.ok(envelope.requests.length)

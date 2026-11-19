@@ -9,7 +9,6 @@ import { TURN_COMPLETION_GATE_MARKER_PREFIX } from "../../shared/checkpoint-tran
 import { HOOK_AGENT_OWNER_METADATA_KEY } from "../hooks/execution-context"
 import {
   createOpeningReplyReminderMiddleware,
-  ACKNOWLEDGED_REPLY_REMINDER,
   OPENING_REPLY_REMINDER
 } from "./opening-reply-reminder"
 
@@ -64,7 +63,7 @@ async function run(
 }
 
 describe("Bot main-turn opening reply reminder", () => {
-  it("nudges after two silent tool calls, continues after an update, and never persists the cue", async () => {
+  it("nudges after two silent tool calls, keeps following tool steps silent, and never persists the cue", async () => {
     const { model, read, messages } = await run(
       [new HumanMessage("检查三份文件")],
       [
@@ -74,7 +73,7 @@ describe("Bot main-turn opening reply reminder", () => {
         new AIMessage("三份文件均已核对。")
       ]
     )
-    expect(model.calls.map(hasReminder)).toEqual([false, false, true, false])
+    expect(model.calls.map(hasReminder)).toEqual([false, false, true, true])
     expect(read).toHaveBeenCalledTimes(3)
     expect(messages.at(-1)?.content).toBe("三份文件均已核对。")
     expect(messages.filter((m) => m.type === "human")).toHaveLength(1)
@@ -84,13 +83,26 @@ describe("Bot main-turn opening reply reminder", () => {
     for (const messages of model.calls) expect(messages[0].content).toEqual(model.calls[0][0].content)
   })
 
-  it("accepts a visible first reply alongside tools without extra acknowledgements", async () => {
-    const { model } = await run(
+  it("shows only the actual answer across repeated tool calls", async () => {
+    const { model, messages } = await run(
       [new HumanMessage("检查文件")],
       [call("one", "我先检查文件。"), call("two"), call("three"), new AIMessage("结果")]
     )
-    expect(model.calls.map(hasReminder)).toEqual([false, false, false, false])
-    expect(model.calls.slice(1).every(messages => JSON.stringify(messages.at(-1)?.content).includes(ACKNOWLEDGED_REPLY_REMINDER))).toBe(true)
+    expect(model.calls.map(hasReminder)).toEqual([false, false, true, true])
+    expect(messages.filter(AIMessage.isInstance).map(m => m.content)).toEqual(["", "", "", "结果"])
+  })
+
+  it("replaces provider text blocks accompanying tools and preserves separate reasoning and real answers", async () => {
+    const reasoning = { type: "reasoning", reasoning: "internal" }
+    const { messages } = await run([new HumanMessage("检查文件")], [
+      call("one", [reasoning, { type: "output_text", text: "Let me check the pipeline." }]),
+      call("two", [{ type: "text", text: "我用 finishTurn 结束本轮。" }]),
+      new AIMessage("服务返回 E_EMPTY_BATCH。")
+    ])
+    const steps = messages.filter(AIMessage.isInstance)
+    expect(steps[0].content).toEqual([reasoning])
+    expect(steps[1].content).toEqual([])
+    expect(steps[2].content).toBe("服务返回 E_EMPTY_BATCH。")
   })
 
   it("lets a simple answer finish immediately", async () => {

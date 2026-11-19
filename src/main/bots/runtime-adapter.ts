@@ -131,6 +131,22 @@ function isBackgroundCommitSkip(event: SchedulerRendererEvent): boolean {
   )
 }
 
+/** A provider can stream prose before disclosing that this message calls a tool.
+ * Official turn messages contain the classified answer. Keep live tool and reasoning events intact. */
+function botReplyPreview(event: SchedulerRendererEvent): SchedulerRendererEvent | undefined {
+  if (event.type === "message-delta" && !event.subagentId && event.content) {
+    return event.reasoning || event.toolCalls?.length ? { ...event, content: "" } : undefined
+  }
+  if (event.type === "custom" && event.data.type === "coordinator_ai_snapshot_message") {
+    const message = event.data.assistantMessage
+    if (message && typeof message === "object" && "content" in message) {
+      const { content: _draft, ...rest } = message
+      return "reasoning" in rest ? { ...event, data: { ...event.data, assistantMessage: rest } } : undefined
+    }
+  }
+  return event
+}
+
 function canonicalWorkspace(path: string): string {
   try {
     return realpathSync.native(path)
@@ -1097,7 +1113,7 @@ export function createLocalBotRunPort(
                   bot,
                   memory,
                   signal,
-                  ["user", "group", "mock"].includes(task.origin.kind),
+                  reporting ? "schema-only" : ["user", "group", "mock"].includes(task.origin.kind),
                   memoryContext
                 )
               : []
@@ -1556,7 +1572,7 @@ export function createLocalBotRunPort(
             })
           const promptMemories = isBotMemoryEnabled(bot) ? memory.forPrompt(bot.id, memoryContext) : []
           const eventContext =
-            (communication ? buildBotTurnContext(task, promptMemories, undefined, Boolean(resultContext)) : "") +
+            (communication ? buildBotTurnContext(task, promptMemories, undefined, resultContext?.delivery?.review) : "") +
             (resultContext?.selectionReason ? "\n\nThe worker flagged a version choice. Automatic attachment selection is on hold. If the requested version is identifiable, use bot_work_result_select_files with its exact evidenceId before replying. Otherwise explain the outstanding choice; do not describe an attachment as delivered." : "") +
             (communication && !reporting && !resultContext ? `\n\nWorking directory for short local actions: ${JSON.stringify(workspacePath)}` : "") +
             (workInputs ? botWorkInputPrompt(workInputs) : "") +
@@ -1673,32 +1689,6 @@ export function createLocalBotRunPort(
                       }
                     }
                   }
-                  // Only committed, current-turn assistant steps with tools are progress.
-                  // Never forward reasoning, tool output, private peer turns or historical snapshots.
-                  if (
-                    !signal.aborted &&
-                    task.mockSource?.transport === "im" &&
-                    isBotMainUserTurn(task) &&
-                    threadId === task.threadId &&
-                    event.type === "turn-messages"
-                  ) {
-                    const opening = event.messages.find(
-                      (message) =>
-                        message.role === "assistant" &&
-                        message.tool_calls?.length &&
-                        splitBotInlineReasoning(message.content).body.trim()
-                    )
-                    if (opening) {
-                      try {
-                        getHost().imChannel.openingReply(
-                          task.id,
-                          splitBotInlineReasoning(opening.content).body
-                        )
-                      } catch (error) {
-                        console.warn("[Bots] IM opening reply unavailable", error)
-                      }
-                    }
-                  }
                   if (groupId) {
                     // Native values are flushed before this turn-scoped event.
                     // Tool-bearing assistant steps are progress; final delivery
@@ -1730,8 +1720,11 @@ export function createLocalBotRunPort(
                   }
                   if (event.type === "started" && work && !work.source && !simulated)
                     mirrorStandardTurnStreamToRenderer(threadId, event, true)
-                  else if (!isBackgroundCommitSkip(event))
-                    mirrorStandardTurnStreamToRenderer(threadId, event)
+                  else if (!isBackgroundCommitSkip(event)) {
+                    const visible = threadId === task.threadId && (isBotMainUserTurn(task) || resultContext)
+                      ? botReplyPreview(event) : event
+                    if (visible) mirrorStandardTurnStreamToRenderer(threadId, visible)
+                  }
                 }
               }),
               {
@@ -2149,7 +2142,7 @@ export function createLocalBotRunPort(
                   }
                   // Keep the useful private result for a delegating Bot. Settlement no longer
                   // republishes it; an empty private final can fall back to the actual sent text.
-                  if (!groupId || splitBotInlineReasoning(output.finalText ?? "").body.trim())
+                  if (!dispatchAcknowledged && (!groupId || splitBotInlineReasoning(output.finalText ?? "").body.trim()))
                     finalText = output.finalText
                   if (reviewOwned)
                     getHost().recordWorkResultEvidence(task.id, isBotRoutineSilent(output.finalText)
