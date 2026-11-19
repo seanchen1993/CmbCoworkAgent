@@ -13,6 +13,7 @@ interface ShortcutFixture {
   clearInstalled: () => void
   readClipboard: () => string
   publish: (enabled: boolean) => void
+  loadCatalog: () => void
   setAdministrator: (allowed: boolean) => void
 }
 declare global {
@@ -92,7 +93,11 @@ async function main(): Promise<void> {
       }
     )
     await shortcut.waitFor({ state: "hidden" })
-    await page.evaluate(() => window.shortcutFixture.publish(true))
+    await page.evaluate(() => {
+      // A manifest check starts while the existing skill catalog request is finishing.
+      window.shortcutFixture.publish(true)
+      window.shortcutFixture.loadCatalog()
+    })
     await shortcut.waitFor()
     await page.getByText("当前会话导航", { exact: true }).waitFor()
     await page.evaluate(() => window.shortcutFixture.setAdministrator(false))

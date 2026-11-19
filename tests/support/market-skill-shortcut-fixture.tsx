@@ -23,6 +23,8 @@ const skill: SkillMetadata = {
   path: "/skills/project-plugin-author/SKILL.md"
 }
 let binding: MarketSkillShortcutBinding = { revision: "initial", target: null }
+let catalogLoaded = false
+const catalogListeners = new Set<() => void>()
 let administrator = true
 let clipboard = ""
 let installed = false
@@ -38,8 +40,17 @@ Object.defineProperty(navigator, "clipboard", {
 
 Object.assign(window, {
   api: {
+    skills: {
+      onMarketCatalogChanged: (callback: () => void) => {
+        catalogListeners.add(callback)
+        return () => catalogListeners.delete(callback)
+      }
+    },
     marketSkillShortcut: {
-      get: async () => ({ ok: true, value: binding }),
+      get: async () => ({
+        ok: true,
+        value: catalogLoaded ? binding : { revision: binding.revision, target: null }
+      }),
       resolve: async () => ({
         ok: true,
         value: installed ? { kind: "available", skill } : { kind: "missing" }
@@ -67,6 +78,10 @@ Object.assign(window, {
     publish: (enabled: boolean) => {
       binding = { revision: binding.revision + "-next", target: enabled ? target : null }
       window.dispatchEvent(new Event("online"))
+    },
+    loadCatalog: () => {
+      catalogLoaded = true
+      for (const listener of catalogListeners) listener()
     },
     setAdministrator: (allowed: boolean) => {
       administrator = allowed

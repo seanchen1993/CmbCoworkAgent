@@ -3,6 +3,8 @@ import {
   canCurrentUserViewMarketItem,
   buildUploaderIdCandidates
 } from "../../shared/market-item-visibility"
+import { getMarketSourceAccess, type MarketSourceAccess } from "../../shared/market-source-access"
+import { marketSkillUrl, readMarketSkillCatalog } from "./market-skill-catalog"
 import { userIdentityKey } from "../../shared/user-identity"
 import {
   isMarketSkillShortcutKey,
@@ -17,12 +19,14 @@ import { resolveUpdateSource } from "../updater/channel-config"
 import { fetchLatestJson } from "../updater/checker"
 import { readBoundedResponse } from "./market-source-access"
 
-const MARKET_ROUTE = "/api/trajectories/marketplace"
-const MAX_LIST_BYTES = 2 * 1024 * 1024
 const MAX_PACKAGE_BYTES = 32 * 1024 * 1024
 const EMPTY_BINDING = { revision: "unavailable", target: null } as const
 
-type ListedTarget = MarketSkillShortcutTarget & { filename: string; sha256?: string }
+type ListedTarget = MarketSkillShortcutTarget & {
+  filename: string
+  sha256?: string
+  sourceAccess?: MarketSourceAccess
+}
 type ListedBinding = Omit<MarketSkillShortcutBinding, "target"> & { target: ListedTarget | null }
 
 class MarketShortcutError extends Error {
@@ -71,12 +75,6 @@ async function loadPublishedShortcut() {
   return parseMarketSkillShortcutConfig(manifest.conversationShortcuts?.projectPluginCreation)
 }
 
-function marketUrl(route: string): string {
-  const base = import.meta.env.VITE_API_BASE_URL?.trim().replace(/\/+$/, "")
-  if (!base) throw new Error("Market base URL is not configured")
-  return base + MARKET_ROUTE + route
-}
-
 export async function getMarketShortcutBinding(
   session = getMarketShortcutSession()
 ): Promise<ListedBinding> {
@@ -84,46 +82,30 @@ export async function getMarketShortcutBinding(
   if (!session.isCurrent()) marketShortcutChanged()
   if (!config) return EMPTY_BINDING
 
-  const response = await fetch(marketUrl("/list/skill"), {
-    cache: "no-store",
-    signal: AbortSignal.timeout(10_000),
-    headers: { "Content-Type": "application/json" }
-  })
-  const body = await readBoundedResponse(response, MAX_LIST_BYTES)
+  const items = (await readMarketSkillCatalog()).map(record)
   if (!session.isCurrent()) marketShortcutChanged()
-  if (!body) throw new Error("Market skill list is unavailable")
-  const data = record(JSON.parse(body.toString("utf8")))
-  if (!Array.isArray(data?.items)) throw new Error("Invalid market skill list")
-
-  const items = data.items.map(record)
   const byId = items.filter((item) => item?.id === config.itemId)
   const item = byId[0]
   if (byId.length !== 1 || !item || item.name !== config.marketName) return EMPTY_BINDING
   // The legacy download addresses a name. A pinned hash can verify bytes when
   // that name is ambiguous in the catalog.
-  if (!config.sha256 && items.filter((row) => row?.name === config.marketName).length !== 1) {
-    return EMPTY_BINDING
-  }
+  const uniqueName = items.filter((row) => row?.name === config.marketName).length === 1
+  if (!config.sha256 && !uniqueName) return EMPTY_BINDING
 
+  const marketIdentity = {
+    user_id: typeof item.user_id === "string" ? item.user_id : undefined,
+    extra_json: typeof item.extra_json === "string" ? item.extra_json : undefined
+  }
   const ids = [session.user?.sapId, session.user?.ystId].flatMap(buildUploaderIdCandidates)
-  if (
-    !canCurrentUserViewMarketItem(
-      {
-        user_id: typeof item.user_id === "string" ? item.user_id : undefined,
-        extra_json: typeof item.extra_json === "string" ? item.extra_json : undefined
-      },
-      session.user?.sapId,
-      ids,
-      session.user?.pathName
-    )
-  ) {
+  if (!canCurrentUserViewMarketItem(marketIdentity, session.user?.sapId, ids, session.user?.pathName)) {
     return EMPTY_BINDING
   }
 
+  const sourceAccess = uniqueName ? getMarketSourceAccess(marketIdentity, session.user) : undefined
   const filename = typeof item.filename === "string" ? item.filename : ""
   const label = typeof item.chinese_name === "string" ? item.chinese_name.trim().slice(0, 256) : ""
   const revision = createHash("sha256")
-    .update(JSON.stringify([config, filename, item.version, item.updated_at]))
+    .update(JSON.stringify([config, filename, item.version, item.updated_at, sourceAccess]))
     .digest("hex")
   return {
     revision,
@@ -134,7 +116,8 @@ export async function getMarketShortcutBinding(
       name: label || config.marketName,
       description: typeof item.description === "string" ? item.description.slice(0, 4_096) : "",
       skillName: config.skillName ?? config.marketName,
-      sha256: config.sha256
+      sha256: config.sha256,
+      sourceAccess
     }
   }
 }
@@ -162,7 +145,7 @@ export async function fetchMarketShortcutPackage(
 ) {
   if (!session.isCurrent()) marketShortcutChanged()
   const response = await fetch(
-    marketUrl(`/download/skill/${encodeURIComponent(target.marketName)}`),
+    marketSkillUrl(`/download/skill/${encodeURIComponent(target.marketName)}`),
     {
       cache: "no-store",
       signal: AbortSignal.timeout(30_000),

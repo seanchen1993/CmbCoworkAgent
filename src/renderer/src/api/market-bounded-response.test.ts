@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
+  MARKET_SKILL_LIST_MAX_ITEMS,
+  marketApi,
   readBoundedMarketBinaryResponse,
   readBoundedMarketJsonResponse
 } from "./market"
@@ -79,5 +81,36 @@ describe("bounded market JSON responses", () => {
     abortController.abort()
     await expect(pending).rejects.toMatchObject({ name: "AbortError" })
     expect(cancelled).toBe(true)
+  })
+})
+
+describe("legacy market skill catalog in Electron", () => {
+  it("uses the shared IPC and aborts only the requesting consumer", async () => {
+    const total = MARKET_SKILL_LIST_MAX_ITEMS + 1
+    const items = [{ name: "one" }]
+    let finish!: (page: { items: typeof items; total: number }) => void
+    const catalog = new Promise<{ items: typeof items; total: number }>((resolve) => {
+      finish = resolve
+    })
+    const marketCatalog = vi.fn(() => catalog)
+    const fetch = vi.fn()
+    vi.stubGlobal("window", { api: { skills: { marketCatalog } } })
+    vi.stubGlobal("fetch", fetch)
+    try {
+      const controller = new AbortController()
+      const aborted = marketApi.getSkills({ signal: controller.signal })
+      const other = marketApi.getSkills()
+      controller.abort()
+      await expect(aborted).rejects.toMatchObject({ name: "AbortError" })
+      await expect(marketApi.getSkills({ signal: controller.signal })).rejects.toMatchObject({
+        name: "AbortError"
+      })
+      finish({ items, total })
+      await expect(other).resolves.toEqual({ success: true, data: items, total, hasNextPage: true })
+      expect(marketCatalog).toHaveBeenCalledTimes(2)
+      expect(fetch).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

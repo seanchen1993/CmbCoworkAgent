@@ -1,4 +1,9 @@
-import { canReadPluginSource, type MarketSourceIdentity } from "../../shared/market-source-access"
+import {
+  canReadPluginSource,
+  type MarketSourceAccess,
+  type MarketSourceIdentity
+} from "../../shared/market-source-access"
+import { refreshMarketSkillCatalog } from "../services/market-skill-catalog"
 import { resolveMarketSourceAccess } from "../services/market-source-access"
 import {
   fetchMarketShortcutPackage,
@@ -8,10 +13,11 @@ import {
   marketShortcutResult,
   verifyMarketShortcutTarget
 } from "../services/market-skill-shortcut"
-import type {
-  MarketSkillShortcutSelection,
-  MarketSkillShortcutSkillState,
-  MarketSkillShortcutTarget
+import {
+  isMarketSkillShortcutKey,
+  type MarketSkillShortcutSelection,
+  type MarketSkillShortcutSkillState,
+  type MarketSkillShortcutTarget
 } from "../../shared/market-skill-shortcut"
 import {
   readContentFile,
@@ -28,7 +34,7 @@ import { BrowserWindow, IpcMain, shell } from "electron"
 import { randomUUID } from "node:crypto"
 import * as fs from "fs/promises"
 import * as path from "path"
-import { existsSync, mkdirSync, readdirSync, rmSync } from "fs"
+import { existsSync, lstatSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "fs"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
 import {
@@ -68,6 +74,8 @@ import {
 import { normalizeSkillPluginCatalogKind } from "../skill-plugin-catalog/protocol"
 import {
   beginSkillCatalogTopologyMutation,
+  getSkillCatalogTopologyRevision,
+  isSkillCatalogTopologyMutationBusy,
   waitForSkillCatalogTopologyIdle
 } from "../skill-plugin-catalog/topology-mutation-gate"
 import {
@@ -156,6 +164,9 @@ function isPathUnderAllowedDirs(filePath: string): boolean {
 async function assertUserOriginalContent(filePath: string): Promise<void> {
   assertOriginalContent(filePath)
   const real = await fs.realpath(filePath)
+  if (isShortcutSourceFile(filePath) || isShortcutSourceFile(real)) {
+    throw new Error(MARKET_CONTENT_DENIED)
+  }
   const custom = await fs.realpath(getCustomSkillsDir()).catch(() => null)
   if (custom && isPathUnderDir(real, custom)) return
   for (const plugin of getPlugins()) {
@@ -494,11 +505,12 @@ export async function repairMojibakeNamesInSkillDir(skillDirPath: string): Promi
 
 const MARKETPLACE_SKILL_METADATA_PATH = ".cmbcoworkagent/marketplace-skill.json"
 const MARKET_SHORTCUT_SOURCE_FILE = ".cmb-market-shortcut-source.json"
+const ORIGINAL_UPLOAD_MARKER = ".cmb-original-upload.json"
 
 type MarketShortcutSkillState = MarketSkillShortcutSkillState<SkillMetadata>
 
 interface VerifiedShortcutUpload {
-  target: MarketSkillShortcutTarget
+  target: MarketSkillShortcutTarget & { sourceAccess?: MarketSourceAccess }
   isCurrent: () => boolean
 }
 
@@ -533,9 +545,6 @@ async function readMarketShortcutSkill(
     return { kind: "missing" }
   }
 
-  if (findProtectedMarketRoot(path.join(skillDir, "SKILL.md")) !== skillDir) {
-    return { kind: "missing" }
-  }
   const [discovered] = await discoverSkills(skillDir, 0)
   if (!discovered || discovered.name.trim() !== target.skillName) return { kind: "missing" }
   const [skill] = await loadSkills(skillDir, "user", { maxDepth: 0 })
@@ -563,27 +572,31 @@ function validateShortcutUpload(
   }
 }
 
-async function writeShortcutSource(skillDir: string, shortcut?: VerifiedShortcutUpload) {
-  if (!shortcut) return
-  if (!shortcut.isCurrent()) marketShortcutChanged()
-  await fs.writeFile(
-    path.join(skillDir, MARKET_SHORTCUT_SOURCE_FILE),
-    JSON.stringify({ itemId: shortcut.target.itemId }),
-    { flag: "wx" }
-  )
+function shortcutSource(itemId: string): string {
+  return JSON.stringify({ itemId })
 }
 
-// Older protected market installs have no item ID. Adopt one only when its full
-// installation matches the authorized package, including any supporting files.
+// The catalog does not read this receipt. Compare package contents outside the
+// topology fence, then commit a single receipt only if the root is still current.
 async function linkMatchingMarketSkill(
   skillDir: string,
   shortcut: VerifiedShortcutUpload,
   archiveFiles: ReadonlyMap<string, () => Buffer>
 ): Promise<boolean> {
-  if (findProtectedMarketRoot(path.join(skillDir, "SKILL.md")) !== skillDir) return false
-  const endMutation = beginSkillCatalogTopologyMutation()
+  await waitForSkillCatalogTopologyIdle()
+  const revision = getSkillCatalogTopologyRevision()
   try {
-    if (!(await fs.lstat(skillDir)).isDirectory()) return false
+    const root = await fs.lstat(skillDir)
+    if (!root.isDirectory()) return false
+    const protectedRoot = findProtectedMarketRoot(path.join(skillDir, "SKILL.md"))
+    if (
+      protectedRoot !== skillDir &&
+      (protectedRoot ||
+        !shortcut.target.sourceAccess ||
+        !(await fs.lstat(path.join(skillDir, ORIGINAL_UPLOAD_MARKER))).isFile())
+    ) {
+      return false
+    }
     const files = (await listSkillFiles(skillDir)).filter(
       (file) => file !== path.join(skillDir, MARKET_CONTENT_MARKER)
     )
@@ -593,13 +606,26 @@ async function linkMatchingMarketSkill(
       const expected = archiveFiles.get(normalizeSkillRelativePath(path.relative(skillDir, file)))
       if (!expected || !(await readContentFile(file)).equals(expected())) return false
     }
-    await writeShortcutSource(skillDir, shortcut)
-    notifyHooksChanged("skill-shortcut-linked")
+    const current = lstatSync(skillDir)
+    if (
+      !current.isDirectory() ||
+      current.dev !== root.dev ||
+      current.ino !== root.ino ||
+      current.mtimeMs !== root.mtimeMs ||
+      isSkillCatalogTopologyMutationBusy() ||
+      getSkillCatalogTopologyRevision() !== revision
+    ) {
+      return false
+    }
+    if (!shortcut.isCurrent()) marketShortcutChanged()
+    writeFileSync(
+      path.join(skillDir, MARKET_SHORTCUT_SOURCE_FILE),
+      shortcutSource(shortcut.target.itemId),
+      { flag: "wx" }
+    )
     return true
   } catch {
     return false
-  } finally {
-    endMutation()
   }
 }
 
@@ -857,7 +883,7 @@ async function listSkillFiles(skillDirPath: string): Promise<string[]> {
   async function walk(dirPath: string): Promise<void> {
     const entries = await fs.readdir(dirPath, { withFileTypes: true })
     for (const entry of entries) {
-      if (entry.name === ".cmb-original-upload.json" || isShortcutSourceFile(entry.name)) continue
+      if (entry.name === ORIGINAL_UPLOAD_MARKER || isShortcutSourceFile(entry.name)) continue
       const fullPath = path.join(dirPath, entry.name)
       if (entry.isDirectory()) {
         await walk(fullPath)
@@ -1671,10 +1697,29 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
     }
 
     try {
-      const sourceAccess =
-        options.origin === "market" && !shortcut
+      const sourceAccess = shortcut
+        ? shortcut.target.sourceAccess
+        : options.origin === "market"
           ? await resolveMarketSourceAccess("skill", options.marketplace, buffer)
           : undefined
+      const marketItemId = shortcut?.target.itemId ?? options.marketplace?.id
+      const sourceItemId =
+        (shortcut || sourceAccess) && isMarketSkillShortcutKey(marketItemId)
+          ? marketItemId
+          : undefined
+      const markInstalledSkill = async (skillDir: string): Promise<void> => {
+        if (shortcut && !shortcut.isCurrent()) marketShortcutChanged()
+        if (options.origin === "market" && !sourceAccess) protectMarketDirectory(skillDir)
+        else await fs.writeFile(path.join(skillDir, ORIGINAL_UPLOAD_MARKER), "{}")
+        if (sourceItemId) {
+          await fs.writeFile(
+            path.join(skillDir, MARKET_SHORTCUT_SOURCE_FILE),
+            shortcutSource(sourceItemId),
+            { flag: "wx" }
+          )
+        }
+        if (shortcut && !shortcut.isCurrent()) marketShortcutChanged()
+      }
       assertOriginalUpload(Buffer.from(buffer), fileName)
       if (ext === ".md") {
         const content = Buffer.from(buffer).toString("utf-8")
@@ -1709,9 +1754,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           createdSkillDir = true
           await fs.writeFile(path.join(skillDir, "SKILL.md"), content, "utf-8")
           clearDisabledSkillsForSkillDir(skillDir)
-          if (options.origin === "market" && !sourceAccess) protectMarketDirectory(skillDir)
-          else await fs.writeFile(path.join(skillDir, ".cmb-original-upload.json"), "{}")
-          await writeShortcutSource(skillDir, shortcut)
+          await markInstalledSkill(skillDir)
           invalidateEnabledSkillsCache()
           notifyHooksChanged("skill-uploaded")
           return { success: true, skillName }
@@ -1828,9 +1871,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
             await fs.writeFile(destPath, entry.getData())
           }
           clearDisabledSkillsForSkillDir(skillDir)
-          if (options.origin === "market" && !sourceAccess) protectMarketDirectory(skillDir)
-          else await fs.writeFile(path.join(skillDir, ".cmb-original-upload.json"), "{}")
-          await writeShortcutSource(skillDir, shortcut)
+          await markInstalledSkill(skillDir)
           invalidateEnabledSkillsCache()
           notifyHooksChanged("skill-uploaded")
           return { success: true, skillName }
@@ -1850,6 +1891,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
     }
   }
 
+  ipcMain.handle("skills:marketCatalog", () => refreshMarketSkillCatalog())
   ipcMain.handle("skills:upload", (_event, payload) => uploadSkill(payload))
   ipcMain.handle("marketSkillShortcut:get", () =>
     marketShortcutResult(() => getMarketShortcutBinding())
@@ -1871,10 +1913,10 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
       if (!session.isCurrent()) marketShortcutChanged()
       if (existing.kind !== "missing") return existing
       const bundle = await fetchMarketShortcutPackage(session, target)
-      await verifyMarketShortcutTarget(session, selection)
+      const currentTarget = await verifyMarketShortcutTarget(session, selection)
       const result = await uploadSkill(
         { ...bundle, options: { origin: "market" } },
-        { target, isCurrent: session.isCurrent }
+        { target: currentTarget, isCurrent: session.isCurrent }
       )
       await verifyMarketShortcutTarget(session, selection)
       const skill = await readMarketShortcutSkill(target)
@@ -1929,7 +1971,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
           }
           if (
             isMarketplaceSkillMetadataPath(relativePath) ||
-            relativePath === ".cmb-original-upload.json"
+            relativePath === ORIGINAL_UPLOAD_MARKER
           ) {
             continue
           }

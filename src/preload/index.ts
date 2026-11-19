@@ -1,3 +1,4 @@
+import { MARKET_SKILL_CATALOG_CHANGED, type MarketSkillCatalogPage } from "../shared/market-skill-catalog"
 import { PROJECT_AGENT_RUN_CHANNEL, type ProjectAgentRunListener, type ProjectAgentRunEvent } from "../shared/project-agent-run"
 import type { ProjectReportApi } from "../shared/project-analysis-report"
 import type {
@@ -2401,6 +2402,12 @@ const api = {
     > => ipcRenderer.invoke("marketSkillShortcut:install", selection)
   },
   skills: {
+    marketCatalog: (): Promise<MarketSkillCatalogPage> => ipcRenderer.invoke("skills:marketCatalog"),
+    onMarketCatalogChanged: (callback: () => void): (() => void) => {
+      const listener = () => callback()
+      ipcRenderer.on(MARKET_SKILL_CATALOG_CHANGED, listener)
+      return () => ipcRenderer.removeListener(MARKET_SKILL_CATALOG_CHANGED, listener)
+    },
     catalog: {
       read: (
         input: SkillPluginCatalogPageInput,

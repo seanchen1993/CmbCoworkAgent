@@ -1,3 +1,4 @@
+import type { MarketSkillCatalogPage } from "../shared/market-skill-catalog"
 import type { ProjectAgentRunListener } from "../shared/project-agent-run"
 import type { ProjectReportApi } from "../shared/project-analysis-report"
 import type {
@@ -1843,6 +1844,8 @@ interface CustomAPI {
     >
   }
   skills: {
+    marketCatalog: () => Promise<MarketSkillCatalogPage>
+    onMarketCatalogChanged: (callback: () => void) => () => void
     catalog: {
       read: (
         input: SkillPluginCatalogPageInput,

@@ -65,10 +65,23 @@ export function useMarketSkillShortcut() {
     const refresh = () => void refreshMarketSkillShortcut(accountRevision)
     const refreshOnFocus = () => void refreshMarketSkillShortcut(accountRevision, true)
     refresh()
+    let subscribed = true
+    const unsubscribe = window.api?.skills?.onMarketCatalogChanged?.(() => {
+      const inProgress = pending?.accountRevision === accountRevision ? pending.promise : null
+      if (!inProgress) refreshOnFocus()
+      else {
+        // A read started before the stock catalog loaded may already have seen an empty snapshot.
+        void inProgress.then(() => {
+          if (subscribed) refreshOnFocus()
+        })
+      }
+    })
     const interval = window.setInterval(refreshOnFocus, REFRESH_MS)
     window.addEventListener("focus", refreshOnFocus)
     window.addEventListener("online", refreshOnFocus)
     return () => {
+      subscribed = false
+      unsubscribe?.()
       window.clearInterval(interval)
       window.removeEventListener("focus", refreshOnFocus)
       window.removeEventListener("online", refreshOnFocus)
