@@ -4059,6 +4059,15 @@ const api = {
       error?: string
       cancelled?: boolean
     }> => ipcRenderer.invoke("dashboard:knowledgeOrgGroups", roomId, opts),
+    knowledgeRoomPeople: (
+      roomId: string,
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ): Promise<{
+      success: boolean
+      data?: KnowledgeUserDetails
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeRoomPeople", roomId, opts),
     knowledgeUserDetails: (opts?: {
       upperOrgLv1?: string | string[] | null
     }): Promise<{

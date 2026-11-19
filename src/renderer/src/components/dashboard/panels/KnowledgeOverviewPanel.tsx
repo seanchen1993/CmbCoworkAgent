@@ -321,7 +321,6 @@ export function KnowledgeOverviewPanel({
             key={JSON.stringify([rooms, refreshKey])}
             rooms={rooms}
             initialRoom={accumulation?.orgRoom}
-            people={people}
             retry={scopeNote ? undefined : retryAccumulation}
             items={accumulation?.orgs ?? null}
             loading={accumulationLoading}
