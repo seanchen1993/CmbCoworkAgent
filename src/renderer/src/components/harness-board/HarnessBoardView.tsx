@@ -265,6 +265,7 @@ const HARNESS_SIDEBAR_PORTAL_ID = "harness-sidebar-portal"
 const THREAD_UNREAD_STORAGE_KEY = "threads:unreadIds"
 const PINNED_HARNESS_PROJECTS_STORAGE_KEY = "harness:pinnedProjects"
 const PINNED_HARNESS_FEATURES_STORAGE_KEY = "harness:pinnedFeatures"
+const COLLAPSED_HARNESS_GROUPS_STORAGE_KEY = "harness:collapsedSessionGroups"
 const SYSTEM_CONSTRAINT_UPDATE_KIND = "system-constraints-update"
 const FEATURE_SESSION_INITIAL_VISIBLE_COUNT = 5
 const FEATURE_SESSION_VISIBLE_INCREMENT = 8
@@ -285,7 +286,6 @@ const ENTERPRISE_PROJECT_SEARCH_DEBOUNCE_MS = 300
 const ENTERPRISE_PROJECT_DETAIL_QUERY_DEBOUNCE_MS = 160
 const ENTERPRISE_PROJECT_DETAIL_QUERY_BATCH_SIZE = 32
 const ENTERPRISE_PROJECT_DETAIL_STATE_MAX_ENTRIES = 128
-type ProjectSidebarScrollIntent = "preserve" | "top" | null
 const LEAN_TOKEN_VISIBLE_PREFIX_LENGTH = 6
 
 const preventHarnessDialogOutsideClose: React.ComponentProps<
@@ -7588,7 +7588,7 @@ function ProjectFeatureSidebar({
   editingThreadId,
   editingTitle,
   scrollTopRef,
-  scrollIntentRef,
+  preserveScrollRef,
   onToggleCollapse,
   onToggleProjectPin,
   onToggleFeaturePin,
@@ -7627,7 +7627,7 @@ function ProjectFeatureSidebar({
   editingThreadId: string | null
   editingTitle: string
   scrollTopRef: MutableRefObject<number>
-  scrollIntentRef: MutableRefObject<ProjectSidebarScrollIntent>
+  preserveScrollRef: MutableRefObject<boolean>
   onToggleCollapse: (key: string) => void
   onToggleProjectPin: (projectId: string) => void
   onToggleFeaturePin: (featureKey: string) => void
@@ -7696,49 +7696,15 @@ function ProjectFeatureSidebar({
     if (!viewport) return
     scrollTopRef.current = viewport.scrollTop
     pendingScrollRestoreRef.current = viewport.scrollTop > 0 ? viewport.scrollTop : null
-    scrollIntentRef.current = "preserve"
+    preserveScrollRef.current = true
     preserveScrollUntilRef.current = window.performance.now() + 2000
-  }, [getSidebarViewport, scrollIntentRef, scrollTopRef])
+  }, [getSidebarViewport, preserveScrollRef, scrollTopRef])
 
   useLayoutEffect(() => {
     const viewport = getSidebarViewport()
     if (!viewport) return
 
-    const scrollIntent = scrollIntentRef.current
-    if (scrollIntent === "top") {
-      const targetProjectId = isViewingSession
-        ? null
-        : (selectedFeature?.projectId ?? selectedProjectId)
-      const targetProject = groups.find((group) => group.project.projectId === targetProjectId)
-      const targetSlug = selectedFeature?.slug
-      const targetFeature = targetProject?.featureGroups.find((group) => group.slug === targetSlug)
-      if (
-        targetProject &&
-        (collapsedKeys.has(targetProject.key) ||
-          (targetFeature && collapsedKeys.has(targetFeature.key)))
-      ) {
-        return
-      }
-      const targetKey = targetFeature?.key ?? targetProject?.key
-      const target = Array.from(
-        viewport.querySelectorAll<HTMLElement>("[data-sidebar-group-key]")
-      ).find((element) => element.dataset.sidebarGroupKey === targetKey)
-      if (target) {
-        const viewportRect = viewport.getBoundingClientRect()
-        const targetRect = target.getBoundingClientRect()
-        if (targetRect.top < viewportRect.top) {
-          viewport.scrollTop += targetRect.top - viewportRect.top
-        } else if (targetRect.bottom > viewportRect.bottom) {
-          viewport.scrollTop += targetRect.bottom - viewportRect.bottom
-        }
-      } else if (!targetProjectId) {
-        viewport.scrollTop = 0
-      }
-      scrollTopRef.current = viewport.scrollTop
-      preserveScrollUntilRef.current = 0
-      pendingScrollRestoreRef.current = null
-      if (target || !targetProjectId) scrollIntentRef.current = null
-    } else if (scrollIntent === "preserve") {
+    if (preserveScrollRef.current) {
       const targetScrollTop = pendingScrollRestoreRef.current ?? scrollTopRef.current
       if (targetScrollTop > 0) {
         const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
@@ -7771,7 +7737,7 @@ function ProjectFeatureSidebar({
     getSidebarViewport,
     groups,
     isViewingSession,
-    scrollIntentRef,
+    preserveScrollRef,
     scrollTopRef,
     selectedFeature?.activeSessionThreadId,
     selectedFeature?.projectId,
@@ -7948,7 +7914,6 @@ function ProjectFeatureSidebar({
                   </div>
                 )}
                 <div
-                  data-sidebar-group-key={group.key}
                   className={cn(
                     "group flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-left transition-colors",
                     projectSelected
@@ -8130,7 +8095,6 @@ function ProjectFeatureSidebar({
                       return (
                         <div key={featureGroup.key} className="space-y-1">
                           <div
-                            data-sidebar-group-key={featureGroup.key}
                             className={cn(
                               "group flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-left transition-colors",
                               featureSelected
@@ -8508,7 +8472,9 @@ export function HarnessBoardView({
   const { cleanupThread } = useThreadContext()
   const allThreadStates = useThreadStateSummaries()
   const allStreamLoadingStates = useAllStreamLoadingStates()
-  const [collapsedFeatureKeys, setCollapsedFeatureKeys] = useState<Set<string>>(new Set())
+  const [collapsedGroupKeys, setCollapsedGroupKeys] = useState(() =>
+    readStoredStringSet(COLLAPSED_HARNESS_GROUPS_STORAGE_KEY)
+  )
   const [pinnedProjectIds, setPinnedProjectIds] = useState<Set<string>>(() =>
     readStoredStringSet(PINNED_HARNESS_PROJECTS_STORAGE_KEY)
   )
@@ -8558,7 +8524,7 @@ export function HarnessBoardView({
   const currentThreadIdRef = useRef(currentThreadId)
   const isViewingSessionRef = useRef(isViewingSession)
   const projectSidebarScrollTopRef = useRef(0)
-  const projectSidebarScrollIntentRef = useRef<ProjectSidebarScrollIntent>(null)
+  const preserveProjectSidebarScrollRef = useRef(false)
   const projectDetailsRefreshInFlightRef = useRef(false)
   const selectedProjectRefreshInFlightRef = useRef(false)
   const skipRunDetailLoadForSessionRef = useRef<string | null>(null)
@@ -10234,7 +10200,6 @@ export function HarnessBoardView({
       setFeatureName("")
       setSelectedDeployUnitIds(new Set())
       await loadProjectDetail(result.projectId)
-      projectSidebarScrollIntentRef.current = "top"
       setSelectedProjectSession(null)
       setSelectedProjectId(result.projectId)
       setSelectedFeature({
@@ -10746,7 +10711,6 @@ export function HarnessBoardView({
 
   const openProjectDetail = useCallback(
     (projectId: string): void => {
-      projectSidebarScrollIntentRef.current = "top"
       setSelectedProjectSession(null)
       setSelectedFeature(null)
       setSelectedProjectId(projectId)
@@ -10792,9 +10756,6 @@ export function HarnessBoardView({
 
   const openFeatureDetail = useCallback(
     (projectId: string, slug: string, activeSessionThreadId?: string, deleted?: boolean): void => {
-      if (!activeSessionThreadId) {
-        projectSidebarScrollIntentRef.current = "top"
-      }
       setSelectedProjectSession(null)
       setSelectedProjectId(projectId)
       setSelectedFeature({ projectId, slug, activeSessionThreadId, deleted })
@@ -10831,7 +10792,6 @@ export function HarnessBoardView({
       selectedProjectSessionRef.current?.projectId ??
       selectedFeatureRef.current?.projectId ??
       selectedProjectIdRef.current
-    projectSidebarScrollIntentRef.current = "top"
     setSelectedProjectSession(null)
     setSelectedFeature(null)
     setIsViewingSession(false)
@@ -11028,48 +10988,16 @@ export function HarnessBoardView({
     threadsById
   ])
 
-  // Detail navigation expands its target without folding unrelated projects.
-  // Session selection preserves the user's sidebar expansion state.
-  const autoCollapseFeature = selectedFeature && !isViewingSession ? selectedFeature : null
-  const autoCollapseProjectId = autoCollapseFeature
-    ? autoCollapseFeature.projectId
-    : selectedProjectId && !selectedFeature && !selectedProjectSession && !isViewingSession
-      ? selectedProjectId
-      : null
-
-  const expandedDetailKeyRef = useRef<string | null>(null)
   useEffect(() => {
-    if (!autoCollapseProjectId) {
-      expandedDetailKeyRef.current = null
-      return
-    }
-    const targetSlug = autoCollapseFeature?.slug
-    const detailKey = JSON.stringify([autoCollapseProjectId, targetSlug])
-    if (expandedDetailKeyRef.current === detailKey) return
-    const targetGroup = projectSidebarGroups.find(
-      (group) => group.project.projectId === autoCollapseProjectId
+    localStorage.setItem(
+      COLLAPSED_HARNESS_GROUPS_STORAGE_KEY,
+      JSON.stringify([...collapsedGroupKeys])
     )
-    if (!targetGroup) return
-    const targetFeature = targetGroup.featureGroups.find((group) => group.slug === targetSlug)
-    if (targetSlug && !targetFeature) return
-    expandedDetailKeyRef.current = detailKey
-
-    setCollapsedFeatureKeys((current) => {
-      const next = new Set(current)
-      const projectChanged = next.delete(targetGroup.key)
-      const featureChanged = targetFeature ? next.delete(targetFeature.key) : false
-      return projectChanged || featureChanged ? next : current
-    })
-  }, [
-    autoCollapseFeature?.projectId,
-    autoCollapseFeature?.slug,
-    autoCollapseProjectId,
-    projectSidebarGroups
-  ])
+  }, [collapsedGroupKeys])
 
   const allFeatureGroupsCollapsed =
     projectSidebarGroups.length > 0 &&
-    projectSidebarGroups.every((group) => collapsedFeatureKeys.has(group.key))
+    projectSidebarGroups.every((group) => collapsedGroupKeys.has(group.key))
 
   const togglePinnedProject = useCallback((projectId: string): void => {
     setPinnedProjectIds((current) =>
@@ -11084,7 +11012,7 @@ export function HarnessBoardView({
   }, [])
 
   const toggleAllFeatureGroups = useCallback(() => {
-    setCollapsedFeatureKeys((current) => {
+    setCollapsedGroupKeys((current) => {
       const next = new Set(current)
       if (allFeatureGroupsCollapsed) {
         for (const group of projectSidebarGroups) {
@@ -11418,9 +11346,6 @@ export function HarnessBoardView({
   )
 
   const handleSessionViewChange = useCallback((viewing: boolean): void => {
-    if (!viewing) {
-      projectSidebarScrollIntentRef.current = "top"
-    }
     setIsViewingSession(viewing)
   }, [])
 
@@ -11467,7 +11392,7 @@ export function HarnessBoardView({
           <ProjectFeatureSidebar
             groups={projectSidebarGroups}
             managedScheduleRefreshRevision={managedScheduleRefreshRevision}
-            collapsedKeys={collapsedFeatureKeys}
+            collapsedKeys={collapsedGroupKeys}
             pinnedProjectIds={pinnedProjectIds}
             pinnedFeatureKeys={pinnedFeatureKeys}
             allCollapsed={allFeatureGroupsCollapsed}
@@ -11485,9 +11410,9 @@ export function HarnessBoardView({
             editingThreadId={editingThreadId}
             editingTitle={editingTitle}
             scrollTopRef={projectSidebarScrollTopRef}
-            scrollIntentRef={projectSidebarScrollIntentRef}
+            preserveScrollRef={preserveProjectSidebarScrollRef}
             onToggleCollapse={(key) =>
-              setCollapsedFeatureKeys((current) => {
+              setCollapsedGroupKeys((current) => {
                 const next = new Set(current)
                 if (next.has(key)) next.delete(key)
                 else next.add(key)
