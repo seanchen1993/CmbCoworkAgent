@@ -203,6 +203,7 @@ export function AgentGitCommitDialog({
   const activeThreadIdRef = useRef(threadId)
   const diffListRequestIdRef = useRef(0)
   const emptySelectionResolvedRef = useRef(false)
+  const [dialogContent, setDialogContent] = useState<HTMLDivElement | null>(null)
   const { cardNumber, handleCardNumberChange, persistNow } = useWorkspaceTaskCard(workspacePath)
   const [selectedGitWorktreePath, setSelectedGitWorktreePath] = useState<string | undefined>(() => {
     if (suggestedGitWorktreePath) return suggestedGitWorktreePath
@@ -544,7 +545,10 @@ export function AgentGitCommitDialog({
         if (!next && !running) onCancel()
       }}
     >
-      <DialogContent className="sm:max-w-2xl rounded-2xl border border-border bg-background p-0 shadow-xl flex max-h-[85vh] flex-col overflow-hidden">
+      <DialogContent
+        ref={setDialogContent}
+        className="sm:max-w-2xl rounded-2xl border border-border bg-background p-0 shadow-xl flex max-h-[85vh] flex-col overflow-visible"
+      >
         <div className="flex shrink-0 items-center gap-2 px-5 py-4 border-b border-border/70">
           <GitCommitHorizontal className="size-4 text-status-info" />
           <div className="text-[16px] font-semibold">Agent 请求提交</div>
@@ -752,6 +756,7 @@ export function AgentGitCommitDialog({
               </span>
             </div>
             <TaskCardPicker
+              portalContainer={dialogContent}
               value={cardNumber}
               onValueChange={(nextValue, card?: TaskCardItem | null) =>
                 handleCardNumberChange(nextValue, card)
@@ -838,7 +843,7 @@ export function AgentGitCommitDialog({
         </form>
         </div>
 
-        <div className="shrink-0 border-t border-border/70 px-5 pb-5 pt-3 flex flex-col gap-2 bg-background">
+        <div className="shrink-0 border-t border-border/70 px-5 pb-5 pt-3 flex flex-col gap-2">
           <Button
             type="button"
             className="w-full h-9"
