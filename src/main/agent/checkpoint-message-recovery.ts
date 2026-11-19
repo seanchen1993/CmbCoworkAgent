@@ -28,7 +28,8 @@ export async function recoverMainCheckpointMessages(
     byteBudget: RECOVERY_BYTE_BUDGET,
     includeVisibleMessagePresence: true,
     notAfterCreatedAt: checkpointCreatedAt,
-    recoveryCheckpointId: context.checkpointId
+    recoveryCheckpointId: context.checkpointId,
+    ...(context.transcriptRevision ? { recoveryTranscriptRevision: context.transcriptRevision } : {})
   })
   // A partially migrated legacy checkpoint is not an authoritative durable
   // source yet, even when the rows copied so far fit into one page.

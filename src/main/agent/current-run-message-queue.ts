@@ -792,7 +792,7 @@ function assignGoalGraphAssistantIdentity(
 export function createCurrentRunMessageQueueMiddleware(
   ownerRunToken?: string,
   loadGoalProviderOccurrence?: GoalProviderOccurrenceLoader,
-  prepareGoalProviderHistory?: (threadId: string) => Promise<void> | undefined
+  prepareGoalProviderHistory?: (threadId: string, goalTurn: boolean) => Promise<void> | undefined
 ): ReturnType<typeof createMiddleware> {
   return createMiddleware({
     name: "currentRunMessageQueue",
@@ -803,17 +803,14 @@ export function createCurrentRunMessageQueueMiddleware(
           : undefined
       const messages = request.state?.messages ?? request.messages
       // Record before the handler can emit the first raw delta.
-      if (
-        threadId &&
-        ownerRunToken &&
-        rememberGoalGraphProviderOccurrences(threadId, ownerRunToken, messages)
-      ) {
-        const preparation = prepareGoalProviderHistory?.(threadId)
+      if (threadId && ownerRunToken && isCurrentRunMessageQueueOwner(threadId, ownerRunToken)) {
+        const goalTurn = rememberGoalGraphProviderOccurrences(threadId, ownerRunToken, messages)
+        const preparation = prepareGoalProviderHistory?.(threadId, goalTurn)
         if (preparation) {
           await preparation
           request.runtime?.signal?.throwIfAborted()
           if (!isCurrentRunMessageQueueOwner(threadId, ownerRunToken)) {
-            throw new DOMException("Superseded Goal turn", "AbortError")
+            throw new DOMException("Superseded turn", "AbortError")
           }
         }
       }

@@ -35,12 +35,59 @@ function unescapeXml(value: string): string {
     .replace(/&amp;/g, "&")
 }
 
+function readSkillField(block: string, tag: "name" | "path"): string {
+  const opening = `<${tag}>`
+  const closing = `</${tag}>`
+  let cursor = 0
+  for (;;) {
+    const start = block.indexOf(opening, cursor)
+    if (start < 0) return ""
+    const contentStart = start + opening.length
+    const nextTag = block.indexOf("<", contentStart)
+    if (nextTag < 0) return ""
+    if (block.startsWith(closing, nextTag)) {
+      return unescapeXml(block.slice(contentStart, nextTag)).trim()
+    }
+    cursor = nextTag
+  }
+}
+
+export interface ParsedSkillUseBlock {
+  skillName: string
+  skillPath: string
+  rest: string
+  block: string
+}
+
+/** Read the complete trailing transport used by the composer and the chat renderer. */
+export function parseSkillUseBlock(content: string): ParsedSkillUseBlock | null {
+  const closeAt = content.lastIndexOf(SKILL_USE_CLOSE_TAG)
+  if (closeAt < 0 || content.slice(closeAt + SKILL_USE_CLOSE_TAG.length).trim()) return null
+  const openAt = content.lastIndexOf(SKILL_USE_OPEN_TAG, closeAt)
+  if (openAt < 0) return null
+  const block = content.slice(openAt, closeAt + SKILL_USE_CLOSE_TAG.length)
+  const skillName = readSkillField(block, "name")
+  const skillPath = readSkillField(block, "path")
+  if (!skillName || !skillPath) return null
+  return { skillName, skillPath, rest: content.slice(0, openAt).trimEnd(), block }
+}
+
 /**
  * The skill directory is named after the skill, so the last path segment before
  * SKILL.md names the skill even when the `<name>` pair itself did not survive.
  */
 function skillNameFromPathTail(block: string): string {
-  return block.match(/([^\\/<>\s]+)[\\/]SKILL\.md\s*<\/path>/i)?.[1] ?? ""
+  for (const closing of block.matchAll(/<\/path>/gi)) {
+    let end = closing.index
+    while (end > 0 && /\s/.test(block[end - 1])) end -= 1
+    const suffix = block.slice(Math.max(0, end - 9), end)
+    if (!/^[\\/]skill\.md$/i.test(suffix)) continue
+    const nameEnd = end - suffix.length
+    let start = nameEnd
+    while (start > 0 && !/[\\/<>\s]/.test(block[start - 1])) start -= 1
+    if (start !== nameEnd) return block.slice(start, nameEnd)
+  }
+  return ""
 }
 
 /**
@@ -49,9 +96,7 @@ function skillNameFromPathTail(block: string): string {
  * the path tail is the fallback rather than whatever text follows the open tag.
  */
 function salvageSkillName(block: string): string {
-  const paired = block.match(/<name>\s*([^<]*)\s*<\/name>/)
-  const name = paired ? unescapeXml(paired[1]).trim() : ""
-  return name || skillNameFromPathTail(block)
+  return readSkillField(block, "name") || skillNameFromPathTail(block)
 }
 
 /**
@@ -82,7 +127,7 @@ export function stripSkillUseBlockForDisplay(
   // mentions the tag name carries neither, and is left alone.
   if (!block.includes("<instruction>") && !block.includes(SKILL_USE_CLOSE_TAG)) return null
   return {
-    rest: content.slice(0, openAt).replace(/\s+$/, ""),
+    rest: content.slice(0, openAt).trimEnd(),
     skillName: salvageSkillName(block)
   }
 }

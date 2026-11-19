@@ -1,7 +1,7 @@
 import {
   WORKFLOW_NOTIFICATION_MARKER_PREFIX,
   WORKFLOW_NOTIFICATION_TURN_PROMPT
-} from "./checkpoint-transcript"
+} from "./transcript-visibility"
 
 export { WORKFLOW_NOTIFICATION_TURN_PROMPT }
 

@@ -1,3 +1,4 @@
+import { matchesOrdinaryThreadScope } from "../../shared/thread-search-scope"
 import type { ThreadGroupSelector } from "../types"
 
 function readNestedMetadataObject(
@@ -15,6 +16,10 @@ export function threadMetadataMatchesGroupSelector(
   metadata: Record<string, unknown>,
   selector: ThreadGroupSelector
 ): boolean {
+  if (selector.type === "workspace") {
+    return matchesOrdinaryThreadScope({ metadata }, selector.workspacePath)
+  }
+
   const feature = readNestedMetadataObject(metadata, "harnessFeature")
   const projectSession = readNestedMetadataObject(metadata, "harnessProjectSession")
   const featureProject = typeof feature?.projectId === "string" ? feature.projectId.trim() : ""
@@ -26,17 +31,6 @@ export function threadMetadataMatchesGroupSelector(
   const isValidFeature = Boolean(featureProject && featureSlug)
   const isValidProjectSession = Boolean(projectSessionProject && projectSessionKind)
 
-  if (selector.type === "workspace") {
-    const isFeatureThread =
-      typeof feature?.projectId === "string" && typeof feature?.slug === "string"
-    const isProjectSessionThread =
-      typeof projectSession?.projectId === "string" && typeof projectSession?.kind === "string"
-    if (isFeatureThread || isProjectSessionThread) return false
-    const workspacePath = metadata.workspacePath
-    return selector.workspacePath === null
-      ? typeof workspacePath !== "string" || !workspacePath.trim()
-      : typeof workspacePath === "string" && workspacePath === selector.workspacePath
-  }
   if (selector.type === "harness-feature") {
     return (
       !isValidProjectSession &&

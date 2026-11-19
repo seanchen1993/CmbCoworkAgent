@@ -1,5 +1,5 @@
 import type { ResourceLimits, Worker } from "node:worker_threads"
-import { getDbPath } from "../storage"
+import { getDbPath, getThreadCheckpointDir } from "../storage"
 import type { ThreadMessagesPage, ThreadMessagesPageOptions } from "../types"
 import type {
   ThreadMessageHydrationWorkerResponse,
@@ -93,7 +93,8 @@ export class ThreadMessageHydrationClient {
 
   constructor(
     private readonly workerFactory: HydrationWorkerFactory = createBundledWorker,
-    private readonly databasePath: () => string = getDbPath
+    private readonly databasePath: () => string = getDbPath,
+    private readonly checkpointDirectory?: () => string
   ) {}
 
   private handleResponse = (response: ThreadMessageHydrationWorkerResponse): void => {
@@ -215,6 +216,17 @@ export class ThreadMessageHydrationClient {
         "Thread message hydration request capacity exceeded"
       )
     }
+    const residentMessageIds = new Set<string>()
+    let residentBytes = 96 * 1024
+    if (options.targetMessageId && Array.isArray(options.residentMessageIds)) {
+      for (const id of options.residentMessageIds.slice(-320).reverse()) {
+        if (typeof id !== "string" || !id || id.length > 4096 || residentMessageIds.has(id)) continue
+        const bytes = Buffer.byteLength(JSON.stringify(id)) + 24
+        if (bytes > residentBytes) continue
+        residentMessageIds.add(id)
+        residentBytes -= bytes
+      }
+    }
     this.activeRequestCount += 1
     const requestId = this.nextRequestId++
     const foregroundKey =
@@ -258,17 +270,20 @@ export class ThreadMessageHydrationClient {
             type: "read-page",
             requestId,
             databasePath: this.databasePath(),
+            checkpointDirectory: options.includeVisibleMessagePresence ? this.checkpointDirectory?.() : undefined,
             threadId,
             options: {
               beforeOrdinal: options.beforeOrdinal,
               beforeMessageId: options.beforeMessageId,
               targetMessageId: options.targetMessageId,
+              ...(residentMessageIds.size > 0 ? { residentMessageIds: [...residentMessageIds] } : {}),
               anchorMessageId: options.anchorMessageId,
               limit: options.limit,
               byteBudget: options.byteBudget,
               includeVisibleMessagePresence: options.includeVisibleMessagePresence,
               notAfterCreatedAt: options.notAfterCreatedAt,
-              recoveryCheckpointId: options.recoveryCheckpointId
+              recoveryCheckpointId: options.recoveryCheckpointId,
+              recoveryTranscriptRevision: options.recoveryTranscriptRevision
             },
             cancellationBuffer
           })
@@ -346,7 +361,7 @@ function closeDefaultClientAtProcessExit(): void {
 }
 
 function getDefaultClient(): ThreadMessageHydrationClient {
-  defaultClient ??= new ThreadMessageHydrationClient()
+  defaultClient ??= new ThreadMessageHydrationClient(createBundledWorker, getDbPath, getThreadCheckpointDir)
   if (!defaultShutdownHookRegistered) {
     defaultShutdownHookRegistered = true
     process.once("beforeExit", closeDefaultClientAtProcessExit)
