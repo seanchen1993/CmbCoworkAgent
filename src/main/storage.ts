@@ -2614,15 +2614,21 @@ function normalizeMcpConnector(value: unknown): import("./types").McpConnectorCo
 
 export function getMcpConnectors(): import("./types").McpConnectorConfig[] {
   getOpenworkDir()
-  if (!existsSync(MCP_CONNECTORS_FILE)) return []
+  if (!existsSync(MCP_CONNECTORS_FILE)) {
+    return []
+  }
   try {
     const content = readFileSync(MCP_CONNECTORS_FILE, "utf-8")
     const parsed = JSON.parse(content) as unknown
-    if (!Array.isArray(parsed)) return []
+    if (!Array.isArray(parsed)) {
+      console.error(`[MCP] Invalid connector config: ${MCP_CONNECTORS_FILE}`)
+      return []
+    }
     return parsed
       .map((item) => normalizeMcpConnector(item))
       .filter((item): item is import("./types").McpConnectorConfig => item !== null)
-  } catch {
+  } catch (error) {
+    console.error(`[MCP] Failed to read connector config: ${MCP_CONNECTORS_FILE}`, error)
     return []
   }
 }
@@ -3112,13 +3118,24 @@ function parseBrowserCdpConfigRecord(parsed: Record<string, unknown>): BrowserCd
 
 export function getBrowserCdpConfig(): BrowserCdpConfig {
   getOpenworkDir()
-  if (!existsSync(BROWSER_CDP_CONFIG_FILE)) return defaultBrowserCdpConfig()
+  if (!existsSync(BROWSER_CDP_CONFIG_FILE)) {
+    const defaults = defaultBrowserCdpConfig()
+    console.info(`[BrowserCdpConfig] missing, using defaults: ${BROWSER_CDP_CONFIG_FILE}`)
+    return defaults
+  }
   try {
     const content = readFileSync(BROWSER_CDP_CONFIG_FILE, "utf-8")
     const parsed = JSON.parse(content) as Record<string, unknown>
-    return parseBrowserCdpConfigRecord(parsed)
-  } catch {
-    return defaultBrowserCdpConfig()
+    const config = parseBrowserCdpConfigRecord(parsed)
+    console.info(`[BrowserCdpConfig] loaded: enabled=${config.enabled}`)
+    return config
+  } catch (error) {
+    const defaults = defaultBrowserCdpConfig()
+    console.error(
+      `[BrowserCdpConfig] failed to read, using defaults: ${BROWSER_CDP_CONFIG_FILE}`,
+      error
+    )
+    return defaults
   }
 }
 

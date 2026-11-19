@@ -2,8 +2,10 @@ import { dirname, join } from "node:path"
 import { getMcpConnectors, upsertMcpConnector } from "../../storage"
 import { type BrowserCdpConfig } from "../../../shared/browser-types"
 import { getCurrentBrowserCdpPort } from "./browser-cdp"
+import { BUILTIN_BROWSER_LOG_PREFIX } from "../../../shared/browser-types"
 
 const PLAYWRIGHT_MCP_NAME = "In-app-browser"
+const PLAYWRIGHT_MCP_CONNECTOR_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[McpConnector]`
 const MANAGED_PLAYWRIGHT_MCP_LAZY_LOAD = false
 const ELECTRON_RUN_AS_NODE_ENV = "ELECTRON_RUN_AS_NODE"
 
@@ -32,10 +34,7 @@ function findManagedPlaywrightMcpConnector() {
 }
 
 function buildPlaywrightMcpArgs(cdpPort: number): string[] {
-  return [
-    resolveBundledPlaywrightMcpCliPath(),
-    `--cdp-endpoint=http://127.0.0.1:${cdpPort}`
-  ]
+  return [resolveBundledPlaywrightMcpCliPath(), `--cdp-endpoint=http://127.0.0.1:${cdpPort}`]
 }
 
 function buildDisabledPlaywrightMcpArgs(existingArgs?: string[]): string[] {
@@ -45,6 +44,12 @@ function buildDisabledPlaywrightMcpArgs(existingArgs?: string[]): string[] {
 
 function sameArgs(left: string[], right: string[]): boolean {
   return JSON.stringify(left) === JSON.stringify(right)
+}
+
+function getCdpEndpoint(args?: string[]): string | null {
+  return (
+    args?.find((arg) => arg.startsWith("--cdp-endpoint="))?.slice("--cdp-endpoint=".length) ?? null
+  )
 }
 
 function isManagedPlaywrightMcpConnectorSynced(
@@ -64,11 +69,20 @@ function isManagedPlaywrightMcpConnectorSynced(
 
 export async function autoRegisterPlaywrightMcpConnector(cdpPort: number | null): Promise<void> {
   const existing = findManagedPlaywrightMcpConnector()
+  console.info(`${PLAYWRIGHT_MCP_CONNECTOR_LOG_PREFIX} startup sync`, {
+    runtimePort: cdpPort,
+    existingEnabled: existing?.enabled ?? null,
+    existingEndpoint: getCdpEndpoint(existing?.args)
+  })
 
   if (cdpPort === null) {
-    if (!existing) return
+    if (!existing) {
+      return
+    }
     const nextArgs = buildDisabledPlaywrightMcpArgs(existing.args)
-    if (isManagedPlaywrightMcpConnectorSynced(existing, { enabled: false, args: nextArgs })) return
+    if (isManagedPlaywrightMcpConnectorSynced(existing, { enabled: false, args: nextArgs })) {
+      return
+    }
     upsertMcpConnector({
       id: existing.id,
       name: PLAYWRIGHT_MCP_NAME,
@@ -79,11 +93,15 @@ export async function autoRegisterPlaywrightMcpConnector(cdpPort: number | null)
       enabled: false,
       lazyLoad: MANAGED_PLAYWRIGHT_MCP_LAZY_LOAD
     })
+    console.info(`${PLAYWRIGHT_MCP_CONNECTOR_LOG_PREFIX} connector disabled`)
     return
   }
 
   const nextArgs = buildPlaywrightMcpArgs(cdpPort)
-  if (isManagedPlaywrightMcpConnectorSynced(existing, { enabled: true, args: nextArgs })) return
+  if (isManagedPlaywrightMcpConnectorSynced(existing, { enabled: true, args: nextArgs })) {
+    console.info(`${PLAYWRIGHT_MCP_CONNECTOR_LOG_PREFIX} connector already synchronized`)
+    return
+  }
 
   upsertMcpConnector({
     id: existing?.id,
@@ -95,6 +113,9 @@ export async function autoRegisterPlaywrightMcpConnector(cdpPort: number | null)
     enabled: true,
     lazyLoad: MANAGED_PLAYWRIGHT_MCP_LAZY_LOAD
   })
+  console.info(`${PLAYWRIGHT_MCP_CONNECTOR_LOG_PREFIX} connector updated`, {
+    endpoint: getCdpEndpoint(nextArgs)
+  })
 }
 
 export async function syncPlaywrightMcpConnectorForBrowserCdpConfig(
@@ -102,6 +123,11 @@ export async function syncPlaywrightMcpConnectorForBrowserCdpConfig(
 ): Promise<{ invalidateCapabilities: boolean }> {
   const existing = findManagedPlaywrightMcpConnector()
   const runtimePort = getCurrentBrowserCdpPort()
+  console.info(`${PLAYWRIGHT_MCP_CONNECTOR_LOG_PREFIX} settings sync`, {
+    configEnabled: config.enabled,
+    runtimePort,
+    existingEndpoint: getCdpEndpoint(existing?.args)
+  })
 
   if (config.enabled === false) {
     if (!existing) {
@@ -122,12 +148,16 @@ export async function syncPlaywrightMcpConnectorForBrowserCdpConfig(
       enabled: false,
       lazyLoad: MANAGED_PLAYWRIGHT_MCP_LAZY_LOAD
     })
+    console.info(`${PLAYWRIGHT_MCP_CONNECTOR_LOG_PREFIX} connector disabled from settings`)
     return { invalidateCapabilities: true }
   }
 
   // A changed setting takes effect only after restart. Do not publish a
   // connector endpoint unless this process actually started CDP on that port.
   if (runtimePort === null) {
+    console.warn(
+      `${PLAYWRIGHT_MCP_CONNECTOR_LOG_PREFIX} config enabled but runtime CDP port is missing`
+    )
     return { invalidateCapabilities: false }
   }
 
@@ -142,6 +172,9 @@ export async function syncPlaywrightMcpConnectorForBrowserCdpConfig(
       env: buildManagedPlaywrightMcpEnv(existing?.env),
       enabled: true,
       lazyLoad: MANAGED_PLAYWRIGHT_MCP_LAZY_LOAD
+    })
+    console.info(`${PLAYWRIGHT_MCP_CONNECTOR_LOG_PREFIX} connector updated from settings`, {
+      endpoint: getCdpEndpoint(nextArgs)
     })
   }
 
