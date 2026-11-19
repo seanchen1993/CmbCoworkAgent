@@ -18,7 +18,3 @@ export const STREAM_TOOL_CALL_ARGS_MODE_KEY = "cmb_stream_tool_call_args_mode"
 export function readStreamMessageWireMode(value: unknown): StreamMessageWireMode | undefined {
   return value === "delta" || value === "snapshot" ? value : undefined
 }
-
-/** Keep provisional main-agent chunks on their durable notification-turn identity. */
-export const STREAM_TRANSCRIPT_BOUNDARY_ID_KEY = "cmb_stream_transcript_boundary_id"
-export const STREAM_PREVIOUS_PROVIDER_OCCURRENCE_KEY = "cmb_stream_previous_provider_occurrence"

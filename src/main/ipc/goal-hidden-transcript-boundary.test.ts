@@ -1,4 +1,5 @@
 import { AIMessage, AIMessageChunk, HumanMessage, ToolMessage } from "@langchain/core/messages"
+import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons"
 import { addMessages } from "@langchain/langgraph"
 import type { BrowserWindow } from "electron"
 import { mkdtempSync, readFileSync, rmSync } from "node:fs"
@@ -10,10 +11,6 @@ import {
   WORKFLOW_NOTIFICATION_MARKER_PREFIX
 } from "../../shared/checkpoint-transcript"
 import { NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY } from "../../shared/graph-transcript-boundary"
-import {
-  STREAM_PREVIOUS_PROVIDER_OCCURRENCE_KEY,
-  STREAM_TRANSCRIPT_BOUNDARY_ID_KEY
-} from "../../shared/stream-message-wire-mode"
 import {
   buildMessageRoleCollisionId,
   buildMessageSameRoleDuplicateId,
@@ -245,46 +242,60 @@ it.each([
         request: { runtime: { configurable: { thread_id: string } }; messages: typeof graph },
         handler: () => Promise<AIMessage>
       ) => Promise<AIMessage>
-      const newResponse = await wrapModelCall(
-        { runtime: { configurable: { thread_id: threadId } }, messages: graph },
-        async () => new AIMessage({ id: providerId, content: "Result verified" })
-      )
-      expect(newResponse.id).not.toBe(previousCall.id)
-      expect(newResponse.additional_kwargs).toMatchObject(provider(3))
+      const namespace = "model_request:fixture"
+      const executionId = "cmb-notification-assistant:" + namespace
+      const forwardChunk = (content: string, id?: string) => {
+        const chunk = serialize("messages", [
+          new AIMessageChunk({ id, content }),
+          { langgraph_checkpoint_ns: namespace }
+        ])
+        return persistAndForwardPhysicalRunStreamChunk(
+          window,
+          "agent:test",
+          threadId,
+          runToken,
+          signal,
+          "messages",
+          chunk.data
+        )
+      }
+      // The first token can precede an ID. A different provider ID may appear
+      // on the completed message, but both have the registered execution ID.
+      const runModel = () =>
+        wrapModelCall(
+          { runtime: { configurable: { thread_id: threadId } }, messages: graph },
+          async () => {
+            if (notification) {
+              expect(forwardChunk("", "wire-opening-id")).toBeNull()
+              expect(forwardChunk("Result ")).toBe(executionId)
+              expect(forwardChunk("verified", "wire-content-id")).toBe(executionId)
+            }
+            return new AIMessage({ id: providerId, content: "Result verified" })
+          }
+        )
+      const newResponse = notification
+        ? await AsyncLocalStorageProviderSingleton.runWithConfig(
+            { metadata: { langgraph_checkpoint_ns: namespace } },
+            runModel
+          )
+        : await runModel()
+      if (notification) {
+        expect(newResponse.id).toBe(executionId)
+        expect(newResponse.additional_kwargs).toMatchObject({
+          [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: executionId,
+          [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: 1
+        })
+      } else {
+        expect(newResponse.id).not.toBe(previousCall.id)
+        expect(newResponse.additional_kwargs).toMatchObject(provider(3))
+      }
       // A graph-owned recovery may enter the model before IPC consumes its
       // frame. The earlier durable parent allows occurrence assignment first.
       forwardValues(graph)
       expect(db.getThreadTranscriptBoundaryOrdinal(threadId, hidden.id!)).toBe(4)
       const updated = addMessages(graph, [newResponse])
       expect(updated).toHaveLength(6)
-      const chunk = serialize("messages", [
-        new AIMessageChunk({ id: providerId, content: newResponse.content }),
-        { checkpoint_ns: "model:fixture" }
-      ])
-      persistAndForwardPhysicalRunStreamChunk(
-        window,
-        "agent:test",
-        threadId,
-        runToken,
-        signal,
-        "messages",
-        chunk.data
-      )
-      if (notification) {
-        expect(window.webContents.send).toHaveBeenLastCalledWith(
-          "agent:test",
-          expect.objectContaining({
-            mode: "messages",
-            data: [
-              expect.anything(),
-              expect.objectContaining({
-                [STREAM_TRANSCRIPT_BOUNDARY_ID_KEY]: hidden.id,
-                [STREAM_PREVIOUS_PROVIDER_OCCURRENCE_KEY]: 2
-              })
-            ]
-          })
-        )
-      }
+      if (!notification) forwardChunk(String(newResponse.content), providerId)
       forwardValues(updated)
       const persisted = db.getThreadMessages(threadId)
       expect(persisted.map(({ content, ordinal }) => [content, ordinal])).toEqual([
@@ -295,8 +306,8 @@ it.each([
         [newResponse.content, 5]
       ])
       expect(persisted.at(-1)).toMatchObject({
-        provider_source_id: providerId,
-        provider_occurrence: 3
+        provider_source_id: notification ? executionId : providerId,
+        provider_occurrence: notification ? 1 : 3
       })
       serialize = createStreamDataSerializer({ projectMessageChunks: true })
       values = createSerializedValuesMessageAccumulator()
@@ -354,10 +365,6 @@ it.each([
             serialize = createStreamDataSerializer({ projectMessageChunks: true })
             values = createSerializedValuesMessageAccumulator()
             forwardValues(restoredGraph, resumedRun, resumesCheckpoint)
-            const outgoing = vi.mocked(window.webContents.send).mock.lastCall?.[1]
-            expect(outgoing?.data?.[STREAM_TRANSCRIPT_BOUNDARY_ID_KEY]).toBe(
-              resumesCheckpoint ? hidden.id : undefined
-            )
             expect(db.getThreadMessages(threadId)).toEqual(checkpoint)
           }
         } finally {

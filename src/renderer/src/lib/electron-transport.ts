@@ -40,8 +40,6 @@ import { mergeStreamToolCallArgs } from "../../../shared/stream-tool-call-chunks
 import {
   readStreamMessageWireMode,
   STREAM_MESSAGE_CONTENT_MODE_KEY,
-  STREAM_PREVIOUS_PROVIDER_OCCURRENCE_KEY,
-  STREAM_TRANSCRIPT_BOUNDARY_ID_KEY,
   STREAM_MESSAGE_REASONING_MODE_KEY,
   STREAM_TOOL_CALL_ARGS_MODE_KEY,
   type StreamMessageWireMode
@@ -259,8 +257,6 @@ interface MessageMetadata {
   checkpoint_ns?: string
   name?: string
   [SUBAGENT_OWNER_METADATA_KEY]?: string
-  [STREAM_TRANSCRIPT_BOUNDARY_ID_KEY]?: string
-  [STREAM_PREVIOUS_PROVIDER_OCCURRENCE_KEY]?: number
   [STREAM_MESSAGE_CONTENT_MODE_KEY]?: StreamMessageWireMode
   [STREAM_MESSAGE_REASONING_MODE_KEY]?: StreamMessageWireMode
 }
@@ -3845,11 +3841,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
                 )
               ) ?? this.nextMessageFallbackIndex("ai"))
             : undefined
-          // A notification has no visible user message to reset the local identity.
-          const boundaryId = metadata?.[STREAM_TRANSCRIPT_BOUNDARY_ID_KEY]
           const streamScopeKey =
-            observedProviderMessageId && (checkpointNs || boundaryId)
-              ? JSON.stringify([observedProviderMessageId, checkpointNs, boundaryId])
+            observedProviderMessageId && checkpointNs
+              ? JSON.stringify([observedProviderMessageId, checkpointNs])
               : undefined
           const scopedMessageIndex = streamScopeKey
             ? this.mainAssistantIndexByStreamScope.get(streamScopeKey)
@@ -3857,8 +3851,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
           const startsNewScopedOccurrence =
             !!streamScopeKey &&
             scopedMessageIndex === undefined &&
-            (this.mainAssistantScopedObservedIds.has(observedProviderMessageId!) ||
-              (!!boundaryId && this.mainAssistantIndexByObservedId.has(observedProviderMessageId!)))
+            this.mainAssistantScopedObservedIds.has(observedProviderMessageId!)
           const idlessCompletedResolution = this.routePendingIdlessCompletedAssistant(
             observedProviderMessageId,
             content
@@ -3914,16 +3907,6 @@ export class ElectronIPCTransport implements UseStreamTransport {
               id: observedProviderMessageId,
               role: "assistant"
             })
-            const previous = metadata?.[STREAM_PREVIOUS_PROVIDER_OCCURRENCE_KEY]
-            const highest = this.mainAssistantHighestProviderOccurrence.get(sourceId) ?? 0
-            if (
-              boundaryId &&
-              previous !== undefined &&
-              Number.isSafeInteger(previous) &&
-              previous > highest
-            ) {
-              this.mainAssistantHighestProviderOccurrence.set(sourceId, previous)
-            }
             if (!this.mainAssistantHighestProviderOccurrence.has(sourceId)) {
               this.rememberMainAssistantProviderIdentity(messageIndex, {
                 providerSourceId: sourceId,
@@ -4314,7 +4297,6 @@ export class ElectronIPCTransport implements UseStreamTransport {
       }
       // Values mode returns full state with serialized LangChain messages
       const state = data as {
-        [STREAM_TRANSCRIPT_BOUNDARY_ID_KEY]?: string
         messages?: SerializedMessageChunk[]
         todos?: { id?: string; content?: string; status?: string }[]
         files?: Record<string, unknown> | Array<{ path: string; is_dir?: boolean; size?: number }>
@@ -4363,17 +4345,6 @@ export class ElectronIPCTransport implements UseStreamTransport {
         const className = getSerializedMessageClassName(rawMessage)
         if (!className.includes("AI")) continue
         const kwargs = rawMessage.kwargs ?? {}
-        if (state[STREAM_TRANSCRIPT_BOUNDARY_ID_KEY]) {
-          const tuple = getMessageProviderTupleFromMetadata(kwargs.additional_kwargs)
-          if (tuple?.provider_source_id && tuple.provider_occurrence) {
-            const current =
-              this.mainAssistantHighestProviderOccurrence.get(tuple.provider_source_id) ?? 0
-            this.mainAssistantHighestProviderOccurrence.set(
-              tuple.provider_source_id,
-              Math.max(current, tuple.provider_occurrence)
-            )
-          }
-        }
         const parentMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
         const rawAbsoluteIndex = kwargs.additional_kwargs?.[WORKER_SNAPSHOT_INDEX_MESSAGE_KEY]
         const absoluteMessageIndex =

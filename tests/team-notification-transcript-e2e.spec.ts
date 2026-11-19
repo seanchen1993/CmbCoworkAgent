@@ -7,10 +7,17 @@ import { createRequire } from "node:module"
 import path from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { _electron as electron, type ElectronApplication, type Page } from "playwright"
+import { TURN_COMPLETION_GATE_MARKER_PREFIX } from "../src/shared/checkpoint-transcript"
 import { COORDINATOR_NOTIFICATION_PROMPT_PREFIX } from "../src/shared/internal-notification-turn"
 
+const repairThroughGate = process.argv.includes("--gate")
 const root = path.resolve(import.meta.dirname, "..")
-const output = path.join(root, "output", "team-notification-e2e", String(Date.now()))
+const output = path.join(
+  root,
+  "output",
+  "team-notification-e2e",
+  (repairThroughGate ? "gate-" : "") + Date.now()
+)
 const workspace = path.join(output, "workspace")
 const model = "deepseek-team-notification"
 const modelId = "custom:team-notification"
@@ -19,8 +26,15 @@ const submitText = "Launch one read-only worker and report its result."
 const startText = "Fixture worker launch"
 const waitingText = "Fixture worker launched"
 const workerText = "TEAM_WORKER_RESULT"
-const reportText = "Fixture Team worker result verified"
-const expectedMainReplies = [startText, waitingText, reportText]
+const reportPrefix = "Fixture Team "
+const reportText = reportPrefix + "worker result verified"
+const invalidReport = "Fixture Team invalid report\n<function=fixture>"
+const expectedMainReplies = [
+  startText,
+  waitingText,
+  ...(repairThroughGate ? [invalidReport] : []),
+  reportText
+]
 const workerCallId = "fixture-start-worker"
 
 interface ModelRequest {
@@ -62,9 +76,11 @@ async function main(): Promise<void> {
   await mkdir(workspace, { recursive: true })
   let notifications = 0
   let workerRuns = 0
+  let gateRepairs = 0
   let requests = 0
   const serverErrors: string[] = []
   const pageErrors: string[] = []
+  const reportReady = Promise.withResolvers<void>()
   const server = createServer(async (request, response) => {
     try {
       assert.equal(request.url, "/v1/chat/completions")
@@ -79,15 +95,20 @@ async function main(): Promise<void> {
       let text: string
       let toolCalls: unknown[] | undefined
       let streamSlowly = false
-      if (latestUser?.includes(COORDINATOR_NOTIFICATION_PROMPT_PREFIX)) {
+      if (latestUser?.includes(TURN_COMPLETION_GATE_MARKER_PREFIX)) {
+        assert.ok(repairThroughGate && hasWorkerTool)
+        gateRepairs++
+        text = reportText
+        streamSlowly = true
+      } else if (latestUser?.includes(COORDINATOR_NOTIFICATION_PROMPT_PREFIX)) {
         assert.ok(hasWorkerTool)
         assert.ok(
           latestUser.includes(workerText),
           "the real worker evidence reached the coordinator"
         )
         notifications++
-        text = reportText
-        streamSlowly = true
+        text = repairThroughGate ? invalidReport : reportText
+        streamSlowly = !repairThroughGate
       } else if (!hasWorkerTool) {
         assert.ok(latestUser?.includes("TEAM_WORKER_FIXTURE"))
         workerRuns++
@@ -129,14 +150,24 @@ async function main(): Promise<void> {
         }
         response.write("data: " + JSON.stringify(data) + "\n\n")
       }
-      const prefix = streamSlowly ? "Fixture Team " : text
+      const prefix = streamSlowly ? reportPrefix : text
       send(
         { role: "assistant", content: prefix, ...(toolCalls && { tool_calls: toolCalls }) },
         null
       )
       if (streamSlowly) {
-        // The ordinary transcript flusher must write the prefix before values arrive.
-        await delay(750)
+        // Hold the final frame until the test observes the committed draft.
+        const timeout = new AbortController()
+        try {
+          await Promise.race([
+            reportReady.promise,
+            delay(25_000, undefined, { signal: timeout.signal }).then(() => {
+              throw new Error("Team notification draft was not observed")
+            })
+          ])
+        } finally {
+          timeout.abort()
+        }
         send({ content: text.slice(prefix.length) }, null)
       }
       send({}, toolCalls ? "tool_calls" : "stop")
@@ -216,12 +247,22 @@ async function main(): Promise<void> {
     )
     assert.deepEqual(
       stored.map(({ role }) => role),
-      ["user", "assistant", "tool", "assistant", "assistant"]
+      [
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+        "assistant",
+        ...(repairThroughGate ? ["assistant"] : [])
+      ]
     )
     assert.deepEqual(
       stored.filter(({ role }) => role === "assistant").map(({ content }) => content),
       expectedMainReplies
     )
+    const notificationReplies = stored.slice(4)
+    for (const reply of notificationReplies) assert.match(reply.id, /^cmb-notification-assistant:/)
+    assert.equal(new Set(notificationReplies.map(({ id }) => id)).size, notificationReplies.length)
     assert.ok(stored[2].tool_call_id && stored[2].tool_call_id === stored[1].tool_calls?.[0]?.id)
     assert.equal(await chat.getByText("INTERRUPTED", { exact: true }).count(), 0)
     for (const text of expectedMainReplies) {
@@ -259,10 +300,24 @@ async function main(): Promise<void> {
       { port, title, workspace, model, modelId }
     )
     await initial.reload({ waitUntil: "domcontentloaded" })
-    const { composer } = await openThread(initial, threadId)
+    const { chat, composer } = await openThread(initial, threadId)
     await initial.waitForTimeout(1_000)
     await composer.fill(submitText)
     await composer.locator("xpath=ancestor::form").locator('button[type="submit"]').last().click()
+    await chat.getByText(reportPrefix.trim(), { exact: true }).waitFor({ timeout: 20_000 })
+    await initial.waitForFunction(
+      async ({ threadId, reportPrefix }) => {
+        const api = (window as unknown as FixtureWindow).api
+        const messages = await api.threads.getMessages(threadId)
+        return (
+          messages.filter(({ role, content }) => role === "assistant" && content === reportPrefix)
+            .length === 1
+        )
+      },
+      { threadId, reportPrefix },
+      { timeout: 20_000, polling: 100 }
+    )
+    reportReady.resolve()
     await assertTranscript(initial, threadId, "live")
     await app!.close()
     app = undefined
@@ -271,9 +326,13 @@ async function main(): Promise<void> {
     await assertTranscript(reopened, threadId, "cold")
     assert.equal(workerRuns, 1)
     assert.equal(notifications, 1)
+    assert.equal(gateRepairs, repairThroughGate ? 1 : 0)
     assert.deepEqual(serverErrors, [])
     assert.deepEqual(pageErrors, [])
-    console.log("PASS real Team worker notification, single main transcript and cold reopen")
+    console.log(
+      "PASS real Team worker notification, single main transcript and cold reopen" +
+        (repairThroughGate ? " with completion-gate repair" : "")
+    )
   } catch (error) {
     await page?.screenshot({ path: path.join(output, "failure.png") }).catch(() => undefined)
     console.error({ output, requests, workerRuns, notifications, serverErrors, pageErrors })

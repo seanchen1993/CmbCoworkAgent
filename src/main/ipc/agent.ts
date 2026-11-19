@@ -94,15 +94,14 @@ import {
   type ModelRetryHooks,
   type FetchErrorInfo
 } from "../agent/runtime"
-import { mergeCurrentRunGraphProviderOccurrences } from "../agent/current-run-message-queue"
+import {
+  getCurrentRunNotificationAssistantIdentity,
+  mergeCurrentRunGraphProviderOccurrences
+} from "../agent/current-run-message-queue"
 import {
   hasScopedGraphTranscriptBoundary,
   NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY
 } from "../../shared/graph-transcript-boundary"
-import {
-  STREAM_PREVIOUS_PROVIDER_OCCURRENCE_KEY,
-  STREAM_TRANSCRIPT_BOUNDARY_ID_KEY
-} from "../../shared/stream-message-wire-mode"
 import type { CheckpointMetadata } from "@langchain/langgraph-checkpoint"
 import {
   addThreadGoalEvent,
@@ -4080,7 +4079,7 @@ const streamTranscriptAssistantIdentities = new Map<string, StreamTranscriptAssi
 const streamTranscriptAttempts = new Map<string, ThreadMessageStreamAttempt>()
 interface StreamTranscriptBoundary {
   id: string
-  notificationOccurrences?: Map<string, number>
+  notification?: boolean
 }
 const streamTranscriptBoundaries = new Map<string, StreamTranscriptBoundary>()
 
@@ -4344,7 +4343,7 @@ export function createPhysicalRunHiddenUserMessage(
   discardStreamTranscriptToolCallAccumulators(threadId, runToken)
   streamTranscriptBoundaries.set(pendingStreamTranscriptKey(threadId, runToken), {
     id: graphUserId,
-    ...(scope === "notification" && { notificationOccurrences: new Map() })
+    ...(scope === "notification" && { notification: true })
   })
 
   const additionalKwargs = { ...fields.additional_kwargs }
@@ -4423,9 +4422,18 @@ function persistStreamTranscriptChunk(
   mode: string,
   payload: unknown,
   options: { deferFlush?: boolean } = {}
-): QueuedStreamTranscriptMessage | null {
+): string | null {
   if (!isCurrentRunMessageQueueOwner(threadId, runToken)) return null
   if (shouldSkipMainTranscriptStreamPayload(mode, payload, threadId)) return null
+  if (Array.isArray(payload) && getSerializedMessageRole(payload[0]) === "assistant") {
+    const metadata = messageStreamMetadata(mode, payload)
+    const identity = getCurrentRunNotificationAssistantIdentity(
+      threadId,
+      runToken,
+      metadata?.langgraph_checkpoint_ns ?? metadata?.checkpoint_ns
+    )
+    if (identity) setSerializedMessageIdentity(payload, identity)
+  }
   const message = persistedMessageFromStreamPayload(payload)
   if (!message) return null
   const completedRoute = routeCurrentRunCompletedAssistantMessage(threadId, message, runToken)
@@ -4440,7 +4448,7 @@ function persistStreamTranscriptChunk(
   }
   hydrateStreamTranscriptToolCalls(threadId, runToken, message)
   queueStreamTranscriptMessage(threadId, runToken, { ...message, streamContentMode }, options)
-  return message
+  return message.id
 }
 
 function isPhysicalStreamRunActive(
@@ -4571,40 +4579,9 @@ function adoptGraphTranscriptBoundaryFromValues(
   }
   streamTranscriptBoundaries.set(runKey, {
     id: boundaryId,
-    ...(notification && { notificationOccurrences: new Map() })
+    ...(notification && { notification: true })
   })
   streamTranscriptAssistantIdentities.delete(runKey)
-}
-
-function projectNotificationStreamChunk(
-  threadId: string,
-  runToken: string,
-  message: QueuedStreamTranscriptMessage,
-  payload: unknown
-): unknown {
-  const boundary = streamTranscriptBoundaries.get(pendingStreamTranscriptKey(threadId, runToken))
-  const occurrences = boundary?.notificationOccurrences
-  if (!boundary || !occurrences || message.role !== "assistant" || !Array.isArray(payload)) {
-    return payload
-  }
-
-  const sourceId = getMessageProviderSourceId(message)
-  let previous = occurrences.get(sourceId)
-  if (previous === undefined) {
-    previous =
-      loadPreviousRunProviderOccurrences(threadId, runToken, boundary.id, [sourceId])?.find(
-        (entry) => entry.role === "assistant"
-      )?.provider_occurrence ?? 0
-    occurrences.set(sourceId, previous)
-  }
-  return [
-    payload[0],
-    {
-      ...asPlainRecord(payload[1]),
-      [STREAM_TRANSCRIPT_BOUNDARY_ID_KEY]: boundary.id,
-      [STREAM_PREVIOUS_PROVIDER_OCCURRENCE_KEY]: previous
-    }
-  ]
 }
 
 export function persistAndForwardPhysicalRunStreamChunk(
@@ -4628,10 +4605,8 @@ export function persistAndForwardPhysicalRunStreamChunk(
   // Arm the 250 ms run-scoped flush window for ordinary token chunks. Deferring
   // every chunk until a values/terminal event lets a long answer accumulate
   // thousands of deltas and makes final coalescing quadratic in output length.
-  const message = persistStreamTranscriptChunk(threadId, runToken, mode, payload)
-  let outgoing = message
-    ? projectNotificationStreamChunk(threadId, runToken, message, payload)
-    : payload
+  const messageId = persistStreamTranscriptChunk(threadId, runToken, mode, payload)
+  let outgoing = payload
   if (mode === "values") {
     const runKey = pendingStreamTranscriptKey(threadId, runToken)
     adoptGraphTranscriptBoundaryFromValues(
@@ -4686,9 +4661,6 @@ export function persistAndForwardPhysicalRunStreamChunk(
       if (Array.isArray(frame?.messages)) {
         outgoing = {
           ...frame,
-          ...(boundary?.notificationOccurrences && {
-            [STREAM_TRANSCRIPT_BOUNDARY_ID_KEY]: boundary.id
-          }),
           messages: projectCommittedGraphMessages(frame.messages)
         }
       }
@@ -4702,7 +4674,7 @@ export function persistAndForwardPhysicalRunStreamChunk(
     data: sanitizeStreamDataForRenderer(mode, outgoing, valuesMessageIndexOffset),
     ...(mode === "values" ? { valuesSnapshotKind } : {})
   })
-  return message?.id ?? null
+  return messageId
 }
 
 function persistVisibleUserTranscriptMessage(
@@ -11694,7 +11666,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   abortController.signal,
                   boundaryGoal,
                   { content: revisionPrompt },
-                  boundary?.notificationOccurrences ? "notification" : "goal"
+                  boundary?.notification ? "notification" : "goal"
                 )
                 const revisionStream = await resumeAgentRuntime.stream(
                   { messages: [revisionInput] },
@@ -12839,7 +12811,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   abortController.signal,
                   boundaryGoal,
                   { content: revisionPrompt },
-                  boundary?.notificationOccurrences ? "notification" : "goal"
+                  boundary?.notification ? "notification" : "goal"
                 )
                 const revisionStream = await intAgentRuntime.stream(
                   { messages: [revisionInput] },

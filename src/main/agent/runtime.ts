@@ -1,7 +1,4 @@
-import {
-  hasScopedGraphTranscriptBoundary,
-  NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY
-} from "../../shared/graph-transcript-boundary"
+import { NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY } from "../../shared/graph-transcript-boundary"
 import { createStageUsageMiddleware } from "./trace/stage-usage-middleware"
 import {
   createSubagentLifecycleMiddleware,
@@ -298,15 +295,16 @@ export function createPhysicalScopedGateRecoveryMessage(
   prompt: string
 ): HumanMessage {
   const parent = messages.findLast(HumanMessage.isInstance)
-  const goalBoundary = parent?.additional_kwargs[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] === true
+  const goalBoundary =
+    parent?.additional_kwargs[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] === true &&
+    Boolean(goalManager.getActive(threadId))
   const notificationBoundary =
     parent?.additional_kwargs[NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY] === true
   if (
     !parent?.id ||
-    !hasScopedGraphTranscriptBoundary(parent.additional_kwargs) ||
+    (!goalBoundary && !notificationBoundary) ||
     !runToken ||
-    !isCurrentRunMessageQueueOwner(threadId, runToken) ||
-    (goalBoundary && !goalManager.getActive(threadId))
+    !isCurrentRunMessageQueueOwner(threadId, runToken)
   ) {
     return new HumanMessage(prompt)
   }

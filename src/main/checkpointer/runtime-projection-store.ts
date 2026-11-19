@@ -32,6 +32,7 @@ import {
 } from "../../shared/message-role-collision"
 import {
   getCheckpointTranscriptMessageIdentity,
+  isInternalNotificationMessage,
   isRestorableConversationTranscriptMessage,
   isWorkflowPlumbingTranscriptContent
 } from "../../shared/checkpoint-transcript"
@@ -734,7 +735,7 @@ function isVisibleSerializedCheckpointMessage(raw: unknown): boolean {
   const kwargs = objectRecord(message.kwargs) ?? {}
   const additionalKwargs =
     objectRecord(message.additional_kwargs) ?? objectRecord(kwargs.additional_kwargs) ?? {}
-  if (additionalKwargs.cmb_internal_coordinator_notification === true) return false
+  if (isInternalNotificationMessage(raw)) return false
   const role = serializedMessageRole(message, kwargs)
   const rawContent = message.content ?? kwargs.content
   const visibleUserMessage = additionalKwargs.cmb_visible_user_message

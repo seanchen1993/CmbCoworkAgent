@@ -30,6 +30,7 @@ import {
   ToolMessage,
   type BaseMessage
 } from "@langchain/core/messages"
+import { getConfig } from "@langchain/langgraph"
 import { createMiddleware } from "langchain"
 import { randomUUID } from "crypto"
 import type { Message } from "../types"
@@ -39,7 +40,10 @@ import {
   isWorkflowPlumbingTranscriptContent
 } from "../../shared/checkpoint-transcript"
 import { isSerializedSummarizationMessage } from "../../shared/context-compaction-messages"
-import { hasScopedGraphTranscriptBoundary } from "../../shared/graph-transcript-boundary"
+import {
+  hasScopedGraphTranscriptBoundary,
+  NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY
+} from "../../shared/graph-transcript-boundary"
 import { GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY } from "./goals/internal-prompt"
 import {
   advanceCompletedMessageContentRoute,
@@ -297,7 +301,11 @@ type ScopedGraphProviderRole = "assistant" | "tool"
 type ScopedGraphProviderOccurrences = Map<string, Partial<Record<ScopedGraphProviderRole, number>>>
 const scopedGraphOccurrencesByThread = new Map<
   string,
-  { runToken: string; boundaries: Map<string, ScopedGraphProviderOccurrences> }
+  {
+    runToken: string
+    boundaries: Map<string, ScopedGraphProviderOccurrences>
+    notificationExecutions: Set<string>
+  }
 >()
 const VISIBLE_USER_MESSAGE_KEY = "cmb_visible_user_message"
 // A renderer can withdraw a handoff while its async UserPromptSubmit/skill hooks
@@ -646,9 +654,10 @@ function rememberScopedGraphProviderOccurrences(
     return false
   }
 
+  if (!isCurrentRunMessageQueueOwner(threadId, runToken)) return false
   let scope = scopedGraphOccurrencesByThread.get(threadId)
   if (!scope) {
-    scope = { runToken, boundaries: new Map() }
+    scope = { runToken, boundaries: new Map(), notificationExecutions: new Set() }
     scopedGraphOccurrencesByThread.set(threadId, scope)
   }
   const parentId = boundary.additional_kwargs[GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]
@@ -715,6 +724,48 @@ export function mergeCurrentRunGraphProviderOccurrences(
     }
   }
   return [...occurrences.values()]
+}
+
+interface NotificationAssistantIdentity {
+  stableId: string
+  providerSourceId: string
+  providerOccurrence: number
+}
+
+/** The graph model node and its token callbacks share the same execution namespace. */
+export function getCurrentRunNotificationAssistantIdentity(
+  threadId: string,
+  runToken: string,
+  namespace: unknown
+): NotificationAssistantIdentity | undefined {
+  const scope = scopedGraphOccurrencesByThread.get(threadId)
+  if (
+    typeof namespace !== "string" ||
+    scope?.runToken !== runToken ||
+    !scope.notificationExecutions.has(namespace)
+  ) {
+    return undefined
+  }
+  const stableId = "cmb-notification-assistant:" + namespace
+  return { stableId, providerSourceId: stableId, providerOccurrence: 1 }
+}
+
+function registerNotificationModelExecution(
+  threadId: string,
+  runToken: string,
+  messages: readonly BaseMessage[]
+): NotificationAssistantIdentity | undefined {
+  const latestUser = messages.findLast(HumanMessage.isInstance)
+  if (latestUser?.additional_kwargs[NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY] !== true) {
+    return undefined
+  }
+  const namespace = getConfig()?.metadata?.langgraph_checkpoint_ns
+  const scope = scopedGraphOccurrencesByThread.get(threadId)
+  if (typeof namespace !== "string" || !namespace || scope?.runToken !== runToken) {
+    return undefined
+  }
+  scope.notificationExecutions.add(namespace)
+  return getCurrentRunNotificationAssistantIdentity(threadId, runToken, namespace)
 }
 
 function assignScopedGraphAssistantIdentity(
@@ -815,15 +866,28 @@ export function createCurrentRunMessageQueueMiddleware(
           }
         }
       }
+      const notificationIdentity =
+        threadId && ownerRunToken
+          ? registerNotificationModelExecution(threadId, ownerRunToken, messages)
+          : undefined
       const response = await handler(request)
       if (threadId && ownerRunToken && AIMessage.isInstance(response)) {
-        assignScopedGraphAssistantIdentity(
-          threadId,
-          ownerRunToken,
-          messages,
-          response,
-          loadGraphProviderOccurrence
-        )
+        if (notificationIdentity) {
+          response.id = notificationIdentity.stableId
+          response.additional_kwargs = {
+            ...response.additional_kwargs,
+            [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: notificationIdentity.providerSourceId,
+            [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: notificationIdentity.providerOccurrence
+          }
+        } else {
+          assignScopedGraphAssistantIdentity(
+            threadId,
+            ownerRunToken,
+            messages,
+            response,
+            loadGraphProviderOccurrence
+          )
+        }
         const completed = completedAssistantMessageForTranscript(response)
         if (completed) {
           completedAssistantMessagesByRun.set(runScopedKey(threadId, ownerRunToken), completed)
