@@ -55,7 +55,7 @@ import {
   Check,
   SlidersHorizontal
 } from "lucide-react"
-import type { FileAttachment, HarnessRunDetailViewModel, QueuedMessage } from "@/types"
+import type { HarnessRunDetailViewModel, QueuedMessage } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import {
@@ -182,8 +182,7 @@ import {
   readBoundedWorkspaceMentionFile,
   retainMentionedWorkspaceFilesForWorkspace,
   resolveAtFileAttachments,
-  resolveAtFileSelection,
-  type MentionedWorkspaceFile
+  resolveAtFileSelection
 } from "@/features/mentions/atFileAttachments"
 import { MentionFileChip } from "@/features/mentions/MentionFileChip"
 import { DEFAULT_IM_CHANNEL_ID } from "../../../../shared/im-gateway-contract"
@@ -2244,6 +2243,8 @@ export function ChatContainer({
     harnessAgentmdLoadStatus,
     currentModel,
     draftInput: input,
+    draftAttachments: attachments,
+    draftMentionedFiles: mentionedFiles,
     harnessNextActionDialogTips,
     draftSkill: selectedSkill,
     workspaceFiles,
@@ -2291,6 +2292,8 @@ export function ChatContainer({
     clearHookInterruption,
     setContextReminder,
     setDraftInput: setInput,
+    setDraftAttachments: setAttachments,
+    setDraftMentionedFiles: setMentionedFiles,
     setHarnessNextActionDialogTips,
     setDraftSkill: setSelectedSkill,
     draftBuiltinBrowser: selectedBuiltinBrowser,
@@ -2597,12 +2600,10 @@ export function ChatContainer({
   )
 
   // ── File attachments state ──
-  const [attachments, setAttachments] = useState<FileAttachment[]>([])
-  const [mentionedFiles, setMentionedFiles] = useState<MentionedWorkspaceFile[]>([])
   const [attachmentLoading, setAttachmentLoading] = useState(false)
   const [dragOver, setDragOver] = useState(false)
-  const attachmentsRef = useRef<FileAttachment[]>([])
-  const mentionedFilesRef = useRef<MentionedWorkspaceFile[]>([])
+  const attachmentsRef = useRef(attachments)
+  const mentionedFilesRef = useRef(mentionedFiles)
   const activeAtFilePreviewTokensRef = useRef(new Set<string>())
 
   // Keep ref in sync with state
@@ -2619,7 +2620,7 @@ export function ChatContainer({
       mentionedFilesRef.current = retained
       return retained
     })
-  }, [workspacePath])
+  }, [setMentionedFiles, workspacePath])
   useEffect(
     () => () => {
       for (const requestToken of activeAtFilePreviewTokensRef.current) {
@@ -2729,7 +2730,7 @@ export function ChatContainer({
         setAttachmentLoading(false)
       }
     },
-    [setError, clearError, attachmentLoading]
+    [setError, clearError, attachmentLoading, setAttachments]
   )
 
   const handleAttachClick = useCallback(async () => {
@@ -2748,10 +2749,10 @@ export function ChatContainer({
 
   const removeAttachment = useCallback((index: number) => {
     setAttachments((prev) => prev.filter((_, i) => i !== index))
-  }, [])
+  }, [setAttachments])
   const removeMentionedFile = useCallback((index: number) => {
     setMentionedFiles((prev) => prev.filter((_, i) => i !== index))
-  }, [])
+  }, [setMentionedFiles])
 
   const dropZoneRef = useRef<HTMLDivElement>(null)
 
@@ -5232,7 +5233,7 @@ export function ChatContainer({
         setError("@文件暂时不可用，请直接发送消息或改用普通附件。")
       }
     },
-    [atFileMentions.mode, clearError, input, setError, setInput, workspacePath]
+    [atFileMentions.mode, clearError, input, setError, setInput, setMentionedFiles, workspacePath]
   )
 
   const appendVisibleUserMessageWithTime = useCallback(

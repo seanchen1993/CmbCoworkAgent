@@ -4,7 +4,7 @@ import { createRoot } from "react-dom/client"
 import { Dialog, DialogContent, DialogTitle } from "../../src/renderer/src/components/ui/dialog"
 import {
   ProjectPluginDevelopmentGuide,
-  ProjectPluginManagementLink
+  ProjectPluginWorkspaceShortcut
 } from "../../src/renderer/src/components/customize/ProjectPluginDevelopmentGuide"
 import { MarketSkillShortcutAction } from "../../src/renderer/src/components/customize/MarketPanel/MarketSkillShortcutAction"
 import { useAppStore } from "../../src/renderer/src/lib/store"
@@ -34,6 +34,16 @@ let clipboard = ""
 let installed = false
 const drafts = new Map<string, { text?: string; skill?: string; attachment?: string }>()
 let releaseInstall: (() => void) | null = null
+let recentWorkspace: string | null = "/recent"
+let selectedWorkspace: string | null = null
+const createdWorkspaces: string[] = []
+const fixtureThreadContext = {
+  getThreadActions: (threadId: string) => ({
+    setDraftSkill: (selection: SkillMetadata) => {
+      drafts.set(threadId, { ...drafts.get(threadId), skill: selection.name })
+    }
+  })
+}
 
 Object.defineProperty(navigator, "clipboard", {
   value: {
@@ -44,7 +54,21 @@ Object.defineProperty(navigator, "clipboard", {
 })
 
 Object.assign(window, {
+  fixtureThreadContext,
   api: {
+    workspace: { get: async () => recentWorkspace },
+    file: {
+      selectDirectory: async () => ({
+        canceled: !selectedWorkspace,
+        filePaths: selectedWorkspace ? [selectedWorkspace] : []
+      })
+    },
+    threads: {
+      create: async ({ workspacePath }: { workspacePath: string }) => {
+        createdWorkspaces.push(workspacePath)
+        return { thread_id: "dev-" + createdWorkspaces.length }
+      }
+    },
     skills: {
       onMarketCatalogChanged: (callback: () => void) => {
         catalogListeners.add(callback)
@@ -81,6 +105,11 @@ Object.assign(window, {
       installed = false
     },
     readClipboard: () => clipboard,
+    setWorkspaces: (recent: string | null, selected: string | null) => {
+      recentWorkspace = recent
+      selectedWorkspace = selected
+    },
+    createdWorkspaces: () => createdWorkspaces,
     publish: (enabled: boolean) => {
       binding = { revision: binding.revision + "-next", target: enabled ? target : null }
       window.dispatchEvent(new Event("online"))
@@ -100,7 +129,7 @@ useAppStore.setState({ currentThreadId: "new", mainView: "thread" })
 function Composer({ threadId }: { threadId: string }) {
   const draft = drafts.get(threadId)
   return (
-    <form onSubmit={(event) => event.preventDefault()}>
+    <form data-thread={threadId} onSubmit={(event) => event.preventDefault()}>
       <textarea
         aria-label="消息草稿"
         defaultValue={draft?.text ?? ""}
@@ -165,7 +194,7 @@ function Fixture() {
       />
     )
   }
-  if (view === "workspace-plugins") return <ProjectPluginManagementLink />
+  if (view === "workspace-plugins") return <ProjectPluginWorkspaceShortcut />
   return <Composer key={threadId} threadId={threadId} />
 }
 

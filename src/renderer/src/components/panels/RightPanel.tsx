@@ -1,4 +1,4 @@
-import { ProjectPluginManagementLink } from "@/components/customize/ProjectPluginDevelopmentGuide"
+import { ProjectPluginWorkspaceShortcut } from "@/components/customize/ProjectPluginDevelopmentGuide"
 import {
   useState,
   useRef,
@@ -2383,7 +2383,7 @@ export function RightPanel({
                   onToggle={() => toggleExclusivePanel("plugins", pluginsOpen)}
                 />
               </div>
-              <ProjectPluginManagementLink />
+              <ProjectPluginWorkspaceShortcut />
             </div>
             {pluginsOpen && (
               <div

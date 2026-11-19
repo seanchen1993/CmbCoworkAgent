@@ -13,6 +13,8 @@ interface ShortcutFixture {
   finishInstall: () => void
   clearInstalled: () => void
   readClipboard: () => string
+  setWorkspaces: (recent: string | null, selected: string | null) => void
+  createdWorkspaces: () => string[]
   publish: (enabled: boolean) => void
   loadCatalog: () => void
   setAdministrator: (allowed: boolean) => void
@@ -43,11 +45,20 @@ async function main(): Promise<void> {
             path: "fixture-store",
             namespace: "shortcut-fixture"
           }))
+          builder.onResolve({ filter: /\/lib\/thread-context$/ }, () => ({
+            path: "thread-context",
+            namespace: "shortcut-fixture"
+          }))
+          builder.onLoad({ filter: /^thread-context$/, namespace: "shortcut-fixture" }, () => ({
+            contents: "export const useThreadContext = () => window.fixtureThreadContext",
+            loader: "js"
+          }))
           builder.onLoad({ filter: /^fixture-store$/, namespace: "shortcut-fixture" }, () => ({
             contents: `
             import { create } from "zustand"
             export const useAppStore = create((set) => ({
               bumpPluginVersion: () => {},
+              addThreadSummary: () => {},
               setShowCustomizeView: (show, tab) => { if (show) set({mainView: tab}) },
               selectThread: (threadId) => set({currentThreadId: threadId, mainView: "thread"}),
               setMainView: (mainView) => set({mainView}),
@@ -152,7 +163,51 @@ async function main(): Promise<void> {
     const workspaceGuide = page.getByTitle("开发项目模式插件")
     await workspaceGuide.hover()
     await workspaceGuide.click()
-    await workspaceGuide.waitFor({ state: "hidden" })
+    await page.locator('form[data-thread="dev-1"]').waitFor()
+    assert.equal(
+      await page.getByLabel("技能", { exact: true }).textContent(),
+      "project-plugin-author"
+    )
+    assert.equal(await draft.inputValue(), "")
+    assert.deepEqual(await page.evaluate(() => window.shortcutFixture.createdWorkspaces()), [
+      "/recent"
+    ])
+    await page.evaluate(() => window.shortcutFixture.selectThread("new"))
+    assert.equal(await draft.inputValue(), original)
+    assert.equal(await page.getByLabel("已附加文件").textContent(), "spec.md")
+
+    await page.evaluate(() => {
+      window.shortcutFixture.setWorkspaces(null, null)
+      window.shortcutFixture.openView("workspace-plugins")
+    })
+    await workspaceGuide.click()
+    await page.waitForFunction(() => {
+      const button = document.querySelector("button[title='开发项目模式插件']")
+      return button && !button.hasAttribute("disabled")
+    })
+    assert.deepEqual(await page.evaluate(() => window.shortcutFixture.createdWorkspaces()), [
+      "/recent"
+    ])
+
+    await page.evaluate(() => {
+      window.shortcutFixture.setWorkspaces(null, "/chosen")
+      window.shortcutFixture.clearInstalled()
+    })
+    await workspaceGuide.click()
+    await guide.getByRole("button", { name: "安装并开始" }).click()
+    await page.waitForFunction(() => window.shortcutFixture.hasPendingInstall())
+    await page.evaluate(() => window.shortcutFixture.finishInstall())
+    await page.locator('form[data-thread="dev-2"]').waitFor()
+    assert.equal(
+      await page.getByLabel("技能", { exact: true }).textContent(),
+      "project-plugin-author"
+    )
+    assert.deepEqual(await page.evaluate(() => window.shortcutFixture.createdWorkspaces()), [
+      "/recent",
+      "/chosen"
+    ])
+
+    await page.evaluate(() => window.shortcutFixture.openView("plugins"))
     await development.click()
     await guide.getByText(/在普通会话的技能列表中选择/).waitFor()
     await page.keyboard.press("Escape")
