@@ -20,6 +20,8 @@ import {
 import { canDeliverBotFeedback, canSteerBotTask } from "../bots/continuation"
 import { LocalBotHost, type BotRunLease } from "../bots/host"
 import { BotStore } from "../bots/store"
+import { tracksBotInputPreparation } from "../bots/history-input-projection"
+import { botWorkInputPrompt, workRoutingMessage } from "../bots/work-input"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { BOT_BROWSER_PROMPT_PREFIX } from "../../shared/user-input-transport"
 import { AsyncKeyedLock } from "./async-keyed-lock"
@@ -56,6 +58,7 @@ const botSteerSource = extract(
 )
 
 function steeringFixture() {
+  queue.setCurrentRunInjectionNotifier(() => {})
   const activeRuns = new Map<string, AbortController>()
   const currentRunMessagePreparers = new Map<string, {
     runToken: string
@@ -174,7 +177,8 @@ async function workFixture(holdPreparation = false, preparation: "accept" | "rej
       const run = steering.start(task.threadId, task.id, "bot", holdPreparation, preparation)
       const steer = evaluate<NonNullable<BotRunLease["steer"]>>(
         "const runtime = {" + botSteerSource + "}", "runtime.steer", {
-          task, canSteerBotTask, canDeliverBotFeedback, steerAgentRun,
+          task, canSteerBotTask, canDeliverBotFeedback, steerAgentRun, tracksBotInputPreparation,
+          reviewInputVersion: 0, botWorkInputPrompt, workRoutingMessage,
           superseded: false, dismissedQuestion: false, interactionWaits: 0,
           reviewOwned: false, interruptModel: undefined, supplementalMessages: new Map(),
           getHost: () => host, getLocalThreadRunLease,

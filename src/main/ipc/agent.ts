@@ -19,7 +19,11 @@ import {
   STOP_HOOK_REVISION_PROMPT_PREFIX,
   type SerializedHookMessage
 } from "./stop-hook-context"
-import { persistedMessageFromStreamPayload, streamPayloadContentMode } from "./stream-transcript-payload"
+import {
+  getSerializedMessageRole,
+  persistedMessageFromStreamPayload,
+  streamPayloadContentMode
+} from "./stream-transcript-payload"
 import {
   selectStreamTranscriptValueSnapshots,
   rememberSelectedStreamTranscriptValueSnapshots,
@@ -34,7 +38,9 @@ import { withThreadRunMutationLock } from "./thread-run-mutation-lock"
 import {
   createSerializedValuesMessageAccumulator,
   createStreamDataSerializer,
-  sanitizeStreamDataForRenderer
+  sanitizeCoordinatorWorkerStreamDataForRenderer,
+  sanitizeStreamDataForRenderer,
+  type SerializedValuesMessageSnapshot
 } from "./stream-data-serialization"
 import {
   classifyPhysicalStreamRunFailure,
@@ -71,7 +77,14 @@ import {
   isProjectModeAgentTeamEnabled
 } from "../../shared/project-mode-agent-team"
 import { HumanMessage, SystemMessage, type BaseMessage } from "@langchain/core/messages"
-import { getDurableRuntimeTail } from "./thread-runtime-tail"
+import {
+  getDurableRuntimeTail,
+  getForkableReplyId,
+  materializeSavedForkTails,
+  preserveForkDurableTail,
+  captureInterruptedForkReply,
+  type DurableRuntimeTail
+} from "./thread-runtime-tail"
 import { Command, isCommand } from "@langchain/langgraph"
 import {
   getCapturedSystemPromptPreview,
@@ -93,6 +106,7 @@ import {
   type ModelRetryHooks,
   type FetchErrorInfo
 } from "../agent/runtime"
+import { mergeCurrentRunGoalProviderOccurrences } from "../agent/current-run-message-queue"
 import type { CheckpointMetadata } from "@langchain/langgraph-checkpoint"
 import {
   addThreadGoalEvent,
@@ -106,8 +120,11 @@ import {
   captureThreadMessageProviderOccurrenceBoundary,
   getThreadMessagesByIds,
   getThread,
+  getThreadTranscriptBoundaryOrdinal,
+  reserveThreadGraphTranscriptBoundary,
   updateThread,
-  upsertThreadMessages
+  upsertThreadMessages,
+  withThreadMessageIdentitySnapshot
 } from "../db"
 import {
   assertNoTranscriptAgentModeTransition,
@@ -171,6 +188,7 @@ import {
 import {
   checkpointHasInterrupt,
   deriveCheckpointTranscriptIndex,
+  getCheckpointUserMessageIndex,
   isWorkflowPlumbingTranscriptContent,
   neutralizeWorkflowPlumbingUserText
 } from "../../shared/checkpoint-transcript"
@@ -206,7 +224,14 @@ import {
 } from "./stream-message-side-effect-buffer"
 import {
   FORK_BOUNDARY_MARKER_VERSION,
-  FORK_BOUNDARY_THREAD_METADATA_KEY
+  FORK_BOUNDARY_THREAD_METADATA_KEY,
+  FORK_DURABLE_TAIL_KEY,
+  getCheckpointId,
+  getForkBoundaryMarker,
+  isSyntheticContinuationTurnId,
+  readForkBoundaryMarker,
+  readForkDurableTail,
+  readInterruptedTurnUserId
 } from "../../shared/checkpoint-forkability"
 import { normalizeTraceTokenUsage } from "../agent/trace/token-usage"
 import { getSoloTaskOwnerIdFromStreamPayload, SoloTaskTraceManager } from "../agent/trace/solo-task"
@@ -369,7 +394,11 @@ import {
   isGoalBoundaryStillCurrent,
   validateGoalText
 } from "../agent/goals/goal-manager"
-import { buildGoalContinuationPromptFromHookContexts } from "../agent/goals/internal-prompt"
+import {
+  buildGoalContinuationPromptFromHookContexts,
+  GOAL_CONTINUATION_BOUNDARY_METADATA_KEY,
+  GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY
+} from "../agent/goals/internal-prompt"
 import { goalManager, goalStore } from "../agent/goals/runtime"
 import {
   extractGoalTransportAttachmentNames,
@@ -450,7 +479,8 @@ import {
   getLocalThreadRunLease,
   releaseLocalThreadRunLease,
   type LocalThreadRunLease,
-  type LocalThreadRunLeaseClaim
+  type LocalThreadRunLeaseClaim,
+  type LocalThreadRunOwner
 } from "../agent/thread-run-lease"
 import { isKnowledgeDepositionBlocked } from "../services/knowledge-base-manager"
 import { emitAppAttention } from "../app-attention-events"
@@ -678,6 +708,7 @@ async function queueAutoModeAgentTurnEnd(input: {
 async function markLatestForkBoundary(input: {
   threadId: string
   turnId?: string
+  graphInputUserId?: string
   source: "agent_run_complete" | "agent_run_interrupted"
   runToken: string
   controller: AbortController
@@ -695,10 +726,7 @@ async function markLatestForkBoundary(input: {
       })
       if (!ownsPhysicalLease()) return
       if (!tuple) return
-      // 用户中断场景（agent_run_interrupted）下，checkpoint 可能包含 __interrupt__，
-      // 此时应跳过 checkpointHasInterrupt 检查，允许创建 fork boundary，
-      // 以便用户可以在中断点之后进行 fork 操作。
-      if (checkpointHasInterrupt(tuple.checkpoint) && source !== "agent_run_interrupted") return
+      if (checkpointHasInterrupt(tuple.checkpoint) || tuple.metadata?.source === "input") return
       if ((tuple.pendingWrites?.length ?? 0) > 0 && source !== "agent_run_interrupted") return
 
       const checkpointId =
@@ -706,22 +734,46 @@ async function markLatestForkBoundary(input: {
           ? tuple.config.configurable.checkpoint_id
           : tuple.checkpoint.id
       if (!checkpointId) return
+      let turnUserMessageId: string | undefined
+      if (source === "agent_run_interrupted") {
+        if (getForkBoundaryMarker(tuple) || readForkDurableTail(tuple.metadata)) return
+        const protectedIds = await checkpointer.getLegacyForkCheckpointIds(threadId)
+        if (!ownsPhysicalLease() || protectedIds?.has(checkpointId)) return
+        turnUserMessageId = readInterruptedTurnUserId(
+          tuple.checkpoint,
+          { kind: "turn_complete", outcome, turnId },
+          input.graphInputUserId
+        )
+        if (turnId && !turnUserMessageId && !isSyntheticContinuationTurnId(turnId)) return
+      }
 
       const transcript = deriveCheckpointTranscriptIndex(tuple.checkpoint)
-      const lastVisibleMessageId = transcript.visibleMessageIds.at(-1)
+      const rawReplyId = getForkableReplyId(tuple, source === "agent_run_interrupted", transcript)
+      const durableReply = !rawReplyId && turnUserMessageId
+        ? captureInterruptedForkReply(threadId, tuple, turnUserMessageId, transcript)
+        : undefined
+      const lastVisibleMessageId = rawReplyId ?? durableReply?.replyId
+      if (!lastVisibleMessageId) return
       if (!ownsPhysicalLease()) return
       await checkpointer.updateCheckpointMetadata(tuple.config, (metadata) => {
+        if (!ownsPhysicalLease()) return metadata
+        if (source === "agent_run_interrupted" &&
+            (readForkBoundaryMarker(metadata) || readForkDurableTail(metadata))) {
+          return metadata
+        }
         const base =
           metadata && typeof metadata === "object" && !Array.isArray(metadata)
             ? (metadata as Record<string, unknown>)
             : {}
         return {
           ...base,
+          ...(durableReply && { [FORK_DURABLE_TAIL_KEY]: durableReply.durableTail }),
           cmb_fork_boundary: {
             version: 1,
             kind: "turn_complete",
             boundaryId: `${outcome === "interrupted" ? "turn_interrupted" : "turn_complete"}:${threadId}:${checkpointId}`,
             turnId,
+            ...(turnUserMessageId && { turnUserMessageId }),
             checkpointId,
             checkpointNs: "",
             completedAt: new Date().toISOString(),
@@ -760,15 +812,65 @@ async function markLatestForkBoundaryBestEffort(
   })
 }
 
-function ensureThreadForkBoundaryMarkerEra(
+async function ensureThreadForkBoundaryMarkerEra(
   threadId: string,
-  metadata: Record<string, unknown>
-): void {
-  if (metadata[FORK_BOUNDARY_THREAD_METADATA_KEY] === FORK_BOUNDARY_MARKER_VERSION) return
+  metadata: Record<string, unknown>,
+  ownsRun: () => boolean,
+  options: { continuationTurnId?: string; durableTail?: DurableRuntimeTail } = {}
+): Promise<string | undefined> {
+  const { continuationTurnId, durableTail } = options
+  const inMarkerEra = metadata[FORK_BOUNDARY_THREAD_METADATA_KEY] === FORK_BOUNDARY_MARKER_VERSION
+  const recoverContinuationInput = continuationTurnId && isSyntheticContinuationTurnId(continuationTurnId)
+  if (inMarkerEra && !recoverContinuationInput && !durableTail?.persistedMessages.length) return
+  const graphInputUserId = await withCheckpointer(threadId, async (checkpointer) => {
+    if (!ownsRun()) return
+    const capturedLegacyIds = await checkpointer.getLegacyForkCheckpointIds(threadId)
+    const shouldCapture = !inMarkerEra && capturedLegacyIds === undefined
+    if (durableTail) {
+      await preserveForkDurableTail(checkpointer, durableTail, {
+        activeRun: false,
+        pendingApproval: hasPendingApprovalForThread(threadId),
+        legacyFallbackMode: shouldCapture ? "all" : "none",
+        legacyCheckpointIds: capturedLegacyIds
+      }, ownsRun)
+    }
+    let beforeTurnUserId: string | null | undefined
+    let userId: string | undefined
+    if (continuationTurnId) {
+      const config = { configurable: { thread_id: threadId, checkpoint_ns: "" } }
+      const latest = await checkpointer.getTuple(config)
+      if (latest) {
+        const heldTurn =
+          checkpointHasInterrupt(latest.checkpoint) ||
+          (latest.pendingWrites?.length ?? 0) > 0 ||
+          hasPendingApprovalForThread(threadId)
+        if (getCheckpointUserMessageIndex(latest.checkpoint, continuationTurnId) >= 0) {
+          userId = continuationTurnId
+        } else if (recoverContinuationInput) {
+          const savedOrigin = await checkpointer.getForkTurnUserId(threadId, getCheckpointId(latest))
+          if (savedOrigin && getCheckpointUserMessageIndex(latest.checkpoint, savedOrigin) >= 0) {
+            userId = savedOrigin
+          }
+        }
+        if (shouldCapture && (heldTurn || (userId && !recoverContinuationInput))) {
+          beforeTurnUserId = userId ?? null
+        }
+      }
+    }
+    if (shouldCapture && ownsRun()) {
+      await checkpointer.captureLegacyForkCheckpointIds(
+        threadId, beforeTurnUserId, ownsRun,
+        (tuples) => materializeSavedForkTails(threadId, tuples)
+      )
+    }
+    return userId
+  })
+  if (inMarkerEra || !ownsRun()) return graphInputUserId
   metadata[FORK_BOUNDARY_THREAD_METADATA_KEY] = FORK_BOUNDARY_MARKER_VERSION
   patchLatestThreadMetadata(threadId, {
     set: { [FORK_BOUNDARY_THREAD_METADATA_KEY]: FORK_BOUNDARY_MARKER_VERSION }
   })
+  return graphInputUserId
 }
 
 const COORDINATOR_OWNED_THREAD_METADATA_KEYS = [
@@ -1223,16 +1325,16 @@ export async function waitForActiveAgentRunToSettle(
 export async function cancelAndWaitForAgentThreadRun(
   threadId: string,
   window?: BrowserWindow | null
-): Promise<"settled" | "timed_out"> {
+): Promise<"settled" | "timed_out" | "shell_timed_out"> {
+  const shellSettlement = LocalSandbox.cancelBackgroundTasksWithin(
+    threadId,
+    ACTIVE_RUN_REPLACEMENT_MAX_WAIT_MS,
+    { includeChildRuns: true }
+  )
   const controller = activeRuns.get(threadId)
-  if (!controller) return "settled"
+  if (!controller) return (await shellSettlement) ? "settled" : "shell_timed_out"
   const channel = streamChannelByRunController.get(controller)
 
-  try {
-    LocalSandbox.cancelBackgroundTasks(threadId)
-  } catch (error) {
-    console.warn("[Agent] Failed to cancel foreground background tasks during delete:", error)
-  }
   try {
     flushPendingStreamTranscriptMessagesForThread(threadId)
   } catch (error) {
@@ -1240,7 +1342,11 @@ export async function cancelAndWaitForAgentThreadRun(
   }
   controller.abort()
   if (window && channel) safeSendToWindow(window, channel, { type: "done" })
-  return waitForReplacedRunToSettle(threadId)
+  const [foreground, shellSettled] = await Promise.all([
+    waitForReplacedRunToSettle(threadId),
+    shellSettlement
+  ])
+  return shellSettled ? foreground : "shell_timed_out"
 }
 
 async function waitForReplacedRunToSettle(threadId: string): Promise<"settled" | "timed_out"> {
@@ -1351,7 +1457,8 @@ function persistGoalUserMessage(
   threadId: string,
   content: string,
   goalId = goalManager.get(threadId)?.goalId ?? null,
-  activeWindowId = goalManager.get(threadId)?.activeWindowId ?? null
+  activeWindowId = goalManager.get(threadId)?.activeWindowId ?? null,
+  transcriptMessageId?: string
 ): void {
   try {
     addThreadGoalEvent(
@@ -1359,7 +1466,8 @@ function persistGoalUserMessage(
       `${GOAL_USER_MESSAGE_EVENT_PREFIX}${content}`,
       goalId,
       Date.now(),
-      activeWindowId
+      activeWindowId,
+      transcriptMessageId
     )
   } catch (error) {
     console.warn("[Goal] failed to persist goal user message:", error)
@@ -1472,6 +1580,7 @@ function emitGoalNotice(
 
 function handleGoalNonStartingControlCommand(params: {
   threadId: string
+  runOwner: LocalThreadRunOwner
   command: ReturnType<typeof parseGoalSlashCommand>
   originalMessage?: string
   window: BrowserWindow | null | undefined
@@ -1481,6 +1590,7 @@ function handleGoalNonStartingControlCommand(params: {
 }): GoalControlResult {
   const {
     threadId,
+    runOwner,
     command,
     originalMessage,
     window,
@@ -1550,7 +1660,7 @@ function handleGoalNonStartingControlCommand(params: {
     }
 
     abortActiveRun(threadId)
-    LocalSandbox.cancelBackgroundTasks(threadId)
+    LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: runOwner })
     const goal = goalManager.pause(threadId, "user-paused")
     const pausedReason = displayGoalPausedReason(goal?.pausedReason) || "已手动暂停。"
     const notice = emitGoalNotice(
@@ -1576,7 +1686,7 @@ function handleGoalNonStartingControlCommand(params: {
     const terminatedCurrentRun = existingGoal.status === "active"
     if (existingGoal.status === "active") {
       abortActiveRun(threadId)
-      LocalSandbox.cancelBackgroundTasks(threadId)
+      LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: runOwner })
     }
     goalManager.clear(threadId)
     // Memory hygiene: drop any background-evidence batches parked for the
@@ -1613,6 +1723,14 @@ async function executeAgentGoalControl(
       // Possibly a managed transport's shim; see AgentRunDelivery.window.
       const window = delivery.window
       const activeController = activeRuns.get(threadId)
+      const controlledRunOwner =
+        context.allowForeignOwnerGoalControl && activeController
+          ? getLocalThreadRunLease(threadId)?.owner
+          : undefined
+      const runOwner =
+        controlledRunOwner ??
+        context.localRunLease?.owner ??
+        (context.source === "heartbeat" ? "scheduler" : context.source)
       const channel = activeController
         ? (streamChannelByRunController.get(activeController) ?? `agent:stream:${threadId}`)
         : `agent:stream:${threadId}`
@@ -1624,6 +1742,7 @@ async function executeAgentGoalControl(
       const goalCommand = parseGoalSlashCommand(message)
       const result = handleGoalNonStartingControlCommand({
         threadId,
+        runOwner,
         command: goalCommand,
         originalMessage: message,
         window,
@@ -1669,7 +1788,7 @@ function pauseActiveGoalAfterBoundary(
   }
   const paused = goalManager.pause(threadId, reason)
   if (paused?.status !== "paused") return
-  LocalSandbox.cancelBackgroundTasks(threadId)
+  LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: "desktop" })
   emitGoalNotice(
     window,
     channel,
@@ -1944,6 +2063,9 @@ interface PhysicalAgentRunSettlementOptions {
   cleanupNotificationSkills: () => void
   turnStateShouldDispose: boolean
   disposeTurnState: () => void
+  interruptedForkBoundary?: Pick<
+    Parameters<typeof markLatestForkBoundary>[0], "turnId" | "graphInputUserId"
+  >
   criticalBeforeReleasePhases?: readonly RunSettlementPhase[]
   beforeNotificationPhases?: readonly RunSettlementPhase[]
   runOwner?: LocalThreadRunLease["owner"]
@@ -1962,6 +2084,7 @@ async function settlePhysicalAgentRun({
   cleanupNotificationSkills,
   turnStateShouldDispose,
   disposeTurnState,
+  interruptedForkBoundary,
   criticalBeforeReleasePhases = [],
   beforeNotificationPhases = [],
   runOwner = "desktop",
@@ -1998,10 +2121,23 @@ async function settlePhysicalAgentRun({
           transcriptFlushSucceeded = true
         }
       },
+      ...(interruptedForkBoundary ? [{
+        name: "persist-interrupted-fork-boundary",
+        run: () => markLatestForkBoundaryBestEffort({
+          ...interruptedForkBoundary,
+          threadId,
+          source: "agent_run_interrupted",
+          runToken,
+          controller
+        })
+      }] : []),
       {
         name: "discard-tool-call-accumulators",
         shouldRun: () => transcriptFlushSucceeded,
-        run: () => discardStreamTranscriptToolCallAccumulators(threadId, runToken)
+        run: () => {
+          discardStreamTranscriptToolCallAccumulators(threadId, runToken)
+          streamTranscriptBoundaryIds.delete(pendingStreamTranscriptKey(threadId, runToken))
+        }
       },
       {
         name: "invalidate-message-preparer",
@@ -2812,7 +2948,7 @@ function sendCoordinatorWorkerStream(
     const serialized = focusedWorker.serialize(stream.mode, stream.data)
     valuesSnapshotKind = serialized.valuesSnapshotKind
     if (isContextCompactionStreamPayload(stream.mode, serialized.data)) return
-    data = sanitizeStreamDataForRenderer(
+    data = sanitizeCoordinatorWorkerStreamDataForRenderer(
       stream.mode,
       serialized.data,
       serialized.valuesMessageIndexOffset
@@ -3759,9 +3895,30 @@ interface SerializedValuesSideEffectMessage extends SerializedHookMessage {
   }
 }
 
-function extractSerializedValuesMessages(payload: unknown): unknown[] {
-  if (!payload || typeof payload !== "object") return []
-  const messages = (payload as { messages?: unknown }).messages
+const committedGoalMessageReceipts = new WeakMap<object, Record<string, unknown>>()
+
+function projectCommittedGoalMessages(messages: readonly unknown[]): readonly unknown[] {
+  let projected: unknown[] | undefined
+  messages.forEach((source, index) => {
+    if (!source || typeof source !== "object") return
+    const receipt = committedGoalMessageReceipts.get(source)
+    if (!receipt) return
+    projected ??= messages.slice()
+    projected[index] = receipt
+  })
+  return projected ?? messages
+}
+
+function replayCommittedStreamValues(
+  snapshot: SerializedValuesMessageSnapshot | undefined
+): unknown[] {
+  if (!snapshot) return []
+  const payload = sanitizeStreamDataForRenderer(
+    "values",
+    { messages: projectCommittedGoalMessages(snapshot.messages) },
+    snapshot.valuesMessageIndexOffset
+  )
+  const messages = asPlainRecord(payload)?.messages
   return Array.isArray(messages) ? messages : []
 }
 
@@ -3978,6 +4135,9 @@ const streamTranscriptToolCallAccumulators = new Map<
 
 const streamTranscriptAssistantIdentities = new Map<string, StreamTranscriptAssistantIdentity>()
 const streamTranscriptAttempts = new Map<string, ThreadMessageStreamAttempt>()
+const streamTranscriptBoundaryIds = new Map<string, string>()
+
+class StreamTranscriptSnapshotRequiredError extends Error {}
 
 function pendingStreamTranscriptKey(threadId: string, runToken: string): string {
   return `${threadId}\u0000${runToken}`
@@ -4025,6 +4185,9 @@ function discardStreamTranscriptToolCallAccumulators(threadId: string, runToken:
 
 function discardStreamTranscriptToolCallAccumulatorsForThread(threadId: string): void {
   const prefix = `${threadId}\u0000`
+  for (const key of streamTranscriptBoundaryIds.keys()) {
+    if (key.startsWith(prefix)) streamTranscriptBoundaryIds.delete(key)
+  }
   for (const key of streamTranscriptAttempts.keys()) {
     if (key.startsWith(prefix)) streamTranscriptAttempts.delete(key)
   }
@@ -4033,10 +4196,25 @@ function discardStreamTranscriptToolCallAccumulatorsForThread(threadId: string):
   }
 }
 
+function loadPreviousRunProviderOccurrences(
+  threadId: string,
+  runToken: string,
+  boundaryId: string,
+  sourceIds: readonly string[]
+) {
+  return mergeCurrentRunGoalProviderOccurrences(
+    threadId,
+    runToken,
+    boundaryId,
+    sourceIds,
+    getThreadMessageProviderOccurrencesBeforeUser(threadId, boundaryId, sourceIds)
+  )
+}
+
 function flushPendingStreamTranscriptMessages(
   threadId: string,
   runToken: string,
-  options: { throwOnError?: boolean; checkpoint?: boolean } = {}
+  options: { throwOnError?: boolean; allowWaitingForSnapshot?: boolean } = {}
 ): void {
   const pendingKey = pendingStreamTranscriptKey(threadId, runToken)
   const pending = pendingStreamTranscriptMessages.get(pendingKey)
@@ -4057,27 +4235,37 @@ function flushPendingStreamTranscriptMessages(
             getMessageProviderOccurrence(message) === pending.requiredSnapshotProviderOccurrence)
       )
       if (!hasRequiredSnapshot) {
-        throw new Error("Stream suffix is waiting for an authoritative assistant snapshot")
+        throw new StreamTranscriptSnapshotRequiredError(
+          "Stream suffix is waiting for an authoritative assistant snapshot"
+        )
       }
     }
-    const resolved = resolveStreamTranscriptFlush({
-      queuedMessages: pending.messages,
-      currentAssistantIdentity: streamTranscriptAssistantIdentities.get(pendingKey),
-      loadBaselineMessages: () =>
-        getThreadMessageIdentityContext(
-          threadId,
-          pending.messages.map((message) => ({
-            messageId: message.id,
-            providerSourceId: getMessageProviderSourceId(message),
-            providerOccurrence: getMessageProviderOccurrence(message),
-            role: message.role
-          }))
-        )
-    })
+    const boundaryId = streamTranscriptBoundaryIds.get(pendingKey)
+    const resolve = () =>
+      resolveStreamTranscriptFlush({
+        queuedMessages: pending.messages,
+        currentAssistantIdentity: streamTranscriptAssistantIdentities.get(pendingKey),
+        ...(boundaryId && {
+          boundaryOrdinal: getThreadTranscriptBoundaryOrdinal(threadId, boundaryId),
+          loadPreviousOccurrences: (sourceIds: readonly string[]) =>
+            loadPreviousRunProviderOccurrences(threadId, runToken, boundaryId, sourceIds)
+        }),
+        loadBaselineMessages: () =>
+          getThreadMessageIdentityContext(
+            threadId,
+            pending.messages.map((message) => ({
+              messageId: message.id,
+              providerSourceId: getMessageProviderSourceId(message),
+              providerOccurrence: getMessageProviderOccurrence(message),
+              role: message.role
+            }))
+          )
+      })
+    const resolved = boundaryId ? withThreadMessageIdentitySnapshot(resolve) : resolve()
     const { messages, preserveExistingOrder } = resolved
     if (messages.length === 0) return
-    let streamAttempt = options.checkpoint ? undefined : streamTranscriptAttempts.get(pendingKey)
-    if (!options.checkpoint && !streamAttempt) {
+    let streamAttempt = streamTranscriptAttempts.get(pendingKey)
+    if (!streamAttempt) {
       streamAttempt = new ThreadMessageStreamAttempt(threadId)
       streamTranscriptAttempts.set(pendingKey, streamAttempt)
     }
@@ -4092,7 +4280,9 @@ function flushPendingStreamTranscriptMessages(
           providerOccurrence: getMessageProviderOccurrence(messages[0]) ?? 1
         }
         streamTranscriptAssistantIdentities.delete(pendingKey)
-        throw new Error("Stream text delta no longer matches its durable assistant row")
+        throw new StreamTranscriptSnapshotRequiredError(
+          "Stream text delta no longer matches its durable assistant row"
+        )
       }
       persistedCount = 1
     } else {
@@ -4124,6 +4314,9 @@ function flushPendingStreamTranscriptMessages(
       requiredSnapshotProviderOccurrence:
         rejectedDeltaIdentity?.providerOccurrence ?? pending.requiredSnapshotProviderOccurrence
     })
+    if (options.allowWaitingForSnapshot && error instanceof StreamTranscriptSnapshotRequiredError) {
+      return
+    }
     if (options.throwOnError) throw error
     console.warn("[Agent] Failed to persist streamed transcript messages:", error)
   }
@@ -4165,6 +4358,9 @@ function flushPendingStreamTranscriptMessagesForThread(
   for (const runToken of owners) {
     if (!remainingOwners.has(runToken)) {
       discardStreamTranscriptToolCallAccumulators(threadId, runToken)
+      if (!isCurrentRunMessageQueueOwner(threadId, runToken)) {
+        streamTranscriptBoundaryIds.delete(pendingStreamTranscriptKey(threadId, runToken))
+      }
     }
   }
   if (firstError) {
@@ -4174,9 +4370,57 @@ function flushPendingStreamTranscriptMessagesForThread(
   return remainingOwners.size === 0
 }
 
+/** Give one internal Goal input an ordinal before its first provider chunk. */
+export function createPhysicalRunHiddenUserMessage(
+  threadId: string,
+  runToken: string,
+  signal: AbortSignal,
+  goalBoundary: Pick<ThreadGoal, "goalId" | "activeWindowId"> | null | undefined,
+  fields: { content: string; id?: string; additional_kwargs?: HumanMessage["additional_kwargs"] }
+): HumanMessage {
+  throwIfPhysicalStreamRunIsInactive(threadId, runToken, signal)
+  const activeGoal = goalBoundary ? goalManager.getActive(threadId) : null
+  if (
+    !isGoalBoundaryStillCurrent(
+      activeGoal?.goalId,
+      goalBoundary?.goalId,
+      activeGoal?.activeWindowId,
+      goalBoundary?.activeWindowId
+    )
+  ) {
+    return new HumanMessage(fields)
+  }
+
+  flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
+  const graphUserId = uuid()
+  reserveThreadGraphTranscriptBoundary(threadId, graphUserId)
+  // The previous graph stream has finished. Only the new input belongs to
+  // the next attempt, so retire the prior journal and cached identities.
+  discardStreamTranscriptToolCallAccumulators(threadId, runToken)
+  streamTranscriptBoundaryIds.set(pendingStreamTranscriptKey(threadId, runToken), graphUserId)
+
+  const additionalKwargs = { ...fields.additional_kwargs }
+  delete additionalKwargs[COORDINATOR_VISIBLE_USER_MESSAGE_KEY]
+  return new HumanMessage({
+    content: fields.content,
+    id: graphUserId,
+    additional_kwargs: {
+      ...additionalKwargs,
+      [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true
+    }
+  })
+}
+
 setCurrentRunTranscriptFlushBeforeInjection((threadId, runToken) => {
   flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
-  streamTranscriptAssistantIdentities.delete(pendingStreamTranscriptKey(threadId, runToken))
+  const key = pendingStreamTranscriptKey(threadId, runToken)
+  streamTranscriptAssistantIdentities.delete(key)
+  return (userMessageId) => {
+    discardStreamTranscriptToolCallAccumulators(threadId, runToken)
+    if (userMessageId && streamTranscriptBoundaryIds.has(key)) {
+      streamTranscriptBoundaryIds.set(key, userMessageId)
+    }
+  }
 })
 
 function discardPendingStreamTranscriptMessages(threadId: string, runToken: string): string[] {
@@ -4325,7 +4569,55 @@ async function awaitPhysicalStreamRunSetup<T>({
   }
 }
 
-function persistAndForwardPhysicalRunStreamChunk(
+function adoptGraphTranscriptBoundaryFromValues(
+  threadId: string,
+  runToken: string,
+  payload: unknown,
+  completeValuesMessages?: readonly unknown[]
+): void {
+  const runKey = pendingStreamTranscriptKey(threadId, runToken)
+  const currentBoundaryId = streamTranscriptBoundaryIds.get(runKey)
+  const frameMessages = asPlainRecord(payload)?.messages
+  const changedMessages = Array.isArray(frameMessages) ? frameMessages : []
+  const messages = currentBoundaryId ? changedMessages : completeValuesMessages ?? changedMessages
+  const input = messages.findLast((message) => getSerializedMessageRole(message) === "user")
+  const inputRecord = asPlainRecord(input)
+  const kwargs = asPlainRecord(inputRecord?.kwargs) ?? inputRecord
+  const boundaryId = kwargs?.id
+  const additionalKwargs = asPlainRecord(kwargs?.additional_kwargs)
+  if (
+    typeof boundaryId !== "string" ||
+    boundaryId === currentBoundaryId ||
+    additionalKwargs?.[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] !== true
+  ) {
+    return
+  }
+
+  const parentId = additionalKwargs[GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]
+  const gateInput = typeof parentId === "string" && Boolean(parentId)
+  if (currentBoundaryId && !gateInput) return
+  const ordinal = getThreadTranscriptBoundaryOrdinal(threadId, boundaryId)
+  if (ordinal === undefined) {
+    if (
+      !gateInput ||
+      !goalManager.getActive(threadId) ||
+      getThreadTranscriptBoundaryOrdinal(threadId, parentId) === undefined
+    ) {
+      return
+    }
+    // Repairs are injected inside the graph. Consume the preceding model's
+    // frames on their original boundary before assigning a durable position.
+    flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
+    reserveThreadGraphTranscriptBoundary(threadId, boundaryId)
+  } else if (currentBoundaryId) {
+    const currentOrdinal = getThreadTranscriptBoundaryOrdinal(threadId, currentBoundaryId)
+    if (currentOrdinal !== undefined && ordinal < currentOrdinal) return
+  }
+  streamTranscriptBoundaryIds.set(runKey, boundaryId)
+  streamTranscriptAssistantIdentities.delete(runKey)
+}
+
+export function persistAndForwardPhysicalRunStreamChunk(
   window: BrowserWindow,
   channel: string,
   threadId: string,
@@ -4336,6 +4628,7 @@ function persistAndForwardPhysicalRunStreamChunk(
   valuesMessageIndexOffset = 0,
   valuesSnapshotKind: "full" | "append" | "tail" = "full",
   completeValuesMessages?: readonly unknown[],
+  projectGoalValues = false,
   loadPreviousTurnOccurrences?: (
     userMessageId: string,
     sourceIds: readonly string[]
@@ -4349,40 +4642,62 @@ function persistAndForwardPhysicalRunStreamChunk(
   // every chunk until a values/terminal event lets a long answer accumulate
   // thousands of deltas and makes final coalescing quadratic in output length.
   const messageId = persistStreamTranscriptChunk(threadId, runToken, mode, payload)
+  let outgoing = payload
   if (mode === "values") {
+    const runKey = pendingStreamTranscriptKey(threadId, runToken)
+    adoptGraphTranscriptBoundaryFromValues(threadId, runToken, payload, completeValuesMessages)
+    flushPendingStreamTranscriptMessages(threadId, runToken, {
+      throwOnError: true,
+      allowWaitingForSnapshot: true
+    })
     // Graph values are the ordered authority for final fields. Persist them at
     // the active-run fence so delayed renderer echoes cannot restore old text,
     // and values-only finals do not depend on an unmarked renderer writeback.
-    const snapshots = selectStreamTranscriptValueSnapshots(payload, valuesSnapshotKind, {
-      completeMessages: completeValuesMessages,
-      loadBaselineMessages: (selectors) =>
-        getThreadMessageIdentityContext(
-          threadId,
-          selectors.map((message) => ({
-            messageId: message.id,
-            providerSourceId: getMessageProviderSourceId(message),
-            providerOccurrence: getMessageProviderOccurrence(message),
-            role: message.role as Message["role"]
-          }))
-        ),
-      loadPreviousTurnOccurrences: loadPreviousTurnOccurrences ?? ((userMessageId, sourceIds) =>
-        getThreadMessageProviderOccurrencesBeforeUser(threadId, userMessageId, sourceIds))
-    })
+    const goalReceipts = projectGoalValues || streamTranscriptBoundaryIds.has(runKey)
+    const receipts: Array<[object, Record<string, unknown>]> = []
+    const snapshots = withThreadMessageIdentitySnapshot(() =>
+      selectStreamTranscriptValueSnapshots(payload, valuesSnapshotKind, {
+        completeMessages: completeValuesMessages,
+        onResolve: goalReceipts
+          ? (source, canonical) => {
+              receipts.push([source, canonical])
+            }
+          : undefined,
+        resolveBoundaryOrdinal: (userMessageId) =>
+          getThreadTranscriptBoundaryOrdinal(threadId, userMessageId),
+        loadBaselineMessages: (selectors) =>
+          getThreadMessageIdentityContext(
+            threadId,
+            selectors.map((message) => ({
+              messageId: message.id,
+              providerSourceId: getMessageProviderSourceId(message),
+              providerOccurrence: getMessageProviderOccurrence(message),
+              role: message.role as Message["role"]
+            }))
+          ),
+        loadPreviousTurnOccurrences: loadPreviousTurnOccurrences ?? ((userMessageId, sourceIds) =>
+          loadPreviousRunProviderOccurrences(threadId, runToken, userMessageId, sourceIds))
+      })
+    )
     rememberSelectedStreamTranscriptValueSnapshots(payload, snapshots)
     for (const snapshot of snapshots) {
       persistStreamTranscriptChunk(threadId, runToken, "messages", snapshot, { deferFlush: true })
     }
-    flushPendingStreamTranscriptMessages(threadId, runToken, {
-      throwOnError: true,
-      checkpoint: true
-    })
-    // Values are the committed graph boundary, not part of the next failed attempt.
-    streamTranscriptAttempts.delete(pendingStreamTranscriptKey(threadId, runToken))
+    flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
+    if (goalReceipts) {
+      for (const [source, receipt] of receipts) committedGoalMessageReceipts.set(source, receipt)
+      const frame = asPlainRecord(payload)
+      if (Array.isArray(frame?.messages)) {
+        outgoing = { ...frame, messages: projectCommittedGoalMessages(frame.messages) }
+      }
+    }
+    // Commit both provisional writes and authoritative updates at this boundary.
+    discardStreamTranscriptToolCallAccumulators(threadId, runToken)
   }
   safeSendToWindow(window, channel, {
     type: "stream",
     mode,
-    data: sanitizeStreamDataForRenderer(mode, payload, valuesMessageIndexOffset),
+    data: sanitizeStreamDataForRenderer(mode, outgoing, valuesMessageIndexOffset),
     ...(mode === "values" ? { valuesSnapshotKind } : {})
   })
   return messageId
@@ -4831,14 +5146,24 @@ function clearStreamDisconnectRetry(window: BrowserWindow, channel: string): voi
   })
 }
 
-function resetFailedStreamAttempt(
+class StreamTranscriptRollbackError extends AggregateError {
+  constructor(rollbackError: unknown, streamError?: unknown) {
+    super(
+      streamError === undefined ? [rollbackError] : [streamError, rollbackError],
+      "Failed to roll back provisional stream transcript",
+      { cause: streamError ?? rollbackError }
+    )
+  }
+}
+
+export function resetFailedStreamAttempt(
   window: BrowserWindow,
   channel: string,
   threadId: string,
   runToken: string,
   stableMessages: unknown[],
   inFlightMessageIds: Set<string>,
-  options: { preservePendingTranscript?: boolean } = {}
+  options: { preservePendingTranscript?: boolean; streamError?: unknown } = {}
 ): void {
   if (options.preservePendingTranscript) {
     inFlightMessageIds.clear()
@@ -4850,9 +5175,15 @@ function resetFailedStreamAttempt(
     inFlightMessageIds.clear()
     return
   }
-  const rollback = streamTranscriptAttempts
-    .get(pendingStreamTranscriptKey(threadId, runToken))
-    ?.rollback()
+  const attempt = streamTranscriptAttempts.get(pendingStreamTranscriptKey(threadId, runToken))
+  let rollback: ReturnType<ThreadMessageStreamAttempt["rollback"]> | undefined
+  try {
+    rollback = attempt?.rollback()
+  } catch (rollbackError) {
+    // Terminal cleanup must not flush buffers from the failed attempt again.
+    discardPendingStreamTranscriptMessages(threadId, runToken)
+    throw new StreamTranscriptRollbackError(rollbackError, options.streamError)
+  }
   discardStreamTranscriptToolCallAccumulators(threadId, runToken)
   const discardedMessageIds = [
     ...new Set([
@@ -4892,6 +5223,7 @@ export async function retryStreamAfterDisconnect<T>(
   resume: () => Promise<AsyncIterable<T>>,
   isActive: () => boolean = () => true
 ): Promise<StreamDisconnectRetryResult<T>> {
+  if (error instanceof StreamTranscriptRollbackError) throw error
   let retryError = error
   let nextRetries = retries
 
@@ -5426,6 +5758,22 @@ async function autoProposeSKill(
 
 export function registerAgentHandlers(ipcMain: IpcMain): void {
   console.log("[Agent] Registering agent handlers...")
+  LocalSandbox.onBackgroundShellChange((change) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      safeSendToWindow(window, "agent:background-shell-changed", change)
+    }
+  })
+  ipcMain.handle(
+    "agent:has-background-shell",
+    (_event, threadId: unknown) =>
+      typeof threadId === "string" &&
+      LocalSandbox.hasActiveBackgroundTasks(threadId, { threadRunOwner: "desktop" })
+  )
+  ipcMain.handle(
+    "agent:cancel-background-shell",
+    (_event, threadId: unknown) =>
+      typeof threadId === "string" && LocalSandbox.cancelDetachedBackgroundTasks(threadId)
+  )
   // Let the runtime's checkpointer LRU avoid evicting threads with a live run.
   setCheckpointerBusyGuard(hasActiveAgentRun)
 
@@ -5954,7 +6302,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   registerActiveAgentRunCanceller((threadId) => {
     const controller = activeRuns.get(threadId)
     if (!controller) return false
-    LocalSandbox.cancelBackgroundTasks(threadId)
+    LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: "desktop" })
     const activeRunToken = turnStates.get(threadId)?.runToken
     if (activeRunToken) flushPendingStreamTranscriptMessages(threadId, activeRunToken)
     controller.abort()
@@ -5985,11 +6333,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         message,
         modelId,
         streamRequestId,
-        userMessageId,
+        userMessageId: requestedUserMessageId,
         agentMode: requestedAgentMode,
         managedExecution,
         coordinatorInternalNotification
       }: AgentInvokeParams = request
+      let userMessageId = requestedUserMessageId
+      const runOwner = runExecutionContext.localRunLease?.owner ?? "desktop"
       if (!managedExecution && managedBizRetryService.blocksThread(threadId)) {
         const error = "请在决策入口操作"
         delivery.send(
@@ -6144,10 +6494,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         !isBotInternalTurnInvoke
       ) {
         const goalCommand = parseGoalSlashCommand(message)
+        if (goalCommand.type === "set" || goalCommand.type === "resume") {
+          userMessageId = userMessageId?.trim() || uuid()
+        }
         if (goalCommand.type !== "none") {
           try {
             const controlResult = handleGoalNonStartingControlCommand({
               threadId,
+              runOwner,
               command: goalCommand,
               originalMessage: message,
               window,
@@ -6286,7 +6640,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
-              persistGoalUserMessage(threadId, "/goal resume", goal.goalId, goal.activeWindowId)
+              persistGoalUserMessage(
+                threadId,
+                "/goal resume",
+                goal.goalId,
+                goal.activeWindowId,
+                userMessageId
+              )
               emitGoalNotice(
                 window,
                 channel,
@@ -6363,7 +6723,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
               if (!ensureGoalEvaluatorConfigured()) return
 
-              LocalSandbox.cancelBackgroundTasks(threadId)
+              LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: runOwner })
               const goal = goalManager.set(threadId, validatedGoalText, {
                 context: goalCommand.context
               })
@@ -6371,7 +6731,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 threadId,
                 buildPersistedGoalSetUserMessage(goalCommand.displayText, transportPayload),
                 goal.goalId,
-                goal.activeWindowId
+                goal.activeWindowId,
+                userMessageId
               )
               emitGoalNotice(
                 window,
@@ -6398,7 +6759,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const currentGoal = goalManager.get(threadId)
           if (currentGoal?.status === "active") {
             goalManager.pause(threadId, "user message preempted active goal")
-            LocalSandbox.cancelBackgroundTasks(threadId)
+            LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: runOwner })
             emitGoalNotice(
               window,
               channel,
@@ -6755,9 +7116,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
         const desktopCompletionCursor = captureStreamAssistantCursor(threadId)
         let turnStateShouldDispose = false
+        let interruptedForkBoundary: PhysicalAgentRunSettlementOptions["interruptedForkBoundary"]
         const runGoal = messageControlsEnabled ? goalManager.getActive(threadId) : null
         runGoalId = runGoal?.goalId ?? null
         runGoalActiveWindowId = runGoal?.activeWindowId ?? null
+        if (runGoal && userMessageId) {
+          streamTranscriptBoundaryIds.set(pendingStreamTranscriptKey(threadId, runToken), userMessageId)
+        }
 
         // Abort the stream if the window is closed/destroyed
         const onWindowClosed = (): void => {
@@ -6886,14 +7251,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             type: "custom",
             data: {
               type: "goal_subturn_complete",
-              messages: latestSerializedValuesMessagesForGoalFlush
+              messages: projectCommittedGoalMessages(latestSerializedValuesMessagesForGoalFlush),
+              nativeTranscriptCommitted: true
             }
           })
           latestSerializedValuesMessagesForGoalFlush = []
         }
 
         const cancelGoalBackgroundTasks = (): void => {
-          LocalSandbox.cancelBackgroundTasks(threadId)
+          LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: runOwner })
         }
 
         const isAbortLikeError = (error: unknown): boolean =>
@@ -7281,7 +7647,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           })
           metadata = parsedThreadMetadata.metadata
           assertBotMockThreadEntry(metadata, runExecutionContext)
-          ensureThreadForkBoundaryMarkerEra(threadId, metadata)
           console.log("[Agent] Thread metadata:", metadata)
 
           const workspacePath = parsedThreadMetadata.workspacePath
@@ -7333,6 +7698,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             finishTraceInBackground(tracer, "error", "WORKSPACE_REQUIRED", "Agent")
             return
           }
+          await ensureThreadForkBoundaryMarkerEra(
+            threadId,
+            metadata,
+            () => isPhysicalStreamRunActive(threadId, runToken, abortController.signal),
+            { durableTail: durableRuntimeTail }
+          )
+          throwIfInvokeAborted()
 
           // Apply hook-supplied prompt rewrite / context injection. `message` remains the raw
           // user input for tracing and proposal capture; `effectiveMessage` is what the LLM sees.
@@ -8243,6 +8615,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             })
           }
 
+          const augmentedUserFields = {
+            id: userMessageId,
+            content: effectiveMessage,
+            additional_kwargs: {
+              [COORDINATOR_AUGMENTED_USER_MESSAGE_KEY]: true,
+              [COORDINATOR_VISIBLE_USER_MESSAGE_KEY]: visibleTranscriptUserMessage
+            }
+          }
           const userHumanMessage = isCoordinatorNotificationTurn || isBotCheckpointResumeInvoke
             ? undefined
             : continueBotTaskCheckpointId || isBotCommandNotificationInvoke || isBotResultReportInvoke
@@ -8268,6 +8648,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   // Reuse the existing internal-receipt projection for live UI, hydration and search.
                   additional_kwargs: { [COORDINATOR_INTERNAL_NOTIFICATION_MESSAGE_KEY]: true }
                 })
+            : isWorkflowNotificationTurn
+              ? createPhysicalRunHiddenUserMessage(threadId, runToken, abortController.signal, runGoal, augmentedUserFields)
             : effectiveMessage === message
               ? new HumanMessage({
                   id: userMessageId,
@@ -8282,6 +8664,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   additional_kwargs: {
                     [COORDINATOR_AUGMENTED_USER_MESSAGE_KEY]: true,
                     [COORDINATOR_VISIBLE_USER_MESSAGE_KEY]: visibleTranscriptUserMessage,
+                    ...(runGoalId !== null && { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true }),
                     ...(botPreparedUserRequest !== undefined
                       ? { [BOT_PREPARED_USER_REQUEST_KEY]: botPreparedUserRequest } : {})
                   }
@@ -8290,12 +8673,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const notificationOccurrenceBoundary = isInternalNotificationTurn
             ? captureThreadMessageProviderOccurrenceBoundary(threadId)
             : undefined
-          const coordinatorNotificationMessageId = `coordinator-notification:${runToken}`
-          const humanMessages: BaseMessage[] = [
-            ...durableRuntimeTail.messages,
-            coordinatorNotificationHumanMessage
-              ? new HumanMessage({
-                  id: coordinatorNotificationMessageId,
+          const coordinatorNotificationInput = coordinatorNotificationHumanMessage
+              ? createPhysicalRunHiddenUserMessage(threadId, runToken, abortController.signal, isCoordinatorNotificationTurn ? runGoal : null, {
+                  id: `coordinator-notification:${runToken}`,
                   content: coordinatorNotificationHumanMessage,
                   additional_kwargs: {
                     [COORDINATOR_INTERNAL_NOTIFICATION_MESSAGE_KEY]: true,
@@ -8304,7 +8684,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                     )
                   }
                 })
-              : undefined,
+              : undefined
+          const humanMessages: BaseMessage[] = [
+            ...durableRuntimeTail.messages,
+            coordinatorNotificationInput,
             appendBotTurnContext(userHumanMessage, botTurnContext && botPreparedSystemPrompt
               ? { ...botTurnContext, text: `${botTurnContext.text}\n\n${botPreparedSystemPrompt}` }
               : botTurnContext)
@@ -8434,10 +8817,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
               onCoordinatorNotificationAction,
-              ...(coordinatorNotificationHumanMessage
+              ...(coordinatorNotificationInput?.id && coordinatorNotificationHumanMessage
                 ? {
                     coordinatorNotificationDelivery: {
-                      messageId: coordinatorNotificationMessageId,
+                      messageId: coordinatorNotificationInput.id,
                       content: coordinatorNotificationHumanMessage,
                       onPendingWrite: coordinatorNotificationWrites.track,
                       onCommitted: async () => {
@@ -8646,6 +9029,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               valuesMessageIndexOffset,
               valuesSnapshotKind,
               completeValuesMessages,
+              runGoalId !== null,
               notificationOccurrenceBoundary
                 ? (userId, sourceIds) =>
                     getThreadMessageProviderOccurrencesBeforeUser(threadId, userId, sourceIds) ??
@@ -9013,7 +9397,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           )
           let activeStream: AsyncIterable<unknown> = stream
           let streamDisconnectRetries = 0
-          let latestStableStreamMessages: unknown[] = []
+          const committedStreamValues = createSerializedValuesMessageAccumulator()
+          let latestStableStreamValues: SerializedValuesMessageSnapshot | undefined
           const inFlightStreamMessageIds = new Set<string>()
           const pendingMessageSideEffectPayloads = createStreamMessageSideEffectBuffer({
             getReasoningSeed: (messageId) => _reasoningByAiMessageId.get(messageId),
@@ -9025,10 +9410,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           ): Promise<void> => {
             const serializeForRun = createStreamDataSerializer({ projectMessageChunks: true })
             const valuesAccumulator = createSerializedValuesMessageAccumulator()
-            let latestValuesSnapshot = {
-              messages: [] as unknown[],
-              valuesMessageIndexOffset: 0
-            }
             const commitPendingMessageSideEffects = async (): Promise<void> => {
               for (const payload of pendingMessageSideEffectPayloads.drain()) {
                 await processChunkSideEffects("messages", payload)
@@ -9047,23 +9428,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 if (isCoordinatorWorkerStreamChunk(mode, data, threadId)) {
                   continue
                 }
-                const {
-                  data: serialized,
-                  valuesMessageIndexOffset,
-                  valuesSnapshotKind
-                } = serializeForRun(mode, data)
+                const frame = serializeForRun(mode, data)
+                const { data: serialized, valuesMessageIndexOffset, valuesSnapshotKind } = frame
                 if (isContextCompactionStreamPayload(mode, serialized)) continue
-                if (mode === "values") {
-                  latestValuesSnapshot = valuesAccumulator.update({
-                    data: serialized,
-                    valuesMessageIndexOffset,
-                    valuesSnapshotKind
-                  })
-                  latestSerializedValuesMessagesForGoalFlush = latestValuesSnapshot.messages
-                  flushPendingStreamTranscriptMessages(threadId, runToken)
-                  discardStreamTranscriptToolCallAccumulators(threadId, runToken)
-                  inFlightStreamMessageIds.clear()
-                }
+                const valuesSnapshot =
+                  mode === "values" ? valuesAccumulator.update(frame) : undefined
                 // UI forwarding is the primary path. Trace / metrics / skill-evolution
                 // processing below are side effects and must never block streaming.
                 const messageId = forwardStreamChunk(
@@ -9071,8 +9440,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   serialized,
                   valuesMessageIndexOffset,
                   valuesSnapshotKind,
-                  mode === "values" ? latestValuesSnapshot.messages : undefined
+                  valuesSnapshot?.messages
                 )
+                if (valuesSnapshot) {
+                  latestStableStreamValues = committedStreamValues.update(frame)
+                  latestSerializedValuesMessagesForGoalFlush = latestStableStreamValues.messages
+                  inFlightStreamMessageIds.clear()
+                }
                 if (messageId) inFlightStreamMessageIds.add(messageId)
                 if (mode === "messages") {
                   pendingMessageSideEffectPayloads.push(serialized)
@@ -9084,26 +9458,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
               await commitPendingMessageSideEffects()
               throwIfInvokeAborted()
-              flushPendingStreamTranscriptMessages(threadId, runToken)
+              flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
               discardStreamTranscriptToolCallAccumulators(threadId, runToken)
               inFlightStreamMessageIds.clear()
             } catch (error) {
               pendingMessageSideEffectPayloads.clear()
-              latestStableStreamMessages = extractSerializedValuesMessages(
-                sanitizeStreamDataForRenderer(
-                  "values",
-                  { messages: latestValuesSnapshot.messages },
-                  latestValuesSnapshot.valuesMessageIndexOffset
-                )
-              )
               resetFailedStreamAttempt(
                 window,
                 channel,
                 threadId,
                 runToken,
-                latestStableStreamMessages,
+                replayCommittedStreamValues(latestStableStreamValues),
                 inFlightStreamMessageIds,
-                { preservePendingTranscript: abortController.signal.aborted }
+                {
+                  preservePendingTranscript: abortController.signal.aborted,
+                  streamError: error
+                }
               )
               latestSerializedValuesMessagesForGoalFlush = []
               throw error
@@ -9115,7 +9485,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             error: unknown,
             label: string
           ): Promise<boolean> => {
-            if (isHookHaltError(error)) throw error
+            if (isHookHaltError(error) || error instanceof StreamTranscriptRollbackError) throw error
             if (!isRetryableApiError(error) || remainingCandidates.length === 0) {
               return false
             }
@@ -9172,6 +9542,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             goalContinuationInput: string,
             expectedGoal: ThreadGoal
           ): Promise<boolean> => {
+            if (!getCurrentGoalForContinuation(expectedGoal)) return false
+            const goalInput = createPhysicalRunHiddenUserMessage(
+              threadId,
+              runToken,
+              abortController.signal,
+              expectedGoal,
+              { content: goalContinuationInput }
+            )
             let inputCheckpointed = false
             while (true) {
               try {
@@ -9180,7 +9558,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 const goalStream = await agent.stream(
                   inputCheckpointed
                     ? null
-                    : { messages: [new HumanMessage(goalContinuationInput)] },
+                    : { messages: [goalInput] },
                   streamConfig
                 )
                 throwIfInvokeAborted()
@@ -9286,8 +9664,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 runRevision: async (revisionPrompt) => {
                   if (!agent)
                     throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+                  const revisionInput = createPhysicalRunHiddenUserMessage(
+                    threadId,
+                    runToken,
+                    abortController.signal,
+                    runGoal,
+                    { content: revisionPrompt }
+                  )
                   const revisionStream = await agent.stream(
-                    { messages: [new HumanMessage(revisionPrompt)] },
+                    { messages: [revisionInput] },
                     streamConfig
                   )
                   await consumeStreamWithSideEffects(revisionStream)
@@ -10129,13 +10514,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
               })
             }
-            await markLatestForkBoundaryBestEffort({
-              threadId,
-              turnId: turnState.turnId,
-              source: "agent_run_interrupted",
-              runToken,
-              controller: abortController
-            })
+            interruptedForkBoundary = { turnId: turnState.turnId }
             turnStateShouldDispose = true
           }
         } catch (error) {
@@ -10344,13 +10723,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
               })
             }
-            await markLatestForkBoundaryBestEffort({
-              threadId,
-              turnId: turnState.turnId,
-              source: "agent_run_interrupted",
-              runToken,
-              controller: abortController
-            })
+            interruptedForkBoundary = { turnId: turnState.turnId }
             turnStateShouldDispose = true
           }
         } finally {
@@ -10374,6 +10747,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             threadId,
             runToken,
             controller: abortController,
+            interruptedForkBoundary,
             settledPromise: activeRunSettledPromise,
             resolveSettlement: resolveActiveRunSettled,
             runOwner: runExecutionContext.localRunLease?.owner ?? "desktop",
@@ -10609,7 +10983,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           console.warn("[Agent] Failed to parse thread metadata, using empty object")
       })
       let metadata = parsedThreadMetadata.metadata
-      ensureThreadForkBoundaryMarkerEra(threadId, metadata)
       const workspacePath = parsedThreadMetadata.workspacePath
       let harnessAgentContext: HarnessAgentContext
       try {
@@ -10944,8 +11317,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
         pruneTurnStateAtInterrupt(turnState, getAllEnabledHooksForInterrupt(workspacePath))
         ensureTurnId(turnState, threadId, "resume")
+        const forkBoundarySetup = await awaitResumeSetup(() =>
+          ensureThreadForkBoundaryMarkerEra(
+            threadId,
+            metadata,
+            () => isPhysicalStreamRunActive(threadId, runToken, abortController.signal),
+            { continuationTurnId: turnState.turnId }
+          )
+        )
+        if (forkBoundarySetup.status === "abandoned") return
         const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
         let turnStateShouldDispose = false
+        let interruptedForkBoundary: PhysicalAgentRunSettlementOptions["interruptedForkBoundary"]
         const boundaryGoal = goalManager.getActive(threadId)
         const boundaryGoalId = boundaryGoal?.goalId ?? null
         const boundaryGoalActiveWindowId = boundaryGoal?.activeWindowId ?? null
@@ -11463,17 +11846,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           )
           let activeResumeStream: AsyncIterable<unknown> = resumeStream
           let resumeStreamDisconnectRetries = 0
-          let resumeStableStreamMessages: unknown[] = []
+          const committedResumeValues = createSerializedValuesMessageAccumulator()
+          let latestStableResumeValues: SerializedValuesMessageSnapshot | undefined
           const resumeInFlightMessageIds = new Set<string>()
           const pendingResumeMessagePayloads = createStreamMessageSideEffectBuffer()
 
           const consumeResumeStream = async (source: AsyncIterable<unknown>): Promise<void> => {
             const serializeForRun = createStreamDataSerializer({ projectMessageChunks: true })
             const valuesAccumulator = createSerializedValuesMessageAccumulator()
-            let latestValuesSnapshot = {
-              messages: [] as unknown[],
-              valuesMessageIndexOffset: 0
-            }
             const commitPendingResumeMessageSideEffects = async (): Promise<void> => {
               for (const payload of pendingResumeMessagePayloads.drain()) {
                 await resumeSubagentLifecycle.processPayload(payload)
@@ -11488,22 +11868,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 if (isCoordinatorWorkerStreamChunk(mode, data, threadId)) {
                   continue
                 }
-                const {
-                  data: serialized,
-                  valuesMessageIndexOffset,
-                  valuesSnapshotKind
-                } = serializeForRun(mode, data)
+                const frame = serializeForRun(mode, data)
+                const { data: serialized, valuesMessageIndexOffset, valuesSnapshotKind } = frame
                 if (isContextCompactionStreamPayload(mode, serialized)) continue
-                if (mode === "values") {
-                  latestValuesSnapshot = valuesAccumulator.update({
-                    data: serialized,
-                    valuesMessageIndexOffset,
-                    valuesSnapshotKind
-                  })
-                  flushPendingStreamTranscriptMessages(threadId, runToken)
-                  discardStreamTranscriptToolCallAccumulators(threadId, runToken)
-                  resumeInFlightMessageIds.clear()
-                }
+                const valuesSnapshot =
+                  mode === "values" ? valuesAccumulator.update(frame) : undefined
                 const messageId = persistAndForwardPhysicalRunStreamChunk(
                   window,
                   channel,
@@ -11514,8 +11883,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   serialized,
                   valuesMessageIndexOffset,
                   valuesSnapshotKind,
-                  mode === "values" ? latestValuesSnapshot.messages : undefined
+                  valuesSnapshot?.messages
                 )
+                if (valuesSnapshot) {
+                  latestStableResumeValues = committedResumeValues.update(frame)
+                  resumeInFlightMessageIds.clear()
+                }
                 if (messageId) resumeInFlightMessageIds.add(messageId)
                 if (mode === "messages") {
                   pendingResumeMessagePayloads.push(serialized)
@@ -11531,26 +11904,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
               await commitPendingResumeMessageSideEffects()
               throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
-              flushPendingStreamTranscriptMessages(threadId, runToken)
+              flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
               discardStreamTranscriptToolCallAccumulators(threadId, runToken)
               resumeInFlightMessageIds.clear()
             } catch (error) {
               pendingResumeMessagePayloads.clear()
-              resumeStableStreamMessages = extractSerializedValuesMessages(
-                sanitizeStreamDataForRenderer(
-                  "values",
-                  { messages: latestValuesSnapshot.messages },
-                  latestValuesSnapshot.valuesMessageIndexOffset
-                )
-              )
               resetFailedStreamAttempt(
                 window,
                 channel,
                 threadId,
                 runToken,
-                resumeStableStreamMessages,
+                replayCommittedStreamValues(latestStableResumeValues),
                 resumeInFlightMessageIds,
-                { preservePendingTranscript: abortController.signal.aborted }
+                {
+                  preservePendingTranscript: abortController.signal.aborted,
+                  streamError: error
+                }
               )
               throw error
             }
@@ -11629,8 +11998,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               runRevision: async (revisionPrompt) => {
                 if (!resumeAgentRuntime)
                   throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+                const revisionInput = createPhysicalRunHiddenUserMessage(
+                  threadId,
+                  runToken,
+                  abortController.signal,
+                  boundaryGoal,
+                  { content: revisionPrompt }
+                )
                 const revisionStream = await resumeAgentRuntime.stream(
-                  { messages: [new HumanMessage(revisionPrompt)] },
+                  { messages: [revisionInput] },
                   resumeStreamConfig
                 )
                 await consumeResumeStream(revisionStream)
@@ -11833,13 +12209,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               error: error instanceof Error ? error.message : "Unknown error"
             })
           } else {
-            await markLatestForkBoundaryBestEffort({
-              threadId,
+            interruptedForkBoundary = {
               turnId: turnState.turnId,
-              source: "agent_run_interrupted",
-              runToken,
-              controller: abortController
-            })
+              graphInputUserId: forkBoundarySetup.value
+            }
           }
           turnStateShouldDispose = true
         } finally {
@@ -11851,6 +12224,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             threadId,
             runToken,
             controller: abortController,
+            interruptedForkBoundary,
             settledPromise: resumeRunSettledPromise,
             resolveSettlement: resolveResumeRunSettled,
             criticalBeforeReleasePhases: [
@@ -11961,7 +12335,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         console.warn("[Agent] Failed to parse thread metadata, using empty object")
     })
     const metadata = parsedThreadMetadata.metadata
-    ensureThreadForkBoundaryMarkerEra(threadId, metadata)
     const workspacePath = parsedThreadMetadata.workspacePath
     const modelId = parsedThreadMetadata.modelId
     let harnessAgentContext: HarnessAgentContext
@@ -12116,8 +12489,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
       pruneTurnStateAtInterrupt(turnState, getAllEnabledHooksForInterrupt(workspacePath))
       ensureTurnId(turnState, threadId, "interrupt")
+      const forkBoundarySetup = await awaitInterruptSetup(() =>
+        ensureThreadForkBoundaryMarkerEra(
+          threadId,
+          metadata,
+          () => isPhysicalStreamRunActive(threadId, runToken, abortController.signal),
+          { continuationTurnId: turnState.turnId }
+        )
+      )
+      if (forkBoundarySetup.status === "abandoned") return
       const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
       let turnStateShouldDispose = false
+      let interruptedForkBoundary: PhysicalAgentRunSettlementOptions["interruptedForkBoundary"]
       const autoCommitSetup = await awaitInterruptSetup(() =>
         beginAutoCommitTracking(threadId, workspacePath, {
           reuseSnapshot: turnState.autoCommitSnapshot !== undefined,
@@ -12607,17 +12990,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           )
           let activeIntStream: AsyncIterable<unknown> = intStream
           let intStreamDisconnectRetries = 0
-          let intStableStreamMessages: unknown[] = []
+          const committedInterruptValues = createSerializedValuesMessageAccumulator()
+          let latestStableInterruptValues: SerializedValuesMessageSnapshot | undefined
           const intInFlightMessageIds = new Set<string>()
           const pendingIntMessagePayloads = createStreamMessageSideEffectBuffer()
 
           const consumeInterruptStream = async (source: AsyncIterable<unknown>): Promise<void> => {
             const serializeForRun = createStreamDataSerializer({ projectMessageChunks: true })
             const valuesAccumulator = createSerializedValuesMessageAccumulator()
-            let latestValuesSnapshot = {
-              messages: [] as unknown[],
-              valuesMessageIndexOffset: 0
-            }
             const commitPendingInterruptMessageSideEffects = async (): Promise<void> => {
               for (const payload of pendingIntMessagePayloads.drain()) {
                 await interruptSubagentLifecycle.processPayload(payload)
@@ -12632,22 +13012,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 if (isCoordinatorWorkerStreamChunk(mode, data, threadId)) {
                   continue
                 }
-                const {
-                  data: serialized,
-                  valuesMessageIndexOffset,
-                  valuesSnapshotKind
-                } = serializeForRun(mode, data)
+                const frame = serializeForRun(mode, data)
+                const { data: serialized, valuesMessageIndexOffset, valuesSnapshotKind } = frame
                 if (isContextCompactionStreamPayload(mode, serialized)) continue
-                if (mode === "values") {
-                  latestValuesSnapshot = valuesAccumulator.update({
-                    data: serialized,
-                    valuesMessageIndexOffset,
-                    valuesSnapshotKind
-                  })
-                  flushPendingStreamTranscriptMessages(threadId, runToken)
-                  discardStreamTranscriptToolCallAccumulators(threadId, runToken)
-                  intInFlightMessageIds.clear()
-                }
+                const valuesSnapshot =
+                  mode === "values" ? valuesAccumulator.update(frame) : undefined
                 const messageId = persistAndForwardPhysicalRunStreamChunk(
                   window,
                   channel,
@@ -12658,8 +13027,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   serialized,
                   valuesMessageIndexOffset,
                   valuesSnapshotKind,
-                  mode === "values" ? latestValuesSnapshot.messages : undefined
+                  valuesSnapshot?.messages
                 )
+                if (valuesSnapshot) {
+                  latestStableInterruptValues = committedInterruptValues.update(frame)
+                  intInFlightMessageIds.clear()
+                }
                 if (messageId) intInFlightMessageIds.add(messageId)
                 if (mode === "messages") {
                   pendingIntMessagePayloads.push(serialized)
@@ -12675,26 +13048,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
               await commitPendingInterruptMessageSideEffects()
               throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
-              flushPendingStreamTranscriptMessages(threadId, runToken)
+              flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
               discardStreamTranscriptToolCallAccumulators(threadId, runToken)
               intInFlightMessageIds.clear()
             } catch (error) {
               pendingIntMessagePayloads.clear()
-              intStableStreamMessages = extractSerializedValuesMessages(
-                sanitizeStreamDataForRenderer(
-                  "values",
-                  { messages: latestValuesSnapshot.messages },
-                  latestValuesSnapshot.valuesMessageIndexOffset
-                )
-              )
               resetFailedStreamAttempt(
                 window,
                 channel,
                 threadId,
                 runToken,
-                intStableStreamMessages,
+                replayCommittedStreamValues(latestStableInterruptValues),
                 intInFlightMessageIds,
-                { preservePendingTranscript: abortController.signal.aborted }
+                {
+                  preservePendingTranscript: abortController.signal.aborted,
+                  streamError: error
+                }
               )
               throw error
             }
@@ -12766,8 +13135,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               runRevision: async (revisionPrompt) => {
                 if (!intAgentRuntime)
                   throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+                const revisionInput = createPhysicalRunHiddenUserMessage(
+                  threadId,
+                  runToken,
+                  abortController.signal,
+                  boundaryGoal,
+                  { content: revisionPrompt }
+                )
                 const revisionStream = await intAgentRuntime.stream(
-                  { messages: [new HumanMessage(revisionPrompt)] },
+                  { messages: [revisionInput] },
                   interruptStreamConfig
                 )
                 await consumeInterruptStream(revisionStream)
@@ -12985,13 +13361,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             error: error instanceof Error ? error.message : "Unknown error"
           })
         } else {
-          await markLatestForkBoundaryBestEffort({
-            threadId,
+          interruptedForkBoundary = {
             turnId: turnState.turnId,
-            source: "agent_run_interrupted",
-            runToken,
-            controller: abortController
-          })
+            graphInputUserId: forkBoundarySetup.value
+          }
           turnStateShouldDispose = true
         }
       } finally {
@@ -13002,6 +13375,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           threadId,
           runToken,
           controller: abortController,
+          interruptedForkBoundary,
           settledPromise: interruptRunSettledPromise,
           resolveSettlement: resolveInterruptRunSettled,
           criticalBeforeReleasePhases: [
@@ -13137,21 +13511,23 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               )
             })
         }
+        const detachedShellCancelled =
+          !cancelWorkers && !controller && LocalSandbox.cancelDetachedBackgroundTasks(threadId)
         if (controller && !cancelWorkers) {
           // Foreground cancellation should stop the active run and any thread-scoped
-          // background tasks it launched. "Stop background workers" uses the same IPC
+          // desktop shell tasks. "Stop background workers" uses the same IPC
           // entrypoint with cancelWorkers=true and must not abort the foreground turn.
-          LocalSandbox.cancelBackgroundTasks(threadId)
+          LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: "desktop" })
           if (activeRunToken) flushPendingStreamTranscriptMessages(threadId, activeRunToken)
           controller.abort()
           // Keep activeRuns populated until the run's finally block resolves activeRunSettled.
           // A user can cancel and immediately send another message; the next invoke must wait
           // for checkpoint/sandbox cleanup before opening a replacement stream.
           console.log(`[Agent] cancel: aborted controller for thread ${threadId}`)
-        } else if (!controller && !cancelWorkers) {
+        } else if (!detachedShellCancelled && !controller && !cancelWorkers) {
           console.warn(`[Agent] cancel: no active run found for thread ${threadId}`)
         }
-        const cancelled = Boolean(controller && !cancelWorkers)
+        const cancelled = Boolean(controller && !cancelWorkers) || detachedShellCancelled
         if (cancelled) handleAutoModeAgentCancelled(threadId)
         else if (workers.length > 0) handleAutoModeAgentCancelled(threadId, "background")
         return cancelled

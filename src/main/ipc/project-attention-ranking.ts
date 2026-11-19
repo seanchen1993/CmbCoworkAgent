@@ -1,3 +1,4 @@
+import { calculateProjectElapsedMs, readLastExecution } from "./project-mode-execution-metrics"
 import {
   vibecodingAdoptedShare,
   type ProjectAttentionSortKey
@@ -17,7 +18,11 @@ type JsonRecord = Record<string, unknown>
 type Query = (index: string, body: JsonRecord) => Promise<unknown>
 export const PROJECT_ATTENTION_ID_PAGE_SIZE = 1000
 export const PROJECT_ATTENTION_METRIC_BATCH_SIZE = 200
-export type ProjectMetricSortKey = ProjectAttentionSortKey | "conversationCount" | "generatedLines"
+export type ProjectMetricSortKey =
+  | ProjectAttentionSortKey
+  | "conversationCount"
+  | "generatedLines"
+  | "elapsedMs"
 
 function record(value: unknown): JsonRecord {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {}
@@ -45,10 +50,11 @@ export interface ProjectAttentionRankingScope {
   traceIndex: string
 }
 
-/** Enumerate only snapshot IDs, with stable cursors and no top-N truncation. */
+/** Enumerate snapshot IDs without truncation; elapsed ranking also needs their creation times. */
 async function matchingProjectIds(
   scope: ProjectAttentionRankingScope,
-  query: Query
+  query: Query,
+  createdAtByProject?: Map<string, string>
 ): Promise<string[]> {
   const ids = new Set<string>()
   const cursors = new Set<string>()
@@ -65,7 +71,20 @@ async function matchingProjectIds(
               size: PROJECT_ATTENTION_ID_PAGE_SIZE,
               sources: [{ project: { terms: { field: "properties.projectId" } } }],
               ...(after ? { after } : {})
-            }
+            },
+            ...(createdAtByProject
+              ? {
+                  aggs: {
+                    creation: {
+                      top_hits: {
+                        size: 1,
+                        sort: [{ eventTime: { order: "desc" } }],
+                        _source: { includes: ["properties.lifecycleCreatedAt"] }
+                      }
+                    }
+                  }
+                }
+              : {})
           }
         }
       }),
@@ -78,6 +97,13 @@ async function matchingProjectIds(
         throw new Error("项目排序分页出现无效或重复项目，请重试")
       }
       ids.add(id)
+      if (createdAtByProject) {
+        const hits = record(record(record(bucket).creation).hits).hits
+        const value = Array.isArray(hits)
+          ? record(record(record(hits[0])._source).properties).lifecycleCreatedAt
+          : undefined
+        if (typeof value === "string") createdAtByProject.set(id, value)
+      }
     }
     const next = record(page.after_key)
     if (buckets.length === 0 || Object.keys(next).length === 0) break
@@ -184,12 +210,14 @@ export function buildProjectAttentionMetricQuery(
     }
   }
   const inner =
-    key === "conversationCount"
-      ? {}
-      : {
-          known_details: { filter: { exists: { field: "suspectedTechnicalDetailSupplement" } } },
-          suspected_details: { filter: { term: { suspectedTechnicalDetailSupplement: true } } }
-        }
+    key === "elapsedMs"
+      ? { last_execution_end: { max: { field: "endedAt" } } }
+      : key === "conversationCount"
+        ? {}
+        : {
+            known_details: { filter: { exists: { field: "suspectedTechnicalDetailSupplement" } } },
+            suspected_details: { filter: { term: { suspectedTechnicalDetailSupplement: true } } }
+          }
   return {
     index: scope.traceIndex,
     body: {
@@ -214,7 +242,11 @@ export function buildProjectAttentionMetricQuery(
   }
 }
 
-function metricValue(bucket: JsonRecord, key: ProjectMetricSortKey): number | null {
+function metricValue(
+  bucket: JsonRecord,
+  key: ProjectMetricSortKey,
+  createdAt?: string
+): number | null {
   if (key === "generatedLines") return Number(record(bucket.generated_lines).value) || 0
   if (key === "inclusiveAdoptionRate") {
     return normalizeCodeStatsFromContainer(bucket).inclusiveAdoptionRate
@@ -225,6 +257,12 @@ function metricValue(bucket: JsonRecord, key: ProjectMetricSortKey): number | nu
     return vibecodingAdoptedShare(lines("plugin_constrained"), lines("vibecoding"))
   }
   const conversations = readMainAgentConversations(bucket)
+  if (key === "elapsedMs") {
+    return calculateProjectElapsedMs(
+      createdAt,
+      readLastExecution(conversations, "last_execution_end")
+    )
+  }
   if (key === "conversationCount") return Number(conversations.doc_count) || 0
   if (key === "suspectedTechnicalDetailConversationCount") {
     return Number(record(conversations.known_details).doc_count) > 0
@@ -240,7 +278,8 @@ export async function fetchProjectAttentionRanking(
   key: ProjectMetricSortKey,
   query: Query
 ): Promise<Map<string, number | null>> {
-  const ids = await matchingProjectIds(scope, query)
+  const createdAtByProject = key === "elapsedMs" ? new Map<string, string>() : undefined
+  const ids = await matchingProjectIds(scope, query, createdAtByProject)
   const empty = key === "conversationCount" || key === "generatedLines" ? 0 : null
   const metrics = new Map<string, number | null>(ids.map((id) => [id, empty]))
   await mapAwardBatches(ids, PROJECT_ATTENTION_METRIC_BATCH_SIZE, async (batch) => {
@@ -253,7 +292,7 @@ export async function fetchProjectAttentionRanking(
       if (typeof id !== "string" || !allowed.has(id)) {
         throw new Error("项目排序返回了范围外的项目，请重试")
       }
-      metrics.set(id, metricValue(bucket, key))
+      metrics.set(id, metricValue(bucket, key, createdAtByProject?.get(id)))
     }
   })
   return metrics

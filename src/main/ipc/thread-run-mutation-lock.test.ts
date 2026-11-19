@@ -74,4 +74,20 @@ describe("thread mutation incarnation lease", () => {
       expect(source).toMatch(pattern)
     }
   })
+
+  it("marks interrupted forks after committing buffered output and before releasing the run", () => {
+    const agent = readFileSync(fileURLToPath(new URL("./agent.ts", import.meta.url)), "utf8")
+    const start = agent.indexOf("async function settlePhysicalAgentRun({")
+    const settlement = agent.slice(start, start + 8_000)
+    const flush = settlement.indexOf('name: "flush-stream-transcript"')
+    const mark = settlement.indexOf('name: "persist-interrupted-fork-boundary"')
+    const release = settlement.indexOf('name: "release-active-controller"')
+    expect(flush).toBeGreaterThanOrEqual(0)
+    expect(mark).toBeGreaterThan(flush)
+    expect(release).toBeGreaterThan(mark)
+    expect(settlement.slice(mark, release)).toContain('source: "agent_run_interrupted"')
+    for (const kind of ["invoke", "resume", "interrupt"]) {
+      expect(agent).toMatch(new RegExp(`kind: "${kind}",[\\s\\S]{0,220}interruptedForkBoundary,`))
+    }
+  })
 })

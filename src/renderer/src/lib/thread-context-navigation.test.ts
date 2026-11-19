@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url"
 import { runInNewContext } from "node:vm"
 import ts from "typescript"
 import { describe, expect, it } from "vitest"
+import { ForegroundHydrationGeneration, isThreadHistoryHydrationAttemptActive } from "./thread-hydration"
 import { createDehydratedThreadStatePatch } from "./thread-dehydration"
 
 describe("thread context navigation isolation", () => {
@@ -55,14 +56,19 @@ describe("thread context navigation isolation", () => {
     const states = {
       cold: createDehydratedThreadStatePatch(),
       resident: { ...createDehydratedThreadStatePatch(), dehydrated: false },
-      reopening: createDehydratedThreadStatePatch()
+      reopening: { ...createDehydratedThreadStatePatch(), historyLoading: true }
     }
     const ids: { [key: string]: Set<string> } = {}
     const appended: { [key: string]: Record[] } = {}
     const initialized = new Set(["resident", "reopening"])
+    const foreground = new ForegroundHydrationGeneration("reopening")
+    const reopening = { loadGeneration: 1, foregroundToken: foreground.capture("reopening"), botNotices: [] as Record[] }
     const handle = runInNewContext(ts.transpileModule(`(${subscription})`, {
       compilerOptions: { target: ts.ScriptTarget.ES2022 }
     }).outputText, {
+      threadHistoryHydrationAttemptsRef: { current: { reopening } },
+      threadHistoryLoadGenerationRef: { current: { reopening: 1 } },
+      foregroundHydrationGeneration: foreground, isThreadHistoryHydrationAttemptActive,
       LOCAL_BOT_HOST_ID: "local", threadStatesRef: { current: states },
       initializedThreadsRef: { current: initialized }, knownDurableMessageIdsRef: { current: ids },
       isThreadDeletionPending: () => false,
@@ -84,6 +90,7 @@ describe("thread context navigation isolation", () => {
     expect(ids.cold).toBeUndefined()
     expect(appended.resident.map(message => message.id)).toEqual(["first", "second"])
     expect(appended.reopening.map(message => message.id)).toEqual(["first", "second"])
+    expect(reopening.botNotices.map(message => message.id)).toEqual(["first", "second"])
     // Reopening registers the holder before history hydration clears dehydrated.
     initialized.add("cold")
     handle({ hostId: "local", reminder: { threadId: "cold", id: "new", content: "new", createdAt: 2 } })

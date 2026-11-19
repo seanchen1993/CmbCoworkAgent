@@ -332,6 +332,7 @@ async function executeTask(taskId: string): Promise<void> {
       modelId: effectiveModelId,
       enableAgentsPrompt: false,
       noSchedulerTool: true,
+      autoBackgroundHandoff: false,
       abortSignal: abortController.signal
     })
 

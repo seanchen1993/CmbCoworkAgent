@@ -1,3 +1,5 @@
+import { readDashboardTracePages } from "./dashboard-trace-pages"
+
 type JsonRecord = Record<string, unknown>
 
 export interface TraceExportRecord {
@@ -9,10 +11,7 @@ export interface TraceExportRecord {
   rawPending?: boolean
 }
 
-const EXPORT_CHUNK_SIZE = 10
 const EXPORT_CONTENT_BYTE_LIMIT = 64 * 1024 * 1024
-const record = (value: unknown): JsonRecord =>
-  value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {}
 const text = (value: unknown): string => (typeof value === "string" ? value.trim() : "")
 
 /** Load only the selected page, in small sequential batches. Never export preview DTOs. */
@@ -47,34 +46,10 @@ export async function loadTraceExportDetails<T extends TraceExportRecord>(input:
   if (traceIds.length) selection.push({ terms: { traceId: traceIds } })
   const filters = [...input.filters, { bool: { should: selection, minimum_should_match: 1 } }]
   const traces = new Map<string, T>()
-  const cursors = new Set<string>()
   let bytes = 0
-  let size = EXPORT_CHUNK_SIZE
-  let after: unknown[] | undefined
-  for (;;) {
-    let raw: JsonRecord
-    try {
-      raw = record(
-        await input.query({
-          size,
-          track_total_hits: false,
-          query: { bool: { filter: filters } },
-          sort: [{ startedAt: { order: "asc", missing: "_last" } }, { traceId: { order: "asc" } }],
-          ...(after ? { search_after: after } : {}),
-          _source: { includes: input.sourceIncludes }
-        })
-      )
-    } catch (error) {
-      if (!input.isResponseTooLarge(error) || size === 1) throw error
-      size = Math.max(1, Math.floor(size / 2))
-      continue
-    }
-    const hits = record(raw.hits).hits
-    if (raw.timed_out || Number(record(raw._shards).failed) > 0 || !Array.isArray(hits)) {
-      throw new Error("完整会话未加载成功，导出已取消，请重试")
-    }
+  for await (const hits of readDashboardTracePages({ ...input, filters })) {
     for (const hit of hits) {
-      const trace = input.normalize(record(hit))
+      const trace = input.normalize(hit)
       if (!trace.traceId || trace.rawPending || trace.rawAvailable !== true) {
         throw new Error(`会话记录 ${trace.traceId || "未知"} 缺少完整内容，无法导出，请刷新后重试`)
       }
@@ -91,15 +66,6 @@ export async function loadTraceExportDetails<T extends TraceExportRecord>(input:
       }
       traces.set(trace.traceId, trace)
     }
-    if (hits.length < size) break
-    const next = record(hits.at(-1)).sort
-    if (!Array.isArray(next) || next.length !== 2) {
-      throw new Error("导出分页游标缺失，无法确认完整会话，请重试")
-    }
-    const cursor = JSON.stringify(next)
-    if (cursors.has(cursor)) throw new Error("导出分页游标未前进，请重试")
-    cursors.add(cursor)
-    after = next
   }
   if ([...requested].some((id) => !traces.has(id))) {
     throw new Error("部分会话记录已变化或无权读取，请刷新列表后重试")

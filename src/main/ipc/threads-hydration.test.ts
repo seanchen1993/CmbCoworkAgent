@@ -1,5 +1,8 @@
 import { readFileSync } from "fs"
-import { describe, expect, it } from "vitest"
+import ts from "typescript"
+import { describe, expect, it, vi } from "vitest"
+import type { ThreadDeleteOptions } from "../types"
+import { assertThreadDeletionWorkspace, isThreadDeletionBusy } from "./thread-deletion-busy"
 
 const source = readFileSync(new URL("./threads.ts", import.meta.url), "utf8")
 
@@ -10,6 +13,131 @@ function deletionHandlerSource(): string {
   expect(end).toBeGreaterThan(start)
   return source.slice(start, end)
 }
+
+// Exercise the registered handler and its teardown closure without loading Electron or a DB.
+function loadThreadDeletionHandler({
+  externalOwner = false,
+  backgroundShell = false
+}: { externalOwner?: boolean; backgroundShell?: boolean } = {}) {
+  const start = source.indexOf("const deletingThreads = new Map")
+  const end = source.indexOf("const deleteThreadFromRenderer = async", start)
+  const code = ts.transpileModule(source.slice(start, end), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 }
+  }).outputText
+  const noop = (): void => undefined
+  const releaseShellBlock = vi.fn()
+  const blockNewBackgroundTasks = vi.fn(() => releaseShellBlock)
+  const cancelAndWaitForAgentThreadRun = vi.fn<() => Promise<string>>()
+  const cancelWorkflow = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
+  const rollbackWorkflowThreadDisposal = vi.fn()
+  const hasExternalThreadRunOwner = vi.fn(() => externalOwner)
+  const hasActiveBackgroundTasks = vi.fn(() => backgroundShell)
+  const dependencies = {
+    normalizeThreadDeleteOptions: (options?: ThreadDeleteOptions) => options,
+    requireThreadMutationLease: (threadId: string) => threadId,
+    withThreadMutationLeaseLock: (_lease: string, run: (row: { metadata: string }) => unknown) =>
+      run({ metadata: "{}" }),
+    cancelLegacySubagentTranscriptMigration: noop,
+    cancelSubagentTranscriptStartupRead: noop,
+    cancelLegacyCheckpointTranscriptBootstrap: noop,
+    getAgentModeFromMetadata: () => "normal",
+    threadDeletionMetadata: () => ({}),
+    assertScopedBotWorkThreadDeletion: () => false,
+    findBotWorkThreadOwner: () => undefined,
+    hasBotWorkMetadata: () => false,
+    assertThreadDeletionGroup: noop,
+    threadDeletionRuntime: () => ({
+      hasActiveRun: () => false, isAborting: () => false,
+      hasExternalRun: () => hasExternalThreadRunOwner(), hasWorkflowRun: () => false,
+      hasWorkerRun: () => false, hasBackgroundShell: hasActiveBackgroundTasks
+    }),
+    assertThreadDeletionWorkspace,
+    isThreadDeletionBusy,
+    hasActiveAgentRun: () => false,
+    isActiveAgentRunAborting: () => false,
+    waitForActiveAgentRunToSettle: () => Promise.resolve("settled"),
+    hasExternalThreadRunOwner,
+    isExternallyManagedThreadRunBusy: () =>
+      hasExternalThreadRunOwner() || hasActiveBackgroundTasks(),
+    LocalSandbox: { blockNewBackgroundTasks, hasActiveBackgroundTasks },
+    BrowserWindow: { fromWebContents: () => null },
+    workflowRunManager: {
+      isActive: () => false,
+      activeWorkspaceForThread: () => undefined,
+      cancelAndWait: cancelWorkflow
+    },
+    coordinatorWorkerManager: { hasRunningWorkersForThread: () => false },
+    isWorkflowThreadMarkedDisposed: () => false,
+    markWorkflowThreadDisposed: noop,
+    rollbackWorkflowThreadDisposal,
+    cancelAndWaitForAgentThreadRun
+  }
+  const execute = new Function(
+    ...Object.keys(dependencies),
+    `${code}\nreturn deleteThread`
+  )(...Object.values(dependencies)) as (
+    event: { sender: object },
+    threadId: string,
+    options?: ThreadDeleteOptions
+  ) => Promise<void>
+
+  return {
+    remove: (options?: ThreadDeleteOptions) => execute({ sender: {} }, "thread", options),
+    blockNewBackgroundTasks,
+    releaseShellBlock,
+    cancelAndWaitForAgentThreadRun,
+    cancelWorkflow,
+    hasExternalThreadRunOwner,
+    rollbackWorkflowThreadDisposal
+  }
+}
+
+describe("threads:delete shell and external owner coordination", () => {
+  it.each([
+    [undefined, "会话仍在运行或有待处理结果，已停止删除。"],
+    [{ requireIdle: true }, "会话仍在运行，已跳过该会话。"]
+  ] as const)("keeps an externally owned shell running (%j)", async (options, message) => {
+    const handler = loadThreadDeletionHandler({ externalOwner: true, backgroundShell: true })
+
+    await expect(handler.remove(options)).rejects.toThrow(message)
+
+    expect(handler.blockNewBackgroundTasks).not.toHaveBeenCalled()
+    expect(handler.cancelWorkflow).not.toHaveBeenCalled()
+    expect(handler.cancelAndWaitForAgentThreadRun).not.toHaveBeenCalled()
+  })
+
+  it("rechecks external ownership after waiting for workflow cancellation", async () => {
+    const handler = loadThreadDeletionHandler()
+    const workflowExit = Promise.withResolvers<void>()
+    handler.cancelWorkflow.mockReturnValue(workflowExit.promise)
+
+    const deletion = handler.remove()
+    expect(handler.cancelWorkflow).toHaveBeenCalledExactlyOnceWith("thread")
+    handler.hasExternalThreadRunOwner.mockReturnValue(true)
+    workflowExit.resolve()
+
+    await expect(deletion).rejects.toThrow("会话仍在运行或有待处理结果，已停止删除。")
+    expect(handler.cancelAndWaitForAgentThreadRun).not.toHaveBeenCalled()
+    expect(handler.rollbackWorkflowThreadDisposal).toHaveBeenCalledExactlyOnceWith("thread", false)
+    expect(handler.releaseShellBlock).toHaveBeenCalledOnce()
+  })
+
+  it("waits for the thread's own detached shell during individual deletion", async () => {
+    const handler = loadThreadDeletionHandler({ backgroundShell: true })
+    const shellExit = Promise.withResolvers<string>()
+    handler.cancelAndWaitForAgentThreadRun.mockReturnValue(shellExit.promise)
+    const deletion = handler.remove()
+
+    await vi.waitFor(() =>
+      expect(handler.cancelAndWaitForAgentThreadRun).toHaveBeenCalledExactlyOnceWith("thread", null)
+    )
+    expect(handler.blockNewBackgroundTasks).toHaveBeenCalledExactlyOnceWith("thread")
+    expect(handler.releaseShellBlock).not.toHaveBeenCalled()
+    shellExit.resolve("shell_timed_out")
+    await expect(deletion).rejects.toThrow("Shell 任务仍在退出，已停止删除。请稍后重试。")
+    expect(handler.releaseShellBlock).toHaveBeenCalledOnce()
+  })
+})
 
 describe("threads:get hydration contract", () => {
   it("runs the hot path in the read-only metadata worker with a narrow fallback", () => {
@@ -60,10 +188,10 @@ describe("threads:get hydration contract", () => {
     expect(handler).toContain("if (options?.requireIdle)")
     expect(handler.indexOf("isThreadDeletionBusy(")).toBeLessThan(
       handler.indexOf(
-        "performThreadDeletion(event, threadId, options?.groupGuard, assertOwnership)"
+        "performThreadDeletion(event, threadId, metadata, options, assertOwnership)"
       )
     )
-    expect(handler).toContain("isThreadDeletionBusy(threadId, threadDeletionRuntime(metadata))")
+    expect(handler).toContain("isThreadDeletionBusy(threadId, runtime)")
     expect(source).toContain("isExternallyManagedThreadRunBusy(id, metadata)")
     expect(handler).not.toContain("isThreadForkBusy(")
     expect(handler).not.toContain("restoreWorkersForThread")
@@ -83,7 +211,7 @@ describe("threads:get hydration contract", () => {
     const lockIndex = handler.indexOf("withThreadMutationLeaseLock(lease")
     const selectionIndex = handler.indexOf("assertThreadDeletionGroup(threadRow, metadata")
     const deletionIndex = handler.indexOf(
-      "performThreadDeletion(event, threadId, options?.groupGuard, assertOwnership)"
+      "performThreadDeletion(event, threadId, metadata, options, assertOwnership)"
     )
     const groupCheck = source.slice(
       source.indexOf("function assertThreadDeletionGroup("),
@@ -98,6 +226,21 @@ describe("threads:get hydration contract", () => {
     expect(groupCheck).toContain(
       "threadMetadataMatchesGroupSelector(metadata, groupGuard.selector)"
     )
+  })
+
+  it("rechecks grouped deletion shell activity directly before blocking new starts", () => {
+    const handler = deletionHandlerSource()
+    const priorDeletion = handler.indexOf("await deletingThreads.get(threadId)")
+    const idleCheck = handler.indexOf("await isThreadDeletionBusy(threadId")
+    const shellRecheck = handler.indexOf("busy || runtime.hasBackgroundShell(threadId)")
+    const block = handler.indexOf("LocalSandbox.blockNewBackgroundTasks(threadId)")
+
+    expect(source).toContain("hasActiveBackgroundTasks(id, { includeChildRuns: true })")
+    expect(priorDeletion).toBeGreaterThanOrEqual(0)
+    expect(idleCheck).toBeGreaterThan(priorDeletion)
+    expect(shellRecheck).toBeGreaterThan(idleCheck)
+    expect(block).toBeGreaterThan(shellRecheck)
+    expect(handler.slice(shellRecheck, block)).not.toMatch(/\bawait\b/)
   })
 
   it("revalidates a grouped selection again at the synchronous database commit boundary", () => {

@@ -521,6 +521,11 @@ export interface TurnCompletionGateOptions {
   todoGateEnabled?: boolean
   onRecovery?: TurnCompletionRecoveryCallback
   checkFinalDelivery?: TurnFinalDeliveryCheck
+  createRecoveryMessage?: (
+    threadId: string,
+    messages: readonly BaseMessage[],
+    prompt: string
+  ) => HumanMessage
 }
 
 interface GateGraphState {
@@ -545,7 +550,8 @@ export function createTurnCompletionGateMiddleware(
     maxTodoNudges = DEFAULT_MAX_TODO_NUDGES,
     todoGateEnabled = true,
     onRecovery,
-    checkFinalDelivery
+    checkFinalDelivery,
+    createRecoveryMessage = (_threadId, _messages, prompt) => new HumanMessage(prompt)
   } = options
 
   return createMiddleware({
@@ -621,7 +627,10 @@ export function createTurnCompletionGateMiddleware(
             attempt: runState.retriesUsed,
             maxAttempts: maxRetries
           })
-          return { messages: [new HumanMessage(prompt)], jumpTo: "model" as const }
+          return {
+            messages: [createRecoveryMessage(threadId, messages, prompt)],
+            jumpTo: "model" as const
+          }
         }
 
         // The protocol is satisfied. Now the task-state gate: a final answer
@@ -652,12 +661,9 @@ export function createTurnCompletionGateMiddleware(
           attempt: runState.todoNudgesUsed,
           maxAttempts: maxTodoNudges
         })
+        const prompt = buildTodoRecoveryPrompt(unfinished, runState.todoNudgesUsed, maxTodoNudges)
         return {
-          messages: [
-            new HumanMessage(
-              buildTodoRecoveryPrompt(unfinished, runState.todoNudgesUsed, maxTodoNudges)
-            )
-          ],
+          messages: [createRecoveryMessage(threadId, messages, prompt)],
           jumpTo: "model" as const
         }
       }

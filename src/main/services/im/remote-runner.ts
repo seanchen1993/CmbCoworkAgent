@@ -14,6 +14,7 @@ import {
   type RuntimeInteractionWaitHooks
 } from "../../agent/runtime"
 import { parseGoalSlashCommand } from "../../agent/goals/slash"
+import { SHELL_TASK_MONITOR_TOOL_NAMES } from "../../agent/shell-task-monitor"
 import {
   createStandardTurnTrace,
   getHarnessAgentContext,
@@ -114,7 +115,7 @@ import {
 
 const IM_INBOX_BLOCKED_TOOLS = [
   "execute",
-  "task_output",
+  ...SHELL_TASK_MONITOR_TOOL_NAMES,
   "code_exec",
   "save_code_exec_tool",
   "search_tool",

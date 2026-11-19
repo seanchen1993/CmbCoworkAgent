@@ -50,6 +50,8 @@ interface ValuesIdentityContext {
   /** The run's existing values accumulator, including tool/user boundaries. */
   completeMessages?: readonly unknown[]
   loadBaselineMessages?: (selectors: readonly RoleCollisionMessage[]) => readonly Message[]
+  resolveBoundaryOrdinal?: (userMessageId: string) => number | undefined
+  onResolve?: (source: Record<string, unknown>, canonical: Record<string, unknown>) => void
   loadPreviousTurnOccurrences?: (
     userMessageId: string,
     providerSourceIds: readonly string[]
@@ -69,10 +71,16 @@ function identity(message: unknown): RoleCollisionMessage | undefined {
   const kwargs = record(source?.kwargs) ?? source
   const role = getSerializedMessageRole(message)
   if (!kwargs || !role || typeof kwargs.id !== "string" || !kwargs.id.trim()) return undefined
+  const additionalKwargs = record(kwargs.additional_kwargs)
+  const providerTuple = getMessageProviderTupleFromMetadata(additionalKwargs)
+  const rawProviderSourceId = additionalKwargs?.[MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]
   return {
     id: kwargs.id,
     role,
-    ...getMessageProviderTupleFromMetadata(record(kwargs.additional_kwargs)),
+    ...(providerTuple ??
+      (role === "assistant" && typeof rawProviderSourceId === "string" && rawProviderSourceId.trim()
+        ? { provider_source_id: rawProviderSourceId.trim() }
+        : {})),
     ...(typeof kwargs.tool_call_id === "string" ? { tool_call_id: kwargs.tool_call_id } : {})
   }
 }
@@ -80,7 +88,11 @@ function identity(message: unknown): RoleCollisionMessage | undefined {
 const sourceKey = (message: RoleCollisionMessage) =>
   JSON.stringify([message.role, getMessageProviderSourceId(message)])
 const occurrenceKey = (message: RoleCollisionMessage) =>
-  JSON.stringify([sourceKey(message), getMessageProviderOccurrence(message) ?? 1])
+  JSON.stringify([
+    sourceKey(message),
+    getMessageProviderOccurrence(message) ?? 1,
+    message.role === "tool" ? message.tool_call_id : undefined
+  ])
 
 /** Values contain complete fields, even when their envelope is an append/tail.
  * Keep field presence intact: the message parser distinguishes a missing field
@@ -127,34 +139,38 @@ export function selectStreamTranscriptValueSnapshots(
   const baselineBoundary = user
     ? baseline.findLastIndex((message) => message.role === "user" && message.id === user.id)
     : baseline.findLastIndex((message) => message.role === "user")
+  const userMessageId = user?.id ?? (baselineBoundary >= 0 ? baseline[baselineBoundary].id : undefined)
+  const boundaryOrdinal = userMessageId ? context.resolveBoundaryOrdinal?.(userMessageId) : undefined
   const previousTurn =
-    user && baselineBoundary < 0 ? baseline : baseline.slice(0, Math.max(0, baselineBoundary))
+    boundaryOrdinal !== undefined
+      ? baseline.filter((message) => message.ordinal !== undefined && message.ordinal < boundaryOrdinal)
+      : user && baselineBoundary < 0
+        ? baseline
+        : baseline.slice(0, Math.max(0, baselineBoundary))
   const offsets = new Map<string, number>()
   for (const message of previousTurn) {
     const key = sourceKey(message)
     offsets.set(key, Math.max(offsets.get(key) ?? 0, getMessageProviderOccurrence(message) ?? 1))
   }
-  const userMessageId =
-    user?.id ?? (baselineBoundary >= 0 ? baseline[baselineBoundary].id : undefined)
   if (userMessageId && context.loadPreviousTurnOccurrences) {
     const previous = context.loadPreviousTurnOccurrences(userMessageId, [
-      ...new Set(changedEntries.map((entry) => getMessageProviderSourceId(entry.identity)))
+      ...new Set(entries.map((entry) => getMessageProviderSourceId(entry.identity)))
     ])
-    // A hidden notification prompt has no durable user row. A caller with a
-    // captured run boundary can still authoritatively distinguish history from
-    // this turn's streamed rows; an empty result is meaningful too.
-    if (previous !== undefined) offsets.clear()
-    for (const message of previous ?? []) {
-      offsets.set(
-        JSON.stringify([message.role, message.provider_source_id]),
-        message.provider_occurrence
-      )
+    if (previous !== undefined) {
+      offsets.clear()
+      for (const message of previous) {
+        offsets.set(
+          JSON.stringify([message.role, message.provider_source_id]),
+          message.provider_occurrence
+        )
+      }
     }
   }
   const counts = new Map(offsets)
   const turnBaseline = new Map<string, Message[]>()
   for (const message of baseline) {
     const key = sourceKey(message)
+    if (boundaryOrdinal !== undefined && (message.ordinal ?? -1) <= boundaryOrdinal) continue
     if ((getMessageProviderOccurrence(message) ?? 1) <= (offsets.get(key) ?? 0)) continue
     const candidates = turnBaseline.get(key) ?? []
     candidates.push(message)
@@ -224,7 +240,11 @@ export function selectStreamTranscriptValueSnapshots(
     context.loadBaselineMessages?.(
       declared.filter((_message, index) => changed.has(entries[index].message))
     ) ?? baseline
-  const baselineIds = new Map(baseline.map((message) => [occurrenceKey(message), message.id]))
+  const baselineIds = new Map(
+    baseline
+      .filter((message) => boundaryOrdinal === undefined || (message.ordinal ?? -1) > boundaryOrdinal)
+      .map((message) => [occurrenceKey(message), message.id])
+  )
   const normalized = normalizeCompleteMessageIds(
     normalizeMessageRoleCollisionIds(baseline, declared)
   )
@@ -260,6 +280,7 @@ export function selectStreamTranscriptValueSnapshots(
       }
     ]
     if (persistedMessageFromStreamPayload(tuple)) {
+      context.onResolve?.(source, tuple[0])
       localOccurrences.set(tuple, localPositions[index])
       result.push(tuple)
     }

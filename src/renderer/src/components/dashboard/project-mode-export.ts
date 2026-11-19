@@ -1,3 +1,4 @@
+import { formatProjectElapsed, PROJECT_ELAPSED_HINT } from "./project-stage-analysis-view"
 import type {
   DashboardProjectModeExportData,
   DashboardProjectModeProject,
@@ -61,7 +62,8 @@ export const PROJECT_MODE_PROJECT_EXPORT_HEADER = [
   "创建人 YST ID",
   "部门",
   "创建时间",
-  "最新执行时间"
+  "最新执行时间",
+  "项目历时"
 ]
 
 function formatPercent(value: number | null | undefined): string {
@@ -174,6 +176,7 @@ export function buildProjectModeProjectExportSummaryRows(
       `项目总量超过 ${data.projectLimit.toLocaleString("zh-CN")} 条，本工作表仅展示前 ${data.projects.length.toLocaleString("zh-CN")} 条。`
     ])
   }
+  rows.push(["项目历时计算说明", PROJECT_ELAPSED_HINT])
   return rows
 }
 
@@ -243,7 +246,8 @@ export function buildProjectModeProjectExportRows(
         project.creatorYstId || "",
         creatorDepartment(project),
         formatDateTime(project.lifecycleCreatedAt),
-        formatDateTime(project.lastExecutedAt)
+        formatDateTime(project.lastExecutedAt),
+        formatProjectElapsed(project.elapsedMs)
       ]
     })
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 import {
   buildKnowledgeProjectQueries,
+  fetchKnowledgeProjectAggregates,
   fetchKnowledgeAccumulation,
   parseKnowledgeDistribution,
   parseKnowledgeProjectStats,
@@ -185,5 +186,137 @@ describe("project constraint aggregates", () => {
       successfulReadCount: 12400
     })
     expect(() => parseKnowledgeProjectStats({}, {})).toThrow()
+  })
+})
+
+describe("knowledge project range and query budget", () => {
+  const permission = { term: { upperOrgLv1: "本室" } }
+  const creation = {
+    range: { "properties.lifecycleCreatedAt": { gte: "2026-10-01", lte: "2026-10-31" } }
+  }
+  const time = { range: { eventTime: { gte: "2026-10-01", lte: "2026-10-31" } } }
+  const snapshot = {
+    aggregations: { projects: { value: 1001 }, loaded: { projects: { value: 800 } } }
+  }
+  it("uses exactly two aggregation-only requests for lifetime data", async () => {
+    const requests: Record<string, unknown>[] = []
+    const result = await fetchKnowledgeProjectAggregates(
+      async (body) => {
+        requests.push(body)
+        return requests.length === 1
+          ? snapshot
+          : { aggregations: { projects: { value: 700 }, reads: { value: 9000 } } }
+      },
+      [permission],
+      [permission],
+      false
+    )
+    expect(result.successfulReadCount).toBe(9000)
+    expect(requests).toHaveLength(2)
+    expect(JSON.stringify(requests)).not.toContain("eventTime")
+    expect(requests.every((b) => b.size === 0 && b.track_total_hits === false)).toBe(true)
+  })
+  it("completely counts more than one ID page with bounded, disjoint batches", async () => {
+    let page = 0,
+      readQueries = 0,
+      inFlight = 0,
+      peak = 0
+    const collected: string[] = []
+    const result = await fetchKnowledgeProjectAggregates(
+      async (body) => {
+        inFlight++
+        peak = Math.max(peak, inFlight)
+        await Promise.resolve()
+        inFlight--
+        const b = body as {
+          query: { bool: { filter: Record<string, unknown>[] } }
+          aggs: { loaded?: unknown; ids?: { composite: { size: number } } }
+        }
+        expect(body.size).toBe(0)
+        expect(JSON.stringify(body)).not.toMatch(/_raw|top_hits/)
+        expect(b.query.bool.filter).toContainEqual(permission)
+        if (b.aggs.loaded) return snapshot
+        if (b.aggs.ids) {
+          expect(b.query.bool.filter).toContainEqual(creation)
+          expect(b.aggs.ids.composite.size).toBe(500)
+          const start = page++ * 500
+          const ids = Array.from(
+            { length: Math.max(0, Math.min(500, 1001 - start)) },
+            (_, i) => `p${String(start + i).padStart(4, "0")}`
+          )
+          return {
+            aggregations: {
+              ids: {
+                buckets: ids.map((project) => ({ key: { project } })),
+                ...(ids.length ? { after_key: { project: ids.at(-1) } } : {})
+              }
+            }
+          }
+        }
+        expect(b.query.bool.filter).toContainEqual(time)
+        const ids = (b.query.bool.filter.at(-1)?.terms as Record<string, string[]>)[
+          "properties.harnessProjectId"
+        ]
+        expect(ids.length).toBeLessThanOrEqual(500)
+        collected.push(...ids)
+        readQueries++
+        return {
+          aggregations: { projects: { value: ids.length }, reads: { value: ids.length * 2 } }
+        }
+      },
+      [permission, creation],
+      [permission, time],
+      true
+    )
+    expect(result).toEqual({
+      projectCount: 1001,
+      loadedProjectCount: 800,
+      readProjectCount: 1001,
+      successfulReadCount: 2002
+    })
+    expect(new Set(collected).size).toBe(1001)
+    expect(readQueries).toBe(3)
+    expect(peak).toBe(1)
+  })
+  it("returns zero reads for an empty created-project scope without an unscoped read", async () => {
+    let calls = 0
+    const result = await fetchKnowledgeProjectAggregates(
+      async () =>
+        ++calls === 1
+          ? { aggregations: { projects: { value: 0 }, loaded: { projects: { value: 0 } } } }
+          : { aggregations: { ids: { buckets: [] } } },
+      [permission, creation],
+      [permission, time],
+      true
+    )
+    expect(calls).toBe(2)
+    expect(result.readProjectCount).toBe(0)
+    expect(result.successfulReadCount).toBe(0)
+  })
+  it("rejects repeated pagination cursors and partial ES results", async () => {
+    await expect(
+      fetchKnowledgeProjectAggregates(
+        async (body) => {
+          const b = body as {
+            query: { bool: { filter: Record<string, unknown>[] } }
+            aggs: { loaded?: unknown; ids?: { composite: { size: number } } }
+          }
+          if (b.aggs.loaded) return snapshot
+          if (b.aggs.ids)
+            return {
+              aggregations: {
+                ids: { buckets: [{ key: { project: "p1" } }], after_key: { project: "p1" } }
+              }
+            }
+          return { aggregations: { projects: { value: 1 }, reads: { value: 2 } } }
+        },
+        [permission, creation],
+        [permission, time],
+        true
+      )
+    ).rejects.toThrow("游标重复")
+    await expect(
+      fetchKnowledgeProjectAggregates(async () => ({ timed_out: true }), [], [], false)
+    ).rejects.toThrow("未完整返回")
   })
 })

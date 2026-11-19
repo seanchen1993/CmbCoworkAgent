@@ -6,10 +6,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 vi.mock("../services/system-constraint-read-reporter", () => ({
   recordSystemConstraintRead: vi.fn()
 }))
+vi.mock("../services/harness-deploy-unit-attribution", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/harness-deploy-unit-attribution")>()),
+  loadHarnessDeployUnitSnapshot: vi.fn(async () => null)
+}))
 
 import { recordSystemConstraintRead } from "../services/system-constraint-read-reporter"
 import { LocalSandbox, executeTraceContext, type LocalSandboxOptions } from "./local-sandbox"
 import type { TraceContext } from "./trace/types"
+import { loadHarnessDeployUnitSnapshot } from "../services/harness-deploy-unit-attribution"
 
 const temporaryRoots: string[] = []
 
@@ -61,6 +66,7 @@ async function createSandboxFixture(sandboxOptions: Partial<LocalSandboxOptions>
 
 beforeEach(() => {
   vi.mocked(recordSystemConstraintRead).mockClear()
+  vi.mocked(loadHarnessDeployUnitSnapshot).mockReset().mockResolvedValue(null)
 })
 
 afterEach(async () => {
@@ -70,6 +76,25 @@ afterEach(async () => {
 })
 
 describe("LocalSandbox system-constraint telemetry", () => {
+  it("captures a stable binding for each trace's successful reads, without local paths", async () => {
+    vi.mocked(loadHarnessDeployUnitSnapshot).mockResolvedValue({
+      ids: ["a"],
+      mappings: [{ deployUnitId: "a", localRepoPath: "/private/code" }]
+    })
+    const { sandbox, constraintPath, outsidePath } = await createSandboxFixture()
+    await sandbox.read(outsidePath)
+    expect(loadHarnessDeployUnitSnapshot).not.toHaveBeenCalled()
+    await sandbox.read(constraintPath)
+    vi.mocked(loadHarnessDeployUnitSnapshot).mockResolvedValue(null)
+    await sandbox.read(constraintPath)
+    expect(loadHarnessDeployUnitSnapshot).toHaveBeenCalledTimes(1)
+    const calls = vi.mocked(recordSystemConstraintRead).mock.calls
+    expect(calls).toHaveLength(2)
+    for (const [call] of calls) {
+      expect(call.harnessDeployUnitIds).toEqual(["a"])
+      expect(JSON.stringify(call)).not.toContain("/private/code")
+    }
+  })
   it("records only after read_file actually returns constraint content", async () => {
     const { sandbox, constraintPath, emptyConstraintPath, outsidePath } =
       await createSandboxFixture()

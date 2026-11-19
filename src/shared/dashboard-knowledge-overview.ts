@@ -51,6 +51,21 @@ export interface KnowledgeActiveDetails {
   unavailableReason?: DashboardKnowledgeCommitRateUnavailableReason
 }
 
+export interface KnowledgeUserDetail {
+  userName: string
+  roomName: string
+  totalNum: number
+  abandonedNum: number
+  recentNum: number
+  updateActiveNum: number
+  readActiveNum: number
+}
+
+export interface KnowledgeUserDetails {
+  items: KnowledgeUserDetail[]
+  unavailableReason?: DashboardKnowledgeCommitRateUnavailableReason
+}
+
 export interface KnowledgeReadFile {
   filePath: string
   pluginId: string

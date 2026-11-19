@@ -567,12 +567,27 @@ function testClearOnEveryRunExit(): void {
     "export async function cancelAndWaitForAgentThreadRun("
   )
   assert(foregroundDeleteStart >= 0, "foreground thread deletion helper exists")
-  const foregroundDeleteBody = agentIpc.slice(foregroundDeleteStart, foregroundDeleteStart + 900)
+  const foregroundDeleteBody = agentIpc.slice(
+    foregroundDeleteStart,
+    agentIpc.indexOf("async function waitForReplacedRunToSettle", foregroundDeleteStart)
+  )
   assertSourceOrder(
     foregroundDeleteBody,
     "controller.abort()",
-    "return waitForReplacedRunToSettle(threadId)",
+    "waitForReplacedRunToSettle(threadId)",
     "thread deletion aborts and bounded-waits for its foreground run"
+  )
+  assertSourceOrder(
+    foregroundDeleteBody,
+    "LocalSandbox.cancelBackgroundTasksWithin(",
+    "if (!controller) return (await shellSettlement)",
+    "thread deletion waits for detached Bash even when no foreground run is active"
+  )
+  assertSourceOrder(
+    threadsIpc,
+    'if (runOutcome === "shell_timed_out")',
+    "clearToolConcurrencyLocksForThread(threadId)",
+    "thread deletion stops on a shell settlement timeout before tearing down its runtime"
   )
   const deletedRuntimeStart = agentIpc.indexOf("export function disposeDeletedAgentThreadRuntime(")
   assert(deletedRuntimeStart >= 0, "deleted-thread runtime cleanup exists")
@@ -1507,7 +1522,7 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   const forkBoundaryHelperStart = agentIpc.indexOf("async function markLatestForkBoundary(")
   const forkBoundaryHelperBody = agentIpc.slice(
     forkBoundaryHelperStart,
-    forkBoundaryHelperStart + 2800
+    agentIpc.indexOf("async function markLatestForkBoundaryBestEffort(", forkBoundaryHelperStart)
   )
   assertIncludes(
     forkBoundaryHelperBody,
@@ -1558,8 +1573,8 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     )
   }
   assert(
-    forkBoundaryCallIndexes.length === 7,
-    `all terminal boundary calls are physical-run scoped: got ${forkBoundaryCallIndexes.length}`
+    forkBoundaryCallIndexes.length === 3,
+    `all completion boundary calls are physical-run scoped: got ${forkBoundaryCallIndexes.length}`
   )
   for (const index of forkBoundaryCallIndexes) {
     const callBody = agentIpc.slice(index, index + 380)
@@ -1570,6 +1585,20 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
       "fork boundary call carries its controller"
     )
   }
+  const settlementStart = agentIpc.indexOf("async function settlePhysicalAgentRun({")
+  const settlement = agentIpc.slice(settlementStart, settlementStart + 8_000)
+  assertSourceOrder(
+    settlement,
+    'name: "flush-stream-transcript"',
+    'name: "persist-interrupted-fork-boundary"',
+    "interrupted forks see all transcript rows committed by settlement"
+  )
+  assertSourceOrder(
+    settlement,
+    'name: "persist-interrupted-fork-boundary"',
+    'name: "release-active-controller"',
+    "interrupted forks are marked under the originating controller"
+  )
 
   const completionBoundaryMarker = 'source: "agent_run_complete"'
   const completionBoundaryIndexes: number[] = []

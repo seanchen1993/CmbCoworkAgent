@@ -20,6 +20,7 @@
 
 import { classifyApiError, type ApiErrorCode } from "../agent/failover"
 import { hasFailedCommandResult } from "../../shared/command-result"
+import { isShellTaskMonitorToolName } from "../agent/shell-task-monitor"
 
 export type ToolFailureKind =
   | "throw"
@@ -42,10 +43,7 @@ export interface ToolFailureSignal {
  * is intentionally permissive (covers many ad-hoc shapes) because tools in
  * this codebase have no schema for their return values.
  */
-export function detectToolFailure(
-  _toolName: string,
-  toolResult: unknown
-): ToolFailureSignal | null {
+export function detectToolFailure(toolName: string, toolResult: unknown): ToolFailureSignal | null {
   if (toolResult === null || toolResult === undefined) return null
 
   // PR-12 follow-up — plain-string results. The execute tool (deepagents)
@@ -56,7 +54,16 @@ export function detectToolFailure(
   // failed) with exit code N]" marker — only "failed" (and any explicit
   // non-zero code) triggers; bare "succeeded" returns null.
   if (typeof toolResult === "string") {
-    if (hasFailedCommandResult(toolResult)) {
+    // Shell monitors append their own terminal line after arbitrary command output.
+    const match = isShellTaskMonitorToolName(toolName)
+      ? /^\[Command (succeeded|failed) with exit code (-?\d+|null), elapsed: \d+s\]$/.exec(
+          toolResult.slice(toolResult.lastIndexOf("\n") + 1)
+        )
+      : null
+    const failed = isShellTaskMonitorToolName(toolName)
+      ? !!match && (match[1] === "failed" || (match[2] !== "null" && Number(match[2]) !== 0))
+      : hasFailedCommandResult(toolResult)
+    if (failed) {
       const truncated = toolResult.length > 500 ? toolResult.slice(0, 500) + "…" : toolResult
       return {
         kind: "exit-nonzero",
@@ -96,6 +103,19 @@ export function detectToolFailure(
 }
 
 /**
+ * Build the signal for an interrupted tool using its observed message.
+ */
+export function toolFailureSignalFromAbort(message: string): ToolFailureSignal {
+  return {
+    kind: "abort",
+    message,
+    errorType: "unknown",
+    isInterrupt: true,
+    isTimeout: false
+  }
+}
+
+/**
  * Build the signal for a thrown JS error. Called from toolErrorMiddleware.
  */
 export function toolFailureSignalFromThrow(
@@ -103,14 +123,7 @@ export function toolFailureSignalFromThrow(
   opts: { aborted?: boolean } = {}
 ): ToolFailureSignal {
   if (opts.aborted) {
-    const msg = err instanceof Error ? err.message : String(err)
-    return {
-      kind: "abort",
-      message: msg,
-      errorType: "unknown",
-      isInterrupt: true,
-      isTimeout: false
-    }
+    return toolFailureSignalFromAbort(err instanceof Error ? err.message : String(err))
   }
   const isTimeout =
     err instanceof Error &&

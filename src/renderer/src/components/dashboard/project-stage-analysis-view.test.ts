@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
   formatStageDuration,
+  formatProjectElapsed,
   resolveSlowestAvgStage,
   stageDurationShare,
   SLOWEST_AVG_MIN_CONVERSATIONS
@@ -106,4 +107,11 @@ describe("阶段占比", () => {
     // 阶段之和可能因为 terms 截断而对不上 total，别让进度条溢出。
     expect(stageDurationShare(1200, 1000)).toBe(1)
   })
+})
+
+it("formats project elapsed time across days and keeps missing data distinct from short runs", () => {
+  expect(formatProjectElapsed(90_180_000)).toBe("1天 1小时 3分钟")
+  expect(formatProjectElapsed(0)).toBe("不足1分钟")
+  expect(formatProjectElapsed(null)).toBe("—")
+  expect(formatProjectElapsed(-1)).toBe("—")
 })
