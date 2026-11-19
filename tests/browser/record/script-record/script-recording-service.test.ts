@@ -1466,6 +1466,23 @@ test("recorded script flow", async ({ page }) => {
     })
   })
 
+  it("keeps a user-issued navigation when no successful load event follows", () => {
+    startScriptRecording({ threadId: "thread-1" })
+
+    // BrowserService records this before awaiting loadURL because Chromium can
+    // reject a redirected or superseded request with ERR_ABORTED.
+    recordScriptNavigation("https://example.com/requested", "explicit")
+
+    const session = stopScriptRecording()
+    expect(session.actions).toEqual([
+      expect.objectContaining({
+        kind: "navigate",
+        url: "https://example.com/requested"
+      })
+    ])
+    expect(session.script).toContain("await page.goto('https://example.com/requested');")
+  })
+
   it("records implicit navigation after an untargeted explicit navigation mark", () => {
     startScriptRecording({ threadId: "thread-1" })
 

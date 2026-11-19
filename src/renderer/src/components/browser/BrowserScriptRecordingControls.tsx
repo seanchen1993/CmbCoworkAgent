@@ -358,7 +358,6 @@ export function BrowserScriptRecordingControls({
       setScriptRecording(nextSession)
       setIsRecordingEdited(false)
       setHasPendingUnsaved(false)
-      toast.success("操作录制已开始。请直接在内置浏览器里操作页面。")
     } catch (error) {
       console.error(
         `[BrowserScriptRecordingControls] Failed to start script recording: ${formatError(error)}`
@@ -375,7 +374,6 @@ export function BrowserScriptRecordingControls({
       const nextSession = await window.api.browser.pauseScriptRecording(getPanelWidth?.())
       setScriptRecording(nextSession)
       setRecordingDialogOpen(true)
-      toast.success("操作录制已暂停")
     } catch (error) {
       console.error(
         `[BrowserScriptRecordingControls] Failed to pause script recording: ${formatError(error)}`
@@ -392,7 +390,6 @@ export function BrowserScriptRecordingControls({
       if (!(await persistActiveDraftIfNeeded())) return
       const nextSession = await window.api.browser.resumeScriptRecording()
       setScriptRecording(nextSession)
-      toast.success("操作录制已继续")
     } catch (error) {
       console.error(
         `[BrowserScriptRecordingControls] Failed to resume script recording: ${formatError(error)}`
@@ -414,11 +411,6 @@ export function BrowserScriptRecordingControls({
       setScriptRecording(nextSession)
       setHasPendingUnsaved(true)
       setRecordingDialogOpen(true)
-      if (nextSession.actions.length > 0) {
-        toast.success(`操作录制已停止，已生成 ${nextSession.actions.length} 个步骤。`)
-      } else {
-        toast.warning("操作录制已停止，但还没有采集到可生成自动化脚本的页面操作。")
-      }
     } catch (error) {
       console.error(
         `[BrowserScriptRecordingControls] Failed to stop script recording: ${formatError(error)}`
@@ -964,7 +956,6 @@ export function BrowserScriptRecordingControls({
         setHasPendingUnsaved(false)
         setScriptLibraryOpen(false)
         setRecordingDialogOpen(false)
-        toast.success(`${getRecordingLabel("script")}已从当前操作继续`)
       } catch (error) {
         console.error(
           `[BrowserScriptRecordingControls] Failed to continue library script ${entry.fileName}: ${formatError(error)}`

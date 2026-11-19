@@ -828,8 +828,11 @@ export class BrowserService {
 
     try {
       session.error = undefined
-      await session.view.webContents.loadURL(url)
+      // Record the user-issued navigation before awaiting Chromium. loadURL may
+      // reject with ERR_ABORTED for redirects or a superseding navigation even
+      // though this is still a real, replayable user action.
       recordScriptNavigation(url, "explicit")
+      await session.view.webContents.loadURL(url)
     } catch (error) {
       // A following navigate call or an HTTP redirect can cancel the previous
       // load. Electron rejects loadURL with ERR_ABORTED even though the next
