@@ -60,6 +60,7 @@ export default defineConfig({
       "src/renderer/src/components/harness-board/harness-board-render-window.test.ts",
       "src/renderer/src/components/harness-board/harness-settings-lazy.test.ts",
       "src/renderer/src/components/harness-board/knowledge-preview-lazy.test.ts",
+      "src/renderer/src/components/harness-board/project-dialog-plugin-visibility.test.ts",
       "src/renderer/src/components/tabs/file-preview-isolation.test.ts",
       "src/renderer/src/components/sidebar/thread-sidebar-window.test.ts",
       "src/renderer/src/lib/bounded-chat-search-text.test.ts",
