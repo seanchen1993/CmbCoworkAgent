@@ -264,8 +264,7 @@ async function main() {
         name: "记忆链路测试",
         instructions: "帮助整理文档。已误写的临时测试信息。",
         color: "#168bea",
-        modelRef: "custom:memory-fixture",
-        memoryMode: "inherit"
+        modelRef: "custom:memory-fixture"
       })
     }, `http://127.0.0.1:${address.port}/v1`)
     const idle = () =>
@@ -277,6 +276,20 @@ async function main() {
           )
       )
     await idle()
+    assert.equal(bot.memoryMode, "enabled")
+    const appMemorySettings = () => page.evaluate(async () => ({
+      global: await window.api.memory.getEnabled(),
+      project: await window.api.memory.getProjectModeEnabled()
+    }))
+    const initialSettings = await appMemorySettings()
+    assert.equal(initialSettings.global, false)
+    const setBotMemory = (memoryMode: "enabled" | "disabled") =>
+      page.evaluate(async ({ id, memoryMode }) => {
+        const { bots } = window.api
+        const current = (await bots.snapshot()).bots.find((b) => b.id === id)
+        if (!current) throw new Error("Fixture Bot missing")
+        return bots.update({ ...current, memoryMode, expectedVersion: current.version })
+      }, { id: bot.id, memoryMode })
     const send = async (message: string, whileRunning?: (id: string) => Promise<void>) => {
       const task = await page.evaluate(
         ({ botId, message }) =>
@@ -300,6 +313,17 @@ async function main() {
       assert.ok(row)
       assert.equal(row.state, "completed", JSON.stringify(row))
     }
+    const checkDefault = async () => {
+      const message = "查看当前 Bot 的长期记忆设置。"
+      const start = calls.length
+      await send(message)
+      const turn = calls.slice(start).find((call) => call.user.startsWith(message) && call.tools.length)
+      assert.ok(turn, "default Bot should reach the model")
+      for (const name of memoryTools) assert.ok(turn.tools.includes(name), name)
+      assert.ok(!turn.tools.includes("memory_search"), "application memory must stay separate")
+    }
+    await checkDefault()
+    assert.equal((await setBotMemory("disabled")).memoryMode, "disabled")
     await send("MM_OFF：查看当前记忆状态。")
     if (legacy) {
       await app!.close()
@@ -319,16 +343,11 @@ async function main() {
       )
       assert.ok(migrated)
       assert.equal(migrated.threadId, bot.threadId)
-      assert.equal(migrated.memoryMode, "inherit")
-      await send("MM_OFF：升级后查看当前记忆状态。")
+      assert.equal(migrated.memoryMode, "enabled")
+      await checkDefault()
     }
-    const savedBot = await page.evaluate(async (id) => {
-      const api = window.api,
-        b = (await api.bots.snapshot()).bots.find((b) => b.id === id)
-      if (!b) throw new Error("Fixture Bot missing")
-      return api.bots.update({ ...b, memoryMode: "enabled", expectedVersion: b.version })
-    }, bot.id)
-    assert.equal(savedBot.memoryMode, "enabled")
+    if (!legacy) assert.equal((await setBotMemory("enabled")).memoryMode, "enabled")
+    assert.deepEqual(await appMemorySettings(), initialSettings)
     await send("MM_CREATE：恢复职责为帮助整理文档，然后记住我偏好先给结论再给细节。")
     const restored = await page.evaluate(
       async (id) => (await window.api.bots.snapshot()).bots.find((b) => b.id === id),
@@ -367,6 +386,7 @@ async function main() {
       !JSON.stringify(transcript).includes(OPENING_REPLY_REMINDER),
       "the internal cue is not chat history"
     )
+    assert.deepEqual(await appMemorySettings(), initialSettings)
     assert.deepEqual(errors, [])
     console.log(
       "PASS: silent tools → ephemeral opening reminder → visible update while running → continued tools and final result"

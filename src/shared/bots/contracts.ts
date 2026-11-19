@@ -49,7 +49,7 @@ export const BOT_AVATAR_SHAPES = [
 ] as const
 export type BotAvatarShape = (typeof BOT_AVATAR_SHAPES)[number]
 
-export const BOT_MEMORY_MODES = ["inherit", "enabled", "disabled"] as const
+export const BOT_MEMORY_MODES = ["enabled", "disabled"] as const
 export type BotMemoryMode = (typeof BOT_MEMORY_MODES)[number]
 
 export interface BotHostInfo {
@@ -67,7 +67,7 @@ export interface BotDefinition {
   name: string
   instructions: string
   modelRef: string | null
-  /** Missing on older clients; explicit values override the global long-term memory setting. */
+  /** Bot-scoped long-term memory. Defaults to enabled when omitted. */
   memoryMode?: BotMemoryMode
   /** null/omitted: all enabled skills; []: none; names are portable template references. */
   allowedSkillNames?: string[] | null

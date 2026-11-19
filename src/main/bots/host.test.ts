@@ -282,7 +282,7 @@ describe("Bot control state", () => {
     expect(archive().archived).toBe(true)
   })
 
-  it("upgrades old Bots to inherited memory and preserves explicit overrides across older-client edits and reopening", () => {
+  it("defaults old and new Bots to enabled and preserves explicit settings across legacy edits and reopening", () => {
     const raw = new NativeSqliteAdapter(new DatabaseSync(":memory:"))
     databases.push(raw)
     raw.run(`CREATE TABLE bots (
@@ -294,7 +294,7 @@ describe("Bot control state", () => {
     INSERT INTO bots VALUES ('legacy', 'legacy-thread', 'Legacy', '', NULL, '#123456', 0, 1, 1, 1)`)
     const db = new BotStore(raw)
     const legacy = db.getBot("legacy")
-    expect(legacy.memoryMode).toBe("inherit")
+    expect(legacy.memoryMode).toBe("enabled")
     const enabled = db.create(parseCreateBot({ ...input, memoryMode: "enabled" }))
     const disabled = db.update(
       parseUpdateBot({
@@ -314,15 +314,25 @@ describe("Bot control state", () => {
       })
     )
     expect(renamed.memoryMode).toBe("disabled")
-    expect(new BotStore(raw).getBot(enabled.id).memoryMode).toBe("enabled")
-    expect(new BotStore(raw).getBot(renamed.id).memoryMode).toBe("disabled")
-    expect(db.create(input).memoryMode).toBe("inherit")
+    const inherited = db.create(input)
+    expect(inherited.memoryMode).toBe("enabled")
+    // Reopen a database written by a client with the former three-state setting.
+    raw.run("UPDATE bots SET memory_mode='inherit' WHERE id=?", [inherited.id])
+    const reopened = new BotStore(raw)
+    expect(reopened.getBot(inherited.id).memoryMode).toBe("enabled")
+    expect(raw.exec("SELECT memory_mode FROM bots WHERE id=?", [inherited.id])[0].values).toEqual([
+      ["enabled"]
+    ])
+    expect(reopened.getBot(enabled.id).memoryMode).toBe("enabled")
+    expect(reopened.getBot(renamed.id).memoryMode).toBe("disabled")
+    const legacyCreate = parseCreateBot({ ...input, memoryMode: "inherit" })
+    expect(reopened.create(legacyCreate).memoryMode).toBe("enabled")
+    const legacyEdit = { ...renamed, memoryMode: "inherit" }
     expect(() =>
-      db.update({ ...renamed, expectedVersion: disabled.version, memoryMode: "inherit" })
+      reopened.update(parseUpdateBot({ ...legacyEdit, expectedVersion: disabled.version }))
     ).toThrow("已被修改")
-    expect(
-      db.update({ ...renamed, expectedVersion: renamed.version, memoryMode: "inherit" }).memoryMode
-    ).toBe("inherit")
+    const updated = reopened.update(parseUpdateBot({ ...legacyEdit, expectedVersion: renamed.version }))
+    expect(updated.memoryMode).toBe("disabled")
     for (const value of [null, true, "on", ""]) {
       expect(() => parseCreateBot({ ...input, memoryMode: value })).toThrow("长期记忆")
       expect(() =>

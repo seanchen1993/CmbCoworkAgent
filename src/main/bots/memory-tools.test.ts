@@ -53,15 +53,17 @@ it("exposes only shared and current-group facts and preserves error receipts on 
   expect(JSON.parse(saved.content).scope).toEqual({ kind: "group", groupId: "g" })
 })
 
-function tools(signal = new AbortController().signal, allowDelete = true) {
-  return createBotMemoryTools(bot, memory, signal, allowDelete)
+function tools(
+  signal = new AbortController().signal,
+  allowDelete = true,
+  memoryMode?: BotDefinition["memoryMode"]
+) {
+  return createBotMemoryTools({ ...bot, memoryMode }, memory, signal, allowDelete)
 }
 
 it.each([
-  [undefined, false, false],
+  [undefined, false, true],
   [undefined, true, true],
-  ["inherit", false, false],
-  ["inherit", true, true],
   ["enabled", false, true],
   ["enabled", true, true],
   ["disabled", false, false],
@@ -168,11 +170,10 @@ it("rejects stale versions, disabled memory and cancellation without losing the 
   await expect(
     forget.invoke({ id: original.id, expectedVersion: original.version })
   ).rejects.toThrow("更新")
-  flags.enabled = false
-  await expect(forget.invoke({ id: entry.id, expectedVersion: entry.version })).rejects.toThrow(
-    "关闭"
-  )
-  flags.enabled = true
+  const disabledForget = tools(controller.signal, true, "disabled")
+    .find((tool) => tool.name === "bot_forget")!
+  await expect(disabledForget.invoke({ id: entry.id, expectedVersion: entry.version }))
+    .rejects.toThrow("关闭")
   controller.abort(new Error("cancelled"))
   await expect(forget.invoke({ id: entry.id, expectedVersion: entry.version })).rejects.toThrow(
     "cancelled"
@@ -197,8 +198,7 @@ it("preserves disabled, missing and conflicting memory operations as error ToolM
     bot_remember: { name: "New", content: "Must not be saved" },
     bot_forget: { id: entry.id, expectedVersion: entry.version }
   }
-  flags.enabled = false
-  for (const tool of all) {
+  for (const tool of tools(undefined, true, "disabled")) {
     const result = await tool.invoke({
       type: "tool_call",
       id: `disabled-${tool.name}`,
@@ -209,7 +209,6 @@ it("preserves disabled, missing and conflicting memory operations as error ToolM
     expect(result.tool_call_id).toBe(`disabled-${tool.name}`)
     expect(result.content).toContain("关闭")
   }
-  flags.enabled = true
   for (const [name, input] of [
     ["bot_memory_get", { id: "missing" }],
     [

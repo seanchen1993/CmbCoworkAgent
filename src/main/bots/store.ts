@@ -588,7 +588,9 @@ export class BotStore {
       )
         db.run("ALTER TABLE bots ADD COLUMN allowed_skill_names_json TEXT")
       if (!this.rows("PRAGMA table_info(bots)").some((column) => column.name === "memory_mode"))
-        db.run("ALTER TABLE bots ADD COLUMN memory_mode TEXT NOT NULL DEFAULT 'inherit'")
+        db.run("ALTER TABLE bots ADD COLUMN memory_mode TEXT NOT NULL DEFAULT 'enabled'")
+      else
+        db.run("UPDATE bots SET memory_mode='enabled' WHERE memory_mode='inherit'")
       if (
         !this.rows("PRAGMA table_info(bots)").some(
           (column) => column.name === "introduction_pending"
@@ -1163,7 +1165,7 @@ export class BotStore {
       name: String(row.name),
       instructions: String(row.instructions),
       modelRef: row.model_ref == null ? null : String(row.model_ref),
-      memoryMode: (row.memory_mode ?? "inherit") as BotDefinition["memoryMode"],
+      memoryMode: row.memory_mode === "disabled" ? "disabled" : "enabled",
       allowedSkillNames:
         row.allowed_skill_names_json == null
           ? null
@@ -2731,7 +2733,7 @@ export class BotStore {
           input.color,
           input.shape ?? "drop",
           input.label ?? "",
-          input.memoryMode ?? "inherit",
+          input.memoryMode ?? "enabled",
           input.allowedSkillNames == null
             ? null
             : JSON.stringify(parseBotSkillNames(input.allowedSkillNames)),
@@ -2832,7 +2834,7 @@ export class BotStore {
           input.color,
           input.shape ?? bot.shape ?? "drop",
           input.label ?? bot.label ?? "",
-          input.memoryMode ?? bot.memoryMode ?? "inherit",
+          input.memoryMode ?? bot.memoryMode ?? "enabled",
           JSON.stringify(
             input.allowedSkillNames === undefined
               ? bot.allowedSkillNames ?? null

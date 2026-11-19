@@ -62,53 +62,50 @@ createRoot(document.getElementById("root")).render(<App/>);
     page.on("pageerror", (error) => errors.push(error.message))
     await page.setContent('<div id="root"></div>')
     await page.addScriptTag({ content: result.outputFiles[0].text })
-    const setting = page.getByRole("combobox", { name: "记忆配置", exact: true })
+    const setting = page.getByRole("switch", { name: "Bot 长期记忆" })
     await setting.waitFor()
-    assert.equal(await setting.textContent(), "跟随全局")
-    const change = async (label: string) => {
-      await setting.click()
-      await page.getByRole("option", { name: label, exact: true }).click()
-    }
-    await change("开启")
+    assert.equal(await setting.isChecked(), true)
+    assert.equal(await page.getByText("跟随全局", { exact: true }).count(), 0)
+    await setting.click()
     await page.waitForFunction(
-      () => (window as FixtureWindow).fixture.bots[0].memoryMode === "enabled"
+      () => (window as FixtureWindow).fixture.bots[0].memoryMode === "disabled"
     )
-    assert.equal(await setting.textContent(), "开启")
+    assert.equal(await setting.isChecked(), false)
     const saved = await page.evaluate(() => (window as FixtureWindow).fixture.updates[0])
     assert.equal(saved.id, "a")
+    assert.equal(saved.memoryMode, "disabled")
     assert.equal(saved.expectedVersion, 1)
     assert.equal(saved.instructions, "Synthetic role")
 
     await page.getByRole("button", { name: "切换测试 Bot" }).click()
     await page.getByText("Saved preference b", { exact: true }).waitFor()
-    assert.equal(await setting.textContent(), "关闭")
+    assert.equal(await setting.isChecked(), false)
     await page.getByRole("button", { name: "编辑 Saved preference b" }).click()
     assert.equal(await page.locator("textarea").inputValue(), "Durable content b")
     await page.getByRole("button", { name: "取消", exact: true }).click()
     await page.getByRole("button", { name: "切换测试 Bot" }).click()
     await page.getByText("Saved preference a", { exact: true }).waitFor()
-    assert.equal(await setting.textContent(), "开启")
+    assert.equal(await setting.isChecked(), false)
 
     await page.evaluate(() => {
       ;(window as FixtureWindow).fixture.fail = true
     })
-    await change("关闭")
+    await setting.click()
     await page.getByRole("alert").filter({ hasText: "请先停止当前任务" }).waitFor()
-    assert.equal(await setting.textContent(), "开启")
-    await change("关闭")
+    assert.equal(await setting.isChecked(), false)
+    await setting.focus()
+    await page.keyboard.press("Space")
     await page.waitForFunction(
-      () => (window as FixtureWindow).fixture.bots[0].memoryMode === "disabled"
+      () => (window as FixtureWindow).fixture.bots[0].memoryMode === "enabled"
     )
-    assert.equal(await setting.textContent(), "关闭")
+    assert.equal(await setting.isChecked(), true)
     assert.equal(await page.getByText("Saved preference a", { exact: true }).count(), 1)
-    await change("跟随全局")
-    await page.waitForFunction(
-      () => (window as FixtureWindow).fixture.bots[0].memoryMode === "inherit"
-    )
-    assert.equal(await setting.textContent(), "跟随全局")
+    await page.getByRole("button", { name: "切换测试 Bot" }).click()
+    await page.getByText("Saved preference b", { exact: true }).waitFor()
+    assert.equal(await setting.isChecked(), false)
     assert.deepEqual(errors, [])
     console.log(
-      "Bot memory settings: override, persistence, isolation, retained entries and failed save passed"
+      "Bot memory settings: default on, toggling, isolation, retained entries and failed save passed"
     )
   } finally {
     await browser.close()

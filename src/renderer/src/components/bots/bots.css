@@ -826,15 +826,6 @@
 .bot-memory-navigation > button:hover:not(:disabled) {
   color: var(--bot-text);
 }
-.bot-memory-config-trigger {
-  color: var(--bot-muted);
-  flex-shrink: 0;
-}
-.bot-memory-config-trigger:hover:not(:disabled),
-.bot-memory-config-trigger[data-state="open"] {
-  color: var(--bot-text);
-  background: var(--bot-hover);
-}
 .bot-memory-entry-heading {
   display: flex;
   align-items: center;

@@ -1,6 +1,6 @@
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
-import { getGlobalRoutingMode, isMemoryEnabled } from "../storage"
+import { getGlobalRoutingMode } from "../storage"
 import { resolveModel } from "../routing"
 import { getModelConfigByRef, getDefaultModelConfig } from "../models/registry"
 import { SelectedModelUnavailableError } from "../models/selection-error"
@@ -89,14 +89,12 @@ function isApproved(content: unknown, userText: string, operationCount: number):
 /** Reuse original extraction and routing; the Bot verifies scope before its versioned commit. */
 export function createBotMemoryMaintainer(
   memory: BotMemoryService,
-  isActive: (botId: string, version?: number) => boolean,
-  memoryEnabled: (botId: string) => boolean = () => isMemoryEnabled()
+  canSummarize: (botId: string, version?: number) => boolean
 ): BotMemoryMaintainer {
   return new BotMemoryMaintainer(async (batch, signal) => {
     const eligible = () =>
       !signal.aborted &&
-      isActive(batch.botId, batch.botVersion) &&
-      memoryEnabled(batch.botId) &&
+      canSummarize(batch.botId, batch.botVersion) &&
       memory.editVersion(batch.botId) === batch.editVersion
     if (!eligible()) return
     const routingMode = getGlobalRoutingMode()

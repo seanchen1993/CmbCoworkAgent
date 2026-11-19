@@ -148,12 +148,15 @@ export function getLocalBotHost(): LocalBotHost {
         try {
           // A settings change also invalidates an already queued/in-flight summary.
           const bot = host.getBot(id)
-          return !bot.archived && (version === undefined || bot.version === version)
+          return (
+            !bot.archived &&
+            isBotMemoryEnabled(bot) &&
+            (version === undefined || bot.version === version)
+          )
         } catch {
           return false
         }
-      },
-      (id) => isBotMemoryEnabled(host!.getBot(id))
+      }
     )
     const store = new BotStore(
         database,

@@ -3775,12 +3775,12 @@ describe("Bot Runtime integration", () => {
     expect(prompt).not.toContain("Three sections")
     expect(JSON.parse(fixture.update.mock.calls.at(-1)![1].metadata).memoryEnabled).toBe(false)
   })
-  it("does not read or inject saved facts when the global memory setting is off", async () => {
-    fixture.memoryEnabled = false
+  it("does not read or inject saved facts when Bot memory is off", async () => {
+    fixture.memoryEnabled = true
     fixture.memorySnapshot.mockImplementationOnce(() => {
       throw new Error("Disabled memory must not be read")
     })
-    await port().acquire(bot, task)!.execute(new AbortController().signal, vi.fn())
+    await port().acquire({ ...bot, memoryMode: "disabled" }, task)!.execute(new AbortController().signal, vi.fn())
     expect(fixture.memorySnapshot).not.toHaveBeenCalled()
     expect(fixture.start.mock.calls[0][2].extraSystemPrompt).not.toContain(
       "Scoped Bot memory reference"
@@ -3789,8 +3789,8 @@ describe("Bot Runtime integration", () => {
   it.each([
     ["enabled", false, true],
     ["disabled", true, false],
-    ["inherit", false, false],
-    ["inherit", true, true]
+    [undefined, false, true],
+    [undefined, true, true]
   ] as const)(
     "uses Bot memory %s over global %s for the whole private turn",
     async (memoryMode, global, enabled) => {

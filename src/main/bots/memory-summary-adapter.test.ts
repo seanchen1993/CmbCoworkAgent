@@ -74,8 +74,8 @@ describe("Bot automatic memory verification", () => {
   it.each([
     ["enabled", false, true],
     ["disabled", true, false],
-    ["inherit", false, false],
-    ["inherit", true, true]
+    [undefined, false, true],
+    [undefined, true, true]
   ] as const)(
     "uses Bot memory %s over global %s before extraction and commit",
     async (memoryMode, global, enabled) => {
@@ -85,7 +85,6 @@ describe("Bot automatic memory verification", () => {
       fixture.extraction.mockImplementation(async (options) => options.apply([preference]))
       const maintainer = createBotMemoryMaintainer(
         memory,
-        () => true,
         () => isBotMemoryEnabled({ memoryMode })
       )
       try {
@@ -122,8 +121,7 @@ describe("Bot automatic memory verification", () => {
       )
       const maintainer = createBotMemoryMaintainer(
         memory,
-        (_id, expected) => expected === version,
-        () => enabled
+        (_id, expected) => expected === version && enabled
       )
       try {
         maintainer.enqueue({ ...turn, editVersion: 0, botVersion: version })
@@ -362,6 +360,7 @@ describe("Bot automatic memory verification", () => {
       const entry = memory.write("a", { name: "Existing preference", content: "Prefer blue" })
       const apply = vi.spyOn(memory, "applySummary")
       let active = true
+      let memoryEnabled = true
       let finish!: () => void
       let started!: () => void
       const pending = new Promise<void>((resolve) => (started = resolve))
@@ -378,7 +377,7 @@ describe("Bot automatic memory verification", () => {
           })
       )
       const warning = vi.spyOn(console, "error").mockImplementation(() => {})
-      const maintainer = createBotMemoryMaintainer(memory, () => active)
+      const maintainer = createBotMemoryMaintainer(memory, () => active && memoryEnabled)
       try {
         maintainer.enqueue({ ...turn, editVersion: memory.editVersion("a") })
         await pending
@@ -386,7 +385,7 @@ describe("Bot automatic memory verification", () => {
           memory.write("a", { ...entry, expectedVersion: entry.version, content: "Prefer red" })
         if (change === "delete") memory.remove("a", entry.id, entry.version)
         if (change === "archive") active = false
-        if (change === "disable") fixture.enabled = false
+        if (change === "disable") memoryEnabled = false
         const expected = memory.list("a")
         const closing = change === "close" ? maintainer.close() : undefined
         finish()
@@ -542,7 +541,8 @@ describe("Bot memory extraction wiring", () => {
     fixture.extraction.mockImplementation(async (options) => {
       commit = options.apply
     })
-    const maintainer = createBotMemoryMaintainer(memory, () => true)
+    let memoryEnabled = true
+    const maintainer = createBotMemoryMaintainer(memory, () => memoryEnabled)
     maintainer.enqueue(turn)
     await tick()
     expect(fixture.extraction).toHaveBeenCalledWith(
@@ -556,7 +556,7 @@ describe("Bot memory extraction wiring", () => {
     )
     commit!([])
     expect(apply).not.toHaveBeenCalled()
-    fixture.enabled = false
+    memoryEnabled = false
     commit!([])
     maintainer.enqueue(turn)
     await tick()
@@ -587,6 +587,7 @@ describe("Bot memory extraction wiring", () => {
       const entry = memory.write("a", { name: "Synthetic preference", content: "Prefer blue" })
       const apply = vi.spyOn(memory, "applySummary")
       let active = true
+      let memoryEnabled = true
       let finish: (() => void) | undefined
       let started!: () => void
       const pending = new Promise<void>((resolve) => (started = resolve))
@@ -609,7 +610,7 @@ describe("Bot memory extraction wiring", () => {
             started()
           })
       )
-      const maintainer = createBotMemoryMaintainer(memory, () => active)
+      const maintainer = createBotMemoryMaintainer(memory, () => active && memoryEnabled)
       try {
         maintainer.enqueue({ ...turn, editVersion: memory.editVersion("a") })
         await pending
@@ -617,7 +618,7 @@ describe("Bot memory extraction wiring", () => {
           memory.write("a", { ...entry, expectedVersion: entry.version, content: "Prefer red" })
         if (change === "delete") memory.remove("a", entry.id, entry.version)
         if (change === "archive") active = false
-        if (change === "disable") fixture.enabled = false
+        if (change === "disable") memoryEnabled = false
         const expected = memory.list("a")
         const closing = change === "close" ? maintainer.close() : undefined
         finish!()

@@ -1,10 +1,11 @@
 import { botMemoryScopeLabel, type BotMemoryScope } from "../../../../shared/bots/memory-scope"
 import { botErrorMessage } from "@/lib/bot-error-message"
 import { useEffect, useId, useRef, useState } from "react"
-import { ArrowLeft, Check, Loader2, MoreHorizontal, Plus, Share2, Trash2, X } from "lucide-react"
+import { ArrowLeft, Check, Loader2, MoreHorizontal, Pencil, Plus, Share2, Trash2, X } from "lucide-react"
 import * as Menu from "@radix-ui/react-dropdown-menu"
 import { BotDetailCard } from "./BotDetailsPane"
 import { Button } from "@/components/ui/button"
+import { Switch } from "@/components/ui/switch"
 import {
   Select,
   SelectContent,
@@ -18,12 +19,6 @@ import type {
   BotMemory,
   BotMemoryMode
 } from "../../../../shared/bots/contracts"
-
-const memoryDescriptions: Record<BotMemoryMode, string> = {
-  inherit: "跟随设置中的记忆开关，仅用于此 Bot。",
-  enabled: "在对话中读取和保存记忆，优先于全局设置。",
-  disabled: "暂停读取和自动保存，已有记忆仍可管理。"
-}
 
 export function BotMemoryNavigation({ onBack, disabled }: { onBack(): void; disabled?: boolean }) {
   const back = useRef<HTMLButtonElement>(null)
@@ -54,7 +49,7 @@ export function BotMemoryPanel({
   onBack?(): void
 }) {
   const botId = bot.id
-  const memoryMode = bot.memoryMode ?? "inherit"
+  const memoryEnabled = bot.memoryMode !== "disabled"
   const memoryDescriptionId = useId()
   const [entries, setEntries] = useState<BotMemory[] | null>(null)
   const [editing, setEditing] = useState<BotMemory | "new" | null>(null)
@@ -169,28 +164,20 @@ export function BotMemoryPanel({
     }
   }
   const configuration = (
-    <BotDetailCard title={groupId ? "Bot 记忆配置" : "记忆配置"} actions={
-      <Select
-        value={memoryMode}
+    <BotDetailCard title="Bot 长期记忆" actions={
+      <Switch
+        aria-label="Bot 长期记忆"
+        aria-describedby={memoryDescriptionId}
+        checked={memoryEnabled}
         disabled={busy}
-        onValueChange={(value) => void changeMemoryMode(value as BotMemoryMode)}
-      >
-        <SelectTrigger
-          aria-label="记忆配置"
-          aria-describedby={memoryDescriptionId}
-          className="bot-memory-config-trigger h-8 w-auto gap-2 rounded-lg border-0 px-2 py-1 text-xs shadow-none"
-        >
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent align="end" showScrollButtons={false}>
-          <SelectItem value="inherit">跟随全局</SelectItem>
-          <SelectItem value="enabled">开启</SelectItem>
-          <SelectItem value="disabled">关闭</SelectItem>
-        </SelectContent>
-      </Select>
+        onCheckedChange={(checked) => void changeMemoryMode(checked ? "enabled" : "disabled")}
+      />
     }>
       <p id={memoryDescriptionId} className="bot-detail-empty">
-        {groupId ? `适用于「${bot.name}」的私聊和所有群聊。` : memoryDescriptions[memoryMode]}
+        {memoryEnabled
+          ? "在对话中读取和保存长期记忆。"
+          : "已暂停读取和保存，已有记忆仍可管理。"}
+        {groupId && `此开关适用于「${bot.name}」的私聊和所有群聊。`}
       </p>
     </BotDetailCard>
   )
@@ -205,9 +192,11 @@ export function BotMemoryPanel({
         <Plus size={16} />
       </button>
     }>
-      {!groupId && (
-        <p className="mb-3 text-xs text-muted-foreground">
-          群内记忆仅用于所属群。
+      {!groupId && !editing && (
+        <p role="note" aria-label="记忆使用范围说明" className="mb-3 text-xs leading-relaxed text-muted-foreground">
+          <span className="whitespace-nowrap">「仅私聊」</span>限私聊，
+          <span className="whitespace-nowrap">「Bot 共享」</span>适用于此 Bot 的所有对话，
+          <span className="whitespace-nowrap">「群内」</span>限所属群。
         </p>
       )}
       {(error || readError) && (
@@ -336,6 +325,9 @@ export function BotMemoryPanel({
                   <Menu.Portal>
                     <Menu.Content align="end" sideOffset={4} collisionPadding={8}
                       data-bot-popup className="bot-workspace-menu bot-memory-menu">
+                      <Menu.Item onSelect={() => edit(entry)}>
+                        <Pencil size={14} /> 编辑记忆
+                      </Menu.Item>
                       {recipients.length > 0 && (
                         <Menu.Item onSelect={() => {
                           setSharing(entry.id)
