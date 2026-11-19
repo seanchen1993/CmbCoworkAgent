@@ -4,7 +4,11 @@ import ts from "typescript"
 import { describe, expect, it, vi } from "vitest"
 
 // Run the real IPC callbacks without initializing Electron or the agent runtime.
-function loadCancelCallback(path: string, channel: string, dependencies: Record<string, unknown>) {
+function loadCancelCallback<Input = Record<string, unknown>>(
+  path: string,
+  channel: string,
+  dependencies: Record<string, unknown>
+) {
   const file = ts.createSourceFile(
     path,
     readFileSync(resolve(path), "utf8"),
@@ -32,20 +36,45 @@ function loadCancelCallback(path: string, channel: string, dependencies: Record<
   }).outputText
   return new Function(...Object.keys(dependencies), `${code}\nreturn execute`)(
     ...Object.values(dependencies)
-  ) as (event: { sender: object }, input: Record<string, unknown>) => Promise<boolean> | boolean
+  ) as (event: { sender: object }, input: Input) => Promise<boolean> | boolean
+}
+
+function loadThreadDeletionHelper(cancelBackgroundTasksWithin: () => Promise<boolean>) {
+  const source = readFileSync(resolve("src/main/ipc/agent.ts"), "utf8")
+  const start = source.indexOf("async function cancelAndWaitForAgentThreadRun(")
+  const end = source.indexOf("async function waitForReplacedRunToSettle", start)
+  const code = ts.transpileModule(source.slice(start, end), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None }
+  }).outputText
+  return new Function(
+    "activeRuns",
+    "LocalSandbox",
+    "ACTIVE_RUN_REPLACEMENT_MAX_WAIT_MS",
+    `${code}
+return cancelAndWaitForAgentThreadRun`
+  )(new Map(), { cancelBackgroundTasksWithin }, 30_000) as (
+    threadId: string
+  ) => Promise<string>
 }
 
 function loadWorkerCancel(
-  options: { workerCount?: number; foreground?: boolean; foreignOwner?: boolean } = {}
+  options: {
+    workerCount?: number
+    foreground?: boolean
+    foreignOwner?: boolean
+    desktopDetached?: boolean
+  } = {}
 ) {
   const worker = { worker_id: "worker" }
   const cancelWorkers = vi.fn(() => Array.from({ length: options.workerCount ?? 1 }, () => worker))
   const abortForeground = vi.fn()
   const cancelManaged = vi.fn()
   const dismissNotifications = vi.fn()
+  const cancelBackgroundTasks = vi.fn()
+  const cancelDetachedBackgroundTasks = vi.fn(() => options.desktopDetached ?? false)
   const execute = loadCancelCallback("src/main/ipc/agent.ts", "agent:cancel", {
     withThreadRunMutationLock: (_threadId: string, run: () => unknown) => run(),
-    getLocalThreadRunLease: () => (options.foreignOwner ? { owner: "managed" } : undefined),
+    getLocalThreadRunLease: () => (options.foreignOwner ? { owner: "im" } : undefined),
     BrowserWindow: { fromWebContents: () => null },
     activeRuns: new Map(options.foreground ? [["thread", { abort: abortForeground }]] : []),
     turnStates: new Map(),
@@ -55,9 +84,17 @@ function loadWorkerCancel(
       acknowledgeNotifications: dismissNotifications
     },
     handleAutoModeAgentCancelled: cancelManaged,
-    LocalSandbox: { cancelBackgroundTasks: vi.fn() }
+    LocalSandbox: { cancelBackgroundTasks, cancelDetachedBackgroundTasks }
   })
-  return { execute, cancelWorkers, abortForeground, cancelManaged, dismissNotifications }
+  return {
+    execute,
+    cancelWorkers,
+    abortForeground,
+    cancelManaged,
+    dismissNotifications,
+    cancelBackgroundTasks,
+    cancelDetachedBackgroundTasks
+  }
 }
 
 describe("managed background cancellation IPC wiring", () => {
@@ -84,21 +121,44 @@ describe("managed background cancellation IPC wiring", () => {
   })
 
   it("keeps the foreground agent alive when the user stops workers", async () => {
-    const { execute, abortForeground, cancelManaged } = loadWorkerCancel({ foreground: true })
+    const { execute, abortForeground, cancelManaged, cancelBackgroundTasks } = loadWorkerCancel({
+      foreground: true
+    })
 
     await execute({ sender: {} }, { threadId: "thread", cancelWorkers: true })
 
     expect(abortForeground).not.toHaveBeenCalled()
+    expect(cancelBackgroundTasks).not.toHaveBeenCalled()
     expect(cancelManaged).toHaveBeenCalledExactlyOnceWith("thread", "background")
   })
 
-  it("preserves foreground cancellation", async () => {
-    const { execute, abortForeground, cancelManaged } = loadWorkerCancel({ foreground: true })
+  it("cancels desktop-owned shell tasks with the foreground run", async () => {
+    const {
+      execute,
+      abortForeground,
+      cancelManaged,
+      cancelBackgroundTasks,
+      cancelDetachedBackgroundTasks
+    } = loadWorkerCancel({ foreground: true })
 
     expect(await execute({ sender: {} }, { threadId: "thread" })).toBe(true)
 
     expect(abortForeground).toHaveBeenCalledOnce()
+    expect(cancelBackgroundTasks).toHaveBeenCalledExactlyOnceWith("thread", {
+      threadRunOwner: "desktop"
+    })
+    expect(cancelDetachedBackgroundTasks).not.toHaveBeenCalled()
     expect(cancelManaged).toHaveBeenCalledExactlyOnceWith("thread")
+  })
+
+  it.each([true, false])("limits idle Stop to detached desktop shells (%s)", async (desktopDetached) => {
+    const { execute, cancelBackgroundTasks, cancelDetachedBackgroundTasks, cancelManaged } =
+      loadWorkerCancel({ desktopDetached })
+
+    expect(await execute({ sender: {} }, { threadId: "thread" })).toBe(desktopDetached)
+    expect(cancelBackgroundTasks).not.toHaveBeenCalled()
+    expect(cancelDetachedBackgroundTasks).toHaveBeenCalledExactlyOnceWith("thread")
+    expect(cancelManaged).toHaveBeenCalledTimes(desktopDetached ? 1 : 0)
   })
 
   it("preserves the refusal to cancel a thread owned by another transport", async () => {
@@ -108,6 +168,44 @@ describe("managed background cancellation IPC wiring", () => {
 
     expect(cancelWorkers).not.toHaveBeenCalled()
     expect(cancelManaged).not.toHaveBeenCalled()
+  })
+
+  it("queries and stops detached shell without touching the foreground or managed controllers", async () => {
+    const cancelDetachedBackgroundTasks = vi.fn(() => true)
+    const hasActiveBackgroundTasks = vi.fn(() => true)
+    const dependencies = { LocalSandbox: { cancelDetachedBackgroundTasks, hasActiveBackgroundTasks } }
+    const status = loadCancelCallback<unknown>(
+      "src/main/ipc/agent.ts",
+      "agent:has-background-shell",
+      dependencies
+    )
+    const stop = loadCancelCallback<unknown>(
+      "src/main/ipc/agent.ts",
+      "agent:cancel-background-shell",
+      dependencies
+    )
+    const event = { sender: {} }
+
+    expect(await status(event, "thread")).toBe(true)
+    expect(await stop(event, "thread")).toBe(true)
+    expect(await stop(event, { threadId: "thread" })).toBe(false)
+    expect(hasActiveBackgroundTasks).toHaveBeenCalledExactlyOnceWith("thread", {
+      threadRunOwner: "desktop"
+    })
+    expect(cancelDetachedBackgroundTasks).toHaveBeenCalledExactlyOnceWith("thread")
+  })
+
+  it.each([
+    [true, "settled"],
+    [false, "shell_timed_out"]
+  ])("waits for idle thread and child shell cleanup before deletion (%s)", async (shellSettled, outcome) => {
+    const cancelShell = vi.fn(async () => shellSettled)
+    const closeThread = loadThreadDeletionHelper(cancelShell)
+
+    await expect(closeThread("idle-thread")).resolves.toBe(outcome)
+    expect(cancelShell).toHaveBeenCalledExactlyOnceWith("idle-thread", 30_000, {
+      includeChildRuns: true
+    })
   })
 
   it.each([true, false])(

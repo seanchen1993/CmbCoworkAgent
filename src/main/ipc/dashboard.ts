@@ -20,17 +20,28 @@ import {
 import type {
   RunAnalysisData,
   RunAnalysisOptions,
+  RunAnalysisStageExportRequest,
+  RunAnalysisPluginStages,
   RunAnalysisRange,
   RunAnalysisSessionRequest
 } from "../../shared/project-run-analysis"
 import {
   fetchRunAnalysis,
   fetchRunAnalysisStages,
+  fetchRunAnalysisPluginStages,
+  groupRunAnalysisExportTargets,
   fetchRunAnalysisSessions,
   emptyRunAnalysisMetrics,
-  fetchRunAnalysisTrace
+  fetchRunAnalysisThread,
+  runAnalysisAttributionFilters
 } from "./project-run-analysis"
-import { makeMockRunAnalysis, makeMockRunAnalysisStages } from "./project-run-analysis-mock"
+import {
+  makeMockRunAnalysis,
+  makeMockRunAnalysisStages,
+  makeMockRunAnalysisPluginStages,
+  mockRunAnalysisSessionIndexes,
+  mockStageNames
+} from "./project-run-analysis-mock"
 import {
   excludesTestProjects,
   excludeTestProjectsFromQuery,
@@ -61,7 +72,10 @@ import {
   type ProjectMetricSortKey
 } from "./project-attention-ranking"
 import { isNestedMappingError } from "./dashboard-es-nested-mapping"
-import { queryWithToolUsageMappingFallback } from "./dashboard-tool-usage-query"
+import {
+  FILTERED_TOOL_EXCLUDES,
+  queryWithToolUsageMappingFallback
+} from "./dashboard-tool-usage-query"
 import { fetchUserProfileDirectory } from "./dashboard-user-profile-query"
 import {
   projectModeMetricTimeFilters,
@@ -1324,7 +1338,6 @@ const DISLIKE_TYPE_OPTIONS = [
 ] as const
 
 const DASHBOARD_ALLOWED_IDS_ENV = "VITE_DASHBOARD_ALLOWED_YST_IDS"
-const DASHBOARD_PROJECT_ANALYSIS_IDS_ENV = "VITE_DASHBOARD_PROJECT_ANALYSIS_YST_IDS"
 const DASHBOARD_UNRESTRICTED_IDS_ENV = "VITE_DASHBOARD_UNRESTRICTED_YST_IDS"
 const TRACE_EVOLVER_REVIEW_ADMIN_IDS_ENV = "VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS"
 const DASHBOARD_AWARDS_ADMIN_IDS_ENV = "VITE_DASHBOARD_AWARDS_ADMIN_YST_IDS"
@@ -1416,26 +1429,9 @@ function isDashboardProjectModeAllowed(): boolean {
   return access.loggedIn
 }
 
-function isDashboardProjectAnalysisAllowed(
-  access: DashboardAccessContext = getDashboardAccessContext()
-): boolean {
-  if (import.meta.env.DEV) return true
-  return (
-    access.loggedIn &&
-    Boolean(access.ystId) &&
-    splitEnvIds(import.meta.env[DASHBOARD_PROJECT_ANALYSIS_IDS_ENV] as string | undefined).has(
-      access.ystId
-    )
-  )
-}
-
-function requireDashboardProjectAnalysisAccess(): void {
-  if (!isDashboardProjectAnalysisAllowed()) throw new Error("无项目分析访问权限")
-}
-
 function requireDashboardProjectAnalysisAgentAccess(): void {
   if (!PROJECT_ANALYSIS_AGENT_ENABLED) throw new Error("项目分析 Agent 暂未开放")
-  requireDashboardProjectAnalysisAccess()
+  requireDashboardProjectModeAccess()
 }
 
 function isDashboardProjectModeAdmin(
@@ -11417,30 +11413,6 @@ function makeMockProjectModeProjectCommits(
  */
 const ES_MAX_RESULT_WINDOW = 10000
 
-/** Built-in file/system/meta tools excluded from the "已过滤" tool ranking. */
-const FILTERED_TOOL_EXCLUDES = [
-  // Claude Code 内置文件 / 系统工具
-  "execute",
-  "read_file",
-  "write_file",
-  "glob",
-  "grep",
-  "list_directory",
-  "task",
-  "task_output",
-  "ls",
-  "edit_file",
-  // 工具搜索 / 元工具
-  "search_tool",
-  "inspect_tool",
-  "invoke_deferred_tool",
-  // 内置代码执行辅助
-  "code_exec",
-  "save_code_exec_tool",
-  // 内置任务管理
-  "write_todos"
-]
-
 interface ProjectModeFeatureView {
   totalDurationMs?: number | null
   lastExecutedAt?: string | null
@@ -13210,7 +13182,10 @@ async function fetchProjectModePageUsage(
     const featureAgg = asRecord(mainAgentConversations.by_feature)
     const featureBuckets = Array.isArray(featureAgg.buckets) ? featureAgg.buckets : []
     lastExecutionByProject.set(key, readLastExecution(mainAgentConversations))
-    lastExecutionEndByProject.set(key, readLastExecution(mainAgentConversations, "last_execution_end"))
+    lastExecutionEndByProject.set(
+      key,
+      readLastExecution(mainAgentConversations, "last_execution_end")
+    )
     if (
       asNumber(featureAgg.sum_other_doc_count) > 0 ||
       asNumber(featureAgg.doc_count_error_upper_bound) !== 0
@@ -13871,14 +13846,14 @@ const projectModePageCache = new ProjectModePageCache<ProjectModeProjectPageData
 const runAnalysisCache = new ProjectModePageCache<RunAnalysisData>()
 
 function makeMockRunAnalysisTrace(
-  request: RunAnalysisSessionRequest & { traceId?: string },
+  request: RunAnalysisSessionRequest,
   index: number
 ): DashboardTraceDetail {
-  const traceId =
-    request.traceId ?? `run-analysis-demo:${request.projectId}:${request.featureSlug}:${index}`
+  const scope = `run-analysis-demo:${request.projectId}:${request.featureSlug}`
+  const traceId = `${scope}:${index}`
   const trace = makeMockTraceWithConversation({
     traceId,
-    threadId: `demo-thread-${index}`,
+    threadId: `${scope}:thread-${index < 3 ? "new" : index % 6}`,
     startedAt: new Date(Date.now() - (index + 1) * 600000),
     durationMs: 60000,
     skill: "示例研发技能",
@@ -13892,12 +13867,13 @@ function makeMockRunAnalysisTrace(
   trace.usedSkills = index < 12 ? [] : ["示例研发技能"]
   trace.harnessProjectId = request.projectId
   trace.harnessFeatureSlug = request.featureSlug ?? undefined
-  trace.harnessNodeName =
-    request.nodeName ?? ["design-方案设计", "dev-编码实现", "test-测试"][index % 3]
-  return makeMockDashboardTraceDetail(trace, index)
+  const stages = mockStageNames(request.projectId)
+  trace.harnessNodeName = stages[index % stages.length]
+  trace.harnessNodeStatus = index % 5 === 0 ? "已完成" : "进行中"
+  return makeMockDashboardTraceDetail(trace, index % 6)
 }
 function makeMockRunAnalysisSessions(request: RunAnalysisSessionRequest) {
-  const indexes = Array.from({ length: request.metric === "noSkill" ? 12 : 30 }, (_, i) => i)
+  const indexes = mockRunAnalysisSessionIndexes(request)
   const rows = indexes
     .map((index) => makeMockRunAnalysisTrace(request, index))
     .map((trace) => ({
@@ -14050,7 +14026,7 @@ async function fetchProjectRunAnalysis(
   return data
 }
 
-async function runAnalysisDetailFilters(
+async function runAnalysisProjectFilters(
   request: RunAnalysisSessionRequest
 ): Promise<Record<string, unknown>[]> {
   const access = requireDashboardProjectModeAccess()
@@ -14088,18 +14064,11 @@ async function runAnalysisDetailFilters(
   const total = getTotalHits(raw, NaN)
   if (!Number.isSafeInteger(total) || total < 0) throw new Error("项目范围校验结果不完整，请重试")
   if (total === 0) throw new Error("当前可访问及筛选范围内未找到该项目，请刷新项目列表后重试")
-  return [
-    ...projectModeTraceFilters(null, org),
-    { term: { harnessProjectId: request.projectId } },
-    request.featureSlug === null
-      ? { bool: { must_not: [{ exists: { field: "harnessFeatureSlug" } }] } }
-      : { term: { harnessFeatureSlug: request.featureSlug } },
-    ...(request.nodeName === undefined
-      ? []
-      : request.nodeName === null
-        ? [{ bool: { must_not: [{ exists: { field: "harnessNodeName" } }] } }]
-        : [{ term: { harnessNodeName: request.nodeName } }])
-  ]
+  return [...projectModeTraceFilters(null, org), { term: { harnessProjectId: request.projectId } }]
+}
+
+async function runAnalysisDetailFilters(request: RunAnalysisSessionRequest) {
+  return [...(await runAnalysisProjectFilters(request)), ...runAnalysisAttributionFilters(request)]
 }
 
 async function fetchProjectModeMetricSortedPage(
@@ -15879,17 +15848,11 @@ async function runDashboardHandlerInProjectScope<T>(
   operation: () => Promise<T>
 ): Promise<T | { success: false; error: string }> {
   try {
-    // Gate every analysis entry before any data query, including direct IPC calls.
     if (
       channel === "dashboard:projectModeAnalysisAgent" ||
       channel.startsWith("dashboard:projectReport")
     ) {
       requireDashboardProjectAnalysisAgentAccess()
-    } else if (
-      channel.startsWith("dashboard:projectModeRunAnalysis") ||
-      channel === "dashboard:projectModePeriodMetrics"
-    ) {
-      requireDashboardProjectAnalysisAccess()
     }
     if (import.meta.env.DEV || !excludesTestProjects(channel, args)) return operation()
     const access = requireDashboardProjectModeAccess()
@@ -16065,7 +16028,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       inReportRoomScope(room, signal, () =>
         import.meta.env.DEV
           ? Promise.resolve({
-              rows: makeMockRunAnalysisStages(),
+              rows: makeMockRunAnalysisStages(projectId),
               dataAsOf: new Date().toISOString()
             })
           : fetchProjectRunAnalysisStageDetails({ upperOrgLv1: room, projectId, featureSlug })
@@ -16138,7 +16101,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     return isDashboardProjectModeAllowed()
   })
 
-  _ipcMain.handle("dashboard:isProjectAnalysisAllowed", () => isDashboardProjectAnalysisAllowed())
+  _ipcMain.handle("dashboard:isProjectAnalysisAllowed", () => isDashboardProjectModeAllowed())
 
   _ipcMain.handle("dashboard:orgFilterDefaults", () => getDashboardOrgFilterDefaults())
 
@@ -16551,7 +16514,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
             dashboardRequestContext.run({ signal }, () =>
               import.meta.env.DEV
                 ? Promise.resolve({
-                    rows: makeMockRunAnalysisStages(),
+                    rows: makeMockRunAnalysisStages(request.projectId),
                     dataAsOf: new Date().toISOString()
                   })
                 : fetchProjectRunAnalysisStageDetails(request)
@@ -16595,13 +16558,47 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   )
   registerLatestDashboardHandler(
     _ipcMain,
+    "dashboard:projectModeRunAnalysisExportStages",
+    async (
+      _,
+      range: RunAnalysisRange,
+      options: RunAnalysisOptions,
+      request: RunAnalysisStageExportRequest
+    ) => {
+      try {
+        const inventory = import.meta.env.DEV
+          ? makeMockRunAnalysis(range, options)
+          : await fetchProjectRunAnalysis(range, { ...options, refresh: false })
+        const groups = groupRunAnalysisExportTargets(inventory.rows, request.targets)
+        const plugins: RunAnalysisPluginStages[] = []
+        const filters = import.meta.env.DEV
+          ? []
+          : projectModeTraceFilters(
+              null,
+              buildProjectModeOrgFilter(options, requireDashboardProjectModeAccess())
+            )
+        for (const [adapterName, features] of groups) {
+          const stages = import.meta.env.DEV
+            ? makeMockRunAnalysisPluginStages(features)
+            : await fetchRunAnalysisPluginStages(esQuery, getEsIndex("trace"), filters, features, request.asOf)
+          plugins.push({ adapterName, stages })
+        }
+        return { success: true, data: plugins }
+      } catch (e) {
+        logDashboardRequestError("projectModeRunAnalysisExportStages", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+  registerLatestDashboardHandler(
+    _ipcMain,
     "dashboard:projectModeRunAnalysisStages",
     async (_, request: RunAnalysisSessionRequest) => {
       try {
         if (import.meta.env.DEV)
           return {
             success: true,
-            data: { rows: makeMockRunAnalysisStages(), dataAsOf: new Date().toISOString() }
+            data: { rows: makeMockRunAnalysisStages(request.projectId), dataAsOf: new Date().toISOString() }
           }
         return { success: true, data: await fetchProjectRunAnalysisStageDetails(request) }
       } catch (e) {
@@ -16635,29 +16632,37 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
 
   registerLatestDashboardHandler(
     _ipcMain,
-    "dashboard:projectModeRunAnalysisTrace",
+    "dashboard:projectModeRunAnalysisThread",
     async (_, request: RunAnalysisSessionRequest & { traceId: string }) => {
       try {
         if (!request.traceId?.trim()) throw new Error("Trace ID is required")
-        if (import.meta.env.DEV)
+        if (import.meta.env.DEV) {
+          const rows = Array.from({ length: 30 }, (_, index) =>
+            makeMockRunAnalysisTrace(request, index)
+          )
+          const selected = mockRunAnalysisSessionIndexes(request)
+            .map((i) => rows[i])
+            .find((row) => row.traceId === request.traceId)
+          if (!selected) throw new Error("未找到所选轮次")
           return {
             success: true,
-            data: makeMockRunAnalysisTrace(request, Number(request.traceId.split(":").at(-1)) || 0)
+            data: rows.filter((row) => row.threadId === selected.threadId).reverse()
           }
-        const filters = await runAnalysisDetailFilters(request)
+        }
         return {
           success: true,
-          data: await fetchRunAnalysisTrace(
-            esQuery,
-            getEsIndex("trace"),
-            filters,
+          data: await fetchRunAnalysisThread({
+            query: esQuery,
+            index: getEsIndex("trace"),
+            projectFilters: await runAnalysisProjectFilters(request),
             request,
-            dashboardTraceSourceIncludes(),
-            (hit) => normalizeTraceDetail(hit as EsSearchHit)
-          )
+            sourceIncludes: dashboardTraceSourceIncludes(),
+            normalize: (hit) => normalizeTraceDetail(hit as EsSearchHit),
+            isResponseTooLarge: isDashboardEsResponseTooLarge
+          })
         }
       } catch (e) {
-        logDashboardRequestError("projectModeRunAnalysisTrace", e)
+        logDashboardRequestError("projectModeRunAnalysisThread", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

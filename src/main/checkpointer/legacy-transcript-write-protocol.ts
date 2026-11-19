@@ -44,9 +44,24 @@ interface CopyCursor extends SourcePoint {
   readonly fragmentIndex: number
 }
 
+export interface LegacyTranscriptOrderIdentity {
+  readonly checkpointIndex: number
+  readonly messageId: string
+  readonly role: LegacyTranscriptWriteRow["role"]
+  readonly toolCallId: string | null
+  readonly providerSourceId: string | null
+  readonly providerOccurrence: number | null
+  readonly declaredProviderIdentity?: { provider_source_id: string; provider_occurrence: number }
+}
+
+export interface LegacyTranscriptOrder {
+  readonly messages: readonly LegacyTranscriptOrderIdentity[]
+  readonly graphBoundaries: readonly { checkpointIndex: number; messageId: string }[]
+}
+
 export type LegacyTranscriptWriteCommand =
   | { readonly kind: "read-state" }
-  | ({ readonly kind: "reserve" } & SourcePoint)
+  | ({ readonly kind: "reserve"; readonly order?: LegacyTranscriptOrder } & SourcePoint)
   | ({
       readonly kind: "copy"
       readonly mode: "rows"

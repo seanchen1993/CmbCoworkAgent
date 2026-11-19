@@ -28,7 +28,7 @@ vi.mock("../../harness-board/service", () => ({
   getHarnessFeatureBinding: vi.fn(async () => null)
 }))
 vi.mock("../../services/adoption-tracker", () => ({
-  clearAdoptionContext: () => undefined,
+  clearAdoptionContext: vi.fn(() => undefined),
   setAdoptionContext: () => undefined
 }))
 vi.mock("../skill-eval/documents", () => ({
@@ -47,6 +47,7 @@ import {
   setTraceReporter,
   TraceCollector
 } from "./collector"
+import { clearAdoptionContext } from "../../services/adoption-tracker"
 import { getHarnessFeatureBinding } from "../../harness-board/service"
 
 let tracesDir = ""
@@ -112,6 +113,17 @@ describe("TraceCollector completion", () => {
     expect(readCreatorTraceId(context)).toBeUndefined()
   })
 
+  it.each([true, false, undefined])(
+    "uploads the resolved code Skill flag %s independently of direct Skill usage",
+    async (flag) => {
+      const tracer = new TraceCollector("inherited", "hello", "test", { includeSkillEval: false })
+      vi.mocked(clearAdoptionContext).mockReturnValueOnce(flag)
+      const trace = sanitizeTraceForCloudUpload(await tracer.finish("success"))
+      expect(trace.usedSkills).toEqual([])
+      expect(trace.hasCodeAttributedSkill).toBe(flag)
+      expect("hasCodeAttributedSkill" in trace).toBe(flag !== undefined)
+    }
+  )
   it("uploads feature-bound unit IDs without repository paths or per-unit allocation", async () => {
     vi.mocked(getHarnessFeatureBinding).mockResolvedValueOnce({
       projectId: "p",

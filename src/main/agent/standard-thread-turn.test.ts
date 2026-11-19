@@ -40,7 +40,9 @@ import { resolve } from "node:path"
 import type { PluginMetadata } from "../types"
 import { issueRuntimePluginSourceToken, withRuntimePluginSource } from "../plugins/runtime-source-scope"
 import { IdleModelServiceHoursError } from "../../shared/idle-model-service-window"
+import * as runtime from "./runtime"
 import type { CreateAgentRuntimeOptions } from "./runtime"
+import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "./thread-run-lease"
 import {
   HarnessDeployUnitContextLimitError,
   HarnessRequiredContextError,
@@ -106,6 +108,41 @@ describe("managed model routing", () => {
     ).rejects.toThrow("Ultra 模型不可用")
     expect(routingMocks.resolveModel).not.toHaveBeenCalled()
   })
+})
+
+describe("prepareStandardThreadRuntimeFactory shell policy", () => {
+  it.each(["desktop", "im", "scheduler"] as const)(
+    "applies the confirmed %s lease policy to the initial runtime and model fallback",
+    async (owner) => {
+      const threadId = `shell-policy-${owner}`
+      const runId = "active-run"
+      const workspacePath = process.cwd()
+      const abortSignal = new AbortController().signal
+      const reachedRuntime = new Error("Reached runtime creation")
+      const createRuntime = vi.spyOn(runtime, "createAgentRuntime").mockRejectedValue(reachedRuntime)
+      const factory = prepareStandardThreadRuntimeFactory({
+        source: owner,
+        runLease: { owner, runId },
+        baseOptions: { threadId, workspacePath, abortSignal, autoBackgroundHandoff: true }
+      })
+      expect(claimLocalThreadRunLease({ threadId, owner, runId }).acquired).toBe(true)
+      try {
+        for (const modelId of ["first", "fallback"]) {
+          await expect(factory.create(modelId)).rejects.toBe(reachedRuntime)
+          expect(createRuntime).toHaveBeenLastCalledWith({
+            threadId,
+            workspacePath,
+            modelId,
+            abortSignal,
+            autoBackgroundHandoff: owner === "desktop"
+          })
+        }
+      } finally {
+        releaseLocalThreadRunLease(threadId, owner, runId)
+        createRuntime.mockRestore()
+      }
+    }
+  )
 })
 
 describe("getHarnessAgentContext", () => {

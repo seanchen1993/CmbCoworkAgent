@@ -20,6 +20,8 @@ import type {
 import type {
   RunAnalysisData,
   RunAnalysisOptions,
+  RunAnalysisStageExportRequest,
+  RunAnalysisPluginStages,
   RunAnalysisRange,
   RunAnalysisSessionRequest,
   RunAnalysisStages,
@@ -1270,6 +1272,9 @@ interface CustomAPI {
       }
     }>
     cancel: (threadId: string, options?: { cancelWorkers?: boolean }) => Promise<void>
+    hasBackgroundShell: (threadId: string) => Promise<boolean>
+    onBackgroundShellChanged: (threadId: string, callback: (active: boolean) => void) => () => void
+    cancelBackgroundShell: (threadId: string) => Promise<void>
     queueCurrentRunMessage: (
       threadId: string,
       message: { id: string; content: string; displayContent?: string; composerSubmission?: import("../shared/mods/v2/composer-mentions").ComposerSubmission }
@@ -2934,12 +2939,17 @@ interface CustomAPI {
       range: RunAnalysisRange,
       options?: RunAnalysisOptions
     ) => Promise<{ success: boolean; data?: RunAnalysisData; error?: string }>
+    projectModeRunAnalysisExportStages: (
+      range: RunAnalysisRange,
+      options: RunAnalysisOptions,
+      request: RunAnalysisStageExportRequest
+    ) => Promise<{ success: boolean; data?: RunAnalysisPluginStages[]; error?: string }>
     projectModeRunAnalysisStages: (
       request: RunAnalysisSessionRequest
     ) => Promise<{ success: boolean; data?: RunAnalysisStages; error?: string }>
-    projectModeRunAnalysisTrace: (
+    projectModeRunAnalysisThread: (
       request: RunAnalysisSessionRequest & { traceId: string }
-    ) => Promise<{ success: boolean; data?: DashboardTraceDetail; error?: string }>
+    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     projectModeRunAnalysisSessions: (
       request: RunAnalysisSessionRequest
     ) => Promise<{ success: boolean; data?: RunAnalysisSessions; error?: string }>

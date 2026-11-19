@@ -298,8 +298,16 @@ export interface Message {
   provider_occurrence?: number
   /** Renderer-only provenance for Team worker content; absent for partial fragments. */
   worker_content_source?: "values" | "snapshot"
+  /** Complete tool-call list for this worker message, including a deliberate empty list. */
+  worker_tool_calls_source?: "snapshot"
   /** This worker identity has appeared in a complete ordered values frame. */
   worker_snapshot_identity?: boolean
+  /** Absolute position in the producer's complete values frame. */
+  worker_snapshot_index?: number
+  /** The worker identity supplied by the producer, before occurrence inference. */
+  worker_provider_identity?: boolean
+  /** Recent wire IDs observed for this explicitly identified worker reply. */
+  worker_provider_wire_ids?: readonly string[]
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
   content_priority?: number

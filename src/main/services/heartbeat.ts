@@ -449,6 +449,7 @@ async function executeHeartbeat(): Promise<void> {
       noSchedulerTool: true,
       hookTurnId: userMessage.id,
       modTurnRunId: heartbeatRunId,
+      autoBackgroundHandoff: false,
       abortSignal: controller.signal
     })
 

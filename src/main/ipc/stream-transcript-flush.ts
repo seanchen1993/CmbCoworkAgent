@@ -159,12 +159,29 @@ function mergeQueuedStreamMessage(
 
 function normalizeQueuedStreamMessages(
   baselineMessages: readonly Message[],
-  messages: readonly QueuedStreamTranscriptMessage[]
+  messages: readonly QueuedStreamTranscriptMessage[],
+  boundary?: { ordinal: number; previousOccurrences?: readonly BaselineProviderOccurrence[] }
 ): QueuedStreamTranscriptMessage[] {
+  const firstCandidateIndex = boundary
+    ? baselineMessages.findIndex((message) => (message.ordinal ?? -1) > boundary.ordinal)
+    : 0
+  const previousOccurrences = new Map(
+    boundary?.previousOccurrences?.map((message) => [
+      JSON.stringify([message.provider_source_id, message.role]),
+      message.provider_occurrence
+    ])
+  )
   return normalizeAppendedMessageIds(
     baselineMessages,
     normalizeMessageRoleCollisionIds(baselineMessages, messages),
-    { splitAssistantAfterTool: true }
+    {
+      splitAssistantAfterTool: true,
+      ...(boundary && {
+        firstCandidateIndex: firstCandidateIndex < 0 ? baselineMessages.length : firstCandidateIndex,
+        previousProviderOccurrence: (sourceId, role) =>
+          previousOccurrences.get(JSON.stringify([sourceId, role]))
+      })
+    }
   )
 }
 
@@ -406,14 +423,24 @@ function deriveTrailingAssistantIdentity(
  * batch lacks an explicit provider tuple and cannot reuse the run-scoped
  * identity established by an earlier full normalization.
  */
+interface BaselineProviderOccurrence {
+  provider_source_id: string
+  role: string
+  provider_occurrence: number
+}
+
 export function resolveStreamTranscriptFlush({
   queuedMessages,
   currentAssistantIdentity,
-  loadBaselineMessages
+  loadBaselineMessages,
+  boundaryOrdinal,
+  loadPreviousOccurrences
 }: {
   queuedMessages: readonly QueuedStreamTranscriptMessage[]
   currentAssistantIdentity?: StreamTranscriptAssistantIdentity
   loadBaselineMessages: () => readonly Message[]
+  boundaryOrdinal?: number
+  loadPreviousOccurrences?: (sourceIds: readonly string[]) => readonly BaselineProviderOccurrence[] | undefined
 }): ResolvedStreamTranscriptFlush {
   if (currentAssistantIdentity) {
     const cached = applyCachedAssistantIdentity(queuedMessages, currentAssistantIdentity)
@@ -436,7 +463,11 @@ export function resolveStreamTranscriptFlush({
   const cachedAssistantWasRejected =
     currentAssistantIdentity !== undefined &&
     queuedMessages.some((message) => message.role === "assistant")
-  if (!cachedAssistantWasRejected && canUseIncrementalStreamTranscriptUpsert(incrementalMessages)) {
+  if (
+    boundaryOrdinal === undefined &&
+    !cachedAssistantWasRejected &&
+    canUseIncrementalStreamTranscriptUpsert(incrementalMessages)
+  ) {
     return {
       messages: incrementalMessages,
       preserveExistingOrder: true,
@@ -452,9 +483,18 @@ export function resolveStreamTranscriptFlush({
   }
 
   const baselineMessages = loadBaselineMessages()
-  const normalizedMessages = normalizeQueuedStreamMessages(baselineMessages, queuedMessages).map(
-    stableAssistantProviderTuple
-  )
+  const normalizedMessages = normalizeQueuedStreamMessages(
+    baselineMessages,
+    queuedMessages,
+    boundaryOrdinal === undefined
+      ? undefined
+      : {
+          ordinal: boundaryOrdinal,
+          previousOccurrences: loadPreviousOccurrences?.([
+            ...new Set(queuedMessages.map(getMessageProviderSourceId))
+          ])
+        }
+  ).map(stableAssistantProviderTuple)
   return {
     messages: coalesceNormalizedStreamMessages(normalizedMessages),
     // The bounded baseline resolves identities only. Existing durable ordinals

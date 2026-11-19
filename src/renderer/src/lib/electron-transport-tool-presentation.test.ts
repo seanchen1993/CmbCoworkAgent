@@ -51,6 +51,24 @@ describe("actual renderer tool presentation routes", () => {
     ])
   })
 
+  it("keeps native Tool UUID and presentation distinct from a workflow provider alias", () => {
+    const native = tool()
+    const kwargs = native.kwargs!
+    const tuple = { cmb_internal_provider_source_id: "provider", cmb_internal_provider_occurrence: 1 }
+    Object.assign(kwargs.additional_kwargs!, tuple)
+    const ordinary = {
+      ...native,
+      kwargs: { ...kwargs, id: "provider-wire", content: "ordinary result", additional_kwargs: tuple }
+    }
+    const rows = new ElectronIPCTransport()
+      .convertWorkflowAgentValuesSnapshot([ordinary, native], "workflow:1")
+
+    expect(rows).toHaveLength(2)
+    expect(rows[0]).toMatchObject({ content: "ordinary result", is_error: true })
+    expect(rows[1]).toMatchObject({ id: "actual-uuid", is_error: false, status: "error",
+      function_row: { uuid: "actual-uuid" } })
+  })
+
   it.each([{ uuid: "other" }, { messageType: "assistant" }, { door: "response" },
     { sequence: 0 }])("retains execution error display for invalid tool provenance %j", stamp => {
     const message = tool(stamp)

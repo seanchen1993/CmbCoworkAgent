@@ -47,6 +47,26 @@ export interface CheckpointTranscriptMessage {
   rawIndex?: number
 }
 
+/** Identity fields shared by retained Graph messages and legacy checkpoint import. */
+export function getCheckpointTranscriptMessageIdentity(
+  id: string,
+  role: "user" | "assistant" | "system" | "tool",
+  additionalKwargs: Record<string, unknown>,
+  toolCallId?: unknown
+) {
+  const declaredProviderIdentity =
+    role === "assistant" || role === "tool"
+      ? getMessageProviderTupleFromMetadata(additionalKwargs)
+      : undefined
+  return {
+    id,
+    role,
+    declaredProviderIdentity,
+    ...declaredProviderIdentity,
+    ...(role === "tool" && typeof toolCallId === "string" && { tool_call_id: toolCallId })
+  }
+}
+
 export type CheckpointMessageForkTargetReason =
   | "missing_message"
   | "not_assistant"

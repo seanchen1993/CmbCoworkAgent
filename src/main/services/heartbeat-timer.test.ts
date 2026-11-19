@@ -320,4 +320,24 @@ describe("heartbeat timer invalidation", () => {
     })
     expect(successorEntered).toBe(true)
   })
+
+  it("runs commands in the foreground by default without enabling ManagedRun behavior", async () => {
+    mocks.resolveModel.mockResolvedValue({ resolvedModelId: "model" })
+    mocks.getHeartbeatContent.mockReturnValue("- inspect workspace")
+    mocks.getThreadCore.mockReturnValue(null)
+    mocks.pinCheckpointer.mockReturnValue(vi.fn())
+    mocks.getCheckpointer.mockResolvedValue({
+      getTuple: vi.fn().mockResolvedValue(undefined),
+      deleteThread: vi.fn().mockResolvedValue(undefined)
+    })
+    mocks.closeCheckpointer.mockResolvedValue(undefined)
+    mocks.createAgentRuntime.mockResolvedValue({ stream: async () => [] })
+
+    await runHeartbeatNow()
+
+    expect(mocks.createAgentRuntime).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ autoBackgroundHandoff: false, threadId: "heartbeat" })
+    )
+    expect(mocks.createAgentRuntime.mock.calls[0][0]).not.toHaveProperty("managedExecution")
+  })
 })

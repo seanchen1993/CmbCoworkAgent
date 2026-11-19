@@ -4,6 +4,9 @@ import { types } from "node:util"
 import { stat } from "node:fs/promises"
 import { NativeSqliteAdapter, type NativeSqliteValue } from "../db/native-sqlite-adapter"
 import { checkpointWalInBackground } from "../db/wal-checkpoint"
+import { ensureLegacyTranscriptSlots } from "../db/legacy-transcript-slots"
+import { createLegacyDurableIdentityLookup, getLegacyTranscriptSlotIdentity,
+  reserveLegacyTranscriptOrdinals } from "./legacy-transcript-order"
 import {
   resolveCheckpointDatabaseIdentity,
   assertCheckpointDatabasePathCurrent,
@@ -18,6 +21,8 @@ import {
   type LegacyTranscriptWriterData,
   type LegacyTranscriptMarker,
   type LegacyTranscriptWriteRow,
+  type LegacyTranscriptOrder,
+  type LegacyTranscriptOrderIdentity,
   type LegacyTranscriptWriteCommand,
   type LegacyTranscriptWriteAcknowledgement,
   type LegacyTranscriptWriteResult,
@@ -70,6 +75,7 @@ interface Actor {
   source?: { checkpointId: string; totalMessages: number }
   timing?: TimingSource
   recoveryIntegrity?: boolean
+  scopedOrder?: boolean
   fragment?: { index: number; total: number; row: LegacyTranscriptWriteRow }
   cleanupPending?: boolean
   retainedAdmission?: () => void
@@ -263,12 +269,12 @@ const text = (value: unknown): string => {
   return value
 }
 const nullableText = (value: unknown): string | null => (value === null ? null : text(value))
-function entries(value: unknown, minimum = 0): unknown[] {
+function entries(value: unknown, minimum = 0, maximum = limits.rowsPerBatch): unknown[] {
   if (
     !Array.isArray(value) ||
     types.isProxy(value) ||
     value.length < minimum ||
-    value.length > limits.rowsPerBatch
+    value.length > maximum
   )
     fail("LEGACY_TRANSCRIPT_WRITE_PROTOCOL")
   const result: unknown[] = []
@@ -332,6 +338,54 @@ function point(value: Record<string, unknown>) {
   if (!checkpointId) fail("LEGACY_TRANSCRIPT_WRITE_PROTOCOL")
   return { checkpointId, totalMessages: integer(value.totalMessages) }
 }
+function order(value: unknown, totalMessages: number): LegacyTranscriptOrder {
+  const plan = object(value, ["messages", "graphBoundaries"])
+  let bytes = 0
+  const identityText = (value: unknown) => {
+    const id = text(value)
+    bytes += Buffer.byteLength(id) + 8
+    if (!id || bytes > limits.batchBytes) fail("LEGACY_TRANSCRIPT_WRITE_PROTOCOL")
+    return id
+  }
+  const maximum = Math.floor(limits.batchBytes / 32)
+  const messages = entries(plan.messages, totalMessages, maximum).map((raw) => {
+    const fields = ["checkpointIndex", "messageId", "role", "toolCallId", "providerSourceId",
+      "providerOccurrence"]
+    if (raw && typeof raw === "object" && !types.isProxy(raw) &&
+      Object.hasOwn(raw, "declaredProviderIdentity")) fields.push("declaredProviderIdentity")
+    const item = object(raw, fields)
+    const role = text(item.role)
+    if (!["user", "assistant", "system", "tool"].includes(role))
+      fail("LEGACY_TRANSCRIPT_WRITE_PROTOCOL")
+    bytes += 32
+    const providerOccurrence = item.providerOccurrence === null ? null : integer(item.providerOccurrence)
+    if (providerOccurrence === 0) fail("LEGACY_TRANSCRIPT_WRITE_PROTOCOL")
+    const declared = item.declaredProviderIdentity === undefined ? undefined :
+      object(item.declaredProviderIdentity, ["provider_source_id", "provider_occurrence"])
+    if (declared && integer(declared.provider_occurrence) === 0)
+      fail("LEGACY_TRANSCRIPT_WRITE_PROTOCOL")
+    return { checkpointIndex: integer(item.checkpointIndex), messageId: identityText(item.messageId),
+      role: role as LegacyTranscriptOrderIdentity["role"],
+      toolCallId: item.toolCallId === null ? null : identityText(item.toolCallId),
+      providerSourceId: item.providerSourceId === null ? null : identityText(item.providerSourceId),
+      providerOccurrence, ...(declared && { declaredProviderIdentity: {
+        provider_source_id: identityText(declared.provider_source_id),
+        provider_occurrence: integer(declared.provider_occurrence)
+      } }) }
+  })
+  const graphBoundaries = entries(plan.graphBoundaries, 1, maximum).map((raw) => {
+    const item = object(raw, ["checkpointIndex", "messageId"])
+    bytes += 16
+    return { checkpointIndex: integer(item.checkpointIndex), messageId: identityText(item.messageId) }
+  })
+  if (messages.length !== totalMessages ||
+    messages.some((row, i) => i > 0 && row.checkpointIndex <= messages[i - 1].checkpointIndex) ||
+    graphBoundaries.some((row, i) => i > 0 && row.checkpointIndex <= graphBoundaries[i - 1].checkpointIndex) ||
+    new Set([...messages, ...graphBoundaries].map(row => row.checkpointIndex)).size !==
+      messages.length + graphBoundaries.length)
+    fail("LEGACY_TRANSCRIPT_WRITE_PROTOCOL")
+  return { messages, graphBoundaries }
+}
 function copyCommand(value: unknown): LegacyTranscriptWriteCommand {
   if (!value || typeof value !== "object" || types.isProxy(value))
     fail("LEGACY_TRANSCRIPT_WRITE_PROTOCOL")
@@ -341,8 +395,13 @@ function copyCommand(value: unknown): LegacyTranscriptWriteCommand {
     object(value, ["kind"])
     return { kind }
   }
-  if (kind === "reserve")
-    return { kind, ...point(object(value, ["kind", "checkpointId", "totalMessages"])) }
+  if (kind === "reserve") {
+    const keys = ["kind", "checkpointId", "totalMessages"]
+    const scoped = Object.hasOwn(value, "order")
+    const source = object(value, scoped ? [...keys, "order"] : keys)
+    const identity = point(source)
+    return { kind, ...identity, ...(scoped && { order: order(source.order, identity.totalMessages) }) }
+  }
   if (kind === "finish") {
     const source = object(value, [
       "kind",
@@ -580,6 +639,12 @@ function progress(
     ...(fragmentOwned === undefined ? {} : { fragmentOwned })
   }
 }
+function usesScopedOrder(actor: Actor): boolean {
+  return actor.scopedOrder ??= hasTable(actor.database, "legacy_checkpoint_transcript_slots") &&
+    row(actor.database, `SELECT scoped_order FROM ${markerTable} WHERE thread_id=?`,
+      [actor.threadId])?.[0] === 1
+}
+
 function insertMessage(
   actor: Actor,
   message: LegacyTranscriptWriteRow,
@@ -587,6 +652,20 @@ function insertMessage(
   total: number
 ): number {
   const database = actor.database
+  const scoped = usesScopedOrder(actor)
+  let ordinal = index
+  if (scoped) {
+    const slot = row(database, `SELECT ordinal,provider_source_id,role,provider_occurrence
+      FROM legacy_checkpoint_transcript_slots
+      WHERE thread_id=? AND checkpoint_id=? AND message_index=?`,
+    [actor.threadId, actor.source?.checkpointId, index])
+    // A missing slot is already satisfied by an existing durable occurrence.
+    if (!slot) return 0
+    const identity = getLegacyTranscriptSlotIdentity(message)
+    if (slot[1] !== null && (slot[1] !== identity.source || slot[2] !== identity.role ||
+      slot[3] !== identity.occurrence)) fail("LEGACY_TRANSCRIPT_WRITE_SOURCE_CHANGED")
+    ordinal = integer(slot[0])
+  }
   const recovery = (actor.recoveryIntegrity ??= (
     database.exec("PRAGMA table_info(thread_messages)")[0]?.values ?? []
   ).some((value) => value[1] === "recovery_integrity"))
@@ -609,12 +688,12 @@ function insertMessage(
       message.status,
       message.isError,
       message.createdAt,
-      index,
+      ordinal,
       ...(recovery ? [message.recoveryIntegrity] : [])
     ]
   )
   const inserted = database.getRowsModified()
-  if (!inserted)
+  if (!inserted && !scoped)
     database.run(
       `UPDATE thread_messages SET ordinal=?
     WHERE thread_id=? AND message_id=? AND ordinal>=?`,
@@ -711,6 +790,10 @@ function copy(
     ]
   )
   if (actor.database.getRowsModified() !== 1) fail("LEGACY_TRANSCRIPT_WRITE_SOURCE_CHANGED")
+  if (next > command.index && usesScopedOrder(actor))
+    actor.database.run(`DELETE FROM legacy_checkpoint_transcript_slots
+      WHERE thread_id=? AND checkpoint_id=? AND message_index>=? AND message_index<?`,
+    [actor.threadId, state.checkpointId, command.index, next])
   return progress(actor, inserted, fragmentOwned)
 }
 
@@ -820,24 +903,52 @@ function apply(actor: Actor, command: LegacyTranscriptWriteCommand): LegacyTrans
       requireMarker(actor, command)
       return progress(actor)
     }
-    const summary = row(
+    const database = actor.database
+    const existingBucket = command.order ? row(database,
+      "SELECT message_count,next_ordinal FROM thread_message_buckets WHERE thread_id=?",
+      [actor.threadId]) : undefined
+    const summary = existingBucket ?? row(
       actor.database,
       `SELECT COUNT(*),COALESCE(MAX(ordinal),-1)+1
       FROM thread_messages WHERE thread_id=?`,
       [actor.threadId]
     )!
-    if (command.totalMessages > 0 && Number(summary[0]) > 0)
+    const reservation = command.order && reserveLegacyTranscriptOrdinals(database,
+      { threadId: actor.threadId, ...command.order },
+      createLegacyDurableIdentityLookup(database, actor.threadId),
+      () => current(actor, true))
+    const ordinals = reservation?.ordinals
+    const reservedCount = reservation?.reservedCount ?? command.totalMessages
+    const complete = Boolean(reservation && reservedCount === 0)
+    if (!ordinals && reservedCount > 0 && Number(summary[0]) > 0)
       actor.database.run("UPDATE thread_messages SET ordinal=ordinal+? WHERE thread_id=?", [
-        command.totalMessages,
+        reservedCount,
         actor.threadId
       ])
-    actor.database.run(
+    if (!complete) actor.database.run(
       `INSERT INTO thread_message_buckets(thread_id,message_count,next_ordinal,updated_at)
       VALUES (?,?,?,?) ON CONFLICT(thread_id) DO UPDATE SET message_count=excluded.message_count,
       next_ordinal=excluded.next_ordinal,updated_at=excluded.updated_at`,
-      [actor.threadId, Number(summary[0]), Number(summary[1]) + command.totalMessages, Date.now()]
+      [actor.threadId, Number(summary[0]), Number(summary[1]) + reservedCount, Date.now()]
     )
-    actor.database.run(
+    if (command.order && ordinals) {
+      const slots = command.order.messages.flatMap((message, index) =>
+        ordinals[index] === null ? [] :
+          [{ index, ordinal: ordinals[index], ...getLegacyTranscriptSlotIdentity(message) }])
+      if (slots.length) database.run(`INSERT INTO legacy_checkpoint_transcript_slots
+        (thread_id,checkpoint_id,message_index,ordinal,provider_source_id,role,provider_occurrence)
+        SELECT ?,?,json_extract(value,'$.index'),json_extract(value,'$.ordinal'),
+          json_extract(value,'$.source'),json_extract(value,'$.role'),json_extract(value,'$.occurrence')
+        FROM json_each(?)`, [actor.threadId, command.checkpointId, JSON.stringify(slots)])
+    }
+    if (command.order) database.run(
+      `INSERT INTO ${markerTable}(thread_id,checkpoint_id,total_messages,next_index,
+      current_fragment_index,status,scoped_order,updated_at) VALUES (?,?,?,?,0,?,?,?)`,
+      [actor.threadId, command.checkpointId, command.totalMessages,
+        complete ? command.totalMessages : 0, complete ? "complete" : "migrating",
+        Number(Boolean(ordinals)), Date.now()]
+    )
+    else database.run(
       `INSERT INTO ${markerTable}(thread_id,checkpoint_id,total_messages,next_index,
       current_fragment_index,status,updated_at) VALUES (?,?,?,0,0,'migrating',?)`,
       [actor.threadId, command.checkpointId, command.totalMessages, Date.now()]
@@ -855,7 +966,8 @@ function apply(actor: Actor, command: LegacyTranscriptWriteCommand): LegacyTrans
       [actor.threadId]
     )!
     actor.database.run(
-      "UPDATE thread_message_buckets SET message_count=?,next_ordinal=?,updated_at=? WHERE thread_id=?",
+      `UPDATE thread_message_buckets SET message_count=?,next_ordinal=
+      ${usesScopedOrder(actor) ? "MAX(next_ordinal,?)" : "?"},updated_at=? WHERE thread_id=?`,
       [Number(summary[0]), Number(summary[1]), Date.now(), actor.threadId]
     )
     actor.database.run(
@@ -884,6 +996,7 @@ async function reserveWithWalMaintenance(
     fail("LEGACY_TRANSCRIPT_WRITE_DATABASE_UNAVAILABLE")
   const work = () => {
     ensureMarkerSchema(database)
+    if (command.order) ensureLegacyTranscriptSlots(database)
     return transaction(actor, () => apply(actor, command))
   }
   // Respect a connection whose owner already disabled automatic checkpoints.

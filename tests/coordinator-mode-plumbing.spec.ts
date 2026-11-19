@@ -1641,8 +1641,8 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "LocalSandbox.cancelBackgroundTasks(threadId)",
-    "agent cancel still revokes foreground thread-scoped background tasks for full-turn cancellation"
+    'LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: "desktop" })',
+    "agent cancel revokes desktop-owned shell tasks for full-turn cancellation"
   )
   assertMatches(
     agentIpc,
@@ -1842,12 +1842,13 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "extractRawText(kwargs.content)",
     "agent IPC compares raw checkpoint message text before trace truncation"
   )
-  const stableValuesSanitizations =
-    agentIpc.match(/\{ messages: latestValuesSnapshot\.messages \}/g)?.length ?? 0
-  assert(
-    stableValuesSanitizations === 3,
-    "invoke, resume, and interrupt retain complete values only for exceptional reset paths"
-  )
+  for (const snapshot of ["latestStableStreamValues", "latestStableResumeValues", "latestStableInterruptValues"]) {
+    assertIncludes(
+      agentIpc,
+      `replayCommittedStreamValues(${snapshot})`,
+      "invoke, resume, and interrupt replay committed values on exceptional reset paths"
+    )
+  }
   assertSourceOrder(
     streamSerialization,
     "messages.slice(currentTurnBoundary)",
@@ -1862,7 +1863,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   assertSourceOrder(
     agentIpc,
     "const serialized = focusedWorker.serialize(stream.mode, stream.data)",
-    "data = sanitizeStreamDataForRenderer(",
+    "data = sanitizeCoordinatorWorkerStreamDataForRenderer(",
     "focused worker stream uses its run-scoped serializer before renderer sanitization"
   )
   assertIncludes(
@@ -1882,7 +1883,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "data: sanitizeStreamDataForRenderer(mode, payload, valuesMessageIndexOffset)",
+    "data: sanitizeStreamDataForRenderer(mode, outgoing, valuesMessageIndexOffset)",
     "normal invoke stream sanitizes renderer payloads"
   )
   assertIncludes(
@@ -2142,7 +2143,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   assertSourceOrder(
     agentIpc,
     "isCoordinatorWorkerStreamChunk(mode, data, threadId)",
-    "} = serializeForRun(mode, data)",
+    "const frame = serializeForRun(mode, data)",
     "agent IPC filters async worker chunks before serializing payloads for renderer forwarding"
   )
   const streamHelper = await readProjectFile("src/main/agent/main-turn-stream.ts")
@@ -2669,13 +2670,18 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "withNativeApprovalWait(threadId, options.abortSignal, async (approvalSignal) =>",
+    "withNativeApprovalWait(threadId, signal, async (approvalSignal) =>",
     "runtime retains run ownership while combining native approval and Mods cancellation"
   )
   assertIncludes(
     runtime,
     'approvalSignal?.addEventListener("abort", onAbort',
     "runtime rejects pending approvals when the owning run or Mods operation is aborted"
+  )
+  assertIncludes(
+    runtime,
+    "signal = options.abortSignal",
+    "runtime uses the owning run signal by default and accepts a detached task signal"
   )
   assertIncludes(
     runtime,
@@ -2956,7 +2962,7 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     workerAccess,
-    'new Set(["execute", "task_output", ...deferredToolNames])',
+    'new Set(["execute", ...SHELL_TASK_MONITOR_TOOL_NAMES, ...deferredToolNames])',
     "worker access policy removes shell execution and deferred execution from owned_files-scoped write workers"
   )
   assertIncludes(
@@ -3058,7 +3064,7 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     coordinatorMode,
-    "read_only workers do not receive direct write_file/edit_file tools, but they DO keep execute",
+    "read_only workers keep execute and monitor",
     "coordinator prompt reflects that read_only workers keep (read-only-gated) execute — so the model prefers cheap read_only workers for shell inspection"
   )
   assertIncludes(
@@ -3099,8 +3105,23 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "closeCheckpointer(workerInput.workerThreadId)",
+    "cleanupChildRuntimeResources(workerInput.workerThreadId)",
     "runtime releases worker checkpointer resources when a worker turn finishes"
+  )
+  assertIncludes(
+    runtime,
+    "await cleanupChildRuntimeResources(workflowThreadId)",
+    "runtime releases every workflow subagent's resources through the same shell fence"
+  )
+  assertIncludes(
+    runtime,
+    "shellParentThreadId: workerInput.parentThreadId",
+    "worker runtime registers actual parent ownership for thread deletion"
+  )
+  assertIncludes(
+    runtime,
+    "shellParentThreadId: threadId",
+    "workflow subagent runtime registers actual parent ownership for thread deletion"
   )
   assertMatches(
     runtime,
@@ -3177,7 +3198,7 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   assertSourceOrder(
     threadsIpcForRollback,
     "while (deletingThreads.has(threadId))",
-    "const deletion = performThreadDeletion(event, threadId, options?.groupGuard)",
+    "const deletion = performThreadDeletion(event, threadId, metadata, options)",
     "a new deletion WAITS OUT any in-flight deletion of the same thread before starting"
   )
   assertMatches(
@@ -3293,23 +3314,24 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "await Promise.allSettled",
-    "runtime waits for worker resource cleanup before a worker run resolves"
-  )
-  assertIncludes(
-    runtime,
-    "Promise.resolve().then(cancelWorkerBackgroundTasks)",
-    "runtime keeps worker ACL/checkpointer cleanup running even if background-task cancellation throws"
-  )
-  assertIncludes(
-    runtime,
     'workerInput.abortSignal.removeEventListener("abort", cancelWorkerBackgroundTasks)',
     "runtime removes async worker abort cleanup listeners"
   )
-  assertIncludes(
-    runtime,
-    "LocalSandbox.revokeGrantedAclsForRun(workerInput.workerThreadId)",
-    "runtime revokes worker-scoped sandbox ACLs after async worker run"
+  const childRuntimeCleanup = runtime.slice(
+    runtime.indexOf("export async function cleanupChildRuntimeResources("),
+    runtime.indexOf("export async function retireThreadCheckpointer")
+  )
+  assertSourceOrder(
+    childRuntimeCleanup,
+    "await LocalSandbox.cancelBackgroundTasksAndWait(threadId)",
+    "LocalSandbox.revokeGrantedAclsForRun(threadId)",
+    "runtime waits for physical shell cleanup before revoking child ACLs"
+  )
+  assertSourceOrder(
+    childRuntimeCleanup,
+    "await LocalSandbox.cancelBackgroundTasksAndWait(threadId)",
+    "closeCheckpointer(threadId)",
+    "runtime waits for physical shell cleanup before closing the child checkpoint"
   )
   assertIncludes(
     runtime,
@@ -3547,7 +3569,7 @@ async function testHookAgentIdentityPlumbing(): Promise<void> {
   )
   assertMatches(
     agentIpc,
-    /const switchToNextFailoverCandidate = async[\s\S]{0,180}?if \(isHookHaltError\(error\)\) throw error/,
+    /const switchToNextFailoverCandidate = async[\s\S]{0,180}?if \(isHookHaltError\(error\) \|\| error instanceof StreamTranscriptRollbackError\) throw error/,
     "goal-continuation failover never reclassifies a Hook halt as a model failure"
   )
   assertMatches(

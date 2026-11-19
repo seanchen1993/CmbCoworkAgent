@@ -211,7 +211,7 @@ export function buildToolResultAssociations(
     if (bucket.activeCount === 0) pendingCallsByRawId.delete(rawToolCallId)
     results.set(pendingCall.key, {
       content: message.content,
-      is_error: message.is_error === true || message.status === "error"
+      is_error: message.is_error ?? message.status === "error"
     })
   }
 

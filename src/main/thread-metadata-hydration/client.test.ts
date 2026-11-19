@@ -67,7 +67,8 @@ function fixture(): { database: DatabaseSync; path: string } {
       goal_id TEXT,
       active_window_id TEXT,
       message TEXT NOT NULL,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      transcript_message_id TEXT
     );
     CREATE TABLE thread_messages (
       thread_id TEXT NOT NULL,
@@ -75,6 +76,7 @@ function fixture(): { database: DatabaseSync; path: string } {
       role TEXT NOT NULL,
       goal_id TEXT,
       active_window_id TEXT,
+      created_at INTEGER NOT NULL DEFAULT 1,
       ordinal INTEGER NOT NULL,
       PRIMARY KEY(thread_id, message_id)
     );

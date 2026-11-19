@@ -29,7 +29,11 @@ import {
   STOP_HOOK_REVISION_PROMPT_PREFIX,
   type SerializedHookMessage
 } from "./stop-hook-context"
-import { persistedMessageFromStreamPayload, streamPayloadContentMode } from "./stream-transcript-payload"
+import {
+  getSerializedMessageRole,
+  persistedMessageFromStreamPayload,
+  streamPayloadContentMode
+} from "./stream-transcript-payload"
 import { readNativeConversationStreamProjection } from
   "../agent/native-conversation-stream-projection"
 import {
@@ -51,7 +55,9 @@ import { withThreadRunMutationLock } from "./thread-run-mutation-lock"
 import {
   createSerializedValuesMessageAccumulator,
   createStreamDataSerializer,
-  sanitizeStreamDataForRenderer
+  sanitizeCoordinatorWorkerStreamDataForRenderer,
+  sanitizeStreamDataForRenderer,
+  type SerializedValuesMessageSnapshot
 } from "./stream-data-serialization"
 import {
   classifyPhysicalStreamRunFailure,
@@ -119,6 +125,7 @@ import {
   type ModelRetryHooks,
   type FetchErrorInfo
 } from "../agent/runtime"
+import { mergeCurrentRunGoalProviderOccurrences } from "../agent/current-run-message-queue"
 import type { CheckpointMetadata } from "@langchain/langgraph-checkpoint"
 import {
   addThreadGoalEvent,
@@ -134,8 +141,11 @@ import {
   getThreadMessagesByIds,
   getThread,
   partitionCanonicalThreadMessageEchoes,
+  getThreadTranscriptBoundaryOrdinal,
+  reserveThreadGraphTranscriptBoundary,
   updateThread,
-  upsertThreadMessages
+  upsertThreadMessages,
+  withThreadMessageIdentitySnapshot
 } from "../db"
 import {
   assertNoTranscriptAgentModeTransition,
@@ -408,7 +418,11 @@ import {
   isGoalBoundaryStillCurrent,
   validateGoalText
 } from "../agent/goals/goal-manager"
-import { buildGoalContinuationPromptFromHookContexts } from "../agent/goals/internal-prompt"
+import {
+  buildGoalContinuationPromptFromHookContexts,
+  GOAL_CONTINUATION_BOUNDARY_METADATA_KEY,
+  GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY
+} from "../agent/goals/internal-prompt"
 import { goalManager, goalStore } from "../agent/goals/runtime"
 import {
   extractGoalTransportAttachmentNames,
@@ -492,7 +506,8 @@ import {
   getLocalThreadRunLease,
   releaseLocalThreadRunLease,
   type LocalThreadRunLease,
-  type LocalThreadRunLeaseClaim
+  type LocalThreadRunLeaseClaim,
+  type LocalThreadRunOwner
 } from "../agent/thread-run-lease"
 import { isKnowledgeDepositionBlocked } from "../services/knowledge-base-manager"
 import { emitAppAttention } from "../app-attention-events"
@@ -1379,16 +1394,16 @@ export async function waitForActiveAgentRunToSettle(
 export async function cancelAndWaitForAgentThreadRun(
   threadId: string,
   window?: BrowserWindow | null
-): Promise<"settled" | "timed_out"> {
+): Promise<"settled" | "timed_out" | "shell_timed_out"> {
+  const shellSettlement = LocalSandbox.cancelBackgroundTasksWithin(
+    threadId,
+    ACTIVE_RUN_REPLACEMENT_MAX_WAIT_MS,
+    { includeChildRuns: true }
+  )
   const controller = activeRuns.get(threadId)
-  if (!controller) return "settled"
+  if (!controller) return (await shellSettlement) ? "settled" : "shell_timed_out"
   const channel = streamChannelByRunController.get(controller)
 
-  try {
-    LocalSandbox.cancelBackgroundTasks(threadId)
-  } catch (error) {
-    console.warn("[Agent] Failed to cancel foreground background tasks during delete:", error)
-  }
   try {
     flushPendingStreamTranscriptMessagesForThread(threadId)
   } catch (error) {
@@ -1396,7 +1411,11 @@ export async function cancelAndWaitForAgentThreadRun(
   }
   controller.abort()
   if (window && channel) safeSendToWindow(window, channel, { type: "done" })
-  return waitForReplacedRunToSettle(threadId)
+  const [foreground, shellSettled] = await Promise.all([
+    waitForReplacedRunToSettle(threadId),
+    shellSettlement
+  ])
+  return shellSettled ? foreground : "shell_timed_out"
 }
 
 function cancelFunctionAgentTurn(
@@ -1536,7 +1555,8 @@ function persistGoalUserMessage(
   threadId: string,
   content: string,
   goalId = goalManager.get(threadId)?.goalId ?? null,
-  activeWindowId = goalManager.get(threadId)?.activeWindowId ?? null
+  activeWindowId = goalManager.get(threadId)?.activeWindowId ?? null,
+  transcriptMessageId?: string
 ): void {
   try {
     addThreadGoalEvent(
@@ -1544,7 +1564,8 @@ function persistGoalUserMessage(
       `${GOAL_USER_MESSAGE_EVENT_PREFIX}${content}`,
       goalId,
       Date.now(),
-      activeWindowId
+      activeWindowId,
+      transcriptMessageId
     )
   } catch (error) {
     console.warn("[Goal] failed to persist goal user message:", error)
@@ -1661,6 +1682,7 @@ function emitGoalNotice(
 
 function handleGoalNonStartingControlCommand(params: {
   threadId: string
+  runOwner: LocalThreadRunOwner
   command: ReturnType<typeof parseGoalSlashCommand>
   originalMessage?: string
   window: BrowserWindow | null | undefined
@@ -1670,6 +1692,7 @@ function handleGoalNonStartingControlCommand(params: {
 }): GoalControlResult {
   const {
     threadId,
+    runOwner,
     command,
     originalMessage,
     window,
@@ -1737,7 +1760,7 @@ function handleGoalNonStartingControlCommand(params: {
     }
 
     abortActiveRun(threadId)
-    LocalSandbox.cancelBackgroundTasks(threadId)
+    LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: runOwner })
     const goal = goalManager.pause(threadId, "user-paused")
     const pausedReason = displayGoalPausedReason(goal?.pausedReason) || "已手动暂停。"
     const notice = emitGoalNotice(
@@ -1763,7 +1786,7 @@ function handleGoalNonStartingControlCommand(params: {
     const terminatedCurrentRun = existingGoal.status === "active"
     if (existingGoal.status === "active") {
       abortActiveRun(threadId)
-      LocalSandbox.cancelBackgroundTasks(threadId)
+      LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: runOwner })
     }
     goalManager.clear(threadId)
     // Memory hygiene: drop any background-evidence batches parked for the
@@ -1800,6 +1823,14 @@ async function executeAgentGoalControl(
       // Possibly a managed transport's shim; see AgentRunDelivery.window.
       const window = delivery.window
       const activeController = activeRuns.get(threadId)
+      const controlledRunOwner =
+        context.allowForeignOwnerGoalControl && activeController
+          ? getLocalThreadRunLease(threadId)?.owner
+          : undefined
+      const runOwner =
+        controlledRunOwner ??
+        context.localRunLease?.owner ??
+        (context.source === "heartbeat" ? "scheduler" : context.source)
       const channel = activeController
         ? (streamChannelByRunController.get(activeController) ?? `agent:stream:${threadId}`)
         : `agent:stream:${threadId}`
@@ -1811,6 +1842,7 @@ async function executeAgentGoalControl(
       const goalCommand = parseGoalSlashCommand(message)
       const result = handleGoalNonStartingControlCommand({
         threadId,
+        runOwner,
         command: goalCommand,
         originalMessage: message,
         window,
@@ -1856,7 +1888,7 @@ function pauseActiveGoalAfterBoundary(
   }
   const paused = goalManager.pause(threadId, reason)
   if (paused?.status !== "paused") return
-  LocalSandbox.cancelBackgroundTasks(threadId)
+  LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: "desktop" })
   emitGoalNotice(
     window,
     channel,
@@ -2221,7 +2253,10 @@ async function settlePhysicalAgentRun({
       {
         name: "discard-tool-call-accumulators",
         shouldRun: () => transcriptFlushSucceeded,
-        run: () => discardStreamTranscriptToolCallAccumulators(threadId, runToken)
+        run: () => {
+          discardStreamTranscriptToolCallAccumulators(threadId, runToken)
+          streamTranscriptBoundaryIds.delete(pendingStreamTranscriptKey(threadId, runToken))
+        }
       },
       {
         name: "invalidate-message-preparer",
@@ -3101,7 +3136,7 @@ function sendCoordinatorWorkerStream(
     const serialized = focusedWorker.serialize(stream.mode, stream.data)
     valuesSnapshotKind = serialized.valuesSnapshotKind
     if (isContextCompactionStreamPayload(stream.mode, serialized.data)) return
-    data = sanitizeStreamDataForRenderer(
+    data = sanitizeCoordinatorWorkerStreamDataForRenderer(
       stream.mode,
       serialized.data,
       serialized.valuesMessageIndexOffset
@@ -4030,9 +4065,30 @@ interface SerializedValuesSideEffectMessage extends SerializedHookMessage {
   }
 }
 
-function extractSerializedValuesMessages(payload: unknown): unknown[] {
-  if (!payload || typeof payload !== "object") return []
-  const messages = (payload as { messages?: unknown }).messages
+const committedGoalMessageReceipts = new WeakMap<object, Record<string, unknown>>()
+
+function projectCommittedGoalMessages(messages: readonly unknown[]): readonly unknown[] {
+  let projected: unknown[] | undefined
+  messages.forEach((source, index) => {
+    if (!source || typeof source !== "object") return
+    const receipt = committedGoalMessageReceipts.get(source)
+    if (!receipt) return
+    projected ??= messages.slice()
+    projected[index] = receipt
+  })
+  return projected ?? messages
+}
+
+function replayCommittedStreamValues(
+  snapshot: SerializedValuesMessageSnapshot | undefined
+): unknown[] {
+  if (!snapshot) return []
+  const payload = sanitizeStreamDataForRenderer(
+    "values",
+    { messages: projectCommittedGoalMessages(snapshot.messages) },
+    snapshot.valuesMessageIndexOffset
+  )
+  const messages = asPlainRecord(payload)?.messages
   return Array.isArray(messages) ? messages : []
 }
 
@@ -4205,6 +4261,9 @@ const streamTranscriptToolCallAccumulators = new Map<
 
 const streamTranscriptAssistantIdentities = new Map<string, StreamTranscriptAssistantIdentity>()
 const streamTranscriptAttempts = new Map<string, ThreadMessageStreamAttempt>()
+const streamTranscriptBoundaryIds = new Map<string, string>()
+
+class StreamTranscriptSnapshotRequiredError extends Error {}
 
 function pendingStreamTranscriptKey(threadId: string, runToken: string): string {
   return `${threadId}\u0000${runToken}`
@@ -4252,6 +4311,9 @@ function discardStreamTranscriptToolCallAccumulators(threadId: string, runToken:
 
 function discardStreamTranscriptToolCallAccumulatorsForThread(threadId: string): void {
   const prefix = `${threadId}\u0000`
+  for (const key of streamTranscriptBoundaryIds.keys()) {
+    if (key.startsWith(prefix)) streamTranscriptBoundaryIds.delete(key)
+  }
   for (const key of streamTranscriptAttempts.keys()) {
     if (key.startsWith(prefix)) streamTranscriptAttempts.delete(key)
   }
@@ -4260,10 +4322,25 @@ function discardStreamTranscriptToolCallAccumulatorsForThread(threadId: string):
   }
 }
 
+function loadPreviousRunProviderOccurrences(
+  threadId: string,
+  runToken: string,
+  boundaryId: string,
+  sourceIds: readonly string[]
+) {
+  return mergeCurrentRunGoalProviderOccurrences(
+    threadId,
+    runToken,
+    boundaryId,
+    sourceIds,
+    getThreadMessageProviderOccurrencesBeforeUser(threadId, boundaryId, sourceIds)
+  )
+}
+
 function flushPendingStreamTranscriptMessages(
   threadId: string,
   runToken: string,
-  options: { throwOnError?: boolean; messageId?: string; assertCurrent?: () => void; checkpoint?: boolean } = {}
+  options: { throwOnError?: boolean; allowWaitingForSnapshot?: boolean; messageId?: string; assertCurrent?: () => void; checkpoint?: boolean } = {}
 ): void {
   options.assertCurrent?.()
   const pendingKey = pendingStreamTranscriptKey(threadId, runToken)
@@ -4294,30 +4371,40 @@ function flushPendingStreamTranscriptMessages(
             getMessageProviderOccurrence(message) === pending.requiredSnapshotProviderOccurrence)
       )
       if (!hasRequiredSnapshot) {
-        throw new Error("Stream suffix is waiting for an authoritative assistant snapshot")
+        throw new StreamTranscriptSnapshotRequiredError(
+          "Stream suffix is waiting for an authoritative assistant snapshot"
+        )
       }
     }
     const queuedMessages = reconcileNativePartialQueuedMessages(selected, threadId, runToken)
     const retainedPartials = new Set(queuedMessages)
     const retiredPartials = selected.filter(message => !retainedPartials.has(message))
-    const resolved = resolveStreamTranscriptFlush({
-      queuedMessages,
-      currentAssistantIdentity: streamTranscriptAssistantIdentities.get(pendingKey),
-      loadBaselineMessages: () =>
-        getThreadMessageIdentityContext(
-          threadId,
-          selected.map((message) => ({
-            messageId: message.id,
-            providerSourceId: getMessageProviderSourceId(message),
-            providerOccurrence: getMessageProviderOccurrence(message),
-            role: message.role
-          }))
-        )
-    })
+    const boundaryId = streamTranscriptBoundaryIds.get(pendingKey)
+    const resolve = () =>
+      resolveStreamTranscriptFlush({
+        queuedMessages,
+        currentAssistantIdentity: streamTranscriptAssistantIdentities.get(pendingKey),
+        ...(boundaryId && {
+          boundaryOrdinal: getThreadTranscriptBoundaryOrdinal(threadId, boundaryId),
+          loadPreviousOccurrences: (sourceIds: readonly string[]) =>
+            loadPreviousRunProviderOccurrences(threadId, runToken, boundaryId, sourceIds)
+        }),
+        loadBaselineMessages: () =>
+          getThreadMessageIdentityContext(
+            threadId,
+            selected.map((message) => ({
+              messageId: message.id,
+              providerSourceId: getMessageProviderSourceId(message),
+              providerOccurrence: getMessageProviderOccurrence(message),
+              role: message.role
+            }))
+          )
+      })
+    const resolved = boundaryId ? withThreadMessageIdentitySnapshot(resolve) : resolve()
     const { messages, preserveExistingOrder } = resolved
     if (messages.length === 0) return
-    let streamAttempt = options.checkpoint ? undefined : streamTranscriptAttempts.get(pendingKey)
-    if (!options.checkpoint && !streamAttempt) {
+    let streamAttempt = streamTranscriptAttempts.get(pendingKey)
+    if (!streamAttempt) {
       streamAttempt = new ThreadMessageStreamAttempt(threadId)
       streamTranscriptAttempts.set(pendingKey, streamAttempt)
     }
@@ -4334,7 +4421,9 @@ function flushPendingStreamTranscriptMessages(
           providerOccurrence: getMessageProviderOccurrence(messages[0]) ?? 1
         }
         if (!targeted) streamTranscriptAssistantIdentities.delete(pendingKey)
-        throw new Error("Stream text delta no longer matches its durable assistant row")
+        throw new StreamTranscriptSnapshotRequiredError(
+          "Stream text delta no longer matches its durable assistant row"
+        )
       }
       persistedCount = 1
     } else {
@@ -4379,6 +4468,9 @@ function flushPendingStreamTranscriptMessages(
       requiredSnapshotProviderOccurrence:
         rejectedDeltaIdentity?.providerOccurrence ?? pending.requiredSnapshotProviderOccurrence
     })
+    if (options.allowWaitingForSnapshot && error instanceof StreamTranscriptSnapshotRequiredError) {
+      return
+    }
     if (options.throwOnError) throw error
     console.warn("[Agent] Failed to persist streamed transcript messages:", error)
   }
@@ -4450,6 +4542,9 @@ function flushPendingStreamTranscriptMessagesForThread(
   for (const runToken of owners) {
     if (!remainingOwners.has(runToken)) {
       discardStreamTranscriptToolCallAccumulators(threadId, runToken)
+      if (!isCurrentRunMessageQueueOwner(threadId, runToken)) {
+        streamTranscriptBoundaryIds.delete(pendingStreamTranscriptKey(threadId, runToken))
+      }
     }
   }
   if (firstError) {
@@ -4459,9 +4554,57 @@ function flushPendingStreamTranscriptMessagesForThread(
   return remainingOwners.size === 0
 }
 
+/** Give one internal Goal input an ordinal before its first provider chunk. */
+export function createPhysicalRunHiddenUserMessage(
+  threadId: string,
+  runToken: string,
+  signal: AbortSignal,
+  goalBoundary: Pick<ThreadGoal, "goalId" | "activeWindowId"> | null | undefined,
+  fields: { content: string; id?: string; additional_kwargs?: HumanMessage["additional_kwargs"] }
+): HumanMessage {
+  throwIfPhysicalStreamRunIsInactive(threadId, runToken, signal)
+  const activeGoal = goalBoundary ? goalManager.getActive(threadId) : null
+  if (
+    !isGoalBoundaryStillCurrent(
+      activeGoal?.goalId,
+      goalBoundary?.goalId,
+      activeGoal?.activeWindowId,
+      goalBoundary?.activeWindowId
+    )
+  ) {
+    return new HumanMessage(fields)
+  }
+
+  flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
+  const graphUserId = uuid()
+  reserveThreadGraphTranscriptBoundary(threadId, graphUserId)
+  // The previous graph stream has finished. Only the new input belongs to
+  // the next attempt, so retire the prior journal and cached identities.
+  discardStreamTranscriptToolCallAccumulators(threadId, runToken)
+  streamTranscriptBoundaryIds.set(pendingStreamTranscriptKey(threadId, runToken), graphUserId)
+
+  const additionalKwargs = { ...fields.additional_kwargs }
+  delete additionalKwargs[COORDINATOR_VISIBLE_USER_MESSAGE_KEY]
+  return new HumanMessage({
+    content: fields.content,
+    id: graphUserId,
+    additional_kwargs: {
+      ...additionalKwargs,
+      [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true
+    }
+  })
+}
+
 setCurrentRunTranscriptFlushBeforeInjection((threadId, runToken) => {
   flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
-  streamTranscriptAssistantIdentities.delete(pendingStreamTranscriptKey(threadId, runToken))
+  const key = pendingStreamTranscriptKey(threadId, runToken)
+  streamTranscriptAssistantIdentities.delete(key)
+  return (userMessageId) => {
+    discardStreamTranscriptToolCallAccumulators(threadId, runToken)
+    if (userMessageId && streamTranscriptBoundaryIds.has(key)) {
+      streamTranscriptBoundaryIds.set(key, userMessageId)
+    }
+  }
 })
 
 function discardPendingStreamTranscriptMessages(threadId: string, runToken: string): string[] {
@@ -4628,7 +4771,55 @@ async function awaitPhysicalStreamRunSetup<T>({
   }
 }
 
-function persistAndForwardPhysicalRunStreamChunk(
+function adoptGraphTranscriptBoundaryFromValues(
+  threadId: string,
+  runToken: string,
+  payload: unknown,
+  completeValuesMessages?: readonly unknown[]
+): void {
+  const runKey = pendingStreamTranscriptKey(threadId, runToken)
+  const currentBoundaryId = streamTranscriptBoundaryIds.get(runKey)
+  const frameMessages = asPlainRecord(payload)?.messages
+  const changedMessages = Array.isArray(frameMessages) ? frameMessages : []
+  const messages = currentBoundaryId ? changedMessages : completeValuesMessages ?? changedMessages
+  const input = messages.findLast((message) => getSerializedMessageRole(message) === "user")
+  const inputRecord = asPlainRecord(input)
+  const kwargs = asPlainRecord(inputRecord?.kwargs) ?? inputRecord
+  const boundaryId = kwargs?.id
+  const additionalKwargs = asPlainRecord(kwargs?.additional_kwargs)
+  if (
+    typeof boundaryId !== "string" ||
+    boundaryId === currentBoundaryId ||
+    additionalKwargs?.[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] !== true
+  ) {
+    return
+  }
+
+  const parentId = additionalKwargs[GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]
+  const gateInput = typeof parentId === "string" && Boolean(parentId)
+  if (currentBoundaryId && !gateInput) return
+  const ordinal = getThreadTranscriptBoundaryOrdinal(threadId, boundaryId)
+  if (ordinal === undefined) {
+    if (
+      !gateInput ||
+      !goalManager.getActive(threadId) ||
+      getThreadTranscriptBoundaryOrdinal(threadId, parentId) === undefined
+    ) {
+      return
+    }
+    // Repairs are injected inside the graph. Consume the preceding model's
+    // frames on their original boundary before assigning a durable position.
+    flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
+    reserveThreadGraphTranscriptBoundary(threadId, boundaryId)
+  } else if (currentBoundaryId) {
+    const currentOrdinal = getThreadTranscriptBoundaryOrdinal(threadId, currentBoundaryId)
+    if (currentOrdinal !== undefined && ordinal < currentOrdinal) return
+  }
+  streamTranscriptBoundaryIds.set(runKey, boundaryId)
+  streamTranscriptAssistantIdentities.delete(runKey)
+}
+
+export function persistAndForwardPhysicalRunStreamChunk(
   window: BrowserWindow,
   channel: string,
   threadId: string,
@@ -4638,7 +4829,8 @@ function persistAndForwardPhysicalRunStreamChunk(
   payload: unknown,
   valuesMessageIndexOffset = 0,
   valuesSnapshotKind: "full" | "append" | "tail" = "full",
-  completeValuesMessages?: readonly unknown[]
+  completeValuesMessages?: readonly unknown[],
+  projectGoalValues = false
 ): string | null {
   // This fence deliberately sits immediately beside persistence and renderer
   // forwarding. A provider callback may resume after any earlier await even
@@ -4664,40 +4856,62 @@ function persistAndForwardPhysicalRunStreamChunk(
       payload,
       streamPayloadContentMode(payload)
     )
+  let outgoing = payload
   if (mode === "values") {
+    const runKey = pendingStreamTranscriptKey(threadId, runToken)
+    adoptGraphTranscriptBoundaryFromValues(threadId, runToken, payload, completeValuesMessages)
+    flushPendingStreamTranscriptMessages(threadId, runToken, {
+      throwOnError: true,
+      allowWaitingForSnapshot: true
+    })
     // Graph values are the ordered authority for final fields. Persist them at
     // the active-run fence so delayed renderer echoes cannot restore old text,
     // and values-only finals do not depend on an unmarked renderer writeback.
-    const snapshots = selectStreamTranscriptValueSnapshots(payload, valuesSnapshotKind, {
-      completeMessages: completeValuesMessages,
-      loadBaselineMessages: (selectors) =>
-        getThreadMessageIdentityContext(
-          threadId,
-          selectors.map((message) => ({
-            messageId: message.id,
-            providerSourceId: getMessageProviderSourceId(message),
-            providerOccurrence: getMessageProviderOccurrence(message),
-            role: message.role as Message["role"]
-          }))
-        ),
-      loadPreviousTurnOccurrences: (userMessageId, sourceIds) =>
-        getThreadMessageProviderOccurrencesBeforeUser(threadId, userMessageId, sourceIds)
-    })
+    const goalReceipts = projectGoalValues || streamTranscriptBoundaryIds.has(runKey)
+    const receipts: Array<[object, Record<string, unknown>]> = []
+    const snapshots = withThreadMessageIdentitySnapshot(() =>
+      selectStreamTranscriptValueSnapshots(payload, valuesSnapshotKind, {
+        completeMessages: completeValuesMessages,
+        onResolve: goalReceipts
+          ? (source, canonical) => {
+              receipts.push([source, canonical])
+            }
+          : undefined,
+        resolveBoundaryOrdinal: (userMessageId) =>
+          getThreadTranscriptBoundaryOrdinal(threadId, userMessageId),
+        loadBaselineMessages: (selectors) =>
+          getThreadMessageIdentityContext(
+            threadId,
+            selectors.map((message) => ({
+              messageId: message.id,
+              providerSourceId: getMessageProviderSourceId(message),
+              providerOccurrence: getMessageProviderOccurrence(message),
+              role: message.role as Message["role"]
+            }))
+          ),
+        loadPreviousTurnOccurrences: (userMessageId, sourceIds) =>
+          loadPreviousRunProviderOccurrences(threadId, runToken, userMessageId, sourceIds)
+      })
+    )
     rememberSelectedStreamTranscriptValueSnapshots(payload, snapshots)
     for (const snapshot of snapshots) {
       persistStreamTranscriptChunk(threadId, runToken, "messages", snapshot, { deferFlush: true })
     }
-    flushPendingStreamTranscriptMessages(threadId, runToken, {
-      throwOnError: true,
-      checkpoint: true
-    })
-    // Values are the committed graph boundary, not part of the next failed attempt.
-    streamTranscriptAttempts.delete(pendingStreamTranscriptKey(threadId, runToken))
+    flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
+    if (goalReceipts) {
+      for (const [source, receipt] of receipts) committedGoalMessageReceipts.set(source, receipt)
+      const frame = asPlainRecord(payload)
+      if (Array.isArray(frame?.messages)) {
+        outgoing = { ...frame, messages: projectCommittedGoalMessages(frame.messages) }
+      }
+    }
+    // Commit both provisional writes and authoritative updates at this boundary.
+    discardStreamTranscriptToolCallAccumulators(threadId, runToken)
   }
   safeSendToWindow(window, channel, {
     type: "stream",
     mode,
-    data: sanitizeStreamDataForRenderer(mode, payload, valuesMessageIndexOffset),
+    data: sanitizeStreamDataForRenderer(mode, outgoing, valuesMessageIndexOffset),
     ...(mode === "values" ? { valuesSnapshotKind } : {})
   })
   return messageId
@@ -5145,14 +5359,24 @@ function clearStreamDisconnectRetry(window: BrowserWindow, channel: string): voi
   })
 }
 
-function resetFailedStreamAttempt(
+class StreamTranscriptRollbackError extends AggregateError {
+  constructor(rollbackError: unknown, streamError?: unknown) {
+    super(
+      streamError === undefined ? [rollbackError] : [streamError, rollbackError],
+      "Failed to roll back provisional stream transcript",
+      { cause: streamError ?? rollbackError }
+    )
+  }
+}
+
+export function resetFailedStreamAttempt(
   window: BrowserWindow,
   channel: string,
   threadId: string,
   runToken: string,
   stableMessages: unknown[],
   inFlightMessageIds: Set<string>,
-  options: { preservePendingTranscript?: boolean } = {}
+  options: { preservePendingTranscript?: boolean; streamError?: unknown } = {}
 ): void {
   if (options.preservePendingTranscript) {
     inFlightMessageIds.clear()
@@ -5164,9 +5388,15 @@ function resetFailedStreamAttempt(
     inFlightMessageIds.clear()
     return
   }
-  const rollback = streamTranscriptAttempts
-    .get(pendingStreamTranscriptKey(threadId, runToken))
-    ?.rollback()
+  const attempt = streamTranscriptAttempts.get(pendingStreamTranscriptKey(threadId, runToken))
+  let rollback: ReturnType<ThreadMessageStreamAttempt["rollback"]> | undefined
+  try {
+    rollback = attempt?.rollback()
+  } catch (rollbackError) {
+    // Terminal cleanup must not flush buffers from the failed attempt again.
+    discardPendingStreamTranscriptMessages(threadId, runToken)
+    throw new StreamTranscriptRollbackError(rollbackError, options.streamError)
+  }
   discardStreamTranscriptToolCallAccumulators(threadId, runToken)
   const discardedMessageIds = [
     ...new Set([
@@ -5206,6 +5436,7 @@ export async function retryStreamAfterDisconnect<T>(
   resume: () => Promise<AsyncIterable<T>>,
   isActive: () => boolean = () => true
 ): Promise<StreamDisconnectRetryResult<T>> {
+  if (error instanceof StreamTranscriptRollbackError) throw error
   let retryError = error
   let nextRetries = retries
 
@@ -5740,6 +5971,22 @@ async function autoProposeSKill(
 
 export function registerAgentHandlers(ipcMain: IpcMain): void {
   console.log("[Agent] Registering agent handlers...")
+  LocalSandbox.onBackgroundShellChange((change) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      safeSendToWindow(window, "agent:background-shell-changed", change)
+    }
+  })
+  ipcMain.handle(
+    "agent:has-background-shell",
+    (_event, threadId: unknown) =>
+      typeof threadId === "string" &&
+      LocalSandbox.hasActiveBackgroundTasks(threadId, { threadRunOwner: "desktop" })
+  )
+  ipcMain.handle(
+    "agent:cancel-background-shell",
+    (_event, threadId: unknown) =>
+      typeof threadId === "string" && LocalSandbox.cancelDetachedBackgroundTasks(threadId)
+  )
   // Let the runtime's checkpointer LRU avoid evicting threads with a live run.
   setCheckpointerBusyGuard(hasActiveAgentRun)
 
@@ -6305,7 +6552,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   registerActiveAgentRunCanceller((threadId) => {
     const controller = activeRuns.get(threadId)
     if (!controller) return false
-    LocalSandbox.cancelBackgroundTasks(threadId)
+    LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: "desktop" })
     const activeRunToken = turnStates.get(threadId)?.runToken
     if (activeRunToken) flushPendingStreamTranscriptMessages(threadId, activeRunToken)
     controller.abort()
@@ -6350,12 +6597,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const channel = resolveAgentStreamRequestChannel(ambientChannel, streamRequestId)
       // The original visible row and final Human input share one address even for callers
       // that omit an ID. Generating another ID during persistence would split that occurrence.
-      const userMessageId = requestedUserMessageId?.trim() || uuid()
+      let userMessageId = requestedUserMessageId?.trim() || uuid()
       const pluginPrompt = nativePluginPromptRun(runExecutionContext.pluginPrompt, threadId, message)
       if (runExecutionContext.source === "mods" && !pluginPrompt)
         throw Error("MODS_PLUGIN_PROMPT_RECEIPT_INVALID")
       if (pluginPrompt && isWorkflowPlumbingTranscriptContent(message))
         throw Error("MODS_PLUGIN_PROMPT_INTERNAL_TEXT")
+      const runOwner = runExecutionContext.localRunLease?.owner ?? "desktop"
       if (!managedExecution && managedBizRetryService.blocksThread(threadId)) {
         const error = "请在决策入口操作"
         delivery.send(channel, { type: "error", error })
@@ -6468,10 +6716,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       if (!pluginPrompt && !isTrustedCoordinatorNotificationInvoke && !isWorkflowNotificationInvoke) {
         const goalCommand = parseGoalSlashCommand(message)
+        if (goalCommand.type === "set" || goalCommand.type === "resume") {
+          userMessageId = userMessageId?.trim() || uuid()
+        }
         if (goalCommand.type !== "none") {
           try {
             const controlResult = handleGoalNonStartingControlCommand({
               threadId,
+              runOwner,
               command: goalCommand,
               originalMessage: message,
               window,
@@ -6612,7 +6864,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 safeSendToWindow(window, channel, { type: "done" })
                 return
               }
-              persistGoalUserMessage(threadId, "/goal resume", goal.goalId, goal.activeWindowId)
+              persistGoalUserMessage(
+                threadId,
+                "/goal resume",
+                goal.goalId,
+                goal.activeWindowId,
+                userMessageId
+              )
               emitGoalNotice(
                 window,
                 channel,
@@ -6692,7 +6950,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
               if (!ensureGoalEvaluatorConfigured()) return
 
-              LocalSandbox.cancelBackgroundTasks(threadId)
+              LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: runOwner })
               const goal = goalManager.set(threadId, validatedGoalText, {
                 context: goalCommand.context
               })
@@ -6700,7 +6958,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 threadId,
                 buildPersistedGoalSetUserMessage(goalCommand.displayText, transportPayload),
                 goal.goalId,
-                goal.activeWindowId
+                goal.activeWindowId,
+                userMessageId
               )
               emitGoalNotice(
                 window,
@@ -6728,7 +6987,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const currentGoal = goalManager.get(threadId)
           if (currentGoal?.status === "active") {
             goalManager.pause(threadId, "user message preempted active goal")
-            LocalSandbox.cancelBackgroundTasks(threadId)
+            LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: runOwner })
             emitGoalNotice(
               window,
               channel,
@@ -7194,6 +7453,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const runGoal = goalManager.getActive(threadId)
         runGoalId = runGoal?.goalId ?? null
         runGoalActiveWindowId = runGoal?.activeWindowId ?? null
+        if (runGoal && userMessageId) {
+          streamTranscriptBoundaryIds.set(pendingStreamTranscriptKey(threadId, runToken), userMessageId)
+        }
 
         // Abort the stream if the window is closed/destroyed
         const onWindowClosed = (): void => {
@@ -7320,14 +7582,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             type: "custom",
             data: {
               type: "goal_subturn_complete",
-              messages: latestSerializedValuesMessagesForGoalFlush
+              messages: projectCommittedGoalMessages(latestSerializedValuesMessagesForGoalFlush),
+              nativeTranscriptCommitted: true
             }
           })
           latestSerializedValuesMessagesForGoalFlush = []
         }
 
         const cancelGoalBackgroundTasks = (): void => {
-          LocalSandbox.cancelBackgroundTasks(threadId)
+          LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: runOwner })
         }
 
         const isAbortLikeError = (error: unknown): boolean =>
@@ -8665,20 +8928,35 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             })
           }
 
+          const augmentedUserFields = {
+            id: userMessageId,
+            content: effectiveMessage,
+            additional_kwargs: {
+              [COORDINATOR_AUGMENTED_USER_MESSAGE_KEY]: true,
+              [COORDINATOR_VISIBLE_USER_MESSAGE_KEY]: visibleTranscriptUserMessage
+            }
+          }
           const userHumanMessage = isCoordinatorNotificationTurn
             ? undefined
-            : modsSubmittedText === undefined && effectiveMessage === message
-              ? new HumanMessage({
-                  id: userMessageId,
-                  content: effectiveMessage
-                })
+            : isWorkflowNotificationTurn
+              ? createPhysicalRunHiddenUserMessage(
+                  threadId,
+                  runToken,
+                  abortController.signal,
+                  runGoal,
+                  augmentedUserFields
+                )
               : new HumanMessage({
                   id: userMessageId,
                   content: effectiveMessage,
-                  additional_kwargs: {
-                    [COORDINATOR_AUGMENTED_USER_MESSAGE_KEY]: true,
-                    [COORDINATOR_VISIBLE_USER_MESSAGE_KEY]: visibleTranscriptUserMessage
-                  }
+                  ...(effectiveMessage !== message && {
+                    additional_kwargs: {
+                      ...augmentedUserFields.additional_kwargs,
+                      ...(runGoalId !== null && {
+                        [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true
+                      })
+                    }
+                  })
                 })
 
           const nativeInputManager = getModsManager()
@@ -8714,17 +8992,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   pluginPrompt?.assertLive()
                 }
               }) : undefined
+          const coordinatorNotificationInput = coordinatorNotificationHumanMessage
+            ? createPhysicalRunHiddenUserMessage(
+                threadId,
+                runToken,
+                abortController.signal,
+                isCoordinatorNotificationTurn ? runGoal : null,
+                {
+                  content: coordinatorNotificationHumanMessage,
+                  additional_kwargs: { [COORDINATOR_INTERNAL_NOTIFICATION_MESSAGE_KEY]: true }
+                }
+              )
+            : undefined
 
           const humanMessages: BaseMessage[] = [
             ...durableRuntimeTail.messages,
-            coordinatorNotificationHumanMessage
-              ? new HumanMessage({
-                  content: coordinatorNotificationHumanMessage,
-                  additional_kwargs: {
-                    [COORDINATOR_INTERNAL_NOTIFICATION_MESSAGE_KEY]: true
-                  }
-                })
-              : undefined,
+            coordinatorNotificationInput,
             userHumanMessage
           ].filter((message): message is BaseMessage => message !== undefined)
           let currentTurnUserMessageForEvidence =
@@ -8992,7 +9275,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               payload,
               valuesMessageIndexOffset,
               valuesSnapshotKind,
-              completeValuesMessages
+              completeValuesMessages,
+              runGoalId !== null
             )
           }
 
@@ -9355,7 +9639,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           )
           let activeStream: AsyncIterable<unknown> = stream
           let streamDisconnectRetries = 0
-          let latestStableStreamMessages: unknown[] = []
+          const committedStreamValues = createSerializedValuesMessageAccumulator()
+          let latestStableStreamValues: SerializedValuesMessageSnapshot | undefined
           const inFlightStreamMessageIds = new Set<string>()
           const pendingMessageSideEffectPayloads = createStreamMessageSideEffectBuffer({
             getReasoningSeed: (messageId) => _reasoningByAiMessageId.get(messageId),
@@ -9383,10 +9668,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           ): Promise<void> => {
             const serializeForRun = createStreamDataSerializer({ projectMessageChunks: true })
             const valuesAccumulator = createSerializedValuesMessageAccumulator()
-            let latestValuesSnapshot = {
-              messages: [] as unknown[],
-              valuesMessageIndexOffset: 0
-            }
             const commitPendingMessageSideEffects = async (): Promise<void> => {
               for (const payload of pendingMessageSideEffectPayloads.drain()) {
                 await processChunkSideEffects("messages", payload)
@@ -9410,23 +9691,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   await yieldBeforeStreamProjection(abortController.signal)
                   throwIfInvokeAborted()
                 }
-                const {
-                  data: serialized,
-                  valuesMessageIndexOffset,
-                  valuesSnapshotKind
-                } = serializeForRun(mode, data)
+                const frame = serializeForRun(mode, data)
+                const { data: serialized, valuesMessageIndexOffset, valuesSnapshotKind } = frame
                 if (isContextCompactionStreamPayload(mode, serialized)) continue
-                if (mode === "values") {
-                  latestValuesSnapshot = valuesAccumulator.update({
-                    data: serialized,
-                    valuesMessageIndexOffset,
-                    valuesSnapshotKind
-                  })
-                  latestSerializedValuesMessagesForGoalFlush = latestValuesSnapshot.messages
-                  flushPendingStreamTranscriptMessages(threadId, runToken)
-                  discardStreamTranscriptToolCallAccumulators(threadId, runToken)
-                  inFlightStreamMessageIds.clear()
-                }
+                const valuesSnapshot =
+                  mode === "values" ? valuesAccumulator.update(frame) : undefined
                 // UI forwarding is the primary path. Trace / metrics / skill-evolution
                 // processing below are side effects and must never block streaming.
                 const messageId = forwardStreamChunk(
@@ -9434,8 +9703,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   serialized,
                   valuesMessageIndexOffset,
                   valuesSnapshotKind,
-                  mode === "values" ? latestValuesSnapshot.messages : undefined
+                  valuesSnapshot?.messages
                 )
+                if (valuesSnapshot) {
+                  latestStableStreamValues = committedStreamValues.update(frame)
+                  latestSerializedValuesMessagesForGoalFlush = latestStableStreamValues.messages
+                  inFlightStreamMessageIds.clear()
+                }
                 if (messageId) inFlightStreamMessageIds.add(messageId)
                 if (mode === "messages") {
                   pendingMessageSideEffectPayloads.push(serialized)
@@ -9447,26 +9721,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
               await commitPendingMessageSideEffects()
               throwIfInvokeAborted()
-              flushPendingStreamTranscriptMessages(threadId, runToken)
+              flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
               discardStreamTranscriptToolCallAccumulators(threadId, runToken)
               inFlightStreamMessageIds.clear()
             } catch (error) {
               pendingMessageSideEffectPayloads.clear()
-              latestStableStreamMessages = extractSerializedValuesMessages(
-                sanitizeStreamDataForRenderer(
-                  "values",
-                  { messages: latestValuesSnapshot.messages },
-                  latestValuesSnapshot.valuesMessageIndexOffset
-                )
-              )
               resetFailedStreamAttempt(
                 window,
                 channel,
                 threadId,
                 runToken,
-                latestStableStreamMessages,
+                replayCommittedStreamValues(latestStableStreamValues),
                 inFlightStreamMessageIds,
-                { preservePendingTranscript: abortController.signal.aborted }
+                {
+                  preservePendingTranscript: abortController.signal.aborted,
+                  streamError: error
+                }
               )
               latestSerializedValuesMessagesForGoalFlush = []
               throw error
@@ -9478,7 +9748,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             error: unknown,
             label: string
           ): Promise<boolean> => {
-            if (isHookHaltError(error)) throw error
+            if (isHookHaltError(error) || error instanceof StreamTranscriptRollbackError) throw error
             if (!isRetryableApiError(error) || remainingCandidates.length === 0) {
               return false
             }
@@ -9534,6 +9804,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             goalContinuationInput: string,
             expectedGoal: ThreadGoal
           ): Promise<boolean> => {
+            if (!getCurrentGoalForContinuation(expectedGoal)) return false
+            const goalInput = createPhysicalRunHiddenUserMessage(
+              threadId,
+              runToken,
+              abortController.signal,
+              expectedGoal,
+              { content: goalContinuationInput }
+            )
             let inputCheckpointed = false
             while (true) {
               try {
@@ -9542,7 +9820,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 const goalStream = await agent.stream(
                   inputCheckpointed
                     ? null
-                    : { messages: [new HumanMessage(goalContinuationInput)] },
+                    : { messages: [goalInput] },
                   streamConfig
                 )
                 throwIfInvokeAborted()
@@ -9660,8 +9938,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 runRevision: async (revisionPrompt, revisionSignal, revisionInput) => {
                   if (!agent)
                     throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+                  const hiddenRevisionInput = () => createPhysicalRunHiddenUserMessage(
+                    threadId,
+                    runToken,
+                    abortController.signal,
+                    runGoal,
+                    { content: revisionPrompt }
+                  )
                   const revisionStream = await agent.stream(
-                    revisionInput ?? { messages: [new HumanMessage(revisionPrompt)] },
+                    revisionInput ?? { messages: [hiddenRevisionInput()] },
                     { ...streamConfig, signal: revisionSignal ?? streamConfig.signal }
                   )
                   await consumeStreamWithSideEffects(revisionStream)
@@ -11904,17 +12189,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           )
           let activeResumeStream: AsyncIterable<unknown> = resumeStream
           let resumeStreamDisconnectRetries = 0
-          let resumeStableStreamMessages: unknown[] = []
+          const committedResumeValues = createSerializedValuesMessageAccumulator()
+          let latestStableResumeValues: SerializedValuesMessageSnapshot | undefined
           const resumeInFlightMessageIds = new Set<string>()
           const pendingResumeMessagePayloads = createStreamMessageSideEffectBuffer()
 
           const consumeResumeStream = async (source: AsyncIterable<unknown>): Promise<void> => {
             const serializeForRun = createStreamDataSerializer({ projectMessageChunks: true })
             const valuesAccumulator = createSerializedValuesMessageAccumulator()
-            let latestValuesSnapshot = {
-              messages: [] as unknown[],
-              valuesMessageIndexOffset: 0
-            }
             const commitPendingResumeMessageSideEffects = async (): Promise<void> => {
               for (const payload of pendingResumeMessagePayloads.drain()) {
                 await resumeSubagentLifecycle.processPayload(payload)
@@ -11933,22 +12215,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   await yieldBeforeStreamProjection(abortController.signal)
                   throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
                 }
-                const {
-                  data: serialized,
-                  valuesMessageIndexOffset,
-                  valuesSnapshotKind
-                } = serializeForRun(mode, data)
+                const frame = serializeForRun(mode, data)
+                const { data: serialized, valuesMessageIndexOffset, valuesSnapshotKind } = frame
                 if (isContextCompactionStreamPayload(mode, serialized)) continue
-                if (mode === "values") {
-                  latestValuesSnapshot = valuesAccumulator.update({
-                    data: serialized,
-                    valuesMessageIndexOffset,
-                    valuesSnapshotKind
-                  })
-                  flushPendingStreamTranscriptMessages(threadId, runToken)
-                  discardStreamTranscriptToolCallAccumulators(threadId, runToken)
-                  resumeInFlightMessageIds.clear()
-                }
+                const valuesSnapshot =
+                  mode === "values" ? valuesAccumulator.update(frame) : undefined
                 const messageId = persistAndForwardPhysicalRunStreamChunk(
                   window,
                   channel,
@@ -11959,8 +12230,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   serialized,
                   valuesMessageIndexOffset,
                   valuesSnapshotKind,
-                  mode === "values" ? latestValuesSnapshot.messages : undefined
+                  valuesSnapshot?.messages
                 )
+                if (valuesSnapshot) {
+                  latestStableResumeValues = committedResumeValues.update(frame)
+                  resumeInFlightMessageIds.clear()
+                }
                 if (messageId) resumeInFlightMessageIds.add(messageId)
                 if (mode === "messages") {
                   pendingResumeMessagePayloads.push(serialized)
@@ -11976,26 +12251,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
               await commitPendingResumeMessageSideEffects()
               throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
-              flushPendingStreamTranscriptMessages(threadId, runToken)
+              flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
               discardStreamTranscriptToolCallAccumulators(threadId, runToken)
               resumeInFlightMessageIds.clear()
             } catch (error) {
               pendingResumeMessagePayloads.clear()
-              resumeStableStreamMessages = extractSerializedValuesMessages(
-                sanitizeStreamDataForRenderer(
-                  "values",
-                  { messages: latestValuesSnapshot.messages },
-                  latestValuesSnapshot.valuesMessageIndexOffset
-                )
-              )
               resetFailedStreamAttempt(
                 window,
                 channel,
                 threadId,
                 runToken,
-                resumeStableStreamMessages,
+                replayCommittedStreamValues(latestStableResumeValues),
                 resumeInFlightMessageIds,
-                { preservePendingTranscript: abortController.signal.aborted }
+                {
+                  preservePendingTranscript: abortController.signal.aborted,
+                  streamError: error
+                }
               )
               throw error
             }
@@ -12085,8 +12356,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               runRevision: async (revisionPrompt, revisionSignal, revisionInput) => {
                 if (!resumeAgentRuntime)
                   throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+                const hiddenRevisionInput = () => createPhysicalRunHiddenUserMessage(
+                  threadId,
+                  runToken,
+                  abortController.signal,
+                  boundaryGoal,
+                  { content: revisionPrompt }
+                )
                 const revisionStream = await resumeAgentRuntime.stream(
-                  revisionInput ?? { messages: [new HumanMessage(revisionPrompt)] },
+                  revisionInput ?? { messages: [hiddenRevisionInput()] },
                   { ...resumeStreamConfig, signal: revisionSignal ?? resumeStreamConfig.signal }
                 )
                 await consumeResumeStream(revisionStream)
@@ -13119,17 +13397,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           )
           let activeIntStream: AsyncIterable<unknown> = intStream
           let intStreamDisconnectRetries = 0
-          let intStableStreamMessages: unknown[] = []
+          const committedInterruptValues = createSerializedValuesMessageAccumulator()
+          let latestStableInterruptValues: SerializedValuesMessageSnapshot | undefined
           const intInFlightMessageIds = new Set<string>()
           const pendingIntMessagePayloads = createStreamMessageSideEffectBuffer()
 
           const consumeInterruptStream = async (source: AsyncIterable<unknown>): Promise<void> => {
             const serializeForRun = createStreamDataSerializer({ projectMessageChunks: true })
             const valuesAccumulator = createSerializedValuesMessageAccumulator()
-            let latestValuesSnapshot = {
-              messages: [] as unknown[],
-              valuesMessageIndexOffset: 0
-            }
             const commitPendingInterruptMessageSideEffects = async (): Promise<void> => {
               for (const payload of pendingIntMessagePayloads.drain()) {
                 await interruptSubagentLifecycle.processPayload(payload)
@@ -13148,22 +13423,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   await yieldBeforeStreamProjection(abortController.signal)
                   throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
                 }
-                const {
-                  data: serialized,
-                  valuesMessageIndexOffset,
-                  valuesSnapshotKind
-                } = serializeForRun(mode, data)
+                const frame = serializeForRun(mode, data)
+                const { data: serialized, valuesMessageIndexOffset, valuesSnapshotKind } = frame
                 if (isContextCompactionStreamPayload(mode, serialized)) continue
-                if (mode === "values") {
-                  latestValuesSnapshot = valuesAccumulator.update({
-                    data: serialized,
-                    valuesMessageIndexOffset,
-                    valuesSnapshotKind
-                  })
-                  flushPendingStreamTranscriptMessages(threadId, runToken)
-                  discardStreamTranscriptToolCallAccumulators(threadId, runToken)
-                  intInFlightMessageIds.clear()
-                }
+                const valuesSnapshot =
+                  mode === "values" ? valuesAccumulator.update(frame) : undefined
                 const messageId = persistAndForwardPhysicalRunStreamChunk(
                   window,
                   channel,
@@ -13174,8 +13438,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   serialized,
                   valuesMessageIndexOffset,
                   valuesSnapshotKind,
-                  mode === "values" ? latestValuesSnapshot.messages : undefined
+                  valuesSnapshot?.messages
                 )
+                if (valuesSnapshot) {
+                  latestStableInterruptValues = committedInterruptValues.update(frame)
+                  intInFlightMessageIds.clear()
+                }
                 if (messageId) intInFlightMessageIds.add(messageId)
                 if (mode === "messages") {
                   pendingIntMessagePayloads.push(serialized)
@@ -13191,26 +13459,22 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
               await commitPendingInterruptMessageSideEffects()
               throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
-              flushPendingStreamTranscriptMessages(threadId, runToken)
+              flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
               discardStreamTranscriptToolCallAccumulators(threadId, runToken)
               intInFlightMessageIds.clear()
             } catch (error) {
               pendingIntMessagePayloads.clear()
-              intStableStreamMessages = extractSerializedValuesMessages(
-                sanitizeStreamDataForRenderer(
-                  "values",
-                  { messages: latestValuesSnapshot.messages },
-                  latestValuesSnapshot.valuesMessageIndexOffset
-                )
-              )
               resetFailedStreamAttempt(
                 window,
                 channel,
                 threadId,
                 runToken,
-                intStableStreamMessages,
+                replayCommittedStreamValues(latestStableInterruptValues),
                 intInFlightMessageIds,
-                { preservePendingTranscript: abortController.signal.aborted }
+                {
+                  preservePendingTranscript: abortController.signal.aborted,
+                  streamError: error
+                }
               )
               throw error
             }
@@ -13287,8 +13551,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               runRevision: async (revisionPrompt, revisionSignal, revisionInput) => {
                 if (!intAgentRuntime)
                   throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
+                const hiddenRevisionInput = () => createPhysicalRunHiddenUserMessage(
+                  threadId,
+                  runToken,
+                  abortController.signal,
+                  boundaryGoal,
+                  { content: revisionPrompt }
+                )
                 const revisionStream = await intAgentRuntime.stream(
-                  revisionInput ?? { messages: [new HumanMessage(revisionPrompt)] },
+                  revisionInput ?? { messages: [hiddenRevisionInput()] },
                   {
                     ...interruptStreamConfig,
                     signal: revisionSignal ?? interruptStreamConfig.signal
@@ -13664,7 +13935,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               )
             })
         }
-        let cancelledBackground = false
+        const detachedShellCancelled =
+          !cancelWorkers && !controller && LocalSandbox.cancelDetachedBackgroundTasks(threadId)
         if (controller && !cancelWorkers) {
           try {
             stopRequestByRunController.get(controller)?.()
@@ -13673,25 +13945,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             console.warn("[Agent] Original stop owner could not record cancellation:", error)
           }
           // Foreground cancellation should stop the active run and any thread-scoped
-          // background tasks it launched. "Stop background workers" uses the same IPC
+          // desktop shell tasks. "Stop background workers" uses the same IPC
           // entrypoint with cancelWorkers=true and must not abort the foreground turn.
-          LocalSandbox.cancelBackgroundTasks(threadId)
+          LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: "desktop" })
           if (activeRunToken) flushPendingStreamTranscriptMessages(threadId, activeRunToken)
           controller.abort()
           // Keep activeRuns populated until the run's finally block resolves activeRunSettled.
           // A user can cancel and immediately send another message; the next invoke must wait
           // for checkpoint/sandbox cleanup before opening a replacement stream.
           console.log(`[Agent] cancel: aborted controller for thread ${threadId}`)
-        } else if (!controller && !cancelWorkers) {
-          if (LocalSandbox.hasActiveBackgroundTasks(threadId)) {
-            await LocalSandbox.cancelBackgroundTasksAndWait(threadId)
-            cancelledBackground = true
-            console.log(`[Agent] cancel: stopped idle background tasks for thread ${threadId}`)
-          } else {
-            console.warn(`[Agent] cancel: no active run found for thread ${threadId}`)
-          }
+        } else if (!detachedShellCancelled && !controller && !cancelWorkers) {
+          console.warn(`[Agent] cancel: no active run found for thread ${threadId}`)
         }
-        const cancelled = Boolean(controller && !cancelWorkers) || cancelledBackground
+        const cancelled = Boolean(controller && !cancelWorkers) || detachedShellCancelled
         if (cancelled) handleAutoModeAgentCancelled(threadId)
         else if (workers.length > 0) handleAutoModeAgentCancelled(threadId, "background")
         return cancelled

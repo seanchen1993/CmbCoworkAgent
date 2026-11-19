@@ -151,6 +151,7 @@ import {
 } from "@/lib/coordinator-mode-helpers"
 import { ModelSwitcher } from "./ModelSwitcher"
 import { chatClawDefaultModel } from "@/lib/chat-claw-state"
+import { BackgroundShellStopButton } from "./BackgroundShellStopButton"
 import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
 import { WorkflowRunPanel, WorkflowHistoryButton } from "./WorkflowRunPanel"
 import { SandboxModeSwitcher } from "./SandboxModeSwitcher"
@@ -10181,6 +10182,7 @@ export function ChatContainer({
                           />
                         </div>
                         <div className="ml-auto flex shrink-0 items-center justify-end gap-1.5">
+                          <BackgroundShellStopButton key={threadId} threadId={threadId} />
                           {isLoading ? (
                             <>
                               {(canSubmitGoalCommandWhileLoading || isModCommandInput || localCommandTarget) && (

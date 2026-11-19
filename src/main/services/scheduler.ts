@@ -346,6 +346,7 @@ async function executeTask(taskId: string): Promise<void> {
       noSchedulerTool: true,
       hookTurnId: userMessage.id,
       modTurnRunId: schedulerRunId,
+      autoBackgroundHandoff: false,
       abortSignal: abortController.signal
     })
 

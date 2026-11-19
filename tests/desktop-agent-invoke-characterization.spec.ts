@@ -135,7 +135,7 @@ function testFreshTurnGoalAndTranscriptSemantics(): void {
     ordinaryGoalPreemption,
     [
       'goalManager.pause(threadId, "user message preempted active goal")',
-      "LocalSandbox.cancelBackgroundTasks(threadId)"
+      "LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: runOwner })"
     ],
     "ordinary desktop input pauses an active goal before replacing the run"
   )
@@ -371,7 +371,7 @@ function testIdentityFencedCleanupAndCancellation(): void {
       "return withThreadRunMutationLock(threadId",
       "const controller = activeRuns.get(threadId)",
       "const activeRunToken = turnStates.get(threadId)?.runToken",
-      "LocalSandbox.cancelBackgroundTasks(threadId)",
+      'LocalSandbox.cancelBackgroundTasks(threadId, { threadRunOwner: "desktop" })',
       "flushPendingStreamTranscriptMessages(threadId, activeRunToken)",
       "controller.abort()"
     ],

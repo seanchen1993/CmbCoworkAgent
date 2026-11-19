@@ -200,6 +200,32 @@ it("fixes target/actor identity and owns command fields before asynchronous admi
   expect(rows(f.db)).toHaveLength(1)
 })
 
+it("rejects inconsistent Goal ordering before changing any durable row or marker", async () => {
+  const f = fixture()
+  const a = f.make()
+  const before = rows(f.db)
+  const existing = {
+    checkpointIndex: 0, messageId: "legacy", role: "assistant" as const,
+    providerSourceId: null, providerOccurrence: null, toolCallId: null
+  }
+  expect(await a.sendCommand({
+    kind: "reserve", checkpointId: "goal-source", totalMessages: 1,
+    order: { messages: [existing], graphBoundaries: [{ checkpointIndex: 0, messageId: "hidden" }] }
+  })).toMatchObject({ ok: false, error: { code: "LEGACY_TRANSCRIPT_WRITE_PROTOCOL" } })
+  expect(rows(f.db)).toEqual(before)
+  expect(await a.sendCommand({ kind: "read-state" })).toMatchObject({
+    ok: true, result: { marker: null }
+  })
+
+  f.db.run("CREATE TABLE function_logical_sessions(thread_id TEXT,incarnation_key TEXT)")
+  f.db.run("INSERT INTO function_logical_sessions VALUES('A',?)", [JSON.stringify(["token", "inc"])])
+  expect(await a.sendCommand({
+    kind: "reserve", checkpointId: "goal-source", totalMessages: 1,
+    order: { messages: [existing], graphBoundaries: [{ checkpointIndex: 1, messageId: "hidden" }] }
+  })).toMatchObject({ ok: false, error: { code: "MODS_CONVERSATION_MIGRATION_REQUIRED" } })
+  expect(rows(f.db)).toEqual(before)
+})
+
 it("admits completed discovery facts while rejecting every native-owner write", async () => {
   const f = fixture(),
     a = f.make()

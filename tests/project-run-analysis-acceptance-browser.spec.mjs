@@ -32,7 +32,8 @@ const bundle = await build({
       import {getDefaultRange,navigateRange} from './components/dashboard/use-dashboard';
       import {ProjectModePanel} from './components/dashboard/panels/ProjectModePanel';
       import {TooltipProvider} from './components/ui/tooltip';
-      import {makeMockRunAnalysis, makeMockRunAnalysisStages} from '../../main/ipc/project-run-analysis-mock';
+      import {groupRunAnalysisExportTargets} from '../../main/ipc/project-run-analysis';
+      import {makeMockRunAnalysis, makeMockRunAnalysisStages, makeMockRunAnalysisPluginStages} from '../../main/ipc/project-run-analysis-mock';
       import {resolveOperationsPeriod} from '../../shared/project-operations-period';
       import {RECOMMENDED_REPORT_TEMPLATE_ID,RECOMMENDED_REPORT_TEMPLATE_NAME} from '../../shared/project-analysis-report';
       const range = {from:'2020-01-01T00:00:00Z', to:'2030-01-01T00:00:00Z'};
@@ -98,9 +99,13 @@ const bundle = await build({
         },
         cancelRequests: async families => {calls.push({type:'cancel',families});return {cancelled:1}},
         projectModeRunAnalysis: async (range,options) => ({success:true,data:await qa.load(range,options)}),
+        projectModeRunAnalysisExportStages: async (range, options, request) => {
+          const groups=groupRunAnalysisExportTargets(qa.loadedRows, request.targets);
+          return {success:true,data:[...groups].map(([adapterName,features])=>({adapterName,stages:makeMockRunAnalysisPluginStages(features)}))};
+        },
         projectModeRunAnalysisStages: async request => {
           calls.push({type:'stages',request});
-          return {success:true,data:{rows:makeMockRunAnalysisStages(),dataAsOf:new Date().toISOString()}};
+          return {success:true,data:{rows:makeMockRunAnalysisStages(request.projectId),dataAsOf:new Date().toISOString()}};
         },
         projectModeRunAnalysisSessions: async request => {
           calls.push({type:'sessions',request});
@@ -109,16 +114,22 @@ const bundle = await build({
             endedAt:'2026-10-20T01:01:00Z',durationMs:60000,nodeName:request.nodeName??'dev-编码实现',usedSkills:[]
           }]}};
         },
-        projectModeRunAnalysisTrace: async request => {
-          calls.push({type:'trace',request});
-          return {success:true,data:{traceId:request.traceId,threadId:'acceptance-thread',
+        projectModeRunAnalysisThread: async request => {
+          calls.push({type:'thread',request});
+          const selected={traceId:request.traceId,threadId:'acceptance-thread',
             startedAt:'2026-10-20T01:00:00Z',endedAt:'2026-10-20T01:01:00Z',durationMs:60000,
             userMessage:'验收会话：检查本次执行',outcome:'success',totalToolCalls:1,modelCallCount:1,
             userInputRequestCount:0,totalInputTokens:100,totalOutputTokens:50,totalTokens:150,
             usedSkills:[],evolvedSkills:[],traceKind:'root',rawAvailable:true,nodes:[{
               id:'msg1',type:'message',parentId:null,name:'assistant',startedAt:'2026-10-20T01:01:00Z',
               output:'验收回复：本次执行已完成',metadata:{role:'assistant'}
-            }]}};
+            }]};
+          const round=(id,start,end,message,reply,usedSkills)=>({...selected,traceId:id,startedAt:start,endedAt:end,
+            userMessage:message,usedSkills,nodes:[{...selected.nodes[0],startedAt:end,output:reply}]});
+          return {success:true,data:[
+            round('previous','2026-10-20T00:58:00Z','2026-10-20T00:59:00Z','上一轮使用过技能','已完成前置检查',['qa-skill']),
+            selected,round('next','2026-10-20T01:02:00Z','2026-10-20T01:03:00Z','下一轮继续核对','已核对后续结果',[])
+          ]};
         },
         threadTraces: () => {throw Error('Unexpected whole-thread fetch')}
       }};
@@ -149,7 +160,7 @@ const bundle = await build({
           <div data-testid="dashboard-time-control"><TimeControlBar key={currentRange.from+currentRange.to} {...timeControl} range={currentRange}/></div>
           {menu!=='project' ? <div>其他菜单内容</div> : integrated ? <ProjectModePanel data={null} loading={overviewRequest.loading} error={overviewRequest.error} codeSource={null}
             codeStatsOverride={null} codeStatsLoading={false} onCodeSourceChange={()=>{}}
-            createdInRangeProjectsOnly runAnalysisAllowed runAnalysisRange={currentRange} runAnalysisTimeControl={timeControl} runAnalysisOptions={{upperOrgLv1:[room]}}
+            createdInRangeProjectsOnly runAnalysisRange={currentRange} runAnalysisTimeControl={timeControl} runAnalysisOptions={{upperOrgLv1:[room]}}
             projectPages={{}} projectPageLoading={{active:false,archived:false}} projectPageError={{}}
             onProjectPageChange={()=>{}} onOpenTraces={()=>{}} onOpenFeatureCommits={()=>{}} onOpenProjectCommits={()=>{}}
             loadFeatureNodes={async()=>[]} loadOperationalDetails={async()=>null} loadStageAnalysis={async()=>null}/>
@@ -364,6 +375,40 @@ try {
   const download = await downloadPromise
   const workbook = XLSX.readFile(await download.path(), { cellNF: true })
   const exported = XLSX.utils.sheet_to_json(workbook.Sheets["匹配特性"], { defval: null })
+  function checkPluginSheets(book) {
+    const features = XLSX.utils.sheet_to_json(book.Sheets["匹配特性"], { defval: null })
+    const plugins = [...new Set(features.map((row) => row.插件名称))]
+    assert.equal(book.SheetNames.filter((name) => name.startsWith("插件-")).length, plugins.length)
+    for (const plugin of plugins) {
+      const details = features.filter((row) => row.插件名称 === plugin)
+      const sheet = book.Sheets["插件-" + plugin]
+      const rows = XLSX.utils.sheet_to_json(sheet, { defval: null })
+      const names =
+        plugin === "数据研发插件"
+          ? ["取数", "校验"]
+          : ["design-方案设计", "dev-编码实现", "test-测试"]
+      const metrics = ["主对话（轮）", "节点完成后（次）", "无 Skill 归因（次）"]
+      const totals = ["主Agent对话（轮）", "节点完成后主对话（次）", "无 Skill 归因主对话（次）"]
+      const columns = names.flatMap((name) => metrics.map((metric) => name + " · " + metric))
+      assert.deepEqual(
+        Object.keys(rows[0]).filter((key) => key.includes(" · ")),
+        columns
+      )
+      assert.ok(Object.keys(features[0]).every((key) => !columns.includes(key)))
+      assert.equal(rows.length, details.length)
+      rows.forEach((row, i) => {
+        for (const key of Object.keys(details[i])) assert.deepEqual(row[key], details[i][key])
+        metrics.forEach((metric, j) =>
+          assert.equal(
+            names.reduce((sum, stage) => sum + row[stage + " · " + metric], 0),
+            row[totals[j]]
+          )
+        )
+      })
+    }
+  }
+  checkPluginSheets(workbook)
+  assert.equal(workbook.SheetNames.filter((name) => name.startsWith("插件-")).length, 2)
   assert.equal(exported.find((row) => row.项目编号 === "LEAN-000002").是否精益项目, "否")
   assert.equal(exported.find((row) => row.项目编号 === "LEAN-000003").是否精益项目, "是")
   assert.equal(exported.find((row) => row.项目名称.endsWith("客户经营平台 1")).项目编号, null)
@@ -411,6 +456,18 @@ try {
     36,
     "Export must include all pages"
   )
+  const searchBox = page.getByRole("textbox", { name: "项目或特性关键词" })
+  await searchBox.fill("LEAN-000003")
+  const filteredDownload = page.waitForEvent("download")
+  await page.getByRole("button", { name: "导出Excel", exact: true }).click()
+  const filteredBook = XLSX.readFile(await (await filteredDownload).path())
+  checkPluginSheets(filteredBook)
+  assert.deepEqual(
+    filteredBook.SheetNames.filter((name) => name.startsWith("插件-")),
+    ["插件-数据研发插件"]
+  )
+  assert.equal(XLSX.utils.sheet_to_json(filteredBook.Sheets["匹配特性"]).length, 3)
+  await searchBox.fill("")
   await page.getByRole("button", { name: "复制汇总", exact: true }).click()
   assert.match(await page.evaluate(() => window.runQA.copied), /36/)
   assert.match(await page.evaluate(() => window.runQA.copied), /LEAN-000002/)
@@ -419,6 +476,7 @@ try {
   const projectDownloadPromise = page.waitForEvent("download")
   await page.getByRole("button", { name: "导出Excel", exact: true }).click()
   const projectWorkbook = XLSX.readFile(await (await projectDownloadPromise).path())
+  checkPluginSheets(projectWorkbook)
   const exportedProjects = XLSX.utils.sheet_to_json(projectWorkbook.Sheets["项目汇总"], {
     defval: null
   })
@@ -439,11 +497,11 @@ try {
   await page.getByText("匹配特性", { exact: true }).waitFor()
   await page.getByRole("button", { name: "按特性", exact: true }).click()
   await tableRows.first().locator('td:last-child button[aria-label^="查看"]').click()
-  await page
-    .getByRole("dialog")
-    .getByRole("cell", { name: "design-方案设计", exact: true })
-    .waitFor()
-  assert.equal(await page.getByRole("dialog").locator("tbody > tr").count(), 3)
+  const stageTable = page.getByRole("dialog").locator("tbody")
+  await stageTable.locator("tr").first().waitFor()
+  const firstStage = await stageTable.locator("tr").first().locator("td").first().innerText()
+  assert.ok(["取数", "design-方案设计"].includes(firstStage))
+  assert.equal(await stageTable.locator("tr").count(), firstStage === "取数" ? 2 : 3)
   assert.equal(
     await page
       .getByRole("dialog")
@@ -468,13 +526,38 @@ try {
   await sessions.getByRole("button", { name: "查看完整会话", exact: true }).click()
   await page.getByRole("heading", { name: "项目分析 · 完整会话", exact: true }).waitFor()
   await page.getByText("验收会话：检查本次执行", { exact: false }).first().waitFor()
+  const conversation = page.getByRole("dialog", { name: "项目分析 · 完整会话", exact: true })
+  for (const message of [
+    "上一轮使用过技能",
+    "已完成前置检查",
+    "验收会话：检查本次执行",
+    "下一轮继续核对",
+    "已核对后续结果"
+  ]) {
+    await conversation
+      .locator("[data-trace-id]")
+      .getByText(message, { exact: true })
+      .first()
+      .waitFor()
+  }
+  const roundIds = await conversation
+    .locator("[data-trace-id]")
+    .evaluateAll((nodes) => [...new Set(nodes.map((node) => node.dataset.traceId))])
+  assert.deepEqual(roundIds, ["previous", "acceptance-trace", "next"])
+  const selectedRound = conversation.getByRole("button", {
+    name: /验收会话：检查本次执行/,
+    pressed: true
+  })
+  await selectedRound.waitFor()
+  await conversation.getByRole("button", { name: /下一轮继续核对/, pressed: false }).click()
+  await conversation.getByRole("button", { name: /下一轮继续核对/, pressed: true }).waitFor()
   const detailCalls = await page.evaluate(() => window.runQA.calls.filter((c) => c.type !== "load"))
   assert.deepEqual(
     detailCalls.map((c) => c.type),
-    ["stages", "sessions", "trace"]
+    ["stages", "sessions", "thread"]
   )
   assert.equal(detailCalls[1].request.metric, "noSkill")
-  assert.equal(detailCalls[1].request.nodeName, "design-方案设计")
+  assert.equal(detailCalls[1].request.nodeName, firstStage)
   assert.equal(detailCalls[2].request.traceId, "acceptance-trace")
   assert.deepEqual(detailCalls[2].request.upperOrgLv1, ["A"])
   await page.screenshot({ path: join(output, "trace.png") })
@@ -482,6 +565,33 @@ try {
   await page.keyboard.press("Escape")
   await page.keyboard.press("Escape")
   await page.getByRole("dialog").waitFor({ state: "hidden" })
+  for (const [label, metric] of [
+    ["节点完成后", "completedNode"],
+    ["无 Skill 归因", "unattributedSkill"]
+  ]) {
+    const matchedFeature = page.getByRole("button", { name: /查看.+详情/ }).first()
+    await matchedFeature.click()
+    const stages = page
+      .getByRole("dialog")
+      .filter({ has: page.getByText("开始于该阶段的主对话", { exact: true }) })
+    await stages
+      .getByRole("button", { name: new RegExp("查看" + label + "的") })
+      .first()
+      .click()
+    await page
+      .getByRole("heading", {
+        name: label === "节点完成后" ? "节点完成后的主 Agent 对话" : "无 Skill 归因的主 Agent 对话"
+      })
+      .waitFor()
+    assert.equal(
+      await page.evaluate(
+        () => window.runQA.calls.filter((c) => c.type === "sessions").at(-1).request.metric
+      ),
+      metric
+    )
+    await page.keyboard.press("Escape")
+    await page.keyboard.press("Escape")
+  }
   await page.evaluate(() => window.runQA.setRoom("B"))
   await waitLoad("B:all")
   assert.equal(await tableRows.count(), 0, "Old room results cannot remain visible")

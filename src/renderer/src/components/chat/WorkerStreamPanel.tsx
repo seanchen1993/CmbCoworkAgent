@@ -1,4 +1,9 @@
-import { resolveWorkerSnapshotContent } from "@/lib/worker-message-content"
+import {
+  createWorkerSignatureMatches,
+  parseWorkerTurnScopedId,
+  resolveWorkerSnapshotContent,
+  sameWorkerRoleAndToolCall
+} from "@/lib/worker-message-content"
 import {
   useCallback,
   useEffect,
@@ -15,7 +20,11 @@ import { HookLogChip, HookLogModal } from "./HookLogViews"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { useThreadContext, useThreadState, type HookLogBucket } from "@/lib/thread-context"
-import { applyWorkerFocusTailUpdateToMergedMessages, useAppStore } from "@/lib/store"
+import {
+  applyWorkerFocusTailUpdateToMergedMessages,
+  enrichWorkerProviderIdentities,
+  useAppStore
+} from "@/lib/store"
 import { buildMessageBubbleTimingMeta } from "@/lib/message-bubble-timing"
 import {
   buildVisibleMessageLayout,
@@ -24,7 +33,13 @@ import {
 } from "@/lib/message-display-visibility"
 import { buildToolResultAssociations } from "@/lib/worker-tool-result-key"
 import {
+  mergeWorkerProviderWireIds,
+  applyWorkerToolCallSnapshot,
+  restoreSnapshotAliasCallsWithResults
+} from "@/lib/snapshot-message-aliases"
+import {
   buildWorkerCheckpointHistory,
+  canMatchWorkerCheckpointIdentity,
   checkpointHistoryMessageMatchesSparseLive,
   isExplicitWorkerOccurrenceAfter,
   isCompleteWorkerSnapshotCoveringHistory,
@@ -33,13 +48,14 @@ import {
   preserveWorkerHistoryMessageIdentities,
   MAX_WORKER_HISTORY_MESSAGES
 } from "@/lib/worker-checkpoint-history"
-import type { Message } from "@/types"
+import type { Message, ToolCall } from "@/types"
 import { cn } from "@/lib/utils"
 import {
   buildWorkerMessageWindow,
   WORKER_MESSAGE_WINDOW_SIZE
 } from "@/lib/worker-message-window"
 import {
+  getMessageProviderOccurrence,
   getMessageProviderSourceId,
   MESSAGE_SAME_ROLE_DUPLICATE_MARKER,
   normalizeAppendedMessageIds,
@@ -70,12 +86,6 @@ function isWorkerSnapshotMessageId(id: string): boolean {
   return unscopedId.startsWith("worker-snapshot-")
 }
 
-function parseWorkerTurnScopedId(id: string): { rawId: string; turn: number } | undefined {
-  const match = /^worker-turn-.*-(\d+)::(.+)$/.exec(id)
-  if (!match) return undefined
-  return { rawId: match[2], turn: Number(match[1]) }
-}
-
 function workerTransportSourceId(message: Message): string {
   const scoped = parseWorkerTurnScopedId(message.id)
   return getMessageProviderSourceId({
@@ -92,7 +102,13 @@ function workerTransportRenderId(message: Message): string {
 }
 
 function workerTransportIdentityKey(message: Message, turnKey: string): string {
-  return [turnKey, message.role, workerTransportSourceId(message)].join("\u001f")
+  return [turnKey, message.role, workerTransportSourceId(message), message.tool_call_id].join(
+    "\u001f"
+  )
+}
+
+function workerExplicitOccurrenceKey(message: Message, turnKey: string): string {
+  return `${workerTransportIdentityKey(message, turnKey)}\u001f${message.provider_occurrence ?? 1}`
 }
 
 function repeatedWorkerTransportIdentityKeys(
@@ -116,26 +132,34 @@ function findSameWorkerTransportIdentityIndex(
   messages: readonly Message[],
   message: Message,
   turnKeys: readonly string[],
-  turnKey: string
+  turnKey: string,
+  claimed: ReadonlySet<number>
 ): number | undefined {
   const renderId = workerTransportRenderId(message)
+  const occurrence = getMessageProviderOccurrence(message)
+  const canMatch = (candidate: Message, candidateIndex: number): boolean =>
+    !claimed.has(candidateIndex) &&
+    turnKeys[candidateIndex] === turnKey &&
+    sameWorkerRoleAndToolCall(candidate, message) &&
+    canMatchWorkerCheckpointIdentity(candidate, message) &&
+    (occurrence === undefined || (getMessageProviderOccurrence(candidate) ?? 1) === occurrence)
   const exactIndex = messages.findIndex(
     (candidate, candidateIndex) =>
-      turnKeys[candidateIndex] === turnKey &&
-      candidate.role === message.role &&
-      workerTransportRenderId(candidate) === renderId
+      canMatch(candidate, candidateIndex) && workerTransportRenderId(candidate) === renderId
   )
   if (exactIndex >= 0) return exactIndex
 
-  if (renderId.includes(MESSAGE_SAME_ROLE_DUPLICATE_MARKER)) return undefined
+  if (occurrence === undefined && renderId.includes(MESSAGE_SAME_ROLE_DUPLICATE_MARKER)) {
+    return undefined
+  }
 
   const sourceId = workerTransportSourceId(message)
   const providerMatches = messages.flatMap((candidate, candidateIndex) =>
-    turnKeys[candidateIndex] === turnKey &&
-    candidate.role === message.role &&
-    workerTransportSourceId(candidate) === sourceId &&
-    (parseWorkerTurnScopedId(candidate.id) !== undefined ||
-      parseWorkerTurnScopedId(message.id) !== undefined)
+    canMatch(candidate, candidateIndex) &&
+    (Boolean(candidate.worker_provider_identity) !== Boolean(message.worker_provider_identity) ||
+      (workerTransportSourceId(candidate) === sourceId &&
+        (parseWorkerTurnScopedId(candidate.id) !== undefined ||
+          parseWorkerTurnScopedId(message.id) !== undefined)))
       ? [candidateIndex]
       : []
   )
@@ -251,32 +275,22 @@ function isCompatibleWorkerToolResultReplay(a: Message, b: Message): boolean {
   return areWorkerContentsCompatible(a.content, b.content)
 }
 
-function findCompatibleWorkerReplayIndex(
+function findWorkerReplayIndex(
   messages: Message[],
   message: Message,
-  turnKeys?: readonly string[],
-  turnKey?: string
+  turnKeys: readonly string[],
+  turnKey: string,
+  claimed: ReadonlySet<number>
 ): number | undefined {
-  const index = messages.findIndex(
-    (item, candidateIndex) =>
-      (turnKey === undefined || turnKeys?.[candidateIndex] === turnKey) &&
-      (isCompatibleWorkerAssistantToolReplay(item, message) ||
-        isCompatibleWorkerToolResultReplay(item, message))
-  )
-  return index >= 0 ? index : undefined
-}
-
-function findSameWorkerAssistantTextIndex(
-  messages: Message[],
-  message: Message,
-  turnKeys?: readonly string[],
-  turnKey?: string
-): number | undefined {
-  const index = messages.findIndex(
-    (item, candidateIndex) =>
-      (turnKey === undefined || turnKeys?.[candidateIndex] === turnKey) &&
-      isSameWorkerAssistantText(item, message)
-  )
+  if (message.worker_provider_identity) return undefined
+  const matches = (item: Message, candidateIndex: number): boolean =>
+    !claimed.has(candidateIndex) &&
+    turnKeys[candidateIndex] === turnKey &&
+    !item.worker_provider_identity &&
+    (isCompatibleWorkerAssistantToolReplay(item, message) ||
+      isCompatibleWorkerToolResultReplay(item, message) ||
+      isSameWorkerAssistantText(item, message))
+  const index = messages.findIndex(matches)
   return index >= 0 ? index : undefined
 }
 
@@ -313,31 +327,15 @@ function relativeWorkerTurnKeys(messages: readonly Message[], turnOffset: number
   )
 }
 
-function workerTurnSignatureKey(turnKey: string, signature: string | undefined): string | undefined {
+function workerTurnSignatureKey(turnKey: string, message: Message): string | undefined {
+  if (message.worker_provider_identity) return undefined
+  const signature = workerFocusMessageSignature(message)
   return signature ? `${turnKey}\u0000${signature}` : undefined
 }
 
 function incrementSignatureCount(map: Map<string, number>, signature: string | undefined): void {
   if (!signature) return
   map.set(signature, (map.get(signature) ?? 0) + 1)
-}
-
-function takeWindowedSignatureMatch(
-  indexes: number[] | undefined,
-  remainingBySignature: Map<string, number>,
-  signature: string | undefined
-): number | undefined {
-  if (!indexes?.length || !signature) return undefined
-  const remaining = remainingBySignature.get(signature) ?? 0
-  if (remaining <= 0) return indexes.shift()
-
-  // If the same text appears in multiple worker turns, live messages usually
-  // belong to the most recent slice. Match the last N compatible snapshots
-  // instead of blindly consuming the oldest one.
-  const matchPosition = Math.max(0, indexes.length - remaining)
-  const [index] = indexes.splice(matchPosition, 1)
-  remainingBySignature.set(signature, remaining - 1)
-  return index
 }
 
 const WORKER_THINKING_MESSAGES = [
@@ -373,14 +371,30 @@ const WORKER_THINKING_MESSAGES = [
   "就快好了..."
 ]
 
+function mergeWorkerProviderIdentity(history: Message, live: Message): Partial<Message> {
+  const declared = live.worker_provider_identity ? live : history
+  if (!declared.worker_provider_identity) return {}
+  return {
+    worker_provider_identity: true,
+    provider_source_id: declared.provider_source_id,
+    provider_occurrence: declared.provider_occurrence,
+    worker_provider_wire_ids: mergeWorkerProviderWireIds(
+      history.worker_provider_wire_ids,
+      live.worker_provider_wire_ids
+    )
+  }
+}
+
 function mergeCheckpointAlignedWorkerMessage(
   historyMessage: Message,
   liveMessage: Message,
-  id: string
+  id: string,
+  earlierAliasToolCalls: Map<Message, readonly ToolCall[]>
 ): Message {
-  return {
+  const merged = {
     ...historyMessage,
     ...liveMessage,
+    ...mergeWorkerProviderIdentity(historyMessage, liveMessage),
     id,
     content: mergeWorkerCheckpointSparseContent(historyMessage, liveMessage),
     reasoning: liveMessage.reasoning ?? historyMessage.reasoning,
@@ -393,21 +407,30 @@ function mergeCheckpointAlignedWorkerMessage(
     status: liveMessage.status ?? historyMessage.status,
     is_error: liveMessage.is_error ?? historyMessage.is_error
   }
+  return applyWorkerToolCallSnapshot(historyMessage, liveMessage, merged, earlierAliasToolCalls)
 }
 
-function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Message[] {
+// eslint-disable-next-line react-refresh/only-export-components -- exercise the panel's merge with real stream data
+export function mergeWorkerHistoryWithLiveMessages(
+  checkpoint: Message[],
+  liveMessages: Message[]
+): Message[] {
+  const baseMessages = enrichWorkerProviderIdentities(checkpoint, liveMessages)
+  const earlierAliasToolCalls = new Map<Message, readonly ToolCall[]>()
   if (isCompleteWorkerSnapshotCoveringHistory(baseMessages, liveMessages)) {
     const normalizedLiveMessages = normalizeCompleteMessageIds(liveMessages)
     const historyOffset = normalizedLiveMessages.length - baseMessages.length
-    return normalizedLiveMessages.map((liveMessage, index) => {
+    const alignedMessages = normalizedLiveMessages.map((liveMessage, index) => {
       if (index < historyOffset) return liveMessage
       const historyMessage = baseMessages[index - historyOffset]
       return mergeCheckpointAlignedWorkerMessage(
         historyMessage,
         liveMessage,
-        liveMessage.id
+        liveMessage.id,
+        earlierAliasToolCalls
       )
     })
+    return restoreSnapshotAliasCallsWithResults(alignedMessages, earlierAliasToolCalls)
   }
   const replayPrefixLength = findWorkerHistorySuffixReplayPrefixLength(
     baseMessages,
@@ -421,16 +444,18 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
       return mergeCheckpointAlignedWorkerMessage(
         historyMessage,
         liveMessages[index - historyOffset],
-        historyMessage.id
+        historyMessage.id,
+        earlierAliasToolCalls
       )
     })
     const appendedTail = normalizeWorkerMessagesAfterHistory(
       alignedMessages,
       liveMessages.slice(replayPrefixLength)
     )
-    return appendedTail.length > 0
-      ? mergeMessages(alignedMessages, appendedTail)
+    const merged = appendedTail.length > 0
+      ? mergeWorkerHistoryWithLiveMessages(alignedMessages, appendedTail)
       : alignedMessages
+    return restoreSnapshotAliasCallsWithResults(merged, earlierAliasToolCalls)
   }
   const normalizedBaseMessages = normalizeCompleteMessageIds(baseMessages)
   const normalizedLiveMessages = normalizeAppendedMessageIds(
@@ -441,7 +466,7 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
         normalizeMessageRoleCollisionIds(normalizedBaseMessages, liveMessages)
       )
     ),
-    { splitAssistantAfterTool: true }
+    { splitAssistantAfterTool: true, preserveWorkerSnapshotIdentities: true }
   )
   if (normalizedBaseMessages.length === 0) return normalizedLiveMessages
   if (normalizedLiveMessages.length === 0) return normalizedBaseMessages
@@ -465,8 +490,14 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
         latestWorkerTurnKey(normalizedBaseMessages)
       )
   const indexById = new Map(merged.map((message, index) => [message.id, index]))
-  const snapshotIndexesBySignature = new Map<string, number[]>()
-  const liveIndexesBySignature = new Map<string, number[]>()
+  const claimed = new Set<number>()
+  const explicitIndexes = new Map<string, number | null>()
+  const addExplicitIndex = (message: Message, turnKey: string, index: number): void => {
+    const key = workerExplicitOccurrenceKey(message, turnKey)
+    explicitIndexes.set(key, explicitIndexes.has(key) ? null : index)
+  }
+  const snapshotSignatureMatches = createWorkerSignatureMatches(merged)
+  const liveSignatureMatches = createWorkerSignatureMatches(merged)
   const incomingLiveCountsBySignature = new Map<string, number>()
   const incomingSnapshotCountsBySignature = new Map<string, number>()
   const repeatedLiveTransportIdentities = repeatedWorkerTransportIdentityKeys(
@@ -474,10 +505,7 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
     liveTurnKeys
   )
   normalizedLiveMessages.forEach((message, index) => {
-    const signature = workerTurnSignatureKey(
-      liveTurnKeys[index],
-      workerFocusMessageSignature(message)
-    )
+    const signature = workerTurnSignatureKey(liveTurnKeys[index], message)
     if (isWorkerNonSnapshotMessageId(message.id)) {
       incrementSignatureCount(incomingLiveCountsBySignature, signature)
     }
@@ -486,72 +514,65 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
     }
   })
   merged.forEach((message, index) => {
-    const signature = workerTurnSignatureKey(
-      mergedTurnKeys[index],
-      workerFocusMessageSignature(message)
-    )
-    if (signature && isWorkerSnapshotMessageId(message.id)) {
-      const indexes = snapshotIndexesBySignature.get(signature) ?? []
-      indexes.push(index)
-      snapshotIndexesBySignature.set(signature, indexes)
+    if (message.worker_provider_identity) {
+      addExplicitIndex(message, mergedTurnKeys[index], index)
     }
-    if (signature && isWorkerNonSnapshotMessageId(message.id)) {
-      const indexes = liveIndexesBySignature.get(signature) ?? []
-      indexes.push(index)
-      liveIndexesBySignature.set(signature, indexes)
-    }
+    const signature = workerTurnSignatureKey(mergedTurnKeys[index], message)
+    if (!signature) return
+    const matches = isWorkerSnapshotMessageId(message.id)
+      ? snapshotSignatureMatches
+      : liveSignatureMatches
+    matches.add(signature, index)
   })
 
   normalizedLiveMessages.forEach((live, liveIndex) => {
     const turnKey = liveTurnKeys[liveIndex]
-    const signature = workerTurnSignatureKey(
-      turnKey,
-      workerFocusMessageSignature(live)
-    )
+    const signature = workerTurnSignatureKey(turnKey, live)
+    const existingIndex = indexById.get(live.id)
     const index =
-      indexById.get(live.id) ??
-      findSameWorkerTransportIdentityIndex(merged, live, mergedTurnKeys, turnKey) ??
+      (existingIndex !== undefined &&
+      sameWorkerRoleAndToolCall(merged[existingIndex], live) &&
+      canMatchWorkerCheckpointIdentity(merged[existingIndex], live)
+        ? existingIndex
+        : undefined) ??
+      (live.worker_provider_identity
+        ? explicitIndexes.get(workerExplicitOccurrenceKey(live, turnKey))
+        : undefined) ??
+      findSameWorkerTransportIdentityIndex(merged, live, mergedTurnKeys, turnKey, claimed) ??
       (signature && isWorkerNonSnapshotMessageId(live.id)
-        ? takeWindowedSignatureMatch(
-            snapshotIndexesBySignature.get(signature),
-            incomingLiveCountsBySignature,
-            signature
-          )
+        ? snapshotSignatureMatches.take(signature, incomingLiveCountsBySignature, live, claimed)
         : undefined) ??
       (signature && isWorkerSnapshotMessageId(live.id)
-        ? takeWindowedSignatureMatch(
-            liveIndexesBySignature.get(signature),
-            incomingSnapshotCountsBySignature,
-            signature
-          )
+        ? liveSignatureMatches.take(signature, incomingSnapshotCountsBySignature, live, claimed)
         : undefined) ??
-      findCompatibleWorkerReplayIndex(merged, live, mergedTurnKeys, turnKey) ??
-      findSameWorkerAssistantTextIndex(merged, live, mergedTurnKeys, turnKey)
+      findWorkerReplayIndex(merged, live, mergedTurnKeys, turnKey, claimed)
     if (index === undefined) {
       indexById.set(live.id, merged.length)
-      if (signature && isWorkerSnapshotMessageId(live.id)) {
-        const indexes = snapshotIndexesBySignature.get(signature) ?? []
-        indexes.push(merged.length)
-        snapshotIndexesBySignature.set(signature, indexes)
-      }
-      if (signature && isWorkerNonSnapshotMessageId(live.id)) {
-        const indexes = liveIndexesBySignature.get(signature) ?? []
-        indexes.push(merged.length)
-        liveIndexesBySignature.set(signature, indexes)
-      }
+      claimed.add(merged.length)
       merged.push(live)
       mergedTurnKeys.push(turnKey)
+      if (live.worker_provider_identity) {
+        addExplicitIndex(live, turnKey, merged.length - 1)
+      }
+      if (signature) {
+        const matches = isWorkerSnapshotMessageId(live.id)
+          ? snapshotSignatureMatches
+          : liveSignatureMatches
+        matches.add(signature, merged.length - 1)
+      }
       return
     }
 
     const existing = merged[index]
+    claimed.add(index)
     const id = existing.id
     const incomingDefinesRepeatedOccurrence = repeatedLiveTransportIdentities.has(
       workerTransportIdentityKey(live, turnKey)
     )
-    merged[index] = {
+    const updated: Message = {
       ...existing,
       ...live,
+      ...mergeWorkerProviderIdentity(existing, live),
       id,
       content: resolveWorkerPanelContent(
         existing,
@@ -577,11 +598,15 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
         ? live.is_error
         : (live.is_error ?? existing.is_error)
     }
+    merged[index] = applyWorkerToolCallSnapshot(existing, live, updated, earlierAliasToolCalls)
+    if (live.worker_provider_identity && !existing.worker_provider_identity) {
+      addExplicitIndex(merged[index], mergedTurnKeys[index], index)
+    }
     indexById.set(id, index)
     indexById.set(live.id, index)
   })
 
-  return merged
+  return restoreSnapshotAliasCallsWithResults(merged, earlierAliasToolCalls)
 }
 
 function findWorkerHistorySuffixReplayPrefixLength(
@@ -934,7 +959,7 @@ function mergeWorkerPanelMessages(
     liveMessages,
     liveContentVersion,
     liveTail: liveMessages.at(-1),
-    messages: mergeMessages(historyMessages, liveMessages)
+    messages: mergeWorkerHistoryWithLiveMessages(historyMessages, liveMessages)
   }
 }
 

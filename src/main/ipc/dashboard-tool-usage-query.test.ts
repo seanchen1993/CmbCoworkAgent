@@ -1,5 +1,17 @@
 import { expect, it, vi } from "vitest"
-import { queryWithToolUsageMappingFallback } from "./dashboard-tool-usage-query"
+import { buildToolUsageAggs } from "../../shared/dashboard-tool-usage"
+import {
+  FILTERED_TOOL_EXCLUDES,
+  queryWithToolUsageMappingFallback
+} from "./dashboard-tool-usage-query"
+
+it("excludes both built-in shell result tools from complete and legacy rankings", () => {
+  const query = buildToolUsageAggs(FILTERED_TOOL_EXCLUDES)
+  const names = ["monitor", "task_output"]
+  const filters = query.tool_usage_complete.aggs.usage.aggs.filtered.filter.bool.must_not
+  expect(filters[0].terms["toolUsage.name"]).toEqual(expect.arrayContaining(names))
+  expect(query.tool_usage_legacy_filtered.terms.exclude).toEqual(expect.arrayContaining(names))
+})
 
 it("keeps filters and other metrics available when the nested mapping is not deployed", async () => {
   const query = {

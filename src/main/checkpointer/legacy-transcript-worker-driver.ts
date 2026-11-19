@@ -110,7 +110,8 @@ function progress(value: unknown): LegacyTranscriptWriteProgress {
   }
 }
 function rowHeader(message: DurableLegacyCheckpointMessage) {
-  const { contentFragments: _fragments, ...row } = message
+  const { contentFragments: _fragments, checkpointIndex: _checkpointIndex,
+    declaredProviderIdentity: _declaredProviderIdentity, ...row } = message
   return row
 }
 
@@ -347,11 +348,23 @@ export class LegacyTranscriptWorkerDriver {
         current.checkpointId === source.checkpointId &&
         current.totalMessages === totalMessages
       if (!source.complete) {
+        const order = !current && source.graphBoundaries.length > 0 ? {
+          graphBoundaries: source.graphBoundaries,
+          messages: source.messages.map(({ checkpointIndex, messageId, role, toolCallId,
+            providerSourceId, providerOccurrence, declaredProviderIdentity }) => ({
+            checkpointIndex, messageId, role, toolCallId, providerSourceId, providerOccurrence,
+            ...(declaredProviderIdentity && { declaredProviderIdentity })
+          }))
+        } : undefined
+        // The rare Goal import adds identity-only evidence to the existing reserve request.
+        // Bound it before crossing Worker/Main; Main validates the shape and size independently.
+        if (order && Buffer.byteLength(JSON.stringify(order)) > limits.batchBytes) fail()
         current = progress(
           await this.command(job, {
             kind: "reserve",
             checkpointId: source.checkpointId,
-            totalMessages
+            totalMessages,
+            ...(order && { order })
           })
         ).marker
         if (
@@ -436,7 +449,7 @@ export class LegacyTranscriptWorkerDriver {
           batches++
         }
         if (!current) fail()
-        const finished = progress(
+        const finished = current.status === "complete" ? current : progress(
           await this.command(job, {
             kind: "finish",
             checkpointId: source.checkpointId,

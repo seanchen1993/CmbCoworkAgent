@@ -16,6 +16,11 @@ import { captureStagedSnapshotsForCommit, measureForCommit } from "./adoption-tr
 import { markInAppCommitProcessed } from "./git-hook-service"
 import { getTracesDir, parseStoredTraceLine } from "../agent/trace/collector"
 import {
+  AUTO_COMMIT_FEATURE_ENABLED,
+  hasUnsettledWorkspaceShell,
+  tryAcquireWorkspaceAutoCommit
+} from "../agent/shell-auto-commit-lock"
+import {
   discoverWorkspaceGitRepositories,
   type DiscoveredGitRepository
 } from "./git-repository-discovery"
@@ -23,7 +28,7 @@ import {
 const execFileAsync = promisify(execFile)
 const GIT_EXEC_MAX_BUFFER_BYTES = 20 * 1024 * 1024
 const GIT_CONTEXT_QUERY_TIMEOUT_MS = 10_000
-const AUTO_COMMIT_FEATURE_ENABLED = false
+const WORKSPACE_SHELL_ACTIVE_REASON = "工作区中仍有 Shell 任务，已跳过本回合自动提交"
 
 /** A real person saw the confirmation dialog and declined it. */
 export const AUTO_COMMIT_USER_DECLINED_REASON = "用户取消了本次自动提交"
@@ -1067,11 +1072,19 @@ async function maybeAutoCommitMultipleRepositories(params: {
     }
   }
 
+  const releaseWorkspace = tryAcquireWorkspaceAutoCommit(workspacePath)
+  if (!releaseWorkspace) {
+    return { ...preview, status: "skipped", reasons: [WORKSPACE_SHELL_ACTIVE_REASON] }
+  }
   const committedRepoResults: AgentAutoCommitRepoResult[] = []
-  for (const plan of plans) {
-    committedRepoResults.push(
-      await executeRepositoryAutoCommitPlan({ threadId, workspacePath, settings, plan })
-    )
+  try {
+    for (const plan of plans) {
+      committedRepoResults.push(
+        await executeRepositoryAutoCommitPlan({ threadId, workspacePath, settings, plan })
+      )
+    }
+  } finally {
+    releaseWorkspace()
   }
 
   if (committedRepoResults.some((repo) => repo.status === "committed") && workspaceCardNumber?.trim()) {
@@ -1151,6 +1164,9 @@ export async function maybeAutoCommitAfterAgentRun({
     }
     if (!existsSync(workspacePath)) {
       return { status: "skipped", reasons: ["工作区路径不存在，已跳过自动提交"] }
+    }
+    if (hasUnsettledWorkspaceShell(workspacePath)) {
+      return { status: "skipped", reasons: [WORKSPACE_SHELL_ACTIVE_REASON] }
     }
     const repositorySnapshots = snapshot.repositories ?? []
     const shouldUseMultiRepoFlow =
@@ -1328,6 +1344,10 @@ export async function maybeAutoCommitAfterAgentRun({
       }
     }
 
+    const releaseWorkspace = tryAcquireWorkspaceAutoCommit(workspacePath)
+    if (!releaseWorkspace) {
+      return { ...preview, status: "skipped", reasons: [WORKSPACE_SHELL_ACTIVE_REASON] }
+    }
     try {
       await runGit(workspacePath, ["add", "--", ...candidateFiles])
       // Measure adoption in-app (like the manual commit paths) BEFORE the commit
@@ -1416,6 +1436,8 @@ export async function maybeAutoCommitAfterAgentRun({
         warnings,
         reasons: [getExecErrorText(error) || "提交失败"]
       }
+    } finally {
+      releaseWorkspace()
     }
   } finally {
     touchedFilesByThread.delete(threadId)

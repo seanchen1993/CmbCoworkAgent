@@ -50,10 +50,18 @@ export type RawExecuteFn = (
   command: string,
   sandboxMode?: string,
   cwd?: string
-) => Promise<ExecuteResponse>
+) => Promise<ExecuteResponse & { capReached?: boolean }>
+
+export interface OrchestratedExecuteOptions {
+  rawExecute: RawExecuteFn
+  signal: AbortSignal
+}
 
 /** Function to request interactive approval from the user (renderer). */
-export type RequestApprovalFn = (req: ApprovalRequest) => Promise<ApprovalDecision>
+export type RequestApprovalFn = (
+  req: ApprovalRequest,
+  signal?: AbortSignal
+) => Promise<ApprovalDecision>
 
 /**
  * Generic prompt shown when a sandboxed command fails with output that looks like a
@@ -339,9 +347,11 @@ export class ToolOrchestrator {
     cwd: string,
     sandboxMode: string,
     shellSyntax: CommandShellSyntax = process.platform === "win32" ? "powershell" : "posix",
-    outsideShellSyntax: CommandShellSyntax = shellSyntax
+    outsideShellSyntax: CommandShellSyntax = shellSyntax,
+    execution?: OrchestratedExecuteOptions
   ): Promise<ExecuteResponse> {
     {
+      const rawExecute = execution?.rawExecute ?? this.rawExecute
       const modApproved = hasModOperationApproval("host:execute", { command, cwd })
       const yoloMode = this.readYoloMode() || modApproved
       console.log(
@@ -414,7 +424,7 @@ export class ToolOrchestrator {
             truncated: false
           }
         }
-        return this.requestCardCommit(command, cwd, shellSyntax)
+        return this.requestCardCommit(command, cwd, shellSyntax, execution?.signal)
       }
 
       // A push from an app-owned transient branch is never silently approved by
@@ -438,24 +448,27 @@ export class ToolOrchestrator {
             truncated: false
           }
         }
-        const approval = await this.requestApproval({
-          id: randomUUID(),
-          tool_call: { id: randomUUID(), name: "execute", args: { command } },
-          safety_level: "needs_approval",
-          operation: "execute",
-          command,
-          cwd,
-          reason: modPermissionReason(
-            "Push the assigned isolated workflow branch to its matching remote branch?"
-          ),
-          allowed_decisions: ["approve", "reject"],
-          allowed_approval_types: ["approve", "reject"]
-        })
+        const approval = await this.requestShellApproval(
+          {
+            id: randomUUID(),
+            tool_call: { id: randomUUID(), name: "execute", args: { command } },
+            safety_level: "needs_approval",
+            operation: "execute",
+            command,
+            cwd,
+            reason: modPermissionReason(
+              "Push the assigned isolated workflow branch to its matching remote branch?"
+            ),
+            allowed_decisions: ["approve", "reject"],
+            allowed_approval_types: ["approve", "reject"]
+          },
+          execution?.signal
+        )
         const decision = this.mapDecisionToReview(approval.type)
-        if (decision === "denied" || decision === "abort") {
+        if (decision === "denied" || decision === "abort" || execution?.signal.aborted) {
           return { output: "Command rejected by user.", exitCode: 1, truncated: false }
         }
-        return this.rawExecute(command, sandboxMode, cwd)
+        return rawExecute(command, sandboxMode, cwd)
       }
 
       // 2.6 git push → route a plain (non-force) push through workspace:pushWorktree — the
@@ -475,22 +488,36 @@ export class ToolOrchestrator {
       ) {
         const gitCommandCwd = resolveGitPushCommandCwd(command, cwd, shellSyntax)
         if (isPathInsideOrSame(gitCommandCwd, cwd)) {
-          return this.requestWorktreePush(command, cwd, gitCommandCwd)
+          return this.requestWorktreePush(command, cwd, gitCommandCwd, execution?.signal)
         }
       }
 
       // 3. YOLO mode: skip the initial command approval for safe + needs_approval
       // commands, but still require explicit approval before escaping the sandbox.
       if (yoloMode) {
-        const result = await this.rawExecute(command, sandboxMode, cwd)
-        return this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result, outsideShellSyntax)
+        const result = await rawExecute(command, sandboxMode, cwd)
+        return this.maybeRetryOutsideSandbox(
+          command,
+          cwd,
+          sandboxMode,
+          result,
+          outsideShellSyntax,
+          execution
+        )
       }
 
       // 4. Safe commands → execute directly
       if (safety.level === "safe") {
         console.log("[Orchestrator] safe → rawExecute")
-        const result = await this.rawExecute(command, sandboxMode, cwd)
-        return this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result, outsideShellSyntax)
+        const result = await rawExecute(command, sandboxMode, cwd)
+        return this.maybeRetryOutsideSandbox(
+          command,
+          cwd,
+          sandboxMode,
+          result,
+          outsideShellSyntax,
+          execution
+        )
       }
 
       // 5. Needs approval → check cache, then ask user
@@ -507,7 +534,7 @@ export class ToolOrchestrator {
         key,
         patternKey,
         async (): Promise<ReviewDecision> => {
-          const approval = await this.requestApproval({
+          const request: ApprovalRequest = {
             id: randomUUID(),
             tool_call: { id: randomUUID(), name: "execute", args: { command } },
             safety_level: "needs_approval",
@@ -519,8 +546,9 @@ export class ToolOrchestrator {
             // Always offer permanent approval — for known executables it uses prefix match,
             // for unknown executables it uses exact match (still useful for repeated commands).
             allowed_approval_types: ["approve", "approve_session", "approve_permanent", "reject"]
-          })
-          return this.mapDecisionToReview(approval.type)
+          }
+          const approval = await this.requestShellApproval(request, execution?.signal)
+          return execution?.signal.aborted ? "abort" : this.mapDecisionToReview(approval.type)
         },
         {
           allowPermanentMatch: true,
@@ -540,13 +568,14 @@ export class ToolOrchestrator {
       // 6. Execute (with sandbox), then offer a one-shot bypass prompt if the failure
       // looks sandbox-induced.
       try {
-        const result = await this.rawExecute(command, sandboxMode, cwd)
+        const result = await rawExecute(command, sandboxMode, cwd)
         return await this.maybeRetryOutsideSandbox(
           command,
           cwd,
           sandboxMode,
           result,
-          outsideShellSyntax
+          outsideShellSyntax,
+          execution
         )
       } catch (err) {
         // 7. Sandbox denial → block and inform user
@@ -573,7 +602,8 @@ export class ToolOrchestrator {
   private async requestCardCommit(
     command: string,
     cwd: string,
-    shellSyntax: CommandShellSyntax
+    shellSyntax: CommandShellSyntax,
+    signal?: AbortSignal
   ): Promise<ExecuteResponse> {
     const suggestedCommitMessage = extractGitCommitMessage(command, shellSyntax)
     const gitCommandCwd = resolveGitCommandCwd(command, cwd, shellSyntax)
@@ -676,7 +706,7 @@ export class ToolOrchestrator {
     console.log(
       `[Orchestrator] git commit → task-card dialog (cwd=${cwd}, gitCwd=${gitCommandCwd})`
     )
-    const decision = await this.requestApproval({
+    const request: ApprovalRequest = {
       id: randomUUID(),
       tool_call: { id: randomUUID(), name: "execute", args: { command } },
       safety_level: "needs_approval",
@@ -692,7 +722,8 @@ export class ToolOrchestrator {
       reason: modPermissionReason("Git 提交需要选择任务卡片并确认"),
       allowed_decisions: ["approve", "reject"],
       allowed_approval_types: ["approve", "reject"]
-    })
+    }
+    const decision = await this.requestShellApproval(request, signal)
 
     if (decision.type !== "approve") {
       return {
@@ -731,7 +762,8 @@ export class ToolOrchestrator {
   private async requestWorktreePush(
     command: string,
     cwd: string,
-    gitCommandCwd: string
+    gitCommandCwd: string,
+    signal?: AbortSignal
   ): Promise<ExecuteResponse> {
     const gitCommandCwdError = await validateGitOperationCwd(cwd, gitCommandCwd, "push")
     if (gitCommandCwdError) {
@@ -744,7 +776,7 @@ export class ToolOrchestrator {
     console.log(
       `[Orchestrator] git push → workspace:pushWorktree (cwd=${cwd}, gitCwd=${gitCommandCwd})`
     )
-    const decision = await this.requestApproval({
+    const request: ApprovalRequest = {
       id: randomUUID(),
       tool_call: { id: randomUUID(), name: "execute", args: { command } },
       safety_level: "needs_approval",
@@ -757,7 +789,8 @@ export class ToolOrchestrator {
       ),
       allowed_decisions: ["approve", "reject"],
       allowed_approval_types: ["approve", "reject"]
-    })
+    }
+    const decision = await this.requestShellApproval(request, signal)
 
     const result = decision.pushResult
     if (decision.type !== "approve") {
@@ -792,15 +825,23 @@ export class ToolOrchestrator {
     command: string,
     cwd: string,
     sandboxMode: string,
-    result: ExecuteResponse,
-    outsideShellSyntax: CommandShellSyntax = process.platform === "win32" ? "powershell" : "posix"
+    result: ExecuteResponse & { capReached?: boolean },
+    outsideShellSyntax: CommandShellSyntax = process.platform === "win32" ? "powershell" : "posix",
+    execution?: OrchestratedExecuteOptions
   ): Promise<ExecuteResponse> {
-    if (sandboxMode === "none") return result
     if (getModCallContext()) return result
-    if (!this.sandboxEscapeAllowed) return result
+    if (sandboxMode === "none" || !this.sandboxEscapeAllowed) return result
+    if (result.capReached || result.exitCode === 130 || execution?.signal.aborted) return result
     // Single Codex-style bypass check — covers piped-spawn EPERM, git .git writes,
     // dubious ownership, ssh auth, generic EACCES/Access-is-denied/拒绝访问, etc.
-    return this.maybeRequestSandboxBypass(command, cwd, sandboxMode, result, outsideShellSyntax)
+    return this.maybeRequestSandboxBypass(
+      command,
+      cwd,
+      sandboxMode,
+      result,
+      outsideShellSyntax,
+      execution
+    )
   }
 
   /**
@@ -820,7 +861,8 @@ export class ToolOrchestrator {
     cwd: string,
     sandboxMode: string,
     sandboxResult: ExecuteResponse,
-    outsideShellSyntax: CommandShellSyntax
+    outsideShellSyntax: CommandShellSyntax,
+    execution?: OrchestratedExecuteOptions
   ): Promise<ExecuteResponse> {
     const output = sandboxResult.output ?? ""
     if (!LocalSandbox.isLikelySandboxDenied(sandboxResult.exitCode, output, command)) {
@@ -833,7 +875,7 @@ export class ToolOrchestrator {
     const promptReason =
       LocalSandbox.getSandboxBypassGuidance(output) ?? SANDBOX_BYPASS_PROMPT_REASON
     console.warn(`[Orchestrator] sandbox bypass eligible for "${command}" (sandbox=${sandboxMode})`)
-    const approval = await this.requestApproval({
+    const request: ApprovalRequest = {
       id: randomUUID(),
       tool_call: { id: randomUUID(), name: "execute", args: { command } },
       safety_level: "needs_approval",
@@ -844,9 +886,10 @@ export class ToolOrchestrator {
       retry_reason: promptReason,
       allowed_decisions: ["approve", "reject"],
       allowed_approval_types: ["approve", "reject"]
-    })
+    }
+    const approval = await this.requestShellApproval(request, execution?.signal)
     const decision = this.mapDecisionToReview(approval.type)
-    if (decision === "denied" || decision === "abort") {
+    if (decision === "denied" || decision === "abort" || execution?.signal.aborted) {
       // Surface the original sandbox failure to the agent so it can adjust its plan.
       console.warn(
         `[Orchestrator] sandbox bypass rejected for "${command}" — returning original sandbox output`
@@ -872,9 +915,19 @@ export class ToolOrchestrator {
       isGitCommitCommand(command, outsideShellSyntax) ||
       isGitPushCommand(command, outsideShellSyntax)
     ) {
-      return this.execute(command, cwd, "none", outsideShellSyntax, outsideShellSyntax)
+      return this.execute(command, cwd, "none", outsideShellSyntax, outsideShellSyntax, execution)
     }
-    return this.rawExecute(command, "none", cwd)
+    return (execution?.rawExecute ?? this.rawExecute)(command, "none", cwd)
+  }
+
+  private requestShellApproval(
+    request: ApprovalRequest,
+    signal?: AbortSignal
+  ): Promise<ApprovalDecision> {
+    if (signal?.aborted) {
+      return Promise.resolve({ type: "reject", tool_call_id: request.tool_call?.id ?? request.id })
+    }
+    return signal ? this.requestApproval(request, signal) : this.requestApproval(request)
   }
 
   /**
