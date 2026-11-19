@@ -13,9 +13,10 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import type { KnowledgeUserDetail } from "../../../../shared/dashboard-knowledge-overview"
 import type { DashboardKnowledgeCommitRateUnavailableReason } from "../../../../shared/dashboard-knowledge-commit-rate"
-import { useKnowledgeDetails } from "./use-knowledge-details"
+import type { KnowledgePeopleState } from "./use-knowledge-details"
 
-const COLUMNS: { key: keyof KnowledgeUserDetail; label: string; numeric?: boolean }[] = [
+type ColumnKey = keyof Omit<KnowledgeUserDetail, "roomId" | "groupId" | "groupName">
+const COLUMNS: { key: ColumnKey; label: string; numeric?: boolean }[] = [
   { key: "userName", label: "用户" },
   { key: "roomName", label: "所属室" },
   { key: "totalNum", label: "知识沉淀总数", numeric: true },
@@ -30,30 +31,19 @@ const SCOPE_NOTES: Record<DashboardKnowledgeCommitRateUnavailableReason, string>
   roomNotMapped: "所选室未配置室编号，无法查询用户明细",
   noAccess: "仅可查看本室的用户明细"
 }
-const loadDetails = (rooms: string[]) =>
-  window.api.dashboard.knowledgeUserDetails({ upperOrgLv1: rooms })
 const PAGE_SIZE = 10
 const compareText = (a: string, b: string): number => a.localeCompare(b, "zh-CN", { numeric: true })
 
 export function KnowledgeUserDetailsTable({
-  rooms,
-  refreshKey
+  people: { data, loading, error, retry }
 }: {
-  rooms: string[]
-  refreshKey: number
+  people: KnowledgePeopleState
 }): React.JSX.Element {
-  const { data, loading, error, retry } = useKnowledgeDetails(
-    true,
-    rooms,
-    "dashboard:knowledgeUserDetails",
-    loadDetails,
-    refreshKey
-  )
   const [keyword, setKeyword] = useState("")
   const [page, setPage] = useState(1)
   const [exporting, setExporting] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
-  const [sort, setSort] = useState<{ key: keyof KnowledgeUserDetail; direction: "asc" | "desc" }>({
+  const [sort, setSort] = useState<{ key: ColumnKey; direction: "asc" | "desc" }>({
     key: "totalNum",
     direction: "desc"
   })

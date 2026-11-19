@@ -51,3 +51,12 @@ export function useKnowledgeDetails<T>(
     retry: () => setRetryKey((n) => n + 1)
   }
 }
+
+const loadPeople = (rooms: string[]) =>
+  window.api.dashboard.knowledgeUserDetails({ upperOrgLv1: rooms })
+
+export function useKnowledgePeople(rooms: string[], refreshKey: number) {
+  return useKnowledgeDetails(true, rooms, "dashboard:knowledgeUserDetails", loadPeople, refreshKey)
+}
+
+export type KnowledgePeopleState = ReturnType<typeof useKnowledgePeople>
