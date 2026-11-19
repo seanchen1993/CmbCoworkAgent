@@ -1,13 +1,29 @@
 import { canReadPluginSource, type MarketSourceIdentity } from "../../shared/market-source-access"
 import { resolveMarketSourceAccess } from "../services/market-source-access"
 import {
+  fetchMarketShortcutPackage,
+  getMarketShortcutBinding,
+  getMarketShortcutSession,
+  marketShortcutChanged,
+  marketShortcutResult,
+  updateMarketShortcutBinding,
+  verifyMarketShortcutTarget
+} from "../services/market-skill-shortcut"
+import type {
+  MarketSkillShortcutSelection,
+  MarketSkillShortcutSkillState,
+  MarketSkillShortcutTarget,
+  MarketSkillShortcutUpdate
+} from "../../shared/market-skill-shortcut"
+import {
   readContentFile,
   assertOriginalContent,
   assertOriginalUpload,
   findProtectedMarketRoot,
   protectMarketDirectory,
   upgradeMarkedMarketDirectories,
-  MARKET_CONTENT_DENIED
+  MARKET_CONTENT_DENIED,
+  MARKET_CONTENT_MARKER
 } from "../services/market-content"
 import AdmZip from "adm-zip"
 import { BrowserWindow, IpcMain, shell } from "electron"
@@ -19,6 +35,8 @@ import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
 import {
   getCustomSkillsDir,
+  getDisabledSkillRuntimePolicy,
+  isStandaloneSkillDisabledByRuntimePolicy,
   getPlugins,
   getEnabledPluginSkillSourceMetadata,
   getOpenworkDir,
@@ -50,7 +68,10 @@ import {
   resolveSkillPreviewInWorker
 } from "../skill-plugin-catalog/client"
 import { normalizeSkillPluginCatalogKind } from "../skill-plugin-catalog/protocol"
-import { beginSkillCatalogTopologyMutation } from "../skill-plugin-catalog/topology-mutation-gate"
+import {
+  beginSkillCatalogTopologyMutation,
+  waitForSkillCatalogTopologyIdle
+} from "../skill-plugin-catalog/topology-mutation-gate"
 import {
   commitCanonicalDisabledSkillMutation,
   DisabledSkillMutationQueue,
@@ -474,6 +495,115 @@ export async function repairMojibakeNamesInSkillDir(skillDirPath: string): Promi
 }
 
 const MARKETPLACE_SKILL_METADATA_PATH = ".cmbcoworkagent/marketplace-skill.json"
+const MARKET_SHORTCUT_SOURCE_FILE = ".cmb-market-shortcut-source.json"
+
+type MarketShortcutSkillState = MarketSkillShortcutSkillState<SkillMetadata>
+
+interface VerifiedShortcutUpload {
+  target: MarketSkillShortcutTarget
+  isCurrent: () => boolean
+}
+
+function isShortcutSourceFile(relativePath: string): boolean {
+  return (
+    path.posix
+      .basename(normalizeSkillRelativePath(relativePath))
+      .replace(/[. ]+$/, "")
+      .toLowerCase() === MARKET_SHORTCUT_SOURCE_FILE
+  )
+}
+
+async function readMarketShortcutSkill(
+  target: MarketSkillShortcutTarget
+): Promise<MarketShortcutSkillState> {
+  await waitForSkillCatalogTopologyIdle()
+  const customDir = getCustomSkillsDir()
+  const directory = sanitizeSkillName(target.skillName)
+  const skillDir = path.resolve(customDir, directory)
+  if (skillDir === path.resolve(customDir) || path.dirname(skillDir) !== path.resolve(customDir)) {
+    return { kind: "missing" }
+  }
+
+  try {
+    const marker = path.join(skillDir, MARKET_SHORTCUT_SOURCE_FILE)
+    if (!(await fs.lstat(skillDir)).isDirectory() || !(await fs.lstat(marker)).isFile()) {
+      return { kind: "missing" }
+    }
+    const saved = JSON.parse(await fs.readFile(marker, "utf8")) as { itemId?: string }
+    if (saved.itemId !== target.itemId) return { kind: "missing" }
+  } catch {
+    return { kind: "missing" }
+  }
+
+  if (findProtectedMarketRoot(path.join(skillDir, "SKILL.md")) !== skillDir) {
+    return { kind: "missing" }
+  }
+  const [discovered] = await discoverSkills(skillDir, 0)
+  if (!discovered || discovered.name.trim() !== target.skillName) return { kind: "missing" }
+  const [skill] = await loadSkills(skillDir, "user", { maxDepth: 0 })
+  if (!skill) return { kind: "missing" }
+  const identity = { ...discovered, sourceDir: customDir, relativePath: directory }
+  if (isStandaloneSkillDisabledByRuntimePolicy(identity, getDisabledSkillRuntimePolicy())) {
+    return { kind: "disabled" }
+  }
+  return {
+    kind: "available",
+    skill: { ...skill, id: getDiscoveredSkillId(identity), relativePath: directory }
+  }
+}
+
+function validateShortcutUpload(
+  shortcut: VerifiedShortcutUpload | undefined,
+  name: string,
+  skillDir: string,
+  customDir: string
+): void {
+  if (!shortcut) return
+  if (!shortcut.isCurrent()) marketShortcutChanged()
+  if (shortcut.target.skillName !== name || path.dirname(skillDir) !== customDir) {
+    throw new Error("安装包中的技能与市场条目不一致")
+  }
+}
+
+async function writeShortcutSource(skillDir: string, shortcut?: VerifiedShortcutUpload) {
+  if (!shortcut) return
+  if (!shortcut.isCurrent()) marketShortcutChanged()
+  await fs.writeFile(
+    path.join(skillDir, MARKET_SHORTCUT_SOURCE_FILE),
+    JSON.stringify({ itemId: shortcut.target.itemId }),
+    { flag: "wx" }
+  )
+}
+
+// Older protected market installs have no item ID. Adopt one only when its full
+// installation matches the authorized package, including any supporting files.
+async function linkMatchingMarketSkill(
+  skillDir: string,
+  shortcut: VerifiedShortcutUpload,
+  archiveFiles: ReadonlyMap<string, () => Buffer>
+): Promise<boolean> {
+  if (findProtectedMarketRoot(path.join(skillDir, "SKILL.md")) !== skillDir) return false
+  const endMutation = beginSkillCatalogTopologyMutation()
+  try {
+    if (!(await fs.lstat(skillDir)).isDirectory()) return false
+    const files = (await listSkillFiles(skillDir)).filter(
+      (file) => file !== path.join(skillDir, MARKET_CONTENT_MARKER)
+    )
+    if (files.length !== archiveFiles.size) return false
+    for (const file of files) {
+      if (!(await fs.lstat(file)).isFile()) return false
+      const expected = archiveFiles.get(normalizeSkillRelativePath(path.relative(skillDir, file)))
+      if (!expected || !(await readContentFile(file)).equals(expected())) return false
+    }
+    await writeShortcutSource(skillDir, shortcut)
+    notifyHooksChanged("skill-shortcut-linked")
+    return true
+  } catch {
+    return false
+  } finally {
+    endMutation()
+  }
+}
 
 interface MarketplaceSkillMetadata {
   nestedSkills?: Array<{ relativePath?: string; name?: string }>
@@ -729,7 +859,7 @@ async function listSkillFiles(skillDirPath: string): Promise<string[]> {
   async function walk(dirPath: string): Promise<void> {
     const entries = await fs.readdir(dirPath, { withFileTypes: true })
     for (const entry of entries) {
-      if (entry.name === ".cmb-original-upload.json") continue
+      if (entry.name === ".cmb-original-upload.json" || isShortcutSourceFile(entry.name)) continue
       const fullPath = path.join(dirPath, entry.name)
       if (entry.isDirectory()) {
         await walk(fullPath)
@@ -1505,192 +1635,261 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
     }
   )
 
-  ipcMain.handle(
-    "skills:upload",
-    async (
-      _event,
-      payload: { buffer: ArrayBuffer; fileName: string; options?: SkillUploadOptions }
-    ): Promise<SkillUploadResult> => {
-      const { buffer, fileName, options = {} } = payload
-      if (!buffer || !fileName || typeof fileName !== "string") {
-        return { success: false, error: "Invalid buffer or fileName" }
-      }
+  const uploadSkill = async (
+    payload: { buffer: ArrayBuffer; fileName: string; options?: SkillUploadOptions },
+    shortcut?: VerifiedShortcutUpload
+  ): Promise<SkillUploadResult> => {
+    const { buffer, fileName, options = {} } = payload
+    if (!buffer || !fileName || typeof fileName !== "string") {
+      return { success: false, error: "Invalid buffer or fileName" }
+    }
 
-      const ext = path.extname(fileName).toLowerCase()
-      const customDir = getCustomSkillsDir()
-      mkdirSync(customDir, { recursive: true })
+    const ext = path.extname(fileName).toLowerCase()
+    const customDir = getCustomSkillsDir()
+    mkdirSync(customDir, { recursive: true })
 
-      let existingSkillNamesCache: Set<string> | null = null
-      const getExistingSkillNames = async (): Promise<Set<string>> => {
-        if (existingSkillNamesCache) return existingSkillNamesCache
-        const [builtin, custom] = await Promise.all([
-          loadSkills(getSkillsDir(), "project"),
-          loadSkills(getCustomSkillsDir(), "user")
-        ])
-        existingSkillNamesCache = new Set(
-          [...builtin, ...custom].map((s) => normalizeSkillNameForComparison(s.name))
-        )
-        return existingSkillNamesCache
-      }
+    let existingSkillNamesCache: Set<string> | null = null
+    const getExistingSkillNames = async (): Promise<Set<string>> => {
+      if (existingSkillNamesCache) return existingSkillNamesCache
+      const [builtin, custom] = await Promise.all([
+        loadSkills(getSkillsDir(), "project"),
+        loadSkills(getCustomSkillsDir(), "user")
+      ])
+      existingSkillNamesCache = new Set(
+        [...builtin, ...custom].map((s) => normalizeSkillNameForComparison(s.name))
+      )
+      return existingSkillNamesCache
+    }
 
-      const checkNameDuplicate = async (nameToCheck: string): Promise<boolean> => {
-        return (await getExistingSkillNames()).has(normalizeSkillNameForComparison(nameToCheck))
-      }
+    const checkNameDuplicate = async (nameToCheck: string): Promise<boolean> => {
+      return (await getExistingSkillNames()).has(normalizeSkillNameForComparison(nameToCheck))
+    }
 
-      const checkDirCollision = (sanitizedName: string): boolean => {
-        return (
-          existsSync(path.join(customDir, sanitizedName)) ||
-          existsSync(path.join(getSkillsDir(), sanitizedName))
-        )
-      }
+    const checkDirCollision = (sanitizedName: string): boolean => {
+      return (
+        existsSync(path.join(customDir, sanitizedName)) ||
+        existsSync(path.join(getSkillsDir(), sanitizedName))
+      )
+    }
 
-      try {
-        const sourceAccess = options.origin === "market"
+    try {
+      const sourceAccess =
+        options.origin === "market" && !shortcut
           ? await resolveMarketSourceAccess("skill", options.marketplace, buffer)
           : undefined
-        assertOriginalUpload(Buffer.from(buffer), fileName)
-        if (ext === ".md") {
-          const content = Buffer.from(buffer).toString("utf-8")
-          const frontmatter = parseYamlFrontmatter(content)
-          const name = frontmatter.name?.trim()
-          if (!name) {
-            return { success: false, error: "SKILL.md 必须包含 YAML frontmatter 中的 name 字段" }
-          }
-          if (await checkNameDuplicate(name)) {
-            return { success: false, error: `技能名称「${name}」已存在` }
-          }
-          const skillName = sanitizeSkillName(name)
-          if (checkDirCollision(skillName)) {
-            return { success: false, error: `技能目录「${skillName}」已存在，请换一个名称` }
-          }
-          const skillDir = path.join(customDir, skillName)
-          const endTopologyMutation = beginSkillCatalogTopologyMutation()
-          let createdSkillDir = false
-          try {
-            mkdirSync(skillDir)
-            createdSkillDir = true
-            await fs.writeFile(path.join(skillDir, "SKILL.md"), content, "utf-8")
-            clearDisabledSkillsForSkillDir(skillDir)
-            if (options.origin === "market" && !sourceAccess) protectMarketDirectory(skillDir)
-            else await fs.writeFile(path.join(skillDir, ".cmb-original-upload.json"), "{}")
-            invalidateEnabledSkillsCache()
-            notifyHooksChanged("skill-uploaded")
+      assertOriginalUpload(Buffer.from(buffer), fileName)
+      if (ext === ".md") {
+        const content = Buffer.from(buffer).toString("utf-8")
+        const frontmatter = parseYamlFrontmatter(content)
+        const name = frontmatter.name?.trim()
+        if (!name) {
+          return { success: false, error: "SKILL.md 必须包含 YAML frontmatter 中的 name 字段" }
+        }
+        const skillName = sanitizeSkillName(name)
+        const skillDir = path.join(customDir, skillName)
+        validateShortcutUpload(shortcut, name, skillDir, customDir)
+        if (await checkNameDuplicate(name)) {
+          if (
+            shortcut &&
+            (await linkMatchingMarketSkill(
+              skillDir,
+              shortcut,
+              new Map([["SKILL.md", () => Buffer.from(buffer)]])
+            ))
+          ) {
             return { success: true, skillName }
-          } catch (error) {
-            if (createdSkillDir) {
-              await fs.rm(skillDir, { recursive: true, force: true }).catch(() => undefined)
-            }
-            throw error
-          } finally {
-            endTopologyMutation()
           }
+          return { success: false, error: `技能名称「${name}」已存在` }
+        }
+        if (checkDirCollision(skillName)) {
+          return { success: false, error: `技能目录「${skillName}」已存在，请换一个名称` }
+        }
+        const endTopologyMutation = beginSkillCatalogTopologyMutation()
+        let createdSkillDir = false
+        try {
+          mkdirSync(skillDir)
+          createdSkillDir = true
+          await fs.writeFile(path.join(skillDir, "SKILL.md"), content, "utf-8")
+          clearDisabledSkillsForSkillDir(skillDir)
+          if (options.origin === "market" && !sourceAccess) protectMarketDirectory(skillDir)
+          else await fs.writeFile(path.join(skillDir, ".cmb-original-upload.json"), "{}")
+          await writeShortcutSource(skillDir, shortcut)
+          invalidateEnabledSkillsCache()
+          notifyHooksChanged("skill-uploaded")
+          return { success: true, skillName }
+        } catch (error) {
+          if (createdSkillDir) {
+            await fs.rm(skillDir, { recursive: true, force: true }).catch(() => undefined)
+          }
+          throw error
+        } finally {
+          endTopologyMutation()
+        }
+      }
+
+      if (ext === ".zip") {
+        const zip = new AdmZip(Buffer.from(buffer))
+        const entries = zip.getEntries()
+        for (const entry of entries) {
+          if (!entry.isDirectory) assertOriginalUpload(entry.getData(), decodeZipEntryName(entry))
+        }
+        const decodedEntries: DecodedZipEntry[] = entries.map((entry) => ({
+          entry,
+          decodedName: decodeZipEntryName(entry)
+        }))
+
+        const skillMdEntry = selectRootSkillMarkdownEntry<(typeof decodedEntries)[number]>(
+          decodedEntries,
+          (item) => item.entry.isDirectory
+        )
+
+        if (!skillMdEntry) {
+          return { success: false, error: "ZIP 文件必须包含 SKILL.md" }
         }
 
-        if (ext === ".zip") {
-          const zip = new AdmZip(Buffer.from(buffer))
-          const entries = zip.getEntries()
-          for (const entry of entries) {
-            if (!entry.isDirectory) assertOriginalUpload(entry.getData(), decodeZipEntryName(entry))
-          }
-          const decodedEntries: DecodedZipEntry[] = entries.map((entry) => ({
-            entry,
-            decodedName: decodeZipEntryName(entry)
-          }))
-
-          const skillMdEntry = selectRootSkillMarkdownEntry<(typeof decodedEntries)[number]>(
-            decodedEntries,
-            (item) => item.entry.isDirectory
-          )
-
-          if (!skillMdEntry) {
-            return { success: false, error: "ZIP 文件必须包含 SKILL.md" }
-          }
-
-          const content = decodeSkillTextFile(
-            skillMdEntry.entry.getData(),
-            skillMdEntry.decodedName
-          )
-          const frontmatter = parseYamlFrontmatter(content)
-          const name = frontmatter.name?.trim()
-          if (!name) {
-            return { success: false, error: "SKILL.md 必须包含 YAML frontmatter 中的 name 字段" }
-          }
-          if (await checkNameDuplicate(name)) {
-            return { success: false, error: `技能名称「${name}」已存在` }
-          }
-          const skillName = sanitizeSkillName(name)
-          if (checkDirCollision(skillName)) {
-            return { success: false, error: `技能目录「${skillName}」已存在，请换一个名称` }
-          }
-
-          const basePrefix = skillMdEntry.decodedName.replace(/SKILL\.md$/i, "")
-          const metadata = readMarketplaceSkillMetadataFromZip(decodedEntries, basePrefix)
-          const nestedNameConflicts = findNestedSkillNameConflicts(
-            getNestedSkillNameCandidates(decodedEntries, basePrefix, metadata),
-            await getExistingSkillNames()
-          )
-          if (nestedNameConflicts.length > 0 && !options.allowNestedNameDuplicates) {
-            const preview = nestedNameConflicts
-              .slice(0, 5)
-              .map((item) => `${item.name}（${item.relativePath}）`)
-              .join("、")
-            const suffix = nestedNameConflicts.length > 5 ? "等" : ""
-            return {
-              success: false,
-              error: `导入会引入 ${nestedNameConflicts.length} 个与现有 skill 同名的子技能：${preview}${suffix}`,
-              nestedNameConflicts
-            }
-          }
-
-          const skillDir = path.join(customDir, skillName)
-          const endTopologyMutation = beginSkillCatalogTopologyMutation()
-          let createdSkillDir = false
-          try {
-            mkdirSync(skillDir)
-            createdSkillDir = true
-
+        const content = decodeSkillTextFile(skillMdEntry.entry.getData(), skillMdEntry.decodedName)
+        const frontmatter = parseYamlFrontmatter(content)
+        const name = frontmatter.name?.trim()
+        if (!name) {
+          return { success: false, error: "SKILL.md 必须包含 YAML frontmatter 中的 name 字段" }
+        }
+        const skillName = sanitizeSkillName(name)
+        const skillDir = path.join(customDir, skillName)
+        validateShortcutUpload(shortcut, name, skillDir, customDir)
+        const basePrefix = skillMdEntry.decodedName.replace(/SKILL\.md$/i, "")
+        if (await checkNameDuplicate(name)) {
+          if (shortcut) {
+            const files = new Map<string, () => Buffer>()
             for (const item of decodedEntries) {
-              const entry = item.entry
-              if (entry.isDirectory) continue
-              if (!item.decodedName.startsWith(basePrefix)) continue
-              const relativePath = item.decodedName.slice(basePrefix.length)
-              if (!relativePath) continue
-              if (isMarketplaceSkillMetadataPath(relativePath)) continue
-              const destPath = path.resolve(skillDir, relativePath)
+              if (item.entry.isDirectory || !item.decodedName.startsWith(basePrefix)) continue
+              const relative = normalizeArchiveEntryName(item.decodedName.slice(basePrefix.length))
               if (
-                !destPath.startsWith(path.resolve(skillDir) + path.sep) &&
-                destPath !== path.resolve(skillDir)
+                !relative ||
+                isMarketplaceSkillMetadataPath(relative) ||
+                isShortcutSourceFile(relative)
               ) {
-                console.warn(
-                  `[Skills] Skipping ZIP entry with path traversal: ${item.decodedName || entry.entryName}`
-                )
                 continue
               }
-              const destDir = path.dirname(destPath)
-              mkdirSync(destDir, { recursive: true })
-              await fs.writeFile(destPath, entry.getData())
+              files.set(relative, () => item.entry.getData())
             }
-            clearDisabledSkillsForSkillDir(skillDir)
-            if (options.origin === "market" && !sourceAccess) protectMarketDirectory(skillDir)
-            else await fs.writeFile(path.join(skillDir, ".cmb-original-upload.json"), "{}")
-            invalidateEnabledSkillsCache()
-            notifyHooksChanged("skill-uploaded")
-            return { success: true, skillName }
-          } catch (error) {
-            if (createdSkillDir) {
-              await fs.rm(skillDir, { recursive: true, force: true }).catch(() => undefined)
+            if (await linkMatchingMarketSkill(skillDir, shortcut, files)) {
+              return { success: true, skillName }
             }
-            throw error
-          } finally {
-            endTopologyMutation()
+          }
+          return { success: false, error: `技能名称「${name}」已存在` }
+        }
+        if (checkDirCollision(skillName)) {
+          return { success: false, error: `技能目录「${skillName}」已存在，请换一个名称` }
+        }
+        const metadata = readMarketplaceSkillMetadataFromZip(decodedEntries, basePrefix)
+        const nestedNameConflicts = findNestedSkillNameConflicts(
+          getNestedSkillNameCandidates(decodedEntries, basePrefix, metadata),
+          await getExistingSkillNames()
+        )
+        if (nestedNameConflicts.length > 0 && !options.allowNestedNameDuplicates) {
+          const preview = nestedNameConflicts
+            .slice(0, 5)
+            .map((item) => `${item.name}（${item.relativePath}）`)
+            .join("、")
+          const suffix = nestedNameConflicts.length > 5 ? "等" : ""
+          return {
+            success: false,
+            error: `导入会引入 ${nestedNameConflicts.length} 个与现有 skill 同名的子技能：${preview}${suffix}`,
+            nestedNameConflicts
           }
         }
 
-        return { success: false, error: "仅支持 .md 或 .zip 文件" }
-      } catch (e) {
-        return { success: false, error: e instanceof Error ? e.message : "Unknown error" }
+        if (shortcut && !shortcut.isCurrent()) marketShortcutChanged()
+        const endTopologyMutation = beginSkillCatalogTopologyMutation()
+        let createdSkillDir = false
+        try {
+          mkdirSync(skillDir)
+          createdSkillDir = true
+
+          for (const item of decodedEntries) {
+            const entry = item.entry
+            if (entry.isDirectory) continue
+            if (!item.decodedName.startsWith(basePrefix)) continue
+            const relativePath = item.decodedName.slice(basePrefix.length)
+            if (!relativePath) continue
+            if (isMarketplaceSkillMetadataPath(relativePath) || isShortcutSourceFile(relativePath)) {
+              continue
+            }
+            const destPath = path.resolve(skillDir, relativePath)
+            if (
+              !destPath.startsWith(path.resolve(skillDir) + path.sep) &&
+              destPath !== path.resolve(skillDir)
+            ) {
+              console.warn(
+                `[Skills] Skipping ZIP entry with path traversal: ${item.decodedName || entry.entryName}`
+              )
+              continue
+            }
+            const destDir = path.dirname(destPath)
+            mkdirSync(destDir, { recursive: true })
+            await fs.writeFile(destPath, entry.getData())
+          }
+          clearDisabledSkillsForSkillDir(skillDir)
+          if (options.origin === "market" && !sourceAccess) protectMarketDirectory(skillDir)
+          else await fs.writeFile(path.join(skillDir, ".cmb-original-upload.json"), "{}")
+          await writeShortcutSource(skillDir, shortcut)
+          invalidateEnabledSkillsCache()
+          notifyHooksChanged("skill-uploaded")
+          return { success: true, skillName }
+        } catch (error) {
+          if (createdSkillDir) {
+            await fs.rm(skillDir, { recursive: true, force: true }).catch(() => undefined)
+          }
+          throw error
+        } finally {
+          endTopologyMutation()
+        }
       }
+
+      return { success: false, error: "仅支持 .md 或 .zip 文件" }
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : "Unknown error" }
     }
+  }
+
+  ipcMain.handle("skills:upload", (_event, payload) => uploadSkill(payload))
+  ipcMain.handle("marketSkillShortcut:get", () =>
+    marketShortcutResult(() => getMarketShortcutBinding())
+  )
+  ipcMain.handle("marketSkillShortcut:set", (_event, input: MarketSkillShortcutUpdate) =>
+    marketShortcutResult(() => updateMarketShortcutBinding(input))
+  )
+  ipcMain.handle("marketSkillShortcut:resolve", (_event, selection: MarketSkillShortcutSelection) =>
+    marketShortcutResult(async () => {
+      const session = getMarketShortcutSession()
+      const target = await verifyMarketShortcutTarget(session, selection)
+      const skill = await readMarketShortcutSkill(target)
+      if (!session.isCurrent()) marketShortcutChanged()
+      return skill
+    })
+  )
+  ipcMain.handle("marketSkillShortcut:install", (_event, selection: MarketSkillShortcutSelection) =>
+    marketShortcutResult(async (): Promise<MarketShortcutSkillState> => {
+      const session = getMarketShortcutSession()
+      const target = await verifyMarketShortcutTarget(session, selection)
+      const existing = await readMarketShortcutSkill(target)
+      if (!session.isCurrent()) marketShortcutChanged()
+      if (existing.kind !== "missing") return existing
+      const bundle = await fetchMarketShortcutPackage(session, selection)
+      await verifyMarketShortcutTarget(session, selection)
+      const result = await uploadSkill(
+        { ...bundle, options: { origin: "market" } },
+        { target, isCurrent: session.isCurrent }
+      )
+      await verifyMarketShortcutTarget(session, selection)
+      const skill = await readMarketShortcutSkill(target)
+      if (!session.isCurrent()) marketShortcutChanged()
+      if (skill.kind !== "missing") return skill
+      return {
+        kind: "failed",
+        error: result.error || "技能已安装，暂时无法读取。请重试。"
+      }
+    })
   )
 
   ipcMain.handle(

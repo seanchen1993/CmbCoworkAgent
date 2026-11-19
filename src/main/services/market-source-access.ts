@@ -8,7 +8,7 @@ import {
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 const MAX_BUNDLE_BYTES = 32 * 1024 * 1024
 
-async function readBoundedResponse(response: Response, limit: number): Promise<Buffer | undefined> {
+export async function readBoundedResponse(response: Response, limit: number): Promise<Buffer | undefined> {
   if (!response.ok || Number(response.headers.get("content-length")) > limit) {
     await response.body?.cancel()
     return undefined

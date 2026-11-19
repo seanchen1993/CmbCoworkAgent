@@ -49,6 +49,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import type { McpConnectorConfig, PluginManifest, PluginMetadata, SkillMetadata } from "@/types"
 import { UniversalUploadDialog } from "./UniversalUploadDialog"
 import { MarketDetailView } from "./MarketDetailView"
+import { MarketSkillShortcutAction } from "./MarketSkillShortcutAction"
 import { SkillDetail } from "../SkillsPanel"
 import { MCPConnectorDetail } from "../MCPConnectorDetail"
 import { PluginDetailPanel } from "../PluginsPanel"
@@ -2669,6 +2670,13 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
                       : "应用市场"}
                   </h2>
                   <span className="flex items-center gap-2">
+                    {detailMode === "detail" && activeTab === "skill" && selectedItem?.id && (
+                      <MarketSkillShortcutAction
+                        key={selectedItem.id}
+                        itemId={selectedItem.id}
+                        label={selectedItem.chinese_name || selectedItem.name}
+                      />
+                    )}
                     {detailMode === "detail" &&
                     selectedItem &&
                     activeTab !== ORG_SKILL_MARKET_TYPE &&

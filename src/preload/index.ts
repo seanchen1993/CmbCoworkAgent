@@ -150,6 +150,13 @@ import type {
 import type { ParsedAttachment } from "../main/file-parser"
 import type { SkillPreviewGrantRequest, SkillPreviewGrantResult } from "../shared/skill-preview"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
+import type {
+  MarketSkillShortcutBinding,
+  MarketSkillShortcutResult,
+  MarketSkillShortcutSelection,
+  MarketSkillShortcutSkillState,
+  MarketSkillShortcutUpdate
+} from "../shared/market-skill-shortcut"
 import { UserInfoConfig } from "../main/storage"
 import type {
   ManagedSavedCodeExecTool,
@@ -2383,6 +2390,18 @@ const api = {
     supportedExtensions: (): Promise<string[]> => {
       return ipcRenderer.invoke("file:supportedExtensions")
     }
+  },
+  marketSkillShortcut: {
+    get: (): Promise<MarketSkillShortcutResult<MarketSkillShortcutBinding>> =>
+      ipcRenderer.invoke("marketSkillShortcut:get"),
+    set: (input: MarketSkillShortcutUpdate): Promise<MarketSkillShortcutResult<MarketSkillShortcutBinding>> =>
+      ipcRenderer.invoke("marketSkillShortcut:set", input),
+    resolve: (selection: MarketSkillShortcutSelection): Promise<
+      MarketSkillShortcutResult<MarketSkillShortcutSkillState<SkillMetadata>>
+    > => ipcRenderer.invoke("marketSkillShortcut:resolve", selection),
+    install: (selection: MarketSkillShortcutSelection): Promise<
+      MarketSkillShortcutResult<MarketSkillShortcutSkillState<SkillMetadata>>
+    > => ipcRenderer.invoke("marketSkillShortcut:install", selection)
   },
   skills: {
     catalog: {
