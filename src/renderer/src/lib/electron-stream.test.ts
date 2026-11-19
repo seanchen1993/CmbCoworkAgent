@@ -4,6 +4,11 @@ import type { UseStreamTransport } from "@langchain/langgraph-sdk/react"
 import { createElectronStream } from "./electron-stream"
 import { ElectronIPCTransport } from "./electron-transport"
 import { createStreamDataSerializer } from "../../../main/ipc/stream-data-serialization"
+import { buildMessageSameRoleDuplicateId } from "../../../shared/message-role-collision"
+import {
+  STREAM_PREVIOUS_PROVIDER_OCCURRENCE_KEY,
+  STREAM_TRANSCRIPT_BOUNDARY_ID_KEY
+} from "../../../shared/stream-message-wire-mode"
 import recordedProviderStream from "../../../../tests/fixtures/reused-provider-live-stream.json"
 import {
   createLiveStreamCumulativeFrameProjector,
@@ -146,6 +151,64 @@ describe("Electron stream snapshot regression", () => {
       }
     }
   )
+  it("uses durable notification occurrences for Team drafts and values replays", async () => {
+    const transport = new ElectronIPCTransport() as unknown as {
+      convertToSDKEvents(event: unknown, threadId: string, agentMode: string): Event[]
+    }
+    const sourceId = "reused-notification-provider"
+    const stableId = (occurrence: number) =>
+      buildMessageSameRoleDuplicateId(sourceId, "assistant", occurrence)
+    const emit = (mode: string, data: unknown) =>
+      transport.convertToSDKEvents({ type: "stream", mode, data }, "test", "coordinator")
+    const partial = (boundary: string, previous: number, content: string, step = "model") =>
+      emit("messages", [
+        { id: ["langchain_core", "messages", "AIMessageChunk"], kwargs: { id: sourceId, content } },
+        {
+          langgraph_node: "model_request",
+          checkpoint_ns: step,
+          [STREAM_TRANSCRIPT_BOUNDARY_ID_KEY]: boundary,
+          [STREAM_PREVIOUS_PROVIDER_OCCURRENCE_KEY]: previous
+        }
+      ])
+    const complete = (boundary: string, occurrence: number, content: string) =>
+      emit("values", {
+        [STREAM_TRANSCRIPT_BOUNDARY_ID_KEY]: boundary,
+        messages: [
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: {
+              id: stableId(occurrence),
+              content,
+              additional_kwargs: {
+                cmb_internal_provider_source_id: sourceId,
+                cmb_internal_provider_occurrence: occurrence
+              }
+            }
+          }
+        ]
+      })
+    const { stream, frames } = await run([
+      ...partial("notification-1", 1, "watch "),
+      ...complete("notification-1", 2, "watch done"),
+      ...complete("notification-1", 2, "watch done"),
+      ...complete("notification-1", 3, "values only"),
+      ...partial("notification-1", 1, "follow ", "after-tool"),
+      ...complete("notification-1", 4, "follow through"),
+      ...partial("notification-2", 4, "watch "),
+      ...complete("notification-2", 5, "watch done")
+    ])
+    expect(
+      frames.some((frame) =>
+        frame.some((msg) => msg.id === stableId(2) && msg.content === "watch ")
+      )
+    ).toBe(true)
+    expect(stream.messages.map(({ id, content }) => [id, content])).toEqual([
+      [stableId(2), "watch done"],
+      [stableId(3), "values only"],
+      [stableId(4), "follow through"],
+      [stableId(5), "watch done"]
+    ])
+  })
   it("prefers explicit occurrences over execution scopes and resets scope state on retry", async () => {
     const transport = new ElectronIPCTransport() as unknown as {
       convertToSDKEvents(event: unknown, threadId: string, agentMode: string): Event[]

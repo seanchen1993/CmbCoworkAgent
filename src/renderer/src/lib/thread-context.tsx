@@ -74,6 +74,7 @@ import {
 import {
   findMessagesAfterCheckpointVisibleIds,
   isCheckpointEmptyAssistantToolCallMessage,
+  isInternalNotificationMessage,
   mergeCheckpointAuthorityTranscriptMessages
 } from "../../../shared/checkpoint-transcript"
 import {
@@ -6386,7 +6387,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   return []
                 }
                 const additionalKwargs = msg.additional_kwargs ?? msg.kwargs?.additional_kwargs
-                if (additionalKwargs?.cmb_internal_coordinator_notification === true) {
+                if (isInternalNotificationMessage(msg)) {
                   return []
                 }
 

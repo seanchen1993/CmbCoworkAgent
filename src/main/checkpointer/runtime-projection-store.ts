@@ -4,7 +4,7 @@ import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
 import { ensureLegacyTranscriptSlots } from "../db/legacy-transcript-slots"
 import { ensureMessageSnapshotGeneration as migrateMessageSnapshotGeneration } from "./message-snapshot-schema"
 import { hasPendingLegacyMessageTimes, migrateLegacyMessageTimes } from "./legacy-message-times"
-import { GOAL_CONTINUATION_BOUNDARY_METADATA_KEY } from "../agent/goals/internal-prompt"
+import { hasScopedGraphTranscriptBoundary } from "../../shared/graph-transcript-boundary"
 import { isLosslessTranscriptPayload } from "../../shared/transcript-recovery-integrity"
 import { createHash, randomUUID, type Hash } from "node:crypto"
 import {
@@ -1297,7 +1297,7 @@ function buildDurableLegacyCheckpointMessages(
     const visibleUserMessage = additionalKwargs.cmb_visible_user_message
     if (
       role === "user" &&
-      additionalKwargs[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] === true &&
+      hasScopedGraphTranscriptBoundary(additionalKwargs) &&
       !(typeof visibleUserMessage === "string" && visibleUserMessage.trim())
     ) {
       graphBoundaries.push({ checkpointIndex: index, messageId: sourceId })

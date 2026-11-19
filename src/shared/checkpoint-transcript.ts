@@ -1,3 +1,4 @@
+import { NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY } from "./graph-transcript-boundary"
 import {
   buildMessageRoleCollisionId,
   buildMessageSameRoleDuplicateId,
@@ -576,7 +577,11 @@ function getAdditionalKwargs(
  */
 export function isInternalNotificationMessage(message: unknown): boolean {
   if (!isRecord(message)) return false
-  return getAdditionalKwargs(message)?.cmb_internal_coordinator_notification === true
+  const metadata = getAdditionalKwargs(message)
+  return (
+    metadata?.cmb_internal_coordinator_notification === true ||
+    metadata?.[NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY] === true
+  )
 }
 
 function collectToolCallIds(value: unknown, ids: Set<string>): void {
@@ -827,7 +832,7 @@ export function deriveCheckpointTranscriptIndex(checkpoint: unknown): Checkpoint
   getCheckpointMessages(checkpoint).forEach((raw, index) => {
     if (!isRecord(raw)) return
     const additionalKwargs = getAdditionalKwargs(raw)
-    if (additionalKwargs?.cmb_internal_coordinator_notification === true) return
+    if (isInternalNotificationMessage(raw)) return
 
     for (const toolCallId of getReferencedToolCallIds(raw)) {
       if (seenSubagentTranscriptIds.has(toolCallId)) continue
