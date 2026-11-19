@@ -1,4 +1,7 @@
-import type { KnowledgeUserDetail } from "../../shared/dashboard-knowledge-overview"
+import {
+  normalizeKnowledgeOrgId,
+  type KnowledgeUserDetail
+} from "../../shared/dashboard-knowledge-overview"
 import { DashboardRequestCancelledError } from "../services/dashboard-request-coordinator"
 
 const COUNT_FIELDS = [
@@ -20,6 +23,14 @@ export function parseKnowledgeUserDetails(value: unknown): KnowledgeUserDetail[]
       if (text != null && typeof text !== "string")
         throw new Error(`用户知识沉淀明细接口返回了无效字段：${field}`)
       row[field] = typeof text === "string" ? text.trim() : ""
+    }
+    for (const field of ["roomId", "groupId"] as const) {
+      if (field in item) row[field] = normalizeKnowledgeOrgId(item[field])
+    }
+    if ("groupName" in item) {
+      if (item.groupName != null && typeof item.groupName !== "string")
+        throw new Error("用户知识沉淀明细接口返回了无效字段：groupName")
+      row.groupName = item.groupName?.trim() || null
     }
     for (const field of COUNT_FIELDS) {
       const count: unknown = item[field]
