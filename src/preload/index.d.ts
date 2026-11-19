@@ -27,6 +27,7 @@ import type {
 } from "../shared/managed-run-schedule"
 import type {
   KnowledgeAccumulationData,
+  KnowledgeOrgItem,
   KnowledgeActiveDetails,
   KnowledgeFileReaders,
   KnowledgeProjectStats,
@@ -2719,6 +2720,15 @@ interface CustomAPI {
     knowledgeAccumulation: (opts?: { upperOrgLv1?: string | string[] | null }) => Promise<{
       success: boolean
       data?: KnowledgeAccumulationData
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeOrgGroups: (
+      roomId: string,
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{
+      success: boolean
+      data?: KnowledgeOrgItem[]
       error?: string
       cancelled?: boolean
     }>

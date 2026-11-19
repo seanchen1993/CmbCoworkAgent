@@ -34,7 +34,8 @@ qa.users=Array.from({length:45},(_,i)=>({
 }));
 window.api={dashboard:{
  knowledgeProjectStats:(range,opts)=>{qa.calls.push({kind:'projects',range,opts});return new Promise(resolve=>qa.pending.push(resolve))},
- knowledgeAccumulation:async()=>{qa.calls.push({kind:'accumulation'});return {success:true,data:{totals:{totalNum:0,abandonedNum:0,activeNum:0},users:[],orgs:[],systems:[],errors:{}}}},
+ knowledgeAccumulation:async(opts)=>{qa.calls.push({kind:'accumulation'});return {success:true,data:{totals:{totalNum:0,abandonedNum:0,activeNum:0},users:[],orgs:[],systems:[],errors:{},...(qa.orgData ? qa.orgData(opts.upperOrgLv1) : {})}}},
+ knowledgeOrgGroups:async(id,opts)=>{qa.calls.push({kind:'groups',id,opts});return qa.getGroups(id)},
  knowledgeRecentConstraintFiles:async()=>{qa.calls.push({kind:'recent'});return {success:true,data:{fileCount:0,complete:true}}},
  knowledgeUserDetails:async(opts)=>{qa.calls.push({kind:'userDetails',opts});return qa.deferUsers ? new Promise(resolve=>qa.userPending.push(resolve)) : {success:true,data:{items:qa.users}}},
  exportExcel:async(sheets,options)=>{qa.exports.push({sheets,options});return qa.exportResult ?? {success:true}},
@@ -294,9 +295,98 @@ try {
   )
   await section.getByText("所选室未配置室编号，无法查询用户明细").waitFor()
   assert.equal(await exportButton.isDisabled(), true)
+  // Exercise both chart and keyboard-accessible legend, keeping the personal table in its own scope.
+  const org = page.getByRole("region", { name: "部门分布情况", exact: true })
+  await page.evaluate(() => {
+    const qa = window.qa
+    qa.deferUsers = false
+    const roomA = { id: "1", name: "甲室(杭州)", value: 40 }
+    const roomB = { id: "2", name: "乙室", value: 20 }
+    const groups = [
+      { id: "10", name: "开发一组", value: 25 },
+      { id: "11", name: "开发二组", value: 10 },
+      { id: null, name: "未归属组", value: 5 }
+    ]
+    qa.orgData = (rooms) =>
+      rooms.length === 1
+        ? { orgRoom: roomA, orgs: groups }
+        : { orgs: [roomA, roomB, { id: null, name: "未归属室", value: 1 }] }
+    qa.getGroups = () => ({ success: true, data: groups })
+    const row = qa.users[0]
+    qa.users = [
+      { ...row, userName: "低", roomId: "1", groupId: "10", totalNum: 5 },
+      { ...row, userName: "高", roomName: "甲室（杭州）", groupId: "10", totalNum: 20 },
+      {
+        ...row,
+        userName: "他室同组",
+        roomId: "2",
+        roomName: "甲室(杭州)",
+        groupId: "10",
+        totalNum: 99
+      },
+      { ...row, userName: "其他组员", roomId: "1", groupId: "11", totalNum: 10 },
+      { ...row, userName: "待分组", roomId: "1", groupId: null, groupName: null, totalNum: 5 },
+      { ...row, userName: "旧记录", roomId: "1", totalNum: 80 }
+    ]
+    qa.setRooms([])
+  })
+  await org.getByRole("button", { name: "查看甲室(杭州)" }).waitFor()
+  await section.getByText("共 6 条").waitFor()
+  assert.equal(await org.getByRole("button", { name: "查看未归属室" }).count(), 0)
+  const userCalls = () =>
+    page.evaluate(() => window.qa.calls.filter((call) => call.kind === "userDetails").length)
+  const callsBefore = await userCalls()
+  await org.locator(".recharts-pie-sector path").first().dispatchEvent("click")
+  await org.getByRole("button", { name: "查看开发一组" }).focus()
+  await page.keyboard.press("Enter")
+  const ranking = org.getByRole("list", { name: "组内人员排名" })
+  await ranking.waitFor()
+  const listed = () => ranking.locator("li span[title]").allTextContents()
+  assert.deepEqual(await listed(), ["高", "低"])
+  await org.getByRole("button", { name: "甲室(杭州)" }).click()
+  await org.getByRole("button", { name: "查看未归属组" }).click()
+  assert.deepEqual(await listed(), ["待分组"])
+  await section.getByText("共 6 条").waitFor()
+  assert.equal(await userCalls(), callsBefore)
+  assert.equal(
+    await page.evaluate(() => window.qa.calls.filter((call) => call.kind === "groups").length),
+    1
+  )
+  await org.getByRole("button", { name: "室分布" }).click()
+  await page.evaluate(() => {
+    window.qa.getGroups = () =>
+      new Promise((resolve) => {
+        window.qa.finishGroups = resolve
+      })
+  })
+  await org.getByRole("button", { name: "查看乙室" }).click()
+  await org.getByText("加载中").waitFor()
+  await org.getByRole("button", { name: "室分布" }).click()
+  await page.evaluate(() =>
+    window.qa.finishGroups({ success: true, data: [{ id: "stale", name: "过期结果", value: 7 }] })
+  )
+  assert.equal(await org.getByText("过期结果").count(), 0)
+  await page.evaluate(() => {
+    window.qa.getGroups = () => ({ success: false, error: "组分布查询失败" })
+  })
+  await org.getByRole("button", { name: "查看乙室" }).click()
+  await org.getByRole("alert").waitFor()
+  await page.evaluate(() => {
+    window.qa.getGroups = () => ({ success: true, data: [] })
+  })
+  await org.getByRole("button", { name: "重试" }).click()
+  await org.getByText("暂无数据").waitFor()
+  // A single effective room, including a member's default scope, starts at groups.
+  await page.evaluate(() => window.qa.setRooms(["甲室(杭州)"]))
+  await org.getByRole("button", { name: "查看开发二组" }).click()
+  assert.deepEqual(await listed(), ["其他组员"])
+  assert.equal(await org.getByRole("button", { name: "室分布" }).count(), 0)
+  await page.evaluate(() => window.qa.setRooms(["甲室(杭州)", "乙室"]))
+  await org.getByRole("button", { name: "查看甲室(杭州)" }).waitFor()
+  assert.equal(await ranking.count(), 0)
   assert.deepEqual(errors, [])
   console.log(
-    "Knowledge browser checks passed: 10-row pages, all 7 sortable columns, full/filtered export with ordering and numeric cells, export cancellation/failure, scope/date isolation, search, refresh/retry and responsive layout."
+    "Knowledge browser checks passed: 10-row pages, all 7 sortable columns, full/filtered export with ordering and numeric cells, export cancellation/failure, room/group/member drilldown, stale responses, scope/date isolation, search, refresh/retry and responsive layout."
   )
 } finally {
   await browser.close()

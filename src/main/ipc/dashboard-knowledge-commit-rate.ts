@@ -8,11 +8,14 @@
  * VITE_KNOWLEDGE_ROOM_ORG_IDS，是「室名称: 室编号」的 JSON 对象，映射里没有的室查不了。
  * env 在构建时注入，增删室要重新打包。
  */
+import { normalizeRoomName } from "../../shared/dashboard-knowledge-overview"
 import { DashboardRequestCancelledError } from "../services/dashboard-request-coordinator"
 import type {
   DashboardKnowledgeCommitRate,
   DashboardKnowledgeCommitRateUnavailableReason
 } from "../../shared/dashboard-knowledge-commit-rate"
+
+export { normalizeRoomName }
 
 const KNOWLEDGE_COMMIT_RATE_TIMEOUT_MS = 10_000
 
@@ -29,14 +32,6 @@ export function formatKnowledgeApiTime(iso: string): string {
     `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
     `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
   )
-}
-
-/**
- * 室名称比对前统一括号：映射按手工录入，室名称来自采集到的机构路径，「(成都)」和「（成都）」
- * 两种写法都可能出现，不统一的话带地域后缀的室会被当成没配置。
- */
-export function normalizeRoomName(name: string): string {
-  return name.trim().replace(/（/g, "(").replace(/）/g, ")")
 }
 
 /** 解析 VITE_KNOWLEDGE_ROOM_ORG_IDS。配置写错直接报错，免得被当成「该室没配置」悄悄放过。 */

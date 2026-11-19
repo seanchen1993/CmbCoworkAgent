@@ -5,6 +5,27 @@ export interface KnowledgeDistributionItem {
   value: number
 }
 
+export interface KnowledgeOrgItem extends KnowledgeDistributionItem {
+  /** Older service versions omit the ID. An explicit null denotes an unassigned bucket. */
+  id?: string | null
+}
+
+export interface KnowledgeRoom {
+  id: string
+  name: string
+}
+
+export function normalizeKnowledgeOrgId(value: unknown): string | null {
+  if (typeof value === "string") return value.trim() || null
+  if (typeof value === "number" && Number.isSafeInteger(value)) return String(value)
+  if (value == null) return null
+  throw new Error("知识沉淀接口返回了无效的机构编号")
+}
+
+export function normalizeRoomName(name: string): string {
+  return name.trim().replace(/（/g, "(").replace(/）/g, ")")
+}
+
 export interface KnowledgeAccumulationTotals {
   totalNum: number
   abandonedNum: number
@@ -16,7 +37,9 @@ export type KnowledgeSection = "totals" | "users" | "orgs" | "systems"
 export interface KnowledgeAccumulationData {
   totals: KnowledgeAccumulationTotals | null
   users: KnowledgeDistributionItem[] | null
-  orgs: KnowledgeDistributionItem[] | null
+  orgs: KnowledgeOrgItem[] | null
+  /** When present, orgs contains this room's groups. */
+  orgRoom?: KnowledgeRoom
   systems: KnowledgeDistributionItem[] | null
   errors: Partial<Record<KnowledgeSection, string>>
   unavailableReason?: DashboardKnowledgeCommitRateUnavailableReason
@@ -54,6 +77,9 @@ export interface KnowledgeActiveDetails {
 export interface KnowledgeUserDetail {
   userName: string
   roomName: string
+  roomId?: string | null
+  groupId?: string | null
+  groupName?: string | null
   totalNum: number
   abandonedNum: number
   recentNum: number
