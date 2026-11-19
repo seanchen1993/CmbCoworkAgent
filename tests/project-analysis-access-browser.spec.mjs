@@ -10,7 +10,7 @@ const bundle = await build({
     resolveDir: renderer,
     loader: "tsx",
     contents: `
-      import React, {useState} from 'react';
+      import React from 'react';
       import {createRoot} from 'react-dom/client';
       import {ProjectModePanel} from './components/dashboard/panels/ProjectModePanel';
       import {ProjectAgentWorkspaceHost} from './components/dashboard/ProjectAgentWorkspaceHost';
@@ -25,10 +25,9 @@ const bundle = await build({
         cancelRequests:async()=>({cancelled:0})
       }};
       function App(){
-        const [allowed,setAllowed]=useState(false);qa.setAllowed=setAllowed;
         return <TooltipProvider><ProjectModePanel data={null} loading={false} error={null}
           codeSource={null} codeStatsOverride={null} codeStatsLoading={false} onCodeSourceChange={()=>{}}
-          createdInRangeProjectsOnly={false} runAnalysisAllowed={allowed}
+          createdInRangeProjectsOnly={false}
           runAnalysisRange={{from:'2020-01-01T00:00:00Z',to:'2030-01-01T00:00:00Z'}}
           runAnalysisTimeControl={{granularity:'custom',onGranularityChange:()=>{},onNavigate:()=>{},onCustomRange:()=>{}}}
           runAnalysisOptions={{}} projectPages={{}} projectPageLoading={{active:false,archived:false}}
@@ -87,23 +86,21 @@ try {
   const analysis = page.getByRole("tab", { name: "项目分析", exact: true })
   const list = page.getByRole("tab", { name: "项目列表", exact: true })
   await list.waitFor()
-  assert.equal(await analysis.count(), 0)
+  await analysis.waitFor()
   assert.equal(await page.evaluate(() => window.accessQA.loads), 0)
-  await page.evaluate(() => window.accessQA.setAllowed(true))
   await analysis.click()
   await page.getByText("1 / 2 页 · 30条").waitFor()
   assert.equal(await page.getByRole("button", { name: "项目分析 Agent", exact: true }).count(), 0)
   assert.equal(await page.getByRole("dialog").count(), 0)
   assert.equal(await page.getByRole("button", { name: "导出Excel", exact: true }).isEnabled(), true)
   const loads = await page.evaluate(() => window.accessQA.loads)
-  await page.evaluate(() => window.accessQA.setAllowed(false))
-  await page.getByRole("region", { name: "项目分析", exact: true }).waitFor({ state: "detached" })
-  assert.equal(await analysis.count(), 0)
+  await list.click()
   assert.equal(await list.getAttribute("aria-selected"), "true")
+  assert.equal(await analysis.isVisible(), true)
   assert.equal(await page.evaluate(() => window.accessQA.loads), loads)
   assert.deepEqual(errors, [])
   console.log(
-    "Project analysis visibility, permission revocation and disabled Agent browser checks passed."
+    "Project analysis tab visibility, lazy loading and disabled Agent browser checks passed."
   )
 } finally {
   await browser.close()

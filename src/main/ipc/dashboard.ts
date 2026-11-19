@@ -1329,7 +1329,6 @@ const DISLIKE_TYPE_OPTIONS = [
 ] as const
 
 const DASHBOARD_ALLOWED_IDS_ENV = "VITE_DASHBOARD_ALLOWED_YST_IDS"
-const DASHBOARD_PROJECT_ANALYSIS_IDS_ENV = "VITE_DASHBOARD_PROJECT_ANALYSIS_YST_IDS"
 const DASHBOARD_UNRESTRICTED_IDS_ENV = "VITE_DASHBOARD_UNRESTRICTED_YST_IDS"
 const TRACE_EVOLVER_REVIEW_ADMIN_IDS_ENV = "VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS"
 const DASHBOARD_AWARDS_ADMIN_IDS_ENV = "VITE_DASHBOARD_AWARDS_ADMIN_YST_IDS"
@@ -1421,26 +1420,9 @@ function isDashboardProjectModeAllowed(): boolean {
   return access.loggedIn
 }
 
-function isDashboardProjectAnalysisAllowed(
-  access: DashboardAccessContext = getDashboardAccessContext()
-): boolean {
-  if (import.meta.env.DEV) return true
-  return (
-    access.loggedIn &&
-    Boolean(access.ystId) &&
-    splitEnvIds(import.meta.env[DASHBOARD_PROJECT_ANALYSIS_IDS_ENV] as string | undefined).has(
-      access.ystId
-    )
-  )
-}
-
-function requireDashboardProjectAnalysisAccess(): void {
-  if (!isDashboardProjectAnalysisAllowed()) throw new Error("无项目分析访问权限")
-}
-
 function requireDashboardProjectAnalysisAgentAccess(): void {
   if (!PROJECT_ANALYSIS_AGENT_ENABLED) throw new Error("项目分析 Agent 暂未开放")
-  requireDashboardProjectAnalysisAccess()
+  requireDashboardProjectModeAccess()
 }
 
 function isDashboardProjectModeAdmin(
@@ -15881,17 +15863,11 @@ async function runDashboardHandlerInProjectScope<T>(
   operation: () => Promise<T>
 ): Promise<T | { success: false; error: string }> {
   try {
-    // Gate every analysis entry before any data query, including direct IPC calls.
     if (
       channel === "dashboard:projectModeAnalysisAgent" ||
       channel.startsWith("dashboard:projectReport")
     ) {
       requireDashboardProjectAnalysisAgentAccess()
-    } else if (
-      channel.startsWith("dashboard:projectModeRunAnalysis") ||
-      channel === "dashboard:projectModePeriodMetrics"
-    ) {
-      requireDashboardProjectAnalysisAccess()
     }
     if (import.meta.env.DEV || !excludesTestProjects(channel, args)) return operation()
     const access = requireDashboardProjectModeAccess()
@@ -16140,7 +16116,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
     return isDashboardProjectModeAllowed()
   })
 
-  _ipcMain.handle("dashboard:isProjectAnalysisAllowed", () => isDashboardProjectAnalysisAllowed())
+  _ipcMain.handle("dashboard:isProjectAnalysisAllowed", () => isDashboardProjectModeAllowed())
 
   _ipcMain.handle("dashboard:orgFilterDefaults", () => getDashboardOrgFilterDefaults())
 

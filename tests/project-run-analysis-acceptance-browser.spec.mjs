@@ -160,7 +160,7 @@ const bundle = await build({
           <div data-testid="dashboard-time-control"><TimeControlBar key={currentRange.from+currentRange.to} {...timeControl} range={currentRange}/></div>
           {menu!=='project' ? <div>其他菜单内容</div> : integrated ? <ProjectModePanel data={null} loading={overviewRequest.loading} error={overviewRequest.error} codeSource={null}
             codeStatsOverride={null} codeStatsLoading={false} onCodeSourceChange={()=>{}}
-            createdInRangeProjectsOnly runAnalysisAllowed runAnalysisRange={currentRange} runAnalysisTimeControl={timeControl} runAnalysisOptions={{upperOrgLv1:[room]}}
+            createdInRangeProjectsOnly runAnalysisRange={currentRange} runAnalysisTimeControl={timeControl} runAnalysisOptions={{upperOrgLv1:[room]}}
             projectPages={{}} projectPageLoading={{active:false,archived:false}} projectPageError={{}}
             onProjectPageChange={()=>{}} onOpenTraces={()=>{}} onOpenFeatureCommits={()=>{}} onOpenProjectCommits={()=>{}}
             loadFeatureNodes={async()=>[]} loadOperationalDetails={async()=>null} loadStageAnalysis={async()=>null}/>

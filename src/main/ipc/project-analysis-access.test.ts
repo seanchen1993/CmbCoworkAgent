@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs"
 import { runInNewContext } from "node:vm"
 import { createSourceFile, isFunctionDeclaration, ScriptTarget, transpileModule } from "typescript"
 import { describe, expect, it, vi } from "vitest"
+import { excludesTestProjects, testProjectLookupScope } from "./project-mode-test-projects"
 
 // Run the actual IPC gates without starting Electron or contacting Elasticsearch.
 const source = createSourceFile(
@@ -10,9 +11,17 @@ const source = createSourceFile(
   ScriptTarget.Latest
 )
 const names = [
-  "splitEnvIds",
-  "isDashboardProjectAnalysisAllowed",
-  "requireDashboardProjectAnalysisAccess",
+  "getDashboardAccessContext",
+  "isDashboardProjectModeAllowed",
+  "requireDashboardProjectModeAccess",
+  "isDashboardProjectModeAdmin",
+  "buildProjectModeOrgFilter",
+  "buildProjectModeAccessFilter",
+  "buildUpperOrgLv1Filter",
+  "buildUpperOrgLv1ListFilter",
+  "normalizeUpperOrgLv1List",
+  "appendOptionalFilter",
+  "buildNoAccessFilter",
   "requireDashboardProjectAnalysisAgentAccess",
   "runDashboardHandlerInProjectScope",
   "registerLatestDashboardHandler",
@@ -29,7 +38,6 @@ const compiled = transpileModule(
     .replaceAll("import.meta.env", "testEnv")}\nglobalThis.api = { ${names.join(",")} }`,
   { compilerOptions: { target: ScriptTarget.ES2022 } }
 ).outputText
-const ids = ["383331", "231855", "319167", "312613", "256963"]
 const analysisChannels = [
   "projectModeRunAnalysis",
   "projectModeRunAnalysisStages",
@@ -49,19 +57,20 @@ const agentChannels = [
   "projectReportExport"
 ]
 
-function fixture(ystId = "outside", dev = false) {
-  const user = { loggedIn: true, ystId, sapId: "80383331", unrestricted: true, upperOrgLv1: "本室" }
+function fixture(ystId = "ordinary", sapId = "SAP-user", dev = false) {
+  const user = { ystId, sapId, pathName: "本室" }
   const operation = vi.fn(async () => ({ success: true }))
   const scope = vi.fn(async (_options: unknown, run: () => Promise<unknown>) => run())
   const ctx: Record<string, unknown> = {
-    testEnv: { DEV: dev, VITE_DASHBOARD_PROJECT_ANALYSIS_YST_IDS: ids.join(",") },
-    DASHBOARD_PROJECT_ANALYSIS_IDS_ENV: "VITE_DASHBOARD_PROJECT_ANALYSIS_YST_IDS",
+    testEnv: { DEV: dev },
     PROJECT_ANALYSIS_AGENT_ENABLED: false,
-    getDashboardAccessContext: () => user,
-    requireDashboardProjectModeAccess: () => user,
-    excludesTestProjects: () => true,
-    testProjectLookupScope: () => ({}),
-    buildProjectModeOrgFilter: () => ({ term: { upperOrgLv1: user.upperOrgLv1 } }),
+    getUserInfo: () => user,
+    deriveUpperOrgLv1FromPath: (path: string) => path,
+    getDashboardAllowedIds: () => new Set(["cross-room-admin"]),
+    getDashboardUnrestrictedIds: () => new Set(),
+    DASHBOARD_UNCLASSIFIED_ORG: "未归类",
+    excludesTestProjects,
+    testProjectLookupScope,
     withProjectModeTestExclusion: scope,
     getEsIndex: (name: string) => name,
     esQuery: vi.fn(),
@@ -74,7 +83,7 @@ function fixture(ystId = "outside", dev = false) {
   }
   runInNewContext(compiled, ctx)
   const api = ctx.api as {
-    isDashboardProjectAnalysisAllowed(): boolean
+    isDashboardProjectModeAllowed(): boolean
     runDashboardHandlerInProjectScope(
       channel: string,
       args: unknown[],
@@ -97,56 +106,76 @@ function fixture(ystId = "outside", dev = false) {
     api,
     scope,
     operation,
-    run: (name: string) => api.runDashboardHandlerInProjectScope(`dashboard:${name}`, [], operation)
+    run: (name: string, args: unknown[] = []) =>
+      api.runDashboardHandlerInProjectScope(`dashboard:${name}`, args, operation)
   }
 }
 
-describe("project analysis whitelist and Agent release gate", () => {
-  it.each(ids)("allows %s without expanding room access", async (id) => {
-    const h = fixture(id)
-    expect(h.api.isDashboardProjectAnalysisAllowed()).toBe(true)
-    for (const channel of analysisChannels) expect(await h.run(channel)).toEqual({ success: true })
-    expect(h.scope.mock.calls[0][0]).toMatchObject({
-      accessFilters: [{ term: { upperOrgLv1: "本室" } }]
-    })
-  })
-  it.each(analysisChannels)("blocks a direct %s call before any query", async (channel) => {
-    const h = fixture()
-    expect(h.api.isDashboardProjectAnalysisAllowed()).toBe(false)
-    expect(await h.run(channel)).toEqual({ success: false, error: "无项目分析访问权限" })
+describe("project analysis uses project-mode access and the independent Agent release switch", () => {
+  it.each([
+    ["ordinary", ""],
+    ["", "SAP-user"]
+  ])(
+    "opens every analysis entry for a logged-in user (%s, %s) within their room",
+    async (ystId, sapId) => {
+      const h = fixture(ystId, sapId)
+      expect(h.api.isDashboardProjectModeAllowed()).toBe(true)
+      for (const channel of analysisChannels) {
+        expect(await h.run(channel)).toEqual({ success: true })
+        expect(h.scope.mock.calls.at(-1)?.[0]).toMatchObject({
+          accessFilters: [{ term: { upperOrgLv1: "本室" } }]
+        })
+      }
+    }
+  )
+  it.each(analysisChannels)("requires login before data queries through %s", async (channel) => {
+    const h = fixture("", "")
+    expect(h.api.isDashboardProjectModeAllowed()).toBe(false)
+    expect(await h.run(channel)).toEqual({ success: false, error: "请先登录后再查看项目运营面板" })
     expect(h.scope).not.toHaveBeenCalled()
     expect(h.operation).not.toHaveBeenCalled()
   })
-  it("denies logged-out users, SAP-only matches, missing config and substring matches", () => {
-    const h = fixture("38333")
-    h.user.sapId = "383331"
-    expect(h.api.isDashboardProjectAnalysisAllowed()).toBe(false)
-    h.user.ystId = "383331"
-    h.user.loggedIn = false
-    expect(h.api.isDashboardProjectAnalysisAllowed()).toBe(false)
-    h.user.loggedIn = true
-    h.ctx.testEnv = { DEV: false }
-    expect(h.api.isDashboardProjectAnalysisAllowed()).toBe(false)
+  it("intersects requested rooms with existing access for detail and export", async () => {
+    const h = fixture()
+    for (const channel of [
+      "projectModeRunAnalysisSessions",
+      "projectModeRunAnalysisExportStages"
+    ]) {
+      expect(await h.run(channel, [{ upperOrgLv1: ["其他室"] }])).toEqual({ success: true })
+      expect(h.scope.mock.calls.at(-1)?.[0]).toMatchObject({
+        accessFilters: [
+          {
+            bool: {
+              filter: [{ term: { upperOrgLv1: "本室" } }, { terms: { upperOrgLv1: ["其他室"] } }]
+            }
+          }
+        ]
+      })
+    }
+    h.user.pathName = ""
+    await h.run("projectModeRunAnalysis")
+    expect(h.scope.mock.calls.at(-1)?.[0]).toMatchObject({
+      accessFilters: [{ term: { traceId: "__dashboard_no_access__" } }]
+    })
+    const admin = fixture("cross-room-admin")
+    await admin.run("projectModeRunAnalysis")
+    expect(admin.scope.mock.calls[0][0]).toMatchObject({ accessFilters: [] })
   })
-  it.each(agentChannels)("disables %s even for a whitelisted user and in DEV", async (channel) => {
+  it.each(agentChannels)("keeps %s gated by the separate Agent switch", async (channel) => {
     for (const dev of [false, true]) {
-      const h = fixture(ids[0], dev)
+      const h = fixture("ordinary", "", dev)
       expect(await h.run(channel)).toEqual({ success: false, error: "项目分析 Agent 暂未开放" })
       expect(h.scope).not.toHaveBeenCalled()
       expect(h.operation).not.toHaveBeenCalled()
     }
   })
-  it("continues to check the whitelist if Agent is explicitly re-enabled", async () => {
-    const h = fixture()
+  it("requires login even if the Agent release switch is enabled", async () => {
+    const h = fixture("", "")
     h.ctx.PROJECT_ANALYSIS_AGENT_ENABLED = true
     expect(await h.run("projectReportGenerate")).toEqual({
       success: false,
-      error: "无项目分析访问权限"
+      error: "请先登录后再查看项目运营面板"
     })
-  })
-  it("keeps the project list available and permits analysis preview in DEV", async () => {
-    expect(await fixture().run("projectModeProjects")).toEqual({ success: true })
-    expect(await fixture("dev", true).run("projectModeRunAnalysis")).toEqual({ success: true })
   })
   it("applies gates through both real IPC registration paths", async () => {
     const h = fixture()
@@ -158,13 +187,12 @@ describe("project analysis whitelist and Agent release gate", () => {
     h.api.registerLatestDashboardHandler(target, "dashboard:projectModeRunAnalysis", h.operation)
     h.api.registerScopedDashboardHandler(target, "dashboard:projectReportRead", h.operation)
     expect(await handlers.get("dashboard:projectModeRunAnalysis")!({ sender: {} })).toEqual({
-      success: false,
-      error: "无项目分析访问权限"
+      success: true
     })
     expect(await handlers.get("dashboard:projectReportRead")!({ sender: {} })).toEqual({
       success: false,
       error: "项目分析 Agent 暂未开放"
     })
-    expect(h.operation).not.toHaveBeenCalled()
+    expect(h.operation).toHaveBeenCalledTimes(1)
   })
 })
