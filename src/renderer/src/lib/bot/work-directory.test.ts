@@ -86,9 +86,9 @@ function fixture(withIm = true) {
   const conversationWorks = vi.fn<NonNullable<NonNullable<BotClient["im"]>["conversationWorks"]>>()
   const client = { hostId: "local", subscribe: () => () => {}, works: { list, summaries, get },
     im: withIm ? { conversationWorks } : undefined } as unknown as BotClient
-  const render = (selectedId: string | null = null, revision = 0, audience = "desktop") => {
+  const render = (selectedId: string | null = null, revision = 0, audience = "desktop", previewId?: string) => {
     hooks.cursor = 0
-    const result = useBotWorks(client, "bot", selectedId, revision, audience)
+    const result = useBotWorks(client, "bot", selectedId, revision, audience, previewId)
     for (const effect of hooks.effects.splice(0)) effect()
     return result
   }
@@ -98,6 +98,17 @@ function fixture(withIm = true) {
   }
   return { firstPage, later, rows, list, conversationWorks, summaries, get, render, refresh }
 }
+
+it("keeps the open task selected when another task cannot be previewed", async () => {
+  const { firstPage: [active], render } = fixture()
+  const view = () => render(active.id, 0, "desktop", "missing")
+  await view().refresh()
+  const { selected, preview, error, previewError } = view()
+  expect(selected).toEqual(active)
+  expect(preview).toBeNull()
+  expect(previewError).toBeTruthy()
+  expect(error).toBeNull()
+})
 
 it("refreshes loaded pages after unlink and original-thread deletion, retaining valid work and its order", async () => {
   const { firstPage, later, rows, summaries, render, refresh } = fixture()

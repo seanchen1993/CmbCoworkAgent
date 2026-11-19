@@ -122,7 +122,7 @@ function fixture() {
   const view = { detailOpen: true, detailTab: "details" }
   const scope = {
     client, selected: { id: work.botId }, selectedIm: null, activeWorkId: null,
-    currentBotId: work.botId, canPreviewWork: true, detailOpen: view.detailOpen,
+    currentBotId: work.botId, currentImId: null, canPreviewWork: true, detailOpen: view.detailOpen,
     view, updateView: (patch: Partial<typeof view>) => Object.assign(view, patch),
     document: { activeElement: null }, profileMenuTrigger: { current: null },
     workPreviewNavigation: { current: null }, workPreviewReturn: { current: null },
@@ -150,7 +150,7 @@ function fixture() {
     pendingQuestions, get, expose, answerQuestion, onOpenApproval, setWorkPreview, click, setActiveTab, toast, view,
     closeDetails: () => handlers.setDetailOpen(false),
     openComputer: () => handlers.setDetailTab("computer"),
-    previewAnotherWork: () => handlers.openWorkPreview("another-work", {}, "另一项任务")
+    previewAnotherWork: () => handlers.openWorkPreview("another-work", { closest: () => null }, "另一项任务")
   }
 }
 

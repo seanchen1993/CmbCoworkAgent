@@ -178,7 +178,7 @@ async function main() {
         threadId = result.work.threadId
         // Exercise a task that is already streaming while its chat is still closed.
         await Promise.race([firstWorkerToken, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error("worker did not stream")), 30000); timer.unref() })])
-        await page.locator(".bot-work-row").filter({ hasText: "流式补充验收任务" }).click()
+        await page.getByRole("button", { name: "进入任务：流式补充验收任务", exact: true }).click()
       }
       const chat = page.locator(`[data-chat-thread-id="${threadId}"]`)
       const input = chat.locator('textarea, [role="textbox"][contenteditable="true"]').last()
@@ -305,7 +305,7 @@ async function main() {
       await page.getByText("Bots", { exact: true }).first().click()
       await page.getByText(bot.name, { exact: true }).first().click()
       if (kind === "bot-work")
-        await page.locator(".bot-work-row").filter({ hasText: "流式补充验收任务" }).click()
+        await page.getByRole("button", { name: "进入任务：流式补充验收任务", exact: true }).click()
       await chat.getByText(`AFTER_${kind}`, { exact: true }).waitFor()
       for (const value of expected)
         assert.equal(await chat.getByText(value, { exact: true }).count(), 1)

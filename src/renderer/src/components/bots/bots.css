@@ -3543,23 +3543,20 @@ button.bot-inline-mention:focus-visible {
   padding: 9px 6px;
   border-radius: 8px;
 }
-.bot-work-entry { position: relative; min-width: 0; }
-.bot-work-entry .bot-work-preview-action {
-  position: absolute;
-  top: 50%;
-  right: 0;
-  transform: translateY(-50%);
-  width: 27px;
-  height: 27px;
-  pointer-events: none;
-  opacity: 0;
+/* The whole row previews the task. The trailing button has its own full-height hit area. */
+.bot-work-entry { display: flex; min-width: 0; border-radius: 8px; }
+.bot-work-entry:hover { background: color-mix(in srgb, var(--bot-hover) 55%, transparent); }
+.bot-work-entry[data-current] { background: var(--bot-hover); }
+.bot-work-entry > .bot-work-row { flex: 1; }
+.bot-work-entry > .bot-work-row:hover { background: transparent; }
+.bot-work-open-action {
+  display: grid;
+  place-items: center;
+  flex: 0 0 32px;
+  border-radius: 8px;
+  color: var(--bot-muted);
 }
-.bot-work-entry:is(:hover, :focus-within) .bot-work-preview-action { opacity: 1; pointer-events: auto; }
-.bot-work-entry:has(.bot-work-preview-action):is(:hover, :focus-within) .bot-work-row-chevron { visibility: hidden; }
-@media (hover: none) {
-  .bot-work-entry .bot-work-preview-action { opacity: 1; pointer-events: auto; }
-  .bot-work-entry:has(.bot-work-preview-action) .bot-work-row-chevron { visibility: hidden; }
-}
+.bot-work-open-action:is(:hover, :focus-visible) { background: var(--bot-hover); color: var(--bot-text); }
 .bot-work-row > .bot-work-state-icon { width: 16px; height: 16px; }
 .bot-work-row-copy { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
 .bot-work-row-copy > :is(.bot-work-row-title, small) {

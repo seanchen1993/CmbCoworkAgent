@@ -1,5 +1,5 @@
 import { useId, useRef, useState } from "react"
-import { Plus, Search, Eye, ChevronDown, ChevronRight, X, Loader2, Clock3, CirclePause, CircleCheck, CircleAlert, CircleStop, CircleDot, CircleDashed } from "lucide-react"
+import { Plus, Search, ChevronDown, ChevronRight, X, Loader2, Clock3, CirclePause, CircleCheck, CircleAlert, CircleStop, CircleDot, CircleDashed } from "lucide-react"
 import { resolveBotWorkStatus } from "@/lib/bot/work-status"
 import type { BotClient } from "../../../../shared/bots/contracts"
 import type { BotWorkItem, BotWorkSummary } from "../../../../shared/bots/work"
@@ -338,20 +338,27 @@ export function BotWorkPanel({
           const work = entry.work
           const status = resolveBotWorkStatus(work)
           return (
-            <div key={work.id} className="bot-work-entry">
-              <button type="button" className="bot-work-row" data-work-id={work.id}
-                aria-pressed={selected?.id === work.id} onClick={() => onSelect(work.id)}>
+            <div key={work.id} className="bot-work-entry" data-work-id={work.id}
+              data-current={selected?.id === work.id || undefined}>
+              <button type="button" className="bot-work-row"
+                aria-label={`${onPreview ? "预览任务" : "进入任务"}：${work.title}`}
+                aria-describedby={`bot-work-status-${work.id}`}
+                onClick={event => onPreview ? onPreview(work, event.currentTarget) : onSelect(work.id)}>
                 <BotWorkStatusIcon work={work} status={status} />
                 <span className="bot-work-row-copy">
                   <span className="bot-work-row-title" title={work.title}>{work.title}</span>
-                  <small>{status.label}</small>
+                  <small id={`bot-work-status-${work.id}`}>{status.label}{work.activity?.unread && <span className="sr-only">，未读</span>}</small>
                 </span>
-                {work.activity?.unread && <span className="bot-work-unread" role="img" aria-label="未读" />}
-                <ChevronRight size={14} className="bot-work-row-chevron" aria-hidden="true" />
+                {work.activity?.unread && <span className="bot-work-unread" aria-hidden="true" />}
+                {!onPreview && <ChevronRight size={14} className="bot-work-row-chevron" aria-hidden="true" />}
               </button>
-              {onPreview && <button type="button" className="bot-icon-button bot-work-preview-action"
-                aria-label={`预览任务：${work.title}`} title="预览任务"
-                onClick={event => onPreview(work, event.currentTarget)}><Eye size={14} /></button>}
+              {onPreview && (
+                <button type="button" className="bot-work-open-action"
+                  aria-label={`进入任务：${work.title}`} title="进入任务对话"
+                  aria-current={selected?.id === work.id || undefined} onClick={() => onSelect(work.id)}>
+                  <ChevronRight size={15} aria-hidden="true" />
+                </button>
+              )}
             </div>
           )
         })}

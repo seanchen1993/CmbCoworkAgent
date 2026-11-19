@@ -989,7 +989,7 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
           await page.locator(`[data-chat-thread-id="${bot.threadId}"]`)
             .getByText("已新建任务，我会按所选技能处理，结果发回这里。", { exact: true }).waitFor()
           await page.screenshot({ path: join(archive.directory, "slash-skill-main-return.png") })
-          await page.locator(".bot-work-row").filter({ hasText: data.works[0].title }).first().click()
+          await page.getByRole("button", { name: "进入任务：" + data.works[0].title, exact: true }).first().click()
           await page.locator(`[data-chat-thread-id="${data.works[0].threadId}"]`).waitFor()
           await page.locator(`[data-chat-thread-id="${data.works[0].threadId}"]`)
             .getByText("prd.md", { exact: true }).first().waitFor()
@@ -1095,7 +1095,7 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
           await page.getByText(bot.name, { exact: true }).first().click()
           await page.locator(".bot-work-row").filter({ hasText: work.title }).first().waitFor()
           await page.screenshot({ path: join(archive.directory, `${test.id}-task-return.png`) })
-          await page.locator(".bot-work-row").filter({ hasText: work.title }).first().click()
+          await page.getByRole("button", { name: "进入任务：" + work.title, exact: true }).first().click()
           await page.locator(`[data-chat-thread-id="${work.threadId}"]`).waitFor()
           await page
             .locator(`[data-chat-thread-id="${work.threadId}"]`)

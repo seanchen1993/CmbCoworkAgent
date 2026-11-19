@@ -143,7 +143,7 @@ function fixture(mentions?: BotMessageMention[], attachments = [pickerAttachment
   const client = { hostId: "local", works: { validateSkillWorkspace, create, get },
     conversations: { expose }, send, requestReceipts, messageReply, cancel, stopConversation } as unknown as BotClient
   const workDirectory: NonNullable<Parameters<typeof BotConversation>[0]["workDirectory"]> = {
-    items: [work], priority: [], selected: null, cursor: null, query: "", setQuery: vi.fn(),
+    items: [work], priority: [], selected: null, preview: null, previewError: null, cursor: null, query: "", setQuery: vi.fn(),
     loading: false, error: null, refresh: async () => {}, more: async () => {},
     current: { current: { botId: bot.id, selectedId: null, audience: "desktop" } }
   }
@@ -564,7 +564,7 @@ it.each(["trigger", "disabled-trigger", "departed-thread"])(
       hooks.cursor = 0
       hooks.slots = []
       const tree = BotSkillTargetDialog({ skill: "review", close: vi.fn(), choose: vi.fn(),
-        directory: { items: [], priority: [], query: "", loading: false, selected: null, cursor: null,
+        directory: { items: [], priority: [], query: "", loading: false, selected: null, preview: null, previewError: null, cursor: null,
           setQuery: vi.fn(), error: null, refresh: async () => {}, more: async () => {},
           current: { current: { botId: "bot", selectedId: null, audience: "desktop" } } } })
       const content = find<{ onCloseAutoFocus(event: { preventDefault(): void }): void }>(tree, DialogContent)!

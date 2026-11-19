@@ -26,7 +26,7 @@ function handler(file: string, component: string, name: string, scope: Record<st
 function navigation(canPreviewWork = true) {
   const selectWork = vi.fn(), openWorkPreview = vi.fn(), trigger = {}
   const openWork = handler("BotsWorkspace.tsx", "BotWorkspaceForHost", "openWork", {
-    canPreviewWork, selectWork, openWorkPreview, detailTriggerRef: { current: trigger },
+    canPreviewWork, activeWorkId: null, selectWork, openWorkPreview, detailTriggerRef: { current: trigger },
     works: { items: [{ id: "existing", title: "已有任务" }, { id: "channel", source: { transport: "im" } }], priority: [] },
     useCallback: (fn: unknown) => fn
   }) as (id: string | null) => void
@@ -50,7 +50,7 @@ function workspaceFixture() {
   const view = { detailTab: "details", detailOpen: true }
   const workspace = (name: string, dependencies: Record<string, unknown> = {}) =>
     handler("BotsWorkspace.tsx", "BotWorkspaceForHost", name, {
-      canPreviewWork: true, currentBotId: "bot", currentImId: null, selectedIm: null, client: { hostId: "local" }, detailOpen: false,
+      canPreviewWork: true, activeWorkId: null, currentBotId: "bot", currentImId: null, selectedIm: null, client: { hostId: "local" }, detailOpen: false,
       useAppStore: { getState: () => appState }, useCallback: (fn: unknown) => fn,
       workPreviewReturn, workPreviewNavigation, approvalNavigation, setWorkPreview,
       view, updateView: (patch: Partial<typeof view>) => Object.assign(view, patch),
@@ -208,7 +208,7 @@ describe("task creation and skill assignment keep the main Bot chat", () => {
 
     if (arrival.previews) {
       expect(setWorkPreview).toHaveBeenCalledExactlyOnceWith({
-        hostId: "local", botId: "bot", audience: "desktop", workId: "created", title: "新任务"
+        hostId: "local", botId: "bot", audience: "desktop", fromWorkId: null, workId: "created", title: "新任务"
       })
     } else {
       expect(setWorkPreview).not.toHaveBeenCalled()

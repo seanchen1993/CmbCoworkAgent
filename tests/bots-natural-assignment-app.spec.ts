@@ -211,7 +211,7 @@ async function main() {
       (await list()).map((w: any) => w.id),
       [work.id]
     )
-    const row = page.locator(".bot-work-row").filter({ hasText: work.title })
+    const row = page.getByRole("button", { name: "进入任务：" + work.title, exact: true })
     const previewDraft = "查看任务时保留这条未发送草稿。"
     await composer().fill(previewDraft)
     await row.click()

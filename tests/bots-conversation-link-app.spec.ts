@@ -339,7 +339,7 @@ async function main() {
     }
     const returnToTask = async (workId: string, targetThreadId = threadId) => {
       await page.getByRole("button", { name: /返回 .* 主对话$/ }).first().click()
-      await page.locator(`[data-work-id="${workId}"]`).click()
+      await page.locator(`[data-work-id="${workId}"]`).getByRole("button", { name: /^进入任务：/ }).click()
       await page.getByRole("button", { name: "打开任务", exact: true }).click()
       await page.locator(`[data-chat-thread-id="${targetThreadId}"]`).waitFor()
     }
@@ -469,7 +469,7 @@ async function main() {
     await page.locator(".bot-task-parent").click()
     assert.equal(await page.locator("[data-bot-association-notice]").count(), 0)
     await page.locator(`[data-work-id="${linked.work.id}"]`).waitFor()
-    await page.locator(`[data-work-id="${linked.work.id}"]`).click()
+    await page.locator(`[data-work-id="${linked.work.id}"]`).getByRole("button", { name: /^进入任务：/ }).click()
     await page.getByRole("button", { name: "打开任务", exact: true }).click()
     await page.getByRole("button", { name: "任务详情与操作", exact: true }).click()
     await page.locator(".bot-work-options").getByText("已有会话关联", { exact: true }).waitFor()

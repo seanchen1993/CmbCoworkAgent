@@ -16,13 +16,16 @@ export function useBotWorks(
   botId: string | undefined,
   selectedId: string | null,
   revision: number,
-  audience = "desktop"
+  audience = "desktop",
+  previewId?: string
 ) {
   const [items, setItems] = useState<BotWorkSummary[]>([])
   const [priority, setPriority] = useState<BotWorkSummary[]>([])
   const displayed = useRef(items)
   displayed.current = items
   const [selected, setSelected] = useState<BotWorkItem | null>(null)
+  const [preview, setPreview] = useState<BotWorkItem | null>(null)
+  const [previewError, setPreviewError] = useState<string | null>(null)
   const [cursor, setCursor] = useState<string | null>(null)
   const [query, setQuery] = useState("")
   const scope = JSON.stringify([client.hostId, botId, audience, query])
@@ -58,7 +61,8 @@ export function useBotWorks(
       try {
         const readDetail =
           !!selectedId && !removed.current.has(selectedId) && (!changed || changed.has(selectedId))
-        const [page, detail] = await Promise.all([
+        const readPreview = previewId && !removed.current.has(previewId) && (!changed || changed.has(previewId))
+        const [page, detail, previewDetail] = await Promise.all([
           listPage(botId),
           readDetail ? client.works.get(botId, selectedId!).then(
             work => ({ work, error: null }),
@@ -66,7 +70,11 @@ export function useBotWorks(
               if (!isMissingSelectedWork(cause)) throw cause
               return { work: null, error: botErrorMessage(cause) }
             }
-          ) : Promise.resolve(undefined)
+          ) : Promise.resolve(undefined),
+          readPreview ? client.works.get(botId, previewId).then(
+            work => ({ work, error: null }),
+            cause => ({ work: null, error: botErrorMessage(cause) })
+          ) : undefined
         ])
         if (generation.current !== token) return
         const merged = new Map(page.items.map(item => [item.id, item]))
@@ -113,6 +121,13 @@ export function useBotWorks(
         setPriority(page.priority.filter(visible))
         setItems([...merged.values()].filter(visible))
         if (query || loadedPages.current === 1) setCursor(nextCursor)
+        if (previewDetail) {
+          setPreview(previewDetail.work)
+          setPreviewError(previewDetail.error)
+        } else if (previewId && removed.current.has(previewId)) {
+          setPreview(null)
+          setPreviewError("任务已删除。")
+        }
         if (detail) setSelected(detail.work)
         if (!selectedId || removed.current.has(selectedId)) setSelected(null)
         setError(detail?.error ?? null)
@@ -125,7 +140,7 @@ export function useBotWorks(
         if (generation.current === token) setLoading(false)
       }
     },
-    [client, botId, selectedId, query, scope, listPage]
+    [client, botId, selectedId, previewId, query, scope, listPage]
   )
   const latestLoad = useRef(load)
   latestLoad.current = load
@@ -179,6 +194,10 @@ export function useBotWorks(
   useEffect(() => {
     setSelected(null)
   }, [botId, selectedId])
+  useEffect(() => {
+    setPreview(null)
+    setPreviewError(null)
+  }, [client, botId, audience, previewId])
   useEffect(() => {
     void refresh()
     return () => {
@@ -262,6 +281,8 @@ export function useBotWorks(
       loadedScope === scope
         ? items.map((item) => (selected?.id === item.id ? selected : item))
         : [],
+    preview: preview?.botId === botId && preview?.id === previewId ? preview : null,
+    previewError: previewId ? previewError : null,
     selected: selected?.botId === botId && selected?.id === selectedId ? selected : null,
     cursor: loadedScope === scope ? cursor : null,
     query,

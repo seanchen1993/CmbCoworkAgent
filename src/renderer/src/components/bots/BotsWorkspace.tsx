@@ -549,12 +549,6 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
     closeNewChat()
     updateView(botMainConversationSelection(view, group.botId, id))
   }
-  const openImWork = (botId: string, id: string) => {
-    if (!selectedIm || selectedIm.botId !== botId) return
-    updateView({
-      activeImWorkIdByConversation: { ...view.activeImWorkIdByConversation, [selectedIm.id]: id }
-    })
-  }
   const openPrivateMain = (botId: string) => {
     closeNewChat()
     updateView(botMainConversationSelection(useBotViewStore.getState().hosts[client.hostId], botId))
@@ -758,6 +752,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
     workId: string
     title: string
     audience: string
+    fromWorkId: string | null
   } | null>(null)
   const workPreviewReturn = useRef<BotWorkPreviewReturn | null>(null)
   // Keep an identity even with no open preview so dismissing a newer preview invalidates older navigation.
@@ -787,10 +782,9 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
     })
     return () => { unsubscribe(); workPreviewNavigation.current = { preview: null } }
   }, [])
-  const canPreviewWork = client.hostId === "local" && !selectedGroup &&
-    !newChat && !activeWorkId
+  const canPreviewWork = client.hostId === "local" && !selectedGroup && !newChat
   const preview = canPreviewWork && workPreview?.hostId === client.hostId &&
-    workPreview.audience === (selectedIm?.id ?? "desktop") && workPreview.botId === selected?.id ? workPreview : null
+    workPreview.fromWorkId === activeWorkId && workPreview.audience === (selectedIm?.id ?? "desktop") && workPreview.botId === selected?.id ? workPreview : null
   const personalDetailOpen = detailOpen
   useEffect(() => {
     if (workPreview && !preview) dismissWorkPreview()
@@ -800,12 +794,14 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
     selected?.id,
     activeWorkId ?? preview?.workId ?? null,
     snapshot?.revision ?? 0,
-    selectedIm?.id ?? "desktop"
+    selectedIm?.id ?? "desktop",
+    activeWorkId && preview?.workId !== activeWorkId ? preview?.workId : undefined
   )
   const loadedWork = activeWorkId && works.selected?.id === activeWorkId ? works.selected : null
   const workDeletionPending = isWorkDeletionPending(loadedWork)
-  const previewWork = preview && works.selected?.id === preview.workId &&
-    works.selected.audienceKey === (selectedIm ? `im:${selectedIm.id}` : "desktop") ? works.selected : null
+  const previewDetail = works.preview ?? works.selected
+  const previewWork = preview && previewDetail?.id === preview.workId &&
+    previewDetail.audienceKey === (selectedIm ? `im:${selectedIm.id}` : "desktop") ? previewDetail : null
   const selectedWork =
     loadedWork &&
     !loadedWork.deletionCommitted &&
@@ -897,7 +893,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
   const currentImId = selectedIm?.id
   const selectWork = useCallback((id: string | null) => {
     if (!currentBotId) return
-    workPreviewNavigation.current = { preview: null }
+    dismissWorkPreview()
     const prefs = useBotViewStore.getState().hosts[client.hostId]
     if (currentImId)
       updateView({
@@ -907,7 +903,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
         }
       })
     else updateView({ activeWorkIdByBot: { ...prefs?.activeWorkIdByBot, [currentBotId]: id } })
-  }, [client.hostId, currentBotId, currentImId, updateView])
+  }, [client.hostId, currentBotId, currentImId, updateView, dismissWorkPreview])
   const openWorkPreview = useCallback((workId: string, trigger: HTMLButtonElement | null, title: string) => {
     // Creation may finish while Settings covers the still-mounted Bots workspace.
     const { mainView, showCustomizeView } = useAppStore.getState()
@@ -923,13 +919,13 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
       trigger,
       scroll: previous?.scroll ?? (container ? { container, top: container.scrollTop } : undefined)
     }
-    setWorkPreview({ hostId: client.hostId, botId: currentBotId, workId, title, audience: currentImId ?? "desktop" })
-  }, [canPreviewWork, client.hostId, currentBotId, currentImId, detailOpen])
+    setWorkPreview({ hostId: client.hostId, botId: currentBotId, workId, title, audience: currentImId ?? "desktop", fromWorkId: activeWorkId })
+  }, [canPreviewWork, client.hostId, currentBotId, currentImId, activeWorkId, detailOpen])
   const openWork = useCallback((workId: string | null) => {
-    if (!workId || !canPreviewWork) { selectWork(workId); return }
+    if (!workId || !canPreviewWork || activeWorkId) { selectWork(workId); return }
     const work = [...works.priority, ...works.items].find(item => item.id === workId)
     openWorkPreview(workId, detailTriggerRef.current, work?.title ?? "任务")
-  }, [canPreviewWork, selectWork, openWorkPreview, works.items, works.priority])
+  }, [canPreviewWork, activeWorkId, selectWork, openWorkPreview, works.items, works.priority])
   const closeWorkPreview = () => {
     const previous = workPreviewReturn.current
     dismissWorkPreview()
@@ -943,7 +939,8 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
     const intent = { preview }
     workPreviewNavigation.current = intent
     const isCurrent = () => workPreviewNavigation.current === intent &&
-      works.current.current.botId === preview.botId && works.current.current.selectedId === preview.workId &&
+      works.current.current.botId === preview.botId &&
+      works.current.current.selectedId === (preview.fromWorkId ?? preview.workId) &&
       useAppStore.getState().mainView === "bots" && !useAppStore.getState().showCustomizeView
     try {
       const threadId = await resolveBotWorkThreadForNavigation(client, previewWork, isCurrent)
@@ -2511,11 +2508,11 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                   work={previewWork?.deletionCommitted ? null : previewWork}
                   activeTask={previewWork ? tasksByThread.get(previewWork.threadId)?.findLast((task) =>
                     !task.injectedInto && (task.state === "running" || task.state === "waiting_user")) : undefined}
-                  directoryError={previewWork?.deletionCommitted ? "任务已删除。" : works.error}
+                  directoryError={previewWork?.deletionCommitted ? "任务已删除。" : works.previewError ?? works.error}
                   backLabel={detailOpen && detailTab === "details" ? "返回任务列表" : "关闭任务预览"}
                   onBack={closeWorkPreview}
                   onOpen={() => void openPreviewConversation()}
-                  onOpenMain={selectedIm ? closeWorkPreview : previewWork?.parentThreadId === selected.threadId ? () => {
+                  onOpenMain={selectedIm ? () => selectWork(null) : previewWork?.parentThreadId === selected.threadId ? () => {
                     dismissWorkPreview()
                     if (previewWork.resultPublicationId) useChatSourceNavigation.getState().request({
                       threadId: selected.threadId, messageId: previewWork.resultPublicationId, ordinal: 0
@@ -2549,7 +2546,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                   setImBot(selected)
                 }}
                 onMain={() => openPrivateMain(selected.id)}
-                onWork={(id) => openImWork(selected.id, id)}
+                onWork={selectWork}
                 controller={works}
                 captureWorkNavigation={captureWorkNavigation}
                 onPreview={canPreviewWork ? (work, trigger) => openWorkPreview(work.id, trigger, work.title) : undefined}

@@ -281,7 +281,7 @@ async function main() {
       fullPage: true,
       animations: "disabled"
     })
-    await page.locator(`[data-work-id="${linked.work.id}"]`).click()
+    await page.locator(`[data-work-id="${linked.work.id}"]`).getByRole("button", { name: /^进入任务：/ }).click()
     await ready(threadId)
     await taskOptions.click()
     await page.getByRole("button", { name: "解除任务关联", exact: true }).waitFor()

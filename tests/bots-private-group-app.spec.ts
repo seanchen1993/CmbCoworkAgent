@@ -842,7 +842,7 @@ async function main() {
           botId, operationId: crypto.randomUUID(), title: "运行中补充验收任务", goal: "STEER_HOLD_bot-work"
         }), bot.id)
         threadId = result.work.threadId
-        await page.locator(".bot-work-row").filter({ hasText: "运行中补充验收任务" }).click()
+        await page.getByRole("button", { name: "进入任务：运行中补充验收任务", exact: true }).click()
       } else {
         await fill(`STEER_HOLD_${kind}`)
         await send()
@@ -880,7 +880,7 @@ async function main() {
       await page.reload()
       await page.getByText("Bots", { exact: true }).first().click()
       await page.getByText(bot.name, { exact: true }).first().click()
-      if (kind === "bot-work") await page.locator(".bot-work-row").filter({ hasText: "运行中补充验收任务" }).click()
+      if (kind === "bot-work") await page.getByRole("button", { name: "进入任务：运行中补充验收任务", exact: true }).click()
       await chat.getByText("STEER_AFTER_BOUNDARY", { exact: true }).waitFor()
       for (const value of expected) assert.equal(await chat.getByText(value, { exact: true }).count(), 1)
       console.log(`stage: ${kind} two corrections retained in the same run/thread, UI and reload verified`)
