@@ -171,6 +171,37 @@ describe("published market skill shortcut IPC", () => {
     )
   })
 
+  it.each([
+    { baseUrl: "https://updates.example", editable: true },
+    { baseUrl: "https://updates-selftest.example", editable: false }
+  ])("limits selftest source grants at $baseUrl", async ({ baseUrl, editable }) => {
+    const { getUpdateChannelConfigPath } = await import("../updater/channel-config")
+    await writeFile(
+      getUpdateChannelConfigPath(),
+      JSON.stringify({
+        enabled: true,
+        channel: "selftest",
+        baseUrl,
+        expiresAt: new Date(Date.now() + 60_000).toISOString()
+      })
+    )
+    config = {
+      ...target,
+      allowSourceForAll: true,
+      sha256: createHash("sha256").update(markdown).digest("hex")
+    }
+    await expect(call("install", await selection())).resolves.toMatchObject({
+      ok: true,
+      value: { kind: "available" }
+    })
+    const skillPath = join(installedDirectory(), "SKILL.md")
+    await expect(skillCall("read", skillPath)).resolves.toMatchObject({ success: editable })
+    await expect(skillCall("exportForMarket", skillPath)).resolves.toMatchObject({
+      success: editable
+    })
+    expect(catalogRequests()).toHaveLength(1)
+  })
+
   it("uses the manifest pointer and reuses ordinary market visibility rules", async () => {
     config = { itemId: target.itemId, marketName: target.marketName }
     items = [

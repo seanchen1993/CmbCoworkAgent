@@ -70,10 +70,17 @@ function record(value: unknown): Record<string, unknown> | null {
 }
 
 async function loadPublishedShortcut() {
-  const source = resolveUpdateSource(import.meta.env.VITE_UPDATE_SERVER_URL ?? "")
+  const trustedBaseUrl = (import.meta.env.VITE_UPDATE_SERVER_URL ?? "").trim().replace(/\/+$/, "")
+  const source = resolveUpdateSource(trustedBaseUrl)
   if (!source.baseUrl) return null
   const manifest = await fetchLatestJson(source.baseUrl, source.manifestFile)
-  return parseMarketSkillShortcutConfig(manifest.conversationShortcuts?.projectPluginCreation)
+  const config = parseMarketSkillShortcutConfig(manifest.conversationShortcuts?.projectPluginCreation)
+  // A local selftest override can select a different server. Only the
+  // release service configured in the client may allow editable downloads.
+  if (config?.allowSourceForAll && source.baseUrl !== trustedBaseUrl) {
+    return { ...config, allowSourceForAll: undefined }
+  }
+  return config
 }
 
 export async function getMarketShortcutBinding(
