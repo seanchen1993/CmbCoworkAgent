@@ -223,10 +223,25 @@ const HARNESS_INSPECT_COMMAND_CONFIG_KEYS: Record<
 
 interface ConfiguredHarnessInvocation {
   cwd: string
+  pluginName: string
   invocation: {
     executable: string
     args: string[]
   }
+}
+
+class HarnessPluginCommandError extends Error {
+  constructor(
+    pluginName: string,
+    readonly detail: string,
+    message = formatHarnessPluginCommandFailure(pluginName)
+  ) {
+    super(message)
+  }
+}
+
+function formatHarnessPluginCommandFailure(pluginName: string): string {
+  return `插件「${pluginName}」执行失败，请联系插件开发者`
 }
 
 type HarnessInvocationSuccessLogMode = "full" | "summary" | "none"
@@ -668,7 +683,7 @@ async function resolveHarnessAdapterSnapshot(
   return pluginToHarnessAdapterSnapshot(plugin, snapshot)
 }
 
-function adapterPluginDir(project: HarnessProjectMetadata): string {
+function requireAdapterPlugin(project: HarnessProjectMetadata): PluginMetadata {
   const adapter = project["harness-adapter"]
   if (adapter.type !== "plugin") {
     throw new Error(`Unsupported harness adapter type: ${adapter.type}`)
@@ -678,7 +693,7 @@ function adapterPluginDir(project: HarnessProjectMetadata): string {
   if (!plugin) {
     throw new Error(`Harness adapter plugin not found: ${adapter.name || adapter.id}`)
   }
-  return plugin.path
+  return plugin
 }
 
 function findAdapterPlugin(project: HarnessProjectMetadata): PluginMetadata | null {
@@ -993,6 +1008,27 @@ function parseInspectCommand(
   return { executable, args: restArgs }
 }
 
+function configureHarnessInvocation(
+  command: string,
+  project: HarnessProjectMetadata,
+  mode: HarnessInspectCommandName,
+  plugin: PluginMetadata,
+  options: HarnessCommandParseOptions
+): ConfiguredHarnessInvocation {
+  const cwd = plugin.path
+  try {
+    return {
+      cwd,
+      pluginName: plugin.name,
+      invocation: parseInspectCommand(command, project, mode, cwd, options)
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    console.error(`[HarnessBoard] [${HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]}] ${detail}`)
+    throw new HarnessPluginCommandError(plugin.name, detail)
+  }
+}
+
 async function readBoardConfig(cwd: string): Promise<Record<string, unknown> | null> {
   const configPath = join(cwd, BOARD_CONFIG_REL_PATH)
   try {
@@ -1139,9 +1175,11 @@ function isProjectMissingError(message: string): boolean {
 
 function formatProjectDetailError(project: HarnessProjectMetadata, error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
-  if (isProjectMissingError(message)) {
+  const detail = error instanceof HarnessPluginCommandError ? error.detail : message
+  if (isProjectMissingError(detail)) {
     return projectDirectoryMissingMessage(project)
   }
+  if (error instanceof HarnessPluginCommandError) return error.message
   return message.startsWith("读取项目状态失败") ? message : `读取项目状态失败：${message}`
 }
 
@@ -1150,10 +1188,11 @@ async function buildOptionalConfiguredHarnessInvocation(
   mode: HarnessInspectCommandName,
   options: HarnessCommandParseOptions = {}
 ): Promise<ConfiguredHarnessInvocation | null> {
-  const cwd = adapterPluginDir(project)
+  const plugin = requireAdapterPlugin(project)
+  const cwd = plugin.path
   const config = await readBoardConfig(cwd)
   const compatibility = evaluateBoardPluginCompatibility(
-    findAdapterPlugin(project),
+    plugin,
     project["harness-adapter"].name || project["harness-adapter"].id,
     { value: config, error: null }
   )
@@ -1167,13 +1206,10 @@ async function buildOptionalConfiguredHarnessInvocation(
   if (!configuredCommand) return null
   const leanToken = options.leanToken ?? (await readLeanTokenStore()).leanToken
 
-  return {
-    cwd,
-    invocation: parseInspectCommand(configuredCommand, project, mode, cwd, {
-      ...options,
-      leanToken
-    })
-  }
+  return configureHarnessInvocation(configuredCommand, project, mode, plugin, {
+    ...options,
+    leanToken
+  })
 }
 
 async function buildConfiguredHarnessInvocation(
@@ -1229,6 +1265,15 @@ function harnessDetailCancelledError(): Error {
   const error = new Error("Harness detail request was superseded")
   error.name = "AbortError"
   return error
+}
+
+async function isPythonCommandNotFound(error: unknown): Promise<boolean> {
+  if (!(error instanceof Error)) return false
+  const { code, path, cwd } = error as NodeJS.ErrnoException & { cwd?: string }
+  if (code !== "ENOENT" || !path || !/^python3?(?:\.exe)?$/i.test(path) || !cwd) return false
+
+  // spawn also reports ENOENT if the working directory is missing.
+  return (await stat(cwd).catch(() => null))?.isDirectory() === true
 }
 
 async function runHarnessInvocationAsync(
@@ -1308,7 +1353,7 @@ async function runHarnessInvocationAsync(
         const stdout = Buffer.concat(stdoutChunks, stdoutLength)
         const stderr = Buffer.concat(stderrChunks, stderrLength)
         settle(() => {
-          rejectPromise(createHarnessInvocationError(error.message, { stdout, stderr }))
+          rejectPromise(Object.assign(error, { stdout, stderr, cwd: executable.cwd }))
         })
       })
       child.once("close", (code, signal) => {
@@ -1356,8 +1401,13 @@ async function runHarnessInvocationAsync(
     if (logOptions) logHarnessInvocationSuccess(stdoutBuffer, logOptions)
     return stdoutBuffer
   } catch (error) {
+    if (signal?.aborted) throw harnessDetailCancelledError()
     if (logOptions) logHarnessInvocationFailure(configured, logOptions, error)
-    throw new Error(formatAdapterError(error))
+    const message =
+      logOptions?.configKey === "create_project" && (await isPythonCommandNotFound(error))
+        ? "请安装最新版 Python 3"
+        : undefined
+    throw new HarnessPluginCommandError(configured.pluginName, formatAdapterError(error), message)
   } finally {
     release()
   }
@@ -1394,13 +1444,9 @@ function parseInspectAdapterOutput(
   const raw = decodeAdapterBuffer(stdoutBuffer).trim()
 
   if (!raw) {
-    logHarnessStatusResultFailure(
-      invocation,
-      configKey,
-      stdoutBuffer,
-      "Inspect adapter returned empty output"
-    )
-    throw new Error("Inspect adapter returned empty output")
+    const detail = "Inspect adapter returned empty output"
+    logHarnessStatusResultFailure(invocation, configKey, stdoutBuffer, detail)
+    throw new HarnessPluginCommandError(invocation.pluginName, detail)
   }
 
   try {
@@ -1411,13 +1457,9 @@ function parseInspectAdapterOutput(
     return parsed
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    logHarnessStatusResultFailure(
-      invocation,
-      configKey,
-      stdoutBuffer,
-      `Inspect adapter returned invalid JSON: ${message}`
-    )
-    throw new Error(`Inspect adapter returned invalid JSON: ${message}`)
+    const detail = `Inspect adapter returned invalid JSON: ${message}`
+    logHarnessStatusResultFailure(invocation, configKey, stdoutBuffer, detail)
+    throw new HarnessPluginCommandError(invocation.pluginName, detail)
   }
 }
 
@@ -1452,7 +1494,7 @@ function assertSkipNodeInvocationResult(
 
   const message = normalizeText(parsed.message).trim() || "插件返回跳过节点失败"
   logHarnessStatusResultFailure(configured, "skip_node", stdoutBuffer, message)
-  throw new Error(message)
+  throw new HarnessPluginCommandError(configured.pluginName, message)
 }
 
 function uniqueStringsInOrder(values: unknown): string[] {
@@ -2442,14 +2484,10 @@ function buildConfiguredHarnessInvocationFromContext(
   if (!command) {
     throw new Error(`插件未配置 inspectCommands.${process.platform}.${configKey}，请检查插件设置`)
   }
-  const cwd = context.plugin.path
-  return {
-    cwd,
-    invocation: parseInspectCommand(command, project, mode, cwd, {
-      ...options,
-      leanToken: context.leanToken
-    })
-  }
+  return configureHarnessInvocation(command, project, mode, context.plugin, {
+    ...options,
+    leanToken: context.leanToken
+  })
 }
 
 function hasConfiguredHarnessInvocationInContext(
@@ -2654,6 +2692,7 @@ async function initializeHarnessProject(project: HarnessProjectMetadata): Promis
       HARNESS_ADAPTER_TIMEOUT_MS
     )
   } catch (error) {
+    if (error instanceof HarnessPluginCommandError) throw error
     const raw = error instanceof Error ? error.message : String(error)
     throw new Error(`创建项目失败：${raw}`)
   }
@@ -2887,7 +2926,7 @@ async function readHarnessFeatureSessionContextAgentPrompt(
           message
         }
       )
-      return { warning: formatSessionContextInjectWarning(message) }
+      return { warning: formatHarnessPluginCommandFailure(configured.pluginName) }
     }
     const agentmdLoadStatus = normalizeHarnessAgentmdLoadStatus(result.agentmdLoadStatus)
     const sessionContext = requireCompleteHarnessSessionContext(
@@ -2918,6 +2957,7 @@ async function readHarnessFeatureSessionContextAgentPrompt(
         error
       }
     )
+    if (error instanceof HarnessPluginCommandError) return { warning: detail }
     return { warning: formatSessionContextInjectWarning(detail) }
   }
 }
@@ -3418,9 +3458,11 @@ export async function createHarnessFeature(
     )
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error)
-    if (raw.includes("已存在")) {
+    const detail = error instanceof HarnessPluginCommandError ? error.detail : raw
+    if (detail.includes("已存在")) {
       throw new Error("该特性在当前项目路径下已存在")
     }
+    if (error instanceof HarnessPluginCommandError) throw error
     throw new Error(`创建特性失败：${raw}`)
   }
 
@@ -3490,6 +3532,7 @@ export async function skipHarnessRunNode(
     assertSkipNodeInvocationResult(configured, stdoutBuffer)
     logHarnessInvocationSuccess(stdoutBuffer, harnessCommandLogOptions("skipNode"))
   } catch (error) {
+    if (error instanceof HarnessPluginCommandError) throw error
     const raw = error instanceof Error ? error.message : String(error)
     throw new Error(`跳过节点失败：${raw}`)
   } finally {
@@ -3655,12 +3698,13 @@ export async function getHarnessProjectDetail(
 async function runInspectAdapterBatch(
   projects: HarnessProjectMetadata[],
   mode: "project",
-  cwd: string,
+  plugin: PluginMetadata,
   configSnapshot?: HarnessBoardConfigReadSnapshot,
   leanToken = "",
   adapterScope?: string,
   signal?: AbortSignal
 ): Promise<HarnessAdapterDetailBatchResult> {
+  const cwd = plugin.path
   const firstProject = projects[0]
   const configuredCommand = configSnapshot
     ? readBoardConfigPlatformTextFromValue(
@@ -3674,18 +3718,11 @@ async function runInspectAdapterBatch(
   }
 
   const projectDirs = projects.map((project) => projectDirectoryName(project))
-  const { executable, args } = parseInspectCommand(configuredCommand, firstProject, mode, cwd, {
+  const configured = configureHarnessInvocation(configuredCommand, firstProject, mode, plugin, {
     projectDirs,
     leanToken
   })
 
-  const configured: ConfiguredHarnessInvocation = {
-    cwd,
-    invocation: {
-      executable,
-      args
-    }
-  }
   const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
   const stdoutBuffer = await runHarnessInvocationAsync(
     configured,
@@ -3711,8 +3748,13 @@ async function runInspectAdapterBatch(
       `[HarnessBoard] [${configKey}] Command: ${formatHarnessCommand(configured.invocation)}`
     )
     console.error(`[HarnessBoard] [${configKey}] CWD: ${configured.cwd}`)
-    if (error instanceof HarnessAdapterDetailWorkerResultError && error.preview) {
-      console.error(`[HarnessBoard] [${configKey}] Result preview:\n${error.preview}`)
+    if (error instanceof HarnessAdapterDetailWorkerResultError) {
+      if (error.preview) {
+        console.error(`[HarnessBoard] [${configKey}] Result preview:\n${error.preview}`)
+      }
+      if (error.code !== "HARNESS_ADAPTER_DETAIL_CANCELLED") {
+        throw new HarnessPluginCommandError(configured.pluginName, message)
+      }
     }
     throw error
   }
@@ -3805,7 +3847,7 @@ async function loadHarnessProjectDetails(
   const groups = new Map<
     string,
     {
-      cwd: string
+      plugin: PluginMetadata
       projects: HarnessProjectMetadata[]
       configSnapshot?: HarnessBoardConfigReadSnapshot
       leanToken: string
@@ -3858,7 +3900,7 @@ async function loadHarnessProjectDetails(
       existing.projects.push(project)
     } else {
       groups.set(key, {
-        cwd: plugin.path,
+        plugin,
         projects: [project],
         configSnapshot,
         leanToken: configContext.leanToken
@@ -3881,7 +3923,7 @@ async function loadHarnessProjectDetails(
         const snapshot = await runInspectAdapterBatch(
           batch,
           "project",
-          group.cwd,
+          group.plugin,
           group.configSnapshot,
           group.leanToken,
           `${scope}:adapter`,
@@ -3894,10 +3936,13 @@ async function loadHarnessProjectDetails(
           const projectDir = projectDirectoryName(project)
           const projectData = snapshot.projects[projectDir]
           if (!projectData) {
+            console.error(
+              `[HarnessBoard] [project_status] Inspect adapter did not return status for ${projectDir}`
+            )
             result[project.projectId] = await makeProjectErrorDetail(
               project,
               "Inspect 读取失败",
-              `读取项目状态失败：Inspect adapter 未返回项目文件夹 ${projectDir} 的状态`,
+              formatHarnessPluginCommandFailure(group.plugin.name),
               configContextByProjectId.get(project.projectId)
             )
             continue
@@ -3988,8 +4033,13 @@ async function loadHarnessRunDetail(
       `[HarnessBoard] [feature_status] Command: ${formatHarnessCommand(configured.invocation)}`
     )
     console.error(`[HarnessBoard] [feature_status] CWD: ${configured.cwd}`)
-    if (error instanceof HarnessAdapterDetailWorkerResultError && error.preview) {
-      console.error(`[HarnessBoard] [feature_status] Result preview:\n${error.preview}`)
+    if (error instanceof HarnessAdapterDetailWorkerResultError) {
+      if (error.preview) {
+        console.error(`[HarnessBoard] [feature_status] Result preview:\n${error.preview}`)
+      }
+      if (error.code !== "HARNESS_ADAPTER_DETAIL_CANCELLED") {
+        throw new HarnessPluginCommandError(configured.pluginName, message)
+      }
     }
     throw error
   }

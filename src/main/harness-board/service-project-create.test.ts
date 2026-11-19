@@ -36,6 +36,16 @@ const input = () => ({
 const storePath = () => join(state.root, "harness-board-projects.json")
 const projectPath = () => join(input().workspacePath, input().projectDir)
 
+async function writeProjectCreateCommand(command: string): Promise<void> {
+  await writeFile(
+    join(state.root, "plugin", "board_core", "board_config.json"),
+    JSON.stringify({
+      apiVersion: 1,
+      inspectCommands: { [process.platform]: { create_project: command } }
+    })
+  )
+}
+
 beforeEach(async () => {
   await mkdir(join(state.root, "plugin", "board_core"), { recursive: true })
   await mkdir(projectPath(), { recursive: true })
@@ -46,16 +56,8 @@ beforeEach(async () => {
 fs.writeFileSync(path.join(process.argv[2], process.argv[3], 'initialized.json'),
   JSON.stringify({ workspacePath: process.argv[2], projectDir: process.argv[3] }));`
   )
-  await writeFile(
-    join(state.root, "plugin", "board_core", "board_config.json"),
-    JSON.stringify({
-      apiVersion: 1,
-      inspectCommands: {
-        [process.platform]: {
-          create_project: `"${process.execPath}" "\${pluginPath}/init.cjs" "\${pluginWorkspace}" "\${projectDir}"`
-        }
-      }
-    })
+  await writeProjectCreateCommand(
+    `"${process.execPath}" "\${pluginPath}/init.cjs" "\${pluginWorkspace}" "\${projectDir}"`
   )
 })
 afterEach(() => rm(state.root, { recursive: true, force: true }))
@@ -143,6 +145,45 @@ describe("create project in a selected directory", () => {
       workspacePath: input().workspacePath,
       projectDir: input().projectDir
     })
+  })
+
+  it("shows the plugin name and logs the original command failure", async () => {
+    const logs = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      await writeFile(
+        join(state.root, "plugin", "init.cjs"),
+        'console.error("spawn python ENOENT"); process.exit(1)'
+      )
+
+      await expect(createHarnessProject(input())).rejects.toMatchObject({
+        message: "插件「plugin」执行失败，请联系插件开发者"
+      })
+      expect(logs).toHaveBeenCalledWith(expect.stringContaining("exit 1: spawn python ENOENT"))
+      await expect(readFile(storePath())).rejects.toMatchObject({ code: "ENOENT" })
+    } finally {
+      logs.mockRestore()
+    }
+  })
+
+  it.each([
+    ["python", "请安装最新版 Python 3"],
+    ["python3", "请安装最新版 Python 3"],
+    ["python.exe", "请安装最新版 Python 3"],
+    ["missing-plugin-command", "插件「plugin」执行失败，请联系插件开发者"]
+  ])("shows the appropriate message when %s cannot start", async (command, message) => {
+    const emptyPath = join(state.root, "empty-path")
+    await mkdir(emptyPath)
+    await writeProjectCreateCommand(command)
+    const logs = vi.spyOn(console, "error").mockImplementation(() => {})
+    vi.stubEnv("PATH", emptyPath)
+    try {
+      await expect(createHarnessProject(input())).rejects.toMatchObject({ message })
+      expect(logs).toHaveBeenCalledWith(expect.stringContaining(`spawn ${command} ENOENT`))
+      await expect(readFile(storePath())).rejects.toMatchObject({ code: "ENOENT" })
+    } finally {
+      vi.unstubAllEnvs()
+      logs.mockRestore()
+    }
   })
 
   it("blocks hidden content before invoking the plugin or saving a project", async () => {
