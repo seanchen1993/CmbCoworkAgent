@@ -1,17 +1,19 @@
 import { randomUUID } from "crypto"
 
-/** Reserved main-process metadata field. Renderer patches cannot write this key. */
-export const THREAD_INCARNATION_METADATA_KEY = "cmb_thread_incarnation"
+import {
+  THREAD_INCARNATION_METADATA_KEY,
+  matchesThreadIncarnationSnapshot,
+  type ThreadIncarnationSnapshot
+} from "../../shared/thread-incarnation"
+
+export { THREAD_INCARNATION_METADATA_KEY } from "../../shared/thread-incarnation"
 
 export interface ThreadIncarnationRow {
   created_at: number
   metadata: string | null
 }
 
-export interface ThreadIncarnation {
-  token: string | null
-  legacyCreatedAt: number
-}
+export type ThreadIncarnation = ThreadIncarnationSnapshot
 
 const capturedMetadataGet = WeakMap.prototype.get
 const capturedMetadataSet = WeakMap.prototype.set

@@ -122,11 +122,13 @@ export interface ChatMessageVirtualListProps {
   projection: import("../../lib/chat-message-projection").ChatMessageProjectionSnapshot
   visibleMessageIndexes: readonly number[]
   lastUserMessageIndex: number
+  historyWindowRevision: number
   historyHasMore: boolean
   historyPageLoading: boolean
   historyRemainingCount: number
   onLoadEarlierHistoryPage: () => void
   historyGapBeforeMessageId: string | null
+  showReleasedHistoryAtEnd?: boolean
   canLoadReleasedHistory: boolean
   onLoadReleasedHistoryWindow: () => void
   onRestoreLatestHistoryWindow: () => void
@@ -387,6 +389,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   historyRemainingCount,
   onLoadEarlierHistoryPage,
   historyGapBeforeMessageId,
+  showReleasedHistoryAtEnd,
   canLoadReleasedHistory,
   onLoadReleasedHistoryWindow,
   onRestoreLatestHistoryWindow,
@@ -415,6 +418,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   virtuosoRef,
   navigatorVirtualRangeRef,
   initialTopMostItemIndex,
+  historyWindowRevision,
   onInitialVirtualItemsRendered,
   onContentHeightChanged,
   onAtBottomStateChange,
@@ -434,9 +438,13 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   const virtualIdentities = useMemo(() => virtualRows.map(row => row.identity), [virtualRows])
   const virtualPositionByIdentity = useMemo(() =>
     new Map(virtualRows.map((row, index) => [row.identity, index])), [virtualRows])
+  // Replacing durable history invalidates measurements even when the new page
+  // shares message identities. Prepending to the same window keeps its indices.
+  const windowScope = useMemo(() => JSON.stringify([threadId, historyWindowRevision]),
+    [threadId, historyWindowRevision])
   const [previousVirtualWindow, setVirtualWindow] = useState(() =>
-    projectChatVirtualWindow(null, threadId, virtualIdentities))
-  const virtualWindow = projectChatVirtualWindow(previousVirtualWindow, threadId, virtualIdentities)
+    projectChatVirtualWindow(null, windowScope, virtualIdentities))
+  const virtualWindow = projectChatVirtualWindow(previousVirtualWindow, windowScope, virtualIdentities)
   if (virtualWindow !== previousVirtualWindow) setVirtualWindow(virtualWindow)
   const shouldVirtualize = shouldVirtualizeChatMessageList(visibleMessageIndexes.length)
   const turnNoticePlacements = useMemo(
@@ -601,6 +609,37 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
     onInitialVirtualItemsRendered()
   }
 
+  const releasedHistory = useMemo(() => (
+    <div
+      data-chat-history-boundary="released-middle"
+      className="mb-4 flex flex-col items-center gap-1 rounded-md border border-dashed border-border/70 bg-muted/20 px-3 py-2 text-center text-xs text-muted-foreground"
+    >
+      <span>为控制内存，中间消息当前未驻留</span>
+      <div className="flex flex-wrap items-center justify-center gap-1.5">
+        {canLoadReleasedHistory && (
+          <button
+            type="button"
+            onClick={onLoadReleasedHistoryWindow}
+            disabled={historyPageLoading}
+            className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-background px-2.5 py-0.5 text-foreground transition-colors hover:bg-muted disabled:cursor-wait disabled:opacity-60"
+          >
+            {historyPageLoading && <Loader2 className="size-3 animate-spin" />}
+            {historyPageLoading ? "正在读取中间消息" : "继续读取中间消息"}
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onRestoreLatestHistoryWindow}
+          disabled={historyPageLoading}
+          className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-background px-2.5 py-0.5 text-foreground transition-colors hover:bg-muted disabled:cursor-wait disabled:opacity-60"
+        >
+          {historyPageLoading && !canLoadReleasedHistory && <Loader2 className="size-3 animate-spin" />}
+          返回最新消息
+        </button>
+      </div>
+    </div>
+  ), [canLoadReleasedHistory, historyPageLoading, onLoadReleasedHistoryWindow, onRestoreLatestHistoryWindow])
+
   const renderMessage = useCallback(
     (visibleIndex: number, messageIndex: number): React.JSX.Element | null => {
       const message = messages[messageIndex]
@@ -621,38 +660,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
 
       return (
         <>
-          {startsAfterReleasedHistory ? (
-            <div
-              data-chat-history-boundary="released-middle"
-              className="mb-4 flex flex-col items-center gap-1 rounded-md border border-dashed border-border/70 bg-muted/20 px-3 py-2 text-center text-xs text-muted-foreground"
-            >
-              <span>为控制内存，中间消息当前未驻留</span>
-              <div className="flex flex-wrap items-center justify-center gap-1.5">
-                {canLoadReleasedHistory ? (
-                  <button
-                    type="button"
-                    onClick={onLoadReleasedHistoryWindow}
-                    disabled={historyPageLoading}
-                    className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-background px-2.5 py-0.5 text-foreground transition-colors hover:bg-muted disabled:cursor-wait disabled:opacity-60"
-                  >
-                    {historyPageLoading ? <Loader2 className="size-3 animate-spin" /> : null}
-                    {historyPageLoading ? "正在读取中间消息" : "继续读取中间消息"}
-                  </button>
-                ) : null}
-                <button
-                  type="button"
-                  onClick={onRestoreLatestHistoryWindow}
-                  disabled={historyPageLoading}
-                  className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-background px-2.5 py-0.5 text-foreground transition-colors hover:bg-muted disabled:cursor-wait disabled:opacity-60"
-                >
-                  {historyPageLoading && !canLoadReleasedHistory ? (
-                    <Loader2 className="size-3 animate-spin" />
-                  ) : null}
-                  返回最新消息
-                </button>
-              </div>
-            </div>
-          ) : null}
+          {startsAfterReleasedHistory && releasedHistory}
           <ChatMessageRow
             messageGeneration={messageAttempts?.generations.get(message.id) ?? 0}
             messageRevision={messageAttempts?.revision ?? 0}
@@ -694,12 +702,10 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
     [
       assistantDurationMsById,
       autoApproveGitPush,
-      canLoadReleasedHistory,
       contentMessageRefs,
       contentVersion,
       forkingMessageId,
       historyGapBeforeMessageId,
-      historyPageLoading,
       hookLogBucketByTurnId,
       hookLoggingEnabled,
       isLoading,
@@ -709,13 +715,12 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
       onApprovalDecision,
       onEditUserMessage,
       onForkFromMessage,
-      onLoadReleasedHistoryWindow,
       onOpenHookLogBucket,
-      onRestoreLatestHistoryWindow,
       onSetGoalFromMessage,
       pendingApproval,
       pendingApprovalToolCallKeys,
       placedRows,
+      releasedHistory,
       setMessageRef,
       threadId,
       toolCallStates,
@@ -752,6 +757,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   ) : null
   const footerContent = (
     <>
+      {showReleasedHistoryAtEnd && releasedHistory}
       {hookLoggingEnabled && detachedHookLogBuckets.length > 0 ? (
         <div className="mt-1 space-y-2 pt-4">
           <div className="flex flex-wrap justify-start gap-2">

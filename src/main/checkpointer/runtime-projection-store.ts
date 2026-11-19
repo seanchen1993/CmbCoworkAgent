@@ -7,8 +7,9 @@ import { serializeFunctionConversationNativeMessage } from "../agent/function-co
 import type { PreparedNativeDataRequest, PreparedNativeDataSource, PreparedNativeDataFacts,
   PreparedNativeSnapshotSeal } from "./runtime-projection-protocol"
 import { DatabaseSync, type SQLInputValue } from "node:sqlite"
-import { existsSync } from "node:fs"
+import { existsSync, statSync } from "node:fs"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
+import { sqliteRecoveryFamilyKey } from "../db/sqlite-recovery-family"
 import { ensureLegacyTranscriptSlots } from "../db/legacy-transcript-slots"
 import { createLegacyDurableIdentityLookup, getLegacyTranscriptSlotIdentity,
   reserveLegacyTranscriptOrdinals } from "./legacy-transcript-order"
@@ -25,10 +26,13 @@ import {
 } from "../display-message-identity"
 import type {
   CheckpointRuntimeProjectionStats,
-  LegacyCheckpointTranscriptMigrationStats
+  LegacyCheckpointTranscriptMigrationStats,
+  LegacySearchBootstrapGuard
 } from "./runtime-projection-protocol"
 import {
   CHECKPOINT_RUNTIME_PROJECTION_CANCELLED,
+  CHECKPOINT_RUNTIME_PROJECTION_FOREGROUND_REQUIRED,
+  NATIVE_DURABLE_CHECKPOINT_ID,
   CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY
 } from "./runtime-projection-protocol"
 import {
@@ -39,6 +43,7 @@ import {
   normalizeCompleteSnapshotMessageIds
 } from "../../shared/message-role-collision"
 import {
+  isInternalNotificationMessage,
   getCheckpointTranscriptMessageIdentity,
   isRestorableConversationTranscriptMessage,
   isWorkflowPlumbingTranscriptContent
@@ -744,7 +749,7 @@ function isVisibleSerializedCheckpointMessage(raw: unknown): boolean {
   const kwargs = objectRecord(message.kwargs) ?? {}
   const additionalKwargs =
     objectRecord(message.additional_kwargs) ?? objectRecord(kwargs.additional_kwargs) ?? {}
-  if (additionalKwargs.cmb_internal_coordinator_notification === true) return false
+  if (isInternalNotificationMessage(raw)) return false
   const role = serializedMessageRole(message, kwargs)
   const functionFields = functionConversationTranscriptFields(message,
     typeof kwargs.id === "string" ? kwargs.id : typeof message.id === "string" ? message.id : undefined,
@@ -1312,7 +1317,7 @@ function buildDurableLegacyCheckpointMessages(
       graphBoundaries.push({ checkpointIndex: index, messageId: sourceId })
       continue
     }
-    if (additionalKwargs.cmb_internal_coordinator_notification === true) continue
+    if (isInternalNotificationMessage(raw)) continue
     const reasoning =
       role === "assistant"
         ? (normalizeTranscriptReasoning(
@@ -2204,7 +2209,8 @@ function legacyTranscriptMessageJsonBytes(messages: readonly unknown[], cancella
 export function prepareLegacyCheckpointTranscriptSource(
   checkpointDatabasePath: string, threadId: string, checkpointNs: string,
   state: LegacyTranscriptReadState,
-  cancellationBuffer: SharedArrayBuffer
+  cancellationBuffer: SharedArrayBuffer,
+  searchGuard?: LegacySearchBootstrapGuard
 ): PreparedLegacyCheckpointTranscriptSource {
   const cancellation = new Int32Array(cancellationBuffer), marker = state.marker
   throwIfCancelled(cancellation)
@@ -2214,6 +2220,24 @@ export function prepareLegacyCheckpointTranscriptSource(
     return { kind: "complete-readonly", checkpointId: marker.checkpointId,
       totalMessages: marker.totalMessages }
   }
+  if (searchGuard) {
+    if (marker?.checkpointId === NATIVE_DURABLE_CHECKPOINT_ID && marker.status === "complete")
+      return readonlyComplete()
+    // Background search only imports a bounded source into an empty ordinary transcript.
+    // Existing durable rows and incomplete copies still require foreground reconciliation.
+    if (!state.ordinary || marker || state.durableHistory ||
+      (statSync(checkpointDatabasePath, { throwIfNoEntry: false })?.size ?? 0) > 8 * 1024 * 1024)
+      throw Object.assign(Error("Legacy search requires foreground history recovery"), {
+        name: CHECKPOINT_RUNTIME_PROJECTION_FOREGROUND_REQUIRED
+      })
+    if (searchGuard.sourceKey !== undefined &&
+      sqliteRecoveryFamilyKey(checkpointDatabasePath) !== searchGuard.sourceKey)
+      throw Object.assign(Error("Legacy search checkpoint source changed"), {
+        name: CHECKPOINT_RUNTIME_PROJECTION_CANCELLED
+      })
+  }
+  if (marker?.checkpointId === NATIVE_DURABLE_CHECKPOINT_ID && marker.status === "complete")
+    return readonlyComplete()
   if (!state.ordinary) {
     if (marker?.status === "complete") return readonlyComplete()
     throw new ModFunctionError("MODS_CONVERSATION_MIGRATION_REQUIRED")
@@ -2238,6 +2262,14 @@ export function prepareLegacyCheckpointTranscriptSource(
         if (marker?.status === "complete") return readonlyComplete()
         if (marker) legacyTranscriptSourceUnavailable()
         return { kind: "empty" }
+      }
+      if (searchGuard?.checkpointId !== undefined) {
+        const identity = database.prepare(`SELECT rowid AS id FROM checkpoints
+          WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=?`).get(threadId, checkpointNs, head.checkpointId)
+        if (head.checkpointId !== searchGuard.checkpointId || identity?.id !== searchGuard.checkpointRowId ||
+          searchGuard.recoverySuffix !== "") throw Object.assign(Error("Legacy search checkpoint changed"), {
+            name: CHECKPOINT_RUNTIME_PROJECTION_CANCELLED
+          })
       }
       const headRaw = parseLegacyCheckpoint(head)
       // Reject an explicit native channel before opening any potentially large chain.
@@ -2288,6 +2320,10 @@ export function prepareLegacyCheckpointTranscriptSource(
       objectRecord(hydrated.channel_values)!.messages as unknown[] : []
     const { messages: durableMessages, graphBoundaries } = buildDurableLegacyCheckpointMessages(
       messages, row.checkpointTs, cancellation)
+    if (searchGuard && durableMessages.length > 2048)
+      throw Object.assign(Error("Legacy search checkpoint exceeds the background budget"), {
+        name: CHECKPOINT_RUNTIME_PROJECTION_FOREGROUND_REQUIRED
+      })
     if (marker && (durableMessages.length !== marker.totalMessages ||
       (marker.fragmentIndex > 0 && (!durableMessages[marker.nextIndex]?.contentFragments ||
         marker.fragmentIndex >= durableMessages[marker.nextIndex].contentFragments!.length)))) {
@@ -2297,7 +2333,7 @@ export function prepareLegacyCheckpointTranscriptSource(
     let sourceBytes = payloadBytes(row.checkpoint)
     if (!marker) {
       const rawInline = Array.isArray(objectRecord(raw.channel_values)?.messages)
-      const canPersist = runtimeProjectionSchemaIsPublished(database) &&
+      const canPersist = !searchGuard && runtimeProjectionSchemaIsPublished(database) &&
         (!rawInline || messageSnapshotSchemaIsPublished(database))
       let sourceStillCurrent: boolean
       if (canPersist) {

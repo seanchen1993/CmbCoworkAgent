@@ -101,6 +101,7 @@ export interface LegacyTranscriptWriteProgress {
   readonly marker: LegacyTranscriptMarker | null
   readonly inserted: number
   readonly fragmentOwned?: boolean
+  readonly searchProjectionState?: "complete" | "truncated" | "unverified"
 }
 
 export interface LegacyTranscriptReadState {
@@ -109,6 +110,7 @@ export interface LegacyTranscriptReadState {
   readonly ordinary: boolean
   /** A compacted checkpoint can omit a Goal boundary already recorded in the transcript. */
   readonly hasGraphBoundary?: boolean
+  readonly durableHistory?: boolean
 }
 
 export function legacyTranscriptWriteRowBytes(row: LegacyTranscriptWriteRow): number {
@@ -145,6 +147,7 @@ export type LegacyTranscriptWriteResult =
   | { readonly nextIndex: number; readonly complete: boolean }
 
 export const LEGACY_TRANSCRIPT_WRITE_ERRORS = [
+  "CHECKPOINT_RUNTIME_PROJECTION_FOREGROUND_REQUIRED",
   "LEGACY_TRANSCRIPT_WRITE_PROTOCOL",
   "LEGACY_TRANSCRIPT_WRITE_BUSY",
   "LEGACY_TRANSCRIPT_WRITE_CANCELLED",

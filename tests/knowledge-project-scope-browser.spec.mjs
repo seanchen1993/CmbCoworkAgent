@@ -36,6 +36,7 @@ window.api={dashboard:{
  knowledgeProjectStats:(range,opts)=>{qa.calls.push({kind:'projects',range,opts});return new Promise(resolve=>qa.pending.push(resolve))},
  knowledgeAccumulation:async(opts)=>{qa.calls.push({kind:'accumulation'});return {success:true,data:{totals:{totalNum:0,abandonedNum:0,activeNum:0},users:[],orgs:[],systems:[],errors:{},...(qa.orgData ? qa.orgData(opts.upperOrgLv1) : {})}}},
  knowledgeOrgGroups:async(id,opts)=>{qa.calls.push({kind:'groups',id,opts});return qa.getGroups(id)},
+ knowledgeRoomPeople:async(id,opts)=>{qa.calls.push({kind:'roomPeople',id,opts});return qa.getRoomPeople(id)},
  knowledgeRecentConstraintFiles:async()=>{qa.calls.push({kind:'recent'});return {success:true,data:{fileCount:0,complete:true}}},
  knowledgeUserDetails:async(opts)=>{qa.calls.push({kind:'userDetails',opts});return qa.deferUsers ? new Promise(resolve=>qa.userPending.push(resolve)) : {success:true,data:{items:qa.users}}},
  exportExcel:async(sheets,options)=>{qa.exports.push({sheets,options});return qa.exportResult ?? {success:true}},
@@ -313,9 +314,9 @@ try {
         : { orgs: [roomA, roomB, { id: null, name: "未归属室", value: 1 }] }
     qa.getGroups = () => ({ success: true, data: groups })
     const row = qa.users[0]
-    qa.users = [
+    const roomPeople = [
       { ...row, userName: "低", roomId: "1", groupId: "10", totalNum: 5 },
-      { ...row, userName: "高", roomName: "甲室（杭州）", groupId: "10", totalNum: 20 },
+      { ...row, userName: "高", roomName: "", groupId: "10", totalNum: 20 },
       {
         ...row,
         userName: "他室同组",
@@ -328,6 +329,10 @@ try {
       { ...row, userName: "待分组", roomId: "1", groupId: null, groupName: null, totalNum: 5 },
       { ...row, userName: "旧记录", roomId: "1", totalNum: 80 }
     ]
+    qa.getRoomPeople = (id) => ({ success: true, data: { items: id === "1" ? roomPeople : [] } })
+    qa.users = roomPeople.map((person) =>
+      person.userName === "高" ? { ...person, userName: "仅全局列表" } : person
+    )
     qa.setRooms([])
   })
   await org.getByRole("button", { name: "查看甲室(杭州)" }).waitFor()
@@ -336,8 +341,15 @@ try {
   const userCalls = () =>
     page.evaluate(() => window.qa.calls.filter((call) => call.kind === "userDetails").length)
   const callsBefore = await userCalls()
+  const drilldownCalls = () =>
+    page.evaluate(() =>
+      window.qa.calls.filter(({ kind }) => ["groups", "roomPeople"].includes(kind))
+    )
   await org.locator(".recharts-pie-sector path").first().dispatchEvent("click")
-  await org.getByRole("button", { name: "查看开发一组" }).focus()
+  const firstGroup = org.getByRole("button", { name: "查看开发一组" })
+  await firstGroup.waitFor()
+  assert.deepEqual(await drilldownCalls(), [{ kind: "groups", id: "1", opts: { upperOrgLv1: [] } }])
+  await firstGroup.focus()
   await page.keyboard.press("Enter")
   const ranking = org.getByRole("list", { name: "组内人员排名" })
   await ranking.waitFor()
@@ -348,10 +360,10 @@ try {
   assert.deepEqual(await listed(), ["待分组"])
   await section.getByText("共 6 条").waitFor()
   assert.equal(await userCalls(), callsBefore)
-  assert.equal(
-    await page.evaluate(() => window.qa.calls.filter((call) => call.kind === "groups").length),
-    1
-  )
+  assert.deepEqual(await drilldownCalls(), [
+    { kind: "groups", id: "1", opts: { upperOrgLv1: [] } },
+    { kind: "roomPeople", id: "1", opts: { upperOrgLv1: [] } }
+  ])
   await org.getByRole("button", { name: "室分布" }).click()
   await page.evaluate(() => {
     window.qa.getGroups = () =>
@@ -379,6 +391,7 @@ try {
   // A single effective room, including a member's default scope, starts at groups.
   await page.evaluate(() => window.qa.setRooms(["甲室(杭州)"]))
   await org.getByRole("button", { name: "查看开发二组" }).click()
+  await ranking.waitFor()
   assert.deepEqual(await listed(), ["其他组员"])
   assert.equal(await org.getByRole("button", { name: "室分布" }).count(), 0)
   await page.evaluate(() => window.qa.setRooms(["甲室(杭州)", "乙室"]))

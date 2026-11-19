@@ -1,6 +1,8 @@
 import { invalidateThreadTitleObservers } from "./thread-title-observer"
 import { startHostRuntimeTiming } from "../services/host-runtime-timing"
 import { ensureManagedRunSchedulesSchema } from "./managed-run-schedules"
+import { installThreadSearchSchema } from "../thread-search/schema"
+import { publishedThreadMessageFragmentsSql } from "./thread-message-fragment-storage"
 import { ensureAppNotificationsSchema } from "./app-notifications-schema"
 import { ensureUiGuideSchema } from "./ui-guide-store"
 import {
@@ -8,13 +10,14 @@ import {
   getMemorySessionOptInMigrationState,
   markMemorySessionOptInMigrated
 } from "../storage"
-import { type NativeSqliteAdapter, type NativeSqliteReadOne, type NativeSqliteValue,
+import { type NativeSqliteAdapter, type NativeSqliteExecResult, type NativeSqliteReadOne, type NativeSqliteValue,
   openNativeSqliteDatabase } from "./native-sqlite-adapter"
 import { originalCurrentDispatch } from "./native-read-dispatch"
 import { THREAD_RUNTIME_SCOPE_INDEX, THREAD_RUNTIME_SCOPE_EXPRESSION } from "./thread-runtime-scope-query"
-import { ensureLegacyTranscriptSlots } from "./legacy-transcript-slots"
+import { ensureLegacyTranscriptSlots, ensureThreadGraphTranscriptBoundaries } from "./legacy-transcript-slots"
 import { mergeThreadValueObjects } from "../../shared/thread-values"
 import { ensureLegacyMessageTimeArchive } from "../checkpointer/legacy-message-times"
+import { THREAD_MESSAGE_BEFORE_CURSOR_SQL, threadMessageBeforeCursorBindings } from "../thread-message-hydration/order-sql"
 import {
   decodeTranscriptRecoveryIntegrity,
   isLosslessTranscriptPayload,
@@ -46,10 +49,7 @@ import {
   mergeIncrementalMessageContent,
   normalizeCompleteSnapshotMessageIds
 } from "../../shared/message-role-collision"
-import {
-  isRestorableConversationTranscriptMessage,
-  isVisibleTranscriptMessage
-} from "../../shared/checkpoint-transcript"
+import { isRestorableConversationTranscriptMessage } from "../../shared/checkpoint-transcript"
 import type { ForkDurableTailReference } from "../../shared/checkpoint-forkability"
 import { projectCoordinatorTranscriptNoise } from "../../shared/internal-notification-turn"
 import { cleanUserAttachmentContentForDisplay } from "../../shared/user-attachment-display"
@@ -64,10 +64,21 @@ import {
 import { createChatSearchPlan, appendChatSearchToolSummaries } from "../../shared/chat-search-plan"
 import { iterateChatSearchLocations, projectChatSearchPlan } from "../../shared/chat-search-index"
 import type { ChatSearchLocation } from "../../shared/chat-search-types"
+import { searchDurableThreadMessages } from "../thread-search/durable-message-search"
+import {
+  decodeLegacyOverlapProofs, ensureLegacyCheckpointSourceIds, legacyCheckpointProviderIdentity, legacyPublicationSources,
+  MAX_LEGACY_OVERLAP_PROOFS, NATIVE_DURABLE_CHECKPOINT_ID, rebindLegacyOverlapProof
+} from "../checkpointer/legacy-checkpoint-source"
+import {
+  clampToolCalls,
+  isMessageRole,
+  normalizeMessageContent,
+  parseJsonValue,
+  THREAD_MESSAGE_TEXT_LIMIT
+} from "../../shared/thread-message-content"
 import type {
   Message,
   ThreadMessageWrite,
-  ThreadMessageSearchMatch,
   ThreadMessageSearchOptions,
   ThreadMessageSearchPage,
   ThreadMessagesPage,
@@ -124,14 +135,6 @@ interface ThreadMessageIdAlias {
 }
 const threadMessageIdAliases = new Map<string, Map<string, ThreadMessageIdAlias>>()
 
-const THREAD_MESSAGE_TEXT_LIMIT = 120_000
-const THREAD_MESSAGE_BLOCK_LIMIT = 80
-const THREAD_MESSAGE_BLOCK_TEXT_LIMIT = 60_000
-const THREAD_MESSAGE_JSON_STRING_LIMIT = 20_000
-const THREAD_MESSAGE_JSON_ARRAY_LIMIT = 100
-const THREAD_MESSAGE_JSON_OBJECT_KEY_LIMIT = 80
-const THREAD_MESSAGE_JSON_DEPTH_LIMIT = 6
-const THREAD_MESSAGE_TOOL_CALL_LIMIT = 50
 const THREAD_MESSAGE_ALIAS_LIMIT = 1_000
 const THREAD_MESSAGE_FRAGMENT_TEXT_LIMIT = 4_096
 const THREAD_SUBAGENT_TEXT_FRAGMENT_LIMIT = 4_096
@@ -140,17 +143,15 @@ const THREAD_SUBAGENT_TOOL_GROUP_LOOKBACK = 101
 export const DEFAULT_THREAD_MESSAGES_PAGE_LIMIT = 500
 const MAX_THREAD_MESSAGES_PAGE_LIMIT = 1_000
 export const THREAD_MESSAGES_PAGE_BYTE_BUDGET = 4 * 1024 * 1024
-export const DEFAULT_THREAD_MESSAGE_SEARCH_LIMIT = 50
-export const MAX_THREAD_MESSAGE_SEARCH_LIMIT = 100
-// Durable search runs synchronously in Electron's main process. Keep each IPC
-// window small enough that even rows at the 120k transcript limit cannot hold
-// the event loop for a perceptible interval; callers continue through the
-// compound cursor for older history.
-export const THREAD_MESSAGE_SEARCH_SCAN_LIMIT = 32
-export const THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET = 512 * 1024
-export const THREAD_MESSAGE_SEARCH_QUERY_LIMIT = 256
-export const THREAD_MESSAGE_SEARCH_PREVIEW_LIMIT = 320
-export const THREAD_MESSAGE_SEARCH_RESPONSE_BYTE_BUDGET = 128 * 1024
+export {
+  DEFAULT_THREAD_MESSAGE_SEARCH_LIMIT,
+  MAX_THREAD_MESSAGE_SEARCH_LIMIT,
+  THREAD_MESSAGE_SEARCH_SCAN_LIMIT,
+  THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET,
+  THREAD_MESSAGE_SEARCH_QUERY_LIMIT,
+  THREAD_MESSAGE_SEARCH_PREVIEW_LIMIT,
+  THREAD_MESSAGE_SEARCH_RESPONSE_BYTE_BUDGET
+} from "../thread-search/durable-message-search"
 // Mode changes run on Electron main. Inspect only a small prefix there; an
 // over-budget internal-only transcript is treated as unknown and therefore
 // locked, while the exact initial-hydration scan stays in the worker.
@@ -233,15 +234,6 @@ function safeJsonStringify(value: unknown): string {
   })
 }
 
-function parseJsonValue(raw: unknown): unknown {
-  if (typeof raw !== "string" || raw.trim() === "") return undefined
-  try {
-    return JSON.parse(raw)
-  } catch {
-    return undefined
-  }
-}
-
 function normalizeTimestamp(value: unknown, fallback: number | null = null): number | null {
   if (value instanceof Date) {
     const time = value.getTime()
@@ -262,95 +254,6 @@ function dateFromTimestamp(value: unknown): Date | undefined {
   if (millis === null) return undefined
   const date = new Date(millis)
   return Number.isFinite(date.getTime()) ? date : undefined
-}
-
-function truncateTranscriptString(value: string, limit: number): string {
-  if (value.length <= limit) return value
-  return `${value.slice(0, limit)}\n[truncated ${value.length - limit} chars]`
-}
-
-function summarizeJsonValue(value: unknown): unknown {
-  if (typeof value === "string")
-    return truncateTranscriptString(value, THREAD_MESSAGE_JSON_STRING_LIMIT)
-  if (Array.isArray(value)) return `[Array ${value.length}]`
-  if (value instanceof Date) return value.toISOString()
-  if (value && typeof value === "object") return "[Object]"
-  if (typeof value === "bigint") return value.toString()
-  if (typeof value === "function") return `[Function ${value.name || "anonymous"}]`
-  if (typeof value === "symbol") return value.toString()
-  return value
-}
-
-function clampJsonForTranscript(
-  value: unknown,
-  options: {
-    stringLimit: number
-    arrayLimit: number
-    objectKeyLimit: number
-    depthLimit: number
-  },
-  depth = 0,
-  seen = new WeakSet<object>()
-): unknown {
-  if (typeof value === "string") return truncateTranscriptString(value, options.stringLimit)
-  if (
-    value === null ||
-    value === undefined ||
-    typeof value === "number" ||
-    typeof value === "boolean"
-  ) {
-    return value
-  }
-  if (value instanceof Date) return value.toISOString()
-  if (typeof value === "bigint") return value.toString()
-  if (typeof value === "function") return `[Function ${value.name || "anonymous"}]`
-  if (typeof value === "symbol") return value.toString()
-  if (!value || typeof value !== "object") return value
-  if (seen.has(value)) return "[Circular]"
-  if (depth >= options.depthLimit) return summarizeJsonValue(value)
-
-  seen.add(value)
-  try {
-    if (Array.isArray(value)) {
-      const values = value
-        .slice(0, options.arrayLimit)
-        .map((item) => clampJsonForTranscript(item, options, depth + 1, seen))
-      if (value.length > options.arrayLimit) {
-        values.push(`[truncated ${value.length - options.arrayLimit} items]`)
-      }
-      return values
-    }
-
-    const output: Record<string, unknown> = {}
-    const entries = Object.entries(value).slice(0, options.objectKeyLimit)
-    for (const [key, nested] of entries) {
-      output[key] = clampJsonForTranscript(nested, options, depth + 1, seen)
-    }
-
-    const keyCount = Object.keys(value).length
-    if (keyCount > options.objectKeyLimit) {
-      output.__truncated_keys = keyCount - options.objectKeyLimit
-    }
-    return output
-  } finally {
-    seen.delete(value)
-  }
-}
-
-function normalizeMessageContent(content: unknown): Message["content"] {
-  if (typeof content === "string")
-    return truncateTranscriptString(content, THREAD_MESSAGE_TEXT_LIMIT)
-  if (Array.isArray(content)) {
-    return content.slice(0, THREAD_MESSAGE_BLOCK_LIMIT).map((block) =>
-      clampJsonForTranscript(block, {
-        stringLimit: THREAD_MESSAGE_BLOCK_TEXT_LIMIT,
-        arrayLimit: THREAD_MESSAGE_JSON_ARRAY_LIMIT,
-        objectKeyLimit: THREAD_MESSAGE_JSON_OBJECT_KEY_LIMIT,
-        depthLimit: THREAD_MESSAGE_JSON_DEPTH_LIMIT
-      })
-    ) as Message["content"]
-  }
-  return ""
 }
 
 function parseMessageContent(raw: unknown): Message["content"] {
@@ -384,18 +287,6 @@ function mergeMessageContent(
   }
 
   return normalizeMessageContent(incoming)
-}
-
-function clampToolCalls(value: unknown): Message["tool_calls"] {
-  if (!Array.isArray(value)) return undefined
-  return value.slice(0, THREAD_MESSAGE_TOOL_CALL_LIMIT).map((toolCall) =>
-    clampJsonForTranscript(toolCall, {
-      stringLimit: THREAD_MESSAGE_JSON_STRING_LIMIT,
-      arrayLimit: THREAD_MESSAGE_JSON_ARRAY_LIMIT,
-      objectKeyLimit: THREAD_MESSAGE_JSON_OBJECT_KEY_LIMIT,
-      depthLimit: THREAD_MESSAGE_JSON_DEPTH_LIMIT
-    })
-  ) as Message["tool_calls"]
 }
 
 function mergeToolCalls(
@@ -574,7 +465,8 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
   const dbPath = getDbPath()
   console.log("Initializing database at:", dbPath)
   threadMessageIdAliases.clear()
-  db = openNativeSqliteDatabase(dbPath, "DB").database
+  const opened = openNativeSqliteDatabase(dbPath, "DB")
+  db = opened.database
 
   // Create tables if they don't exist
   db.run(`
@@ -733,18 +625,7 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
     )
   `)
 
-  db.run(`
-    CREATE TABLE IF NOT EXISTS thread_graph_transcript_boundaries (
-      thread_id TEXT NOT NULL REFERENCES threads(thread_id) ON DELETE CASCADE,
-      graph_user_id TEXT NOT NULL,
-      ordinal INTEGER NOT NULL,
-      PRIMARY KEY(thread_id, graph_user_id)
-    )
-  `)
-  db.run(`
-    CREATE INDEX IF NOT EXISTS idx_thread_graph_transcript_boundaries_order
-    ON thread_graph_transcript_boundaries(thread_id, ordinal)
-  `)
+  ensureThreadGraphTranscriptBoundaries(db)
 
   db.run(`
     CREATE TABLE IF NOT EXISTS legacy_checkpoint_transcript_migrations (
@@ -753,6 +634,17 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
       total_messages INTEGER NOT NULL,
       next_index INTEGER NOT NULL,
       current_fragment_index INTEGER NOT NULL DEFAULT 0,
+      active_fragment_revision TEXT,
+      append_ordinal_base INTEGER,
+      ordinal_reservation TEXT,
+      source_key TEXT,
+      search_projection_state TEXT,
+      occurrence_unverified_version INTEGER,
+      occurrence_only INTEGER NOT NULL DEFAULT 0,
+      timing_checkpoint_id TEXT,
+      timing_source_prefix TEXT,
+      adopted_source_start INTEGER,
+      progress_key TEXT,
       status TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     )
@@ -766,6 +658,50 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
     )
   }
   ensureLegacyTranscriptSlots(db)
+  if (!legacyTranscriptMigrationColumns.some((column) => column[1] === "active_fragment_revision")) {
+    db.run("ALTER TABLE legacy_checkpoint_transcript_migrations ADD COLUMN active_fragment_revision TEXT")
+  }
+  if (!legacyTranscriptMigrationColumns.some((column) => column[1] === "append_ordinal_base")) {
+    db.run("ALTER TABLE legacy_checkpoint_transcript_migrations ADD COLUMN append_ordinal_base INTEGER")
+  }
+  if (!legacyTranscriptMigrationColumns.some((column) => column[1] === "ordinal_reservation")) {
+    db.run("ALTER TABLE legacy_checkpoint_transcript_migrations ADD COLUMN ordinal_reservation TEXT")
+  }
+  if (!legacyTranscriptMigrationColumns.some((column) => column[1] === "source_key")) {
+    db.run("ALTER TABLE legacy_checkpoint_transcript_migrations ADD COLUMN source_key TEXT")
+  }
+  if (!legacyTranscriptMigrationColumns.some((column) => column[1] === "search_projection_state")) {
+    db.run("ALTER TABLE legacy_checkpoint_transcript_migrations ADD COLUMN search_projection_state TEXT")
+  }
+  if (!legacyTranscriptMigrationColumns.some((column) => column[1] === "occurrence_unverified_version")) {
+    db.run("ALTER TABLE legacy_checkpoint_transcript_migrations ADD COLUMN occurrence_unverified_version INTEGER")
+  }
+  if (!legacyTranscriptMigrationColumns.some((column) => column[1] === "occurrence_only")) {
+    db.run("ALTER TABLE legacy_checkpoint_transcript_migrations ADD COLUMN occurrence_only INTEGER NOT NULL DEFAULT 0")
+  }
+  if (!legacyTranscriptMigrationColumns.some((column) => column[1] === "timing_checkpoint_id")) {
+    db.run("ALTER TABLE legacy_checkpoint_transcript_migrations ADD COLUMN timing_checkpoint_id TEXT")
+  }
+  if (!legacyTranscriptMigrationColumns.some((column) => column[1] === "timing_source_prefix")) {
+    db.run("ALTER TABLE legacy_checkpoint_transcript_migrations ADD COLUMN timing_source_prefix TEXT")
+  }
+  if (!legacyTranscriptMigrationColumns.some((column) => column[1] === "adopted_source_start")) {
+    db.run("ALTER TABLE legacy_checkpoint_transcript_migrations ADD COLUMN adopted_source_start INTEGER")
+  }
+  if (!legacyTranscriptMigrationColumns.some((column) => column[1] === "progress_key")) {
+    db.run("ALTER TABLE legacy_checkpoint_transcript_migrations ADD COLUMN progress_key TEXT")
+  }
+  if (opened.recovered) {
+    // The restored durable database may predate independently committed checkpoint files.
+    db.run("DELETE FROM legacy_checkpoint_transcript_migrations WHERE checkpoint_id = ?", [
+      NATIVE_DURABLE_CHECKPOINT_ID
+    ])
+  }
+  const database = db
+  ensureLegacyCheckpointSourceIds(database.run.bind(database), (table, name) => Boolean(
+    database.exec(`PRAGMA table_info(${table})`)[0]?.values
+      .some((row) => row[1] === name)
+  ))
 
   db.run(`
     CREATE TABLE IF NOT EXISTS thread_message_fragments (
@@ -1060,6 +996,9 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
   ensureUiGuideSchema(db)
   ensureManagedRunSchedulesSchema(db)
   ensureImServiceSchema(db)
+  installThreadSearchSchema(database, (table, column) => Boolean(
+    database.exec(`PRAGMA table_info(${table})`)[0]?.values.some((row) => row[1] === column)
+  ))
 
   migrateLegacyMemorySessionOptIn(db)
   saveToDisk()
@@ -1158,16 +1097,167 @@ function restoreThreadMessageTimes(
   }
 }
 
+const NATIVE_PUBLICATION_FIELDS = `content_key, provider_content_key, payload_content_key, source_turn_key,
+  published_checkpoint_id, source_declared_occurrence, merged_checkpoint_ids`
+const CHECKPOINT_RELOCATION_TABLES = ["legacy_checkpoint_transcript_imports", "legacy_checkpoint_search_overlaps"] as const
+
+function moveCheckpointOverlap(database: NativeSqliteAdapter, threadId: string, fromId: string, toId: string,
+  rebind?: { fromIdentity: string; toIdentity: string; mergedIdentity: string }): void {
+  const rows = database.exec(`SELECT message_id, projection_proof FROM legacy_checkpoint_search_overlaps
+    WHERE thread_id = ? AND message_id IN (?, ?)`, [threadId, fromId, toId])[0]?.values ?? []
+  const source = rows.find(([id]) => id === fromId)
+  const target = rows.find(([id]) => id === toId)
+  if (!source && (!target || !rebind)) return
+  const sourceProofs = source ? decodeLegacyOverlapProofs(source[1]) : []
+  const targetProofs = target ? decodeLegacyOverlapProofs(target[1]) : []
+  const proofs = new Map((rebind ? [
+    ...sourceProofs.map((proof) => rebindLegacyOverlapProof(proof, rebind.fromIdentity, rebind.mergedIdentity)),
+    ...targetProofs.map((proof) => rebindLegacyOverlapProof(proof, rebind.toIdentity, rebind.mergedIdentity))
+  ] : [...sourceProofs, ...targetProofs])
+    .map((proof) => [proof?.digest, proof]))
+  const known = [...proofs.values()].filter((proof) => proof !== null)
+  const bounded = known.slice(0, MAX_LEGACY_OVERLAP_PROOFS)
+  const merged = known.length > bounded.length || proofs.has(undefined) ? [...bounded, null] : bounded
+  database.run(`UPDATE legacy_checkpoint_search_overlaps SET message_id = ?, projection_proof = ?
+    WHERE thread_id = ? AND message_id = ?`, [toId, JSON.stringify(merged), threadId, target ? toId : fromId])
+  if (target && source) database.run(`DELETE FROM legacy_checkpoint_search_overlaps
+    WHERE thread_id = ? AND message_id = ?`, [threadId, fromId])
+}
+
+function readMessagePublication(database: NativeSqliteAdapter, threadId: string, id: string) {
+  const row = database.exec(`SELECT ${NATIVE_PUBLICATION_FIELDS}, owned_by_migration
+    FROM legacy_checkpoint_transcript_imports WHERE thread_id = ? AND message_id = ?`, [threadId, id])[0]?.values[0]
+  if (!row) return undefined
+  const [contentKey, providerKey, payloadKey, turnKey, checkpoint, declaredOccurrence, mergedCheckpoints, owned] = row
+  return { contentKey, providerKey, payloadKey, turnKey, checkpoint, declaredOccurrence, mergedCheckpoints, owned }
+}
+
+type NativePublication = Omit<NonNullable<ReturnType<typeof readMessagePublication>>, "owned">
+
+function restoreNativePublication(database: NativeSqliteAdapter, threadId: string, id: string,
+  publication: NativePublication) {
+  const { contentKey, providerKey, payloadKey, turnKey, checkpoint, declaredOccurrence, mergedCheckpoints } = publication
+  database.run(`INSERT INTO legacy_checkpoint_transcript_imports
+    (thread_id, message_id, owned_by_migration, ${NATIVE_PUBLICATION_FIELDS})
+    VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(thread_id, message_id) DO UPDATE SET
+      content_key = excluded.content_key, provider_content_key = excluded.provider_content_key,
+      payload_content_key = excluded.payload_content_key, source_turn_key = excluded.source_turn_key,
+      published_checkpoint_id = excluded.published_checkpoint_id,
+      source_declared_occurrence = excluded.source_declared_occurrence,
+      merged_checkpoint_ids = excluded.merged_checkpoint_ids
+    WHERE owned_by_migration = 0`,
+  [threadId, id, contentKey, providerKey, payloadKey, turnKey, checkpoint, declaredOccurrence, mergedCheckpoints])
+}
+
+function readActiveFragmentPreimage(database: NativeSqliteAdapter, threadId: string, id: string,
+  sameRowRename = false) {
+  const [checkpointId, nextIndex, fragments, progressKey, cursor, contentKey, mergeKey, current] = database.exec(`
+    SELECT m.checkpoint_id, m.next_index, m.current_fragment_index, m.progress_key,
+      m.active_fragment_revision, i.content_key,
+      json_extract(m.active_fragment_revision, '$[8]'),
+      json_extract(m.active_fragment_revision, '$[2]') IS COALESCE(v.version, 0)
+    FROM legacy_checkpoint_transcript_migrations AS m
+    JOIN thread_messages AS body ON body.thread_id = m.thread_id AND body.message_id = $id
+    LEFT JOIN legacy_checkpoint_transcript_imports AS i ON i.thread_id = m.thread_id AND i.message_id = $id
+    LEFT JOIN thread_search_message_versions AS v ON v.thread_id = m.thread_id AND v.message_id = $id
+    WHERE m.thread_id = $threadId AND m.status = 'migrating' AND m.current_fragment_index > 0
+      AND CASE WHEN json_valid(m.active_fragment_revision) THEN
+        json_extract(m.active_fragment_revision, '$[0]') = $id
+        AND json_extract(m.active_fragment_revision, '$[3]') = m.current_fragment_index
+        AND (
+          (json_extract(m.active_fragment_revision, '$[2]') = COALESCE(v.version, 0) AND
+            ((i.owned_by_migration = 1 AND i.partial_version = COALESCE(v.version, 0))
+              OR ($sameRowRename = 1 AND i.content_key IS NULL)))
+          OR (i.content_key IS NOT NULL AND json_extract(m.active_fragment_revision, '$[8]') = body.fork_replay_key)
+        ) END
+  `, { $threadId: threadId, $id: id, $sameRowRename: Number(sameRowRename) })[0]?.values[0] ?? []
+  return typeof checkpointId === "string" && typeof nextIndex === "number" &&
+    typeof fragments === "number" && typeof cursor === "string"
+    ? { id, checkpointId, nextIndex, fragments, progressKey, cursor,
+        contentKey: typeof contentKey === "string" ? contentKey : null,
+        mergeKey: typeof mergeKey === "string" ? mergeKey : null, current: current === 1 } : undefined
+}
+
+type ActiveFragmentPreimage = NonNullable<ReturnType<typeof readActiveFragmentPreimage>>
+
+function recordNativeActiveFragment(database: NativeSqliteAdapter, threadId: string,
+  id: string, replayKey: string, preimage: ActiveFragmentPreimage): void {
+  // A native write preserves the occurrence but replaces its fragment buffer.
+  // Keep its replay identity until recovery verifies the current payload.
+  database.run(`UPDATE legacy_checkpoint_transcript_migrations
+    SET active_fragment_revision = json_array(
+      ?, COALESCE((SELECT epoch FROM thread_search_structure_versions WHERE thread_id = ?), 0),
+      CASE WHEN ? = 1 THEN
+        COALESCE((SELECT version FROM thread_search_message_versions WHERE thread_id = ? AND message_id = ?), 0) END,
+      current_fragment_index, 0, NULL, json_extract(?, '$[6]'), NULL, ?),
+      updated_at = MAX(updated_at + 1, ?)
+    WHERE thread_id = ? AND checkpoint_id = ? AND progress_key IS ? AND status = 'migrating'
+      AND next_index = ? AND current_fragment_index = ?`,
+  [id, threadId, Number(preimage.current), threadId, id, preimage.cursor, replayKey, Date.now(), threadId,
+    preimage.checkpointId, preimage.progressKey ?? null, preimage.nextIndex, preimage.fragments])
+}
+
+function restoreActiveFragmentPreimage(database: NativeSqliteAdapter, threadId: string,
+  id: string, preimage: ActiveFragmentPreimage, attemptedId: string | undefined): void {
+  const stamp = database.exec(`SELECT COALESCE(e.epoch, 0), COALESCE(v.version, 0), m.fork_replay_key
+    FROM thread_messages AS m LEFT JOIN thread_search_structure_versions AS e USING (thread_id)
+    LEFT JOIN thread_search_message_versions AS v USING (thread_id, message_id)
+    WHERE m.thread_id = ? AND m.message_id = ?`, [threadId, id])[0]?.values[0]
+  if (!stamp) return
+  const [epoch, version, replayKey] = stamp
+  if (preimage.mergeKey !== null && preimage.mergeKey !== replayKey) return
+  database.run(`UPDATE legacy_checkpoint_transcript_migrations
+    SET active_fragment_revision = json_set(
+      CASE WHEN json_array_length($cursor) > 7 THEN json_set($cursor, '$[7]', NULL) ELSE $cursor END,
+      '$[0]', $id, '$[1]', $epoch, '$[2]', $version),
+      updated_at = MAX(updated_at + 1, $now)
+    WHERE thread_id = $thread AND checkpoint_id = $checkpoint AND next_index = $nextIndex
+      AND current_fragment_index = $fragments AND status = 'migrating' AND progress_key IS $progress
+      AND (active_fragment_revision IS NULL OR CASE WHEN json_valid(active_fragment_revision) THEN
+        json_extract(active_fragment_revision, '$[0]') IN ($priorId, $attemptedId, $id) END)
+      AND ($contentKey IS NULL OR EXISTS (SELECT 1 FROM legacy_checkpoint_transcript_imports
+        WHERE thread_id = $thread AND message_id = $id AND content_key = $contentKey
+          AND (owned_by_migration = 1 OR $merged = 1)))
+  `, {
+    $cursor: preimage.cursor, $id: id, $epoch: epoch, $version: preimage.current ? version : null,
+    $now: Date.now(), $thread: threadId, $checkpoint: preimage.checkpointId, $nextIndex: preimage.nextIndex,
+    $fragments: preimage.fragments, $progress: preimage.progressKey ?? null, $priorId: preimage.id,
+    $attemptedId: attemptedId ?? id, $contentKey: preimage.contentKey, $merged: Number(preimage.mergeKey !== null)
+  })
+  if (database.getRowsModified() === 1 && preimage.contentKey !== null && preimage.mergeKey === null) {
+    database.run(`UPDATE legacy_checkpoint_transcript_imports
+      SET partial_version = ?, rewrite_progress = NULL WHERE thread_id = ? AND message_id = ?`,
+    [version, threadId, id])
+  }
+}
+
 /** Undo only rows written since the last graph values boundary, using resolved DB ids.
  * Each preimage is read once; ordinary text suffix flushes keep their bounded append path.
  */
+interface ThreadMessageStreamPreimage {
+  row: ThreadMessageRow
+  publication?: NativePublication
+  fragments: NativeSqliteValue[][]
+  fragmentState?: NativeSqliteValue[]
+  activeFragment?: ActiveFragmentPreimage
+}
+
 export class ThreadMessageStreamAttempt {
-  private readonly before = new Map<string, ThreadMessageRow | null>()
+  private readonly before = new Map<string, ThreadMessageStreamPreimage | null>()
+  private readonly relocated = new Map<string, NativeSqliteExecResult[]>()
   private readonly renamedIds = new Map<string, string>()
   private readonly originalIds = new Map<string, string>()
   private readonly writtenTimes = new Map<string, ThreadMessageTimes>()
 
   constructor(private readonly threadId: string) {}
+
+  captureRelocation(messageId: string): void {
+    this.capture(messageId)
+    if (this.relocated.has(messageId)) return
+    const database = getDb()
+    this.relocated.set(messageId, CHECKPOINT_RELOCATION_TABLES.map((table) =>
+      database.exec(`SELECT * FROM ${table} WHERE thread_id = ? AND message_id = ?`, [this.threadId, messageId])[0]))
+  }
 
   capture(messageId: string): void {
     if (this.before.has(messageId)) return
@@ -1177,16 +1267,19 @@ export class ThreadMessageStreamAttempt {
       this.before.set(messageId, null)
       return
     }
-    // Fold pre-existing fragments into the preimage once so restoring the row
-    // preserves text without keeping a second fragment journal.
-    const content = parseMessageContent(row.content_json)
-    const suffix =
-      typeof content === "string"
-        ? getThreadMessageTextFragments(database, this.threadId, [messageId]).get(messageId)
-        : undefined
+    // Retain the published generation and original cuts. Folding a large
+    // preimage into one row would bypass the normal bounded fragment reads.
+    const fragments = database.exec(`SELECT content_text, created_at, generation
+      FROM thread_message_fragments AS f WHERE thread_id = ? AND message_id = ?
+      AND ${publishedThreadMessageFragmentsSql("f")} ORDER BY fragment_id`, [this.threadId, messageId])[0]?.values ?? []
+    const fragmentState = database.exec(`SELECT total_chars, updated_at FROM thread_message_fragment_states
+      WHERE thread_id = ? AND message_id = ?`, [this.threadId, messageId])[0]?.values[0]
+    const publication = readMessagePublication(database, this.threadId, messageId)
     this.before.set(messageId, {
-      ...row,
-      content_json: suffix ? safeJsonStringify(`${content}${suffix}`) : row.content_json
+      row, fragments, fragmentState,
+      publication: publication?.owned === 0 ? publication : undefined,
+      activeFragment: publication
+        ? readActiveFragmentPreimage(database, this.threadId, messageId) : undefined
     })
   }
 
@@ -1207,7 +1300,7 @@ export class ThreadMessageStreamAttempt {
     previous: ThreadMessageTimes,
     times: ThreadMessageTimes
   ): void {
-    const preimage = this.before.get(this.originalIds.get(messageId) ?? messageId)
+    const preimage = this.before.get(this.originalIds.get(messageId) ?? messageId)?.row
     if (!preimage) return
     const lastWrite = this.writtenTimes.get(messageId) ?? preimage
     Object.assign(preimage, restoreThreadMessageTimes(preimage, previous, lastWrite))
@@ -1220,18 +1313,20 @@ export class ThreadMessageStreamAttempt {
     if (this.before.size === 0) return { discardedMessageIds, restoredMessages }
     const database = getDb()
     database.withImmediateWriteTransaction(() => {
+      const restoredIds = new Map<string, string>()
       const currentRows = getThreadMessageRows(database, this.threadId, [...this.before.keys()])
-      const rowKeys = [...this.before.values()].flatMap((row) =>
-        row?.fork_replay_key ? [row.fork_replay_key] : []
+      const rowKeys = [...this.before.values()].flatMap((preimage) =>
+        preimage?.row.fork_replay_key ? [preimage.row.fork_replay_key] : []
       )
       const liveByKey = getThreadMessageRows(database, this.threadId, rowKeys, "fork_replay_key")
-      const preimages = new Map<string, ThreadMessageRow | null>()
+      const preimages = new Map<string, ThreadMessageStreamPreimage | null>()
       const seenKeys = new Set<string>()
-      for (const [id, row] of this.before) {
-        if (!row) {
+      for (const [id, preimage] of this.before) {
+        if (!preimage) {
           preimages.set(id, null)
           continue
         }
+        const { row } = preimage
         const key = row.fork_replay_key
         if (key && seenKeys.has(key)) continue
         if (key) seenKeys.add(key)
@@ -1243,7 +1338,7 @@ export class ThreadMessageStreamAttempt {
           forkRow &&
           forkRow.message_id !== id &&
           forkRow.message_id !== journalId &&
-          (destination === undefined || destination?.fork_replay_key === key)
+          (destination === undefined || destination?.row.fork_replay_key === key)
         const live =
           forkRow && (externalRename || forkRow.message_id === id || forkRow.message_id === journalId)
             ? forkRow
@@ -1264,7 +1359,8 @@ export class ThreadMessageStreamAttempt {
           restored.provider_occurrence = forkRow.provider_occurrence
           currentRows.set(forkRow.message_id, forkRow)
         }
-        preimages.set(restored.message_id, restored)
+        restoredIds.set(id, restored.message_id)
+        preimages.set(restored.message_id, { ...preimage, row: restored })
       }
 
       let removedCount = 0
@@ -1291,15 +1387,25 @@ export class ThreadMessageStreamAttempt {
           id
         ])
       }
-      for (const row of preimages.values()) {
-        if (!row) continue
+      for (const preimage of preimages.values()) {
+        if (!preimage) continue
+        const { row, publication, fragments, fragmentState } = preimage
+        const id = row.message_id
         const columns = Object.keys(row)
         database.run(
           `INSERT INTO thread_messages (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
           Object.values(row)
         )
+        for (const fragment of fragments) {
+          database.run(`INSERT INTO thread_message_fragments
+            (thread_id, message_id, content_text, created_at, generation) VALUES (?, ?, ?, ?, ?)`,
+            [this.threadId, id, ...fragment])
+        }
+        if (fragmentState) database.run(`INSERT INTO thread_message_fragment_states
+          (thread_id, message_id, total_chars, updated_at) VALUES (?, ?, ?, ?)`, [this.threadId, id, ...fragmentState])
+        if (publication) restoreNativePublication(database, this.threadId, id, publication)
         if (row.fork_replay_key) removedKeys.delete(row.fork_replay_key)
-        restoredMessages.push(threadMessageRowToMessage(row))
+        restoredMessages.push(threadMessageRowToMessage(row, fragments.map(([content]) => content).join("")))
       }
       for (const key of removedKeys) {
         database.run(
@@ -1309,6 +1415,26 @@ export class ThreadMessageStreamAttempt {
            AND NOT EXISTS (SELECT 1 FROM thread_fork_replay_merges WHERE thread_id = ? AND source_key = ?)`,
           [this.threadId, key, this.threadId, key, this.threadId, key]
         )
+      }
+      for (const [sourceId, proofRows] of this.relocated) {
+        const id = restoredIds.get(sourceId) ?? sourceId
+        for (const [index, table] of CHECKPOINT_RELOCATION_TABLES.entries()) {
+          database.run(`DELETE FROM ${table} WHERE thread_id = ? AND message_id = ?`, [this.threadId, id])
+          const proof = proofRows[index]
+          const values = proof?.values[0]
+          if (!values) continue
+          const { columns } = proof
+          // Rollback restores the published generation, not an interrupted
+          // private replacement or its old version-bound cursor.
+          database.run(`INSERT INTO ${table} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
+            values.map((value, column) => columns[column] === "message_id" ? id :
+              ["partial_version", "rewrite_progress"].includes(columns[column]) ? null : value))
+        }
+      }
+      for (const preimage of preimages.values()) {
+        if (!preimage?.activeFragment) continue
+        restoreActiveFragmentPreimage(database, this.threadId, preimage.row.message_id,
+          preimage.activeFragment, this.renamedIds.get(preimage.activeFragment.id))
       }
       // Keep next_ordinal monotonic. Other messages (for example injected user
       // input) can have arrived since this attempt began and must stay intact.
@@ -1321,13 +1447,10 @@ export class ThreadMessageStreamAttempt {
     this.renamedIds.clear()
     this.originalIds.clear()
     this.writtenTimes.clear()
+    this.relocated.clear()
     saveToDisk()
     return { discardedMessageIds, restoredMessages }
   }
-}
-
-function isMessageRole(value: unknown): value is Message["role"] {
-  return value === "user" || value === "assistant" || value === "system" || value === "tool"
 }
 
 export function normalizeThreadMessageInput(
@@ -1627,10 +1750,10 @@ function getThreadMessageTextFragments(
     const batch = uniqueIds.slice(offset, offset + maxIdsPerQuery)
     const placeholders = batch.map(() => "?").join(", ")
     const stmt = database.prepare(
-      `SELECT message_id, content_text
-       FROM thread_message_fragments
-       WHERE thread_id = ? AND message_id IN (${placeholders})
-       ORDER BY message_id ASC, fragment_id ASC`
+      `SELECT f.message_id, f.content_text
+       FROM thread_message_fragments AS f
+       WHERE f.thread_id = ? AND f.message_id IN (${placeholders}) AND ${publishedThreadMessageFragmentsSql("f")}
+       ORDER BY f.message_id ASC, f.fragment_id ASC`
     )
     stmt.bind([threadId, ...batch])
     try {
@@ -2093,19 +2216,21 @@ export function hasVisibleThreadMessages(threadId: string): boolean {
 
 export function getThreadMessages(threadId: string): Message[] {
   const database = getDb()
-  const stmt = database.prepare(
-    "SELECT * FROM thread_messages WHERE thread_id = ? ORDER BY ordinal ASC, created_at ASC, message_id ASC"
-  )
-  stmt.bind([threadId])
-  const rows: ThreadMessageRow[] = []
-  try {
-    while (stmt.step()) {
-      rows.push(stmt.getAsObject() as unknown as ThreadMessageRow)
+  return database.withReadSnapshot(() => {
+    const stmt = database.prepare(
+      "SELECT * FROM thread_messages WHERE thread_id = ? ORDER BY ordinal ASC, created_at ASC, message_id ASC"
+    )
+    stmt.bind([threadId])
+    const rows: ThreadMessageRow[] = []
+    try {
+      while (stmt.step()) {
+        rows.push(stmt.getAsObject() as unknown as ThreadMessageRow)
+      }
+    } finally {
+      stmt.free()
     }
-  } finally {
-    stmt.free()
-  }
-  return threadMessageRowsToMessages(database, threadId, rows)
+    return threadMessageRowsToMessages(database, threadId, rows)
+  })
 }
 
 function normalizeThreadMessagesPageLimit(limit: number | undefined): number {
@@ -2133,6 +2258,11 @@ export function getThreadMessagesPage(
   options: ThreadMessagesPageOptions = {}
 ): ThreadMessagesPage {
   const database = getDb()
+  return database.withReadSnapshot(() => readThreadMessagesPage(database, threadId, options))
+}
+
+function readThreadMessagesPage(database: ReturnType<typeof getDb>, threadId: string,
+  options: ThreadMessagesPageOptions): ThreadMessagesPage {
   const limit = normalizeThreadMessagesPageLimit(options.limit)
   const byteBudget = normalizeThreadMessagesPageByteBudget(options.byteBudget)
   const hasBeforeOrdinal =
@@ -2254,7 +2384,7 @@ export function getThreadMessagesPage(
          LEFT JOIN thread_message_fragment_states AS fragments
            ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
          WHERE m.thread_id = ?
-           AND (m.ordinal < ? OR (m.ordinal = ? AND m.message_id < ?))
+           ${THREAD_MESSAGE_BEFORE_CURSOR_SQL}
          ORDER BY m.ordinal DESC, m.message_id DESC
          LIMIT ?`
           )
@@ -2283,9 +2413,7 @@ export function getThreadMessagesPage(
         : hasBeforeOrdinal
           ? [
               threadId,
-              options.beforeOrdinal,
-              options.beforeOrdinal,
-              normalizedBeforeMessageId,
+              ...threadMessageBeforeCursorBindings(threadId, normalizedBeforeMessageId, options.beforeOrdinal!),
               limit + 1
             ]
           : [threadId, limit + 1]
@@ -2355,439 +2483,13 @@ export function getThreadMessagesPage(
   }
 }
 
-function normalizeThreadMessageSearchLimit(limit: number | undefined): number {
-  if (!Number.isFinite(limit) || limit === undefined || limit <= 0) {
-    return DEFAULT_THREAD_MESSAGE_SEARCH_LIMIT
-  }
-  return Math.min(MAX_THREAD_MESSAGE_SEARCH_LIMIT, Math.max(1, Math.floor(limit)))
-}
-
-interface ThreadMessageSearchCandidate {
-  messageId: string
-  ordinal: number
-  role: ThreadMessageRole
-  createdAt: number
-  contentJson: string
-  toolCallsJson: string | null
-  toolCallsTruncated: boolean
-}
-
-
-
-function parseThreadMessageSearchJson(raw: string | null): {
-  valid: boolean
-  value: unknown
-} {
-  if (raw === null || raw === "") return { valid: false, value: undefined }
-  try {
-    return { valid: true, value: JSON.parse(raw) }
-  } catch {
-    return { valid: false, value: undefined }
-  }
-}
-
-/**
- * Search one bounded durable-transcript window. SQLite reads compact headers
- * first; only a candidate/byte-bounded suffix is projected and inspected. Empty
- * match pages can still carry a cursor, so callers continue toward older messages
- * until `hasMore` is false without one IPC blocking on the whole transcript.
- */
 export function searchThreadMessages(
   threadId: string,
-  rawQuery: string,
-  options: ThreadMessageSearchOptions = {}
+  query: string,
+  options?: ThreadMessageSearchOptions
 ): ThreadMessageSearchPage {
-  const normalizedThreadId = typeof threadId === "string" ? threadId.trim() : ""
-  const query = typeof rawQuery === "string" ? rawQuery.trim().toLowerCase() : ""
-  if (query.length > THREAD_MESSAGE_SEARCH_QUERY_LIMIT) {
-    throw new RangeError(
-      `Thread message search query exceeds ${THREAD_MESSAGE_SEARCH_QUERY_LIMIT} characters`
-    )
-  }
-  if (!normalizedThreadId || !query) {
-    return {
-      matches: [],
-      beforeOrdinal: null,
-      beforeMessageId: null,
-      hasMore: false,
-      scanned: 0,
-      truncated: false
-    }
-  }
-
-  const hasBeforeOrdinal =
-    Number.isSafeInteger(options.beforeOrdinal) && (options.beforeOrdinal ?? -1) >= 0
-  const normalizedBeforeMessageId = options.beforeMessageId?.trim() ?? ""
-  const hasBeforeMessageId = normalizedBeforeMessageId.length > 0
-  if (hasBeforeOrdinal !== hasBeforeMessageId) {
-    throw new Error(
-      "Thread message search cursor requires beforeOrdinal and beforeMessageId together"
-    )
-  }
-
   const database = getDb()
-  const cursorPredicate = hasBeforeOrdinal
-    ? "AND (m.ordinal < ? OR (m.ordinal = ? AND m.message_id < ?))"
-    : ""
-  const cursorBindings: Array<string | number> = hasBeforeOrdinal
-    ? [
-        normalizedThreadId,
-        options.beforeOrdinal!,
-        options.beforeOrdinal!,
-        normalizedBeforeMessageId
-      ]
-    : [normalizedThreadId]
-
-  // Read only compact headers here. The extra row establishes whether another
-  // bounded scan window exists without touching its content_json value.
-  const candidateStatement = database.prepare(
-    `SELECT
-       m.message_id,
-       m.ordinal,
-       1024
-         + length(CAST(m.content_json AS BLOB))
-         + length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB))
-         + COALESCE(fragments.total_chars * 4, 0) AS estimated_bytes,
-       1024
-         + length(CAST(m.content_json AS BLOB))
-         + COALESCE(fragments.total_chars * 4, 0) AS content_estimated_bytes
-     FROM thread_messages AS m
-     LEFT JOIN thread_message_fragment_states AS fragments
-       ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
-     WHERE m.thread_id = ?
-       ${cursorPredicate}
-     ORDER BY m.ordinal DESC, m.message_id DESC
-     LIMIT ?`
-  )
-  candidateStatement.bind([...cursorBindings, THREAD_MESSAGE_SEARCH_SCAN_LIMIT + 1])
-  const candidateHeaders: Array<{
-    messageId: string
-    ordinal: number
-    estimatedBytes: number
-    contentEstimatedBytes: number
-  }> = []
-  try {
-    while (candidateStatement.step()) {
-      const row = candidateStatement.getAsObject() as {
-        message_id?: unknown
-        ordinal?: unknown
-        estimated_bytes?: unknown
-        content_estimated_bytes?: unknown
-      }
-      if (typeof row.message_id !== "string") continue
-      candidateHeaders.push({
-        messageId: row.message_id,
-        ordinal: Number(row.ordinal) || 0,
-        estimatedBytes: Math.max(0, Number(row.estimated_bytes) || 0),
-        contentEstimatedBytes: Math.max(0, Number(row.content_estimated_bytes) || 0)
-      })
-    }
-  } finally {
-    candidateStatement.free()
-  }
-
-  const firstCandidate = candidateHeaders[0]
-  if (
-    firstCandidate &&
-    firstCandidate.estimatedBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET &&
-    firstCandidate.contentEstimatedBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET
-  ) {
-    // A single legal structured message can be larger than the per-call budget. Parsing it would
-    // put an unbounded synchronous burst on Electron's main thread. Skip this row transparently
-    // and continue from the next ordinal; `truncated` keeps this visible to the renderer.
-    const hasMore = candidateHeaders.length > 1
-    return {
-      matches: [],
-      beforeOrdinal: hasMore ? firstCandidate.ordinal : null,
-      beforeMessageId: hasMore ? firstCandidate.messageId : null,
-      hasMore,
-      scanned: 1,
-      truncated: true
-    }
-  }
-
-  const selectedCandidates: typeof candidateHeaders = []
-  let selectedCandidateBytes = 0
-  for (const candidate of candidateHeaders) {
-    if (selectedCandidates.length >= THREAD_MESSAGE_SEARCH_SCAN_LIMIT) break
-    const searchableCandidateBytes =
-      candidate.estimatedBytes <= THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET
-        ? candidate.estimatedBytes
-        : candidate.contentEstimatedBytes
-    if (searchableCandidateBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET) break
-    if (
-      selectedCandidates.length > 0 &&
-      selectedCandidateBytes + searchableCandidateBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET
-    ) {
-      break
-    }
-    selectedCandidates.push(candidate)
-    selectedCandidateBytes += searchableCandidateBytes
-  }
-  if (selectedCandidates.length === 0) {
-    return {
-      matches: [],
-      beforeOrdinal: null,
-      beforeMessageId: null,
-      hasMore: false,
-      scanned: 0,
-      truncated: false
-    }
-  }
-
-  const limit = normalizeThreadMessageSearchLimit(options.limit)
-  const candidateRowsStatement = database.prepare(
-    `SELECT
-       m.message_id,
-       m.ordinal,
-       m.role,
-       m.created_at,
-       m.content_json,
-       CASE
-         WHEN 1024
-           + length(CAST(m.content_json AS BLOB))
-           + length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB))
-           + COALESCE(fragments.total_chars * 4, 0) <= ?
-         THEN m.tool_calls_json
-         ELSE NULL
-       END AS tool_calls_json,
-       CASE
-         WHEN m.tool_calls_json IS NOT NULL AND 1024
-           + length(CAST(m.content_json AS BLOB))
-           + length(CAST(m.tool_calls_json AS BLOB))
-           + COALESCE(fragments.total_chars * 4, 0) > ?
-         THEN 1
-         ELSE 0
-       END AS tool_calls_truncated
-     FROM thread_messages AS m
-     LEFT JOIN thread_message_fragment_states AS fragments
-       ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
-     WHERE m.thread_id = ?
-       ${cursorPredicate}
-     ORDER BY m.ordinal DESC, m.message_id DESC
-     LIMIT ?`
-  )
-  candidateRowsStatement.bind([
-    THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET,
-    THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET,
-    ...cursorBindings,
-    selectedCandidates.length
-  ])
-  const candidates: ThreadMessageSearchCandidate[] = []
-  try {
-    while (candidateRowsStatement.step()) {
-      const row = candidateRowsStatement.getAsObject() as {
-        message_id?: unknown
-        ordinal?: unknown
-        role?: unknown
-        created_at?: unknown
-        content_json?: unknown
-        tool_calls_json?: unknown
-        tool_calls_truncated?: unknown
-      }
-      if (
-        typeof row.message_id !== "string" ||
-        !isMessageRole(row.role) ||
-        typeof row.content_json !== "string"
-      ) {
-        continue
-      }
-      candidates.push({
-        messageId: row.message_id,
-        ordinal: Number(row.ordinal) || 0,
-        role: row.role,
-        createdAt: Number(row.created_at) || 0,
-        contentJson: row.content_json,
-        toolCallsJson: typeof row.tool_calls_json === "string" ? row.tool_calls_json : null,
-        toolCallsTruncated: Number(row.tool_calls_truncated) === 1
-      })
-    }
-  } finally {
-    candidateRowsStatement.free()
-  }
-
-  const headersById = new Map(
-    selectedCandidates.map((candidate, index) => [candidate.messageId, { candidate, index }])
-  )
-  const fragmentStatement = database.prepare(
-    `SELECT f.content_text
-     FROM thread_message_fragments AS f
-     WHERE f.thread_id = ? AND f.message_id = ?
-     ORDER BY f.fragment_id ASC`
-  )
-  const rawMatches: ThreadMessageSearchMatch[] = []
-  let inspectedBytes = 0
-  let advancedCandidateCount = 0
-  let lastAdvancedCandidate: (typeof selectedCandidates)[number] | null = null
-  let truncatedRows = false
-  try {
-    for (const candidate of candidates) {
-      const header = headersById.get(candidate.messageId)
-      if (!header) continue
-      const baseBytes =
-        1024 +
-        Buffer.byteLength(candidate.contentJson, "utf8") +
-        Buffer.byteLength(candidate.toolCallsJson ?? "", "utf8")
-      if (candidate.toolCallsTruncated) truncatedRows = true
-
-      if (baseBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET) {
-        truncatedRows = true
-        advancedCandidateCount = header.index + 1
-        lastAdvancedCandidate = header.candidate
-        continue
-      }
-
-      const parsedContent = parseThreadMessageSearchJson(candidate.contentJson)
-      if (candidate.role === "tool") {
-        // Completed tool details are folded and have no independent message row in the DOM.
-        advancedCandidateCount = header.index + 1
-        lastAdvancedCandidate = header.candidate
-        continue
-      }
-
-      const fragments: string[] = []
-      let candidateBytes = baseBytes
-      // Hydration appends fragments only to string content. Rebuild that same bounded value before
-      // applying display filters so a split attachment/internal marker cannot leak into search.
-      if (parsedContent.valid && typeof parsedContent.value === "string") {
-        fragmentStatement.bind([normalizedThreadId, candidate.messageId])
-        while (fragmentStatement.step()) {
-          const row = fragmentStatement.getAsObject() as { content_text?: unknown }
-          if (typeof row.content_text !== "string") continue
-          candidateBytes += Buffer.byteLength(row.content_text, "utf8")
-          if (candidateBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET) break
-          fragments.push(row.content_text)
-        }
-      }
-
-      if (candidateBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET) {
-        truncatedRows = true
-        advancedCandidateCount = header.index + 1
-        lastAdvancedCandidate = header.candidate
-        continue
-      }
-
-      const storedContent = parsedContent.valid ? normalizeMessageContent(parsedContent.value) : ""
-      const appendedContent =
-        typeof storedContent === "string" && fragments.length > 0
-          ? `${storedContent}${fragments.join("")}`
-          : storedContent
-      const hydratedContent =
-        fragments.length > 0 ? normalizeMessageContent(appendedContent) : storedContent
-      if (parsedContent.valid && !isVisibleTranscriptMessage(candidate.role, hydratedContent)) {
-        // Search and targeted hydration must use the same transcript visibility boundary.
-        // Otherwise an internal goal/workflow row can be returned as a match and then be
-        // discarded by the renderer, leaving the viewport on an unrelated message.
-        advancedCandidateCount = header.index + 1
-        lastAdvancedCandidate = header.candidate
-        continue
-      }
-
-      const toolCalls = parseToolCalls(candidate.toolCallsJson)
-      const displayCandidateContent =
-        candidate.role === "user" && typeof hydratedContent === "string"
-          ? cleanUserAttachmentContentForDisplay(hydratedContent)
-          : hydratedContent
-      const coordinatorProjection = projectCoordinatorTranscriptNoise(
-        candidate.role,
-        displayCandidateContent,
-        toolCalls
-      )
-      if (coordinatorProjection.hidden) {
-        advancedCandidateCount = header.index + 1
-        lastAdvancedCandidate = header.candidate
-        continue
-      }
-
-      if (inspectedBytes + candidateBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET) break
-      inspectedBytes += candidateBytes
-
-      const searchPlan = createChatSearchPlan(
-        candidate.role,
-        coordinatorProjection.contentChanged
-          ? coordinatorProjection.contentText
-          : displayCandidateContent
-      )
-      appendChatSearchToolSummaries(searchPlan, coordinatorProjection.visibleToolCalls ?? [])
-      const projectedSegments = projectChatSearchPlan(searchPlan)
-      if (searchPlan.truncated) truncatedRows = true
-      const found = iterateChatSearchLocations(projectedSegments, query, 1001)
-      // Budget individual locations before constructing a possibly oversized first response row.
-      const locations: ChatSearchLocation[] = []
-      let locationBytes = 0
-      for (const location of found) {
-        const bytes = Buffer.byteLength(JSON.stringify(location), "utf8") + 1
-        if (locationBytes + bytes > 48 * 1024 || locations.length >= 1000) {
-          truncatedRows = true
-          break
-        }
-        locations.push(location)
-        locationBytes += bytes
-      }
-      const occurrenceCount = locations.length
-      const preview = locations[0]?.context.slice(0, THREAD_MESSAGE_SEARCH_PREVIEW_LIMIT) ?? ""
-
-      advancedCandidateCount = header.index + 1
-      lastAdvancedCandidate = header.candidate
-      if (occurrenceCount > 0) {
-        rawMatches.push({
-          messageId: candidate.messageId,
-          ordinal: candidate.ordinal,
-          role: candidate.role,
-          createdAt: candidate.createdAt,
-          occurrenceCount,
-          locations,
-          preview
-        })
-        if (rawMatches.length >= limit + 1) break
-      }
-    }
-  } finally {
-    fragmentStatement.free()
-  }
-
-  // Reserve envelope/cursor space, then measure exact JSON bytes for every
-  // returned match. This keeps renderer IPC bounded even for escape-heavy text.
-  const matches: ThreadMessageSearchMatch[] = []
-  let responseBytes = 8 * 1024
-  let truncatedMatches = false
-  for (const match of rawMatches) {
-    if (matches.length >= limit) {
-      truncatedMatches = true
-      break
-    }
-    const matchBytes = Buffer.byteLength(JSON.stringify(match), "utf8") + 1
-    if (
-      matches.length > 0 &&
-      responseBytes + matchBytes > THREAD_MESSAGE_SEARCH_RESPONSE_BYTE_BUDGET
-    ) {
-      truncatedMatches = true
-      break
-    }
-    matches.push(match)
-    responseBytes += matchBytes
-  }
-  if (rawMatches.length > matches.length) truncatedMatches = true
-
-  let beforeOrdinal: number | null = null
-  let beforeMessageId: string | null = null
-  if (truncatedMatches && matches.length > 0) {
-    const lastMatch = matches[matches.length - 1]
-    beforeOrdinal = lastMatch.ordinal
-    beforeMessageId = lastMatch.messageId
-  } else if (lastAdvancedCandidate && candidateHeaders.length > advancedCandidateCount) {
-    beforeOrdinal = lastAdvancedCandidate.ordinal
-    beforeMessageId = lastAdvancedCandidate.messageId
-  }
-
-  return {
-    matches,
-    beforeOrdinal,
-    beforeMessageId,
-    hasMore: beforeOrdinal !== null && beforeMessageId !== null,
-    scanned: advancedCandidateCount,
-    truncated: truncatedRows
-  }
+  return database.withReadSnapshot(() => searchDurableThreadMessages(database, threadId, query, options))
 }
 
 interface ThreadSubagentMessageRow {
@@ -4443,16 +4145,18 @@ export function forEachThreadSubagentManifestJson(visit: (manifestJson: string) 
 
 export function getThreadMessagesByIds(threadId: string, messageIds: readonly string[]): Message[] {
   const database = getDb()
-  const rows = getThreadMessageRows(database, threadId, messageIds)
-  const orderedRows: ThreadMessageRow[] = []
-  const seen = new Set<string>()
-  for (const messageId of messageIds) {
-    if (!messageId || seen.has(messageId)) continue
-    seen.add(messageId)
-    const row = rows.get(messageId)
-    if (row) orderedRows.push(row)
-  }
-  return threadMessageRowsToMessages(database, threadId, orderedRows)
+  return database.withReadSnapshot(() => {
+    const rows = getThreadMessageRows(database, threadId, messageIds)
+    const orderedRows: ThreadMessageRow[] = []
+    const seen = new Set<string>()
+    for (const messageId of messageIds) {
+      if (!messageId || seen.has(messageId)) continue
+      seen.add(messageId)
+      const row = rows.get(messageId)
+      if (row) orderedRows.push(row)
+    }
+    return threadMessageRowsToMessages(database, threadId, orderedRows)
+  })
 }
 
 /** Source-only lookup for a mounted user row; it never hydrates transcript contents. */
@@ -4518,6 +4222,15 @@ export function getThreadMessagesForForkReplay(
   matchesDigest: (message: Message, digest: string) => boolean
 ): Message[] | undefined {
   const database = getDb()
+  return database.withReadSnapshot(() => readThreadMessagesForForkReplay(database, threadId, references, matchesDigest))
+}
+
+function readThreadMessagesForForkReplay(
+  database: NativeSqliteAdapter,
+  threadId: string,
+  references: readonly ForkDurableTailReference[],
+  matchesDigest: (message: Message, digest: string) => boolean
+): Message[] | undefined {
   const directIds = references.flatMap((ref) => "digest" in ref ? [ref.id] : [])
   const directKeys = references.flatMap((ref) => "key" in ref ? [ref.key] : [])
   const byId = getThreadMessageRows(database, threadId, directIds)
@@ -4620,8 +4333,10 @@ export function withThreadMessageIdentitySnapshot<T>(operation: () => T): T {
 
 export function hasUnresolvedLegacyTranscriptSlots(threadId: string): boolean {
   const stmt = getDb().prepare(
-    `SELECT 1 FROM legacy_checkpoint_transcript_slots
-     WHERE thread_id = ? AND provider_source_id IS NULL LIMIT 1`
+    `SELECT 1 FROM legacy_checkpoint_transcript_slots AS slot
+     JOIN legacy_checkpoint_transcript_migrations AS migration USING (thread_id, checkpoint_id)
+     WHERE slot.thread_id = ? AND (slot.provider_source_id IS NULL OR migration.status = 'reserving')
+     LIMIT 1`
   )
   try {
     stmt.bind([threadId])
@@ -4629,6 +4344,12 @@ export function hasUnresolvedLegacyTranscriptSlots(threadId: string): boolean {
   } finally {
     stmt.free()
   }
+}
+
+/** A Goal reservation can publish its final slots before their boundaries move. */
+export function hasPendingGoalTranscriptOrder(threadId: string): boolean {
+  return Boolean(getDb().exec(`SELECT 1 FROM legacy_checkpoint_transcript_migrations
+    WHERE thread_id = ? AND scoped_order = 1 AND status = 'reserving'`, [threadId])[0]?.values.length)
 }
 
 export function getThreadMessageProviderOccurrencesBeforeUser(
@@ -4646,6 +4367,7 @@ function readThreadMessageProviderOccurrencesBeforeUser(
   userMessageId: string,
   providerSourceIds: readonly string[]
 ): Array<{ provider_source_id: string; role: Message["role"]; provider_occurrence: number }> | undefined {
+  if (hasPendingGoalTranscriptOrder(threadId)) return undefined
   const ordinal = getThreadTranscriptBoundaryOrdinal(threadId, userMessageId)
   if (ordinal === undefined) return undefined
   const database = getDb()
@@ -4755,6 +4477,11 @@ export function getThreadMessageIdentityContext(
   tailLimit: number = 32
 ): Message[] {
   const database = getDb()
+  return database.withReadSnapshot(() => readThreadMessageIdentityContext(database, threadId, selectors, tailLimit))
+}
+
+function readThreadMessageIdentityContext(database: NativeSqliteAdapter, threadId: string,
+  selectors: readonly ThreadMessageIdentityContextSelector[], tailLimit: number): Message[] {
   const boundedTailLimit = Math.min(500, Math.max(1, Math.floor(tailLimit) || 32))
   const rows = new Map<string, ThreadMessageRow>()
   const rememberRows = (stmt: ReturnType<NativeSqliteAdapter["prepare"]>): void => {
@@ -4869,6 +4596,11 @@ export function getThreadMessagesAfterAnyId(
   limit?: number
 ): Message[] {
   const database = getDb()
+  return database.withReadSnapshot(() => readThreadMessagesAfterAnyId(database, threadId, messageIds, limit))
+}
+
+function readThreadMessagesAfterAnyId(database: NativeSqliteAdapter, threadId: string,
+  messageIds: readonly string[], limit: number | undefined): Message[] {
   const uniqueIds = Array.from(new Set(messageIds.filter(Boolean)))
   if (uniqueIds.length === 0) return []
 
@@ -5296,6 +5028,7 @@ export function appendThreadMessageTextDelta(
            SELECT MAX(candidate.fragment_id)
            FROM thread_message_fragments AS candidate
            WHERE candidate.thread_id = m.thread_id AND candidate.message_id = m.message_id
+             AND ${publishedThreadMessageFragmentsSql("candidate", "m")}
          )
        WHERE m.thread_id = ? AND m.message_id = ?`
     )
@@ -5383,11 +5116,10 @@ export function appendThreadMessageTextDelta(
       const fragmentEnd = end > deltaOffset ? end : Math.min(delta.length, deltaOffset + 2)
       const fragment = delta.slice(deltaOffset, fragmentEnd)
       database.run(
-        `INSERT INTO thread_message_fragments (
-           thread_id, message_id, content_text, created_at
-         ) SELECT ?, ?, ?, ? FROM thread_messages WHERE thread_id=? AND message_id=?
-           AND ${ordinaryPredicate}`,
-        [threadId, messageId, fragment, Date.now(), threadId, messageId]
+        `INSERT INTO thread_message_fragments (thread_id, message_id, content_text, created_at, generation)
+         SELECT thread_id, message_id, ?, ?, fragment_generation FROM thread_messages
+         WHERE thread_id = ? AND message_id = ? AND ${ordinaryPredicate}`,
+        [fragment, Date.now(), threadId, messageId]
       )
       deltaOffset += fragment.length
     }
@@ -6078,26 +5810,11 @@ function upsertThreadMessagesCore(
         if (aliasSourceId) {
           const sourceRows = getThreadMessageRows(database, threadId, [aliasSourceId])
           if (!sourceRows.has(aliasSourceId)) {
-            options.streamAttempt?.capture(normalized.id)
-            options.streamAttempt?.capture(aliasSourceId)
+            options.streamAttempt?.captureRelocation(normalized.id)
+            options.streamAttempt?.captureRelocation(aliasSourceId)
             const replayKey = recordForkMessageLineage(database, threadId, existing)
-            database.run(
-              `UPDATE thread_messages SET message_id = ?, fork_replay_key = ?
-               WHERE thread_id = ? AND message_id = ?`,
-              [aliasSourceId, replayKey, threadId, normalized.id]
-            )
-            database.run(
-              `UPDATE thread_message_fragments
-               SET message_id = ?
-               WHERE thread_id = ? AND message_id = ?`,
-              [aliasSourceId, threadId, normalized.id]
-            )
-            database.run(
-              `UPDATE thread_message_fragment_states
-               SET message_id = ?
-               WHERE thread_id = ? AND message_id = ?`,
-              [aliasSourceId, threadId, normalized.id]
-            )
+            relocateThreadMessage(database, threadId, normalized.id, aliasSourceId,
+              existing.provider_source_id, existing.provider_occurrence, replayKey)
             options.streamAttempt?.recordRename(normalized.id, aliasSourceId)
             existingRows.delete(normalized.id)
             existing = undefined
@@ -6259,6 +5976,7 @@ function upsertThreadMessagesCore(
           : null)
 
       if (existing) {
+        const activeFragment = readActiveFragmentPreimage(database, threadId, normalized.id)
         database.run(
           `UPDATE thread_messages
            SET provider_source_id = ?, provider_occurrence = ?, role = ?, content_json = ?, reasoning = ?, tool_calls_json = ?, tool_call_id = ?,
@@ -6301,6 +6019,14 @@ function upsertThreadMessagesCore(
           "DELETE FROM thread_message_fragment_states WHERE thread_id = ? AND message_id = ?",
           [threadId, normalized.id]
         )
+        if (activeFragment) {
+          const replayKey = existing.fork_replay_key ?? randomUUID()
+          if (!existing.fork_replay_key) {
+            database.run("UPDATE thread_messages SET fork_replay_key = ? WHERE thread_id = ? AND message_id = ?",
+              [replayKey, threadId, normalized.id])
+          }
+          recordNativeActiveFragment(database, threadId, normalized.id, replayKey, activeFragment)
+        }
       } else {
         const ordinal = nextOrdinal
         nextOrdinal += 1
@@ -6640,6 +6366,56 @@ function recordForkMessageLineage(
   return targetKey
 }
 
+function relocateThreadMessage(database: NativeSqliteAdapter, threadId: string, fromId: string, toId: string,
+  providerSourceId: string | null, providerOccurrence: number | null, replayKey: string): void {
+  // This path moves exactly one row and all of its fragments. Transfer only
+  // ownership receipts still bound to that row's current version.
+  const activeCopy = readActiveFragmentPreimage(database, threadId, fromId, true)
+  const [importKey, rewriting, partialVersion] = database.exec(`SELECT
+    i.content_key,
+    CASE WHEN json_valid(i.rewrite_progress) AND
+      json_extract(i.rewrite_progress, '$.version') = COALESCE(v.version, 0)
+      THEN i.rewrite_progress END,
+    CASE WHEN i.partial_version = COALESCE(v.version, 0) THEN i.partial_version END
+    FROM thread_messages source
+    LEFT JOIN thread_search_message_versions v USING (thread_id, message_id)
+    LEFT JOIN legacy_checkpoint_transcript_imports i USING (thread_id, message_id)
+    WHERE source.thread_id = ? AND source.message_id = ?`, [threadId, fromId])[0]?.values[0] ?? []
+  database.run(
+    `UPDATE thread_messages
+     SET message_id = ?, provider_source_id = ?, provider_occurrence = ?, fork_replay_key = ?
+     WHERE thread_id = ? AND message_id = ?`,
+    [toId, providerSourceId, providerOccurrence, replayKey, threadId, fromId]
+  )
+  database.run(
+    `UPDATE thread_message_fragments
+     SET message_id = ?
+     WHERE thread_id = ? AND message_id = ?`,
+    [toId, threadId, fromId]
+  )
+  database.run(
+    `UPDATE thread_message_fragment_states
+     SET message_id = ?
+     WHERE thread_id = ? AND message_id = ?`,
+    [toId, threadId, fromId]
+  )
+  database.run(`UPDATE OR IGNORE legacy_checkpoint_retired_fragments SET message_id = ?
+    WHERE thread_id = ? AND message_id = ?`, [toId, threadId, fromId])
+  if (typeof importKey === "string") {
+    const version = Number(database.exec(`SELECT version FROM thread_search_message_versions
+      WHERE thread_id = ? AND message_id = ?`, [threadId, toId])[0]?.values[0]?.[0] ?? 0)
+    database.run(`DELETE FROM legacy_checkpoint_transcript_imports WHERE thread_id = ? AND message_id = ?`,
+      [threadId, toId])
+    database.run(`UPDATE legacy_checkpoint_transcript_imports
+      SET message_id = ?, rewrite_progress = json_set(?, '$.version', ?), partial_version = ?
+      WHERE thread_id = ? AND message_id = ?`, [
+      toId, rewriting ?? null, version, typeof partialVersion === "number" ? version : null, threadId, fromId
+    ])
+  }
+  if (activeCopy) restoreActiveFragmentPreimage(database, threadId, toId, activeCopy, fromId)
+  moveCheckpointOverlap(database, threadId, fromId, toId)
+}
+
 export function replaceThreadMessageId(
   threadId: string,
   fromMessageId: string,
@@ -6784,26 +6560,13 @@ export function replaceThreadMessageId(
         source.provider_occurrence ??
         getMessageProviderOccurrence({ id: fromId, role: source.role }) ??
         null
-      database.run(
-        `UPDATE thread_messages
-         SET message_id = ?, provider_source_id = ?, provider_occurrence = ?, fork_replay_key = ?
-         WHERE thread_id = ? AND message_id = ?`,
-        [toId, providerSourceId, providerOccurrence, replayKey, threadId, fromId]
-      )
-      database.run(
-        `UPDATE thread_message_fragments
-         SET message_id = ?
-         WHERE thread_id = ? AND message_id = ?`,
-        [toId, threadId, fromId]
-      )
-      database.run(
-        `UPDATE thread_message_fragment_states
-         SET message_id = ?
-         WHERE thread_id = ? AND message_id = ?`,
-        [toId, threadId, fromId]
-      )
+      relocateThreadMessage(database, threadId, fromId, toId, providerSourceId, providerOccurrence, replayKey)
     } else {
+      const activeFragment = readActiveFragmentPreimage(database, threadId, fromId) ??
+        readActiveFragmentPreimage(database, threadId, toId)
       const fragmentText = getThreadMessageTextFragments(database, threadId, [fromId, toId])
+      const sourcePublication = readMessagePublication(database, threadId, fromId)
+      const targetPublication = readMessagePublication(database, threadId, toId)
       const targetContent = threadMessageRowToMessage(target, fragmentText.get(toId)).content
       const sourceContent = threadMessageRowToMessage(source, fragmentText.get(fromId)).content
       const sourceToolCalls = parseToolCalls(source.tool_calls_json)
@@ -6839,6 +6602,8 @@ export function replaceThreadMessageId(
         sourceContentPriority,
         targetContentPriority
       )
+      const mergedToolsJson = Array.isArray(mergedToolCalls) ? safeJsonStringify(mergedToolCalls)
+        : targetPublication?.owned === 1 && target.tool_calls_json === "[]" ? "[]" : null
       const inferredSourceProviderId = getMessageProviderSourceId({
         id: fromId,
         role: source.role
@@ -6877,7 +6642,7 @@ export function replaceThreadMessageId(
             { reasoning: source.reasoning ?? undefined },
             { reasoning: target.reasoning ?? undefined }
           ).reasoning ?? null,
-          Array.isArray(mergedToolCalls) ? safeJsonStringify(mergedToolCalls) : null,
+          mergedToolsJson,
           target.tool_call_id ?? source.tool_call_id,
           target.name ?? source.name,
           target.status ?? source.status,
@@ -6919,6 +6684,36 @@ export function replaceThreadMessageId(
          WHERE thread_id = ? AND message_id IN (?, ?)`,
         [threadId, fromId, toId]
       )
+      // Keep both inputs' ancestry. Only an existing target import can keep
+      // its strict content receipt, which is checked against the merged row.
+      const publication = sourcePublication ?? targetPublication
+      if (publication) {
+        const sources = new Set([
+          ...legacyPublicationSources(sourcePublication?.checkpoint, sourcePublication?.mergedCheckpoints),
+          ...legacyPublicationSources(targetPublication?.checkpoint, targetPublication?.mergedCheckpoints)
+        ])
+        if (targetPublication?.owned === 1) {
+          const otherSources = [...sources].filter((checkpoint) => checkpoint !== targetPublication.checkpoint)
+          database.run(`UPDATE legacy_checkpoint_transcript_imports SET merged_checkpoint_ids = ?
+            WHERE thread_id = ? AND message_id = ?`, [otherSources.length ? JSON.stringify(otherSources) : null, threadId, toId])
+        } else {
+          const [primary, ...others] = sources
+          if (primary !== undefined) restoreNativePublication(database, threadId, toId, {
+            contentKey: publication.contentKey, providerKey: null, payloadKey: null, turnKey: null,
+            checkpoint: primary, declaredOccurrence: null, mergedCheckpoints: others.length ? JSON.stringify(others) : null
+          })
+        }
+      }
+      if (sourcePublication?.owned === 1 && typeof sourcePublication.checkpoint === "string")
+        database.run(`DELETE FROM legacy_checkpoint_transcript_imports WHERE thread_id = ? AND message_id = ?`, [threadId, fromId])
+      const fromIdentity = legacyCheckpointProviderIdentity({ messageId: fromId, role: source.role,
+        providerSourceId: source.provider_source_id, providerOccurrence: source.provider_occurrence })
+      const toIdentity = legacyCheckpointProviderIdentity({ messageId: toId, role: target.role,
+        providerSourceId: target.provider_source_id, providerOccurrence: target.provider_occurrence })
+      const mergedIdentity = legacyCheckpointProviderIdentity({ messageId: toId, role: target.role,
+        providerSourceId: mergedProviderSourceId, providerOccurrence: mergedProviderOccurrence })
+      moveCheckpointOverlap(database, threadId, fromId, toId, { fromIdentity, toIdentity, mergedIdentity })
+      if (activeFragment) recordNativeActiveFragment(database, threadId, toId, replayKey, activeFragment)
     }
     return { aliasRole, changed: true }
   })
@@ -7037,6 +6832,18 @@ export function getPersistedThreadWorkspaceBindings(): PersistedThreadWorkspaceB
     stmt.free()
   }
   return bindings
+}
+
+/** Bounded identity for operations that yield. Rows predating the trigger use the empty token. */
+export function getThreadRowLifetime(threadId: string): string | null {
+  const result = getDb().exec(
+    `SELECT COALESCE(lifetime.token, '') FROM threads AS thread
+     LEFT JOIN thread_row_lifetimes AS lifetime ON lifetime.thread_id = thread.thread_id
+     WHERE thread.thread_id = ?`,
+    [threadId]
+  )
+  const token = result[0]?.values[0]?.[0]
+  return typeof token === "string" ? token : null
 }
 
 /** Metadata/status projection for hot main-process paths. */
@@ -7426,7 +7233,11 @@ export function getThread(threadId: string): ThreadRow | null {
   }
 }
 
-export function createThread(threadId: string, metadata?: Record<string, unknown>): ThreadRow {
+export function createThread(
+  threadId: string,
+  metadata?: Record<string, unknown>,
+  options?: { newDurableTranscript?: boolean }
+): ThreadRow {
   const database = getDb()
   const row = insertThread(database, threadId, metadata)
   saveToDisk()
@@ -7450,11 +7261,28 @@ function insertThread(database: NativeSqliteAdapter, threadId: string,
   const title = (storedMetadata.title as string) || null
   const serializedMetadata = JSON.stringify(storedMetadata)
 
-  database.run(
+  const insertThread = () => database.run(
     `INSERT INTO threads (thread_id, created_at, updated_at, metadata, status, title)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [threadId, now, now, serializedMetadata, "idle", title]
+     VALUES (?, ?, ?, ?, ?, ?)`, [threadId, now, now, serializedMetadata, "idle", title]
   )
+  if (options?.newDurableTranscript) {
+    database.run("SAVEPOINT create_durable_thread")
+    try {
+      insertThread()
+      database.run(
+        `INSERT INTO legacy_checkpoint_transcript_migrations
+         (thread_id, checkpoint_id, total_messages, next_index, status, updated_at, search_projection_state)
+         VALUES (?, ?, 0, 0, 'complete', ?, 'complete')`, [threadId, NATIVE_DURABLE_CHECKPOINT_ID, now]
+      )
+      database.run("RELEASE create_durable_thread")
+    } catch (error) {
+      database.run("ROLLBACK TO create_durable_thread")
+      database.run("RELEASE create_durable_thread")
+      throw error
+    }
+  } else {
+    insertThread()
+  }
 
   return {
     thread_id: threadId,

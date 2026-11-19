@@ -57,6 +57,7 @@ interface ConversationPresencePageSummary {
   total: number
   hasVisibleMessages?: boolean
   legacyCheckpointMigrationStatus?: "migrating" | "complete" | null
+  legacyCheckpointSourceNeedsVerification?: boolean
   legacyMessageTimesPending?: boolean
   canonicalCheckpointVerified?: boolean
 }
@@ -177,7 +178,8 @@ export function shouldBootstrapLegacyCheckpointTranscript(
   // The durable table becomes the full transcript authority only after the
   // one-time migration marker is complete.
   return (
-    page.legacyCheckpointMigrationStatus !== "complete" || page.legacyMessageTimesPending === true
+    page.legacyCheckpointMigrationStatus !== "complete" || page.legacyMessageTimesPending === true ||
+    page.legacyCheckpointSourceNeedsVerification === true
   )
 }
 
@@ -185,13 +187,15 @@ export function shouldAwaitCheckpointConversationPresence(
   page: ConversationPresencePageSummary | null | undefined
 ): boolean {
   return Boolean(page && !page.canonicalCheckpointVerified &&
-    page.legacyCheckpointMigrationStatus !== "complete")
+    (page.legacyCheckpointMigrationStatus !== "complete" ||
+      (page.legacyCheckpointSourceNeedsVerification && page.hasVisibleMessages !== true)))
 }
 
 export function shouldKeepMainTranscriptLoadingAfterPage(
   result: { succeeded: true; page: ConversationPresencePageSummary } | { succeeded: false }
 ): boolean {
-  return result.succeeded && shouldBootstrapLegacyCheckpointTranscript(result.page)
+  return result.succeeded && (shouldAwaitCheckpointConversationPresence(result.page) ||
+    result.page.legacyMessageTimesPending === true)
 }
 
 export function resolveConversationPresenceFromPage(

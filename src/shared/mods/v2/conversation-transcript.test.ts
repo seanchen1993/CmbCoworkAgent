@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest"
 import {
+  isRestorableConversationTranscriptMessage,
+  isVisibleTranscriptMessage,
+  WORKFLOW_NOTIFICATION_TURN_PROMPT
+} from "../../transcript-visibility"
+import {
   functionConversationTranscriptFields,
   hasInvalidFunctionConversationTranscriptStamp,
   isFunctionConversationHiddenNote,
@@ -20,6 +25,17 @@ const stamp = (): FunctionConversationTranscriptStamp => ({
 })
 
 describe("host conversation transcript data", () => {
+  it("keeps the shared transcript visibility policy for hidden, invalid, and provider rows", () => {
+    const hiddenNote = { function_row: stamp() }
+    const badStamp = { function_row_invalid: true }
+    expect(isVisibleTranscriptMessage("user", "private note", hiddenNote)).toBe(false)
+    expect(isRestorableConversationTranscriptMessage("user", "private note", hiddenNote)).toBe(true)
+    expect(isVisibleTranscriptMessage("user", "unknown native row", badStamp)).toBe(false)
+    expect(isRestorableConversationTranscriptMessage("user", "unknown native row", badStamp))
+      .toBe(false)
+    expect(isVisibleTranscriptMessage("user", WORKFLOW_NOTIFICATION_TURN_PROMPT)).toBe(false)
+  })
+
   it("round-trips durable data without constructing authority", () => {
     const value = JSON.parse(JSON.stringify(stamp()))
     expect(isFunctionConversationTranscriptStamp(value)).toBe(true)

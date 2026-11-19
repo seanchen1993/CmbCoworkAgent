@@ -5,6 +5,7 @@ import { ClawSidebarShell } from "@/components/panels/ClawSidebarHost"
 import { RightPanelDock } from "@/components/panels/RightPanelDock"
 import { editorNavigationScopeKey } from "../../shared/mods/v2/developer-editor"
 import { ProjectAgentWorkspaceHost } from "@/components/dashboard/ProjectAgentWorkspaceHost"
+import { ThreadSearchDialog } from "@/components/search/ThreadSearchDialog"
 import {
   useCallback,
   useDeferredValue,
@@ -1048,6 +1049,9 @@ function App(): React.JSX.Element {
 
   return (
     <ThreadProvider>
+      <ThreadSearchDialog activateChat={() => {
+        if (previewFullscreen || browserFullscreen) setRightModule("work")
+      }} />
       {/*
         isolate：把 app 内部的 z-index 关进自己的层叠上下文。
 

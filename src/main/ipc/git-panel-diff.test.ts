@@ -22,6 +22,7 @@ import {
   symlinkSync,
   writeFileSync
 } from "fs"
+import { rm } from "node:fs/promises"
 import { tmpdir } from "os"
 import { basename, dirname, join } from "path"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
@@ -902,24 +903,21 @@ describe("buildGitPanelFileDiff — on-demand single file", () => {
     }
   })
 
-  it("returns a renderable omitted notice when a diff exceeds the safety buffer", async () => {
+  it("returns a renderable omitted notice when a diff exceeds the safety buffer", async ({ onTestFinished }) => {
     const localRepo = createRepo("gitpanel-large-diff-")
-    try {
-      writeFileSync(join(localRepo, "large.txt"), `${"a".repeat(900 * 1024)}\n`)
-      gitIn(localRepo, ["add", "."])
-      gitIn(localRepo, ["commit", "-q", "-m", "large"])
-      writeFileSync(join(localRepo, "large.txt"), `${"b".repeat(900 * 1024)}\n`)
+    onTestFinished(() => rm(localRepo, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }))
+    writeFileSync(join(localRepo, "large.txt"), `${"a".repeat(900 * 1024)}\n`)
+    gitIn(localRepo, ["add", "."])
+    gitIn(localRepo, ["commit", "-q", "-m", "large"])
+    writeFileSync(join(localRepo, "large.txt"), `${"b".repeat(900 * 1024)}\n`)
 
-      const result = await buildGitPanelFileDiff(localRepo, "large.txt", { silent: true })
+    const result = await buildGitPanelFileDiff(localRepo, "large.txt", { silent: true })
 
-      expect(result?.diffLoaded).toBe(true)
-      expect(result?.diff).toContain("[diff omitted: output exceeded")
-      expect(result?.diff).toContain("@@ -0,0 +1 @@")
-      expect(result?.additions).toBeGreaterThan(0)
-      expect(result?.deletions).toBeGreaterThan(0)
-    } finally {
-      rmSync(localRepo, { recursive: true, force: true })
-    }
+    expect(result?.diffLoaded).toBe(true)
+    expect(result?.diff).toContain("[diff omitted: output exceeded")
+    expect(result?.diff).toContain("@@ -0,0 +1 @@")
+    expect(result?.additions).toBeGreaterThan(0)
+    expect(result?.deletions).toBeGreaterThan(0)
   })
 })
 

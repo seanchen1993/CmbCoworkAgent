@@ -168,6 +168,24 @@ describe("knowledge APIs", () => {
     ).toEqual([])
     expect(request).toHaveBeenCalledTimes(2)
   })
+  it("reports a room aggregate returned for a group request as an error", async () => {
+    const room = { id: "992391", name: "零售基础客群经营开发室(成都)", value: 747 }
+    const request = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const { orgIds } = JSON.parse(String(init?.body))
+      if (orgIds === null) return Response.json([room])
+      expect(orgIds).toEqual([992391])
+      return Response.json([{ ...room, id: 992391 }])
+    })
+    const rooms = await fetchKnowledgeOrgDistribution("http://kb.test", null, undefined, request)
+    expect(rooms).toEqual([room])
+    await expect(
+      fetchKnowledgeOrgDistribution("http://kb.test", [rooms[0].id!], undefined, request)
+    ).rejects.toThrow("组分布接口返回了室汇总")
+    expect(request.mock.calls.map(([url]) => url)).toEqual([
+      "http://kb.test/knowledge/org-distribution",
+      "http://kb.test/knowledge/org-distribution"
+    ])
+  })
   it("sends null for all and keeps a failed section from erasing successful sections", async () => {
     const request = vi.fn(async (url: string, init: RequestInit) => {
       expect(JSON.parse(init.body as string)).toEqual({ orgIds: null })

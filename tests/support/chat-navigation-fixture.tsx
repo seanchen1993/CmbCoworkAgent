@@ -108,7 +108,9 @@ function SearchFixture({ kind }: { kind: SearchCase }): React.JSX.Element {
     let active = false
     const changeLayout = (): void => {
       if (!active) return
-      if (layoutSpacer.current) layoutSpacer.current.style.height = `${500 + (++step % 2) * 40}px`
+      // Move the hit beyond the viewport on every alternating frame. Search
+      // should yield to the thumb while it is still seeking that occurrence.
+      if (layoutSpacer.current) layoutSpacer.current.style.height = `${500 + (++step % 2) * 450}px`
       frame = requestAnimationFrame(changeLayout)
     }
     const finish = (): void => { active = false; cancelAnimationFrame(frame) }
@@ -266,6 +268,7 @@ function ListFixture({ count }: { count: number }): React.JSX.Element {
       })), contentVersion: 0, structureVersion: 0 },
       visibleMessageIndexes: Array.from({ length: count }, (_, index) => index),
       lastUserMessageIndex: -1,
+      historyWindowRevision: 0,
       historyHasMore: false,
       historyPageLoading: false,
       historyRemainingCount: 0,

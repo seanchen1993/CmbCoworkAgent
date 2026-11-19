@@ -1,5 +1,6 @@
 import { resolve } from "path"
 import { createHash } from "node:crypto"
+import { createRequire } from "node:module"
 import { readFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, realpathSync, statSync } from "fs"
 import { defineConfig } from "electron-vite"
 import react from "@vitejs/plugin-react"
@@ -14,6 +15,7 @@ const virtuosoPatchDigest = createHash("sha256")
   .update(readFileSync(resolve("patches/react-virtuoso-scroll-cancel/react-virtuoso-4.18.12.patch")))
   .digest("hex")
 const pkg = JSON.parse(readFileSync("./package.json", "utf-8"))
+const requireDependency = createRequire(import.meta.url)
 
 // Plugin to copy resources to output
 function copyResources(): { name: string; closeBundle: () => Promise<void> } {
@@ -115,7 +117,11 @@ export default defineConfig({
       // These parser entry points are ESM-only. Keep their real default plugins in the
       // CJS bundle instead of passing require(ESM) namespaces to unified.use().
       externalizeDeps: {
-        exclude: ["unified", "remark-parse", "remark-gfm", "remark-rehype"]
+        exclude: [
+          "decode-named-character-reference", "micromark-util-decode-numeric-character-reference",
+          "micromark", "micromark-extension-gfm",
+          "remark-gfm", "remark-parse", "remark-rehype", "unified"
+        ]
       },
       lib: {
         entry: {
@@ -154,6 +160,8 @@ export default defineConfig({
     },
     resolve: {
       alias: {
+        // Both dev and built Web Workers need the decoder without DOM dependencies.
+        "decode-named-character-reference": requireDependency.resolve("decode-named-character-reference"),
         "@": resolve("src/renderer/src"),
         "@renderer": resolve("src/renderer/src")
       }

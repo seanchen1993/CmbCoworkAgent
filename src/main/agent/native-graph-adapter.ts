@@ -8,6 +8,26 @@ import { wrapFunctionConversationInvocation } from "./mods-conversation-invocati
 import type { FunctionConversationCompactionReconciler } from "./mods-conversation-invocation"
 import { wrapFunctionConversationNativeInvocation } from "./function-conversation-native-invocation"
 import { createFunctionConversationNativeAgent } from "./native-agent-factory"
+import { ModFunctionError } from "../../shared/mods/v2/contracts"
+import { isCompletionRevisionInput, type CompletionRevisionInput } from "./skill-lifecycle/completion-hooks"
+
+const nativeRevisionGraphs = new WeakSet<object>()
+const nativeGraphHas = WeakSet.prototype.has, nativeGraphAdd = WeakSet.prototype.add
+const apply = Reflect.apply
+
+export function isRuntimeNativeCompletionGraph(graph: object | null | undefined): boolean {
+  return apply(nativeGraphHas, nativeRevisionGraphs, [graph]) as boolean
+}
+
+/** Only a graph with the installed native input consumer may use the one-shot receipt. */
+export function selectRuntimeCompletionRevisionInput(graph: object,
+  prepared: CompletionRevisionInput | undefined,
+  ordinary: () => CompletionRevisionInput): CompletionRevisionInput {
+  if (!isRuntimeNativeCompletionGraph(graph)) return ordinary()
+  if (!isCompletionRevisionInput(prepared))
+    throw new ModFunctionError("MODS_COMPLETION_REVISION_INPUT_INVALID")
+  return prepared
+}
 
 interface ConversationBinding {
   readonly store: FunctionConversationStore
@@ -60,7 +80,8 @@ export function createRuntimeConversationGraph(
           : {})
       })
     : agent
-  return native
-    ? wrapFunctionConversationNativeInvocation(admitted, native.host, native.runtime)
-    : admitted
+  if (!native) return admitted
+  const wrapped = wrapFunctionConversationNativeInvocation(admitted, native.host, native.runtime)
+  apply(nativeGraphAdd, nativeRevisionGraphs, [wrapped])
+  return wrapped
 }

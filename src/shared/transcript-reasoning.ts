@@ -50,3 +50,22 @@ export function mergeTranscriptReasoningUpdates(
       : undefined
   }
 }
+
+export function normalizeVisibleReasoningText(reasoning: string | undefined): string {
+  if (!reasoning) return ""
+  const startsOrEndsWithWhitespace = !reasoning[0].trim() || !reasoning.at(-1)!.trim()
+  if (
+    !startsOrEndsWithWhitespace &&
+    !(reasoning[0] === "<" && reasoning.slice(0, 7).toLowerCase() === "<think>") &&
+    !(reasoning.at(-1) === ">" && reasoning.slice(-8).toLowerCase() === "</think>")
+  ) {
+    // Ordinary provider reasoning is already a standalone, trimmed string.
+    // Returning it directly avoids two regex passes + trim over the complete
+    // cumulative reasoning snapshot for every token.
+    return reasoning
+  }
+  let visible = reasoning.trim()
+  if (visible.slice(0, 7).toLowerCase() === "<think>") visible = visible.slice(7).trimStart()
+  if (visible.slice(-8).toLowerCase() === "</think>") visible = visible.slice(0, -8).trimEnd()
+  return visible
+}

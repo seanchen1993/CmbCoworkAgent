@@ -1,63 +1,47 @@
 import { describe, expect, it } from "vitest"
-import { projectMarkdownVisibleText } from "./markdown-visible-text"
+import { markdownSearchAdmission, projectMarkdownVisibleText } from "./markdown-visible-text"
 
 describe("Markdown visible search projection", () => {
-  it("keeps unmatched delimiter runs literal without repeatedly scanning their suffixes", () => {
-    const text = `prefix ${"`".repeat(64_000)}`
+  it.each([
+    ["Release is **very *ready*** for rollout.", "Release is very ready for rollout."],
+    ["Inline code is ` line\nbreak ` today.", "Inline code is line break today."],
+    ["Build &copy; 2026 after review.", "Build © 2026 after review."],
+    ["Before [missing book][REF_ID] after.", "Before [missing book][REF_ID] after."],
+    ["prefix [manual](broken\n\nurl) suffix", "prefix [manual](broken\nurl) suffix"],
+    ["> Recommended\n> steps", "\nRecommended\nsteps\n"],
+    [String.raw`Open C:\ai\CmbCoworkAgent now.`, String.raw`Open C:\ai\CmbCoworkAgent now.`],
+    ["```diff\n+ [x](literal &lt;ready&gt;)\n- #tag *.ts\n```", "+ [x](literal &lt;ready&gt;)\n- #tag *.ts\n"],
+    ["[visible label](https://hidden.example/path_(secret)) ![alt](hidden-image.png)", "visible label "],
+    ["[label][ref]\n\n[ref]: https://hidden\n\n&amp;", "label\n&"],
+    ["visible\n[ref]: https://visible.example\nend", "visible\n[ref]: https://visible.example\nend"],
+    ["---", ""],
+    ["1. ordered item", "\nordered item\n"],
+    ["prefix ``abc`", "prefix ``abc`"]
+  ])("projects %j with the normal chat Markdown semantics", (source, text) => {
+    expect(projectMarkdownVisibleText(source)).toEqual({ text, truncated: false })
+  })
+
+  it("indexes GFM table cell text without exposing its separator syntax", () => {
+    const result = projectMarkdownVisibleText("Color | Value\n:--- | ---:\nred | active")
+    expect(result.truncated).toBe(false)
+    expect(result.text).toMatch(/Color\s+Value\s+red\s+active/)
+    expect(result.text).not.toContain("|")
+    expect(result.text).not.toContain("---")
+  })
+
+  it("admits long literal text and reports pathological parser input as unsearched", () => {
+    const literal = "the original message ".repeat(8_000) + "final words"
+    expect(markdownSearchAdmission(literal)).toBe("literal")
+    expect(projectMarkdownVisibleText(literal)).toEqual({ text: literal, truncated: false })
     const started = performance.now()
-    expect(projectMarkdownVisibleText(text) === text).toBe(true)
+    for (const source of ["[x](".repeat(16_000), "> ".repeat(4000), "-\t".repeat(1700),
+      "1.\t".repeat(1700), "`".repeat(64_000), literal.repeat(6)]) {
+      expect(projectMarkdownVisibleText(source)).toEqual({ text: "", truncated: true })
+    }
+    const wideTable = ["| x ".repeat(7000), "| - ".repeat(7000), "| y ".repeat(7000)].join("|\n")
+    expect(projectMarkdownVisibleText(wideTable)).toEqual({ text: "", truncated: true })
+    expect(projectMarkdownVisibleText("**important**\n" + "normal x\n".repeat(5000)))
+      .toEqual({ text: "", truncated: true })
     expect(performance.now() - started).toBeLessThan(1500)
-    expect(projectMarkdownVisibleText("prefix ``abc`")).toBe("prefix ``abc`")
-  })
-
-  it("bounds scans for repeated unfinished link destinations", () => {
-    const text = `${"[x](".repeat(16_000)}end)`
-    const started = performance.now()
-    const projected = projectMarkdownVisibleText(text)
-    expect(projected).toContain("[x](")
-    expect(performance.now() - started).toBeLessThan(1500)
-  })
-  it("keeps link labels but excludes link and image destinations", () => {
-    const text = projectMarkdownVisibleText(
-      "[visible label](https://hidden.example/path_(secret)) ![alt](hidden-image.png)"
-    )
-    expect(text).toContain("visible label")
-    expect(text).not.toContain("hidden.example")
-    expect(text).not.toContain("hidden-image")
-    expect(text).not.toContain("alt")
-    expect(projectMarkdownVisibleText("visible\n[ref]: https://visible.example\nend"))
-      .toBe("visible\n[ref]: https://visible.example\nend")
-    expect(projectMarkdownVisibleText("visible\n\n[ref]: https://hidden.example\n\nend"))
-      .toBe("visible\n\n\nend")
-  })
-
-  it("preserves visible emphasis, inline code, fenced code and GFM order", () => {
-    expect(projectMarkdownVisibleText("**bold** then `code`\n```ts\nconst x = 1\n```\n| cell |"))
-      .toBe("bold then code\nconst x = 1\n| cell |")
-  })
-
-  it("preserves coding punctuation and projects common GFM controls", () => {
-    expect(projectMarkdownVisibleText("foo_bar *.ts a > b #tag ~x\n- item\n1. next\n- [x] done"))
-      .toBe("foo_bar *.ts a > b #tag ~x\nitem\nnext\ndone")
-    expect(projectMarkdownVisibleText("[label][ref]\n\n[ref]: https://hidden\n\n&amp;"))
-      .toBe("label\n\n\n&")
-    expect(projectMarkdownVisibleText("```ts\nunclosed body"))
-      .toBe("unclosed body")
-    expect(projectMarkdownVisibleText("```diff\n+ [x](literal)\n- #tag *.ts\n```"))
-      .toBe("+ [x](literal)\n- #tag *.ts\n")
-    expect(projectMarkdownVisibleText("    ```ts\n    literal fence"))
-      .toBe("    ```ts\n    literal fence")
-    expect(() => projectMarkdownVisibleText("&#999999999;")).not.toThrow()
-    expect(projectMarkdownVisibleText("foo__bar__ a__b__c")).toBe("foo__bar__ a__b__c")
-    expect(projectMarkdownVisibleText("__init__ obj.__class__")).toBe("init obj.class")
-  })
-
-  it("keeps a multi-megabyte projection linear", () => {
-    const markdown = "plain foo_bar [label](https://hidden) `code`\n".repeat(85_000)
-    const started = performance.now()
-    const projected = projectMarkdownVisibleText(markdown)
-    expect(projected).toContain("plain foo_bar label code")
-    expect(projected).not.toContain("https://hidden")
-    expect(performance.now() - started).toBeLessThan(1_500)
   })
 })

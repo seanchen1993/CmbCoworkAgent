@@ -14,6 +14,7 @@ export async function readCanonicalCheckpointBootstrap(input: {
   workspace: string
   incarnation: ThreadIncarnation
   foregroundKey: string
+  signal?: AbortSignal
   assertCurrent(): void
 }): Promise<LegacyCheckpointTranscriptBootstrapResult | null> {
   const fixed = Object.freeze({ ...input, incarnation: Object.freeze({ ...input.incarnation }) })
@@ -47,7 +48,8 @@ export async function readCanonicalCheckpointBootstrap(input: {
     databasePath,
     fixed.threadId,
     "",
-    fixed.foregroundKey
+    fixed.foregroundKey,
+    fixed.signal
   )
   fixed.assertCurrent()
   const head = runtimeTuple as { checkpoint?: { id?: unknown } } | null

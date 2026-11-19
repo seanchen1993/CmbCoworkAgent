@@ -1,6 +1,6 @@
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { BaseMessage, HumanMessage } from "@langchain/core/messages"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -169,6 +169,7 @@ function createHydrationDatabase(): { database: DatabaseSync; path: string } {
       next_index INTEGER NOT NULL,
       current_fragment_index INTEGER NOT NULL,
       status TEXT NOT NULL,
+      source_key TEXT,
       updated_at INTEGER NOT NULL
     );
     CREATE TABLE thread_goal_events (
@@ -335,6 +336,7 @@ describe("checkpoint recovery hydration boundary", () => {
       type: "read-page",
       requestId: 1,
       databasePath: path,
+      checkpointDirectory: dirname(path),
       threadId: "legacy",
       options: {
         limit: 10,
@@ -351,6 +353,8 @@ describe("checkpoint recovery hydration boundary", () => {
 
   it("keeps every completed legacy row even when created_at advances past checkpoint ts", () => {
     const { database, path } = createHydrationDatabase()
+    const checkpointDirectory = dirname(path)
+    writeFileSync(join(checkpointDirectory, "legacy.sqlite"), "missing checkpoint snapshot")
     const checkpointTime = Date.parse("2026-08-28T00:00:00.000Z")
     insertHydrationMessage(database, "legacy-0", 0, checkpointTime)
     insertHydrationMessage(database, "legacy-1", 1, checkpointTime + 1)
@@ -375,6 +379,7 @@ describe("checkpoint recovery hydration boundary", () => {
       type: "read-page",
       requestId: 1,
       databasePath: path,
+      checkpointDirectory,
       threadId: "legacy",
       options: {
         limit: 10,
@@ -393,5 +398,12 @@ describe("checkpoint recovery hydration boundary", () => {
     ])
     expect(result.page.legacyCheckpointMigrationStatus).toBe("complete")
     expect(result.page.hasMore).toBe(false)
+    const regularPage = readThreadMessagesPage(database, {
+      type: "read-page", requestId: 2, databasePath: path, checkpointDirectory,
+      threadId: "legacy", options: { includeVisibleMessagePresence: true },
+      cancellationBuffer: new SharedArrayBuffer(4)
+    })
+    expect(regularPage.page).toMatchObject({ legacyCheckpointMigrationStatus: "complete",
+      legacyCheckpointSourceNeedsVerification: true })
   })
 })

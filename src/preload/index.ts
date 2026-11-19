@@ -47,6 +47,7 @@ import type {
   ManagedRunScheduleIdentity,
   ManagedRunScheduleChange
 } from "../shared/managed-run-schedule"
+import type { ThreadSearchOpenRequest, ThreadSearchPage, ThreadSearchStartRequest, ThreadSearchWindow } from "../shared/thread-search-types"
 import type {
   KnowledgeAccumulationData,
   KnowledgeOrgItem,
@@ -1240,6 +1241,12 @@ const api = {
     }
   },
   threads: {
+    searchEnabled: process.env.CMB_DISABLE_THREAD_SEARCH !== "1",
+    searchStart: (request: ThreadSearchStartRequest): Promise<ThreadSearchPage> => ipcRenderer.invoke("threads:search-start", request),
+    searchContinue: (cursor: string): Promise<ThreadSearchPage> => ipcRenderer.invoke("threads:search-continue", cursor),
+    searchCancel: (id?: string): Promise<void> => ipcRenderer.invoke("threads:search-cancel", id),
+    searchSummary: (request: ThreadSearchOpenRequest): Promise<Thread | null> => ipcRenderer.invoke("threads:search-summary", request),
+    searchTargetWindow: (request: ThreadSearchOpenRequest): Promise<ThreadSearchWindow> => ipcRenderer.invoke("threads:search-target-window", request),
     list: async (): Promise<Thread[]> => {
       const threads: Thread[] = []
       let beforeUpdatedAt: number | undefined
@@ -1376,13 +1383,17 @@ const api = {
     getLatestCheckpoint: (threadId: string): Promise<unknown | null> => {
       return ipcRenderer.invoke("threads:latest-checkpoint", threadId)
     },
-    getLatestCheckpointRuntimeState: (threadId: string): Promise<unknown | null> => {
-      return ipcRenderer.invoke("threads:latest-checkpoint-runtime-state", threadId)
+    getLatestCheckpointRuntimeState: (
+      threadId: string,
+      options?: { requestScope?: "foreground-hydration" }
+    ): Promise<unknown | null> => {
+      return ipcRenderer.invoke("threads:latest-checkpoint-runtime-state", threadId, options)
     },
     bootstrapLegacyCheckpointTranscript: (
-      threadId: string
+      threadId: string,
+      options?: { requestScope?: "foreground-hydration" }
     ): Promise<ThreadLegacyCheckpointBootstrapResult | null> => {
-      return ipcRenderer.invoke("threads:bootstrap-legacy-checkpoint-transcript", threadId)
+      return ipcRenderer.invoke("threads:bootstrap-legacy-checkpoint-transcript", threadId, options)
     },
     getGoalEvents: (
       threadId: string,
@@ -4467,6 +4478,15 @@ const api = {
       error?: string
       cancelled?: boolean
     }> => ipcRenderer.invoke("dashboard:knowledgeOrgGroups", roomId, opts),
+    knowledgeRoomPeople: (
+      roomId: string,
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ): Promise<{
+      success: boolean
+      data?: KnowledgeUserDetails
+      error?: string
+      cancelled?: boolean
+    }> => ipcRenderer.invoke("dashboard:knowledgeRoomPeople", roomId, opts),
     knowledgeUserDetails: (opts?: {
       upperOrgLv1?: string | string[] | null
     }): Promise<{

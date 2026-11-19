@@ -125,7 +125,14 @@ import {
   type ModelRetryHooks,
   type FetchErrorInfo
 } from "../agent/runtime"
-import { mergeCurrentRunGoalProviderOccurrences } from "../agent/current-run-message-queue"
+import {
+  getCurrentRunNotificationAssistantIdentity,
+  mergeCurrentRunGraphProviderOccurrences
+} from "../agent/current-run-message-queue"
+import {
+  hasScopedGraphTranscriptBoundary,
+  NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY
+} from "../../shared/graph-transcript-boundary"
 import type { CheckpointMetadata } from "@langchain/langgraph-checkpoint"
 import {
   addThreadGoalEvent,
@@ -403,6 +410,10 @@ import { appendRetainedExplicitSkillContext } from "../agent/skill-lifecycle/ret
 import type { SkillLifecycleMatch } from "../agent/skill-lifecycle/registry"
 import { createSkillUseTracker, type SkillUseTracker } from "../agent/skill-lifecycle/tracker"
 import { runCompletionHooksWithRevision } from "../agent/skill-lifecycle/completion-hooks"
+import {
+  isRuntimeNativeCompletionGraph,
+  selectRuntimeCompletionRevisionInput
+} from "../agent/native-graph-adapter"
 import {
   discardAgentAutoCommitTracking,
   maybeAutoCommitAfterAgentRun,
@@ -2255,7 +2266,7 @@ async function settlePhysicalAgentRun({
         shouldRun: () => transcriptFlushSucceeded,
         run: () => {
           discardStreamTranscriptToolCallAccumulators(threadId, runToken)
-          streamTranscriptBoundaryIds.delete(pendingStreamTranscriptKey(threadId, runToken))
+          streamTranscriptBoundaries.delete(pendingStreamTranscriptKey(threadId, runToken))
         }
       },
       {
@@ -4065,13 +4076,13 @@ interface SerializedValuesSideEffectMessage extends SerializedHookMessage {
   }
 }
 
-const committedGoalMessageReceipts = new WeakMap<object, Record<string, unknown>>()
+const committedGraphMessageReceipts = new WeakMap<object, Record<string, unknown>>()
 
-function projectCommittedGoalMessages(messages: readonly unknown[]): readonly unknown[] {
+function projectCommittedGraphMessages(messages: readonly unknown[]): readonly unknown[] {
   let projected: unknown[] | undefined
   messages.forEach((source, index) => {
     if (!source || typeof source !== "object") return
-    const receipt = committedGoalMessageReceipts.get(source)
+    const receipt = committedGraphMessageReceipts.get(source)
     if (!receipt) return
     projected ??= messages.slice()
     projected[index] = receipt
@@ -4085,7 +4096,7 @@ function replayCommittedStreamValues(
   if (!snapshot) return []
   const payload = sanitizeStreamDataForRenderer(
     "values",
-    { messages: projectCommittedGoalMessages(snapshot.messages) },
+    { messages: projectCommittedGraphMessages(snapshot.messages) },
     snapshot.valuesMessageIndexOffset
   )
   const messages = asPlainRecord(payload)?.messages
@@ -4261,7 +4272,11 @@ const streamTranscriptToolCallAccumulators = new Map<
 
 const streamTranscriptAssistantIdentities = new Map<string, StreamTranscriptAssistantIdentity>()
 const streamTranscriptAttempts = new Map<string, ThreadMessageStreamAttempt>()
-const streamTranscriptBoundaryIds = new Map<string, string>()
+interface StreamTranscriptBoundary {
+  id: string
+  notification?: boolean
+}
+const streamTranscriptBoundaries = new Map<string, StreamTranscriptBoundary>()
 
 class StreamTranscriptSnapshotRequiredError extends Error {}
 
@@ -4311,8 +4326,8 @@ function discardStreamTranscriptToolCallAccumulators(threadId: string, runToken:
 
 function discardStreamTranscriptToolCallAccumulatorsForThread(threadId: string): void {
   const prefix = `${threadId}\u0000`
-  for (const key of streamTranscriptBoundaryIds.keys()) {
-    if (key.startsWith(prefix)) streamTranscriptBoundaryIds.delete(key)
+  for (const key of streamTranscriptBoundaries.keys()) {
+    if (key.startsWith(prefix)) streamTranscriptBoundaries.delete(key)
   }
   for (const key of streamTranscriptAttempts.keys()) {
     if (key.startsWith(prefix)) streamTranscriptAttempts.delete(key)
@@ -4328,7 +4343,7 @@ function loadPreviousRunProviderOccurrences(
   boundaryId: string,
   sourceIds: readonly string[]
 ) {
-  return mergeCurrentRunGoalProviderOccurrences(
+  return mergeCurrentRunGraphProviderOccurrences(
     threadId,
     runToken,
     boundaryId,
@@ -4379,7 +4394,7 @@ function flushPendingStreamTranscriptMessages(
     const queuedMessages = reconcileNativePartialQueuedMessages(selected, threadId, runToken)
     const retainedPartials = new Set(queuedMessages)
     const retiredPartials = selected.filter(message => !retainedPartials.has(message))
-    const boundaryId = streamTranscriptBoundaryIds.get(pendingKey)
+    const boundaryId = streamTranscriptBoundaries.get(pendingKey)?.id
     const resolve = () =>
       resolveStreamTranscriptFlush({
         queuedMessages,
@@ -4543,7 +4558,7 @@ function flushPendingStreamTranscriptMessagesForThread(
     if (!remainingOwners.has(runToken)) {
       discardStreamTranscriptToolCallAccumulators(threadId, runToken)
       if (!isCurrentRunMessageQueueOwner(threadId, runToken)) {
-        streamTranscriptBoundaryIds.delete(pendingStreamTranscriptKey(threadId, runToken))
+        streamTranscriptBoundaries.delete(pendingStreamTranscriptKey(threadId, runToken))
       }
     }
   }
@@ -4554,34 +4569,37 @@ function flushPendingStreamTranscriptMessagesForThread(
   return remainingOwners.size === 0
 }
 
-/** Give one internal Goal input an ordinal before its first provider chunk. */
+/** Give a hidden Goal or notification turn an ordinal before its first provider chunk. */
 export function createPhysicalRunHiddenUserMessage(
   threadId: string,
   runToken: string,
   signal: AbortSignal,
   goalBoundary: Pick<ThreadGoal, "goalId" | "activeWindowId"> | null | undefined,
-  fields: { content: string; id?: string; additional_kwargs?: HumanMessage["additional_kwargs"] }
+  fields: { content: string; id?: string; additional_kwargs?: HumanMessage["additional_kwargs"] },
+  scope: "goal" | "notification" = "goal",
+  persistence: "reserve" | "native" = "reserve"
 ): HumanMessage {
   throwIfPhysicalStreamRunIsInactive(threadId, runToken, signal)
   const activeGoal = goalBoundary ? goalManager.getActive(threadId) : null
-  if (
-    !isGoalBoundaryStillCurrent(
-      activeGoal?.goalId,
-      goalBoundary?.goalId,
-      activeGoal?.activeWindowId,
-      goalBoundary?.activeWindowId
-    )
-  ) {
-    return new HumanMessage(fields)
-  }
+  const currentGoal = isGoalBoundaryStillCurrent(
+    activeGoal?.goalId,
+    goalBoundary?.goalId,
+    activeGoal?.activeWindowId,
+    goalBoundary?.activeWindowId
+  )
+  if (!currentGoal && scope !== "notification") return new HumanMessage(fields)
 
   flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
   const graphUserId = uuid()
-  reserveThreadGraphTranscriptBoundary(threadId, graphUserId)
+  // A certified native repair commits its hidden row before the model can start.
+  if (persistence === "reserve") reserveThreadGraphTranscriptBoundary(threadId, graphUserId)
   // The previous graph stream has finished. Only the new input belongs to
   // the next attempt, so retire the prior journal and cached identities.
   discardStreamTranscriptToolCallAccumulators(threadId, runToken)
-  streamTranscriptBoundaryIds.set(pendingStreamTranscriptKey(threadId, runToken), graphUserId)
+  streamTranscriptBoundaries.set(pendingStreamTranscriptKey(threadId, runToken), {
+    id: graphUserId,
+    ...(scope === "notification" && { notification: true })
+  })
 
   const additionalKwargs = { ...fields.additional_kwargs }
   delete additionalKwargs[COORDINATOR_VISIBLE_USER_MESSAGE_KEY]
@@ -4590,9 +4608,25 @@ export function createPhysicalRunHiddenUserMessage(
     id: graphUserId,
     additional_kwargs: {
       ...additionalKwargs,
-      [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true
+      ...(currentGoal && { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true }),
+      ...(scope === "notification" && { [NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY]: true })
     }
   })
+}
+
+function prepareNativePhysicalRevisionMessage(
+  graph: object | null | undefined,
+  threadId: string,
+  runToken: string,
+  signal: AbortSignal,
+  goal: Pick<ThreadGoal, "goalId" | "activeWindowId"> | null | undefined,
+  content: string,
+  notification: boolean
+): HumanMessage | undefined {
+  if ((!goal && !notification) || !isRuntimeNativeCompletionGraph(graph)) return undefined
+  // The completion loop seals and authenticates this exact message as its native input.
+  return createPhysicalRunHiddenUserMessage(threadId, runToken, signal, goal,
+    { content, id: uuid() }, notification ? "notification" : "goal", "native")
 }
 
 setCurrentRunTranscriptFlushBeforeInjection((threadId, runToken) => {
@@ -4601,8 +4635,8 @@ setCurrentRunTranscriptFlushBeforeInjection((threadId, runToken) => {
   streamTranscriptAssistantIdentities.delete(key)
   return (userMessageId) => {
     discardStreamTranscriptToolCallAccumulators(threadId, runToken)
-    if (userMessageId && streamTranscriptBoundaryIds.has(key)) {
-      streamTranscriptBoundaryIds.set(key, userMessageId)
+    if (userMessageId && streamTranscriptBoundaries.has(key)) {
+      streamTranscriptBoundaries.set(key, { id: userMessageId })
     }
   }
 })
@@ -4673,6 +4707,15 @@ function persistStreamTranscriptChunk(
     guardOwner()
     rememberFunctionPlacedMessage(threadId, canonical, guardOwner)
     return canonical.id
+  }
+  if (Array.isArray(payload) && getSerializedMessageRole(payload[0]) === "assistant") {
+    const metadata = messageStreamMetadata(mode, payload)
+    const identity = getCurrentRunNotificationAssistantIdentity(
+      threadId,
+      runToken,
+      metadata?.langgraph_checkpoint_ns ?? metadata?.checkpoint_ns
+    )
+    if (identity) setSerializedMessageIdentity(payload, identity)
   }
   const message = persistedMessageFromStreamPayload(payload)
   if (!message) return null
@@ -4775,10 +4818,12 @@ function adoptGraphTranscriptBoundaryFromValues(
   threadId: string,
   runToken: string,
   payload: unknown,
-  completeValuesMessages?: readonly unknown[]
+  completeValuesMessages: readonly unknown[] | undefined,
+  resumeNotification: boolean
 ): void {
   const runKey = pendingStreamTranscriptKey(threadId, runToken)
-  const currentBoundaryId = streamTranscriptBoundaryIds.get(runKey)
+  const current = streamTranscriptBoundaries.get(runKey)
+  const currentBoundaryId = current?.id
   const frameMessages = asPlainRecord(payload)?.messages
   const changedMessages = Array.isArray(frameMessages) ? frameMessages : []
   const messages = currentBoundaryId ? changedMessages : completeValuesMessages ?? changedMessages
@@ -4790,19 +4835,24 @@ function adoptGraphTranscriptBoundaryFromValues(
   if (
     typeof boundaryId !== "string" ||
     boundaryId === currentBoundaryId ||
-    additionalKwargs?.[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] !== true
+    !hasScopedGraphTranscriptBoundary(additionalKwargs)
   ) {
     return
   }
 
-  const parentId = additionalKwargs[GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]
+  const notification = additionalKwargs?.[NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY] === true
+  // A prior notification cannot claim a new invoke. Approval is resuming the
+  // checkpoint itself and may adopt an already reserved boundary.
+  if (notification && !currentBoundaryId && !resumeNotification) return
+  const parentId = additionalKwargs?.[GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]
   const gateInput = typeof parentId === "string" && Boolean(parentId)
   if (currentBoundaryId && !gateInput) return
   const ordinal = getThreadTranscriptBoundaryOrdinal(threadId, boundaryId)
   if (ordinal === undefined) {
     if (
       !gateInput ||
-      !goalManager.getActive(threadId) ||
+      (notification && !currentBoundaryId) ||
+      (!notification && !goalManager.getActive(threadId)) ||
       getThreadTranscriptBoundaryOrdinal(threadId, parentId) === undefined
     ) {
       return
@@ -4815,7 +4865,10 @@ function adoptGraphTranscriptBoundaryFromValues(
     const currentOrdinal = getThreadTranscriptBoundaryOrdinal(threadId, currentBoundaryId)
     if (currentOrdinal !== undefined && ordinal < currentOrdinal) return
   }
-  streamTranscriptBoundaryIds.set(runKey, boundaryId)
+  streamTranscriptBoundaries.set(runKey, {
+    id: boundaryId,
+    ...(notification && { notification: true })
+  })
   streamTranscriptAssistantIdentities.delete(runKey)
 }
 
@@ -4830,7 +4883,8 @@ export function persistAndForwardPhysicalRunStreamChunk(
   valuesMessageIndexOffset = 0,
   valuesSnapshotKind: "full" | "append" | "tail" = "full",
   completeValuesMessages?: readonly unknown[],
-  projectGoalValues = false
+  projectGoalValues = false,
+  resumeNotification = false
 ): string | null {
   // This fence deliberately sits immediately beside persistence and renderer
   // forwarding. A provider callback may resume after any earlier await even
@@ -4859,7 +4913,13 @@ export function persistAndForwardPhysicalRunStreamChunk(
   let outgoing = payload
   if (mode === "values") {
     const runKey = pendingStreamTranscriptKey(threadId, runToken)
-    adoptGraphTranscriptBoundaryFromValues(threadId, runToken, payload, completeValuesMessages)
+    adoptGraphTranscriptBoundaryFromValues(
+      threadId,
+      runToken,
+      payload,
+      completeValuesMessages,
+      resumeNotification
+    )
     flushPendingStreamTranscriptMessages(threadId, runToken, {
       throwOnError: true,
       allowWaitingForSnapshot: true
@@ -4867,12 +4927,13 @@ export function persistAndForwardPhysicalRunStreamChunk(
     // Graph values are the ordered authority for final fields. Persist them at
     // the active-run fence so delayed renderer echoes cannot restore old text,
     // and values-only finals do not depend on an unmarked renderer writeback.
-    const goalReceipts = projectGoalValues || streamTranscriptBoundaryIds.has(runKey)
+    const boundary = streamTranscriptBoundaries.get(runKey)
+    const projectReceipts = projectGoalValues || !!boundary
     const receipts: Array<[object, Record<string, unknown>]> = []
     const snapshots = withThreadMessageIdentitySnapshot(() =>
       selectStreamTranscriptValueSnapshots(payload, valuesSnapshotKind, {
         completeMessages: completeValuesMessages,
-        onResolve: goalReceipts
+        onResolve: projectReceipts
           ? (source, canonical) => {
               receipts.push([source, canonical])
             }
@@ -4898,11 +4959,14 @@ export function persistAndForwardPhysicalRunStreamChunk(
       persistStreamTranscriptChunk(threadId, runToken, "messages", snapshot, { deferFlush: true })
     }
     flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
-    if (goalReceipts) {
-      for (const [source, receipt] of receipts) committedGoalMessageReceipts.set(source, receipt)
+    if (projectReceipts) {
+      for (const [source, receipt] of receipts) committedGraphMessageReceipts.set(source, receipt)
       const frame = asPlainRecord(payload)
       if (Array.isArray(frame?.messages)) {
-        outgoing = { ...frame, messages: projectCommittedGoalMessages(frame.messages) }
+        outgoing = {
+          ...frame,
+          messages: projectCommittedGraphMessages(frame.messages)
+        }
       }
     }
     // Commit both provisional writes and authoritative updates at this boundary.
@@ -7454,7 +7518,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         runGoalId = runGoal?.goalId ?? null
         runGoalActiveWindowId = runGoal?.activeWindowId ?? null
         if (runGoal && userMessageId) {
-          streamTranscriptBoundaryIds.set(pendingStreamTranscriptKey(threadId, runToken), userMessageId)
+          streamTranscriptBoundaries.set(pendingStreamTranscriptKey(threadId, runToken), {
+            id: userMessageId
+          })
         }
 
         // Abort the stream if the window is closed/destroyed
@@ -7582,7 +7648,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             type: "custom",
             data: {
               type: "goal_subturn_complete",
-              messages: projectCommittedGoalMessages(latestSerializedValuesMessagesForGoalFlush),
+              messages: projectCommittedGraphMessages(latestSerializedValuesMessagesForGoalFlush),
               nativeTranscriptCommitted: true
             }
           })
@@ -8944,7 +9010,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   runToken,
                   abortController.signal,
                   runGoal,
-                  augmentedUserFields
+                  augmentedUserFields,
+                  "notification"
                 )
               : new HumanMessage({
                   id: userMessageId,
@@ -8992,17 +9059,23 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   pluginPrompt?.assertLive()
                 }
               }) : undefined
-          const coordinatorNotificationInput = coordinatorNotificationHumanMessage
-            ? createPhysicalRunHiddenUserMessage(
-                threadId,
-                runToken,
-                abortController.signal,
-                isCoordinatorNotificationTurn ? runGoal : null,
-                {
-                  content: coordinatorNotificationHumanMessage,
-                  additional_kwargs: { [COORDINATOR_INTERNAL_NOTIFICATION_MESSAGE_KEY]: true }
-                }
-              )
+          const coordinatorNotificationFields = coordinatorNotificationHumanMessage
+            ? {
+                content: coordinatorNotificationHumanMessage,
+                additional_kwargs: { [COORDINATOR_INTERNAL_NOTIFICATION_MESSAGE_KEY]: true }
+              }
+            : undefined
+          const coordinatorNotificationInput = coordinatorNotificationFields
+            ? isCoordinatorNotificationTurn
+              ? createPhysicalRunHiddenUserMessage(
+                  threadId,
+                  runToken,
+                  abortController.signal,
+                  runGoal,
+                  coordinatorNotificationFields,
+                  "notification"
+                )
+              : new HumanMessage(coordinatorNotificationFields)
             : undefined
 
           const humanMessages: BaseMessage[] = [
@@ -9935,19 +10008,21 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 // behavior (Stop hooks fire) — its worker result is re-discoverable
                 // on the next thread hydrate, so the same loss risk does not apply.
                 runStopHooks: isWorkflowNotificationTurn ? async () => null : undefined,
+                prepareRevisionMessage: (prompt, signal) => prepareNativePhysicalRevisionMessage(
+                  agent, threadId, runToken, signal, runGoal, prompt, isCoordinatorNotificationTurn
+                ),
                 runRevision: async (revisionPrompt, revisionSignal, revisionInput) => {
                   if (!agent)
                     throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
-                  const hiddenRevisionInput = () => createPhysicalRunHiddenUserMessage(
-                    threadId,
-                    runToken,
-                    abortController.signal,
-                    runGoal,
-                    { content: revisionPrompt }
-                  )
+                  const signal = revisionSignal ?? streamConfig.signal
+                  const input = selectRuntimeCompletionRevisionInput(agent, revisionInput, () => ({
+                    messages: [createPhysicalRunHiddenUserMessage(threadId, runToken, signal,
+                      runGoal, { content: revisionPrompt },
+                      isCoordinatorNotificationTurn ? "notification" : "goal")]
+                  }))
                   const revisionStream = await agent.stream(
-                    revisionInput ?? { messages: [hiddenRevisionInput()] },
-                    { ...streamConfig, signal: revisionSignal ?? streamConfig.signal }
+                    input,
+                    { ...streamConfig, signal }
                   )
                   await consumeStreamWithSideEffects(revisionStream)
                 },
@@ -12230,7 +12305,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   serialized,
                   valuesMessageIndexOffset,
                   valuesSnapshotKind,
-                  valuesSnapshot?.messages
+                  valuesSnapshot?.messages,
+                  false,
+                  true
                 )
                 if (valuesSnapshot) {
                   latestStableResumeValues = committedResumeValues.update(frame)
@@ -12353,20 +12430,21 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               ...getHarnessHookContext(harnessAgentContext),
               abortSignal: abortController.signal,
               getStopContext: () => stopContextCollector.snapshot(),
+              prepareRevisionMessage: (prompt, signal) => prepareNativePhysicalRevisionMessage(
+                resumeAgentRuntime, threadId, runToken, signal, boundaryGoal, prompt,
+                streamTranscriptBoundaries.get(pendingStreamTranscriptKey(threadId, runToken))
+                  ?.notification === true
+              ),
               runRevision: async (revisionPrompt, revisionSignal, revisionInput) => {
                 if (!resumeAgentRuntime)
                   throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
-                const hiddenRevisionInput = () => createPhysicalRunHiddenUserMessage(
-                  threadId,
-                  runToken,
-                  abortController.signal,
-                  boundaryGoal,
-                  { content: revisionPrompt }
-                )
-                const revisionStream = await resumeAgentRuntime.stream(
-                  revisionInput ?? { messages: [hiddenRevisionInput()] },
-                  { ...resumeStreamConfig, signal: revisionSignal ?? resumeStreamConfig.signal }
-                )
+                const signal = revisionSignal ?? resumeStreamConfig.signal
+                const input = selectRuntimeCompletionRevisionInput(resumeAgentRuntime, revisionInput, () => {
+                  const boundary = streamTranscriptBoundaries.get(pendingStreamTranscriptKey(threadId, runToken))
+                  return { messages: [createPhysicalRunHiddenUserMessage(threadId, runToken, signal,
+                    boundaryGoal, { content: revisionPrompt }, boundary?.notification ? "notification" : "goal")] }
+                })
+                const revisionStream = await resumeAgentRuntime.stream(input, { ...resumeStreamConfig, signal })
                 await consumeResumeStream(revisionStream)
               },
               sendNotice: sendHookNotice,
@@ -13438,7 +13516,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   serialized,
                   valuesMessageIndexOffset,
                   valuesSnapshotKind,
-                  valuesSnapshot?.messages
+                  valuesSnapshot?.messages,
+                  false,
+                  true
                 )
                 if (valuesSnapshot) {
                   latestStableInterruptValues = committedInterruptValues.update(frame)
@@ -13548,23 +13628,21 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               ...getHarnessHookContext(harnessAgentContext),
               abortSignal: abortController.signal,
               getStopContext: () => stopContextCollector.snapshot(),
+              prepareRevisionMessage: (prompt, signal) => prepareNativePhysicalRevisionMessage(
+                intAgentRuntime, threadId, runToken, signal, boundaryGoal, prompt,
+                streamTranscriptBoundaries.get(pendingStreamTranscriptKey(threadId, runToken))
+                  ?.notification === true
+              ),
               runRevision: async (revisionPrompt, revisionSignal, revisionInput) => {
                 if (!intAgentRuntime)
                   throw new Error("Cannot revise after Stop hook: agent runtime is unavailable")
-                const hiddenRevisionInput = () => createPhysicalRunHiddenUserMessage(
-                  threadId,
-                  runToken,
-                  abortController.signal,
-                  boundaryGoal,
-                  { content: revisionPrompt }
-                )
-                const revisionStream = await intAgentRuntime.stream(
-                  revisionInput ?? { messages: [hiddenRevisionInput()] },
-                  {
-                    ...interruptStreamConfig,
-                    signal: revisionSignal ?? interruptStreamConfig.signal
-                  }
-                )
+                const signal = revisionSignal ?? interruptStreamConfig.signal
+                const input = selectRuntimeCompletionRevisionInput(intAgentRuntime, revisionInput, () => {
+                  const boundary = streamTranscriptBoundaries.get(pendingStreamTranscriptKey(threadId, runToken))
+                  return { messages: [createPhysicalRunHiddenUserMessage(threadId, runToken, signal,
+                    boundaryGoal, { content: revisionPrompt }, boundary?.notification ? "notification" : "goal")] }
+                })
+                const revisionStream = await intAgentRuntime.stream(input, { ...interruptStreamConfig, signal })
                 await consumeInterruptStream(revisionStream)
               },
               sendNotice: sendHookNotice,

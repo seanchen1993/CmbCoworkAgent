@@ -8,6 +8,8 @@ import type {
 } from "./runtime-projection-protocol"
 import {
   CHECKPOINT_RUNTIME_PROJECTION_CANCELLED,
+  CHECKPOINT_RUNTIME_PROJECTION_FOREGROUND_REQUIRED,
+  CHECKPOINT_RUNTIME_PROJECTION_RESUME_REQUIRED,
   CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY
 } from "./runtime-projection-protocol"
 import {
@@ -54,7 +56,8 @@ function failureResponse(
     ok: false,
     error: {
       code:
-        normalized.name === CHECKPOINT_RUNTIME_PROJECTION_CANCELLED
+        [CHECKPOINT_RUNTIME_PROJECTION_FOREGROUND_REQUIRED, CHECKPOINT_RUNTIME_PROJECTION_RESUME_REQUIRED].includes(normalized.name)
+          ? normalized.name : normalized.name === CHECKPOINT_RUNTIME_PROJECTION_CANCELLED
           ? CHECKPOINT_RUNTIME_PROJECTION_CANCELLED
           : normalized.name === CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY
             ? CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY

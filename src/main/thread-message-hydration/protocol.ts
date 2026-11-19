@@ -13,18 +13,21 @@ export interface ThreadMessageHydrationReadRequest {
   type: "read-page"
   requestId: number
   databasePath: string
+  checkpointDirectory?: string
   threadId: string
   options: Pick<
     ThreadMessagesPageOptions,
     | "beforeOrdinal"
     | "beforeMessageId"
     | "targetMessageId"
+    | "residentMessageIds"
     | "anchorMessageId"
     | "limit"
     | "byteBudget"
     | "includeVisibleMessagePresence"
     | "notAfterCreatedAt"
     | "recoveryCheckpointId"
+    | "recoveryTranscriptRevision"
   >
   cancellationBuffer: SharedArrayBuffer
 }

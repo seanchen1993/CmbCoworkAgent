@@ -1096,6 +1096,7 @@ async function testQueuedRendererPersistenceRejectsSameIdReplacement(): Promise<
     const listForkable = handlers.get("threads:list-forkable-checkpoints")
     const resolveFork = handlers.get("threads:resolve-fork-checkpoint-for-message")
     const fork = handlers.get("threads:fork")
+    const bootstrap = handlers.get("threads:bootstrap-legacy-checkpoint-transcript")
     assert(appendMessages, "appendMessages handler should be registered")
     assert(
       persistSubagentTranscripts,
@@ -1107,6 +1108,7 @@ async function testQueuedRendererPersistenceRejectsSameIdReplacement(): Promise<
     assert(listForkable, "listForkable handler should be registered")
     assert(resolveFork, "resolveFork handler should be registered")
     assert(fork, "fork handler should be registered")
+    assert(bootstrap, "bootstrap handler should be registered")
 
     let lockAcquired!: () => void
     const lockAcquiredPromise = new Promise<void>((resolve) => {
@@ -1186,6 +1188,15 @@ async function testQueuedRendererPersistenceRejectsSameIdReplacement(): Promise<
       fork(null, { sourceThreadId: threadId, title: "stale fork" }) as Promise<unknown>,
       /Thread changed while the request was queued/
     )
+    let bootstrapSettled = false
+    const queuedBootstrap = Promise.resolve(bootstrap({ sender: { id: 129 } }, threadId)).then(
+      (result) => {
+        bootstrapSettled = true
+        return result
+      }
+    )
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.equal(bootstrapSettled, false, "Legacy migration waits on the original thread lease")
 
     // Both handlers captured the original row before queuing on the mutation lock.
     // Recreate with the same id, timestamp and metadata before either can commit.
@@ -1207,6 +1218,7 @@ async function testQueuedRendererPersistenceRejectsSameIdReplacement(): Promise<
     await lockHolder
 
     assert.equal((await appendPromise).count, 0)
+    assert.equal(await queuedBootstrap, null, "An old bootstrap cannot hydrate a same-ID replacement")
     await Promise.all([
       persistRejected,
       replaceRejected,

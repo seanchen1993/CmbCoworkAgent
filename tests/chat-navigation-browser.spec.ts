@@ -35,7 +35,7 @@ async function activeMatch(page: Page) {
     const viewport = document.getElementById("viewport")!
     const box = viewport.getBoundingClientRect()
     return {
-      status: document.querySelector("[aria-live]")?.textContent,
+    status: document.querySelector("[data-chat-search-overlay] [aria-live]")?.textContent,
       scrollTop: viewport.scrollTop,
       visible: Boolean(
         rect &&
@@ -66,6 +66,7 @@ async function main(): Promise<void> {
     entryPoints: [join(projectRoot, "src/renderer/src/lib/chat-search.worker.ts")],
     bundle: true,
     platform: "browser",
+    conditions: ["worker"],
     format: "iife",
     write: false
   })
@@ -175,6 +176,8 @@ async function main(): Promise<void> {
       const failure = {
         message: error instanceof Error ? error.stack : String(error),
         dom: await page.evaluate(() => ({
+          searchStatus: document.querySelector("[data-chat-search-overlay] [aria-live]")?.textContent,
+          searchInput: document.querySelector<HTMLInputElement>("[data-chat-search-overlay] input")?.value,
           expandButtons: [...document.querySelectorAll("button")].filter(
             (node) => node.textContent?.trim() === "展开全文"
           ).length,
@@ -219,7 +222,8 @@ async function main(): Promise<void> {
       }
       results.push({ name, passed: false, error: JSON.stringify(failure) })
       if (!scrollbarCancelOnly)
-        await page.screenshot({ path: join(artifacts, `failure-${results.length - 1}.png`) })
+        await page.screenshot({ path: join(artifacts, `failure-${results.length - 1}.png`),
+          timeout: 2000 }).catch(() => {})
     }
     console.log(JSON.stringify(results.at(-1)))
   }
@@ -287,7 +291,7 @@ async function main(): Promise<void> {
       }
       await page.getByPlaceholder("在当前会话中搜索").fill("needle")
       await page.waitForFunction(() =>
-        document.querySelector("[aria-live]")?.textContent?.includes("1/")
+        document.querySelector("[data-chat-search-overlay] [aria-live]")?.textContent?.includes("1/")
       )
     }
     await check("different occurrences in one tall message", async () => {
@@ -306,6 +310,7 @@ async function main(): Promise<void> {
         (top) => Math.abs(document.getElementById("viewport")!.scrollTop - top) < 4,
         first.scrollTop
       )
+      await waitForActiveMatch(page)
       assert((await activeMatch(page)).visible)
       return { first, second }
     })
@@ -495,10 +500,7 @@ async function main(): Promise<void> {
         await page.waitForFunction(() => window.chatNavigationFixture.searchNavigationActive?.() === true)
         if (kind === "scrollbar-delayed")
           await page.waitForFunction(() => Boolean(window.chatNavigationFixture.finishHydration))
-        else await page.waitForFunction(() => {
-          const registry = (CSS as unknown as { highlights: Map<string, Set<Range>> }).highlights
-          return [...(registry.get("chat-search-active") ?? [])][0]?.toString() === "needle"
-        })
+        else await page.waitForFunction(() => window.chatNavigationMetrics.preciseScrolls > 0)
         const thumb = page.getByTestId("search-real-scrollbar-thumb")
         const bounds = await thumb.boundingBox()
         assert(bounds && bounds.width > 0 && bounds.height > 0, "A real Radix thumb must be presented")

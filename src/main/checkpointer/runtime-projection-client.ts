@@ -1,10 +1,12 @@
 import { types as nodeTypes } from "node:util"
 import { validateFunctionConversationTranscriptStamp } from "../../shared/mods/v2/conversation-transcript"
+import type { LegacySearchBootstrapGuard } from "./runtime-projection-protocol"
 import type { Worker } from "node:worker_threads"
 import type { LegacyTranscriptWriter } from "./legacy-transcript-main-writer"
 import type { LegacyTranscriptWriteMessage } from "./legacy-transcript-write-protocol"
 import type { CanonicalCheckpointDisplaySelection } from "./function-conversation-canonical-display-worker"
 import { existsSync } from "node:fs"
+import { hasSqliteRecoverySidecar } from "../db/sqlite-recovery-family"
 import type {
   CheckpointDatabaseIdentity,
   CheckpointDatabaseFileIdentity
@@ -335,6 +337,12 @@ export class CheckpointRuntimeProjectionWorkerUnavailableError extends Error {
 
 export function isCheckpointRuntimeProjectionCancelled(error: unknown): boolean {
   return error instanceof Error && error.name === CHECKPOINT_RUNTIME_PROJECTION_CANCELLED
+}
+
+function checkpointProjectionCancelled(): Error {
+  const error = new Error("Checkpoint runtime projection request cancelled")
+  error.name = CHECKPOINT_RUNTIME_PROJECTION_CANCELLED
+  return error
 }
 
 export function isCheckpointRuntimeProjectionSchemaNotReady(error: unknown): boolean {
@@ -953,7 +961,8 @@ export class CheckpointRuntimeProjectionClient {
     databasePath: string,
     threadId: string,
     checkpointNs = "",
-    foregroundKey?: string | number
+    foregroundKey?: string | number,
+    signal?: AbortSignal
   ): Promise<unknown | null> {
     return this.request(
       {
@@ -962,7 +971,12 @@ export class CheckpointRuntimeProjectionClient {
         threadId,
         checkpointNs
       },
-      foregroundKey === undefined ? {} : { cancellable: true, foregroundKey: String(foregroundKey) }
+      {
+        cancellable: foregroundKey !== undefined || !!signal,
+        awaitPhysical: true,
+        foregroundKey: foregroundKey === undefined ? undefined : String(foregroundKey),
+        signal
+      }
     ).then((value) => value ?? null)
   }
 
@@ -1011,7 +1025,9 @@ export class CheckpointRuntimeProjectionClient {
     threadId: string,
     checkpointNs = "",
     foregroundKey?: string | number,
-    source?: LegacyCheckpointTranscriptHostSource
+    source?: LegacyCheckpointTranscriptHostSource,
+    signal?: AbortSignal,
+    guard?: LegacySearchBootstrapGuard
   ): Promise<LegacyCheckpointTranscriptBootstrapResult> {
     return this.request(
       {
@@ -1019,12 +1035,15 @@ export class CheckpointRuntimeProjectionClient {
         databasePath,
         messageDatabasePath,
         threadId,
-        checkpointNs
+        checkpointNs,
+        searchGuard: guard ? Object.freeze({ ...guard, incarnation: Object.freeze({ ...guard.incarnation }) }) : undefined
       },
       {
         cancellable: true,
+        awaitPhysical: true,
         bootstrapThreadId: threadId,
         legacySource: source,
+        signal,
         ...(foregroundKey === undefined ? {} : { foregroundKey: String(foregroundKey) })
       }
     ).then((value) => value as LegacyCheckpointTranscriptBootstrapResult)
@@ -1150,14 +1169,18 @@ export function readLatestCheckpointRuntimeTupleInWorker(
   databasePath: string,
   threadId: string,
   checkpointNs = "",
-  foregroundKey?: string | number
+  foregroundKey?: string | number,
+  signal?: AbortSignal
 ): Promise<unknown | null> {
-  if (!existsSync(databasePath)) return Promise.resolve(null)
+  if (!existsSync(databasePath) && !hasSqliteRecoverySidecar(databasePath)) {
+    return Promise.resolve(null)
+  }
   return getDefaultClient().readLatestRuntimeTuple(
     databasePath,
     threadId,
     checkpointNs,
-    foregroundKey
+    foregroundKey,
+    signal
   )
 }
 
@@ -1189,9 +1212,10 @@ export function bootstrapLegacyCheckpointTranscriptInWorker(
   threadId: string,
   checkpointNs = "",
   foregroundKey?: string | number,
-  source?: LegacyCheckpointTranscriptHostSource
+  source?: LegacyCheckpointTranscriptHostSource,
+  signal?: AbortSignal
 ): Promise<LegacyCheckpointTranscriptBootstrapResult> {
-  if (!existsSync(databasePath)) {
+  if (!existsSync(databasePath) && !hasSqliteRecoverySidecar(databasePath)) {
     return Promise.resolve(emptyLegacyCheckpointBootstrapResult())
   }
   return getDefaultClient().bootstrapLegacyTranscript(
@@ -1200,7 +1224,8 @@ export function bootstrapLegacyCheckpointTranscriptInWorker(
     threadId,
     checkpointNs,
     foregroundKey,
-    source
+    source,
+    signal
   )
 }
 

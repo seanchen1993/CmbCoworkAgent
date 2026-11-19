@@ -1,3 +1,4 @@
+import type { ThreadMessagesPage } from "../../../main/types"
 import {
   createContext,
   memo,
@@ -94,6 +95,7 @@ import {
 import {
   findMessagesAfterCheckpointVisibleIds,
   isCheckpointEmptyAssistantToolCallMessage,
+  isInternalNotificationMessage,
   mergeCheckpointAuthorityTranscriptMessages
 } from "../../../shared/checkpoint-transcript"
 import {
@@ -103,6 +105,7 @@ import {
 } from "./goal-notice-messages"
 import {
   buildRestoredCheckpointTranscript,
+  excludeDuplicateGoalSidecars,
   filterGoalEventsForDurablePage,
   formatGoalEventMessage,
   getGoalTranscriptPageRange,
@@ -113,11 +116,14 @@ import {
   isGoalResumeCommandContent,
   isVisibleCheckpointTranscriptMessage,
   mergeGoalUserEventsIntoDurablePage,
+  resolveGoalEventsForTargetPage,
   restoreDurableTranscriptOrdinals,
   sameGoalCommandMessage,
   type GoalTranscriptPageExtent
 } from "./goal-transcript"
+import { messageHasVisibleRow } from "./message-display-visibility"
 import { mergeGoalUiEvents } from "./goal-ui-events"
+import { GOAL_USER_EVENT_MESSAGE_ID_PREFIX } from "../../../shared/goal-events"
 import {
   latestPersistedCheckpointMessageAt,
   restoreRawCheckpointMessageTime,
@@ -217,11 +223,13 @@ import {
   createForwardThreadMessagePageWindow,
   createThreadMessagePageWindow,
   createTargetedThreadMessageWindow,
+  selectTargetedThreadMessageTail,
   mergeLatestThreadMessagePage,
   prependBoundedThreadMessagePage,
   prependThreadMessagePageWindow,
   restoreLatestThreadMessageWindow,
   isForwardThreadMessagePageCursor,
+  getForwardPageBackwardBoundary,
   isThreadMessageForwardPageProgress,
   isThreadMessagePageContinuousWithBoundary,
   threadMessagePageIdentity,
@@ -410,6 +418,27 @@ const normalizePersistedThreadMessages = (messages: Message[]): Message[] => {
       ...(endAt ? { end_at: endAt } : {})
     }
   })
+}
+
+function getTranscriptGoalEvents(state: ThreadState | undefined, explicit?: GoalEvent) {
+  const events = new Map<number, GoalEvent>()
+  for (const event of state?.searchGoalEvents ?? []) events.set(event.event_id, event)
+  for (const event of state?.goalUi.events ?? []) events.set(event.event_id, event)
+  for (const event of state?.goalTranscriptEvents ?? []) events.set(event.event_id, event)
+  if (explicit) events.set(explicit.event_id, explicit)
+  return [...events.values()].sort((left, right) => left.event_id - right.event_id)
+}
+
+function rememberSearchGoalEvent(previous: readonly GoalEvent[], event: GoalEvent): GoalEvent[] {
+  const retained: GoalEvent[] = []
+  let remaining = 256 * 1024
+  for (const candidate of [event, ...previous.filter((older) => older.event_id !== event.event_id)]) {
+    remaining -= 256 + 2 * (candidate.message.length + (candidate.goal_id?.length ?? 0) +
+      (candidate.active_window_id?.length ?? 0) + (candidate.transcript_message_id?.length ?? 0))
+    if (remaining < 0 || retained.length >= 128) break
+    retained.push(candidate)
+  }
+  return retained
 }
 
 const mergePersistedMessagesIntoTranscript = (
@@ -676,6 +705,7 @@ export interface ThreadState {
   goalUi: GoalUiState
   goalTranscriptEvents: GoalEvent[]
   goalTranscriptPageBoundary?: Pick<Message, "id" | "created_at">
+  searchGoalEvents: GoalEvent[]
   activeTurnStartTime: number | null
   todos: Todo[]
   workspaceFiles: FileInfo[]
@@ -726,11 +756,15 @@ export interface ThreadState {
   draftBuiltinBrowser: boolean
   scheduledTaskLoading: boolean
   historyLoading: boolean
+  historyRestorationPending: boolean
+  historyRestorationFailed: boolean
   historyPageLoading: boolean
   historyHasMore: boolean
   historyPageCursor: ThreadMessagePageCursor | null
   /** Lightweight page descriptors make a released middle reloadable without retaining bodies. */
   historyPageWindows: ThreadMessagePageWindow[]
+  /** Changes only when the resident window is replaced, not when a page is prepended. */
+  historyWindowRevision: number
   /** Explicit discontinuity between a paged historical window and the protected live tail. */
   historyWindowGap: ThreadMessageWindowGap | null
   historyMessageTotal: number
@@ -828,6 +862,7 @@ function threadDehydrationEligibilityMayHaveChanged(
     )
   return (
     previous.historyLoading !== next.historyLoading ||
+    previous.historyRestorationPending !== next.historyRestorationPending ||
     previous.historyPageLoading !== next.historyPageLoading ||
     previous.subagentTranscriptBaselineReady !== next.subagentTranscriptBaselineReady ||
     previous.scheduledTaskLoading !== next.scheduledTaskLoading ||
@@ -901,10 +936,14 @@ export interface ThreadActions {
   removeLocalMessage: (messageId: string) => void
   setMessages: (messages: Message[]) => void
   loadEarlierMessages: () => Promise<number>
-  loadMessageWindowAround: (target: { messageId: string; ordinal: number }) => Promise<boolean>
-  loadReleasedMessageWindow: () => Promise<boolean>
+  loadMessageWindowAround: (
+    target: { messageId: string; ordinal: number },
+    readPage?: (residentMessageIds: readonly string[]) => Promise<{ page: ThreadMessagesPage; goalEvent?: GoalEvent } | null>
+  ) => Promise<boolean>
+  loadReleasedMessageWindow: () => Promise<{ revealMessageId: string | null } | false>
   restoreLatestMessageWindow: () => Promise<boolean>
   cancelMessageWindowLoad: () => void
+  retryHistoryRestoration: () => void
   addQueuedMessage: (message: QueuedMessage) => void
   prependQueuedMessage: (message: QueuedMessage) => void
   getQueuedMessage: (messageId: string) => QueuedMessage | undefined
@@ -1030,6 +1069,7 @@ const createDefaultThreadState = (): ThreadState => ({
   queueAutoDrainSuppressed: false,
   goalUi: { goal: null, events: [], lastUpdated: null },
   goalTranscriptEvents: [],
+  searchGoalEvents: [],
   activeTurnStartTime: null,
   todos: [],
   workspaceFiles: [],
@@ -1068,10 +1108,13 @@ const createDefaultThreadState = (): ThreadState => ({
   // passive effect runs. Treat that shell as loading so first-open/dehydrated
   // tasks can never flash the empty conversation UI.
   historyLoading: true,
+  historyRestorationPending: false,
+  historyRestorationFailed: false,
   historyPageLoading: false,
   historyHasMore: false,
   historyPageCursor: null,
   historyPageWindows: [],
+  historyWindowRevision: 0,
   historyWindowGap: null,
   historyMessageTotal: 0,
   historyConversationPresence: "unknown",
@@ -1275,6 +1318,7 @@ function normalizeThreadState(state: ThreadState): ThreadState {
     historyHasMore: state.historyHasMore ?? false,
     historyPageCursor: state.historyPageCursor ?? null,
     historyPageWindows: state.historyPageWindows ?? [],
+    historyWindowRevision: state.historyWindowRevision ?? 0,
     historyWindowGap: state.historyWindowGap ?? null,
     historyMessageTotal: state.historyMessageTotal ?? state.messages.length,
     historyConversationPresence:
@@ -1432,8 +1476,10 @@ const collectKnownDurableMessageIds = (
 ): ReadonlySet<string> => {
   const durableIds = new Set<string>()
   for (const window of pageWindows) {
-    if (window.firstMessageId) durableIds.add(window.firstMessageId)
-    if (window.lastMessageId) durableIds.add(window.lastMessageId)
+    for (const id of [window.firstDurableMessageId ?? window.firstMessageId,
+      window.lastDurableMessageId ?? window.lastMessageId]) {
+      if (id && !id.startsWith(GOAL_USER_EVENT_MESSAGE_ID_PREFIX) && !id.startsWith("\u0000")) durableIds.add(id)
+    }
   }
   if (rememberedDurableMessageIds) {
     for (const messageId of rememberedDurableMessageIds) durableIds.add(messageId)
@@ -1928,12 +1974,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const threadHistoryHydrationAttemptsRef = useRef<Record<string, ThreadHistoryHydrationAttempt>>(
     {}
   )
-  const cancelThreadHistoryHydrationRetry = useCallback((threadId: string): void => {
-    const timer = threadHistoryHydrationRetryTimersRef.current[threadId]
-    if (timer === undefined) return
-    window.clearTimeout(timer)
-    delete threadHistoryHydrationRetryTimersRef.current[threadId]
-  }, [])
   const saveSubagentTranscriptsRef = useRef<
     (
       threadId: string,
@@ -2234,6 +2274,16 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     },
     [commitThreadStateChanges]
   )
+
+  const cancelThreadHistoryHydrationRetry = useCallback((threadId: string): void => {
+    const timer = threadHistoryHydrationRetryTimersRef.current[threadId]
+    if (timer === undefined) return
+    window.clearTimeout(timer)
+    delete threadHistoryHydrationRetryTimersRef.current[threadId]
+    updateThreadState(threadId, (state) => state.historyRestorationPending
+      ? { historyRestorationPending: false, historyRestorationFailed: true }
+      : {})
+  }, [updateThreadState])
 
   const deleteThreadState = useCallback(
     (threadId: string): void => {
@@ -2963,7 +3013,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         )
         const pageWindows = upsertLatestThreadMessagePageWindow(
           state.historyPageWindows,
-          createThreadMessagePageWindow(persistedMessages, null)
+          createThreadMessagePageWindow(persistedMessages, null, undefined, persistedPageMessages)
         )
         const pageBoundaryIds = new Set(pageWindows.map((window) => window.lastMessageId))
         const durableBoundaryIds = collectKnownDurableMessageIds(
@@ -5368,16 +5418,17 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                       ?.created_at
               const olderMessages = mergeGoalUserEventsIntoDurablePage(
                 olderDurableMessages,
-                latest.goalTranscriptEvents,
+                getTranscriptGoalEvents(latest),
                 olderPageMessages,
                 getGoalTranscriptPageRange(olderPageMessages, page.hasMore, {
                   kind: "backward",
                   boundary: { ordinal: cursor.beforeOrdinal, createdAt: beforeCreatedAt }
-                })
+                }),
+                latest.messages
               )
               const pageWindows = prependThreadMessagePageWindow(
                 latest.historyPageWindows,
-                createThreadMessagePageWindow(olderDurableMessages, cursor, beforeCreatedAt)
+                createThreadMessagePageWindow(olderMessages, cursor, beforeCreatedAt, olderPageMessages)
               )
               const pageBoundaryIds = new Set(pageWindows.map((window) => window.lastMessageId))
               const durableBoundaryIds = collectKnownDurableMessageIds(
@@ -5442,7 +5493,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             return 0
           }
         },
-        loadMessageWindowAround: async (target) => {
+        loadMessageWindowAround: async (target, readPage) => {
           const state = threadStatesRef.current[threadId]
           if (!state) return false
           if (!target.messageId || !Number.isSafeInteger(target.ordinal) || target.ordinal < 0) {
@@ -5458,15 +5509,46 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             messageWindowIntentCoordinator.isCurrent(intent)
           updateThreadState(threadId, () => ({ historyPageLoading: true }))
           try {
-            const page = await window.api.threads.getMessagesPage(threadId, {
-              targetMessageId: target.messageId,
-              limit: TARGETED_THREAD_MESSAGE_PAGE_LIMIT
-            })
+            const residentMessageIds = selectTargetedThreadMessageTail(
+              state.messages, THREAD_MESSAGE_PROTECTED_TAIL, state.historyWindowGap
+            ).filter((message) => message.ordinal !== undefined).map((message) => message.id)
+            const result = readPage ? await readPage(residentMessageIds) : { page: await window.api.threads.getMessagesPage(threadId, {
+              targetMessageId: target.messageId, limit: TARGETED_THREAD_MESSAGE_PAGE_LIMIT, residentMessageIds
+            }), goalEvent: undefined }
+            const page = result?.page
             await pendingGoalTranscriptEventsRef.current[threadId]
-            if (!isCurrentLoad() || !acceptTranscriptPage(threadId, page)) return false
-            const targetPageMessages = normalizePersistedThreadMessages(page.messages)
-            const targetMessages = targetPageMessages.filter(isVisibleCheckpointTranscriptMessage)
-            rememberDurableMessageIds(threadId, targetMessages)
+            if (!isCurrentLoad()) return false
+            if (!page) {
+              updateThreadState(threadId, () => ({ historyPageLoading: false }))
+              messageWindowIntentCoordinator.finish(intent)
+              return false
+            }
+            if (!acceptTranscriptPage(threadId, page)) return false
+            const raw = normalizePersistedThreadMessages(page.messages)
+            const durableMessages = raw.filter(isVisibleCheckpointTranscriptMessage)
+            rememberDurableMessageIds(threadId, durableMessages)
+            const explicitGoal = result?.goalEvent
+            const residentOrdinals = page.residentOrdinals
+              ? new Map(page.residentOrdinals.map(([id, ordinal]) => [id, ordinal])) : undefined
+            const goalAnchors = new Map<string, string>()
+            for (const [id, , anchor] of page.residentOrdinals ?? []) {
+              if (anchor) goalAnchors.set(id, anchor)
+            }
+            const knownGoals = getTranscriptGoalEvents(threadStatesRef.current[threadId], explicitGoal)
+              .filter((event) => event.event_id === explicitGoal?.event_id ||
+                residentOrdinals?.get(`${GOAL_USER_EVENT_MESSAGE_ID_PREFIX}${event.event_id}`) !== null)
+            const goalEvents = readPage ? resolveGoalEventsForTargetPage(knownGoals, raw, goalAnchors, explicitGoal) : knownGoals
+            for (const event of goalEvents) {
+              if (event.transcript_message_id)
+                goalAnchors.set(`${GOAL_USER_EVENT_MESSAGE_ID_PREFIX}${event.event_id}`, event.transcript_message_id)
+            }
+            const targetState = threadStatesRef.current[threadId]
+            const targetTail = selectTargetedThreadMessageTail(targetState?.messages ?? [],
+              THREAD_MESSAGE_PROTECTED_TAIL, targetState?.historyWindowGap)
+              .filter(({ id }) => residentOrdinals?.get(id) !== null)
+            const targetMessages = mergeGoalUserEventsIntoDurablePage(durableMessages, goalEvents, raw,
+              getGoalTranscriptPageRange(raw, page.hasMore, page.hasNewerMessages === false ? undefined : { kind: "target" }),
+              targetTail)
             if (!targetMessages.some((message) => message.id === target.messageId)) {
               updateThreadState(threadId, () => ({ historyPageLoading: false }))
               messageWindowIntentCoordinator.finish(intent)
@@ -5475,6 +5557,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
             let loaded = false
             updateThreadState(threadId, (latest) => {
+              const live = liveStreamAccumulatorsRef.current[threadId]
+              const activeMessageIds = new Set(live?.active ? live.messages.flatMap(({ id }) => id ? [id] : []) : [])
+              const scheduled = schedulerStreamingRef.current[threadId]
+              const scheduledId = scheduled?.assistantLocation?.tail.id ?? scheduled?.currentMsgId
+              if (scheduledId) activeMessageIds.add(scheduledId)
               const windowResult = createTargetedThreadMessageWindow(
                 latest.messages,
                 targetMessages,
@@ -5482,24 +5569,32 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   targetMessageId: target.messageId,
                   maximumResidentMessages: THREAD_MESSAGE_RESIDENT_LIMIT,
                   protectedTailMessages: THREAD_MESSAGE_PROTECTED_TAIL,
-                  existingGap: latest.historyWindowGap
+                  existingGap: latest.historyWindowGap,
+                  residentOrdinals,
+                  goalAnchors,
+                  activeMessageIds,
+                  hasNewerMessages: page.hasNewerMessages
                 }
               )
-              const messages = mergeGoalUserEventsIntoDurablePage(
-                windowResult.messages,
-                latest.goalTranscriptEvents,
-                targetPageMessages,
-                getGoalTranscriptPageRange(targetPageMessages, page.hasMore, { kind: "target" })
-              )
+              const messages = windowResult.messages
               loaded = windowResult.messages.some((message) => message.id === target.messageId)
               const nextToolCallStates = retainResidentToolCallStates(
                 upsertToolCallStatesFromMessages(latest.toolCallStates, targetMessages),
                 messages
               )
+              if (windowResult.reusedLayout) {
+                return {
+                  messages: windowResult.messages,
+                  toolCallStates: nextToolCallStates,
+                  ...(explicitGoal ? { searchGoalEvents: rememberSearchGoalEvent(latest.searchGoalEvents, explicitGoal) } : {}),
+                  historyPageLoading: false
+                }
+              }
+              const durableTarget = result?.goalEvent?.transcript_message_id ?? target.messageId
               const targetPageWindow = createThreadMessagePageWindow(targetMessages, {
-                targetMessageId: target.messageId
-              })
-              const forwardPageWindow = createForwardThreadMessagePageWindow(target.messageId)
+                targetMessageId: durableTarget
+              }, undefined, raw)
+              const forwardPageWindow = createForwardThreadMessagePageWindow(durableTarget)
               const pageWindows = [
                 targetPageWindow,
                 ...(forwardPageWindow ? [forwardPageWindow] : []),
@@ -5508,9 +5603,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               return {
                 messages,
                 toolCallStates: nextToolCallStates,
+                ...(explicitGoal ? { searchGoalEvents: rememberSearchGoalEvent(latest.searchGoalEvents, explicitGoal) } : {}),
                 historyPageLoading: false,
                 historyHasMore: page.hasMore,
-                goalTranscriptPageBoundary: targetPageMessages.find(
+                goalTranscriptPageBoundary: raw.find(
                   (message) => message.id === page.beforeMessageId
                 ),
                 historyPageCursor:
@@ -5522,6 +5618,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                     : null,
                 historyPageWindows: pageWindows,
                 historyWindowGap: attachThreadMessageGapReload(windowResult.gap, pageWindows),
+                historyWindowRevision: latest.historyWindowRevision + 1,
                 historyMessageTotal: page.total,
                 historyLoadedMessageCount: Math.min(
                   page.total,
@@ -5576,11 +5673,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             const reloadedPageMessages = normalizePersistedThreadMessages(page.messages)
             const reloadedMessages = reloadedPageMessages.filter(isVisibleCheckpointTranscriptMessage)
             rememberDurableMessageIds(threadId, reloadedMessages)
+            const raw = reloadedPageMessages
+            const pageTail = raw.at(-1)
             if (
               isForwardReload
                 ? page.verifiedAnchorMessageId !== gap.reloadTargetMessageId
                 : !isThreadMessagePageContinuousWithBoundary(
-                    reloadedMessages,
+                    raw,
                     gap.reloadTargetMessageId
                   )
             ) {
@@ -5588,22 +5687,24 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               messageWindowIntentCoordinator.finish(intent)
               return false
             }
-            // A verified anchor with no newer durable row is not progress. Keep the gap intact so
-            // a later durable sync/retry can continue instead of repeatedly closing on the anchor.
             if (
               isForwardReload &&
               !isThreadMessageForwardPageProgress(
-                reloadedMessages,
+                raw,
                 page.verifiedAnchorMessageId,
                 gap.reloadTargetMessageId
               )
             ) {
-              updateThreadState(threadId, () => ({ historyPageLoading: false }))
+              updateThreadState(threadId, (latest) => ({
+                historyPageLoading: false,
+                ...(raw.length === 0 && !page.hasMore && latest.historyWindowGap === gap
+                  ? { historyWindowGap: null } : {})
+              }))
               messageWindowIntentCoordinator.finish(intent)
-              return false
+              return raw.length === 0 && !page.hasMore ? { revealMessageId: null } : false
             }
 
-            let loaded = false
+            let loaded: { revealMessageId: string | null } | false = false
             updateThreadState(threadId, (latest) => {
               const currentGap = latest.historyWindowGap
               if (
@@ -5628,22 +5729,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               ) {
                 return { historyPageLoading: false }
               }
-              const windowResult = advanceThreadMessageWindowAcrossGap(
-                latest.messages,
-                reloadedMessages,
-                {
-                  gap: currentGap,
-                  maximumResidentMessages: THREAD_MESSAGE_RESIDENT_LIMIT,
-                  protectedTailMessages: THREAD_MESSAGE_PROTECTED_TAIL
-                }
-              )
               let extent: GoalTranscriptPageExtent | undefined
               if (reloadCursor && "anchorMessageId" in reloadCursor) {
+                const anchor = page.verifiedAnchor
                 extent = {
                   kind: "forward",
-                  anchor: latest.messages.find(
-                    (message) => message.id === reloadCursor.anchorMessageId
-                  )
+                  anchor: anchor && anchor.messageId === reloadCursor.anchorMessageId ? {
+                    ordinal: anchor.ordinal,
+                    ...(anchor.createdAt !== undefined && { created_at: new Date(anchor.createdAt) })
+                  } : undefined
                 }
               } else if (reloadCursor && typeof reloadCursor.beforeOrdinal === "number") {
                 const beforeCreatedAt =
@@ -5663,19 +5757,57 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               } else if (reloadCursor && "targetMessageId" in reloadCursor) {
                 extent = { kind: "target" }
               }
-              const messages = mergeGoalUserEventsIntoDurablePage(
-                windowResult.messages,
-                latest.goalTranscriptEvents,
+              const displayedPage = mergeGoalUserEventsIntoDurablePage(
+                reloadedMessages,
+                getTranscriptGoalEvents(latest),
                 reloadedPageMessages,
-                getGoalTranscriptPageRange(reloadedPageMessages, page.hasMore, extent)
+                getGoalTranscriptPageRange(reloadedPageMessages, page.hasMore, extent),
+                selectTargetedThreadMessageTail(latest.messages, THREAD_MESSAGE_PROTECTED_TAIL, currentGap)
               )
+              if (isForwardReload && pageTail && !displayedPage.length) {
+                loaded = { revealMessageId: null }
+                const forward = createForwardThreadMessagePageWindow(pageTail.id)!
+                const pageWindows = latest.historyPageWindows.map((window) =>
+                  window.reloadCursor && "anchorMessageId" in window.reloadCursor &&
+                  window.reloadCursor.anchorMessageId === gap.reloadAnchorMessageId
+                    ? forward : window
+                )
+                return {
+                  historyPageLoading: false,
+                  historyPageWindows: pageWindows,
+                  historyWindowGap: page.hasMore ? {
+                    ...currentGap,
+                    reloadAnchorMessageId: pageTail.id,
+                    reloadTargetMessageId: pageTail.id
+                  } : null
+                }
+              }
+              const live = liveStreamAccumulatorsRef.current[threadId]
+              const activeMessageIds = new Set(live?.active ? live.messages.flatMap(({ id }) => id ? [id] : []) : [])
+              const scheduled = schedulerStreamingRef.current[threadId]
+              const scheduledId = scheduled?.assistantLocation?.tail.id ?? scheduled?.currentMsgId
+              if (scheduledId) activeMessageIds.add(scheduledId)
+              const windowResult = advanceThreadMessageWindowAcrossGap(
+                latest.messages,
+                displayedPage,
+                {
+                  gap: currentGap,
+                  maximumResidentMessages: THREAD_MESSAGE_RESIDENT_LIMIT,
+                  protectedTailMessages: THREAD_MESSAGE_PROTECTED_TAIL,
+                  activeMessageIds,
+                  rawPage: raw,
+                  hasMore: isForwardReload ? page.hasMore : undefined
+                }
+              )
+              const messages = windowResult.messages
               let pageWindows = latest.historyPageWindows
               if (isForwardReload && reloadCursor) {
                 const currentPageWindow = createThreadMessagePageWindow(
-                  reloadedMessages,
-                  reloadCursor
+                  displayedPage,
+                  reloadCursor,
+                  undefined,
+                  raw
                 )
-                const pageTail = reloadedMessages.at(-1)
                 const forwardPageWindow = pageTail
                   ? createForwardThreadMessagePageWindow(pageTail.id)
                   : null
@@ -5685,9 +5817,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   ...latest.historyPageWindows.filter((window) => window.reloadCursor === null)
                 ]
               }
-              loaded = isForwardReload
-                ? reloadedMessages.length > 0
-                : windowResult.messages.some((message) => message.id === gap.reloadTargetMessageId)
+              if (isForwardReload) {
+                const displayedIds = new Set(displayedPage.map(({ id }) => id))
+                const firstVisible = excludeDuplicateGoalSidecars(messages).find((message) =>
+                  displayedIds.has(message.id) && messageHasVisibleRow(message))
+                loaded = { revealMessageId: firstVisible?.id ?? null }
+              } else if (raw.some((message) => message.id === gap.reloadTargetMessageId)) {
+                loaded = { revealMessageId: gap.reloadTargetMessageId }
+              }
+              const firstRetained = isForwardReload ? getForwardPageBackwardBoundary(messages, raw) : undefined
+              const backwardFromForward = firstRetained?.ordinal !== undefined
+                ? { beforeOrdinal: firstRetained.ordinal, beforeMessageId: firstRetained.id }
+                : null
               return {
                 messages,
                 toolCallStates: retainResidentToolCallStates(
@@ -5695,12 +5836,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   messages
                 ),
                 historyPageLoading: false,
-                historyHasMore: isForwardReload ? latest.historyHasMore : page.hasMore,
+                historyHasMore: isForwardReload ? Boolean(backwardFromForward) : page.hasMore,
                 goalTranscriptPageBoundary: isForwardReload
-                  ? latest.goalTranscriptPageBoundary
-                  : reloadedPageMessages.find((message) => message.id === page.beforeMessageId),
+                  ? firstRetained ?? latest.goalTranscriptPageBoundary
+                  : raw.find((message) => message.id === page.beforeMessageId),
                 historyPageCursor: isForwardReload
-                  ? latest.historyPageCursor
+                  ? backwardFromForward
                   : page.hasMore && page.beforeOrdinal !== null && page.beforeMessageId !== null
                     ? {
                         beforeOrdinal: page.beforeOrdinal,
@@ -5741,13 +5882,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             })
             await pendingGoalTranscriptEventsRef.current[threadId]
             if (!isCurrentLoad() || !acceptTranscriptPage(threadId, page)) return false
-            const latestPageMessages = normalizePersistedThreadMessages(page.messages)
-            const latestMessages = latestPageMessages.filter(isVisibleCheckpointTranscriptMessage)
-            rememberDurableMessageIds(threadId, latestMessages)
+            const raw = normalizePersistedThreadMessages(page.messages)
+            const visible = raw.filter(isVisibleCheckpointTranscriptMessage)
+            rememberDurableMessageIds(threadId, visible)
             latestDurableMessagePageIdentitiesRef.current[threadId] = threadMessagePageIdentitySet(
               page.messages
             )
             updateThreadState(threadId, (latest) => {
+              const latestMessages = visible
               const windowResult = restoreLatestThreadMessageWindow(
                 latest.messages,
                 latestMessages,
@@ -5759,11 +5901,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               )
               const messages = mergeGoalUserEventsIntoDurablePage(
                 windowResult.messages,
-                latest.goalTranscriptEvents,
-                latestPageMessages,
-                getGoalTranscriptPageRange(latestPageMessages, page.hasMore)
+                getTranscriptGoalEvents(latest),
+                raw,
+                getGoalTranscriptPageRange(raw, page.hasMore)
               )
-              const pageWindows = [createThreadMessagePageWindow(latestMessages, null)]
+              const pageWindows = [createThreadMessagePageWindow(latestMessages, null, undefined, raw)]
               return {
                 messages,
                 toolCallStates: retainResidentToolCallStates(
@@ -5772,7 +5914,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 ),
                 historyPageLoading: false,
                 historyHasMore: page.hasMore,
-                goalTranscriptPageBoundary: latestPageMessages.find(
+                goalTranscriptPageBoundary: raw.find(
                   (message) => message.id === page.beforeMessageId
                 ),
                 historyPageCursor:
@@ -5784,6 +5926,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                     : null,
                 historyPageWindows: pageWindows,
                 historyWindowGap: null,
+                historyWindowRevision: latest.historyWindowRevision + 1,
                 historyMessageTotal: page.total,
                 historyLoadedMessageCount: page.messages.length
               }
@@ -5810,6 +5953,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             return
           if (!messageWindowIntentCoordinator.cancel(threadId)) return
           updateThreadState(threadId, () => ({ historyPageLoading: false }))
+        },
+        retryHistoryRestoration: () => {
+          const state = threadStatesRef.current[threadId]
+          if (state?.historyRestorationFailed && !state.historyRestorationPending) {
+            delete threadHistoryHydrationRetryCountsRef.current[threadId]
+            loadThreadHistoryRef.current(threadId)
+          }
         },
         addQueuedMessage: (message: QueuedMessage) => {
           updateThreadState(threadId, (state) => {
@@ -6100,8 +6250,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       threadId: string,
       loadGeneration: number,
       foregroundToken: ForegroundHydrationToken | null
-    ): void => {
-      if (threadHistoryHydrationRetryTimersRef.current[threadId] !== undefined) return
+    ): boolean => {
+      if (threadHistoryHydrationRetryTimersRef.current[threadId] !== undefined) return true
       const retryCount = threadHistoryHydrationRetryCountsRef.current[threadId] ?? 0
       const retrySchedule = getThreadHistoryHydrationRetrySchedule(retryCount)
       if (retrySchedule.exhausted || retrySchedule.delayMs === null) {
@@ -6110,7 +6260,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         // inactive task is once again eligible for dehydration.
         threadHistoryHydrationRetryCountsRef.current[threadId] = retrySchedule.nextRetryCount
         setDehydrationEligibilityRevision((revision) => revision + 1)
-        return
+        return false
       }
       threadHistoryHydrationRetryCountsRef.current[threadId] = retrySchedule.nextRetryCount
       const runWhenWindowIsSafe = (): void => {
@@ -6145,18 +6295,25 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           return
         }
         delete threadHistoryHydrationRetryTimersRef.current[threadId]
-        if (disposition === "cancel") return
+        if (disposition === "cancel") {
+          updateThreadState(threadId, (state) => state.historyRestorationPending
+            ? { historyRestorationPending: false, historyRestorationFailed: true }
+            : {})
+          return
+        }
         loadThreadHistoryRef.current(threadId)
       }
       threadHistoryHydrationRetryTimersRef.current[threadId] = window.setTimeout(
         runWhenWindowIsSafe,
         retrySchedule.delayMs
       )
+      return true
     },
     [
       foregroundHydrationGeneration,
       messageWindowIntentCoordinator,
-      setDehydrationEligibilityRevision
+      setDehydrationEligibilityRevision,
+      updateThreadState
     ]
   )
 
@@ -6213,6 +6370,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       let checkpointPresenceFallbackResolved = false
       let mainTranscriptPublished = false
       let criticalHistoryHydrationFailed = false
+      let runtimeHydrationFailed = false
       const existingTranscriptRetryTimer =
         subagentTranscriptHydrationRetryTimersRef.current[threadId]
       if (existingTranscriptRetryTimer !== undefined) {
@@ -6226,6 +6384,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       }
       updateThreadState(threadId, () => ({
         historyLoading: !hadPublishedTranscript,
+        historyRestorationPending: true,
+        historyRestorationFailed: false,
         historyPageLoading: true,
         historyConversationPresence: "unknown",
         subagentTranscriptBaselineReady: false
@@ -6299,7 +6459,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         if (isCurrentTranscriptHydration()) {
           const pageWindows =
             visiblePersistedThreadMessages.length > 0
-              ? [createThreadMessagePageWindow(visiblePersistedThreadMessages, null)]
+              ? [createThreadMessagePageWindow(visiblePersistedThreadMessages, null, undefined, persistedThreadMessages)]
               : []
           if (mainTranscriptPublished) {
             actions.setMessages(visiblePersistedThreadMessages)
@@ -6394,9 +6554,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         .then((rawTranscripts) => ({ succeeded: true as const, rawTranscripts }))
         .catch((error) => ({ succeeded: false as const, error, rawTranscripts: {} }))
       const checkpointRuntimeLoad = (async () => {
+        const options = foregroundToken ? { requestScope: "foreground-hydration" as const } : undefined
         try {
           if (shouldBootstrapLegacyTranscript) {
-            const bootstrap = await window.api.threads.bootstrapLegacyCheckpointTranscript(threadId)
+            const bootstrap = await window.api.threads.bootstrapLegacyCheckpointTranscript(
+              threadId, options
+            )
             if (!bootstrap) {
               throw new Error("Legacy checkpoint transcript bootstrap was cancelled")
             }
@@ -6406,7 +6569,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               legacyMessagePage: bootstrap.page
             }
           }
-          const checkpoint = await window.api.threads.getLatestCheckpointRuntimeState(threadId)
+          const checkpoint = await window.api.threads.getLatestCheckpointRuntimeState(threadId, options)
           return { succeeded: true as const, checkpoint, legacyMessagePage: null }
         } catch (error) {
           return { succeeded: false as const, error, legacyMessagePage: null }
@@ -6605,7 +6768,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               ),
               historyPageWindows:
                 visiblePersistedThreadMessages.length > 0
-                  ? [createThreadMessagePageWindow(visiblePersistedThreadMessages, null)]
+                  ? [createThreadMessagePageWindow(visiblePersistedThreadMessages, null, undefined, persistedThreadMessages)]
                   : [],
               historyWindowGap: null,
               historyMessageTotal: durableMessageTotal,
@@ -6670,7 +6833,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                   return []
                 }
                 const additionalKwargs = msg.additional_kwargs ?? msg.kwargs?.additional_kwargs
-                if (additionalKwargs?.cmb_internal_coordinator_notification === true) {
+                if (isInternalNotificationMessage(msg)) {
                   return []
                 }
 
@@ -6883,16 +7046,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         if (shouldBootstrapLegacyTranscript && invalidateRejectedTranscriptSource(threadId, error,
           currentSource, "threads:bootstrap-legacy-checkpoint-transcript")) return
         if (!isCurrentLoad()) return
-        criticalHistoryHydrationFailed = true
+        runtimeHydrationFailed = true
+        if (shouldAwaitCheckpointPresence) criticalHistoryHydrationFailed = true
         console.error("[ThreadContext] Failed to load thread history:", error)
       }
       if (!isCurrentLoad()) return
-      if (criticalHistoryHydrationFailed) {
+      let historyRetryScheduled = false
+      if (criticalHistoryHydrationFailed || runtimeHydrationFailed) {
         // Keep one bounded retry chain for the main page, goal sidecar and
         // checkpoint fallback. Resetting the counter after only the DB page
         // succeeds would otherwise turn a persistent checkpoint/sidecar error
         // into an unbounded 500 ms reload loop.
-        scheduleThreadHistoryHydrationRetry(threadId, loadGeneration, foregroundToken)
+        historyRetryScheduled = scheduleThreadHistoryHydrationRetry(threadId, loadGeneration, foregroundToken)
       } else {
         delete threadHistoryHydrationRetryCountsRef.current[threadId]
       }
@@ -7009,6 +7174,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         }
       }
       messageWindowIntentCoordinator.finish(transcriptHydrationIntent)
+      updateThreadState(threadId, (state) => ({
+        historyRestorationPending: criticalHistoryHydrationFailed && historyRetryScheduled,
+        historyRestorationFailed: criticalHistoryHydrationFailed && !historyRetryScheduled,
+        goalUi: {
+          ...state.goalUi,
+          events: mergeGoalUiEvents(restoredGoalUiEvents, state.goalUi.events)
+        }
+      }))
       // A renderer can reload after main has injected a steered draft but before
       // it receives the IPC acknowledgement. The checkpoint is then the durable
       // source of truth: remove any matching local draft so auto-drain cannot
@@ -7672,6 +7845,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         if (
           (!state ||
             state.historyLoading ||
+            state.historyRestorationPending ||
+            state.historyRestorationFailed ||
             state.historyConversationPresence === "unknown" ||
             (!state.subagentTranscriptBaselineReady && !subagentTranscriptRetryExhausted)) &&
           !attemptIsCurrent
@@ -8475,6 +8650,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       if (
         hydrationAttemptIsActive &&
         (state.historyLoading ||
+          state.historyRestorationPending ||
           state.historyPageLoading ||
           (!state.subagentTranscriptBaselineReady && !subagentTranscriptRetryExhausted))
       ) {

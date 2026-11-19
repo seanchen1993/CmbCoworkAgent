@@ -36,7 +36,8 @@ export async function recoverMainCheckpointMessages(
     byteBudget: RECOVERY_BYTE_BUDGET,
     includeVisibleMessagePresence: true,
     notAfterCreatedAt: checkpointCreatedAt,
-    recoveryCheckpointId: context.checkpointId
+    recoveryCheckpointId: context.checkpointId,
+    ...(context.transcriptRevision ? { recoveryTranscriptRevision: context.transcriptRevision } : {})
   })
   sourceGuard?.()
   for (const message of page.messages) {

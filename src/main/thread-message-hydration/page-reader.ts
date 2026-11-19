@@ -1,18 +1,32 @@
+import { join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { canonicalDisplayColumnsDigest, canonicalDisplayValueDigest,
   readCanonicalDisplayProjection } from
   "../checkpointer/function-conversation-canonical-display-worker"
 import { decodeTranscriptRecoveryIntegrity } from "../../shared/transcript-recovery-integrity"
 import { hasPendingLegacyMessageTimes } from "../checkpointer/legacy-message-times"
-import type { ContentBlock, Message, ToolCall } from "../types"
+import {
+  beginLegacyCheckpointRecoveryHash, legacyCheckpointReplayRowSql, NATIVE_DURABLE_CHECKPOINT_ID
+} from "../checkpointer/legacy-checkpoint-source"
+import { EMPTY_SQLITE_RECOVERY_FAMILY_KEY, sqliteRecoveryFamilyKey } from "../db/sqlite-recovery-family"
+import { hasThreadMessageFragmentGenerations, publishedThreadMessageFragmentsSql } from "../db/thread-message-fragment-storage"
+import {
+  clampToolCalls,
+  messageContentNeedsTranscriptClamp,
+  normalizeMessageContent,
+  THREAD_MESSAGE_TEXT_LIMIT,
+  toolCallsNeedTranscriptClamp
+} from "../../shared/thread-message-content"
+import type { Message, ToolCall } from "../types"
 import type {
   ThreadMessageHydrationWorkerStats,
   ThreadMessageHydrationReadRequest,
   CanonicalThreadDisplayWitness
 } from "./protocol"
 import { THREAD_MESSAGE_HYDRATION_CANCELLED } from "./protocol"
+import { THREAD_MESSAGE_BEFORE_CURSOR_SQL, threadMessageBeforeCursorBindings } from "./order-sql"
 import { isRestorableConversationTranscriptMessage } from "../../shared/checkpoint-transcript"
-import { normalizeTranscriptReasoning } from "../../shared/transcript-reasoning"
+import { normalizeTranscriptReasoning, normalizeVisibleReasoningText } from "../../shared/transcript-reasoning"
 import { isFunctionPluginPromptOrigin } from "../../shared/mods/v2/plugin-prompt"
 import { functionConversationTranscriptFields } from "../../shared/mods/v2/conversation-transcript"
 import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
@@ -22,17 +36,11 @@ import type { FunctionConversationProjectionColumns } from "../db/function-conve
 import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
 import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
+  GOAL_USER_EVENT_MESSAGE_ID_PREFIX,
   isVisibleGoalUserEventMessage
 } from "../../shared/goal-events"
+import { THREAD_SEARCH_GOAL_EVENT_SQL } from "../thread-search/goal-event"
 
-const THREAD_MESSAGE_TEXT_LIMIT = 120_000
-const THREAD_MESSAGE_BLOCK_LIMIT = 80
-const THREAD_MESSAGE_BLOCK_TEXT_LIMIT = 60_000
-const THREAD_MESSAGE_JSON_STRING_LIMIT = 20_000
-const THREAD_MESSAGE_JSON_ARRAY_LIMIT = 100
-const THREAD_MESSAGE_JSON_OBJECT_KEY_LIMIT = 80
-const THREAD_MESSAGE_JSON_DEPTH_LIMIT = 6
-const THREAD_MESSAGE_TOOL_CALL_LIMIT = 50
 const DEFAULT_THREAD_MESSAGES_PAGE_LIMIT = 500
 const MAX_THREAD_MESSAGES_PAGE_LIMIT = 1_000
 export const THREAD_MESSAGE_HYDRATION_MAX_BYTE_BUDGET = 4 * 1024 * 1024
@@ -70,6 +78,9 @@ interface ThreadMessageRow {
 
 interface CandidateRow {
   message_id: string
+  missingSourceRow?: boolean
+  sourceLogicalId?: string
+  sourceContentKey?: string
   ordinal: number
   estimated_bytes: number
 }
@@ -81,8 +92,24 @@ interface FragmentSummary {
 
 interface LegacyCheckpointMigrationBoundary {
   checkpointId: string
+  sourceKey: string | null
   totalMessages: number
+  hasSourceIds: boolean
+  usesPhysicalSourceIds: boolean
+  requiresContentProof: boolean
+  recoveryRevisionMismatch: boolean
+  unverifiedRecoveryRevision: boolean
+  nativeTranscript: boolean
   status: "migrating" | "complete"
+}
+
+function cannotProveRecoverySource(
+  migration: LegacyCheckpointMigrationBoundary | null,
+  checkpointId: string | undefined
+): boolean {
+  return Boolean(checkpointId && migration && !migration.hasSourceIds &&
+    (migration.recoveryRevisionMismatch || (!migration.nativeTranscript &&
+      (migration.unverifiedRecoveryRevision || migration.checkpointId !== checkpointId))))
 }
 
 export class ThreadMessageHydrationCancelledError extends Error {
@@ -137,79 +164,6 @@ function dateFromTimestamp(value: unknown): Date | undefined {
   return Number.isFinite(date.getTime()) ? date : undefined
 }
 
-function truncateTranscriptString(value: string, limit: number): string {
-  if (value.length <= limit) return value
-  return `${value.slice(0, limit)}\n[truncated ${value.length - limit} chars]`
-}
-
-function summarizeJsonValue(value: unknown): unknown {
-  if (typeof value === "string") {
-    return truncateTranscriptString(value, THREAD_MESSAGE_JSON_STRING_LIMIT)
-  }
-  if (Array.isArray(value)) return `[Array ${value.length}]`
-  if (value instanceof Date) return value.toISOString()
-  if (value && typeof value === "object") return "[Object]"
-  if (typeof value === "bigint") return value.toString()
-  if (typeof value === "function") return `[Function ${value.name || "anonymous"}]`
-  if (typeof value === "symbol") return value.toString()
-  return value
-}
-
-function clampJsonForTranscript(
-  value: unknown,
-  options: {
-    stringLimit: number
-    arrayLimit: number
-    objectKeyLimit: number
-    depthLimit: number
-  },
-  depth = 0,
-  seen = new WeakSet<object>()
-): unknown {
-  if (typeof value === "string") return truncateTranscriptString(value, options.stringLimit)
-  if (
-    value === null ||
-    value === undefined ||
-    typeof value === "number" ||
-    typeof value === "boolean"
-  ) {
-    return value
-  }
-  if (value instanceof Date) return value.toISOString()
-  if (typeof value === "bigint") return value.toString()
-  if (typeof value === "function") return `[Function ${value.name || "anonymous"}]`
-  if (typeof value === "symbol") return value.toString()
-  if (!value || typeof value !== "object") return value
-  if (seen.has(value)) return "[Circular]"
-  if (depth >= options.depthLimit) return summarizeJsonValue(value)
-
-  seen.add(value)
-  try {
-    if (Array.isArray(value)) {
-      const values = value
-        .slice(0, options.arrayLimit)
-        .map((item) => clampJsonForTranscript(item, options, depth + 1, seen))
-      if (value.length > options.arrayLimit) {
-        values.push(`[truncated ${value.length - options.arrayLimit} items]`)
-      }
-      return values
-    }
-
-    const output: Record<string, unknown> = {}
-    const entries = Object.entries(value).slice(0, options.objectKeyLimit)
-    for (const [key, nested] of entries) {
-      output[key] = clampJsonForTranscript(nested, options, depth + 1, seen)
-    }
-    const keyCount = Object.keys(value).length
-    if (keyCount > options.objectKeyLimit) {
-      output.__truncated_keys = keyCount - options.objectKeyLimit
-    }
-    return output
-  } finally {
-    seen.delete(value)
-  }
-}
-
 function parseJsonValue(raw: unknown, cancellation: Int32Array): unknown {
   if (typeof raw !== "string" || raw.trim() === "") return undefined
   throwIfCancelled(cancellation)
@@ -222,115 +176,10 @@ function parseJsonValue(raw: unknown, cancellation: Int32Array): unknown {
   }
 }
 
-function normalizeMessageContent(content: unknown): Message["content"] {
-  if (typeof content === "string") {
-    return truncateTranscriptString(content, THREAD_MESSAGE_TEXT_LIMIT)
-  }
-  if (Array.isArray(content)) {
-    return content
-      .slice(0, THREAD_MESSAGE_BLOCK_LIMIT)
-      .map((block) =>
-        clampJsonForTranscript(block, {
-          stringLimit: THREAD_MESSAGE_BLOCK_TEXT_LIMIT,
-          arrayLimit: THREAD_MESSAGE_JSON_ARRAY_LIMIT,
-          objectKeyLimit: THREAD_MESSAGE_JSON_OBJECT_KEY_LIMIT,
-          depthLimit: THREAD_MESSAGE_JSON_DEPTH_LIMIT
-        })
-      ) as ContentBlock[]
-  }
-  return ""
-}
-
-function parsedToolCalls(parsed: unknown): ToolCall[] | undefined {
-  if (!Array.isArray(parsed)) return undefined
-  return parsed
-    .slice(0, THREAD_MESSAGE_TOOL_CALL_LIMIT)
-    .map((toolCall) =>
-      clampJsonForTranscript(toolCall, {
-        stringLimit: THREAD_MESSAGE_JSON_STRING_LIMIT,
-        arrayLimit: THREAD_MESSAGE_JSON_ARRAY_LIMIT,
-        objectKeyLimit: THREAD_MESSAGE_JSON_OBJECT_KEY_LIMIT,
-        depthLimit: THREAD_MESSAGE_JSON_DEPTH_LIMIT
-      })
-    ) as ToolCall[]
-}
-
-function jsonValueNeedsTranscriptClamp(
-  value: unknown,
-  options: {
-    stringLimit: number
-    arrayLimit: number
-    objectKeyLimit: number
-    depthLimit: number
-  },
-  depth = 0
-): boolean {
-  if (typeof value === "string") return value.length > options.stringLimit
-  if (!value || typeof value !== "object") return false
-  if (depth >= options.depthLimit) return true
-  if (Array.isArray(value)) {
-    return (
-      value.length > options.arrayLimit ||
-      value
-        .slice(0, options.arrayLimit)
-        .some((nested) => jsonValueNeedsTranscriptClamp(nested, options, depth + 1))
-    )
-  }
-  const entries = Object.entries(value)
-  return (
-    entries.length > options.objectKeyLimit ||
-    entries
-      .slice(0, options.objectKeyLimit)
-      .some(([, nested]) => jsonValueNeedsTranscriptClamp(nested, options, depth + 1))
-  )
-}
-
-function messageContentNeedsTranscriptClamp(content: unknown): boolean {
-  if (typeof content === "string") return content.length > THREAD_MESSAGE_TEXT_LIMIT
-  if (!Array.isArray(content)) return content !== undefined && content !== null
-  if (content.length > THREAD_MESSAGE_BLOCK_LIMIT) return true
-  return content.some((block) =>
-    jsonValueNeedsTranscriptClamp(block, {
-      stringLimit: THREAD_MESSAGE_BLOCK_TEXT_LIMIT,
-      arrayLimit: THREAD_MESSAGE_JSON_ARRAY_LIMIT,
-      objectKeyLimit: THREAD_MESSAGE_JSON_OBJECT_KEY_LIMIT,
-      depthLimit: THREAD_MESSAGE_JSON_DEPTH_LIMIT
-    })
-  )
-}
-
-function toolCallsNeedTranscriptClamp(toolCalls: unknown): boolean {
-  if (!Array.isArray(toolCalls)) return toolCalls !== undefined && toolCalls !== null
-  if (toolCalls.length > THREAD_MESSAGE_TOOL_CALL_LIMIT) return true
-  return toolCalls.some((toolCall) =>
-    jsonValueNeedsTranscriptClamp(toolCall, {
-      stringLimit: THREAD_MESSAGE_JSON_STRING_LIMIT,
-      arrayLimit: THREAD_MESSAGE_JSON_ARRAY_LIMIT,
-      objectKeyLimit: THREAD_MESSAGE_JSON_OBJECT_KEY_LIMIT,
-      depthLimit: THREAD_MESSAGE_JSON_DEPTH_LIMIT
-    })
-  )
-}
-
 function messageBoolean(value: unknown): boolean | undefined {
   if (typeof value === "boolean") return value
   if (typeof value === "number") return value !== 0
   return undefined
-}
-
-function appendFragmentSummary(
-  storedContent: Message["content"],
-  fragment: FragmentSummary | undefined
-): Message["content"] {
-  if (!fragment || fragment.length === 0 || typeof storedContent !== "string") {
-    return storedContent
-  }
-  const combinedLength = storedContent.length + fragment.length
-  if (combinedLength <= THREAD_MESSAGE_TEXT_LIMIT) {
-    return `${storedContent}${fragment.prefix}`
-  }
-  const retained = `${storedContent}${fragment.prefix}`.slice(0, THREAD_MESSAGE_TEXT_LIMIT)
-  return `${retained}\n[truncated ${combinedLength - THREAD_MESSAGE_TEXT_LIMIT} chars]`
 }
 
 function rowToMessage(
@@ -344,10 +193,17 @@ function rowToMessage(
   const endAt = dateFromTimestamp(row.end_at)
   const isError = messageBoolean(row.is_error)
   const parsedToolCallValues = parseJsonValue(row.tool_calls_json, cancellation)
-  const toolCalls = parsedToolCalls(parsedToolCallValues)
+  const toolCalls = clampToolCalls(parsedToolCallValues)
   const parsedContent = parseJsonValue(row.content_json, cancellation)
-  const storedContent = normalizeMessageContent(parsedContent)
-  const content = appendFragmentSummary(storedContent, fragment)
+  let omittedChars = 0
+  let content: Message["content"]
+  if (typeof parsedContent === "string") {
+    const head = parsedContent.slice(0, THREAD_MESSAGE_TEXT_LIMIT)
+    content = head + (fragment?.prefix.slice(0, THREAD_MESSAGE_TEXT_LIMIT - head.length) ?? "")
+    omittedChars = Math.max(0, parsedContent.length + (fragment?.length ?? 0) - THREAD_MESSAGE_TEXT_LIMIT)
+  } else {
+    content = normalizeMessageContent(parsedContent)
+  }
   // The optional column keeps old databases readable. Only the host's bounded source stamp
   // is forwarded; malformed or assistant-owned stamps never classify a human message.
   const source = row.role === "user" && typeof row.prompt_origin_json === "string" &&
@@ -372,6 +228,7 @@ function rowToMessage(
         : {}),
       role: row.role,
       content,
+      ...(omittedChars > 0 ? { content_preview_notice: `[truncated ${omittedChars} chars]` } : {}),
       ...(row.reasoning ? { reasoning: normalizeTranscriptReasoning(row.reasoning) } : {}),
       ...(toolCalls ? { tool_calls: toolCalls } : {}),
       ...(row.tool_call_id ? { tool_call_id: row.tool_call_id } : {}),
@@ -391,11 +248,7 @@ function rowToMessage(
     truncated:
       messageContentNeedsTranscriptClamp(parsedContent) ||
       toolCallsNeedTranscriptClamp(parsedToolCallValues) ||
-      Boolean(
-        fragment &&
-          typeof storedContent === "string" &&
-          storedContent.length + fragment.length > THREAD_MESSAGE_TEXT_LIMIT
-      )
+      omittedChars > 0
   }
 }
 
@@ -500,11 +353,15 @@ function boundedMessagePreviewText(content: Message["content"]): string {
 
 function summarizeOversizedToolCalls(toolCalls: ToolCall[] | undefined): ToolCall[] | undefined {
   if (!toolCalls?.length) return undefined
-  return toolCalls.slice(0, 20).map((toolCall) => ({
+  const summaries = toolCalls.filter((toolCall) =>
+    typeof toolCall.id === "string" && Boolean(toolCall.id.trim()) &&
+    typeof toolCall.name === "string" && Boolean(toolCall.name.trim())
+  ).slice(0, 20).map((toolCall) => ({
     id: toolCall.id.slice(0, 512),
     name: toolCall.name.slice(0, 512),
     args: { __hydration_truncated: true }
   }))
+  return summaries.length ? summaries : undefined
 }
 
 /**
@@ -519,11 +376,30 @@ function projectMessageToByteBudget(
   if (fullBytes <= byteBudget) return { message, truncated: false, bytes: fullBytes }
 
   const summarizedToolCalls = summarizeOversizedToolCalls(message.tool_calls)
+  if (jsonBytes(message.content) < byteBudget) {
+    // Preserve the original body and its block coordinates when only another
+    // field makes the row too large for this page.
+    const structured = { ...message, tool_calls: summarizedToolCalls }
+    const withoutTools = { ...message, tool_calls: undefined }
+    for (const candidate of [structured, withoutTools]) {
+      const bytes = jsonBytes(candidate)
+      if (bytes <= byteBudget) return { message: candidate, truncated: true, bytes }
+    }
+    const shortenedReasoning = normalizeVisibleReasoningText(message.reasoning)
+      ? OVERSIZED_MESSAGE_MARKER : undefined
+    for (const base of [structured, withoutTools]) {
+      const candidate = { ...base, reasoning: shortenedReasoning }
+      const bytes = jsonBytes(candidate)
+      if (bytes <= byteBudget) return { message: candidate, truncated: true, bytes }
+    }
+  }
+
   const previewSource = boundedMessagePreviewText(message.content)
-  const reasoningSource = message.reasoning ?? ""
+  const reasoningSource = normalizeVisibleReasoningText(message.reasoning)
   const base: Message = {
     ...message,
     content: OVERSIZED_MESSAGE_MARKER,
+    content_preview_notice: undefined,
     reasoning: reasoningSource ? OVERSIZED_MESSAGE_MARKER : undefined,
     ...(summarizedToolCalls ? { tool_calls: summarizedToolCalls } : { tool_calls: undefined })
   }
@@ -566,7 +442,7 @@ function readCandidates(
   limit: number,
   cancellation: Int32Array,
   legacyMigration: LegacyCheckpointMigrationBoundary | null
-): CandidateRow[] {
+): { rows: CandidateRow[]; verifiedAnchor?: import("../types").ThreadMessagesPage["verifiedAnchor"] } {
   const beforeOrdinal = request.options.beforeOrdinal
   const beforeMessageId = request.options.beforeMessageId?.trim() ?? ""
   const targetMessageId = request.options.targetMessageId?.trim() ?? ""
@@ -577,26 +453,38 @@ function readCandidates(
   const hasAnchorMessageId = anchorMessageId.length > 0
   const notAfterCreatedAt = normalizeTimestamp(request.options.notAfterCreatedAt)
   const recoveryCheckpointId = request.options.recoveryCheckpointId?.trim() ?? ""
+  if (cannotProveRecoverySource(legacyMigration, recoveryCheckpointId)) return { rows: [] }
   const legacyMessageCount = Math.max(0, legacyMigration?.totalMessages ?? 0)
   const completedLegacyMigration = legacyMigration?.status === "complete"
   const recoveryTargetsMigratedCheckpoint =
     completedLegacyMigration &&
     Boolean(recoveryCheckpointId) &&
     legacyMigration.checkpointId === recoveryCheckpointId
+  const recoveryUsesSourceIds = Boolean(recoveryCheckpointId && legacyMigration?.hasSourceIds)
+  const matchesSourceRow = (source: string, message: string) => legacyMigration?.usesPhysicalSourceIds
+    ? `((${source}.physical_replay_key IS NULL AND ${source}.message_id = ${message}.message_id)
+      OR ${message}.rowid = ${legacyCheckpointReplayRowSql(`${source}.thread_id`, `${source}.physical_replay_key`)})`
+    : `${source}.message_id = ${message}.message_id`
   const createdAtBoundarySql =
     notAfterCreatedAt === null
       ? ""
+      : recoveryUsesSourceIds
+        ? `\n           AND EXISTS (SELECT 1 FROM legacy_checkpoint_transcript_source_ids AS source
+          WHERE source.thread_id = m.thread_id AND source.checkpoint_id = ?
+            AND ${matchesSourceRow("source", "m")})`
       : recoveryTargetsMigratedCheckpoint
         ? "\n           AND m.ordinal < ?"
-        : completedLegacyMigration
+        : completedLegacyMigration && !legacyMigration.hasSourceIds && !legacyMigration.nativeTranscript
           ? "\n           AND (m.ordinal < ? OR m.created_at <= ?)"
           : "\n           AND m.created_at <= ?"
-  const boundaryBindings: number[] =
+  const boundaryBindings: Array<string | number> =
     notAfterCreatedAt === null
       ? []
+      : recoveryUsesSourceIds
+        ? [recoveryCheckpointId]
       : recoveryTargetsMigratedCheckpoint
         ? [legacyMessageCount]
-        : completedLegacyMigration
+        : completedLegacyMigration && !legacyMigration.hasSourceIds && !legacyMigration.nativeTranscript
           ? [legacyMessageCount, notAfterCreatedAt]
           : [notAfterCreatedAt]
   if (hasBeforeOrdinal !== hasBeforeMessageId) {
@@ -619,6 +507,37 @@ function readCandidates(
       "Thread message page targetMessageId is mutually exclusive with anchorMessageId"
     )
   }
+  if (recoveryUsesSourceIds && !hasBeforeOrdinal && !hasTargetMessageId && !hasAnchorMessageId) {
+    const source = database.prepare(`
+      SELECT COALESCE(m.message_id, original.message_id) AS message_id, m.ordinal,
+        m.message_id IS NULL AS missing_source_row,
+        original.message_id AS source_logical_id, original.content_key AS source_content_key,
+        1024 + CASE WHEN fragments.total_chars IS NOT NULL THEN fragments.total_chars * 4
+          ELSE octet_length(m.content_json) END
+          + COALESCE(octet_length(m.reasoning), 0)
+          + COALESCE(octet_length(m.tool_calls_json), 0) AS estimated_bytes
+      FROM legacy_checkpoint_transcript_source_ids AS original
+      LEFT JOIN thread_messages AS m ON m.thread_id = original.thread_id
+        AND ${matchesSourceRow("original", "m")}
+      LEFT JOIN thread_message_fragment_states AS fragments
+        ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
+      WHERE original.thread_id = ? AND original.checkpoint_id = ?
+      ORDER BY original.source_index DESC LIMIT ?`)
+    const rows: CandidateRow[] = []
+    for (const row of source.iterate(request.threadId, recoveryCheckpointId, limit + 1)) {
+      throwIfCancelled(cancellation)
+      if (typeof row.message_id !== "string") continue
+      rows.push({
+        message_id: row.message_id,
+        ...(row.missing_source_row === 1 && { missingSourceRow: true }),
+        ...(typeof row.source_logical_id === "string" && { sourceLogicalId: row.source_logical_id }),
+        ...(typeof row.source_content_key === "string" && { sourceContentKey: row.source_content_key }),
+        ordinal: Number(row.ordinal) || 0,
+        estimated_bytes: Math.max(0, Number(row.estimated_bytes) || 0)
+      })
+    }
+    return { rows }
+  }
 
   // Resolve exact ids separately. Forward reads exclude the anchor body, while targeted reads
   // use the resolved composite tuple to make the target the first candidate regardless of how
@@ -627,7 +546,7 @@ function readCandidates(
   const exactMessage = hasTargetMessageId || hasAnchorMessageId
     ? database
         .prepare(
-          `SELECT m.ordinal
+          `SELECT m.ordinal, m.created_at
            FROM thread_messages AS m
            WHERE m.thread_id = ? AND m.message_id = ?${createdAtBoundarySql}`
         )
@@ -705,7 +624,7 @@ function readCandidates(
          LEFT JOIN thread_message_fragment_states AS fragments
            ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
          WHERE m.thread_id = ?
-           AND (m.ordinal < ? OR (m.ordinal = ? AND m.message_id < ?))
+           ${THREAD_MESSAGE_BEFORE_CURSOR_SQL}
            ${createdAtBoundarySql}
          ORDER BY m.ordinal DESC, m.message_id DESC
          LIMIT ?`
@@ -746,9 +665,7 @@ function readCandidates(
       : hasBeforeOrdinal
         ? [
             request.threadId,
-            beforeOrdinal as number,
-            beforeOrdinal as number,
-            beforeMessageId,
+            ...threadMessageBeforeCursorBindings(request.threadId, beforeMessageId, beforeOrdinal as number),
             ...boundaryBindings,
             limit + 1
           ]
@@ -763,7 +680,16 @@ function readCandidates(
       estimated_bytes: Math.max(0, Number(raw.estimated_bytes) || 0)
     })
   }
-  return rows
+  return {
+    rows,
+    ...(hasAnchorMessageId && exactMessageOrdinal !== null && {
+      verifiedAnchor: {
+        messageId: anchorMessageId,
+        ordinal: exactMessageOrdinal,
+        ...(typeof exactMessage?.created_at === "number" && { createdAt: exactMessage.created_at })
+      }
+    })
+  }
 }
 
 function selectCandidates(candidates: CandidateRow[], limit: number, byteBudget: number): {
@@ -809,7 +735,8 @@ function readFragmentSummaries(
   database: DatabaseSync,
   threadId: string,
   messageIds: readonly string[],
-  cancellation: Int32Array
+  cancellation: Int32Array,
+  onFragment?: (messageId: string, text: string) => void
 ): Map<string, FragmentSummary> {
   const fragments = new Map<string, FragmentSummary>()
   const uniqueIds = [...new Set(messageIds.filter(Boolean))]
@@ -817,14 +744,16 @@ function readFragmentSummaries(
     const batch = uniqueIds.slice(offset, offset + 500)
     const placeholders = batch.map(() => "?").join(", ")
     const statement = database.prepare(
-      `SELECT message_id, content_text
-       FROM thread_message_fragments
-       WHERE thread_id = ? AND message_id IN (${placeholders})
-       ORDER BY message_id ASC, fragment_id ASC`
+      `SELECT f.message_id, f.content_text
+       FROM thread_message_fragments AS f
+       WHERE f.thread_id = ? AND f.message_id IN (${placeholders})
+         ${hasThreadMessageFragmentGenerations(database) ? `AND ${publishedThreadMessageFragmentsSql("f")}` : ""}
+       ORDER BY f.message_id ASC, f.fragment_id ASC`
     )
     for (const raw of statement.iterate(threadId, ...batch)) {
       throwIfCancelled(cancellation)
       if (typeof raw.message_id !== "string" || typeof raw.content_text !== "string") continue
+      onFragment?.(raw.message_id, raw.content_text)
       const existing = fragments.get(raw.message_id) ?? { prefix: "", length: 0 }
       const remainingPrefix = Math.max(0, THREAD_MESSAGE_TEXT_LIMIT - existing.prefix.length)
       fragments.set(raw.message_id, {
@@ -939,8 +868,10 @@ function hasVisibleThreadConversation(
 
 function getLegacyCheckpointMigration(
   database: DatabaseSync,
-  threadId: string
+  threadId: string,
+  options: ThreadMessageHydrationReadRequest["options"]
 ): LegacyCheckpointMigrationBoundary | null {
+  const recoveryCheckpointId = options.recoveryCheckpointId?.trim()
   const hasMigrationTable = database
     .prepare(
       `SELECT 1
@@ -950,21 +881,63 @@ function getLegacyCheckpointMigration(
     )
     .get()
   if (!hasMigrationTable) return null
+  const hasTimingSource = database.prepare("PRAGMA table_info(legacy_checkpoint_transcript_migrations)").all()
+    .some((column) => column.name === "timing_checkpoint_id")
   const row = database
     .prepare(
-      `SELECT checkpoint_id, total_messages, status
+      `SELECT checkpoint_id, total_messages, status, source_key,
+         ${hasTimingSource ? "timing_checkpoint_id" : "NULL"} AS timing_checkpoint_id
        FROM legacy_checkpoint_transcript_migrations
        WHERE thread_id = ?
        LIMIT 1`
     )
-    .get(threadId) as
-    | { checkpoint_id?: unknown; total_messages?: unknown; status?: unknown }
-    | undefined
+    .get(threadId)
   if (!row || typeof row.checkpoint_id !== "string") return null
+  const hasTable = database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+  const verifiedSource = recoveryCheckpointId && hasTable.get("legacy_checkpoint_transcript_sources")
+    ? database.prepare(`SELECT transcript_revision FROM legacy_checkpoint_transcript_sources
+        WHERE thread_id = ? AND checkpoint_id = ?`).get(threadId, recoveryCheckpointId)
+    : undefined
+  const recoveryRevisionMismatch = Boolean(verifiedSource &&
+    (verifiedSource.transcript_revision ?? null) !== (options.recoveryTranscriptRevision ?? null))
+  const unverifiedRecoveryRevision = Boolean(options.recoveryTranscriptRevision && !verifiedSource)
+  const hasSourceIds = Boolean(recoveryCheckpointId && !recoveryRevisionMismatch && !unverifiedRecoveryRevision && (verifiedSource ||
+    (row.status === "complete" && row.checkpoint_id === recoveryCheckpointId &&
+      hasTable.get("legacy_checkpoint_transcript_source_ids") &&
+      database.prepare(`SELECT 1 FROM legacy_checkpoint_transcript_source_ids
+        WHERE thread_id = ? AND checkpoint_id = ? LIMIT 1`).get(threadId, recoveryCheckpointId))
+  ))
   return {
     checkpointId: row.checkpoint_id,
+    sourceKey: typeof row.source_key === "string" ? row.source_key : null,
     totalMessages: Math.max(0, Number(row.total_messages) || 0),
+    hasSourceIds,
+    usesPhysicalSourceIds: hasSourceIds &&
+      Boolean(database.prepare(`SELECT 1 FROM pragma_table_info('legacy_checkpoint_transcript_source_ids')
+        WHERE name = 'physical_replay_key'`).get()),
+    requiresContentProof: Boolean(verifiedSource && hasSourceIds),
+    recoveryRevisionMismatch,
+    unverifiedRecoveryRevision,
+    nativeTranscript: row.checkpoint_id === NATIVE_DURABLE_CHECKPOINT_ID ||
+      row.timing_checkpoint_id === NATIVE_DURABLE_CHECKPOINT_ID,
     status: row.status === "complete" ? "complete" : "migrating"
+  }
+}
+
+function legacySourceNeedsVerification(
+  migration: LegacyCheckpointMigrationBoundary | null,
+  { threadId, checkpointDirectory, options }: ThreadMessageHydrationReadRequest
+): boolean {
+  // Snapshot repair uses the copied checkpoint's exact durable membership and
+  // integrity. A broken source file must still be repairable from that copy.
+  if (migration?.status !== "complete" || options.recoveryCheckpointId ||
+      !checkpointDirectory || !/^[a-zA-Z0-9_-]+$/.test(threadId))
+    return false
+  try {
+    const source = sqliteRecoveryFamilyKey(join(checkpointDirectory, `${threadId}.sqlite`))
+    return source !== EMPTY_SQLITE_RECOVERY_FAMILY_KEY && source !== migration.sourceKey
+  } catch {
+    return true
   }
 }
 
@@ -976,6 +949,42 @@ export function openThreadMessageHydrationDatabase(databasePath: string): Databa
   })
   database.exec("PRAGMA query_only = ON")
   return database
+}
+
+function readResidentOrdinals(
+  database: DatabaseSync, threadId: string, ids: readonly string[], byteBudget: number
+): NonNullable<import("../types").ThreadMessagesPage["residentOrdinals"]> {
+  if (!ids.length) return []
+  const anchors = database.prepare(`SELECT message_id, ordinal FROM thread_messages
+    WHERE thread_id = ? AND message_id IN (${ids.map(() => "?").join(", ")})`)
+  const byId = new Map(anchors.all(threadId, ...ids).map((row) => [String(row.message_id), Number(row.ordinal)]))
+  const result: NonNullable<import("../types").ThreadMessagesPage["residentOrdinals"]> = []
+  let goalEvent: ReturnType<DatabaseSync["prepare"]> | undefined
+  let bytes = 1
+  for (const id of ids) {
+    let ordinal = byId.get(id) ?? null
+    let goalAnchorId: string | undefined
+    if (ordinal === null && id.startsWith(GOAL_USER_EVENT_MESSAGE_ID_PREFIX)) {
+      const suffix = id.slice(GOAL_USER_EVENT_MESSAGE_ID_PREFIX.length)
+      const eventId = Number(suffix)
+      if (/^\d{1,16}$/.test(suffix) && Number.isSafeInteger(eventId)) {
+        goalEvent ??= database.prepare(THREAD_SEARCH_GOAL_EVENT_SQL)
+        const event = goalEvent.get(threadId, eventId)
+        if (typeof event?.message === "string" && event.oversized_scope !== 1 &&
+            isVisibleGoalUserEventMessage(event.message) && typeof event.transcript_ordinal === "number" &&
+            typeof event.transcript_message_id === "string") {
+          ordinal = event.transcript_ordinal
+          goalAnchorId = event.transcript_message_id
+        }
+      }
+    }
+    const entry: (typeof result)[number] = goalAnchorId ? [id, ordinal, goalAnchorId] : [id, ordinal]
+    const size = jsonBytes(entry) + 1
+    if (bytes + size > byteBudget) continue
+    result.push(entry)
+    bytes += size
+  }
+  return result
 }
 
 export function readThreadMessagesPage(
@@ -1003,12 +1012,14 @@ export function readThreadMessagesPage(
     const hasVisibleMessages = request.options.includeVisibleMessagePresence
       ? hasVisibleThreadConversation(database, request.threadId, cancellation)
       : undefined
-    const legacyCheckpointMigration = request.options.includeVisibleMessagePresence
-      ? getLegacyCheckpointMigration(database, request.threadId)
+    const legacyCheckpointMigration = request.options.includeVisibleMessagePresence || request.options.recoveryCheckpointId
+      ? getLegacyCheckpointMigration(database, request.threadId, request.options)
       : null
     const legacyCheckpointMigrationStatus = request.options.includeVisibleMessagePresence
-      ? (legacyCheckpointMigration?.status ?? null)
+      ? (request.options.recoveryCheckpointId && legacyCheckpointMigration?.hasSourceIds
+        ? "complete" : legacyCheckpointMigration?.status ?? null)
       : undefined
+    const sourceNeedsVerification = legacySourceNeedsVerification(legacyCheckpointMigration, request)
     const legacyMessageTimesPending =
       legacyCheckpointMigration?.status === "complete" &&
       hasPendingLegacyMessageTimes(
@@ -1016,26 +1027,82 @@ export function readThreadMessagesPage(
         request.threadId,
         legacyCheckpointMigration.checkpointId
       )
-    const candidates = readCandidates(
+    const { rows: candidates, verifiedAnchor } = readCandidates(
       database,
       request,
       limit,
       cancellation,
       legacyCheckpointMigration
     )
-    const { selected, estimatedBytes } = selectCandidates(candidates, limit, byteBudget)
+    const residentOrdinals = request.options.targetMessageId && request.options.residentMessageIds
+      ? readResidentOrdinals(database, request.threadId, request.options.residentMessageIds, Math.floor(byteBudget / 4))
+      : undefined
+    const residentBytes = residentOrdinals ? jsonBytes(residentOrdinals) : 0
+    const { selected, estimatedBytes } = selectCandidates(candidates, limit, byteBudget - residentBytes)
+    const physicalIds = selected.filter((candidate) => !candidate.missingSourceRow).map((candidate) => candidate.message_id)
     const rowsById = readRowsById(
       database,
       request.threadId,
-      selected.map((candidate) => candidate.message_id),
+      physicalIds,
       cancellation
     )
+    const expectedHashes = new Map<string, string>()
+    const logicalIds = new Map<string, string>()
+    const contentHashes = new Map<string, NonNullable<ReturnType<typeof beginLegacyCheckpointRecoveryHash>>>()
+    if (legacyCheckpointMigration?.requiresContentProof && request.options.recoveryCheckpointId) {
+      const aliases = legacyCheckpointMigration.usesPhysicalSourceIds
+      const verifiedCandidates = new Map<string, CandidateRow | null>()
+      for (const candidate of selected) {
+        if (candidate.sourceLogicalId && !candidate.missingSourceRow) {
+          verifiedCandidates.set(candidate.message_id, verifiedCandidates.has(candidate.message_id) ? null : candidate)
+        }
+      }
+      const expected = database.prepare(`SELECT message_id, content_key FROM legacy_checkpoint_transcript_source_ids
+        WHERE thread_id = $threadId AND checkpoint_id = $checkpointId AND message_id = $messageId
+          ${aliases ? "AND physical_replay_key IS NULL" : ""}
+        ${aliases ? `UNION ALL SELECT message_id, content_key FROM legacy_checkpoint_transcript_source_ids
+          WHERE thread_id = $threadId AND checkpoint_id = $checkpointId AND physical_replay_key IS NOT NULL
+            AND ${legacyCheckpointReplayRowSql("$threadId", "physical_replay_key")} = (
+              SELECT rowid FROM thread_messages WHERE thread_id = $threadId AND message_id = $messageId
+            )` : ""}
+        LIMIT 2`)
+      for (const row of rowsById.values()) {
+        throwIfCancelled(cancellation)
+        let source = verifiedCandidates.get(row.message_id)
+        if (!verifiedCandidates.size) {
+          const bindings = { threadId: request.threadId, checkpointId: request.options.recoveryCheckpointId,
+            messageId: row.message_id }
+          const records = expected.all(bindings)
+          const record = records[0]
+          if (records.length === 1 && typeof record?.message_id === "string" && typeof record.content_key === "string") {
+            source = { message_id: row.message_id, ordinal: row.ordinal, estimated_bytes: 0,
+              sourceLogicalId: record.message_id, sourceContentKey: record.content_key }
+          }
+        }
+        if (typeof source?.sourceContentKey !== "string" || typeof source.sourceLogicalId !== "string") continue
+        const hash = beginLegacyCheckpointRecoveryHash({
+          messageId: source.sourceLogicalId, providerSourceId: row.provider_source_id,
+          providerOccurrence: row.provider_occurrence, role: row.role, contentJson: row.content_json,
+          reasoning: row.reasoning, toolCallsJson: row.tool_calls_json, toolCallId: row.tool_call_id,
+          name: row.name, status: row.status, isError: row.is_error
+        })
+        if (!hash) continue
+        expectedHashes.set(row.message_id, source.sourceContentKey)
+        logicalIds.set(row.message_id, source.sourceLogicalId)
+        contentHashes.set(row.message_id, hash)
+      }
+    }
     const fragments = readFragmentSummaries(
       database,
       request.threadId,
-      selected.map((candidate) => candidate.message_id),
-      cancellation
+      physicalIds,
+      cancellation,
+      contentHashes.size ? (id, fragment) => contentHashes.get(id)?.update(fragment, "utf16le") : undefined
     )
+    const matchesCheckpointContent = !legacyCheckpointMigration?.requiresContentProof ||
+      (selected.length === rowsById.size && rowsById.size === contentHashes.size &&
+        Array.from(contentHashes).every(([id, hash]) =>
+        hash.digest("hex") === expectedHashes.get(id)))
     const orderedMessages: Message[] = []
     const returnedCandidates: CandidateRow[] = []
     const truncatedMessageIds: string[] = []
@@ -1046,9 +1113,10 @@ export function readThreadMessagesPage(
     const markedIds = rowsById.size
       ? findFunctionConversationProjectionMarkers(adapter, request.threadId, [...rowsById.keys()])
       : new Set<string>()
-    let responseBytes = THREAD_MESSAGE_HYDRATION_RESPONSE_OVERHEAD
+    let responseBytes = THREAD_MESSAGE_HYDRATION_RESPONSE_OVERHEAD + residentBytes
     for (const candidate of selected) {
       throwIfCancelled(cancellation)
+      if (candidate.missingSourceRow) continue
       const row = rowsById.get(candidate.message_id)
       if (!row) continue
       const canonical = markedIds.has(row.message_id)
@@ -1063,6 +1131,8 @@ export function readThreadMessagesPage(
       const hydrated = canonical ??
         rowToMessage(row, fragments.get(candidate.message_id), cancellation)
       if (!hydrated.message) throw Error("MODS_CONVERSATION_DISPLAY_SOURCE_INVALID")
+      const logicalId = !canonical ? logicalIds.get(candidate.message_id) : undefined
+      if (logicalId !== undefined && logicalId !== hydrated.message.id) hydrated.message.id = logicalId
       const remaining = Math.max(1, byteBudget - responseBytes)
       const projected = projectMessageToByteBudget(hydrated.message, remaining)
       if (orderedMessages.length > 0 && projected.truncated) break
@@ -1076,6 +1146,10 @@ export function readThreadMessagesPage(
         truncatedMessageIds.push(candidate.message_id)
       }
     }
+    const head = request.options.targetMessageId ? returnedCandidates[0] : undefined
+    const hasNewerMessages = head && Boolean(database.prepare(`SELECT 1 FROM thread_messages
+      WHERE thread_id = ? AND (ordinal, message_id) > (?, ?) LIMIT 1`)
+      .get(request.threadId, head.ordinal, head.message_id))
     throwIfCancelled(cancellation)
     database.exec("COMMIT")
     const oldest = returnedCandidates.at(-1)
@@ -1084,6 +1158,8 @@ export function readThreadMessagesPage(
       ...(canonicalWitnesses.length ? { canonicalWitnesses } : {}),
       page: {
         messages: isForwardPage ? orderedMessages : orderedMessages.reverse(),
+        ...(residentOrdinals ? { residentOrdinals } : {}),
+        ...(hasNewerMessages !== undefined ? { hasNewerMessages } : {}),
         beforeOrdinal: !isForwardPage && hasMore && oldest ? oldest.ordinal : null,
         beforeMessageId: !isForwardPage && hasMore && oldest ? oldest.message_id : null,
         hasMore,
@@ -1093,13 +1169,14 @@ export function readThreadMessagesPage(
         ...(legacyCheckpointMigrationStatus !== undefined
           ? { legacyCheckpointMigrationStatus }
           : {}),
-        ...(isForwardPage
-          ? { verifiedAnchorMessageId: request.options.anchorMessageId?.trim() }
-          : {}),
+        ...(sourceNeedsVerification ? { legacyCheckpointSourceNeedsVerification: true } : {}),
+        ...(verifiedAnchor ? { verifiedAnchorMessageId: verifiedAnchor.messageId, verifiedAnchor } : {}),
         ...(truncatedMessageIds.length > 0 ? { truncatedMessageIds } : {}),
         ...(request.options.recoveryCheckpointId
           ? {
               recoveryIntegrity:
+                !cannotProveRecoverySource(legacyCheckpointMigration, request.options.recoveryCheckpointId) &&
+                matchesCheckpointContent &&
                 truncatedMessageIds.length === 0 &&
                 orderedMessages.every((message) => message.recovery_integrity === "verified")
                   ? ("verified" as const)

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { ThreadSummaryPage } from "../../../main/types"
 import type { Thread } from "../types"
-import { useAppStore } from "./store"
+import { adoptThreadSearchSummary, useAppStore } from "./store"
 import { isOrdinaryFlowMetadata } from "../../../shared/mods/flows/scope"
 
 function createThread(threadId: string): Thread {
@@ -79,6 +79,19 @@ describe("app store thread-directory loading", () => {
     expect(state.threads[0].metadata?.hostProjectRuntime).toStrictEqual(binding)
     expect(Boolean(state.threads[0].metadata?.hostProjectRuntime)).toBe(true)
     expect(isOrdinaryFlowMetadata(state.threads[0].metadata)).toBe(false)
+  })
+
+  it("adopts an updated search summary without discarding local file history", () => {
+    const thread = createThread("same")
+    useAppStore.setState({ threads: [{
+      ...thread, metadata: { llmFileHistory: ["file"], agentMode: "coordinator" }
+    }] })
+    expect(adoptThreadSearchSummary({
+      ...thread, updated_at: new Date(2), title: "Updated", metadata: { remoteReadOnly: true }
+    }, { token: null, legacyCreatedAt: 1 })).toBe(true)
+    const [adopted] = useAppStore.getState().threads
+    expect(adopted.title).toBe("Updated")
+    expect(adopted.metadata).toEqual({ llmFileHistory: ["file"], remoteReadOnly: true })
   })
 
   it("refreshes the directory without navigating away from project mode", async () => {

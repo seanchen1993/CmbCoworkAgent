@@ -17,6 +17,10 @@ import {
   ThreadMessageHydrationWorkerUnavailableError
 } from "./client"
 import { isThreadMessagePageContinuousWithBoundary } from "../../renderer/src/lib/thread-message-pages"
+import { createChatSearchPlan } from "../../shared/chat-search-plan"
+import { findChatSearchLocations, projectChatSearchPlan, validateChatSearchLocation } from "../../shared/chat-search-index"
+import { createThreadSearchMessagePlan } from "../../shared/thread-search-projection"
+import { THREAD_MESSAGE_TEXT_LIMIT } from "../../shared/thread-message-content"
 import {
   THREAD_CONVERSATION_PRESENCE_SCAN_BYTE_BUDGET,
   THREAD_CONVERSATION_PRESENCE_SCAN_LIMIT,
@@ -105,6 +109,7 @@ function createDatabase(): { database: DatabaseSync; path: string } {
       next_index INTEGER NOT NULL,
       current_fragment_index INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL,
+      source_key TEXT,
       updated_at INTEGER NOT NULL
     );
     CREATE TABLE thread_goal_events (
@@ -768,6 +773,64 @@ describe("thread message hydration worker", () => {
       })
     ).resolves.toMatchObject({ hasVisibleMessages: true })
   }, 30_000)
+
+  it("keeps legacy malformed tool entries out of hydrated messages", async () => {
+    const { database, path } = createDatabase()
+    const tool = { id: "valid-call", name: "read_file", args: { file_path: "notes.txt" } }
+    database.prepare(`
+      INSERT INTO thread_messages (
+        thread_id, message_id, role, content_json, tool_calls_json, created_at, ordinal
+      ) VALUES ('legacy-tools', 'assistant-1', 'assistant', '"reply"', ?, 1, 0)
+    `).run(JSON.stringify([null, [], "ignored", tool]))
+    database.close()
+
+    const client = createWorkerClient(path)
+    const page = await client.readPage("legacy-tools", { limit: 1 })
+    expect(page.messages[0]?.tool_calls).toEqual([tool])
+    expect(page.truncatedMessageIds).toEqual(["assistant-1"])
+  })
+
+  it("keeps a text preview diagnostic outside the Markdown source and exact search coordinates", async () => {
+    const { database, path } = createDatabase()
+    const retained = "persisted needle ".padEnd(THREAD_MESSAGE_TEXT_LIMIT - 1, "x") + "\\"
+    const stored = retained + "omitted text"
+    database.prepare(`INSERT INTO thread_messages
+      (thread_id, message_id, role, content_json, created_at, ordinal)
+      VALUES ('bounded-markdown', 'assistant-1', 'assistant', ?, 1, 0)`).run(JSON.stringify(stored))
+    database.close()
+    const client = createWorkerClient(path)
+    const page = await client.readPage("bounded-markdown", { limit: 1 })
+    expect(page.truncatedMessageIds).toEqual(["assistant-1"])
+    expect(page.messages[0]).toMatchObject({
+      content: retained, content_preview_notice: "[truncated 12 chars]"
+    })
+    const search = createThreadSearchMessagePlan("assistant", stored, [], null)!
+    const [hit] = findChatSearchLocations(projectChatSearchPlan(search), "persisted needle")
+    const resident = projectChatSearchPlan(createChatSearchPlan("assistant", page.messages[0].content))
+    expect(hit).toBeDefined()
+    expect(validateChatSearchLocation(resident, hit)).toBe(true)
+    expect(findChatSearchLocations(resident, "truncated")).toEqual([])
+  })
+
+  it("preserves an admitted structured body when tool data exceeds the target page budget", async () => {
+    const { database, path } = createDatabase()
+    const content = [{ type: "text", text: "First block" }, { type: "text", text: "Exact **body**" }]
+    const calls = Array.from({ length: 50 }, (_, index) => ({
+      ...(index > 0 ? { id: `call-${index}` } : {}), name: "read_file", args: { path: "x".repeat(6_000) }
+    }))
+    database.prepare(`INSERT INTO thread_messages
+      (thread_id, message_id, role, content_json, tool_calls_json, created_at, ordinal)
+      VALUES ('with-tools', 'target', 'assistant', ?, ?, 1, 0)`).run(JSON.stringify(content), JSON.stringify(calls))
+    database.close()
+    const client = createWorkerClient(path)
+    const page = await client.readPage("with-tools", { limit: 1, targetMessageId: "target", byteBudget: 64 * 1024 })
+    expect(page.messages[0]?.content).toEqual(content)
+    expect(page.messages[0]?.tool_calls?.[0]?.id).toBe("call-1")
+    expect(page.truncatedMessageIds).toEqual(["target"])
+    const plan = createChatSearchPlan("assistant", page.messages[0].content)
+    expect(findChatSearchLocations(projectChatSearchPlan(plan), "Exact body"))
+      .toMatchObject([{ blockIndex: 1 }])
+  })
 
   it("projects one oversized structured row without breaking the IPC page budget", async () => {
     const { database, path } = createDatabase()

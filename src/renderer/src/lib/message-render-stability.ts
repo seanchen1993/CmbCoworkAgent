@@ -58,6 +58,7 @@ export function areMessageRenderFieldsEqual(
     left.function_row_invalid === right.function_row_invalid &&
     areStructuredValuesEqual(left.function_row, right.function_row) &&
     areStructuredValuesEqual(left.prompt_origin, right.prompt_origin) &&
+    left.content_preview_notice === right.content_preview_notice &&
     areStructuredValuesEqual(left.content, right.content) &&
     areToolCallsEqual(left.tool_calls, right.tool_calls)
   )

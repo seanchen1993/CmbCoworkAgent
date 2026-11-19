@@ -1,4 +1,4 @@
-const IM_REMOTE_TRANSCRIPT_MESSAGE_PREFIXES = [
+export const IM_REMOTE_TRANSCRIPT_MESSAGE_PREFIXES = [
   "im-remote-approval:",
   "im-remote-user-input:"
 ] as const

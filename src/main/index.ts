@@ -1,6 +1,8 @@
 import { registerProjectCapabilityRuntimeAdmission } from "./plugins/project-capability-admission"
 import { registerLegacyCompositionAdmission } from "./harness-board/project-runtime/composition-legacy-production"
 import { registerWindowPresentation } from "./window-presentation"
+import { registerThreadSearchHandlers, closeThreadSearchWorker } from "./ipc/thread-search"
+import { closeDurableMessageSearchWorker } from "./thread-search/durable-message-search-client"
 import { cleanupMarketRuntimeContent } from "./services/market-content"
 import { harnessStageWatches } from "./services/harness-stage-attribution"
 import { initializeHarnessConfigV2 } from "./harness-board/config-v2"
@@ -1208,6 +1210,7 @@ if (browserNativeMessagingHostLaunch) {
     registerAgentHandlers(ipcMain)
     registerWorkflowHandlers(ipcMain)
     registerThreadHandlers(ipcMain)
+    registerThreadSearchHandlers(ipcMain)
     registerModelHandlers(ipcMain)
     registerDirectoryPickerHandler(ipcMain, () => mainWindow, trustedMainRendererUrl)
     registerWorkspaceFilePreviewHandlers(ipcMain)
@@ -1860,6 +1863,8 @@ if (browserNativeMessagingHostLaunch) {
         .catch((err) => console.warn("[Main] stop built-in robot error:", err)),
       stopAllLsp().catch((err) => console.warn("[Main] stopAllLsp error:", err)),
       closeRuntime().catch((err) => console.warn("[Main] closeRuntime error:", err)),
+      closeThreadSearchWorker(),
+      closeDurableMessageSearchWorker(),
       closeThreadMessageHydrationWorker().catch((err) =>
         console.warn("[Main] closeThreadMessageHydrationWorker error:", err)
       ),

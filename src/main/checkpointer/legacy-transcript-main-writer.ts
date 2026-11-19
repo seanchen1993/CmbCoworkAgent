@@ -76,6 +76,7 @@ interface Actor {
   timing?: TimingSource
   recoveryIntegrity?: boolean
   scopedOrder?: boolean
+  searchSourceKey?: string
   fragment?: { index: number; total: number; row: LegacyTranscriptWriteRow }
   cleanupPending?: boolean
   retainedAdmission?: () => void
@@ -165,6 +166,7 @@ export function createLegacyTranscriptWriter(input: {
   checkpointNamespace: string
   incarnation: ThreadIncarnation
   actualDatabase: NativeSqliteAdapter
+  searchSourceKey?: string
   assertCurrent(): void
 }): LegacyTranscriptWriter {
   const data = Object.freeze({
@@ -184,6 +186,7 @@ export function createLegacyTranscriptWriter(input: {
       legacyCreatedAt: input.incarnation.legacyCreatedAt
     }),
     guard: input.assertCurrent,
+    searchSourceKey: input.searchSourceKey,
     data,
     controller: new AbortController(),
     sequence: 0,
@@ -906,11 +909,18 @@ function apply(actor: Actor, command: LegacyTranscriptWriteCommand): LegacyTrans
     const ordinary = noNativeOwner(actor)
     return { marker, ordinary, ...(!marker && ordinary && hasGraphBoundary(actor) && {
       hasGraphBoundary: true
+    }), ...(actor.searchSourceKey !== undefined && {
+      durableHistory: Boolean(row(actor.database,
+        "SELECT 1 FROM thread_messages WHERE thread_id=? LIMIT 1", [actor.threadId]))
     }) }
   }
   if (command.kind === "reserve") {
     const old = readMarker(actor)
     bindSource(actor, command.checkpointId, command.totalMessages)
+    if (actor.searchSourceKey !== undefined && (old || command.order || hasGraphBoundary(actor) ||
+      command.totalMessages > 2048 || row(actor.database,
+        "SELECT 1 FROM thread_messages WHERE thread_id=? LIMIT 1", [actor.threadId])))
+      fail("CHECKPOINT_RUNTIME_PROJECTION_FOREGROUND_REQUIRED")
     if (old) {
       requireMarker(actor, command)
       return progress(actor)
@@ -990,6 +1000,17 @@ function apply(actor: Actor, command: LegacyTranscriptWriteCommand): LegacyTrans
       [Date.now(), actor.threadId, state.checkpointId, state.totalMessages]
     )
     if (actor.database.getRowsModified() !== 1) fail("LEGACY_TRANSCRIPT_WRITE_SOURCE_CHANGED")
+    if (actor.searchSourceKey !== undefined) {
+      if (Number(summary[0]) !== state.totalMessages)
+        fail("CHECKPOINT_RUNTIME_PROJECTION_FOREGROUND_REQUIRED")
+      const uncertain = row(actor.database, `SELECT 1 FROM thread_messages
+        WHERE thread_id=? AND recovery_integrity IS NOT 1 LIMIT 1`, [actor.threadId])
+      const searchProjectionState = uncertain ? "unverified" : "complete"
+      actor.database.run(`UPDATE ${markerTable} SET source_key=?,search_projection_state=?
+        WHERE thread_id=? AND checkpoint_id=? AND status='complete'`,
+      [actor.searchSourceKey, searchProjectionState, actor.threadId, state.checkpointId])
+      return { ...progress(actor), searchProjectionState }
+    }
     return progress(actor)
   }
   if (command.kind === "timing-source") return timingSource(actor, command.checkpointId)

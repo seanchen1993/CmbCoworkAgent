@@ -1,3 +1,4 @@
+import { HumanMessage } from "@langchain/core/messages"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 const harness = vi.hoisted(() => ({
@@ -23,7 +24,9 @@ vi.mock("./function-conversation-native-invocation", () => ({
   wrapFunctionConversationNativeInvocation: harness.protect
 }))
 
-import { createRuntimeConversationGraph, type RuntimeConversationGraphPlan } from "./native-graph-adapter"
+import { createRuntimeConversationGraph, isRuntimeNativeCompletionGraph,
+  selectRuntimeCompletionRevisionInput, type RuntimeConversationGraphPlan } from "./native-graph-adapter"
+import type { CompletionRevisionInput } from "./skill-lifecycle/completion-hooks"
 
 const options = { model: "controlled-model", tools: [] } as unknown as
   Parameters<typeof createRuntimeConversationGraph>[0]
@@ -129,6 +132,22 @@ describe("runtime conversation graph assembly", () => {
       { kind: "native", ...f } as unknown as RuntimeConversationGraphPlan)
     expect(harness.admit).not.toHaveBeenCalled()
     expect(harness.protect).toHaveBeenCalledWith(harness.native, f.host, f.runtime)
+  })
+
+  it("recognizes only the installed native graph and refuses an unproved revision", () => {
+    const f = fixture()
+    const native = createRuntimeConversationGraph(options,
+      { kind: "native", ...f } as unknown as RuntimeConversationGraphPlan)
+    const ordinary = createRuntimeConversationGraph(options, { kind: "ordinary" })
+    const input: CompletionRevisionInput = { messages: [new HumanMessage("unproved revision")] }
+    const fallback = vi.fn(() => input)
+    expect(isRuntimeNativeCompletionGraph(native)).toBe(true)
+    expect(isRuntimeNativeCompletionGraph(harness.native)).toBe(false)
+    expect(isRuntimeNativeCompletionGraph({ ...native })).toBe(false)
+    expect(selectRuntimeCompletionRevisionInput(ordinary, input, fallback)).toBe(input)
+    expect(() => selectRuntimeCompletionRevisionInput(native, input, fallback))
+      .toThrow("MODS_COMPLETION_REVISION_INPUT_INVALID")
+    expect(fallback).toHaveBeenCalledOnce()
   })
 
   it.each(["factory", "catalog", "install", "admit", "protect"])(

@@ -441,7 +441,13 @@ describe("durable stream attempt rollback", () => {
       end_at: new Date(3)
     })
     db.upsertThreadMessages(id, [original])
-    db.appendThreadMessageTextDelta(id, { ...original, reasoning: undefined, content: " suffix" })
+    expect(db.appendThreadMessageTextDelta(id, { ...original, reasoning: undefined, content: " suffix".repeat(2000) }))
+      .toBe(true)
+    const publishedCuts = () => db.getDb().exec(`SELECT m.content_json, m.fragment_generation, f.content_text
+      FROM thread_messages AS m JOIN thread_message_fragments AS f USING (thread_id, message_id)
+      WHERE m.thread_id = ? AND f.generation = m.fragment_generation ORDER BY f.fragment_id`, [id])[0]?.values
+    const cuts = publishedCuts()
+    expect(cuts?.length).toBeGreaterThan(1)
     const before = db.getThreadMessages(id)
     const attempt = new db.ThreadMessageStreamAttempt(id)
     db.upsertThreadMessages(
@@ -460,6 +466,7 @@ describe("durable stream attempt rollback", () => {
     )
     expect(attempt.rollback().discardedMessageIds).toEqual([])
     expect(db.getThreadMessages(id)).toEqual(before)
+    expect(publishedCuts()).toEqual(cuts)
   })
 
   it("uses resolved occurrence IDs instead of deleting historical provider ID collisions", () => {

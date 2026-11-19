@@ -1,5 +1,18 @@
 import type { NativeSqliteAdapter } from "./native-sqlite-adapter"
 
+export function ensureThreadGraphTranscriptBoundaries(database: NativeSqliteAdapter): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS thread_graph_transcript_boundaries (
+      thread_id TEXT NOT NULL REFERENCES threads(thread_id) ON DELETE CASCADE,
+      graph_user_id TEXT NOT NULL,
+      ordinal INTEGER NOT NULL,
+      PRIMARY KEY(thread_id, graph_user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_thread_graph_transcript_boundaries_order
+      ON thread_graph_transcript_boundaries(thread_id, ordinal)
+  `)
+}
+
 /** Persist unused ordinals so the importer and live transcript move the same slots. */
 export function ensureLegacyTranscriptSlots(database: NativeSqliteAdapter): void {
   database.exec(`

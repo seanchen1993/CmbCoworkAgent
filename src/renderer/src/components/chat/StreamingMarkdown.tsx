@@ -1,8 +1,8 @@
 import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown"
 import { rehypeChatHighlight } from "../../lib/markdown-highlight"
-import remarkGfm from "remark-gfm"
 import remarkWindowsFileLinks from "@/lib/remark-windows-file-links"
 import type { ChatSearchLocation } from "../../../../shared/chat-search-types"
+import { CHAT_MARKDOWN_REMARK_PLUGINS, markChatMarkdownSearchNavigation } from "../../../../shared/markdown-visible-text"
 import { ChatSearchContext } from "./ChatSearchContext"
 import { Check, Copy } from "lucide-react"
 import {
@@ -82,13 +82,12 @@ function MarkdownCodeBlock({
 
 // Hoisted to module scope so the prop identities stay stable across renders
 // (recreating these every render makes react-markdown redo work and churns GC).
-const REMARK_PLUGINS = [remarkGfm, remarkWindowsFileLinks, remarkStreamingMarkdownParse]
-const COMPLETED_REMARK_PLUGINS = [remarkGfm, remarkWindowsFileLinks, remarkCompletedMarkdownParseCache]
-const STABLE_PREFIX_REMARK_PLUGINS = [remarkGfm, remarkWindowsFileLinks, remarkStableMarkdownPrefixCache]
-const REHYPE_PLUGINS = [rehypeChatHighlight]
-// While streaming we skip syntax highlighting (the expensive rehype pass) and
-// reuse a single empty array identity so react-markdown doesn't see a new prop.
-const NO_REHYPE_PLUGINS: typeof REHYPE_PLUGINS = []
+const REMARK_PLUGINS = [...CHAT_MARKDOWN_REMARK_PLUGINS, remarkWindowsFileLinks, remarkStreamingMarkdownParse]
+const COMPLETED_REMARK_PLUGINS = [...CHAT_MARKDOWN_REMARK_PLUGINS, remarkWindowsFileLinks, remarkCompletedMarkdownParseCache]
+const STABLE_PREFIX_REMARK_PLUGINS = [...CHAT_MARKDOWN_REMARK_PLUGINS, remarkWindowsFileLinks, remarkStableMarkdownPrefixCache]
+const REHYPE_PLUGINS = [rehypeChatHighlight, markChatMarkdownSearchNavigation]
+// Streaming skips the expensive syntax-highlighting pass.
+const STREAMING_REHYPE_PLUGINS = [markChatMarkdownSearchNavigation]
 
 // react-markdown's default URL sanitizer treats a Windows drive letter and
 // custom local schemes as unsafe protocols (for example, `C:/repo/a.ts` and
@@ -166,7 +165,7 @@ const MarkdownFragment = memo(function MarkdownFragment({
 }): React.JSX.Element {
   const renderCodeBlock = useMemo(
     () =>
-      function renderCodeBlock({
+      function RenderMarkdownCode({
         rawCode,
         language,
         className,
@@ -204,7 +203,7 @@ const MarkdownFragment = memo(function MarkdownFragment({
       <ReactMarkdown
         remarkPlugins={isStreaming ? stablePrefix ? STABLE_PREFIX_REMARK_PLUGINS : REMARK_PLUGINS
           : COMPLETED_REMARK_PLUGINS}
-        rehypePlugins={isStreaming ? NO_REHYPE_PLUGINS : REHYPE_PLUGINS}
+        rehypePlugins={isStreaming ? STREAMING_REHYPE_PLUGINS : REHYPE_PLUGINS}
         components={components}
         urlTransform={threadId ? transformStreamingMarkdownUrl : undefined}
       >

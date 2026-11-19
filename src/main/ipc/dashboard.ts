@@ -14819,19 +14819,20 @@ async function fetchKnowledgeUserDetails(
 ): Promise<KnowledgeUserDetails> {
   const scope = resolveKnowledgeRequestScope(opts)
   if (scope.unavailableReason) return { items: [], unavailableReason: scope.unavailableReason }
+  return fetchKnowledgePeopleForScope(scope.orgIds)
+}
+
+async function fetchKnowledgePeopleForScope(orgIds: string[] | null): Promise<KnowledgeUserDetails> {
   if (import.meta.env.DEV) {
-    return { items: demoKnowledgePeople(getDemoKnowledgeRoomIds(), scope.orgIds) }
+    return { items: demoKnowledgePeople(getDemoKnowledgeRoomIds(), orgIds) }
   }
   const url = (import.meta.env.VITE_KNOWLEDGE_OVERVIEW_BASE_URL as string | undefined)?.trim() ?? ""
   return {
-    items: await fetchKnowledgeUserDetailList(url, scope.orgIds, getDashboardRequestSignal())
+    items: await fetchKnowledgeUserDetailList(url, orgIds, getDashboardRequestSignal())
   }
 }
 
-async function fetchKnowledgeOrgGroups(
-  roomId: string,
-  opts: OrgFilterOptions | undefined
-): Promise<KnowledgeOrgItem[]> {
+function requireKnowledgeDrilldownRoom(roomId: string, opts: OrgFilterOptions | undefined): void {
   const scope = resolveKnowledgeRequestScope(opts)
   if (
     typeof roomId !== "string" ||
@@ -14839,13 +14840,28 @@ async function fetchKnowledgeOrgGroups(
     scope.unavailableReason ||
     (scope.orgIds && !scope.orgIds.includes(roomId))
   ) {
-    throw new Error("当前范围内无法查看该室的组分布")
+    throw new Error("当前范围内无法查看该室的明细")
   }
+}
+
+async function fetchKnowledgeOrgGroups(
+  roomId: string,
+  opts: OrgFilterOptions | undefined
+): Promise<KnowledgeOrgItem[]> {
+  requireKnowledgeDrilldownRoom(roomId, opts)
   if (import.meta.env.DEV) {
     return demoKnowledgeOrgs(demoKnowledgePeople(getDemoKnowledgeRoomIds(), [roomId]), true)
   }
   const url = (import.meta.env.VITE_KNOWLEDGE_OVERVIEW_BASE_URL as string | undefined)?.trim() ?? ""
   return fetchKnowledgeOrgDistribution(url, [roomId], getDashboardRequestSignal())
+}
+
+async function fetchKnowledgeRoomPeople(
+  roomId: string,
+  opts: OrgFilterOptions | undefined
+): Promise<KnowledgeUserDetails> {
+  requireKnowledgeDrilldownRoom(roomId, opts)
+  return fetchKnowledgePeopleForScope([roomId])
 }
 
 async function fetchKnowledgeOverviewAccumulation(
@@ -16329,6 +16345,19 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchKnowledgeOrgGroups(roomId, opts) }
       } catch (e) {
         logDashboardRequestError("knowledgeOrgGroups", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:knowledgeRoomPeople",
+    async (_, roomId: string, opts: OrgFilterOptions | undefined) => {
+      try {
+        return { success: true, data: await fetchKnowledgeRoomPeople(roomId, opts) }
+      } catch (e) {
+        logDashboardRequestError("knowledgeRoomPeople", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

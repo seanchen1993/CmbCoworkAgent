@@ -47,6 +47,8 @@ describe("chat message virtual list initial location", () => {
     )
 
     expect(source).toMatch(/key=\{virtualWindow\.key\}/)
+    expect(source).toMatch(/windowScope = useMemo\(\(\) => JSON\.stringify\(\[threadId, historyWindowRevision\]\)/)
+    expect(source).toMatch(/projectChatVirtualWindow\(previousVirtualWindow, windowScope, virtualIdentities\)/)
     expect(source).toMatch(/firstItemIndex=\{virtualWindow\.firstItemIndex\}/)
     expect(source).toMatch(/initialTopMostItemIndex=\{resolvedInitialTopMostItemIndex\}/)
     expect(source).toMatch(

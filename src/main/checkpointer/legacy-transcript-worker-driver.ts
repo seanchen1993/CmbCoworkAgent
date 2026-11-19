@@ -33,7 +33,7 @@ import { FUNCTION_MOD_RESOURCE_BUDGETS } from "../../shared/mods/v2/resource-bud
 const limits = FUNCTION_MOD_RESOURCE_BUDGETS.legacyTranscriptBridgeWriter
 type Request = Pick<
   LegacyCheckpointTranscriptBootstrapRequest,
-  "requestId" | "databasePath" | "threadId" | "checkpointNs" | "cancellationBuffer" | "legacyWriter"
+  "requestId" | "databasePath" | "threadId" | "checkpointNs" | "cancellationBuffer" | "legacyWriter" | "searchGuard"
 >
 interface LegacyJob {
   kind: "legacy"
@@ -98,17 +98,23 @@ function marker(value: unknown): LegacyTranscriptMarker | null {
 function readState(value: unknown): LegacyTranscriptReadState {
   const ordinary = own(value, "ordinary")
   const hasGraphBoundary = own(value, "hasGraphBoundary")
+  const durableHistory = own(value, "durableHistory")
   if (typeof ordinary !== "boolean") fail()
   if (hasGraphBoundary !== undefined && typeof hasGraphBoundary !== "boolean") fail()
-  return { ordinary, marker: marker(own(value, "marker")), hasGraphBoundary }
+  if (durableHistory !== undefined && typeof durableHistory !== "boolean") fail()
+  return { ordinary, marker: marker(own(value, "marker")), hasGraphBoundary, durableHistory }
 }
 function progress(value: unknown): LegacyTranscriptWriteProgress {
   const fragmentOwned = own(value, "fragmentOwned")
+  const searchProjectionState = own(value, "searchProjectionState")
   if (!(fragmentOwned === undefined || typeof fragmentOwned === "boolean")) fail()
+  if (searchProjectionState !== undefined && searchProjectionState !== "complete" &&
+    searchProjectionState !== "truncated" && searchProjectionState !== "unverified") fail()
   return {
     marker: marker(own(value, "marker")),
     inserted: count(own(value, "inserted")),
-    ...(fragmentOwned === undefined ? {} : { fragmentOwned })
+    ...(fragmentOwned === undefined ? {} : { fragmentOwned }),
+    ...(searchProjectionState === undefined ? {} : { searchProjectionState })
   }
 }
 function rowHeader(message: DurableLegacyCheckpointMessage) {
@@ -164,7 +170,9 @@ export class LegacyTranscriptWorkerDriver {
       threadId: input.threadId,
       checkpointNs: input.checkpointNs,
       cancellationBuffer: input.cancellationBuffer,
-      legacyWriter: data
+      legacyWriter: data,
+      searchGuard: input.searchGuard && Object.freeze({ ...input.searchGuard,
+        incarnation: Object.freeze({ ...input.searchGuard.incarnation }) })
     })
     return new Promise((resolve, reject) => {
       const job: LegacyJob = {
@@ -326,7 +334,8 @@ export class LegacyTranscriptWorkerDriver {
       request.threadId,
       request.checkpointNs,
       state,
-      request.cancellationBuffer
+      request.cancellationBuffer,
+      request.searchGuard
     )
     if (source.kind === "empty")
       return {
@@ -341,6 +350,7 @@ export class LegacyTranscriptWorkerDriver {
       }
     let migratedMessages = 0,
       batches = 0
+    let searchProjectionState: LegacyTranscriptWriteProgress["searchProjectionState"]
     if (source.kind === "source") {
       const totalMessages = source.messages.length
       let current = state.marker
@@ -350,7 +360,7 @@ export class LegacyTranscriptWorkerDriver {
         current.checkpointId === source.checkpointId &&
         current.totalMessages === totalMessages
       if (!source.complete) {
-        const order = !current && (source.graphBoundaries.length > 0 || state.hasGraphBoundary) ? {
+        const order = !request.searchGuard && !current && (source.graphBoundaries.length > 0 || state.hasGraphBoundary) ? {
           graphBoundaries: source.graphBoundaries,
           messages: source.messages.map(({ checkpointIndex, messageId, role, toolCallId,
             providerSourceId, providerOccurrence, declaredProviderIdentity }) => ({
@@ -451,7 +461,7 @@ export class LegacyTranscriptWorkerDriver {
           batches++
         }
         if (!current) fail()
-        const finished = current.status === "complete" ? current : progress(
+        const finalProgress = current.status === "complete" ? undefined : progress(
           await this.command(job, {
             kind: "finish",
             checkpointId: source.checkpointId,
@@ -459,7 +469,9 @@ export class LegacyTranscriptWorkerDriver {
             index: current.nextIndex,
             fragmentIndex: current.fragmentIndex
           })
-        ).marker
+        )
+        const finished = finalProgress?.marker ?? current
+        searchProjectionState = finalProgress?.searchProjectionState
         if (
           !finished ||
           finished.status !== "complete" ||
@@ -515,7 +527,7 @@ export class LegacyTranscriptWorkerDriver {
       }
     }
     this.assertCurrent(job)
-    const runtimeTuple = readLatestCheckpointRuntimeTuple(
+    const runtimeTuple = request.searchGuard ? null : readLatestCheckpointRuntimeTuple(
       request.databasePath,
       request.threadId,
       request.checkpointNs,
@@ -529,7 +541,8 @@ export class LegacyTranscriptWorkerDriver {
         totalMessages: source.kind === "source" ? source.messages.length : source.totalMessages,
         migratedMessages,
         batches,
-        payloadBytes: source.kind === "source" ? source.payloadBytes : 0
+        payloadBytes: source.kind === "source" ? source.payloadBytes : 0,
+        ...(searchProjectionState === undefined ? {} : { searchProjectionState })
       }
     }
   }

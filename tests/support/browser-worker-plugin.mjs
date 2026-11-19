@@ -20,6 +20,7 @@ export function browserWorkerPlugin() {
           bundle: true,
           write: false,
           platform: "browser",
+          conditions: ["worker"],
           format: "iife",
           alias: builder.initialOptions.alias,
           define: builder.initialOptions.define,

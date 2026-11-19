@@ -136,7 +136,7 @@ export async function createThreadService(
 
   // This check deliberately remains outside the best-effort context lookup above.
   nativeSession?.assertCurrent()
-  const thread = dbCreateThread(threadId, nextMetadata)
+  const thread = dbCreateThread(threadId, nextMetadata, { newDurableTranscript: true })
   return {
     thread_id: thread.thread_id,
     created_at: new Date(thread.created_at),

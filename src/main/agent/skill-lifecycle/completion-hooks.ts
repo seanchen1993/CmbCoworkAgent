@@ -338,6 +338,7 @@ export async function runCompletionHooksWithRevision({
   getStopContext,
   hookScope,
   skillUseTracker,
+  prepareRevisionMessage,
   runRevision,
   sendNotice,
   sendError,
@@ -373,6 +374,7 @@ export async function runCompletionHooksWithRevision({
   getStopContext: () => StopHookContext
   hookScope: HookScopeController
   skillUseTracker?: SkillUseTracker
+  prepareRevisionMessage?(prompt: string, signal: AbortSignal): HumanMessage | undefined
   runRevision: (prompt: string, signal?: AbortSignal, input?: CompletionRevisionInput) => Promise<void>
   sendNotice: (message: string) => void
   sendError: (message: string) => void
@@ -418,7 +420,9 @@ export async function runCompletionHooksWithRevision({
   const modelBudget = completionGate ? completionGateBudget(completionGate) : undefined
   const originalSignal = abortSignal
   const revise = async (prompt: string): Promise<void> => {
-    const message = new HumanMessage({ id: randomUUID(), content: prompt })
+    // Seal the exact graph message after the physical host has prepared any transcript boundary.
+    const message = prepareRevisionMessage?.(prompt, abortSignal) ??
+      new HumanMessage({ id: randomUUID(), content: prompt })
     const input: CompletionRevisionInput = Object.freeze({
       messages: Object.freeze([message]) as unknown as [HumanMessage]
     })

@@ -2,6 +2,7 @@ import { inspectFunctionConversationForkAdmission } from "../agent/function-conv
 import { notifyRemoteThreadChanged } from "../agent/renderer-stream-mirror"
 import type { ThreadDirectoryChangeKind } from "../../shared/thread-directory-change"
 import { captureThreadTranscriptSourceScope } from "./thread-transcript-source-scope"
+import { cancelSearchBackfill, registerSearchBackfillBusyCheck } from "../thread-search/coverage"
 import { getCapturedSubagentSession, subagentExportKey } from "../services/subagent-session-capture"
 import type { SubagentExportTarget as ExportScope } from "../../shared/subagent-session-export"
 import { formatHookDateTime } from "../../shared/hook-time"
@@ -16,6 +17,7 @@ import {
   copyThreadSubagentManifestRowsPage,
   getDb,
   getThreadCore,
+  getThreadRowLifetime,
   getFirstThreadRepliedUserMessageIdentity,
   getThreadHydrationCore,
   getThreadValuesJson,
@@ -25,7 +27,6 @@ import {
   getThreadMessagesAfterAnyId,
   getThreadMessagesByIds,
   getThreadMessagesPage,
-  searchThreadMessages,
   getThreadSubagentManifestAt,
   getThreadSubagentBucketIdPage,
   hasThreadSubagentManifestRows,
@@ -142,6 +143,8 @@ import {
   hasExternalThreadRunOwner,
   isExternallyManagedThreadRunBusy
 } from "../services/thread-external-run-busy"
+import { searchDurableThreadMessagesInWorker } from "../thread-search/durable-message-search-client"
+import { canReadThreadSearchContent } from "./thread-search-display"
 import { threadMetadataMatchesGroupSelector } from "../services/thread-group-selector"
 import type {
   ForkableCheckpoint,
@@ -204,7 +207,9 @@ import type {
 } from "../../shared/checkpoint-forkability"
 import {
   captureThreadMutationLease,
+  isThreadPublicationPending,
   requireThreadMutationLease,
+  stageThreadPublication,
   ThreadMutationLeaseExpiredError,
   withThreadMutationLeaseLock,
   withThreadRunMutationLock
@@ -1874,7 +1879,8 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
         const targetWorkspacePath =
           typeof targetMetadata.workspacePath === "string" ? targetMetadata.workspacePath : null
 
-        return withThreadRunMutationLock(targetThreadId, async () => {
+        const finishPublication = stageThreadPublication(targetThreadId)
+        const completed = await withThreadRunMutationLock(targetThreadId, async () => {
           let targetSaver: SqlJsSaver | null = null
           let rowCreated = false
           let nativeImport: FunctionConversationForkNativeImport | undefined
@@ -2115,12 +2121,14 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
               assertForkCurrent()
               if (!nativeImport.view().ready) throw Error("MODS_CONVERSATION_FORK_PROOF")
             }
-            notifyCommittedThreadChange(targetThreadId, "created", row)
             return {
-              thread: serializeThreadRow(row),
-              sourceThreadId,
-              sourceCheckpointId: checkpointId,
-              sourceCheckpointNs: ""
+              row,
+              result: {
+                thread: serializeThreadRow(row),
+                sourceThreadId,
+                sourceCheckpointId: checkpointId,
+                sourceCheckpointNs: "" as const
+              }
             }
           } catch (error) {
             try {
@@ -2147,7 +2155,9 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
             })
             throw error
           }
-        })
+        }).finally(finishPublication)
+        notifyCommittedThreadChange(targetThreadId, "created", completed.row)
+        return completed.result
       })
     })
   )
@@ -3289,6 +3299,38 @@ function normalizeThreadDeleteOptions(options: unknown): ThreadDeleteOptions | u
 }
 
 export function registerThreadHandlers(ipcMain: IpcMain): void {
+  const checkpointHydrations = new Map<number, AbortController>()
+  const checkpointHydrationOperations = new Map<string, Set<AbortController>>()
+  function beginCheckpointHydration(
+    owner: number,
+    threadId: string,
+    options?: ThreadHydrationOptions
+  ) {
+    const controller = new AbortController()
+    const active = checkpointHydrationOperations.get(threadId) ?? new Set<AbortController>()
+    active.add(controller)
+    checkpointHydrationOperations.set(threadId, active)
+    const foreground = options?.requestScope === "foreground-hydration"
+    if (foreground) {
+      checkpointHydrations.get(owner)?.abort()
+      checkpointHydrations.set(owner, controller)
+    }
+    return {
+      controller,
+      isCurrent: () => !controller.signal.aborted,
+      finish() {
+        active.delete(controller)
+        if (!active.size) checkpointHydrationOperations.delete(threadId)
+        if (checkpointHydrations.get(owner) === controller) checkpointHydrations.delete(owner)
+      },
+      workerKey: foreground ? `thread-hydration:${owner}` : `thread-background:${owner}:${threadId}`
+    }
+  }
+
+  registerSearchBackfillBusyCheck((threadId, metadata) =>
+    hasActiveAgentRun(threadId) || hasPendingApprovalForThread(threadId) ||
+    isExternallyManagedThreadRunBusy(threadId, metadata) || workflowRunManager.isActive(threadId) ||
+    coordinatorWorkerManager.hasRunningWorkersForThread(threadId))
   // Read a bounded page of task summaries. The renderer incrementally builds the
   // directory so Electron never structured-clones an unbounded task table.
   ipcMain.handle("threads:list-page", async (event, options?: ThreadSummaryPageOptions) => {
@@ -3396,14 +3438,22 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "threads:search-messages",
     async (
-      _event,
+      event,
       {
         threadId,
         query,
         options
       }: { threadId: string; query: string; options?: ThreadMessageSearchOptions }
     ) => {
-      return searchThreadMessages(threadId, query, options)
+      if (!canReadThreadSearchContent(threadId)) return {
+        matches: [], beforeOrdinal: null, beforeMessageId: null, hasMore: false, scanned: 0,
+        truncated: true
+      }
+      const lifetime = getThreadRowLifetime(threadId)
+      const page = await searchDurableThreadMessagesInWorker(event.sender.id, threadId, query, options)
+      if (getThreadRowLifetime(threadId) !== lifetime) throw new Error("Thread search superseded")
+      if (!canReadThreadSearchContent(threadId)) throw new Error("Thread search superseded")
+      return page
     }
   )
 
@@ -4210,6 +4260,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       notifyCommittedThreadChange(threadId, "deleted", latestThread)
       getModsManager()?.closeFunctionThread(threadId)
       clearTrustedToolFilePreviewSourcesForThread(threadId, previewScopeKeys)
+      void cancelSearchBackfill(threadId)
       forgetLegacySubagentTranscriptMigration(threadId)
       // Detach the deleted task from its shared physical workspace watcher so
       // subscriber lists and per-change IPC fan-out cannot grow forever.
@@ -4378,6 +4429,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       // behind until deletion or a later idempotent retry.
       cancelLegacySubagentTranscriptMigration(threadId)
       cancelSubagentTranscriptStartupRead(threadId)
+      for (const controller of checkpointHydrationOperations.get(threadId) ?? []) controller.abort()
       cancelLegacyCheckpointTranscriptBootstrap(threadId)
       return withThreadMutationLeaseLock(lease, async (threadRow) => {
         let metadata: Record<string, unknown>
@@ -4506,15 +4558,25 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   // Renderer hydration needs only small runtime channels (todos, interrupts,
   // etc.). Keep the full latest-checkpoint API above for worker/fork callers
   // that intentionally need channel_values.messages.
-  ipcMain.handle("threads:latest-checkpoint-runtime-state", async (event, threadId: string) => {
+  ipcMain.handle("threads:latest-checkpoint-runtime-state", async (event, threadId: string, options?: ThreadHydrationOptions) => {
+    const normalizedThreadId = assertValidCheckpointThreadId(threadId)
+    const hydration = beginCheckpointHydration(event.sender.id, normalizedThreadId, options)
     try {
-      const normalizedThreadId = assertValidCheckpointThreadId(threadId)
-      return await readLatestCheckpointRuntimeTupleInWorker(
-        getThreadCheckpointPath(normalizedThreadId),
-        normalizedThreadId,
-        "",
-        `thread-hydration:${event.sender.id}`
-      )
+      const lifetime = getThreadRowLifetime(normalizedThreadId)
+      if (lifetime === null) return null
+      const isCurrent = () =>
+        hydration.isCurrent() && getThreadRowLifetime(normalizedThreadId) === lifetime
+      const result = await withThreadRunMutationLock(normalizedThreadId, async () => {
+        if (!isCurrent()) return null
+        return readLatestCheckpointRuntimeTupleInWorker(
+          getThreadCheckpointPath(normalizedThreadId),
+          normalizedThreadId,
+          "",
+          hydration.workerKey,
+          hydration.controller.signal
+        )
+      })
+      return isCurrent() ? result : null
     } catch (e) {
       if (isCheckpointRuntimeProjectionCancelled(e)) return null
       console.warn("Failed to get latest thread checkpoint runtime state:", e)
@@ -4523,6 +4585,8 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       // interrupts and other runtime channels instead of silently treating a
       // transient read failure as an authoritative empty runtime state.
       throw e
+    } finally {
+      hydration.finish()
     }
   })
 
@@ -4533,40 +4597,53 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   // enters Electron main or the renderer hydration path.
   ipcMain.handle(
     "threads:bootstrap-legacy-checkpoint-transcript",
-    async (event, threadId: string) => {
-      const read = captureThreadDisplayRead(event, threadId)
-      const source = { assertCurrent: read.assertCurrent,
+    async (event, threadId: string, options?: ThreadHydrationOptions) => {
+      const normalizedThreadId = assertValidCheckpointThreadId(threadId)
+      if (isThreadPublicationPending(normalizedThreadId) ||
+        getThreadRowLifetime(normalizedThreadId) === null) return null
+      const read = captureThreadDisplayRead(event, normalizedThreadId)
+      const hydration = beginCheckpointHydration(event.sender.id, normalizedThreadId, options)
+      const signal = AbortSignal.any([read.signal, hydration.controller.signal])
+      const assertCurrent = () => {
+        signal.throwIfAborted()
+        read.assertCurrent()
+      }
+      const source = { assertCurrent,
         verify: (witnesses: readonly CanonicalThreadDisplayWitness[]) =>
-          verifyCanonicalThreadDisplayWitnesses(threadId, witnesses, read.assertCurrent) }
+          verifyCanonicalThreadDisplayWitnesses(normalizedThreadId, witnesses, assertCurrent) }
       try {
-        const normalizedThreadId = assertValidCheckpointThreadId(threadId)
         const sourceScope = captureThreadTranscriptSourceScope(normalizedThreadId, read)
         const workspaceValue = nativeFunctionConversationWorkspace(read.row.metadata)
         const manager = getModsManager()
         const workspace = workspaceValue ? manager?.workspaceKey(workspaceValue) ?? workspaceValue : ""
         const canonical = await readCanonicalCheckpointBootstrap({ threadId: normalizedThreadId,
-          workspace, incarnation: read.incarnation, assertCurrent: read.assertCurrent,
-          foregroundKey: `thread-hydration:${event.sender.id}` })
+          workspace, incarnation: read.incarnation, assertCurrent, signal,
+          foregroundKey: hydration.workerKey })
         let bootstrap = canonical
         if (!bootstrap) {
           const writer = await import("../checkpointer/legacy-transcript-main-writer")
-          read.assertCurrent()
-          bootstrap = await bootstrapLegacyCheckpointTranscriptInWorker(
-            getThreadCheckpointPath(normalizedThreadId), getDbPath(), normalizedThreadId, "",
-            `thread-hydration:${event.sender.id}`, {
-              assertCurrent: read.assertCurrent,
-              createWriter(context) {
-                read.assertCurrent()
-                if (context.threadId !== normalizedThreadId || context.checkpointNamespace !== "")
-                  throw Error("LEGACY_TRANSCRIPT_WRITE_SOURCE_CHANGED")
-                return writer.createLegacyTranscriptWriter({ actualWorker: context.actualWorker,
-                  workerGeneration: context.workerGeneration, requestId: context.requestId,
-                  threadId: normalizedThreadId, checkpointNamespace: "", incarnation: read.incarnation,
-                  actualDatabase: read.database, assertCurrent: read.assertCurrent })
-              }
-            }
-          )
+          assertCurrent()
+          bootstrap = await withThreadRunMutationLock(normalizedThreadId, async () => {
+            assertCurrent()
+            return bootstrapLegacyCheckpointTranscriptInWorker(
+              getThreadCheckpointPath(normalizedThreadId), getDbPath(), normalizedThreadId, "",
+              hydration.workerKey, {
+                assertCurrent,
+                createWriter(context) {
+                  assertCurrent()
+                  if (context.threadId !== normalizedThreadId || context.checkpointNamespace !== "")
+                    throw Error("LEGACY_TRANSCRIPT_WRITE_SOURCE_CHANGED")
+                  return writer.createLegacyTranscriptWriter({ actualWorker: context.actualWorker,
+                    workerGeneration: context.workerGeneration, requestId: context.requestId,
+                    threadId: normalizedThreadId, checkpointNamespace: "", incarnation: read.incarnation,
+                    actualDatabase: read.database, assertCurrent })
+                }
+              }, signal
+            )
+          })
         }
+        if (!bootstrap) return null
+        assertCurrent()
         const pageOptions = {
           limit: 128,
           byteBudget: 1024 * 1024,
@@ -4586,7 +4663,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           await new Promise<void>((resolve) => setImmediate(resolve))
           page = await readThreadMessagesPageInWorker(normalizedThreadId, pageOptions, undefined, source)
         }
-        read.assertCurrent()
+        assertCurrent()
         return {
           checkpoint: bootstrap.runtimeTuple,
           page: { ...page, ...(sourceScope ? { sourceScope } : {}),
@@ -4594,12 +4671,15 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           migration: bootstrap.stats
         }
       } catch (error) {
-        if (isCheckpointRuntimeProjectionCancelled(error)) return null
+        if (signal.aborted || isCheckpointRuntimeProjectionCancelled(error)) return null
         console.warn("Failed to bootstrap legacy checkpoint transcript:", error)
         // Only a retired read is cancellation. Keep proof, migration and worker
         // failures visible to bounded hydration recovery and its diagnostics.
         throw error
-      } finally { read.dispose() }
+      } finally {
+        hydration.finish()
+        read.dispose()
+      }
     }
   )
 

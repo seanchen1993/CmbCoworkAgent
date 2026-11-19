@@ -75,6 +75,8 @@ import { persistedMessageFromStreamPayload } from "../ipc/stream-transcript-payl
 import { resolveStreamTranscriptFlush } from "../ipc/stream-transcript-flush"
 import { isFunctionConversationNotice, isFunctionConversationToolSystemSide } from
   "../../shared/mods/v2/conversation-transcript"
+import { NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY } from "../../shared/graph-transcript-boundary"
+import { GOAL_CONTINUATION_BOUNDARY_METADATA_KEY } from "./goals/internal-prompt"
 import { createCompactionCrashProcessFixture } from
   "../../../tests/support/function-conversation-compaction-crash-process"
 
@@ -965,6 +967,9 @@ describe("actual native host factory through graph, resident Hook, protector and
       }
       let postCalls = 0, stopCalls = 0, gateCalls = 0
       let revision: import("./skill-lifecycle/completion-hooks").CompletionRevisionInput | undefined
+      const scopedKey = trigger === "Resume" ? NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY
+        : trigger === "CompletionGate" ? GOAL_CONTINUATION_BOUNDARY_METADATA_KEY : undefined
+      let preparedMessage: HumanMessage | undefined
       const outcome = await runCompletionHooksWithRevision({
         threadId: f.threadId, workspacePath: f.root, turnId: f.turnId, runId: f.physicalRunId,
         abortSignal: f.controller.signal, hookScope: createHookScope(),
@@ -979,6 +984,9 @@ describe("actual native host factory through graph, resident Hook, protector and
           ? { decision: "revise", reason: "repair native-secret-canary" } : { decision: "pass" },
         maxRevisionAttempts: 2, revisionPromptPrefix: "actual host repair",
         sendNotice: () => undefined, sendError: value => { throw Error(value) },
+        prepareRevisionMessage: prompt => scopedKey ?
+          (preparedMessage = new HumanMessage({ id: randomUUID(), content: prompt,
+            additional_kwargs: { [scopedKey]: true } })) : undefined,
         runRevision: async (_prompt, signal, input) => {
           expect(input).toBeDefined()
           revision = input
@@ -1003,6 +1011,11 @@ describe("actual native host factory through graph, resident Hook, protector and
       expect(row.nativePayload).not.toContain("native-secret-canary")
       const columns = readFunctionConversationRawProjection(f.database, f.threadId, message.id!)!
       expect(columns.content_json).toBe(JSON.stringify(""))
+      if (scopedKey) {
+        expect(message).toBe(preparedMessage)
+        expect(retained?.additional_kwargs[scopedKey]).toBe(true)
+        expect(appDb.getThreadTranscriptBoundaryOrdinal(f.threadId, message.id!)).toBe(columns.ordinal)
+      }
       expect(readFunctionConversationPresentationDisposition(f.database, {
         target: current.runtime.target.ref, row, threadId: f.threadId,
         incarnation: f.incarnation, assertCurrent: f.guard

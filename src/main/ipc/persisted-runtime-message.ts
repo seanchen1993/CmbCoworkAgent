@@ -59,23 +59,23 @@ export function persistedMessageToRuntimeMessage(message: Message,
     return options.resolveFunctionRow(message, fields.function_row)
   }
   const content = message.content as BaseMessage["content"]
+  const providerSourceId = message.provider_source_id?.trim()
+  const providerOccurrence = message.provider_occurrence ?? 1
+  const providerMetadata = providerSourceId && Number.isInteger(providerOccurrence) &&
+    providerOccurrence >= 1
+    ? {
+        [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: providerSourceId,
+        [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: providerOccurrence
+      }
+    : undefined
+  const fields = { id: message.id, content, additional_kwargs: providerMetadata }
   if (message.role === "user") {
-    return new HumanMessage({ id: message.id, content })
+    return new HumanMessage(fields)
   }
   if (message.role === "assistant") {
-    const providerSourceId = message.provider_source_id?.trim()
-    const providerOccurrence = message.provider_occurrence
     const additionalKwargs = {
+      ...providerMetadata,
       ...(message.reasoning ? { reasoning: message.reasoning } : {}),
-      ...(providerSourceId &&
-      typeof providerOccurrence === "number" &&
-      Number.isInteger(providerOccurrence) &&
-      providerOccurrence >= 1
-        ? {
-            [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: providerSourceId,
-            [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: providerOccurrence
-          }
-        : {})
     }
     return new AIMessage({
       id: message.id,
@@ -89,19 +89,18 @@ export function persistedMessageToRuntimeMessage(message: Message,
     })
   }
   if (message.role === "system") {
-    return new SystemMessage({ id: message.id, content })
+    return new SystemMessage(fields)
   }
   if (message.role === "tool") {
     if (!message.tool_call_id) return null
     const status =
       message.status === "success" || message.status === "error" ? message.status : undefined
     return new ToolMessage({
-      id: message.id,
-      content,
+      ...fields,
       tool_call_id: message.tool_call_id,
       ...(message.name ? { name: message.name } : {}),
       ...(status ? { status } : {}),
-      ...(message.is_error ? { additional_kwargs: { is_error: true } } : {})
+      ...(message.is_error ? { additional_kwargs: { ...providerMetadata, is_error: true } } : {})
     })
   }
   return null
