@@ -20,6 +20,10 @@ interface MarkdownPreviewProps {
    * 未提供时本地相对路径图片按原样渲染（一般会裂图）。
    */
   readBinaryFile?: (resolvedPath: string) => Promise<string | null>
+  /** 读取本地 HTML 文件内容，用于在 Markdown 预览中以内嵌沙箱渲染。 */
+  readHtmlFile?: (resolvedPath: string) => Promise<string | null>
+  /** 打开 Markdown 中指向本地文件的相对链接。 */
+  onOpenLocalFile?: (resolvedPath: string) => void
   /** 允许调用方生成的内存 Blob URL；默认仍使用 react-markdown 的安全协议白名单。 */
   allowBlobUrls?: boolean
 }
@@ -180,6 +184,64 @@ function MarkdownImage({
   return <img src={directUrl ?? loadedUrl ?? src ?? ""} alt={alt ?? ""} {...props} />
 }
 
+function MarkdownHtml({
+  path,
+  label,
+  readHtmlFile
+}: {
+  path: string
+  label: React.ReactNode
+  readHtmlFile: (resolvedPath: string) => Promise<string | null>
+}): React.JSX.Element {
+  const [loaded, setLoaded] = useState<{
+    path: string
+    html: string | null
+    failed: boolean
+  } | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    void readHtmlFile(path)
+      .then((content) => {
+        if (cancelled) return
+        setLoaded({ path, html: content, failed: content === null })
+      })
+      .catch(() => {
+        if (!cancelled) setLoaded({ path, html: null, failed: true })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [path, readHtmlFile])
+
+  const current = loaded?.path === path ? loaded : null
+
+  return (
+    <span className="my-4 block overflow-hidden rounded-lg border border-border bg-white not-prose">
+      <span className="block border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-foreground">
+        {label}
+      </span>
+      {current?.failed ? (
+        <span className="flex h-32 items-center justify-center text-sm text-destructive">
+          HTML 加载失败
+        </span>
+      ) : !current ? (
+        <span className="flex h-32 items-center justify-center text-sm text-muted-foreground">
+          正在加载 HTML
+        </span>
+      ) : (
+        <iframe
+          title={typeof label === "string" ? label : "HTML 预览"}
+          srcDoc={current.html ?? ""}
+          sandbox=""
+          loading="lazy"
+          className="block h-[360px] w-full border-0 bg-white"
+        />
+      )}
+    </span>
+  )
+}
+
 export function MarkdownPreview({
   content,
   path,
@@ -190,6 +252,8 @@ export function MarkdownPreview({
   whiteBackground = false,
   viewMode,
   readBinaryFile,
+  readHtmlFile,
+  onOpenLocalFile,
   allowBlobUrls = false
 }: MarkdownPreviewProps) {
   const [copySuccess, setCopySuccess] = useState(false)
@@ -201,6 +265,26 @@ export function MarkdownPreview({
   const markdownComponents = useMemo<Components>(
     () => ({
       ...MARKDOWN_COMPONENTS,
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      a({ node: _node, href, children }) {
+        if (isExternalHref(href)) return <a href={href}>{children}</a>
+        const resolvedPath = href && path ? resolveMarkdownImagePath(path, href) : null
+        if (resolvedPath && /\.html?$/i.test(stripQueryAndHash(resolvedPath)) && readHtmlFile) {
+          return <MarkdownHtml path={resolvedPath} label={children} readHtmlFile={readHtmlFile} />
+        }
+        if (resolvedPath && onOpenLocalFile) {
+          return (
+            <button
+              type="button"
+              className="cursor-pointer border-0 bg-transparent p-0 text-primary underline underline-offset-2 hover:text-primary/80"
+              onClick={() => onOpenLocalFile(resolvedPath)}
+            >
+              {children}
+            </button>
+          )
+        }
+        return <span>{children}</span>
+      },
       // `node` is destructured out so it isn't spread onto the DOM element.
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       img({ node: _node, src, alt, ...props }) {
@@ -215,7 +299,7 @@ export function MarkdownPreview({
         )
       }
     }),
-    [path, readBinaryFile]
+    [onOpenLocalFile, path, readBinaryFile, readHtmlFile]
   )
 
   const toggleExpanded = useCallback(() => {

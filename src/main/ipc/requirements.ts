@@ -124,6 +124,21 @@ type MammothMarkdownConverter = typeof mammoth & {
 }
 
 const MAX_TEXT_BYTES = 5 * 1024 * 1024
+const MAX_PRD_ASSET_BYTES = 10 * 1024 * 1024
+const MAX_PRD_IMAGE_PREVIEW_BYTES = 5 * 1024 * 1024
+const MAX_PRD_HTML_PREVIEW_BYTES = 2 * 1024 * 1024
+const PRD_IMAGE_MIME_TYPES: Record<string, string> = {
+  ".avif": "image/avif",
+  ".bmp": "image/bmp",
+  ".gif": "image/gif",
+  ".ico": "image/x-icon",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".webp": "image/webp"
+}
+const PRD_HTML_EXTENSIONS = new Set([".html", ".htm"])
 const UNSAFE_FILENAME_CHARACTER = /[<>:"/\\|?*]/
 const REQUIREMENTS_DIRNAME = "requirements"
 const REQUIREMENTS_INDEX_FILENAME = "index.json"
@@ -1605,6 +1620,216 @@ export function registerRequirementHandlers(ipcMain: IpcMain): void {
         return {
           success: false,
           error: error instanceof Error ? error.message : "保存 PRD 文件失败"
+        }
+      }
+    }
+  )
+  ipcMain.handle(
+    "requirements:upload-prd-asset",
+    async (
+      _event,
+      payload: { reqId: string; prdFilePath: string; fileName: string; bytes: ArrayBuffer }
+    ) => {
+      try {
+        const reqId = payload?.reqId?.trim()
+        const prdFilePath = payload?.prdFilePath?.trim().replace(/\\/g, "/")
+        const rawFileName = path.basename(payload?.fileName?.trim() || "")
+        if (!reqId || !prdFilePath || !rawFileName || !(payload.bytes instanceof ArrayBuffer)) {
+          return { success: false, error: "需求编号、PRD 路径和文件不能为空" }
+        }
+
+        const bytes = Buffer.from(payload.bytes)
+        if (bytes.byteLength === 0) return { success: false, error: "不能上传空文件" }
+        if (bytes.byteLength > MAX_PRD_ASSET_BYTES) {
+          return { success: false, error: "单个附件不能超过 10MB" }
+        }
+        const uploadExtension = path.extname(rawFileName).toLowerCase()
+        if (!PRD_IMAGE_MIME_TYPES[uploadExtension] && !PRD_HTML_EXTENSIONS.has(uploadExtension)) {
+          return { success: false, error: "仅支持上传图片和 HTML 文件" }
+        }
+
+        const item = (await readRequirementIndex()).find((entry) => entry.reqId === reqId)
+        if (!item) return { success: false, error: `需求不存在：${reqId}` }
+
+        const prdRoot = await fs.realpath(getRequirementPrdDir(item))
+        const relativePrdPath = prdFilePath.replace(/^\/+/, "").replace(/^prd\//i, "")
+        const requestedPrdPath = path.resolve(prdRoot, relativePrdPath)
+        const resolvedPrdPath = await fs.realpath(requestedPrdPath)
+        if (resolvedPrdPath !== prdRoot && !resolvedPrdPath.startsWith(`${prdRoot}${path.sep}`)) {
+          return { success: false, error: "PRD 文件路径超出当前需求目录" }
+        }
+
+        const extension = path.extname(rawFileName)
+        const baseName = path
+          .basename(rawFileName, extension)
+          .replace(/[^\p{L}\p{N}._-]+/gu, "-")
+          .replace(/^-+|-+$/g, "")
+          .slice(0, 80)
+        const safeExtension = extension.replace(/[^a-zA-Z0-9.]/g, "").slice(0, 16)
+        const storedFileName = `${baseName || "file"}-${randomUUID().slice(0, 8)}${safeExtension}`
+        const assetsDir = path.join(prdRoot, "assets")
+        await fs.mkdir(assetsDir, { recursive: true })
+        const targetPath = path.join(assetsDir, storedFileName)
+        await fs.writeFile(targetPath, bytes, { flag: "wx" })
+
+        const relativePath = path
+          .relative(path.dirname(resolvedPrdPath), targetPath)
+          .split(path.sep)
+          .join("/")
+        return { success: true, relativePath }
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "上传 PRD 附件失败"
+        }
+      }
+    }
+  )
+  ipcMain.handle(
+    "requirements:read-prd-image",
+    async (_event, payload: { reqId: string; filePath: string }) => {
+      try {
+        const reqId = payload?.reqId?.trim()
+        const filePath = payload?.filePath?.trim().replace(/\\/g, "/")
+        if (!reqId || !filePath) return { success: false, error: "图片路径不能为空" }
+
+        const item = (await readRequirementIndex()).find((entry) => entry.reqId === reqId)
+        if (!item) return { success: false, error: `需求不存在：${reqId}` }
+
+        const prdRoot = await fs.realpath(getRequirementPrdDir(item))
+        const relativePath = filePath.replace(/^\/+/, "").replace(/^prd\//i, "")
+        const requestedPath = path.resolve(prdRoot, relativePath)
+        const targetPath = await fs.realpath(requestedPath)
+        if (targetPath !== prdRoot && !targetPath.startsWith(`${prdRoot}${path.sep}`)) {
+          return { success: false, error: "图片路径超出当前需求的 PRD 目录" }
+        }
+
+        const mimeType = PRD_IMAGE_MIME_TYPES[path.extname(targetPath).toLowerCase()]
+        if (!mimeType) return { success: false, error: "不支持预览该图片格式" }
+        const stats = await fs.stat(targetPath)
+        if (!stats.isFile()) return { success: false, error: "图片文件不存在" }
+        if (stats.size > MAX_PRD_IMAGE_PREVIEW_BYTES) {
+          return { success: false, error: "超过 5MB 的图片不能内联预览" }
+        }
+
+        const bytes = await fs.readFile(targetPath)
+        return { success: true, bytes, mimeType }
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "读取 PRD 图片失败"
+        }
+      }
+    }
+  )
+  ipcMain.handle(
+    "requirements:read-prd-html",
+    async (_event, payload: { reqId: string; filePath: string }) => {
+      try {
+        const reqId = payload?.reqId?.trim()
+        const filePath = payload?.filePath?.trim().replace(/\\/g, "/")
+        if (!reqId || !filePath) return { success: false, error: "HTML 路径不能为空" }
+
+        const item = (await readRequirementIndex()).find((entry) => entry.reqId === reqId)
+        if (!item) return { success: false, error: `需求不存在：${reqId}` }
+
+        const prdRoot = await fs.realpath(getRequirementPrdDir(item))
+        const relativePath = filePath.replace(/^\/+/, "").replace(/^prd\//i, "")
+        const requestedPath = path.resolve(prdRoot, relativePath)
+        const targetPath = await fs.realpath(requestedPath)
+        if (targetPath !== prdRoot && !targetPath.startsWith(`${prdRoot}${path.sep}`)) {
+          return { success: false, error: "HTML 路径超出当前需求的 PRD 目录" }
+        }
+        if (!PRD_HTML_EXTENSIONS.has(path.extname(targetPath).toLowerCase())) {
+          return { success: false, error: "仅支持预览 HTML 文件" }
+        }
+        const stats = await fs.stat(targetPath)
+        if (!stats.isFile()) return { success: false, error: "HTML 文件不存在" }
+        if (stats.size > MAX_PRD_HTML_PREVIEW_BYTES) {
+          return { success: false, error: "超过 2MB 的 HTML 不能内联预览" }
+        }
+        return { success: true, content: await fs.readFile(targetPath, "utf-8") }
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "读取 PRD HTML 失败"
+        }
+      }
+    }
+  )
+  ipcMain.handle(
+    "requirements:sync-prototype-to-prd",
+    async (
+      _event,
+      payload: {
+        reqId: string
+        prdFilePath: string
+        prototypeFilePath: string
+        workspacePath: string
+      }
+    ) => {
+      try {
+        const reqId = payload?.reqId?.trim()
+        const prdFilePath = payload?.prdFilePath?.trim().replace(/\\/g, "/")
+        const prototypeFilePath = payload?.prototypeFilePath?.trim()
+        const workspacePath = payload?.workspacePath?.trim()
+        if (!reqId || !prdFilePath || !prototypeFilePath || !workspacePath) {
+          return { success: false, error: "同步原型所需的路径信息不完整" }
+        }
+
+        const item = (await readRequirementIndex()).find((entry) => entry.reqId === reqId)
+        if (!item) return { success: false, error: `需求不存在：${reqId}` }
+
+        const workspaceRoot = await fs.realpath(workspacePath)
+        const sourceCandidate = path.isAbsolute(prototypeFilePath)
+          ? prototypeFilePath
+          : path.resolve(workspaceRoot, prototypeFilePath)
+        const sourcePath = await fs.realpath(sourceCandidate)
+        if (sourcePath !== workspaceRoot && !sourcePath.startsWith(`${workspaceRoot}${path.sep}`)) {
+          return { success: false, error: "原型 HTML 路径超出当前工作区" }
+        }
+        if (!PRD_HTML_EXTENSIONS.has(path.extname(sourcePath).toLowerCase())) {
+          return { success: false, error: "原型文件不是 HTML" }
+        }
+        const sourceStats = await fs.stat(sourcePath)
+        if (!sourceStats.isFile()) return { success: false, error: "原型 HTML 文件不存在" }
+        if (sourceStats.size > MAX_PRD_ASSET_BYTES) {
+          return { success: false, error: "原型 HTML 超过 10MB 限制" }
+        }
+
+        const prdRoot = await fs.realpath(getRequirementPrdDir(item))
+        const relativePrdPath = prdFilePath.replace(/^\/+/, "").replace(/^prd\//i, "")
+        const mdPath = await fs.realpath(path.resolve(prdRoot, relativePrdPath))
+        if (mdPath !== prdRoot && !mdPath.startsWith(`${prdRoot}${path.sep}`)) {
+          return { success: false, error: "MD 文件路径超出当前需求的 PRD 目录" }
+        }
+
+        const mdBaseName = path.basename(mdPath, path.extname(mdPath))
+        const targetFileName = `${safeSegment(mdBaseName, "prd")}-prototype.html`
+        const assetsDir = path.join(prdRoot, "assets")
+        await fs.mkdir(assetsDir, { recursive: true })
+        await fs.copyFile(sourcePath, path.join(assetsDir, targetFileName))
+
+        const relativeAssetPath = path
+          .relative(path.dirname(mdPath), path.join(assetsDir, targetFileName))
+          .split(path.sep)
+          .join("/")
+        const markerStart = "<!-- requirement-prototype-html:start -->"
+        const markerEnd = "<!-- requirement-prototype-html:end -->"
+        const block = `${markerStart}\n[原型 HTML](${relativeAssetPath})\n${markerEnd}`
+        const markdown = await fs.readFile(mdPath, "utf-8")
+        const markerPattern =
+          /<!-- requirement-prototype-html:start -->[\s\S]*?<!-- requirement-prototype-html:end -->/u
+        const nextMarkdown = markerPattern.test(markdown)
+          ? markdown.replace(markerPattern, block)
+          : `${markdown.trimEnd()}\n\n${block}\n`
+        if (nextMarkdown !== markdown) await fs.writeFile(mdPath, nextMarkdown, "utf-8")
+
+        return { success: true, relativePath: relativeAssetPath }
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "同步原型到 MD 失败"
         }
       }
     }

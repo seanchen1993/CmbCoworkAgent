@@ -1,13 +1,12 @@
-import { useEffect, useState, type ReactNode } from "react"
+import { useRef, useState, type ReactNode } from "react"
 import {
   ArrowLeft,
   Check,
   ChevronDown,
   ExternalLink,
+  FileDown,
   FileText,
-  Loader2,
-  Pencil,
-  Save
+  Loader2
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -18,11 +17,10 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger
 } from "@/components/ui/dropdown-menu"
-import { MarkdownPreview } from "@/components/ui/MarkdownPreview/MarkdownPreview"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import { readRequirementWorkspaceTextFile } from "@/lib/requirement-workspace-text"
 import type { RequirementRecord } from "./requirement-data"
 import { REQUIREMENT_ACTION_HINTS, RequirementActionButton } from "./RequirementActionButton"
+import { RequirementMarkdownEditorAndPreview } from "./RequirementMarkdownEditorAndPreview"
 
 export function RequirementFunctionWorkspace({
   requirement,
@@ -34,11 +32,14 @@ export function RequirementFunctionWorkspace({
   prototypeCoveredByFullPrd = false,
   prototypeSkipped,
   prototypePreview,
+  prototypeHtmlFile,
+  workspacePath,
   reloadToken,
   onBack,
   navigationItems,
   navigationValue,
   onNavigate,
+  onOpenAttachment,
   onRequestPrototypeDesign
 }: {
   requirement: RequirementRecord
@@ -50,65 +51,45 @@ export function RequirementFunctionWorkspace({
   prototypeCoveredByFullPrd?: boolean
   prototypeSkipped: boolean
   prototypePreview?: ReactNode
+  prototypeHtmlFile?: string
+  workspacePath: string
   reloadToken: number
   onBack: () => void
   navigationItems?: Array<{ value: string; label: string; hasPrototype?: boolean }>
   navigationValue?: string
   onNavigate?: (value: string) => void
+  onOpenAttachment?: (filePath: string) => void
   onRequestPrototypeDesign?: () => void
 }): React.JSX.Element {
-  const [content, setContent] = useState("")
-  const [draft, setDraft] = useState("")
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [editing, setEditing] = useState(false)
-  const [saving, setSaving] = useState(false)
+  const [syncRevision, setSyncRevision] = useState(0)
+  const [syncing, setSyncing] = useState(false)
+  const [markdownEditing, setMarkdownEditing] = useState(false)
+  const syncInFlightRef = useRef(false)
+  const syncScopeRef = useRef("")
+  const syncScope = `${requirement.id}\u0000${filePath}\u0000${prototypeHtmlFile ?? ""}`
+  syncScopeRef.current = syncScope
 
-  useEffect(() => {
-    let cancelled = false
-    setLoading(true)
-    setError(null)
-    setEditing(false)
-    void (async () => {
-      if (!threadId) {
-        if (!cancelled) {
-          setError("当前需求尚未关联任务，无法读取 PRD 文件")
-          setLoading(false)
-        }
-        return
-      }
-      const result = await readRequirementWorkspaceTextFile(threadId, filePath, {
-        lanePrefix: "requirement-function-workspace"
-      })
-      if (cancelled) return
-      if (!result.success) setError(result.error || "PRD 文件加载失败")
-      else {
-        setContent(result.content ?? "")
-        setDraft(result.content ?? "")
-      }
-      setLoading(false)
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [filePath, reloadToken, threadId])
-
-  const save = async (): Promise<void> => {
-    setSaving(true)
+  const syncPrototypeToMarkdown = async (): Promise<void> => {
+    if (!prototypeHtmlFile || markdownEditing || syncInFlightRef.current) return
+    const requestScope = syncScope
+    syncInFlightRef.current = true
+    setSyncing(true)
     try {
-      const result = await window.api.requirements.savePrdFile({
+      const result = await window.api.requirements.syncPrototypeToPrd({
         reqId: requirement.id,
-        filePath,
-        content: draft
+        prdFilePath: filePath,
+        prototypeFilePath: prototypeHtmlFile,
+        workspacePath
       })
-      if (!result.success) throw new Error(result.error || "保存失败")
-      setContent(draft)
-      setEditing(false)
-      toast.success("PRD 已保存")
-    } catch (saveError) {
-      toast.error(saveError instanceof Error ? saveError.message : "保存 PRD 失败")
+      if (!result.success) throw new Error(result.error || "同步失败")
+      if (syncScopeRef.current !== requestScope) return
+      setSyncRevision((revision) => revision + 1)
+      toast.success("原型 HTML 已同步到 MD 文档")
+    } catch (syncError) {
+      toast.error(syncError instanceof Error ? syncError.message : "同步原型到 MD 失败")
     } finally {
-      setSaving(false)
+      syncInFlightRef.current = false
+      setSyncing(false)
     }
   }
 
@@ -167,99 +148,42 @@ export function RequirementFunctionWorkspace({
       </div>
 
       <div className="grid min-h-0 flex-1 grid-cols-2 gap-3">
-        <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-border/80 bg-white transition-colors duration-200 hover:border-primary/70">
-          <header className="flex h-10 shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-slate-100/80 px-3.5">
-            <span className="text-xs font-semibold text-foreground/75">MD 预览</span>
-            <span
-              className="min-w-0 flex-1 truncate text-center text-xs text-muted-foreground/80"
-              title={filePath}
-            >
-              {filePath.replace(/^\/+/, "")}
-            </span>
-            {editing ? (
-              <div className="flex items-center gap-1.5">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 px-2 text-xs"
-                  disabled={saving}
-                  onClick={() => {
-                    setDraft(content)
-                    setEditing(false)
-                  }}
-                >
-                  取消
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  className="h-7 gap-1 px-2 text-xs"
-                  disabled={saving || draft === content}
-                  onClick={() => void save()}
-                >
-                  {saving ? (
-                    <Loader2 className="size-3 animate-spin" />
-                  ) : (
-                    <Save className="size-3" />
-                  )}
-                  保存
-                </Button>
-              </div>
-            ) : (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-7 gap-1 px-2 text-xs text-primary hover:text-primary"
-                disabled={loading || Boolean(error)}
-                onClick={() => setEditing(true)}
-              >
-                <Pencil className="size-3" />
-                可编辑
-              </Button>
-            )}
-          </header>
-          <div className="min-h-0 flex-1 overflow-auto">
-            {loading ? (
-              <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
-                <Loader2 className="size-4 animate-spin" />
-                正在读取 PRD
-              </div>
-            ) : error ? (
-              <div className="flex h-full items-center justify-center p-6 text-center text-sm text-destructive">
-                {error}
-              </div>
-            ) : editing ? (
-              <textarea
-                value={draft}
-                onChange={(event) => setDraft(event.target.value)}
-                aria-label={`编辑 ${title} PRD`}
-                className="h-full min-h-[360px] w-full resize-none border-0 bg-white p-5 font-mono text-sm leading-6 text-foreground outline-none focus:ring-2 focus:ring-inset focus:ring-primary/20"
-                spellCheck={false}
-                autoFocus
-              />
-            ) : (
-              <MarkdownPreview
-                content={content}
-                path={filePath}
-                showHeader={false}
-                showModeToggle={false}
-                whiteBackground
-                className="min-h-full"
-              />
-            )}
-          </div>
-        </section>
+        <RequirementMarkdownEditorAndPreview
+          requirementId={requirement.id}
+          title={title}
+          filePath={filePath}
+          threadId={threadId}
+          reloadToken={reloadToken + syncRevision}
+          scrollToBottomToken={syncRevision}
+          onEditingChange={setMarkdownEditing}
+          onOpenAttachment={onOpenAttachment}
+        />
 
         <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-border/80 bg-white transition-colors duration-200 hover:border-primary/70">
           <header className="flex h-10 shrink-0 items-center justify-between border-b border-border/80 bg-slate-100/80 px-3.5">
             <span className="text-xs font-semibold text-foreground/75">原型预览</span>
             {prototypeGenerated ? (
-              <TooltipProvider delayDuration={200}>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span className="inline-flex">
+              <div className="flex items-center gap-1">
+                {prototypeHtmlFile ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 gap-1 px-2 text-xs text-primary hover:text-primary"
+                    disabled={syncing || markdownEditing}
+                    onClick={() => void syncPrototypeToMarkdown()}
+                  >
+                    {syncing ? (
+                      <Loader2 className="size-3 animate-spin" />
+                    ) : (
+                      <FileDown className="size-3" />
+                    )}
+                    同步到MD文档里
+                  </Button>
+                ) : null}
+                <TooltipProvider delayDuration={200}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
                       <Button
                         type="button"
                         variant="ghost"
@@ -270,13 +194,13 @@ export function RequirementFunctionWorkspace({
                         <ExternalLink className="size-3" />
                         继续完善设计
                       </Button>
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" className="max-w-64">
-                    已关联设计会话，点击可跳转并继续完善原型
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom" className="max-w-64">
+                      已关联设计会话，点击可跳转并继续完善原型
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              </div>
             ) : null}
           </header>
           <div className="relative min-h-0 flex-1 bg-slate-50/70">

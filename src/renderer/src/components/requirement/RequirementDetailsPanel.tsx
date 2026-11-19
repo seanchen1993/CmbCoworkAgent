@@ -536,6 +536,8 @@ export function RequirementDetailsPanel({
             prototypeGenerated={fullPrdPrototypeGenerated}
             hasPrototypeDesignSession={hasFullPrdDesignSession}
             prototypeSkipped={false}
+            prototypeHtmlFile={fullPrdDesignEntry?.htmlFile}
+            workspacePath={workspacePath}
             prototypePreview={
               fullPrdDesignEntry?.htmlFile && threadId ? (
                 <PrototypeHtmlPreview
@@ -549,6 +551,7 @@ export function RequirementDetailsPanel({
             }
             reloadToken={prdPreviewReloadToken}
             onBack={() => setFullPrdWorkspaceOpen(false)}
+            onOpenAttachment={openWorkspaceFilePreview}
             navigationValue="full-prd"
             navigationItems={[
               { value: "full-prd", label: "整个需求", hasPrototype: fullPrdPrototypeGenerated },
@@ -588,6 +591,14 @@ export function RequirementDetailsPanel({
             }
             prototypeCoveredByFullPrd={hasFullPrdDesignSession}
             prototypeSkipped={selectedPrototypeStatus?.skipped ?? false}
+            prototypeHtmlFile={
+              selectedPrototypeStatus?.generated
+                ? selectedPrototypeStatus.prototypePath
+                : hasFullPrdDesignSession
+                  ? fullPrdDesignEntry?.htmlFile
+                  : undefined
+            }
+            workspacePath={workspacePath}
             prototypePreview={
               selectedPrototypeStatus?.generated && threadId ? (
                 <PrototypeHtmlPreview
@@ -614,6 +625,7 @@ export function RequirementDetailsPanel({
             }
             reloadToken={prdPreviewReloadToken}
             onBack={() => setSelectedFunction(null)}
+            onOpenAttachment={openWorkspaceFilePreview}
             navigationValue={getRequirementPrototypeFunctionKey(selectedFunction)}
             navigationItems={
               requirementSpaceManifest

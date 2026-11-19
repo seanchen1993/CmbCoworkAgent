@@ -1,6 +1,7 @@
 import { ipcRenderer } from "electron"
 
 import type { RequirementRuntimeItem } from "../main/ipc/requirements"
+import type { RequirementsApi } from "./requirements-api-types"
 
 export const requirementsApi = {
   list: (): Promise<RequirementRuntimeItem[]> => ipcRenderer.invoke("requirements:list"),
@@ -146,6 +147,41 @@ export const requirementsApi = {
       success: boolean
       error?: string
     }>,
+  uploadPrdAsset: (payload: {
+    reqId: string
+    prdFilePath: string
+    fileName: string
+    bytes: ArrayBuffer
+  }) =>
+    ipcRenderer.invoke("requirements:upload-prd-asset", payload) as Promise<{
+      success: boolean
+      relativePath?: string
+      error?: string
+    }>,
+  readPrdImage: (payload: { reqId: string; filePath: string }) =>
+    ipcRenderer.invoke("requirements:read-prd-image", payload) as Promise<{
+      success: boolean
+      bytes?: Uint8Array<ArrayBuffer>
+      mimeType?: string
+      error?: string
+    }>,
+  readPrdHtml: (payload: { reqId: string; filePath: string }) =>
+    ipcRenderer.invoke("requirements:read-prd-html", payload) as Promise<{
+      success: boolean
+      content?: string
+      error?: string
+    }>,
+  syncPrototypeToPrd: (payload: {
+    reqId: string
+    prdFilePath: string
+    prototypeFilePath: string
+    workspacePath: string
+  }) =>
+    ipcRenderer.invoke("requirements:sync-prototype-to-prd", payload) as Promise<{
+      success: boolean
+      relativePath?: string
+      error?: string
+    }>,
   getFunctionHtml: (payload: { workspacePath: string; requirementFilePath: string }) =>
     ipcRenderer.invoke("requirements:get-function-html", payload) as Promise<{
       success: boolean
@@ -192,4 +228,4 @@ export const requirementsApi = {
       prdPath?: string
       error?: string
     }>
-}
+} satisfies RequirementsApi

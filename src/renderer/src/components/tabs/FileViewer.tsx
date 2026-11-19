@@ -592,6 +592,7 @@ export function FileViewer({
           whiteBackground
           className="markdown-preview"
           readBinaryFile={readBinaryDependencyFile}
+          readHtmlFile={readHtmlDependencyFile}
         />
       </div>
     )
