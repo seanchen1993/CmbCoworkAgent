@@ -15,6 +15,7 @@ import { GOAL_CONTINUATION_BOUNDARY_METADATA_KEY } from "../agent/goals/internal
 import { CHECKPOINT_RUNTIME_PROJECTION_CANCELLED } from "../checkpointer/runtime-projection-protocol"
 import { bootstrapLegacyCheckpointTranscript } from "../checkpointer/runtime-projection-store"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
+import { readThreadMessagesPage } from "../thread-message-hydration/page-reader"
 import {
   closeDatabase,
   createThread,
@@ -24,7 +25,9 @@ import {
   hasUnresolvedLegacyTranscriptSlots,
   initializeDatabase,
   moveThreadMessagesAfterAnchor,
+  replaceThreadMessageId,
   reserveThreadGraphTranscriptBoundary,
+  ThreadMessageStreamAttempt,
   upsertThreadMessages,
   withThreadMessageIdentitySnapshot
 } from "."
@@ -59,11 +62,11 @@ afterEach(async () => {
   rmSync(directory, { recursive: true, force: true })
 })
 
-async function checkpoint(messages: BaseMessage[], id = checkpointId): Promise<void> {
+async function checkpoint(messages: BaseMessage[], id = checkpointId, parent?: string): Promise<void> {
   const saver = new SqlJsSaver(checkpointPath, undefined, { maxRootCheckpoints: 3 })
   try {
     await saver.put(
-      { configurable: { thread_id: threadId, checkpoint_ns: "" } },
+      { configurable: { thread_id: threadId, checkpoint_ns: "", ...(parent ? { checkpoint_id: parent } : {}) } },
       {
         v: 1,
         id,
@@ -147,6 +150,410 @@ const slots = () =>
     .all(threadId)
 
 describe("legacy checkpoint transcript slots", () => {
+  it.each([false, true])("preserves checkpoint fragment ownership across a stream rollback (descendant=%s)", async (descendant) => {
+    const root = visibleUser("root")
+    const large = assistant("wide", "prior ".repeat(360_000))
+    await checkpoint([root, large])
+    pauseAtCommittedBatch(() => Number(migrationState()?.current_fragment_index) > 0)
+    const attempt = new ThreadMessageStreamAttempt(threadId)
+    upsertThreadMessages(threadId, [{
+      id: "wide", role: "assistant", content: "provisional replacement", content_mode: "snapshot",
+      created_at: new Date()
+    }], { preserveExistingOrder: true, streamAttempt: attempt })
+    expect(attempt.rollback().restoredMessages.some((message) => message.id === "wide")).toBe(true)
+    const restored = observer.prepare(`SELECT active_fragment_revision FROM legacy_checkpoint_transcript_migrations
+      WHERE thread_id = ?`).get(threadId)?.active_fragment_revision
+    expect(JSON.parse(String(restored))[0]).toBe("wide")
+
+    const nextId = descendant ? "updated-checkpoint" : checkpointId
+    await checkpoint([root, assistant("wide", "revised answer"), assistant("following")],
+      nextId, descendant ? checkpointId : undefined)
+    expect(bootstrap().stats.checkpointId).toBe(nextId)
+    expect(getThreadMessages(threadId).map(({ id, content }) => [id, content])).toEqual([
+      ["root", "root"], ["wide", "revised answer"], ["following", "following"]
+    ])
+    expect(migrationState()?.status).toBe("complete")
+  })
+
+  it("resumes an old prefix copy at the slot moved by a live steering message", async () => {
+    const root = visibleUser("root")
+    await checkpoint([root, assistant("recovered")])
+    persist([root, visibleUser("guide")])
+    observer.prepare(`INSERT INTO legacy_checkpoint_transcript_migrations
+      (thread_id, checkpoint_id, total_messages, next_index, scoped_order, status, updated_at)
+      VALUES (?, ?, 2, 1, 0, 'migrating', 0)`).run(threadId, checkpointId)
+    observer.prepare(`INSERT INTO legacy_checkpoint_transcript_slots
+      (thread_id, checkpoint_id, message_index, ordinal) VALUES (?, ?, 1, 2)`).run(threadId, checkpointId)
+
+    expect(bootstrap().stats).toMatchObject({ migratedMessages: 1 })
+    expect(durableOrder()).toEqual([["root", 0], ["guide", 1], ["recovered", 2]])
+    expect(slots()).toEqual([])
+  })
+
+  it("keeps known provider occurrences when an old slot in a later turn has no identity", () => {
+    persist([assistant("known"), visibleUser("current")])
+    observer.prepare(`INSERT INTO legacy_checkpoint_transcript_migrations
+      (thread_id, checkpoint_id, total_messages, next_index, scoped_order, status, updated_at)
+      VALUES (?, ?, 3, 2, 0, 'migrating', 0)`).run(threadId, checkpointId)
+    observer.prepare(`INSERT INTO legacy_checkpoint_transcript_slots
+      (thread_id, checkpoint_id, message_index, ordinal) VALUES (?, ?, 2, 2)`).run(threadId, checkpointId)
+    expect(hasUnresolvedLegacyTranscriptSlots(threadId)).toBe(true)
+    expect(getThreadMessageProviderOccurrencesBeforeUser(threadId, "current", ["known"])).toEqual([
+      { provider_source_id: "known", role: "assistant", provider_occurrence: 1 }
+    ])
+  })
+
+  it.each([
+    { extended: false, intervening: false },
+    { extended: true, intervening: false },
+    { extended: true, intervening: true }
+  ])("finishes a reserved occurrence already persisted live ($extended, $intervening)", async ({ extended, intervening }) => {
+    const root = visibleUser("root")
+    const reply = assistant("already-written", "one verified reply")
+    persist([root])
+    reserveThreadGraphTranscriptBoundary(threadId, "hidden")
+    await checkpoint([root, hiddenGoalInput(), reply])
+    pauseAtCommittedBatch(() => migrationState()?.status === "migrating")
+    expect(slots()).toEqual([{ message_index: 1, ordinal: 2 }])
+    const native = extended ? assistant(reply.id!, "one verified reply with a live suffix") : reply
+    persist(intervening ? [assistant("intervening"), native] : [native])
+
+    expect(bootstrap().stats).toMatchObject({ migratedMessages: 0, searchProjectionState: "complete" })
+    expect(durableOrder()).toEqual(intervening
+      ? [["root", 0], ["already-written", 2], ["intervening", 3]]
+      : [["root", 0], ["already-written", 3]])
+    expect(getThreadMessages(threadId).find((message) => message.id === native.id)?.content).toBe(native.content)
+    expect(slots()).toEqual([])
+    expect(migrationState()?.status).toBe("complete")
+  })
+
+  it.each([
+    { fragmented: false, occupyingRole: "tool", removed: false, promoted: false },
+    { fragmented: false, occupyingRole: "assistant", removed: false, promoted: false },
+    { fragmented: true, occupyingRole: "tool", removed: false, promoted: false },
+    { fragmented: true, occupyingRole: "tool", removed: true, promoted: false },
+    { fragmented: true, occupyingRole: "tool", removed: false, promoted: true }
+  ] as const)("preserves a reserved reply when its ID is reused ($fragmented, $occupyingRole, $removed, $promoted)", async ({
+    fragmented, occupyingRole, removed, promoted
+  }) => {
+    const root = visibleUser("root")
+    persist([root])
+    reserveThreadGraphTranscriptBoundary(threadId, "hidden")
+    const reply = fragmented ? "head " + "x".repeat(2 * 1024 * 1024) + " tail" : "older reply"
+    await checkpoint([root, hiddenGoalInput(), assistant("reused", reply)])
+    pauseAtCommittedBatch(() => migrationState()?.status === "migrating")
+    persist([visibleUser("live")])
+    upsertThreadMessages(threadId, [{ id: "reused", role: occupyingRole, content: "live occupant",
+      ...(occupyingRole === "tool" ? { tool_call_id: "live-tool" } :
+        { provider_source_id: "new-provider", provider_occurrence: 1 }),
+      created_at: new Date() }], { preserveExistingOrder: true })
+    let alias = buildMessageRoleCollisionId("reused", "assistant")
+    if (fragmented) {
+      pauseAtCommittedBatch(() => Number(migrationState()?.current_fragment_index) > 0)
+      if (removed) observer.prepare("DELETE FROM thread_messages WHERE thread_id = ? AND message_id = 'reused'").run(threadId)
+      if (promoted) {
+        expect(replaceThreadMessageId(threadId, alias, "promoted", "assistant")).toBe(true)
+        alias = "promoted"
+      }
+    }
+
+    expect(bootstrap().stats.searchProjectionState).toBe("complete")
+    expect(durableOrder()).toEqual([["root", 0], [alias, 2], ["live", 3], ...(removed ? [] : [["reused", 4]])])
+    if (!removed) expect(getThreadMessages(threadId).find((message) => message.id === "reused")?.content).toBe("live occupant")
+    if (fragmented) {
+      const hash = createHash("sha256")
+      for (const row of observer.prepare(`SELECT content_text FROM thread_message_fragments
+        WHERE thread_id = ? AND message_id = ? ORDER BY fragment_id`).iterate(threadId, alias))
+        hash.update(String(row.content_text))
+      expect(hash.digest("hex")).toBe(createHash("sha256").update(reply).digest("hex"))
+    } else {
+      expect(getThreadMessages(threadId).find((message) => message.id === alias)?.content).toBe(reply)
+      const revision = observer.prepare(`SELECT transcript_revision FROM legacy_checkpoint_transcript_sources
+        WHERE thread_id = ? AND checkpoint_id = ?`).get(threadId, checkpointId)?.transcript_revision
+      const recover = () => readThreadMessagesPage(observer, {
+        type: "read-page", requestId: 1, databasePath: storage.databasePath, threadId,
+        options: { recoveryCheckpointId: checkpointId,
+          ...(typeof revision === "string" ? { recoveryTranscriptRevision: revision } : {}) },
+        cancellationBuffer: new SharedArrayBuffer(4)
+      }).page
+      const expectRecovered = () => {
+        const page = recover()
+        expect(page.recoveryIntegrity).toBe("verified")
+        expect(page.messages.map(({ id, content }) => [id, content])).toEqual([["root", "root"], ["reused", reply]])
+      }
+      expectRecovered()
+      expect(replaceThreadMessageId(threadId, alias, "promoted", "assistant")).toBe(true)
+      expectRecovered()
+      persist([assistant("official", reply)])
+      expect(replaceThreadMessageId(threadId, "promoted", "official", "assistant")).toBe(true)
+      expectRecovered()
+    }
+    expect(slots()).toEqual([])
+  })
+
+  it.each([
+    { scoped: true, pruned: false, transition: "stage" },
+    { scoped: false, pruned: true, transition: "stage" },
+    { scoped: true, pruned: true, transition: "rollback" },
+    { scoped: true, pruned: true, transition: "native-rename" }
+  ])("settles a merged active fragment copy ($scoped, $pruned, $transition)", async ({
+    scoped, pruned, transition
+  }) => {
+    const root = visibleUser("root")
+    const text = "original answer " + "x".repeat(2 * 1024 * 1024)
+    const active = assistant("wide", text)
+    const prefix = [root, ...(scoped ? [hiddenGoalInput()] : []), active]
+    persist([root])
+    if (scoped) reserveThreadGraphTranscriptBoundary(threadId, "hidden")
+    await checkpoint(prefix)
+    pauseAtCommittedBatch(() => Number(migrationState()?.current_fragment_index) > 0)
+    upsertThreadMessages(threadId, [{
+      id: "canonical", role: "assistant", content: text, created_at: new Date()
+    }], { preserveExistingOrder: true })
+    expect(replaceThreadMessageId(threadId, "wide", "canonical", "assistant")).toBe(true)
+    const fragmentState = observer.prepare(`SELECT
+      json_extract(active_fragment_revision, '$[7].generation') AS stage,
+      json_extract(active_fragment_revision, '$[8]') AS merge_key
+      FROM legacy_checkpoint_transcript_migrations WHERE thread_id = ?`)
+    expect(fragmentState.get(threadId)?.merge_key).toEqual(expect.any(String))
+    const nativeOwner = transition === "native-rename"
+    let physicalId = "canonical"
+    if (transition === "rollback" || nativeOwner) {
+      const attempt = nativeOwner ? undefined : new ThreadMessageStreamAttempt(threadId)
+      upsertThreadMessages(threadId, [{
+        id: physicalId, role: "assistant",
+        content: nativeOwner ? "new authoritative reply" : "provisional reply",
+        content_mode: "snapshot", content_priority: 1, created_at: new Date()
+      }], { preserveExistingOrder: true, streamAttempt: attempt })
+      if (attempt) {
+        expect(attempt.rollback().restoredMessages.map(({ id }) => id)).toEqual([physicalId])
+      } else {
+        expect(replaceThreadMessageId(threadId, physicalId, "final-canonical", "assistant")).toBe(true)
+        physicalId = "final-canonical"
+      }
+      expect(fragmentState.get(threadId)?.merge_key).toEqual(expect.any(String))
+    }
+
+    let head = checkpointId
+    const tail = [visibleUser("next-user"), assistant("next-reply"), visibleUser("last-user")]
+    if (pruned) {
+      persist(tail)
+      for (let index = 0; index < tail.length; index += 1) {
+        const id = `${checkpointId}-${index + 1}`
+        await checkpoint([...prefix, ...tail.slice(0, index + 1)], id, head)
+        head = id
+      }
+    }
+    if (transition === "stage") {
+      pauseAtCommittedBatch(() => typeof fragmentState.get(threadId)?.stage === "string")
+      expect(fragmentState.get(threadId)?.merge_key).toEqual(expect.any(String))
+    }
+
+    expect(bootstrap().stats).toMatchObject({
+      checkpointId: head, searchProjectionState: nativeOwner ? "unverified" : "complete"
+    })
+    const published = observer.prepare(`SELECT content_json, ordinal,
+      (SELECT SUM(LENGTH(content_text)) FROM thread_message_fragments AS f
+        WHERE f.thread_id = m.thread_id AND f.message_id = m.message_id
+          AND f.generation = m.fragment_generation) AS length
+      FROM thread_messages AS m WHERE m.thread_id = ? AND m.message_id = ?`).get(threadId, physicalId)
+    expect(published).toMatchObject(nativeOwner
+      ? { content_json: JSON.stringify("new authoritative reply"), length: null, ordinal: scoped ? 2 : 1 }
+      : { length: text.length, ordinal: scoped ? 2 : 1 })
+    expect(durableOrder().map(([id]) => id)).toEqual([
+      "root", physicalId, ...(pruned ? tail.map(({ id }) => id) : [])
+    ])
+    expect(migrationState()).toMatchObject({ status: "complete", current_fragment_index: 0 })
+    expect(slots()).toEqual([])
+  })
+
+  it.each([false, true])("settles a scoped copy after a native write to the same row (pruned=%s)", async (pruned) => {
+    const root = visibleUser("root")
+    const original = [root, hiddenGoalInput(), assistant("wide", "legacy body ".repeat(190_000)),
+      assistant("following")]
+    persist([root])
+    reserveThreadGraphTranscriptBoundary(threadId, "hidden")
+    await checkpoint(original)
+    pauseAtCommittedBatch(() => Number(migrationState()?.current_fragment_index) > 0)
+    const native = "new committed reply"
+    upsertThreadMessages(threadId, [{
+      id: "wide", role: "assistant", content: native, created_at: new Date(), content_priority: 1
+    }], { preserveExistingOrder: true })
+    const replacement = [root, hiddenGoalInput(), assistant("wide", native), assistant("following")]
+    let head = checkpointId
+    if (pruned) {
+      for (let index = 1; index <= 3; index += 1) {
+        const descendant = `${checkpointId}-${index}`
+        await checkpoint(replacement, descendant, head)
+        head = descendant
+      }
+    }
+    expect(bootstrap().stats).toMatchObject({
+      checkpointId: head, searchProjectionState: pruned ? "complete" : "unverified"
+    })
+    expect(getThreadMessages(threadId).map(({ id, content, ordinal }) => [id, content, ordinal]))
+      .toEqual([["root", "root", 0], ["wide", native, 2], ["following", "following", 3]])
+    expect(migrationState()).toMatchObject({ status: "complete", current_fragment_index: 0 })
+    expect(slots()).toEqual([])
+  })
+
+  it.each([
+    { compacted: false, revision: "same", append: true },
+    { compacted: true, revision: "same", append: true },
+    { compacted: false, revision: "extend", append: false },
+    { compacted: true, revision: "extend", append: true },
+    { compacted: false, revision: "replace", append: true },
+    { compacted: true, revision: "replace", append: false }
+  ])("continues owned scoped fragments after a same-checkpoint save ($compacted, $revision, $append)", async ({
+    compacted, revision, append
+  }) => {
+    const root = visibleUser("root")
+    const reply = "old body " + "x".repeat(2 * 1024 * 1024)
+    persist([root])
+    reserveThreadGraphTranscriptBoundary(threadId, "hidden")
+    const original = [root, hiddenGoalInput(), assistant("old-reply", reply)]
+    await checkpoint(original)
+    pauseAtCommittedBatch(() => Number(migrationState()?.current_fragment_index) > 0)
+    const expectedReply = revision === "replace" ? "corrected reply"
+      : revision === "extend" ? reply + " live continuation" : reply
+    const active = assistant("old-reply", expectedReply)
+    const prefix = compacted ? [root, active] : [root, hiddenGoalInput(), active]
+    await checkpoint(append ? [...prefix, assistant("next-reply", "newly appended reply")] : prefix)
+
+    expect(bootstrap().stats).toMatchObject({ totalMessages: append ? 3 : 2, searchProjectionState: "complete" })
+    expect(durableOrder()).toEqual([["root", 0], ["old-reply", 2], ...(append ? [["next-reply", 3]] : [])])
+    if (append)
+      expect(getThreadMessages(threadId).find((message) => message.id === "next-reply")?.content).toBe("newly appended reply")
+    const chunks = observer.prepare(`SELECT SUM(LENGTH(content_text)) AS length FROM thread_message_fragments
+      WHERE thread_id = ? AND message_id = 'old-reply'`).get(threadId)
+    if (revision === "replace") {
+      expect(chunks?.length).toBeNull()
+      expect(getThreadMessages(threadId).find((message) => message.id === "old-reply")?.content)
+        .toBe(expectedReply)
+    } else {
+      expect(chunks?.length).toBe(expectedReply.length)
+    }
+    expect(migrationState()?.status).toBe("complete")
+    expect(slots()).toEqual([])
+  })
+
+  it.each([
+    { compacted: false, revision: "same", rollback: false },
+    { compacted: true, revision: "extend", rollback: false },
+    { compacted: true, revision: "replace", rollback: true }
+  ])("recovers a pruned scoped checkpoint from an authenticated descendant ($revision)", async ({
+    compacted, revision, rollback
+  }) => {
+    const root = visibleUser("root")
+    const committed = assistant("already-written", "committed reply")
+    const reply = "original reply " + "x".repeat(2 * 1024 * 1024)
+    persist([root, committed])
+    reserveThreadGraphTranscriptBoundary(threadId, "hidden")
+    await checkpoint([root, committed, hiddenGoalInput(), assistant("wide", reply)])
+    pauseAtCommittedBatch(() => Number(migrationState()?.current_fragment_index) > 0)
+    expect(migrationState()).toMatchObject({ status: "migrating", scoped_order: 1, next_index: 2 })
+    expect(replaceThreadMessageId(threadId, committed.id!, "canonical-written", "assistant")).toBe(true)
+    if (rollback) {
+      const attempt = new ThreadMessageStreamAttempt(threadId)
+      upsertThreadMessages(threadId, [{
+        id: "wide", role: "assistant", content: "provisional reply", content_mode: "snapshot",
+        created_at: new Date()
+      }], { preserveExistingOrder: true, streamAttempt: attempt })
+      expect(attempt.rollback().restoredMessages.map(({ id }) => id)).toEqual(["wide"])
+    }
+    const expected = revision === "replace" ? "corrected reply"
+      : revision === "extend" ? reply + " after resuming" : reply
+    const prefix = [root, committed, ...(compacted ? [] : [hiddenGoalInput()]), assistant("wide", expected)]
+    const tail = [visibleUser("next-user"), assistant("next-reply"), visibleUser("final-user")]
+    persist(tail)
+    let parent = checkpointId
+    for (let index = 0; index < tail.length; index += 1) {
+      const id = `${checkpointId}-${index + 1}`
+      await checkpoint([...prefix, ...tail.slice(0, index + 1)], id, parent)
+      parent = id
+    }
+    const checkpoints = new DatabaseSync(checkpointPath, { readOnly: true })
+    try {
+      expect(checkpoints.prepare("SELECT 1 FROM checkpoints WHERE checkpoint_id = ?").get(checkpointId))
+        .toBeUndefined()
+    } finally {
+      checkpoints.close()
+    }
+    expect(bootstrap().stats).toMatchObject({
+      checkpointId: parent, totalMessages: 6, searchProjectionState: "complete"
+    })
+    expect(durableOrder()).toEqual([
+      ["root", 0], ["canonical-written", 1], ["wide", 3],
+      ["next-user", 4], ["next-reply", 5], ["final-user", 6]
+    ])
+    const stored = observer.prepare(`SELECT m.content_json AS content,
+      (SELECT SUM(LENGTH(f.content_text)) FROM thread_message_fragments AS f
+        WHERE f.thread_id = m.thread_id AND f.message_id = m.message_id
+          AND f.generation = m.fragment_generation) AS length
+      FROM thread_messages AS m WHERE m.thread_id = ? AND m.message_id = 'wide'`).get(threadId)
+    if (revision === "replace") {
+      expect(stored).toMatchObject({ content: JSON.stringify(expected), length: null })
+    } else {
+      expect(stored).toMatchObject({ length: expected.length })
+    }
+    expect(migrationState()).toMatchObject({ status: "complete", next_index: 6 })
+    expect(slots()).toEqual([])
+  })
+
+  it("defers provider identity reads while a committed reservation still moves its Goal boundary", async () => {
+    const first = assistant("shared")
+    persist([visibleUser("root"), first])
+    const olderBoundary = new HumanMessage({ id: "older-hidden", content: "older continuation",
+      additional_kwargs: { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true } })
+    reserveThreadGraphTranscriptBoundary(threadId, olderBoundary.id!)
+    reserveThreadGraphTranscriptBoundary(threadId, "hidden")
+    const reply = new AIMessage({ id: "shared", content: "second reply",
+      additional_kwargs: { [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: "shared",
+        [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: 2 } })
+    await checkpoint([olderBoundary, reply, hiddenGoalInput()])
+
+    pauseAtCommittedBatch(() => migrationState()?.status === "reserving")
+    expect(hasUnresolvedLegacyTranscriptSlots(threadId)).toBe(true)
+    expect(getThreadMessageProviderOccurrencesBeforeUser(threadId, "hidden", ["shared"])).toBeUndefined()
+    expect(bootstrap().stats.migratedMessages).toBe(1)
+    expect(getThreadMessageProviderOccurrencesBeforeUser(threadId, "hidden", ["shared"])).toEqual([
+      { provider_source_id: "shared", role: "assistant", provider_occurrence: 2 }
+    ])
+  })
+
+  it("preserves distinct replies with the same declared identity across a hidden Goal turn", async () => {
+    const reply = (id: string, content: string) => new AIMessage({ id, content,
+      additional_kwargs: { [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: "reused",
+        [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: 1 } })
+    reserveThreadGraphTranscriptBoundary(threadId, "hidden")
+    await checkpoint([visibleUser("root"), reply("first", "first draft"), reply("revision", "first draft complete"),
+      hiddenGoalInput(), reply("second", "second reply")])
+
+    expect(bootstrap().stats.migratedMessages).toBe(3)
+    expect(getThreadMessages(threadId).map((row) => row.content)).toEqual([
+      "root", "first draft complete", "second reply"
+    ])
+  })
+
+  it.each([false, true])("reserves new history after a completed copy (had a Goal boundary: %s)", async (alreadyScoped) => {
+    const root = visibleUser("root")
+    persist([root])
+    if (alreadyScoped) reserveThreadGraphTranscriptBoundary(threadId, "hidden")
+    const earlier = assistant("earlier")
+    const prior = alreadyScoped ? [root, hiddenGoalInput(), earlier] : [root, earlier]
+    await checkpoint(prior)
+    expect(bootstrap().stats.migratedMessages).toBe(1)
+
+    if (!alreadyScoped) reserveThreadGraphTranscriptBoundary(threadId, "hidden")
+    const later = alreadyScoped ? prior : [...prior, hiddenGoalInput()]
+    await checkpoint([...later, assistant("missing", "new checkpoint-only reply")], "next-checkpoint", checkpointId)
+    expect(bootstrap().stats).toMatchObject({ checkpointId: "next-checkpoint", migratedMessages: 1 })
+    expect(durableOrder()).toEqual([["root", 0], ["earlier", alreadyScoped ? 2 : 1], ["missing", 3]])
+    expect(getThreadTranscriptBoundaryOrdinal(threadId, "hidden")).toBe(alreadyScoped ? 1 : 2)
+    expect(slots()).toEqual([])
+    expect(bootstrap().stats.migratedMessages).toBe(0)
+  })
+
   it.each([
     { fragmented: false, hasVisibleNeighbor: true },
     { fragmented: true, hasVisibleNeighbor: true },

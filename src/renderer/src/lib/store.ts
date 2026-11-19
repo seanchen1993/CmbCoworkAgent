@@ -11,6 +11,9 @@ import {
   mergeWorkerToolCallSnapshot,
   restoreSnapshotAliasCallsWithResults
 } from "./snapshot-message-aliases"
+import { cancelThreadSearchNavigation, useThreadSearch } from "./thread-search-navigation"
+import { THREAD_LIST_PRIORITY_KEYS } from "../../../shared/thread-directory-metadata"
+import { THREAD_INCARNATION_METADATA_KEY, matchesThreadIncarnationSnapshot, type ThreadIncarnationSnapshot } from "../../../shared/thread-incarnation"
 import { create } from "zustand"
 import type { EvolutionCandidate } from "@/api/evolution"
 import type {
@@ -1464,6 +1467,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     options?: ThreadDeleteOptions & { deferDirectoryUpdate?: boolean }
   ) => {
     console.log("[Store] Deleting thread:", threadId)
+    if (useThreadSearch.getState().navigation?.result.threadId === threadId) cancelThreadSearchNavigation()
     rendererDeletingThreadIds.add(threadId)
     markThreadDirectoryMutation(threadId)
     try {
@@ -2622,3 +2626,38 @@ export function selectSkillRetryContext(
   if (!threadId) return null
   return state.skillRetryContextByThread.get(threadId) ?? null
 }
+
+export function adoptThreadSearchSummary(thread: Thread, identity: ThreadIncarnationSnapshot): boolean {
+  if (isThreadDeletionPending(thread.thread_id)) return false
+  const state = useAppStore.getState()
+  const existing = state.threads.find((item) => item.thread_id === thread.thread_id)
+  if (existing) {
+    const token = existing.metadata?.[THREAD_INCARNATION_METADATA_KEY]
+    // Some legacy summaries omit the private token; retain the richer row when creation agrees.
+    const same = typeof token === "string"
+      ? matchesThreadIncarnationSnapshot({ token, legacyCreatedAt: +new Date(existing.created_at) }, identity)
+      : +new Date(existing.created_at) === identity.legacyCreatedAt
+    if (!same) return false
+    if (+new Date(thread.updated_at) > +new Date(existing.updated_at)) {
+      const metadata = { ...existing.metadata, ...thread.metadata }
+      for (const key of THREAD_LIST_PRIORITY_KEYS) {
+        if (!Object.hasOwn(thread.metadata ?? {}, key)) delete metadata[key]
+      }
+      const merged = { ...existing, ...thread, metadata }
+      markThreadDirectoryMutation(thread.thread_id)
+      const threads = state.threads.map((item) => item === existing ? merged : item)
+      useAppStore.setState({ threads: adoptThreadDirectorySnapshot(threads) })
+    }
+    return true
+  }
+  markThreadDirectoryMutation(thread.thread_id)
+  useAppStore.setState({ threads: adoptThreadDirectorySnapshot([thread, ...state.threads]) })
+  return true
+}
+
+useAppStore.subscribe((state, previous) => {
+  const command = useThreadSearch.getState().navigation
+  if (command && (state.currentThreadId !== command.result.threadId ||
+    (!previous.showCustomizeView && state.showCustomizeView) ||
+    (state.mainView !== previous.mainView && state.mainView !== "thread"))) cancelThreadSearchNavigation()
+})

@@ -53,6 +53,7 @@ export function areMessageRenderFieldsEqual(
     left.id === right.id &&
     left.role === right.role &&
     left.reasoning === right.reasoning &&
+    left.content_preview_notice === right.content_preview_notice &&
     areStructuredValuesEqual(left.content, right.content) &&
     areToolCallsEqual(left.tool_calls, right.tool_calls)
   )

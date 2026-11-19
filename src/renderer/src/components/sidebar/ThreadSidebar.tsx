@@ -1,3 +1,4 @@
+import { ThreadSearchButton } from "@/components/search/ThreadSearchDialog"
 import { useState, useCallback, useEffect, useMemo, useRef, memo } from "react"
 import { useShallow } from "zustand/react/shallow"
 import {
@@ -50,7 +51,8 @@ import {
   useThreadStateSummaries,
   useThreadContext
 } from "@/lib/thread-context"
-import { cn, truncate } from "@/lib/utils"
+import { cn } from "@/lib/utils"
+import { getDisplayThreadTitle } from "../../../../shared/thread-search-scope"
 import { useFeatureGate } from "@/lib/feature-gates"
 import {
   cleanupDeletedThreadIfResident,
@@ -153,22 +155,6 @@ function formatCompactTime(date: Date | string): string {
   const day = d.getDate()
   if (d.getFullYear() === now.getFullYear()) return `${month}/${day}`
   return `${String(d.getFullYear()).slice(2)}/${month}/${day}`
-}
-
-function getDisplayThreadTitle(thread: Thread): string {
-  if (isRemoteInboxThread(thread)) return REMOTE_INBOX_WORKSPACE_NAME
-  const title = thread.title?.trim()
-
-  if (!title || title === "..." || title === "…") {
-    return truncate(thread.thread_id, 20)
-  }
-
-  if (title.startsWith("[Heartbeat]")) return title.slice(12).trim()
-  if (title.startsWith("[定时]")) return title.slice(5).trim()
-  if (title.startsWith("[远端机器人] ")) return `(远端) ${title.slice(8).trim()}`
-  if (title.startsWith("[机器人] ")) return title.slice(6).trim()
-
-  return title
 }
 
 function getRemoteThreadKind(thread: Thread): "inbox" | "feature" | null {
@@ -1220,6 +1206,7 @@ export const ThreadSidebar = memo(function ThreadSidebar(): React.JSX.Element {
         className="p-1 pb-0.5 space-y-1.5"
         style={{ paddingTop: "max(4px, var(--sidebar-safe-padding, 0px))" }}
       >
+        <ThreadSearchButton />
         <div
           role="tablist"
           aria-label="侧边栏模式"

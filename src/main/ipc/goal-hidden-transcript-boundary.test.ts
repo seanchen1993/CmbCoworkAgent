@@ -633,7 +633,7 @@ it.each([
   }
 )
 
-it("prepares upgraded Goal history before the provider runs and respects its physical owner", async () => {
+it.each([false, true])("prepares provider history and respects the run owner (Goal turn=%s)", async (goalTurn) => {
   const threadId = "goal-with-upgraded-provider-history"
   const runToken = "originating-owner"
   let finishPreparation!: () => void
@@ -647,7 +647,7 @@ it("prepares upgraded Goal history before the provider runs and respects its phy
   const boundary = new HumanMessage({
     id: "goal-boundary",
     content: "Continuation",
-    additional_kwargs: { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true }
+    ...(goalTurn && { additional_kwargs: { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true } })
   })
   const middleware = createCurrentRunMessageQueueMiddleware(runToken, undefined, prepare)
   const wrapModelCall = middleware.wrapModelCall as unknown as (
@@ -661,7 +661,7 @@ it("prepares upgraded Goal history before the provider runs and respects its phy
   setCurrentRunMessageQueueOwner(threadId, runToken)
   try {
     const initial = wrapModelCall(request, handler)
-    expect(prepare).toHaveBeenCalledWith(threadId)
+    expect(prepare).toHaveBeenCalledWith(threadId, goalTurn)
     expect(handler).not.toHaveBeenCalled()
     finishPreparation()
     await initial

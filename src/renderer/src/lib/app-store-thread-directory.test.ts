@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { ThreadSummaryPage } from "../../../main/types"
 import type { Thread } from "../types"
-import { useAppStore } from "./store"
+import { adoptThreadSearchSummary, useAppStore } from "./store"
 
 function createThread(threadId: string): Thread {
   return {
@@ -44,6 +44,19 @@ describe("app store thread-directory loading", () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
+  })
+
+  it("adopts an updated search summary without discarding local file history", () => {
+    const thread = createThread("same")
+    useAppStore.setState({ threads: [{
+      ...thread, metadata: { llmFileHistory: ["file"], agentMode: "coordinator" }
+    }] })
+    expect(adoptThreadSearchSummary({
+      ...thread, updated_at: new Date(2), title: "Updated", metadata: { remoteReadOnly: true }
+    }, { token: null, legacyCreatedAt: 1 })).toBe(true)
+    const [adopted] = useAppStore.getState().threads
+    expect(adopted.title).toBe("Updated")
+    expect(adopted.metadata).toEqual({ llmFileHistory: ["file"], remoteReadOnly: true })
   })
 
   it("refreshes the directory without navigating away from project mode", async () => {

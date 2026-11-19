@@ -13,7 +13,7 @@ describe("thread message search IPC plumbing", () => {
     expect(handlers).toContain('ipcMain.handle("threads:messages"')
     expect(handlers).toContain('"threads:messages-page"')
     expect(handlers).toContain('"threads:search-messages"')
-    expect(handlers).toMatch(/threads:search-messages[\s\S]*searchThreadMessages\(threadId, query, options\)/)
+    expect(handlers).toMatch(/threads:search-messages[\s\S]*searchDurableThreadMessagesInWorker\(event\.sender\.id, threadId, query, options\)/)
 
     expect(preload).toMatch(/searchMessages:[\s\S]*threads:search-messages/)
     expect(declarations).toMatch(/searchMessages:[\s\S]*Promise<ThreadMessageSearchPage>/)

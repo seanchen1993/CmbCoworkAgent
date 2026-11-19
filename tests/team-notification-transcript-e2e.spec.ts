@@ -9,6 +9,7 @@ import { setTimeout as delay } from "node:timers/promises"
 import { _electron as electron, type ElectronApplication, type Page } from "playwright"
 import { TURN_COMPLETION_GATE_MARKER_PREFIX } from "../src/shared/checkpoint-transcript"
 import { COORDINATOR_NOTIFICATION_PROMPT_PREFIX } from "../src/shared/internal-notification-turn"
+import type { ThreadSearchPage, ThreadSearchStartRequest } from "../src/shared/thread-search-types"
 
 const repairThroughGate = process.argv.includes("--gate")
 const root = path.resolve(import.meta.dirname, "..")
@@ -64,6 +65,9 @@ interface FixtureWindow {
     threads: {
       create(metadata: Record<string, unknown>): Promise<{ thread_id: string }>
       getMessages(id: string): Promise<StoredMessage[]>
+      searchStart(request: ThreadSearchStartRequest): Promise<ThreadSearchPage>
+      searchContinue(cursor: string): Promise<ThreadSearchPage>
+      searchCancel(sessionId: string): Promise<unknown>
       getMessagesPage(
         id: string,
         options: { includeVisibleMessagePresence: boolean }
@@ -263,6 +267,32 @@ async function main(): Promise<void> {
     const notificationReplies = stored.slice(4)
     for (const reply of notificationReplies) assert.match(reply.id, /^cmb-notification-assistant:/)
     assert.equal(new Set(notificationReplies.map(({ id }) => id)).size, notificationReplies.length)
+
+    const searchAll = (query: string) => view.evaluate(async (value) => {
+      const { threads } = (window as unknown as FixtureWindow).api
+      let page = await threads.searchStart({ query: value })
+      const sessionId = page.sessionId
+      const results = [...page.results]
+      try {
+        while (page.nextCursor) {
+          page = await threads.searchContinue(page.nextCursor)
+          results.push(...page.results)
+        }
+        return results
+      } finally {
+        await threads.searchCancel(sessionId)
+      }
+    }, query)
+    const report = await searchAll(reportText)
+    assert.deepEqual(
+      report.map(({ threadId: id, target }) => [
+        id, target?.kind === "durableMessage" ? target.messageId : null
+      ]),
+      [[threadId, notificationReplies.at(-1)?.id]],
+      phase + ": search must target the stable Team reply"
+    )
+    const internal = await searchAll(COORDINATOR_NOTIFICATION_PROMPT_PREFIX)
+    assert.deepEqual(internal, [], phase + ": search must hide notification prompts")
     assert.ok(stored[2].tool_call_id && stored[2].tool_call_id === stored[1].tool_calls?.[0]?.id)
     assert.equal(await chat.getByText("INTERRUPTED", { exact: true }).count(), 0)
     for (const text of expectedMainReplies) {

@@ -49,7 +49,7 @@ describe("chat message virtual list initial location", () => {
       "utf8"
     )
 
-    expect(source).toMatch(/key=\{threadId\}/)
+    expect(source).toMatch(/key=\{`\$\{threadId\}:\$\{historyWindowRevision\}`\}/)
     expect(source).toMatch(
       /initialTopMostItemIndex=\{resolvedInitialTopMostItemIndex\}/
     )

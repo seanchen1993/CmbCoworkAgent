@@ -841,7 +841,7 @@ function assignScopedGraphAssistantIdentity(
 export function createCurrentRunMessageQueueMiddleware(
   ownerRunToken?: string,
   loadGraphProviderOccurrence?: GraphProviderOccurrenceLoader,
-  prepareScopedProviderHistory?: (threadId: string) => Promise<void> | undefined
+  prepareScopedProviderHistory?: (threadId: string, scopedTurn: boolean) => Promise<void> | undefined
 ): ReturnType<typeof createMiddleware> {
   return createMiddleware({
     name: "currentRunMessageQueue",
@@ -852,17 +852,14 @@ export function createCurrentRunMessageQueueMiddleware(
           : undefined
       const messages = request.state?.messages ?? request.messages
       // Record before the handler can emit the first raw delta.
-      if (
-        threadId &&
-        ownerRunToken &&
-        rememberScopedGraphProviderOccurrences(threadId, ownerRunToken, messages)
-      ) {
-        const preparation = prepareScopedProviderHistory?.(threadId)
+      if (threadId && ownerRunToken && isCurrentRunMessageQueueOwner(threadId, ownerRunToken)) {
+        const scopedTurn = rememberScopedGraphProviderOccurrences(threadId, ownerRunToken, messages)
+        const preparation = prepareScopedProviderHistory?.(threadId, scopedTurn)
         if (preparation) {
           await preparation
           request.runtime?.signal?.throwIfAborted()
           if (!isCurrentRunMessageQueueOwner(threadId, ownerRunToken)) {
-            throw new DOMException("Superseded scoped graph turn", "AbortError")
+            throw new DOMException("Superseded turn", "AbortError")
           }
         }
       }

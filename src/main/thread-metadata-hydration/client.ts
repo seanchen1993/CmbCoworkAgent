@@ -10,6 +10,7 @@ import type {
 import type {
   ThreadGitMetadataProjection,
   ThreadGoalHydrationEvent,
+  ThreadMetadataHydrationReadThreadRequest,
   ThreadMetadataHydrationWorkerResponse
 } from "./protocol"
 import { THREAD_METADATA_HYDRATION_CANCELLED } from "./protocol"
@@ -209,7 +210,7 @@ export class ThreadMetadataHydrationClient {
   private async request(
     kind: RequestKind,
     payload:
-      | { type: "read-thread"; threadId: string }
+      | Pick<ThreadMetadataHydrationReadThreadRequest, "type" | "threadId" | "search">
       | {
           type: "read-list-page"
           beforeUpdatedAt?: number
@@ -314,15 +315,18 @@ export class ThreadMetadataHydrationClient {
     }
   }
 
-  readThread(threadId: string, webContentsId?: number): Promise<Thread | null> {
-    const normalizedThreadId = threadId.trim()
-    const latestKey = Number.isSafeInteger(webContentsId) ? `thread:${webContentsId}` : null
-    const requestKey = latestKey ? `${normalizedThreadId}:${latestKey}` : normalizedThreadId
+  readThread(
+    threadId: string, webContentsId?: number, search?: ThreadMetadataHydrationReadThreadRequest["search"]
+  ): Promise<Thread | null> {
+    const normalizedThreadId = search ? threadId : threadId.trim()
+    const mode = !search ? "thread" : search.includeSummary ? "search-summary" : "search-identity"
+    const latestKey = Number.isSafeInteger(webContentsId) ? `${mode}:${webContentsId}` : null
+    const requestKey = JSON.stringify([normalizedThreadId, latestKey, search])
     const existing = this.threadRequests.get(requestKey)
     if (existing) return existing
     const request = this.request(
       "thread",
-      { type: "read-thread", threadId: normalizedThreadId },
+      { type: "read-thread", threadId: normalizedThreadId, ...(search ? { search } : {}) },
       latestKey
     ).then((value) => value as Thread | null)
     this.threadRequests.set(requestKey, request)
@@ -573,6 +577,14 @@ export function readThreadHydrationInWorker(
   webContentsId?: number
 ): Promise<Thread | null> {
   return getDefaultClient().readThread(threadId, webContentsId)
+}
+
+export function readThreadSearchHydrationInWorker(
+  threadId: string,
+  webContentsId: number,
+  search: NonNullable<ThreadMetadataHydrationReadThreadRequest["search"]>
+): Promise<Thread | null> {
+  return getDefaultClient().readThread(threadId, webContentsId, search)
 }
 
 export function readThreadSummaryPageInWorker(

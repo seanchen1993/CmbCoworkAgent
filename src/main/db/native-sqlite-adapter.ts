@@ -37,7 +37,7 @@ export interface NativeSqliteCloseOptions {
   checkpoint?: boolean
 }
 
-const RECOVERY_SUFFIXES = ["", ".flush.tmp", ".tmp", ".bak", ".bak.tmp"]
+import { SQLITE_RECOVERY_SUFFIXES } from "./sqlite-recovery-family"
 const NATIVE_SIDECAR_SUFFIXES = ["-wal", "-shm"]
 
 function normalizeBinding(value: unknown): NativeSqliteValue {
@@ -317,7 +317,7 @@ function candidateMtime(path: string): number {
 
 function getRecoveryCandidates(dbPath: string): RecoveryCandidate[] {
   const candidates: RecoveryCandidate[] = []
-  for (const suffix of RECOVERY_SUFFIXES) {
+  for (const suffix of SQLITE_RECOVERY_SUFFIXES) {
     const path = `${dbPath}${suffix}`
     try {
       const stats = statSync(path)
@@ -353,26 +353,48 @@ function probeSqliteFile(path: string, verifyAllPages: boolean): boolean {
 }
 
 function chooseRecoveryCandidate(
-  candidates: readonly RecoveryCandidate[]
+  candidates: readonly RecoveryCandidate[],
+  probe = probeSqliteFile
 ): RecoveryCandidate | null {
   const live = candidates.find((candidate) => candidate.suffix === "")
   // Keep the normal open path O(1): a full integrity_check scans the entire
   // database and recreates the same main-thread-size stall this adapter removes.
   // Recovery candidates are cold paths and receive a bounded quick_check.
-  if (live && probeSqliteFile(live.path, false)) {
+  if (live && probe(live.path, false)) {
     for (const candidate of candidates) {
       const isNewerTemp =
         (candidate.suffix === ".tmp" || candidate.suffix === ".flush.tmp") &&
         candidate.mtimeMs > live.mtimeMs
-      if (isNewerTemp && probeSqliteFile(candidate.path, true)) return candidate
+      if (isNewerTemp && probe(candidate.path, true)) return candidate
     }
     return live
   }
 
   for (const candidate of candidates) {
-    if (candidate !== live && probeSqliteFile(candidate.path, true)) return candidate
+    if (candidate !== live && probe(candidate.path, true)) return candidate
   }
   return null
+}
+
+/** Resolve a durable recovery source without publishing, renaming or modifying its files. */
+export function findNativeSqliteRecoverySource(
+  dbPath: string, maximumBytes: number
+): string | null {
+  const candidates = getRecoveryCandidates(dbPath)
+  const checkSize = (candidatePath: string) => {
+    const file = statSync(candidatePath)
+    const wal = statSync(candidatePath + "-wal", { throwIfNoEntry: false })
+    if (file.size + (wal?.size ?? 0) > maximumBytes) {
+      throw new RangeError("Checkpoint recovery source exceeds background search budget")
+    }
+  }
+  const selected = chooseRecoveryCandidate(candidates, (path, verifyAllPages) => {
+    if (verifyAllPages) checkSize(path)
+    return probeSqliteFile(path, verifyAllPages)
+  })
+  if (!selected) return null
+  checkSize(selected.path)
+  return selected.path
 }
 
 function removeNativeSidecars(dbPath: string): void {
