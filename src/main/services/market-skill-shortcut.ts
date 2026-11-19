@@ -1,17 +1,25 @@
 import { userIdentityKey } from "../../shared/user-identity"
 import {
   isMarketSkillShortcutKey,
+  PROJECT_PLUGIN_SKILL_SHORTCUT_SLOT,
   type MarketSkillShortcutBinding,
   type MarketSkillShortcutResult,
   type MarketSkillShortcutSelection,
+  type MarketSkillShortcutTarget,
   type MarketSkillShortcutUpdate
 } from "../../shared/market-skill-shortcut"
 import { getUserInfo } from "../storage"
 import { readBoundedResponse } from "./market-source-access"
 
-const ROUTE = "/api/trajectories/marketplace/conversation-shortcuts/project-plugin-creation"
+const MARKET_ROUTE = "/api/trajectories/marketplace"
+const SHORTCUT_QUERY = new URLSearchParams({
+  conversationShortcut: PROJECT_PLUGIN_SKILL_SHORTCUT_SLOT
+})
 const MAX_BINDING_BYTES = 16 * 1024
 const MAX_PACKAGE_BYTES = 32 * 1024 * 1024
+
+type ListedTarget = MarketSkillShortcutTarget & { marketName: string; filename: string }
+type ListedBinding = Omit<MarketSkillShortcutBinding, "target"> & { target: ListedTarget | null }
 
 class ShortcutRequestError extends Error {
   constructor(
@@ -59,79 +67,122 @@ function record(value: unknown): Record<string, unknown> | null {
     : null
 }
 
-export function parseMarketShortcutBinding(value: unknown): MarketSkillShortcutBinding {
-  const data = record(value)
-  if (!data || !isMarketSkillShortcutKey(data.revision) || typeof data.canManage !== "boolean") {
-    throw new Error("Invalid market shortcut binding")
-  }
-  const target = record(data.target)
+function isMarketName(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 256 &&
+    value === value.trim() &&
+    value !== "." &&
+    value !== ".." &&
+    !/\p{Cc}/u.test(value)
+  )
+}
+
+function parseListedTarget(value: unknown, skillNameOverride: unknown): ListedTarget {
+  const item = record(value)
   if (
-    data.target !== null &&
-    (!target ||
-      !isMarketSkillShortcutKey(target.itemId) ||
-      typeof target.name !== "string" ||
-      !target.name.trim() ||
-      target.name.length > 256 ||
-      typeof target.description !== "string" ||
-      target.description.length > 4_096 ||
-      typeof target.skillName !== "string" ||
-      !target.skillName.trim() ||
-      target.skillName.length > 256)
+    !item ||
+    !isMarketSkillShortcutKey(item.id) ||
+    !isMarketName(item.name) ||
+    typeof item.description !== "string" ||
+    item.description.length > 4_096 ||
+    typeof item.filename !== "string" ||
+    item.filename.length > 512 ||
+    typeof item.extra_json !== "string"
   ) {
-    throw new Error("Invalid market shortcut target")
+    throw new Error("Invalid skill in the market shortcut list")
   }
-  const assignedItemId = data.canManage ? data.assignedItemId : null
-  if (assignedItemId !== null && !isMarketSkillShortcutKey(assignedItemId)) {
-    throw new Error("Invalid market shortcut assignment")
+  const extra = record(JSON.parse(item.extra_json))
+  if (extra?.conversationShortcut !== PROJECT_PLUGIN_SKILL_SHORTCUT_SLOT) {
+    throw new Error("Skill is missing the market shortcut marker")
   }
+
+  const skillName = skillNameOverride ?? item.name
+  if (!isMarketName(skillName)) throw new Error("Invalid skill name in the market shortcut list")
+  const label =
+    typeof item.chinese_name === "string" && item.chinese_name.length <= 256
+      ? item.chinese_name.trim()
+      : ""
   return {
-    revision: data.revision,
-    canManage: data.canManage,
-    assignedItemId,
-    target: target
-      ? {
-          itemId: target.itemId as string,
-          name: (target.name as string).trim(),
-          description: target.description as string,
-          skillName: (target.skillName as string).trim()
-        }
-      : null
+    itemId: item.id,
+    marketName: item.name,
+    filename: item.filename,
+    name: label || item.name,
+    description: item.description,
+    skillName
   }
 }
 
-async function fetchShortcut(
+function parseMarketShortcutBinding(value: unknown): ListedBinding {
+  const data = record(value)
+  const shortcut = record(data?.shortcut)
+  if (
+    !shortcut ||
+    shortcut.slot !== PROJECT_PLUGIN_SKILL_SHORTCUT_SLOT ||
+    !isMarketSkillShortcutKey(shortcut.revision) ||
+    typeof shortcut.canManage !== "boolean" ||
+    !Array.isArray(data?.items) ||
+    data.items.length > 1
+  ) {
+    throw new Error("Market skill list does not support scoped shortcuts")
+  }
+  const assignedItemId = shortcut.canManage ? shortcut.assignedItemId : null
+  if (assignedItemId !== null && !isMarketSkillShortcutKey(assignedItemId)) {
+    throw new Error("Invalid market shortcut assignment")
+  }
+  const target = data.items.length ? parseListedTarget(data.items[0], shortcut.skillName) : null
+  if (target && shortcut.canManage && assignedItemId !== target.itemId) {
+    throw new Error("Market shortcut assignment does not match the listed skill")
+  }
+  return { revision: shortcut.revision, canManage: shortcut.canManage, assignedItemId, target }
+}
+
+async function requestShortcut(
   session: MarketShortcutSession,
   route: string,
   init: RequestInit,
   accept: string,
-  limit: number
-): Promise<{ body: Buffer; headers: Headers }> {
+  timeout = 10_000
+): Promise<Response> {
   if (!session.isCurrent()) marketShortcutChanged()
   const base = import.meta.env.VITE_API_BASE_URL?.trim().replace(/\/+$/, "")
   if (!base) throw new Error("Market base URL is not configured")
-  const url = new URL(base + ROUTE + route)
+  const url = new URL(base + MARKET_ROUTE + route)
   if (url.protocol !== "https:") throw new Error("Market shortcut requires HTTPS")
+
+  const headers = new Headers(init.headers)
+  headers.set("Authorization", `Bearer ${session.accessToken}`)
+  headers.set("Accept", accept)
   const response = await fetch(url, {
     ...init,
     cache: "no-store",
     redirect: "error",
-    signal: AbortSignal.timeout(limit === MAX_PACKAGE_BYTES ? 30_000 : 10_000),
-    headers: { ...init.headers, Authorization: `Bearer ${session.accessToken}`, Accept: accept }
+    signal: AbortSignal.timeout(timeout),
+    headers
   })
-  const body = await readBoundedResponse(response, limit)
-  if (!session.isCurrent()) marketShortcutChanged()
-  if (response.status === 409 || response.status === 412) marketShortcutChanged()
+  const isCurrent = session.isCurrent()
+  if (!response.ok || !isCurrent) await response.body?.cancel().catch(() => undefined)
+  if (!isCurrent || response.status === 409 || response.status === 412) marketShortcutChanged()
   if (response.status === 401 || response.status === 403) {
     throw new ShortcutRequestError("forbidden", "当前账号没有此操作的权限")
   }
-  if (!body) throw new Error("Market shortcut response unavailable")
-  return { body, headers: response.headers }
+  if (!response.ok) throw new Error("Market shortcut response unavailable")
+  return response
 }
 
 export async function getMarketShortcutBinding(
   session = getMarketShortcutSession()
-): Promise<MarketSkillShortcutBinding> {
-  const { body } = await fetchShortcut(session, "", {}, "application/json", MAX_BINDING_BYTES)
+): Promise<ListedBinding> {
+  const response = await requestShortcut(
+    session,
+    `/list/skill?${SHORTCUT_QUERY}`,
+    {},
+    "application/json"
+  )
+  const body = await readBoundedResponse(response, MAX_BINDING_BYTES)
+  if (!session.isCurrent()) marketShortcutChanged()
+  if (!body) throw new Error("Market shortcut list is unavailable")
   return parseMarketShortcutBinding(JSON.parse(body.toString("utf8")))
 }
 
@@ -140,28 +191,55 @@ export async function updateMarketShortcutBinding(
 ): Promise<MarketSkillShortcutBinding> {
   if (
     !isMarketSkillShortcutKey(input?.revision) ||
-    (input.itemId !== null && !isMarketSkillShortcutKey(input.itemId))
+    !isMarketSkillShortcutKey(input.itemId) ||
+    !isMarketName(input.marketName) ||
+    typeof input.enabled !== "boolean"
   ) {
     throw new Error("Invalid market shortcut update")
   }
-  const { body } = await fetchShortcut(
-    getMarketShortcutSession(),
-    "",
-    {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ itemId: input.itemId, revision: input.revision })
-    },
-    "application/json",
-    MAX_BINDING_BYTES
+  const session = getMarketShortcutSession()
+  // Require the opt-in list protocol before sending a metadata-only write.
+  const before = await getMarketShortcutBinding(session)
+  if (!before.canManage) {
+    throw new ShortcutRequestError("forbidden", "当前账号没有配置会话导航的权限")
+  }
+  if (
+    before.revision !== input.revision ||
+    (!input.enabled && before.assignedItemId !== input.itemId)
+  ) {
+    marketShortcutChanged()
+  }
+
+  const body = new FormData()
+  body.set("resource_type", "skill")
+  body.set("name", input.marketName)
+  body.set("item_id", input.itemId)
+  body.set("shortcut_revision", input.revision)
+  body.set(
+    "extra_json",
+    JSON.stringify({
+      conversationShortcut: input.enabled ? PROJECT_PLUGIN_SKILL_SHORTCUT_SLOT : null
+    })
   )
-  return parseMarketShortcutBinding(JSON.parse(body.toString("utf8")))
+  const response = await requestShortcut(
+    session,
+    `/skill/${encodeURIComponent(input.marketName)}?${SHORTCUT_QUERY}`,
+    { method: "PUT", body },
+    "application/json"
+  )
+  await response.body?.cancel().catch(() => undefined)
+
+  const after = await getMarketShortcutBinding(session)
+  if (!after.canManage || after.assignedItemId !== (input.enabled ? input.itemId : null)) {
+    marketShortcutChanged()
+  }
+  return after
 }
 
 export async function verifyMarketShortcutTarget(
   session: MarketShortcutSession,
   selection: MarketSkillShortcutSelection
-) {
+): Promise<ListedTarget> {
   if (
     !isMarketSkillShortcutKey(selection?.itemId) ||
     !isMarketSkillShortcutKey(selection.revision)
@@ -177,20 +255,32 @@ export async function verifyMarketShortcutTarget(
 
 export async function fetchMarketShortcutPackage(
   session: MarketShortcutSession,
-  selection: MarketSkillShortcutSelection
+  selection: MarketSkillShortcutSelection,
+  target: ListedTarget
 ) {
-  const query = new URLSearchParams({ itemId: selection.itemId, revision: selection.revision })
-  const { body, headers } = await fetchShortcut(
+  const query = new URLSearchParams(SHORTCUT_QUERY)
+  query.set("itemId", selection.itemId)
+  query.set("shortcutRevision", selection.revision)
+  const response = await requestShortcut(
     session,
-    `/installation?${query}`,
+    `/download/skill/${encodeURIComponent(target.marketName)}?${query}`,
     {},
     "application/octet-stream",
-    MAX_PACKAGE_BYTES
+    30_000
   )
-  const format = headers.get("X-Skill-Package-Format")
-  if (format !== "zip" && format !== "md") throw new Error("Unsupported skill package")
-  return {
-    fileName: `market-skill.${format}`,
-    buffer: new Uint8Array(body).buffer
+  if (response.headers.get("X-Marketplace-Item-Id") !== target.itemId) {
+    await response.body?.cancel().catch(() => undefined)
+    marketShortcutChanged()
   }
+
+  const filename = response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/i)?.[1]
+  const format = /\.(zip|md)$/i.exec(filename || target.filename)?.[1]?.toLowerCase()
+  if (!format) {
+    await response.body?.cancel().catch(() => undefined)
+    throw new Error("Unsupported skill package")
+  }
+  const body = await readBoundedResponse(response, MAX_PACKAGE_BYTES)
+  if (!session.isCurrent()) marketShortcutChanged()
+  if (!body) throw new Error("Market skill package unavailable")
+  return { fileName: `market-skill.${format}`, buffer: new Uint8Array(body).buffer }
 }

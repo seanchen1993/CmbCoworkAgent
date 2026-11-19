@@ -2674,6 +2674,7 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
                       <MarketSkillShortcutAction
                         key={selectedItem.id}
                         itemId={selectedItem.id}
+                        marketName={selectedItem.name}
                         label={selectedItem.chinese_name || selectedItem.name}
                       />
                     )}

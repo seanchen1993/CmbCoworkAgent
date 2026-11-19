@@ -1875,7 +1875,7 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
       const existing = await readMarketShortcutSkill(target)
       if (!session.isCurrent()) marketShortcutChanged()
       if (existing.kind !== "missing") return existing
-      const bundle = await fetchMarketShortcutPackage(session, selection)
+      const bundle = await fetchMarketShortcutPackage(session, selection, target)
       await verifyMarketShortcutTarget(session, selection)
       const result = await uploadSkill(
         { ...bundle, options: { origin: "market" } },

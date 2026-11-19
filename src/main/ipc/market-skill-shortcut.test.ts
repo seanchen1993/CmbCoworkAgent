@@ -4,7 +4,10 @@ import { join } from "node:path"
 import type { IpcMain } from "electron"
 import AdmZip from "adm-zip"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import type { MarketSkillShortcutBinding } from "../../shared/market-skill-shortcut"
+import {
+  PROJECT_PLUGIN_SKILL_SHORTCUT_SLOT as slot,
+  type MarketSkillShortcutBinding
+} from "../../shared/market-skill-shortcut"
 
 vi.mock("electron", () => ({
   app: {},
@@ -13,6 +16,9 @@ vi.mock("electron", () => ({
 }))
 
 const selection = { itemId: "market-417", revision: "rev-1" }
+const marketName = "market-plugin-listing"
+const update = { ...selection, marketName, enabled: false }
+const basePath = "/api/trajectories/marketplace"
 const candidate = {
   itemId: selection.itemId,
   name: "市场显示名",
@@ -28,6 +34,9 @@ describe("market skill shortcut IPC", () => {
   let afterDownload: (() => void) | undefined
   let bundle: { content: string | ArrayBuffer; format: "zip" | "md" }
   let allowWrite: boolean
+  let scopedList: boolean
+  let listedMarker: boolean
+  let downloadItemId: string
   let fetchStub: ReturnType<typeof vi.fn<typeof fetch>>
 
   beforeEach(async () => {
@@ -44,32 +53,78 @@ describe("market skill shortcut IPC", () => {
     afterDownload = undefined
     bundle = { content: markdown, format: "md" }
     allowWrite = true
+    scopedList = true
+    listedMarker = true
+    downloadItemId = selection.itemId
     const storage = await import("../storage")
     storage.upsertUserInfoConfig({ ystId: "admin", ystAccessToken: "fixture-token" })
     fetchStub = vi.fn<typeof fetch>(async (input, init) => {
       const url = new URL(String(input))
       expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer fixture-token")
       expect(init?.redirect).toBe("error")
-      if (url.pathname.endsWith("/installation")) {
+      expect(url.searchParams.get("conversationShortcut")).toBe(slot)
+      if (url.pathname === `${basePath}/download/skill/${marketName}`) {
         expect(url.searchParams.get("itemId")).toBe(candidate.itemId)
-        expect(url.searchParams.get("revision")).toBe(selection.revision)
+        expect(url.searchParams.get("shortcutRevision")).toBe(selection.revision)
         afterDownload?.()
         return new Response(bundle.content, {
-          headers: { "X-Skill-Package-Format": bundle.format }
+          headers: {
+            "Content-Disposition": `attachment; filename="package.${bundle.format}"`,
+            "X-Marketplace-Item-Id": downloadItemId
+          }
         })
       }
       if (init?.method === "PUT") {
+        expect(url.pathname).toBe(`${basePath}/skill/${marketName}`)
         if (!allowWrite) return new Response(null, { status: 403 })
-        const input = JSON.parse(String(init.body))
-        if (input.revision !== binding.revision) return new Response(null, { status: 409 })
+        const body = init.body as FormData
+        expect(body.get("resource_type")).toBe("skill")
+        expect(body.get("name")).toBe(marketName)
+        expect(body.get("shortcut_revision")).toBe(binding.revision)
+        expect(body.get("item_id")).toBe(candidate.itemId)
+        expect(body.has("description")).toBe(false)
+        const mark = JSON.parse(String(body.get("extra_json")))
+        expect(mark).toEqual({
+          conversationShortcut: mark.conversationShortcut === null ? null : slot
+        })
+        const enabled = mark.conversationShortcut === slot
         binding = {
           ...binding,
-          revision: "rev-2",
-          target: input.itemId === null ? null : candidate,
-          assignedItemId: input.itemId
+          revision: binding.revision + "-next",
+          target: enabled ? candidate : null,
+          assignedItemId: enabled ? candidate.itemId : null
         }
+        return new Response(null, { status: 204 })
       }
-      return Response.json(binding)
+      expect(url.pathname).toBe(`${basePath}/list/skill`)
+      return Response.json({
+        type: "skill",
+        items: binding.target
+          ? [
+              {
+                id: binding.target.itemId,
+                name: marketName,
+                chinese_name: binding.target.name,
+                description: binding.target.description,
+                filename: `package.${bundle.format}`,
+                extra_json: JSON.stringify(
+                  listedMarker ? { conversationShortcut: slot, grayOrgs: ["fixture"] } : {}
+                )
+              }
+            ]
+          : [],
+        ...(scopedList
+          ? {
+              shortcut: {
+                slot,
+                revision: binding.revision,
+                canManage: binding.canManage,
+                assignedItemId: binding.assignedItemId,
+                skillName: binding.target?.skillName
+              }
+            }
+          : {})
+      })
     })
     vi.stubGlobal("fetch", fetchStub)
     handlers = new Map()
@@ -95,18 +150,20 @@ describe("market skill shortcut IPC", () => {
   ) => handlers.get(`marketSkillShortcut:${operation}`)!({}, input)
 
   it("hides an unassigned target and rejects outdated or unauthorized writes", async () => {
-    await expect(call(handlers, "set", { itemId: null, revision: "old" })).resolves.toMatchObject({
+    await expect(call(handlers, "set", { ...update, revision: "old" })).resolves.toMatchObject({
       ok: false,
       code: "changed"
     })
     allowWrite = false
-    await expect(
-      call(handlers, "set", { itemId: null, revision: selection.revision })
-    ).resolves.toMatchObject({ ok: false, code: "forbidden" })
+    await expect(call(handlers, "set", update)).resolves.toMatchObject({
+      ok: false,
+      code: "forbidden"
+    })
     allowWrite = true
-    await expect(
-      call(handlers, "set", { itemId: null, revision: selection.revision })
-    ).resolves.toMatchObject({ ok: true, value: { target: null, assignedItemId: null } })
+    await expect(call(handlers, "set", update)).resolves.toMatchObject({
+      ok: true,
+      value: { target: null, assignedItemId: null }
+    })
     await expect(call(handlers, "get")).resolves.toMatchObject({
       ok: true,
       value: { target: null }
@@ -115,6 +172,44 @@ describe("market skill shortcut IPC", () => {
       ok: false,
       code: "changed"
     })
+  })
+
+  it("sets the marker on an existing skill record and reloads the scoped list", async () => {
+    binding = { ...binding, target: null, assignedItemId: null }
+    await expect(call(handlers, "set", { ...update, enabled: true })).resolves.toMatchObject({
+      ok: true,
+      value: {
+        assignedItemId: candidate.itemId,
+        target: { itemId: candidate.itemId, name: candidate.name }
+      }
+    })
+    expect(fetchStub.mock.calls.map(([, init]) => init?.method ?? "GET")).toEqual([
+      "GET",
+      "PUT",
+      "GET"
+    ])
+  })
+
+  it("rejects an old list response or an unmarked item before sending a write", async () => {
+    scopedList = false
+    await expect(call(handlers, "get")).resolves.toMatchObject({ ok: false, code: "unavailable" })
+    await expect(call(handlers, "set", update)).resolves.toMatchObject({
+      ok: false,
+      code: "unavailable"
+    })
+    scopedList = true
+    listedMarker = false
+    await expect(call(handlers, "get")).resolves.toMatchObject({ ok: false, code: "unavailable" })
+    expect(fetchStub.mock.calls.every(([, init]) => init?.method !== "PUT")).toBe(true)
+  })
+
+  it("requires market-side admin permission even when the request contains a valid item and revision", async () => {
+    binding = { ...binding, canManage: false, assignedItemId: null }
+    await expect(call(handlers, "set", { ...update, enabled: true })).resolves.toMatchObject({
+      ok: false,
+      code: "forbidden"
+    })
+    expect(fetchStub).toHaveBeenCalledTimes(1)
   })
 
   it("installs the verified item and returns the exact root despite different market display name", async () => {
@@ -179,7 +274,7 @@ describe("market skill shortcut IPC", () => {
       value: { kind: "available", skill: { id: candidate.skillName } }
     })
     expect(
-      fetchStub.mock.calls.filter(([url]) => String(url).includes("/installation"))
+      fetchStub.mock.calls.filter(([url]) => String(url).includes("/download/skill/"))
     ).toHaveLength(1)
   })
 
@@ -200,6 +295,17 @@ describe("market skill shortcut IPC", () => {
     await expect(
       readFile(join(home, "skills", candidate.skillName, "SKILL.md"), "utf8")
     ).resolves.toBe(markdown)
+  })
+
+  it("rejects the legacy download if the service returns no validated item ID", async () => {
+    downloadItemId = ""
+    await expect(call(handlers, "install", selection)).resolves.toMatchObject({
+      ok: false,
+      code: "changed"
+    })
+    await expect(
+      readFile(join(home, "skills", candidate.skillName, "SKILL.md"))
+    ).rejects.toMatchObject({ code: "ENOENT" })
   })
 
   it("cancels before installing when the target changes during download", async () => {

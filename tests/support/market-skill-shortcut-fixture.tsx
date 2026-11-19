@@ -34,13 +34,21 @@ Object.assign(window, {
   api: {
     marketSkillShortcut: {
       get: async () => ({ ok: true, value: binding }),
-      set: async ({ itemId, revision }: { itemId: string | null; revision: string }) => {
+      set: async ({
+        itemId,
+        enabled,
+        revision
+      }: {
+        itemId: string
+        enabled: boolean
+        revision: string
+      }) => {
         if (revision !== binding.revision) return { ok: false, code: "changed" }
         binding = {
           ...binding,
           revision: revision + "-next",
-          assignedItemId: itemId,
-          target: itemId ? target : null
+          assignedItemId: enabled ? itemId : null,
+          target: enabled ? target : null
         }
         return { ok: true, value: binding }
       },
@@ -109,7 +117,11 @@ function Fixture() {
   const threadId = useAppStore((state) => state.currentThreadId) ?? "new"
   return (
     <>
-      <MarketSkillShortcutAction itemId={target.itemId} label={target.name} />
+      <MarketSkillShortcutAction
+        itemId={target.itemId}
+        marketName={target.skillName}
+        label={target.name}
+      />
       <Composer key={threadId} threadId={threadId} />
     </>
   )

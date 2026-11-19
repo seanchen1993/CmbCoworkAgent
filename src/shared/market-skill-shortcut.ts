@@ -1,3 +1,4 @@
+export const PROJECT_PLUGIN_SKILL_SHORTCUT_SLOT = "project-plugin-creation"
 export const PROJECT_PLUGIN_SKILL_SHORTCUT_LABEL = "开发项目模式插件"
 
 export interface MarketSkillShortcutTarget {
@@ -20,7 +21,9 @@ export interface MarketSkillShortcutSelection {
 }
 
 export interface MarketSkillShortcutUpdate {
-  itemId: string | null
+  itemId: string
+  marketName: string
+  enabled: boolean
   revision: string
 }
 

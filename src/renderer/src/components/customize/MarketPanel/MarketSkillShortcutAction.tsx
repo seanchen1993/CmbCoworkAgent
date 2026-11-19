@@ -19,9 +19,11 @@ import { isMarketSkillShortcutKey } from "../../../../../shared/market-skill-sho
 
 export function MarketSkillShortcutAction({
   itemId,
+  marketName,
   label
 }: {
   itemId: string
+  marketName: string
   label: string
 }): React.JSX.Element | null {
   const { accountRevision, binding } = useMarketSkillShortcut()
@@ -59,7 +61,9 @@ export function MarketSkillShortcutAction({
     setSaving(true)
     try {
       const result = await window.api.marketSkillShortcut.set({
-        itemId: confirmation.remove ? null : itemId,
+        itemId,
+        marketName,
+        enabled: !confirmation.remove,
         revision: confirmation.revision
       })
       if (useAppStore.getState().accountRevision !== accountRevision) return
