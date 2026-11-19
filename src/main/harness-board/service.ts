@@ -32,13 +32,13 @@ import type { KnowledgeDepositionWorkspace } from "../../shared/knowledge-base-t
 import { harnessNotifications } from "./notifications"
 import { spawn, type ChildProcess } from "child_process"
 import { createHash } from "crypto"
-import { access, readFile, stat } from "node:fs/promises"
+import { access, mkdir, readFile, stat } from "node:fs/promises"
 import { assertEmptyProjectDirectory } from "./project-workspace"
 import { basename, isAbsolute, join, relative, resolve } from "path"
 import { serialize } from "node:v8"
 import * as chardet from "jschardet"
 import * as iconv from "iconv-lite"
-import { v4 as uuid } from "uuid"
+import { v4 as uuid, validate as validateUuid, version as uuidVersion } from "uuid"
 import { getOpenworkDir, getPlugins, getUserInfo } from "../storage"
 import { deriveUpperOrgLevelsFromPath } from "../org-levels"
 import { managedRunStore } from "./managed-run-store"
@@ -957,6 +957,21 @@ function replaceHarnessConfigPlaceholders(
   )
 }
 
+function isProjectBatchPlaceholder(token: string): boolean {
+  return token === "${projectDirs...}" || token === "${projectCodes...}"
+}
+
+function getProjectInspectBatchSize(command: string | null): number {
+  if (command) {
+    try {
+      if (!tokenizeInspectCommand(command).some(isProjectBatchPlaceholder)) return 1
+    } catch {
+      // Invocation handles malformed commands through the existing per-batch error path.
+    }
+  }
+  return HARNESS_ADAPTER_DETAIL_MAX_PROJECTS_PER_BATCH
+}
+
 function parseInspectCommand(
   command: string,
   project: HarnessProjectMetadata,
@@ -984,7 +999,7 @@ function parseInspectCommand(
   const tokens = tokenizeInspectCommand(command.trim())
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index]
-    if ((token === "${projectCodes...}" || token === "${projectDirs...}") && options.projectDirs) {
+    if (isProjectBatchPlaceholder(token) && options.projectDirs) {
       args.push(...options.projectDirs)
       continue
     }
@@ -2220,19 +2235,20 @@ async function requireProject(projectId: string): Promise<HarnessProjectMetadata
   return (await requireProjectContext(projectId)).project
 }
 
-function validateCreateInput(input: HarnessProjectCreateInput): void {
+function validateCreateInput(input: HarnessProjectCreateInput): {
+  workspacePath: string
+  projectDir: string
+} {
   const required = [
     input.adapterId,
     input.adapterType,
     input.name,
     input.projectCode,
-    input.projectDir,
     input.systemId,
-    input.systemName,
-    input.workspacePath
+    input.systemName
   ]
   if (required.some((value) => typeof value !== "string" || value.trim().length === 0)) {
-    throw new Error("Project name, code, system and workspace are required")
+    throw new Error("Project name, code and system are required")
   }
   if (typeof input.isTestProject !== "boolean") {
     throw new Error("请选择是否作为测试项目")
@@ -2241,7 +2257,20 @@ function validateCreateInput(input: HarnessProjectCreateInput): void {
     throw new Error("Project description must be a string")
   }
   validateHarnessName(input.projectCode, "项目编号")
-  validateHarnessName(input.projectDir, "项目文件夹")
+  if (
+    [input.workspacePath, input.projectDir].some(
+      (value) => value !== undefined && typeof value !== "string"
+    )
+  ) {
+    throw new Error("请选择完整的插件工作区文件夹")
+  }
+  const workspacePath = input.workspacePath?.trim() ?? ""
+  const projectDir = input.projectDir?.trim() ?? ""
+  if (Boolean(workspacePath) !== Boolean(projectDir)) {
+    throw new Error("请选择完整的插件工作区文件夹")
+  }
+  if (projectDir) validateHarnessName(input.projectDir, "项目文件夹")
+  return { workspacePath, projectDir }
 }
 
 function validateProjectMetadataInput(input: HarnessProjectMetadataUpdateInput): void {
@@ -3381,25 +3410,53 @@ export async function getHarnessProjectAdapterSnapshot(
   }
 }
 
+function getDefaultHarnessWorkspacePath(): string {
+  return join(getOpenworkDir(), "project-workspaces")
+}
+
+function normalizeProjectCreateId(projectId: unknown): string {
+  if (typeof projectId !== "string" || !validateUuid(projectId) || uuidVersion(projectId) !== 4) {
+    throw new Error("项目 ID 无效")
+  }
+  return projectId.toLowerCase()
+}
+
+function validateNewProjectIdentity(
+  projectId: string,
+  projectCode: string,
+  store: HarnessProjectStoreFile
+): void {
+  validateProjectCodeUnique(projectCode, store)
+  if (store.projects.some((project) => project.projectId === projectId)) {
+    throw new Error("项目 ID 已被使用，请重新打开创建项目窗口")
+  }
+}
+
+export function getDefaultHarnessProjectDirectoryPreview(projectId: string): string {
+  return join(getDefaultHarnessWorkspacePath(), normalizeProjectCreateId(projectId))
+}
+
 export async function createHarnessProject(
   input: HarnessProjectCreateInput
 ): Promise<HarnessProjectMetadata> {
-  validateCreateInput(input)
+  const { workspacePath, projectDir } = validateCreateInput(input)
+  const projectId =
+    input.projectId === undefined ? uuid() : normalizeProjectCreateId(input.projectId)
   const store = await readProjectStore()
-  validateProjectCodeUnique(input.projectCode, store)
+  validateNewProjectIdentity(projectId, input.projectCode, store)
   const harnessAdapter = await resolveHarnessAdapter(input.adapterId, input.adapterType)
   const knowledgeBaseIds = await assertSelectableKnowledgeBaseIds(input.knowledgeBaseIds)
   const project: HarnessProjectMetadata = {
-    projectId: uuid(),
+    projectId,
     name: input.name.trim(),
     description: input.description.trim(),
     projectCode: input.projectCode.trim(),
     projectFromLean: input.projectFromLean === true,
     isTestProject: input.isTestProject,
-    projectDir: input.projectDir.trim(),
+    projectDir: projectDir || projectId,
     systemId: input.systemId.trim(),
     systemName: input.systemName.trim(),
-    workspacePath: input.workspacePath.trim(),
+    workspacePath: workspacePath || getDefaultHarnessWorkspacePath(),
     knowledgeBaseIds,
     "harness-adapter": harnessAdapter,
     creator: getCurrentProjectCreator(),
@@ -3410,9 +3467,19 @@ export async function createHarnessProject(
   }
   normalizeProject(project)
 
+  const managedProjectPath = workspacePath ? null : projectDirectoryPath(project)
+  if (managedProjectPath) {
+    try {
+      await mkdir(project.workspacePath, { recursive: true })
+      await mkdir(managedProjectPath)
+    } catch (error) {
+      console.error("[HarnessBoard] Failed to create managed project directory", error)
+      throw new Error("无法自动创建插件工作区，请在高级设置中选择文件夹")
+    }
+  }
   await initializeHarnessProject(project)
   await mutateProjectStore((latest) => {
-    validateProjectCodeUnique(input.projectCode, latest)
+    validateNewProjectIdentity(projectId, input.projectCode, latest)
     latest.projects.unshift(project)
   })
   return project
@@ -3910,15 +3977,11 @@ async function loadHarnessProjectDetails(
 
   for (const group of groups.values()) {
     throwIfHarnessDetailCancelled(signal)
-    for (
-      let offset = 0;
-      offset < group.projects.length;
-      offset += HARNESS_ADAPTER_DETAIL_MAX_PROJECTS_PER_BATCH
-    ) {
-      const batch = group.projects.slice(
-        offset,
-        offset + HARNESS_ADAPTER_DETAIL_MAX_PROJECTS_PER_BATCH
-      )
+    const batchSize = getProjectInspectBatchSize(
+      readBoardConfigPlatformTextFromValue(group.configSnapshot?.value ?? null, "project_status")
+    )
+    for (let offset = 0; offset < group.projects.length; offset += batchSize) {
+      const batch = group.projects.slice(offset, offset + batchSize)
       try {
         const snapshot = await runInspectAdapterBatch(
           batch,

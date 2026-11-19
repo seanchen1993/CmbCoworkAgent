@@ -1,6 +1,7 @@
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import type { HarnessProjectMetadata } from "../../shared/harness-board-types"
 
 const state = vi.hoisted(() => ({
   root: `/tmp/harness-project-create-${process.pid}-${Date.now()}`
@@ -12,15 +13,53 @@ vi.mock("../storage", () => ({
 }))
 vi.mock("./notifications", () => ({ harnessNotifications: {} }))
 vi.mock("./managed-run-store", () => ({ managedRunStore: {} }))
-vi.mock("./catalog-client", () => ({}))
+vi.mock("./catalog-client", () => ({
+  cancelHarnessCatalogScope: () => undefined,
+  readHarnessProjectContextsInWorker: async (projectIds: string[]) => {
+    const store = JSON.parse(await readFile(storePath(), "utf8")) as {
+      projects: HarnessProjectMetadata[]
+    }
+    const plugin = { id: "plugin", name: "plugin", path: join(state.root, "plugin") }
+    const value = JSON.parse(
+      await readFile(join(plugin.path, "board_core", "board_config.json"), "utf8")
+    )
+    return {
+      projects: Object.fromEntries(
+        store.projects
+          .filter(({ projectId }) => projectIds.includes(projectId))
+          .map((project) => [
+            project.projectId,
+            {
+              project,
+              plugin,
+              configSnapshot: { value, error: null },
+              projectDirectoryExists: true
+            }
+          ])
+      )
+    }
+  }
+}))
+vi.mock("./adapter-detail-client", async () => {
+  const { normalizeHarnessAdapterDetailBatch } = await import("./adapter-detail-normalizer")
+  return {
+    cancelHarnessAdapterDetailScope: () => undefined,
+    parseHarnessAdapterDetailBatchInWorker: async (
+      buffer: Buffer,
+      projects: Parameters<typeof normalizeHarnessAdapterDetailBatch>[1]
+    ) => normalizeHarnessAdapterDetailBatch(buffer, projects).result
+  }
+})
 import {
   archiveHarnessProject,
   createHarnessProject,
+  getDefaultHarnessProjectDirectoryPreview,
+  getHarnessProjectDetails,
   updateHarnessProjectMetadata
 } from "./service"
 import { initializeHarnessConfigV2 } from "./config-v2"
 
-const input = () => ({
+const automaticInput = () => ({
   adapterId: "plugin",
   adapterType: "plugin" as const,
   name: "项目名称",
@@ -29,19 +68,24 @@ const input = () => ({
   projectFromLean: false,
   isTestProject: false,
   systemId: "system",
-  systemName: "系统",
+  systemName: "系统"
+})
+const input = () => ({
+  ...automaticInput(),
   workspacePath: join(state.root, "work space"),
   projectDir: "项目_A-1"
 })
 const storePath = () => join(state.root, "harness-board-projects.json")
 const projectPath = () => join(input().workspacePath, input().projectDir)
 
-async function writeProjectCreateCommand(command: string): Promise<void> {
+async function writeProjectCreateCommand(command: string, projectStatus?: string): Promise<void> {
   await writeFile(
     join(state.root, "plugin", "board_core", "board_config.json"),
     JSON.stringify({
       apiVersion: 1,
-      inspectCommands: { [process.platform]: { create_project: command } }
+      inspectCommands: {
+        [process.platform]: { create_project: command, project_status: projectStatus }
+      }
     })
   )
 }
@@ -61,6 +105,117 @@ fs.writeFileSync(path.join(process.argv[2], process.argv[3], 'initialized.json')
   )
 })
 afterEach(() => rm(state.root, { recursive: true, force: true }))
+
+describe("create project in a managed directory", () => {
+  const previewProjectId = "7adc35d3-dac4-4cb3-973c-8ccdd037ed2b"
+
+  it.each([{}, { workspacePath: "", projectDir: "" }])(
+    "creates the default directory when no folder is selected (%j)",
+    async (workspace) => {
+      const workspacePath = join(state.root, "project-workspaces")
+      const created = await createHarnessProject({ ...automaticInput(), ...workspace })
+      const projectDir = created.projectId
+      const initialized = JSON.parse(
+        await readFile(join(workspacePath, projectDir, "initialized.json"), "utf8")
+      )
+      expect(initialized).toEqual({ workspacePath, projectDir })
+      const store = JSON.parse(await readFile(storePath(), "utf8"))
+      expect(store.projects[0]).toMatchObject({ workspacePath, projectDir })
+    }
+  )
+
+  it("uses the previewed directory and preserves plugin output if initialization fails", async () => {
+    const workspacePath = join(state.root, "project-workspaces")
+    const preview = getDefaultHarnessProjectDirectoryPreview(previewProjectId)
+    expect(preview).toBe(join(workspacePath, previewProjectId))
+    await expect(readdir(workspacePath)).rejects.toMatchObject({ code: "ENOENT" })
+
+    const scriptPath = join(state.root, "plugin", "init.cjs")
+    const workingScript = await readFile(scriptPath, "utf8")
+    await writeFile(scriptPath, `${workingScript}\nprocess.exit(1)`)
+    const createInput = { ...automaticInput(), projectId: previewProjectId }
+
+    await expect(createHarnessProject(createInput)).rejects.toThrow("插件「plugin」执行失败")
+    const initialized = JSON.parse(await readFile(join(preview, "initialized.json"), "utf8"))
+    expect(initialized).toEqual({ workspacePath, projectDir: previewProjectId })
+    await expect(readFile(storePath())).rejects.toMatchObject({ code: "ENOENT" })
+
+    await writeFile(scriptPath, workingScript)
+    const created = await createHarnessProject(automaticInput())
+    expect(created).toMatchObject({
+      projectDir: created.projectId,
+      workspacePath
+    })
+    expect(created.projectId).not.toBe(previewProjectId)
+    expect(await readdir(preview)).toEqual(["initialized.json"])
+  })
+
+  it("rejects an invalid project ID before previewing or creating the directory", async () => {
+    const projectId = "../invalid"
+    expect(() => getDefaultHarnessProjectDirectoryPreview(projectId)).toThrow("项目 ID 无效")
+    await expect(createHarnessProject({ ...automaticInput(), projectId })).rejects.toThrow(
+      "项目 ID 无效"
+    )
+    await expect(readdir(join(state.root, "project-workspaces"))).rejects.toMatchObject({
+      code: "ENOENT"
+    })
+  })
+
+  it("rejects a duplicate ID even when the second project uses a manual directory", async () => {
+    await createHarnessProject({ ...automaticInput(), projectId: previewProjectId })
+    await expect(
+      createHarnessProject({ ...input(), projectCode: "P002", projectId: previewProjectId })
+    ).rejects.toThrow("项目 ID 已被使用")
+    expect(await readdir(projectPath())).toEqual([])
+  })
+
+  it.each([{ workspacePath: "/tmp" }, { projectDir: "my-project" }])(
+    "rejects an incomplete manual selection (%j)",
+    async (workspace) => {
+      await expect(createHarnessProject({ ...automaticInput(), ...workspace })).rejects.toThrow(
+        "请选择完整的插件工作区文件夹"
+      )
+      await expect(readdir(join(state.root, "project-workspaces"))).rejects.toMatchObject({
+        code: "ENOENT"
+      })
+    }
+  )
+})
+
+describe("inspect projects sharing a managed workspace", () => {
+  it.each([
+    ["${projectDir}", false],
+    ["${projectDirs...}", true],
+    ["${projectCodes...}", true]
+  ])("queries all projects when the plugin uses %s", async (placeholder, supportsBatch) => {
+    const first = await createHarnessProject(automaticInput())
+    const second = await createHarnessProject({ ...automaticInput(), projectCode: "P002" })
+    const projectIds = [first.projectId, second.projectId]
+    const logPath = join(state.root, "plugin", "inspected.jsonl")
+    await writeFile(
+      join(state.root, "plugin", "inspect.cjs"),
+      `const fs = require("node:fs");
+const projectDirs = process.argv.slice(2);
+fs.appendFileSync("inspected.jsonl", JSON.stringify(projectDirs) + "\\n");
+console.log(JSON.stringify({
+  workflow: {},
+  projects: Object.fromEntries(projectDirs.map((dir) => [dir, { runs: [] }]))
+}));`
+    )
+    await writeProjectCreateCommand(
+      "",
+      `"${process.execPath}" "\${pluginPath}/inspect.cjs" "${placeholder}"`
+    )
+
+    const details = await getHarnessProjectDetails(projectIds)
+    expect(projectIds.map((id) => details[id].error)).toEqual([null, null])
+    const calls = (await readFile(logPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+    expect(calls).toEqual(supportsBatch ? [projectIds] : [[first.projectId], [second.projectId]])
+  })
+})
 
 describe("create project in a selected directory", () => {
   it.each([true, false])(

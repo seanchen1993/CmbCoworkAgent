@@ -3098,6 +3098,7 @@ interface CustomAPI {
     syncKnowledgeBase: (idKey: string) => Promise<KnowledgeBaseSyncResult>
     getKnowledgePreview: (idKey: string) => Promise<HarnessKnowledgePreviewResult>
     cancelKnowledgePreviewRequests: () => Promise<void>
+    getDefaultProjectDirectoryPreview: (projectId: string) => Promise<string>
     selectProjectDirectory: () => Promise<{
       workspacePath: string
       projectDir: string

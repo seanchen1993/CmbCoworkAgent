@@ -9,7 +9,7 @@ import {
 import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
 import { BizRetryNotice } from "./BizRetryNotice"
-import { ProjectWorkspaceField } from "./ProjectWorkspaceField"
+import { ProjectWorkspaceAdvancedSettings, ProjectWorkspaceField } from "./ProjectWorkspaceField"
 import { ProjectTestField } from "./ProjectTestField"
 import {
   Fragment,
@@ -332,7 +332,10 @@ function createEmptyProjectMetadataForm(adapterId = ""): HarnessProjectMetadataU
   }
 }
 
-function createEmptyProjectForm(adapterId = ""): HarnessProjectCreateInput {
+type ProjectCreateForm = HarnessProjectCreateInput &
+  Pick<HarnessProjectMetadataUpdateInput, "workspacePath" | "projectDir">
+
+function createEmptyProjectForm(adapterId = ""): ProjectCreateForm {
   return createEmptyProjectMetadataForm(adapterId)
 }
 
@@ -963,17 +966,19 @@ async function createHarnessSession(params: CreateHarnessSessionParams): Promise
   return createHarnessFeatureThread({ projectId, slug, workspacePath, nextAction, createThread })
 }
 
-function metadataRequiredMissing(form: HarnessProjectMetadataUpdateInput): boolean {
+function metadataRequiredMissing(
+  form: HarnessProjectMetadataUpdateInput,
+  requireWorkspace = true
+): boolean {
   if (typeof form.isTestProject !== "boolean") return true
+  if (requireWorkspace && (!form.workspacePath.trim() || !form.projectDir.trim())) return true
   return [
     form.adapterId,
     form.adapterType,
     form.name,
     form.projectCode,
-    form.projectDir,
     form.systemId,
-    form.systemName,
-    form.workspacePath
+    form.systemName
   ].some((value) => !value.trim())
 }
 
@@ -2867,22 +2872,24 @@ function ProjectFormDialog({
   onInstallPlugin,
   onOpenSystemConstraints,
   onPickWorkspace,
+  onUseDefaultWorkspace,
   onSubmit
 }: {
   open: boolean
   creating: boolean
   workspaceValidating: boolean
   workspaceError: string | null
-  form: HarnessProjectCreateInput
+  form: ProjectCreateForm
   registry: ProjectModeAdapterItem[]
   knowledgeBases: KnowledgeBaseListResult | null
   installingPluginNames: Set<string>
   error: string | null
   verification: EnterpriseProjectCodeVerification
   onOpenChange: (open: boolean) => void
-  onChange: (form: HarnessProjectCreateInput) => void
+  onChange: React.Dispatch<React.SetStateAction<ProjectCreateForm>>
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
   onPickWorkspace: () => void
+  onUseDefaultWorkspace: () => void
   onOpenSystemConstraints: () => void
   onSubmit: () => void
 }): React.JSX.Element {
@@ -3052,12 +3059,18 @@ function ProjectFormDialog({
                 onOpenSystemConstraints={onOpenSystemConstraints}
                 onChange={(knowledgeBaseIds) => onChange({ ...form, knowledgeBaseIds })}
               />
-              <ProjectWorkspaceField
+              <ProjectWorkspaceAdvancedSettings
                 workspacePath={form.workspacePath}
                 projectDir={form.projectDir}
                 error={projectDirError}
                 disabled={creating || workspaceValidating}
                 onPickWorkspace={onPickWorkspace}
+                onUseDefault={onUseDefaultWorkspace}
+                onPreviewDefaultPath={() => {
+                  const projectId = form.projectId ?? crypto.randomUUID()
+                  if (!form.projectId) onChange((current) => ({ ...current, projectId }))
+                  return window.api.harnessBoard.getDefaultProjectDirectoryPreview(projectId)
+                }}
               />
             </section>
 
@@ -3083,7 +3096,7 @@ function ProjectFormDialog({
               workspaceValidating ||
               Boolean(workspaceError) ||
               verification.pending ||
-              metadataRequiredMissing(form) ||
+              metadataRequiredMissing(form, false) ||
               metadataNameInvalid(form) ||
               metadataLengthInvalid(form, { validateProjectDir: true }) ||
               !selectedAdapter?.boardCompatibility.compatible
@@ -4663,7 +4676,6 @@ function ProjectCard({
   const pluginCompatibilityMessage = boardCompatibilityMessage(project.boardCompatibility)
   const pluginCompatibilityStatus = boardCompatibilityStatus(project.boardCompatibility)
   const archivedStatus: HarnessStatus = { label: "已归档", uiKind: "archived" }
-  const projectRootPath = resolveProjectRootPath(project)
 
   useEffect(() => {
     if (archived || !projectCode) return
@@ -4826,19 +4838,7 @@ function ProjectCard({
           )}
         </div>
 
-        <div className="mt-2.5 flex min-w-0 items-center justify-between gap-2 border-t border-border/70 pt-2.5 text-[11px] text-muted-foreground">
-          <div className="flex min-w-0 items-center gap-1">
-            <FolderOpen className="size-3 shrink-0" />
-            <span className="truncate" title={projectRootPath}>
-              {getWorkspaceName(projectRootPath)}
-            </span>
-            {/*<span*/}
-            {/*  className="max-w-28 truncate rounded-full border border-border/80 bg-muted/70 px-2.5 py-1 text-[11px] text-muted-foreground"*/}
-            {/*  title={project.harnessAdapter.name}*/}
-            {/*>*/}
-            {/*  {project.harnessAdapter.name}*/}
-            {/*</span>*/}
-          </div>
+        <div className="mt-2.5 flex min-w-0 items-center justify-end border-t border-border/70 pt-2.5 text-[11px] text-muted-foreground empty:hidden">
           {pluginUpdateInfo ? (
             <ProjectPluginUpdateButton
               pluginUpdateInfo={pluginUpdateInfo}
@@ -6029,15 +6029,6 @@ function ProjectDetailPage({
                       {project.systemName || "-"}
                     </strong>
                   </span>
-                  <span
-                    className="shrink-0 max-w-52 truncate rounded-full border border-border/70 bg-background/70 px-2 py-0.5 text-[11px] text-muted-foreground"
-                    title={projectRootPath}
-                  >
-                    工作区{" "}
-                    <strong className="font-medium text-foreground">
-                      {getWorkspaceName(projectRootPath)}
-                    </strong>
-                  </span>
                   <span className="shrink-0 rounded-full border border-border/70 bg-muted/35 px-2 py-0.5 text-[11px] text-muted-foreground">
                     特性{" "}
                     <strong className="font-medium text-foreground">
@@ -6050,17 +6041,13 @@ function ProjectDetailPage({
                       {loading || !detail ? "-" : activeCount}
                     </strong>
                   </span>
-                  <Button
+                  <button
                     type="button"
-                    variant="ghost"
-                    size="icon-sm"
-                    className="ml-auto size-7 shrink-0"
-                    title="打开项目工作区"
-                    aria-label="打开项目工作区"
+                    className="shrink-0 rounded-full border border-border/70 bg-background/70 px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     onClick={openProjectWorkspaceInFileManager}
                   >
-                    <FolderOpen className="size-3.5" />
-                  </Button>
+                    打开工作区
+                  </button>
                 </div>
               </section>
               <HarnessProjectPhaseFlow steps={phaseSteps} />
@@ -8345,7 +8332,7 @@ export function HarnessBoardView({
   const [loadingRun, setLoadingRun] = useState(false)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [creating, setCreating] = useState(false)
-  const [form, setForm] = useState<HarnessProjectCreateInput>(() => createEmptyProjectForm())
+  const [form, setForm] = useState<ProjectCreateForm>(() => createEmptyProjectForm())
   const [formError, setFormError] = useState<string | null>(null)
   const [workspaceValidating, setWorkspaceValidating] = useState(false)
   const [workspaceError, setWorkspaceError] = useState<string | null>(null)
@@ -9738,11 +9725,17 @@ export function HarnessBoardView({
     }
   }
 
+  const handleUseDefaultWorkspace = (): void => {
+    setForm((current) => ({ ...current, workspacePath: "", projectDir: "" }))
+    setWorkspaceError(null)
+    setFormError(null)
+  }
+
   const handleSubmit = async (): Promise<void> => {
     if (creating || createProjectVerification.pending || workspaceValidating || workspaceError)
       return
     setFormError(null)
-    if (metadataRequiredMissing(form)) {
+    if (metadataRequiredMissing(form, false)) {
       setFormError("所有字段均为必填")
       return
     }
@@ -11987,6 +11980,7 @@ export function HarnessBoardView({
         onInstallPlugin={handleInstallMarketPlugin}
         onOpenSystemConstraints={handleOpenSystemConstraints}
         onPickWorkspace={() => void handlePickWorkspace()}
+        onUseDefaultWorkspace={handleUseDefaultWorkspace}
         onSubmit={() => void handleSubmit()}
       />
       <ProjectEditDialog

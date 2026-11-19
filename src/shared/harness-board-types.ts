@@ -242,17 +242,18 @@ export interface HarnessProjectMetadata {
 }
 
 export interface HarnessProjectCreateInput {
+  projectId?: string
   adapterId: string
   adapterType: HarnessAdapterType
   name: string
   projectCode: string
   projectFromLean: boolean
   isTestProject?: boolean
-  projectDir: string
+  projectDir?: string
   description: string
   systemId: string
   systemName: string
-  workspacePath: string
+  workspacePath?: string
   knowledgeBaseIds?: string[]
 }
 

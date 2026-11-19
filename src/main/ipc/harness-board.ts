@@ -18,6 +18,7 @@ import {
   buildHarnessFeatureDialogTips,
   getHarnessDynamicWorkflowConfig,
   deleteHarnessProject,
+  getDefaultHarnessProjectDirectoryPreview,
   getHarnessProjectDetail,
   prepareHarnessKnowledgeDeposition,
   getHarnessProjectDetails,
@@ -404,6 +405,10 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("harnessBoard:cancelKnowledgePreviewRequests", (event): void => {
     cancelHarnessKnowledgePreviewOwner(event.sender.id)
   })
+
+  ipcMain.handle("harnessBoard:getDefaultProjectDirectoryPreview", (_event, projectId: string) =>
+    getDefaultHarnessProjectDirectoryPreview(projectId)
+  )
 
   ipcMain.handle("harnessBoard:selectProjectDirectory", async (event) => {
     const parent = BrowserWindow.fromWebContents(event.sender)
