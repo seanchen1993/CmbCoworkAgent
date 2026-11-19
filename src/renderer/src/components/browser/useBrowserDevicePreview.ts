@@ -34,11 +34,11 @@ export function useBrowserDevicePreview(onClose: () => void): {
     height: 0
   })
   const [scale, setScale] = useState(1)
-  settingsRef.current = settings
 
   const updateSettings = useCallback(
     (nextSettings: BrowserDeviceSettings) => {
       const closing = settingsRef.current.open && !nextSettings.open
+      settingsRef.current = nextSettings
       setSettings(nextSettings)
       if (closing) onClose()
     },
@@ -47,20 +47,26 @@ export function useBrowserDevicePreview(onClose: () => void): {
 
   const applyViewport = useCallback((viewport: BrowserDeviceViewport | undefined) => {
     if (!viewport) return
-    setSettings((current) =>
+    const current = settingsRef.current
+    const nextSettings =
       current.open &&
       current.width === viewport.width &&
       current.height === viewport.height &&
       current.scale === viewport.scale
         ? current
         : { open: true, ...viewport }
-    )
+    // syncBounds can run before React commits the state update. Keep the
+    // imperative layout source current so a visible toolbar and BrowserView
+    // metrics cannot temporarily disagree.
+    settingsRef.current = nextSettings
+    setSettings(nextSettings)
   }, [])
 
   const reset = useCallback(() => {
     scaleRef.current = 1
+    settingsRef.current = { open: false, width: 0, height: 0 }
     setScale(1)
-    setSettings({ open: false, width: 0, height: 0 })
+    setSettings(settingsRef.current)
   }, [])
 
   const getLayout = useCallback((rect: DOMRect): BrowserDevicePreviewLayout => {
@@ -75,9 +81,9 @@ export function useBrowserDevicePreview(onClose: () => void): {
     )
     lastViewportSizeRef.current = { width: rect.width, height: rect.height }
     if (devicePreviewWasOpen && viewportSizeChanged && device.scale !== undefined) {
-      setSettings((current) =>
-        current.scale === undefined ? current : { ...current, scale: undefined }
-      )
+      const nextSettings = { ...device, scale: undefined }
+      settingsRef.current = nextSettings
+      setSettings(nextSettings)
     }
 
     const availableWidth = Math.max(0, rect.width - (device.open ? DEVICE_PREVIEW_PADDING * 2 : 0))

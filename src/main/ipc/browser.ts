@@ -100,7 +100,11 @@ function registerBrowserControlIpc({ browserService, ipcMain }: BrowserIpcContex
     return browserService.attach(options)
   })
 
-  ipcMain.handle("browser:detach", () => {
+  ipcMain.handle("browser:detach", async () => {
+    // detach is the Browser workspace reset boundary. Make playback shutdown
+    // authoritative in the main process so no renderer caller can accidentally
+    // leave a script driving a disposed/recreated BrowserView.
+    await cancelRecordingScriptExecutionInBuiltinBrowser()
     return browserService.detach()
   })
 

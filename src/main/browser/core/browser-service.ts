@@ -60,6 +60,22 @@ const MAX_EXTRACTED_IFRAME_LINKS = 100
 const VIEWPORT_SYNC_TIMEOUT_MS = 10_000
 const configuredDownloadSessions = new WeakSet<Session>()
 
+/**
+ * Device preview scale is a renderer layout detail, not part of the emulated CSS
+ * viewport. The renderer may legitimately recompute it when the restored panel
+ * has a different amount of vertical space (window size, console, title bar,
+ * display scaling, and so on). Width and height are the replay contract; waiting
+ * for the recorded scale can otherwise turn a completed sync into a permanent
+ * mismatch.
+ */
+export function deviceViewportMatchesRequested(
+  current: BrowserDeviceViewport | null | undefined,
+  requested: BrowserDeviceViewport | null | undefined
+): boolean {
+  if (!current || !requested) return current === requested
+  return current.width === requested.width && current.height === requested.height
+}
+
 function safeDownloadFileName(fileName: string): string {
   const leafName = basename(win32.basename(fileName.trim()))
   const sanitized = leafName.replace(/[<>:"/\\|?*\u0000-\u001f]/gu, "_").replace(/[ .]+$/gu, "")
@@ -569,6 +585,9 @@ export class BrowserService {
     const existingSession = this.activeSession
     const session = this.ensureActiveSession(sessionId, options.workspacePath)
     if (options.viewportId && options.viewportId !== session.viewportId) {
+      console.info(
+        `${BROWSER_SERVICE_LOG_PREFIX} Viewport owner changed from ${session.viewportId ?? "none"} to ${options.viewportId}; revision reset from ${session.viewportRevision}.`
+      )
       session.viewportId = options.viewportId
       session.viewportRevision = 0
     }
@@ -686,6 +705,16 @@ export class BrowserService {
 
   detach(): BrowserState {
     const sessionId = BROWSER_SESSION_ID
+    // detach is the explicit "back to home" transition. A replay can be
+    // cancelled before the renderer acknowledges its requested device viewport;
+    // do not let that stale request reopen the device toolbar after home is
+    // attached again.
+    if (this.pendingDeviceViewport) {
+      console.info(
+        `${BROWSER_SERVICE_LOG_PREFIX} Clearing pending device viewport on home detach: ${JSON.stringify(this.pendingDeviceViewport)}.`
+      )
+    }
+    this.pendingDeviceViewport = undefined
     if (!this.activeSession) return this.getState()
     this.disposeActiveSession()
     this.emitState(sessionId)
@@ -757,11 +786,32 @@ export class BrowserService {
 
   async setViewport(update: BrowserViewportUpdate): Promise<BrowserState> {
     const session = this.getActiveSession()
-    if (!session || !Number.isSafeInteger(update.revision)) return this.getState()
+    if (!session || !Number.isSafeInteger(update.revision)) {
+      if (this.pendingDeviceViewport) {
+        console.warn(
+          `${BROWSER_SERVICE_LOG_PREFIX} Rejected viewport sync while device preview is pending: session=${session ? "active" : "missing"}, revision=${String(update.revision)}.`
+        )
+      }
+      return this.getState()
+    }
     // A hidden/unmounted BrowserPanel can still have an IPC update in flight. Do not
     // let it overwrite the bounds of the panel that replaced it.
-    if (update.viewportId !== session.viewportId) return this.getState()
-    if (update.revision <= session.viewportRevision) return this.getState()
+    if (update.viewportId !== session.viewportId) {
+      if (this.pendingDeviceViewport) {
+        console.warn(
+          `${BROWSER_SERVICE_LOG_PREFIX} Rejected viewport sync from non-owner panel: incoming=${update.viewportId}, owner=${session.viewportId ?? "none"}, revision=${update.revision}, pending=${JSON.stringify(this.pendingDeviceViewport)}.`
+        )
+      }
+      return this.getState()
+    }
+    if (update.revision <= session.viewportRevision) {
+      if (this.pendingDeviceViewport) {
+        console.warn(
+          `${BROWSER_SERVICE_LOG_PREFIX} Rejected stale viewport sync: incomingRevision=${update.revision}, currentRevision=${session.viewportRevision}, viewportId=${update.viewportId}.`
+        )
+      }
+      return this.getState()
+    }
     session.viewportRevision = update.revision
     this.setBounds(update.bounds, update.visible, false)
     const metricsChanged =
@@ -778,34 +828,34 @@ export class BrowserService {
           }
         : null
     }
-    if (
-      this.pendingDeviceViewport &&
-      session.deviceViewport &&
-      session.deviceViewport.width === this.pendingDeviceViewport.width &&
-      session.deviceViewport.height === this.pendingDeviceViewport.height &&
-      Math.abs(session.deviceViewport.scale - this.pendingDeviceViewport.scale) < 0.001
-    ) {
+    if (deviceViewportMatchesRequested(session.deviceViewport, this.pendingDeviceViewport)) {
+      console.info(
+        `${BROWSER_SERVICE_LOG_PREFIX} Device viewport synchronized: current=${JSON.stringify(session.deviceViewport)}, requested=${JSON.stringify(this.pendingDeviceViewport)}, viewportId=${session.viewportId ?? "none"}, revision=${session.viewportRevision}.`
+      )
       this.pendingDeviceViewport = undefined
     }
     this.emitState(session.id)
     return this.getState()
   }
 
-  async waitForDeviceViewport(viewport?: BrowserDeviceViewport): Promise<void> {
+  async waitForDeviceViewport(
+    viewport?: BrowserDeviceViewport,
+    isCancelled: () => boolean = () => false
+  ): Promise<void> {
     if (!viewport) return
     const deadline = Date.now() + VIEWPORT_SYNC_TIMEOUT_MS
     while (Date.now() < deadline) {
+      if (isCancelled()) return
       const current = this.getActiveSession()?.deviceViewport
-      if (
-        current &&
-        current.width === viewport.width &&
-        current.height === viewport.height &&
-        Math.abs(current.scale - viewport.scale) < 0.001
-      ) {
+      if (deviceViewportMatchesRequested(current, viewport)) {
         return
       }
       await new Promise<void>((resolve) => setTimeout(resolve, 25))
     }
+    const session = this.getActiveSession()
+    console.error(
+      `${BROWSER_SERVICE_LOG_PREFIX} Device viewport synchronization timed out: requested=${JSON.stringify(viewport)}, current=${JSON.stringify(session?.deviceViewport ?? null)}, pending=${JSON.stringify(this.pendingDeviceViewport ?? null)}, viewportId=${session?.viewportId ?? "none"}, revision=${session?.viewportRevision ?? "none"}.`
+    )
     throw new Error("设备预览设置未在回放开始前完成同步")
   }
 
@@ -965,6 +1015,12 @@ export class BrowserService {
     deviceViewport?: BrowserDeviceViewport
   ): void {
     this.pendingDeviceViewport = deviceViewport ? { ...deviceViewport } : undefined
+    if (deviceViewport) {
+      const session = this.getActiveSession()
+      console.info(
+        `${BROWSER_SERVICE_LOG_PREFIX} Requested replay device viewport ${JSON.stringify(deviceViewport)}; current=${JSON.stringify(session?.deviceViewport ?? null)}, viewportId=${session?.viewportId ?? "none"}, revision=${session?.viewportRevision ?? "none"}.`
+      )
+    }
     const window = this.getUsableWindow()
     window.webContents.send(BROWSER_PANEL_REQUEST_CHANNEL, {
       threadId,

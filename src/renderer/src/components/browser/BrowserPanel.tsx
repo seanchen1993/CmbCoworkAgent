@@ -734,9 +734,25 @@ export function BrowserPanel({
     resetDevicePreview()
     try {
       await window.api.browser.detach()
-      const nextState = await window.api.browser.attach({ workspacePath, visible: false })
+      // The new BrowserView starts with no bounds or device metrics. Invalidate
+      // renderer-side deduplication from the disposed view so the same-looking
+      // home/replay layout is still sent to the new session.
+      lastBoundsRef.current = null
+      lastBrowserViewVisibleRef.current = null
+      lastDeviceMetricsRef.current = ""
+      hasVisibleBoundsRef.current = false
+      // A detached session is recreated here, so it must be claimed by this
+      // mounted panel again. Without viewportId, every later setViewport update
+      // is rejected as belonging to a different panel and the next replay waits
+      // forever for device-preview synchronization.
+      const nextState = await window.api.browser.attach({
+        workspacePath,
+        visible: false,
+        viewportId: viewportIdRef.current
+      })
       applyBrowserState(nextState)
       applyPendingDeviceViewport(nextState.pendingDeviceViewport)
+      syncBounds()
       setUrlInput("")
       setCopiedConsole(false)
       setConsoleOpen(false)
@@ -751,6 +767,7 @@ export function BrowserPanel({
     applyPendingDeviceViewport,
     reportBrowserError,
     resetDevicePreview,
+    syncBounds,
     workspacePath
   ])
 

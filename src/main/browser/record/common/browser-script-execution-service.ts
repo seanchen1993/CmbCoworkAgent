@@ -348,7 +348,7 @@ async function connectInAppBrowser(options: {
     workspacePath: options.workspacePath ?? undefined,
     visible: true
   })
-  await browserService.waitForDeviceViewport(options.deviceViewport)
+  await browserService.waitForDeviceViewport(options.deviceViewport, options.isCancelled)
   if (options.isCancelled()) {
     throw new BrowserScriptExecutionCancelledError()
   }
