@@ -1,6 +1,11 @@
+import { runAnalysisKey } from "../../shared/project-run-analysis"
 import type {
   RunAnalysisData,
   RunAnalysisFeature,
+  RunAnalysisFeatureTarget,
+  RunAnalysisStageExportRequest,
+  RunAnalysisPluginStages,
+  StageTurnCounts,
   RunAnalysisMetrics,
   RunAnalysisRange,
   RunAnalysisMembership,
@@ -15,6 +20,8 @@ import {
   stageBucketCodeFilterClause
 } from "./dashboard-stage-buckets"
 import { normalizeCodeStatsFromContainer } from "./dashboard-code-stats"
+import { STAGE_DONE_LABEL } from "../../shared/harness-stage-bucket"
+import { readDashboardTracePages } from "./dashboard-trace-pages"
 import { assertProjectModeResultComplete } from "./project-mode-query-scope"
 
 type Json = Record<string, unknown>
@@ -34,8 +41,6 @@ function exactTotalHits(total: unknown): number | null {
 }
 const iso = (v: unknown): string | null =>
   typeof v === "number" && Number.isFinite(v) ? new Date(v).toISOString() : null
-export const runAnalysisKey = (project: string, feature: string | null): string =>
-  JSON.stringify([project, feature])
 
 /** Empty/missing indexed Skill arrays follow the existing project-mode attribution contract. */
 export function noSkillMainConversationFilter(): Json {
@@ -208,12 +213,127 @@ const featureSources = (prefix = ""): Json[] => [
   source("feature", `${prefix}harnessFeatureSlug`, true)
 ]
 
+function runAnalysisPairFilter(candidates: RunAnalysisFeatureTarget[], prefix = ""): Json {
+  const grouped = new Map<string, (string | null)[]>()
+  for (const key of candidates) {
+    const slugs = grouped.get(key.projectId) ?? []
+    slugs.push(key.featureSlug)
+    grouped.set(key.projectId, slugs)
+  }
+  const should: Json[] = []
+  for (const [project, values] of grouped) {
+    const slugs = values.filter((v): v is string => v !== null)
+    const features: Json[] = []
+    for (let offset = 0; offset < slugs.length; offset += 1000)
+      features.push({
+        terms: { [`${prefix}harnessFeatureSlug`]: slugs.slice(offset, offset + 1000) }
+      })
+    if (values.includes(null))
+      features.push({
+        bool: { must_not: [{ exists: { field: `${prefix}harnessFeatureSlug` } }] }
+      })
+    should.push({
+      bool: {
+        filter: [
+          { term: { [`${prefix}harnessProjectId`]: project } },
+          { bool: { should: features, minimum_should_match: 1 } }
+        ]
+      }
+    })
+  }
+  return { bool: { should, minimum_should_match: 1 } }
+}
+
+const completedNode = { term: { harnessNodeStatus: STAGE_DONE_LABEL } }
+const unattributedSkill = { term: { hasCodeAttributedSkill: false } }
+
+const mainTurnStatusAggs = {
+  node_status_reported: {
+    filter: { exists: { field: "harnessNodeStatus" } },
+    aggs: { completed: { filter: completedNode } }
+  },
+  skill_attribution_reported: {
+    filter: { exists: { field: "hasCodeAttributedSkill" } },
+    aggs: { unattributed: { filter: unattributedSkill } }
+  }
+}
+
+function readStageTurnCounts(main: Json): StageTurnCounts {
+  const node = record(main.node_status_reported)
+  const skill = record(main.skill_attribution_reported)
+  return {
+    conversationCount: number(main.doc_count),
+    nodeStatusReported: number(node.doc_count),
+    skillAttributionReported: number(skill.doc_count),
+    completedNode: number(record(node.completed).doc_count),
+    unattributedSkill: number(record(skill.unattributed).doc_count)
+  }
+}
+
+export function groupRunAnalysisExportTargets(
+  rows: RunAnalysisFeature[],
+  targets: RunAnalysisStageExportRequest["targets"]
+) {
+  const available = new Map(
+    rows.map((row) => [runAnalysisKey(row.projectId, row.featureSlug), row])
+  )
+  const plugins = new Map<string | null, RunAnalysisFeature[]>()
+  for (const target of targets) {
+    const key = runAnalysisKey(target.projectId, target.featureSlug)
+    const row = available.get(key)
+    if (!row || row.featureSlug !== target.featureSlug || row.adapterName !== target.adapterName)
+      throw new Error("项目分析名单已变化，请刷新后重新导出")
+    available.delete(key)
+    const group = plugins.get(row.adapterName)
+    if (group) group.push(row)
+    else plugins.set(row.adapterName, [row])
+  }
+  return plugins
+}
+
+export async function fetchRunAnalysisPluginStages(
+  query: RunAnalysisQuery,
+  index: string,
+  filters: Json[],
+  targets: RunAnalysisFeatureTarget[],
+  asOf: string
+): Promise<RunAnalysisPluginStages["stages"]> {
+  if (!Number.isFinite(Date.parse(asOf)))
+    throw new Error("项目分析数据截至时间无效，请刷新后重新导出")
+  // Keep legacy traces without a start timestamp in the same population as the feature list.
+  const cutoff = { bool: { must_not: [{ range: { startedAt: { gt: asOf } } }] } }
+  const stages: RunAnalysisPluginStages["stages"] = []
+  for (let start = 0; start < targets.length; start += RUN_ANALYSIS_BATCH_SIZE) {
+    const batch = targets.slice(start, start + RUN_ANALYSIS_BATCH_SIZE)
+    await forEachRunAnalysisBucket(
+      query,
+      index,
+      [...filters, cutoff, runAnalysisPairFilter(batch)],
+      [...featureSources(), source("stage", "harnessNodeName", true)],
+      mainAgentConversationAggs(mainTurnStatusAggs),
+      (bucket) => {
+        const key = record(bucket.key)
+        stages.push({
+          projectId: key.project as string,
+          featureSlug: key.feature as string | null,
+          nodeName: key.stage as string | null,
+          ...readStageTurnCounts(readMainAgentConversations(bucket))
+        })
+      }
+    )
+  }
+  return stages
+}
+
 export function runAnalysisMetricAggs(range: RunAnalysisRange): Json {
   return {
     first_execution: { min: { field: "startedAt" } },
     last_execution: { max: { field: "startedAt" } },
     last_end: { max: { field: "endedAt" } },
-    ...mainAgentConversationAggs({ duration: { stats: { field: "durationMs" } } }),
+    ...mainAgentConversationAggs({
+      duration: { stats: { field: "durationMs" } },
+      ...mainTurnStatusAggs
+    }),
     no_skill: { filter: noSkillMainConversationFilter() },
     tool_calls: { stats: { field: "totalToolCalls" } },
     model_calls: { stats: { field: "modelCallCount" } },
@@ -230,6 +350,8 @@ export function emptyRunAnalysisMetrics(): RunAnalysisMetrics {
     traceCount: 0,
     conversationCount: 0,
     noSkillConversationCount: 0,
+    completedNodeConversationCount: 0,
+    unattributedSkillConversationCount: 0,
     firstExecutedAt: null,
     lastExecutedAt: null,
     lastEndedAt: null,
@@ -250,6 +372,7 @@ export function emptyRunAnalysisMetrics(): RunAnalysisMetrics {
 export function readRunAnalysisMetrics(bucket: Json): RunAnalysisMetrics {
   const main = readMainAgentConversations(bucket),
     duration = record(main.duration)
+  const turns = readStageTurnCounts(main)
   const start = record(bucket.first_execution).value,
     end = record(bucket.last_end).value
   const tool = record(bucket.tool_calls),
@@ -259,6 +382,10 @@ export function readRunAnalysisMetrics(bucket: Json): RunAnalysisMetrics {
     traceCount: number(bucket.doc_count),
     conversationCount: number(main.doc_count),
     noSkillConversationCount: number(record(bucket.no_skill).doc_count),
+    completedNodeConversationCount:
+      turns.conversationCount && !turns.nodeStatusReported ? null : turns.completedNode,
+    unattributedSkillConversationCount:
+      turns.conversationCount && !turns.skillAttributionReported ? null : turns.unattributedSkill,
     firstExecutedAt: iso(start),
     lastExecutedAt: iso(record(bucket.last_execution).value),
     lastEndedAt: iso(end),
@@ -304,6 +431,7 @@ const SNAPSHOT_FIELDS = [
     "lifecycleCreatedAt",
     "lifecycleStatus",
     "featureCount",
+    "workflowStageNames",
     "features.slug",
     "features.title",
     "features.currentNodeId",
@@ -411,7 +539,7 @@ export async function fetchRunAnalysis(
       { terms: { "properties.harnessProjectId": batch } }
     ]
     if (scope.membership === "executed") {
-      const candidates: { project: string; feature: string | null }[] = []
+      const candidates: RunAnalysisFeatureTarget[] = []
       await forEachRunAnalysisBucket(
         query,
         scope.traceIndex,
@@ -422,42 +550,12 @@ export async function fetchRunAnalysis(
           const key = record(b.key)
           if (typeof key.project !== "string" || !batch.includes(key.project))
             throw new Error("执行名单超出项目范围")
-          candidates.push({ project: key.project, feature: key.feature as string | null })
+          candidates.push({ projectId: key.project, featureSlug: key.feature as string | null })
         }
       )
       if (!candidates.length) continue
-      const pairFilter = (prefix: string): Json => {
-        const grouped = new Map<string, (string | null)[]>()
-        for (const key of candidates) {
-          const slugs = grouped.get(key.project) ?? []
-          slugs.push(key.feature)
-          grouped.set(key.project, slugs)
-        }
-        const should: Json[] = []
-        for (const [project, values] of grouped) {
-          const slugs = values.filter((v): v is string => v !== null)
-          const features: Json[] = []
-          for (let offset = 0; offset < slugs.length; offset += 1000)
-            features.push({
-              terms: { [`${prefix}harnessFeatureSlug`]: slugs.slice(offset, offset + 1000) }
-            })
-          if (values.includes(null))
-            features.push({
-              bool: { must_not: [{ exists: { field: `${prefix}harnessFeatureSlug` } }] }
-            })
-          should.push({
-            bool: {
-              filter: [
-                { term: { [`${prefix}harnessProjectId`]: project } },
-                { bool: { should: features, minimum_should_match: 1 } }
-              ]
-            }
-          })
-        }
-        return { bool: { should, minimum_should_match: 1 } }
-      }
-      traceFilters.push(pairFilter(""))
-      eventFilters.push(pairFilter("properties."))
+      traceFilters.push(runAnalysisPairFilter(candidates))
+      eventFilters.push(runAnalysisPairFilter(candidates, "properties."))
     }
     const allowed = new Set(batch)
     const identify = (bucket: Json): RunAnalysisFeature => {
@@ -551,9 +649,17 @@ export async function fetchRunAnalysis(
   const allRows = [...rows.values()]
   const selected =
     scope.membership === "executed" ? allRows.filter((r) => r.executedInRange) : allRows
+  const selectedProjects = new Set(selected.map((row) => row.projectId))
+  const workflowStageNamesByProject = Object.fromEntries(
+    [...selectedProjects].map((id) => {
+      const names = record(projects.get(id)?.properties).workflowStageNames
+      return [id, Array.isArray(names) ? names.filter((name) => text(name) !== null) : []]
+    })
+  )
   return {
     rows: selected,
-    projectCount: new Set(selected.map((r) => r.projectId)).size,
+    workflowStageNamesByProject,
+    projectCount: selectedProjects.size,
     featureCount: selected.filter((r) => r.featureSlug !== null).length,
     range: scope.range,
     membership: scope.membership,
@@ -585,6 +691,9 @@ export async function fetchRunAnalysisStages(
 export function runAnalysisSessionMetricFilters(
   metric: RunAnalysisSessionRequest["metric"]
 ): Json[] {
+  if (metric === "completedNode") return [projectModeMainAgentConversationFilter(), completedNode]
+  if (metric === "unattributedSkill")
+    return [projectModeMainAgentConversationFilter(), unattributedSkill]
   return metric === "noSkill"
     ? [noSkillMainConversationFilter()]
     : metric === "main"
@@ -592,6 +701,29 @@ export function runAnalysisSessionMetricFilters(
       : metric === "subagent"
         ? [childFilter]
         : []
+}
+
+export function runAnalysisAttributionFilters(request: RunAnalysisSessionRequest): Json[] {
+  return [
+    request.featureSlug === null
+      ? { bool: { must_not: [{ exists: { field: "harnessFeatureSlug" } }] } }
+      : { term: { harnessFeatureSlug: request.featureSlug } },
+    ...(request.nodeName === undefined
+      ? []
+      : request.nodeName === null
+        ? [{ bool: { must_not: [{ exists: { field: "harnessNodeName" } }] } }]
+        : [{ term: { harnessNodeName: request.nodeName } }])
+  ]
+}
+
+const threadFields = ["rootThreadId", "parentThreadId", "threadId"] as const
+
+function conversationThreadId(source: Json): string | null {
+  for (const field of threadFields) {
+    const id = text(source[field])?.trim()
+    if (id && id !== "unknown-thread") return id
+  }
+  return null
 }
 
 /** Cursor paging for drilldowns: only lightweight headers, matching the counted metric. */
@@ -621,7 +753,7 @@ export async function fetchRunAnalysisSessions(
       _source: {
         includes: [
           "traceId",
-          "threadId",
+          ...threadFields,
           "startedAt",
           "endedAt",
           "durationMs",
@@ -653,7 +785,7 @@ export async function fetchRunAnalysisSessions(
       if (!text(s.traceId)) throw new Error("会话缺少标识")
       return {
         traceId: text(s.traceId)!,
-        threadId: text(s.threadId),
+        threadId: conversationThreadId(s),
         startedAt: text(s.startedAt),
         endedAt: text(s.endedAt),
         durationMs: typeof s.durationMs === "number" ? s.durationMs : null,
@@ -698,4 +830,47 @@ export async function fetchRunAnalysisTrace<T>(
   if (!Array.isArray(hits.hits) || hits.hits.length !== 1 || exactTotalHits(hits.total) !== 1)
     throw new Error("未找到该口径下唯一的完整会话记录")
   return normalize(record(hits.hits[0]))
+}
+
+/** Resolve the selected round under its original metric, then read its thread under the same project/room access. */
+export async function fetchRunAnalysisThread<T extends { traceId: string }>(input: {
+  query: RunAnalysisQuery
+  index: string
+  projectFilters: Json[]
+  request: RunAnalysisSessionRequest & { traceId: string }
+  sourceIncludes: string[]
+  normalize: (hit: Json) => T
+  isResponseTooLarge: (error: unknown) => boolean
+}): Promise<T[]> {
+  const { query, index, request, projectFilters } = input
+  const threadId = await fetchRunAnalysisTrace(
+    query,
+    index,
+    [...projectFilters, ...runAnalysisAttributionFilters(request)],
+    request,
+    [...threadFields],
+    (hit) => conversationThreadId(record(hit._source))
+  )
+  const selection = threadId
+    ? {
+        bool: {
+          should: threadFields.map((field) => ({ term: { [field]: threadId } })),
+          minimum_should_match: 1
+        }
+      }
+    : { term: { traceId: request.traceId } }
+  const traces = new Map<string, T>()
+  for await (const hits of readDashboardTracePages({
+    filters: [...projectFilters, selection],
+    sourceIncludes: input.sourceIncludes,
+    query: (body) => query(index, body),
+    isResponseTooLarge: input.isResponseTooLarge
+  })) {
+    for (const hit of hits) {
+      const trace = input.normalize(hit)
+      traces.set(trace.traceId, trace)
+    }
+  }
+  if (!traces.has(request.traceId)) throw new Error("所选轮次已变化，请刷新会话列表后重试")
+  return [...traces.values()]
 }

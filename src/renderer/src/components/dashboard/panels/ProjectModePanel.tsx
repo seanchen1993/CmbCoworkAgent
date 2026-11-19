@@ -3466,7 +3466,6 @@ function ProjectModePanelContent({
   codeStatsLoading,
   onCodeSourceChange,
   createdInRangeProjectsOnly,
-  runAnalysisAllowed = false,
   runAnalysisRange,
   runAnalysisTimeControl,
   runAnalysisOptions,
@@ -3506,7 +3505,6 @@ function ProjectModePanelContent({
   /** 切换 source 下拉（null = 全部来源）。 */
   onCodeSourceChange: (source: string | null) => void
   createdInRangeProjectsOnly: boolean
-  runAnalysisAllowed?: boolean
   runAnalysisRange: RunAnalysisRange
   runAnalysisTimeControl: Omit<DashboardTimeControl, "range">
   runAnalysisOptions: RunAnalysisOptions
@@ -3558,8 +3556,7 @@ function ProjectModePanelContent({
   onSkillFunnelFirstStageClick?: () => void
   marketSkillKeys?: Set<string>
 }): React.JSX.Element {
-  const [selectedProjectView, setProjectView] = useState<"list" | "analysis">("list")
-  const projectView = runAnalysisAllowed ? selectedProjectView : "list"
+  const [projectView, setProjectView] = useState<"list" | "analysis">("list")
   const [analysisOpened, setAnalysisOpened] = useState(false)
   const openCodeTrace = useContext(OpenProjectCodeTrace)
   const analysisProject = (row: RunAnalysisFeature): DashboardProjectModeProject => ({
@@ -3921,24 +3918,22 @@ function ProjectModePanelContent({
           >
             项目列表
           </button>
-          {runAnalysisAllowed && (
-            <button
-              role="tab"
-              aria-selected={projectView === "analysis"}
-              className={cn(
-                "rounded px-3 py-1.5",
-                projectView === "analysis" && "bg-muted font-medium"
-              )}
-              onClick={() => {
-                setAnalysisOpened(true)
-                setProjectView("analysis")
-              }}
-            >
-              项目分析
-            </button>
-          )}
+          <button
+            role="tab"
+            aria-selected={projectView === "analysis"}
+            className={cn(
+              "rounded px-3 py-1.5",
+              projectView === "analysis" && "bg-muted font-medium"
+            )}
+            onClick={() => {
+              setAnalysisOpened(true)
+              setProjectView("analysis")
+            }}
+          >
+            项目分析
+          </button>
         </div>
-        {runAnalysisAllowed && analysisOpened && (
+        {analysisOpened && (
           <div hidden={projectView !== "analysis"}>
             <ProjectRunAnalysis
               range={runAnalysisRange}

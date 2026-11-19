@@ -11,6 +11,8 @@ import type {
 import type {
   RunAnalysisData,
   RunAnalysisOptions,
+  RunAnalysisStageExportRequest,
+  RunAnalysisPluginStages,
   RunAnalysisRange,
   RunAnalysisSessionRequest,
   RunAnalysisStages,
@@ -2784,12 +2786,17 @@ interface CustomAPI {
       range: RunAnalysisRange,
       options?: RunAnalysisOptions
     ) => Promise<{ success: boolean; data?: RunAnalysisData; error?: string }>
+    projectModeRunAnalysisExportStages: (
+      range: RunAnalysisRange,
+      options: RunAnalysisOptions,
+      request: RunAnalysisStageExportRequest
+    ) => Promise<{ success: boolean; data?: RunAnalysisPluginStages[]; error?: string }>
     projectModeRunAnalysisStages: (
       request: RunAnalysisSessionRequest
     ) => Promise<{ success: boolean; data?: RunAnalysisStages; error?: string }>
-    projectModeRunAnalysisTrace: (
+    projectModeRunAnalysisThread: (
       request: RunAnalysisSessionRequest & { traceId: string }
-    ) => Promise<{ success: boolean; data?: DashboardTraceDetail; error?: string }>
+    ) => Promise<{ success: boolean; data?: DashboardTraceDetail[]; error?: string }>
     projectModeRunAnalysisSessions: (
       request: RunAnalysisSessionRequest
     ) => Promise<{ success: boolean; data?: RunAnalysisSessions; error?: string }>

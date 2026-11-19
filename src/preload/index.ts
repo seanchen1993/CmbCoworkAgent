@@ -11,6 +11,8 @@ import type {
 import type {
   RunAnalysisData,
   RunAnalysisOptions,
+  RunAnalysisStageExportRequest,
+  RunAnalysisPluginStages,
   RunAnalysisRange,
   RunAnalysisSessionRequest,
   RunAnalysisStages,
@@ -4110,14 +4112,20 @@ const api = {
       options?: RunAnalysisOptions
     ): Promise<{ success: boolean; data?: RunAnalysisData; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeRunAnalysis", range, options),
+    projectModeRunAnalysisExportStages: (
+      range: RunAnalysisRange,
+      options: RunAnalysisOptions,
+      request: RunAnalysisStageExportRequest
+    ): Promise<{ success: boolean; data?: RunAnalysisPluginStages[]; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectModeRunAnalysisExportStages", range, options, request),
     projectModeRunAnalysisStages: (
       request: RunAnalysisSessionRequest
     ): Promise<{ success: boolean; data?: RunAnalysisStages; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeRunAnalysisStages", request),
-    projectModeRunAnalysisTrace: (
+    projectModeRunAnalysisThread: (
       request: RunAnalysisSessionRequest & { traceId: string }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
-      ipcRenderer.invoke("dashboard:projectModeRunAnalysisTrace", request),
+      ipcRenderer.invoke("dashboard:projectModeRunAnalysisThread", request),
     projectModeRunAnalysisSessions: (
       request: RunAnalysisSessionRequest
     ): Promise<{ success: boolean; data?: RunAnalysisSessions; error?: string }> =>
