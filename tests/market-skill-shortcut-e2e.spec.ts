@@ -74,9 +74,8 @@ async function main(): Promise<void> {
           conversationShortcuts: published
             ? {
                 projectPluginCreation: {
-                  itemId: "shortcut-e2e-item",
                   marketName: name,
-              allowSourceForAll: true,
+                  allowSourceForAll: true,
                   sha256: createHash("sha256").update(markdown).digest("hex")
                 }
               }
@@ -90,7 +89,6 @@ async function main(): Promise<void> {
           type: "skill",
           items: [
             {
-              id: "shortcut-e2e-item",
               name,
               chinese_name: label,
               user_id: "another-author / E2E Publisher",
@@ -259,7 +257,7 @@ async function main(): Promise<void> {
       ),
       [true, true, true]
     )
-    console.log("Market shortcut E2E passed in built Electron")
+    console.log("Name-only market shortcut E2E passed in built Electron")
   } finally {
     await app?.close()
     await new Promise<void>((resolveServer) => server.close(() => resolveServer()))

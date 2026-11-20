@@ -8,7 +8,7 @@
 
 1. 在客户端进入「应用市场 → 技能」，打开已上架的独立技能详情。
 2. 使用应用市场管理员账号，打开「管理员模式」，点击「复制导航配置」。
-   客户端会把条目 ID 和市场内部名称复制为 JSON。
+   客户端会把市场内部名称复制为 JSON。条目有 ID 时会一并复制。
 3. 在现有发布清单中合并 `conversationShortcuts.projectPluginCreation`，
    沿用当前渠道的清单发布权限和发布流程。保留清单里的版本、包下载地址等其他配置。
    通过现有配置发布渠道上传更新后的清单即可，应用包版本可保持原值。
@@ -21,13 +21,15 @@
 {
   "conversationShortcuts": {
     "projectPluginCreation": {
-      "itemId": "market-417",
       "marketName": "project-plugin-author"
     }
   }
 }
 ```
 
+- 市场条目没有 ID 时，只填 `marketName` 即可。名称必须在独立技能目录中唯一。
+  同名条目同时存在时，按名称配置的入口会隐藏。
+- 条目有 ID 时可在配置中写入 `itemId`。客户端会同时核对 ID 和名称。
 - **换目标**时用新技能复制的对象替换 `projectPluginCreation`，再发布清单。
 - **撤下入口**时将 `projectPluginCreation` 设为 `null` 或删除该键，再发布清单。
 - 如确认该技能的源码可向所有能看到导航的用户开放，在同一个 `projectPluginCreation` 对象里

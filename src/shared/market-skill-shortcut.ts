@@ -1,7 +1,7 @@
 export const PROJECT_PLUGIN_SKILL_SHORTCUT_LABEL = "开发项目模式插件"
 
 export interface MarketSkillShortcutConfig {
-  itemId: string
+  itemId?: string
   marketName: string
   skillName?: string
   sha256?: string
@@ -14,6 +14,7 @@ export interface ConversationShortcutsConfig {
 
 export interface MarketSkillShortcutTarget {
   itemId: string
+  matchesNameOnly?: boolean
   marketName: string
   name: string
   description: string
@@ -63,9 +64,12 @@ function isMarketName(value: unknown): value is string {
 
 export function parseMarketSkillShortcutConfig(value: unknown): MarketSkillShortcutConfig | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null
-  const { itemId, marketName, skillName, sha256, allowSourceForAll } = value as Record<string, unknown>
+  const { itemId, marketName, skillName, sha256, allowSourceForAll } = value as Record<
+    string,
+    unknown
+  >
   if (
-    !isMarketSkillShortcutKey(itemId) ||
+    (itemId !== undefined && !isMarketSkillShortcutKey(itemId)) ||
     !isMarketName(marketName) ||
     (skillName !== undefined && !isMarketName(skillName)) ||
     (sha256 !== undefined && (typeof sha256 !== "string" || !/^[a-f\d]{64}$/i.test(sha256))) ||

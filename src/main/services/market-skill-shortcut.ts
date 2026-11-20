@@ -74,7 +74,9 @@ async function loadPublishedShortcut() {
   const source = resolveUpdateSource(trustedBaseUrl)
   if (!source.baseUrl) return null
   const manifest = await fetchLatestJson(source.baseUrl, source.manifestFile)
-  const config = parseMarketSkillShortcutConfig(manifest.conversationShortcuts?.projectPluginCreation)
+  const config = parseMarketSkillShortcutConfig(
+    manifest.conversationShortcuts?.projectPluginCreation
+  )
   // A local selftest override can select a different server. Only the
   // release service configured in the client may allow editable downloads.
   if (config?.allowSourceForAll && source.baseUrl !== trustedBaseUrl) {
@@ -91,20 +93,25 @@ export async function getMarketShortcutBinding(
   if (!config) return EMPTY_BINDING
 
   const items = readMarketSkillCatalog().map(record)
-  const byId = items.filter((item) => item?.id === config.itemId)
-  const item = byId[0]
-  if (byId.length !== 1 || !item || item.name !== config.marketName) return EMPTY_BINDING
-  // The legacy download addresses a name. A pinned hash can verify bytes when
-  // that name is ambiguous in the catalog.
-  const uniqueName = items.filter((row) => row?.name === config.marketName).length === 1
-  if (!config.sha256 && !uniqueName) return EMPTY_BINDING
+  const byName = items.filter((row) => row?.name === config.marketName)
+  const matches =
+    config.itemId === undefined ? byName : items.filter((row) => row?.id === config.itemId)
+  const item = matches[0]
+  if (matches.length !== 1 || !item || item.name !== config.marketName) return EMPTY_BINDING
+  // Only an explicit ID can choose among duplicate names. The old download
+  // then needs a pinned hash to verify that it served the selected package.
+  const uniqueName = byName.length === 1
+  if (!uniqueName && !config.sha256) return EMPTY_BINDING
+  const marketItemId = isMarketSkillShortcutKey(item.id) ? item.id : undefined
 
   const marketIdentity = {
     user_id: typeof item.user_id === "string" ? item.user_id : undefined,
     extra_json: typeof item.extra_json === "string" ? item.extra_json : undefined
   }
   const ids = [session.user?.sapId, session.user?.ystId].flatMap(buildUploaderIdCandidates)
-  if (!canCurrentUserViewMarketItem(marketIdentity, session.user?.sapId, ids, session.user?.pathName)) {
+  if (
+    !canCurrentUserViewMarketItem(marketIdentity, session.user?.sapId, ids, session.user?.pathName)
+  ) {
     return EMPTY_BINDING
   }
 
@@ -112,16 +119,34 @@ export async function getMarketShortcutBinding(
   // Cached authorization is only a hint for linking bytes already readable
   // locally. New originals require a publisher opt-in tied to a verified hash.
   const canLinkExistingOriginal =
-    allowSourceForAll || (uniqueName && Boolean(getMarketSourceAccess(marketIdentity, session.user)))
+    allowSourceForAll ||
+    (uniqueName && Boolean(getMarketSourceAccess(marketIdentity, session.user)))
   const filename = typeof item.filename === "string" ? item.filename : ""
   const label = typeof item.chinese_name === "string" ? item.chinese_name.trim().slice(0, 256) : ""
+  // Keep a stable receipt across updates to the same legacy listing.
+  const itemId =
+    marketItemId ??
+    "name:" +
+      createHash("sha256")
+        .update(JSON.stringify([config.marketName, marketIdentity.user_id, item.created_at]))
+        .digest("hex")
   const revision = createHash("sha256")
-    .update(JSON.stringify([config, filename, item.version, item.updated_at, canLinkExistingOriginal]))
+    .update(
+      JSON.stringify([
+        config,
+        itemId,
+        filename,
+        item.version,
+        item.updated_at,
+        canLinkExistingOriginal
+      ])
+    )
     .digest("hex")
   return {
     revision,
     target: {
-      itemId: config.itemId,
+      itemId,
+      matchesNameOnly: marketItemId === undefined,
       marketName: config.marketName,
       filename,
       name: label || config.marketName,

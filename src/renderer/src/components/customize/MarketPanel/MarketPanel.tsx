@@ -2596,9 +2596,9 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
                       : "应用市场"}
                   </h2>
                   <span className="flex items-center gap-2">
-                    {detailMode === "detail" && activeTab === "skill" && selectedItem?.id && (
+                    {detailMode === "detail" && activeTab === "skill" && selectedItem && (
                       <MarketSkillShortcutAction
-                        key={selectedItem.id}
+                        key={selectedItem.id ?? selectedItem.name}
                         itemId={selectedItem.id}
                         marketName={selectedItem.name}
                         canCopy={isAdminModeActive}

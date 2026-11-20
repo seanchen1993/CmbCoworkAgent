@@ -239,6 +239,43 @@ describe("published market skill shortcut IPC", () => {
     await expect(call("get")).resolves.toMatchObject({ ok: true, value: { target: null } })
   })
 
+  it.each([undefined, target.itemId])(
+    "installs a unique marketName without an ID in the manifest (catalog ID %s)",
+    async (id) => {
+      items = [{ ...listedItem, id }]
+      config = { marketName: target.marketName }
+      bundle.content = markdown.replace(target.skillName, target.marketName)
+      const chosen = await selection()
+      if (id) expect(chosen.itemId).toBe(id)
+      else expect(chosen.itemId).toMatch(/^name:[a-f0-9]{64}$/)
+
+      const installed = {
+        ok: true,
+        value: { kind: "available", skill: { name: target.marketName } }
+      }
+      await expect(call("install", chosen)).resolves.toMatchObject(installed)
+      await expect(call("resolve", chosen)).resolves.toMatchObject(installed)
+      expect(catalogRequests()).toHaveLength(1)
+    }
+  )
+
+  it("hides ambiguous name-only configurations, even with a pinned hash", async () => {
+    items = [listedItem, { ...listedItem, id: undefined }]
+    config = {
+      marketName: target.marketName,
+      sha256: createHash("sha256").update(markdown).digest("hex")
+    }
+    await refreshCatalog()
+    await expect(call("get")).resolves.toMatchObject({ ok: true, value: { target: null } })
+    expect(catalogRequests()).toHaveLength(1)
+  })
+
+  it("keeps an explicit ID mandatory when the identified row has no matching ID", async () => {
+    items = [{ ...listedItem, id: undefined }]
+    await refreshCatalog()
+    await expect(call("get")).resolves.toMatchObject({ ok: true, value: { target: null } })
+  })
+
   it("uses the configured hash to verify bytes when the market download name is ambiguous", async () => {
     items = [listedItem, { ...listedItem, id: "another-id" }]
     config = { ...target, sha256: "0".repeat(64) }

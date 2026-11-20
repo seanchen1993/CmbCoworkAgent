@@ -3,6 +3,7 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { useMarketSkillShortcut } from "@/lib/market-skill-shortcut"
 import {
+  isMarketSkillShortcutKey,
   parseMarketSkillShortcutConfig,
   type ConversationShortcutsConfig
 } from "../../../../../shared/market-skill-shortcut"
@@ -12,16 +13,21 @@ export function MarketSkillShortcutAction({
   marketName,
   canCopy
 }: {
-  itemId: string
+  itemId?: string
   marketName: string
   canCopy: boolean
 }): React.JSX.Element | null {
   const { binding } = useMarketSkillShortcut()
-  const config = parseMarketSkillShortcutConfig({ itemId, marketName })
+  const config = parseMarketSkillShortcutConfig({
+    itemId: isMarketSkillShortcutKey(itemId) ? itemId : undefined,
+    marketName
+  })
   if (!config) return null
 
   const target = binding?.target
-  const isPublished = target?.itemId === config.itemId && target.marketName === config.marketName
+  const isPublished =
+    target?.marketName === config.marketName &&
+    (config.itemId === undefined ? target.matchesNameOnly : target.itemId === config.itemId)
   if (!canCopy && !isPublished) return null
 
   async function copyConfig(): Promise<void> {
