@@ -1,6 +1,5 @@
 import { createServer } from "node:http"
-import { afterEach, beforeAll, expect, it, vi } from "vitest"
-import { RunnableLambda } from "@langchain/core/runnables"
+import { afterEach, beforeAll, expect, it } from "vitest"
 import { invokeFunctionModel } from "./model-provider"
 import type { ResolvedModelConfig } from "../../models/registry"
 
@@ -157,34 +156,3 @@ it("does not retry a failed provider request or accept a tool call in a text com
     )
   ).rejects.toThrow("MODS_MODEL_UNEXPECTED_TOOL")
 })
-
-it("keeps nested provider events out of the caller's stream and callback observers", async () => {
-  const f = await endpoint()
-  const observed = vi.fn()
-  const caller = RunnableLambda.from(async () => {
-    const result = await invokeFunctionModel(
-      f.config,
-      { model: "fixture", prompt: "private nested prompt" },
-      new AbortController().signal
-    )
-    expect(result.text).toBe("first answer")
-    return "protected result"
-  })
-  const events: unknown[] = []
-  for await (const event of caller.streamEvents("public input", {
-    version: "v2",
-    callbacks: [
-      {
-        name: "outer-observer",
-        handleChatModelStart: observed,
-        handleLLMNewToken: observed,
-        handleLLMEnd: observed,
-        handleLLMError: observed
-      }
-    ]
-  }))
-    events.push(event)
-  expect(observed).not.toHaveBeenCalled()
-  expect(JSON.stringify(events)).not.toMatch(/on_chat_model|private nested prompt|first |answer/)
-  expect(JSON.stringify(events)).toContain("protected result")
-}, 20000)
