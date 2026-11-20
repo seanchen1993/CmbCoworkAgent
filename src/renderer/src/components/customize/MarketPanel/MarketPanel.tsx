@@ -49,6 +49,11 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import type { McpConnectorConfig, PluginManifest, PluginMetadata, SkillMetadata } from "@/types"
 import { UniversalUploadDialog } from "./UniversalUploadDialog"
 import { MarketDetailView } from "./MarketDetailView"
+import { MarketSkillShortcutAction } from "./MarketSkillShortcutAction"
+import {
+  canCurrentUserViewMarketItem,
+  doesMarketUserIdMatchCurrentUser
+} from "../../../../../shared/market-item-visibility"
 import { SkillDetail } from "../SkillsPanel"
 import { MCPConnectorDetail } from "../MCPConnectorDetail"
 import { PluginDetailPanel } from "../PluginsPanel"
@@ -90,7 +95,6 @@ import { TraceExplorer } from "../../dashboard/TraceHistoryDialog"
 import { toast } from "sonner"
 import {
   buildUploaderIdCandidates,
-  getUploaderIdCandidates,
   getAllSkills,
   getSkillMetricByName,
   sortSkillItemsByUsage,
@@ -298,32 +302,6 @@ function parseMarketExtraJson(extraJson?: string): MarketExtraJson {
   }
 }
 
-function getGrayUserIdsFromExtraJson(extraJson?: string): string[] {
-  const parsed = parseMarketExtraJson(extraJson)
-  if (!Array.isArray(parsed.grayUserIds)) return []
-  return Array.from(
-    new Set(
-      parsed.grayUserIds
-        .filter((item): item is string => typeof item === "string")
-        .map((item) => item.trim())
-        .filter(Boolean)
-    )
-  )
-}
-
-function getGrayOrgsFromExtraJson(extraJson?: string): string[] {
-  const parsed = parseMarketExtraJson(extraJson)
-  if (!Array.isArray(parsed.grayOrgs)) return []
-  return Array.from(
-    new Set(
-      parsed.grayOrgs
-        .filter((item): item is string => typeof item === "string")
-        .map((item) => item.trim())
-        .filter(Boolean)
-    )
-  )
-}
-
 function getMarketUpdatedAt(item: Pick<MarketItem, "created_at" | "updated_at" | "extra_json">): string {
   return parseMarketExtraJson(item.extra_json).updated_at || item.updated_at || item.created_at
 }
@@ -364,57 +342,6 @@ function getMarketAdminYstIds(): Set<string> {
 }
 
 const MARKET_ADMIN_YST_IDS = getMarketAdminYstIds()
-
-function doesMarketUserIdMatchCurrentUser(
-  rawUserId: string | null | undefined,
-  currentUserIdCandidates: Iterable<string>,
-  currentUserSapId?: string | null | undefined
-): boolean {
-  const normalizedCurrentIds = Array.from(
-    new Set([
-      ...Array.from(currentUserIdCandidates, (value) => String(value || "").trim()).filter(Boolean),
-      ...buildUploaderIdCandidates(currentUserSapId || undefined)
-    ])
-  )
-  if (!rawUserId || normalizedCurrentIds.length === 0) return false
-
-  const targetCandidates = getUploaderIdCandidates(rawUserId)
-  return targetCandidates.some((candidate) =>
-    normalizedCurrentIds.some(
-      (currentId) =>
-        currentId === candidate || currentId.includes(candidate) || candidate.includes(currentId)
-    )
-  )
-}
-
-function canCurrentUserViewMarketItem(
-  item: MarketItem,
-  currentUserSapId: string | null | undefined,
-  currentUserIdCandidates: Iterable<string>,
-  currentUserPathName?: string | null | undefined
-): boolean {
-  if (doesMarketUserIdMatchCurrentUser(item.user_id, currentUserIdCandidates, currentUserSapId)) {
-    return true
-  }
-  const grayUserIds = getGrayUserIdsFromExtraJson(item.extra_json)
-  const grayOrgs = getGrayOrgsFromExtraJson(item.extra_json)
-
-  if (grayUserIds.length === 0 && grayOrgs.length === 0) return true
-
-  if (grayUserIds.length > 0 && grayUserIds.some((userId) =>
-    doesMarketUserIdMatchCurrentUser(userId, currentUserIdCandidates, currentUserSapId)
-  )) {
-    return true
-  }
-
-  if (grayOrgs.length > 0 && currentUserPathName && grayOrgs.some((org) =>
-    currentUserPathName.includes(org)
-  )) {
-    return true
-  }
-
-  return false
-}
 
 type UploadFilterMode = "mine" | "installed" | "featured" | "certified"
 
@@ -2669,6 +2596,14 @@ export const MarketPanel = React.memo(function MarketPanel(): React.JSX.Element 
                       : "应用市场"}
                   </h2>
                   <span className="flex items-center gap-2">
+                    {detailMode === "detail" && activeTab === "skill" && selectedItem && (
+                      <MarketSkillShortcutAction
+                        key={selectedItem.id ?? selectedItem.name}
+                        itemId={selectedItem.id}
+                        marketName={selectedItem.name}
+                        canCopy={isAdminModeActive}
+                      />
+                    )}
                     {detailMode === "detail" &&
                     selectedItem &&
                     activeTab !== ORG_SKILL_MARKET_TYPE &&

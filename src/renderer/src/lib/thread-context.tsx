@@ -1,4 +1,5 @@
 import type { ThreadMessagesPage } from "../../../main/types"
+import type { MentionedWorkspaceFile } from "@/features/mentions/atFileAttachments"
 import {
   createContext,
   memo,
@@ -54,6 +55,7 @@ import type {
   Message,
   Todo,
   FileInfo,
+  FileAttachment,
   Subagent,
   HITLRequest,
   ToolCallState,
@@ -723,6 +725,8 @@ export interface ThreadState {
   contextReminder: ContextReminderState
   harnessAgentmdLoadStatus: HarnessAgentmdLoadStatusState | null
   draftInput: string
+  draftAttachments: FileAttachment[]
+  draftMentionedFiles: MentionedWorkspaceFile[]
   harnessNextActionDialogTips: string | null
   /**
    * Skill chip the user has selected for the next send. Kept alongside
@@ -908,6 +912,8 @@ interface StreamData {
 }
 
 // Actions available on a thread
+type DraftFilesUpdate<T> = T[] | ((previous: T[]) => T[])
+
 export interface ThreadActions {
   appendMessage: (message: Message) => void
   syncDurableTranscript: (requiredMessageIds?: string[]) => Promise<boolean>
@@ -960,6 +966,8 @@ export interface ThreadActions {
     update: ContextReminderState | ((prev: ContextReminderState) => ContextReminderState)
   ) => void
   setDraftInput: (input: string) => void
+  setDraftAttachments: (update: DraftFilesUpdate<FileAttachment>) => void
+  setDraftMentionedFiles: (update: DraftFilesUpdate<MentionedWorkspaceFile>) => void
   setHarnessNextActionDialogTips: (tips: string | null) => void
   setDraftSkill: (skill: SkillMetadata | null) => void
   setDraftBuiltinBrowser: (selected: boolean) => void
@@ -1099,6 +1107,8 @@ const createDefaultThreadState = (): ThreadState => ({
   contextReminder: createDefaultContextReminderState(),
   harnessAgentmdLoadStatus: null,
   draftInput: "",
+  draftAttachments: [],
+  draftMentionedFiles: [],
   harnessNextActionDialogTips: null,
   draftSkill: null,
   draftBuiltinBrowser: false,
@@ -5968,6 +5978,17 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         },
         setDraftInput: (input: string) => {
           updateThreadState(threadId, () => ({ draftInput: input }))
+        },
+        setDraftAttachments: (update) => {
+          updateThreadState(threadId, (state) => ({
+            draftAttachments: typeof update === "function" ? update(state.draftAttachments) : update
+          }))
+        },
+        setDraftMentionedFiles: (update) => {
+          updateThreadState(threadId, (state) => ({
+            draftMentionedFiles:
+              typeof update === "function" ? update(state.draftMentionedFiles) : update
+          }))
         },
         setHarnessNextActionDialogTips: (tips: string | null) => {
           const normalizedTips = tips?.trim() || null

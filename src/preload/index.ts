@@ -1,3 +1,4 @@
+import { MARKET_SKILL_CATALOG_CHANGED, type MarketSkillCatalogPage } from "../shared/market-skill-catalog"
 import { PROJECT_AGENT_RUN_CHANNEL, type ProjectAgentRunListener, type ProjectAgentRunEvent } from "../shared/project-agent-run"
 import type { ProjectReportApi } from "../shared/project-analysis-report"
 import type {
@@ -154,6 +155,12 @@ import type {
 import type { ParsedAttachment } from "../main/file-parser"
 import type { SkillPreviewGrantRequest, SkillPreviewGrantResult } from "../shared/skill-preview"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
+import type {
+  MarketSkillShortcutBinding,
+  MarketSkillShortcutResult,
+  MarketSkillShortcutSelection,
+  MarketSkillShortcutSkillState
+} from "../shared/market-skill-shortcut"
 import { UserInfoConfig } from "../main/storage"
 import type {
   ManagedSavedCodeExecTool,
@@ -2398,7 +2405,23 @@ const api = {
       return ipcRenderer.invoke("file:supportedExtensions")
     }
   },
+  marketSkillShortcut: {
+    get: (): Promise<MarketSkillShortcutResult<MarketSkillShortcutBinding>> =>
+      ipcRenderer.invoke("marketSkillShortcut:get"),
+    resolve: (selection: MarketSkillShortcutSelection): Promise<
+      MarketSkillShortcutResult<MarketSkillShortcutSkillState<SkillMetadata>>
+    > => ipcRenderer.invoke("marketSkillShortcut:resolve", selection),
+    install: (selection: MarketSkillShortcutSelection): Promise<
+      MarketSkillShortcutResult<MarketSkillShortcutSkillState<SkillMetadata>>
+    > => ipcRenderer.invoke("marketSkillShortcut:install", selection)
+  },
   skills: {
+    marketCatalog: (): Promise<MarketSkillCatalogPage> => ipcRenderer.invoke("skills:marketCatalog"),
+    onMarketCatalogChanged: (callback: () => void): (() => void) => {
+      const listener = () => callback()
+      ipcRenderer.on(MARKET_SKILL_CATALOG_CHANGED, listener)
+      return () => ipcRenderer.removeListener(MARKET_SKILL_CATALOG_CHANGED, listener)
+    },
     catalog: {
       read: (
         input: SkillPluginCatalogPageInput,

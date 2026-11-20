@@ -1,3 +1,4 @@
+import type { MarketSkillCatalogPage } from "../shared/market-skill-catalog"
 import type { ProjectAgentRunListener } from "../shared/project-agent-run"
 import type { ProjectReportApi } from "../shared/project-analysis-report"
 import type {
@@ -125,6 +126,12 @@ import type {
   SubagentTranscriptBlobExportResult,
   SubagentTranscriptBlobField
 } from "../main/types"
+import type {
+  MarketSkillShortcutBinding,
+  MarketSkillShortcutResult,
+  MarketSkillShortcutSelection,
+  MarketSkillShortcutSkillState
+} from "../shared/market-skill-shortcut"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import type {
@@ -1841,7 +1848,18 @@ interface CustomAPI {
     }) => Promise<{ canceled: boolean; filePaths: string[] }>
     supportedExtensions: () => Promise<string[]>
   }
+  marketSkillShortcut: {
+    get: () => Promise<MarketSkillShortcutResult<MarketSkillShortcutBinding>>
+    resolve: (selection: MarketSkillShortcutSelection) => Promise<
+      MarketSkillShortcutResult<MarketSkillShortcutSkillState<SkillMetadata>>
+    >
+    install: (selection: MarketSkillShortcutSelection) => Promise<
+      MarketSkillShortcutResult<MarketSkillShortcutSkillState<SkillMetadata>>
+    >
+  }
   skills: {
+    marketCatalog: () => Promise<MarketSkillCatalogPage>
+    onMarketCatalogChanged: (callback: () => void) => () => void
     catalog: {
       read: (
         input: SkillPluginCatalogPageInput,

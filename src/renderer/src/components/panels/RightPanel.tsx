@@ -1,3 +1,4 @@
+import { ProjectPluginDevelopmentGuide } from "@/components/customize/ProjectPluginDevelopmentGuide"
 import {
   useState,
   useRef,
@@ -2366,19 +2367,24 @@ export function RightPanel({
 
           {/* PLUGINS */}
           <div className="flex shrink-0 flex-col">
-            <SectionHeader
-              title="插件"
-              icon={Puzzle}
-              badge={pluginSummary.value?.total ?? null}
-              badgeTitle={
-                pluginSummary.value ? `已安装 ${pluginSummary.value.total} 个插件` : undefined
-              }
-              badgeTruncated={pluginSummary.value?.truncated}
-              loading={pluginSummary.loading || (!pluginSummary.value && !pluginSummary.error)}
-              error={pluginSummary.error}
-              isOpen={pluginsOpen}
-              onToggle={() => toggleExclusivePanel("plugins", pluginsOpen)}
-            />
+            <div className="relative">
+              <SectionHeader
+                title="插件"
+                icon={Puzzle}
+                badge={pluginSummary.value?.total ?? null}
+                badgeTitle={
+                  pluginSummary.value ? `已安装 ${pluginSummary.value.total} 个插件` : undefined
+                }
+                badgeTruncated={pluginSummary.value?.truncated}
+                loading={pluginSummary.loading || (!pluginSummary.value && !pluginSummary.error)}
+                error={pluginSummary.error}
+                isOpen={pluginsOpen}
+                onToggle={() => toggleExclusivePanel("plugins", pluginsOpen)}
+              />
+              <div className="absolute inset-y-0 left-24 z-10 flex items-center">
+                <ProjectPluginDevelopmentGuide entry="workspace" />
+              </div>
+            </div>
             {pluginsOpen && (
               <div
                 className="right-panel-scroll overflow-auto border-t border-border/45"
