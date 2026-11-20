@@ -1,6 +1,13 @@
+import { finishThreadSearchNavigation, isCurrentThreadSearchNavigation, useThreadSearch, type DurableSearchNavigation } from "@/lib/thread-search-navigation"
+import { projectHumanGate } from "../../../../shared/harness-notifications"
+import { IDLE_MODEL_OUTSIDE_HOURS_MESSAGE } from "../../../../shared/idle-model-service-window"
+import { IDLE_MODEL_SAP_REQUIRED_MESSAGE } from "../../../../shared/model-catalog"
+import { useHarnessNotifications } from "@/lib/harness-notifications"
+import { BizRetryDecisionCard } from "@/components/harness-board/BizRetryNotice"
 import React, {
   useRef,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useCallback,
   useState,
@@ -8,8 +15,9 @@ import React, {
 } from "react"
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkBreaks from "remark-breaks"
+import type { VirtuosoHandle } from "react-virtuoso"
 import {
-  Send,
+  ArrowUp,
   Square,
   AlertCircle,
   X,
@@ -30,7 +38,6 @@ import {
   FilePenLine,
   Plus,
   Loader2,
-  CornerDownLeft,
   Flag,
   CheckCircle2,
   PauseCircle,
@@ -46,9 +53,10 @@ import {
   GripVertical,
   Pencil,
   ListEnd,
-  Check
+  Check,
+  SlidersHorizontal
 } from "lucide-react"
-import type { FileAttachment, QueuedMessage } from "@/types"
+import type { HarnessRunDetailViewModel, QueuedMessage } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import {
@@ -62,7 +70,9 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
+import { ToggleThumb } from "@/components/ui/toggle-thumb"
 import { useAppStore } from "@/lib/store"
+import { GitChangeNotice } from "@/components/git/GitChangeNotice"
 import {
   consumePendingHarnessNextAction,
   getPendingHarnessNextAction,
@@ -79,38 +89,31 @@ import {
   useCurrentThread,
   useThreadStream,
   useThreadContext,
-  type HookLogBucket,
   type ApiErrorDetailState
 } from "@/lib/thread-context"
+import { filterCoordinatorNoiseMessages } from "@/lib/message-display-helpers"
+import { canChangeThreadAgentMode } from "@/lib/agent-mode-switch-availability"
+import { getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
 import {
-  filterCoordinatorNoiseMessages,
-  isCoordinatorNotificationPrompt
-} from "@/lib/message-display-helpers"
-import { reconcileMessageDisplayOrder } from "@/lib/message-display-order"
-import {
-  buildToolResultAssociations,
-  getWorkerToolUiKey
-} from "@/lib/worker-tool-result-key"
-import {
-  buildVisibleMessageLayout,
-  messageHasVisibleRow
+  messageHasVisibleRow,
+  normalizeVisibleReasoningText
 } from "@/lib/message-display-visibility"
-import { createToolDerivationMessageSelector } from "@/lib/message-render-stability"
 import {
   isCoordinatorModeMetadata,
   isMultiModeMetadata,
   isWorkflowModeMetadata
 } from "@/lib/coordinator-mode-helpers"
 import { ModelSwitcher } from "./ModelSwitcher"
+import { BackgroundShellStopButton } from "./BackgroundShellStopButton"
 import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
 import { WorkflowRunPanel, WorkflowHistoryButton } from "./WorkflowRunPanel"
 import { SandboxModeSwitcher } from "./SandboxModeSwitcher"
 import { MemorySessionSwitcher } from "./MemorySessionSwitcher"
+import { ThreadRemoteAccessSwitcher } from "./ThreadRemoteAccessSwitcher"
 import { OutputStyleSwitcher } from "./OutputStyleSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
-import { ChatMessageCount } from "./ChatMessageCount"
 import {
   getSystemConstraintsLoadCounts,
   hasNoLoadedSystemConstraints,
@@ -119,7 +122,6 @@ import {
 import type {
   GoalUiState,
   ForkableCheckpoint,
-  HITLRequest,
   Message,
   SkillMetadata,
   Thread,
@@ -128,19 +130,32 @@ import type {
   ToolCallStatus,
   UserInputResponse
 } from "@/types"
-import { MessageBubble } from "./MessageBubble"
+import {
+  CHAT_MESSAGE_VIRTUALIZATION_THRESHOLD,
+  ChatMessageVirtualList,
+  shouldVirtualizeChatMessageList,
+  type ChatApprovalDecision
+} from "./ChatMessageVirtualList"
 import { ChatScrollNavigator } from "./ChatScrollNavigator"
 import { ChatScrollToBottomButton } from "./ChatScrollToBottomButton"
-import { ChatSearchOverlay } from "./ChatSearchOverlay"
+import {
+  ChatSearchOverlay,
+  type DurableChatSearchOptions,
+  type DurableChatSearchMatch,
+  type DurableChatSearchPage
+} from "./ChatSearchOverlay"
+import { chatScrollSessionStore, type ChatScrollSessionAnchor } from "./chat-scroll-session-store"
 import { WelcomeSkills } from "./WelcomeSkills"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
 import { AgentGitCommitDialog, type AgentCommitOutcome } from "./AgentGitCommitDialog"
 import { ContextReminderController, isContextReminderPending } from "./ContextReminderController"
-import { uploadChatData, ChatReportPayload } from "@/api"
-import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
+import { YoloEnableConfirmDialog } from "@/components/YoloEnableConfirmDialog"
+import { uploadChatData } from "@/api"
+import { insertLog } from "../../../js/mmjUtils"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
+import { formatHookClockTime, HOOK_TIME_ZONE_LABEL } from "../../../../shared/hook-time"
 import {
   getBuiltinBrowserTitleSource,
   isBuiltinBrowserCommandSelection,
@@ -165,20 +180,39 @@ import {
 } from "@/features/mentions/useAtFileMentions"
 import { AtFileMentionPopover } from "@/features/mentions/AtFileMentionPopover"
 import {
+  readBoundedWorkspaceMentionFile,
+  retainMentionedWorkspaceFilesForWorkspace,
   resolveAtFileAttachments,
-  resolveAtFileSelection,
-  type MentionedWorkspaceFile
+  resolveAtFileSelection
 } from "@/features/mentions/atFileAttachments"
 import { MentionFileChip } from "@/features/mentions/MentionFileChip"
+import { DEFAULT_IM_CHANNEL_ID } from "../../../../shared/im-gateway-contract"
+import { GOAL_USER_EVENT_MESSAGE_ID_PREFIX } from "../../../../shared/goal-events"
+import { findThreadMessageGapTailStart } from "@/lib/thread-message-pages"
 import { splitGoalTransportPayload } from "../../../../shared/goal-slash"
+import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
 import {
-  CHAT_AUTO_SCROLL_ALWAYS,
-  normalizeChatAutoScrollMessageLimit
-} from "../../../../shared/chat-scroll"
+  MAX_ATTACHMENT_FILE_BYTES,
+  type SelectedAttachmentFileGrant
+} from "../../../../shared/file-attachment"
+import { cleanUserAttachmentContentForDisplay } from "../../../../shared/user-attachment-display"
+import { resolveChatSearchContiguousTailStart } from "@/lib/chat-search-gap-boundary"
+import { createMessageIdIndexLookup, type MessageIdIndexLookup } from "@/lib/lazy-message-id-index"
 import { BuiltinBrowserChip } from "@/features/builtin-browser/BuiltinBrowserChip"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
-import { mergeChatSkills, selectSkillForSlashName } from "@/features/slash-commands/skill-merge"
+import { selectSkillForSlashName } from "@/features/slash-commands/skill-merge"
 import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
+import {
+  ensureDisabledSkillsChangedInvalidationSource,
+  ensureSkillsChangedInvalidationSource,
+  isSkillCatalogFresh,
+  projectChatSkillCatalog,
+  readSkillCatalogCache,
+  revalidateSkillCatalog,
+  subscribeSkillCatalogInvalidation,
+  type ChatSkillCatalogProjection
+} from "@/lib/app-catalog-cache"
+import { readHarnessBoardCatalogCache } from "@/components/harness-board/harness-board-cache"
 import {
   getQueuedModelContent,
   getQueuedDisplayContent,
@@ -187,17 +221,14 @@ import {
   canClaimQueuedMessage,
   classifyGuidedMessage
 } from "@/lib/queued-message-content"
-import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
-import { formatGoalEventMessage, isVisibleCheckpointTranscriptMessage } from "@/lib/goal-transcript"
-import { buildGoalPanelViewModel, goalVerdictTone } from "@/lib/goal-panel-view"
+import { getSkillMetadataId, isSkillDisabled } from "@/lib/skill-ids"
 import {
-  liveStreamMessageRole,
-  normalizeLiveStreamMessageIds,
-  normalizeLiveStreamMessageContent,
-  stringifyMessageContentForReport,
-  type LiveStreamMessage as StreamMessage
-} from "@/lib/live-stream-messages"
-import { buildMessageBubbleTimingMeta } from "@/lib/message-bubble-timing"
+  excludeDuplicateGoalSidecars,
+  formatGoalEventMessage,
+  isVisibleCheckpointTranscriptMessage
+} from "@/lib/goal-transcript"
+import { buildGoalPanelViewModel, goalVerdictTone } from "@/lib/goal-panel-view"
+import { buildLatestChatReportBatch, type ChatReportBatch } from "@/lib/chat-report-batch"
 import {
   markChatReportUploadFailed,
   markChatReportUploadSucceeded,
@@ -208,29 +239,144 @@ import {
   shouldClearPendingApprovalAfterGoalControl
 } from "@/lib/goal-control-submit"
 import {
+  getSubmitInFlightReleaseVersion,
   releaseSubmitInFlightLock,
   shouldQueueBehindInFlightSubmit,
   shouldUseSubmitInFlightLock,
+  subscribeSubmitInFlightRelease,
   tryAcquireSubmitInFlightLock,
   type SubmitInFlightLockRef
 } from "@/lib/submit-in-flight-lock"
 import { GitBranchSwitcher } from "./GitBranchSwitcher"
 import { ProcessingDuration } from "./ProcessingDuration"
 import { ContextCompactionCard } from "./ContextCompactionCard"
-import { HookLogChip, HookLogModal } from "./HookLogViews"
+import { HookLogModal } from "./HookLogViews"
+import {
+  shouldHydrateDurableSearchMatch,
+  boundChatSearchCorpus,
+  chatSearchDocumentUnits,
+  type ChatSearchCorpus,
+  type ChatSearchDocument
+} from "@/lib/chat-search-matches"
+import { createChatMessageProjector } from "@/lib/chat-message-projection"
+import { createChatSearchIndexer } from "@/lib/chat-search-indexer"
+import { createChatSearchPlan, appendChatSearchToolSummaries } from "../../../../shared/chat-search-plan"
+import { areChatSearchPlansEqual, type ChatSearchReveal } from "../../../../shared/chat-search-types"
+import { getChatThreadProjectionRuntime } from "@/lib/chat-thread-projection-cache"
+import {
+  chatScrollTailMessageIdentity,
+  classifyChatScrollTailChange,
+  shouldMarkChatTailContentGrowth
+} from "@/lib/chat-scroll-tail-change"
+import { loadWorkspaceFilesDeduped, resumeWorkspaceFilesDeduped } from "@/lib/workspace-file-load"
+import {
+  createChatScrollState,
+  isChatScrollDetached,
+  mergeChatScrollEffects,
+  resolveChatBottomScrollWriter,
+  shouldConfirmChatViewportBottom,
+  shouldFollowChatOutput,
+  transitionChatScroll,
+  type ChatScrollEffect,
+  type ChatScrollEvent,
+  type ChatScrollState,
+  type ChatScrollTransition
+} from "../../../../shared/chat-scroll-controller"
+import {
+  isProjectModeAgentTeamEnabled,
+  isProjectModeAgentTeamSelectionDisabled
+} from "../../../../shared/project-mode-agent-team"
 
-const PROJECT_MODE_AGENT_TEAM_ENABLED =
-  import.meta.env.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED?.trim() === "1"
+const PROJECT_MODE_AGENT_TEAM_ENABLED = isProjectModeAgentTeamEnabled(
+  import.meta.env.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED
+)
+const REMOTE_THREAD_TIP_DISMISSALS_STORAGE_KEY = "chat:remote-thread-tip-dismissals"
 
-function interruptionNoticeCopy(event: string, action: string): {
+function loadRemoteThreadTipDismissals(): Set<string> {
+  try {
+    const raw = sessionStorage.getItem(REMOTE_THREAD_TIP_DISMISSALS_STORAGE_KEY)
+    if (!raw) return new Set()
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return new Set()
+    return new Set(parsed.filter((threadId): threadId is string => typeof threadId === "string"))
+  } catch {
+    return new Set()
+  }
+}
+
+function persistRemoteThreadTipDismissals(threadIds: Set<string>): void {
+  try {
+    sessionStorage.setItem(REMOTE_THREAD_TIP_DISMISSALS_STORAGE_KEY, JSON.stringify([...threadIds]))
+  } catch {
+    // Tip dismissal is a best-effort, renderer-session-only preference.
+  }
+}
+const CHAT_AT_BOTTOM_THRESHOLD_PX = 32
+const CHAT_SCROLL_UP_DETACH_DELTA_PX = 1
+const CHAT_USER_SCROLL_INTENT_WINDOW_MS = 350
+const CHAT_BOTTOM_SETTLE_MAX_FRAMES = 60
+const CHAT_FOLLOW_SETTLE_MAX_FRAMES = 12
+const CHAT_HISTORY_ANCHOR_MAX_FRAMES = 120
+const CHAT_HISTORY_ANCHOR_STABLE_FRAMES = 12
+const CHAT_SESSION_ANCHOR_STABLE_FRAMES = 2
+const CHAT_LOCAL_SEARCH_HISTORY_LIMIT = 500
+const CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT = 4 * 1024 * 1024
+type YoloModeLoadState = "loading" | "loaded" | "failed"
+function awaitWorkspaceMentionLoad<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    const error = new Error("Workspace mention load was cancelled")
+    error.name = "AbortError"
+    return Promise.reject(error)
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      signal.removeEventListener("abort", onAbort)
+      const error = new Error("Workspace mention load was cancelled")
+      error.name = "AbortError"
+      reject(error)
+    }
+    signal.addEventListener("abort", onAbort, { once: true })
+    void operation.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort)
+        resolve(value)
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort)
+        reject(error)
+      }
+    )
+  })
+}
+
+interface PendingDurableHistoryAnchor {
+  threadId: string
+  generation: number
+  messageId: string
+  viewportTop: number
+  previousMessageCount: number
+  previousLoadedMessageCount: number
+  attempt: number
+  stableFrames: number
+}
+
+interface PendingChatSessionAnchor extends ChatScrollSessionAnchor {
+  threadId: string
+  attempt: number
+  stableFrames: number
+}
+
+function interruptionNoticeCopy(
+  event: string,
+  action: string
+): {
   title: string
   explanation: string
 } {
   if (event.startsWith("Failure fuse")) {
     return {
       title: "工具失败熔断已停止本轮",
-      explanation:
-        "这是工具失败熔断结果，不是应用崩溃。你可以调整策略后发送新消息继续对话。"
+      explanation: "这是工具失败熔断结果，不是应用崩溃。你可以调整策略后发送新消息继续对话。"
     }
   }
   if (event.startsWith("Tool-call loop")) {
@@ -264,20 +410,20 @@ function goalStatusView(status: "active" | "paused" | "complete"): {
     return {
       label: "已完成",
       icon: <CheckCircle2 className="size-4 text-emerald-600" />,
-      className: "text-[#23483c]"
+      className: "text-status-nominal"
     }
   }
   if (status === "paused") {
     return {
       label: "已暂停",
       icon: <PauseCircle className="size-4 text-amber-600" />,
-      className: "text-[#51453a]"
+      className: "text-status-warning"
     }
   }
   return {
     label: "进行中",
     icon: <Flag className="size-4 text-sky-600" />,
-    className: "text-[#2f3f4a]"
+    className: "text-status-info"
   }
 }
 
@@ -326,7 +472,7 @@ function GoalStatusPanel({
       <div className="relative mx-auto mb-2 max-w-3xl">
         <div
           className={cn(
-            "flex items-center gap-3 rounded-2xl border border-black/[0.07] bg-white/82 px-3 py-2 shadow-[0_14px_42px_rgba(24,24,27,0.09),0_1px_0_rgba(255,255,255,0.88)_inset] backdrop-blur-2xl",
+            "flex items-center gap-3 rounded-2xl border border-border bg-background-elevated/90 px-3 py-2 shadow-[0_14px_42px_rgba(0,0,0,0.12)] backdrop-blur-2xl dark:shadow-[0_16px_42px_rgba(0,0,0,0.28)]",
             status.className
           )}
         >
@@ -335,13 +481,13 @@ function GoalStatusPanel({
             className="flex min-w-0 flex-1 items-center gap-3 text-left"
             onClick={() => onOpenChange(!open)}
           >
-            <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-white shadow-[0_6px_18px_rgba(24,24,27,0.10)] ring-1 ring-black/[0.06]">
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-background-interactive shadow-[0_6px_18px_rgba(0,0,0,0.10)] ring-1 ring-border">
               {status.icon}
             </span>
             <span className="min-w-0 flex-1">
               <span className="flex flex-wrap items-center gap-2">
                 <span className="shrink-0 text-sm font-semibold">Goal {status.label}</span>
-                <span className="shrink-0 rounded-full border border-black/[0.05] bg-[#f7f7f5]/85 px-2 py-0.5 text-[11px] text-muted-foreground">
+                <span className="shrink-0 rounded-full border border-border bg-background-interactive/85 px-2 py-0.5 text-[11px] text-muted-foreground">
                   {duration} · {goal.turnsUsed}/{goal.maxTurns} 轮
                 </span>
               </span>
@@ -354,7 +500,7 @@ function GoalStatusPanel({
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                  className="flex size-8 items-center justify-center rounded-full bg-background-interactive/90 text-foreground/70 ring-1 ring-border transition-colors hover:bg-secondary hover:text-foreground"
                   onClick={onEditGoal}
                   aria-label="编辑 Goal"
                 >
@@ -368,7 +514,7 @@ function GoalStatusPanel({
                 <TooltipTrigger asChild>
                   <button
                     type="button"
-                    className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                    className="flex size-8 items-center justify-center rounded-full bg-background-interactive/90 text-foreground/70 ring-1 ring-border transition-colors hover:bg-secondary hover:text-foreground"
                     onClick={() => onCommand("/goal pause")}
                     aria-label="暂停 Goal"
                   >
@@ -383,7 +529,7 @@ function GoalStatusPanel({
                 <TooltipTrigger asChild>
                   <button
                     type="button"
-                    className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                    className="flex size-8 items-center justify-center rounded-full bg-background-interactive/90 text-foreground/70 ring-1 ring-border transition-colors hover:bg-secondary hover:text-foreground"
                     onClick={() => onCommand("/goal resume")}
                     aria-label="继续 Goal"
                   >
@@ -397,7 +543,7 @@ function GoalStatusPanel({
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                  className="flex size-8 items-center justify-center rounded-full bg-background-interactive/90 text-foreground/70 ring-1 ring-border transition-colors hover:bg-secondary hover:text-foreground"
                   onClick={() => onOpenChange(!open)}
                   aria-label="查看 Goal 详情"
                 >
@@ -410,7 +556,7 @@ function GoalStatusPanel({
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                  className="flex size-8 items-center justify-center rounded-full bg-background-interactive/90 text-foreground/70 ring-1 ring-border transition-colors hover:bg-secondary hover:text-foreground"
                   onClick={() => onCommand("/goal clear")}
                   aria-label="清除 Goal"
                 >
@@ -423,16 +569,16 @@ function GoalStatusPanel({
         </div>
 
         {open && (
-          <div className="fixed bottom-24 right-5 top-16 z-40 flex w-[min(480px,calc(100vw-40px))] flex-col overflow-hidden rounded-3xl border border-black/[0.08] bg-[#fbfaf8] shadow-[0_24px_80px_rgba(24,24,27,0.18)]">
-            <div className="border-b border-black/[0.06] bg-white px-5 py-4">
+          <div className="fixed bottom-24 right-5 top-16 z-40 flex w-[min(480px,calc(100vw-40px))] flex-col overflow-hidden rounded-3xl border border-border bg-background shadow-[0_24px_80px_rgba(0,0,0,0.22)] dark:shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
+            <div className="border-b border-border bg-background-elevated px-5 py-4">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="flex size-10 items-center justify-center rounded-full bg-[#f7f7f5] shadow-sm ring-1 ring-black/[0.06]">
+                    <span className="flex size-10 items-center justify-center rounded-full bg-background-interactive shadow-sm ring-1 ring-border">
                       {status.icon}
                     </span>
                     <div className="text-lg font-semibold text-foreground">Goal {status.label}</div>
-                    <div className="rounded-full border border-black/[0.06] bg-[#f6f5f2] px-2 py-0.5 text-xs text-muted-foreground">
+                    <div className="rounded-full border border-border bg-background-interactive px-2 py-0.5 text-xs text-muted-foreground">
                       {duration} · {goal.turnsUsed}/{goal.maxTurns} 轮
                     </div>
                     <div
@@ -450,14 +596,14 @@ function GoalStatusPanel({
                 </div>
                 <button
                   type="button"
-                  className="flex size-8 shrink-0 items-center justify-center rounded-full bg-[#f6f5f2] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  className="flex size-8 shrink-0 items-center justify-center rounded-full bg-background-interactive text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                   onClick={() => onOpenChange(false)}
                   aria-label="关闭 Goal 详情"
                 >
                   <X className="size-4" />
                 </button>
               </div>
-              <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-[#eeece8]">
+              <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-background-interactive">
                 <div
                   className={cn(
                     "h-full rounded-full",
@@ -475,7 +621,7 @@ function GoalStatusPanel({
             <div className="flex-1 space-y-4 overflow-y-auto overflow-x-hidden px-5 py-4 text-sm break-words [overflow-wrap:anywhere]">
               <section
                 className={cn(
-                  "min-w-0 overflow-hidden rounded-2xl border p-4 shadow-[0_1px_0_rgba(255,255,255,0.8)_inset]",
+                  "min-w-0 overflow-hidden rounded-2xl border p-4 shadow-[inset_0_1px_0_var(--border)]",
                   goalVerdictTone(goal.lastVerdict)
                 )}
               >
@@ -486,13 +632,13 @@ function GoalStatusPanel({
                 <div className="whitespace-pre-wrap break-words text-base leading-7 text-foreground/90 [overflow-wrap:anywhere]">
                   {evaluatorReason}
                 </div>
-                <div className="mt-3 rounded-xl bg-white/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
+                <div className="mt-3 rounded-xl bg-background-interactive/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
                   这里展示的是 evaluator 根据最近一轮 assistant 回复、工具结果和持久化 ledger
                   做出的判断。它解释为什么 Goal 会继续、暂停或完成。
                 </div>
               </section>
 
-              <section className="min-w-0 overflow-hidden rounded-2xl border border-black/[0.06] bg-white p-4">
+              <section className="min-w-0 overflow-hidden rounded-2xl border border-border bg-background-elevated p-4">
                 <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
                   <Flag className="size-4" />
                   目标与完成标准
@@ -507,7 +653,7 @@ function GoalStatusPanel({
                     </div>
                   </div>
                   {goal.completionCondition !== goal.objective && (
-                    <div className="border-t border-black/[0.06] pt-3">
+                    <div className="border-t border-border pt-3">
                       <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                         完成条件
                       </div>
@@ -517,7 +663,7 @@ function GoalStatusPanel({
                     </div>
                   )}
                   {contextText && (
-                    <div className="border-t border-black/[0.06] pt-3">
+                    <div className="border-t border-border pt-3">
                       <div className="mb-1 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                         <Notebook className="size-3.5" />
                         启动上下文
@@ -530,7 +676,7 @@ function GoalStatusPanel({
                 </div>
               </section>
 
-              <section className="min-w-0 overflow-hidden rounded-2xl border border-black/[0.06] bg-white p-4">
+              <section className="min-w-0 overflow-hidden rounded-2xl border border-border bg-background-elevated p-4">
                 <div className="mb-1 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
                   <Layers className="size-4" />
                   进展与证据
@@ -541,7 +687,7 @@ function GoalStatusPanel({
                 </div>
 
                 {!hasLedgerDetails ? (
-                  <div className="rounded-xl border border-dashed border-black/[0.10] bg-[#fbfaf8] px-3 py-4 text-center text-xs text-muted-foreground">
+                  <div className="rounded-xl border border-dashed border-border bg-background-interactive/70 px-3 py-4 text-center text-xs text-muted-foreground">
                     暂无 ledger 条目。下一轮评估后会在这里记录进展、证据或阻塞。
                   </div>
                 ) : (
@@ -555,7 +701,7 @@ function GoalStatusPanel({
                         <ol className="space-y-2">
                           {allProgressItems.map((item, index) => (
                             <li key={`progress-${index}`} className="flex min-w-0 gap-2 leading-5">
-                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-emerald-50 text-[11px] font-semibold text-emerald-700">
+                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-status-nominal/10 text-[11px] font-semibold text-status-nominal">
                                 {index + 1}
                               </span>
                               <span className="min-w-0 whitespace-pre-wrap break-words text-foreground/85 [overflow-wrap:anywhere]">
@@ -568,7 +714,7 @@ function GoalStatusPanel({
                     )}
 
                     {allEvidenceItems.length > 0 && (
-                      <div className="border-t border-black/[0.06] pt-4">
+                      <div className="border-t border-border pt-4">
                         <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-foreground/80">
                           <Database className="size-3.5 text-sky-600" />
                           证据
@@ -576,7 +722,7 @@ function GoalStatusPanel({
                         <ol className="space-y-2">
                           {allEvidenceItems.map((item, index) => (
                             <li key={`evidence-${index}`} className="flex min-w-0 gap-2 leading-5">
-                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-sky-50 text-[11px] font-semibold text-sky-700">
+                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-status-info/10 text-[11px] font-semibold text-status-info">
                                 {index + 1}
                               </span>
                               <span className="min-w-0 whitespace-pre-wrap break-words text-foreground/85 [overflow-wrap:anywhere]">
@@ -589,7 +735,7 @@ function GoalStatusPanel({
                     )}
 
                     {allBlockerItems.length > 0 && (
-                      <div className="border-t border-black/[0.06] pt-4">
+                      <div className="border-t border-border pt-4">
                         <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-foreground/80">
                           <CircleAlert className="size-3.5 text-amber-600" />
                           未解决问题
@@ -597,7 +743,7 @@ function GoalStatusPanel({
                         <ol className="space-y-2">
                           {allBlockerItems.map((item, index) => (
                             <li key={`blocker-${index}`} className="flex min-w-0 gap-2 leading-5">
-                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-amber-50 text-[11px] font-semibold text-amber-700">
+                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-status-warning/10 text-[11px] font-semibold text-status-warning">
                                 {index + 1}
                               </span>
                               <span className="min-w-0 whitespace-pre-wrap break-words text-foreground/85 [overflow-wrap:anywhere]">
@@ -612,26 +758,29 @@ function GoalStatusPanel({
                 )}
               </section>
 
-              <section className="min-w-0 overflow-hidden rounded-2xl border border-black/[0.06] bg-white p-4">
+              <section className="min-w-0 overflow-hidden rounded-2xl border border-border bg-background-elevated p-4">
                 <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
                   <Clock className="size-4" />
                   最近事件
                 </div>
-                <div className="mb-3 rounded-xl bg-[#fbfaf8] px-3 py-2 text-xs leading-5 text-muted-foreground">
+                <div className="mb-3 rounded-xl bg-background-interactive/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
                   最近一条：{recentEventSummary}
                 </div>
                 <details>
-                  <summary className="cursor-pointer list-none rounded-lg border border-black/[0.06] px-3 py-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/40">
+                  <summary className="cursor-pointer list-none rounded-lg border border-border px-3 py-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/40">
                     展开事件历史（{latestEvents.length}）
                   </summary>
                   {latestEvents.length === 0 ? (
-                    <div className="mt-3 rounded-lg bg-[#fbfaf8] px-3 py-2 text-xs text-muted-foreground">
+                    <div className="mt-3 rounded-lg bg-background-interactive/70 px-3 py-2 text-xs text-muted-foreground">
                       暂无事件
                     </div>
                   ) : (
                     <div className="mt-3 space-y-3">
                       {latestEvents.map((event) => (
-                        <div key={event.event_id} className="border-l-2 border-black/[0.10] pl-3">
+                        <div
+                          key={event.event_id}
+                          className="border-l-2 border-border-emphasis pl-3"
+                        >
                           <div className="mb-1 text-[11px] text-muted-foreground">
                             {goalEventTimeLabel(event.created_at)}
                           </div>
@@ -646,7 +795,7 @@ function GoalStatusPanel({
               </section>
             </div>
 
-            <div className="flex items-center justify-between gap-2 border-t border-black/[0.06] bg-white px-5 py-3">
+            <div className="flex items-center justify-between gap-2 border-t border-border bg-background-elevated px-5 py-3">
               <button
                 type="button"
                 className="rounded-xl px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted"
@@ -657,7 +806,7 @@ function GoalStatusPanel({
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  className="rounded-xl border border-black/[0.08] px-3 py-2 text-sm font-medium transition-colors hover:bg-muted"
+                  className="rounded-xl border border-border px-3 py-2 text-sm font-medium transition-colors hover:bg-muted"
                   onClick={onEditGoal}
                 >
                   编辑
@@ -682,7 +831,7 @@ function GoalStatusPanel({
                 )}
                 <button
                   type="button"
-                  className="rounded-xl border border-black/[0.08] px-3 py-2 text-sm font-medium transition-colors hover:bg-muted"
+                  className="rounded-xl border border-border px-3 py-2 text-sm font-medium transition-colors hover:bg-muted"
                   onClick={() => onCommand("/goal clear")}
                 >
                   清除
@@ -728,13 +877,9 @@ const CHAT_SURFACE_CONFIG: Record<ChatSurface, ChatSurfaceConfig> = {
 
 interface ChatContainerProps {
   threadId: string
-  showGitChangeNotice?: boolean
   surface?: ChatSurface
   hideWelcomeSkillTabs?: boolean
   readOnlyReason?: string | null
-  onOpenGitPanel?: () => void
-  onDismissGitChangeNotice?: () => void
-  onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
   onHarnessSessionCreated?: (threadId: string) => void
 }
 
@@ -785,11 +930,6 @@ function isTerminalToolCallStatus(status?: ToolCallStatus): boolean {
   )
 }
 
-function useStableToolDerivationMessages(messages: readonly Message[]): readonly Message[] {
-  const [selectStableMessages] = useState(createToolDerivationMessageSelector)
-  return selectStableMessages(messages)
-}
-
 const THINKING_MESSAGES = [
   "我先想想...",
   "让我捋一捋...",
@@ -833,9 +973,14 @@ const ATTACH_FILE_POPOVER_CONTENT = (
 const DOC_SAVE_AS_DOCX_HINT = "doc文件不要直接改后缀，在文件系统“另存为”docx之后上传。"
 const MAX_ATTACHMENTS = 3
 const MAX_TOTAL_CHARS = 24_000
+const AT_FILE_PREVIEW_LANE = "chat-at-file-submit"
 /** 输入框正文硬上限(字符数)。超过则拒绝发送并提示,防止病态超长输入。
  * 取值与附件总字符上限(MAX_TOTAL_CHARS)一致,均为 24000。 */
 const MAX_INPUT_CHARS = 24_000
+
+type PendingAttachmentInput =
+  | ({ kind: "selected" } & SelectedAttachmentFileGrant)
+  | { kind: "bytes"; fileName: string; bytes: ArrayBuffer }
 
 // Module-level (not a component-local useRef): TabbedPanel unmounts ChatContainer
 // entirely when switching to a file tab (`isAgentTab ? <ChatContainer> : <FileViewer>`)
@@ -884,6 +1029,8 @@ const RECOVERABLE_QUEUE_ERRORS = new Set([
   QUEUE_MODEL_REQUIRED_ERROR,
   QUEUE_MODEL_MISSING_ERROR,
   QUEUE_MODEL_UNAVAILABLE_ERROR,
+  IDLE_MODEL_OUTSIDE_HOURS_MESSAGE,
+  IDLE_MODEL_SAP_REQUIRED_MESSAGE,
   QUEUE_WORKSPACE_REQUIRED_ERROR
 ])
 const CHAT_REPORT_UPLOAD_DEBOUNCE_MS = 250
@@ -907,22 +1054,6 @@ const ROTATING_WORDS = [
   "部署上线"
 ]
 
-const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
-const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
-
-type MessageTimeValue = {
-  start_at?: string
-  end_at?: string
-}
-
-type MessageTimeMap = Record<string, MessageTimeValue>
-
-const messageTimeOrderEntries = (
-  updates: MessageTimeMap
-): Array<MessageTimeValue & { id: string }> => {
-  return Object.entries(updates).map(([id, time]) => ({ id, ...time }))
-}
-
 const getMessageText = (content: Message["content"]): string => {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return ""
@@ -937,6 +1068,81 @@ const getMessageText = (content: Message["content"]): string => {
     .join("\n")
 }
 
+function cleanUserAttachmentMarkupForDisplay(message: Message): Message {
+  if (
+    message.role !== "user" ||
+    typeof message.content !== "string" ||
+    !message.content.includes("<attachment ")
+  ) {
+    return message
+  }
+
+  const content = cleanUserAttachmentContentForDisplay(message.content)
+  return { ...message, content }
+}
+
+interface ThreadDisplayBaselineCacheEntry {
+  contentVersion: number
+  sourceLength: number
+  sourceTailSnapshot: Message | undefined
+  sourceTailProjected: boolean
+  baseline: Message[]
+}
+
+const threadDisplayBaselineCache = new WeakMap<
+  readonly Message[],
+  ThreadDisplayBaselineCacheEntry
+>()
+
+function getThreadDisplayBaseline(messages: readonly Message[], contentVersion: number): Message[] {
+  const cached = threadDisplayBaselineCache.get(messages)
+  if (cached?.contentVersion === contentVersion) return cached.baseline
+  const sourceTail = messages.at(-1)
+  if (
+    cached &&
+    cached.sourceLength === messages.length &&
+    cached.sourceTailSnapshot &&
+    sourceTail &&
+    sourceTail.role !== "user" &&
+    cached.sourceTailSnapshot.id === sourceTail.id &&
+    cached.sourceTailSnapshot.role === sourceTail.role &&
+    cached.sourceTailSnapshot.tool_call_id === sourceTail.tool_call_id
+  ) {
+    const projectedTail = filterCoordinatorNoiseMessages(
+      isVisibleCheckpointTranscriptMessage(sourceTail)
+        ? [cleanUserAttachmentMarkupForDisplay(sourceTail)]
+        : []
+    )
+    if (!cached.sourceTailProjected && projectedTail.length === 0) {
+      cached.contentVersion = contentVersion
+      cached.sourceTailSnapshot = sourceTail
+      return cached.baseline
+    }
+    if (
+      cached.sourceTailProjected &&
+      projectedTail.length === 1 &&
+      cached.baseline.at(-1)?.id === sourceTail.id
+    ) {
+      cached.baseline[cached.baseline.length - 1] = projectedTail[0]
+      cached.contentVersion = contentVersion
+      cached.sourceTailSnapshot = sourceTail
+      return cached.baseline
+    }
+  }
+  const baseline = filterCoordinatorNoiseMessages(
+    excludeDuplicateGoalSidecars(messages.filter(isVisibleCheckpointTranscriptMessage))
+      .map(cleanUserAttachmentMarkupForDisplay)
+  )
+  threadDisplayBaselineCache.set(messages, {
+    contentVersion,
+    sourceLength: messages.length,
+    sourceTailSnapshot: sourceTail,
+    sourceTailProjected: Boolean(sourceTail && baseline.at(-1)?.id === sourceTail.id),
+    baseline
+  })
+  return baseline
+}
+
 type ForkDestinationMode = "local" | "workspace"
 
 interface MessageForkDialogTarget {
@@ -944,6 +1150,39 @@ interface MessageForkDialogTarget {
   sourceWorkspacePath: string | null
   message: Message
   checkpoint: ForkableCheckpoint
+}
+
+interface RemoteThreadDisplayInfo {
+  kind: "inbox" | "feature"
+  historical: boolean
+  featureLabel?: string
+}
+
+function getRemoteThreadDisplayInfo(thread: Thread | null): RemoteThreadDisplayInfo | null {
+  const metadata = thread?.metadata
+  if (!metadata || (metadata.targetKind !== "inbox" && metadata.targetKind !== "feature")) {
+    return null
+  }
+  const delivery = metadata.imDeliveryContext
+  if (!delivery || typeof delivery !== "object" || Array.isArray(delivery)) return null
+  const context = delivery as Record<string, unknown>
+  if (context.provider !== DEFAULT_IM_CHANNEL_ID || typeof context.conversationKey !== "string") {
+    return null
+  }
+  if (metadata.targetKind === "inbox") {
+    return { kind: "inbox", historical: metadata.remoteState === "historical" }
+  }
+  const harnessFeature = metadata.harnessFeature
+  if (!harnessFeature || typeof harnessFeature !== "object" || Array.isArray(harnessFeature)) {
+    return null
+  }
+  const feature = harnessFeature as Record<string, unknown>
+  if (typeof feature.projectId !== "string" || typeof feature.slug !== "string") return null
+  return {
+    kind: "feature",
+    historical: metadata.remoteState === "historical",
+    featureLabel: feature.slug
+  }
 }
 
 function getForkWorkspacePath(thread: Thread | null): string | null {
@@ -1026,6 +1265,7 @@ function RotatingHeadline() {
 interface HarnessFeatureBinding {
   projectId: string
   slug: string
+  runId?: string
 }
 
 function getHarnessFeatureBinding(thread: Thread | null | undefined): HarnessFeatureBinding | null {
@@ -1037,7 +1277,56 @@ function getHarnessFeatureBinding(thread: Thread | null | undefined): HarnessFea
   const metadata = harnessFeature as Record<string, unknown>
   const projectId = typeof metadata.projectId === "string" ? metadata.projectId.trim() : ""
   const slug = typeof metadata.slug === "string" ? metadata.slug.trim() : ""
-  return projectId && slug ? { projectId, slug } : null
+  const runId = typeof metadata.runId === "string" ? metadata.runId.trim() : ""
+  return projectId && slug
+    ? { projectId, slug, ...(runId ? { runId } : {}) }
+    : null
+}
+
+type HarnessPreferredPlugin = { id?: string; name?: string } | null
+
+function getCachedHarnessPreferredPlugin(projectId: string): HarnessPreferredPlugin {
+  const project = readHarnessBoardCatalogCache()?.projects.find(
+    (candidate) => candidate.projectId === projectId
+  )
+  return project ? { id: project.harnessAdapter.id, name: project.harnessAdapter.name } : null
+}
+
+interface InitialChatSkillCatalogState {
+  projection: ChatSkillCatalogProjection | null
+  loading: boolean
+  targetProjectId: string | null
+  resolvedProjectId: string | null
+  preferredPlugin: HarnessPreferredPlugin
+}
+
+function createInitialChatSkillCatalogState(
+  threadId: string,
+  surface: ChatSurface
+): InitialChatSkillCatalogState {
+  const store = useAppStore.getState()
+  const binding = getHarnessFeatureBinding(
+    store.threads.find((thread) => thread.thread_id === threadId)
+  )
+  const targetProjectId = binding?.projectId ?? null
+  const harnessScoped = surface !== "default" || Boolean(binding)
+  const preferredPlugin = binding ? getCachedHarnessPreferredPlugin(binding.projectId) : null
+  const harnessCatalogReady = !binding || preferredPlugin !== null
+  const snapshot = readSkillCatalogCache()
+  const projection = snapshot
+    ? projectChatSkillCatalog(snapshot, {
+        harnessScoped,
+        preferredPlugin
+      })
+    : null
+
+  return {
+    projection,
+    loading: !isSkillCatalogFresh(snapshot, store.pluginVersion) || !harnessCatalogReady,
+    targetProjectId,
+    resolvedProjectId: harnessCatalogReady ? targetProjectId : null,
+    preferredPlugin
+  }
 }
 
 function getSafeHttpUrl(href: unknown): string | null {
@@ -1300,184 +1589,15 @@ function ChatErrorCard({
   )
 }
 
-type ChatApprovalDecision = "approve" | "approve_session" | "approve_permanent" | "reject" | "edit"
-
-interface ChatToolResultInfo {
-  content: string | unknown
-  is_error?: boolean
-}
-
-interface ChatMessageFlags {
-  showAssistantMeta: boolean[]
-  hasUserAfterHead: boolean[]
-}
-
-interface ChatMessageListProps {
-  messages: Message[]
-  perMessageFlags: ChatMessageFlags
-  hookLoggingEnabled: boolean
-  hookLogBucketByTurnId: Map<string, HookLogBucket>
-  detachedHookLogBuckets: HookLogBucket[]
-  contentMessageRefs: React.RefObject<Map<string, HTMLDivElement>>
-  setMessageRef: (messageId: string, role: Message["role"]) => (node: HTMLDivElement | null) => void
-  isLoading: boolean
-  toolResults: Map<string, ChatToolResultInfo>
-  toolCallStates: Map<string, ToolCallState>
-  pendingApprovalToolCallKeys: Set<string>
-  pendingApproval: HITLRequest | null
-  autoApproveGitPush: boolean
-  onApprovalDecision: (decision: ChatApprovalDecision) => void
-  onEditUserMessage: (message: Message) => void
-  onSetGoalFromMessage: (text: string) => void
-  onForkFromMessage: (message: Message) => void
-  forkingMessageId: string | null
-  onOpenHookLogBucket: (turnId: string) => void
-  threadId: string
-  assistantDurationMsById: Map<string, number>
-  userSendTimeLabelById: Map<string, string>
-}
-
-const ChatMessageList = React.memo(function ChatMessageList({
-  messages,
-  perMessageFlags,
-  hookLoggingEnabled,
-  hookLogBucketByTurnId,
-  detachedHookLogBuckets,
-  contentMessageRefs,
-  setMessageRef,
-  isLoading,
-  toolResults,
-  toolCallStates,
-  pendingApprovalToolCallKeys,
-  pendingApproval,
-  autoApproveGitPush,
-  onApprovalDecision,
-  onEditUserMessage,
-  onSetGoalFromMessage,
-  onForkFromMessage,
-  forkingMessageId,
-  onOpenHookLogBucket,
-  threadId,
-  assistantDurationMsById,
-  userSendTimeLabelById
-}: ChatMessageListProps): React.JSX.Element {
-  const visibleMessageLayout = useMemo(
-    () =>
-      buildVisibleMessageLayout(messages, (message) => {
-        const hasHookLogChip =
-          hookLoggingEnabled &&
-          message.role === "user" &&
-          Boolean(hookLogBucketByTurnId.get(message.id)?.entries.length)
-        return messageHasVisibleRow(message, hasHookLogChip)
-      }),
-    [hookLogBucketByTurnId, hookLoggingEnabled, messages]
-  )
-
-  return (
-    <>
-      {messages.map((message, index) => {
-        const previousMessage = visibleMessageLayout.previousVisibleMessageByIndex[index]
-        const isLastMessage = index === visibleMessageLayout.lastVisibleMessageIndex
-        const hasUserAfterHead = perMessageFlags.hasUserAfterHead[index]
-        const showAssistantMeta = perMessageFlags.showAssistantMeta[index]
-
-        const hookLogBucketForTurn =
-          hookLoggingEnabled && message.role === "user"
-            ? hookLogBucketByTurnId.get(message.id)
-            : undefined
-        const hasHookLogChip = Boolean(hookLogBucketForTurn?.entries.length)
-        if (!messageHasVisibleRow(message, hasHookLogChip)) return null
-
-        const navigatorRef = setMessageRef(message.id, message.role)
-        const combinedRef = (node: HTMLDivElement | null): void => {
-          navigatorRef(node)
-          if (node && message.role !== "tool") {
-            contentMessageRefs.current.set(message.id, node)
-            return
-          }
-          contentMessageRefs.current.delete(message.id)
-        }
-
-        return (
-          <div
-            key={`${message.role}:${message.id}`}
-            ref={combinedRef}
-            data-message-role={message.role}
-          >
-            <MessageBubble
-              message={message}
-              previousMessage={previousMessage}
-              isStreaming={isLastMessage && isLoading}
-              showAssistantMeta={showAssistantMeta}
-              toolResults={toolResults}
-              toolCallStates={toolCallStates}
-              pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
-              pendingApproval={pendingApproval}
-              autoApproveGitPush={autoApproveGitPush}
-              onApprovalDecision={onApprovalDecision}
-              onEditUserMessage={onEditUserMessage}
-              onSetGoalFromMessage={onSetGoalFromMessage}
-              onForkFromMessage={onForkFromMessage}
-              forkingMessageId={forkingMessageId}
-              threadId={threadId}
-              isLoading={isLoading}
-              hasUserAfterHead={hasUserAfterHead}
-              assistantDurationMs={assistantDurationMsById.get(message.id)}
-              userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
-            />
-            {hookLogBucketForTurn && hookLogBucketForTurn.entries.length > 0 && (
-              <div className="mt-1 ml-12">
-                <HookLogChip
-                  bucket={hookLogBucketForTurn}
-                  onClick={() => onOpenHookLogBucket(hookLogBucketForTurn.turnId)}
-                />
-              </div>
-            )}
-          </div>
-        )
-      })}
-
-      {hookLoggingEnabled && detachedHookLogBuckets.length > 0 && (
-        <div className="flex flex-wrap justify-start gap-2 mt-1">
-          {detachedHookLogBuckets.map((bucket) => (
-            <HookLogChip
-              key={bucket.turnId}
-              bucket={bucket}
-              onClick={() => onOpenHookLogBucket(bucket.turnId)}
-            />
-          ))}
-        </div>
-      )}
-    </>
-  )
-})
-
 function SystemPromptPreviewButton({
   threadId
 }: {
   threadId?: string | null
 }): React.JSX.Element | null {
-  const [allowed, setAllowed] = useState(false)
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [prompt, setPrompt] = useState<string | null>(null)
   const [updatedAt, setUpdatedAt] = useState<number | null>(null)
-  const closeTimerRef = useRef<number | null>(null)
-
-  useEffect(() => {
-    let cancelled = false
-    window.api.agent
-      .canPreviewSystemPrompt()
-      .then((nextAllowed) => {
-        if (!cancelled) setAllowed(nextAllowed)
-      })
-      .catch(() => {
-        if (!cancelled) setAllowed(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
 
   const loadPreview = useCallback(async () => {
     if (!threadId || loading) return
@@ -1494,46 +1614,27 @@ function SystemPromptPreviewButton({
     }
   }, [loading, threadId])
 
-  const clearCloseTimer = useCallback(() => {
-    if (closeTimerRef.current !== null) {
-      window.clearTimeout(closeTimerRef.current)
-      closeTimerRef.current = null
-    }
-  }, [])
-
-  const scheduleClose = useCallback(() => {
-    clearCloseTimer()
-    closeTimerRef.current = window.setTimeout(() => {
-      setOpen(false)
-      closeTimerRef.current = null
-    }, 120)
-  }, [clearCloseTimer])
-
-  useEffect(() => {
-    return () => clearCloseTimer()
-  }, [clearCloseTimer])
-
   useEffect(() => {
     setOpen(false)
     setPrompt(null)
     setUpdatedAt(null)
   }, [threadId])
 
-  if (!allowed || !threadId) return null
+  if (!threadId) return null
 
   const updatedAtLabel = updatedAt ? new Date(updatedAt).toLocaleString() : "暂无"
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover
+      open={open}
+      onOpenChange={(nextOpen) => {
+        setOpen(nextOpen)
+        if (nextOpen) void loadPreview()
+      }}
+    >
       <PopoverTrigger asChild>
         <button
           type="button"
-          onMouseEnter={() => {
-            clearCloseTimer()
-            setOpen(true)
-            void loadPreview()
-          }}
-          onMouseLeave={scheduleClose}
           className="inline-flex items-center gap-1 rounded-sm px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
           title="系统提示词预览"
           aria-label="系统提示词预览"
@@ -1546,17 +1647,22 @@ function SystemPromptPreviewButton({
         align="start"
         side="top"
         sideOffset={8}
-        onMouseEnter={() => {
-          clearCloseTimer()
-          setOpen(true)
-        }}
-        onMouseLeave={scheduleClose}
-        className="w-[720px] max-w-[calc(100vw-2rem)] p-0"
+        className="w-[420px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border-border bg-popover p-0 shadow-xl"
       >
-        <div className="border-b border-border px-3 py-2 text-xs text-muted-foreground">
-          {loading ? "加载中..." : `更新时间：${updatedAtLabel}`}
+        <div className="flex items-center justify-between border-b border-border/60 px-3 py-2 text-[11px] text-muted-foreground">
+          <span>{loading ? "加载中..." : `更新时间：${updatedAtLabel}`}</span>
+          <button
+            type="button"
+            disabled={loading || !prompt}
+            onClick={() => void navigator.clipboard.writeText(prompt || "").catch(() => {})}
+            className="rounded p-1 hover:bg-muted/60 disabled:cursor-not-allowed disabled:opacity-50"
+            title="复制系统提示词"
+            aria-label="复制系统提示词"
+          >
+            <Copy className="size-3.5" />
+          </button>
         </div>
-        <pre className="max-h-[70vh] overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[11px] leading-5">
+        <pre className="max-h-[50vh] overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[11px] leading-5 text-popover-foreground">
           {prompt || "暂无系统提示词；请先运行一次当前会话。"}
         </pre>
       </PopoverContent>
@@ -1566,17 +1672,30 @@ function SystemPromptPreviewButton({
 
 export function ChatContainer({
   threadId,
-  showGitChangeNotice = false,
   surface = "default",
   hideWelcomeSkillTabs = false,
   readOnlyReason = null,
-  onOpenGitPanel,
-  onDismissGitChangeNotice,
-  onThreadGitStatusChange,
   onHarnessSessionCreated
 }: ChatContainerProps): React.JSX.Element {
+  const remoteThread = useAppStore(
+    (state) => state.threads.find((thread) => thread.thread_id === threadId) ?? null
+  )
+  const setGitWorkspaceStatus = useAppStore((state) => state.setGitWorkspaceStatus)
+  const remoteThreadInfo = useMemo(() => getRemoteThreadDisplayInfo(remoteThread), [remoteThread])
+  const resolvedReadOnlyReason =
+    readOnlyReason ??
+    (remoteThreadInfo?.historical
+      ? "设备接管前的远程历史 Thread 仅可查看"
+      : remoteThreadInfo?.kind === "inbox"
+        ? "招乎默认聊天在桌面仅可查看；请从招乎继续发送消息"
+        : null)
   const surfaceConfig = CHAT_SURFACE_CONFIG[surface]
-  const readOnly = Boolean(readOnlyReason)
+  const [threadProjectionRuntime] = useState(() => getChatThreadProjectionRuntime(threadId))
+  const [initialChatScrollView] = useState(() => chatScrollSessionStore.open(threadId))
+  const initialChatScrollSession = initialChatScrollView.session
+  const chatScrollSessionLeaseRef = useRef(initialChatScrollView.lease)
+  const initialPendingDurableRevealMessageId = initialChatScrollView.pendingRevealMessageId
+  const readOnly = Boolean(resolvedReadOnlyReason)
   const shouldShowWelcomeHeadline = surfaceConfig.showWelcomeHeadline
   const shouldShowWelcomeSkillTabs = surfaceConfig.showWelcomeSkillTabs && !hideWelcomeSkillTabs
   const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips && !readOnly
@@ -1584,21 +1703,97 @@ export function ChatContainer({
   const textareaResizeFrameRef = useRef<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const chatRootRef = useRef<HTMLDivElement>(null)
+  const [dismissedRemoteTipThreadIds, setDismissedRemoteTipThreadIds] = useState(
+    loadRemoteThreadTipDismissals
+  )
+  const virtuosoRef = useRef<VirtuosoHandle | null>(null)
+  const chatScrollStateRef = useRef<ChatScrollState | null>(initialChatScrollSession?.state ?? null)
+  if (chatScrollStateRef.current === null) {
+    chatScrollStateRef.current = createChatScrollState(threadId)
+  }
+  const pendingChatSessionAnchorRef = useRef<PendingChatSessionAnchor | null>(
+    initialChatScrollSession?.anchor
+      ? {
+          ...initialChatScrollSession.anchor,
+          threadId,
+          attempt: 0,
+          stableFrames: 0
+        }
+      : null
+  )
+  const [chatScrollUiState, setChatScrollUiState] = useState(() => ({
+    generation: chatScrollStateRef.current?.generation ?? 0,
+    mode: chatScrollStateRef.current?.mode ?? "initializing",
+    hasUnread: chatScrollStateRef.current?.hasUnread ?? false,
+    unreadCount: chatScrollStateRef.current?.unreadCount ?? 0
+  }))
+  const pendingBottomScrollEffectRef = useRef<ChatScrollEffect | null>(null)
+  const bottomScrollFrameRef = useRef<number | null>(null)
+  const bottomSettleAttemptRef = useRef(0)
+  const bottomSettleEffectKeyRef = useRef("")
+  const lastVisibleMessageIndexRef = useRef(-1)
+  const messageVirtualizationEnabledRef = useRef(false)
+  const lastObservedScrollTopRef = useRef(0)
+  const upwardUserScrollIntentUntilRef = useRef(0)
+  const downwardUserScrollIntentUntilRef = useRef(0)
+  const scrollbarUserIntentActiveRef = useRef(false)
+  const chatContentSnapshotRef = useRef<{
+    threadId: string
+    visibleCount: number
+    lastMessageId: string | null
+    lastMessageIdentity: string | null
+    loadedMessageCount: number
+    contentVersion: number
+    structureVersion: number
+  } | null>(initialChatScrollSession?.contentSnapshot ?? null)
+  const pendingDurableHistoryAnchorRef = useRef<PendingDurableHistoryAnchor | null>(null)
+  const pendingDurableSearchRevealIdRef = useRef<string | null>(
+    initialPendingDurableRevealMessageId
+  )
+  const durableMessageWindowGenerationRef = useRef(0)
+  const chatViewMountedRef = useRef(false)
   const [searchOpen, setSearchOpen] = useState(false)
+  const navigation = useThreadSearch((state) => state.navigation?.result.threadId === threadId ? state.navigation : null)
+  const [searchReveal, setSearchReveal] = useState<ChatSearchReveal | null>(null)
+  const searchIndexerRef = useRef<ReturnType<typeof createChatSearchIndexer> | null>(null)
+  const searchLocalCorpus = useCallback((corpus: ChatSearchCorpus, query: string) => {
+    searchIndexerRef.current ??= createChatSearchIndexer()
+    return searchIndexerRef.current.search(corpus, query)
+  }, [])
+  const cancelLocalSearch = useCallback(() => searchIndexerRef.current?.cancel(), [])
+  useEffect(() => {
+    if (searchOpen) return
+    searchIndexerRef.current?.dispose()
+    searchIndexerRef.current = null
+  }, [searchOpen])
+  useEffect(() => () => searchIndexerRef.current?.dispose(), [threadId])
+  const [scrollParent, setScrollParent] = useState<HTMLDivElement | null>(null)
   const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const isComposingRef = useRef(false)
   // Alias, not a fresh useRef — see submitInFlightLockStore's module-level
   // declaration above for why this must survive ChatContainer remounts.
   const submitInFlightRef = submitInFlightLockStore
-  const [skills, setSkills] = useState<SkillMetadata[]>([])
-  const [disabledSkillIds, setDisabledSkillIds] = useState<Set<string>>(new Set())
-  const [skillsLoading, setSkillsLoading] = useState(true)
-  const [skillsHarnessProjectId, setSkillsHarnessProjectId] = useState<string | null>(null)
-  const [skillsLoadTargetProjectId, setSkillsLoadTargetProjectId] = useState<string | null>(null)
+  const [initialSkillCatalogState] = useState(() =>
+    createInitialChatSkillCatalogState(threadId, surface)
+  )
+  const [skills, setSkills] = useState<SkillMetadata[]>(
+    () => initialSkillCatalogState.projection?.skills ?? []
+  )
+  const [disabledSkillIds, setDisabledSkillIds] = useState<Set<string>>(
+    () => initialSkillCatalogState.projection?.disabledSkillIds ?? new Set()
+  )
+  const [skillsLoading, setSkillsLoading] = useState(initialSkillCatalogState.loading)
+  const [skillsHarnessProjectId, setSkillsHarnessProjectId] = useState<string | null>(
+    initialSkillCatalogState.resolvedProjectId
+  )
+  const [skillsLoadTargetProjectId, setSkillsLoadTargetProjectId] = useState<string | null>(
+    initialSkillCatalogState.targetProjectId
+  )
   const [skillsHarnessPreferredPlugin, setSkillsHarnessPreferredPlugin] = useState<{
     id?: string
     name?: string
-  } | null>(null)
+  } | null>(initialSkillCatalogState.preferredPlugin)
+  const skillsLoadRequestIdRef = useRef(0)
   const [thinkingMessageIndex, setThinkingMessageIndex] = useState(0)
   const [userInputDialogLayout, setUserInputDialogLayout] =
     useState<UserInputRequestDialogLayout | null>(null)
@@ -1619,9 +1814,20 @@ export function ChatContainer({
     }))
   )
   const [yoloMode, setYoloMode] = useState(false)
-  const [yoloModeLoaded, setYoloModeLoaded] = useState(false)
-  const chatScrollSettings = useAppStore((state) => state.chatScrollSettings)
-  const chatScrollLimitNoticeKeyRef = useRef<string | null>(null)
+  const [yoloModeLoadState, setYoloModeLoadState] = useState<YoloModeLoadState>("loading")
+  const yoloModeLoadRequestRef = useRef(0)
+  const [yoloModePending, setYoloModePending] = useState(false)
+  const [yoloEnableConfirmOpen, setYoloEnableConfirmOpen] = useState(false)
+  const [composerSettingsOpen, setComposerSettingsOpen] = useState(false)
+  const [composerEnvironmentRailCollapsed, setComposerEnvironmentRailCollapsed] = useState(false)
+  const yoloModeLoaded = yoloModeLoadState === "loaded"
+  const yoloModeLoadFailed = yoloModeLoadState === "failed"
+  const composerRightClearanceClass = composerEnvironmentRailCollapsed
+    ? yoloMode || yoloModeLoadFailed
+      ? "pr-20"
+      : "pr-12"
+    : null
+  const [systemPromptPreviewAllowed, setSystemPromptPreviewAllowed] = useState(false)
   const [glowVisible, setGlowVisible] = useState(false)
   const appleIntelligenceGlowEnabled = useSyncExternalStore(
     subscribeAppleIntelligenceGlow,
@@ -1664,90 +1870,68 @@ export function ChatContainer({
   const agentModeChangeRequestRef = useRef(0)
   const agentModeChangeChainRef = useRef<Promise<void>>(Promise.resolve())
   const agentModeSaveRef = useRef<Promise<void>>(Promise.resolve())
-  // Draft-queue UI state: inline edit, drag-reorder, and a pump tick that
-  // re-triggers the auto-drain effect after each queued send settles.
+  // Draft-queue UI state: inline edit, drag-reorder, and a retry tick for
+  // authoritative handoff reconciliation.
   const [editingQueueId, setEditingQueueId] = useState<string | null>(null)
   const [editingQueueText, setEditingQueueText] = useState("")
   const [draggingQueueId, setDraggingQueueId] = useState<string | null>(null)
   const queuedEditRequestRef = useRef(0)
   const guidingQueuedMessageIdsRef = useRef(new Set<string>())
   const [queuePumpTick, setQueuePumpTick] = useState(0)
+  const subscribeToSubmitRelease = useCallback(
+    (listener: () => void) => subscribeSubmitInFlightRelease(submitInFlightRef, threadId, listener),
+    [submitInFlightRef, threadId]
+  )
+  const getSubmitReleaseVersion = useCallback(
+    () => getSubmitInFlightReleaseVersion(submitInFlightRef, threadId),
+    [submitInFlightRef, threadId]
+  )
+  const submitReleaseVersion = useSyncExternalStore(
+    subscribeToSubmitRelease,
+    getSubmitReleaseVersion,
+    getSubmitReleaseVersion
+  )
   const chatReportUploadTimersRef = useRef<Record<string, number>>({})
   const chatReportRetryTimersRef = useRef<Record<string, number>>({})
-  const chatReportRetryQueuesRef = useRef<
-    Record<string, Array<{ messages: Message[]; attempt: number }>>
+  const chatReportRetryBatchesRef = useRef<
+    Record<string, { batch: ChatReportBatch; attempt: number } | undefined>
   >({})
+  const chatReportPendingBatchesRef = useRef<
+    Record<string, { batch: ChatReportBatch; attempt: number } | undefined>
+  >({})
+  const chatReportAbortControllersRef = useRef<Record<string, AbortController | undefined>>({})
+  const chatReportDisposedRef = useRef(false)
   // Get the stream data via subscription - reactive updates without re-rendering provider
   const streamData = useThreadStream(threadId)
   const stream = streamData.stream
-
-  useEffect(() => {
-    const { ipcRenderer } = window.electron
-
-    // 主动请求版本，不依赖推送时序
-    ipcRenderer
-      .invoke("get-version")
-      .then((ver: unknown) => {
-        console.log("版本 (invoke)：", ver)
-        if (ver) {
-          localStorage.setItem("version", ver as string)
-          updateMMJUserInfo()
-        }
-      })
-      .catch((e: unknown) => console.warn("get-version failed:", e))
-
-    // 保留推送监听作为备用
-    const removeListener = ipcRenderer.on("version", (ver: unknown) => {
-      console.log("版本 (push)：", ver)
-      localStorage.setItem("version", ver as string)
-      updateMMJUserInfo()
-    })
-
-    return () => {
-      if (typeof removeListener === "function") removeListener()
-    }
-  }, [])
-
-  useEffect(() => {
-    const { ipcRenderer } = window.electron
-
-    // 主动请求 IP，不依赖推送时序
-    ipcRenderer
-      .invoke("get-local-ip")
-      .then((ip: unknown) => {
-        console.log("local ip (invoke)：", ip)
-        if (ip) {
-          localStorage.setItem("localIp", ip as string)
-          updateMMJUserInfo()
-        }
-      })
-      .catch((e: unknown) => console.warn("get-local-ip failed:", e))
-
-    // 保留推送监听作为备用（例如网络变化时主进程重新推送）
-    const removeListener = ipcRenderer.on("ip", (ver: unknown) => {
-      console.log("local ip (push)：", ver)
-      if (ver) {
-        localStorage.setItem("localIp", ver as string)
-      }
-    })
-
-    return () => {
-      if (typeof removeListener === "function") removeListener()
-    }
-  }, [])
 
   const {
     threads,
     models,
     createThread,
     forkThread,
-    updateThread,
+    patchThreadMetadata,
     generateTitleForFirstMessage,
     setShowCustomizeView,
+    showCustomizeView,
     rightPanelCollapsed,
     pluginVersion,
     requestOpenRightPanelSystemConstraints
-  } = useAppStore()
+  } = useAppStore(
+    useShallow((state) => ({
+      threads: state.threads,
+      models: state.models,
+      createThread: state.createThread,
+      forkThread: state.forkThread,
+      patchThreadMetadata: state.patchThreadMetadata,
+      generateTitleForFirstMessage: state.generateTitleForFirstMessage,
+      setShowCustomizeView: state.setShowCustomizeView,
+      showCustomizeView: state.showCustomizeView,
+      rightPanelCollapsed: state.rightPanelCollapsed,
+      pluginVersion: state.pluginVersion,
+      requestOpenRightPanelSystemConstraints: state.requestOpenRightPanelSystemConstraints
+    }))
+  )
   const [forkingMessageId, setForkingMessageId] = useState<string | null>(null)
   const currentThread = useMemo(
     () => threads.find((thread) => thread.thread_id === threadId) ?? null,
@@ -1772,7 +1956,97 @@ export function ChatContainer({
     surface === "harness-project" ||
     surface === "harness-feature-session" ||
     Boolean(harnessFeatureBinding)
-  const disableCoordinatorModeOption = isProjectModeAgentContext && !PROJECT_MODE_AGENT_TEAM_ENABLED
+  const [isManagedRunSessionActive, setIsManagedRunSessionActive] = useState(false)
+  const appNotifications = useHarnessNotifications()
+  const bizRetry = appNotifications.find(
+    (item) =>
+      item.type === "biz_retry" && item.status === "pending" && item.sourceThreadId === threadId
+  )
+  const bizRetryPending = Boolean(bizRetry)
+  const bizRetryHumanGatePending = Boolean(
+    bizRetry &&
+      appNotifications.some(
+        (item) =>
+          item.type === "human_gate" &&
+          item.status === "pending" &&
+          item.projectId === bizRetry.projectId &&
+          item.featureId === bizRetry.featureId
+      )
+  )
+  const humanGate = projectHumanGate(appNotifications.find(
+    (item) =>
+      item.type === "human_gate" && item.status === "pending" && item.sourceThreadId === threadId
+  ))
+  const [humanGateDecisionBusy, setHumanGateDecisionBusy] = useState<"approve" | "reject" | null>(
+    null
+  )
+
+  useEffect(() => {
+    const runId = harnessFeatureBinding?.runId
+    if (!runId) {
+      setIsManagedRunSessionActive(false)
+      return
+    }
+
+    let cancelled = false
+    const applyManagedRunStatus = (managedRun: HarnessRunDetailViewModel["run"]["managedRun"]): void => {
+      if (cancelled) return
+      setIsManagedRunSessionActive(
+        managedRun?.status === "running" &&
+          managedRun.runId === runId &&
+          managedRun.currentSession?.threadId === threadId
+      )
+    }
+
+    const unsubscribe = window.api.harnessBoard.onManagedRunChanged((event) => {
+      if (
+        event.projectId !== harnessFeatureBinding.projectId ||
+        event.featureId !== harnessFeatureBinding.slug ||
+        event.run.runId !== runId
+      ) {
+        return
+      }
+      applyManagedRunStatus(event.run)
+    })
+    void window.api.harnessBoard
+      .getLatestManagedRun(harnessFeatureBinding.projectId, harnessFeatureBinding.slug)
+      .then((managedRun) => applyManagedRunStatus(managedRun ?? undefined))
+      .catch((error) => {
+        if (!cancelled) {
+          console.warn("[ChatContainer] Failed to load managed run status:", error)
+          setIsManagedRunSessionActive(false)
+        }
+      })
+
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [harnessFeatureBinding, threadId])
+
+  const decideHumanGate = useCallback(
+    async (decision: "approve" | "reject"): Promise<void> => {
+      if (!humanGate || humanGateDecisionBusy) return
+      setHumanGateDecisionBusy(decision)
+      try {
+        const { applied: changed } = await window.api.appNotifications.decide({
+          notificationId: humanGate.gateId,
+          action: decision
+        })
+        if (!changed) toast.error("Human Gate 已发生变化，请刷新后重试")
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : String(error))
+      } finally {
+        setHumanGateDecisionBusy(null)
+      }
+    },
+    [humanGate, humanGateDecisionBusy]
+  )
+  const disableCoordinatorModeOption = isProjectModeAgentTeamSelectionDisabled(
+    currentThread?.metadata,
+    isProjectModeAgentContext,
+    PROJECT_MODE_AGENT_TEAM_ENABLED
+  )
   const disableWorkflowModeOption = false
   const pendingHarnessNextActionVersion = useSyncExternalStore(
     subscribePendingHarnessNextActions,
@@ -1800,7 +2074,7 @@ export function ChatContainer({
         return "coordinator"
       }
       const environmentForcedCoordinator = await window.api.agent
-        .isCoordinatorModeForced()
+        .isCoordinatorModeForced(threadId)
         .catch((error) => {
           console.warn("[ChatContainer] Failed to load environment coordinator mode:", error)
           return false
@@ -1810,7 +2084,7 @@ export function ChatContainer({
       }
       return isMultiModeMetadata(metadata) ? "multi" : "normal"
     },
-    [disableCoordinatorModeOption, disableWorkflowModeOption]
+    [disableCoordinatorModeOption, disableWorkflowModeOption, threadId]
   )
 
   const loadResolvedAgentMode = useCallback(async (): Promise<ChatAgentMode> => {
@@ -1869,74 +2143,98 @@ export function ChatContainer({
   // invalidating its own identity (useCallback with empty deps).
   const harnessFeatureBindingRef = useRef(harnessFeatureBinding)
   harnessFeatureBindingRef.current = harnessFeatureBinding
+  const chatSurfaceRef = useRef(surface)
+  chatSurfaceRef.current = surface
 
-  // Define loadSkills function at component level so it can be accessed everywhere
+  // Keep a stable callback for both plugin-version effects and the application-level
+  // skills:changed bridge. The shared cache makes concurrent Chat/RightPanel reads one request.
   const loadSkills = useCallback(async (): Promise<void> => {
-    setSkillsLoading(true)
+    const requestId = ++skillsLoadRequestIdRef.current
     const binding = harnessFeatureBindingRef.current
+    const harnessScoped = chatSurfaceRef.current !== "default" || Boolean(binding)
     const targetProjectId = binding?.projectId ?? null
     setSkillsLoadTargetProjectId(targetProjectId)
-    try {
-      const pluginSkillsPromise =
-        typeof window.api.skills.listPlugins === "function"
-          ? window.api.skills.listPlugins().catch((error) => {
-              console.warn("[ChatContainer] Failed to load plugin skills:", error)
-              return []
-            })
-          : Promise.resolve([])
-      // Pull plugin skills alongside built-in/custom so the slash popover and
-      // welcome-screen skill cards can surface them. Plugin-shipped skills go
-      // through their own enable/disable lifecycle (plugin-level, not the
-      // disabled-skills list), and listPlugins() already filters by
-      // plugin.enabled, so we don't apply disabledSet to them here.
-      const [loadedSkills, pluginSkills, disabledList] = await Promise.all([
-        window.api.skills.list(),
-        pluginSkillsPromise,
-        window.api.skills.getDisabled()
-      ])
-      const disabledSet = new Set(disabledList.map(normalizeSkillId))
-      setDisabledSkillIds(disabledSet)
-      const availableSkills = loadedSkills.filter(
-        (s) => s.source === "project" || s.source === "user"
-      )
+    const pluginVersion = useAppStore.getState().pluginVersion
 
-      // In harness mode, resolve the project's bound plugin so slash surfaces
-      // only expose standalone skills and skills owned by that plugin.
-      let preferredPlugin: { id?: string; name?: string } | null = null
-      if (binding && typeof window.api.harnessBoard?.listProjects === "function") {
-        try {
-          const projects = await window.api.harnessBoard.listProjects()
-          const project = projects.find((p) => p.projectId === binding.projectId)
-          if (project) {
-            preferredPlugin = {
-              id: project.harnessAdapter.id,
-              name: project.harnessAdapter.name
-            }
-          }
-        } catch {
-          // Non-critical: fall through without a preference.
-        }
-      }
-
-      // Keep same-name standalone/plugin rows visible outside harness mode; in
-      // harness mode, plugin skills are restricted to the bound plugin.
-      const merged = mergeChatSkills(availableSkills, pluginSkills, disabledSet, preferredPlugin)
-      setSkills([...merged].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")))
+    const applySnapshot = (
+      snapshot: NonNullable<ReturnType<typeof readSkillCatalogCache>>,
+      preferredPlugin: HarnessPreferredPlugin
+    ): void => {
+      if (requestId !== skillsLoadRequestIdRef.current) return
+      const projection = projectChatSkillCatalog(snapshot, {
+        harnessScoped,
+        preferredPlugin
+      })
+      setSkills(projection.skills)
+      setDisabledSkillIds(projection.disabledSkillIds)
       setSkillsHarnessProjectId(targetProjectId)
       setSkillsHarnessPreferredPlugin(preferredPlugin)
+      setSkillsLoading(false)
+    }
+
+    const cachedSkills = readSkillCatalogCache()
+    const cachedHarnessCatalog = readHarnessBoardCatalogCache()
+    const cachedHarnessPreferredPlugin = binding
+      ? getCachedHarnessPreferredPlugin(binding.projectId)
+      : null
+    if (cachedSkills) {
+      const preferredPlugin = binding ? getCachedHarnessPreferredPlugin(binding.projectId) : null
+      const cachedProjection = projectChatSkillCatalog(cachedSkills, {
+        harnessScoped,
+        preferredPlugin
+      })
+      setSkills(cachedProjection.skills)
+      setDisabledSkillIds(cachedProjection.disabledSkillIds)
+      setSkillsHarnessPreferredPlugin(preferredPlugin)
+      setSkillsHarnessProjectId(!binding || cachedHarnessPreferredPlugin ? targetProjectId : null)
+    }
+    if (
+      isSkillCatalogFresh(cachedSkills, pluginVersion) &&
+      (!binding || cachedHarnessPreferredPlugin)
+    ) {
+      applySnapshot(cachedSkills, cachedHarnessPreferredPlugin)
+      return
+    }
+
+    setSkillsLoading(true)
+    try {
+      const skillCatalogPromise = revalidateSkillCatalog(pluginVersion)
+      const harnessCatalogPromise = !binding
+        ? Promise.resolve(null)
+        : cachedHarnessPreferredPlugin && cachedHarnessCatalog
+          ? Promise.resolve(cachedHarnessCatalog)
+          : window.api.harnessBoard
+              .catalogPage({
+                requestScope: "chat-binding",
+                projectId: binding.projectId,
+                projectLimit: 1,
+                includeRegistry: false
+              })
+              .catch((error) => {
+                console.warn("[ChatContainer] Failed to resolve harness skill binding:", error)
+                return null
+              })
+      const [snapshot, harnessCatalog] = await Promise.all([
+        skillCatalogPromise,
+        harnessCatalogPromise
+      ])
+      const project = binding
+        ? harnessCatalog?.projects.find((candidate) => candidate.projectId === binding.projectId)
+        : null
+      const preferredPlugin = project
+        ? { id: project.harnessAdapter.id, name: project.harnessAdapter.name }
+        : null
+      applySnapshot(snapshot, preferredPlugin)
     } catch (error) {
       console.error("[ChatContainer] Failed to load skills:", error)
-      setSkills([])
-      setSkillsHarnessProjectId(null)
-      setSkillsHarnessPreferredPlugin(null)
-    } finally {
-      setSkillsLoading(false)
+      if (requestId === skillsLoadRequestIdRef.current) setSkillsLoading(false)
     }
   }, [])
 
   // Get persisted thread state and actions from context
   const {
     messages: threadMessages,
+    messagesContentVersion,
     queuedMessages,
     queueAutoDrainSuppressed,
     toolCallStates,
@@ -1955,6 +2253,8 @@ export function ChatContainer({
     harnessAgentmdLoadStatus,
     currentModel,
     draftInput: input,
+    draftAttachments: attachments,
+    draftMentionedFiles: mentionedFiles,
     harnessNextActionDialogTips,
     draftSkill: selectedSkill,
     workspaceFiles,
@@ -1962,6 +2262,16 @@ export function ChatContainer({
     workflowRun,
     scheduledTaskLoading,
     historyLoading,
+    historyPageLoading,
+    historyHasMore,
+    historyPageWindows,
+    historyWindowRevision,
+    historyWindowGap,
+    historyMessageTotal,
+    historyConversationPresence,
+    historyRestorationPending,
+    historyRestorationFailed,
+    historyLoadedMessageCount,
     scheduledTaskId,
     modelRetry,
     contextCompaction,
@@ -1976,6 +2286,12 @@ export function ChatContainer({
     clearFinishedWorkflowRun,
     appendMessage,
     syncDurableTranscript,
+    loadEarlierMessages,
+    loadMessageWindowAround,
+    loadReleasedMessageWindow,
+    restoreLatestMessageWindow,
+    cancelMessageWindowLoad,
+    retryHistoryRestoration,
     removeLocalMessage,
     addQueuedMessage,
     prependQueuedMessage,
@@ -1991,11 +2307,17 @@ export function ChatContainer({
     clearHookInterruption,
     setContextReminder,
     setDraftInput: setInput,
+    setDraftAttachments: setAttachments,
+    setDraftMentionedFiles: setMentionedFiles,
     setHarnessNextActionDialogTips,
     setDraftSkill: setSelectedSkill,
     draftBuiltinBrowser: selectedBuiltinBrowser,
     setDraftBuiltinBrowser: setSelectedBuiltinBrowser
   } = useCurrentThread(threadId)
+  const autoApproveGitPush =
+    pendingApproval?.operation === "git_push" && yoloModeLoaded && yoloMode
+  const workspacePathRef = useRef(workspacePath)
+  workspacePathRef.current = workspacePath
 
   const storedHarnessNextActionDialogTips = harnessNextActionDialogTips?.trim() || null
   const nextActionDialogTips = pendingHarnessDialogTips ?? storedHarnessNextActionDialogTips
@@ -2004,24 +2326,41 @@ export function ChatContainer({
   const systemConstraintsLoadFailed = hasNoLoadedSystemConstraints(harnessAgentmdLoadStatus)
   const systemConstraintsPromptPreview = harnessAgentmdLoadStatus?.promptPreview?.trim()
   const showSystemConstraintsButton = surface === "harness-project"
-  const systemConstraintsTitle =
-    systemConstraintsLoadFailed
-      ? `系统约束未加载 ${systemConstraintCounts.loaded}/${systemConstraintCounts.total}，点击查看详情`
-      : systemConstraintCounts.total > 0
+  const showSystemPromptPreviewButton = Boolean(threadId) && systemPromptPreviewAllowed
+  const showComposerPromptSection =
+    showSystemPromptPreviewButton || showSystemConstraintsButton
+  const systemConstraintsTitle = systemConstraintsLoadFailed
+    ? `系统约束未加载 ${systemConstraintCounts.loaded}/${systemConstraintCounts.total}，点击查看详情`
+    : systemConstraintCounts.total > 0
       ? `系统约束已加载 ${systemConstraintCounts.loaded}/${systemConstraintCounts.total}，点击查看详情`
       : "系统约束，点击查看详情"
-  const systemConstraintsLabel =
-    systemConstraintsLoadFailed
-      ? "系统约束未全部加载"
-      : systemConstraintCounts.loaded > 0
-        ? "系统约束已加载"
-        : "系统约束"
+  const systemConstraintsLabel = systemConstraintsLoadFailed
+    ? "系统约束未全部加载"
+    : systemConstraintCounts.loaded > 0
+      ? "系统约束已加载"
+      : "系统约束"
   const handleOpenSystemConstraints = useCallback((): void => {
+    setComposerSettingsOpen(false)
     requestOpenRightPanelSystemConstraints(threadId)
   }, [requestOpenRightPanelSystemConstraints, threadId])
   const harnessDialogTipsProjectId = harnessFeatureBinding?.projectId ?? null
   const harnessDialogTipsSlug = harnessFeatureBinding?.slug ?? null
   const [harnessDialogTips, setHarnessDialogTips] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    window.api.agent
+      .canPreviewSystemPrompt()
+      .then((allowed) => {
+        if (!cancelled) setSystemPromptPreviewAllowed(allowed)
+      })
+      .catch(() => {
+        if (!cancelled) setSystemPromptPreviewAllowed(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     if (!pendingHarnessDialogTips) return
@@ -2053,6 +2392,7 @@ export function ChatContainer({
 
     return () => {
       cancelled = true
+      void window.api.harnessBoard.cancelDialogTips().catch(() => undefined)
     }
   }, [
     harnessDialogTipsProjectId,
@@ -2071,11 +2411,7 @@ export function ChatContainer({
     useCallback(() => threadContext.getHookLogBuckets(threadId), [threadContext, threadId])
   )
 
-  const hookLogBucketByTurnId = useMemo(() => {
-    const map = new Map<string, HookLogBucket>()
-    for (const bucket of hookLogBuckets) map.set(bucket.turnId, bucket)
-    return map
-  }, [hookLogBuckets])
+  const hookLogBucketByTurnId = threadProjectionRuntime.projectHookLogBucketMap(hookLogBuckets)
   const [hookLogConfig, setHookLogConfig] = useState<{ enabled: boolean; diagnostic: boolean }>({
     enabled: false,
     diagnostic: false
@@ -2111,8 +2447,15 @@ export function ChatContainer({
   const handleOpenMemorySettings = useCallback((): void => {
     setShowCustomizeView(true, "memory")
   }, [setShowCustomizeView])
+  const handleOpenRobotSettings = useCallback((): void => {
+    setShowCustomizeView(true, "robot")
+  }, [setShowCustomizeView])
 
-  const canChangeAgentMode = !historyLoading && threadMessages.length === 0
+  const canChangeAgentMode = canChangeThreadAgentMode({
+    historyLoading,
+    conversationPresence: historyConversationPresence,
+    residentMessageCount: threadMessages.length
+  })
   const queuedApprovalCount = Math.max(0, pendingApprovals.length - 1)
 
   useEffect(() => {
@@ -2130,7 +2473,9 @@ export function ChatContainer({
   const agentModeSwitchDisabledReason = !canChangeAgentMode
     ? historyLoading
       ? "会话历史加载中，暂时不能切换执行模式。"
-      : "当前线程已有消息，执行模式已锁定，请新开线程切换。"
+      : historyConversationPresence === "unknown"
+        ? "会话消息状态尚未确认，请稍后重试。"
+        : "当前线程已有消息，执行模式已锁定，请新开线程切换。"
     : isLoading
       ? "当前请求执行中，结束后才能切换执行模式。"
       : undefined
@@ -2155,25 +2500,36 @@ export function ChatContainer({
           toast.error("会话历史加载中，暂时不能切换执行模式。")
           return
         }
-        if (threadMessages.length > 0) {
+        if (
+          !canChangeThreadAgentMode({
+            historyLoading,
+            conversationPresence: historyConversationPresence,
+            residentMessageCount: threadMessages.length
+          })
+        ) {
+          if (historyConversationPresence === "unknown") {
+            toast.error("会话消息状态尚未确认，请稍后重试。")
+            return
+          }
           toast.error("当前线程已有消息，不能再切换执行模式。请新开线程选择其他模式。")
           return
         }
         if (nextMode !== "coordinator" && !disableCoordinatorModeOption) {
           const isEnvironmentForcedCoordinator = await window.api.agent
-            .isCoordinatorModeForced()
+            .isCoordinatorModeForced(threadId)
             .catch(() => false)
           if (requestId !== agentModeChangeRequestRef.current) return
           if (isEnvironmentForcedCoordinator) {
             toast.error("当前环境变量强制开启 Agent Team，不能切换到其他执行模式")
             return
           }
-          const [workers, hasPendingNotifications] = await Promise.all([
-            window.api.agent
-              .getCoordinatorWorkers(threadId, { subscribeUpdates: false })
-              .catch(() => []),
-            window.api.agent.hasCoordinatorWorkerNotifications(threadId).catch(() => false)
-          ])
+          const workers = await window.api.agent
+            .getCoordinatorWorkers(threadId, { subscribeUpdates: false })
+            .catch(() => [])
+          if (requestId !== agentModeChangeRequestRef.current) return
+          const hasPendingNotifications = await window.api.agent
+            .hasCoordinatorWorkerNotifications(threadId)
+            .catch(() => false)
           if (requestId !== agentModeChangeRequestRef.current) return
           const hasRemoteUnresolvedWorkers = workers.some(
             (worker) => worker.status === "running" || worker.notification_acknowledged === false
@@ -2187,24 +2543,19 @@ export function ChatContainer({
         if (requestId !== agentModeChangeRequestRef.current) return
         agentModeHydratedRef.current = true
         setAgentMode(nextMode)
-        const thread = await window.api.threads.get(threadId)
-        if (requestId !== agentModeChangeRequestRef.current) return
-        const metadata = thread?.metadata ?? {}
-        const nextMetadata: Record<string, unknown> = {
-          ...metadata,
+        const set: Record<string, unknown> = {
           agentMode: nextMode === "multi" ? "normal" : nextMode
         }
+        const remove: string[] = []
         if (nextMode === "normal" || nextMode === "multi") {
-          nextMetadata.subagentsEnabled = nextMode === "multi"
+          set.subagentsEnabled = nextMode === "multi"
         } else {
-          delete nextMetadata.subagentsEnabled
+          remove.push("subagentsEnabled")
         }
         if (nextMode !== "coordinator") {
-          delete nextMetadata.coordinatorMode
+          remove.push("coordinatorMode")
         }
-        await updateThread(threadId, {
-          metadata: nextMetadata
-        })
+        await patchThreadMetadata(threadId, { set, remove })
         persistedAgentModeRef.current = nextMode
       })
       // Serialize writes so an older request can never finish after a newer one
@@ -2229,9 +2580,10 @@ export function ChatContainer({
       disableCoordinatorModeOption,
       disableWorkflowModeOption,
       historyLoading,
+      historyConversationPresence,
       threadId,
       threadMessages,
-      updateThread
+      patchThreadMetadata
     ]
   )
   const userInputScrollPadding = pendingUserInput
@@ -2263,12 +2615,11 @@ export function ChatContainer({
   )
 
   // ── File attachments state ──
-  const [attachments, setAttachments] = useState<FileAttachment[]>([])
-  const [mentionedFiles, setMentionedFiles] = useState<MentionedWorkspaceFile[]>([])
   const [attachmentLoading, setAttachmentLoading] = useState(false)
   const [dragOver, setDragOver] = useState(false)
-  const attachmentsRef = useRef<FileAttachment[]>([])
-  const mentionedFilesRef = useRef<MentionedWorkspaceFile[]>([])
+  const attachmentsRef = useRef(attachments)
+  const mentionedFilesRef = useRef(mentionedFiles)
+  const activeAtFilePreviewTokensRef = useRef(new Set<string>())
 
   // Keep ref in sync with state
   useEffect(() => {
@@ -2277,6 +2628,26 @@ export function ChatContainer({
   useEffect(() => {
     mentionedFilesRef.current = mentionedFiles
   }, [mentionedFiles])
+  useEffect(() => {
+    setMentionedFiles((current) => {
+      const retained = retainMentionedWorkspaceFilesForWorkspace(current, workspacePath)
+      if (retained.length === current.length) return current
+      mentionedFilesRef.current = retained
+      return retained
+    })
+  }, [setMentionedFiles, workspacePath])
+  useEffect(
+    () => () => {
+      for (const requestToken of activeAtFilePreviewTokensRef.current) {
+        void window.api.workspace.cancelFilePreview({
+          lanePrefix: AT_FILE_PREVIEW_LANE,
+          requestToken
+        })
+      }
+      activeAtFilePreviewTokensRef.current.clear()
+    },
+    []
+  )
 
   const totalAttachmentChars = useMemo(
     () => attachments.reduce((sum, a) => sum + a.content.length, 0),
@@ -2290,9 +2661,9 @@ export function ChatContainer({
   const totalPendingFileCount = attachments.length + mentionedFiles.length
   const hasPendingFilePayload = totalPendingFileCount > 0
 
-  const handleFileSelectByPath = useCallback(
-    async (filePaths: string[]) => {
-      if (filePaths.length === 0 || attachmentLoading) return
+  const handleAttachmentInputs = useCallback(
+    async (inputs: PendingAttachmentInput[]) => {
+      if (inputs.length === 0 || attachmentLoading) return
       setAttachmentLoading(true)
       clearError()
       try {
@@ -2304,19 +2675,20 @@ export function ChatContainer({
           ...mentionedFilesRef.current.map((item) => item.absolutePath)
         ])
 
-        for (const filePath of filePaths) {
+        for (const input of inputs) {
+          const displayIdentity = input.kind === "selected" ? input.filePath : input.fileName
           // #7: skip duplicates
-          if (existingPaths.has(filePath)) {
-            const dupName = filePath.replace(/^.*[/\\]/, "") || filePath
+          if (existingPaths.has(displayIdentity)) {
+            const dupName = displayIdentity.replace(/^.*[/\\]/, "") || displayIdentity
             setError(`文件"${dupName}"已添加，跳过重复`)
             continue
           }
 
           // #6: check extension before calling backend
-          const lastDot = filePath.lastIndexOf(".")
-          const ext = lastDot >= 0 ? filePath.substring(lastDot).toLowerCase() : ""
+          const lastDot = displayIdentity.lastIndexOf(".")
+          const ext = lastDot >= 0 ? displayIdentity.substring(lastDot).toLowerCase() : ""
           if (!ext || !SUPPORTED_EXTS.has(ext)) {
-            const fileName = filePath.replace(/^.*[/\\]/, "") || filePath
+            const fileName = displayIdentity.replace(/^.*[/\\]/, "") || displayIdentity
             if (ext === ".doc") {
               setError(`不支持的文件类型"${fileName}"；${DOC_SAVE_AS_DOCX_HINT}`)
             } else {
@@ -2335,7 +2707,18 @@ export function ChatContainer({
             setError(`附件总内容已达上限（${MAX_TOTAL_CHARS.toLocaleString()} 字符）`)
             break
           }
-          const result = await window.api.file.parse(filePath, remaining)
+          const result =
+            input.kind === "selected"
+              ? await window.api.file.parseSelected({
+                  grant: input.grant,
+                  filePath: input.filePath,
+                  maxLength: remaining
+                })
+              : await window.api.file.parseBytes({
+                  fileName: input.fileName,
+                  bytes: input.bytes,
+                  maxLength: remaining
+                })
           if (result.success && result.attachment) {
             // #12: skip empty files
             if (!result.attachment.content.trim()) {
@@ -2362,7 +2745,7 @@ export function ChatContainer({
         setAttachmentLoading(false)
       }
     },
-    [setError, clearError, attachmentLoading]
+    [setError, clearError, attachmentLoading, setAttachments]
   )
 
   const handleAttachClick = useCallback(async () => {
@@ -2371,17 +2754,20 @@ export function ChatContainer({
       return
     }
     const result = await window.api.file.select()
-    if (!result.canceled && result.filePaths.length > 0) {
-      await handleFileSelectByPath(result.filePaths)
+    if (result.error) setError(result.error)
+    if (!result.canceled && result.files.length > 0) {
+      await handleAttachmentInputs(
+        result.files.map((file) => ({ kind: "selected" as const, ...file }))
+      )
     }
-  }, [handleFileSelectByPath, setError])
+  }, [handleAttachmentInputs, setError])
 
   const removeAttachment = useCallback((index: number) => {
     setAttachments((prev) => prev.filter((_, i) => i !== index))
-  }, [])
+  }, [setAttachments])
   const removeMentionedFile = useCallback((index: number) => {
     setMentionedFiles((prev) => prev.filter((_, i) => i !== index))
-  }, [])
+  }, [setMentionedFiles])
 
   const dropZoneRef = useRef<HTMLDivElement>(null)
 
@@ -2393,15 +2779,30 @@ export function ChatContainer({
       if (attachmentLoading) return
       const files = e.dataTransfer.files
       if (files.length > 0) {
-        const paths = Array.from(files)
-          .map((f) => window.api.file.getFilePath(f))
-          .filter((p) => !!p)
-        if (paths.length > 0) {
-          await handleFileSelectByPath(paths)
+        const availableSlots = Math.max(
+          0,
+          MAX_ATTACHMENTS - attachmentsRef.current.length - mentionedFilesRef.current.length
+        )
+        const inputs: PendingAttachmentInput[] = []
+        for (const file of Array.from(files).slice(0, availableSlots)) {
+          const lastDot = file.name.lastIndexOf(".")
+          const ext = lastDot >= 0 ? file.name.substring(lastDot).toLowerCase() : ""
+          if (!SUPPORTED_EXTS.has(ext)) {
+            setError(`不支持的文件类型"${file.name}"，仅支持 txt、md、csv、docx、xlsx、xls`)
+            continue
+          }
+          if (file.size > MAX_ATTACHMENT_FILE_BYTES) {
+            setError(`文件"${file.name}"过大，单文件不超过 5MB`)
+            continue
+          }
+          inputs.push({ kind: "bytes", fileName: file.name, bytes: await file.arrayBuffer() })
+        }
+        if (inputs.length > 0) {
+          await handleAttachmentInputs(inputs)
         }
       }
     },
-    [handleFileSelectByPath, attachmentLoading]
+    [handleAttachmentInputs, attachmentLoading, setError]
   )
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -2446,85 +2847,141 @@ export function ChatContainer({
       setModelContextLimit(undefined)
       return
     }
-    let ignore = false
-    window.api.models
-      .list()
-      .then((models) => {
-        if (ignore) return
-        const match = models.find((model) => model.id === currentModel)
-        setModelContextLimit(match?.maxTokens)
+    const match = models.find((model) => model.id === currentModel)
+    setModelContextLimit(match?.maxTokens)
+  }, [currentModel, models])
+
+  const fetchYoloMode = useCallback((): void => {
+    const requestId = ++yoloModeLoadRequestRef.current
+    setYoloModeLoadState("loading")
+    window.api.sandbox
+      .getYoloMode()
+      .then((nextYoloMode) => {
+        if (requestId !== yoloModeLoadRequestRef.current) return
+        setYoloMode(nextYoloMode)
+        setYoloModeLoadState("loaded")
       })
-      .catch(() => {
-        if (!ignore) setModelContextLimit(undefined)
+      .catch((e) => {
+        if (requestId !== yoloModeLoadRequestRef.current) return
+        setYoloModeLoadState("failed")
+        console.warn("[YoloMode] Failed to fetch:", e)
       })
-    return () => {
-      ignore = true
-    }
-  }, [currentModel])
+  }, [])
 
   useEffect(() => {
-    const fetchYoloMode = (): void => {
-      window.api.sandbox
-        .getYoloMode()
-        .then((nextYoloMode) => {
-          setYoloMode(nextYoloMode)
-          setYoloModeLoaded(true)
-        })
-        .catch((e) => {
-          setYoloModeLoaded(true)
-          console.warn("[YoloMode] Failed to fetch:", e)
-        })
-    }
     fetchYoloMode()
-    return window.api.sandbox.onChanged(fetchYoloMode)
+    const unsubscribe = window.api.sandbox.onChanged(fetchYoloMode)
+    return () => {
+      yoloModeLoadRequestRef.current += 1
+      unsubscribe()
+    }
+  }, [fetchYoloMode])
+
+  const handleSetYoloMode = useCallback(
+    async (nextYoloMode: boolean): Promise<boolean> => {
+      if (!yoloModeLoaded || yoloModePending) return false
+
+      setYoloModePending(true)
+      try {
+        await window.api.sandbox.setYoloMode(nextYoloMode)
+        yoloModeLoadRequestRef.current += 1
+        setYoloMode(nextYoloMode)
+        setYoloModeLoadState("loaded")
+        toast.success(nextYoloMode ? "YOLO 模式已开启" : "YOLO 模式已关闭，审批已恢复")
+        return true
+      } catch (error) {
+        console.error("[YoloMode] Failed to update:", error)
+        toast.error("YOLO 模式切换失败，请稍后重试")
+        fetchYoloMode()
+        return false
+      } finally {
+        setYoloModePending(false)
+      }
+    },
+    [fetchYoloMode, yoloModeLoaded, yoloModePending]
+  )
+
+  const handleToggleYoloMode = useCallback((): void => {
+    if (!yoloModeLoaded || yoloModePending) return
+    if (yoloMode) {
+      void handleSetYoloMode(false)
+      return
+    }
+    setComposerSettingsOpen(false)
+    setYoloEnableConfirmOpen(true)
+  }, [handleSetYoloMode, yoloMode, yoloModeLoaded, yoloModePending])
+
+  const handleConfirmEnableYoloMode = useCallback(async (): Promise<void> => {
+    const updated = await handleSetYoloMode(true)
+    if (updated) setYoloEnableConfirmOpen(false)
+  }, [handleSetYoloMode])
+
+  const handleComposerEnvironmentRailCollapsedChange = useCallback((collapsed: boolean): void => {
+    if (collapsed) setComposerSettingsOpen(false)
+    setComposerEnvironmentRailCollapsed(collapsed)
   }, [])
 
   const uploadLoChatDataForThread = useCallback(
-    async (targetThreadId: string, msgs: Message[], attempt = 0) => {
-      const lastMsg = msgs[msgs.length - 1]
-      if (!lastMsg || lastMsg.role === "user") return
-
-      let lUidx = -1
-      for (let i = msgs.length - 1; i >= 0; i--) {
-        if (msgs[i].role === "user") {
-          lUidx = i
-          break
-        }
+    async (targetThreadId: string, batch: ChatReportBatch, attempt = 0) => {
+      if (chatReportDisposedRef.current) return
+      if (chatReportAbortControllersRef.current[targetThreadId]) {
+        // Per thread, retain only the newest pending report while one bounded request is active.
+        chatReportPendingBatchesRef.current[targetThreadId] = { batch, attempt }
+        return
       }
-      if (lUidx === -1) return
-
-      const tailMessages = msgs.slice(lUidx)
-      const reservedIds = reserveChatReportMessageIds(
-        targetThreadId,
-        tailMessages.map((msg) => msg.id)
-      )
+      const reservedIds = reserveChatReportMessageIds(targetThreadId, batch.messageIds)
       if (reservedIds.length === 0) return
 
-      const payload: ChatReportPayload[] = tailMessages.map((msg) => ({
-        role: msg.role,
-        content: stringifyMessageContentForReport(msg.content)
-      }))
+      const controller = new AbortController()
+      chatReportAbortControllersRef.current[targetThreadId] = controller
       try {
-        await uploadChatData(targetThreadId, payload)
+        await uploadChatData(targetThreadId, batch.payload, controller.signal)
         markChatReportUploadSucceeded(targetThreadId, reservedIds)
       } catch (error) {
         markChatReportUploadFailed(targetThreadId, reservedIds)
-        if (attempt < CHAT_REPORT_MAX_RETRY_ATTEMPTS) {
-          const retryQueue = (chatReportRetryQueuesRef.current[targetThreadId] ??= [])
-          retryQueue.push({ messages: tailMessages, attempt: attempt + 1 })
+        if (
+          !controller.signal.aborted &&
+          !chatReportDisposedRef.current &&
+          attempt < CHAT_REPORT_MAX_RETRY_ATTEMPTS
+        ) {
+          chatReportRetryBatchesRef.current[targetThreadId] = {
+            batch,
+            attempt: attempt + 1
+          }
           if (!chatReportRetryTimersRef.current[targetThreadId]) {
             const retryThreadId = targetThreadId
             const retryDelayMs = Math.min(CHAT_REPORT_RETRY_DELAY_MS * 2 ** attempt, 30_000)
             chatReportRetryTimersRef.current[retryThreadId] = window.setTimeout(() => {
               delete chatReportRetryTimersRef.current[retryThreadId]
-              const retryItems = chatReportRetryQueuesRef.current[retryThreadId]?.splice(0) ?? []
-              for (const retryItem of retryItems) {
-                void uploadLoChatDataForThread(retryThreadId, retryItem.messages, retryItem.attempt)
+              if (chatReportDisposedRef.current) return
+              const retryItem = chatReportRetryBatchesRef.current[retryThreadId]
+              delete chatReportRetryBatchesRef.current[retryThreadId]
+              if (
+                retryItem &&
+                !chatReportAbortControllersRef.current[retryThreadId] &&
+                !chatReportPendingBatchesRef.current[retryThreadId]
+              ) {
+                void uploadLoChatDataForThread(retryThreadId, retryItem.batch, retryItem.attempt)
               }
             }, retryDelayMs)
           }
         }
         console.warn("[Upload] chat数据上报失败:", error)
+      } finally {
+        if (chatReportAbortControllersRef.current[targetThreadId] === controller) {
+          delete chatReportAbortControllersRef.current[targetThreadId]
+        }
+        if (!chatReportDisposedRef.current) {
+          const pending = chatReportPendingBatchesRef.current[targetThreadId]
+          delete chatReportPendingBatchesRef.current[targetThreadId]
+          if (pending) {
+            const retryTimer = chatReportRetryTimersRef.current[targetThreadId]
+            if (retryTimer) window.clearTimeout(retryTimer)
+            delete chatReportRetryTimersRef.current[targetThreadId]
+            delete chatReportRetryBatchesRef.current[targetThreadId]
+            void uploadLoChatDataForThread(targetThreadId, pending.batch, pending.attempt)
+          }
+        }
       }
     },
     []
@@ -2532,16 +2989,39 @@ export function ChatContainer({
 
   const scheduleChatReportUpload = useCallback(
     (targetThreadId: string, msgs: Message[]) => {
+      const batch = buildLatestChatReportBatch(msgs)
+      if (!batch) return
       const existingTimer = chatReportUploadTimersRef.current[targetThreadId]
       if (existingTimer) window.clearTimeout(existingTimer)
-      const messagesForUpload = msgs.slice()
       chatReportUploadTimersRef.current[targetThreadId] = window.setTimeout(() => {
         delete chatReportUploadTimersRef.current[targetThreadId]
-        void uploadLoChatDataForThread(targetThreadId, messagesForUpload)
+        if (chatReportDisposedRef.current) return
+        void uploadLoChatDataForThread(targetThreadId, batch)
       }, CHAT_REPORT_UPLOAD_DEBOUNCE_MS)
     },
     [uploadLoChatDataForThread]
   )
+
+  useEffect(() => {
+    chatReportDisposedRef.current = false
+    return () => {
+      chatReportDisposedRef.current = true
+      for (const timer of Object.values(chatReportUploadTimersRef.current)) {
+        window.clearTimeout(timer)
+      }
+      for (const timer of Object.values(chatReportRetryTimersRef.current)) {
+        window.clearTimeout(timer)
+      }
+      for (const controller of Object.values(chatReportAbortControllersRef.current)) {
+        controller?.abort(new DOMException("Chat surface disposed", "AbortError"))
+      }
+      chatReportUploadTimersRef.current = {}
+      chatReportRetryTimersRef.current = {}
+      chatReportRetryBatchesRef.current = {}
+      chatReportPendingBatchesRef.current = {}
+      chatReportAbortControllersRef.current = {}
+    }
+  }, [])
 
   // Check if sandbox NUX is needed. The main process currently defaults sandbox mode to
   // "none", so this remains dormant unless the setup flow is re-enabled later.
@@ -2618,9 +3098,7 @@ export function ChatContainer({
   // workspace:pushWorktree calls before the pending approval is cleared on re-render.
   const gitPushInFlightRef = useRef<Set<string>>(new Set())
   const handleApprovalDecision = useCallback(
-    async (
-      decision: "approve" | "approve_session" | "approve_permanent" | "reject" | "edit"
-    ): Promise<void> => {
+    async (decision: ChatApprovalDecision): Promise<void> => {
       if (!pendingApproval) return
 
       // Check if this is an orchestrator-sourced approval (has requestId)
@@ -2749,12 +3227,12 @@ export function ChatContainer({
   )
 
   useEffect(() => {
-    if (!yoloModeLoaded || !yoloMode || !pendingApproval) return
+    if (!autoApproveGitPush || !pendingApproval) return
     const approvalRecord = pendingApproval as unknown as Record<string, unknown>
     if (approvalRecord._orchestratorRequestId && approvalRecord.operation === "git_push") {
       void handleApprovalDecision("approve")
     }
-  }, [handleApprovalDecision, pendingApproval, yoloMode, yoloModeLoaded])
+  }, [autoApproveGitPush, handleApprovalDecision, pendingApproval])
 
   // The pending git_commit approval (agent ran `git commit` → task-card dialog), if any.
   const agentCommitApproval = useMemo(() => {
@@ -2879,277 +3357,625 @@ export function ChatContainer({
     return () => clearTimeout(timer)
   }, [appleIntelligenceGlowEnabled, isLoading])
 
-  const displayMessages = useMemo(() => {
-    const normalizedLiveMessages = normalizeLiveStreamMessageIds(
-      threadMessages.map((message) => ({
-        id: message.id,
-        type:
-          message.role === "user"
-            ? "human"
-            : message.role === "assistant"
-              ? "ai"
-              : message.role
-      })),
-      streamData.liveMessages || []
-    )
-    const threadMessageIds = new Set(threadMessages.map((m) => m.id))
-    const liveReasoningById = new Map<string, string>()
-    for (const liveMessage of normalizedLiveMessages) {
-      if (
-        liveMessage.id &&
-        liveStreamMessageRole(liveMessage.type) === "assistant" &&
-        typeof liveMessage.reasoning === "string" &&
-        liveMessage.reasoning.trim()
-      ) {
-        liveReasoningById.set(liveMessage.id, liveMessage.reasoning)
-      }
-    }
-    const threadMessagesWithLiveReasoning = threadMessages.map((message) => {
-      if (message.role !== "assistant" || message.reasoning) return message
-      const liveReasoning = liveReasoningById.get(message.id)
-      return liveReasoning ? { ...message, reasoning: liveReasoning } : message
-    })
-    const streamingMsgs: Message[] = normalizedLiveMessages
-      .filter((m): m is StreamMessage & { id: string } => !!m.id && !threadMessageIds.has(m.id))
-      .filter((m) => !(m.type === "human" && isCoordinatorNotificationPrompt(m.content)))
-      .map((streamMsg) => {
-        const role = liveStreamMessageRole(streamMsg.type)
-
-        return {
-          id: streamMsg.id,
-          role,
-          content: normalizeLiveStreamMessageContent(streamMsg.content),
-          ...(role === "assistant" && streamMsg.reasoning
-            ? { reasoning: streamMsg.reasoning }
-            : {}),
-          tool_calls: streamMsg.tool_calls,
-          ...(role === "tool" &&
-            streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
-          ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
-          ...(role === "tool" &&
-            streamMsg.is_error !== undefined && { is_error: streamMsg.is_error }),
-          created_at: streamMsg.start_at ?? streamMsg.end_at ?? new Date(),
-          ...(streamMsg.start_at && { start_at: streamMsg.start_at }),
-          ...(streamMsg.end_at && { end_at: streamMsg.end_at })
-        }
-      })
-
-    // Clean up attachment XML tags in user messages for display
-    const allMessages = reconcileMessageDisplayOrder(
-      [...threadMessagesWithLiveReasoning, ...streamingMsgs].filter(
-        isVisibleCheckpointTranscriptMessage
-      ),
-      streamData.messages
-    )
-    const cleanedMessages = allMessages.map((msg) => {
-      if (
-        msg.role !== "user" ||
-        typeof msg.content !== "string" ||
-        !msg.content.includes("<attachment ")
-      )
-        return msg
-      // Extract filenames and user text separately, then reorder: filenames first
-      const fileNames: string[] = []
-      const textOnly = msg.content
-        .replace(
-          /<attachment\s+filename="([^"]*)"[^>]*>[\s\S]*?<\/attachment>/g,
-          (_match, name) => {
-            const decoded = name
-              .replace(/&amp;/g, "&")
-              .replace(/&lt;/g, "<")
-              .replace(/&gt;/g, ">")
-              .replace(/&quot;/g, '"')
-            fileNames.push(`📎 ${decoded}`)
-            return ""
-          }
-        )
-        .trim()
-      const cleaned =
-        fileNames.length > 0 ? `${fileNames.join("\n")}\n\n${textOnly}`.trim() : textOnly
-      return { ...msg, content: cleaned }
-    })
-    return filterCoordinatorNoiseMessages(cleanedMessages)
-  }, [threadMessages, streamData.liveMessages, streamData.messages])
-
-  const chatScrollNavigatorMessages = useMemo(
-    () => filterCoordinatorNoiseMessages(threadMessages.filter(isVisibleCheckpointTranscriptMessage)),
-    [threadMessages]
+  const threadDisplayBaseline = useMemo(
+    () => getThreadDisplayBaseline(threadMessages, messagesContentVersion),
+    [messagesContentVersion, threadMessages]
   )
-
-  // Key that drives in-session search re-matching. Message count and isLoading
-  // stay constant while tokens append to the SAME streaming message, so fold in
-  // the last message's text length — otherwise search misses text that is still
-  // being streamed until the run ends.
-  const searchRecomputeKey = useMemo(() => {
-    const last = displayMessages[displayMessages.length - 1]
-    const lastTextLength = last ? getMessageText(last.content).length : 0
-    return `${displayMessages.length}:${isLoading}:${lastTextLength}`
-  }, [displayMessages, isLoading])
-
-  const chatAutoScrollTriggerKey = useMemo(() => {
-    const last = displayMessages[displayMessages.length - 1]
-    const lastTextLength = last ? getMessageText(last.content).length : 0
-    const lastReasoningLength =
-      last && typeof last.reasoning === "string" ? last.reasoning.length : 0
-    const lastToolCallCount = Array.isArray(last?.tool_calls) ? last.tool_calls.length : 0
-    return [
-      displayMessages.length,
-      isLoading ? 1 : 0,
-      last?.id ?? "",
-      lastTextLength,
-      lastReasoningLength,
-      lastToolCallCount,
-      queuedMessages.length
-    ].join(":")
-  }, [displayMessages, isLoading, queuedMessages.length])
-
-  const detachedHookLogBuckets = useMemo(() => {
-    const userMessageIds = new Set(
-      displayMessages.filter((message) => message.role === "user").map((message) => message.id)
-    )
-    return hookLogBuckets.filter(
-      (bucket) => bucket.entries.length > 0 && !userMessageIds.has(bucket.turnId)
-    )
-  }, [displayMessages, hookLogBuckets])
-
-  const lastContentMessageId = useMemo(() => {
-    // Match what actually renders: ordinary empty messages are skipped, while
-    // an empty user row with Hook entries still owns a visible chip and scroll
-    // anchor. Returning a skipped row would make precise alignment fall back to
-    // scroll-to-bottom; omitting the Hook-only row would anchor one turn early.
-    for (let index = displayMessages.length - 1; index >= 0; index -= 1) {
-      const message = displayMessages[index]
-      const hasHookLogChip = Boolean(
+  const liveDisplayProjection = threadProjectionRuntime.projectLiveDisplayMessages(
+    threadMessages,
+    streamData.liveMessages || []
+  )
+  const liveDisplayMessages = liveDisplayProjection.messages
+  let projectChatMessages = threadProjectionRuntime.chatMessageProjectors.get(threadDisplayBaseline)
+  if (!projectChatMessages) {
+    projectChatMessages = createChatMessageProjector()
+    threadProjectionRuntime.chatMessageProjectors.set(threadDisplayBaseline, projectChatMessages)
+  }
+  const displayMessageProjection = projectChatMessages(
+    threadDisplayBaseline,
+    liveDisplayMessages,
+    streamData.messages,
+    messagesContentVersion,
+    liveDisplayProjection
+  )
+  const displayMessages = displayMessageProjection.messages
+  const displayMessagesContentVersion = displayMessageProjection.contentVersion
+  const displayMessagesStructureVersion = displayMessageProjection.structureVersion
+  const chatScrollQuestionStructureRevision =
+    threadProjectionRuntime.projectChatScrollQuestionRevision({
+      scopeKey: threadId,
+      messages: displayMessages,
+      structureVersion: displayMessagesStructureVersion,
+      changedMessages: displayMessageProjection.changedMessages
+    })
+  const stableMessageIndexProjection = threadProjectionRuntime.projectStableMessageIndexes({
+    baseline: threadDisplayBaseline,
+    indexById: displayMessageProjection.indexById,
+    structureVersion: displayMessagesStructureVersion,
+    hookLogBucketByTurnId,
+    hookLogEnabled: hookLogConfig.enabled
+  })
+  const orderedStableVisibleMessageIndexes = stableMessageIndexProjection.visibleIndexes
+  const hasHookLogChipForMessage = useCallback(
+    (message: Message): boolean =>
+      Boolean(
         hookLogConfig.enabled &&
         message.role === "user" &&
         hookLogBucketByTurnId.get(message.id)?.entries.length
+      ),
+    [hookLogBucketByTurnId, hookLogConfig.enabled]
+  )
+  const dynamicVisibilityProjection = threadProjectionRuntime.projectDynamicLiveVisibility({
+    live: liveDisplayProjection,
+    displayMessages,
+    displayIndexById: displayMessageProjection.indexById,
+    displayContentVersion: displayMessagesContentVersion,
+    displayStructureVersion: displayMessagesStructureVersion,
+    hasHookLogChip: hasHookLogChipForMessage
+  })
+  const dynamicVisibilityByIndex = dynamicVisibilityProjection.byIndex
+  const orderedDynamicVisibleMessageIndexes = dynamicVisibilityProjection.orderedVisibleIndexes
+  const liveLastUserMessageIndex = liveDisplayProjection.lastUserMessageId
+    ? displayMessageProjection.indexById.get(liveDisplayProjection.lastUserMessageId)
+    : undefined
+  const lastUserMessageIndex = Math.max(
+    stableMessageIndexProjection.lastUserIndex,
+    liveLastUserMessageIndex ?? -1
+  )
+
+  const chatScrollNavigatorMessages = displayMessages
+
+  // Keep closed search off the token hot path. The content projector already exposes a cheap
+  // scalar version, so search can refresh live text without re-joining block-array content here.
+  const searchRecomputeKey = useMemo(() => {
+    if (!searchOpen) return "closed"
+    return `${displayMessagesContentVersion}:${displayMessages.length}:${isLoading}`
+  }, [displayMessages.length, displayMessagesContentVersion, isLoading, searchOpen])
+
+  const detachedHookLogBuckets = threadProjectionRuntime.projectDetachedHookLogBuckets({
+    displayMessages,
+    structureVersion: displayMessagesStructureVersion,
+    hookLogBuckets
+  })
+
+  const visibleMessageIndexes = threadProjectionRuntime.projectVisibleMessageIndexes({
+    stableIndexes: orderedStableVisibleMessageIndexes,
+    dynamicVisibilityByIndex,
+    orderedDynamicIndexes: orderedDynamicVisibleMessageIndexes,
+    dynamicVersion: dynamicVisibilityProjection.version
+  })
+  const historyGapBeforeRawMessageId = useMemo(() => {
+    if (!historyWindowGap) return undefined
+    return threadMessages[findThreadMessageGapTailStart(threadMessages, historyWindowGap)]?.id ?? null
+  }, [historyWindowGap, threadMessages])
+  const historyGapBeforeVisibleMessageId = useMemo(() => {
+    const beforeMessageId = historyGapBeforeRawMessageId
+    if (!beforeMessageId) return null
+    let boundaryIndex = displayMessageProjection.indexById.get(beforeMessageId)
+    if (boundaryIndex === undefined) {
+      const tailStart = resolveChatSearchContiguousTailStart(
+        threadMessages, threadDisplayBaseline, beforeMessageId
       )
-      if (messageHasVisibleRow(message, hasHookLogChip)) return message.id
+      const boundary = threadDisplayBaseline[tailStart]
+      boundaryIndex = boundary && displayMessageProjection.indexById.get(boundary.id)
     }
-    return null
-  }, [displayMessages, hookLogBucketByTurnId, hookLogConfig.enabled])
+    if (boundaryIndex === undefined) return null
+    const visibleBoundaryIndex = visibleMessageIndexes.find((index) => index >= boundaryIndex)
+    return visibleBoundaryIndex === undefined
+      ? null
+      : (displayMessages[visibleBoundaryIndex]?.id ?? null)
+  }, [
+    displayMessageProjection.indexById,
+    displayMessages,
+    displayMessagesStructureVersion,
+    historyGapBeforeRawMessageId,
+    threadDisplayBaseline,
+    threadMessages,
+    visibleMessageIndexes
+  ])
+  const lastVisibleMessageIndex = visibleMessageIndexes[visibleMessageIndexes.length - 1]
+  const lastContentMessageId =
+    lastVisibleMessageIndex === undefined
+      ? null
+      : (displayMessages[lastVisibleMessageIndex]?.id ?? null)
 
-  // Per-message derived flags precomputed in a single O(n) reverse pass. Use
-  // the same visibility rule as ChatMessageList so invisible tool/empty rows do
-  // not affect assistant actions or turn boundaries.
-  const perMessageFlags = useMemo(() => {
-    const n = displayMessages.length
-    const showAssistantMeta: boolean[] = new Array(n)
-    const hasUserAfterHead: boolean[] = new Array(n)
-    let nextVisibleRole: string | null = null
-    let userAfter = false
-    for (let index = n - 1; index >= 0; index -= 1) {
-      const message = displayMessages[index]
-      hasUserAfterHead[index] = userAfter
-      const hasHookLogChip =
-        hookLogConfig.enabled &&
-        message.role === "user" &&
-        Boolean(hookLogBucketByTurnId.get(message.id)?.entries.length)
-      if (!messageHasVisibleRow(message, hasHookLogChip)) {
-        showAssistantMeta[index] = false
-        continue
-      }
-      showAssistantMeta[index] =
-        message.role !== "assistant" || nextVisibleRole === null || nextVisibleRole !== "assistant"
-      if (message.role === "user") userAfter = true
-      nextVisibleRole = message.role
-    }
-    return { showAssistantMeta, hasUserAfterHead }
-  }, [displayMessages, hookLogBucketByTurnId, hookLogConfig.enabled])
-
-  const toolDerivationMessages = useStableToolDerivationMessages(displayMessages)
-  const toolResults = useMemo(
-    () => buildToolResultAssociations(toolDerivationMessages),
-    [toolDerivationMessages]
+  // Ordinary assistant tokens update only the changed display slot. Keep the
+  // tool projection stable and replace a slot only when that changed row is
+  // itself tool-relevant.
+  const toolDerivationProjection = threadProjectionRuntime.projectToolDerivationMessages(
+    displayMessages,
+    displayMessageProjection.changedMessages,
+    displayMessagesStructureVersion
+  )
+  const toolDerivationMessages = toolDerivationProjection.messages
+  const toolResults = threadProjectionRuntime.projectToolResults(
+    toolDerivationMessages,
+    toolDerivationProjection.version
   )
 
-  const { assistantDurationMsById, userSendTimeLabelById } = useMemo(
-    () => buildMessageBubbleTimingMeta(displayMessages),
-    [displayMessages]
-  )
+  const { assistantDurationMsById, userSendTimeLabelById } =
+    threadProjectionRuntime.projectTimingMeta(displayMessages, displayMessagesStructureVersion)
 
-  const { toolCallDisplayStates, pendingApprovalToolCallKeys } = useMemo(() => {
-    const orderedToolCalls: Array<{
-      key: string
-      call: { id: string; name: string; args: Record<string, unknown> }
-    }> = []
+  const { toolCallDisplayStates, pendingApprovalToolCallKeys } =
+    threadProjectionRuntime.projectToolCallDisplayState({
+      messages: toolDerivationMessages,
+      projectionVersion: toolDerivationProjection.version,
+      toolResults,
+      toolCallStates,
+      pendingApproval,
+      isLoading,
+      compute: () => {
+        const orderedToolCalls: Array<{
+          key: string
+          call: { id: string; name: string; args: Record<string, unknown> }
+        }> = []
 
-    for (const message of toolDerivationMessages) {
-      if (!Array.isArray(message.tool_calls)) continue
-      message.tool_calls.forEach((toolCall, index) => {
-        if (!toolCall?.id) return
-        orderedToolCalls.push({
-          key: getWorkerToolUiKey(message.id, toolCall.id, index),
-          call: toolCall
-        })
-      })
-    }
+        for (const message of toolDerivationMessages) {
+          if (!Array.isArray(message.tool_calls)) continue
+          message.tool_calls.forEach((toolCall, index) => {
+            if (!toolCall?.id) return
+            orderedToolCalls.push({
+              key: getWorkerToolUiKey(message.id, toolCall.id, index),
+              call: toolCall
+            })
+          })
+        }
 
-    const lastOccurrenceKeyByCallId = new Map<string, string>()
-    for (const { key, call } of orderedToolCalls) lastOccurrenceKeyByCallId.set(call.id, key)
+        const lastOccurrenceKeyByCallId = new Map<string, string>()
+        for (const { key, call } of orderedToolCalls) lastOccurrenceKeyByCallId.set(call.id, key)
 
-    const currentApprovalIds = new Set<string>()
-    if (pendingApproval?.pendingToolCallIds?.length) {
-      for (const id of pendingApproval.pendingToolCallIds) {
-        if (id) currentApprovalIds.add(id)
+        const currentApprovalIds = new Set<string>()
+        if (pendingApproval?.pendingToolCallIds?.length) {
+          for (const id of pendingApproval.pendingToolCallIds) {
+            if (id) currentApprovalIds.add(id)
+          }
+        } else if (pendingApproval?.tool_call?.id) {
+          currentApprovalIds.add(pendingApproval.tool_call.id)
+        }
+        const approvalKeys = new Set<string>()
+        for (const id of currentApprovalIds) {
+          const key = lastOccurrenceKeyByCallId.get(id)
+          if (key) approvalKeys.add(key)
+        }
+
+        let activeAssigned = false
+        const nextStates = new Map<string, ToolCallState>()
+
+        for (const { key, call: toolCall } of orderedToolCalls) {
+          const baseState =
+            lastOccurrenceKeyByCallId.get(toolCall.id) === key
+              ? toolCallStates[toolCall.id]
+              : undefined
+          const mergedArgs = mergeToolCallArgs(baseState?.args, toolCall.args)
+          const result = toolResults.get(key)
+          let status: ToolCallStatus
+
+          if (result !== undefined) {
+            status = result.is_error ? "failed" : "completed"
+          } else if (isTerminalToolCallStatus(baseState?.status)) {
+            status = baseState!.status
+          } else if (approvalKeys.has(key)) {
+            status = "awaiting_approval"
+            activeAssigned = true
+          } else if (!isLoading) {
+            status = "interrupted"
+          } else if (!activeAssigned) {
+            status = "running"
+            activeAssigned = true
+          } else {
+            status = "queued"
+          }
+
+          nextStates.set(key, {
+            id: toolCall.id,
+            status,
+            name: toolCall.name || baseState?.name,
+            args: mergedArgs,
+            command: getToolCallCommand(mergedArgs) || baseState?.command,
+            filePath: getToolCallFilePath(mergedArgs) || baseState?.filePath,
+            reason: baseState?.reason,
+            operation: baseState?.operation,
+            code: getToolCallCode(mergedArgs) || baseState?.code,
+            timeoutMs: getToolCallTimeout(mergedArgs) ?? baseState?.timeoutMs,
+            updatedAt: baseState?.updatedAt ?? new Date()
+          })
+        }
+
+        return {
+          toolCallDisplayStates: nextStates,
+          pendingApprovalToolCallKeys: approvalKeys
+        }
       }
-    } else if (pendingApproval?.tool_call?.id) {
-      currentApprovalIds.add(pendingApproval.tool_call.id)
-    }
-    const approvalKeys = new Set<string>()
-    for (const id of currentApprovalIds) {
-      const key = lastOccurrenceKeyByCallId.get(id)
-      if (key) approvalKeys.add(key)
-    }
+    })
 
-    let activeAssigned = false
-    const nextStates = new Map<string, ToolCallState>()
-
-    for (const { key, call: toolCall } of orderedToolCalls) {
-      const baseState =
-        lastOccurrenceKeyByCallId.get(toolCall.id) === key
-          ? toolCallStates[toolCall.id]
+  const buildSearchDocument = useCallback(
+    (message: Message, sortIndex: number): ChatSearchDocument | null => {
+      const hookLogBucket =
+        hookLogConfig.enabled && message.role === "user"
+          ? hookLogBucketByTurnId.get(message.id)
           : undefined
-      const mergedArgs = mergeToolCallArgs(baseState?.args, toolCall.args)
-      const result = toolResults.get(key)
-      let status: ToolCallStatus
+      const hasHookLogChip = Boolean(hookLogBucket?.entries.length)
+      if (!messageHasVisibleRow(message, hasHookLogChip)) return null
 
-      if (result !== undefined) {
-        status = result.is_error ? "failed" : "completed"
-      } else if (isTerminalToolCallStatus(baseState?.status)) {
-        status = baseState!.status
-      } else if (approvalKeys.has(key)) {
-        status = "awaiting_approval"
-        activeAssigned = true
-      } else if (!isLoading) {
-        status = "interrupted"
-      } else if (!activeAssigned) {
-        status = "running"
-        activeAssigned = true
-      } else {
-        status = "queued"
-      }
-
-      nextStates.set(key, {
-        id: toolCall.id,
-        status,
-        name: toolCall.name || baseState?.name,
-        args: mergedArgs,
-        command: getToolCallCommand(mergedArgs) || baseState?.command,
-        filePath: getToolCallFilePath(mergedArgs) || baseState?.filePath,
-        reason: baseState?.reason,
-        operation: baseState?.operation,
-        code: getToolCallCode(mergedArgs) || baseState?.code,
-        timeoutMs: getToolCallTimeout(mergedArgs) ?? baseState?.timeoutMs,
-        updatedAt: baseState?.updatedAt ?? new Date()
+      // Semantic cleanup runs in the worker only after whole-block admission. Splitting a
+      // think/attachment wrapper before stripping it could expose hidden transport content.
+      const hasVisibleReasoning =
+        message.role === "assistant" && Boolean(normalizeVisibleReasoningText(message.reasoning))
+      const plan = createChatSearchPlan(message.role, message.content, {
+        stripThink: hasVisibleReasoning
       })
+      plan.truncated ||= Boolean(message.content_preview_notice)
+      appendChatSearchToolSummaries(plan, message.tool_calls ?? [])
+      // Keep the source slices only; joining them would allocate a second corpus on the UI thread.
+      const textUnits = plan.segments.reduce((sum, segment) => sum + segment.raw.length + 1, 0)
+      return {
+        messageId: message.id,
+        text: "",
+        textUnits,
+        plan,
+        truncated: plan.truncated,
+        // A resident projection owns this row, even if partial. Counts cannot supplement a gap.
+        durableAuthoritative: true,
+        sortIndex
+      }
+    },
+    [hookLogBucketByTurnId, hookLogConfig.enabled]
+  )
+  const stableSearchDocumentsRef = useRef<{
+    baseline: readonly Message[]
+    baselineIndexLookup: MessageIdIndexLookup
+    rawMessages: readonly Message[]
+    indexById: ReadonlyMap<string, number>
+    buildDocument: typeof buildSearchDocument
+    gapBeforeMessageId: string | null | undefined
+    contentVersion: number
+    startIndex: number
+    contiguousTailStartIndex: number
+    truncated: boolean
+    textUnits: number
+    documents: ChatSearchDocument[]
+    documentIndexById: Map<string, number>
+  } | null>(null)
+  const dynamicSearchDocumentsRef = useRef<{
+    truncated: boolean
+    liveStructureVersion: number
+    liveContentVersion: number
+    displayIndexById: ReadonlyMap<string, number>
+    buildDocument: typeof buildSearchDocument
+    documents: ChatSearchDocument[]
+    documentIndexById: Map<string, number>
+  } | null>(null)
+  const getSearchCorpus = useCallback(
+    async (signal?: AbortSignal): Promise<ChatSearchCorpus> => {
+      let batchStart = performance.now()
+      const yieldIfNeeded = async (): Promise<void> => {
+        signal?.throwIfAborted()
+        if (performance.now() - batchStart < 4) return
+        await new Promise<void>((resolve) => setTimeout(resolve, 0))
+        signal?.throwIfAborted()
+        batchStart = performance.now()
+      }
+      let cached = stableSearchDocumentsRef.current
+      let stableDocuments = cached?.documents
+      const stableIdentityMatches =
+        cached &&
+        cached.baseline === threadDisplayBaseline &&
+        cached.rawMessages === threadMessages &&
+        cached.indexById === displayMessageProjection.indexById &&
+        cached.buildDocument === buildSearchDocument &&
+        cached.gapBeforeMessageId === historyGapBeforeRawMessageId
+      if (cached && stableIdentityMatches && cached.contentVersion !== messagesContentVersion) {
+        let requiresRebuild = false
+        let textUnits = cached.textUnits
+        const nextDocuments = [...cached.documents]
+        for (const changedMessage of displayMessageProjection.changedMessages) {
+          await yieldIfNeeded()
+          const cachedDocumentIndex = cached.documentIndexById.get(changedMessage.id)
+          const baselineIndex = cached.baselineIndexLookup.findFirstIndex(changedMessage.id)
+          const belongsToCachedWindow =
+            baselineIndex >= 0 && (baselineIndex >= Math.max(cached.startIndex, cached.contiguousTailStartIndex) ||
+              changedMessage.id.startsWith(GOAL_USER_EVENT_MESSAGE_ID_PREFIX))
+          if (cachedDocumentIndex === undefined) {
+            if (
+              belongsToCachedWindow &&
+              buildSearchDocument(
+                changedMessage,
+                displayMessageProjection.indexById.get(changedMessage.id) ?? baselineIndex
+              )
+            ) {
+              requiresRebuild = true
+              break
+            }
+            continue
+          }
+          const nextDocument = buildSearchDocument(
+            changedMessage,
+            nextDocuments[cachedDocumentIndex].sortIndex ?? baselineIndex
+          )
+          if (!nextDocument) {
+            requiresRebuild = true
+            break
+          }
+          textUnits +=
+            chatSearchDocumentUnits(nextDocument) -
+            chatSearchDocumentUnits(nextDocuments[cachedDocumentIndex])
+          nextDocuments[cachedDocumentIndex] = nextDocument
+        }
+        if (requiresRebuild || textUnits > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT) {
+          stableSearchDocumentsRef.current = null
+          cached = null
+        } else {
+          cached.documents = nextDocuments
+          cached.documentIndexById = new Map(
+            nextDocuments.map((document, index) => [document.messageId, index] as const)
+          )
+          cached.textUnits = textUnits
+          cached.contentVersion = messagesContentVersion
+          stableDocuments = nextDocuments
+        }
+      }
+      if (
+        !cached ||
+        cached.baseline !== threadDisplayBaseline ||
+        cached.rawMessages !== threadMessages ||
+        cached.indexById !== displayMessageProjection.indexById ||
+        cached.buildDocument !== buildSearchDocument ||
+        cached.gapBeforeMessageId !== historyGapBeforeRawMessageId
+      ) {
+        // The durable search API covers the complete persisted transcript. Keep the renderer-side
+        // corpus bounded to the already-visible recent page so opening search after paging through a
+        // very long task cannot synchronously stringify and index the entire hydrated history.
+        const documents: ChatSearchDocument[] = []
+        let textUnits = 0
+        // The durable scanner supplies the detached prefix. Goal sidecars only have a
+        // local rendered representation, so keep them searchable on either side of the gap.
+        const contiguousTailStartIndex = historyGapBeforeRawMessageId === null
+          ? threadDisplayBaseline.length
+          : resolveChatSearchContiguousTailStart(
+              threadMessages, threadDisplayBaseline, historyGapBeforeRawMessageId ?? null
+            )
+        const startIndex = Math.max(0, threadDisplayBaseline.length - CHAT_LOCAL_SEARCH_HISTORY_LIMIT)
+        const addDocument = (messageIndex: number): boolean => {
+          const message = threadDisplayBaseline[messageIndex]
+          const sortIndex = displayMessageProjection.indexById.get(message.id)
+          if (sortIndex === undefined) return true
+          const detached = messageIndex < contiguousTailStartIndex
+          const document = buildSearchDocument(message, detached ? message.ordinal ?? sortIndex : sortIndex)
+          if (!document) return true
+          if (documents.length >= CHAT_LOCAL_SEARCH_HISTORY_LIMIT ||
+              textUnits + chatSearchDocumentUnits(document) > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT) return false
+          documents.push(document)
+          textUnits += chatSearchDocumentUnits(document)
+          return true
+        }
+        let truncated = false
+        for (let index = threadDisplayBaseline.length - 1; index >= 0; index -= 1) {
+          if (!threadDisplayBaseline[index].id.startsWith(GOAL_USER_EVENT_MESSAGE_ID_PREFIX)) continue
+          await yieldIfNeeded()
+          if (!addDocument(index)) {
+            truncated = true
+            break
+          }
+        }
+        for (let index = threadDisplayBaseline.length - 1;
+            index >= Math.max(startIndex, contiguousTailStartIndex); index -= 1) {
+          if (threadDisplayBaseline[index].id.startsWith(GOAL_USER_EVENT_MESSAGE_ID_PREFIX)) continue
+          await yieldIfNeeded()
+          if (!addDocument(index)) break
+        }
+        stableDocuments = documents.sort(
+          (left, right) => (left.sortIndex ?? 0) - (right.sortIndex ?? 0)
+        )
+        stableSearchDocumentsRef.current = {
+          baseline: threadDisplayBaseline,
+          baselineIndexLookup: createMessageIdIndexLookup(threadDisplayBaseline),
+          rawMessages: threadMessages,
+          indexById: displayMessageProjection.indexById,
+          buildDocument: buildSearchDocument,
+          gapBeforeMessageId: historyGapBeforeRawMessageId,
+          contentVersion: messagesContentVersion,
+          startIndex,
+          contiguousTailStartIndex,
+          truncated,
+          textUnits,
+          documents: stableDocuments,
+          documentIndexById: new Map(
+            stableDocuments.map((document, index) => [document.messageId, index] as const)
+          )
+        }
+      }
+      let dynamicCache = dynamicSearchDocumentsRef.current
+      const rebuildDynamicDocuments = async (): Promise<typeof dynamicCache> => {
+        const documents: ChatSearchDocument[] = []
+        let textUnits = 0
+        const startIndex = Math.max(0, liveDisplayMessages.length - CHAT_LOCAL_SEARCH_HISTORY_LIMIT)
+        let truncated = startIndex > 0
+        for (
+          let liveIndex = liveDisplayMessages.length - 1;
+          liveIndex >= startIndex;
+          liveIndex -= 1
+        ) {
+          await yieldIfNeeded()
+          const liveMessage = liveDisplayMessages[liveIndex]
+          const sortIndex = displayMessageProjection.indexById.get(liveMessage.id)
+          if (sortIndex === undefined) continue
+          const message = displayMessages[sortIndex]
+          const document = message ? buildSearchDocument(message, sortIndex) : null
+          if (!document) continue
+          if (
+            documents.length > 0 &&
+            textUnits + chatSearchDocumentUnits(document) > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT
+          ) {
+            truncated = true
+            break
+          }
+          documents.push(document)
+          textUnits += chatSearchDocumentUnits(document)
+          if (textUnits >= CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT) {
+            truncated ||= liveIndex > startIndex
+            break
+          }
+        }
+        documents.sort((left, right) => (left.sortIndex ?? 0) - (right.sortIndex ?? 0))
+        dynamicCache = {
+          truncated,
+          liveStructureVersion: liveDisplayProjection.structureVersion,
+          liveContentVersion: liveDisplayProjection.contentVersion,
+          displayIndexById: displayMessageProjection.indexById,
+          buildDocument: buildSearchDocument,
+          documents,
+          documentIndexById: new Map(
+            documents.map((document, index) => [document.messageId, index])
+          )
+        }
+        dynamicSearchDocumentsRef.current = dynamicCache
+        return dynamicCache
+      }
+      if (
+        !dynamicCache ||
+        dynamicCache.liveStructureVersion !== liveDisplayProjection.structureVersion ||
+        dynamicCache.displayIndexById !== displayMessageProjection.indexById ||
+        dynamicCache.buildDocument !== buildSearchDocument
+      ) {
+        dynamicCache = await rebuildDynamicDocuments()
+      } else if (dynamicCache.liveContentVersion !== liveDisplayProjection.contentVersion) {
+        let requiresRebuild = false
+        dynamicCache = { ...dynamicCache, documents: [...dynamicCache.documents] }
+        for (const liveMessage of liveDisplayProjection.changedMessages) {
+          await yieldIfNeeded()
+          const sortIndex = displayMessageProjection.indexById.get(liveMessage.id)
+          if (sortIndex === undefined) {
+            requiresRebuild = true
+            break
+          }
+          const message = displayMessages[sortIndex]
+          const document = message ? buildSearchDocument(message, sortIndex) : null
+          const documentIndex = dynamicCache.documentIndexById.get(liveMessage.id)
+          if (!document || documentIndex === undefined) {
+            requiresRebuild = true
+            break
+          }
+          dynamicCache.documents[documentIndex] = document
+        }
+        if (
+          requiresRebuild ||
+          dynamicCache.documents.reduce((sum, doc) => sum + chatSearchDocumentUnits(doc), 0) >
+            CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT
+        ) {
+          dynamicCache = await rebuildDynamicDocuments()
+        } else {
+          dynamicCache.liveContentVersion = liveDisplayProjection.contentVersion
+          dynamicSearchDocumentsRef.current = dynamicCache
+        }
+      }
+      const corpus = boundChatSearchCorpus({
+        truncated: stableSearchDocumentsRef.current?.truncated || dynamicCache?.truncated,
+        stableDocuments: stableDocuments ?? [],
+        dynamicDocuments: dynamicCache?.documents ?? [],
+        dynamicMessageIds: liveDisplayProjection.messageIds
+      })
+      // Release excluded raw plans in the UI caches too, not only in the worker's projection cache.
+      const stableCache = stableSearchDocumentsRef.current
+      if (stableCache && stableCache.documents.length !== corpus.stableDocuments.length) {
+        stableCache.documents = [...corpus.stableDocuments]
+        stableCache.textUnits = stableCache.documents.reduce(
+          (sum, doc) => sum + chatSearchDocumentUnits(doc),
+          0
+        )
+        stableCache.documentIndexById = new Map(
+          stableCache.documents.map((doc, index) => [doc.messageId, index])
+        )
+      }
+      if (dynamicCache && dynamicCache.documents.length !== corpus.dynamicDocuments.length) {
+        dynamicCache.documents = [...corpus.dynamicDocuments]
+        dynamicCache.documentIndexById = new Map(
+          dynamicCache.documents.map((doc, index) => [doc.messageId, index])
+        )
+        dynamicCache.truncated = true
+      }
+      return corpus
+    },
+    [
+      buildSearchDocument,
+      displayMessageProjection.indexById,
+      displayMessages,
+      displayMessagesContentVersion,
+      liveDisplayProjection,
+      liveDisplayMessages,
+      historyGapBeforeRawMessageId,
+      messagesContentVersion,
+      threadMessages,
+      threadDisplayBaseline
+    ]
+  )
+  const searchValidationInputsRef = useRef({
+    displayMessages,
+    indexes: displayMessageProjection.indexById,
+    buildSearchDocument
+  })
+  useLayoutEffect(() => {
+    searchValidationInputsRef.current = {
+      displayMessages,
+      indexes: displayMessageProjection.indexById,
+      buildSearchDocument
     }
+  }, [displayMessages, displayMessageProjection.indexById, buildSearchDocument])
+  const validateSearchLocation = useCallback(
+    async (reveal: ChatSearchReveal, signal: AbortSignal) => {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        signal.throwIfAborted()
+        const inputs = searchValidationInputsRef.current
+        const index = inputs.indexes.get(reveal.messageId)
+        const message = index === undefined ? undefined : inputs.displayMessages[index]
+        if (!message || index === undefined) return false
+        let doc = inputs.buildSearchDocument(message, index)
+        if (!doc?.plan) return false
+        for (const cache of [dynamicSearchDocumentsRef.current, stableSearchDocumentsRef.current]) {
+          const cachedIndex = cache?.documentIndexById.get(reveal.messageId)
+          const cached = cachedIndex === undefined ? undefined : cache?.documents[cachedIndex]
+          if (cached && areChatSearchPlansEqual(cached.plan, doc.plan)) {
+            doc = cached
+            break
+          }
+        }
+        searchIndexerRef.current ??= createChatSearchIndexer()
+        const valid = await searchIndexerRef.current.validate(doc, reveal.location, signal)
+        const current = searchValidationInputsRef.current
+        const currentIndex = current.indexes.get(reveal.messageId)
+        const latest =
+          currentIndex === undefined ? undefined : current.displayMessages[currentIndex]
+        if (
+          latest?.content === message.content &&
+          latest?.reasoning === message.reasoning &&
+          latest?.tool_calls === message.tool_calls
+        )
+          return valid
+      }
+      return false
+    },
+    []
+  )
 
-    return {
-      toolCallDisplayStates: nextStates,
-      pendingApprovalToolCallKeys: approvalKeys
-    }
-  }, [isLoading, pendingApproval, toolCallStates, toolDerivationMessages, toolResults])
+  const setPendingDurableRevealMessageId = useCallback(
+    (messageId: string | null): void => {
+      pendingDurableSearchRevealIdRef.current = messageId
+      const lease = chatScrollSessionLeaseRef.current
+      if (lease.threadId !== threadId) return
+      chatScrollSessionStore.setPendingRevealMessageId(lease, messageId)
+    },
+    [threadId]
+  )
+  const invalidateDurableMessageReveal = useCallback((): void => {
+    durableMessageWindowGenerationRef.current += 1
+    setPendingDurableRevealMessageId(null)
+    cancelMessageWindowLoad()
+  }, [cancelMessageWindowLoad, setPendingDurableRevealMessageId])
+  const closeSearch = useCallback((): void => {
+    invalidateDurableMessageReveal()
+    stableSearchDocumentsRef.current = null
+    dynamicSearchDocumentsRef.current = null
+    setSearchOpen(false)
+  }, [invalidateDurableMessageReveal])
 
   // Get the actual scrollable viewport element from Radix ScrollArea
   const getViewport = useCallback((): HTMLDivElement | null => {
@@ -3158,47 +3984,1022 @@ export function ChatContainer({
     ) as HTMLDivElement | null
   }, [])
 
-  const scrollToConversationBottom = useCallback((): void => {
-    const viewport = getViewport()
-    if (!viewport) return
-    viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
-  }, [getViewport])
+  useLayoutEffect(() => {
+    setScrollParent(getViewport())
+  }, [getViewport, threadId])
+
+  const applyChatScrollEvent = useCallback(
+    (event: ChatScrollEvent): ChatScrollTransition => {
+      const current = chatScrollStateRef.current ?? createChatScrollState(threadId)
+      const transition = transitionChatScroll(current, event)
+      chatScrollStateRef.current = transition.state
+      setChatScrollUiState((previous) => {
+        if (
+          previous.generation === transition.state.generation &&
+          previous.mode === transition.state.mode &&
+          previous.hasUnread === transition.state.hasUnread &&
+          previous.unreadCount === transition.state.unreadCount
+        ) {
+          return previous
+        }
+        return {
+          generation: transition.state.generation,
+          mode: transition.state.mode,
+          hasUnread: transition.state.hasUnread,
+          unreadCount: transition.state.unreadCount
+        }
+      })
+      return transition
+    },
+    [threadId]
+  )
+
+  useLayoutEffect(() => {
+    if (bottomScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(bottomScrollFrameRef.current)
+      bottomScrollFrameRef.current = null
+    }
+    if (chatScrollStateRef.current?.threadId !== threadId) {
+      const opened = chatScrollSessionStore.open(threadId)
+      chatScrollSessionLeaseRef.current = opened.lease
+      const restored = opened.session
+      const nextState = restored?.state ?? createChatScrollState(threadId)
+      chatScrollStateRef.current = nextState
+      pendingChatSessionAnchorRef.current = restored?.anchor
+        ? { ...restored.anchor, threadId, attempt: 0, stableFrames: 0 }
+        : null
+      chatContentSnapshotRef.current = restored?.contentSnapshot ?? null
+      pendingDurableSearchRevealIdRef.current = opened.pendingRevealMessageId
+      setChatScrollUiState({
+        generation: nextState.generation,
+        mode: nextState.mode,
+        hasUnread: nextState.hasUnread,
+        unreadCount: nextState.unreadCount
+      })
+    }
+    pendingBottomScrollEffectRef.current = null
+    bottomSettleAttemptRef.current = 0
+    bottomSettleEffectKeyRef.current = ""
+    lastObservedScrollTopRef.current = 0
+    upwardUserScrollIntentUntilRef.current = 0
+    downwardUserScrollIntentUntilRef.current = 0
+    scrollbarUserIntentActiveRef.current = false
+  }, [threadId])
 
   useEffect(() => {
-    if (historyLoading || pendingApproval || pendingUserInput) return
+    if (scrollParent || !scrollRef.current) return
+    setScrollParent(getViewport())
+  }, [getViewport, scrollParent])
 
-    const configuredLimit = normalizeChatAutoScrollMessageLimit(
-      chatScrollSettings.autoScrollMessageLimit
-    )
-    if (
-      configuredLimit !== CHAT_AUTO_SCROLL_ALWAYS &&
-      displayMessages.length > configuredLimit
-    ) {
-      const noticeKey = `${threadId}:${configuredLimit}`
-      if (chatScrollLimitNoticeKeyRef.current !== noticeKey) {
-        chatScrollLimitNoticeKeyRef.current = noticeKey
-        toast.warning(
-          `会话消息已超过 ${configuredLimit} 条，已暂停自动置底。可前往“自定义 / 基础功能 / 通用”调整自动置底消息数量。`
+  const visibleMessageIndexById = useMemo(() => {
+    const indexById = new Map<string, number>()
+    visibleMessageIndexes.forEach((messageIndex, visibleIndex) => {
+      const message = displayMessages[messageIndex]
+      if (message) indexById.set(message.id, visibleIndex)
+    })
+    return indexById
+  }, [displayMessages, displayMessagesStructureVersion, visibleMessageIndexes])
+  const [releasedHistoryRevealRevision, setReleasedHistoryRevealRevision] = useState(0)
+  const isMessageVirtualizationEnabled = shouldVirtualizeChatMessageList(
+    visibleMessageIndexes.length
+  )
+  lastVisibleMessageIndexRef.current = visibleMessageIndexes.length - 1
+  messageVirtualizationEnabledRef.current = isMessageVirtualizationEnabled
+  useEffect(() => {
+    pendingDurableHistoryAnchorRef.current = null
+  }, [threadId])
+
+  const scheduleBottomScrollEffect = useCallback(
+    (effect: ChatScrollEffect): void => {
+      pendingBottomScrollEffectRef.current = mergeChatScrollEffects(
+        pendingBottomScrollEffectRef.current,
+        effect
+      )
+      if (bottomScrollFrameRef.current !== null) return
+
+      const run = (): void => {
+        bottomScrollFrameRef.current = null
+        const pending = pendingBottomScrollEffectRef.current
+        pendingBottomScrollEffectRef.current = null
+        const state = chatScrollStateRef.current
+        if (!pending || !state || pending.generation !== state.generation) return
+
+        const viewport = getViewport()
+        const lastVisibleIndex = lastVisibleMessageIndexRef.current
+        if (!viewport || lastVisibleIndex < 0) {
+          applyChatScrollEvent({
+            type:
+              pending.reason === "content-appended" || pending.reason === "content-grown"
+                ? "PROGRAMMATIC_SCROLL_END"
+                : "SCROLL_TO_BOTTOM_FAILED",
+            generation: pending.generation
+          })
+          return
+        }
+
+        const longSettle =
+          pending.reason === "initial-position" ||
+          pending.reason === "return-to-bottom" ||
+          pending.reason === "restore-complete"
+        const settleKey = `${pending.generation}:${pending.reason}`
+        if (bottomSettleEffectKeyRef.current !== settleKey) {
+          bottomSettleEffectKeyRef.current = settleKey
+          bottomSettleAttemptRef.current = 0
+        }
+        const virtualized = Boolean(messageVirtualizationEnabledRef.current && virtuosoRef.current)
+        const writer = resolveChatBottomScrollWriter(
+          virtualized,
+          pending.reason,
+          bottomSettleAttemptRef.current
+        )
+
+        if (writer === "virtual-index" && virtuosoRef.current) {
+          virtuosoRef.current.scrollToIndex({
+            index: lastVisibleIndex,
+            align: "end",
+            behavior: "auto"
+          })
+        } else {
+          // The viewport write includes Virtuoso's measured footer (queued rows, approvals, and
+          // user-input cards). It deliberately runs on a different frame from virtual tail priming.
+          const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+          if (Math.abs(viewport.scrollTop - bottom) > 1) {
+            viewport.scrollTo({ top: bottom, behavior: "auto" })
+          }
+        }
+
+        const distanceToBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+        // A virtual-index write only guarantees that the final message is mounted. The Virtuoso
+        // footer sits after that item, so confirm only after the next-frame viewport phase has had
+        // a chance to include the measured footer as well.
+        if (writer === "viewport" && distanceToBottom <= CHAT_AT_BOTTOM_THRESHOLD_PX) {
+          bottomSettleAttemptRef.current = 0
+          bottomSettleEffectKeyRef.current = ""
+          applyChatScrollEvent({
+            type: "BOTTOM_CONFIRMED",
+            generation: pending.generation
+          })
+          return
+        }
+
+        const settleLimit = longSettle
+          ? CHAT_BOTTOM_SETTLE_MAX_FRAMES
+          : CHAT_FOLLOW_SETTLE_MAX_FRAMES
+        if (bottomSettleAttemptRef.current < settleLimit) {
+          bottomSettleAttemptRef.current += 1
+          pendingBottomScrollEffectRef.current = mergeChatScrollEffects(
+            pendingBottomScrollEffectRef.current,
+            pending
+          )
+          bottomScrollFrameRef.current = window.requestAnimationFrame(run)
+          return
+        }
+
+        bottomSettleAttemptRef.current = 0
+        bottomSettleEffectKeyRef.current = ""
+        applyChatScrollEvent({
+          type: longSettle ? "SCROLL_TO_BOTTOM_FAILED" : "PROGRAMMATIC_SCROLL_END",
+          generation: pending.generation
+        })
+      }
+
+      bottomScrollFrameRef.current = window.requestAnimationFrame(run)
+    },
+    [applyChatScrollEvent, getViewport]
+  )
+
+  const runChatScrollTransition = useCallback(
+    (transition: ChatScrollTransition): ChatScrollState => {
+      if (transition.state.mode === "restoring" || isChatScrollDetached(transition.state)) {
+        pendingBottomScrollEffectRef.current = null
+        if (bottomScrollFrameRef.current !== null) {
+          window.cancelAnimationFrame(bottomScrollFrameRef.current)
+          bottomScrollFrameRef.current = null
+        }
+      }
+      for (const effect of transition.effects) scheduleBottomScrollEffect(effect)
+      return transition.state
+    },
+    [scheduleBottomScrollEffect]
+  )
+
+  const dispatchChatScrollEvent = useCallback(
+    (event: ChatScrollEvent): ChatScrollState => {
+      let nextState = runChatScrollTransition(applyChatScrollEvent(event))
+      // A real user gesture during page-anchor restoration owns the viewport. Cancel the restore
+      // session immediately so its next animation frame cannot pull the reader back to the old
+      // anchor after wheel/touch/keyboard navigation.
+      if (event.type === "USER_DETACH" && pendingDurableHistoryAnchorRef.current) {
+        pendingDurableHistoryAnchorRef.current = null
+        nextState = runChatScrollTransition(
+          applyChatScrollEvent({ type: "RESTORE_END", generation: nextState.generation })
         )
       }
+      return nextState
+    },
+    [applyChatScrollEvent, runChatScrollTransition]
+  )
+
+  const waitForTranscriptCommit = useCallback(
+    (): Promise<void> =>
+      new Promise((resolve) => {
+        window.requestAnimationFrame(() => resolve())
+      }),
+    []
+  )
+  const consumedSearchNavigation = useRef<number | null>(null)
+  const [consumedSearchNavigationId, setConsumedSearchNavigationId] = useState<number | null>(null)
+  const historyNavigationAttempt = useRef<number | null>(null)
+  const cancelActiveSearchNavigation = useCallback(() => {
+    const command = useThreadSearch.getState().navigation
+    if (command?.result.threadId === threadId) finishThreadSearchNavigation(command.id)
+  }, [threadId])
+
+  const hasTargetedHistoryWindow = historyPageWindows.some((window) =>
+    window.reloadCursor && "targetMessageId" in window.reloadCursor)
+  const scrollToConversationBottom = useCallback((): void => {
+    cancelActiveSearchNavigation()
+    const revealGeneration = durableMessageWindowGenerationRef.current + 1
+    durableMessageWindowGenerationRef.current = revealGeneration
+    setPendingDurableRevealMessageId(null)
+    cancelMessageWindowLoad()
+    pendingChatSessionAnchorRef.current = null
+    // Persist the user's intent before waiting for disk. If the chat unmounts while the latest
+    // page is loading (for example, a file tab opens), cleanup must save `following`, not the
+    // detached state that existed before the click.
+    dispatchChatScrollEvent({ type: "RETURN_TO_BOTTOM" })
+
+    void (async () => {
+      if (historyWindowGap || historyPageLoading || hasTargetedHistoryWindow) {
+        const restored = await restoreLatestMessageWindow()
+        if (
+          !chatViewMountedRef.current ||
+          durableMessageWindowGenerationRef.current !== revealGeneration
+        ) {
+          return
+        }
+        if (!restored) {
+          toast.error("恢复最新消息失败，请稍后重试")
+          return
+        }
+        await waitForTranscriptCommit()
+      }
+      if (
+        !chatViewMountedRef.current ||
+        durableMessageWindowGenerationRef.current !== revealGeneration
+      ) {
+        return
+      }
+      dispatchChatScrollEvent({ type: "RETURN_TO_BOTTOM" })
+    })()
+  }, [
+    cancelActiveSearchNavigation,
+    cancelMessageWindowLoad,
+    dispatchChatScrollEvent,
+    hasTargetedHistoryWindow,
+    historyPageLoading,
+    historyWindowGap,
+    restoreLatestMessageWindow,
+    setPendingDurableRevealMessageId,
+    threadId,
+    waitForTranscriptCommit
+  ])
+
+  useLayoutEffect(() => {
+    chatViewMountedRef.current = true
+    const sessionLease = chatScrollSessionLeaseRef.current
+    return () => {
+      chatViewMountedRef.current = false
+      durableMessageWindowGenerationRef.current += 1
+      const consumed = consumedSearchNavigation.current
+      if (consumed !== null && isCurrentThreadSearchNavigation(consumed)) {
+        finishThreadSearchNavigation(consumed)
+        cancelMessageWindowLoad()
+      }
+      const state = chatScrollStateRef.current
+      if (state?.threadId === threadId) {
+        const viewport = getViewport()
+        let anchor: ChatScrollSessionAnchor | null = null
+        // A durable reveal that is still loading owns the remount destination. Saving the old
+        // viewport anchor here would race it and pull the reopened chat back to stale content.
+        if (viewport && isChatScrollDetached(state) && !pendingDurableSearchRevealIdRef.current) {
+          const viewportTop = viewport.getBoundingClientRect().top
+          let closestDistance = Number.POSITIVE_INFINITY
+          for (const candidate of viewport.querySelectorAll<HTMLElement>(
+            "[data-chat-message-id]"
+          )) {
+            const messageId = candidate.dataset.chatMessageId
+            if (!messageId) continue
+            const offsetFromViewportTop = candidate.getBoundingClientRect().top - viewportTop
+            const distance = Math.abs(offsetFromViewportTop)
+            if (distance >= closestDistance) continue
+            closestDistance = distance
+            anchor = { messageId, offsetFromViewportTop }
+          }
+        }
+        chatScrollSessionStore.save(sessionLease, {
+          state,
+          anchor,
+          contentSnapshot: chatContentSnapshotRef.current
+        })
+      }
+      pendingBottomScrollEffectRef.current = null
+      if (bottomScrollFrameRef.current !== null) {
+        window.cancelAnimationFrame(bottomScrollFrameRef.current)
+        bottomScrollFrameRef.current = null
+      }
+    }
+  }, [cancelMessageWindowLoad, getViewport, threadId])
+  const searchDurableMessages = useCallback(
+    (query: string, options: DurableChatSearchOptions): Promise<DurableChatSearchPage> => {
+      return window.api.threads.searchMessages(threadId, query, options)
+    },
+    [threadId]
+  )
+  const navigationReady =
+    !historyLoading &&
+    !historyRestorationPending &&
+    historyConversationPresence !== "unknown" &&
+    Boolean(scrollParent)
+  const externalNavigation: DurableSearchNavigation | undefined =
+    navigation?.result.navigation === "exact" &&
+    (consumedSearchNavigationId === navigation.id || (navigationReady && !historyRestorationFailed))
+    ? { ...navigation, target: navigation.result.target } : undefined
+  useEffect(() => {
+    if (!navigation) return
+    const isNewAttempt = historyNavigationAttempt.current !== navigation.id
+    historyNavigationAttempt.current = navigation.id
+    if (
+      navigation.result.navigation === "exact" && historyRestorationFailed &&
+      !historyRestorationPending
+    ) {
+      if (isNewAttempt) retryHistoryRestoration()
+      else finishThreadSearchNavigation(navigation.id, "无法恢复会话历史，请重新搜索")
+      return
+    }
+    if (!navigationReady) return
+    if (navigation.result.navigation === "threadOnly") {
+      chatRootRef.current?.querySelector<HTMLElement>("textarea")?.focus()
+      finishThreadSearchNavigation(navigation.id)
+    }
+  }, [navigation, navigationReady, historyRestorationFailed, historyRestorationPending, retryHistoryRestoration])
+
+  const revealDurableMessage = useCallback(
+    async (match: DurableChatSearchMatch): Promise<void> => {
+      const request = match.externalNavigation
+      if (request) {
+        consumedSearchNavigation.current = request.id
+        setConsumedSearchNavigationId(request.id)
+      }
+      if (!request && !shouldHydrateDurableSearchMatch(match.messageId, visibleMessageIndexById)) {
+        // The overlay's common reveal path mounts/centers this resident virtual row immediately.
+        return
+      }
+      const revealGeneration = durableMessageWindowGenerationRef.current + 1
+      durableMessageWindowGenerationRef.current = revealGeneration
+      pendingChatSessionAnchorRef.current = null
+      setPendingDurableRevealMessageId(match.messageId)
+      dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+      pendingBottomScrollEffectRef.current = null
+      if (bottomScrollFrameRef.current !== null) {
+        cancelAnimationFrame(bottomScrollFrameRef.current)
+        bottomScrollFrameRef.current = null
+      }
+      const loaded = await loadMessageWindowAround(match, request ? async (residentMessageIds) => {
+        const resolved = await window.api.threads.searchTargetWindow({
+          ...request.result, target: request.target, residentMessageIds
+        })
+        return chatViewMountedRef.current &&
+          durableMessageWindowGenerationRef.current === revealGeneration &&
+          isCurrentThreadSearchNavigation(request.id) && resolved.status === "resolved"
+          ? resolved : null
+      } : undefined)
+      if (
+        !chatViewMountedRef.current ||
+        durableMessageWindowGenerationRef.current !== revealGeneration
+      ) {
+        throw new Error("Durable chat reveal was superseded")
+      }
+      if (!loaded) {
+        setPendingDurableRevealMessageId(null)
+        throw new Error("Unable to hydrate durable chat search result")
+      }
+      await waitForTranscriptCommit()
+    },
+    [
+      dispatchChatScrollEvent,
+      loadMessageWindowAround,
+      setPendingDurableRevealMessageId,
+      visibleMessageIndexById,
+      waitForTranscriptCommit
+    ]
+  )
+
+  useEffect(() => {
+    if (!scrollParent) return
+    lastObservedScrollTopRef.current = scrollParent.scrollTop
+
+    const confirmOrDetachFromScroll = (): void => {
+      const previousTop = lastObservedScrollTopRef.current
+      const nextTop = scrollParent.scrollTop
+      const distanceToBottom = scrollParent.scrollHeight - nextTop - scrollParent.clientHeight
+      lastObservedScrollTopRef.current = nextTop
+
+      if (
+        nextTop < previousTop - CHAT_SCROLL_UP_DETACH_DELTA_PX &&
+        performance.now() <= upwardUserScrollIntentUntilRef.current
+      ) {
+        upwardUserScrollIntentUntilRef.current = 0
+        dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+        return
+      }
+      const state = chatScrollStateRef.current
+      if (
+        state &&
+        shouldConfirmChatViewportBottom({
+          distanceToBottom,
+          movementDelta: nextTop - previousTop,
+          atBottomThreshold: CHAT_AT_BOTTOM_THRESHOLD_PX,
+          detachDelta: CHAT_SCROLL_UP_DETACH_DELTA_PX,
+          detached: isChatScrollDetached(state),
+          downwardIntentActive: performance.now() <= downwardUserScrollIntentUntilRef.current,
+          scrollbarPointerActive: scrollbarUserIntentActiveRef.current
+        })
+      ) {
+        dispatchChatScrollEvent({ type: "BOTTOM_CONFIRMED" })
+      }
+    }
+    const cancelPendingHistoryAnchorFromUserGesture = (): void => {
+      pendingChatSessionAnchorRef.current = null
+      cancelActiveSearchNavigation()
+      invalidateDurableMessageReveal()
+      const anchor = pendingDurableHistoryAnchorRef.current
+      if (!anchor) return
+      dispatchChatScrollEvent({
+        type: "USER_DETACH",
+        source: "user-input",
+        generation: anchor.generation
+      })
+    }
+    const detachFromExplicitWheel = (event: WheelEvent): void => {
+      if (event.deltaY < 0) {
+        downwardUserScrollIntentUntilRef.current = 0
+        upwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      } else if (event.deltaY > 0) {
+        upwardUserScrollIntentUntilRef.current = 0
+        downwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      }
+    }
+    const scrollRoot = scrollRef.current
+    const detachFromScrollbarPointer = (event: PointerEvent): void => {
+      if (
+        event
+          .composedPath()
+          .some(
+            (target) =>
+              target instanceof HTMLElement && target.hasAttribute("data-scroll-area-scrollbar")
+          )
+      ) {
+        scrollbarUserIntentActiveRef.current = true
+        cancelPendingHistoryAnchorFromUserGesture()
+        dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+      }
+    }
+    const cancelScrollbarPointerIntent = (): void => {
+      scrollbarUserIntentActiveRef.current = false
+    }
+    const finishScrollbarPointerIntent = (): void => {
+      if (!scrollbarUserIntentActiveRef.current) return
+      scrollbarUserIntentActiveRef.current = false
+      lastObservedScrollTopRef.current = scrollParent.scrollTop
+      const distanceToBottom =
+        scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight
+      if (distanceToBottom <= CHAT_AT_BOTTOM_THRESHOLD_PX) {
+        dispatchChatScrollEvent({ type: "BOTTOM_CONFIRMED" })
+      }
+    }
+    let lastTouchY: number | null = null
+    const rememberTouchPosition = (event: TouchEvent): void => {
+      lastTouchY = event.touches[0]?.clientY ?? null
+    }
+    const detachFromTouchScroll = (event: TouchEvent): void => {
+      const nextTouchY = event.touches[0]?.clientY ?? null
+      if (lastTouchY !== null && nextTouchY !== null && nextTouchY > lastTouchY + 1) {
+        downwardUserScrollIntentUntilRef.current = 0
+        upwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      } else if (lastTouchY !== null && nextTouchY !== null && nextTouchY < lastTouchY - 1) {
+        upwardUserScrollIntentUntilRef.current = 0
+        downwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      }
+      lastTouchY = nextTouchY
+    }
+    const detachFromKeyboardScroll = (event: KeyboardEvent): void => {
+      if (useAppStore.getState().showCustomizeView) return
+      if (!chatRootRef.current || chatRootRef.current.offsetParent === null) return
+      if (
+        !chatRootRef.current.contains(document.activeElement) &&
+        document.activeElement !== document.body
+      ) {
+        return
+      }
+      const target = event.target
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return
+      }
+      if (
+        event.key === "ArrowUp" ||
+        event.key === "PageUp" ||
+        event.key === "Home" ||
+        (event.key === " " && event.shiftKey)
+      ) {
+        downwardUserScrollIntentUntilRef.current = 0
+        upwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      } else if (
+        event.key === "ArrowDown" ||
+        event.key === "PageDown" ||
+        event.key === "End" ||
+        (event.key === " " && !event.shiftKey)
+      ) {
+        upwardUserScrollIntentUntilRef.current = 0
+        downwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      }
+    }
+
+    scrollParent.addEventListener("scroll", confirmOrDetachFromScroll, { passive: true })
+    scrollParent.addEventListener("wheel", detachFromExplicitWheel, { passive: true })
+    scrollRoot?.addEventListener("pointerdown", detachFromScrollbarPointer, {
+      capture: true,
+      passive: true
+    })
+    scrollParent.addEventListener("touchstart", rememberTouchPosition, { passive: true })
+    scrollParent.addEventListener("touchmove", detachFromTouchScroll, { passive: true })
+    window.addEventListener("keydown", detachFromKeyboardScroll, true)
+    window.addEventListener("pointerup", finishScrollbarPointerIntent, true)
+    window.addEventListener("pointercancel", cancelScrollbarPointerIntent, true)
+    window.addEventListener("blur", cancelScrollbarPointerIntent)
+    confirmOrDetachFromScroll()
+    return () => {
+      scrollParent.removeEventListener("scroll", confirmOrDetachFromScroll)
+      scrollParent.removeEventListener("wheel", detachFromExplicitWheel)
+      scrollRoot?.removeEventListener("pointerdown", detachFromScrollbarPointer, true)
+      scrollParent.removeEventListener("touchstart", rememberTouchPosition)
+      scrollParent.removeEventListener("touchmove", detachFromTouchScroll)
+      window.removeEventListener("keydown", detachFromKeyboardScroll, true)
+      window.removeEventListener("pointerup", finishScrollbarPointerIntent, true)
+      window.removeEventListener("pointercancel", cancelScrollbarPointerIntent, true)
+      window.removeEventListener("blur", cancelScrollbarPointerIntent)
+    }
+  }, [cancelActiveSearchNavigation, dispatchChatScrollEvent, invalidateDurableMessageReveal, scrollParent])
+
+  const scrollToMessageById = useCallback(
+    (messageId: string): void => {
+      const index = visibleMessageIndexById.get(messageId)
+      if (index === undefined) return
+      cancelActiveSearchNavigation()
+      invalidateDurableMessageReveal()
+      dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+      const targetElement = contentMessageRefs.current.get(messageId)
+      const viewport = getViewport()
+      if (targetElement && viewport) {
+        const viewportRect = viewport.getBoundingClientRect()
+        const targetRect = targetElement.getBoundingClientRect()
+        viewport.scrollTo({
+          top: Math.max(0, viewport.scrollTop + targetRect.top - viewportRect.top - 8),
+          behavior: "smooth"
+        })
+        return
+      }
+      virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: "smooth" })
+    },
+    [cancelActiveSearchNavigation, dispatchChatScrollEvent, getViewport, invalidateDurableMessageReveal, visibleMessageIndexById]
+  )
+  const revealMessage = useCallback(
+    (messageId: string): void => {
+      const index = visibleMessageIndexById.get(messageId)
+      if (index === undefined) return
+      if (pendingDurableSearchRevealIdRef.current !== messageId) {
+        invalidateDurableMessageReveal()
+        dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+      }
+      const targetElement = contentMessageRefs.current.get(messageId)
+      if (targetElement?.isConnected) return
+      virtuosoRef.current?.scrollToIndex({ index, align: "center", behavior: "auto" })
+    },
+    [dispatchChatScrollEvent, invalidateDurableMessageReveal, visibleMessageIndexById]
+  )
+  const handleScrollToQuestion = useCallback((): void => {
+    cancelActiveSearchNavigation()
+    invalidateDurableMessageReveal()
+    dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+  }, [cancelActiveSearchNavigation, dispatchChatScrollEvent, invalidateDurableMessageReveal])
+
+  const handleInitialVirtualItemsRendered = useCallback((): void => {
+    if (historyLoading) return
+    dispatchChatScrollEvent({
+      type: "DATA_READY",
+      generation: chatScrollUiState.generation,
+      messageCount: visibleMessageIndexes.length
+    })
+  }, [
+    chatScrollUiState.generation,
+    dispatchChatScrollEvent,
+    historyLoading,
+    visibleMessageIndexes.length
+  ])
+
+  const handleContentHeightChanged = useCallback((): void => {
+    const state = chatScrollStateRef.current
+    if (
+      visibleMessageIndexes.length === 0 ||
+      !state ||
+      state.generation !== chatScrollUiState.generation ||
+      !shouldFollowChatOutput(state)
+    ) {
+      return
+    }
+    dispatchChatScrollEvent({
+      type: "CONTENT_GROWN",
+      generation: chatScrollUiState.generation
+    })
+  }, [chatScrollUiState.generation, dispatchChatScrollEvent, visibleMessageIndexes.length])
+
+  const handleVirtualAtBottomStateChange = useCallback(
+    (atBottom: boolean): void => {
+      const state = chatScrollStateRef.current
+      // Virtuoso may report `true` when a row collapses or a late measurement shortens content.
+      // That is layout, not proof that a detached reader intentionally returned to the bottom.
+      // Manual downward scrolling is confirmed by the viewport scroll listener; the button changes
+      // mode to following before its programmatic settle, so both intentional paths still work.
+      if (atBottom && state && !isChatScrollDetached(state)) {
+        dispatchChatScrollEvent({
+          type: "BOTTOM_CONFIRMED",
+          generation: chatScrollUiState.generation
+        })
+      }
+    },
+    [chatScrollUiState.generation, dispatchChatScrollEvent]
+  )
+
+  useLayoutEffect(() => {
+    const messageId = pendingDurableSearchRevealIdRef.current
+    if (!messageId || historyPageLoading || !scrollParent) return
+    const index = visibleMessageIndexById.get(messageId)
+    if (index === undefined) return
+    // A replacement window has its own measurement cache. Keep the seek
+    // alive across its first height measurements until the real row mounts.
+    const deadline = performance.now() + 3_000
+    let frame = 0
+    let previousHeight = -1
+    let previousTop = -1
+    const seek = () => {
+      if (pendingDurableSearchRevealIdRef.current !== messageId) return
+      if (performance.now() >= deadline) {
+        setPendingDurableRevealMessageId(null)
+        return
+      }
+      const { scrollHeight, scrollTop } = scrollParent
+      if (!contentMessageRefs.current.get(messageId)?.isConnected &&
+          (scrollHeight !== previousHeight || scrollTop !== previousTop)) {
+        previousHeight = scrollHeight
+        previousTop = scrollTop
+        virtuosoRef.current?.scrollToIndex({ index, align: "center", behavior: "auto" })
+      }
+      frame = requestAnimationFrame(seek)
+    }
+    frame = requestAnimationFrame(seek)
+    return () => cancelAnimationFrame(frame)
+  }, [
+    historyPageLoading,
+    historyWindowRevision,
+    releasedHistoryRevealRevision,
+    scrollParent,
+    setPendingDurableRevealMessageId,
+    visibleMessageIndexById
+  ])
+
+  useLayoutEffect(() => {
+    const anchor = pendingChatSessionAnchorRef.current
+    if (
+      !anchor ||
+      anchor.threadId !== threadId ||
+      historyLoading ||
+      historyPageLoading ||
+      !scrollParent
+    ) {
+      return
+    }
+    const visibleIndex = visibleMessageIndexById.get(anchor.messageId)
+    if (visibleIndex === undefined) {
+      pendingChatSessionAnchorRef.current = null
       return
     }
 
-    const viewport = getViewport()
-    if (!viewport) return
-    const bottomDistance = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-    if (bottomDistance <= 200) {
-      viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+    let frame: number | null = null
+    const finish = (): void => {
+      if (pendingChatSessionAnchorRef.current === anchor) {
+        pendingChatSessionAnchorRef.current = null
+      }
+    }
+    const restore = (): void => {
+      if (pendingChatSessionAnchorRef.current !== anchor) return
+      const viewport = getViewport()
+      const target =
+        contentMessageRefs.current.get(anchor.messageId) ??
+        Array.from(viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []).find(
+          (candidate) => candidate.dataset.chatMessageId === anchor.messageId
+        )
+      if (viewport && target) {
+        const viewportTop = viewport.getBoundingClientRect().top
+        const currentOffset = target.getBoundingClientRect().top - viewportTop
+        const delta = currentOffset - anchor.offsetFromViewportTop
+        if (Math.abs(delta) > 1) viewport.scrollTop += delta
+        anchor.stableFrames = Math.abs(delta) <= 1 ? anchor.stableFrames + 1 : 0
+        if (anchor.stableFrames >= CHAT_SESSION_ANCHOR_STABLE_FRAMES) {
+          finish()
+          return
+        }
+      } else if (anchor.attempt === 0) {
+        virtuosoRef.current?.scrollToIndex({
+          index: visibleIndex,
+          align: "start",
+          behavior: "auto"
+        })
+      }
+
+      anchor.attempt += 1
+      if (anchor.attempt <= CHAT_HISTORY_ANCHOR_MAX_FRAMES) {
+        frame = window.requestAnimationFrame(restore)
+      } else {
+        finish()
+      }
+    }
+    frame = window.requestAnimationFrame(restore)
+    return () => {
+      if (frame !== null) window.cancelAnimationFrame(frame)
     }
   }, [
-    chatAutoScrollTriggerKey,
-    chatScrollSettings.autoScrollMessageLimit,
-    displayMessages.length,
     getViewport,
     historyLoading,
-    pendingApproval,
-    pendingUserInput,
+    historyPageLoading,
+    scrollParent,
+    threadId,
+    visibleMessageIndexById
+  ])
+
+  useEffect(() => {
+    if (historyLoading || !scrollParent) return
+    dispatchChatScrollEvent({
+      type: "DATA_READY",
+      generation: chatScrollUiState.generation,
+      messageCount: visibleMessageIndexes.length
+    })
+  }, [
+    chatScrollUiState.generation,
+    dispatchChatScrollEvent,
+    historyLoading,
+    scrollParent,
+    threadId,
+    visibleMessageIndexes.length
+  ])
+
+  const loadEarlierHistoryPage = useCallback(async (): Promise<void> => {
+    if (historyPageLoading || !historyHasMore) return
+    const generation = chatScrollStateRef.current?.generation
+    dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input", generation })
+    dispatchChatScrollEvent({ type: "RESTORE_BEGIN", generation })
+    const viewport = getViewport()
+    const viewportTop = viewport?.getBoundingClientRect().top ?? 0
+    let anchor: HTMLElement | null = null
+    let anchorDistance = Number.POSITIVE_INFINITY
+    for (const candidate of viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ??
+      []) {
+      const distance = Math.abs(candidate.getBoundingClientRect().top - viewportTop)
+      if (distance < anchorDistance) {
+        anchor = candidate
+        anchorDistance = distance
+      }
+    }
+    const anchorId = anchor?.dataset.chatMessageId
+    const request =
+      anchorId && anchor
+        ? {
+            threadId,
+            generation: generation ?? 0,
+            messageId: anchorId,
+            viewportTop: anchor.getBoundingClientRect().top,
+            previousMessageCount: displayMessages.length,
+            previousLoadedMessageCount: historyLoadedMessageCount,
+            attempt: 0,
+            stableFrames: 0
+          }
+        : null
+    pendingDurableHistoryAnchorRef.current = request
+    try {
+      const prependedCount = await loadEarlierMessages()
+      if (prependedCount === 0 || !request) {
+        if (pendingDurableHistoryAnchorRef.current === request) {
+          pendingDurableHistoryAnchorRef.current = null
+        }
+        dispatchChatScrollEvent({ type: "RESTORE_END", generation })
+      }
+    } catch (error) {
+      if (pendingDurableHistoryAnchorRef.current === request) {
+        pendingDurableHistoryAnchorRef.current = null
+      }
+      dispatchChatScrollEvent({ type: "RESTORE_END", generation })
+      toast.error(error instanceof Error ? error.message : "加载更早消息失败")
+    }
+  }, [
+    dispatchChatScrollEvent,
+    displayMessages.length,
+    getViewport,
+    historyLoadedMessageCount,
+    historyHasMore,
+    historyPageLoading,
+    loadEarlierMessages,
     threadId
+  ])
+  const loadReleasedHistoryWindow = useCallback(async (): Promise<void> => {
+    const targetMessageId = historyWindowGap?.reloadTargetMessageId
+    if (!targetMessageId || historyPageLoading) return
+    const revealGeneration = durableMessageWindowGenerationRef.current + 1
+    durableMessageWindowGenerationRef.current = revealGeneration
+    pendingChatSessionAnchorRef.current = null
+    setPendingDurableRevealMessageId(null)
+    dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+    try {
+      const loaded = await loadReleasedMessageWindow()
+      if (
+        !chatViewMountedRef.current ||
+        durableMessageWindowGenerationRef.current !== revealGeneration
+      ) {
+        return
+      }
+      if (!loaded) {
+        setPendingDurableRevealMessageId(null)
+        toast.error("继续加载中间消息失败，请稍后重试")
+        return
+      }
+      setPendingDurableRevealMessageId(loaded.revealMessageId)
+      if (loaded.revealMessageId) setReleasedHistoryRevealRevision((revision) => revision + 1)
+      await waitForTranscriptCommit()
+    } catch (error) {
+      if (
+        chatViewMountedRef.current &&
+        durableMessageWindowGenerationRef.current === revealGeneration
+      ) {
+        setPendingDurableRevealMessageId(null)
+        toast.error(error instanceof Error ? error.message : "继续加载中间消息失败")
+      }
+    }
+  }, [
+    dispatchChatScrollEvent,
+    historyPageLoading,
+    historyWindowGap?.reloadTargetMessageId,
+    loadReleasedMessageWindow,
+    setPendingDurableRevealMessageId,
+    waitForTranscriptCommit
+  ])
+  const historyRemainingCount = Math.max(0, historyMessageTotal - historyLoadedMessageCount)
+
+  useLayoutEffect(() => {
+    const anchor = pendingDurableHistoryAnchorRef.current
+    if (!anchor || anchor.threadId !== threadId || historyPageLoading) return
+    if (
+      displayMessages.length <= anchor.previousMessageCount &&
+      historyLoadedMessageCount <= anchor.previousLoadedMessageCount
+    ) {
+      return
+    }
+    let frame: number | null = null
+    const finishRestore = (): void => {
+      if (pendingDurableHistoryAnchorRef.current !== anchor) return
+      pendingDurableHistoryAnchorRef.current = null
+      dispatchChatScrollEvent({ type: "RESTORE_END", generation: anchor.generation })
+    }
+    const restoreAnchor = (): void => {
+      if (pendingDurableHistoryAnchorRef.current !== anchor) return
+      const viewport = getViewport()
+      const target =
+        contentMessageRefs.current.get(anchor.messageId) ??
+        Array.from(viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []).find(
+          (candidate) => candidate.dataset.chatMessageId === anchor.messageId
+        )
+      if (viewport && target) {
+        const delta = target.getBoundingClientRect().top - anchor.viewportTop
+        if (Math.abs(delta) > 1) viewport.scrollTop += delta
+        anchor.stableFrames = Math.abs(delta) <= 1 ? anchor.stableFrames + 1 : 0
+        if (anchor.stableFrames >= CHAT_HISTORY_ANCHOR_STABLE_FRAMES) {
+          finishRestore()
+          return
+        }
+      }
+      const visibleIndex = visibleMessageIndexById.get(anchor.messageId)
+      if (!target && anchor.attempt === 0 && visibleIndex !== undefined) {
+        virtuosoRef.current?.scrollToIndex({
+          index: visibleIndex,
+          align: "start",
+          behavior: "auto"
+        })
+      }
+      anchor.attempt += 1
+      if (anchor.attempt <= CHAT_HISTORY_ANCHOR_MAX_FRAMES) {
+        frame = window.requestAnimationFrame(restoreAnchor)
+      } else {
+        finishRestore()
+      }
+    }
+    frame = window.requestAnimationFrame(restoreAnchor)
+    return () => {
+      if (frame !== null) window.cancelAnimationFrame(frame)
+    }
+  }, [
+    dispatchChatScrollEvent,
+    displayMessages.length,
+    getViewport,
+    historyLoadedMessageCount,
+    historyPageLoading,
+    threadId,
+    visibleMessageIndexById
+  ])
+
+  useEffect(() => {
+    const lastVisibleMessageIndex = visibleMessageIndexes.at(-1)
+    const lastVisibleMessage =
+      lastVisibleMessageIndex === undefined ? undefined : displayMessages[lastVisibleMessageIndex]
+    const nextSnapshot = {
+      threadId,
+      visibleCount: visibleMessageIndexes.length,
+      lastMessageId: lastVisibleMessage?.id ?? null,
+      lastMessageIdentity: chatScrollTailMessageIdentity(lastVisibleMessage),
+      loadedMessageCount: historyLoadedMessageCount,
+      contentVersion: displayMessagesContentVersion,
+      structureVersion: displayMessagesStructureVersion
+    }
+    const previous = chatContentSnapshotRef.current
+    if (historyLoading) return
+    chatContentSnapshotRef.current = nextSnapshot
+    if (!previous || previous.threadId !== threadId) return
+
+    const tailChange = classifyChatScrollTailChange({
+      previous,
+      current: nextSnapshot,
+      displayMessages,
+      visibleMessageIndexes,
+      visibleMessageIndexById
+    })
+
+    if (tailChange.appendedMessageCount > 0) {
+      dispatchChatScrollEvent({
+        type: "CONTENT_APPENDED",
+        unreadMessages: tailChange.unreadMessageCount
+      })
+      return
+    }
+    if (
+      shouldMarkChatTailContentGrowth({
+        change: tailChange,
+        currentTail: lastVisibleMessage,
+        contentVersionChanged: nextSnapshot.contentVersion !== previous.contentVersion,
+        structureVersionChanged: nextSnapshot.structureVersion !== previous.structureVersion,
+        changedTail: displayMessageProjection.changedMessages.some(
+          (message) => message.id === nextSnapshot.lastMessageId
+        )
+      })
+    ) {
+      const state = chatScrollStateRef.current
+      if (state && isChatScrollDetached(state)) {
+        dispatchChatScrollEvent({ type: "CONTENT_GROWN", generation: state.generation })
+      }
+    }
+  }, [
+    dispatchChatScrollEvent,
+    displayMessageProjection.changedMessages,
+    displayMessages,
+    displayMessagesContentVersion,
+    displayMessagesStructureVersion,
+    historyLoadedMessageCount,
+    historyLoading,
+    threadId,
+    visibleMessageIndexById,
+    visibleMessageIndexes,
+    visibleMessageIndexes.length
   ])
 
   // Ctrl/Cmd+F opens in-session search. Listen on window (capture phase) so it
@@ -3208,6 +5009,7 @@ export function ChatContainer({
   // only one ChatContainer is mounted per panel (keyed + conditionally rendered).
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
+      if (useAppStore.getState().showCustomizeView || useThreadSearch.getState().open || event.shiftKey || event.altKey || event.isComposing) return
       if (!((event.ctrlKey || event.metaKey) && (event.key === "f" || event.key === "F"))) return
       const root = chatRootRef.current
       if (!root || root.offsetParent === null) return
@@ -3219,19 +5021,31 @@ export function ChatContainer({
   }, [])
 
   useEffect(() => {
-    if (!pendingApproval) return
-    const viewport = getViewport()
-    if (viewport) {
-      viewport.scrollTop = viewport.scrollHeight
-    }
-  }, [pendingApproval, getViewport])
+    const state = chatScrollStateRef.current
+    if (!pendingApproval || !state || !shouldFollowChatOutput(state)) return
+    dispatchChatScrollEvent({ type: "CONTENT_GROWN", generation: state.generation })
+  }, [dispatchChatScrollEvent, pendingApproval])
 
   useEffect(() => {
-    if (!pendingUserInput || !userInputDialogLayout) return
+    const state = chatScrollStateRef.current
+    if (!pendingUserInput || !userInputDialogLayout || !state || !shouldFollowChatOutput(state)) {
+      return
+    }
     const viewport = getViewport()
     if (!viewport) return
+    const generation = state.generation
+    dispatchChatScrollEvent({ type: "PROGRAMMATIC_SCROLL_BEGIN", generation })
 
     const frame = requestAnimationFrame(() => {
+      const currentState = chatScrollStateRef.current
+      if (
+        !currentState ||
+        currentState.generation !== generation ||
+        !shouldFollowChatOutput(currentState)
+      ) {
+        dispatchChatScrollEvent({ type: "PROGRAMMATIC_SCROLL_END", generation })
+        return
+      }
       const targetElement = lastContentMessageId
         ? contentMessageRefs.current.get(lastContentMessageId)
         : null
@@ -3242,32 +5056,26 @@ export function ChatContainer({
         const targetRect = targetElement.getBoundingClientRect()
         const scrollDelta = targetRect.bottom - targetBottom
         if (Math.abs(scrollDelta) > 1) {
-          viewport.scrollTop = Math.max(0, viewport.scrollTop + scrollDelta)
+          viewport.scrollBy({ top: scrollDelta, behavior: "auto" })
         }
       } else {
-        viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+        viewport.scrollTo({ top: viewport.scrollHeight, behavior: "auto" })
       }
+      dispatchChatScrollEvent({ type: "PROGRAMMATIC_SCROLL_END", generation })
     })
 
-    return () => cancelAnimationFrame(frame)
+    return () => {
+      cancelAnimationFrame(frame)
+      dispatchChatScrollEvent({ type: "PROGRAMMATIC_SCROLL_END", generation })
+    }
   }, [
+    dispatchChatScrollEvent,
     getViewport,
     lastContentMessageId,
     pendingUserInput,
     userInputDialogLayout?.height,
     userInputDialogLayout?.top
   ])
-
-  //  滚动到底部
-  // 1.初始化
-  // 2.切换thread
-  useEffect(() => {
-    const viewport = getViewport()
-    if (viewport) {
-      viewport.scrollTop = viewport.scrollHeight
-    }
-  }, [getViewport, historyLoading, threadId])
-
   // Focus input on mount
   useEffect(() => {
     inputRef.current?.focus()
@@ -3313,7 +5121,8 @@ export function ChatContainer({
       nextSkill = selectSkillForSlashName(
         enabledSkillsForSlash,
         slashSkill,
-        harnessFeatureBinding ? skillsHarnessPreferredPlugin : pendingPreferredPlugin
+        harnessFeatureBinding ? skillsHarnessPreferredPlugin : pendingPreferredPlugin,
+        isProjectModeAgentContext
       )
     }
 
@@ -3325,6 +5134,7 @@ export function ChatContainer({
     harnessFeatureBinding,
     historyLoading,
     input,
+    isProjectModeAgentContext,
     pendingHarnessNextAction,
     selectedSkill,
     setInput,
@@ -3345,10 +5155,47 @@ export function ChatContainer({
     skillSelected: selectedSkill !== null,
     browserSelected: selectedBuiltinBrowser
   })
+  const loadMoreWorkspaceMentionFiles = useCallback(
+    async (signal: AbortSignal) => {
+      if (!workspacePath) return null
+      let result: Awaited<ReturnType<typeof resumeWorkspaceFilesDeduped>> | null
+      try {
+        // Do not bind the shared bounded scan to one transient keystroke. A
+        // superseded query stops awaiting it, while the completed segment is
+        // still published for the next query and the Files panel.
+        result = await awaitWorkspaceMentionLoad(
+          resumeWorkspaceFilesDeduped(threadId, workspacePath),
+          signal
+        )
+      } catch (error) {
+        if (signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+          throw error
+        }
+        result = null
+      }
+
+      // Continuation cursors intentionally expire after an idle window. Reopen
+      // one bounded initial scan so @ search can recover without requiring the
+      // user to mount or refresh the Files panel first.
+      if (!result?.success) {
+        result = await awaitWorkspaceMentionLoad(
+          loadWorkspaceFilesDeduped(threadId, workspacePath),
+          signal
+        )
+      }
+      if (!result.success) return null
+      return {
+        files: result.files,
+        continuationAvailable: result.continuationAvailable === true
+      }
+    },
+    [threadId, workspacePath]
+  )
   const atFileMentions = useAtFileMentions({
     input,
     cursorOffset: inputRef.current?.selectionStart ?? input.length,
     workspaceFiles,
+    loadMoreWorkspaceFiles: loadMoreWorkspaceMentionFiles,
     disabled: slash.mode.kind === "slash" || !workspacePath
   })
   const slashPopoverKind = slash.mode.kind
@@ -3378,11 +5225,13 @@ export function ChatContainer({
     contextReminder
   )
   // 项目已删除时，会话仅可查看历史：禁用输入框与编辑器控件。
-  const effectiveInputDisabled = inputDisabled || contextReminderPending || readOnly
+  const effectiveInputDisabled =
+    inputDisabled || contextReminderPending || readOnly || bizRetryPending
   const effectiveComposerControlsDisabled =
-    composerControlsDisabled || contextReminderPending || readOnly
+    composerControlsDisabled || contextReminderPending || readOnly || bizRetryPending
   const inputPlaceholder = useMemo(() => {
-    if (readOnlyReason) return readOnlyReason
+    if (bizRetryPending) return "请在决策入口操作"
+    if (resolvedReadOnlyReason) return resolvedReadOnlyReason
     if (contextReminderPending) return "请先处理上下文提醒"
     const goal = goalUi.goal
     if (isLoading) {
@@ -3404,13 +5253,14 @@ export function ChatContainer({
     }
     return "输入新问题，或用 /goal <目标> 开始新的长期任务"
   }, [
+    bizRetryPending,
     contextReminderPending,
     goalUi.goal,
     hasPendingFilePayload,
     hasActiveGoalRunning,
     goalControlAllowedWhileLoading,
     isLoading,
-    readOnlyReason,
+    resolvedReadOnlyReason,
     scheduledTaskLoading,
     streamData.isLoading
   ])
@@ -3421,24 +5271,6 @@ export function ChatContainer({
       void loadSkills()
     }
   }, [slashPopoverKind, loadSkills])
-
-  const insertTextAtCursor = useCallback(
-    (text: string, replaceRange?: { start: number; end: number }) => {
-      const textarea = inputRef.current
-      const selectionStart = replaceRange?.start ?? textarea?.selectionStart ?? input.length
-      const selectionEnd = replaceRange?.end ?? textarea?.selectionEnd ?? input.length
-      const nextInput = `${input.slice(0, selectionStart)}${text}${input.slice(selectionEnd)}`
-      const nextCursor = selectionStart + text.length
-
-      setInput(nextInput)
-      requestAnimationFrame(() => {
-        const target = inputRef.current
-        if (!target) return
-        target.setSelectionRange(nextCursor, nextCursor)
-      })
-    },
-    [input, setInput]
-  )
 
   // Depend on the stable callback refs, not the whole `slash` object —
   // the hook returns a fresh literal every render, which would re-create
@@ -3474,12 +5306,7 @@ export function ChatContainer({
         textarea.setSelectionRange(cursor, cursor)
       })
     },
-    [
-      setInput,
-      setSelectedBuiltinBrowser,
-      setSelectedSkill,
-      slashResetSelection
-    ]
+    [setInput, setSelectedBuiltinBrowser, setSelectedSkill, slashResetSelection]
   )
 
   const applyAtFileMention = useCallback(
@@ -3509,28 +5336,18 @@ export function ChatContainer({
         }
 
         clearError()
-          void (async () => {
-            let contentChars = 0
-            try {
-              const readResult = await window.api.workspace.readFile(
-                threadId,
-                selection.mentionedFile.workspaceFilePath
-              )
-              if (readResult.success && typeof readResult.content === "string") {
-                contentChars = readResult.content.length
-              }
-            } catch {
-              contentChars = 0
-            }
-
-            setMentionedFiles((prev) => [
-              ...prev,
-              {
-                ...selection.mentionedFile,
-                contentChars
-              }
-            ])
-          })()
+        setMentionedFiles((prev) => {
+          if (
+            prev.some(
+              (candidate) => candidate.absolutePath === selection.mentionedFile.absolutePath
+            )
+          ) {
+            return prev
+          }
+          const next = [...prev, selection.mentionedFile]
+          mentionedFilesRef.current = next
+          return next
+        })
 
         const { nextInput, nextCursor } = removeAtFileTokenFromInput(input, {
           startPos: atFileMentions.mode.startPos,
@@ -3547,14 +5364,11 @@ export function ChatContainer({
         setError("@文件暂时不可用，请直接发送消息或改用普通附件。")
       }
     },
-    [atFileMentions.mode, clearError, input, setError, setInput, threadId, workspacePath]
+    [atFileMentions.mode, clearError, input, setError, setInput, setMentionedFiles, workspacePath]
   )
 
   const appendVisibleUserMessageWithTime = useCallback(
-    async (
-      content: string,
-      options: { persistTiming?: boolean; id?: string } = {}
-    ): Promise<Message> => {
+    async (content: string, options: { id?: string } = {}): Promise<Message> => {
       const userStartAt = new Date()
       const userMessage: Message = {
         id: options.id ?? crypto.randomUUID(),
@@ -3565,25 +5379,9 @@ export function ChatContainer({
         end_at: userStartAt
       }
       appendMessage(userMessage)
-      if (options.persistTiming === false) return userMessage
-
-      const userMessageTime: MessageTimeMap = {
-        [userMessage.id]: {
-          start_at: userStartAt.toISOString(),
-          end_at: userStartAt.toISOString()
-        }
-      }
-      try {
-        await window.api.threads.mergeThreadValues(threadId, {
-          [MESSAGE_TIMES_THREAD_VALUE_KEY]: userMessageTime,
-          [MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: messageTimeOrderEntries(userMessageTime)
-        })
-      } catch (error) {
-        console.warn("[ChatContainer] Failed to save user message time:", error)
-      }
       return userMessage
     },
-    [appendMessage, getViewport, threadId]
+    [appendMessage]
   )
 
   const showGoalControlNotice = useCallback((rawMessage?: string): void => {
@@ -3626,7 +5424,7 @@ export function ChatContainer({
         return
       }
       if (!selectedModel.available) {
-        setError("当前模型不可用，请先在模型配置中设置 API 密钥。")
+        setError(selectedModel.unavailableReason || QUEUE_MODEL_UNAVAILABLE_ERROR)
         return
       }
       if (!workspacePath) {
@@ -3638,7 +5436,7 @@ export function ChatContainer({
       setMentionedFiles([])
       setSelectedSkill(null)
       insertLog("send: /goal resume")
-      await appendVisibleUserMessageWithTime("/goal resume", { persistTiming: false })
+      await appendVisibleUserMessageWithTime("/goal resume")
       await stream.submit(
         {
           messages: [{ type: "human", content: "/goal resume" }]
@@ -3763,9 +5561,9 @@ export function ChatContainer({
     ]
   )
 
-  const handleSubmit = async (e: React.FormEvent, defaultText=''): Promise<void> => {
+  const handleSubmit = async (e: React.FormEvent, defaultText = ""): Promise<void> => {
     e.preventDefault()
-    const trimmedInput = defaultText ||  input.trim()
+    const trimmedInput = defaultText || input.trim()
     const isGoalSlashInput = /^\/goal(?:\s|$)/i.test(trimmedInput)
     const shouldOpenGoalDetailsForStatus = /^\/goal(?:\s+status)?\s*$/i.test(trimmedInput)
     // Defense-in-depth: every current trigger already short-circuits while the
@@ -3791,10 +5589,7 @@ export function ChatContainer({
     })
     const willEnqueueWhileBusy =
       !isGoalSlashInput &&
-      (isLoading ||
-        Boolean(pendingApproval) ||
-        approvalQueue.length > 0 ||
-        shouldQueueBehindSubmit)
+      (isLoading || Boolean(pendingApproval) || approvalQueue.length > 0 || shouldQueueBehindSubmit)
     if (
       (!trimmedInput && !hasPendingFilePayload && !selectedSkill && !selectedBuiltinBrowser) ||
       historyLoading ||
@@ -3917,7 +5712,7 @@ export function ChatContainer({
         }
 
         if (!selectedModel.available) {
-          setError("当前模型不可用，请先在模型配置中设置 API 密钥。")
+          setError(selectedModel.unavailableReason || QUEUE_MODEL_UNAVAILABLE_ERROR)
           return
         }
 
@@ -3982,22 +5777,59 @@ export function ChatContainer({
       if (shouldLockSubmit) liveSubmitPreparingThreads.delete(threadId)
       // 统一在 helper 里完成 @文件解析、内容读取、附件去重和文本清洗，
       // 这里仅消费结果，避免发送流程继续堆积细节分支。
+      const atFileRequestToken = crypto.randomUUID()
+      const atFileWorkspaceKey = normalizeWorkspacePathKey(workspacePath)
+      activeAtFilePreviewTokensRef.current.add(atFileRequestToken)
+      const cancelAtFileReads = (): void => {
+        void window.api.workspace.cancelFilePreview({
+          lanePrefix: AT_FILE_PREVIEW_LANE,
+          requestToken: atFileRequestToken
+        })
+      }
+      let atFileResolution: Awaited<ReturnType<typeof resolveAtFileAttachments>>
+      try {
+        atFileResolution = await resolveAtFileAttachments({
+          rawMessage,
+          attachments: claimedAttachments,
+          mentionedFiles: claimedMentionedFiles,
+          workspacePath,
+          workspaceFiles,
+          maxAttachments: MAX_ATTACHMENTS,
+          maxTotalChars: MAX_TOTAL_CHARS,
+          readWorkspaceFile: async (filePath, maxChars) => {
+            // A workspace can still change before the first user turn is
+            // committed. Fence both sides of the async read so content from a
+            // newly selected workspace is never attached under the old chip path.
+            if (normalizeWorkspacePathKey(workspacePathRef.current) !== atFileWorkspaceKey) {
+              return { success: false }
+            }
+            const result = await readBoundedWorkspaceMentionFile({
+              maxChars,
+              readPage: (offset) =>
+                window.api.workspace.readFilePreview({
+                  source: { threadId, filePath },
+                  offset,
+                  lane: AT_FILE_PREVIEW_LANE,
+                  requestToken: atFileRequestToken
+                })
+            })
+            return normalizeWorkspacePathKey(workspacePathRef.current) === atFileWorkspaceKey
+              ? result
+              : { success: false }
+          },
+          cancelWorkspaceFileReads: cancelAtFileReads
+        })
+      } finally {
+        activeAtFilePreviewTokensRef.current.delete(atFileRequestToken)
+        cancelAtFileReads()
+      }
       const {
         cleanedMessage,
         attachments: resolvedAttachments,
         mentionCountLimitHit,
         mentionAttachmentLimitHit,
         warningMessage: atFileWarningMessage
-      } = await resolveAtFileAttachments({
-        rawMessage,
-        attachments: claimedAttachments,
-        mentionedFiles: claimedMentionedFiles,
-        workspacePath,
-        workspaceFiles,
-        maxAttachments: MAX_ATTACHMENTS,
-        maxTotalChars: MAX_TOTAL_CHARS,
-        readWorkspaceFile: (filePath) => window.api.workspace.readFile(threadId, filePath)
-      })
+      } = atFileResolution
       rawMessage = cleanedMessage
 
       // These are delivery warnings, not run failures. A thread error blocks the
@@ -4010,6 +5842,11 @@ export function ChatContainer({
         // 非致命失败只做提示，不中断后面的普通发送流程。
         toast.warning(atFileWarningMessage)
       }
+
+      // A stale chip may have been the only composer payload. Once it is
+      // rejected, do not emit an empty user turn merely because the pre-read
+      // validation originally saw a pending file chip.
+      if (!rawMessage && resolvedAttachments.length === 0 && !skill && !browser) return
 
       const attachmentPayload = resolvedAttachments.length > 0 ? resolvedAttachments : undefined
       const fallbackUserText = attachmentPayload && !skill ? "请分析以下文件内容。" : ""
@@ -4077,6 +5914,8 @@ export function ChatContainer({
         attachmentModelBlocks,
         attachmentDisplayPrefix,
         skillBlock,
+        skillName: skill?.name,
+        skillDescription: skill?.description,
         builtinBrowser: browser,
         modelId: currentModel,
         created_at: new Date(),
@@ -4107,6 +5946,7 @@ export function ChatContainer({
 
       const coordinatorPrefixed =
         !disableCoordinatorModeOption &&
+        canChangeAgentMode &&
         /^\s*(?:\[coordinator\]|#coordinator)\s*[:-]?/i.test(fullMessage)
       let submitAgentMode: ChatAgentMode = disableCoordinatorModeOption
         ? "normal"
@@ -4140,7 +5980,11 @@ export function ChatContainer({
       ) {
         agentModeHydratedRef.current = true
         setAgentMode("normal")
-      } else if (submitAgentMode === "coordinator" && agentMode !== "coordinator") {
+      } else if (
+        !coordinatorPrefixed &&
+        submitAgentMode === "coordinator" &&
+        agentMode !== "coordinator"
+      ) {
         agentModeHydratedRef.current = true
         setAgentMode("coordinator")
       }
@@ -4149,9 +5993,7 @@ export function ChatContainer({
       if (shouldAppendVisibleUserMessage) {
         // 同步维护顺序数组，支持 app 重启后按消息顺序恢复历史耗时。user message 在前端先 append，
         // checkpoint 恢复时 id 可能不一定完全一致；因此仍需要顺序数组作为兜底。
-        const visibleUserMessagePromise = appendVisibleUserMessageWithTime(displayContent, {
-          persistTiming: !isGoalSlashInput
-        })
+        const visibleUserMessagePromise = appendVisibleUserMessageWithTime(displayContent)
         visibleUserMessage = await visibleUserMessagePromise
       }
 
@@ -4183,7 +6025,7 @@ export function ChatContainer({
             titleSource = getBuiltinBrowserTitleSource(browser)
           }
           if (titleSource) {
-            generateTitleForFirstMessage(threadId, titleSource)
+            generateTitleForFirstMessage(threadId, titleSource, skill?.name, skill?.description)
           }
         }
       }
@@ -4225,6 +6067,10 @@ export function ChatContainer({
     } finally {
       if (shouldLockSubmit) liveSubmitPreparingThreads.delete(threadId)
       if (shouldLockQueuedDraftPreparation) queuedDraftPreparingThreads.delete(threadId)
+      // `done` can flip isLoading to false before stream.submit's promise
+      // continuation releases this mutable lock. The idle-rendered pump then
+      // observes the lock, returns, and otherwise has no reactive reason to
+      // try again. Publish a wake only after the lock is actually gone.
       releaseSubmitInFlightLock(submitInFlightRef, shouldLockSubmit, threadId)
     }
   }
@@ -4524,7 +6370,7 @@ export function ChatContainer({
         if (!queued.modelId && !currentModel) {
           setError(QUEUE_MODEL_REQUIRED_ERROR)
         } else if (queuedModel || currentSelectedModel) {
-          setError(QUEUE_MODEL_UNAVAILABLE_ERROR)
+          setError((queuedModel || currentSelectedModel)?.unavailableReason || QUEUE_MODEL_UNAVAILABLE_ERROR)
         } else {
           setError(QUEUE_MODEL_MISSING_ERROR)
         }
@@ -4558,6 +6404,7 @@ export function ChatContainer({
       }
       const coordinatorPrefixed =
         !disableCoordinatorModeOption &&
+        canChangeAgentMode &&
         /^\s*(?:\[coordinator\]|#coordinator)\s*[:-]?/i.test(fullMessage)
       let submitAgentMode: ChatAgentMode = disableCoordinatorModeOption
         ? "normal"
@@ -4591,7 +6438,11 @@ export function ChatContainer({
       ) {
         agentModeHydratedRef.current = true
         setAgentMode("normal")
-      } else if (submitAgentMode === "coordinator" && agentMode !== "coordinator") {
+      } else if (
+        !coordinatorPrefixed &&
+        submitAgentMode === "coordinator" &&
+        agentMode !== "coordinator"
+      ) {
         agentModeHydratedRef.current = true
         setAgentMode("coordinator")
       }
@@ -4610,7 +6461,6 @@ export function ChatContainer({
       // a new orphaned "ghost" user bubble behind every attempt (appendMessage upserts
       // by id, so re-using queued.id makes a retry replace the same bubble instead).
       const visibleUserMessage = await appendVisibleUserMessageWithTime(displayContent, {
-        persistTiming: true,
         id: queued.id
       })
       if (isFirstMessage) {
@@ -4618,7 +6468,12 @@ export function ChatContainer({
         const hasDefaultTitle = currentThread?.title?.startsWith("Thread ")
         const titleSource = queued.text.trim() || (queued.skillBlock ? "使用技能" : "")
         if (hasDefaultTitle && titleSource) {
-          generateTitleForFirstMessage(threadId, titleSource)
+          generateTitleForFirstMessage(
+            threadId,
+            titleSource,
+            queued.skillName,
+            queued.skillDescription
+          )
         }
       }
       const startTime = Date.now()
@@ -4647,6 +6502,7 @@ export function ChatContainer({
     [
       agentMode,
       appendVisibleUserMessageWithTime,
+      canChangeAgentMode,
       clearFinishedWorkflowRun,
       currentModel,
       deleteQueuedMessage,
@@ -4774,13 +6630,13 @@ export function ChatContainer({
   // queue) could slip in ahead of the pump's own stream.submit and end up silently
   // queued behind it inside the SDK with no visible indication why, while the pump's
   // optimistic UI (bubble already appended, draft already removed from the queue)
-  // sits there looking "sent." Failing fast here avoids that. queuePumpTick forces
-  // a re-check after each settle.
+  // sits there looking "sent." Failing fast here avoids that. The shared release
+  // version forces a re-check after each settle, including across component remounts.
   useEffect(() => {
     if (queueAutoDrainSuppressed) return
     if (submitInFlightRef.current.has(threadId)) return
     if (isLoading || pendingApproval || threadError || !stream) return
-    if (historyLoading || readOnly || contextReminderPending) return
+    if (historyLoading || readOnly || contextReminderPending || bizRetryPending) return
     if (hasActiveGoalRunning) return
     // Reconciliation owns transcript ordering for every handed-off draft, not
     // only the queue head. Draining any ordinary item first could append it
@@ -4834,9 +6690,9 @@ export function ChatContainer({
       })
       .finally(() => {
         releaseSubmitInFlightLock(submitInFlightRef, true, threadId)
-        setQueuePumpTick((tick) => tick + 1)
       })
   }, [
+    bizRetryPending,
     contextReminderPending,
     currentModel,
     hasActiveGoalRunning,
@@ -4852,6 +6708,7 @@ export function ChatContainer({
     removeLocalMessage,
     setError,
     stream,
+    submitReleaseVersion,
     submitQueuedMessage,
     submitInFlightRef,
     threadError,
@@ -4968,11 +6825,6 @@ export function ChatContainer({
     }
   }
 
-  const handleInsertNewline = useCallback((): void => {
-    if (effectiveInputDisabled) return
-    insertTextAtCursor("\n")
-  }, [effectiveInputDisabled, insertTextAtCursor])
-
   // Auto-resize textarea based on content
   const adjustTextareaHeight = useCallback((): void => {
     const textarea = inputRef.current
@@ -5019,12 +6871,13 @@ export function ChatContainer({
       }
       threadContext.reconcileScheduledRunStates()
     } else if (scheduledTaskLoading) {
-      // ChatX bot thread: scheduledTaskLoading is true but no scheduledTaskId
+      // Cancel through IM's queue so its event, replies and runtime settle
+      // together. The managed stream terminal clears loading after cleanup.
       try {
-        const cancelled = await window.api.chatx.cancelByThread(threadId)
-        if (!cancelled) console.warn("[ChatContainer] ChatX thread not found for cancel:", threadId)
+        await window.api.builtinRobot.cancelThread(threadId)
       } catch (err) {
-        console.error("[ChatContainer] Failed to cancel ChatX thread:", err)
+        console.error("[ChatContainer] Failed to cancel remote task:", err)
+        toast.error("停止远程任务失败，请重试")
       }
     } else {
       // Match Claude Code coordinator semantics: the main stop button stops the
@@ -5039,6 +6892,9 @@ export function ChatContainer({
       setQueueAutoDrainSuppressed(true)
       try {
         await Promise.all([stream?.stop(), window.api.agent.cancel(threadId)])
+        if (isManagedRunSessionActive) {
+          toast.success("已退出托管模式", { duration: 1200 })
+        }
       } finally {
         if (goalUi.goal) {
           void refreshGoalUi({ includeEvents: true })
@@ -5046,6 +6902,18 @@ export function ChatContainer({
       }
     }
   }
+
+  const stopGenerationButton = (
+    <button
+      type="button"
+      onClick={handleCancel}
+      aria-label="停止生成"
+      title="停止生成"
+      className="flex size-8 shrink-0 items-center justify-center rounded-full bg-destructive text-destructive-foreground transition-colors hover:bg-destructive/90"
+    >
+      <Square className="size-3 fill-current" />
+    </button>
+  )
 
   const handleCancelBackgroundWorkers = async (): Promise<void> => {
     try {
@@ -5057,16 +6925,23 @@ export function ChatContainer({
 
   useEffect(() => {
     void loadSkills()
-  }, [loadSkills, pluginVersion, harnessFeatureBinding?.projectId])
+    return () => {
+      skillsLoadRequestIdRef.current += 1
+      void window.api.harnessBoard.cancelCatalogRequests("chat-binding").catch(() => undefined)
+    }
+  }, [loadSkills, pluginVersion, harnessFeatureBinding?.projectId, surface])
 
-  // Main broadcasts `skills:changed` after skill evolution writes, optimizer
-  // patches, and plugin SKILL.md edits via the file editor. Subscribe so the
-  // slash popover and welcome-tree get a fresh list without waiting for the
-  // user to re-open `/` (which already triggers a re-fetch on its own).
+  // One application-lifetime bridge translates skills:changed into one cache
+  // revision. ChatContainer and RightPanel then share the same refresh promise.
   useEffect(() => {
-    return window.api.skills.onChanged(() => {
+    const unsubscribe = subscribeSkillCatalogInvalidation(() => {
       void loadSkills()
     })
+    ensureSkillsChangedInvalidationSource((listener) => window.api.skills.onChanged(listener))
+    ensureDisabledSkillsChangedInvalidationSource((listener) =>
+      window.api.hooks.onChanged(listener)
+    )
+    return unsubscribe
   }, [loadSkills])
 
   // ── Skill creation human-confirmation listener ──────────
@@ -5748,7 +7623,7 @@ export function ChatContainer({
             <p className="text-xs">可重试或选择受限沙箱模式继续使用。</p>
             <div className="flex gap-2 mt-1">
               <button
-                className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
+                className="px-3 py-1.5 text-xs bg-button text-button-foreground rounded-md hover:bg-button/90 transition-colors"
                 onClick={() => {
                   setNuxError(null)
                   setNuxLoading(true)
@@ -5792,29 +7667,223 @@ export function ChatContainer({
     messageForkTarget?.sourceWorkspacePath ?? currentForkWorkspacePath
   const currentForkWorkspaceLabel = getForkWorkspaceLabel(messageForkSourceWorkspacePath)
   const selectedForkWorkspaceLabel = getForkWorkspaceLabel(forkWorkspacePath)
+  const remoteLifecycleState = remoteThread?.metadata?.remoteState
+  const remoteThreadStatus = pendingApproval
+    ? "等待桌面审批"
+    : pendingUserInput
+      ? "等待桌面补充输入"
+      : remoteLifecycleState === "historical"
+        ? "接管前历史"
+        : remoteLifecycleState === "waiting_desktop"
+          ? "等待桌面处理"
+          : remoteLifecycleState === "suspended"
+            ? "绑定已暂停"
+            : remoteLifecycleState === "outcome_unknown"
+              ? "执行结果未知"
+              : remoteLifecycleState === "rejected"
+                ? "远程能力不支持"
+                : remoteLifecycleState === "failed"
+                  ? "执行失败"
+                  : isLoading
+                    ? "任务执行中"
+                    : remoteThread?.status === "error"
+                      ? "执行失败"
+                      : remoteThread?.status === "interrupted"
+                        ? "已中止"
+                        : "空闲"
   const interruptionNotice = hookInterruption
     ? interruptionNoticeCopy(hookInterruption.event, hookInterruption.action)
     : null
+  const remoteThreadTipLabel = remoteThreadInfo?.kind === "inbox" ? "招乎默认聊天" : "远程会话"
+  const handleDismissRemoteThreadTip = useCallback(() => {
+    setDismissedRemoteTipThreadIds((current) => {
+      const next = new Set(current)
+      next.add(threadId)
+      persistRemoteThreadTipDismissals(next)
+      return next
+    })
+  }, [threadId])
+  const chatMessageListFooter = (
+    <div
+      className="space-y-4 pt-4 pb-4"
+      style={userInputScrollPadding ? { paddingBottom: `${userInputScrollPadding}px` } : undefined}
+    >
+      {contextCompaction && <ContextCompactionCard compaction={contextCompaction} />}
+      {modelRetry && (
+        <div className="flex items-start gap-2 rounded-md border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-xs text-status-warning-foreground">
+          <span className="mt-0.5 inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-status-warning border-t-transparent" />
+          <div className="min-w-0 flex-1">
+            {modelRetry.retryKind === "completion_gate" ? (
+              // 门禁那边的 reason 已经是一句完整的话（含 n/m），不要再套一层「模型暂时不可用」：
+              // 这一类重试不是模型不可用，是模型答了但答得不成立。
+              <span>{modelRetry.reason}</span>
+            ) : (
+              <span>
+                模型暂时不可用（{modelRetry.reason}），正在重试 {modelRetry.attempt}/
+                {modelRetry.maxRetries}
+                {modelRetry.delayMs > 0 && (
+                  <>（等待 {Math.round(modelRetry.delayMs / 100) / 10}s）</>
+                )}
+                …
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+      {isLoading && (
+        <div className="space-y-3">
+          {contextCompaction?.phase !== "started" && (
+            <div className="flex items-center gap-2 text-sm">
+              <div className="rainbow-spinner" />
+              <span
+                className="thinking-shimmer-text"
+                data-text={THINKING_MESSAGES[thinkingMessageIndex]}
+              >
+                {THINKING_MESSAGES[thinkingMessageIndex]}
+              </span>
+              {streamData.isLoading && (
+                <ProcessingDuration key={threadId} startTime={activeTurnStartTime} text="已处理" />
+              )}
+            </div>
+          )}
+          {todos.length > 0 && <ChatTodos todos={todos} />}
+        </div>
+      )}
+      {workflowRun ? (
+        <WorkflowRunPanel threadId={threadId} run={workflowRun} />
+      ) : isWorkflowModeMetadata(currentThread?.metadata) ? (
+        <WorkflowHistoryButton threadId={threadId} />
+      ) : null}
+      {hookInterruption && !isLoading && (
+        <div className="flex items-start gap-3 rounded-md border border-status-warning/30 bg-status-warning/10 p-4">
+          <ShieldCheck className="mt-0.5 size-5 shrink-0 text-status-warning-foreground" />
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium text-status-warning-foreground">
+              {interruptionNotice?.title}
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-status-warning-foreground/80">
+              <span className="rounded border border-status-warning/40 px-1.5 py-0.5 font-mono">
+                {hookInterruption.event}
+              </span>
+              <span title={HOOK_TIME_ZONE_LABEL}>
+                {formatHookClockTime(hookInterruption.timestamp) ?? "时间无效"}
+              </span>
+            </div>
+            <div className="mt-2 break-words text-sm text-status-warning-foreground">
+              {hookInterruption.reason}
+            </div>
+            {hookInterruption.systemMessage && (
+              <div className="mt-2 break-words text-xs text-status-warning-foreground/80">
+                {hookInterruption.systemMessage}
+              </div>
+            )}
+            <div className="mt-2 text-xs text-muted-foreground">
+              {interruptionNotice?.explanation}
+            </div>
+          </div>
+          <button
+            onClick={clearHookInterruption}
+            className="shrink-0 rounded p-1 transition-colors hover:bg-status-warning/20"
+            aria-label="Dismiss hook notice"
+          >
+            <X className="size-4 text-muted-foreground" />
+          </button>
+        </div>
+      )}
+      {threadError && !isLoading && (
+        <ChatErrorCard error={threadError} detail={errorDetail} onDismiss={handleDismissError} />
+      )}
+    </div>
+  )
 
   return (
-    <div ref={chatRootRef} className="relative flex flex-1 flex-col min-h-0 overflow-hidden">
+    <div
+      ref={chatRootRef}
+      data-chat-thread-id={threadId}
+      className="relative flex flex-1 flex-col min-h-0 overflow-hidden"
+    >
+      {remoteThreadInfo && !dismissedRemoteTipThreadIds.has(threadId) ? (
+        <div className="flex shrink-0 items-start gap-2 border-b border-status-info/20 bg-status-info/5 px-4 py-2 text-xs">
+          <Info className="mt-0.5 size-3.5 shrink-0 text-status-info" />
+          <div className="min-w-0 flex-1 space-y-0.5">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="rounded bg-status-info/15 px-1.5 py-0.5 font-medium text-status-info-foreground">
+                {remoteThreadInfo.kind === "inbox" ? "招乎默认聊天" : "远程会话"}
+              </span>
+              {remoteThreadInfo.kind === "feature" && remoteThreadInfo.featureLabel ? (
+                <span className="font-medium">{remoteThreadInfo.featureLabel}</span>
+              ) : null}
+              <span className="text-muted-foreground">{remoteThreadStatus}</span>
+            </div>
+            <p className="text-muted-foreground">
+              {remoteThreadInfo.kind === "inbox"
+                ? remoteThreadInfo.historical
+                  ? "此 Thread 已停用，仅保留历史，不会接收新消息。"
+                  : "这是招乎的默认聊天，桌面仅用于查看。要在招乎继续其他会话，请先在“接入招乎”中开启，再发送 /会话 切换。"
+                : remoteThreadInfo.historical
+                  ? "此远程会话已停用，仅保留历史；请重新绑定。"
+                  : isLoading
+                    ? "当前任务占用远程运行租约，结束后可在桌面继续。"
+                    : "可在桌面继续处理。"}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleDismissRemoteThreadTip}
+            className="ml-1 inline-flex size-6 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-status-info/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-status-info/50"
+            aria-label={`关闭${remoteThreadTipLabel}提示`}
+            title="关闭提示"
+          >
+            <X className="size-3.5" />
+          </button>
+        </div>
+      ) : null}
       {/* In-session keyword search (Ctrl/Cmd+F) */}
       <ChatSearchOverlay
-        open={searchOpen}
-        onClose={() => setSearchOpen(false)}
+        validateSearchLocation={validateSearchLocation}
+        onCancelLocalSearch={cancelLocalSearch}
+        searchLocalCorpus={searchLocalCorpus}
+        onRevealSearchContext={setSearchReveal}
+        externalNavigation={externalNavigation}
+        onExternalNavigationFinished={(id, success) => {
+          if (!isCurrentThreadSearchNavigation(id)) return
+          setSearchOpen(true)
+          finishThreadSearchNavigation(id, success === false ? "命中内容已变化，或无法定位。请重新搜索" : "")
+        }}
+        open={searchOpen || Boolean(externalNavigation)}
+        onClose={() => {
+          if (externalNavigation) finishThreadSearchNavigation(externalNavigation.id)
+          closeSearch()
+        }}
         getViewport={getViewport}
+        getSearchCorpus={getSearchCorpus}
+        onRevealMessage={revealMessage}
+        searchDurableMessages={searchDurableMessages}
+        onRevealDurableMessage={revealDurableMessage}
+        onDurableRevealFinished={(messageId) => {
+          if (pendingDurableSearchRevealIdRef.current === messageId) setPendingDurableRevealMessageId(null)
+        }}
+        onCancelDurableReveal={invalidateDurableMessageReveal}
         recomputeKey={searchRecomputeKey}
       />
 
       {/* Skill creation confirmation dialog */}
       <SkillCreateConfirmDialog
         request={skillConfirmRequest}
+        visible={!showCustomizeView}
         onApprove={handleSkillApprove}
         onReject={handleSkillReject}
       />
 
+      <YoloEnableConfirmDialog
+        open={yoloEnableConfirmOpen}
+        pending={yoloModePending}
+        onOpenChange={setYoloEnableConfirmOpen}
+        onConfirm={() => void handleConfirmEnableYoloMode()}
+      />
+
       <Dialog
-        open={!!messageForkTarget}
+        open={!!messageForkTarget && !showCustomizeView}
         onOpenChange={(open) => {
           if (!open && !isMessageForkBusy) resetMessageForkDialog()
         }}
@@ -5929,23 +7998,39 @@ export function ChatContainer({
 
       {skillIntentBanner}
       {nuxDialog}
+      {visibleMessageIndexes.length > CHAT_MESSAGE_VIRTUALIZATION_THRESHOLD && (
+        <TooltipProvider delayDuration={180}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span
+                role="img"
+                aria-label="虚拟列表已启用"
+                className="pointer-events-auto absolute right-4 top-4 z-20 block size-2.5 rounded-full bg-emerald-500 ring-2 ring-background shadow-[0_0_0_1px_rgb(16_185_129/0.3)]"
+              />
+            </TooltipTrigger>
+            <TooltipContent side="left" sideOffset={8}>
+              虚拟列表已启用
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      )}
 
       <ChatScrollNavigator
         messages={chatScrollNavigatorMessages}
+        questionStructureRevision={chatScrollQuestionStructureRevision}
+        historyGapBeforeMessageId={historyGapBeforeVisibleMessageId}
+        canLoadReleasedHistory={Boolean(historyWindowGap?.reloadTargetMessageId)}
+        onLoadReleasedHistoryWindow={loadReleasedHistoryWindow}
+        onRevealMessage={revealMessage}
         scrollContainerRef={scrollRef}
         rightPanelCollapsed={rightPanelCollapsed}
+        onScrollToQuestion={handleScrollToQuestion}
+        scrollToMessageById={scrollToMessageById}
       >
-        {({ reserveLeftSpace, setMessageRef }) => (
+        {({ reserveLeftSpace, setMessageRef, virtualRangeRef }) => (
           <>
             <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
-              <div
-                className={cn("p-4", reserveLeftSpace && "md:pl-[20px]")}
-                style={
-                  userInputScrollPadding
-                    ? { paddingBottom: `${userInputScrollPadding}px` }
-                    : undefined
-                }
-              >
+              <div className={cn("px-4 pt-4", reserveLeftSpace && "md:pl-[20px]")}>
                 <div className="max-w-3xl mx-auto space-y-4">
                   {historyLoading && displayMessages.length === 0 && (
                     <div
@@ -5983,9 +8068,23 @@ export function ChatContainer({
                       onOpenMarketBySkill={handleOpenMarketBySkill}
                     />
                   )}
-                  <ChatMessageList
+                  <ChatMessageVirtualList
+                    historyWindowRevision={historyWindowRevision}
+                    messageAttempts={streamData.messageAttempts}
+                    searchReveal={searchOpen || externalNavigation ? searchReveal : null}
                     messages={displayMessages}
-                    perMessageFlags={perMessageFlags}
+                    visibleMessageIndexes={visibleMessageIndexes}
+                    lastUserMessageIndex={lastUserMessageIndex}
+                    contentVersion={displayMessagesContentVersion}
+                    onLoadEarlierHistoryPage={loadEarlierHistoryPage}
+                    historyHasMore={historyHasMore}
+                    historyPageLoading={historyPageLoading}
+                    historyRemainingCount={historyRemainingCount}
+                    historyGapBeforeMessageId={historyGapBeforeVisibleMessageId}
+                    showReleasedHistoryAtEnd={Boolean(historyWindowGap && !historyGapBeforeVisibleMessageId)}
+                    canLoadReleasedHistory={Boolean(historyWindowGap?.reloadTargetMessageId)}
+                    onLoadReleasedHistoryWindow={loadReleasedHistoryWindow}
+                    onRestoreLatestHistoryWindow={scrollToConversationBottom}
                     hookLoggingEnabled={hookLogConfig.enabled}
                     hookLogBucketByTurnId={hookLogBucketByTurnId}
                     detachedHookLogBuckets={detachedHookLogBuckets}
@@ -5996,7 +8095,7 @@ export function ChatContainer({
                     toolCallStates={toolCallDisplayStates}
                     pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
                     pendingApproval={pendingApproval}
-                    autoApproveGitPush={!yoloModeLoaded || yoloMode}
+                    autoApproveGitPush={autoApproveGitPush}
                     onApprovalDecision={handleApprovalDecision}
                     onEditUserMessage={handleEditUserMessage}
                     onSetGoalFromMessage={handleSetGoalFromMessage}
@@ -6006,114 +8105,72 @@ export function ChatContainer({
                     threadId={threadId}
                     assistantDurationMsById={assistantDurationMsById}
                     userSendTimeLabelById={userSendTimeLabelById}
+                    customScrollParent={scrollParent}
+                    virtuosoRef={virtuosoRef}
+                    navigatorVirtualRangeRef={virtualRangeRef}
+                    initialTopMostItemIndex={
+                      pendingDurableSearchRevealIdRef.current &&
+                      visibleMessageIndexById.has(pendingDurableSearchRevealIdRef.current)
+                        ? { index: visibleMessageIndexById.get(pendingDurableSearchRevealIdRef.current)!,
+                            align: "center", behavior: "auto" }
+                        : chatScrollUiState.mode === "initializing" ||
+                      chatScrollUiState.mode === "following"
+                        ? { index: "LAST", align: "end", behavior: "auto" }
+                        : undefined
+                    }
+                    onInitialVirtualItemsRendered={handleInitialVirtualItemsRendered}
+                    onContentHeightChanged={handleContentHeightChanged}
+                    onAtBottomStateChange={handleVirtualAtBottomStateChange}
+                    footer={chatMessageListFooter}
                   />
-
-                  {contextCompaction && (
-                    <ContextCompactionCard compaction={contextCompaction} />
-                  )}
-
-                  {/*测试git diff功能*/}
-                  {/*<DisplayDiffTest/>*/}
-
-                  {/*
-              Hook log chips now live under each user message above. The modal
-              is mounted once at component scope below so it's not bound to a
-              specific message render. Buckets without a visible user message
-              (session lifecycle, worker auto-turns, older placeholders) render
-              their chips in ChatMessageList.
-            */}
-
-                  {/* Orchestrator standalone approval bar moved outside ScrollArea — see below */}
-                  {/* Model retry indicator — shown when the fetch layer is retrying a transient error */}
-                  {modelRetry && (
-                    <div className="flex items-start gap-2 rounded-md border border-amber-300/60 bg-amber-50/60 dark:border-amber-500/40 dark:bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-200">
-                      <span className="inline-block size-3 mt-0.5 rounded-full border-2 border-amber-500 border-t-transparent animate-spin shrink-0" />
-                      <div className="flex-1 min-w-0">
-                        <span>
-                          模型暂时不可用（{modelRetry.reason}），正在重试 {modelRetry.attempt}/
-                          {modelRetry.maxRetries}
-                          {modelRetry.delayMs > 0 && (
-                            <>（等待 {Math.round(modelRetry.delayMs / 100) / 10}s）</>
-                          )}
-                          …
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                  {/* Streaming indicator and inline TODOs */}
-                  {isLoading && (
-                    <div className="space-y-3">
-                      {contextCompaction?.phase !== "started" && (
-                        <div className="flex items-center gap-2 text-sm">
-                          <div className="rainbow-spinner" />
-                          <span
-                            className="thinking-shimmer-text"
-                            data-text={THINKING_MESSAGES[thinkingMessageIndex]}
-                          >
-                            {THINKING_MESSAGES[thinkingMessageIndex]}
-                          </span>
-                          {streamData.isLoading && (
-                            <ProcessingDuration
-                              key={threadId}
-                              startTime={activeTurnStartTime}
-                              text="已处理"
-                            />
-                          )}
-                        </div>
-                      )}
-                      {todos.length > 0 && <ChatTodos todos={todos} />}
-                    </div>
-                  )}
-                  {workflowRun ? (
-                    <WorkflowRunPanel threadId={threadId} run={workflowRun} />
-                  ) : isWorkflowModeMetadata(currentThread?.metadata) ? (
-                    <WorkflowHistoryButton threadId={threadId} />
-                  ) : null}
-                  {hookInterruption && !isLoading && (
-                    <div className="flex items-start gap-3 rounded-md border border-amber-400/60 bg-amber-50/50 p-4 dark:border-amber-500/40 dark:bg-amber-500/10">
-                      <ShieldCheck className="size-5 text-amber-600 shrink-0 mt-0.5 dark:text-amber-300" />
-                      <div className="flex-1 min-w-0">
-                        <div className="font-medium text-amber-800 text-sm dark:text-amber-200">
-                          {interruptionNotice?.title}
-                        </div>
-                        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-700/80 dark:text-amber-200/80">
-                          <span className="rounded border border-amber-400/50 px-1.5 py-0.5 font-mono">
-                            {hookInterruption.event}
-                          </span>
-                          <span>{hookInterruption.timestamp.toLocaleTimeString()}</span>
-                        </div>
-                        <div className="text-sm text-amber-900/90 mt-2 break-words dark:text-amber-100/90">
-                          {hookInterruption.reason}
-                        </div>
-                        {hookInterruption.systemMessage && (
-                          <div className="text-xs text-amber-700/80 mt-2 break-words dark:text-amber-200/80">
-                            {hookInterruption.systemMessage}
-                          </div>
-                        )}
-                        <div className="text-xs text-muted-foreground mt-2">
-                          {interruptionNotice?.explanation}
-                        </div>
-                      </div>
-                      <button
-                        onClick={clearHookInterruption}
-                        className="shrink-0 rounded p-1 hover:bg-amber-500/20 transition-colors"
-                        aria-label="Dismiss hook notice"
-                      >
-                        <X className="size-4 text-muted-foreground" />
-                      </button>
-                    </div>
-                  )}
-                  {/* Error state */}
-                  {threadError && !isLoading && (
-                    <ChatErrorCard
-                      error={threadError}
-                      detail={errorDetail}
-                      onDismiss={handleDismissError}
-                    />
-                  )}
                 </div>
               </div>
             </ScrollArea>
+            {bizRetry && (
+              <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-[20px]")}>
+                <div className="mx-auto w-full max-w-3xl">
+                  <BizRetryDecisionCard
+                    key={bizRetry.notificationId}
+                    notificationId={bizRetry.notificationId}
+                    message={bizRetry.message}
+                    humanGatePending={bizRetryHumanGatePending}
+                    className="mb-0 rounded-md px-3 py-2.5"
+                  />
+                </div>
+              </div>
+            )}
+            {humanGate && (
+              <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-[20px]")}>
+                <div className="mx-auto flex w-full max-w-3xl items-center gap-3 rounded-md border border-status-warning/40 bg-status-warning/10 px-3 py-2.5">
+                  <PauseCircle className="size-4 shrink-0 text-status-warning" />
+                  <div className="min-w-0 flex-1 text-left">
+                    <div className="text-sm font-medium text-status-warning-foreground">
+                      等待人工确认
+                    </div>
+                    <div className="truncate text-xs text-status-warning-foreground/80">
+                      {humanGate.message}
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    disabled={Boolean(humanGateDecisionBusy)}
+                    onClick={() => void decideHumanGate("reject")}
+                  >
+                    拒绝
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={Boolean(humanGateDecisionBusy)}
+                    onClick={() => void decideHumanGate("approve")}
+                  >
+                    批准推进
+                  </Button>
+                </div>
+              </div>
+            )}
             {/* Orchestrator approval bar — placed outside ScrollArea so it's always visible */}
             {pendingApproval &&
               Boolean(
@@ -6121,7 +8178,7 @@ export function ChatContainer({
               ) &&
               (pendingApproval as unknown as Record<string, unknown>).operation !== "git_commit" &&
               !(
-                (!yoloModeLoaded || yoloMode) &&
+                autoApproveGitPush &&
                 (pendingApproval as unknown as Record<string, unknown>).operation === "git_push"
               ) && (
                 <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-[20px]")}>
@@ -6337,7 +8394,7 @@ export function ChatContainer({
                             <>
                               {approvalTypes.includes("approve") && (
                                 <button
-                                  className="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
+                                  className="rounded-md bg-button px-4 py-2 text-sm font-semibold text-button-foreground shadow-sm transition-colors hover:bg-button/90"
                                   onClick={() => handleApprovalDecision("approve")}
                                 >
                                   {isFileApproval
@@ -6417,43 +8474,17 @@ export function ChatContainer({
             <div
               className={cn(
                 "px-4 pb-4",
-                goalUi.goal ? "pt-1" : "pt-4",
+                goalUi.goal ? "pt-1" : "pt-0",
                 reserveLeftSpace && "md:pl-[20px]"
               )}
             >
-              {showGitChangeNotice && (
-                <div className="max-w-3xl mx-auto mb-2 flex items-center justify-between gap-3 rounded-xl border border-status-warning/40 bg-status-warning/10 px-3 py-2">
-                  <div className="min-w-0 flex items-center gap-2 text-[12px] text-foreground">
-                    <AlertCircle className="size-3.5 shrink-0 text-status-warning" />
-                    <span className="truncate">检测到文件变更，可打开 Git 面板查看。</span>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={onOpenGitPanel}
-                      disabled={!onOpenGitPanel}
-                      className="rounded-md bg-status-warning px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-status-warning/90 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      打开
-                    </button>
-                    <button
-                      type="button"
-                      onClick={onDismissGitChangeNotice}
-                      disabled={!onDismissGitChangeNotice}
-                      className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-status-warning/15 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-                      aria-label="关闭文件变更提示"
-                      title="关闭"
-                    >
-                      <X className="size-3.5" />
-                    </button>
-                  </div>
-                </div>
-              )}
+              <GitChangeNotice threadId={threadId} />
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
                 <ChatScrollToBottomButton
-                  getViewport={getViewport}
+                  visible={chatScrollUiState.mode === "detached" || hasTargetedHistoryWindow}
+                  hasUnread={chatScrollUiState.hasUnread}
+                  unreadCount={chatScrollUiState.unreadCount}
                   onScrollToBottom={scrollToConversationBottom}
-                  resetKey={threadId}
                 />
                 <SlashCommandPopover
                   mode={slash.mode}
@@ -6506,9 +8537,9 @@ export function ChatContainer({
                               }}
                               onDragEnd={() => setDraggingQueueId(null)}
                               className={cn(
-                                "rounded-xl bg-amber-900/5 px-2.5 py-2 transition-colors",
+                                "rounded-xl bg-status-warning/5 px-2.5 py-2 transition-colors",
                                 draggingQueueId === queued.id && "opacity-50",
-                                !isEditing && "hover:bg-amber-900/10"
+                                !isEditing && "hover:bg-status-warning/10"
                               )}
                             >
                               {isEditing ? (
@@ -6541,7 +8572,7 @@ export function ChatContainer({
                                     <button
                                       type="button"
                                       onClick={saveEditingQueuedMessage}
-                                      className="flex h-7 items-center gap-1 rounded-md bg-primary px-2 text-xs text-primary-foreground hover:bg-primary/90"
+                                      className="flex h-7 items-center gap-1 rounded-md bg-button px-2 text-xs text-button-foreground hover:bg-button/90"
                                     >
                                       <Check className="size-3.5" />
                                       保存
@@ -6622,25 +8653,324 @@ export function ChatContainer({
                       </div>
                     </div>
                   )}
-                  <div className="flex items-end gap-2">
+                  {/* Composer environment rail, visually tucked behind the primary input card. */}
+                  <div
+                    aria-hidden={composerEnvironmentRailCollapsed}
+                    className={cn(
+                      "relative z-0 mx-3 -mb-4 flex min-w-0 items-center gap-1 rounded-t-[28px] bg-background-interactive/70 pb-[13px] pl-3 pr-2 pt-[5px]",
+                      composerEnvironmentRailCollapsed && "hidden"
+                    )}
+                  >
+                    {/* Scrollable environment context. */}
+                    <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+                      <WorkspacePicker
+                        threadId={threadId}
+                        environmentRailCollapsed={composerEnvironmentRailCollapsed}
+                        onGitStatusChange={setGitWorkspaceStatus}
+                      />
+                      <GitBranchSwitcher
+                        workspacePath={workspacePath}
+                        environmentRailCollapsed={composerEnvironmentRailCollapsed}
+                      />
+                      {tokenUsage && !composerEnvironmentRailCollapsed && (
+                        <ContextUsageIndicator
+                          tokenUsage={tokenUsage}
+                          modelId={currentModel}
+                          contextLimit={modelContextLimit}
+                          className="h-7 bg-transparent hover:bg-muted/60"
+                        />
+                      )}
+                    </div>
+                    {/* Fixed safety and environment actions. */}
+                    <div className="ml-auto flex shrink-0 items-center gap-1">
+                      {yoloModeLoadFailed ? (
+                        <TooltipProvider delayDuration={180}>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span
+                                role="status"
+                                aria-label="YOLO 状态读取失败"
+                                className="inline-flex h-[18px] shrink-0 items-center gap-0.5 rounded-full bg-status-warning/15 px-1 text-[10px] font-normal leading-none text-status-warning"
+                              >
+                                <CircleAlert className="size-2.5" />
+                                YOLO?
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" sideOffset={6}>
+                              无法确认全局 YOLO 状态，请重新读取
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      ) : yoloMode ? (
+                        <TooltipProvider delayDuration={180}>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span
+                                role="status"
+                                aria-label="YOLO 模式已开启"
+                                className="inline-flex h-[18px] shrink-0 items-center gap-0.5 rounded-full bg-status-warning/15 px-1 text-[10px] font-normal leading-none text-status-warning"
+                              >
+                                <Zap className="size-2.5" />
+                                YOLO
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" sideOffset={6}>
+                              全局 YOLO 已开启；关闭后将立即恢复审批
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      ) : null}
+                      <Popover open={composerSettingsOpen} onOpenChange={setComposerSettingsOpen}>
+                        <TooltipProvider delayDuration={180}>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <PopoverTrigger asChild>
+                                <button
+                                  type="button"
+                                  aria-label="更多会话设置"
+                                  className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+                                >
+                                  <SlidersHorizontal className="size-3.5" />
+                                </button>
+                              </PopoverTrigger>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" sideOffset={6}>
+                              更多会话设置
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                        <PopoverContent
+                          align="end"
+                          side="top"
+                          sideOffset={8}
+                          className="w-[328px] max-w-[calc(100vw-24px)] overflow-hidden rounded-2xl border-border/60 bg-popover/95 p-1.5 shadow-2xl backdrop-blur-xl"
+                        >
+                          <div className="flex items-center gap-2 px-2 py-1.5">
+                            <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-background-interactive text-muted-foreground">
+                              <SlidersHorizontal className="size-3.5" />
+                            </span>
+                            <div className="min-w-0">
+                              <div className="text-xs font-semibold text-foreground">会话设置</div>
+                              <div className="mt-0.5 text-[10px] leading-4 text-muted-foreground">
+                                运行选项与会话辅助功能
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="space-y-2 p-0.5">
+                            <section aria-labelledby="composer-run-settings-title">
+                              <div
+                                id="composer-run-settings-title"
+                                className="px-2 pb-1 text-[10px] font-medium text-muted-foreground/80"
+                              >
+                                运行控制
+                              </div>
+                              <div className="rounded-xl bg-background-interactive/60 p-2">
+                                <div className="flex items-center gap-2.5">
+                                  <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-status-warning/15 text-status-warning">
+                                    {yoloModePending || yoloModeLoadState === "loading" ? (
+                                      <Loader2 className="size-3.5 animate-spin" />
+                                    ) : yoloModeLoadFailed ? (
+                                      <CircleAlert className="size-3.5" />
+                                    ) : (
+                                      <Zap className="size-3.5" />
+                                    )}
+                                  </span>
+                                  <span className="min-w-0 flex-1">
+                                    <span className="block text-xs font-semibold text-foreground">
+                                      {yoloModeLoadFailed ? "YOLO 状态读取失败" : "YOLO 模式"}
+                                    </span>
+                                    <span className="mt-0.5 block text-[10px] leading-4 text-muted-foreground">
+                                      {yoloModeLoadFailed
+                                        ? "无法确认全局自动审批状态；部分操作仍可能按已保存设置自动批准。"
+                                        : yoloModeLoadState === "loading"
+                                          ? "正在读取全局自动审批状态…"
+                                          : "全局自动审批设置；切换后立即影响后续操作。"}
+                                    </span>
+                                  </span>
+                                  {yoloModeLoadFailed ? (
+                                    <button
+                                      type="button"
+                                      onClick={fetchYoloMode}
+                                      className="h-7 shrink-0 rounded-md px-2 text-[10px] font-medium text-status-warning transition-colors hover:bg-status-warning/10"
+                                    >
+                                      重新读取
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      role="switch"
+                                      aria-checked={yoloMode}
+                                      aria-label={yoloMode ? "关闭 YOLO 模式" : "开启 YOLO 模式"}
+                                      disabled={!yoloModeLoaded || yoloModePending}
+                                      onClick={() => {
+                                        void handleToggleYoloMode()
+                                      }}
+                                      className={cn(
+                                        "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border p-0.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50",
+                                        yoloMode
+                                          ? "border-status-warning/60 bg-status-warning"
+                                          : "border-border-emphasis bg-muted"
+                                      )}
+                                    >
+                                      <ToggleThumb
+                                        className={cn(
+                                          "size-3.5",
+                                          yoloMode ? "translate-x-4" : "translate-x-0"
+                                        )}
+                                      />
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            </section>
+
+                            <section aria-labelledby="composer-session-settings-title">
+                              <div
+                                id="composer-session-settings-title"
+                                className="px-2 pb-1 text-[10px] font-medium text-muted-foreground/80"
+                              >
+                                会话行为
+                              </div>
+                              <div className="grid gap-0.5 rounded-xl bg-background-interactive/45 p-1 [&_[data-slot=popover-trigger]]:h-9 [&_[data-slot=popover-trigger]]:w-full [&_[data-slot=popover-trigger]]:justify-start [&_[data-slot=popover-trigger]]:rounded-lg">
+                                <MemorySessionSwitcher onOpenSettings={handleOpenMemorySettings} />
+                                {(agentMode === "normal" || agentMode === "multi") && (
+                                  <OutputStyleSwitcher threadId={threadId} disabled={isLoading} />
+                                )}
+                                <ThreadRemoteAccessSwitcher
+                                  threadId={threadId}
+                                  onOpenSettings={handleOpenRobotSettings}
+                                />
+                              </div>
+                            </section>
+
+                            {showComposerPromptSection && (
+                              <section aria-labelledby="composer-preview-settings-title">
+                                <div
+                                  id="composer-preview-settings-title"
+                                  className="px-2 pb-1 text-[10px] font-medium text-muted-foreground/80"
+                                >
+                                  提示词与约束
+                                </div>
+                                <div className="grid gap-0.5 rounded-xl bg-background-interactive/45 p-1 [&_[data-slot=popover-trigger]]:h-9 [&_[data-slot=popover-trigger]]:w-full [&_[data-slot=popover-trigger]]:justify-start [&_[data-slot=popover-trigger]]:rounded-lg">
+                                  {showSystemPromptPreviewButton && (
+                                    <SystemPromptPreviewButton threadId={threadId} />
+                                  )}
+                                  {showSystemConstraintsButton && (
+                                    <SystemConstraintsPreviewPopover
+                                      preview={systemConstraintsPromptPreview}
+                                      align="start"
+                                      side="left"
+                                      sideOffset={8}
+                                    >
+                                      <button
+                                        type="button"
+                                        className={cn(
+                                          "flex h-9 w-full items-center gap-1.5 rounded-md px-2 text-xs transition-colors hover:opacity-80",
+                                          systemConstraintsLoadFailed
+                                            ? "bg-status-warning/15 text-status-warning"
+                                            : "bg-status-nominal/15 text-status-nominal"
+                                        )}
+                                        title={systemConstraintsTitle}
+                                        aria-label={systemConstraintsTitle}
+                                        onClick={handleOpenSystemConstraints}
+                                      >
+                                        <ShieldCheck className="size-3.5" />
+                                        <span>{systemConstraintsLabel}</span>
+                                      </button>
+                                    </SystemConstraintsPreviewPopover>
+                                  )}
+                                </div>
+                              </section>
+                            )}
+                          </div>
+                        </PopoverContent>
+                      </Popover>
+                      <TooltipProvider delayDuration={180}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              aria-label="隐藏环境栏"
+                              aria-expanded="true"
+                              onClick={() => handleComposerEnvironmentRailCollapsedChange(true)}
+                              className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/50 transition-colors hover:bg-muted/40 hover:text-muted-foreground"
+                            >
+                              <ChevronDown className="size-3.5" />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent side="top" sideOffset={6}>
+                            隐藏环境栏
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </div>
+                  </div>
+                  {/* Composer environment rail end. */}
+                  <div className="relative z-10 flex items-end gap-2">
                     <div
                       ref={dropZoneRef}
                       className={cn(
-                        "relative flex-1 min-w-0 flex flex-col rounded-3xl border border-border  transition-colors duration-300",
+                        "relative flex-1 min-w-0 flex flex-col overflow-hidden rounded-[28px] border border-border/80 shadow-sm transition-colors duration-300",
                         pendingUserInput
                           ? "border-primary/25 bg-background"
                           : appleIntelligenceGlowEnabled && glowVisible
-                            ? "bg-white/80"
-                            : "bg-white",
+                            ? "bg-background-elevated/80"
+                            : "bg-background-elevated",
                         dragOver && "border-primary"
                       )}
                       onDrop={handleDrop}
                       onDragOver={handleDragOver}
                       onDragLeave={handleDragLeave}
                     >
+                      {composerEnvironmentRailCollapsed && (
+                        <TooltipProvider delayDuration={180}>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <button
+                                type="button"
+                                aria-label={
+                                  yoloModeLoadFailed
+                                    ? "YOLO 状态读取失败，显示环境栏"
+                                    : yoloMode
+                                      ? "YOLO 模式已开启，显示环境栏"
+                                      : "显示环境栏"
+                                }
+                                aria-expanded={false}
+                                onClick={() => handleComposerEnvironmentRailCollapsedChange(false)}
+                                className="absolute right-3 top-2.5 z-20 inline-flex h-7 min-w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+                              >
+                                {yoloModeLoadFailed ? (
+                                  <span className="inline-flex h-[18px] items-center gap-0.5 rounded-full bg-status-warning/15 px-1 text-[10px] font-normal leading-none text-status-warning hover:bg-status-warning/20">
+                                    <CircleAlert className="size-2.5" />
+                                    YOLO?
+                                    <ChevronUp className="size-2.5" />
+                                  </span>
+                                ) : yoloMode ? (
+                                  <span className="inline-flex h-[18px] items-center gap-0.5 rounded-full bg-status-warning/15 px-1 text-[10px] font-normal leading-none text-status-warning hover:bg-status-warning/20">
+                                    <Zap className="size-2.5" />
+                                    YOLO
+                                    <ChevronUp className="size-2.5" />
+                                  </span>
+                                ) : (
+                                  <ChevronUp className="size-3.5" />
+                                )}
+                              </button>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" sideOffset={6}>
+                              显示环境栏
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      )}
                       {/* Selected chips sit above the textarea inside the composer shell. */}
                       {selectedSkill && (
-                        <div className="flex items-center gap-1.5 px-3 pt-2.5">
+                        <div
+                          className={cn(
+                            "flex items-center gap-1.5 px-3 pt-2.5",
+                            composerRightClearanceClass
+                          )}
+                        >
                           <SkillChip
                             label={selectedSkill.name}
                             onRemove={() => setSelectedSkill(null)}
@@ -6648,7 +8978,12 @@ export function ChatContainer({
                         </div>
                       )}
                       {selectedBuiltinBrowser && (
-                        <div className="flex items-center gap-1.5 px-3 pt-2.5">
+                        <div
+                          className={cn(
+                            "flex items-center gap-1.5 px-3 pt-2.5",
+                            composerRightClearanceClass
+                          )}
+                        >
                           <BuiltinBrowserChip onRemove={() => setSelectedBuiltinBrowser(false)} />
                         </div>
                       )}
@@ -6675,7 +9010,12 @@ export function ChatContainer({
                       )}
                       {/* File chips inside input box */}
                       {(mentionedFiles.length > 0 || attachments.length > 0) && (
-                        <div className="flex flex-col gap-1 px-3 pt-2.5">
+                        <div
+                          className={cn(
+                            "flex flex-col gap-1 px-3 pt-2.5",
+                            composerRightClearanceClass
+                          )}
+                        >
                           <ul className="flex flex-wrap gap-1.5">
                             {mentionedFiles.map((file, idx) => (
                               <li key={file.absolutePath}>
@@ -6743,17 +9083,18 @@ export function ChatContainer({
                         placeholder={inputPlaceholder}
                         disabled={effectiveInputDisabled}
                         className={cn(
-                          "relative z-[1] w-full resize-none bg-transparent overflow-y-auto",
+                          "composer-textarea relative z-[1] mr-2 w-[calc(100%-0.5rem)] resize-none overflow-y-auto bg-transparent",
                           "p-4 text-sm placeholder:text-muted-foreground",
                           "focus:outline-none disabled:opacity-70",
-                          hasPendingFilePayload && "pt-1.5"
+                          hasPendingFilePayload && "pt-1.5",
+                          composerRightClearanceClass
                         )}
-                        rows={3}
+                        rows={2}
                         style={{ minHeight: "44px", maxHeight: "200px" }}
                       />
-                      {/* Bottom bar: + button left, send button right */}
+                      {/* Bottom bar: primary execution controls left, send button right */}
                       <div className="flex items-center justify-between px-3 pb-2 w-full">
-                        <div className="flex items-center gap-1 flex-1 overflow-auto">
+                        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
                           <IconPopoverButton
                             icon={<Plus className="size-4" />}
                             popoverContent={ATTACH_FILE_POPOVER_CONTENT}
@@ -6768,9 +9109,8 @@ export function ChatContainer({
                             className="size-7 rounded-md p-0 text-muted-foreground hover:bg-muted/50 disabled:opacity-40 disabled:cursor-not-allowed"
                             onClick={handleAttachClick}
                           />
-                          <div className="w-px h-4 bg-border mx-1" />
+                          <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
                           <ModelSwitcher threadId={threadId} />
-                          <div className="w-px h-4 bg-border mx-1" />
                           <AgentModeSwitcher
                             showWorkflow
                             mode={
@@ -6782,8 +9122,7 @@ export function ChatContainer({
                             locked={isLoading || !canChangeAgentMode}
                             lockedReason={agentModeSwitchDisabledReason}
                             disabledModes={
-                              disableCoordinatorModeOption ||
-                              disableWorkflowModeOption
+                              disableCoordinatorModeOption || disableWorkflowModeOption
                                 ? {
                                     coordinator: disableCoordinatorModeOption,
                                     workflow: disableWorkflowModeOption
@@ -6791,8 +9130,7 @@ export function ChatContainer({
                                 : undefined
                             }
                             disabledModeReasons={
-                              disableCoordinatorModeOption ||
-                              disableWorkflowModeOption
+                              disableCoordinatorModeOption || disableWorkflowModeOption
                                 ? {
                                     coordinator: disableCoordinatorModeOption
                                       ? "项目模式暂不支持 Agent Team。"
@@ -6805,31 +9143,9 @@ export function ChatContainer({
                             }
                             onChange={handleAgentModeChange}
                           />
-                          <div className="w-px h-4 bg-border mx-1" />
-                          <WorkspacePicker
-                            threadId={threadId}
-                            onGitStatusChange={onThreadGitStatusChange}
-                          />
                         </div>
-                        <div className="flex items-center gap-2">
-                          <TooltipProvider delayDuration={180}>
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <button
-                                  type="button"
-                                  disabled={effectiveInputDisabled}
-                                  onClick={handleInsertNewline}
-                                  aria-label="换行"
-                                  className="cursor-pointer flex items-center justify-center size-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                                >
-                                  <CornerDownLeft className="size-3.5" />
-                                </button>
-                              </TooltipTrigger>
-                              <TooltipContent side="top" sideOffset={6}>
-                                Shift + Enter 换行
-                              </TooltipContent>
-                            </Tooltip>
-                          </TooltipProvider>
+                        <div className="ml-auto flex shrink-0 items-center justify-end gap-1.5">
+                          <BackgroundShellStopButton key={threadId} threadId={threadId} />
                           {isLoading ? (
                             <>
                               {canSubmitGoalCommandWhileLoading && (
@@ -6837,20 +9153,23 @@ export function ChatContainer({
                                   type="submit"
                                   disabled={goalSendButtonDisabledWhileLoading}
                                   aria-label="发送 goal 命令"
-                                  className="flex items-center justify-center size-7 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                  className="flex size-8 shrink-0 items-center justify-center rounded-full bg-button text-button-foreground transition-colors hover:bg-button/90 disabled:cursor-not-allowed disabled:opacity-40"
                                 >
-                                  <Send className="size-3.5" />
+                                  <ArrowUp className="size-5" strokeWidth={1.75} />
                                 </button>
                               )}
-                              <button
-                                type="button"
-                                onClick={handleCancel}
-                                aria-label="停止生成"
-                                title="停止生成"
-                                className="flex items-center justify-center size-7 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
-                              >
-                                <Square className="size-3 fill-current" />
-                              </button>
+                              {isManagedRunSessionActive ? (
+                                <TooltipProvider delayDuration={180}>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>{stopGenerationButton}</TooltipTrigger>
+                                    <TooltipContent side="top" sideOffset={6}>
+                                      手动终止会话将退出托管模式
+                                    </TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
+                              ) : (
+                                stopGenerationButton
+                              )}
                             </>
                           ) : (
                             <>
@@ -6873,34 +9192,6 @@ export function ChatContainer({
                                   </Tooltip>
                                 </TooltipProvider>
                               )}
-                              <TooltipProvider delayDuration={180}>
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        if (effectiveInputDisabled) return
-                                        // 创建伪造的表单提交事件
-                                        const fakeEvent = {
-                                          preventDefault: () => {}
-                                        } as React.FormEvent
-                                        // 发送继续消息
-                                        handleSubmit(fakeEvent, "继续")
-                                      }}
-                                      disabled={effectiveInputDisabled}
-                                      className="flex items-center justify-center gap-1 px-2.5 h-7 rounded-md border border-primary/20 bg-primary/10 text-primary hover:bg-primary/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                                      aria-label="继续对话"
-                                    >
-                                      <Send className="size-3.5" />
-                                      <span className="text-xs font-medium">继续</span>
-                                    </button>
-                                  </TooltipTrigger>
-                                  <TooltipContent side="top" sideOffset={6}>
-                                    点击自动发送“继续”2字
-                                  </TooltipContent>
-                                </Tooltip>
-                              </TooltipProvider>
-
                               <button
                                 type="submit"
                                 disabled={
@@ -6912,22 +9203,18 @@ export function ChatContainer({
                                   (slash.mode.kind === "slash" &&
                                     !isBareGoalSlashCommandInput(input))
                                 }
-                                className="flex items-center justify-center size-7 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                className="flex size-8 shrink-0 items-center justify-center rounded-full bg-button text-button-foreground transition-colors hover:bg-button/90 disabled:cursor-not-allowed disabled:opacity-40"
                               >
-                                <Send className="size-3.5" />
+                                <ArrowUp className="size-5" strokeWidth={1.75} />
                               </button>
                             </>
                           )}
                         </div>
                       </div>
-                      <UserInputRequestDialog
-                        request={pendingUserInput}
-                        onSubmit={handleUserInputSubmit}
-                        onLayoutChange={handleUserInputDialogLayoutChange}
-                      />
                       <AgentGitCommitDialog
                         key={agentCommitApproval?.id ?? "agent-commit-idle"}
-                        open={Boolean(agentCommitApproval)}
+                        // Portal 不受工作区 inert 限制；设置期间只隐藏，保留待审批请求。
+                        open={Boolean(agentCommitApproval) && !showCustomizeView}
                         threadId={threadId}
                         workspacePath={workspacePath}
                         suggestedMessage={agentCommitApproval?.suggestedCommitMessage}
@@ -6942,63 +9229,12 @@ export function ChatContainer({
                         onCancel={handleAgentCommitCancel}
                       />
                     </div>
-                  </div>
-                  {/*chat container bottom panel */}
-                  <div className={"flex items-center justify-between"}>
-                    <div className={"flex items-center gap-2"}>
-                      <ChatMessageCount count={displayMessages.length} />
-                      {yoloMode && (
-                        <button
-                          type="button"
-                          title="点击打开设置"
-                          onClick={() => setShowCustomizeView(true, "sandbox")}
-                          className="inline-flex items-center gap-1 text-[11px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 hover:bg-amber-500/25 transition-colors cursor-pointer"
-                        >
-                          <Zap className="size-3" />
-                          YOLO
-                        </button>
-                      )}
-                      <MemorySessionSwitcher onOpenSettings={handleOpenMemorySettings} />
-                      {(agentMode === "normal" || agentMode === "multi") && (
-                        <OutputStyleSwitcher threadId={threadId} disabled={isLoading} />
-                      )}
-                      <SystemPromptPreviewButton threadId={threadId} />
-                      <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
-                      {tokenUsage && (
-                        <ContextUsageIndicator
-                          tokenUsage={tokenUsage}
-                          modelId={currentModel}
-                          contextLimit={modelContextLimit}
-                        />
-                      )}
-                      {showSystemConstraintsButton && (
-                        <SystemConstraintsPreviewPopover
-                          preview={systemConstraintsPromptPreview}
-                          align="start"
-                          side="top"
-                          sideOffset={8}
-                        >
-                          <button
-                            type="button"
-                            className={cn(
-                              "flex items-center gap-1.5 rounded-sm px-2 py-0.5 text-xs transition-colors hover:opacity-80",
-                              systemConstraintsLoadFailed
-                                ? "bg-amber-500/20 text-amber-600 dark:text-amber-300"
-                                : "bg-emerald-500/20 text-emerald-600 dark:text-emerald-300"
-                            )}
-                            title={systemConstraintsTitle}
-                            aria-label={systemConstraintsTitle}
-                            onClick={handleOpenSystemConstraints}
-                          >
-                            <ShieldCheck className="size-3.5" />
-                            <span>{systemConstraintsLabel}</span>
-                          </button>
-                        </SystemConstraintsPreviewPopover>
-                      )}
-                    </div>
-                    <div className="flex min-w-0 items-center gap-2">
-                      <GitBranchSwitcher workspacePath={workspacePath} />
-                    </div>
+                    {/* Keep the upward-opening request panel outside the composer's clipped shell. */}
+                    <UserInputRequestDialog
+                      request={pendingUserInput}
+                      onSubmit={handleUserInputSubmit}
+                      onLayoutChange={handleUserInputDialogLayoutChange}
+                    />
                   </div>
                 </div>
               </form>

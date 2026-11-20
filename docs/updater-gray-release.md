@@ -3,6 +3,8 @@
 > 适用版本：`feat/updater-gray-release` 起
 > 相关代码：[checker.ts](../src/main/updater/checker.ts) · [gray-release.ts](../src/main/updater/gray-release.ts) · [index.ts](../src/main/updater/index.ts)
 
+更新日志位置、启动回滚排查及正式/灰度逐项对照见 [更新诊断说明](updater-diagnostics.md)。
+
 ## 1. 背景与目标
 
 历史上 `cmbdevclaw-latest.json` 是一份全局清单，所有客户端拿到的版本完全一致。任何一次发布都是 100% 直接铺开，缺少"先小范围验证再全量"的能力，新版本一旦带 bug，影响面是全行。

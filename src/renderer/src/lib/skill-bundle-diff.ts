@@ -1,3 +1,5 @@
+import { structuredPatch } from "diff"
+
 export interface TextBundleFile {
   path: string
   content: string
@@ -34,6 +36,7 @@ const TEXT_BUNDLE_FILE_EXTENSIONS = new Set([
 ])
 const MAX_ZIP_TEXT_FILE_BYTES = 512 * 1024
 const MAX_ZIP_TEXT_TOTAL_BYTES = 2 * 1024 * 1024
+const BUNDLE_DIFF_TIMEOUT_MS = 50
 
 export function normalizeTextBundlePath(input: string): string {
   return input.normalize("NFC").replace(/\\/g, "/").replace(/^\/+/, "")
@@ -101,11 +104,10 @@ function decodeZipFileName(input: Uint8Array | string[]): string {
   }, candidates[0])
 }
 
-function splitLines(content: string): string[] {
+function splitPatchLines(content: string): string[] {
   if (!content) return []
-  const normalized = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
-  const lines = normalized.split("\n")
-  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop()
+  const lines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n")
+  if (lines[lines.length - 1] === "") lines.pop()
   return lines
 }
 
@@ -114,70 +116,46 @@ function hunkRange(start: number, count: number): string {
   return `${start},${count}`
 }
 
-function escapeDiffLine(line: string): string {
-  return line || ""
-}
-
-function buildFilePatch(filePath: string, oldContent: string | null, newContent: string | null): string {
-  const oldLines = splitLines(oldContent || "")
-  const newLines = splitLines(newContent || "")
+function buildFilePatch(
+  filePath: string,
+  oldContent: string | null,
+  newContent: string | null
+): string {
   const header = [
     `diff --git a/${filePath} b/${filePath}`,
-    oldContent === null ? "new file mode 100644" : newContent === null ? "deleted file mode 100644" : "",
+    oldContent === null
+      ? "new file mode 100644"
+      : newContent === null
+        ? "deleted file mode 100644"
+        : "",
     oldContent === null ? "--- /dev/null" : `--- a/${filePath}`,
     newContent === null ? "+++ /dev/null" : `+++ b/${filePath}`
   ].filter(Boolean)
-
-  if (oldContent === null) {
+  const patch = structuredPatch(
+    oldContent === null ? "/dev/null" : `a/${filePath}`,
+    newContent === null ? "/dev/null" : `b/${filePath}`,
+    oldContent ?? "",
+    newContent ?? "",
+    "",
+    "",
+    { context: 3, timeout: BUNDLE_DIFF_TIMEOUT_MS }
+  )
+  if (!patch) {
+    const oldLines = splitPatchLines(oldContent ?? "")
+    const newLines = splitPatchLines(newContent ?? "")
     return [
       ...header,
-      `@@ -0,0 +${hunkRange(1, newLines.length)} @@`,
-      ...newLines.map((line) => `+${escapeDiffLine(line)}`)
+      `@@ -${hunkRange(1, oldLines.length)} +${hunkRange(1, newLines.length)} @@`,
+      ...oldLines.map((line) => `-${line}`),
+      ...newLines.map((line) => `+${line}`)
     ].join("\n")
   }
+  const hunks = patch.hunks.flatMap((hunk) => [
+    `@@ -${hunkRange(hunk.oldStart, hunk.oldLines)} +${hunkRange(hunk.newStart, hunk.newLines)} @@`,
+    ...hunk.lines
+  ])
 
-  if (newContent === null) {
-    return [
-      ...header,
-      `@@ -${hunkRange(1, oldLines.length)} +0,0 @@`,
-      ...oldLines.map((line) => `-${escapeDiffLine(line)}`)
-    ].join("\n")
-  }
-
-  let prefix = 0
-  while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) {
-    prefix++
-  }
-
-  let suffix = 0
-  while (
-    suffix < oldLines.length - prefix &&
-    suffix < newLines.length - prefix &&
-    oldLines[oldLines.length - 1 - suffix] === newLines[newLines.length - 1 - suffix]
-  ) {
-    suffix++
-  }
-
-  const contextBefore = Math.max(0, prefix - 3)
-  const oldChangedEnd = oldLines.length - suffix
-  const newChangedEnd = newLines.length - suffix
-  const contextAfterOldEnd = Math.min(oldLines.length, oldChangedEnd + 3)
-  const contextAfterNewEnd = Math.min(newLines.length, newChangedEnd + 3)
-
-  const hunkOldCount = contextAfterOldEnd - contextBefore
-  const hunkNewCount = contextAfterNewEnd - contextBefore
-  const body: string[] = []
-
-  for (const line of oldLines.slice(contextBefore, prefix)) body.push(` ${escapeDiffLine(line)}`)
-  for (const line of oldLines.slice(prefix, oldChangedEnd)) body.push(`-${escapeDiffLine(line)}`)
-  for (const line of newLines.slice(prefix, newChangedEnd)) body.push(`+${escapeDiffLine(line)}`)
-  for (const line of oldLines.slice(oldChangedEnd, contextAfterOldEnd)) body.push(` ${escapeDiffLine(line)}`)
-
-  return [
-    ...header,
-    `@@ -${hunkRange(contextBefore + 1, hunkOldCount)} +${hunkRange(contextBefore + 1, hunkNewCount)} @@`,
-    ...body
-  ].join("\n")
+  return [...header, ...hunks].join("\n")
 }
 
 function toFileMap(files: TextBundleFile[]): Map<string, string> {

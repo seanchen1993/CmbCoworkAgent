@@ -1,21 +1,27 @@
+import { readContentFile } from "../services/market-content"
 import { existsSync } from "node:fs"
-import { readFile } from "node:fs/promises"
 import {
-  getDisabledSkills,
+  getDisabledSkillRuntimePolicy,
   getEnabledPluginSkillSourceMetadata,
   getEnabledSkillsSources,
+  isDisabledSkillRuntimePolicyCurrent,
+  isStandaloneSkillDisabledByRuntimePolicy,
+  type DisabledSkillRuntimePolicy,
   type PluginSkillSourceMetadata
 } from "../storage"
 import { renderPluginSkillMarkdownPlaceholders } from "../agent/markdown-placeholders"
 import { discoverSkills } from "../skills/discovery"
 import {
   getDiscoveredSkillAliases,
-  isDiscoveredSkillDisabled,
   normalizeSkillId
 } from "../skills/ids"
 import { runHooks, type HookContext, type HookResultCallback } from "./runner"
 import { joinHookText } from "./text"
 import type { HookConfig, HookEvent, HookResult } from "./types"
+import {
+  isSkillVisibleForProjectMode,
+  type ProjectModeSkillScope
+} from "../../shared/skill-visibility"
 
 const MAX_REQUIRED_SKILL_CHARS = 12_000
 
@@ -49,29 +55,47 @@ function trimSkillContent(content: string): string {
   return `${content.slice(0, MAX_REQUIRED_SKILL_CHARS)}\n\n[skill content truncated at ${MAX_REQUIRED_SKILL_CHARS} chars]`
 }
 
-async function resolveSkillGuidance(requiredSkill: string): Promise<ResolvedSkillGuidance | null> {
+async function resolveSkillGuidance(
+  requiredSkill: string,
+  visibilityScope?: ProjectModeSkillScope
+): Promise<ResolvedSkillGuidance | null> {
   const normalized = normalizeSkillId(requiredSkill)
   if (!normalized) return null
 
-  const sourceDirs = await getEnabledSkillsSources()
-  const disabled = new Set(getDisabledSkills().map((name) => name.trim().toLowerCase()))
-  for (const sourceDir of sourceDirs) {
-    if (!existsSync(sourceDir)) continue
+  const maxAttempts = 2
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const sourceDirs = await getEnabledSkillsSources()
+    const runtimePolicy = getDisabledSkillRuntimePolicy()
+    let resolved: ResolvedSkillGuidance | null = null
+    if (!runtimePolicy.denyAllStandaloneSkills) {
+      for (const sourceDir of sourceDirs) {
+        if (!existsSync(sourceDir)) continue
 
-    const resolved = await resolveSkillGuidanceFromSource({ sourceDir, normalized, disabled })
-    if (resolved) return resolved
-  }
+        resolved = await resolveSkillGuidanceFromSource({
+          sourceDir,
+          normalized,
+          runtimePolicy
+        })
+        if (resolved) break
+      }
+    }
+    if (!resolved) {
+      for (const source of getEnabledPluginSkillSourceMetadata()) {
+        if (visibilityScope && !isSkillVisibleForProjectMode(source, visibilityScope)) {
+          continue
+        }
+        if (!existsSync(source.sourceDir)) continue
 
-  for (const source of getEnabledPluginSkillSourceMetadata()) {
-    if (!existsSync(source.sourceDir)) continue
-
-    const resolved = await resolveSkillGuidanceFromSource({
-      sourceDir: source.sourceDir,
-      normalized,
-      maxDepth: source.maxDepth,
-      plugin: source
-    })
-    if (resolved) return resolved
+        resolved = await resolveSkillGuidanceFromSource({
+          sourceDir: source.sourceDir,
+          normalized,
+          maxDepth: source.maxDepth,
+          plugin: source
+        })
+        if (resolved) break
+      }
+    }
+    if (isDisabledSkillRuntimePolicyCurrent(runtimePolicy)) return resolved
   }
 
   return null
@@ -80,20 +104,22 @@ async function resolveSkillGuidance(requiredSkill: string): Promise<ResolvedSkil
 async function resolveSkillGuidanceFromSource({
   sourceDir,
   normalized,
-  disabled,
+  runtimePolicy,
   maxDepth,
   plugin
 }: {
   sourceDir: string
   normalized: string
-  disabled?: Set<string>
+  runtimePolicy?: DisabledSkillRuntimePolicy
   maxDepth?: number
   plugin?: PluginSkillSourceMetadata
 }): Promise<ResolvedSkillGuidance | null> {
   for (const skill of await discoverSkills(sourceDir, maxDepth)) {
-    if (disabled && isDiscoveredSkillDisabled(skill, disabled)) continue
+    if (runtimePolicy && isStandaloneSkillDisabledByRuntimePolicy(skill, runtimePolicy)) {
+      continue
+    }
     try {
-      const content = await readFile(skill.skillMdPath, "utf-8")
+      const content = await readContentFile(skill.skillMdPath, "utf-8")
       const frontmatter = parseYamlFrontmatter(content)
       const skillName = (frontmatter.name || skill.name).trim()
       const candidates = new Set([...getDiscoveredSkillAliases(skill), normalizeSkillId(skillName)])
@@ -137,7 +163,12 @@ export async function enrichHookResultWithRequiredSkill(
 ): Promise<HookResult | null> {
   if (!result?.requiredSkill?.trim()) return result
 
-  const resolved = await resolveSkillGuidance(result.requiredSkill)
+  const visibilityScope: ProjectModeSkillScope = {
+    projectMode: Boolean(hookContext?.featureId || hookContext?.harnessProjectId),
+    boundPluginId: hookContext?.harnessAdapterId,
+    boundPluginName: hookContext?.harnessAdapterName
+  }
+  const resolved = await resolveSkillGuidance(result.requiredSkill, visibilityScope)
   const renderedResolved = resolved
     ? {
         ...resolved,

@@ -1,0 +1,748 @@
+import assert from "node:assert/strict"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import initSqlJs from "sql.js"
+import type { ThreadRow } from "../src/main/db"
+import type { UserInputRequest, UserInputResponse } from "../src/main/types"
+import { ImCommandRouter, parseImCommand } from "../src/main/services/im/command-router"
+import { ImConversationStateStore } from "../src/main/services/im/conversation-state"
+import { ImEventStore } from "../src/main/services/im/event-store"
+import type { ImPersistenceDependencies } from "../src/main/services/im/persistence"
+import { ImCardInteractionStore } from "../src/main/services/im/card-interaction-store"
+import { ImCardPublisher } from "../src/main/services/im/card-publisher"
+import { ImRemoteGrantStore } from "../src/main/services/im/remote-grant-store"
+import { ImRemoteUserInputService } from "../src/main/services/im/remote-user-input-service"
+import { ensureImServiceSchema } from "../src/main/services/im/schema"
+
+const ROUTE = {
+  principalId: "principal-1",
+  conversationKey: "conversation-1"
+}
+
+function userInputRequest(input: {
+  requestId: string
+  threadId?: string
+  questions?: UserInputRequest["questions"]
+}): UserInputRequest {
+  return {
+    requestId: input.requestId,
+    threadId: input.threadId ?? "thread-1",
+    createdAt: "2026-08-03T08:00:00.000Z",
+    questions: input.questions ?? [
+      {
+        header: "格式",
+        id: "export_format",
+        question: "导出格式用哪种？",
+        options: [
+          { label: "CSV (Recommended)", description: "兼容性最好。" },
+          { label: "Excel", description: "保留表格格式。" },
+          { label: "JSON", description: "便于程序读取。" }
+        ]
+      }
+    ]
+  }
+}
+
+async function waitFor(check: () => boolean, label: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (check()) return
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+  }
+  throw new Error(`Timed out waiting for ${label}`)
+}
+
+async function createContext(
+  options: {
+    enabled?: boolean
+    agentMode?: "normal" | "coordinator" | "workflow"
+    threadIds?: string[]
+  } = {}
+) {
+  const root = await mkdtemp(join(tmpdir(), "cmb-im-user-input-"))
+  const SQL = await initSqlJs()
+  const database = new SQL.Database()
+  ensureImServiceSchema(database)
+  const clock = { now: Date.parse("2026-08-03T08:00:00.000Z") }
+  const persistence: ImPersistenceDependencies = {
+    getDatabase: () => database,
+    markDirty: () => undefined,
+    flushStrict: async () => undefined,
+    now: () => clock.now
+  }
+  const conversations = new ImConversationStateStore(persistence)
+  let grantSequence = 0
+  const grants = new ImRemoteGrantStore(persistence, () => `grant-thread-${++grantSequence}`)
+  const events = new ImEventStore(persistence)
+  await conversations.ensureConversation(ROUTE)
+  const threadIds = options.threadIds ?? ["thread-1"]
+  const threads = new Map<string, ThreadRow>()
+  for (const [index, threadId] of threadIds.entries()) {
+    const title = index === 0 ? "桌面会话" : `桌面会话 ${index + 1}`
+    await grants.enableThreadGrant({ route: ROUTE, threadId, title })
+    threads.set(threadId, {
+      thread_id: threadId,
+      created_at: clock.now,
+      updated_at: clock.now,
+      title,
+      status: "idle",
+      thread_values: null,
+      metadata: JSON.stringify({ workspacePath: root, agentMode: options.agentMode ?? "normal" })
+    })
+  }
+
+  const pending = new Map<string, UserInputRequest>()
+  let pendingListener: ((request: Readonly<UserInputRequest>) => void) | null = null
+  let removedListener: ((requestId: string, threadId: string) => void) | null = null
+  const responses: UserInputResponse[] = []
+  const responseOptions: unknown[] = []
+  const answerNotices: unknown[] = []
+  const warnings: unknown[] = []
+  let sendPendingCount = 0
+  const generatedCodes = ["A1B2C3", "D4E5F6", "012ABC", "789DEF"]
+
+  const cardUpdates: Array<{ interactionId: string; content: unknown[] }> = []
+  const cardInteractions = new ImCardInteractionStore(
+    (() => {
+      let sequence = 0
+      return () => `interaction-${++sequence}`
+    })(),
+    () => clock.now
+  )
+  const cardSends = {
+    accept: true,
+    sent: 0,
+    cards: [] as Array<{ tag: string; json: string }>,
+    /** When set, a send stays in flight until it resolves. */
+    hold: null as Promise<void> | null
+  }
+  const cards = new ImCardPublisher({
+    interactions: cardInteractions,
+    createIdempotencyKey: () => `card-idem-${cardUpdates.length}`,
+    // This test's own store; the default reads the module singleton.
+    usesTextReplies: (conversationKey) => conversations.getReplyMode(conversationKey) === "text",
+    gateway: {
+      isAuthenticated: () => true,
+      sendCard: async (card: { tag: string; content: unknown }) => {
+        cardSends.sent += 1
+        cardSends.cards.push({ tag: card.tag, json: JSON.stringify(card.content) })
+        if (cardSends.hold) await cardSends.hold
+        return cardSends.accept
+          ? ({ state: "accepted" } as const)
+          : ({ state: "rejected", reasonCode: "CARD_REJECTED" } as const)
+      },
+      updateCard: async (update) => {
+        cardUpdates.push({ interactionId: update.interactionId, content: [...update.content] })
+        return { state: "accepted" } as const
+      },
+      acknowledgeCardReceipt: async () => undefined
+    } as never,
+    warn: (_message, error) => warnings.push(error)
+  })
+
+  const service = new ImRemoteUserInputService({
+    cards,
+    conversations,
+    access: { getThreadGrant: (threadId) => grants.getThreadGrant(threadId) },
+    grants,
+    events,
+    getThread: (threadId) => threads.get(threadId) ?? null,
+    getSettings: () => ({
+      enabled: options.enabled !== false,
+      gatewayUrl: null,
+      remoteAccess: "inbox-only",
+      remoteApprovalEnabled: false
+    }),
+    getPendingForThread: (threadId) => pending.get(threadId) ?? null,
+    submitResponse: (response, submitOptions) => {
+      const entry = [...pending.entries()].find(
+        ([, request]) => request.requestId === response.requestId
+      )
+      if (!entry) return false
+      responses.push(response)
+      responseOptions.push(submitOptions)
+      const [threadId, removed] = entry
+      pending.delete(threadId)
+      removedListener?.(removed.requestId, removed.threadId)
+      return true
+    },
+    subscribePending: (listener) => {
+      pendingListener = listener
+      return () => {
+        pendingListener = null
+      }
+    },
+    subscribeRemoved: (listener) => {
+      removedListener = listener
+      return () => {
+        removedListener = null
+      }
+    },
+    now: () => clock.now,
+    createCode: () => generatedCodes.shift() ?? "ABC123",
+    warn: (_message, error) => warnings.push(error)
+  })
+  service.registerReplyDrainer({
+    sendPending: async () => {
+      sendPendingCount += 1
+      return { sent: 0, failed: 0, unknown: 0, deferred: 0 }
+    }
+  })
+  service.subscribeAnswer((notice) => answerNotices.push(notice))
+
+  function deliveryText(requestId: string): string {
+    return events
+      .listOutbox()
+      .filter((record) => record.deliveryId === `user-input-request:${requestId}:0`)
+      .map((record) => record.content)
+      .join("\n")
+  }
+
+  function emit(request: UserInputRequest): void {
+    pending.set(request.threadId, request)
+    pendingListener?.(request)
+  }
+
+  async function publish(request: UserInputRequest): Promise<void> {
+    // Waiting on the outbox alone would hang whenever the card lands, since a
+    // delivered card sends no notice. Waiting on the interaction store instead
+    // races the other way: the interaction is registered before the send and
+    // removed again when it is refused. The send attempt is the one event that
+    // happens on both paths.
+    const before = cardSends.sent
+    emit(request)
+    await waitFor(() => cardSends.sent > before, "the card attempt")
+    if (!cardSends.accept) {
+      await waitFor(() => deliveryText(request.requestId).length > 0, "the fallback notice")
+    }
+  }
+
+  return {
+    root,
+    database,
+    clock,
+    conversations,
+    events,
+    service,
+    responses,
+    responseOptions,
+    answerNotices,
+    warnings,
+    deliveryText,
+    emit,
+    publish,
+    sendPendingCount: () => sendPendingCount,
+    cardUpdates,
+    cardInteractions,
+    cardSends,
+    cardJson: () => cardSends.cards.map((card) => card.json).join("\n"),
+    removePending: (threadId = "thread-1") => {
+      const removed = pending.get(threadId)
+      if (!removed) return
+      pending.delete(threadId)
+      removedListener?.(removed.requestId, removed.threadId)
+    }
+  }
+}
+
+/**
+ * The notice shortens only when the card is actually there.
+ *
+ * This is the safety boundary of publishing the card first: a card the platform
+ * refused must leave the reader the whole question, because a run waiting on an
+ * answer has no timeout and the short code alone cannot be acted on.
+ */
+async function testARefusedCardStillDeliversTheWholeQuestion(): Promise<void> {
+  const context = await createContext()
+  try {
+    context.cardSends.accept = false
+    const request = userInputRequest({ requestId: "request-no-card" })
+    await context.publish(request)
+    const text = context.deliveryText(request.requestId)
+    assert(!text.includes("详情见上方卡片"), text)
+    assert(text.includes("导出格式用哪种？"), text)
+    assert(text.includes("1. CSV (Recommended) — 兼容性最好。"), text)
+    assert(text.includes("/回答 A1B2C3 <编号>"), text)
+    // And the refused card is not retained, so a click can never arrive for it.
+    assert.equal(context.cardInteractions.list().length, 0)
+
+    // The question is still answerable by exactly the code that was printed.
+    assert.equal(
+      await context.service.resolveAnswer({
+        argument: "A1B2C3 1",
+        principalId: ROUTE.principalId,
+        conversationKey: ROUTE.conversationKey
+      }),
+      "已从招乎提交回答，任务将继续执行。"
+    )
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testPromptAndSingleUseOptionAnswer(): Promise<void> {
+  const context = await createContext()
+  try {
+    const request = userInputRequest({ requestId: "request-option" })
+    await context.publish(request)
+    // The card landed, so it is the only message: no notice follows it at all.
+    assert.equal(context.deliveryText(request.requestId), "", "a delivered card sends no notice")
+    // Everything a reader needs is therefore in the card, the short code
+    // included — it is the only way to answer when the buttons do not work.
+    assert.equal(context.cardInteractions.list().length, 1)
+    assert.equal(context.sendPendingCount(), 0, "nothing was queued to drain")
+    // Everything a reader needs is therefore in the card: the question, the
+    // options, and the submit button. The short code is deliberately not among
+    // them — a delivered card is answered by pressing it.
+    const card = context.cardJson()
+    assert(card.includes("导出格式用哪种？"), card)
+    assert(card.includes("CSV"), card)
+    assert(!card.includes("A1B2C3"), card)
+
+    assert.equal(
+      await context.service.resolveAnswer({
+        argument: "A1B2C3 1",
+        principalId: "principal-other",
+        conversationKey: ROUTE.conversationKey
+      }),
+      "该输入短码不属于当前招乎会话。"
+    )
+    assert.equal(context.responses.length, 0)
+    assert.equal(
+      await context.service.resolveAnswer({ argument: "A1B2C3 9", ...ROUTE }),
+      "选项编号无效，请输入 1-3。"
+    )
+
+    assert.equal(
+      await context.service.resolveAnswer({ argument: "A1B2C3 1", ...ROUTE }),
+      "已从招乎提交回答，任务将继续执行。"
+    )
+    assert.deepEqual(context.responses, [
+      {
+        requestId: request.requestId,
+        answers: {
+          export_format: {
+            type: "option",
+            questionId: "export_format",
+            optionIndex: 0,
+            label: "CSV (Recommended)",
+            description: "兼容性最好。"
+          }
+        },
+        submittedAt: "2026-08-03T08:00:00.000Z"
+      }
+    ])
+    assert.deepEqual(context.responseOptions, [
+      { notifyRenderer: true, reason: "已从招乎完成补充输入。" }
+    ])
+    assert.deepEqual(context.answerNotices, [
+      {
+        requestId: request.requestId,
+        threadId: request.threadId,
+        message: "已从招乎回答 Agent 的补充问题。"
+      }
+    ])
+    assert.equal(
+      await context.service.resolveAnswer({ argument: "A1B2C3 1", ...ROUTE }),
+      "输入短码不存在、已使用，或该问题已不在等待中。"
+    )
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testMultipleQuestionsRotateCodeAndAcceptCustomText(): Promise<void> {
+  const context = await createContext()
+  try {
+    const request = userInputRequest({
+      requestId: "request-multiple",
+      questions: [
+        ...userInputRequest({ requestId: "template" }).questions,
+        {
+          header: "范围",
+          id: "export_scope",
+          question: "需要导出哪些数据？",
+          options: [
+            { label: "全部 (Recommended)", description: "导出全部可见数据。" },
+            { label: "本月", description: "只导出本月数据。" }
+          ]
+        }
+      ]
+    })
+    await context.publish(request)
+    const next = await context.service.resolveAnswer({ argument: "A1B2C3 2", ...ROUTE })
+    assert(next.includes("已记录第 1 题"))
+    assert(next.includes("需要导出哪些数据？"))
+    assert(next.includes("/回答 D4E5F6 <编号>"))
+    assert.equal(
+      await context.service.resolveAnswer({ argument: "A1B2C3 1", ...ROUTE }),
+      "输入短码不存在、已使用，或该问题已不在等待中。"
+    )
+    assert.equal(
+      await context.service.resolveAnswer({
+        argument: "D4E5F6 其他 仅导出已审核记录",
+        ...ROUTE
+      }),
+      "已从招乎提交回答，任务将继续执行。"
+    )
+    assert.equal(context.responses.length, 1)
+    assert.deepEqual(context.responses[0].answers.export_scope, {
+      type: "other",
+      questionId: "export_scope",
+      text: "仅导出已审核记录"
+    })
+    assert.equal(context.responses[0].answers.export_format.type, "option")
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testLongWaitDesktopRaceAndExplicitCommand(): Promise<void> {
+  const context = await createContext()
+  try {
+    // A code carries no deadline. The run waiting on this question is not
+    // cancelled by elapsed time either, so a code that expired on its own
+    // would leave that run waiting with nothing able to answer it — and send
+    // the person holding the question on their phone back to the desktop,
+    // which is the thing answering from Zhaohu exists to avoid.
+    const lingering = userInputRequest({ requestId: "request-lingering" })
+    await context.publish(lingering)
+    context.clock.now += 6 * 60 * 60_000
+    assert.equal(
+      await context.service.resolveAnswer({ argument: "A1B2C3 1", ...ROUTE }),
+      "已从招乎提交回答，任务将继续执行。"
+    )
+    assert.equal(context.responses.length, 1, "hours later the code must still answer")
+
+    // What still ends a code is its question no longer pending — answered on
+    // the desktop, or the run cancelled.
+    const desktopRace = userInputRequest({ requestId: "request-desktop-race" })
+    await context.publish(desktopRace)
+    context.removePending()
+    assert.equal(
+      await context.service.resolveAnswer({ argument: "D4E5F6 1", ...ROUTE }),
+      "输入短码不存在、已使用，或该问题已不在等待中。"
+    )
+
+    assert.equal(parseImCommand("回答 012ABC 1"), null)
+    assert.deepEqual(parseImCommand("/回答 012ABC 1"), {
+      name: "answer",
+      argument: "012ABC 1"
+    })
+    const routed: unknown[] = []
+    const router = new ImCommandRouter({
+      userInputs: {
+        resolveAnswer: async (input) => {
+          routed.push(input)
+          return "resolved"
+        }
+      }
+    })
+    assert.equal(
+      await router.handle({ command: parseImCommand("/回答 012ABC 1")!, ...ROUTE }),
+      "resolved"
+    )
+    assert.deepEqual(routed, [{ argument: "012ABC 1", ...ROUTE }])
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testDisabledRobotDoesNotPublish(): Promise<void> {
+  const context = await createContext({ enabled: false })
+  try {
+    const request = userInputRequest({ requestId: "request-disabled" })
+    context.emit(request)
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    assert.equal(context.events.listOutbox().length, 0)
+    assert.equal(
+      await context.service.resolveAnswer({ argument: "A1B2C3 1", ...ROUTE }),
+      "本设备的内置机器人已断开。"
+    )
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testAdvancedModesCanPublishAndResolve(): Promise<void> {
+  for (const agentMode of ["coordinator", "workflow"] as const) {
+    const context = await createContext({ agentMode })
+    try {
+      const request = userInputRequest({ requestId: `request-${agentMode}` })
+      await context.publish(request)
+      assert.equal(
+        await context.service.resolveAnswer({ argument: "A1B2C3 1", ...ROUTE }),
+        "已从招乎提交回答，任务将继续执行。"
+      )
+      assert.equal(context.responses.length, 1)
+    } finally {
+      context.service.dispose()
+      context.database.close()
+      await rm(context.root, { recursive: true, force: true })
+    }
+  }
+}
+
+async function testConcurrentThreadsUseIndependentCodes(): Promise<void> {
+  const threadIds = ["thread-1", "thread-2", "thread-3"]
+  const context = await createContext({ threadIds })
+  try {
+    const requests = threadIds.map((threadId, index) =>
+      userInputRequest({ requestId: `request-concurrent-${index + 1}`, threadId })
+    )
+    // Cards off: this is about the codes being independent per thread, and a
+    // delivered card no longer prints one. The notice is where they appear.
+    context.cardSends.accept = false
+    await Promise.all(requests.map((request) => context.publish(request)))
+
+    const codes = requests.map(
+      (request) =>
+        context.deliveryText(request.requestId).match(/\/回答 ([A-F0-9]{6}) <编号>/u)?.[1]
+    )
+    assert.deepEqual(codes, ["A1B2C3", "D4E5F6", "012ABC"])
+
+    for (const code of codes) {
+      assert(code)
+      assert.equal(
+        await context.service.resolveAnswer({ argument: `${code} 1`, ...ROUTE }),
+        "已从招乎提交回答，任务将继续执行。"
+      )
+    }
+    assert.deepEqual(
+      context.responses.map((response) => response.requestId),
+      requests.map((request) => request.requestId)
+    )
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+/**
+ * submitUserInputResponse removes the pending request while still on the stack,
+ * and that removal reaches removeSession before submitResponse has returned. The
+ * card must still end on the answer the reader gave: closing it as "已在桌面处理"
+ * would tell them the desktop handled something they answered from Zhaohu.
+ */
+async function testAnsweringClosesTheCardAsAnsweredNotAsDesktopHandled(): Promise<void> {
+  const context = await createContext()
+  try {
+    const request = userInputRequest({ requestId: "request-card-outcome" })
+    await context.publish(request)
+    await waitFor(
+      () => context.cardInteractions.findByRequestRef(request.requestId) !== undefined,
+      "question card"
+    )
+
+    const reply = await context.service.resolveAnswer({ argument: "A1B2C3 1", ...ROUTE })
+    assert(reply.includes("已从招乎提交回答"), reply)
+    await waitFor(() => context.cardUpdates.length > 0, "terminal card")
+
+    assert.equal(context.cardUpdates.length, 1, "the card must be closed exactly once")
+    const rendered = JSON.stringify(context.cardUpdates[0]!.content)
+    assert(rendered.includes("已回答"), rendered)
+    assert(
+      !rendered.includes("已在桌面处理"),
+      "a Zhaohu answer must not be credited to the desktop"
+    )
+    assert(rendered.includes("CSV"), "the terminal card must show what was answered")
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+/** See the approval spec: the send happens inside emit, the recording after it. */
+function settle(): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, 0))
+}
+
+function twoQuestionRequest(requestId: string): UserInputRequest {
+  return userInputRequest({
+    requestId,
+    questions: [
+      ...userInputRequest({ requestId: "template" }).questions,
+      {
+        header: "范围",
+        id: "export_scope",
+        question: "需要导出哪些数据？",
+        options: [
+          { label: "全部 (Recommended)", description: "导出全部可见数据。" },
+          { label: "本月", description: "只导出本月数据。" }
+        ]
+      }
+    ]
+  })
+}
+
+/**
+ * /文字模式 hands over the question the card stood in for, once, with the
+ * card's own code — answering it is answering the question, as it always was.
+ */
+async function testAHeldBackQuestionIsResentOnceAsText(): Promise<void> {
+  const context = await createContext()
+  try {
+    const request = userInputRequest({ requestId: "request-held" })
+    await context.publish(request)
+    await settle()
+    assert.equal(context.deliveryText(request.requestId), "", "a delivered card sends no notice")
+
+    assert.deepEqual(await context.service.resendPendingAsText(ROUTE.conversationKey), {
+      resent: 1,
+      failed: 0
+    })
+    const text = context.deliveryText(request.requestId)
+    assert(text.includes("导出格式用哪种？"), text)
+    assert(text.includes("/回答 A1B2C3 <编号>"), text)
+    assert.deepEqual(
+      await context.service.resendPendingAsText(ROUTE.conversationKey),
+      { resent: 0, failed: 0 },
+      "a notice goes out once"
+    )
+    assert.equal(
+      await context.service.resolveAnswer({ argument: "A1B2C3 1", ...ROUTE }),
+      "已从招乎提交回答，任务将继续执行。"
+    )
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+/** A question answered before the switch has nothing to hand over. */
+async function testAnAnsweredQuestionIsNotResent(): Promise<void> {
+  const context = await createContext()
+  try {
+    const request = userInputRequest({ requestId: "request-answered" })
+    await context.publish(request)
+    await settle()
+    context.removePending()
+    assert.deepEqual(await context.service.resendPendingAsText(ROUTE.conversationKey), {
+      resent: 0,
+      failed: 0
+    })
+    assert.equal(context.deliveryText(request.requestId), "")
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+/**
+ * Answering by code rotates it and moves to the next question, which arrives
+ * as the reply to /回答. The held-back notice is the first question with the
+ * first code: sending it then would hand the reader a dead code.
+ */
+async function testAQuestionBeingAnsweredIsNotResent(): Promise<void> {
+  const context = await createContext()
+  try {
+    const request = twoQuestionRequest("request-midway")
+    await context.publish(request)
+    await settle()
+    const next = await context.service.resolveAnswer({ argument: "A1B2C3 2", ...ROUTE })
+    assert(next.includes("/回答 D4E5F6 <编号>"), "precondition: answering has begun")
+    assert.deepEqual(await context.service.resendPendingAsText(ROUTE.conversationKey), {
+      resent: 0,
+      failed: 0
+    })
+    assert.equal(context.deliveryText(request.requestId), "", "the dead code never goes out")
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+/** In text mode the question never becomes a card: it is the text notice from the start. */
+async function testTextModeAsksInText(): Promise<void> {
+  const context = await createContext()
+  try {
+    await context.conversations.setReplyMode(ROUTE.conversationKey, "text")
+    const request = userInputRequest({ requestId: "request-text-mode" })
+    context.emit(request)
+    await waitFor(
+      () => context.deliveryText(request.requestId).includes("/回答 A1B2C3"),
+      "the text notice"
+    )
+    assert.equal(context.cardSends.sent, 0, "text mode sends no card")
+    assert.deepEqual(
+      await context.service.resendPendingAsText(ROUTE.conversationKey),
+      { resent: 0, failed: 0 },
+      "nothing was held back"
+    )
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+/** The switch landing while the card is in flight: see the approval spec. */
+async function testASwitchDuringTheCardSendStillHandsTheQuestionOver(): Promise<void> {
+  const context = await createContext()
+  let release!: () => void
+  context.cardSends.hold = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  try {
+    const request = userInputRequest({ requestId: "request-in-flight" })
+    await context.publish(request)
+    await context.conversations.setReplyMode(ROUTE.conversationKey, "text")
+    assert.deepEqual(
+      await context.service.resendPendingAsText(ROUTE.conversationKey),
+      { resent: 0, failed: 0 },
+      "precondition: the switch's own resend cannot see this question yet"
+    )
+    release()
+    await waitFor(
+      () => context.deliveryText(request.requestId).includes("/回答 A1B2C3"),
+      "the question handing itself over once its card lands"
+    )
+    await settle()
+    assert.deepEqual(
+      await context.service.resendPendingAsText(ROUTE.conversationKey),
+      { resent: 0, failed: 0 },
+      "handed over once, not held back as well"
+    )
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function main(): Promise<void> {
+  await testAHeldBackQuestionIsResentOnceAsText()
+  await testAnAnsweredQuestionIsNotResent()
+  await testAQuestionBeingAnsweredIsNotResent()
+  await testTextModeAsksInText()
+  await testASwitchDuringTheCardSendStillHandsTheQuestionOver()
+  await testPromptAndSingleUseOptionAnswer()
+  await testARefusedCardStillDeliversTheWholeQuestion()
+  await testMultipleQuestionsRotateCodeAndAcceptCustomText()
+  await testLongWaitDesktopRaceAndExplicitCommand()
+  await testDisabledRobotDoesNotPublish()
+  await testAdvancedModesCanPublishAndResolve()
+  await testConcurrentThreadsUseIndependentCodes()
+  await testAnsweringClosesTheCardAsAnsweredNotAsDesktopHandled()
+  console.log("IM remote user-input tests passed")
+}
+
+void main().catch((error) => {
+  console.error(error)
+  process.exitCode = 1
+})

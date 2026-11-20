@@ -1,5 +1,4 @@
 import { createHash } from "crypto"
-import { execFileSync } from "child_process"
 import {
   existsSync,
   mkdirSync,
@@ -11,8 +10,13 @@ import {
   statSync,
   writeFileSync
 } from "fs"
-import { basename, dirname, join, resolve, sep } from "path"
+import { dirname, join, resolve, sep } from "path"
 import { homedir } from "os"
+import { realpath as realpathAsync } from "node:fs/promises"
+import {
+  clearAsyncGitRootCache,
+  findCanonicalGitRootAsync as findCanonicalGitRootInBackground
+} from "./git-root-resolver"
 
 export type MemoryScope = "global" | "project"
 
@@ -55,7 +59,7 @@ function normalizeIdentityPath(value: string): string {
 }
 
 function uniqueDestination(dir: string, name: string): string {
-  let target = join(dir, name)
+  const target = join(dir, name)
   if (!existsSync(target)) return target
   const dot = name.lastIndexOf(".")
   const stem = dot > 0 ? name.slice(0, dot) : name
@@ -106,14 +110,6 @@ export function ensureMemoryLayout(): void {
   layoutEnsured = true
 }
 
-function runGit(workDir: string, args: string[]): string {
-  return execFileSync("git", ["-C", workDir, ...args], {
-    encoding: "utf-8",
-    stdio: ["ignore", "pipe", "ignore"],
-    timeout: 5000
-  }).trim()
-}
-
 export function findCanonicalGitRoot(workDir?: string | null): string | null {
   if (!workDir) return null
   const cwd = resolve(workDir)
@@ -123,22 +119,31 @@ export function findCanonicalGitRoot(workDir?: string | null): string | null {
   const cached = gitRootCache.get(cacheKey)
   if (cached && cached.expiresAt > Date.now()) return cached.value
 
+  let current = cwd
   let gitRoot: string | null = null
-  try {
-    const commonDir = runGit(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
-    if (commonDir && basename(commonDir) === ".git") {
-      gitRoot = resolve(dirname(commonDir))
-    }
-  } catch {
-    // Older Git versions may not support --path-format=absolute.
-  }
-
-  if (!gitRoot) {
+  for (let depth = 0; depth < 256; depth += 1) {
+    const marker = join(current, ".git")
     try {
-      gitRoot = resolve(runGit(cwd, ["rev-parse", "--show-toplevel"]))
+      const markerStat = statSync(marker)
+      if (markerStat.isDirectory()) {
+        gitRoot = current
+        break
+      }
+      if (markerStat.isFile() && markerStat.size <= 64 * 1024) {
+        const match = readFileSync(marker, "utf-8").match(/^gitdir:\s*(.+)\s*$/im)
+        if (match?.[1]) {
+          const gitDir = resolve(current, match[1].trim()).replace(/\\/g, "/")
+          const linkedWorktree = gitDir.match(/^(.*\/\.git)\/worktrees\/[^/]+(?:\/.*)?$/i)
+          gitRoot = linkedWorktree?.[1] ? dirname(linkedWorktree[1]) : current
+          break
+        }
+      }
     } catch {
-      gitRoot = null
+      // Keep walking towards the filesystem root.
     }
+    const parent = dirname(current)
+    if (parent === current) break
+    current = parent
   }
 
   gitRootCache.set(cacheKey, {
@@ -150,10 +155,29 @@ export function findCanonicalGitRoot(workDir?: string | null): string | null {
 
 export function clearGitRootCache(): void {
   gitRootCache.clear()
+  clearAsyncGitRootCache()
+}
+
+export function findCanonicalGitRootAsync(
+  workDir?: string | null,
+  signal?: AbortSignal
+): Promise<string | null> {
+  return findCanonicalGitRootInBackground(workDir, signal)
 }
 
 export function resolveProjectId(gitRoot: string): string {
   return createHash("sha256").update(normalizeIdentityPath(gitRoot)).digest("hex").slice(0, 12)
+}
+
+export async function resolveProjectIdAsync(gitRoot: string): Promise<string> {
+  let normalized = resolve(gitRoot)
+  try {
+    normalized = await realpathAsync(normalized)
+  } catch {
+    // Git may return a path that disappeared between discovery and hashing.
+  }
+  if (process.platform === "win32") normalized = normalized.toLowerCase()
+  return createHash("sha256").update(normalized).digest("hex").slice(0, 12)
 }
 
 export function isMemoryStoragePath(filePath?: string | null): boolean {

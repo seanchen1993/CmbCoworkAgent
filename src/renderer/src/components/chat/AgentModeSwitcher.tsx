@@ -537,7 +537,7 @@ function AgentModeSwitcherImpl({
           <span>Smarter</span>
         </div>
         <div className="relative mx-auto h-9 w-full">
-          <div className="absolute inset-y-[3px] left-0 right-0 rounded-full border border-black/[0.06] bg-[#edf0f2] shadow-inner dark:border-white/[0.08] dark:bg-white/[0.09]">
+          <div className="absolute inset-y-[3px] left-0 right-0 rounded-full border border-border bg-background-interactive shadow-inner">
             <div
               aria-hidden="true"
               className={cn(
@@ -564,7 +564,7 @@ function AgentModeSwitcherImpl({
                     stopDisabled
                       ? "bg-muted-foreground/15"
                       : activeIndex > 0 && index <= activeIndex
-                        ? "bg-white/50"
+                        ? "bg-foreground/10"
                         : "bg-muted-foreground/35"
                   )}
                   style={{ left: position }}
@@ -575,7 +575,7 @@ function AgentModeSwitcherImpl({
           <div
             aria-hidden="true"
             className={cn(
-              "pointer-events-none absolute top-1/2 z-10 size-7 -translate-x-1/2 -translate-y-1/2 rounded-full border border-black/[0.09] bg-white shadow-[0_2px_5px_rgba(0,0,0,0.15)] transition-[left,transform] duration-300 ease-out dark:border-white/20 dark:bg-zinc-100",
+              "pointer-events-none absolute top-1/2 z-10 size-7 -translate-x-1/2 -translate-y-1/2 rounded-full border border-border-emphasis bg-background-elevated shadow-[0_2px_5px_rgba(0,0,0,0.15)] transition-[left,transform] duration-300 ease-out dark:bg-foreground",
               thumbHovered && "scale-110"
             )}
             style={{ left: sliderThumbPosition }}

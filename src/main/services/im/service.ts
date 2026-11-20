@@ -1,0 +1,299 @@
+import type { RemoteImEventV1 } from "../../../shared/im-gateway-contract"
+import type { AgentRunDelivery } from "../../agent/agent-run-service"
+import { parseGoalSlashCommand } from "../../agent/goals/slash"
+import { ImConversationTurnQueue } from "./conversation-turn-queue"
+import type { ImIngressResult } from "./ingress-sequencer"
+import { ImIngressSequencer } from "./ingress-sequencer"
+import { imCardReceiptRouter } from "./card-receipt-router"
+import { unavailableImGatewayClient, type ImGatewayClientPort } from "./gateway-client"
+import { registerImInboxSchedulerGateway } from "./inbox-scheduler"
+import { ImRemoteRunner, createImTurnQueueHandler, setRemoteThreadLifecycle } from "./remote-runner"
+import { ImCommandRouter, parseImCommand } from "./command-router"
+import { ImReplyClient } from "./reply-client"
+import { getBuiltinRobotSettings } from "../../storage"
+import { imSelectionContextStore } from "./selection-context"
+import { imEventStore } from "./event-store"
+import { buildImProactiveReplies, eventShortCode } from "./reply-segmentation"
+import { registerImDesktopCompletionReplyDrainer } from "./desktop-completion"
+import { imRemoteApprovalService } from "./remote-approval-service"
+import { imRemoteUserInputService } from "./remote-user-input-service"
+import { imInboxService } from "./inbox-service"
+import { ImSkillCommandService, imSkillCommandService } from "./skill-command"
+import { ImRemoteModeNotificationPump } from "./remote-mode-notification-pump"
+import { ImGoalRunBridge } from "./goal-runner"
+import { imRemoteCapabilityGuard } from "./capability-guard"
+import { imHumanGateAdapter } from "./human-gate-adapter"
+import { imBizRetryAdapter } from "./biz-retry-adapter"
+import { ImSessionSwitchCards } from "./session-switch-cards"
+
+/**
+ * Headless orchestration boundary used by the production WSS adapter and the
+ * contract test harness. Ingress returns after durable received/accepted ACKs;
+ * the Agent turn drains asynchronously so a long turn never blocks later
+ * control-channel delivery.
+ */
+export class ImUnifiedBotService {
+  readonly runner: ImRemoteRunner
+  readonly ingress: ImIngressSequencer
+  readonly turnQueue: ImConversationTurnQueue
+  readonly commandRouter: ImCommandRouter
+  readonly skillCommands: ImSkillCommandService
+  readonly replyClient: ImReplyClient
+  readonly modeNotificationPump: ImRemoteModeNotificationPump
+  readonly goalRuns: ImGoalRunBridge
+  readonly sessionSwitchCards: ImSessionSwitchCards
+  private readonly unregisterSchedulerGateway: () => void
+  private readonly unregisterDesktopCompletionReplyDrainer: () => void
+  private readonly unregisterRemoteApprovalReplyDrainer: () => void
+  private readonly unregisterRemoteUserInputReplyDrainer: () => void
+  private readonly unregisterHumanGateReplyDrainer: () => void
+  private readonly unregisterManagedBizRetryReplyDrainer: () => void
+  private readonly unregisterCardReceiptReplyDrainer: () => void
+  private readonly unregisterCardReceiptCommandRouter: () => void
+  private readonly unregisterSessionSwitchCards: () => void
+  private outboxRetryTimer: ReturnType<typeof setInterval> | undefined
+
+  constructor(
+    readonly gateway: ImGatewayClientPort = unavailableImGatewayClient,
+    options: {
+      skillCommands?: ImSkillCommandService
+      getAgentRunDelivery?: () => AgentRunDelivery | null
+      goalRuns?: ImGoalRunBridge
+    } = {}
+  ) {
+    this.sessionSwitchCards = new ImSessionSwitchCards({
+      gateway,
+      switchSession: (input) =>
+        this.commandRouter.handle({
+          ...input,
+          command: { name: "switch_target", argument: `@${input.code}` }
+        })
+    })
+    this.replyClient = new ImReplyClient(gateway, undefined, undefined, () =>
+      this.sessionSwitchCards.schedule()
+    )
+    this.unregisterSessionSwitchCards = imCardReceiptRouter.registerSessionSwitchCards(
+      this.sessionSwitchCards
+    )
+    this.unregisterSchedulerGateway = registerImInboxSchedulerGateway(gateway, this.replyClient)
+    this.unregisterDesktopCompletionReplyDrainer = registerImDesktopCompletionReplyDrainer(
+      this.replyClient
+    )
+    this.unregisterRemoteApprovalReplyDrainer = imRemoteApprovalService.registerReplyDrainer(
+      this.replyClient
+    )
+    this.unregisterRemoteUserInputReplyDrainer = imRemoteUserInputService.registerReplyDrainer(
+      this.replyClient
+    )
+    this.unregisterHumanGateReplyDrainer = imHumanGateAdapter.registerReplyDrainer(this.replyClient)
+    this.unregisterManagedBizRetryReplyDrainer = imBizRetryAdapter.registerReplyDrainer(
+      this.replyClient
+    )
+    this.unregisterCardReceiptReplyDrainer = imCardReceiptRouter.registerReplyDrainer(
+      this.replyClient
+    )
+    this.goalRuns =
+      options.goalRuns ??
+      new ImGoalRunBridge({ getDelivery: options.getAgentRunDelivery ?? (() => null) })
+    this.modeNotificationPump = new ImRemoteModeNotificationPump({
+      replyClient: this.replyClient,
+      goalRuns: this.goalRuns
+    })
+    this.runner = new ImRemoteRunner({
+      gateway,
+      replyClient: this.replyClient,
+      goalRuns: this.goalRuns,
+      onDetachedResultAvailable: (notice) => this.modeNotificationPump.schedule(notice)
+    })
+    this.ingress = new ImIngressSequencer({
+      inboxService: imInboxService,
+      emitAcknowledgement: (ack) => gateway.sendAcknowledgement(ack),
+      replyClient: this.replyClient
+    })
+    this.turnQueue = new ImConversationTurnQueue(createImTurnQueueHandler(this.runner))
+    this.commandRouter = new ImCommandRouter({
+      abortCurrent: (conversationKey, threadId) =>
+        this.turnQueue.abortCurrentImEvent(conversationKey, undefined, threadId),
+      getCurrentEventId: (conversationKey, threadId) =>
+        this.turnQueue.getCurrentEventId(conversationKey, threadId)
+    })
+    // This instance, not a module singleton: a target-bind click has to reach
+    // the router that can see the live turn queue.
+    this.unregisterCardReceiptCommandRouter = imCardReceiptRouter.registerCommandRouter(
+      this.commandRouter
+    )
+    this.skillCommands = options.skillCommands ?? imSkillCommandService
+  }
+
+  async receiveEvent(event: RemoteImEventV1): Promise<ImIngressResult> {
+    const command = parseImCommand(event.message.text)
+    const goalCommand = event.message.text.trimStart().startsWith("//")
+      ? { type: "none" as const }
+      : parseGoalSlashCommand(event.message.text)
+    const settings = getBuiltinRobotSettings()
+    if (!settings.enabled) {
+      return this.ingress.receiveControlEvent(event, async () => "本设备的内置机器人已断开。")
+    }
+    if (
+      goalCommand.type === "status" ||
+      goalCommand.type === "invalid" ||
+      goalCommand.type === "pause" ||
+      goalCommand.type === "clear"
+    ) {
+      return this.ingress.receiveControlEvent(event, async (storedEvent) => {
+        const decision = await imRemoteCapabilityGuard.evaluate(storedEvent)
+        if (!decision.allowed) return decision.message
+        return this.goalRuns.runControl({
+          threadId: decision.target.threadId,
+          message: event.message.text,
+          userMessageId: `im:${event.eventId}:goal-control`
+        })
+      })
+    }
+    if (goalCommand.type !== "none") {
+      return this.receiveOrdinaryEvent(event)
+    }
+    if (command?.name === "retry") {
+      const resolved = this.commandRouter.resolveRetryEvent(event.conversationKey, command.argument)
+      if ("message" in resolved) {
+        return this.ingress.receiveControlEvent(event, async () => resolved.message)
+      }
+      const original = resolved.event
+      const retryEvent: RemoteImEventV1 = {
+        ...event,
+        message: { type: "text", text: original.messageText }
+      }
+      const result = await this.ingress.receiveOrdinaryEvent(retryEvent, {
+        targetSnapshot: original.targetSnapshot!,
+        retryOfEventId: original.eventId
+      })
+      const code = eventShortCode(original.eventId)
+      await imEventStore.enqueueProactiveReplies(
+        buildImProactiveReplies({
+          deliveryId: `${event.eventId}:retry-warning`,
+          conversationKey: event.conversationKey,
+          text: `已按你的明确指令重试事件 ${code}。原事件结果未知，文件或外部副作用可能重复，请核对。`
+        })
+      )
+      await this.replyClient.sendPending()
+      if (result.event.state === "queued") {
+        void this.turnQueue.notify(event.conversationKey).catch((error) => {
+          console.error("[IM] Retry queue failed:", error)
+        })
+      }
+      return result
+    }
+    if (command) {
+      return this.ingress.receiveControlEvent(event, () =>
+        this.commandRouter.handle({
+          command,
+          conversationKey: event.conversationKey,
+          principalId: event.principalId
+        })
+      )
+    }
+    if (event.message.text.trim().startsWith("/")) {
+      const prepared = await this.skillCommands.prepareForIngress({
+        message: event.message.text,
+        conversationKey: event.conversationKey,
+        principalId: event.principalId
+      })
+      if (prepared.kind === "control") {
+        return this.ingress.receiveControlEvent(event, async () => prepared.reply)
+      }
+    }
+    return this.receiveOrdinaryEvent(event)
+  }
+
+  async receiveOrdinaryEvent(event: RemoteImEventV1): Promise<ImIngressResult> {
+    const result = await this.ingress.receiveOrdinaryEvent(event)
+    if (result.event.state === "queued") {
+      void this.turnQueue.notify(event.conversationKey).catch((error) => {
+        console.error("[IM] Conversation queue failed:", error)
+      })
+    }
+    return result
+  }
+
+  async recoverAndStart(): Promise<string[]> {
+    // Numbered selection lists are intentionally session-local. A restart must
+    // never let an old number bind to a newly reordered project/Feature list.
+    await imSelectionContextStore.clearAll()
+    await imEventStore.cleanupExpiredTerminalData()
+    await imEventStore.recoverInterruptedOutbox()
+    const recovered = await this.turnQueue.recoverAndStart(async (eventIds) => {
+      await Promise.all(
+        eventIds.map(async (eventId) => {
+          const event = imEventStore.getEvent(eventId)
+          if (event) await setRemoteThreadLifecycle(event, "outcome_unknown")
+        })
+      )
+    })
+    await this.modeNotificationPump.recoverAndStart()
+    this.startOutboxRetryLoop()
+    this.sessionSwitchCards.schedule()
+    return recovered
+  }
+
+  abortCurrent(conversationKey: string, eventId?: string): boolean {
+    return this.turnQueue.abortCurrentImEvent(conversationKey, eventId)
+  }
+
+  abortThreadFromDesktop(threadId: string): boolean {
+    // Both, not either: a thread can have an ordinary turn in the queue and a
+    // background summary in the pump, and the pump's runs were reachable from
+    // neither of the two places Stop looked — not in this queue, and holding
+    // their lease under "im" rather than "desktop".
+    const queued = this.turnQueue.abortThreadFromDesktop(threadId)
+    const summarising = this.modeNotificationPump.cancelThread(threadId)
+    return queued || summarising
+  }
+
+  hasActiveRuns(): boolean {
+    return this.turnQueue.hasActiveRuns()
+  }
+
+  async resumeQueued(): Promise<void> {
+    await this.replyClient.sendPending()
+    await Promise.all(
+      imEventStore.listQueuedConversationKeys().map((key) => this.turnQueue.notify(key))
+    )
+  }
+
+  async handleLeaseRevoked(eventId: string, reasonCode = "LEASE_REVOKED"): Promise<void> {
+    if (this.runner.revokeExecutionPermit(eventId, reasonCode)) return
+    const event = imEventStore.getEvent(eventId)
+    if (!event) return
+    const terminal = await imEventStore.handlePermitRevoked(eventId, reasonCode)
+    if (terminal.state === "outcome_unknown") {
+      await setRemoteThreadLifecycle(terminal, "outcome_unknown")
+    }
+  }
+
+  stop(): Promise<void> {
+    if (this.outboxRetryTimer) clearInterval(this.outboxRetryTimer)
+    this.outboxRetryTimer = undefined
+    this.unregisterSchedulerGateway()
+    this.unregisterDesktopCompletionReplyDrainer()
+    this.unregisterRemoteApprovalReplyDrainer()
+    this.unregisterRemoteUserInputReplyDrainer()
+    this.unregisterHumanGateReplyDrainer()
+    this.unregisterManagedBizRetryReplyDrainer()
+    this.unregisterCardReceiptReplyDrainer()
+    this.unregisterCardReceiptCommandRouter()
+    this.unregisterSessionSwitchCards()
+    this.modeNotificationPump.stop()
+    return Promise.all([this.turnQueue.stop(), this.sessionSwitchCards.stop()]).then(
+      () => undefined
+    )
+  }
+
+  private startOutboxRetryLoop(): void {
+    if (this.outboxRetryTimer) return
+    this.outboxRetryTimer = setInterval(() => {
+      if (!this.gateway.isAuthenticated()) return
+      void this.replyClient.sendPending().catch(() => undefined)
+    }, 1_000)
+    this.outboxRetryTimer.unref?.()
+  }
+}

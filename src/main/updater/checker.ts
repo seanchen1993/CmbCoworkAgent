@@ -1,9 +1,11 @@
+import { updaterLog } from "./logger"
 import { app } from "electron"
 import http from "http"
 import https from "https"
 import { getUserInfo, type UserInfoConfig } from "../storage"
 import type { FeatureGatesConfig } from "../../shared/feature-gates"
 import type { RemoteModelCatalog } from "../../shared/model-catalog"
+import type { ConversationShortcutsConfig } from "../../shared/market-skill-shortcut"
 import { evaluateStaging } from "./gray-release"
 import { compareSemver } from "./semver"
 import { DEFAULT_UPDATE_MANIFEST_FILE } from "./channel-config"
@@ -96,6 +98,7 @@ export interface LatestJson {
   featureGates?: FeatureGatesConfig
   /** Optional managed model catalog. Independent from app-update staging. */
   modelCatalog?: RemoteModelCatalog
+  conversationShortcuts?: ConversationShortcutsConfig
 }
 
 export type UpdateType = "asar" | "full"
@@ -156,12 +159,12 @@ export function fetchLatestJson(
   const url = new URL(`${baseUrl}/download`)
   url.searchParams.set("file", manifestFile)
   const urlStr = url.toString()
-  console.log("[Updater] Fetching:", urlStr)
+  updaterLog.log("[Updater] Fetching:", urlStr)
 
   return new Promise((resolve, reject) => {
     const client = urlStr.startsWith("https") ? https : http
     const req = client.request(urlStr, { method: "POST", timeout: 10000 }, (res) => {
-      console.log("[Updater] Response status:", res.statusCode)
+      updaterLog.log("[Updater] Response status:", res.statusCode)
       if (res.statusCode !== 200) {
         reject(new Error(`HTTP ${res.statusCode} fetching latest.json`))
         res.resume()
@@ -169,8 +172,9 @@ export function fetchLatestJson(
       }
 
       let data = ""
-      res.on("data", (chunk: Buffer) => {
-        data += chunk.toString()
+      res.setEncoding("utf8")
+      res.on("data", (chunk: string) => {
+        data += chunk
       })
       res.on("end", () => {
         try {
@@ -268,6 +272,21 @@ function resolveDownload(
     }
   }
 
+  const selectedPackage = updateType === "asar" ? asar : (platformInfo?.full ?? full)
+  updaterLog.log("[Updater] Resolved update package:", {
+    currentVersion,
+    targetVersion,
+    packageVersion,
+    minVersion: topLevelMinVersion,
+    platform,
+    updateType,
+    downloadFile,
+    downloadSha256,
+    downloadSize,
+    packageSource: updateType === "asar" ? "asar" : platformInfo?.full ? "platform.full" : "full",
+    declaredPackageVersion: selectedPackage?.version ?? null,
+    packageVersionInherited: selectedPackage?.version == null
+  })
   return {
     version: packageVersion,
     updateType,
@@ -287,7 +306,7 @@ function safeGetUserInfo(): ReturnType<typeof getUserInfo> {
   try {
     return getUserInfo()
   } catch (err) {
-    console.warn("[Updater] getUserInfo() failed, treating as anonymous:", err)
+    updaterLog.warn("[Updater] getUserInfo() failed, treating as anonymous:", err)
     return null
   }
 }
@@ -356,7 +375,7 @@ export function selectChannelTarget(
           platform
         )
         const grayReason = continuingStagingChain ? "pending-chain" : decision.reason
-        console.log(
+        updaterLog.log(
           `[Updater] Staging hit: v${staging.version} reason=${grayReason}` +
             (decision.bucketKey ? ` user=${decision.bucketKey}` : "")
         )
@@ -378,7 +397,7 @@ export function selectChannelTarget(
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        console.warn(`[Updater] Staging unusable, falling back to stable: ${msg}`)
+        updaterLog.warn(`[Updater] Staging unusable, falling back to stable: ${msg}`)
         // fall through to stable
       }
     }
@@ -400,7 +419,7 @@ export function selectChannelTarget(
     latest.rollback,
     platform
   )
-  console.log(`[Updater] Stable: v${latest.version} grayReason=${decision.reason}`)
+  updaterLog.log(`[Updater] Stable: v${latest.version} grayReason=${decision.reason}`)
   return {
     version: resolved.version,
     targetVersion: latest.version,
@@ -463,13 +482,31 @@ export async function checkForUpdate(
   baseUrl: string,
   options: { manifestFile?: string } = {}
 ): Promise<UpdateCheckResult | null> {
+  updaterLog.log("[Updater] Check started:", {
+    currentVersion: app.getVersion(),
+    platform: process.platform,
+    manifestFile: options.manifestFile ?? DEFAULT_UPDATE_MANIFEST_FILE
+  })
   const latest = await fetchLatestJson(baseUrl, options.manifestFile)
   const currentVersion = app.getVersion()
-  return selectChannelTarget(
+  const result = selectChannelTarget(
     latest,
     currentVersion,
     safeGetUserInfo(),
     process.platform,
     resolvePendingChain(latest, currentVersion)
   )
+  updaterLog.log("[Updater] Check completed:", {
+    currentVersion,
+    stableVersion: latest.version,
+    stagingVersion: latest.staging?.version,
+    hasUpdate: result !== null,
+    channel: result?.channel,
+    grayReason: result?.grayReason,
+    packageVersion: result?.version,
+    targetVersion: result?.targetVersion,
+    updateType: result?.updateType,
+    mandatory: result?.mandatory
+  })
+  return result
 }

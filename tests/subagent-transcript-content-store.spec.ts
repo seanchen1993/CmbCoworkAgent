@@ -393,7 +393,7 @@ async function testCompactionIsIdempotentAndManifestRowsStaySmall(
   )
 }
 
-function testStartupIndexNeverDropsBuckets(store: ContentStore): void {
+function testStartupIndexUsesRecentChronologicalOrderAndHardLimit(store: ContentStore): void {
   const transcripts = Object.fromEntries(
     Array.from({ length: 40 }, (_, index) => {
       const id = `startup-task-${index}`
@@ -421,11 +421,11 @@ function testStartupIndexNeverDropsBuckets(store: ContentStore): void {
       ]
     })
   )
-  const startup = store.buildSubagentTranscriptStartupManifests(transcripts, 2)
+  const startup = store.buildSubagentTranscriptStartupManifests(transcripts)
   assert.deepEqual(
     Object.keys(startup),
-    Object.keys(transcripts),
-    "an exhausted preview budget must still return identity/card rows for every bucket"
+    Object.keys(transcripts).reverse(),
+    "the bounded recent-first startup page must return its card rows in chronological order"
   )
   for (const [id, rawMessages] of Object.entries(startup)) {
     assert(Array.isArray(rawMessages) && rawMessages.length === 2)
@@ -449,6 +449,11 @@ function testStartupIndexNeverDropsBuckets(store: ContentStore): void {
       "startup must fingerprint the full legacy final before projection"
     )
   }
+  assert.deepEqual(
+    store.buildSubagentTranscriptStartupManifests(transcripts, 2),
+    {},
+    "the startup projection must honor an explicit hard byte ceiling"
+  )
 }
 
 function testStartupProjectionMergePreservesDurableFields(store: ContentStore): void {
@@ -488,7 +493,7 @@ function testStartupProjectionMergePreservesDurableFields(store: ContentStore): 
       subagent_reasoning_fingerprint: "full-reasoning-fp"
     }
   ]
-  const startup = store.buildSubagentTranscriptStartupManifests({ [id]: durable }, 2)[
+  const startup = store.buildSubagentTranscriptStartupManifests({ [id]: durable })[
     id
   ] as UnknownRecord[]
   const correction = {
@@ -518,6 +523,87 @@ function testManifestPagingIsBounded(store: ContentStore): void {
   const earlier = store.sliceSubagentTranscriptManifestPage(messages, latest.nextBefore)
   assert.equal(earlier.start, 9_800)
   assert.equal(asRecord(earlier.messages[99], "earlier last").id, "message-9899")
+}
+
+function testManifestPagingKeepsToolGroupsAtomic(store: ContentStore): void {
+  const singleCall = [
+    {
+      id: "assistant-call",
+      role: "assistant",
+      content: "calling",
+      tool_calls: [{ id: "call-1", name: "read", args: { path: "a.txt" } }]
+    },
+    { id: "tool-result", role: "tool", tool_call_id: "call-1", content: "done" },
+    ...Array.from({ length: 99 }, (_, index) => ({
+      id: `tail-${index}`,
+      role: "assistant",
+      content: `tail ${index}`
+    }))
+  ]
+  const singlePage = store.sliceSubagentTranscriptManifestPage(singleCall)
+  assert.equal(singlePage.start, 0)
+  assert.equal(singlePage.messages.length, 101)
+  assert.equal(asRecord(singlePage.messages[0], "single tool owner").id, "assistant-call")
+  assert.equal(singlePage.nextBefore, undefined)
+
+  const multiCall = [
+    {
+      id: "assistant-multi",
+      role: "assistant",
+      content: "calling twice",
+      tool_calls: [
+        { id: "call-a", name: "read", args: {} },
+        { id: "call-b", name: "write", args: {} }
+      ]
+    },
+    { id: "tool-a", role: "tool", tool_call_id: "call-a", content: "a" },
+    { id: "tool-b", role: "tool", tool_call_id: "call-b", content: "b" },
+    ...Array.from({ length: 99 }, (_, index) => ({
+      id: `multi-tail-${index}`,
+      role: "assistant",
+      content: `tail ${index}`
+    }))
+  ]
+  const multiPage = store.sliceSubagentTranscriptManifestPage(multiCall)
+  assert.equal(multiPage.start, 0)
+  assert.deepEqual(
+    multiPage.messages.slice(0, 3).map((item) => asRecord(item, "multi tool group").id),
+    ["assistant-multi", "tool-a", "tool-b"]
+  )
+}
+
+function testManifestByteBoundaryKeepsToolOwner(store: ContentStore): void {
+  const page = store.sliceSubagentTranscriptManifestPage(
+    [
+      {
+        id: "byte-owner",
+        role: "assistant",
+        content: "calling",
+        tool_calls: [{ id: "byte-call", name: "read", args: {} }]
+      },
+      {
+        id: "byte-result",
+        role: "tool",
+        tool_call_id: "byte-call",
+        content: "bounded projection",
+        content_ref: {
+          v: 1,
+          sha256: "d".repeat(64),
+          bytes: 40 * 1024 * 1024,
+          kind: "content"
+        }
+      }
+    ],
+    undefined,
+    100,
+    32 * 1024 * 1024
+  )
+  assert.equal(page.start, 0)
+  assert.equal(page.messages.length, 2)
+  assert.equal(page.deferredHydrationIndex, 1)
+  const owner = asRecord(page.messages[0], "byte boundary owner")
+  assert.equal(owner.id, "byte-owner")
+  assert.equal(Array.isArray(owner.tool_calls), true, "the assistant tool card must remain renderable")
 }
 
 async function testManifestPagingHonorsHydrationByteBudget(store: ContentStore): Promise<void> {
@@ -631,9 +717,11 @@ async function main(): Promise<void> {
     await testCorruptSameHashBlobSelfHeals(store, root, retainedHashes)
     await testGarbageCollection(store, root, retainedHashes)
     await testCompactionIsIdempotentAndManifestRowsStaySmall(store)
-    testStartupIndexNeverDropsBuckets(store)
+    testStartupIndexUsesRecentChronologicalOrderAndHardLimit(store)
     testStartupProjectionMergePreservesDurableFields(store)
     testManifestPagingIsBounded(store)
+    testManifestPagingKeepsToolGroupsAtomic(store)
+    testManifestByteBoundaryKeepsToolOwner(store)
     await testManifestPagingHonorsHydrationByteBudget(store)
     testPrefixHintsNeverDeleteUnmatchedHistory(store)
   } finally {

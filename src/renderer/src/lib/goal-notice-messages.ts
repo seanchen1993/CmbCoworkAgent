@@ -1,6 +1,7 @@
 import type { Message } from "@/types"
 import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
+  GOAL_USER_EVENT_MESSAGE_ID_PREFIX,
   isStaleCheckpointBoundaryNoticeMessage
 } from "../../../shared/goal-events"
 import { splitGoalTransportPayload } from "../../../shared/goal-slash"
@@ -12,6 +13,8 @@ export interface GoalNoticeEvent {
   active_window_id?: string | null
   message: string
   created_at: Date | string | number
+  transcript_ordinal?: number | null
+  transcript_message_id?: string | null
 }
 
 function toTime(value: Date | string | number | null | undefined): number | null {
@@ -124,7 +127,7 @@ export function goalEventToDisplayMessages(event: GoalNoticeEvent): Message[] {
   if (isGoalUserEvent(event.message)) {
     return [
       createGoalUserMessage(event.message.slice(GOAL_USER_MESSAGE_EVENT_PREFIX.length), {
-        id: `goal-user-event-${event.event_id}`,
+        id: `${GOAL_USER_EVENT_MESSAGE_ID_PREFIX}${event.event_id}`,
         createdAt,
         goalId: event.goal_id ?? null,
         activeWindowId: event.active_window_id ?? null
@@ -194,7 +197,7 @@ function hasReliableMessageTime(message: Message): boolean {
 function isRestoredGoalUserMessage(message: Message): boolean {
   return (
     message.role === "user" &&
-    (message.id.startsWith("goal-user-event-") ||
+    (message.id.startsWith(GOAL_USER_EVENT_MESSAGE_ID_PREFIX) ||
       message.id.startsWith("goal-start-prompt-") ||
       message.id.startsWith("goal-legacy-command-"))
   )
@@ -205,7 +208,7 @@ function isLegacyRestoredGoalUserMessage(message: Message): boolean {
 }
 
 function isPersistedRestoredGoalUserMessage(message: Message): boolean {
-  return message.role === "user" && message.id.startsWith("goal-user-event-")
+  return message.role === "user" && message.id.startsWith(GOAL_USER_EVENT_MESSAGE_ID_PREFIX)
 }
 
 function isPromptRestoredGoalUserMessage(message: Message): boolean {

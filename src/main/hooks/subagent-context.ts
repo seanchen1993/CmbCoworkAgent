@@ -49,6 +49,7 @@ export type SubagentStopHarnessContext = Pick<
   | "pluginWorkspace"
   | "featureId"
   | "harnessProjectId"
+  | "harnessAdapterId"
   | "harnessAdapterName"
   | "harnessAdapterVersion"
   | "harnessNodeName"
@@ -61,6 +62,7 @@ export interface SubagentStopHookContextInput extends SubagentStopHarnessContext
   threadId: string
   turnId?: string
   toolCallId: string
+  subagentType?: string
   failed: boolean
 }
 
@@ -94,6 +96,7 @@ export function buildSubagentStopHookContext(input: SubagentStopHookContextInput
     pluginWorkspace: input.pluginWorkspace,
     featureId: input.featureId,
     harnessProjectId: input.harnessProjectId,
+    harnessAdapterId: input.harnessAdapterId,
     harnessAdapterName: input.harnessAdapterName,
     harnessAdapterVersion: input.harnessAdapterVersion,
     harnessNodeName: input.harnessNodeName,
@@ -104,6 +107,7 @@ export function buildSubagentStopHookContext(input: SubagentStopHookContextInput
     turnId: input.turnId,
     subagent: {
       id: input.toolCallId,
+      name: input.subagentType,
       status: input.failed ? "failed" : "completed"
     }
   }

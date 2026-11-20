@@ -60,6 +60,9 @@ function buildClaudeEnv(
 ): Record<string, string> {
   const config = getModelConfigByRef(modelId)
   if (!config) throw new Error(`模型配置不存在: ${modelId}`)
+  if (config.transport === "idle-gateway") {
+    throw new Error("闲时模型使用 OpenAI 接口，暂不支持 Claude Code 终端，请选择其他模型。")
+  }
   const proxyBase = getClaudeCodeProxyBase()
   if (!proxyBase) throw new Error("VITE_CLAUDE_CODE_PROXY_BASE 未配置")
   if (!config.apiKey) throw new Error(`模型 "${config.name}" 的 API Key 未设置`)

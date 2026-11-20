@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { notifyMarketPublished } from "@/lib/market-change-events"
 import {
   AlertCircle,
   ChevronDown,
@@ -8,6 +9,7 @@ import {
   Folder,
   GitBranch,
   Info,
+  Loader2,
   Plus,
   Power,
   Radio,
@@ -35,17 +37,35 @@ import { cn } from "@/lib/utils"
 import type { SkillMetadata } from "@/types"
 import { useAppStore } from "@/lib/store"
 import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
+import {
+  invalidateSkillCatalog,
+  readSkillCatalogCache,
+  revalidateSkillCatalog,
+  subscribeSkillCatalogInvalidation
+} from "@/lib/app-catalog-cache"
+import { SkillDisabledMutationCoordinator } from "@/lib/skill-disabled-mutation-coordinator"
+import { SKILL_PLUGIN_CATALOG_RENDER_BATCH } from "@/lib/skill-plugin-catalog"
 import { marketApi, type MarketItem } from "../../api/market"
-import { DEFAULT_SCENE_CATEGORY } from "../../lib/skill-data-service"
+import {
+  buildUploaderIdCandidates,
+  DEFAULT_SCENE_CATEGORY,
+  getUploaderIdCandidates
+} from "../../lib/skill-data-service"
 import { SkillFileEditor } from "./SkillFileEditor"
 import { UniversalUploadDialog } from "./MarketPanel/UniversalUploadDialog"
 import { toast } from "sonner"
 import { marketInstalledVersionStorage } from "./MarketPanel/MarketUpdateBadge"
 import { marketInstalledSourceStorage } from "./MarketPanel/market-installed-source-storage"
+import {
+  SkillMarketUpdate,
+  SkillMarketUpdateProvider
+} from "./SkillMarketUpdate"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 
 type FilePreviewKind = "text" | "html" | "image" | "pdf"
+type SkillCatalogLoadState = "loading" | "ready" | "error"
+const recoveredEmptySkillCatalogKeys = new Set<string>()
 type FileTreeNode = {
   id: string
   name: string
@@ -70,22 +90,24 @@ type SkillMarketInfo = Pick<
   | "guidance"
   | "user_id"
   | "version"
+  | "extra_json"
 >
 type SaveSkillFileResult = { success: boolean; error?: string }
 type PublishMode = "upload" | "update"
 type PublishSuccessPayload = { skillName: string; mode: PublishMode }
+type CustomSkillOwnershipGroup = "uploaded" | "market" | "org"
 type UploadedItemRecord = {
   name: string
   type: "skill" | "mcp" | "plugin"
   uploadedAt?: string
 }
-type LocalUploadedSkillPathRecord = {
-  path: string
-  uploadedAt?: string
-}
 type EditedSkillPathRecord = {
   path: string
   editedAt?: string
+}
+type UserInfoLite = {
+  sapId?: string | null
+  ystId?: string | null
 }
 
 const KNOWN_TEXT_EXTS = new Set([
@@ -126,7 +148,6 @@ const KNOWN_TEXT_EXTS = new Set([
   "log"
 ])
 const UPLOADED_ITEMS_KEY = "marketplace_uploaded_items"
-const LOCAL_UPLOADED_SKILL_PATHS_KEY = "skills_panel_uploaded_skill_paths"
 const EDITED_SKILL_PATHS_KEY = "skills_panel_edited_skill_paths"
 const DEFAULT_SKILL_VERSION = "v1.0.0"
 
@@ -140,21 +161,6 @@ function normalizeSkillPathKey(skillPath: string): string {
     .replace(/\\/g, "/")
     .trim()
     .toLowerCase()
-}
-
-/**
- * 统一目录名 Key，用于把 upload 返回的目录名与 skills.list() 结果做匹配。
- */
-function normalizeDirNameKey(dirName: string): string {
-  return (
-    String(dirName || "")
-      .replace(/\\/g, "/")
-      .split("/")
-      .filter(Boolean)
-      .pop()
-      ?.trim()
-      .toLowerCase() || ""
-  )
 }
 
 /**
@@ -213,62 +219,6 @@ function readOrgInstalledSkillNamesFromStorage(): Set<string> {
   }
 
   return names
-}
-
-/**
- * 读取“通过 SkillsPanel 上传过”的技能路径集合。
- * 该集合用于判定：这是“我自己上传”的技能，而不是从市场安装来的技能。
- */
-function readLocalUploadedSkillPathSetFromStorage(): Set<string> {
-  try {
-    const raw = localStorage.getItem(LOCAL_UPLOADED_SKILL_PATHS_KEY)
-    const parsed: LocalUploadedSkillPathRecord[] = raw ? JSON.parse(raw) : []
-    if (!Array.isArray(parsed)) return new Set()
-
-    const paths = new Set<string>()
-    for (const item of parsed) {
-      if (!item?.path) continue
-      paths.add(normalizeSkillPathKey(item.path))
-    }
-    return paths
-  } catch (storageError) {
-    console.warn("[SkillsPanel] Failed to read local uploaded skill paths:", storageError)
-    return new Set()
-  }
-}
-
-/**
- * 记录“该技能是从 SkillsPanel 上传”的来源标记。
- */
-function markLocalUploadedSkillPathInStorage(skillPath: string): void {
-  try {
-    const keyPath = normalizeSkillPathKey(skillPath)
-    if (!keyPath) return
-    const raw = localStorage.getItem(LOCAL_UPLOADED_SKILL_PATHS_KEY)
-    const parsed: LocalUploadedSkillPathRecord[] = raw ? JSON.parse(raw) : []
-    const records = Array.isArray(parsed) ? parsed : []
-    const next = records.filter((item) => normalizeSkillPathKey(item?.path || "") !== keyPath)
-    next.push({ path: skillPath, uploadedAt: new Date().toISOString() })
-    localStorage.setItem(LOCAL_UPLOADED_SKILL_PATHS_KEY, JSON.stringify(next))
-  } catch (storageError) {
-    console.warn("[SkillsPanel] Failed to mark local uploaded skill path:", storageError)
-  }
-}
-
-/**
- * 删除技能时同步移除本地上传来源标记，防止脏数据累积。
- */
-function removeLocalUploadedSkillPathFromStorage(skillPath: string): void {
-  try {
-    const keyPath = normalizeSkillPathKey(skillPath)
-    const raw = localStorage.getItem(LOCAL_UPLOADED_SKILL_PATHS_KEY)
-    const parsed: LocalUploadedSkillPathRecord[] = raw ? JSON.parse(raw) : []
-    const records = Array.isArray(parsed) ? parsed : []
-    const next = records.filter((item) => normalizeSkillPathKey(item?.path || "") !== keyPath)
-    localStorage.setItem(LOCAL_UPLOADED_SKILL_PATHS_KEY, JSON.stringify(next))
-  } catch (storageError) {
-    console.warn("[SkillsPanel] Failed to remove local uploaded skill path:", storageError)
-  }
 }
 
 /**
@@ -350,6 +300,16 @@ function getSkillCategory(skill: SkillMetadata, marketInfo: SkillMarketInfo | un
 
 function isFeaturedSkill(marketInfo: SkillMarketInfo | undefined): boolean {
   return marketInfo?.featured === "精品"
+}
+
+function doesSkillMarketInfoBelongToCurrentUser(
+  marketInfo: SkillMarketInfo | undefined,
+  currentUserIdCandidates: ReadonlySet<string>
+): boolean {
+  if (!marketInfo?.user_id || currentUserIdCandidates.size === 0) return false
+  return getUploaderIdCandidates(marketInfo.user_id).some((candidate) =>
+    currentUserIdCandidates.has(candidate)
+  )
 }
 
 function splitMarkdownFrontmatter(
@@ -563,7 +523,8 @@ function PublishSkillDialog(props: {
         version: skill.version || marketInfo?.version || undefined,
         guidance: skill.metadata?.guidance || marketInfo?.guidance || "",
         chinese_name: getSkillChineseName(skill, marketInfo),
-        user_id: marketInfo?.user_id
+        user_id: marketInfo?.user_id,
+        extra_json: marketInfo?.extra_json
       }}
       generatedFile={{
         label: "将自动打包当前技能目录为 zip 并上传",
@@ -775,6 +736,14 @@ function countSkillTreeSkills(node: SkillTreeNode): number {
     (node.skill ? 1 : 0) +
     node.children.reduce((sum, child) => sum + countSkillTreeSkills(child), 0)
   )
+}
+
+function getSkillTreePathKey(skill: SkillMetadata): string {
+  return getSkillTreePath(skill)
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => normalizeSkillId(segment))
+    .join("/")
 }
 
 function splitSkillsByEnabled(
@@ -1246,9 +1215,9 @@ function SkillsGuide(): React.JSX.Element {
                 <p>
                   <code className="mx-1 font-mono text-foreground/85">forcedOutcome</code>
                   取值：
-                  <code className="mx-1 font-mono text-foreground/85">"always-revise"</code>
+                  <code className="mx-1 font-mono text-foreground/85">&quot;always-revise&quot;</code>
                   （强制走修订）/
-                  <code className="mx-1 font-mono text-foreground/85">"always-halt"</code>
+                  <code className="mx-1 font-mono text-foreground/85">&quot;always-halt&quot;</code>
                   （强制终止本轮）；不写则跟随 hook stdout 输出。可选
                   <code className="mx-1 font-mono text-foreground/85">forcedReason</code>
                   作为静态原因。
@@ -1369,7 +1338,10 @@ function SkillsGuide(): React.JSX.Element {
                 </p>
                 <p>
                   常用返回包括
-                  <code className="mx-1 font-mono text-foreground/85">decision="block"</code>、
+                  <code className="mx-1 font-mono text-foreground/85">
+                    decision=&quot;block&quot;
+                  </code>
+                  、
                   <code className="mx-1 font-mono text-foreground/85">reason</code>、
                   <code className="mx-1 font-mono text-foreground/85">systemMessage</code>、
                   <code className="mx-1 font-mono text-foreground/85">additionalContext</code>和
@@ -1413,14 +1385,23 @@ function SkillsGuide(): React.JSX.Element {
 }
 
 export function SkillsPanel(): React.JSX.Element {
-  const { setShowCustomizeView, setMarketInitialSkillCategory, setMarketInitialSkillSearchQuery } =
-    useAppStore()
+  const setShowCustomizeView = useAppStore((state) => state.setShowCustomizeView)
+  const setMarketInitialSkillCategory = useAppStore(
+    (state) => state.setMarketInitialSkillCategory
+  )
+  const setMarketInitialSkillSearchQuery = useAppStore(
+    (state) => state.setMarketInitialSkillSearchQuery
+  )
   const recordSkillUrl = import.meta.env.VITE_JUMP_RECORD_SKILL_URL?.trim() || ""
-  const [skills, setSkills] = useState<SkillMetadata[]>([])
+  const [initialSkillSnapshot] = useState(() => readSkillCatalogCache())
+  const [skills, setSkills] = useState<SkillMetadata[]>(
+    () => initialSkillSnapshot?.localSkills ?? []
+  )
   const [expandedSkills, setExpandedSkills] = useState<Set<string>>(new Set())
   const [expandedDirNodes, setExpandedDirNodes] = useState<Set<string>>(new Set())
   const [skillFilesMap, setSkillFilesMap] = useState<Record<string, string[]>>({})
   const [marketSkillMap, setMarketSkillMap] = useState<Record<string, SkillMarketInfo>>({})
+  const [marketSkillCatalogReady, setMarketSkillCatalogReady] = useState(false)
   const [selectedSkill, setSelectedSkill] = useState<SkillMetadata | null>(null)
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)
   const [selectedFileContent, setSelectedFileContent] = useState<string | null>(null)
@@ -1431,44 +1412,128 @@ export function SkillsPanel(): React.JSX.Element {
   const [publishDialogOpen, setPublishDialogOpen] = useState(false)
   const [publishSkill, setPublishSkill] = useState<SkillMetadata | null>(null)
   const [publishMode, setPublishMode] = useState<PublishMode>("upload")
-  const [disabledSkills, setDisabledSkills] = useState<Set<string>>(new Set())
-  const [uploadedSkillNames, setUploadedSkillNames] = useState<Set<string>>(() =>
-    readUploadedSkillNamesFromStorage()
+  const [disabledSkills, setDisabledSkills] = useState<Set<string>>(
+    () => initialSkillSnapshot?.disabledSkillIds ?? new Set()
   )
-  const [localUploadedSkillPaths, setLocalUploadedSkillPaths] = useState<Set<string>>(() =>
-    readLocalUploadedSkillPathSetFromStorage()
+  const disabledSkillsRef = useRef(disabledSkills)
+  const disabledSkillMutationCoordinatorRef = useRef(
+    new SkillDisabledMutationCoordinator(disabledSkills)
+  )
+  const disabledSkillMutationChainRef = useRef<Promise<void>>(Promise.resolve())
+  const disabledSkillAuthorityRevisionRef = useRef(0)
+  const skillMutationMountedRef = useRef(true)
+  const [skillCatalogLoadState, setSkillCatalogLoadState] = useState<SkillCatalogLoadState>(
+    initialSkillSnapshot ? "ready" : "loading"
+  )
+  const [skillCatalogLoadError, setSkillCatalogLoadError] = useState<string | null>(null)
+  const [uploadedSkillNames] = useState<Set<string>>(() =>
+    readUploadedSkillNamesFromStorage()
   )
   const [orgInstalledSkillNames, setOrgInstalledSkillNames] = useState<Set<string>>(() =>
     readOrgInstalledSkillNamesFromStorage()
   )
+  const [currentUserIdCandidates, setCurrentUserIdCandidates] = useState<Set<string>>(new Set())
+  const [currentUserIdCandidatesReady, setCurrentUserIdCandidatesReady] = useState(false)
   const [editedSkillPaths, setEditedSkillPaths] = useState<Set<string>>(() =>
     readEditedSkillPathSetFromStorage()
   )
   const [searchQuery, setSearchQuery] = useState("")
   const [debouncedQuery, setDebouncedQuery] = useState("")
+  const [visibleSkillLimit, setVisibleSkillLimit] = useState(SKILL_PLUGIN_CATALOG_RENDER_BATCH)
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const skillRefreshGeneration = useRef(0)
 
   const handleSearchChange = useCallback((value: string) => {
     setSearchQuery(value)
     clearTimeout(debounceTimer.current)
-    debounceTimer.current = setTimeout(() => setDebouncedQuery(value), 200)
+    debounceTimer.current = setTimeout(() => {
+      setDebouncedQuery(value)
+      setVisibleSkillLimit(SKILL_PLUGIN_CATALOG_RENDER_BATCH)
+    }, 200)
   }, [])
 
   useEffect(() => {
-    return () => clearTimeout(debounceTimer.current)
+    skillMutationMountedRef.current = true
+    return () => {
+      skillMutationMountedRef.current = false
+      clearTimeout(debounceTimer.current)
+    }
   }, [])
+
+  const publishDisabledSkillSnapshot = useCallback((snapshot: Set<string>): void => {
+    disabledSkillsRef.current = snapshot
+    if (skillMutationMountedRef.current) setDisabledSkills(snapshot)
+  }, [])
+
+  const refreshSkills = useCallback(async (invalidate = false): Promise<SkillMetadata[]> => {
+    const generation = ++skillRefreshGeneration.current
+    const disabledAuthorityRevision = disabledSkillAuthorityRevisionRef.current
+    setSkillCatalogLoadState("loading")
+    setSkillCatalogLoadError(null)
+    if (invalidate) invalidateSkillCatalog()
+    try {
+      const pluginVersion = useAppStore.getState().pluginVersion
+      const cachedBeforeRefresh = readSkillCatalogCache()
+      let snapshot = await revalidateSkillCatalog(pluginVersion)
+      // Development/HMR or a branch update can change bundled skills without a
+      // skills:changed event, leaving an application-lifetime snapshot with no
+      // project rows. If this refresh only reused that exact stale snapshot,
+      // force one isolated Worker rescan. A legitimately empty fresh result is
+      // not scanned twice on every remount.
+      if (
+        !invalidate &&
+        snapshot === cachedBeforeRefresh &&
+        !snapshot.localSkills.some((skill) => skill.source === "project") &&
+        !recoveredEmptySkillCatalogKeys.has(snapshot.key)
+      ) {
+        recoveredEmptySkillCatalogKeys.add(snapshot.key)
+        invalidateSkillCatalog()
+        snapshot = await revalidateSkillCatalog(pluginVersion)
+        recoveredEmptySkillCatalogKeys.add(snapshot.key)
+      }
+      if (generation === skillRefreshGeneration.current) {
+        setSkills(snapshot.localSkills)
+        setOrgInstalledSkillNames(readOrgInstalledSkillNamesFromStorage())
+        if (disabledAuthorityRevision === disabledSkillAuthorityRevisionRef.current) {
+          publishDisabledSkillSnapshot(
+            disabledSkillMutationCoordinatorRef.current.replaceAuthoritative(
+              snapshot.disabledSkillIds
+            )
+          )
+        }
+        setSkillCatalogLoadState("ready")
+      }
+      return snapshot.localSkills
+    } catch (error) {
+      if (generation === skillRefreshGeneration.current) {
+        setSkillCatalogLoadState("error")
+        setSkillCatalogLoadError(error instanceof Error ? error.message : "技能目录加载失败")
+      }
+      throw error
+    }
+  }, [publishDisabledSkillSnapshot])
 
   useEffect(() => {
-    window.api.skills.list().then(setSkills).catch(console.error)
-  }, [])
+    let active = true
+    const timer = setTimeout(() => {
+      void refreshSkills()
+        .then(() => {
+          if (active) setVisibleSkillLimit(SKILL_PLUGIN_CATALOG_RENDER_BATCH)
+        })
+        .catch(console.error)
+    }, 0)
+    return () => {
+      active = false
+      clearTimeout(timer)
+      skillRefreshGeneration.current += 1
+    }
+  }, [refreshSkills])
 
-  const reloadUploadedSkillNames = useCallback(() => {
-    setUploadedSkillNames(readUploadedSkillNamesFromStorage())
-  }, [])
-
-  const reloadLocalUploadedSkillPaths = useCallback(() => {
-    setLocalUploadedSkillPaths(readLocalUploadedSkillPathSetFromStorage())
-  }, [])
+  useEffect(() => {
+    return subscribeSkillCatalogInvalidation(() => {
+      void refreshSkills().catch(console.error)
+    })
+  }, [refreshSkills])
 
   const reloadOrgInstalledSkillNames = useCallback(() => {
     setOrgInstalledSkillNames(readOrgInstalledSkillNamesFromStorage())
@@ -1478,12 +1543,46 @@ export function SkillsPanel(): React.JSX.Element {
     setEditedSkillPaths(readEditedSkillPathSetFromStorage())
   }, [])
 
+  const loadCurrentUserIdCandidates = useCallback(async () => {
+    try {
+      setCurrentUserIdCandidatesReady(false)
+      if (typeof window.api?.models?.getUserInfo !== "function") {
+        setCurrentUserIdCandidates(new Set())
+        setCurrentUserIdCandidatesReady(true)
+        return
+      }
+      const userInfo = (await window.api.models.getUserInfo()) as UserInfoLite | null
+      const normalizedIds = [userInfo?.sapId, userInfo?.ystId]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+      setCurrentUserIdCandidates(
+        new Set(normalizedIds.flatMap((id) => buildUploaderIdCandidates(id)))
+      )
+    } catch (error) {
+      console.warn("[SkillsPanel] Failed to load current user id candidates:", error)
+      setCurrentUserIdCandidates(new Set())
+    } finally {
+      setCurrentUserIdCandidatesReady(true)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadCurrentUserIdCandidates()
+    const unsubscribeLogin = window.electron?.ipcRenderer?.on?.("notify-login-msg", () => {
+      void loadCurrentUserIdCandidates()
+    })
+    return () => {
+      unsubscribeLogin?.()
+    }
+  }, [loadCurrentUserIdCandidates])
+
   const loadMarketSkills = useCallback(async () => {
     try {
+      setMarketSkillCatalogReady(false)
       const res = await marketApi.getSkills()
-      if (!res.success || !res.data) return
+      const items = res.success && res.data ? res.data : []
       const next: Record<string, SkillMarketInfo> = {}
-      for (const item of res.data) {
+      for (const item of items) {
         const normalized = normalizeSkillName(item.name)
         if (!normalized) continue
         next[normalized] = {
@@ -1491,10 +1590,33 @@ export function SkillsPanel(): React.JSX.Element {
           chinese_name: item.chinese_name,
           category: item.category,
           description: item.description,
-          featured: item.featured
+          featured: item.featured,
+          guidance: item.guidance,
+          user_id: item.user_id,
+          version: item.version,
+          extra_json: item.extra_json
+        }
+      }
+      // 临时 mock 注入，用于验证「有更新」提示
+      if (import.meta.env.DEV) {
+        const mockName = "requirement-to-prd"
+        const mockNormalized = normalizeSkillName(mockName)
+        if (!next[mockNormalized]) {
+          next[mockNormalized] = {
+            name: mockName,
+            chinese_name: "需求转PRD",
+            category: "研发类场景/应用类研发",
+            description: "将需求描述转换为结构化 PRD 文档的技能，支持字段拆解、验收点整理和优先级标注。",
+            featured: "",
+            guidance: "可直接提问：帮我把这段需求描述转换为结构化 PRD。",
+            user_id: "10010001",
+            version: "1.2.0",
+            extra_json: JSON.stringify({ grayUserIds: ["10010001"] })
+          }
         }
       }
       setMarketSkillMap(next)
+      setMarketSkillCatalogReady(true)
     } catch (e) {
       console.warn("[SkillsPanel] Failed to load market skills:", e)
     }
@@ -1506,13 +1628,6 @@ export function SkillsPanel(): React.JSX.Element {
     }, 0)
     return () => clearTimeout(timer)
   }, [loadMarketSkills])
-
-  useEffect(() => {
-    window.api.skills
-      .getDisabled()
-      .then((list) => setDisabledSkills(new Set(list.map(normalizeSkillId))))
-      .catch(console.error)
-  }, [])
 
   const skillFilesMapRef = useRef(skillFilesMap)
   useEffect(() => {
@@ -1580,15 +1695,9 @@ export function SkillsPanel(): React.JSX.Element {
     return files
   }, [])
 
-  const shouldHideMarketInstalledFeaturedFiles = useCallback(
-    (skill: SkillMetadata): boolean => {
-      if (skill.source !== "user") return false
-      const localMarked = localUploadedSkillPaths.has(normalizeSkillPathKey(skill.path))
-      const uploadedByMe = uploadedSkillNames.has(normalizeSkillName(skill.name))
-      if (localMarked || uploadedByMe) return false
-      return isFeaturedSkill(marketSkillMap[normalizeSkillName(skill.name)])
-    },
-    [localUploadedSkillPaths, marketSkillMap, uploadedSkillNames]
+  const shouldHideSkillFiles = useCallback(
+    (skill: SkillMetadata): boolean => skill.contentOrigin !== "local",
+    []
   )
 
   const onToggleSkill = useCallback(
@@ -1600,7 +1709,7 @@ export function SkillsPanel(): React.JSX.Element {
       setExpandedSkills(next)
 
       if (!wasExpanded) {
-        if (shouldHideMarketInstalledFeaturedFiles(skill)) {
+        if (shouldHideSkillFiles(skill)) {
           setSelectedSkill(skill)
           setSelectedFilePath(null)
           setSelectedFileContent(null)
@@ -1619,12 +1728,12 @@ export function SkillsPanel(): React.JSX.Element {
         }
       }
     },
-    [ensureSkillFiles, loadFileContent, shouldHideMarketInstalledFeaturedFiles]
+    [ensureSkillFiles, loadFileContent, shouldHideSkillFiles]
   )
 
   const onSelectFile = useCallback(
     async (skill: SkillMetadata, filePath: string) => {
-      if (shouldHideMarketInstalledFeaturedFiles(skill)) {
+      if (shouldHideSkillFiles(skill)) {
         setSelectedSkill(skill)
         setSelectedFilePath(null)
         setSelectedFileContent(null)
@@ -1634,7 +1743,7 @@ export function SkillsPanel(): React.JSX.Element {
       }
       await loadFileContent(skill, filePath)
     },
-    [loadFileContent, shouldHideMarketInstalledFeaturedFiles]
+    [loadFileContent, shouldHideSkillFiles]
   )
 
   const toggleDirNode = useCallback((nodeId: string) => {
@@ -1646,19 +1755,51 @@ export function SkillsPanel(): React.JSX.Element {
     })
   }, [])
 
-  const toggleSkillEnabled = useCallback((skill: SkillMetadata) => {
-    setDisabledSkills((prev) => {
-      const next = new Set(prev)
+  const toggleSkillEnabled = useCallback(
+    (skill: SkillMetadata) => {
       const skillId = getSkillMetadataId(skill)
-      if (isSkillDisabled(skill, next)) {
-        next.delete(skillId)
-      } else {
-        next.add(skillId)
-      }
-      window.api.skills.setDisabled([...next]).catch(console.error)
-      return next
-    })
-  }, [])
+      if (!skillId) return
+      const disabled = !isSkillDisabled(skill, disabledSkillsRef.current)
+      const { version, snapshot } = disabledSkillMutationCoordinatorRef.current.begin(
+        skillId,
+        disabled
+      )
+      disabledSkillAuthorityRevisionRef.current += 1
+      publishDisabledSkillSnapshot(snapshot)
+
+      disabledSkillMutationChainRef.current = disabledSkillMutationChainRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          try {
+            const authoritative = await window.api.skills.setDisabledState(skillId, disabled)
+            disabledSkillAuthorityRevisionRef.current += 1
+            publishDisabledSkillSnapshot(
+              disabledSkillMutationCoordinatorRef.current.settle(
+                skillId,
+                version,
+                authoritative
+              )
+            )
+          } catch (error) {
+            disabledSkillAuthorityRevisionRef.current += 1
+            publishDisabledSkillSnapshot(
+              disabledSkillMutationCoordinatorRef.current.abandon(skillId, version)
+            )
+            // Roll back immediately from the renderer's last authoritative
+            // snapshot, then revalidate through the isolated catalog Worker.
+            // Never recover a Worker failure by scanning SKILL.md on main.
+            console.error("[SkillsPanel] Failed to update disabled skill:", error)
+            if (skillMutationMountedRef.current) {
+              void refreshSkills(true).catch((refreshError) => {
+                console.error("[SkillsPanel] Failed to refresh disabled skills:", refreshError)
+              })
+              toast.error("技能启用状态保存失败，已恢复到保存前状态")
+            }
+          }
+        })
+    },
+    [publishDisabledSkillSnapshot, refreshSkills]
+  )
 
   const handleDeleteSkill = useCallback(
     async (skill: SkillMetadata) => {
@@ -1671,11 +1812,11 @@ export function SkillsPanel(): React.JSX.Element {
         return
       const res = await window.api.skills.delete(skill.path)
       if (res.success) {
-        removeLocalUploadedSkillPathFromStorage(skill.path)
         removeEditedSkillPathFromStorage(skill.path)
+        marketInstalledSourceStorage.removeName(skill.name, "skill")
+        marketInstalledVersionStorage.removeVersion(skill.name, "skill")
         marketInstalledSourceStorage.removeName(skill.name, "orgSkill")
         marketInstalledVersionStorage.removeVersion(skill.name, "orgSkill")
-        reloadLocalUploadedSkillPaths()
         reloadOrgInstalledSkillNames()
         reloadEditedSkillPaths()
         setSelectedSkill(null)
@@ -1686,20 +1827,21 @@ export function SkillsPanel(): React.JSX.Element {
           delete next[getSkillMetadataId(skill)]
           return next
         })
-        window.api.skills.list().then(setSkills).catch(console.error)
-        window.api.skills
-          .getDisabled()
-          .then((list) => setDisabledSkills(new Set(list.map(normalizeSkillId))))
-          .catch(console.error)
+        void refreshSkills(true).catch(console.error)
       } else {
         alert(res.error || "删除失败")
       }
     },
-    [reloadEditedSkillPaths, reloadLocalUploadedSkillPaths, reloadOrgInstalledSkillNames]
+    [
+      refreshSkills,
+      reloadEditedSkillPaths,
+      reloadOrgInstalledSkillNames
+    ]
   )
 
   const builtinSkills = useMemo(() => skills.filter((s) => s.source === "project"), [skills])
   const customSkills = useMemo(() => skills.filter((s) => s.source === "user"), [skills])
+  const customSkillOwnershipReady = marketSkillCatalogReady && currentUserIdCandidatesReady
 
   const resolveMarketInfo = useCallback(
     (skill: SkillMetadata): SkillMarketInfo | undefined => {
@@ -1709,34 +1851,108 @@ export function SkillsPanel(): React.JSX.Element {
     [marketSkillMap]
   )
 
-  const isSkillUploadedInPanel = useCallback(
-    (skill: SkillMetadata | null | undefined): boolean => {
-      if (!skill || skill.source !== "user") return false
-      if (orgInstalledSkillNames.has(normalizeSkillName(skill.name))) return false
-      const localMarked = localUploadedSkillPaths.has(normalizeSkillPathKey(skill.path))
-      if (localMarked) return true
-      if (uploadedSkillNames.has(normalizeSkillName(skill.name))) return true
-      // 历史兜底：无市场同名记录时，仍按“本地上传”处理。
-      return !resolveMarketInfo(skill)
+  const directCustomSkillOwnershipGroup = useCallback(
+    (skill: SkillMetadata | null | undefined): CustomSkillOwnershipGroup | null => {
+      if (!skill || skill.source !== "user") return null
+      if (!customSkillOwnershipReady) return null
+      const normalizedName = normalizeSkillName(skill.name)
+      if (orgInstalledSkillNames.has(normalizedName)) return "org"
+      const marketInfo = marketSkillMap[normalizedName]
+      if (!marketInfo) return "uploaded"
+      return doesSkillMarketInfoBelongToCurrentUser(marketInfo, currentUserIdCandidates)
+        ? "uploaded"
+        : "market"
     },
-    [localUploadedSkillPaths, orgInstalledSkillNames, resolveMarketInfo, uploadedSkillNames]
+    [
+      currentUserIdCandidates,
+      customSkillOwnershipReady,
+      marketSkillMap,
+      orgInstalledSkillNames
+    ]
   )
+
+  const customSkillOwnershipGroups = useMemo(() => {
+    const pathGroup = new Map<string, CustomSkillOwnershipGroup>()
+    const directGroups = new Map<string, CustomSkillOwnershipGroup>()
+
+    for (const skill of customSkills) {
+      const pathKey = getSkillTreePathKey(skill)
+      const directGroup = directCustomSkillOwnershipGroup(skill)
+      if (!pathKey || !directGroup) continue
+      pathGroup.set(pathKey, directGroup)
+      directGroups.set(getSkillMetadataId(skill), directGroup)
+    }
+
+    const next = new Map<string, CustomSkillOwnershipGroup>()
+    const sortedSkills = [...customSkills].sort(
+      (a, b) => getSkillTreePathKey(a).split("/").length - getSkillTreePathKey(b).split("/").length
+    )
+
+    for (const skill of sortedSkills) {
+      const skillId = getSkillMetadataId(skill)
+      const pathKey = getSkillTreePathKey(skill)
+      const directGroup = directGroups.get(skillId)
+      if (!pathKey || !directGroup) continue
+
+      const segments = pathKey.split("/").filter(Boolean)
+      let inheritedGroup: CustomSkillOwnershipGroup | undefined
+      for (let length = segments.length - 1; length > 0; length--) {
+        const ancestorPath = segments.slice(0, length).join("/")
+        const ancestorGroup = pathGroup.get(ancestorPath)
+        if (ancestorGroup) {
+          inheritedGroup = ancestorGroup
+          break
+        }
+      }
+
+      next.set(skillId, inheritedGroup ?? directGroup)
+    }
+
+    return next
+  }, [customSkills, directCustomSkillOwnershipGroup])
+
+  const getCustomSkillOwnershipGroup = useCallback(
+    (skill: SkillMetadata | null | undefined): CustomSkillOwnershipGroup | null => {
+      if (!skill || skill.source !== "user") return null
+      return customSkillOwnershipGroups.get(getSkillMetadataId(skill)) ?? null
+    },
+    [customSkillOwnershipGroups]
+  )
+
+  const isSkillUploadedInPanel = useCallback(
+    (skill: SkillMetadata | null | undefined): boolean =>
+      getCustomSkillOwnershipGroup(skill) === "uploaded",
+    [getCustomSkillOwnershipGroup]
+  )
+
+  /**
+   * 技能更新成功后由 SkillMarketUpdate 组件回调：
+   * 清空旧文件映射、失效缓存并重扫技能目录、清理选中态（技能路径可能已变化）。
+   */
+  const handleSkillUpdated = useCallback(() => {
+    setSkillFilesMap({})
+    void refreshSkills(true).catch(console.error)
+    setSelectedSkill(null)
+    setSelectedFilePath(null)
+    setSelectedFileContent(null)
+  }, [refreshSkills])
 
   const selectedSkillMarketInfo = useMemo(
     () => (selectedSkill ? resolveMarketInfo(selectedSkill) : undefined),
     [resolveMarketInfo, selectedSkill]
   )
   /**
-   * “我自己在 SkillsPanel 上传”的判定：
-   * 优先依赖本地路径标记；其次兜底为“用户技能且市场中无同名项”（历史数据兼容）。
+   * “我上传的技能”的展示归属：
+   * 市场中无同名项，或市场同名项由当前用户上传。
    */
   const selectedSkillUploadedInPanel = useMemo(
     () => isSkillUploadedInPanel(selectedSkill),
     [isSkillUploadedInPanel, selectedSkill]
   )
   const selectedSkillUploadedByMe = useMemo(
-    () => !!selectedSkill && uploadedSkillNames.has(normalizeSkillName(selectedSkill.name)),
-    [selectedSkill, uploadedSkillNames]
+    () =>
+      doesSkillMarketInfoBelongToCurrentUser(selectedSkillMarketInfo, currentUserIdCandidates),
+    [currentUserIdCandidates, selectedSkillMarketInfo]
   )
   const selectedSkillIsEdited = useMemo(
     () => !!selectedSkill && editedSkillPaths.has(normalizeSkillPathKey(selectedSkill.path)),
@@ -1746,29 +1962,32 @@ export function SkillsPanel(): React.JSX.Element {
     () => !!selectedSkillMarketInfo || selectedSkillUploadedByMe,
     [selectedSkillMarketInfo, selectedSkillUploadedByMe]
   )
-  const isMarketInstalledFeaturedSkill = useCallback(
-    (skill: SkillMetadata | null | undefined): boolean => {
-      if (!skill || skill.source !== "user") return false
-      if (isSkillUploadedInPanel(skill)) return false
-      return isFeaturedSkill(resolveMarketInfo(skill))
-    },
-    [isSkillUploadedInPanel, resolveMarketInfo]
-  )
   const selectedSkillHideContent = useMemo(
-    () => isMarketInstalledFeaturedSkill(selectedSkill),
-    [isMarketInstalledFeaturedSkill, selectedSkill]
+    () => !!selectedSkill && selectedSkill.contentOrigin !== "local",
+    [selectedSkill]
   )
   const selectedSkillCanEdit = useMemo(
-    () => !!selectedSkill && selectedSkillUploadedInPanel,
-    [selectedSkill, selectedSkillUploadedInPanel]
+    () => selectedSkill?.contentOrigin === "local",
+    [selectedSkill]
   )
   const selectedSkillShowPublishButton = useMemo(
     () => !!selectedSkill && selectedSkill.source !== "project" && selectedSkillUploadedInPanel,
     [selectedSkill, selectedSkillUploadedInPanel]
   )
   const selectedSkillPublishLabel = "同步到市场"
-  const selectedSkillDeleteDisabledReason = selectedSkillHideContent
-    ? "精品技能是内置技能，不允许删除。你可以点击按钮不启动这个技能。"
+  /**
+   * 归属权门控：是否允许对该技能执行市场更新。
+   * 仅看“是不是我上传/组织级安装”，版本是否有更新的判定由 SkillMarketUpdate 内部完成。
+   */
+  const selectedSkillCanUpdateMarket = useMemo(() => {
+    const skill = selectedSkill
+    if (!skill || skill.source !== "user") return false
+    if (isSkillUploadedInPanel(skill)) return false
+    if (orgInstalledSkillNames.has(normalizeSkillName(skill.name))) return false
+    return true
+  }, [isSkillUploadedInPanel, orgInstalledSkillNames, selectedSkill])
+  const selectedSkillDeleteDisabledReason = selectedSkill?.source === "project"
+    ? "内置技能不允许删除，可以停用。"
     : undefined
 
   const saveSkillFileContent = useCallback(
@@ -1800,10 +2019,8 @@ export function SkillsPanel(): React.JSX.Element {
          * 保存后主动刷新技能列表，保证左侧列表与右侧详情展示的元信息立即一致。
          */
         setSkillFilesMap({})
-        window.api.skills
-          .list()
+        void refreshSkills(true)
           .then((nextSkills) => {
-            setSkills(nextSkills)
             const nextSelected = nextSkills.find((item) => item.path === filePath) || null
             setSelectedSkill(nextSelected)
             if (nextSelected) {
@@ -1815,7 +2032,7 @@ export function SkillsPanel(): React.JSX.Element {
 
       return { success: true }
     },
-    [isSkillUploadedInPanel, selectedFilePath, selectedSkill]
+    [isSkillUploadedInPanel, refreshSkills, selectedFilePath, selectedSkill]
   )
 
   const filterSkillsBySearch = useCallback(
@@ -1839,38 +2056,31 @@ export function SkillsPanel(): React.JSX.Element {
 
   const openPublishDialog = useCallback(
     (skill: SkillMetadata) => {
-      // 已发布过则“更新发布”，否则“一键发布”。
-      const mode: PublishMode = uploadedSkillNames.has(normalizeSkillName(skill.name))
+      const marketInfo = resolveMarketInfo(skill)
+      const mode: PublishMode = doesSkillMarketInfoBelongToCurrentUser(
+        marketInfo,
+        currentUserIdCandidates
+      )
         ? "update"
         : "upload"
       setPublishMode(mode)
       setPublishSkill(skill)
       setPublishDialogOpen(true)
     },
-    [uploadedSkillNames]
+    [currentUserIdCandidates, resolveMarketInfo]
   )
 
   const uploadedCustomSkills = useMemo(
-    () => customSkills.filter((skill) => isSkillUploadedInPanel(skill)),
-    [customSkills, isSkillUploadedInPanel]
+    () => customSkills.filter((skill) => getCustomSkillOwnershipGroup(skill) === "uploaded"),
+    [customSkills, getCustomSkillOwnershipGroup]
   )
   const orgInstalledCustomSkills = useMemo(
-    () =>
-      customSkills.filter(
-        (skill) =>
-          !isSkillUploadedInPanel(skill) &&
-          orgInstalledSkillNames.has(normalizeSkillName(skill.name))
-      ),
-    [customSkills, isSkillUploadedInPanel, orgInstalledSkillNames]
+    () => customSkills.filter((skill) => getCustomSkillOwnershipGroup(skill) === "org"),
+    [customSkills, getCustomSkillOwnershipGroup]
   )
   const marketInstalledCustomSkills = useMemo(
-    () =>
-      customSkills.filter(
-        (skill) =>
-          !isSkillUploadedInPanel(skill) &&
-          !orgInstalledSkillNames.has(normalizeSkillName(skill.name))
-      ),
-    [customSkills, isSkillUploadedInPanel, orgInstalledSkillNames]
+    () => customSkills.filter((skill) => getCustomSkillOwnershipGroup(skill) === "market"),
+    [customSkills, getCustomSkillOwnershipGroup]
   )
 
   const filteredBuiltin = useMemo(
@@ -1890,15 +2100,45 @@ export function SkillsPanel(): React.JSX.Element {
     [filterSkillsBySearch, orgInstalledCustomSkills]
   )
 
+  const visibleSkillGroups = useMemo(() => {
+    const builtin = filteredBuiltin.slice(0, visibleSkillLimit)
+    const uploaded = filteredUploadedCustom.slice(
+      0,
+      Math.max(0, visibleSkillLimit - builtin.length)
+    )
+    const market = filteredMarketInstalledCustom.slice(
+      0,
+      Math.max(0, visibleSkillLimit - builtin.length - uploaded.length)
+    )
+    const org = filteredOrgInstalledCustom.slice(
+      0,
+      Math.max(0, visibleSkillLimit - builtin.length - uploaded.length - market.length)
+    )
+    return {
+      builtin,
+      uploaded,
+      market,
+      org
+    }
+  }, [
+    filteredBuiltin,
+    filteredMarketInstalledCustom,
+    filteredOrgInstalledCustom,
+    filteredUploadedCustom,
+    visibleSkillLimit
+  ])
+  const totalFilteredSkills =
+    filteredBuiltin.length +
+    filteredUploadedCustom.length +
+    filteredMarketInstalledCustom.length +
+    filteredOrgInstalledCustom.length
+
   const openMarketWithSkillSearch = useCallback(
     (skillName: string) => {
       const keyword = skillName.trim()
       setMarketInitialSkillCategory(null)
       setMarketInitialSkillSearchQuery(keyword || null)
-      // 兜底：当 customizeInitialTab 已经是 market 时，先切到 skills 再切回 market，
-      // 保证“更新到市场/发布到市场”后一定触发市场页切换并应用搜索词。
-      setShowCustomizeView(true, "skills")
-      setTimeout(() => setShowCustomizeView(true, "market"), 0)
+      setShowCustomizeView(true, "market")
     },
     [setMarketInitialSkillCategory, setMarketInitialSkillSearchQuery, setShowCustomizeView]
   )
@@ -1959,22 +2199,31 @@ export function SkillsPanel(): React.JSX.Element {
                 </span>
                 <span className="relative">上传技能</span>
               </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="cursor-pointer group relative h-7 flex-1 overflow-hidden rounded-md border-amber-300/55 bg-amber-500/[0.08] px-2 text-xs font-medium text-amber-700 shadow-sm transition-all duration-200 hover:-translate-y-px hover:border-amber-400/70 hover:bg-amber-500/[0.16] hover:shadow-md dark:text-amber-300"
-                onClick={handleOpenRecordSkill}
-                aria-label="录制技能"
-              >
-                <span
-                  aria-hidden="true"
-                  className="pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-amber-400/10 to-amber-400/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
-                />
-                <span className="relative flex size-4 items-center justify-center rounded-full bg-amber-500/15 ring-1 ring-amber-500/25 transition-transform duration-200 group-hover:scale-105">
-                  <Radio className="size-2.5" />
-                </span>
-                <span className="relative">录制技能</span>
-              </Button>
+              <TooltipProvider delayDuration={150}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="cursor-pointer group relative h-7 flex-1 overflow-hidden rounded-md border-amber-300/55 bg-amber-500/[0.08] px-2 text-xs font-medium text-amber-700 shadow-sm transition-all duration-200 hover:-translate-y-px hover:border-amber-400/70 hover:bg-amber-500/[0.16] hover:shadow-md dark:text-amber-300"
+                      onClick={handleOpenRecordSkill}
+                      aria-label="录制技能"
+                    >
+                      <span
+                        aria-hidden="true"
+                        className="pointer-events-none absolute inset-0 bg-gradient-to-r from-transparent via-amber-400/10 to-amber-400/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+                      />
+                      <span className="relative flex size-4 items-center justify-center rounded-full bg-amber-500/15 ring-1 ring-amber-500/25 transition-transform duration-200 group-hover:scale-105">
+                        <Radio className="size-2.5" />
+                      </span>
+                      <span className="relative">录制技能</span>
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-60 text-xs leading-relaxed">
+                    这是合作共建功能，如有问题，请联系王文林
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
             </div>
             <Button
               variant="outline"
@@ -2008,25 +2257,83 @@ export function SkillsPanel(): React.JSX.Element {
         </div>
         <ScrollArea className="flex-1">
           <div className="p-2 space-y-3">
-            <SkillSection
-              title="内置技能"
-              skills={filteredBuiltin}
-              marketSkillMap={marketSkillMap}
-              uploadedSkillNames={uploadedSkillNames}
-              editedSkillPaths={editedSkillPaths}
-              expandedSkills={expandedSkills}
-              skillFilesMap={skillFilesMap}
-              selectedSkill={selectedSkill}
-              expandedDirNodes={expandedDirNodes}
-              disabledSkills={disabledSkills}
-              onToggleSkill={onToggleSkill}
-              onToggleDirNode={toggleDirNode}
-              onSelectFile={onSelectFile}
-            />
+            {skillCatalogLoadState === "loading" && (
+              <div
+                className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground"
+                role="status"
+                aria-live="polite"
+              >
+                <Loader2 className="size-3.5 shrink-0 animate-spin" />
+                <span>{skills.length > 0 ? "正在刷新技能目录…" : "正在加载技能目录…"}</span>
+              </div>
+            )}
+            {skillCatalogLoadState === "error" && (
+              <div
+                className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive"
+                role="alert"
+                title={skillCatalogLoadError ?? undefined}
+              >
+                <AlertCircle className="size-3.5 shrink-0" />
+                <span className="min-w-0 flex-1 truncate">
+                  {skills.length > 0 ? "技能目录刷新失败，当前展示上次结果。" : "技能目录加载失败。"}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 shrink-0 px-2 text-[11px]"
+                  onClick={() => void refreshSkills(true).catch(console.error)}
+                >
+                  重试
+                </Button>
+              </div>
+            )}
+            {skillCatalogLoadState === "ready" && builtinSkills.length === 0 && (
+              <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                <Info className="size-3.5 shrink-0" />
+                <span className="min-w-0 flex-1">当前版本未发现内置技能。</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 shrink-0 px-2 text-[11px]"
+                  onClick={() => void refreshSkills(true).catch(console.error)}
+                >
+                  重新扫描
+                </Button>
+              </div>
+            )}
+            {skillCatalogLoadState === "ready" &&
+              customSkills.length > orgInstalledCustomSkills.length &&
+              !customSkillOwnershipReady && (
+                <div
+                  className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <Loader2 className="size-3.5 shrink-0 animate-spin" />
+                  <span>正在同步应用市场技能归属…</span>
+                </div>
+              )}
+            {builtinSkills.length > 0 && (
+              <SkillSection
+                title="内置技能"
+                skills={visibleSkillGroups.builtin}
+                marketSkillMap={marketSkillMap}
+                uploadedSkillNames={uploadedSkillNames}
+                editedSkillPaths={editedSkillPaths}
+                expandedSkills={expandedSkills}
+                skillFilesMap={skillFilesMap}
+                selectedSkill={selectedSkill}
+                expandedDirNodes={expandedDirNodes}
+                disabledSkills={disabledSkills}
+                onToggleSkill={onToggleSkill}
+                onToggleDirNode={toggleDirNode}
+                onSelectFile={onSelectFile}
+              />
+            )}
             {uploadedCustomSkills.length > 0 && (
               <SkillSection
                 title="我上传的技能"
-                skills={filteredUploadedCustom}
+                skills={visibleSkillGroups.uploaded}
                 marketSkillMap={marketSkillMap}
                 uploadedSkillNames={uploadedSkillNames}
                 editedSkillPaths={editedSkillPaths}
@@ -2041,28 +2348,30 @@ export function SkillsPanel(): React.JSX.Element {
               />
             )}
             {marketInstalledCustomSkills.length > 0 && (
-              <SkillSection
-                title="我从应用市场安装的技能"
-                skills={filteredMarketInstalledCustom}
-                marketSkillMap={marketSkillMap}
-                uploadedSkillNames={uploadedSkillNames}
-                editedSkillPaths={editedSkillPaths}
-                expandedSkills={expandedSkills}
-                skillFilesMap={skillFilesMap}
-                selectedSkill={selectedSkill}
-                expandedDirNodes={expandedDirNodes}
-                disabledSkills={disabledSkills}
-                onToggleSkill={onToggleSkill}
-                onToggleDirNode={toggleDirNode}
-                onSelectFile={onSelectFile}
-                hideFeaturedMarketFiles
-                hideMarketTag
-              />
+              <SkillMarketUpdateProvider onUpdated={handleSkillUpdated}>
+                <SkillSection
+                  title="我从应用市场安装的技能"
+                  skills={visibleSkillGroups.market}
+                  marketSkillMap={marketSkillMap}
+                  uploadedSkillNames={uploadedSkillNames}
+                  editedSkillPaths={editedSkillPaths}
+                  expandedSkills={expandedSkills}
+                  skillFilesMap={skillFilesMap}
+                  selectedSkill={selectedSkill}
+                  expandedDirNodes={expandedDirNodes}
+                  disabledSkills={disabledSkills}
+                  onToggleSkill={onToggleSkill}
+                  onToggleDirNode={toggleDirNode}
+                  onSelectFile={onSelectFile}
+                  hideFeaturedMarketFiles
+                  hideMarketTag
+                />
+              </SkillMarketUpdateProvider>
             )}
             {orgInstalledCustomSkills.length > 0 && (
               <SkillSection
                 title="我安装的组织级技能"
-                skills={filteredOrgInstalledCustom}
+                skills={visibleSkillGroups.org}
                 marketSkillMap={marketSkillMap}
                 uploadedSkillNames={uploadedSkillNames}
                 editedSkillPaths={editedSkillPaths}
@@ -2076,6 +2385,18 @@ export function SkillsPanel(): React.JSX.Element {
                 onSelectFile={onSelectFile}
                 hideMarketTag
               />
+            )}
+            {visibleSkillLimit < totalFilteredSkills && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="w-full text-xs"
+                onClick={() =>
+                  setVisibleSkillLimit((value) => value + SKILL_PLUGIN_CATALOG_RENDER_BATCH)
+                }
+              >
+                加载更多（剩余 {totalFilteredSkills - visibleSkillLimit}）
+              </Button>
             )}
           </div>
         </ScrollArea>
@@ -2105,11 +2426,13 @@ export function SkillsPanel(): React.JSX.Element {
         }
         deleteDisabledReason={selectedSkillDeleteDisabledReason}
         onPublish={
-          selectedSkill && selectedSkillShowPublishButton
+          selectedSkill?.contentOrigin === "local" && selectedSkillShowPublishButton
             ? () => openPublishDialog(selectedSkill)
             : undefined
         }
         publishLabel={selectedSkillPublishLabel}
+        canUpdateMarket={selectedSkillCanUpdateMarket}
+        onUpdated={handleSkillUpdated}
         canEdit={selectedSkillCanEdit}
         hideContentPreview={selectedSkillHideContent}
         onSaveContent={saveSkillFileContent}
@@ -2120,28 +2443,9 @@ export function SkillsPanel(): React.JSX.Element {
       <UploadSkillDialog
         open={uploadDialogOpen}
         onOpenChange={setUploadDialogOpen}
-        onSuccess={(uploadedSkillDirName) => {
+        onSuccess={() => {
           setSkillFilesMap({})
-          window.api.skills
-            .list()
-            .then((nextSkills) => {
-              setSkills(nextSkills)
-              if (!uploadedSkillDirName) return
-              /**
-               * 上传成功后把“目录名（upload 返回）”映射回技能 path，并写入“本面板上传”的来源标记。
-               * 这里用目录名匹配，兼容 frontmatter name 与目录名不完全一致的场景。
-               */
-              const dirNameKey = normalizeDirNameKey(uploadedSkillDirName)
-              const matched = nextSkills.find((item) => {
-                const normalizedDir = getSkillDir(item.path).replace(/\\/g, "/")
-                const dirName = normalizedDir.split("/").filter(Boolean).pop() || ""
-                return normalizeDirNameKey(dirName) === dirNameKey
-              })
-              if (!matched) return
-              markLocalUploadedSkillPathInStorage(matched.path)
-              reloadLocalUploadedSkillPaths()
-            })
-            .catch(console.error)
+          void refreshSkills(true).catch(console.error)
         }}
       />
 
@@ -2155,9 +2459,8 @@ export function SkillsPanel(): React.JSX.Element {
           if (!open) setPublishSkill(null)
         }}
         onSuccess={({ skillName, mode }) => {
-          reloadUploadedSkillNames()
-          void loadMarketSkills()
-          window.api.skills.list().then(setSkills).catch(console.error)
+          notifyMarketPublished("skill")
+          invalidateSkillCatalog()
 
           toast.success(
             mode === "update"
@@ -2215,46 +2518,38 @@ function SkillSection(props: {
   const sectionStyle = useMemo(() => {
     if (title.includes("内置")) {
       return {
-        header:
-          "border-sky-200/70 bg-sky-50/80 text-sky-900 hover:bg-sky-50 dark:border-sky-900/50 dark:bg-sky-950/30 dark:text-sky-100",
-        dot: "bg-sky-500",
-        count:
-          "border-sky-200/80 bg-white/85 text-sky-700 dark:border-sky-800 dark:bg-sky-950/50 dark:text-sky-200"
+        header: "border-status-info/25 bg-status-info/10 text-status-info hover:bg-status-info/15",
+        dot: "bg-status-info",
+        count: "border-status-info/25 bg-background-elevated/85 text-status-info"
       }
     }
     if (title.includes("我上传")) {
       return {
         header:
-          "border-amber-200/70 bg-amber-50/80 text-amber-900 hover:bg-amber-50 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-100",
-        dot: "bg-amber-500",
-        count:
-          "border-amber-200/80 bg-white/85 text-amber-700 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-200"
+          "border-status-warning/25 bg-status-warning/10 text-status-warning hover:bg-status-warning/15",
+        dot: "bg-status-warning",
+        count: "border-status-warning/25 bg-background-elevated/85 text-status-warning"
       }
     }
     if (title.includes("应用市场")) {
       return {
         header:
-          "border-emerald-200/70 bg-emerald-50/80 text-emerald-900 hover:bg-emerald-50 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-100",
-        dot: "bg-emerald-500",
-        count:
-          "border-emerald-200/80 bg-white/85 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200"
+          "border-status-nominal/25 bg-status-nominal/10 text-status-nominal hover:bg-status-nominal/15",
+        dot: "bg-status-nominal",
+        count: "border-status-nominal/25 bg-background-elevated/85 text-status-nominal"
       }
     }
     if (title.includes("组织级")) {
       return {
-        header:
-          "border-violet-200/70 bg-violet-50/80 text-violet-900 hover:bg-violet-50 dark:border-violet-900/50 dark:bg-violet-950/30 dark:text-violet-100",
-        dot: "bg-violet-500",
-        count:
-          "border-violet-200/80 bg-white/85 text-violet-700 dark:border-violet-800 dark:bg-violet-950/50 dark:text-violet-200"
+        header: "border-primary/25 bg-primary/10 text-primary hover:bg-primary/15",
+        dot: "bg-primary",
+        count: "border-primary/25 bg-background-elevated/85 text-primary"
       }
     }
     return {
-      header:
-        "border-border/70 bg-muted/50 text-foreground hover:bg-muted dark:border-border/60 dark:bg-muted/30 dark:text-foreground",
+      header: "border-border/70 bg-muted/50 text-foreground hover:bg-muted",
       dot: "bg-muted-foreground",
-      count:
-        "border-border/70 bg-background text-muted-foreground dark:border-border/60 dark:bg-background/70"
+      count: "border-border/70 bg-background text-muted-foreground"
     }
   }, [title])
   const toggleSkillTreeNode = useCallback((nodeKey: string) => {
@@ -2703,7 +2998,7 @@ function SkillItem(props: {
           {childCount > 0 && (
             <Badge
               variant="outline"
-              className="h-4 gap-1 px-1.5 text-[10px] border-slate-200 text-slate-600 bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:bg-slate-900/40"
+              className="h-4 gap-1 border-border bg-background-interactive px-1.5 text-[10px] text-muted-foreground"
             >
               <Folder className="size-2.5 shrink-0" />
               {childCount}
@@ -2712,7 +3007,7 @@ function SkillItem(props: {
           {isFeatured && (
             <Badge
               variant="outline"
-              className="h-4 gap-1 px-1.5 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
+              className="h-4 gap-1 border-status-warning/25 bg-status-warning/10 px-1.5 text-[10px] text-status-warning"
             >
               <Sparkles className="size-2.5 shrink-0" />
               精品
@@ -2721,16 +3016,23 @@ function SkillItem(props: {
           {hasMarketEntry && !hideMarketTag && (
             <Badge
               variant="outline"
-              className="h-4 gap-1 px-1.5 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
+              className="h-4 gap-1 border-status-nominal/25 bg-status-nominal/10 px-1.5 text-[10px] text-status-nominal"
             >
               <Store className="size-2.5 shrink-0" />
               市场
             </Badge>
           )}
+          {!isFeatured && (
+            <SkillMarketUpdate
+              skill={skill}
+              marketVersion={marketInfo?.version}
+              hasMarketEntry={hasMarketEntry}
+            />
+          )}
           {isEdited && (
             <Badge
               variant="outline"
-              className="h-4 px-1.5 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
+              className="h-4 border-status-warning/25 bg-status-warning/10 px-1.5 text-[10px] text-status-warning"
             >
               已编辑
             </Badge>
@@ -2746,7 +3048,7 @@ function SkillItem(props: {
         >
           {hideFileTree ? (
             <div className="pl-7 pr-2 py-2 text-xs text-muted-foreground">
-              精品技能不支持查看，可以直接使用。
+              内容受保护，可直接使用。仅自己上传的原始技能支持查看和在线编辑。
             </div>
           ) : treeNodes.length > 0 ? (
             <SkillFileTree
@@ -2845,6 +3147,8 @@ export function SkillDetail(props: {
   deleteDisabledReason?: string
   onPublish?: () => void
   publishLabel?: string
+  canUpdateMarket?: boolean
+  onUpdated?: () => void
   canEdit?: boolean
   onSaveContent?: (filePath: string, content: string) => Promise<SaveSkillFileResult>
   isEdited?: boolean
@@ -2867,6 +3171,8 @@ export function SkillDetail(props: {
     deleteDisabledReason,
     onPublish,
     publishLabel = "发布到市场",
+    canUpdateMarket = false,
+    onUpdated,
     canEdit = false,
     onSaveContent,
     isEdited = false,
@@ -2949,11 +3255,15 @@ export function SkillDetail(props: {
   const category = getSkillCategory(skill, marketInfo)
   const description = marketInfo?.description || skill.description || "暂无描述"
   const skillFrontmatterVersion = skill.metadata?.version?.trim() || ""
-  const resolvedSkillVersion = skillFrontmatterVersion || skill.version || DEFAULT_SKILL_VERSION
+  // 兼容用户填写 v1.0.1 / V1.0.1 / 1.0.1，统一展示为小写 v 前缀
+  const normalizedFrontmatterVersion = skillFrontmatterVersion.replace(/^[vV]+/, "")
+  const resolvedSkillVersion = skillFrontmatterVersion
+    ? `v${normalizedFrontmatterVersion}`
+    : skill.version || DEFAULT_SKILL_VERSION
   const skillVersionMissingInFrontmatter = !skillFrontmatterVersion
   const skillVersionTooltip = skillVersionMissingInFrontmatter
     ? `当前没有在 SKILL.md frontmatter 里找到 version，所以这里显示的是默认值 ${DEFAULT_SKILL_VERSION}。`
-    : "这个值直接读取自 SKILL.md frontmatter 里的 version 字段。"
+    : "这个值直接读取自 SKILL.md frontmatter 里的 version 字段（已统一为小写 v 前缀）。"
   const isFeatured = isFeaturedSkill(marketInfo)
   const isMarkdown = !!selectedFilePath && /\.md$/i.test(selectedFilePath)
   const previewContent =
@@ -3001,7 +3311,7 @@ export function SkillDetail(props: {
                     className={cn(publishButtonClassName, "group shrink-0")}
                     onClick={onPublish}
                   >
-                    <span className="flex size-4 items-center justify-center rounded-full bg-white/20 ring-1 ring-white/30 transition-transform duration-200 group-hover:scale-105">
+                    <span className="flex size-4 items-center justify-center rounded-full bg-primary-foreground/20 ring-1 ring-primary-foreground/30 transition-transform duration-200 group-hover:scale-105">
                       <CloudUpload className="size-2.5" />
                     </span>
                     {publishLabel}
@@ -3015,7 +3325,7 @@ export function SkillDetail(props: {
                 {isFeatured && (
                   <Badge
                     variant="outline"
-                    className="h-5 gap-1 px-2 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
+                    className="h-5 gap-1 border-status-warning/25 bg-status-warning/10 px-2 text-[10px] text-status-warning"
                   >
                     <Sparkles className="size-3 shrink-0" />
                     精品
@@ -3024,16 +3334,23 @@ export function SkillDetail(props: {
                 {hasMarketEntry && (
                   <Badge
                     variant="outline"
-                    className="h-5 gap-1 px-2 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
+                    className="h-5 gap-1 border-status-nominal/25 bg-status-nominal/10 px-2 text-[10px] text-status-nominal"
                   >
                     <Store className="size-3 shrink-0" />
                     市场
                   </Badge>
                 )}
+                {!isFeatured && (
+                  <SkillMarketUpdate
+                    skill={skill}
+                    marketVersion={marketInfo?.version}
+                    hasMarketEntry={hasMarketEntry}
+                  />
+                )}
                 {isEdited && (
                   <Badge
                     variant="outline"
-                    className="h-5 px-2 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
+                    className="h-5 border-status-warning/25 bg-status-warning/10 px-2 text-[10px] text-status-warning"
                   >
                     已编辑
                   </Badge>
@@ -3046,8 +3363,8 @@ export function SkillDetail(props: {
                         className={cn(
                           "h-5 gap-1 px-2 text-[10px] cursor-help",
                           skillVersionMissingInFrontmatter
-                            ? "border-amber-200 text-amber-800 bg-amber-50"
-                            : "border-sky-200 text-sky-700 bg-sky-50"
+                            ? "border-status-warning/25 bg-status-warning/10 text-status-warning"
+                            : "border-status-info/25 bg-status-info/10 text-status-info"
                         )}
                       >
                         <GitBranch className="size-3 shrink-0" />
@@ -3068,6 +3385,16 @@ export function SkillDetail(props: {
             </div>
             {!hideActions && (
               <div className="flex items-center gap-1.5 shrink-0">
+                {canUpdateMarket && !isFeatured && (
+                  <SkillMarketUpdate
+                    variant="button"
+                    skill={skill}
+                    marketVersion={marketInfo?.version}
+                    hasMarketEntry={hasMarketEntry}
+                    canUpdate
+                    onUpdated={onUpdated}
+                  />
+                )}
                 {canEditCurrentFile && !isEditing && (
                   <Button
                     variant="outline"
@@ -3175,13 +3502,13 @@ export function SkillDetail(props: {
                 </div>
               </div>
               {skillVersionMissingInFrontmatter && (
-                <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-relaxed text-amber-900">
-                  <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-700" />
+                <div className="flex items-start gap-2 rounded-lg border border-status-warning/25 bg-status-warning/10 px-3 py-2.5 text-xs leading-relaxed text-status-warning">
+                  <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-status-warning-foreground" />
                   <p>
                     当前没有在{" "}
-                    <code className="rounded bg-amber-100 px-1">SKILL.md frontmatter</code> 里找到{" "}
-                    <code className="rounded bg-amber-100 px-1">version</code>，系统当前按{" "}
-                    <code className="rounded bg-amber-100 px-1">{DEFAULT_SKILL_VERSION}</code>{" "}
+                    <code className="rounded bg-status-warning/15 px-1">SKILL.md frontmatter</code> 里找到{" "}
+                    <code className="rounded bg-status-warning/15 px-1">version</code>，系统当前按{" "}
+                    <code className="rounded bg-status-warning/15 px-1">{DEFAULT_SKILL_VERSION}</code>{" "}
                     处理。建议补上 version，方便发布、追踪和版本识别。
                   </p>
                 </div>
@@ -3193,8 +3520,8 @@ export function SkillDetail(props: {
 
       {hideContentPreview ? (
         <div className="flex-1 min-h-0 p-4">
-          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-            精品技能不支持查看，可以直接使用。
+          <div className="rounded-lg border border-status-warning/25 bg-status-warning/10 px-4 py-3 text-sm text-status-warning">
+            内容受保护，可直接使用。仅自己上传的原始技能支持查看和在线编辑。
           </div>
         </div>
       ) : isEditing && canEditCurrentFile ? (
@@ -3232,11 +3559,11 @@ export function SkillDetail(props: {
                   <iframe
                     title={selectedFilePath ?? "pdf preview"}
                     src={binaryDataUrl}
-                    className="h-full w-full rounded-md border border-border bg-white"
+                    className="h-full w-full rounded-md border border-border bg-background-elevated"
                   />
                 </div>
               ) : previewKind === "html" ? (
-                <div className="h-[80vh] min-h-[500px] rounded-md border border-border overflow-hidden bg-white">
+                <div className="html-preview-light-canvas h-[80vh] min-h-[500px] overflow-hidden rounded-md border border-border">
                   <iframe
                     title={selectedFilePath ?? "html preview"}
                     srcDoc={content ?? ""}
@@ -3249,8 +3576,19 @@ export function SkillDetail(props: {
                   {content}
                 </pre>
               ) : (
-                <div className="streaming-markdown text-sm leading-relaxed">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{previewContent ?? ""}</ReactMarkdown>
+                <div className="streaming-markdown text-sm leading-relaxed overflow-x-auto">
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      table: ({ children }) => (
+                        <div className="streaming-markdown-table-wrap my-4 overflow-x-auto">
+                          <table className="w-full border-collapse">{children}</table>
+                        </div>
+                      )
+                    }}
+                  >
+                    {previewContent ?? ""}
+                  </ReactMarkdown>
                 </div>
               )}
             </div>

@@ -48,7 +48,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true
+      () => true
     )
 
     const result = await orchestrator.execute(
@@ -73,7 +73,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true
+      () => true
     )
 
     const result = await orchestrator.execute("git push --force", "C:/ai/CmbCoworkAgent", "none")
@@ -97,7 +97,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      false
+      () => false
     )
 
     const result = await orchestrator.execute("git push --force", "C:/ai/CmbCoworkAgent", "none")
@@ -106,6 +106,30 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     expect(result.output).toContain("Command rejected")
     expect(rawExecute).not.toHaveBeenCalled()
     expect(requestApproval).toHaveBeenCalledTimes(1)
+  })
+
+  it("marks ordinary shell approval requests as execute operations", async () => {
+    const rawExecute = vi.fn<RawExecuteFn>()
+    const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+      type: "reject",
+      tool_call_id: "test"
+    } satisfies ApprovalDecision)
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      () => false
+    )
+    const command = "custom-risky-command --inspect"
+
+    await orchestrator.execute(command, process.cwd(), "none")
+
+    expect(requestApproval).toHaveBeenCalledTimes(1)
+    expect(requestApproval.mock.calls[0][0]).toMatchObject({
+      operation: "execute",
+      command
+    })
+    expect(rawExecute).not.toHaveBeenCalled()
   })
 
   it("reports push-specific cwd validation errors for routed git push commands", async () => {
@@ -119,7 +143,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      false
+      () => false
     )
     const cwd = process.cwd()
     const missingGitCwd = path.join(cwd, ".missing-git-push-cwd-for-test")
@@ -141,7 +165,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true,
+      () => true,
       false,
       false
     )
@@ -170,7 +194,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      false
+      () => false
     )
 
     const result = await orchestrator.execute(
@@ -199,7 +223,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true,
+      () => true,
       false,
       false
     )
@@ -240,6 +264,39 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     expect(requestApproval).toHaveBeenCalledTimes(1)
   })
 
+  it("reads the latest global YOLO state for each operation", async () => {
+    let yoloMode = false
+    const rawExecute = vi.fn<RawExecuteFn>().mockResolvedValue({
+      output: "push ok",
+      exitCode: 0,
+      truncated: false
+    })
+    const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+      type: "reject",
+      tool_call_id: "force-push"
+    })
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      () => yoloMode
+    )
+
+    const rejected = await orchestrator.execute("git push --force", process.cwd(), "none")
+    expect(rejected.exitCode).toBe(1)
+    expect(requestApproval).toHaveBeenCalledTimes(1)
+    expect(rawExecute).not.toHaveBeenCalled()
+
+    yoloMode = true
+    const approved = await orchestrator.execute("git push --force", process.cwd(), "none")
+    expect(approved.exitCode).toBe(0)
+    expect(rawExecute).toHaveBeenCalledTimes(1)
+
+    yoloMode = false
+    await orchestrator.execute("git push --force", process.cwd(), "none")
+    expect(requestApproval).toHaveBeenCalledTimes(2)
+  })
+
   it("rejects a bare commit instead of restaging unstaged hunks from indexed files", async () => {
     const rawExecute = vi.fn<RawExecuteFn>()
     const requestApproval = vi.fn<RequestApprovalFn>()
@@ -247,7 +304,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      false,
+      () => false,
       false,
       true,
       process.cwd()
@@ -274,7 +331,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      false,
+      () => false,
       false,
       true,
       workspace
@@ -313,7 +370,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
         new ApprovalStore(),
         rawExecute,
         requestApproval,
-        false,
+        () => false,
         false,
         true,
         workspace
@@ -352,7 +409,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
         new ApprovalStore(),
         rawExecute,
         requestApproval,
-        false,
+        () => false,
         false,
         true,
         workspace
@@ -387,7 +444,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      false,
+      () => false,
       false,
       true,
       workspace
@@ -419,7 +476,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
         new ApprovalStore(),
         rawExecute,
         requestApproval,
-        false,
+        () => false,
         false,
         true,
         workspace
@@ -447,7 +504,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true
+      () => true
     )
 
     const result = await orchestrator.execute(
@@ -462,6 +519,181 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     expect(requestApproval).not.toHaveBeenCalled()
   })
 
+  it.each([false, true])("preserves Git safety decisions when YOLO is %s", async (yolo) => {
+    const rawExecute = vi.fn<RawExecuteFn>().mockResolvedValue({
+      output: "rewrite completed",
+      exitCode: 0,
+      truncated: false
+    })
+    const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+      type: "reject",
+      tool_call_id: "test"
+    } satisfies ApprovalDecision)
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      () => yolo
+    )
+    const cwd = process.cwd()
+    const rewrite = "node <<'EOF'\nconst seenKeys = new Set()\nseenKeys.add('input')\nEOF"
+
+    const ordinary = await orchestrator.execute(rewrite, cwd, "none", "posix")
+    expect(ordinary.exitCode).toBe(yolo ? 0 : 1)
+    expect(rawExecute).toHaveBeenCalledTimes(yolo ? 1 : 0)
+    expect(requestApproval).toHaveBeenCalledTimes(yolo ? 0 : 1)
+    rawExecute.mockClear()
+    requestApproval.mockClear()
+    for (const command of [
+      "git add -f .env",
+      "for c in HEAD; do git add -f .env; done",
+      'for c in HEAD; do echo "$(git add -f .env)"; done',
+      'for c in HEAD; do bash -c "git add -f .env"; done',
+      "sh -c 'for c in HEAD; do bash -c \"git add -f .env\"; done'",
+      "for c in HEAD; do git show --ext-diff $c; done",
+      "for c in add; do git $c -f .env; done",
+      'rg $options "git add -f" src',
+      "git diff $options -- src/*",
+      "cat > /tmp/force.sh <<'EOF'\ngit add -f .env\nEOF\nsh /tmp/force.sh",
+      "cat > /tmp/force.sh <<'EOF'\ngit add -f .env\nEOF\n$RUN /tmp/force.sh",
+      "node <<'EOF'\nrequire('node:child_process').execSync('git add -f .env')\nEOF",
+      "python3 <<'PY'\nimport subprocess\nsubprocess.run(['git', 'add', '-f', '.env'])\nPY",
+      "$BIN add = -f .env",
+      "$BIN add.foo -f .env",
+      "$BIN foo.add -f .env",
+      "$BIN .add -f .env",
+      "$BIN seenKeys.add -f .env",
+      "$BIN const add -f .env",
+      "$BIN var commit",
+      "/cmd/g?t.exe foo.add -f .env",
+      "sudo /cmd/g?t.exe foo.add -f .env",
+      "( /cmd/g?t.exe foo.add -f .env )"
+    ]) {
+      const blocked = await orchestrator.execute(command, cwd, "none", "posix")
+      expect(blocked.exitCode).toBe(1)
+      expect(blocked.output).toContain("Command forbidden:")
+    }
+    for (const { command, shellSyntax } of [
+      { command: 'rg @options "git add -f" src', shellSyntax: "powershell" as const },
+      { command: "git diff @options -- src/*", shellSyntax: "powershell" as const },
+      { command: "%BIN% commit.foo", shellSyntax: "cmd" as const },
+      { command: "%BIN% const add -f .env", shellSyntax: "cmd" as const },
+      {
+        command: "Write-Output $(& $exe const add -f .env)",
+        shellSyntax: "powershell" as const
+      },
+      { command: "& $exe foo.add -f .env", shellSyntax: "powershell" as const }
+    ]) {
+      const blocked = await orchestrator.execute(command, cwd, "none", shellSyntax)
+      expect(blocked.exitCode).toBe(1)
+      expect(blocked.output).toContain("Command forbidden:")
+    }
+    const denied = await orchestrator.execute("$BIN add = -f .env", cwd, "none", "posix")
+    expect(denied.exitCode).toBe(1)
+    expect(denied.output).toContain("cannot verify Git operations safely")
+    expect(denied.output).not.toContain("forced git add")
+    expect(rawExecute).not.toHaveBeenCalled()
+    expect(requestApproval).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])("executes ordinary Git-text commands when YOLO is %s", async (yolo) => {
+    const rawExecute = vi.fn<RawExecuteFn>().mockResolvedValue({
+      output: "ordinary command completed",
+      exitCode: 0,
+      truncated: false
+    })
+    const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+      type: "approve",
+      tool_call_id: "test"
+    } satisfies ApprovalDecision)
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      () => yolo
+    )
+    for (const { command, shellSyntax, needsReview } of [
+      {
+        command: "node <<'EOF'\nconst $seen = new Set()\n$seen.add('input')\nEOF",
+        shellSyntax: "posix" as const,
+        needsReview: true
+      },
+      {
+        command: "cat <<'EOF'\ngit add -f .env\ngit commit -m example\nEOF",
+        shellSyntax: "posix" as const,
+        needsReview: true
+      },
+      {
+        command: 'echo "git add -f $file"',
+        shellSyntax: "posix" as const,
+        needsReview: true
+      },
+      {
+        command: 'Write-Output "git add -f $file"',
+        shellSyntax: "powershell" as const,
+        needsReview: true
+      },
+      {
+        command: "git diff -- src/*",
+        shellSyntax: "posix" as const,
+        needsReview: false
+      },
+      {
+        command: "git status --short $path",
+        shellSyntax: "powershell" as const,
+        needsReview: true
+      },
+      {
+        command:
+          "cd /Users/chenqiang/Desktop/projects/CmbCoworkAgent && " +
+          'for c in HEAD main; do echo "##### $c $(git log -1 --format=%s $c)"; ' +
+          'git show --stat --format="  author=%an date=%ad" $c | head -60; ' +
+          "echo; done 2>&1 | head -400",
+        shellSyntax: "posix" as const,
+        needsReview: true
+      },
+      {
+        command: 'for c in HEAD; do echo "git commit -m example; git add -f .env"; done',
+        shellSyntax: "posix" as const,
+        needsReview: true
+      }
+    ]) {
+      rawExecute.mockClear()
+      requestApproval.mockClear()
+      const result = await orchestrator.execute(command, process.cwd(), "none", shellSyntax)
+      expect(result.exitCode).toBe(0)
+      expect(rawExecute).toHaveBeenCalledTimes(1)
+      expect(requestApproval).toHaveBeenCalledTimes(!yolo && needsReview ? 1 : 0)
+      if (!yolo && needsReview) {
+        expect(requestApproval.mock.calls[0][0].operation).toBe("execute")
+      }
+    }
+  })
+
+  it("lets the user reject a read-only POSIX loop without executing it", async () => {
+    const rawExecute = vi.fn<RawExecuteFn>()
+    const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+      type: "reject",
+      tool_call_id: "test"
+    } satisfies ApprovalDecision)
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      () => false
+    )
+    const result = await orchestrator.execute(
+      'for c in HEAD; do echo "$(git log -1 --format=%s $c)"; done',
+      process.cwd(),
+      "none",
+      "posix"
+    )
+    expect(result.output).toContain("Command rejected")
+    expect(result.output).not.toContain("Command forbidden")
+    expect(requestApproval).toHaveBeenCalledOnce()
+    expect(rawExecute).not.toHaveBeenCalled()
+  })
+
   it("uses the actual POSIX shell syntax before the YOLO raw-execute shortcut", async () => {
     const rawExecute = vi.fn<RawExecuteFn>()
     const requestApproval = vi.fn<RequestApprovalFn>()
@@ -469,7 +701,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true
+      () => true
     )
 
     const result = await orchestrator.execute(
@@ -492,7 +724,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true
+      () => true
     )
 
     const result = await orchestrator.execute(
@@ -518,7 +750,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true
+      () => true
     )
     const command = String.raw`echo \" ; git commit -m x -- package.json ; echo \"`
 

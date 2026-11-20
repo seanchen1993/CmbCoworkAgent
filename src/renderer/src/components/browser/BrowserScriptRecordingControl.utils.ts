@@ -5,7 +5,7 @@ import type {
 
 export function getRecordingLabel(source: BrowserRecordingSource): string {
   void source
-  return "录制脚本"
+  return "操作录制"
 }
 
 export function isRecordingSessionActive(session: BrowserRecordingSession): boolean {

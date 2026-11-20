@@ -1,5 +1,20 @@
 import { marketApi, type MarketItem } from "../api/market"
 import { getDefaultRange } from "../components/dashboard/use-dashboard"
+import {
+  normalizeUploaderProfileField,
+  parseUploaderIdentity,
+  type UploaderProfileInfo
+} from "../../../shared/market-item-visibility"
+
+export {
+  buildUploaderIdCandidates,
+  getUploaderIdCandidates,
+  normalizeUploaderMapKey,
+  normalizeUploaderProfileField,
+  parseUploaderIdentity,
+  type ParsedUploaderIdentity,
+  type UploaderProfileInfo
+} from "../../../shared/market-item-visibility"
 
 export type SkillSortMode = "default" | "calls_desc" | "calls_asc" | "users_desc" | "users_asc"
 
@@ -13,73 +28,6 @@ export const SCENE_CATEGORY_OPTIONS = [
 ] as const
 
 export const DEFAULT_SCENE_CATEGORY = SCENE_CATEGORY_OPTIONS[0]
-
-export interface UploaderProfileInfo {
-  sapId: string
-  userName: string
-  orgName: string
-}
-
-export interface ParsedUploaderIdentity extends UploaderProfileInfo {
-  raw: string
-  segments: string[]
-}
-
-export function normalizeUploaderProfileField(value?: string): string {
-  const normalized = String(value || "").trim()
-  if (!normalized) return ""
-  if (normalized === "未知用户" || normalized === "未知部门" || normalized.toLowerCase() === "unknown") {
-    return ""
-  }
-  return normalized
-}
-
-export function normalizeUploaderMapKey(rawUserId?: string): string {
-  return String(rawUserId || "").trim()
-}
-
-export function parseUploaderIdentity(rawUserId?: string): ParsedUploaderIdentity | null {
-  const raw = String(rawUserId || "").trim()
-  if (!raw) return null
-  const segments = raw
-    .replace(/／/g, "/")
-    .split("/")
-    .map((segment) => segment.trim())
-    .filter(Boolean)
-  if (segments.length === 0) return null
-
-  return {
-    raw,
-    segments,
-    sapId: segments[0] || "",
-    userName: normalizeUploaderProfileField(segments[1]),
-    orgName: normalizeUploaderProfileField(segments.slice(2).join(" / "))
-  }
-}
-
-export function buildUploaderIdCandidates(rawUserIdOrSapId?: string): string[] {
-  const parsed = parseUploaderIdentity(rawUserIdOrSapId)
-  const baseId = normalizeUploaderMapKey(parsed?.sapId || rawUserIdOrSapId)
-  if (!baseId) return []
-
-  const candidates = new Set<string>([baseId])
-  if (/^\d{6}$/.test(baseId)) {
-    candidates.add(`80${baseId}`)
-  }
-  if (/^80\d{6}$/.test(baseId)) {
-    candidates.add(baseId.slice(2))
-  }
-  return Array.from(candidates)
-}
-
-export function getUploaderIdCandidates(rawUserId?: string): string[] {
-  const parsed = parseUploaderIdentity(rawUserId)
-  return [
-    rawUserId?.trim(),
-    parsed?.sapId,
-    ...buildUploaderIdCandidates(parsed?.sapId || rawUserId)
-  ].filter((value): value is string => Boolean(value))
-}
 
 export function isCompleteUploaderUserId(rawUserId?: string): boolean {
   const parsed = parseUploaderIdentity(rawUserId)
@@ -192,7 +140,7 @@ export function normalizeSkillMetricKey(rawName?: string): string {
   const base = String(rawName || "").trim().replace(/^\$/, "")
   if (!base) return ""
   // Trace 中 usedSkills 可能是 `${name}-${version}`，统一还原成 skill name。
-  return base.replace(/-v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/i, "").trim().toLowerCase()
+  return base.replace(/-v?\d+(?:\.\d+){0,3}(?:[-+][0-9A-Za-z.-]+)?$/i, "").trim().toLowerCase()
 }
 
 /**

@@ -1,6 +1,12 @@
 import { readFileSync } from "fs"
 import { resolve } from "path"
 import { describe, expect, it } from "vitest"
+import ts from "typescript"
+import {
+  configureAgentToolStrategy,
+  getAgentToolStrategy,
+  isAgentToolStrategy
+} from "./agent-runtime-limits"
 
 const readRepositoryFile = (path: string): string =>
   readFileSync(resolve(process.cwd(), path), "utf8")
@@ -22,6 +28,74 @@ describe("agent runtime settings integration", () => {
   const customizeView = readRepositoryFile(
     "src/renderer/src/components/customize/CustomizeView.tsx"
   )
+
+  it("validates the actual tool-strategy IPC handler and restricts it to the main window", () => {
+    const registration = sourceBetween(
+      mainProcess,
+      "ipcMain.handle(\n      AGENT_TOOL_STRATEGY_SET_CHANNEL,",
+      "ipcMain.on(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL"
+    )
+    let handler: (event: { sender: { id: number } }, value: unknown) => unknown
+    let persisted: unknown
+    const compiled = ts.transpile(registration, { target: ts.ScriptTarget.ES2022 })
+    new Function(
+      "ipcMain",
+      "AGENT_TOOL_STRATEGY_SET_CHANNEL",
+      "mainWindow",
+      "isAgentToolStrategy",
+      "setStoredAgentToolStrategy",
+      "configureAgentToolStrategy",
+      "getAgentGraphRecursionLimit",
+      "getWorkflowWorktreeTimeoutMinutes",
+      "getWorkflowWorktreeRemoveTimeoutMinutes",
+      compiled
+    )(
+      {
+        handle: (_channel: string, fn: typeof handler) => {
+          handler = fn
+        }
+      },
+      "app:set-agent-tool-strategy",
+      { isDestroyed: () => false, webContents: { id: 7 } },
+      isAgentToolStrategy,
+      (value: unknown) => {
+        persisted = value
+        return value
+      },
+      configureAgentToolStrategy,
+      () => 2000,
+      () => 3,
+      () => 1
+    )
+    try {
+      expect(() => handler!({ sender: { id: 8 } }, "shell-first")).toThrow("main window")
+      expect(() => handler!({ sender: { id: 7 } }, "bogus")).toThrow("Invalid")
+      expect(persisted).toBeUndefined()
+      expect(getAgentToolStrategy()).toBe("standard")
+      expect(handler!({ sender: { id: 7 } }, "shell-first")).toEqual({
+        toolStrategy: "shell-first",
+        recursionLimit: 2000,
+        workflowWorktreeTimeoutMinutes: 3,
+        workflowWorktreeRemoveTimeoutMinutes: 1
+      })
+      expect(persisted).toBe("shell-first")
+      expect(getAgentToolStrategy()).toBe("shell-first")
+    } finally {
+      configureAgentToolStrategy("standard")
+    }
+    const runtimeHandlers = sourceBetween(
+      mainProcess,
+      "ipcMain.handle(AGENT_RUNTIME_SETTINGS_GET_CHANNEL",
+      "ipcMain.on(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL"
+    )
+    expect(runtimeHandlers.match(/toolStrategy: getAgentToolStrategy\(\)/g)).toHaveLength(4)
+    expect(preload).toContain("setAgentToolStrategy: (value: AgentToolStrategy)")
+    expect(preloadTypes).toContain("setAgentToolStrategy: (value: AgentToolStrategy)")
+    expect(generalPanel).toContain("下次运行生效，当前任务不受影响")
+    expect(generalPanel.indexOf("await window.electron.setAgentToolStrategy(value)")).toBeLessThan(
+      generalPanel.indexOf("setToolStrategy(settings.toolStrategy)")
+    )
+  })
 
   it("validates unknown renderer input before persisting or applying it", () => {
     expect(mainProcess).toContain("(event, value: unknown): AgentRuntimeSettings")
@@ -108,7 +182,7 @@ describe("agent runtime settings integration", () => {
     )
     expect(mergeFinalization).toContain("operationTimeoutMs: number")
     expect(mergeFinalization).toContain("signal?: AbortSignal")
-    expect(mergeFinalization).toContain("operationTimeoutMs,\n      signal")
+    expect(mergeFinalization).toMatch(/operationTimeoutMs,\r?\n\s+signal/)
 
     const merge = sourceBetween(
       worktreeService,
@@ -118,11 +192,11 @@ describe("agent runtime settings integration", () => {
     expect(merge).toContain("const operationTimeoutMs = getWorkflowWorktreeTimeoutMs()")
     expect(merge.match(/\boperationTimeoutMs\b/g)?.length ?? 0).toBeGreaterThan(10)
     expect(merge).not.toMatch(/git\(record\.sourceRoot, \["write-tree"\]\)/)
-    expect(merge).toContain("operationTimeoutMs,\n          input.signal")
+    expect(merge).toMatch(/operationTimeoutMs,\r?\n\s+input\.signal/)
 
     const runtime = readRepositoryFile("src/main/agent/runtime.ts")
-    expect(runtime).toContain(
-      "timeout: options.worktreeIsolation ? getWorkflowWorktreeTimeoutMs() : 60_000"
+    expect(runtime).toMatch(
+      /timeout:\s*managedExecution\s*\?\s*MANAGED_EXECUTE_TIMEOUT_MS\s*:\s*options\.worktreeIsolation\s*\?\s*getWorkflowWorktreeTimeoutMs\(\)\s*:\s*60_000/
     )
   })
 
@@ -136,14 +210,22 @@ describe("agent runtime settings integration", () => {
       "src/main/agent/runtime.ts",
       "src/main/agent/workflow/subagent.ts",
       "src/main/ipc/agent.ts",
-      "src/main/services/chatx.ts",
+      "src/main/services/im/remote-runner.ts",
       "src/main/services/heartbeat.ts",
       "src/main/services/scheduler.ts"
-    ].map(readRepositoryFile)
+    ]
 
-    for (const source of runtimeOwners) {
-      expect(source).toContain("recursionLimit: getAgentGraphRecursionLimit()")
-      expect(source).not.toMatch(/recursionLimit:\s*(?:2000|2_000)/)
+    for (const path of runtimeOwners) {
+      const sites = (readRepositoryFile(path).match(/recursionLimit:[^\r\n]*/g) ?? []).map((site) =>
+        site.trim().replace(/,$/, "")
+      )
+      expect(sites.length, `${path}: 找不到 recursionLimit 调用点`).toBeGreaterThan(0)
+      // 逐个调用点断言，而不是「文件里存在一处 getter」。agent.ts 有 invoke /
+      // resume / interrupt 三处，40faca27 合并时前两处被带回硬编码 1000、第三处
+      // 仍是 getter，旧写法的 toContain 照样通过；只禁 2000 字面量也拦不住 1000。
+      for (const site of sites) {
+        expect(site, path).toBe("recursionLimit: getAgentGraphRecursionLimit()")
+      }
     }
   })
 })

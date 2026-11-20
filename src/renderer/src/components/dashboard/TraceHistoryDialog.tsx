@@ -9,8 +9,10 @@ import {
   Clock,
   Code2,
   Coins,
+  Copy,
   Cpu,
   Download,
+  Fingerprint,
   Gauge,
   Hash,
   Info,
@@ -22,6 +24,7 @@ import {
   Timer,
   Wrench
 } from "lucide-react"
+import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -39,6 +42,9 @@ import type {
   DashboardTraceTriggerScope,
   DashboardTraceViewMode
 } from "./use-dashboard"
+import { unwrapThreadTracesResponse } from "./thread-traces-response"
+import { DrilldownArrow } from "./DrilldownArrow"
+import { ThreadSkillUsageMetric } from "./ThreadSkillUsageMetric"
 
 function fmtDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`
@@ -397,7 +403,7 @@ function outcomeLabel(outcome: string): string {
   if (outcome === "success") return "成功"
   if (outcome === "error") return "错误"
   if (outcome === "cancelled") return "取消"
-  if (outcome === "unknown") return "未定"
+  if (outcome === "unknown") return "未确认完成"
   return outcome || "未知"
 }
 
@@ -407,7 +413,7 @@ function outcomeClass(outcome: string): string {
   if (outcome === "error") return "bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/30"
   if (outcome === "unknown")
     return "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30"
-  return "bg-zinc-500/15 text-zinc-600 dark:text-zinc-400 border-zinc-500/20"
+  return "border-border bg-muted text-muted-foreground"
 }
 
 function shortTraceId(value?: string): string {
@@ -453,11 +459,62 @@ function traceDisplayClass(trace: DashboardTraceDetail): string {
   return "border-border bg-background text-muted-foreground"
 }
 
+/**
+ * 复制完整 ID。列表里 threadId / traceId 都是截断显示的，而排查线上问题时几乎
+ * 一定要拿完整值去 ES 里查，肉眼抄不出来。
+ */
+function CopyIdButton({
+  value,
+  label,
+  className
+}: {
+  value: string
+  label: string
+  className?: string
+}): React.JSX.Element {
+  const handleCopy = async (event: React.MouseEvent): Promise<void> => {
+    // 这些按钮嵌在可点击的卡片里，不拦住会顺手切换选中项。
+    event.stopPropagation()
+    try {
+      await navigator.clipboard.writeText(value)
+      toast.success(`已复制${label}`)
+    } catch {
+      toast.error("复制失败")
+    }
+  }
+  return (
+    // 本文件的 Tooltip 都各自带 Provider（见 InfoHint / SkillCodeStat）——
+    // ui/tooltip 的 Tooltip 是裸 Radix Root，没有 Provider 祖先会直接抛错。
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            className={cn(
+              "shrink-0 text-muted-foreground/60 transition-colors hover:text-foreground",
+              className
+            )}
+            onClick={(event) => void handleCopy(event)}
+            aria-label={`复制${label}`}
+          >
+            <Copy className="size-3" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top">
+          <span className="font-mono text-[10px]">{value}</span>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
 function inferredToolCount(trace: DashboardTraceDetail): number {
   if (trace.totalToolCalls > 0) return trace.totalToolCalls
   const metadataToolCount = (trace.nodes ?? []).reduce((count, node) => {
     const names = node.metadata?.toolNames
-    return count + (Array.isArray(names) ? names.filter((name) => typeof name === "string").length : 0)
+    return (
+      count + (Array.isArray(names) ? names.filter((name) => typeof name === "string").length : 0)
+    )
   }, 0)
   return metadataToolCount || trace.totalToolCalls
 }
@@ -482,6 +539,7 @@ function TraceCard({
   return (
     <button
       type="button"
+      aria-pressed={selected}
       className={cn(
         "w-full rounded-lg border bg-card p-3 text-left transition-colors hover:bg-muted/30",
         selected ? "border-primary shadow-sm" : "border-border",
@@ -504,12 +562,23 @@ function TraceCard({
             parent {shortTraceId(trace.parentTraceId)}
           </span>
         )}
+        <DrilldownArrow className="ml-auto" />
       </div>
-      <p className="line-clamp-3 text-xs leading-5 text-foreground/80">
+      <p
+        className={cn(
+          "line-clamp-3 text-xs leading-5",
+          conversation.userText ? "text-foreground/80" : "text-muted-foreground/60"
+        )}
+      >
         {conversation.userText ||
           (conversation.internalNotificationKind
             ? internalNotificationPreview(conversation.internalNotificationKind)
-            : "无用户输入记录")}
+            : // 预览行没有 `_raw`：子 Agent / workflow trace 的输入正文存在 raw 的根
+              // 节点里，索引字段 userMessage 是空的。此时断言「无用户输入记录」是
+              // 拿缺失的数据下结论——它跟「这条 trace 真的没有用户输入」是两回事。
+              trace.rawPending
+              ? "选中该会话后显示完整内容"
+              : "无用户输入记录")}
       </p>
       {conversation.assistantText && (
         <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
@@ -662,6 +731,7 @@ function TraceThreadGroupCard({
             <span className="truncate text-[11px] font-semibold text-foreground">
               Root Thread {group.threadId.slice(0, 10)}
             </span>
+            <CopyIdButton value={group.threadId} label="threadId" />
             <Badge variant="outline" className="shrink-0 px-1.5 py-0 text-[10px]">
               {group.traces.length} 条
             </Badge>
@@ -671,9 +741,12 @@ function TraceThreadGroupCard({
               </Badge>
             )}
             {group.rootTraceId && (
-              <span className="truncate text-[10px] font-mono text-muted-foreground/50">
-                root {shortTraceId(group.rootTraceId)}
-              </span>
+              <>
+                <span className="truncate text-[10px] font-mono text-muted-foreground/50">
+                  root {shortTraceId(group.rootTraceId)}
+                </span>
+                <CopyIdButton value={group.rootTraceId} label="traceId" />
+              </>
             )}
           </div>
           <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-muted-foreground/60">
@@ -792,6 +865,8 @@ export function TraceExplorer({
   showViewModeToggle = true,
   allowFullscreen = true,
   loadThreadTraces,
+  completeThreadId,
+  initialTraceId,
   className
 }: {
   traces: DashboardTraceDetail[]
@@ -808,17 +883,20 @@ export function TraceExplorer({
   onViewModeChange?: (mode: DashboardTraceViewMode) => void
   showViewModeToggle?: boolean
   allowFullscreen?: boolean
+  /** All supplied records belong to this already-loaded thread, including linked child traces. */
+  completeThreadId?: string | null
+  initialTraceId?: string
   loadThreadTraces?: (threadId: string) => Promise<DashboardTraceDetail[]>
   className?: string
 }): React.JSX.Element {
-  const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null)
+  const [selectedTraceId, setSelectedTraceId] = useState<string | null>(initialTraceId ?? null)
   const [localViewMode, setLocalViewMode] = useState<DashboardTraceViewMode>(defaultViewMode)
   const [fullscreen, setFullscreen] = useState(false)
   // 按 threadId 缓存「完整 thread」拉取结果，避免重复请求。
-  const [threadTraceCache, setThreadTraceCache] = useState<Record<string, DashboardTraceDetail[]>>(
-    {}
-  )
-  const [threadLoadingId, setThreadLoadingId] = useState<string | null>(null)
+  const [threadCacheState, setThreadCacheState] = useState<{
+    loader?: (threadId: string) => Promise<DashboardTraceDetail[]>
+    traces: Record<string, DashboardTraceDetail[]>
+  }>({ traces: {} })
   const activeViewMode = viewMode ?? localViewMode
   const handleViewModeChange = (mode: DashboardTraceViewMode): void => {
     if (!viewMode) setLocalViewMode(mode)
@@ -829,20 +907,29 @@ export function TraceExplorer({
   const defaultLoadThreadTraces = useCallback(
     async (threadId: string): Promise<DashboardTraceDetail[]> => {
       const api = window.api?.dashboard
-      if (!api || typeof api.threadTraces !== "function") return []
-      try {
-        const res = await api.threadTraces(threadId)
-        return res?.success && Array.isArray(res.data) ? (res.data as DashboardTraceDetail[]) : []
-      } catch {
-        return []
+      if (!api || typeof api.threadTraces !== "function") {
+        throw new Error("当前环境不支持加载完整会话")
       }
+      return unwrapThreadTracesResponse(await api.threadTraces(threadId))
     },
     []
   )
   const effectiveLoadThreadTraces = loadThreadTraces ?? defaultLoadThreadTraces
+  // Cache identity includes the query loader (project/time/stage scope). An old
+  // scope is ignored during render, before effects or a new request can run.
+  const threadTraceCache = useMemo<Record<string, DashboardTraceDetail[]>>(
+    () => (threadCacheState.loader === effectiveLoadThreadTraces ? threadCacheState.traces : {}),
+    [threadCacheState, effectiveLoadThreadTraces]
+  )
 
   // 概览分组（来自分页接口，每个 thread 仅含预览的若干条 trace）。
-  const baseGroups = useMemo(() => buildTraceThreadGroups(traces), [traces])
+  const baseGroups = useMemo(
+    () =>
+      completeThreadId && traces.length
+        ? [summarizeThreadGroup(completeThreadId, traces)]
+        : buildTraceThreadGroups(traces),
+    [traces, completeThreadId]
+  )
   // 若某 thread 已拉到完整 trace，则用完整数据重建该分组。
   const traceGroups = useMemo(
     () =>
@@ -879,31 +966,48 @@ export function TraceExplorer({
 
   // thread 模式下选中某个 thread 时，懒加载其完整 trace 列表。
   const selectedThreadId = selectedThreadGroup?.threadId ?? null
+  const threadRequest = useMemo(() => {
+    if (
+      completeThreadId ||
+      activeViewMode !== "thread" ||
+      !selectedThreadId ||
+      selectedThreadId === "unknown-thread" ||
+      threadTraceCache[selectedThreadId]
+    )
+      return null
+    return { threadId: selectedThreadId, load: effectiveLoadThreadTraces }
+  }, [
+    activeViewMode,
+    completeThreadId,
+    selectedThreadId,
+    threadTraceCache,
+    effectiveLoadThreadTraces
+  ])
+  const [failedRequest, setFailedRequest] = useState<typeof threadRequest>(null)
+  const threadLoadFailed = !!threadRequest && failedRequest === threadRequest
+  const threadLoading = !!threadRequest && !threadLoadFailed
   useEffect(() => {
-    if (activeViewMode !== "thread") return
-    if (!selectedThreadId || selectedThreadId === "unknown-thread") return
-    if (threadTraceCache[selectedThreadId]) return
+    if (!threadRequest) return
+    const { threadId, load } = threadRequest
     let cancelled = false
-    setThreadLoadingId(selectedThreadId)
-    void effectiveLoadThreadTraces(selectedThreadId)
+    void load(threadId)
       .then((full) => {
         if (cancelled) return
-        setThreadTraceCache((prev) =>
-          prev[selectedThreadId]
-            ? prev
-            : { ...prev, [selectedThreadId]: Array.isArray(full) ? full : [] }
-        )
+        setThreadCacheState((prev) => ({
+          loader: load,
+          traces: { ...(prev.loader === load ? prev.traces : {}), [threadId]: full }
+        }))
       })
-      .finally(() => {
-        if (!cancelled)
-          setThreadLoadingId((current) => (current === selectedThreadId ? null : current))
+      .catch((error) => {
+        if (cancelled) return
+        console.warn("[Dashboard] 加载完整会话失败:", error)
+        setFailedRequest(threadRequest)
       })
     return () => {
       cancelled = true
     }
-  }, [activeViewMode, selectedThreadId, threadTraceCache, effectiveLoadThreadTraces])
+  }, [threadRequest])
 
-  const threadLoading = threadLoadingId !== null && threadLoadingId === selectedThreadId
   const metricMode = activeViewMode === "thread" && selectedThreadGroup ? "thread" : "trace"
   const metricStartedAt =
     metricMode === "thread" ? selectedThreadGroup?.latestStartedAt : selectedTrace?.startedAt
@@ -919,6 +1023,10 @@ export function TraceExplorer({
     metricMode === "thread"
       ? (selectedThreadGroup?.totalUserInputRequests ?? 0)
       : (selectedTrace?.userInputRequestCount ?? 0)
+  const metricUserInputComplete =
+    metricMode === "thread"
+      ? selectedThreadGroup?.traces.every((trace) => trace.userInputRequestCountComplete === true)
+      : selectedTrace?.userInputRequestCountComplete === true
   const metricDurationMs =
     metricMode === "thread"
       ? (selectedThreadGroup?.totalDurationMs ?? 0)
@@ -1034,20 +1142,45 @@ export function TraceExplorer({
     )
   }
 
+  // thread 列表是摘要预览（不含 _raw），完整对话在选中会话时懒加载。加载还在飞
+  // 的那一小段窗口里 selectedTrace 仍是预览行，此时提示「缺少 raw」是误报——
+  // 加载完成后 threadTraceCache 会用带 _raw 的完整 trace 覆盖它。加载失败时预览行
+  // 同样没有 raw，但原因不是「这条 trace 缺内容」，得说清楚，否则用户既不知道
+  // 发生了什么、也不知道还能重试。
+  const rawMissingNotice = threadLoadFailed
+    ? "完整会话加载失败，当前仅显示摘要。切换到其他会话再切回可重试。"
+    : selectedTrace && !selectedTrace.rawAvailable && !threadLoading
+      ? selectedTrace.rawError || "该 trace 缺少完整 raw 内容，无法还原完整对话"
+      : null
+
+  const enriched = selectedThreadGroup?.traces.find(
+    (trace) => trace.threadSkillUsage !== undefined || trace.threadSkillUsageError
+  )
+  const metricSkills = Array.from(
+    new Set(
+      metricMode === "thread"
+        ? (enriched?.threadSkillUsage?.map((entry) => entry.skill) ??
+            selectedThreadGroup?.traces.flatMap((trace) => trace.usedSkills) ??
+            [])
+        : (selectedTrace?.usedSkills ?? [])
+    )
+  ).filter((skill) => skill.trim())
+  const fillThreadHeight = fullscreen || !!completeThreadId
   const conversationContent = (
     <>
-      {selectedTrace && !selectedTrace.rawAvailable && (
+      {rawMissingNotice && (
         <div className="mb-3 shrink-0 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
-          {selectedTrace.rawError || "该 trace 缺少完整 raw 内容，无法还原完整对话"}
+          {rawMissingNotice}
         </div>
       )}
       {selectedTrace ? (
         activeViewMode === "thread" && selectedThreadGroup ? (
           <TraceThreadConversation
             traces={selectedThreadGroup.traces}
-            className={fullscreen ? "min-h-0 flex-1" : undefined}
+            className={fillThreadHeight ? "min-h-0 flex-1" : undefined}
             loading={threadLoading}
-            fillAvailableHeight={fullscreen}
+            loadFailed={threadLoadFailed}
+            fillAvailableHeight={fillThreadHeight}
             selectedTraceId={selectedTrace.traceId}
           />
         ) : (
@@ -1118,6 +1251,19 @@ export function TraceExplorer({
                     </p>
                   </div>
                 </div>
+                <ThreadSkillUsageMetric
+                  skills={metricSkills}
+                  loading={metricMode === "thread" && threadLoading}
+                  error={metricMode === "thread" ? enriched?.threadSkillUsageError : undefined}
+                  onRetry={() => {
+                    if (!selectedThreadGroup) return
+                    setThreadCacheState((prev) => {
+                      const next = { ...prev.traces }
+                      delete next[selectedThreadGroup.threadId]
+                      return { ...prev, traces: next }
+                    })
+                  }}
+                />
                 <div className="flex shrink-0 items-center gap-2 border-r border-border px-4 py-2.5">
                   <Hash className="size-3.5 shrink-0 text-muted-foreground" />
                   <div>
@@ -1139,7 +1285,11 @@ export function TraceExplorer({
                   <div>
                     <p className="text-[10px] text-muted-foreground">请求用户输入</p>
                     <p className="whitespace-nowrap text-[12px] font-semibold">
-                      {metricUserInputRequests}
+                      {metricUserInputComplete
+                        ? metricUserInputRequests
+                        : metricUserInputRequests > 0
+                          ? `≥${metricUserInputRequests}`
+                          : "—"}
                     </p>
                   </div>
                 </div>
@@ -1181,7 +1331,7 @@ export function TraceExplorer({
                     </p>
                   </div>
                 </div>
-                <div className="flex shrink-0 items-center gap-2 px-4 py-2.5">
+                <div className="flex shrink-0 items-center gap-2 border-r border-border px-4 py-2.5">
                   <Tag className="size-3.5 shrink-0 text-muted-foreground" />
                   <div>
                     <p className="text-[10px] text-muted-foreground">APP 版本</p>
@@ -1190,10 +1340,34 @@ export function TraceExplorer({
                     </p>
                   </div>
                 </div>
+                {/* 排查线上问题基本都要拿这两个 ID 去 ES 查，放在指标条末尾，
+                    不用回左侧列表里翻当前选中的是哪一条。 */}
+                <div className="flex shrink-0 items-center gap-2 px-4 py-2.5">
+                  <Fingerprint className="size-3.5 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0">
+                    <p className="text-[10px] text-muted-foreground">ID</p>
+                    <div className="flex items-center gap-2">
+                      {metricMode === "thread" && selectedThreadGroup ? (
+                        <span className="inline-flex items-center gap-1">
+                          <span className="whitespace-nowrap font-mono text-[11px]">
+                            thread {selectedThreadGroup.threadId.slice(0, 8)}
+                          </span>
+                          <CopyIdButton value={selectedThreadGroup.threadId} label="threadId" />
+                        </span>
+                      ) : null}
+                      <span className="inline-flex items-center gap-1">
+                        <span className="whitespace-nowrap font-mono text-[11px]">
+                          trace {shortTraceId(selectedTrace.traceId)}
+                        </span>
+                        <CopyIdButton value={selectedTrace.traceId} label="traceId" />
+                      </span>
+                    </div>
+                  </div>
+                </div>
               </div>
             )}
 
-            {fullscreen && activeViewMode === "thread" && selectedThreadGroup ? (
+            {fillThreadHeight && activeViewMode === "thread" && selectedThreadGroup ? (
               <div className="flex min-h-0 flex-1 flex-col p-4">{conversationContent}</div>
             ) : (
               <ScrollArea className="min-h-0 flex-1">
@@ -1226,7 +1400,8 @@ export function TraceHistoryDialog({
   exporting = false,
   loading,
   error,
-  onPageChange
+  onPageChange,
+  loadThreadTraces
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -1247,6 +1422,7 @@ export function TraceHistoryDialog({
   loading: boolean
   error: string | null
   onPageChange?: (page: number) => void
+  loadThreadTraces?: (threadId: string) => Promise<DashboardTraceDetail[]>
 }): React.JSX.Element {
   const displayTotalTraces = Math.max(totalTraces, traces.length)
   const totalPages = Math.max(1, Math.ceil(displayTotalTraces / Math.max(1, tracePageSize)))
@@ -1274,6 +1450,7 @@ export function TraceHistoryDialog({
           </div>
         </DialogHeader>
         <TraceExplorer
+          loadThreadTraces={loadThreadTraces}
           traces={traces}
           codeStats={codeStats}
           loading={loading}

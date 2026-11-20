@@ -114,7 +114,7 @@ describe("close behavior UI integration", () => {
   )
   const scheduler = readRepositoryFile("src/main/services/scheduler.ts")
   const heartbeat = readRepositoryFile("src/main/services/heartbeat.ts")
-  const chatx = readRepositoryFile("src/main/services/chatx.ts")
+  const builtinRobotManager = readRepositoryFile("src/main/services/im/manager.ts")
   const preload = readRepositoryFile("src/preload/index.ts")
   const dialog = readRepositoryFile("src/renderer/src/components/app/CloseToTrayDialog.tsx")
   const generalPanel = readRepositoryFile("src/renderer/src/components/customize/GeneralPanel.tsx")
@@ -161,16 +161,27 @@ describe("close behavior UI integration", () => {
   it("protects every agent task owner and drains them before SessionEnd", () => {
     expect(agentIpc.includes("workflowRunManager.hasActiveRuns()")).toBe(true)
     expect(agentIpc.includes("coordinatorWorkerManager.hasRunningWorkers()")).toBe(true)
-    expect(agentIpc.includes("LocalSandbox.hasActiveProcesses()")).toBe(true)
+    expect(agentIpc.includes("LocalSandbox.hasActiveExecutionTasks()")).toBe(true)
     expect(workflowManager.includes("cancelAllAndWait")).toBe(true)
     expect(coordinatorManager.includes("cancelAllWorkersAndWait")).toBe(true)
+    expect(agentIpc.includes("LocalSandbox.beginApplicationShutdown()")).toBe(true)
+    expect(agentIpc.includes("LocalSandbox.cancelAllBackgroundTasksAndWait(timeoutMs)")).toBe(
+      true
+    )
+    expect(agentIpc.includes("LocalSandbox.killAllAndWait(timeoutMs)")).toBe(true)
+    const agentShutdown = agentIpc.slice(
+      agentIpc.indexOf("export async function shutdownAllAgentTasks("),
+      agentIpc.indexOf("function rejectAgentStartDuringShutdown(")
+    )
+    expect(agentShutdown.includes("LocalSandbox.killAll()"), agentShutdown).toBe(false)
     expect(scheduler.includes("hasActiveScheduledTaskRuns")).toBe(true)
     expect(scheduler.includes("stopSchedulerAndWait")).toBe(true)
     expect(heartbeat.includes("stopHeartbeatAndWait")).toBe(true)
-    expect(chatx.includes("shuttingDown = true")).toBe(true)
+    expect(builtinRobotManager.includes("hasActiveRuns(): boolean")).toBe(true)
     expect(mainProcess.includes("shutdownAllAgentTasks(5_000)")).toBe(true)
     expect(mainProcess.includes("stopSchedulerAndWait(5_000)")).toBe(true)
     expect(mainProcess.includes("stopHeartbeatAndWait(5_000)")).toBe(true)
+    expect(mainProcess.includes("builtinRobotManager.stop()")).toBe(true)
     expect(mainProcess.indexOf("shutdownAllAgentTasks(5_000)")).toBeLessThan(
       mainProcess.indexOf("await fireSessionEndAll(5_000")
     )

@@ -1,3 +1,5 @@
+import { isModelAvailable } from "../../../shared/model-catalog"
+import { getModelClientOptions } from "../../models/connection"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import { ChatOpenAI } from "@langchain/openai"
 import {
@@ -9,6 +11,7 @@ import {
 } from "../../storage"
 import { getModelConfigs } from "../../models/registry"
 import type { GoalJudgeDecision, GoalLedger, ThreadGoal } from "./types"
+import { samplingFields } from "../../models/sampling-params"
 
 const GOAL_EVALUATOR_CONTEXT_RATIO = 0.25
 const GOAL_EVALUATOR_MIN_BUDGET_TOKENS = 1_000
@@ -163,10 +166,11 @@ export function getCurrentTurnAssistantResponse(input: {
   lastFinalText?: string
 }): string {
   // Prefer the current turn's final values snapshot when available: it may replace
-  // an incomplete streaming draft. The caller must scope lastFinalText to messages
+  // an incomplete streaming draft, including an explicit clear. Undefined means
+  // no authoritative final was received. The caller must scope it to messages
   // after the current turn's user prompt so previous-turn answers cannot leak in.
   const finalSnapshot = stripThinkBlocks(input.lastFinalText ?? "").trim()
-  if (finalSnapshot) return finalSnapshot
+  if (input.lastFinalText !== undefined) return finalSnapshot
 
   const start = Math.max(0, Math.min(input.currentTurnAssistantStart, input.assistantText.length))
   return stripThinkBlocks(input.assistantText.slice(start)).trim()
@@ -538,7 +542,7 @@ export function resolveEvaluatorConfig(modelId?: string): CustomModelConfig | nu
 }
 
 function findEvaluatorConfig(modelRef: string): CustomModelConfig | null {
-  const configs = getModelConfigs()
+  const configs = getModelConfigs().filter(isModelAvailable)
   const match = /^(builtin|custom):(.*)$/.exec(modelRef)
   if (match) {
     const source = match[1]
@@ -586,9 +590,11 @@ export async function evaluateGoalWithModel(
   const model = new ChatOpenAI({
     model: config.model,
     apiKey: config.apiKey,
-    configuration: { baseURL: config.baseUrl },
+    ...getModelClientOptions(config),
     maxTokens: Math.min(config.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS, 1200),
-    temperature: Math.min(config.temperature ?? DEFAULT_TEMPERATURE, 0.1),
+    ...samplingFields(config.model, {
+      temperature: Math.min(config.temperature ?? DEFAULT_TEMPERATURE, 0.1)
+    }),
     maxRetries: 0,
     // 与主链路 buildCustomChatOpenAI 对齐:显式关闭 thinking,不把开关留给
     // 网关默认值。裁决输出是 ≤1200 token 的 JSON,思维链只会拖慢到撞总时长闸门。

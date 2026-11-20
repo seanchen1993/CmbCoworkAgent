@@ -4,9 +4,12 @@ import {
   INTERNAL_NOTIFICATION_TRIGGER_SOURCE,
   WORKFLOW_NOTIFICATION_TURN_PROMPT
 } from "../../../../shared/internal-notification-turn"
+import { SKILL_USE_TAG_NAME, skillUseDisplayLabel } from "../../../../shared/skill-use-block"
+import { formatBuiltinBrowserPrompt } from "../../features/builtin-browser/builtin-browser"
 import {
   buildThreadConversation,
   buildTraceConversation,
+  isThreadAwaitingFullLoad,
   type TraceConversationSource
 } from "./TraceConversation"
 import { summarizeThreadProjectNodes } from "./trace-project-node-summary"
@@ -28,6 +31,33 @@ function traceWithResponse(
     ...overrides
   }
 }
+
+describe("内置浏览器会话还原", () => {
+  it("保留 slash 选择标记并只展示用户可见文本", () => {
+    const conversation = buildTraceConversation(
+      traceWithResponse({ userMessage: formatBuiltinBrowserPrompt("检查登录页") })
+    )
+
+    expect(conversation.userText).toBe("检查登录页")
+    expect(conversation.messages[0]).toMatchObject({
+      role: "user",
+      content: "检查登录页",
+      builtinBrowserSelected: true
+    })
+  })
+
+  it("内置浏览器-only 消息仍保留用户消息和标签", () => {
+    const conversation = buildTraceConversation(
+      traceWithResponse({ userMessage: formatBuiltinBrowserPrompt("") })
+    )
+
+    expect(conversation.messages[0]).toMatchObject({
+      role: "user",
+      content: "",
+      builtinBrowserSelected: true
+    })
+  })
+})
 
 describe("Thread project node summary", () => {
   it("deduplicates visited project nodes regardless of node status", () => {
@@ -349,5 +379,208 @@ describe("Trace conversation event timeline", () => {
     )
 
     expect(result.messages.filter((message) => message.content === "继续处理")).toHaveLength(2)
+  })
+})
+
+describe("skeleton entries", () => {
+  it("marks a tool call whose payload the byte budget could not afford", () => {
+    // The collector keeps such a call's name and drops its args and result, so
+    // without the flag the panel shows a tool invoked with no arguments that
+    // returned nothing — which reads as a failed call, not a recording limit.
+    const conversation = buildTraceConversation({
+      traceId: "trace-skeleton",
+      startedAt: "2026-07-14T15:21:00.000Z",
+      executionMode: "normal",
+      userMessage: "分析仓库",
+      steps: [
+        {
+          startedAt: "2026-07-14T15:21:01.000Z",
+          assistantText: "先读文件",
+          toolCalls: [{ name: "read_file", args: { path: "README.md" }, result: "ok" }]
+        },
+        {
+          startedAt: "2026-07-14T15:21:02.000Z",
+          assistantText: "",
+          truncated: true,
+          toolCalls: [{ name: "read_file", args: {}, truncated: true }]
+        }
+      ]
+    } as unknown as TraceConversationSource)
+
+    const tools = conversation.messages.flatMap(
+      (message) =>
+        (message as unknown as { tools?: Array<{ name: string; truncated?: boolean }> }).tools ?? []
+    )
+    expect(tools).toHaveLength(2)
+    expect(tools[0].truncated).toBeUndefined()
+    expect(tools[1].truncated).toBe(true)
+    // The name is what the skeleton exists to keep.
+    expect(tools[1].name).toBe("read_file")
+  })
+
+  it("does not invent an empty assistant reply for a skeleton turn", () => {
+    const conversation = buildTraceConversation({
+      traceId: "trace-skeleton-2",
+      startedAt: "2026-07-14T15:21:00.000Z",
+      executionMode: "normal",
+      userMessage: "分析仓库",
+      modelCalls: [
+        { startedAt: "2026-07-14T15:21:01.000Z", outputMessage: { content: "有内容" } },
+        { startedAt: "2026-07-14T15:21:02.000Z", outputMessage: { content: "" }, truncated: true }
+      ]
+    } as unknown as TraceConversationSource)
+
+    const assistants = conversation.messages.filter((message) => message.role === "assistant")
+    expect(assistants).toHaveLength(1)
+    expect(String((assistants[0] as unknown as { content?: string }).content)).toContain("有内容")
+  })
+})
+
+/**
+ * 会话列表改成摘要预览（不含 `_raw`）之后，预览行没有任何对话数据：没有
+ * modelCalls、没有 steps、没有 nodes。此前的兜底会拿 outcome 去补一句「本次运行
+ * 被取消，trace 中没有记录最终回复」——那是拿缺失的数据下结论，线上实际表现是
+ * 加载中的会话满屏「被取消」，加载完成后同一条 trace 明明有完整对话。
+ */
+describe("摘要预览行不得被当成对话渲染", () => {
+  const previewTrace = (
+    overrides: Partial<TraceConversationSource> = {}
+  ): TraceConversationSource => ({
+    traceId: "preview-1",
+    startedAt: "2026-09-04T12:08:56.000Z",
+    endedAt: "2026-09-04T12:19:39.000Z",
+    executionMode: "normal",
+    userMessage: "",
+    rawPending: true,
+    ...overrides
+  })
+
+  it("不给预览行编造「被取消」的结论", () => {
+    const conversation = buildTraceConversation(previewTrace({ outcome: "cancelled" }))
+    expect(conversation.assistantText).toBe("")
+    expect(JSON.stringify(conversation.messages)).not.toContain("本次运行被取消")
+  })
+
+  it("不给预览行编造「运行失败」的结论", () => {
+    const conversation = buildTraceConversation(
+      previewTrace({ outcome: "error", errorMessage: "" })
+    )
+    expect(JSON.stringify(conversation.messages)).not.toContain("本次运行失败")
+  })
+
+  it("真正取消 / 失败的 trace 仍然照常说明原因", () => {
+    // 兜底本身是对的，只是不该套在「数据还没取回来」的行上。
+    const cancelled = buildTraceConversation({
+      traceId: "real-1",
+      startedAt: "2026-09-04T12:08:56.000Z",
+      outcome: "cancelled",
+      userMessage: "帮我改一下"
+    })
+    expect(JSON.stringify(cancelled.messages)).toContain("本次运行被取消")
+
+    const failed = buildTraceConversation({
+      traceId: "real-2",
+      startedAt: "2026-09-04T12:08:56.000Z",
+      outcome: "error",
+      errorMessage: "模型服务不可用",
+      userMessage: "帮我改一下"
+    })
+    expect(JSON.stringify(failed.messages)).toContain("模型服务不可用")
+  })
+
+  it("预览行仍会保留已索引的用户提问", () => {
+    const conversation = buildTraceConversation(
+      previewTrace({ userMessage: "需求ID: 6382", outcome: "success" })
+    )
+    expect(conversation.userText).toContain("6382")
+    expect(conversation.assistantText).toBe("")
+  })
+})
+
+describe("整个 thread 还是摘要预览时不渲染时间线", () => {
+  const preview = (id: string): TraceConversationSource => ({
+    traceId: id,
+    startedAt: "2026-09-04T12:08:56.000Z",
+    rawPending: true
+  })
+  const loaded = (id: string): TraceConversationSource => ({
+    traceId: id,
+    startedAt: "2026-09-04T12:08:56.000Z",
+    userMessage: "帮我改一下",
+    modelCalls: [{ outputMessage: { content: "改好了" } }]
+  })
+
+  it("全部是预览行 → 显示占位而不是半张脸的时间线", () => {
+    expect(isThreadAwaitingFullLoad([preview("a"), preview("b")])).toBe(true)
+  })
+
+  it("已经有数据陆续到位就照常渲染", () => {
+    expect(isThreadAwaitingFullLoad([preview("a"), loaded("b")])).toBe(false)
+    expect(isThreadAwaitingFullLoad([loaded("a")])).toBe(false)
+  })
+
+  it("空列表不算「等待加载」，走原来的空态文案", () => {
+    expect(isThreadAwaitingFullLoad([])).toBe(false)
+  })
+})
+
+describe("显式技能的传输块不得当成用户原话渲染", () => {
+  const skillPath = String.raw`D:\kanban\单据预审核\.autobizdevops\cmb_kanban_latest\skills\autobiz\autobiz-requirement-discuss\SKILL.md`
+  const instruction = [
+    `<${SKILL_USE_TAG_NAME}>`,
+    "<instruction>",
+    "用户显式选择了下面 <name> 指定的技能。请先使用 read_file 工具读取 <path> 指定的 SKILL.md 文件。",
+    "- 不要跳过任何步骤；",
+    "- 始终使用中文回答。",
+    "</instruction>"
+  ].join("\n")
+  const wholeBlock = [
+    instruction,
+    "<name>autobiz-requirement-discuss</name>",
+    `<path>${skillPath}</path>`,
+    `</${SKILL_USE_TAG_NAME}>`
+  ].join("\n")
+  // What the upload sanitizer's head+tail cut leaves behind once the block
+  // pushes the message past the compressed userMessage budget: </name> and the
+  // opening <path> are both inside the elided middle.
+  const cutBlock = [
+    instruction,
+    "<name>autobiz-require",
+    "...[已省略 133 字符]...",
+    String.raw`ban_latest\skills\autobiz\autobiz-requirement-discuss\SKILL.md</path>`,
+    `</${SKILL_USE_TAG_NAME}>`
+  ].join("\n")
+  const userText = (userMessage: string): string =>
+    buildTraceConversation(traceWithResponse({ userMessage })).userText
+
+  it("块被腰斩时仍然只渲染用户自己写的那句话", () => {
+    expect(
+      userText(`请使用 /autobiz-requirement-discuss 继续推进当前 Feature。\n\n${cutBlock}`)
+    ).toBe("请使用 /autobiz-requirement-discuss 继续推进当前 Feature。")
+  })
+
+  it("块完好时只渲染用户原话", () => {
+    expect(userText(`帮我理一下需求\n\n${wholeBlock}`)).toBe("帮我理一下需求")
+  })
+
+  it("没有原话时用与上传标记同一套文案，新旧数据读起来一致", () => {
+    expect(userText(wholeBlock)).toBe(skillUseDisplayLabel("autobiz-requirement-discuss"))
+    expect(userText(wholeBlock)).toBe("[技能] autobiz-requirement-discuss")
+  })
+
+  it("没有原话时从 path 尾巴救回完整技能名，而不是半截的 <name>", () => {
+    expect(userText(cutBlock)).toBe("[技能] autobiz-requirement-discuss")
+  })
+
+  it("连路径都被截断时不猜名字", () => {
+    const nameless = [instruction, "<name>autobiz-require", "...[已省略 200 字符]...", "SKI"].join(
+      "\n"
+    )
+    expect(userText(nameless)).toBe("[技能] （名称未完整记录）")
+  })
+
+  it("用户自己写的标签名不被当成传输块切掉", () => {
+    const prose = `这个 <${SKILL_USE_TAG_NAME}> 标签是干嘛用的？`
+    expect(userText(prose)).toBe(prose)
   })
 })

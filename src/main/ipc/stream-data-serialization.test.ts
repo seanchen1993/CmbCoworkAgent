@@ -1,0 +1,526 @@
+import { AIMessage, AIMessageChunk, HumanMessage, ToolMessage } from "@langchain/core/messages"
+import { describe, expect, it } from "vitest"
+import {
+  createStreamDataSerializer,
+  createSerializedValuesMessageAccumulator,
+  sanitizeCoordinatorWorkerStreamDataForRenderer,
+  sanitizeStreamDataForRenderer,
+  serializeStreamData
+} from "./stream-data-serialization"
+import { createHash } from "node:crypto"
+import { projectDisplayMessageId } from "../display-message-identity"
+import {
+  STREAM_MESSAGE_CONTENT_MODE_KEY,
+  STREAM_MESSAGE_REASONING_MODE_KEY,
+  STREAM_TOOL_CALL_ARGS_MODE_KEY
+} from "../../shared/stream-message-wire-mode"
+
+describe("stream data serialization", () => {
+  it("projects long Team identities without changing wire IDs, chunk tags or source payloads", () => {
+    const longId = "x".repeat(4095) + '😀"\\\ud840\u0000'
+    const digest = createHash("sha256").update(JSON.stringify(longId)).digest("hex")
+    const id = projectDisplayMessageId(longId, "tool-call")
+    expect(id).toBe("cmb-checkpoint-tool-id:sha256:" + digest)
+    const providerId = "cmb-checkpoint-provider-id:sha256:" + digest
+    const provider = {
+      cmb_internal_provider_source_id: longId,
+      cmb_internal_provider_occurrence: 2
+    }
+    const projectedProvider = { ...provider, cmb_internal_provider_source_id: providerId }
+    const serialize = createStreamDataSerializer()
+    const chunk = new AIMessageChunk({
+      id: "request",
+      content: "",
+      additional_kwargs: provider,
+      tool_call_chunks: [{ id: longId, index: 0, name: "read_file", args: '{"path":' }]
+    })
+    const rawChunk = serialize("messages", [chunk, { marker: "preserve" }]).data
+    expect(sanitizeCoordinatorWorkerStreamDataForRenderer("messages", rawChunk, 0)).toEqual([
+      expect.objectContaining({
+        kwargs: expect.objectContaining({
+          id: "request",
+          additional_kwargs: projectedProvider,
+          tool_call_chunks: [
+            expect.objectContaining({
+              id,
+              args: '{"path":',
+              [STREAM_TOOL_CALL_ARGS_MODE_KEY]: "delta"
+            })
+          ]
+        })
+      }),
+      expect.objectContaining({ marker: "preserve" })
+    ])
+    expect(JSON.stringify(rawChunk)).toContain(JSON.stringify(longId))
+    expect(chunk.tool_call_chunks?.[0].id).toBe(longId)
+    expect(chunk.additional_kwargs).toEqual(provider)
+
+    const values = serialize("values", {
+      messages: [
+        new HumanMessage("prompt"),
+        new AIMessage({
+          id: "request",
+          content: "",
+          tool_calls: [
+            { id: longId, name: "read_file", args: { path: "probe.txt" } },
+            { id: "short", name: "read_file", args: {} }
+          ],
+          additional_kwargs: {
+            ...provider,
+            tool_calls: [
+              { id: longId, type: "function", function: { name: "read_file", arguments: "{}" } }
+            ]
+          }
+        }),
+        new ToolMessage({ id: "result", tool_call_id: longId, content: "done" })
+      ]
+    })
+    expect(
+      sanitizeCoordinatorWorkerStreamDataForRenderer(
+        "values",
+        values.data,
+        values.valuesMessageIndexOffset
+      )
+    ).toMatchObject({
+      messages: [
+        {
+          kwargs: {
+            id: "request",
+            tool_calls: [{ id, args: { path: "probe.txt" } }, { id: "short" }],
+            additional_kwargs: {
+              ...projectedProvider,
+              tool_calls: [{ id }],
+              cmb_worker_snapshot_index: 1
+            }
+          }
+        },
+        { kwargs: { id: "result", tool_call_id: id } }
+      ]
+    })
+    expect(JSON.stringify(values.data)).toContain(JSON.stringify(longId))
+  })
+
+  it.each([
+    ["哈", "哈", "，你好"],
+    ["a", "ab", "abc"],
+    ["\n", "\n", "text"]
+  ])("preserves overlapping initial delta chunks: %j", (...parts) => {
+    const serialize = createStreamDataSerializer()
+    const projected = parts.map(
+      (content) =>
+        serialize("messages", [new AIMessageChunk({ id: "repeated", content }), {}]).data as [
+          { kwargs: { content: string } },
+          Record<string, unknown>
+        ]
+    )
+    expect(projected.map(([message]) => message.kwargs.content).join("")).toBe(parts.join(""))
+    expect(
+      projected.every(([, metadata]) => metadata[STREAM_MESSAGE_CONTENT_MODE_KEY] === "delta")
+    ).toBe(true)
+  })
+
+  it("preserves a correction outside the former text sample positions", () => {
+    const serialize = createStreamDataSerializer()
+    const first = "a".repeat(400)
+    const second = first + "b".repeat(400)
+    const corrected = second.slice(0, 100) + "Z" + second.slice(101) + "end"
+    let received = ""
+    for (const content of [first, second, corrected]) {
+      const [message, metadata] = serialize("messages", [
+        new AIMessageChunk({ id: "corrected", content }),
+        { [STREAM_MESSAGE_CONTENT_MODE_KEY]: "snapshot" }
+      ]).data as [{ kwargs: { content: string } }, Record<string, unknown>]
+      received =
+        metadata[STREAM_MESSAGE_CONTENT_MODE_KEY] === "snapshot"
+          ? message.kwargs.content
+          : received + message.kwargs.content
+    }
+    expect(received).toBe(corrected)
+  })
+
+  it.each(["tail", "append", "same-array"])(
+    "retains a tool result replaced outside the former message samples (%s)",
+    (update) => {
+      const serialize = createStreamDataSerializer()
+      const accumulator = createSerializedValuesMessageAccumulator()
+      const messages = [
+        new HumanMessage({ id: "user", content: "prompt" }),
+        ...Array.from(
+          { length: 99 },
+          (_, index) =>
+            new ToolMessage({
+              id: `tool-${index}`,
+              tool_call_id: `call-${index}`,
+              content: "old result"
+            })
+        ),
+        new AIMessage({ id: "tail", content: "answer" })
+      ]
+      accumulator.update(serialize("values", { messages }))
+      const next = update === "same-array" ? messages : messages.slice()
+      next[6] = new ToolMessage({ id: "tool-5", tool_call_id: "call-5", content: "corrected" })
+      if (update === "append") next.push(new AIMessage({ id: "new", content: "new answer" }))
+      else next[next.length - 1] = new AIMessage({ id: "tail", content: "answer plus" })
+      const frame = serialize("values", { messages: next })
+      expect(frame.valuesSnapshotKind).toBe("full")
+      const restored = accumulator.update(frame).messages as Array<{
+        kwargs: { id: string; content: string }
+      }>
+      expect(restored.find((message) => message.kwargs.id === "tool-5")?.kwargs.content).toBe(
+        "corrected"
+      )
+    }
+  )
+
+  it("projects values history before JSON serialization and preserves absolute indexes", () => {
+    let historyPrefixVisited = false
+    const poisonedHistoryMessage = {
+      type: "ai",
+      toJSON(): never {
+        historyPrefixVisited = true
+        throw new Error("historical message must not be serialized")
+      }
+    }
+    Object.defineProperty(poisonedHistoryMessage, "unusedLargePayload", {
+      enumerable: true,
+      get(): never {
+        historyPrefixVisited = true
+        throw new Error("historical payload must not be read")
+      }
+    })
+
+    const currentAssistant = new AIMessage({
+      id: "current-assistant",
+      content: "current answer",
+      additional_kwargs: { retained: true }
+    })
+    const payload = {
+      skillsMetadata: [{ name: "current-skill", path: "C:/skills/current/SKILL.md" }],
+      messages: [
+        poisonedHistoryMessage,
+        new HumanMessage("old prompt"),
+        new AIMessage("old answer"),
+        new HumanMessage("current prompt"),
+        currentAssistant,
+        new ToolMessage({
+          id: "current-tool",
+          content: "tool result",
+          tool_call_id: "call-current"
+        })
+      ]
+    }
+
+    const serialized = serializeStreamData("values", payload)
+
+    expect(historyPrefixVisited).toBe(false)
+    expect(serialized.valuesMessageIndexOffset).toBe(3)
+    expect(serialized.valuesSnapshotKind).toBe("full")
+    expect(serialized.data).toMatchObject({
+      skillsMetadata: [{ name: "current-skill" }],
+      messages: [
+        { id: expect.arrayContaining(["HumanMessage"]), kwargs: { content: "current prompt" } },
+        {
+          id: expect.arrayContaining(["AIMessage"]),
+          kwargs: {
+            id: "current-assistant",
+            content: "current answer",
+            additional_kwargs: { retained: true }
+          }
+        },
+        {
+          id: expect.arrayContaining(["ToolMessage"]),
+          kwargs: { id: "current-tool", content: "tool result", tool_call_id: "call-current" }
+        }
+      ]
+    })
+
+    const rendererData = sanitizeStreamDataForRenderer(
+      "values",
+      serialized.data,
+      serialized.valuesMessageIndexOffset
+    ) as { messages: Array<{ kwargs?: { additional_kwargs?: Record<string, unknown> } }> }
+
+    expect(rendererData.messages).toHaveLength(2)
+    expect(rendererData.messages[0]?.kwargs?.additional_kwargs).toMatchObject({
+      retained: true,
+      cmb_worker_snapshot_index: 4
+    })
+    expect(rendererData.messages[1]?.kwargs?.additional_kwargs).toMatchObject({
+      cmb_worker_snapshot_index: 5
+    })
+    expect(currentAssistant.additional_kwargs).toEqual({ retained: true })
+  })
+
+  it("keeps non-values payload serialization unchanged", () => {
+    const payload = [new AIMessage("delta"), { langgraph_node: "agent" }]
+    const serialized = serializeStreamData("messages", payload)
+
+    expect(serialized.valuesMessageIndexOffset).toBe(0)
+    expect(serialized.valuesSnapshotKind).toBe("full")
+    expect(serialized.data).toMatchObject([
+      { id: expect.arrayContaining(["AIMessage"]), kwargs: { content: "delta" } },
+      { langgraph_node: "agent" }
+    ])
+  })
+
+  it("preserves tool_calls-only AI chunks when there are no argument chunks to project", () => {
+    const serializeForRun = createStreamDataSerializer()
+    const serialized = serializeForRun("messages", [
+      new AIMessageChunk({
+        id: "complete-tool-only",
+        content: "",
+        tool_calls: [
+          {
+            id: "complete-tool-call",
+            name: "read_file",
+            args: { file_path: "README.md" },
+            type: "tool_call"
+          }
+        ]
+      }),
+      { langgraph_node: "agent" }
+    ])
+    const kwargs = (serialized.data as [{ kwargs: Record<string, unknown> }])[0].kwargs
+    expect(kwargs.tool_calls).toEqual([
+      expect.objectContaining({
+        id: "complete-tool-call",
+        name: "read_file",
+        args: { file_path: "README.md" }
+      })
+    ])
+  })
+
+  it("serializes immutable append and assistant-tail frames without visiting the stable turn", () => {
+    let poisonStableMessages = false
+    const message = (
+      className: "HumanMessage" | "AIMessage",
+      id: string,
+      content: string,
+      toolCalls?: Array<{ id: string; name: string; args: Record<string, unknown> }>
+    ) => {
+      const value = {
+        id: ["langchain_core", "messages", className],
+        type: className === "HumanMessage" ? "human" : "ai",
+        kwargs: {
+          id,
+          content,
+          additional_kwargs: {},
+          ...(toolCalls ? { tool_calls: toolCalls } : {})
+        },
+        toJSON(): unknown {
+          if (poisonStableMessages && (id === "turn-user" || id.startsWith("stable-"))) {
+            throw new Error(`stable message ${id} was serialized`)
+          }
+          return { id: value.id, type: value.type, kwargs: value.kwargs }
+        }
+      }
+      return value
+    }
+
+    const stableTurn = [message("HumanMessage", "turn-user", "prompt")]
+    for (let index = 0; index < 10_000; index += 1) {
+      stableTurn.push(message("AIMessage", `stable-${index}`, `answer-${index}`))
+    }
+    const serializeForRun = createStreamDataSerializer()
+    const initial = serializeForRun("values", { messages: stableTurn, todos: [] })
+    expect(initial.valuesSnapshotKind).toBe("full")
+
+    poisonStableMessages = true
+    const appendedTail = message("AIMessage", "live-tail", "a")
+    const appended = serializeForRun("values", {
+      messages: [...stableTurn, appendedTail],
+      todos: []
+    })
+    expect(appended.valuesSnapshotKind).toBe("append")
+    expect(appended.valuesMessageIndexOffset).toBe(stableTurn.length)
+    expect((appended.data as { messages: unknown[] }).messages).toHaveLength(1)
+
+    const grownTail = message("AIMessage", "live-tail", "answer complete")
+    const tail = serializeForRun("values", {
+      messages: [...stableTurn, grownTail],
+      todos: []
+    })
+    expect(tail.valuesSnapshotKind).toBe("tail")
+    expect(tail.valuesMessageIndexOffset).toBe(stableTurn.length)
+    expect((tail.data as { messages: unknown[] }).messages).toHaveLength(1)
+
+    poisonStableMessages = false
+    const taskAppend = serializeForRun("values", {
+      messages: [
+        ...stableTurn,
+        grownTail,
+        message("AIMessage", "task-call", "", [
+          { id: "task-1", name: "task", args: { description: "inspect" } }
+        ])
+      ]
+    })
+    expect(taskAppend.valuesSnapshotKind).toBe("append")
+    expect(taskAppend.valuesMessageIndexOffset).toBe(stableTurn.length + 1)
+    expect((taskAppend.data as { messages: unknown[] }).messages).toHaveLength(1)
+  })
+
+  it("falls back when assistant tail identity or content is not monotonic", () => {
+    const serializeForRun = createStreamDataSerializer()
+    const user = new HumanMessage({ id: "user", content: "prompt" })
+    serializeForRun("values", {
+      messages: [user, new AIMessage({ id: "assistant", content: "long answer" })]
+    })
+
+    const replacement = serializeForRun("values", {
+      messages: [user, new AIMessage({ id: "assistant", content: "rewritten" })]
+    })
+    expect(replacement.valuesSnapshotKind).toBe("full")
+
+    const newIdentity = serializeForRun("values", {
+      messages: [user, new AIMessage({ id: "different", content: "rewritten plus" })]
+    })
+    expect(newIdentity.valuesSnapshotKind).toBe("full")
+  })
+
+  it("reconstructs one mutable complete turn from full, append, and tail payloads", () => {
+    const accumulator = createSerializedValuesMessageAccumulator()
+    const first = { id: "user" }
+    const second = { id: "assistant", content: "a" }
+    const initial = accumulator.update({
+      data: { messages: [first, second] },
+      valuesMessageIndexOffset: 100,
+      valuesSnapshotKind: "full"
+    })
+    const retainedArray = initial.messages
+
+    const appended = accumulator.update({
+      data: { messages: [{ id: "tool" }] },
+      valuesMessageIndexOffset: 102,
+      valuesSnapshotKind: "append"
+    })
+    expect(appended.messages).toBe(retainedArray)
+    expect(appended.messages.map((message) => (message as { id: string }).id)).toEqual([
+      "user",
+      "assistant",
+      "tool"
+    ])
+
+    const tail = accumulator.update({
+      data: { messages: [{ id: "tool", content: "complete" }] },
+      valuesMessageIndexOffset: 102,
+      valuesSnapshotKind: "tail"
+    })
+    expect(tail.messages).toBe(retainedArray)
+    expect(tail.messages[2]).toEqual({ id: "tool", content: "complete" })
+    expect(tail.valuesMessageIndexOffset).toBe(100)
+  })
+
+  it("projects declared cumulative frames with linear wire bytes and input-bounded comparisons", () => {
+    let comparedCharacters = 0
+    let inputCharacters = 0
+    const serializeForRun = createStreamDataSerializer({
+      messageChunkModes: { content: "snapshot", reasoning: "snapshot", tool_args: "snapshot" },
+      onMessageProjection: (observation) => {
+        comparedCharacters += observation.comparedCharacters
+        inputCharacters += observation.inputCharacters
+      }
+    })
+    const contentDeltas: string[] = []
+    const reasoningDeltas: string[] = []
+    const toolArgDeltas: string[] = []
+    let cumulativeContent = ""
+    let cumulativeReasoning = ""
+    let cumulativeToolArgs = ""
+    let wireCharacters = 0
+
+    for (let frame = 0; frame < 1_000; frame += 1) {
+      cumulativeContent += "c".repeat(120)
+      cumulativeReasoning += "r".repeat(120)
+      cumulativeToolArgs += frame === 0 ? `{"payload":"${"t".repeat(108)}` : "t".repeat(120)
+      if (frame === 999) cumulativeToolArgs += '"}'
+
+      const serialized = serializeForRun("messages", [
+        new AIMessageChunk({
+          id: "cumulative-main",
+          content: cumulativeContent,
+          additional_kwargs: { reasoning_content: cumulativeReasoning },
+          tool_call_chunks: [
+            {
+              ...(frame === 0 ? { id: "write-call", name: "write_file" } : {}),
+              index: 0,
+              args: cumulativeToolArgs,
+              type: "tool_call_chunk"
+            }
+          ]
+        }),
+        { langgraph_node: "agent" }
+      ])
+      wireCharacters += JSON.stringify(serialized.data).length
+      const [message, metadata] = serialized.data as [
+        {
+          kwargs: {
+            content: string
+            additional_kwargs: { reasoning_content: string }
+            tool_call_chunks: Array<Record<string, unknown> & { args: string }>
+          }
+        },
+        Record<string, unknown>
+      ]
+      contentDeltas.push(message.kwargs.content)
+      reasoningDeltas.push(message.kwargs.additional_kwargs.reasoning_content)
+      toolArgDeltas.push(message.kwargs.tool_call_chunks[0].args)
+      expect(message.kwargs).not.toHaveProperty("tool_calls")
+      expect(message.kwargs).not.toHaveProperty("invalid_tool_calls")
+      const expectedMode = frame === 0 ? "snapshot" : "delta"
+      expect(metadata[STREAM_MESSAGE_CONTENT_MODE_KEY]).toBe(expectedMode)
+      expect(metadata[STREAM_MESSAGE_REASONING_MODE_KEY]).toBe(expectedMode)
+      expect(message.kwargs.tool_call_chunks[0][STREAM_TOOL_CALL_ARGS_MODE_KEY]).toBe(expectedMode)
+    }
+
+    expect(contentDeltas.join("")).toBe(cumulativeContent)
+    expect(reasoningDeltas.join("")).toBe(cumulativeReasoning)
+    expect(toolArgDeltas.join("")).toBe(cumulativeToolArgs)
+    const finalCharacters =
+      cumulativeContent.length + cumulativeReasoning.length + cumulativeToolArgs.length
+    expect(wireCharacters).toBeLessThan(finalCharacters * 8)
+    // Exact comparison must examine the actual received snapshots. Wire bytes
+    // remain linear in final output; CPU cannot be bounded by sampling text.
+    expect(comparedCharacters).toBeLessThan(inputCharacters)
+  })
+
+  it("preserves delta repeats and falls back to snapshots on cumulative rewrites", () => {
+    const serializeForRun = createStreamDataSerializer({
+      messageChunkModes: { content: "snapshot" }
+    })
+    const frame = (content: string) =>
+      serializeForRun("messages", [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: { id: "rewrite-main", content, additional_kwargs: {} }
+        },
+        { langgraph_node: "agent" }
+      ]).data as [{ kwargs: { content: string } }, Record<string, unknown>]
+
+    expect(frame("prefix-")[0].kwargs.content).toBe("prefix-")
+    expect(frame("prefix-growing")[0].kwargs.content).toBe("growing")
+    const duplicate = frame("prefix-growing")
+    expect(duplicate[0].kwargs.content).toBe("")
+    expect(duplicate[1][STREAM_MESSAGE_CONTENT_MODE_KEY]).toBe("delta")
+
+    const rewrite = frame("rewritten-output")
+    expect(rewrite[0].kwargs.content).toBe("rewritten-output")
+    expect(rewrite[1][STREAM_MESSAGE_CONTENT_MODE_KEY]).toBe("snapshot")
+    const continued = frame("rewritten-output-tail")
+    expect(continued[0].kwargs.content).toBe("-tail")
+    expect(continued[1][STREAM_MESSAGE_CONTENT_MODE_KEY]).toBe("delta")
+
+    const deltaSerializer = createStreamDataSerializer()
+    const deltaParts = ["ha", "!", "ha", "ha"]
+    const projected = deltaParts.map((content) => {
+      const serialized = deltaSerializer("messages", [
+        {
+          id: ["langchain_core", "messages", "AIMessageChunk"],
+          kwargs: { id: "delta-main", content, additional_kwargs: {} }
+        },
+        { langgraph_node: "agent" }
+      ])
+      return (serialized.data as [{ kwargs: { content: string } }])[0].kwargs.content
+    })
+    expect(projected.join("")).toBe(deltaParts.join(""))
+  })
+})

@@ -145,7 +145,7 @@ export function UpdateActionButton({
               className={cn(
                 "cursor-pointer rounded-full px-1.5 py-0.5 text-[9px] font-medium transition-colors shrink-0",
                 status === "error"
-                  ? "bg-red-100 text-red-700 hover:bg-red-200"
+                  ? "bg-status-critical/10 text-status-critical hover:bg-status-critical/15"
                   : "bg-status-warning/15 text-status-warning hover:bg-status-warning/25"
               )}
               title={
@@ -182,7 +182,7 @@ export function UpdateActionButton({
             className={cn(
               "rounded-lg border p-1 transition-all duration-300 shadow-sm group-hover:shadow-md",
               hasUpdate
-                ? "bg-red-100 text-red-600 border-red-200 group-hover:bg-red-200 group-hover:text-red-700 group-hover:shadow-red-200/50"
+                ? "border-status-critical/25 bg-status-critical/10 text-status-critical group-hover:bg-status-critical/15"
                 : "rounded-md border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors"
             )}
           >
@@ -192,7 +192,7 @@ export function UpdateActionButton({
             <div
               className={cn(
                 "text-sm font-semibold leading-5 transition-colors duration-200",
-                hasUpdate && "text-red-700"
+                hasUpdate && "text-status-critical-foreground"
               )}
             >
               {hasUpdate ? (selfTestSource ? "发现自测版本！" : "发现新版本！") : "检测版本"}

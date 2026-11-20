@@ -1,0 +1,460 @@
+import { randomUUID } from "node:crypto"
+import { existsSync, realpathSync, statSync } from "node:fs"
+import { isAbsolute } from "node:path"
+import { HARNESS_SOURCE, type HarnessFeatureSummary } from "../../../shared/harness-board-types"
+import { DEFAULT_IM_CHANNEL_ID } from "../../../shared/im-gateway-contract"
+import { getAgentModeFromMetadata, type AgentMode } from "../../agent/coordinator-mode"
+import type { createThreadService } from "../thread-service"
+import { isFeatureGateEnabled } from "../../feature-gates"
+import { defaultThreadTitle } from "../title-generator"
+import {
+  getHarnessProjectDetail,
+  listHarnessProjects,
+  requireHarnessFeatureWorkspace
+} from "../../harness-board/service"
+import { getBuiltinRobotSettings } from "../../storage"
+import { FEATURE_GATES } from "../../../shared/feature-gates"
+import {
+  imConversationStateStore,
+  type ImConversationStateStore,
+  type ImTargetSnapshot
+} from "./conversation-state"
+
+export interface ImRemoteProjectListItem {
+  id: string
+  name: string
+}
+
+export interface ImRemoteFeatureListItem {
+  projectId: string
+  slug: string
+  title: string
+  status: string
+}
+
+export type ImFeatureValidationResult =
+  | {
+      valid: true
+      project: ImRemoteProjectListItem
+      feature: ImRemoteFeatureListItem
+      workspacePath: string
+    }
+  | { valid: false; reasonCode: string; message: string }
+
+/**
+ * A session's shape, as a person picks it in Zhaohu.
+ *
+ * Two fields rather than one because normal mode carries a second axis: the
+ * Feature vocabulary's solo and multi are both agentMode "normal" and differ
+ * only in whether subagents exist (thread-service.ts). Naming just the mode
+ * would let solo silently become multi, since thread-service defaults
+ * subagentsEnabled to true whenever it was not stated.
+ */
+export interface ImFeatureSessionMode {
+  agentMode: AgentMode
+  subagentsEnabled?: boolean
+}
+
+export interface ImCreatedFeatureThread {
+  threadId: string
+  /** Whatever the shared creation path settled on — requested, inherited or default. */
+  agentMode: AgentMode
+  title: string
+  workspacePath: string
+  projectId: string
+  featureSlug: string
+  projectName: string
+  featureTitle: string
+}
+
+/** A deliberately user-safe binding failure that may be returned to IM verbatim. */
+export class ImFeatureBindingError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "ImFeatureBindingError"
+  }
+}
+
+interface FeatureBindingDependencies {
+  conversationState: ImConversationStateStore
+  getSettings: typeof getBuiltinRobotSettings
+  projectModeEnabled: () => Promise<boolean>
+  listProjects: typeof listHarnessProjects
+  getProjectDetail: typeof getHarnessProjectDetail
+  getFeatureWorkspace: typeof requireHarnessFeatureWorkspace
+  createThread: typeof createThreadService
+  createId: () => string
+}
+
+function existingDirectory(path: string | null | undefined): string | null {
+  const normalized = path?.trim()
+  if (!normalized || !isAbsolute(normalized) || !existsSync(normalized)) return null
+  try {
+    if (!statSync(normalized).isDirectory()) return null
+    return realpathSync(normalized)
+  } catch {
+    return null
+  }
+}
+
+function activeFeature(run: HarnessFeatureSummary): boolean {
+  return run.location !== "archived" && run.featureStatus !== "archived"
+}
+
+function settingsAllowFeatures(dependencies: FeatureBindingDependencies): boolean {
+  const settings = dependencies.getSettings()
+  return settings.enabled
+}
+
+export class ImFeatureBindingService {
+  private readonly dependencies: FeatureBindingDependencies
+
+  constructor(dependencies: Partial<FeatureBindingDependencies> = {}) {
+    this.dependencies = {
+      conversationState: dependencies.conversationState ?? imConversationStateStore,
+      getSettings: dependencies.getSettings ?? getBuiltinRobotSettings,
+      projectModeEnabled:
+        dependencies.projectModeEnabled ??
+        (async () => (await isFeatureGateEnabled(FEATURE_GATES.projectMode)).enabled),
+      listProjects: dependencies.listProjects ?? listHarnessProjects,
+      getProjectDetail: dependencies.getProjectDetail ?? getHarnessProjectDetail,
+      getFeatureWorkspace: dependencies.getFeatureWorkspace ?? requireHarnessFeatureWorkspace,
+      // Imported lazily on purpose. thread-service reaches into the IPC layer
+      // (models, recent-workspace, electron-store); a static edge from an IM
+      // service pulls all of that into the IM module graph and reorders
+      // initialization, which is how remote-access-service ends up being read
+      // before it exists.
+      createThread:
+        dependencies.createThread ??
+        (async (metadata) => (await import("../thread-service")).createThreadService(metadata)),
+      createId: dependencies.createId ?? randomUUID
+    }
+  }
+
+  async listRemoteProjects(): Promise<ImRemoteProjectListItem[]> {
+    if (
+      !settingsAllowFeatures(this.dependencies) ||
+      !(await this.dependencies.projectModeEnabled())
+    ) {
+      return []
+    }
+    return (await this.dependencies.listProjects())
+      .filter(
+        (project) =>
+          project.lifecycle.status === "active" && project.boardCompatibility.compatible === true
+      )
+      .map((project) => ({ id: project.projectId, name: project.name.trim() || project.projectId }))
+  }
+
+  async listRemoteFeatures(projectId: string): Promise<ImRemoteFeatureListItem[]> {
+    const projects = await this.listRemoteProjects()
+    if (!projects.some((project) => project.id === projectId)) return []
+    return this.readRemoteFeatures(projectId)
+  }
+
+  /** Current catalog, not persisted grant snapshots. Read each project only once. */
+  async listRemoteFeatureCatalog(
+    projectIds?: ReadonlySet<string>
+  ): Promise<Array<{ project: ImRemoteProjectListItem; features: ImRemoteFeatureListItem[] }>> {
+    let projects: ImRemoteProjectListItem[]
+    try {
+      projects = await this.listRemoteProjects()
+    } catch (error) {
+      console.warn("[IM] Remote Feature catalog unavailable: project listing failed", error)
+      return []
+    }
+    return Promise.all(
+      projects
+        .filter((project) => !projectIds || projectIds.has(project.id))
+        .map(async (project) => {
+          try {
+            return { project, features: await this.readRemoteFeatures(project.id) }
+          } catch (error) {
+            // Fail closed for this read, without revoking durable grants on a
+            // transient filesystem/plugin failure or hiding other projects.
+            console.warn(
+              "[IM] Remote Feature catalog unavailable:",
+              { projectId: project.id },
+              error
+            )
+            return { project, features: [] }
+          }
+        })
+    )
+  }
+
+  private async readRemoteFeatures(projectId: string): Promise<ImRemoteFeatureListItem[]> {
+    const detail = await this.dependencies.getProjectDetail(projectId)
+    if (detail.error) {
+      console.warn("[IM] Remote Feature catalog unavailable:", { projectId, reason: detail.error })
+      return []
+    }
+    if (detail.projectState?.uiKind === "archived") return []
+    return detail.runs.filter(activeFeature).map((run) => ({
+      projectId,
+      slug: run.slug,
+      title: run.title.trim() || run.slug,
+      status: run.overallStatus?.label || run.featureStatusLabel || run.featureStatus
+    }))
+  }
+
+  /** Display name only; existing authorized sessions may outlive an active Feature. */
+  async getFeatureTitles(projectId: string): Promise<Map<string, string>> {
+    try {
+      const detail = await this.dependencies.getProjectDetail(projectId)
+      return new Map(detail.runs.map((run) => [run.slug, run.title.trim() || run.slug]))
+    } catch {
+      return new Map()
+    }
+  }
+
+  // Validate current access eligibility only. Thread creation and execution load
+  // the plugin context when they actually consume its prompt and agent config.
+  async validateFeature(
+    projectId: string,
+    featureSlug: string,
+    existingWorkspacePath?: string
+  ): Promise<ImFeatureValidationResult> {
+    if (!settingsAllowFeatures(this.dependencies)) {
+      return {
+        valid: false,
+        reasonCode: "REMOTE_FEATURE_ACCESS_DISABLED",
+        message: "本设备未开启 Feature 远程访问。"
+      }
+    }
+    if (!(await this.dependencies.projectModeEnabled())) {
+      return {
+        valid: false,
+        reasonCode: "REMOTE_PROJECT_MODE_DISABLED",
+        message: "本设备未开启 Project Mode。"
+      }
+    }
+
+    const project = (await this.dependencies.listProjects()).find(
+      (candidate) => candidate.projectId === projectId
+    )
+    if (
+      !project ||
+      project.lifecycle.status !== "active" ||
+      project.boardCompatibility.compatible !== true
+    ) {
+      return {
+        valid: false,
+        reasonCode: "REMOTE_PROJECT_UNAVAILABLE",
+        message: "项目不存在、已归档或插件不兼容。"
+      }
+    }
+
+    let detail: Awaited<ReturnType<typeof getHarnessProjectDetail>>
+    try {
+      detail = await this.dependencies.getProjectDetail(projectId)
+    } catch {
+      return {
+        valid: false,
+        reasonCode: "REMOTE_FEATURE_UNAVAILABLE",
+        message: "Feature 或项目状态暂时无法读取。"
+      }
+    }
+    if (detail.error || !existingDirectory(detail.project.projectRootPath)) {
+      return {
+        valid: false,
+        reasonCode: "REMOTE_PROJECT_DIRECTORY_UNAVAILABLE",
+        message: "项目目录不可用。"
+      }
+    }
+    const feature = detail.runs.find((candidate) => candidate.slug === featureSlug)
+    if (!feature || !activeFeature(feature)) {
+      return {
+        valid: false,
+        reasonCode: "REMOTE_FEATURE_UNAVAILABLE",
+        message: "Feature 不存在或已归档。"
+      }
+    }
+
+    let workspacePath: string | null
+    try {
+      workspacePath = existingDirectory(
+        existingWorkspacePath ??
+          (await this.dependencies.getFeatureWorkspace(projectId, featureSlug))
+      )
+    } catch (error) {
+      return {
+        valid: false,
+        reasonCode: "REMOTE_WORKSPACE_UNAVAILABLE",
+        message: error instanceof Error ? error.message : "请先在桌面配置特性会话工作区。"
+      }
+    }
+    if (!workspacePath) {
+      return {
+        valid: false,
+        reasonCode: "REMOTE_WORKSPACE_UNAVAILABLE",
+        message: "会话工作区不存在或不是文件夹。"
+      }
+    }
+
+    return {
+      valid: true,
+      project: { id: projectId, name: project.name.trim() || projectId },
+      feature: {
+        projectId,
+        slug: feature.slug,
+        title: feature.title.trim() || feature.slug,
+        status: feature.overallStatus?.label || feature.featureStatusLabel || feature.featureStatus
+      },
+      workspacePath
+    }
+  }
+
+  async validateExistingFeatureThread(
+    metadata: Record<string, unknown>,
+    workspacePath: string
+  ): Promise<ImFeatureValidationResult> {
+    const harness = metadata.harnessFeature
+    if (!harness || typeof harness !== "object" || Array.isArray(harness)) {
+      return {
+        valid: false,
+        reasonCode: "REMOTE_THREAD_METADATA_MISMATCH",
+        message: "Project Mode 会话元数据不完整。"
+      }
+    }
+    const feature = harness as Record<string, unknown>
+    if (typeof feature.projectId !== "string" || typeof feature.slug !== "string") {
+      return {
+        valid: false,
+        reasonCode: "REMOTE_THREAD_METADATA_MISMATCH",
+        message: "Project Mode 会话缺少项目或 Feature 标识。"
+      }
+    }
+    const normalizedWorkspace = existingDirectory(workspacePath)
+    if (!normalizedWorkspace) {
+      return {
+        valid: false,
+        reasonCode: "REMOTE_WORKSPACE_UNAVAILABLE",
+        message: "Project Mode 会话工作区不可用。"
+      }
+    }
+    const validation = await this.validateFeature(
+      feature.projectId,
+      feature.slug,
+      normalizedWorkspace
+    )
+    if (!validation.valid) return validation
+    return { ...validation, workspacePath: normalizedWorkspace }
+  }
+
+  /**
+   * Creates the Feature's session through the shared path (createThreadService),
+   * not the raw row writer.
+   *
+   * That path maps the Feature's own configured mode onto the thread — solo and
+   * multi to normal, agent_team to coordinator, workflow to workflow — but only
+   * when the caller does not name a mode itself (thread-service.ts checks
+   * hasOwnProperty). This used to pass agentMode: "normal" unconditionally, so
+   * the same Feature produced a workflow session on the desktop and an ordinary
+   * one from Zhaohu.
+   *
+   * `sessionMode` is therefore passed through only when a person asked for it,
+   * and its absence is what lets the Feature decide.
+   */
+  async createFeatureThread(input: {
+    conversationKey: string
+    principalId: string
+    projectId: string
+    featureSlug: string
+    targetId: string
+    sessionMode?: ImFeatureSessionMode
+  }): Promise<ImCreatedFeatureThread> {
+    this.dependencies.conversationState.assertConversationOwner(
+      input.conversationKey,
+      input.principalId
+    )
+    const validation = await this.validateFeature(input.projectId, input.featureSlug)
+    if (!validation.valid) throw new ImFeatureBindingError(validation.message)
+
+    const title = defaultThreadTitle()
+    const thread = await this.dependencies.createThread({
+      title,
+      workspacePath: validation.workspacePath,
+      ...(input.sessionMode
+        ? {
+            agentMode: input.sessionMode.agentMode,
+            ...(input.sessionMode.subagentsEnabled === undefined
+              ? {}
+              : { subagentsEnabled: input.sessionMode.subagentsEnabled })
+          }
+        : {}),
+      targetKind: "feature",
+      remoteThread: true,
+      remoteReadOnly: false,
+      remoteState: "active",
+      harnessFeature: {
+        projectId: input.projectId,
+        slug: input.featureSlug,
+        source: HARNESS_SOURCE
+      },
+      imDeliveryContext: {
+        provider: DEFAULT_IM_CHANNEL_ID,
+        principalId: input.principalId,
+        conversationKey: input.conversationKey,
+        targetId: input.targetId
+      }
+    })
+    return {
+      threadId: thread.thread_id,
+      agentMode: getAgentModeFromMetadata(thread.metadata ?? {}),
+      title,
+      workspacePath: validation.workspacePath,
+      projectId: input.projectId,
+      featureSlug: input.featureSlug,
+      projectName: validation.project.name,
+      featureTitle: validation.feature.title
+    }
+  }
+}
+
+export const imFeatureBindingService = new ImFeatureBindingService()
+
+export function validateImExistingFeatureThread(
+  metadata: Record<string, unknown>,
+  workspacePath: string,
+  service: ImFeatureBindingService = imFeatureBindingService
+): Promise<ImFeatureValidationResult> {
+  return service.validateExistingFeatureThread(metadata, workspacePath)
+}
+
+export async function validateImFeatureTarget(
+  target: Extract<ImTargetSnapshot, { kind: "feature" }>,
+  metadata: Record<string, unknown>,
+  service: ImFeatureBindingService = imFeatureBindingService
+): Promise<ImFeatureValidationResult> {
+  const harness = metadata.harnessFeature
+  if (!harness || typeof harness !== "object" || Array.isArray(harness)) {
+    return {
+      valid: false,
+      reasonCode: "REMOTE_THREAD_METADATA_MISMATCH",
+      message: "远程 Feature Thread 元数据不完整。"
+    }
+  }
+  const feature = harness as Record<string, unknown>
+  if (feature.projectId !== target.projectId || feature.slug !== target.featureSlug) {
+    return {
+      valid: false,
+      reasonCode: "REMOTE_THREAD_METADATA_MISMATCH",
+      message: "远程 Feature Thread 与 binding 不一致。"
+    }
+  }
+  const validation = await service.validateExistingFeatureThread(metadata, target.workspacePath)
+  if (!validation.valid) return validation
+  if (
+    existingDirectory(
+      typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
+    ) !== validation.workspacePath
+  ) {
+    return {
+      valid: false,
+      reasonCode: "REMOTE_WORKSPACE_UNAVAILABLE",
+      message: "会话工作区与绑定不一致，请重新绑定。"
+    }
+  }
+  return validation
+}

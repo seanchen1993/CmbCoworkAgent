@@ -10,7 +10,12 @@
  *   npx -y tsx tests/message-queue-runtime.spec.ts
  */
 
-import { AIMessage, HumanMessage } from "@langchain/core/messages"
+import { AIMessage, HumanMessage, type BaseMessage } from "@langchain/core/messages"
+import { addMessages } from "@langchain/langgraph"
+import {
+  GOAL_CONTINUATION_BOUNDARY_METADATA_KEY,
+  GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY
+} from "../src/main/agent/goals/internal-prompt.ts"
 import {
   queueCurrentRunMessage as queueOwnedCurrentRunMessage,
   deleteCurrentRunQueuedMessage,
@@ -29,7 +34,11 @@ import {
   type CurrentRunQueuedMessage
 } from "../src/main/agent/current-run-message-queue.ts"
 import type { Message } from "../src/main/types.ts"
-import { mergeIncrementalMessageContent } from "../src/shared/message-role-collision.ts"
+import {
+  mergeIncrementalMessageContent,
+  MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY,
+  MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY
+} from "../src/shared/message-role-collision.ts"
 import {
   accumulateStreamToolCallChunks,
   mergeStreamToolCallChunks,
@@ -68,12 +77,17 @@ async function runAfterModel(state: any, runtime: any, runToken?: string): Promi
   return await hook(state, runtime)
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function runWrappedModelCall(response: AIMessage, runtime: any, runToken?: string): Promise<void> {
+async function runWrappedModelCall(
+  response: AIMessage,
+  runtime: ReturnType<typeof rt>,
+  runToken?: string,
+  messages: BaseMessage[] = [],
+  loadGoalProviderOccurrence?: Parameters<typeof createCurrentRunMessageQueueMiddleware>[1]
+): Promise<AIMessage> {
   const ownerToken = runToken ?? (runtime.configurable?.thread_id === T2 ? RUN2 : RUN1)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const mw = createCurrentRunMessageQueueMiddleware(ownerToken) as any
-  await mw.wrapModelCall({ runtime }, async () => response)
+  const mw = createCurrentRunMessageQueueMiddleware(ownerToken, loadGoalProviderOccurrence) as any
+  return await mw.wrapModelCall({ runtime, messages }, async () => response)
 }
 
 const rt = (threadId?: string): { configurable: Record<string, unknown> } => ({
@@ -997,6 +1011,88 @@ async function testAfterModelUsesRawWrappedModelResponse(): Promise<void> {
   )
 }
 
+async function testGoalContinuationPreservesNewGraphSlotsForReusedProviderIds(): Promise<void> {
+  reset()
+  const original = new AIMessage({ id: "provider-id", content: "previous reply" })
+  const boundary = new HumanMessage({
+    id: "goal-boundary",
+    content: "[Continuing active goal]",
+    additional_kwargs: { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true }
+  })
+  const messages = [original, boundary]
+  const loadPriorOccurrences = (threadId: string, boundaryId: string, sourceId: string) => {
+    assert(
+      threadId === T1 && boundaryId === boundary.id && sourceId === original.id,
+      "the offset is loaded for the exact Goal boundary and provider source"
+    )
+    return 4
+  }
+  const result = await runWrappedModelCall(
+    new AIMessage({
+      id: "provider-id",
+      content: "",
+      tool_calls: [{ id: "call-id", name: "read_file", args: { path: "fixture" } }]
+    }),
+    rt(T1),
+    RUN1,
+    messages,
+    loadPriorOccurrences
+  )
+  const reduced = addMessages(messages, result)
+  assertEqual(reduced.length, 3, "the tool-bearing assistant appends after the Goal boundary")
+  assertEqual(reduced[0]?.content, original.content, "the preceding reply stays intact")
+  assertEqual(reduced[1]?.id, boundary.id, "the Goal boundary stays before the new assistant")
+  assertEqual(result.tool_calls?.[0]?.id, "call-id", "the original tool call identity survives")
+  assertEqual(
+    result.toJSON().kwargs.additional_kwargs[MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY],
+    "provider-id",
+    "checkpoint serialization retains the raw provider source"
+  )
+  assertEqual(
+    result.toJSON().kwargs.additional_kwargs[MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY],
+    5,
+    "checkpoint serialization carries the same occurrence as the durable transcript"
+  )
+
+  const next = await runWrappedModelCall(
+    new AIMessage({ id: "provider-id", content: "final reply" }),
+    rt(T1),
+    RUN1,
+    reduced,
+    loadPriorOccurrences
+  )
+  assertEqual(addMessages(reduced, next).length, 4, "a later model cycle also gets its own slot")
+  assertEqual(
+    next.additional_kwargs[MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY],
+    6,
+    "successive same-provider calls preserve distinct occurrences"
+  )
+
+  const gate = new HumanMessage({
+    id: "goal-completion-gate",
+    content: "Internal verification requested a repair",
+    additional_kwargs: {
+      [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true,
+      [GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]: boundary.id
+    }
+  })
+  const repairMessages = addMessages(addMessages(reduced, next), gate)
+  const repair = await runWrappedModelCall(
+    new AIMessage({ id: "provider-id", content: "verified repair" }),
+    rt(T1),
+    RUN1,
+    repairMessages,
+    (threadId, boundaryId, sourceId) =>
+      boundaryId === gate.id ? undefined : loadPriorOccurrences(threadId, boundaryId, sourceId)
+  )
+  assertEqual(
+    repair.additional_kwargs[MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY],
+    7,
+    "a graph-started repair derives the next occurrence before IPC records its boundary"
+  )
+  assertEqual(addMessages(repairMessages, repair).length, 6, "repair appends after its hidden prompt")
+}
+
 async function testAfterModelSkipsWhenToolCalls(): Promise<void> {
   reset()
   queueCurrentRunMessage(T1, msg("a", "steer me"))
@@ -1306,6 +1402,7 @@ async function main(): Promise<void> {
     testAfterModelPassesCompletedAssistantToNotifier,
     testAfterModelMintsTranscriptIdWhenProviderOmitsOne,
     testAfterModelUsesRawWrappedModelResponse,
+    testGoalContinuationPreservesNewGraphSlotsForReusedProviderIds,
     testAfterModelSkipsWhenToolCalls,
     testAfterModelSkipsWhenLastNotAI,
     testAfterModelEmptyQueueNoop,

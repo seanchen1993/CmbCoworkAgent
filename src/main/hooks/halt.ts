@@ -34,6 +34,18 @@ export function isHookHaltError(error: unknown): error is HookHaltError {
   )
 }
 
+/** Model middleware wrappers preserve the cause but drop custom Hook fields. */
+export function getHookHaltError(error: unknown): HookHaltError | undefined {
+  const seen = new Set<unknown>()
+  let current = error
+  while (current instanceof Error && !seen.has(current)) {
+    seen.add(current)
+    if (isHookHaltError(current) && "reason" in current && "hookEvent" in current) return current
+    current = current.cause
+  }
+  return undefined
+}
+
 export function throwIfHookHalt(
   hookEvent: HookEvent,
   result: HookResult | null | undefined,

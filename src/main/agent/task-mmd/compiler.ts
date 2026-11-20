@@ -1,3 +1,5 @@
+import { isModelAvailable } from "../../../shared/model-catalog"
+import { getModelClientOptions } from "../../models/connection"
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import type { CustomModelConfig } from "../../storage"
@@ -16,6 +18,7 @@ import {
 } from "./storage"
 import { stripAnsiText } from "./sanitizer"
 import type { TaskMmdCompileModelInfo, TaskMmdToolEntry } from "./types"
+import { samplingFields } from "../../models/sampling-params"
 
 const compileInFlight = new Set<string>()
 const MIN_FAILURE_BACKOFF_MS = 60_000
@@ -152,7 +155,7 @@ async function resolveTaskMmdCompileModel(
   threadId: string
 ): Promise<{ cfg: CustomModelConfig | null; info: TaskMmdCompileModelInfo }> {
   const settings = getTaskMmdSettings()
-  const configs = getModelConfigs()
+  const configs = getModelConfigs().filter(isModelAvailable)
   const requestedTier = settings.compileModelTier
   const exact = configs.find((item) => (item.tier ?? "premium") === requestedTier) ?? null
 
@@ -229,9 +232,9 @@ async function createCompileModel(threadId: string): Promise<ChatOpenAI | null> 
   return new ChatOpenAI({
     model: cfg.model,
     apiKey: cfg.apiKey,
-    configuration: { baseURL: cfg.baseUrl },
+    ...getModelClientOptions(cfg, { sessionId: threadId }),
     maxTokens: Math.min(cfg.maxOutputTokens ?? 2000, 2000),
-    temperature: 0,
+    ...samplingFields(cfg.model, { temperature: 0 }),
     maxRetries: 0
   })
 }

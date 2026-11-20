@@ -1,0 +1,48 @@
+import type { RunAnalysisOptions, RunAnalysisRange } from "./project-run-analysis"
+import type { RunAnalysisFilters } from "./project-run-analysis-metrics"
+
+/** Release switch for the isolated analysis/report Agent; disabled unless explicitly enabled. */
+export const PROJECT_ANALYSIS_AGENT_ENABLED =
+  import.meta.env.VITE_PROJECT_ANALYSIS_AGENT_ENABLED === "true"
+
+export interface ProjectAnalysisTarget {
+  projectId: string
+  /** Omitted means matching features in a project; null means unbound executions. */
+  featureSlug?: string | null
+}
+export interface ProjectAnalysisMessage {
+  role: "user" | "assistant"
+  content: string
+}
+export interface ProjectAnalysisAgentInput {
+  question: string
+  /** A registered model ref; "default" or omission follows the default model. */
+  modelId?: string
+  messages?: ProjectAnalysisMessage[]
+  range: RunAnalysisRange
+  options: RunAnalysisOptions
+  filters: RunAnalysisFilters
+  target?: ProjectAnalysisTarget
+}
+export interface ProjectAnalysisEvidence {
+  id: string
+  label: string
+  summary: string
+  target?: ProjectAnalysisTarget
+}
+export interface ProjectAnalysisAgentResult {
+  content: string
+  modelName: string
+  dataAsOf: string
+  projectCount: number
+  featureCount: number
+  evidence: ProjectAnalysisEvidence[]
+  toolCalls: Array<{ name: string; success: boolean }>
+  exampleData: boolean
+}
+export interface ProjectAnalysisAgentResponse {
+  success: boolean
+  data?: ProjectAnalysisAgentResult
+  error?: string
+  cancelled?: boolean
+}

@@ -4,17 +4,16 @@ import { Button } from "@/components/ui/button"
 
 interface PDFViewerProps {
   filePath: string
-  base64Content: string
+  sourceUrl: string
 }
 
-export function PDFViewer({ filePath, base64Content }: PDFViewerProps): React.JSX.Element {
+export function PDFViewer({ filePath, sourceUrl }: PDFViewerProps): React.JSX.Element {
   const fileName = filePath.split("/").pop() || filePath
-  const pdfUrl = `data:application/pdf;base64,${base64Content}`
 
   const handleOpenExternal = (): void => {
     // Open in system default PDF viewer
     const link = document.createElement("a")
-    link.href = pdfUrl
+    link.href = sourceUrl
     link.download = fileName
     link.click()
   }
@@ -38,7 +37,7 @@ export function PDFViewer({ filePath, base64Content }: PDFViewerProps): React.JS
       {/* PDF embed */}
       <ScrollArea className="flex-1 min-h-0">
         <div className="flex flex-col items-center min-h-full bg-muted/30">
-          <object data={pdfUrl} type="application/pdf" className="w-full h-full min-h-[600px]">
+          <object data={sourceUrl} type="application/pdf" className="w-full h-full min-h-[600px]">
             {/* Fallback if PDF can't be displayed inline */}
             <div className="flex flex-col items-center justify-center min-h-[600px] gap-4 p-8">
               <FileText className="size-16 text-muted-foreground/50" />

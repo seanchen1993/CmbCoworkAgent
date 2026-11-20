@@ -1,3 +1,19 @@
+import {
+  compatibleWorkerProviderIdentity,
+  createWorkerSignatureMatches,
+  parseWorkerTurnScopedId,
+  resolveWorkerSnapshotContent,
+  sameWorkerRoleAndToolCall
+} from "./worker-message-content"
+import {
+  applyWorkerToolCallSnapshot,
+  mergeWorkerProviderWireIds,
+  mergeWorkerToolCallSnapshot,
+  restoreSnapshotAliasCallsWithResults
+} from "./snapshot-message-aliases"
+import { cancelThreadSearchNavigation, useThreadSearch } from "./thread-search-navigation"
+import { THREAD_LIST_PRIORITY_KEYS } from "../../../shared/thread-directory-metadata"
+import { THREAD_INCARNATION_METADATA_KEY, matchesThreadIncarnationSnapshot, type ThreadIncarnationSnapshot } from "../../../shared/thread-incarnation"
 import { create } from "zustand"
 import type { EvolutionCandidate } from "@/api/evolution"
 import type {
@@ -5,11 +21,17 @@ import type {
   ModelConfig,
   Provider,
   Message,
+  ToolCall,
   ForkableCheckpoint,
   ThreadForkParams
 } from "@/types"
 import type { BrowserCdpConfig } from "../../../shared/browser-types"
 import { findFirstChatThread, isHarnessProjectModeThread } from "./thread-classification"
+import {
+  appendThreadDirectoryPages,
+  indexThreadDirectory,
+  mergeThreadDirectoryFirstPage
+} from "./thread-directory-pagination"
 import { queueStorageKey } from "./queued-message-content"
 import {
   buildAvailableProviderOccurrenceId,
@@ -20,13 +42,80 @@ import {
   normalizeCompleteMessageIds,
   normalizeMessageRoleCollisionIds
 } from "../../../shared/message-role-collision"
-import {
-  normalizeChatScrollSettings,
-  type ChatScrollSettings
-} from "../../../shared/chat-scroll"
+import { revalidateModelCatalog } from "./model-catalog-cache"
+import type { ThreadDeleteOptions, ThreadMetadataPatch } from "../../../main/types"
+import { chatScrollSessionStore } from "@/components/chat/chat-scroll-session-store"
+import { clearChatThreadProjectionRuntime } from "./chat-thread-projection-cache"
+import { runBestEffortCommittedDeletionCleanups } from "./thread-group-deletion"
 
 const MAX_WORKER_FOCUS_MESSAGES = 2_000
 const MAX_WORKER_SIGNATURE_CHARS = 512
+const rendererDeletingThreadIds = new Set<string>()
+const rendererRetiredThreadIds = new Set<string>()
+
+/** Prevent delayed renderer work from touching a Thread once deletion starts. */
+export function isThreadDeletionPending(threadId: string): boolean {
+  return rendererDeletingThreadIds.has(threadId) || rendererRetiredThreadIds.has(threadId)
+}
+
+/** A successful backend delete permanently retires this renderer incarnation. */
+export function isThreadRetired(threadId: string): boolean {
+  return rendererRetiredThreadIds.has(threadId)
+}
+const THREAD_DIRECTORY_PAGE_LIMIT = 128
+const THREAD_DIRECTORY_PAGE_BYTE_BUDGET = 512 * 1024
+const THREAD_DIRECTORY_LOAD_MORE_PAGE_BATCH = 4
+let threadDirectoryLoadGeneration = 0
+let threadDirectoryBootstrapSelectionPending = false
+let threadDirectoryLatestLoadPromise: Promise<boolean> | null = null
+let threadDirectoryCursor: { beforeUpdatedAt: number; beforeThreadId: string } | null = null
+let threadDirectoryLoadMorePromise: Promise<void> | null = null
+let threadDirectoryMutationEpoch = 0
+const threadDirectoryMutationEpochById = new Map<string, number>()
+let indexedThreadDirectorySnapshot: readonly Thread[] | null = null
+let threadDirectoryIndexById = new Map<string, number>()
+
+function adoptThreadDirectorySnapshot(threads: readonly Thread[]): Thread[] {
+  indexedThreadDirectorySnapshot = threads
+  threadDirectoryIndexById = indexThreadDirectory(threads)
+  return threads as Thread[]
+}
+
+function getThreadDirectoryIndex(threads: readonly Thread[]): ReadonlyMap<string, number> {
+  if (indexedThreadDirectorySnapshot !== threads) adoptThreadDirectorySnapshot(threads)
+  return threadDirectoryIndexById
+}
+
+function markThreadDirectoryMutation(threadId: string): void {
+  threadDirectoryMutationEpoch += 1
+  threadDirectoryMutationEpochById.set(threadId, threadDirectoryMutationEpoch)
+}
+
+function forgetAcknowledgedThreadDirectoryMutations(requestEpoch: number): void {
+  for (const [threadId, epoch] of threadDirectoryMutationEpochById) {
+    if (epoch <= requestEpoch) threadDirectoryMutationEpochById.delete(threadId)
+  }
+}
+
+async function waitForAppliedThreadDirectoryLoad(initialLoad: Promise<boolean>): Promise<void> {
+  let pendingLoad = initialLoad
+  for (;;) {
+    try {
+      const applied = await pendingLoad
+      if (applied) return
+    } catch (error) {
+      const latestLoad = threadDirectoryLatestLoadPromise
+      if (!latestLoad || latestLoad === pendingLoad) throw error
+      pendingLoad = latestLoad
+      continue
+    }
+
+    const latestLoad = threadDirectoryLatestLoadPromise
+    if (!latestLoad || latestLoad === pendingLoad) return
+    pendingLoad = latestLoad
+  }
+}
+
 export const DEFAULT_BROWSER_CDP_CONFIG: BrowserCdpConfig = {
   enabled: false,
   profileImportEnabled: false
@@ -112,12 +201,6 @@ function isWorkerSnapshotMessageId(id: string): boolean {
   return unscopedId.startsWith("worker-snapshot-")
 }
 
-function parseWorkerTurnScopedId(id: string): { rawId: string; turn: number } | undefined {
-  const match = /^worker-turn-.*-(\d+)::(.+)$/.exec(id)
-  if (!match) return undefined
-  return { rawId: match[2], turn: Number(match[1]) }
-}
-
 function workerTransportSourceId(message: Message): string {
   const scoped = parseWorkerTurnScopedId(message.id)
   return getMessageProviderSourceId({
@@ -144,23 +227,43 @@ function isWorkerProvisionalSourceId(sourceId: string | undefined): boolean {
   return renderId.startsWith("worker-live-") || renderId.startsWith("worker-snapshot-")
 }
 
-function enrichWorkerProvisionalProviderIdentities(
+export function enrichWorkerProviderIdentities(
   existingMessages: readonly Message[],
   incomingMessages: readonly Message[]
 ): Message[] {
-  return existingMessages.map((existing) => {
-    const existingProviderSourceId = existing.provider_source_id?.trim()
-    if (
-      !isWorkerProvisionalRenderId(existing) ||
-      (existingProviderSourceId && !isWorkerProvisionalSourceId(existingProviderSourceId))
-    ) {
-      return existing
+  const incomingById = new Map<string, Message[]>()
+  for (const incoming of incomingMessages) {
+    if (!incoming.provider_source_id?.trim()) continue
+    const matches = incomingById.get(incoming.id) ?? []
+    matches.push(incoming)
+    incomingById.set(incoming.id, matches)
+  }
+  if (incomingById.size === 0) return [...existingMessages]
+  const turnKeys = workerTurnKeys(existingMessages)
+  const declaredOccurrences = new Set<string>()
+  existingMessages.forEach((existing, index) => {
+    if (existing.worker_provider_identity) {
+      declaredOccurrences.add(workerOccurrenceKey(existing, turnKeys[index]))
     }
-    const matches = incomingMessages.filter(
+  })
+  return existingMessages.map((existing, index) => {
+    if (existing.worker_provider_identity) return existing
+    const existingProviderSourceId = existing.provider_source_id?.trim()
+    const provisionalIdentity =
+      isWorkerProvisionalRenderId(existing) &&
+      (!existingProviderSourceId || isWorkerProvisionalSourceId(existingProviderSourceId))
+    // An exact untagged live ID can be upgraded when the provider starts
+    // sending metadata for the same occurrence. Other raw aliases still need
+    // explicit provider evidence on both sides.
+    const matches = (incomingById.get(existing.id) ?? []).filter(
       (incoming) =>
-        incoming.id === existing.id &&
-        incoming.role === existing.role &&
-        Boolean(incoming.provider_source_id?.trim())
+        sameWorkerRoleAndToolCall(existing, incoming) &&
+        (!incoming.worker_provider_identity ||
+          !declaredOccurrences.has(workerOccurrenceKey(incoming, turnKeys[index]))) &&
+        (provisionalIdentity ||
+          (incoming.worker_provider_identity &&
+            getMessageProviderOccurrence(incoming) ===
+              (getMessageProviderOccurrence(existing) ?? 1)))
     )
     const providerSourceIds = new Set(
       matches.map((message) => message.provider_source_id?.trim()).filter(Boolean)
@@ -170,19 +273,25 @@ function enrichWorkerProvisionalProviderIdentities(
     const providerOccurrence = matches
       .map((message) => getMessageProviderOccurrence(message))
       .find((occurrence) => occurrence !== undefined)
+    const declared = matches.find((message) => message.worker_provider_identity)
+    if (declared) declaredOccurrences.add(workerOccurrenceKey(declared, turnKeys[index]))
     return {
       ...existing,
       provider_source_id: providerSourceId,
-      ...(providerOccurrence !== undefined ? { provider_occurrence: providerOccurrence } : {})
+      ...(providerOccurrence !== undefined ? { provider_occurrence: providerOccurrence } : {}),
+      ...(declared && { worker_provider_identity: true })
     }
   })
 }
 
 function workerTransportIdentityKey(message: Message, turnKey: string): string {
-  return [turnKey, message.role, workerTransportSourceId(message)].join("\u001f")
+  return [turnKey, message.role, workerTransportSourceId(message), message.tool_call_id].join(
+    "\u001f"
+  )
 }
 
 function workerProviderOccurrencesCompatible(left: Message, right: Message): boolean {
+  if (!compatibleWorkerProviderIdentity(left, right)) return false
   const leftOccurrence = getMessageProviderOccurrence(left)
   const rightOccurrence = getMessageProviderOccurrence(right)
   return (
@@ -192,30 +301,15 @@ function workerProviderOccurrencesCompatible(left: Message, right: Message): boo
   )
 }
 
-function findSameExplicitWorkerOccurrenceIndex(
-  messages: readonly Message[],
-  message: Message,
-  turnKeys: readonly string[],
-  turnKey: string
-): number | undefined {
-  const occurrence = getMessageProviderOccurrence(message)
-  if (occurrence === undefined) return undefined
-  const sourceId = workerTransportSourceId(message)
-  const matches = messages.flatMap((candidate, candidateIndex) => {
-    if (
-      turnKeys[candidateIndex] !== turnKey ||
-      candidate.role !== message.role ||
-      workerTransportSourceId(candidate) !== sourceId
-    ) {
-      return []
-    }
-    const candidateOccurrence = getMessageProviderOccurrence(candidate)
-    return candidateOccurrence === occurrence ||
-      (occurrence === 1 && candidateOccurrence === undefined)
-      ? [candidateIndex]
-      : []
-  })
-  return matches.length === 1 ? matches[0] : undefined
+function workerOccurrenceKey(message: Message, turnKey: string): string {
+  return `${workerTransportIdentityKey(message, turnKey)}\u001f${getMessageProviderOccurrence(message) ?? 1}\u001f${message.worker_provider_identity === true}`
+}
+
+function workerSnapshotSlotKey(message: Message, turnKey: string): string | undefined {
+  if (message.worker_snapshot_index === undefined) return undefined
+  const signature = workerFocusMessageSignature(message)
+  if (!signature) return undefined
+  return JSON.stringify([turnKey, message.worker_snapshot_index, signature])
 }
 
 function findExplicitWorkerUserOccurrenceIndex(
@@ -238,16 +332,13 @@ function findExplicitWorkerUserOccurrenceIndex(
 function ensureUniqueWorkerMessageId(messages: readonly Message[], message: Message): Message {
   const occupiedIds = new Set(messages.map((candidate) => candidate.id))
   if (!occupiedIds.has(message.id)) return message
-  const sourceId = workerTransportSourceId(message)
+  const sourceId = message.worker_provider_identity
+    ? getMessageProviderSourceId(message)
+    : workerTransportSourceId(message)
   const occurrence = getMessageProviderOccurrence(message) ?? 1
   return {
     ...message,
-    id: buildAvailableProviderOccurrenceId(
-      sourceId,
-      message.role,
-      occurrence,
-      occupiedIds
-    ),
+    id: buildAvailableProviderOccurrenceId(sourceId, message.role, occurrence, occupiedIds),
     provider_source_id: sourceId,
     provider_occurrence: occurrence
   }
@@ -274,13 +365,16 @@ function findSameWorkerTransportIdentityIndex(
   messages: readonly Message[],
   message: Message,
   turnKeys: readonly string[],
-  turnKey: string
+  turnKey: string,
+  claimed?: ReadonlySet<number>
 ): number | undefined {
   const renderId = workerTransportRenderId(message)
   const exactIndex = messages.findIndex(
     (candidate, candidateIndex) =>
+      !claimed?.has(candidateIndex) &&
       turnKeys[candidateIndex] === turnKey &&
-      candidate.role === message.role &&
+      sameWorkerRoleAndToolCall(candidate, message) &&
+      compatibleWorkerProviderIdentity(candidate, message) &&
       workerProviderOccurrencesCompatible(candidate, message) &&
       workerTransportRenderId(candidate) === renderId
   )
@@ -290,8 +384,9 @@ function findSameWorkerTransportIdentityIndex(
 
   const sourceId = workerTransportSourceId(message)
   const providerMatches = messages.flatMap((candidate, candidateIndex) =>
+    !claimed?.has(candidateIndex) &&
     turnKeys[candidateIndex] === turnKey &&
-    candidate.role === message.role &&
+    sameWorkerRoleAndToolCall(candidate, message) &&
     workerProviderOccurrencesCompatible(candidate, message) &&
     workerTransportSourceId(candidate) === sourceId &&
     (parseWorkerTurnScopedId(candidate.id) !== undefined ||
@@ -359,8 +454,7 @@ function findWorkerToolCallMatch(
 ): { call: WorkerToolCall; index: number } | undefined {
   if (target.id) {
     const index = toolCalls.findIndex(
-      (toolCall, candidateIndex) =>
-        !usedIndexes?.has(candidateIndex) && toolCall.id === target.id
+      (toolCall, candidateIndex) => !usedIndexes?.has(candidateIndex) && toolCall.id === target.id
     )
     return index >= 0 ? { call: toolCalls[index], index } : undefined
   }
@@ -376,9 +470,7 @@ function findWorkerToolCallMatch(
 
   const index = toolCalls.findIndex(
     (toolCall, candidateIndex) =>
-      !usedIndexes?.has(candidateIndex) &&
-      !toolCall.id &&
-      toolCall.name === target.name
+      !usedIndexes?.has(candidateIndex) && !toolCall.id && toolCall.name === target.name
   )
   return index >= 0 ? { call: toolCalls[index], index } : undefined
 }
@@ -455,10 +547,12 @@ function findCompatibleWorkerReplayIndex(
   messages: Message[],
   message: Message,
   turnKeys?: readonly string[],
-  turnKey?: string
+  turnKey?: string,
+  claimed?: ReadonlySet<number>
 ): number | undefined {
   const index = messages.findIndex(
     (item, candidateIndex) =>
+      !claimed?.has(candidateIndex) &&
       (turnKey === undefined || turnKeys?.[candidateIndex] === turnKey) &&
       (isCompatibleWorkerAssistantToolReplay(item, message) ||
         isCompatibleWorkerToolResultReplay(item, message))
@@ -470,10 +564,12 @@ function findSameWorkerAssistantTextIndex(
   messages: Message[],
   message: Message,
   turnKeys?: readonly string[],
-  turnKey?: string
+  turnKey?: string,
+  claimed?: ReadonlySet<number>
 ): number | undefined {
   const index = messages.findIndex(
     (item, candidateIndex) =>
+      !claimed?.has(candidateIndex) &&
       (turnKey === undefined || turnKeys?.[candidateIndex] === turnKey) &&
       isSameWorkerAssistantText(item, message)
   )
@@ -507,40 +603,22 @@ function workerTurnKeys(
 }
 
 function relativeWorkerTurnKeys(messages: readonly Message[], turnOffset: number): string[] {
-  let currentTurn = turnOffset
-  return messages.map((message) => {
-    if (message.role === "user") currentTurn += 1
-    return currentTurn > 0
-      ? `__cmb-worker-turn-${currentTurn}__`
-      : WORKER_PRE_USER_TURN_KEY
-  })
+  return workerTurnKeys(
+    messages,
+    turnOffset > 0 ? `__cmb-worker-turn-${turnOffset}__` : WORKER_PRE_USER_TURN_KEY
+  )
 }
 
-function workerTurnSignatureKey(turnKey: string, signature: string | undefined): string | undefined {
+function workerTurnSignatureKey(
+  turnKey: string,
+  signature: string | undefined
+): string | undefined {
   return signature ? `${turnKey}\u0000${signature}` : undefined
 }
 
 function incrementSignatureCount(map: Map<string, number>, signature: string | undefined): void {
   if (!signature) return
   map.set(signature, (map.get(signature) ?? 0) + 1)
-}
-
-function takeWindowedSignatureMatch(
-  indexes: number[] | undefined,
-  remainingBySignature: Map<string, number>,
-  signature: string | undefined
-): number | undefined {
-  if (!indexes?.length || !signature) return undefined
-  const remaining = remainingBySignature.get(signature) ?? 0
-  if (remaining <= 0) return indexes.shift()
-
-  // Focused live events normally describe the newest worker turn. If older
-  // turns produced identical text, match against the newest compatible replay
-  // window rather than the oldest matching snapshot.
-  const matchPosition = Math.max(0, indexes.length - remaining)
-  const [index] = indexes.splice(matchPosition, 1)
-  remainingBySignature.set(signature, remaining - 1)
-  return index
 }
 
 function pruneWorkerFocusMessages(messages: Message[]): Message[] {
@@ -586,6 +664,13 @@ function reorderWorkerFocusMessagesByIncomingOrder(
   const turnKeyByMessage = new Map(
     messages.map((message, index) => [message, turnKeys[index] ?? WORKER_PRE_USER_TURN_KEY])
   )
+  const maxOccurrences = new Map<string, number>()
+  for (const [message, turnKey] of turnKeyByMessage) {
+    const occurrence = getMessageProviderOccurrence(message)
+    if (occurrence === undefined) continue
+    const key = workerTransportIdentityKey(message, turnKey)
+    maxOccurrences.set(key, Math.max(maxOccurrences.get(key) ?? 0, occurrence))
+  }
   const reordered = [...messages]
   if (incomingOrderedMessages.length > 1) {
     const incomingSlots = [...incomingIndexSet].sort((left, right) => left - right)
@@ -596,15 +681,17 @@ function reorderWorkerFocusMessagesByIncomingOrder(
   for (const [incomingIndex, incomingMessage] of incomingOrderedMessages.entries()) {
     const incomingOccurrence = getMessageProviderOccurrence(incomingMessage)
     if (incomingOccurrence === undefined) continue
+    const incomingTurnKey = incomingOrderedTurnKeys[incomingIndex]
+    const identityKey = workerTransportIdentityKey(incomingMessage, incomingTurnKey)
+    if ((maxOccurrences.get(identityKey) ?? 0) <= incomingOccurrence) continue
     const currentIndex = reordered.findIndex((message) => message.id === incomingMessage.id)
     if (currentIndex < 0) continue
-    const incomingTurnKey = incomingOrderedTurnKeys[incomingIndex]
     const incomingSourceId = getMessageProviderSourceId(incomingMessage)
     const insertionIndex = reordered.findIndex(
       (candidate, index) =>
         index < currentIndex &&
         turnKeyByMessage.get(candidate) === incomingTurnKey &&
-        candidate.role === incomingMessage.role &&
+        sameWorkerRoleAndToolCall(candidate, incomingMessage) &&
         getMessageProviderSourceId(candidate) === incomingSourceId &&
         (getMessageProviderOccurrence(candidate) ?? 0) > incomingOccurrence
     )
@@ -622,8 +709,7 @@ function mergeWorkerToolCalls(
   if (!incoming?.length) return existing
   if (!existing?.length) return incoming
   const incomingIsSparseSubset =
-    existing.length > incoming.length &&
-    areIncomingWorkerToolCallsSubset(existing, incoming)
+    existing.length > incoming.length && areIncomingWorkerToolCallsSubset(existing, incoming)
   if (!areWorkerToolCallsCompatible(existing, incoming) && !incomingIsSparseSubset) {
     return incoming
   }
@@ -655,6 +741,8 @@ function resolveWorkerFocusContent(
   incomingIsOrderedSnapshot: boolean = false,
   incomingDefinesRepeatedOccurrence: boolean = false
 ): Message["content"] {
+  const snapshotContent = resolveWorkerSnapshotContent(existingMessage, incomingMessage)
+  if (snapshotContent !== undefined) return snapshotContent
   if (incomingIsOrderedSnapshot && incomingDefinesRepeatedOccurrence) {
     return incomingMessage.content ?? ""
   }
@@ -679,6 +767,100 @@ function resolveWorkerFocusContent(
   return preferIncomingContent(existingMessage.content, incomingMessage.content)
 }
 
+const normalizedWorkerFocusMessageArrays = new WeakSet<readonly Message[]>()
+
+function workerProviderIdentityExactlyMatches(existing: Message, incoming: Message): boolean {
+  const existingSourceId = existing.provider_source_id?.trim() || undefined
+  const incomingSourceId = incoming.provider_source_id?.trim() || undefined
+  return (
+    existingSourceId === incomingSourceId &&
+    getMessageProviderOccurrence(existing) === getMessageProviderOccurrence(incoming)
+  )
+}
+
+/**
+ * Common live assistant chunks already arrive as a cumulative snapshot for the
+ * same final array entry. Once an array has passed the full reconciliation path,
+ * update that tail without rescanning up to 2,000 historical messages.
+ */
+export function mergeWorkerFocusTailUpdate(
+  existingMessages: Message[],
+  incomingMessage: Message
+): Message[] | undefined {
+  const existing = existingMessages.at(-1)
+  if (
+    !existing ||
+    existing.role !== "assistant" ||
+    incomingMessage.role !== "assistant" ||
+    existing.id !== incomingMessage.id ||
+    !workerProviderIdentityExactlyMatches(existing, incomingMessage)
+  ) {
+    return undefined
+  }
+
+  existingMessages[existingMessages.length - 1] = {
+    ...existing,
+    ...incomingMessage,
+    id: existing.id,
+    worker_provider_wire_ids: mergeWorkerProviderWireIds(
+      existing.worker_provider_wire_ids,
+      incomingMessage.worker_provider_wire_ids
+    ),
+    content: resolveWorkerFocusContent(existing, incomingMessage),
+    reasoning: incomingMessage.reasoning ?? existing.reasoning,
+    tool_calls: incomingMessage.worker_tool_calls_source
+      ? mergeWorkerToolCallSnapshot(existing.tool_calls, incomingMessage.tool_calls)
+      : mergeWorkerToolCalls(existing.tool_calls, incomingMessage.tool_calls),
+    tool_call_id: incomingMessage.tool_call_id ?? existing.tool_call_id,
+    name: incomingMessage.name ?? existing.name,
+    status: incomingMessage.status ?? existing.status,
+    is_error: incomingMessage.is_error ?? existing.is_error
+  }
+  return existingMessages
+}
+
+function rememberNormalizedWorkerFocusMessages(messages: Message[]): Message[] {
+  normalizedWorkerFocusMessageArrays.add(messages)
+  return messages
+}
+
+/**
+ * Reuse the panel's already-merged prefix only when its tail was the exact
+ * previous live object. A checkpoint-enriched/replay-aligned tail deliberately
+ * falls back to the full panel merge so sparse-history semantics stay intact.
+ */
+export function applyWorkerFocusTailUpdateToMergedMessages(
+  previousMergedMessages: Message[],
+  previousLiveTail: Message | undefined,
+  nextLiveMessages: readonly Message[]
+): Message[] | undefined {
+  const nextLiveTail = nextLiveMessages.at(-1)
+  if (
+    !previousLiveTail ||
+    !nextLiveTail ||
+    previousLiveTail.id !== nextLiveTail.id ||
+    previousLiveTail.role !== nextLiveTail.role
+  ) {
+    return undefined
+  }
+
+  // With no separately hydrated history the merged view can be the live array
+  // itself. The store has already replaced its tail in place, so no work remains.
+  if (previousMergedMessages === nextLiveMessages) return previousMergedMessages
+
+  const previousMergedTail = previousMergedMessages.at(-1)
+  if (
+    previousMergedTail !== previousLiveTail ||
+    previousLiveTail.id !== nextLiveTail.id ||
+    previousLiveTail.role !== nextLiveTail.role
+  ) {
+    return undefined
+  }
+
+  previousMergedMessages[previousMergedMessages.length - 1] = nextLiveTail
+  return previousMergedMessages
+}
+
 function preferIncomingContent(
   existing: Message["content"] | undefined,
   incoming: Message["content"] | undefined
@@ -700,6 +882,8 @@ type MainView =
   | "thread"
   | "customize"
   | "evolution"
+  | "scheduled"
+  | "market"
   | "kanban"
   | "harness"
   | "claudecode"
@@ -707,6 +891,10 @@ type MainView =
 
 interface ThreadNavigationOptions {
   preserveView?: boolean
+}
+
+interface ThreadDirectoryLoadOptions {
+  selectInitialThread?: boolean
 }
 
 function resolveChatThreadId(threads: Thread[], preferredThreadId?: string | null): string | null {
@@ -743,12 +931,13 @@ export interface SubagentFocusView {
   subagentId: string
   name: string
   description: string
+  startedAt?: Date
   status?: "pending" | "running" | "completed" | "failed" | "cancelled"
 }
 
 export interface RightPanelWorkRequest {
   id: number
-  target: "systemConstraints"
+  target: "systemConstraints" | "agents"
   threadId: string
 }
 
@@ -771,6 +960,8 @@ interface AppState {
   // Threads
   threads: Thread[]
   currentThreadId: string | null
+  threadDirectoryHasMore: boolean
+  threadDirectoryLoadingMore: boolean
 
   // Models and Providers (global, not per-thread)
   models: ModelConfig[]
@@ -783,17 +974,18 @@ interface AppState {
   // Settings dialog state
   settingsOpen: boolean
   browserCdpConfig: BrowserCdpConfig
-  chatScrollSettings: ChatScrollSettings
 
   // Sidebar state
   sidebarCollapsed: boolean
   rightPanelCollapsed: boolean
+  rightPanelWorkRequestSequence: number
   rightPanelWorkRequest: RightPanelWorkRequest | null
 
   // Split view for inspecting a single coordinator worker stream.
   workerFocusView: WorkerFocusView | null
   workerFocusMessagesThreadId: string | null
   workerFocusMessages: Message[]
+  workerFocusMessagesContentVersion: number
   openWorkerFocusView: (view: WorkerFocusView) => void
   closeWorkerFocusView: () => void
   appendWorkerFocusMessage: (workerThreadId: string, message: Message) => void
@@ -841,7 +1033,9 @@ interface AppState {
 
   // Customize view state
   showCustomizeView: boolean
+  accountRevision: number
   customizeInitialTab: string | null
+  customizeInitialSection: string | null
   marketInitialSkillCategory: string | null
   marketInitialSkillSearchQuery: string | null
   marketInitialSkillDetailName: string | null
@@ -849,7 +1043,10 @@ interface AppState {
   marketInitialTab: string | null
 
   // Thread actions
-  loadThreads: () => Promise<void>
+  loadThreads: (options?: ThreadDirectoryLoadOptions) => Promise<void>
+  addThreadSummary: (thread: Thread) => void
+  loadMoreThreads: () => Promise<void>
+  touchThreadSummaries: (threadIds: Iterable<string>, updatedAt: Date) => void
   createThread: (
     metadata?: Record<string, unknown>,
     options?: ThreadNavigationOptions
@@ -857,13 +1054,23 @@ interface AppState {
   forkThread: (params: ThreadForkParams, options?: ThreadNavigationOptions) => Promise<Thread>
   listForkableCheckpoints: (threadId: string) => Promise<ForkableCheckpoint[]>
   selectThread: (threadId: string, options?: ThreadNavigationOptions) => Promise<void>
-  deleteThread: (threadId: string) => Promise<void>
+  deleteThread: (
+    threadId: string,
+    options?: ThreadDeleteOptions & { deferDirectoryUpdate?: boolean }
+  ) => Promise<void>
+  finalizeThreadDeletions: (threadIds: Iterable<string>) => void
   updateThread: (threadId: string, updates: Partial<Thread>) => Promise<void>
-  generateTitleForFirstMessage: (threadId: string, content: string) => Promise<void>
+  patchThreadMetadata: (threadId: string, patch: ThreadMetadataPatch) => Promise<void>
+  generateTitleForFirstMessage: (
+    threadId: string,
+    content: string,
+    skillName?: string,
+    skillDescription?: string
+  ) => Promise<void>
 
   // Model actions
-  loadModels: () => Promise<void>
-  loadProviders: () => Promise<void>
+  loadModels: (force?: boolean) => Promise<void>
+  loadProviders: (force?: boolean) => Promise<void>
 
   // Panel actions
   setRightPanelTab: (tab: "todos" | "files" | "subagents") => void
@@ -872,9 +1079,14 @@ interface AppState {
 
   // Settings actions
   setSettingsOpen: (open: boolean) => void
-  setChatScrollSettings: (settings: ChatScrollSettings) => void
-  loadChatScrollSettings: () => Promise<void>
   setBrowserCdpConfig: (config: BrowserCdpConfig) => void
+  setGitChangeNoticeEnabled: (enabled: boolean) => Promise<void>
+  loadGitChangeNoticeEnabled: () => Promise<void>
+  gitChangeNoticeEnabled: boolean
+  gitChangeNoticePendingByThread: Record<string, boolean>
+  gitWorkspaceByThread: Record<string, boolean>
+  setGitChangeNoticePending: (threadId: string, pending: boolean) => void
+  setGitWorkspaceStatus: (threadId: string, isGit: boolean) => void
 
   // Sidebar actions
   toggleSidebar: () => void
@@ -882,6 +1094,8 @@ interface AppState {
   toggleRightPanel: () => void
   setRightPanelCollapsed: (collapsed: boolean) => void
   requestOpenRightPanelSystemConstraints: (threadId: string) => void
+  requestOpenRightPanelAgents: (threadId: string) => void
+  consumeRightPanelWorkRequest: (requestId: number) => void
 
   // Kanban actions
   setShowKanbanView: (show: boolean) => void
@@ -891,7 +1105,7 @@ interface AppState {
   setShowHarnessBoardView: (show: boolean) => void
 
   // Customize actions
-  setShowCustomizeView: (show: boolean, tab?: string) => void
+  setShowCustomizeView: (show: boolean, tab?: string, section?: string) => void
   setMarketInitialSkillCategory: (category: string | null) => void
   setMarketInitialSkillSearchQuery: (query: string | null) => void
   setMarketInitialSkillDetailName: (name: string | null) => void
@@ -968,19 +1182,25 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Initial state
   threads: [],
   currentThreadId: null,
+  threadDirectoryHasMore: false,
+  threadDirectoryLoadingMore: false,
   models: [],
   providers: [],
   rightPanelTab: "todos",
   rightModule: "work",
   settingsOpen: false,
-  chatScrollSettings: normalizeChatScrollSettings({}),
   browserCdpConfig: DEFAULT_BROWSER_CDP_CONFIG,
+  gitChangeNoticeEnabled: true,
+  gitChangeNoticePendingByThread: {},
+  gitWorkspaceByThread: {},
   sidebarCollapsed: false,
   rightPanelCollapsed: false,
+  rightPanelWorkRequestSequence: 0,
   rightPanelWorkRequest: null,
   workerFocusView: null,
   workerFocusMessagesThreadId: null,
   workerFocusMessages: [],
+  workerFocusMessagesContentVersion: 0,
   subagentFocusView: null,
   workflowAgentFocusView: null,
   workflowAgentFocusSnapshot: null,
@@ -993,7 +1213,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   dashboardAllowed: null,
   previousThreadId: null,
   showCustomizeView: false,
+  accountRevision: 0,
   customizeInitialTab: null,
+  customizeInitialSection: null,
   marketInitialSkillCategory: null,
   marketInitialSkillSearchQuery: null,
   marketInitialSkillDetailName: null,
@@ -1011,24 +1233,154 @@ export const useAppStore = create<AppState>((set, get) => ({
   evolutionLastRunOpts: null,
 
   // Thread actions
-  loadThreads: async () => {
-    const threads = await window.api.threads.list()
-    set({ threads })
+  loadThreads: (options) => {
+    if (options?.selectInitialThread) threadDirectoryBootstrapSelectionPending = true
+    const generation = ++threadDirectoryLoadGeneration
+    threadDirectoryLoadMorePromise = null
+    const requestMutationEpoch = threadDirectoryMutationEpoch
+    const loadPromise = (async (): Promise<boolean> => {
+      const page = await window.api.threads.listPage({
+        limit: THREAD_DIRECTORY_PAGE_LIMIT,
+        byteBudget: THREAD_DIRECTORY_PAGE_BYTE_BUDGET
+      })
+      if (generation !== threadDirectoryLoadGeneration) return false
 
-    // Select the first chat thread if none selected. Project-mode threads are
-    // rendered inside the harness board and should not become the default chat.
-    if (!get().currentThreadId) {
-      const firstChatThread = findFirstChatThread(threads)
-      if (firstChatThread) {
-        await get().selectThread(firstChatThread.thread_id)
+      threadDirectoryCursor =
+        page.hasMore && page.beforeUpdatedAt !== null && page.beforeThreadId !== null
+          ? { beforeUpdatedAt: page.beforeUpdatedAt, beforeThreadId: page.beforeThreadId }
+          : null
+      set((state) => {
+        const threads = mergeThreadDirectoryFirstPage(state.threads, page.threads, {
+          requestMutationEpoch,
+          mutationEpochById: threadDirectoryMutationEpochById,
+          knownIndexById: getThreadDirectoryIndex(state.threads),
+          completeSnapshot: !page.hasMore,
+          authoritativePageBoundary: page.hasMore ? page.threads.at(-1) : undefined
+        })
+        return {
+          threads:
+            threads === state.threads ? state.threads : adoptThreadDirectorySnapshot(threads),
+          threadDirectoryHasMore: threadDirectoryCursor !== null,
+          threadDirectoryLoadingMore: false
+        }
+      })
+      forgetAcknowledgedThreadDirectoryMutations(requestMutationEpoch)
+
+      // Directory refreshes are data-only. Only the explicit startup bootstrap may
+      // choose a task, and a route change while the request was pending wins.
+      const shouldSelectInitialThread = threadDirectoryBootstrapSelectionPending
+      threadDirectoryBootstrapSelectionPending = false
+      const state = get()
+      if (shouldSelectInitialThread && state.mainView === "thread" && !state.currentThreadId) {
+        const firstChatThread = findFirstChatThread(state.threads)
+        if (firstChatThread) await get().selectThread(firstChatThread.thread_id)
       }
-    }
+
+      return true
+    })()
+    threadDirectoryLatestLoadPromise = loadPromise
+
+    return options?.selectInitialThread
+      ? waitForAppliedThreadDirectoryLoad(loadPromise)
+      : loadPromise.then(() => undefined)
+  },
+
+  loadMoreThreads: async () => {
+    if (threadDirectoryLoadMorePromise) return threadDirectoryLoadMorePromise
+    const initialCursor = threadDirectoryCursor
+    if (!initialCursor || !get().threadDirectoryHasMore) return
+
+    const generation = threadDirectoryLoadGeneration
+    const requestMutationEpoch = threadDirectoryMutationEpoch
+    const loadPromise = (async () => {
+      set({ threadDirectoryLoadingMore: true })
+      try {
+        let cursor = initialCursor
+        let hasMore = true
+        const incoming: Thread[] = []
+        for (let pageIndex = 0; pageIndex < THREAD_DIRECTORY_LOAD_MORE_PAGE_BATCH; pageIndex += 1) {
+          const page = await window.api.threads.listPage({
+            beforeUpdatedAt: cursor.beforeUpdatedAt,
+            beforeThreadId: cursor.beforeThreadId,
+            limit: THREAD_DIRECTORY_PAGE_LIMIT,
+            byteBudget: THREAD_DIRECTORY_PAGE_BYTE_BUDGET
+          })
+          if (generation !== threadDirectoryLoadGeneration) return
+          incoming.push(...page.threads)
+          hasMore = page.hasMore && page.beforeUpdatedAt !== null && page.beforeThreadId !== null
+          if (!hasMore) break
+          cursor = {
+            beforeUpdatedAt: page.beforeUpdatedAt as number,
+            beforeThreadId: page.beforeThreadId as string
+          }
+        }
+        if (generation !== threadDirectoryLoadGeneration) return
+
+        threadDirectoryCursor = hasMore ? cursor : null
+        set((state) => {
+          const threads = appendThreadDirectoryPages(state.threads, incoming, {
+            requestMutationEpoch,
+            mutationEpochById: threadDirectoryMutationEpochById,
+            knownIndexById: getThreadDirectoryIndex(state.threads)
+          })
+          return {
+            threads:
+              threads === state.threads ? state.threads : adoptThreadDirectorySnapshot(threads),
+            threadDirectoryHasMore: threadDirectoryCursor !== null,
+            threadDirectoryLoadingMore: false
+          }
+        })
+        forgetAcknowledgedThreadDirectoryMutations(requestMutationEpoch)
+      } catch (error) {
+        if (generation === threadDirectoryLoadGeneration) {
+          console.error("[Store] Failed to load older tasks:", error)
+        }
+      } finally {
+        if (generation === threadDirectoryLoadGeneration) {
+          threadDirectoryLoadMorePromise = null
+          set({ threadDirectoryLoadingMore: false })
+        }
+      }
+    })()
+    threadDirectoryLoadMorePromise = loadPromise
+    return loadPromise
+  },
+
+  touchThreadSummaries: (threadIds, updatedAt) => {
+    const uniqueIds = new Set(threadIds)
+    if (uniqueIds.size === 0) return
+    for (const threadId of uniqueIds) markThreadDirectoryMutation(threadId)
+    set((state) => {
+      const indexById = getThreadDirectoryIndex(state.threads)
+      let threads: Thread[] | null = null
+      for (const threadId of uniqueIds) {
+        const index = indexById.get(threadId)
+        if (index === undefined) continue
+        threads ??= [...state.threads]
+        threads[index] = { ...threads[index], updated_at: updatedAt }
+      }
+      return threads ? { threads: adoptThreadDirectorySnapshot(threads) } : state
+    })
+  },
+
+  addThreadSummary: (thread) => {
+    markThreadDirectoryMutation(thread.thread_id)
+    set((state) => ({
+      threads: adoptThreadDirectorySnapshot([
+        thread,
+        ...state.threads.filter((item) => item.thread_id !== thread.thread_id)
+      ])
+    }))
   },
 
   createThread: async (metadata?: Record<string, unknown>, options?: ThreadNavigationOptions) => {
     const thread = await window.api.threads.create(metadata)
+    markThreadDirectoryMutation(thread.thread_id)
     set((state) => ({
-      threads: [thread, ...state.threads],
+      threads: adoptThreadDirectorySnapshot([
+        thread,
+        ...state.threads.filter((item) => item.thread_id !== thread.thread_id)
+      ]),
       currentThreadId: thread.thread_id,
       ...(options?.preserveView
         ? {}
@@ -1055,8 +1407,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   forkThread: async (params: ThreadForkParams, options?: ThreadNavigationOptions) => {
     const response = await window.api.threads.fork(params)
     const thread = response.thread
+    markThreadDirectoryMutation(thread.thread_id)
     set((state) => ({
-      threads: [thread, ...state.threads.filter((item) => item.thread_id !== thread.thread_id)],
+      threads: adoptThreadDirectorySnapshot([
+        thread,
+        ...state.threads.filter((item) => item.thread_id !== thread.thread_id)
+      ]),
       currentThreadId: thread.thread_id,
       ...(options?.preserveView
         ? {}
@@ -1106,66 +1462,154 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
   },
 
-  deleteThread: async (threadId: string) => {
+  deleteThread: async (
+    threadId: string,
+    options?: ThreadDeleteOptions & { deferDirectoryUpdate?: boolean }
+  ) => {
     console.log("[Store] Deleting thread:", threadId)
+    if (useThreadSearch.getState().navigation?.result.threadId === threadId) cancelThreadSearchNavigation()
+    rendererDeletingThreadIds.add(threadId)
+    markThreadDirectoryMutation(threadId)
     try {
-      await window.api.threads.delete(threadId)
+      await window.api.threads.delete(
+        threadId,
+        options?.requireIdle === undefined && options?.groupGuard === undefined
+          ? undefined
+          : { requireIdle: options?.requireIdle, groupGuard: options?.groupGuard }
+      )
+      rendererDeletingThreadIds.delete(threadId)
+      rendererRetiredThreadIds.add(threadId)
+      // A directory refresh may start after the optimistic fence but still read
+      // before the database commit becomes visible. Advance the epoch again at
+      // the commit acknowledgement so that stale page cannot resurrect the row.
+      markThreadDirectoryMutation(threadId)
       console.log("[Store] Thread deleted from backend")
       // The draft-message queue is persisted to localStorage independent of the
       // DB thread record (thread-context.tsx's persistQueuedMessages) so it
       // survives reloads; nothing else clears that key, so it would otherwise
       // sit there forever once the thread it belonged to is gone.
-      window.localStorage.removeItem(queueStorageKey(threadId))
-
-      set((state) => {
-        const threads = state.threads.filter((t) => t.thread_id !== threadId)
-        const wasCurrentThread = state.currentThreadId === threadId
-        const newCurrentId = wasCurrentThread
-          ? state.mainView === "harness"
-            ? null
-            : findFirstChatThread(threads)?.thread_id || null
-          : state.currentThreadId
-
-        return {
-          threads,
-          currentThreadId: newCurrentId,
-          // 如果被删除的线程是之前保存的，清掉避免恢复到无效 id
-          previousThreadId: state.previousThreadId === threadId ? null : state.previousThreadId,
-          ...(state.workerFocusView?.threadId === threadId
-            ? {
-                workerFocusView: null,
-                workerFocusMessagesThreadId: null,
-                workerFocusMessages: []
+      // Permanent deletion must evict message-bearing projection/scroll caches immediately.
+      // Advancing the scroll lease also ignores a late React unmount save from the old row.
+      runBestEffortCommittedDeletionCleanups([
+        {
+          label: "Failed to remove deleted thread queue",
+          run: () => window.localStorage.removeItem(queueStorageKey(threadId))
+        },
+        {
+          label: "Failed to clear deleted thread projection",
+          run: () => clearChatThreadProjectionRuntime(threadId)
+        },
+        {
+          label: "Failed to clear deleted thread scroll state",
+          run: () => chatScrollSessionStore.delete(threadId)
+        },
+        ...(options?.deferDirectoryUpdate
+          ? []
+          : [
+              {
+                label: "Failed to finalize deleted thread directory state",
+                run: () => get().finalizeThreadDeletions([threadId])
               }
-            : {}),
-          ...(state.subagentFocusView?.threadId === threadId
-            ? {
-                subagentFocusView: null
-              }
-            : {}),
-          ...(state.workflowAgentFocusView?.threadId === threadId
-            ? {
-                workflowAgentFocusView: null
-              }
-            : {})
-        }
-      })
+            ])
+      ])
     } catch (error) {
+      rendererDeletingThreadIds.delete(threadId)
       console.error("[Store] Failed to delete thread:", error)
       throw error
     }
   },
 
-  updateThread: async (threadId: string, updates: Partial<Thread>) => {
-    const updated = await window.api.threads.update(threadId, updates)
-    set((state) => ({
-      threads: state.threads.map((t) => (t.thread_id === threadId ? updated : t))
-    }))
+  finalizeThreadDeletions: (threadIds: Iterable<string>) => {
+    const deletedIds = new Set(threadIds)
+    if (deletedIds.size === 0) return
+    set((state) => {
+      const threads = state.threads.filter((thread) => !deletedIds.has(thread.thread_id))
+      const directoryChanged = threads.length !== state.threads.length
+      const currentThreadDeleted =
+        state.currentThreadId !== null && deletedIds.has(state.currentThreadId)
+      const previousThreadDeleted =
+        state.previousThreadId !== null && deletedIds.has(state.previousThreadId)
+      const workerFocusDeleted = Boolean(
+        state.workerFocusView && deletedIds.has(state.workerFocusView.threadId)
+      )
+      const subagentFocusDeleted = Boolean(
+        state.subagentFocusView && deletedIds.has(state.subagentFocusView.threadId)
+      )
+      const workflowAgentFocusDeleted = Boolean(
+        state.workflowAgentFocusView && deletedIds.has(state.workflowAgentFocusView.threadId)
+      )
+      if (
+        !directoryChanged &&
+        !currentThreadDeleted &&
+        !previousThreadDeleted &&
+        !workerFocusDeleted &&
+        !subagentFocusDeleted &&
+        !workflowAgentFocusDeleted
+      ) {
+        // Most ids in a large group are intentionally absent from the bounded
+        // directory. Returning the same state prevents a no-op full-app render.
+        return state
+      }
+
+      return {
+        ...(directoryChanged ? { threads: adoptThreadDirectorySnapshot(threads) } : {}),
+        currentThreadId: currentThreadDeleted
+          ? state.mainView === "harness"
+            ? null
+            : findFirstChatThread(threads)?.thread_id || null
+          : state.currentThreadId,
+        previousThreadId: previousThreadDeleted ? null : state.previousThreadId,
+        ...(workerFocusDeleted
+          ? {
+              workerFocusView: null,
+              workerFocusMessagesThreadId: null,
+              workerFocusMessages: []
+            }
+          : {}),
+        ...(subagentFocusDeleted ? { subagentFocusView: null } : {}),
+        ...(workflowAgentFocusDeleted ? { workflowAgentFocusView: null } : {})
+      }
+    })
   },
 
-  generateTitleForFirstMessage: async (threadId: string, content: string) => {
+  updateThread: async (threadId: string, updates: Partial<Thread>) => {
+    if (isThreadDeletionPending(threadId)) return
+    markThreadDirectoryMutation(threadId)
+    const updated = await window.api.threads.update(threadId, updates)
+    if (isThreadDeletionPending(threadId)) return
+    set((state) => {
+      const index = getThreadDirectoryIndex(state.threads).get(threadId)
+      if (index === undefined) return state
+      const threads = [...state.threads]
+      threads[index] = updated
+      return { threads: adoptThreadDirectorySnapshot(threads) }
+    })
+  },
+
+  patchThreadMetadata: async (threadId: string, patch: ThreadMetadataPatch) => {
+    markThreadDirectoryMutation(threadId)
+    const updated = await window.api.threads.patchMetadata(threadId, patch)
+    set((state) => {
+      const index = getThreadDirectoryIndex(state.threads).get(threadId)
+      if (index === undefined) return state
+      const threads = [...state.threads]
+      threads[index] = updated
+      return { threads: adoptThreadDirectorySnapshot(threads) }
+    })
+  },
+
+  generateTitleForFirstMessage: async (
+    threadId: string,
+    content: string,
+    skillName?: string,
+    skillDescription?: string
+  ) => {
     try {
-      const generatedTitle = await window.api.threads.generateTitle(content)
+      const generatedTitle = await window.api.threads.generateTitle(content, {
+        threadId,
+        skillName,
+        skillDescription
+      })
       await get().updateThread(threadId, { title: generatedTitle })
     } catch (error) {
       console.error("[Store] Failed to generate title:", error)
@@ -1173,14 +1617,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   // Model actions
-  loadModels: async () => {
-    const models = await window.api.models.list()
-    set({ models })
+  loadModels: async (force = false) => {
+    const snapshot = await revalidateModelCatalog(force)
+    set({ models: snapshot.models, providers: snapshot.providers })
   },
 
-  loadProviders: async () => {
-    const providers = await window.api.models.listProviders()
-    set({ providers })
+  loadProviders: async (force = false) => {
+    const snapshot = await revalidateModelCatalog(force)
+    set({ models: snapshot.models, providers: snapshot.providers })
   },
 
   // Panel actions
@@ -1204,21 +1648,48 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ settingsOpen: open })
   },
 
-  setChatScrollSettings: (settings: ChatScrollSettings) => {
-    set({ chatScrollSettings: normalizeChatScrollSettings(settings) })
+  setBrowserCdpConfig: (browserCdpConfig: BrowserCdpConfig) => {
+    set({ browserCdpConfig })
   },
 
-  loadChatScrollSettings: async () => {
+  setGitChangeNoticeEnabled: async (enabled: boolean) => {
+    await window.electron.setGitChangeNoticeEnabled(enabled)
+    set({
+      gitChangeNoticeEnabled: enabled,
+      ...(enabled ? {} : { gitChangeNoticePendingByThread: {} })
+    })
+  },
+
+  loadGitChangeNoticeEnabled: async () => {
     try {
-      const chatScrollSettings = await window.electron.getChatScrollSettings()
-      get().setChatScrollSettings(chatScrollSettings)
+      const enabled = await window.electron.getGitChangeNoticeEnabled()
+      set({
+        gitChangeNoticeEnabled: enabled,
+        ...(enabled ? {} : { gitChangeNoticePendingByThread: {} })
+      })
     } catch (error) {
-      console.warn("[Store] Failed to load chat scroll settings; using defaults:", error)
+      console.warn("[Store] Failed to load Git change notice setting; using enabled:", error)
     }
   },
 
-  setBrowserCdpConfig: (browserCdpConfig: BrowserCdpConfig) => {
-    set({ browserCdpConfig })
+  setGitChangeNoticePending: (threadId: string, pending: boolean) => {
+    set((state) => {
+      if (pending && !state.gitChangeNoticeEnabled) return state
+      if (state.gitChangeNoticePendingByThread[threadId] === pending) return state
+      return {
+        gitChangeNoticePendingByThread: {
+          ...state.gitChangeNoticePendingByThread,
+          [threadId]: pending
+        }
+      }
+    })
+  },
+
+  setGitWorkspaceStatus: (threadId: string, isGit: boolean) => {
+    set((state) => {
+      if (state.gitWorkspaceByThread[threadId] === isGit) return state
+      return { gitWorkspaceByThread: { ...state.gitWorkspaceByThread, [threadId]: isGit } }
+    })
   },
 
   // Sidebar actions
@@ -1239,14 +1710,39 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   requestOpenRightPanelSystemConstraints: (threadId: string) => {
-    set((state) => ({
-      rightPanelCollapsed: false,
-      rightPanelWorkRequest: {
-        id: (state.rightPanelWorkRequest?.id ?? 0) + 1,
-        target: "systemConstraints",
-        threadId
+    set((state) => {
+      const requestId = state.rightPanelWorkRequestSequence + 1
+      return {
+        rightPanelCollapsed: false,
+        rightPanelWorkRequestSequence: requestId,
+        rightPanelWorkRequest: {
+          id: requestId,
+          target: "systemConstraints",
+          threadId
+        }
       }
-    }))
+    })
+  },
+
+  requestOpenRightPanelAgents: (threadId: string) => {
+    set((state) => {
+      const requestId = state.rightPanelWorkRequestSequence + 1
+      return {
+        rightPanelCollapsed: false,
+        rightPanelWorkRequestSequence: requestId,
+        rightPanelWorkRequest: {
+          id: requestId,
+          target: "agents",
+          threadId
+        }
+      }
+    })
+  },
+
+  consumeRightPanelWorkRequest: (requestId: number) => {
+    set((state) =>
+      state.rightPanelWorkRequest?.id === requestId ? { rightPanelWorkRequest: null } : {}
+    )
   },
 
   openWorkerFocusView: (view) => {
@@ -1254,6 +1750,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       workerFocusView: view,
       workerFocusMessagesThreadId: view.workerThreadId,
       workerFocusMessages: [],
+      workerFocusMessagesContentVersion: 0,
       subagentFocusView: null,
       workflowAgentFocusView: null
     })
@@ -1263,7 +1760,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({
       workerFocusView: null,
       workerFocusMessagesThreadId: null,
-      workerFocusMessages: []
+      workerFocusMessages: [],
+      workerFocusMessagesContentVersion: 0
     })
   },
 
@@ -1325,16 +1823,32 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (state.workerFocusView?.workerThreadId !== workerThreadId) return {}
       const existingMessages =
         state.workerFocusMessagesThreadId === workerThreadId ? state.workerFocusMessages : []
+      const fastTailMessages =
+        !options?.orderedSnapshot &&
+        messages.length === 1 &&
+        normalizedWorkerFocusMessageArrays.has(existingMessages)
+          ? mergeWorkerFocusTailUpdate(existingMessages, messages[0])
+          : undefined
+      if (fastTailMessages) {
+        return {
+          workerFocusMessagesThreadId: workerThreadId,
+          workerFocusMessages: rememberNormalizedWorkerFocusMessages(fastTailMessages),
+          workerFocusMessagesContentVersion: state.workerFocusMessagesContentVersion + 1
+        }
+      }
       const normalizedExistingMessages = normalizeCompleteMessageIds(
-        enrichWorkerProvisionalProviderIdentities(existingMessages, messages)
+        enrichWorkerProviderIdentities(existingMessages, messages)
       )
       const normalizedMessages = options?.orderedSnapshot
         ? normalizeCompleteMessageIds(
             normalizeMessageRoleCollisionIds(normalizedExistingMessages, messages)
           )
-        : normalizeAppendedMessageIds(normalizedExistingMessages, messages)
+        : normalizeAppendedMessageIds(normalizedExistingMessages, messages, {
+            preserveWorkerSnapshotIdentities: true
+          })
 
       const next = [...normalizedExistingMessages]
+      const earlierAliasToolCalls = new Map<Message, readonly ToolCall[]>()
       const existingUserCount = normalizedExistingMessages.filter(
         (message) => message.role === "user"
       ).length
@@ -1378,9 +1892,9 @@ export const useAppStore = create<AppState>((set, get) => ({
               ? `__cmb-worker-turn-${scopedTurn}__`
               : explicitOccurrenceExistingUserIndex !== undefined
                 ? existingAlignedTurnKeys[explicitOccurrenceExistingUserIndex]
-              : exactExistingUserIndex >= 0
-                ? existingAlignedTurnKeys[exactExistingUserIndex]
-                : undefined
+                : exactExistingUserIndex >= 0
+                  ? existingAlignedTurnKeys[exactExistingUserIndex]
+                  : undefined
         }
         return alignedExistingUserTurnKey ?? turnKey
       })
@@ -1393,9 +1907,28 @@ export const useAppStore = create<AppState>((set, get) => ({
         ? relativeWorkerTurnKeys(next, alignedTurnCount - existingUserCount)
         : workerTurnKeys(next, nextInitialTurnKey)
       const incomingResolvedIndexes: number[] = []
+      // The transport has already reconciled aliases within a full snapshot.
+      // Each remaining row must claim a separate slot even when text matches.
+      const claimed = options?.orderedSnapshot ? new Set<number>() : undefined
+      const explicitSnapshotUpgrade =
+        options?.orderedSnapshot &&
+        normalizedMessages.some((message) => message.worker_provider_identity)
+      const incomingIds = explicitSnapshotUpgrade
+        ? new Set(normalizedMessages.map((message) => message.id))
+        : undefined
+      const legacySnapshotSlots = new Map<string, number | null>()
+      const availableIndex = (index: number | undefined): number | undefined =>
+        index !== undefined && !claimed?.has(index) ? index : undefined
       const indexById = new Map(next.map((item, index) => [item.id, index]))
-      const liveIndexesBySignature = new Map<string, number[]>()
-      const snapshotIndexesBySignature = new Map<string, number[]>()
+      const indexesByOccurrence = new Map<string, Set<number>>()
+      const indexOccurrence = (message: Message, turnKey: string, index: number): void => {
+        const key = workerOccurrenceKey(message, turnKey)
+        const indexes = indexesByOccurrence.get(key) ?? new Set<number>()
+        indexes.add(index)
+        indexesByOccurrence.set(key, indexes)
+      }
+      const liveSignatureMatches = createWorkerSignatureMatches(next)
+      const snapshotSignatureMatches = createWorkerSignatureMatches(next)
       const incomingLiveCountsBySignature = new Map<string, number>()
       const incomingSnapshotCountsBySignature = new Map<string, number>()
       const repeatedIncomingTransportIdentities = repeatedWorkerTransportIdentityKeys(
@@ -1468,42 +2001,54 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
       })
       next.forEach((item, index) => {
+        indexOccurrence(item, nextTurnKeys[index], index)
+        if (
+          incomingIds &&
+          !incomingIds.has(item.id) &&
+          !item.worker_provider_identity &&
+          isWorkerSnapshotMessageId(item.id)
+        ) {
+          // A real row still present by its fallback ID owns that slot even
+          // if the incoming frame lists an identified row with equal prose first.
+          const slotKey = workerSnapshotSlotKey(item, nextTurnKeys[index])
+          if (slotKey) {
+            legacySnapshotSlots.set(slotKey, legacySnapshotSlots.has(slotKey) ? null : index)
+          }
+        }
         const signature = workerTurnSignatureKey(
           nextTurnKeys[index],
           workerFocusMessageSignature(item)
         )
-        if (signature && isWorkerNonSnapshotMessageId(item.id)) {
-          const indexes = liveIndexesBySignature.get(signature) ?? []
-          indexes.push(index)
-          liveIndexesBySignature.set(signature, indexes)
-        }
-        if (signature && isWorkerSnapshotMessageId(item.id)) {
-          const indexes = snapshotIndexesBySignature.get(signature) ?? []
-          indexes.push(index)
-          snapshotIndexesBySignature.set(signature, indexes)
-        }
+        if (!signature) return
+        const matches = isWorkerSnapshotMessageId(item.id)
+          ? snapshotSignatureMatches
+          : liveSignatureMatches
+        matches.add(signature, index)
       })
 
       normalizedMessages.forEach((message, messageIndex) => {
         const turnKey = incomingTurnKeys[messageIndex]
         const transportIdentityKey = workerTransportIdentityKey(message, turnKey)
-        const reservedExistingIndex = reservedExistingIndexByIncomingIndex.get(messageIndex)
+        const reservedExistingIndex = availableIndex(
+          reservedExistingIndexByIncomingIndex.get(messageIndex)
+        )
         const useRepeatedOccurrenceReservation =
           repeatedIdentitiesWithReservations.has(transportIdentityKey)
-        const exactExistingIndex = indexById.get(message.id)
+        const occupiedIndex = indexById.get(message.id)
+        const exactExistingIndex = availableIndex(occupiedIndex)
         const incomingProviderOccurrence = getMessageProviderOccurrence(message)
-        const rawExplicitOccurrenceExistingIndex = findSameExplicitWorkerOccurrenceIndex(
-          next,
-          message,
-          nextTurnKeys,
-          turnKey
-        )
+        const explicitMatches =
+          incomingProviderOccurrence === undefined
+            ? undefined
+            : indexesByOccurrence.get(workerOccurrenceKey(message, turnKey))
+        const rawExplicitOccurrenceExistingIndex =
+          explicitMatches?.size === 1
+            ? availableIndex(explicitMatches.values().next().value)
+            : undefined
         const explicitOccurrenceReservationOwner =
           rawExplicitOccurrenceExistingIndex === undefined
             ? undefined
-            : reservedIncomingIndexByExistingIndex.get(
-                rawExplicitOccurrenceExistingIndex
-              )
+            : reservedIncomingIndexByExistingIndex.get(rawExplicitOccurrenceExistingIndex)
         const explicitOccurrenceExistingIndex =
           explicitOccurrenceReservationOwner === undefined ||
           explicitOccurrenceReservationOwner === messageIndex
@@ -1516,78 +2061,90 @@ export const useAppStore = create<AppState>((set, get) => ({
         const compatibleExactExistingIndex =
           exactExistingIndex !== undefined &&
           !exactIndexIsReservedForAnotherIncoming &&
-          next[exactExistingIndex].role === message.role &&
+          sameWorkerRoleAndToolCall(next[exactExistingIndex], message) &&
+          compatibleWorkerProviderIdentity(next[exactExistingIndex], message) &&
           (getMessageProviderOccurrence(next[exactExistingIndex]) === undefined ||
-            getMessageProviderOccurrence(next[exactExistingIndex]) ===
-              incomingProviderOccurrence)
+            getMessageProviderOccurrence(next[exactExistingIndex]) === incomingProviderOccurrence)
             ? exactExistingIndex
             : undefined
-        const signature = workerTurnSignatureKey(
-          turnKey,
-          workerFocusMessageSignature(message)
-        )
+        const signature = workerTurnSignatureKey(turnKey, workerFocusMessageSignature(message))
+        const legacySlotKey =
+          legacySnapshotSlots.size > 0 && message.worker_provider_identity
+            ? workerSnapshotSlotKey(message, turnKey)
+            : undefined
+        const legacySlotIndex = legacySlotKey
+          ? (legacySnapshotSlots.get(legacySlotKey) ?? undefined)
+          : undefined
         const existingIndex =
           incomingProviderOccurrence !== undefined
             ? (explicitOccurrenceExistingIndex ??
               reservedExistingIndex ??
-              compatibleExactExistingIndex)
+              compatibleExactExistingIndex ??
+              availableIndex(legacySlotIndex))
             : useRepeatedOccurrenceReservation
               ? (reservedExistingIndex ??
                 (!exactIndexIsReservedForAnotherIncoming ? exactExistingIndex : undefined))
               : (exactExistingIndex ??
-                findSameWorkerTransportIdentityIndex(next, message, nextTurnKeys, turnKey) ??
+                findSameWorkerTransportIdentityIndex(
+                  next,
+                  message,
+                  nextTurnKeys,
+                  turnKey,
+                  claimed
+                ) ??
                 (signature && isWorkerSnapshotMessageId(message.id)
-                  ? takeWindowedSignatureMatch(
-                      liveIndexesBySignature.get(signature),
+                  ? liveSignatureMatches.take(
+                      signature,
                       incomingSnapshotCountsBySignature,
-                      signature
+                      message,
+                      claimed
                     )
                   : undefined) ??
                 (signature && isWorkerNonSnapshotMessageId(message.id)
-                  ? takeWindowedSignatureMatch(
-                      snapshotIndexesBySignature.get(signature),
+                  ? snapshotSignatureMatches.take(
+                      signature,
                       incomingLiveCountsBySignature,
-                      signature
+                      message,
+                      claimed
                     )
                   : undefined) ??
-                findCompatibleWorkerReplayIndex(next, message, nextTurnKeys, turnKey) ??
-                findSameWorkerAssistantTextIndex(next, message, nextTurnKeys, turnKey))
+                findCompatibleWorkerReplayIndex(next, message, nextTurnKeys, turnKey, claimed) ??
+                findSameWorkerAssistantTextIndex(next, message, nextTurnKeys, turnKey, claimed))
         if (existingIndex === undefined) {
           const appendedMessage = ensureUniqueWorkerMessageId(next, message)
           indexById.set(appendedMessage.id, next.length)
-          if (signature && isWorkerNonSnapshotMessageId(appendedMessage.id)) {
-            const indexes = liveIndexesBySignature.get(signature) ?? []
-            indexes.push(next.length)
-            liveIndexesBySignature.set(signature, indexes)
-          }
-          if (signature && isWorkerSnapshotMessageId(appendedMessage.id)) {
-            const indexes = snapshotIndexesBySignature.get(signature) ?? []
-            indexes.push(next.length)
-            snapshotIndexesBySignature.set(signature, indexes)
-          }
+          indexOccurrence(appendedMessage, turnKey, next.length)
           incomingResolvedIndexes.push(next.length)
+          claimed?.add(next.length)
           next.push(appendedMessage)
           nextTurnKeys.push(turnKey)
+          if (signature) {
+            const matches = isWorkerSnapshotMessageId(appendedMessage.id)
+              ? snapshotSignatureMatches
+              : liveSignatureMatches
+            matches.add(signature, next.length - 1)
+          }
           return
         }
 
         const existing = next[existingIndex]
-        const incomingIdIsOccupied = next.some(
-          (candidate, candidateIndex) =>
-            candidateIndex !== existingIndex && candidate.id === message.id
-        )
+        const incomingIdIsOccupied =
+          occupiedIndex !== undefined &&
+          occupiedIndex !== existingIndex &&
+          next[occupiedIndex].id === message.id
         const id =
-          useRepeatedOccurrenceReservation && !incomingIdIsOccupied
-            ? message.id
-            : existing.id
+          useRepeatedOccurrenceReservation && !incomingIdIsOccupied ? message.id : existing.id
         const incomingDefinesRepeatedOccurrence =
-          repeatedIncomingTransportIdentities.has(
-            workerTransportIdentityKey(message, turnKey)
-          ) && !useRepeatedOccurrenceReservation
-        next[existingIndex] = {
+          repeatedIncomingTransportIdentities.has(workerTransportIdentityKey(message, turnKey)) &&
+          !useRepeatedOccurrenceReservation
+        const merged: Message = {
           ...existing,
           ...message,
           id,
+          worker_provider_wire_ids: mergeWorkerProviderWireIds(
+            existing.worker_provider_wire_ids,
+            message.worker_provider_wire_ids
+          ),
           content: resolveWorkerFocusContent(
             existing,
             message,
@@ -1605,9 +2162,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           tool_call_id: incomingDefinesRepeatedOccurrence
             ? message.tool_call_id
             : (message.tool_call_id ?? existing.tool_call_id),
-          name: incomingDefinesRepeatedOccurrence
-            ? message.name
-            : (message.name ?? existing.name),
+          name: incomingDefinesRepeatedOccurrence ? message.name : (message.name ?? existing.name),
           status: incomingDefinesRepeatedOccurrence
             ? message.status
             : (message.status ?? existing.status),
@@ -1615,23 +2170,37 @@ export const useAppStore = create<AppState>((set, get) => ({
             ? message.is_error
             : (message.is_error ?? existing.is_error)
         }
+        next[existingIndex] = applyWorkerToolCallSnapshot(
+          existing,
+          message,
+          merged,
+          earlierAliasToolCalls
+        )
+        const existingTurnKey = nextTurnKeys[existingIndex]
+        const priorOccurrenceKey = workerOccurrenceKey(existing, existingTurnKey)
+        const updated = next[existingIndex]
+        if (workerOccurrenceKey(updated, existingTurnKey) !== priorOccurrenceKey) {
+          indexesByOccurrence.get(priorOccurrenceKey)?.delete(existingIndex)
+          indexOccurrence(updated, existingTurnKey, existingIndex)
+        }
         indexById.set(id, existingIndex)
         if (!incomingIdIsOccupied) indexById.set(message.id, existingIndex)
         incomingResolvedIndexes.push(existingIndex)
+        claimed?.add(existingIndex)
       })
       const orderedMessages = options?.orderedSnapshot
-        ? reorderWorkerFocusMessagesByIncomingOrder(
-            next,
-            incomingResolvedIndexes,
-            nextTurnKeys
-          )
+        ? reorderWorkerFocusMessagesByIncomingOrder(next, incomingResolvedIndexes, nextTurnKeys)
         : next
       const prunedMessages = pruneWorkerFocusMessages(
-        orderWorkerFocusMessagesByScopedTurn(orderedMessages)
+        restoreSnapshotAliasCallsWithResults(
+          orderWorkerFocusMessagesByScopedTurn(orderedMessages),
+          earlierAliasToolCalls
+        )
       )
       return {
         workerFocusMessagesThreadId: workerThreadId,
-        workerFocusMessages: prunedMessages
+        workerFocusMessages: rememberNormalizedWorkerFocusMessages(prunedMessages),
+        workerFocusMessagesContentVersion: state.workerFocusMessagesContentVersion + 1
       }
     })
   },
@@ -1670,15 +2239,23 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // Dashboard actions
   loadDashboardAllowed: async () => {
+    const accountRevision = get().accountRevision
     const allowed = await window.api.dashboard.isAllowed().catch(() => false)
     const state = get()
+    if (state.accountRevision !== accountRevision) return
     set({
       dashboardAllowed: allowed,
       ...(allowed
         ? {}
         : {
             showDashboardView: false,
-            mainView: state.mainView === "dashboard" ? ("thread" as const) : state.mainView
+            ...(state.mainView === "dashboard"
+              ? {
+                  mainView: "thread" as const,
+                  currentThreadId: resolveChatThreadId(state.threads, state.previousThreadId),
+                  previousThreadId: null
+                }
+              : {})
           })
     })
   },
@@ -1781,33 +2358,18 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  setShowCustomizeView: (show: boolean, tab?: string) => {
-    if (show) {
-      set({
-        showCustomizeView: true,
-        showKanbanView: false,
-        showHarnessBoardView: false,
-        showClaudeCodeView: false,
-        showDashboardView: false,
-        customizeInitialTab: tab ?? null,
-        mainView: "customize",
-        workerFocusView: null,
-        workerFocusMessagesThreadId: null,
-        workerFocusMessages: [],
-        subagentFocusView: null,
-        workflowAgentFocusView: null
-      })
-    } else {
-      const restored = get().previousThreadId
-      const currentThreadId = resolveChatThreadId(get().threads, restored)
-      set({
-        showCustomizeView: false,
-        customizeInitialTab: null,
-        mainView: "thread",
-        currentThreadId,
-        previousThreadId: null
-      })
+  setShowCustomizeView: (show: boolean, tab?: string, section?: string) => {
+    // Keep legacy callers working after these panels moved out of settings.
+    if (show && (tab === "scheduled" || tab === "market")) {
+      get().setMainView(tab)
+      return
     }
+    // Settings covers the current workspace; closing it does not navigate.
+    set({
+      showCustomizeView: show,
+      customizeInitialTab: show ? (tab ?? null) : null,
+      customizeInitialSection: show ? (section ?? null) : null
+    })
   },
 
   setMarketInitialSkillCategory: (category) => {
@@ -1831,6 +2393,25 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   setMainView: (view) => {
+    if (view === "scheduled" || view === "market") {
+      set({
+        mainView: view,
+        showCustomizeView: false,
+        showKanbanView: false,
+        showHarnessBoardView: false,
+        showClaudeCodeView: false,
+        showDashboardView: false,
+        customizeInitialTab: null,
+        customizeInitialSection: null,
+        workerFocusView: null,
+        workerFocusMessagesThreadId: null,
+        workerFocusMessages: [],
+        subagentFocusView: null,
+        workflowAgentFocusView: null
+      })
+      return
+    }
+
     if (view === "kanban") {
       set({
         mainView: "kanban",
@@ -1850,37 +2431,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     if (view === "customize") {
-      set({
-        mainView: "customize",
-        showCustomizeView: true,
-        showKanbanView: false,
-        showHarnessBoardView: false,
-        showClaudeCodeView: false,
-        showDashboardView: false,
-        workerFocusView: null,
-        workerFocusMessagesThreadId: null,
-        workerFocusMessages: [],
-        subagentFocusView: null,
-        workflowAgentFocusView: null
-      })
+      get().setShowCustomizeView(true)
       return
     }
 
     if (view === "evolution") {
-      set({
-        mainView: "customize",
-        showCustomizeView: true,
-        showKanbanView: false,
-        showHarnessBoardView: false,
-        showClaudeCodeView: false,
-        customizeInitialTab: "evolution",
-        showDashboardView: false,
-        workerFocusView: null,
-        workerFocusMessagesThreadId: null,
-        workerFocusMessages: [],
-        subagentFocusView: null,
-        workflowAgentFocusView: null
-      })
+      get().setShowCustomizeView(true, "evolution")
       return
     }
 
@@ -2070,3 +2626,38 @@ export function selectSkillRetryContext(
   if (!threadId) return null
   return state.skillRetryContextByThread.get(threadId) ?? null
 }
+
+export function adoptThreadSearchSummary(thread: Thread, identity: ThreadIncarnationSnapshot): boolean {
+  if (isThreadDeletionPending(thread.thread_id)) return false
+  const state = useAppStore.getState()
+  const existing = state.threads.find((item) => item.thread_id === thread.thread_id)
+  if (existing) {
+    const token = existing.metadata?.[THREAD_INCARNATION_METADATA_KEY]
+    // Some legacy summaries omit the private token; retain the richer row when creation agrees.
+    const same = typeof token === "string"
+      ? matchesThreadIncarnationSnapshot({ token, legacyCreatedAt: +new Date(existing.created_at) }, identity)
+      : +new Date(existing.created_at) === identity.legacyCreatedAt
+    if (!same) return false
+    if (+new Date(thread.updated_at) > +new Date(existing.updated_at)) {
+      const metadata = { ...existing.metadata, ...thread.metadata }
+      for (const key of THREAD_LIST_PRIORITY_KEYS) {
+        if (!Object.hasOwn(thread.metadata ?? {}, key)) delete metadata[key]
+      }
+      const merged = { ...existing, ...thread, metadata }
+      markThreadDirectoryMutation(thread.thread_id)
+      const threads = state.threads.map((item) => item === existing ? merged : item)
+      useAppStore.setState({ threads: adoptThreadDirectorySnapshot(threads) })
+    }
+    return true
+  }
+  markThreadDirectoryMutation(thread.thread_id)
+  useAppStore.setState({ threads: adoptThreadDirectorySnapshot([thread, ...state.threads]) })
+  return true
+}
+
+useAppStore.subscribe((state, previous) => {
+  const command = useThreadSearch.getState().navigation
+  if (command && (state.currentThreadId !== command.result.threadId ||
+    (!previous.showCustomizeView && state.showCustomizeView) ||
+    (state.mainView !== previous.mainView && state.mainView !== "thread"))) cancelThreadSearchNavigation()
+})

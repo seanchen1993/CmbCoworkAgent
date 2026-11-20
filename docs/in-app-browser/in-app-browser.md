@@ -1,5 +1,11 @@
 # 浏览器集成
 
+> ⚠️ **本文已过期**，部分行数与 handler 数量与当前代码不符（例：`browser-service.ts` 现为 860 行而非 1177，IPC handler 已从 11 个增至 27 个）。保留作历史背景参考。
+>
+> 当前准确文档请看：
+> - `builtin-browser-technical-architecture.md` — 完整技术方案、架构分层、协议契约、风险约束
+> - `builtin-browser-flow-diagrams.md` — 13 张端到端流程图与状态机
+
 该项目是基于 Electron 的 AI 开发助手桌面应用，浏览器相关代码按功能分为三个模块：**核心模块（core）**、**CDP 桥接（cdp）**、**Chrome 数据导入（chrome）**。
 
 代码目录：`src/main/browser/`

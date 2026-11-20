@@ -1,0 +1,1766 @@
+{
+  "description": "Normalization unit tests: pass input exactly as written; do not fill absent fields. For HTTP integration tests, merge into an existing valid legacy Trace fixture after removing its four new statistics fields. Only expectedIndexedNewFields belong in top-level ES fields; remove expectedAbsentNewFields even on partial updates. Existing legacy validation remains unchanged. No production data is included.",
+  "cases": [
+    {
+      "name": "legacy_missing",
+      "input": {
+        "totalToolCalls": 7
+      },
+      "expectedIndexedNewFields": {},
+      "expectedAbsentNewFields": [
+        "toolUsageSchemaVersion",
+        "toolUsageComplete",
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "all_null",
+      "input": {
+        "toolUsageSchemaVersion": null,
+        "toolUsageComplete": null,
+        "toolUsage": null,
+        "userInputRequestCount": null
+      },
+      "expectedIndexedNewFields": {},
+      "expectedAbsentNewFields": [
+        "toolUsageSchemaVersion",
+        "toolUsageComplete",
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "complete_multiple_calls",
+      "input": {
+        "totalToolCalls": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 10
+          },
+          {
+            "name": "request_user_input",
+            "count": 2
+          }
+        ],
+        "userInputRequestCount": 2
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 10
+          },
+          {
+            "name": "request_user_input",
+            "count": 2
+          }
+        ],
+        "userInputRequestCount": 2
+      },
+      "expectedAbsentNewFields": [],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "complete_zero",
+      "input": {
+        "totalToolCalls": 0,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [],
+        "userInputRequestCount": 0
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [],
+        "userInputRequestCount": 0
+      },
+      "expectedAbsentNewFields": [],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "partial",
+      "input": {
+        "totalToolCalls": 20,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 8
+          }
+        ]
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 8
+          }
+        ]
+      },
+      "expectedAbsentNewFields": [
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "partial_does_not_index_question_scalar",
+      "input": {
+        "totalToolCalls": 20,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 8
+          }
+        ],
+        "userInputRequestCount": 8
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 8
+          }
+        ]
+      },
+      "expectedAbsentNewFields": [
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "total_mismatch",
+      "input": {
+        "totalToolCalls": 13,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 10
+          },
+          {
+            "name": "request_user_input",
+            "count": 2
+          }
+        ],
+        "userInputRequestCount": 2
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false
+      },
+      "expectedAbsentNewFields": [
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "question_mismatch",
+      "input": {
+        "totalToolCalls": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 10
+          },
+          {
+            "name": "request_user_input",
+            "count": 2
+          }
+        ],
+        "userInputRequestCount": 1
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false
+      },
+      "expectedAbsentNewFields": [
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "question_string",
+      "input": {
+        "totalToolCalls": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 10
+          },
+          {
+            "name": "request_user_input",
+            "count": 2
+          }
+        ],
+        "userInputRequestCount": "2"
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false
+      },
+      "expectedAbsentNewFields": [
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "question_null",
+      "input": {
+        "totalToolCalls": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 10
+          },
+          {
+            "name": "request_user_input",
+            "count": 2
+          }
+        ],
+        "userInputRequestCount": null
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false
+      },
+      "expectedAbsentNewFields": [
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "flag_string",
+      "input": {
+        "totalToolCalls": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": "true",
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 10
+          },
+          {
+            "name": "request_user_input",
+            "count": 2
+          }
+        ],
+        "userInputRequestCount": 2
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false
+      },
+      "expectedAbsentNewFields": [
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "array_wrong_type",
+      "input": {
+        "totalToolCalls": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": {},
+        "userInputRequestCount": 2
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false
+      },
+      "expectedAbsentNewFields": [
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "duplicate_names",
+      "input": {
+        "totalToolCalls": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 6
+          },
+          {
+            "name": "read_file",
+            "count": 6
+          }
+        ],
+        "userInputRequestCount": 2
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false
+      },
+      "expectedAbsentNewFields": [
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "invalid_name",
+      "input": {
+        "totalToolCalls": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file<script>",
+            "count": 12
+          }
+        ],
+        "userInputRequestCount": 2
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false
+      },
+      "expectedAbsentNewFields": [
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "name_too_long",
+      "input": {
+        "totalToolCalls": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "count": 12
+          }
+        ],
+        "userInputRequestCount": 2
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false
+      },
+      "expectedAbsentNewFields": [
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "negative_count",
+      "input": {
+        "totalToolCalls": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": -1
+          }
+        ],
+        "userInputRequestCount": 2
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false
+      },
+      "expectedAbsentNewFields": [
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "fractional_count",
+      "input": {
+        "totalToolCalls": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 12.5
+          }
+        ],
+        "userInputRequestCount": 2
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false
+      },
+      "expectedAbsentNewFields": [
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "string_count",
+      "input": {
+        "totalToolCalls": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": "12"
+          }
+        ],
+        "userInputRequestCount": 2
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false
+      },
+      "expectedAbsentNewFields": [
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "boolean_count",
+      "input": {
+        "totalToolCalls": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": true
+          }
+        ],
+        "userInputRequestCount": 2
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false
+      },
+      "expectedAbsentNewFields": [
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "too_many_kinds",
+      "input": {
+        "totalToolCalls": 257,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "tool_0",
+            "count": 1
+          },
+          {
+            "name": "tool_1",
+            "count": 1
+          },
+          {
+            "name": "tool_2",
+            "count": 1
+          },
+          {
+            "name": "tool_3",
+            "count": 1
+          },
+          {
+            "name": "tool_4",
+            "count": 1
+          },
+          {
+            "name": "tool_5",
+            "count": 1
+          },
+          {
+            "name": "tool_6",
+            "count": 1
+          },
+          {
+            "name": "tool_7",
+            "count": 1
+          },
+          {
+            "name": "tool_8",
+            "count": 1
+          },
+          {
+            "name": "tool_9",
+            "count": 1
+          },
+          {
+            "name": "tool_10",
+            "count": 1
+          },
+          {
+            "name": "tool_11",
+            "count": 1
+          },
+          {
+            "name": "tool_12",
+            "count": 1
+          },
+          {
+            "name": "tool_13",
+            "count": 1
+          },
+          {
+            "name": "tool_14",
+            "count": 1
+          },
+          {
+            "name": "tool_15",
+            "count": 1
+          },
+          {
+            "name": "tool_16",
+            "count": 1
+          },
+          {
+            "name": "tool_17",
+            "count": 1
+          },
+          {
+            "name": "tool_18",
+            "count": 1
+          },
+          {
+            "name": "tool_19",
+            "count": 1
+          },
+          {
+            "name": "tool_20",
+            "count": 1
+          },
+          {
+            "name": "tool_21",
+            "count": 1
+          },
+          {
+            "name": "tool_22",
+            "count": 1
+          },
+          {
+            "name": "tool_23",
+            "count": 1
+          },
+          {
+            "name": "tool_24",
+            "count": 1
+          },
+          {
+            "name": "tool_25",
+            "count": 1
+          },
+          {
+            "name": "tool_26",
+            "count": 1
+          },
+          {
+            "name": "tool_27",
+            "count": 1
+          },
+          {
+            "name": "tool_28",
+            "count": 1
+          },
+          {
+            "name": "tool_29",
+            "count": 1
+          },
+          {
+            "name": "tool_30",
+            "count": 1
+          },
+          {
+            "name": "tool_31",
+            "count": 1
+          },
+          {
+            "name": "tool_32",
+            "count": 1
+          },
+          {
+            "name": "tool_33",
+            "count": 1
+          },
+          {
+            "name": "tool_34",
+            "count": 1
+          },
+          {
+            "name": "tool_35",
+            "count": 1
+          },
+          {
+            "name": "tool_36",
+            "count": 1
+          },
+          {
+            "name": "tool_37",
+            "count": 1
+          },
+          {
+            "name": "tool_38",
+            "count": 1
+          },
+          {
+            "name": "tool_39",
+            "count": 1
+          },
+          {
+            "name": "tool_40",
+            "count": 1
+          },
+          {
+            "name": "tool_41",
+            "count": 1
+          },
+          {
+            "name": "tool_42",
+            "count": 1
+          },
+          {
+            "name": "tool_43",
+            "count": 1
+          },
+          {
+            "name": "tool_44",
+            "count": 1
+          },
+          {
+            "name": "tool_45",
+            "count": 1
+          },
+          {
+            "name": "tool_46",
+            "count": 1
+          },
+          {
+            "name": "tool_47",
+            "count": 1
+          },
+          {
+            "name": "tool_48",
+            "count": 1
+          },
+          {
+            "name": "tool_49",
+            "count": 1
+          },
+          {
+            "name": "tool_50",
+            "count": 1
+          },
+          {
+            "name": "tool_51",
+            "count": 1
+          },
+          {
+            "name": "tool_52",
+            "count": 1
+          },
+          {
+            "name": "tool_53",
+            "count": 1
+          },
+          {
+            "name": "tool_54",
+            "count": 1
+          },
+          {
+            "name": "tool_55",
+            "count": 1
+          },
+          {
+            "name": "tool_56",
+            "count": 1
+          },
+          {
+            "name": "tool_57",
+            "count": 1
+          },
+          {
+            "name": "tool_58",
+            "count": 1
+          },
+          {
+            "name": "tool_59",
+            "count": 1
+          },
+          {
+            "name": "tool_60",
+            "count": 1
+          },
+          {
+            "name": "tool_61",
+            "count": 1
+          },
+          {
+            "name": "tool_62",
+            "count": 1
+          },
+          {
+            "name": "tool_63",
+            "count": 1
+          },
+          {
+            "name": "tool_64",
+            "count": 1
+          },
+          {
+            "name": "tool_65",
+            "count": 1
+          },
+          {
+            "name": "tool_66",
+            "count": 1
+          },
+          {
+            "name": "tool_67",
+            "count": 1
+          },
+          {
+            "name": "tool_68",
+            "count": 1
+          },
+          {
+            "name": "tool_69",
+            "count": 1
+          },
+          {
+            "name": "tool_70",
+            "count": 1
+          },
+          {
+            "name": "tool_71",
+            "count": 1
+          },
+          {
+            "name": "tool_72",
+            "count": 1
+          },
+          {
+            "name": "tool_73",
+            "count": 1
+          },
+          {
+            "name": "tool_74",
+            "count": 1
+          },
+          {
+            "name": "tool_75",
+            "count": 1
+          },
+          {
+            "name": "tool_76",
+            "count": 1
+          },
+          {
+            "name": "tool_77",
+            "count": 1
+          },
+          {
+            "name": "tool_78",
+            "count": 1
+          },
+          {
+            "name": "tool_79",
+            "count": 1
+          },
+          {
+            "name": "tool_80",
+            "count": 1
+          },
+          {
+            "name": "tool_81",
+            "count": 1
+          },
+          {
+            "name": "tool_82",
+            "count": 1
+          },
+          {
+            "name": "tool_83",
+            "count": 1
+          },
+          {
+            "name": "tool_84",
+            "count": 1
+          },
+          {
+            "name": "tool_85",
+            "count": 1
+          },
+          {
+            "name": "tool_86",
+            "count": 1
+          },
+          {
+            "name": "tool_87",
+            "count": 1
+          },
+          {
+            "name": "tool_88",
+            "count": 1
+          },
+          {
+            "name": "tool_89",
+            "count": 1
+          },
+          {
+            "name": "tool_90",
+            "count": 1
+          },
+          {
+            "name": "tool_91",
+            "count": 1
+          },
+          {
+            "name": "tool_92",
+            "count": 1
+          },
+          {
+            "name": "tool_93",
+            "count": 1
+          },
+          {
+            "name": "tool_94",
+            "count": 1
+          },
+          {
+            "name": "tool_95",
+            "count": 1
+          },
+          {
+            "name": "tool_96",
+            "count": 1
+          },
+          {
+            "name": "tool_97",
+            "count": 1
+          },
+          {
+            "name": "tool_98",
+            "count": 1
+          },
+          {
+            "name": "tool_99",
+            "count": 1
+          },
+          {
+            "name": "tool_100",
+            "count": 1
+          },
+          {
+            "name": "tool_101",
+            "count": 1
+          },
+          {
+            "name": "tool_102",
+            "count": 1
+          },
+          {
+            "name": "tool_103",
+            "count": 1
+          },
+          {
+            "name": "tool_104",
+            "count": 1
+          },
+          {
+            "name": "tool_105",
+            "count": 1
+          },
+          {
+            "name": "tool_106",
+            "count": 1
+          },
+          {
+            "name": "tool_107",
+            "count": 1
+          },
+          {
+            "name": "tool_108",
+            "count": 1
+          },
+          {
+            "name": "tool_109",
+            "count": 1
+          },
+          {
+            "name": "tool_110",
+            "count": 1
+          },
+          {
+            "name": "tool_111",
+            "count": 1
+          },
+          {
+            "name": "tool_112",
+            "count": 1
+          },
+          {
+            "name": "tool_113",
+            "count": 1
+          },
+          {
+            "name": "tool_114",
+            "count": 1
+          },
+          {
+            "name": "tool_115",
+            "count": 1
+          },
+          {
+            "name": "tool_116",
+            "count": 1
+          },
+          {
+            "name": "tool_117",
+            "count": 1
+          },
+          {
+            "name": "tool_118",
+            "count": 1
+          },
+          {
+            "name": "tool_119",
+            "count": 1
+          },
+          {
+            "name": "tool_120",
+            "count": 1
+          },
+          {
+            "name": "tool_121",
+            "count": 1
+          },
+          {
+            "name": "tool_122",
+            "count": 1
+          },
+          {
+            "name": "tool_123",
+            "count": 1
+          },
+          {
+            "name": "tool_124",
+            "count": 1
+          },
+          {
+            "name": "tool_125",
+            "count": 1
+          },
+          {
+            "name": "tool_126",
+            "count": 1
+          },
+          {
+            "name": "tool_127",
+            "count": 1
+          },
+          {
+            "name": "tool_128",
+            "count": 1
+          },
+          {
+            "name": "tool_129",
+            "count": 1
+          },
+          {
+            "name": "tool_130",
+            "count": 1
+          },
+          {
+            "name": "tool_131",
+            "count": 1
+          },
+          {
+            "name": "tool_132",
+            "count": 1
+          },
+          {
+            "name": "tool_133",
+            "count": 1
+          },
+          {
+            "name": "tool_134",
+            "count": 1
+          },
+          {
+            "name": "tool_135",
+            "count": 1
+          },
+          {
+            "name": "tool_136",
+            "count": 1
+          },
+          {
+            "name": "tool_137",
+            "count": 1
+          },
+          {
+            "name": "tool_138",
+            "count": 1
+          },
+          {
+            "name": "tool_139",
+            "count": 1
+          },
+          {
+            "name": "tool_140",
+            "count": 1
+          },
+          {
+            "name": "tool_141",
+            "count": 1
+          },
+          {
+            "name": "tool_142",
+            "count": 1
+          },
+          {
+            "name": "tool_143",
+            "count": 1
+          },
+          {
+            "name": "tool_144",
+            "count": 1
+          },
+          {
+            "name": "tool_145",
+            "count": 1
+          },
+          {
+            "name": "tool_146",
+            "count": 1
+          },
+          {
+            "name": "tool_147",
+            "count": 1
+          },
+          {
+            "name": "tool_148",
+            "count": 1
+          },
+          {
+            "name": "tool_149",
+            "count": 1
+          },
+          {
+            "name": "tool_150",
+            "count": 1
+          },
+          {
+            "name": "tool_151",
+            "count": 1
+          },
+          {
+            "name": "tool_152",
+            "count": 1
+          },
+          {
+            "name": "tool_153",
+            "count": 1
+          },
+          {
+            "name": "tool_154",
+            "count": 1
+          },
+          {
+            "name": "tool_155",
+            "count": 1
+          },
+          {
+            "name": "tool_156",
+            "count": 1
+          },
+          {
+            "name": "tool_157",
+            "count": 1
+          },
+          {
+            "name": "tool_158",
+            "count": 1
+          },
+          {
+            "name": "tool_159",
+            "count": 1
+          },
+          {
+            "name": "tool_160",
+            "count": 1
+          },
+          {
+            "name": "tool_161",
+            "count": 1
+          },
+          {
+            "name": "tool_162",
+            "count": 1
+          },
+          {
+            "name": "tool_163",
+            "count": 1
+          },
+          {
+            "name": "tool_164",
+            "count": 1
+          },
+          {
+            "name": "tool_165",
+            "count": 1
+          },
+          {
+            "name": "tool_166",
+            "count": 1
+          },
+          {
+            "name": "tool_167",
+            "count": 1
+          },
+          {
+            "name": "tool_168",
+            "count": 1
+          },
+          {
+            "name": "tool_169",
+            "count": 1
+          },
+          {
+            "name": "tool_170",
+            "count": 1
+          },
+          {
+            "name": "tool_171",
+            "count": 1
+          },
+          {
+            "name": "tool_172",
+            "count": 1
+          },
+          {
+            "name": "tool_173",
+            "count": 1
+          },
+          {
+            "name": "tool_174",
+            "count": 1
+          },
+          {
+            "name": "tool_175",
+            "count": 1
+          },
+          {
+            "name": "tool_176",
+            "count": 1
+          },
+          {
+            "name": "tool_177",
+            "count": 1
+          },
+          {
+            "name": "tool_178",
+            "count": 1
+          },
+          {
+            "name": "tool_179",
+            "count": 1
+          },
+          {
+            "name": "tool_180",
+            "count": 1
+          },
+          {
+            "name": "tool_181",
+            "count": 1
+          },
+          {
+            "name": "tool_182",
+            "count": 1
+          },
+          {
+            "name": "tool_183",
+            "count": 1
+          },
+          {
+            "name": "tool_184",
+            "count": 1
+          },
+          {
+            "name": "tool_185",
+            "count": 1
+          },
+          {
+            "name": "tool_186",
+            "count": 1
+          },
+          {
+            "name": "tool_187",
+            "count": 1
+          },
+          {
+            "name": "tool_188",
+            "count": 1
+          },
+          {
+            "name": "tool_189",
+            "count": 1
+          },
+          {
+            "name": "tool_190",
+            "count": 1
+          },
+          {
+            "name": "tool_191",
+            "count": 1
+          },
+          {
+            "name": "tool_192",
+            "count": 1
+          },
+          {
+            "name": "tool_193",
+            "count": 1
+          },
+          {
+            "name": "tool_194",
+            "count": 1
+          },
+          {
+            "name": "tool_195",
+            "count": 1
+          },
+          {
+            "name": "tool_196",
+            "count": 1
+          },
+          {
+            "name": "tool_197",
+            "count": 1
+          },
+          {
+            "name": "tool_198",
+            "count": 1
+          },
+          {
+            "name": "tool_199",
+            "count": 1
+          },
+          {
+            "name": "tool_200",
+            "count": 1
+          },
+          {
+            "name": "tool_201",
+            "count": 1
+          },
+          {
+            "name": "tool_202",
+            "count": 1
+          },
+          {
+            "name": "tool_203",
+            "count": 1
+          },
+          {
+            "name": "tool_204",
+            "count": 1
+          },
+          {
+            "name": "tool_205",
+            "count": 1
+          },
+          {
+            "name": "tool_206",
+            "count": 1
+          },
+          {
+            "name": "tool_207",
+            "count": 1
+          },
+          {
+            "name": "tool_208",
+            "count": 1
+          },
+          {
+            "name": "tool_209",
+            "count": 1
+          },
+          {
+            "name": "tool_210",
+            "count": 1
+          },
+          {
+            "name": "tool_211",
+            "count": 1
+          },
+          {
+            "name": "tool_212",
+            "count": 1
+          },
+          {
+            "name": "tool_213",
+            "count": 1
+          },
+          {
+            "name": "tool_214",
+            "count": 1
+          },
+          {
+            "name": "tool_215",
+            "count": 1
+          },
+          {
+            "name": "tool_216",
+            "count": 1
+          },
+          {
+            "name": "tool_217",
+            "count": 1
+          },
+          {
+            "name": "tool_218",
+            "count": 1
+          },
+          {
+            "name": "tool_219",
+            "count": 1
+          },
+          {
+            "name": "tool_220",
+            "count": 1
+          },
+          {
+            "name": "tool_221",
+            "count": 1
+          },
+          {
+            "name": "tool_222",
+            "count": 1
+          },
+          {
+            "name": "tool_223",
+            "count": 1
+          },
+          {
+            "name": "tool_224",
+            "count": 1
+          },
+          {
+            "name": "tool_225",
+            "count": 1
+          },
+          {
+            "name": "tool_226",
+            "count": 1
+          },
+          {
+            "name": "tool_227",
+            "count": 1
+          },
+          {
+            "name": "tool_228",
+            "count": 1
+          },
+          {
+            "name": "tool_229",
+            "count": 1
+          },
+          {
+            "name": "tool_230",
+            "count": 1
+          },
+          {
+            "name": "tool_231",
+            "count": 1
+          },
+          {
+            "name": "tool_232",
+            "count": 1
+          },
+          {
+            "name": "tool_233",
+            "count": 1
+          },
+          {
+            "name": "tool_234",
+            "count": 1
+          },
+          {
+            "name": "tool_235",
+            "count": 1
+          },
+          {
+            "name": "tool_236",
+            "count": 1
+          },
+          {
+            "name": "tool_237",
+            "count": 1
+          },
+          {
+            "name": "tool_238",
+            "count": 1
+          },
+          {
+            "name": "tool_239",
+            "count": 1
+          },
+          {
+            "name": "tool_240",
+            "count": 1
+          },
+          {
+            "name": "tool_241",
+            "count": 1
+          },
+          {
+            "name": "tool_242",
+            "count": 1
+          },
+          {
+            "name": "tool_243",
+            "count": 1
+          },
+          {
+            "name": "tool_244",
+            "count": 1
+          },
+          {
+            "name": "tool_245",
+            "count": 1
+          },
+          {
+            "name": "tool_246",
+            "count": 1
+          },
+          {
+            "name": "tool_247",
+            "count": 1
+          },
+          {
+            "name": "tool_248",
+            "count": 1
+          },
+          {
+            "name": "tool_249",
+            "count": 1
+          },
+          {
+            "name": "tool_250",
+            "count": 1
+          },
+          {
+            "name": "tool_251",
+            "count": 1
+          },
+          {
+            "name": "tool_252",
+            "count": 1
+          },
+          {
+            "name": "tool_253",
+            "count": 1
+          },
+          {
+            "name": "tool_254",
+            "count": 1
+          },
+          {
+            "name": "tool_255",
+            "count": 1
+          },
+          {
+            "name": "tool_256",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false
+      },
+      "expectedAbsentNewFields": [
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "long_sum_overflow",
+      "input": {
+        "totalToolCalls": 9223372036854775807,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 9223372036854775807
+          },
+          {
+            "name": "execute",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false
+      },
+      "expectedAbsentNewFields": [
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "missing_totalToolCalls",
+      "input": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 10
+          },
+          {
+            "name": "request_user_input",
+            "count": 2
+          }
+        ],
+        "userInputRequestCount": 2
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false
+      },
+      "expectedAbsentNewFields": [
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true,
+      "normalizationUnitTestOnly": true,
+      "note": "Pass the exact fragment to the normalizer. HTTP behavior for missing totalToolCalls follows existing required-field validation; do not relax it."
+    },
+    {
+      "name": "missing_userInputRequestCount",
+      "input": {
+        "totalToolCalls": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 10
+          },
+          {
+            "name": "request_user_input",
+            "count": 2
+          }
+        ]
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false
+      },
+      "expectedAbsentNewFields": [
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "missing_toolUsageComplete",
+      "input": {
+        "totalToolCalls": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 10
+          },
+          {
+            "name": "request_user_input",
+            "count": 2
+          }
+        ],
+        "userInputRequestCount": 2
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false
+      },
+      "expectedAbsentNewFields": [
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "missing_toolUsage",
+      "input": {
+        "totalToolCalls": 12,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "userInputRequestCount": 2
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": false
+      },
+      "expectedAbsentNewFields": [
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "unknown_version",
+      "input": {
+        "totalToolCalls": 12,
+        "toolUsageSchemaVersion": 2,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 10
+          },
+          {
+            "name": "request_user_input",
+            "count": 2
+          }
+        ],
+        "userInputRequestCount": 2
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 2,
+        "toolUsageComplete": false
+      },
+      "expectedAbsentNewFields": [
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "invalid_version_type",
+      "input": {
+        "totalToolCalls": 12,
+        "toolUsageSchemaVersion": "1",
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 10
+          },
+          {
+            "name": "request_user_input",
+            "count": 2
+          }
+        ],
+        "userInputRequestCount": 2
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageComplete": false
+      },
+      "expectedAbsentNewFields": [
+        "toolUsageSchemaVersion",
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "missing_version_with_new_fields",
+      "input": {
+        "totalToolCalls": 12,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "read_file",
+            "count": 10
+          },
+          {
+            "name": "request_user_input",
+            "count": 2
+          }
+        ],
+        "userInputRequestCount": 2
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageComplete": false
+      },
+      "expectedAbsentNewFields": [
+        "toolUsageSchemaVersion",
+        "toolUsage",
+        "userInputRequestCount"
+      ],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    },
+    {
+      "name": "valid_invalid_name_bucket",
+      "input": {
+        "totalToolCalls": 1,
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "__invalid_tool_name__",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0
+      },
+      "expectedIndexedNewFields": {
+        "toolUsageSchemaVersion": 1,
+        "toolUsageComplete": true,
+        "toolUsage": [
+          {
+            "name": "__invalid_tool_name__",
+            "count": 1
+          }
+        ],
+        "userInputRequestCount": 0
+      },
+      "expectedAbsentNewFields": [],
+      "newStatisticsMustNotRejectOtherwiseValidTrace": true
+    }
+  ]
+}

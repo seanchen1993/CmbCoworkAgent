@@ -1,5 +1,10 @@
+import { PROJECT_ELAPSED_HINT } from "./project-stage-analysis-view"
 import { describe, expect, it } from "vitest"
-import type { DashboardProjectModeProject, DashboardProjectModeTopUser } from "./use-dashboard"
+import type {
+  DashboardCodeStats,
+  DashboardProjectModeProject,
+  DashboardProjectModeTopUser
+} from "./use-dashboard"
 import {
   buildProjectModeProjectExportRows,
   buildProjectModeProjectExportSummaryRows,
@@ -30,12 +35,25 @@ describe("project-mode Excel export", () => {
     const project = {
       projectId: "project-1",
       name: "示例项目",
+      elapsedMs: 86_460_000,
       lifecycleStatus: "active",
       featureCount: 5,
       conversationCount: 12,
       devStageConversationCount: 7,
       devAssociatedFeatureCount: 3,
       systemConstraintEverLoadedSuccessfully: true,
+      systemConstraintReads: {
+        traceCount: 4,
+        successfulReadCount: 9,
+        distinctFileCount: 2,
+        filesTruncated: false,
+        files: []
+      },
+      hookExecutions: {
+        executionCount: 13,
+        blockedCount: 1,
+        byEvent: []
+      },
       hasError: false,
       features: [],
       topSkills: [],
@@ -48,13 +66,184 @@ describe("project-mode Excel export", () => {
     } as DashboardProjectModeProject
 
     const [row] = buildProjectModeProjectExportRows([project])
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("项目历时")]).toBe("1天 1分钟")
     expect(row).toHaveLength(PROJECT_MODE_PROJECT_EXPORT_HEADER.length)
     expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("特性数")]).toBe(5)
-    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("DEV阶段会话数")]).toBe(7)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("主 Agent 主动会话数")]).toBe(12)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("DEV阶段轮次数")]).toBe(7)
     expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("DEV关联特性数")]).toBe(3)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("系统约束有效读取次数")]).toBe(9)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("运行时 Hook 触发次数")]).toBe(13)
     const constraintIndex = PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("是否加载项目约束")
-    expect(constraintIndex).toBe(PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("项目状态") - 1)
+    const managedRunIndex = PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("是否开启过托管运行")
+    // 两个终身标记并排放在「项目状态」之前，和项目列表里两个徽章挨着是一个意思。
+    expect(managedRunIndex).toBe(constraintIndex + 1)
+    expect(managedRunIndex).toBe(PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("项目状态") - 1)
     expect(row[constraintIndex]).toBe("是")
+  })
+
+  it("导出里托管的标记和次数是两个独立的列", () => {
+    // 标记是终身的，次数按所选时间范围统计，两者不同源。「是 / 0」是合法组合，表示这个
+    // 项目跑过托管但不在当前范围内，导出不能把它折成一个字段。
+    const project = {
+      projectId: "p-managed",
+      name: "托管项目",
+      featureCount: 1,
+      conversationCount: 0,
+      devStageConversationCount: 0,
+      devAssociatedFeatureCount: 0,
+      managedRunEverStarted: true,
+      managedRunCount: 0,
+      stageBuckets: {
+        pluginConstrained: { conversationCount: 0, codeStats: null },
+        vibecoding: { conversationCount: 0, codeStats: null },
+        unattributed: { conversationCount: 0, codeStats: null }
+      }
+    } as DashboardProjectModeProject
+
+    const [row] = buildProjectModeProjectExportRows([project])
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("是否开启过托管运行")]).toBe("是")
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("托管运行次数")]).toBe(0)
+  })
+
+  it("运行开销各项按原始数字导出，不做单位压缩", () => {
+    // 界面上 Token 会压成 3.9M，导出不能这么干——拿去算数会丢精度。
+    const project = {
+      projectId: "p-cost",
+      name: "开销项目",
+      featureCount: 1,
+      conversationCount: 128,
+      devStageConversationCount: 0,
+      devAssociatedFeatureCount: 0,
+      runCost: {
+        toolCalls: 4821,
+        modelCalls: 612,
+        totalTokens: 3_940_000,
+        inputTokens: 3_210_000,
+        outputTokens: 498_000,
+        userInputRequests: 37,
+        userInputRequestDocs: 128
+      },
+      userInputRequestCountComplete: true,
+      stageBuckets: {
+        pluginConstrained: { conversationCount: 0, codeStats: null },
+        vibecoding: { conversationCount: 0, codeStats: null },
+        unattributed: { conversationCount: 0, codeStats: null }
+      }
+    } as DashboardProjectModeProject
+
+    const [row] = buildProjectModeProjectExportRows([project])
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("工具调用次数")]).toBe(4821)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("模型调用次数")]).toBe(612)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("Token 总量")]).toBe(3_940_000)
+    // 三个量各导一列：输入+输出 = 3.708M < 总量 3.94M，差额是缓存读取与创建。
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("输入 Token")]).toBe(3_210_000)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("输出 Token")]).toBe(498_000)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("请求输入次数（不完整时为下限）")]).toBe(
+      project.runCost!.userInputRequests
+    )
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("请求输入统计完整")]).toBe(
+      project.userInputRequestCountComplete ? "是" : "否"
+    )
+  })
+
+  it("exports input requests with explicit coverage, rather than calling them answers", () => {
+    expect(PROJECT_MODE_PROJECT_EXPORT_HEADER).toContain("请求输入次数（不完整时为下限）")
+    expect(PROJECT_MODE_PROJECT_EXPORT_HEADER).toContain("请求输入统计完整")
+    expect(PROJECT_MODE_PROJECT_EXPORT_HEADER).not.toContain("请求用户回答次数")
+  })
+
+  it("后端没回 runCost 时各项都是 0，不是 undefined", () => {
+    const project = {
+      projectId: "p-old",
+      name: "旧主进程",
+      featureCount: 1,
+      conversationCount: 0,
+      devStageConversationCount: 0,
+      devAssociatedFeatureCount: 0,
+      stageBuckets: {
+        pluginConstrained: { conversationCount: 0, codeStats: null },
+        vibecoding: { conversationCount: 0, codeStats: null },
+        unattributed: { conversationCount: 0, codeStats: null }
+      }
+    } as DashboardProjectModeProject
+
+    const [row] = buildProjectModeProjectExportRows([project])
+    for (const column of [
+      "工具调用次数",
+      "模型调用次数",
+      "Token 总量",
+      "输入 Token",
+      "输出 Token"
+    ]) {
+      expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf(column)], column).toBe(0)
+    }
+  })
+
+  it("没跑过托管的项目导出「否」和 0", () => {
+    const project = {
+      projectId: "p-plain",
+      name: "普通项目",
+      featureCount: 1,
+      conversationCount: 0,
+      devStageConversationCount: 0,
+      devAssociatedFeatureCount: 0,
+      stageBuckets: {
+        pluginConstrained: { conversationCount: 0, codeStats: null },
+        vibecoding: { conversationCount: 0, codeStats: null },
+        unattributed: { conversationCount: 0, codeStats: null }
+      }
+    } as DashboardProjectModeProject
+
+    const [row] = buildProjectModeProjectExportRows([project])
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("是否开启过托管运行")]).toBe("否")
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("托管运行次数")]).toBe(0)
+  })
+
+  it("compares Harness vs VibeCoding adopted lines with 未归因 kept out of the share", () => {
+    const adopted = (adoptedLines: number): DashboardCodeStats =>
+      ({ adoptedLines }) as DashboardCodeStats
+    const project = {
+      projectId: "project-2",
+      name: "采纳行数对比",
+      lifecycleStatus: "active",
+      features: [],
+      topSkills: [],
+      codeStats: null,
+      stageBuckets: {
+        pluginConstrained: { conversationCount: 4, codeStats: adopted(750) },
+        vibecoding: { conversationCount: 3, codeStats: adopted(250) },
+        unattributed: { conversationCount: 5, codeStats: adopted(400) }
+      }
+    } as unknown as DashboardProjectModeProject
+
+    const [row] = buildProjectModeProjectExportRows([project])
+    expect(row).toHaveLength(PROJECT_MODE_PROJECT_EXPORT_HEADER.length)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("Harness采纳行数")]).toBe(750)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("VibeCoding采纳行数")]).toBe(250)
+    // 750 / (750 + 250)，未归因的 400 行不进分母。
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("Harness采纳行数占比")]).toBe("75.00%")
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("未归因采纳行数")]).toBe(400)
+  })
+
+  it("leaves the Harness share blank when neither bucket adopted any line", () => {
+    const project = {
+      projectId: "project-3",
+      name: "无采纳",
+      lifecycleStatus: "active",
+      features: [],
+      topSkills: [],
+      codeStats: null,
+      stageBuckets: {
+        pluginConstrained: { conversationCount: 0, codeStats: null },
+        vibecoding: { conversationCount: 0, codeStats: null },
+        unattributed: { conversationCount: 0, codeStats: null }
+      }
+    } as unknown as DashboardProjectModeProject
+
+    const [row] = buildProjectModeProjectExportRows([project])
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("Harness采纳行数")]).toBe(0)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("Harness采纳行数占比")]).toBe("—")
   })
 
   it("reports active and archived totals when the worksheet is capped", () => {
@@ -71,7 +260,8 @@ describe("project-mode Excel export", () => {
       ["统计口径", "合计", "进行中", "已归档"],
       ["匹配项目总量", 3268, 2500, 768],
       ["实际展示数量", 2000, 1600, 400],
-      ["导出提示", "项目总量超过 2,000 条，本工作表仅展示前 2,000 条。"]
+      ["导出提示", "项目总量超过 2,000 条，本工作表仅展示前 2,000 条。"],
+      ["项目历时计算说明", PROJECT_ELAPSED_HINT]
     ])
   })
 
@@ -88,7 +278,8 @@ describe("project-mode Excel export", () => {
     ).toEqual([
       ["统计口径", "合计", "进行中", "已归档"],
       ["匹配项目总量", 18, 15, 3],
-      ["实际展示数量", 18, 15, 3]
+      ["实际展示数量", 18, 15, 3],
+      ["项目历时计算说明", PROJECT_ELAPSED_HINT]
     ])
   })
 })

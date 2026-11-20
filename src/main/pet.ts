@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, type IpcMain, screen } from "electron"
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "fs"
-import { mkdir, readFile, rm } from "fs/promises"
+import { mkdir, readFile, rm, writeFile } from "fs/promises"
 import { basename, join, relative } from "path"
 import { pathToFileURL } from "url"
 import { getOpenworkDir } from "./storage"
@@ -8,7 +8,6 @@ import { copyDirRecursive } from "./utils/fs"
 import {
   getPetWindowPlatformPolicy,
   getPetWindowRefreshAction,
-  resizeWindowAroundPetBody,
   shouldIgnorePetWindowMouseEvents
 } from "./pet-window-policy"
 
@@ -47,7 +46,7 @@ type PetState =
   | "hover"
 
 type PetWindowOptions = {
-  ensureMainWindowVisible: () => BrowserWindow | null
+  toggleMainWindowVisibility: () => BrowserWindow | null
   applyMacDockIcon: () => void
 }
 
@@ -94,6 +93,7 @@ const DEFAULT_PET_STATES: Record<PetState, { y: number; frames: number; fps: num
 
 let petWindow: BrowserWindow | null = null
 let petStartupReady = false
+let petDismissedForSession = false
 let currentPetState: PetState = "idle"
 let petMoveLastX: number | null = null
 let petDragOffset: { x: number; y: number } | null = null
@@ -110,7 +110,6 @@ let petWindowLayout: PetWindowLayout = {
   bubbleTop: 0
 }
 let petWindowIgnoringMouseEvents = false
-let petWindowLayoutChangeUntil = 0
 let petMouseInputPinnedUntil = 0
 let suppressPetClickUntil = 0
 // 拖动窗口会触发高频 move 事件，这个时间戳用于节流状态同步，避免主进程连续 executeJavaScript。
@@ -140,12 +139,6 @@ const PET_WINDOW_RESERVED_LAYOUT: PetWindowLayout = {
 }
 const PET_WINDOW_RESERVED_WIDTH = PET_BUBBLE_WIDTH
 const PET_WINDOW_RESERVED_HEIGHT = PET_WINDOW_RESERVED_LAYOUT.petTop + PET_BODY_HEIGHT
-const PET_WINDOW_COMPACT_LAYOUT: PetWindowLayout = {
-  petLeft: 0,
-  petTop: 0,
-  bubbleLeft: 0,
-  bubbleTop: 0
-}
 // 设置页预览通过 IPC 临时读取二进制，限制单图大小，防止异常资源造成跨进程内存尖峰。
 const MAX_PREVIEW_SPRITE_BYTES = 8 * 1024 * 1024
 const MAX_RUNTIME_SPRITE_BYTES = 16 * 1024 * 1024
@@ -171,7 +164,37 @@ const PET_HOVER_MESSAGES = [
   "代码会跑起来，星星也会亮起来",
   "主人是最可靠的 developer！",
   "我把好运都蹭到你的分支上啦",
-  "饿龙咆哮～"
+  "饿龙咆哮～",
+  "今天的 commit 也一定会闪闪发光！",
+  "主人累了就歇一会儿，我帮你守着代码",
+  "这个问题很快就会被主人拿下！",
+  "我听见灵感正在敲门啦～",
+  "每次调试都是离答案更近一步",
+  "主人的键盘声是我最喜欢的 BGM",
+  "今天也要给自己一个大大的赞！",
+  "放心往前写，我在这里给你撑腰",
+  "小小的 bug，根本难不倒我的主人",
+  "休息一下也是很重要的进度哦",
+  "(｡･ω･｡)ﾉ♡ 今天也喜欢主人",
+  "(ง •_•)ง 一起把 bug 打跑！",
+  "(๑•̀ㅂ•́)و✧ 主人加油！",
+  "(づ｡◕‿‿◕｡)づ 给你一个抱抱",
+  "(≧▽≦) 好耶，灵感来啦！",
+  "(￣▽￣)ゞ 代码守护中",
+  "(。・∀・)ノ 我来陪你啦",
+  "( ´･･)ﾉ(._.`) 不怕，我在呢",
+  "(⌐■_■) 今天也稳稳拿下",
+  "(－_－) zzZ 记得休息呀",
+  "✨ 灵感正在闪闪发光",
+  "⭐ 主人今天也是满分！",
+  "☕ 喝口水，思路会更清晰哦",
+  "💡 叮！好点子出现啦",
+  "💪 再试一次，一定可以！",
+  "🚀 准备发射，目标是零 bug！",
+  "🎉 又向完成迈进了一步！",
+  "🐾 我的小脚印会陪你到终点",
+  "😊 看见主人就开心",
+  "👍 这个思路很不错哦！"
 ]
 const DEFAULT_PET_SETTINGS: PetSettings = {
   enabled: false,
@@ -211,15 +234,20 @@ function keepPetWindowOnTop(window: BrowserWindow | null): void {
 }
 
 /**
- * 通过宠物交互唤起主窗口。
+ * 通过宠物交互切换主窗口的显隐状态。
  *
  * 具体的窗口创建/恢复能力由主进程入口传入，宠物模块只负责在需要时触发该能力。
  */
-function showMainWindowFromPet(): BrowserWindow | null {
-  const mainWindow = petWindowOptions?.ensureMainWindowVisible() ?? null
+function toggleMainWindowFromPet(): BrowserWindow | null {
+  const mainWindow = petWindowOptions?.toggleMainWindowVisibility() ?? null
   clearPetCompletedTaskNotices()
   keepPetWindowOnTop(petWindow)
   return mainWindow
+}
+
+function dismissPetForSession(): void {
+  petDismissedForSession = true
+  closePetWindow()
 }
 
 export function registerPetHandlers(ipcMain: IpcMain): void {
@@ -254,6 +282,7 @@ export function registerPetHandlers(ipcMain: IpcMain): void {
     const previous = readPetSettings()
     const updated = writePetSettings(settings)
     if (!arePetSettingsEqual(previous, updated)) {
+      if (updated.enabled && !previous.enabled) petDismissedForSession = false
       refreshPetWindowForSettings(previous, updated)
       event.sender.send(PET_SETTINGS_CHANGED_CHANNEL, updated)
     }
@@ -517,8 +546,8 @@ function getPetSpritePath(pet: PetListItem): string | null {
   return join(petsRoot, pet.directoryId, pet.spritesheetPath)
 }
 
-function getPetWindowHtmlPath(): string {
-  return join(app.getPath("temp"), "cmbcoworkagent-pet-window.html")
+function getPetWindowHtmlPath(windowId: number): string {
+  return join(app.getPath("temp"), `cmbcoworkagent-pet-window-${windowId}.html`)
 }
 
 function getSelectedPet(): PetListItem | null {
@@ -544,7 +573,6 @@ function closePetWindow(): void {
   petBubbleVisible = false
   petWindowLayout = { ...PET_WINDOW_RESERVED_LAYOUT }
   petWindowIgnoringMouseEvents = false
-  petWindowLayoutChangeUntil = 0
   petMouseInputPinnedUntil = 0
   lastPetMoveStateAt = 0
 }
@@ -586,7 +614,6 @@ function refreshPetWindowForSettings(previous: PetSettings, next: PetSettings): 
   if (action === "recreate") closePetWindow()
   setImmediate(() => {
     createPetWindow()
-    petWindowOptions?.applyMacDockIcon()
   })
 }
 
@@ -718,6 +745,7 @@ export function showPetCompletedTaskNotice(threadId: string, title: string): voi
 
 export function createPetWindow(): void {
   if (!petStartupReady) return
+  if (petDismissedForSession) return
   if (!readPetSettings().enabled) return
   if (petWindow && !petWindow.isDestroyed()) return
 
@@ -760,6 +788,7 @@ export function createPetWindow(): void {
     alwaysOnTop: true,
     // 宠物是辅助窗口，不参与任务栏/Dock；主应用 Dock 图标由 applyMacDockIcon 维护。
     skipTaskbar: true,
+    title: "cmbdevclaw",
     show: false,
     // 隐藏状态下也允许首帧绘制，等 pet-ready 后再显示，避免透明窗口初始闪屏。
     paintWhenInitiallyHidden: true,
@@ -774,6 +803,11 @@ export function createPetWindow(): void {
     }
   })
 
+  // excludedFromShownWindowsMenu 是 BrowserWindow 实例属性，不是构造参数。
+  // 在创建后设置，才能真正将 pet 辅助窗口从 macOS 窗口菜单中排除。
+  if (process.platform === "darwin") {
+    petWindow.excludedFromShownWindowsMenu = true
+  }
   petWindow.setBackgroundColor("#00000000")
   configurePetWindowLayer(petWindow)
   petWindowOptions?.applyMacDockIcon()
@@ -840,7 +874,7 @@ export function createPetWindow(): void {
     #taskTag {
       position: absolute;
       right: 8px;
-      top: 6px;
+      top: 28px;
       z-index: 2;
       display: none;
       min-width: 20px;
@@ -859,6 +893,42 @@ export function createPetWindow(): void {
     #taskTag.show {
       display: block;
     }
+    #closePetButton {
+      position: absolute;
+      right: 0;
+      top: 0;
+      z-index: 3;
+      display: grid;
+      width: 20px;
+      height: 20px;
+      padding: 0;
+      place-items: center;
+      border: 1px solid rgba(120, 113, 108, 0.28);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.94);
+      color: #57534e;
+      font: 700 14px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      cursor: pointer;
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transition:
+        opacity 120ms ease,
+        visibility 120ms ease,
+        color 120ms ease,
+        background-color 120ms ease;
+      box-shadow: 0 4px 10px rgba(41, 37, 36, 0.16);
+    }
+    #petLayer:hover #closePetButton,
+    #closePetButton:focus-visible {
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+    }
+    #closePetButton:hover {
+      background: #ffffff;
+      color: #dc2626;
+    }
     #bubbleLayer {
       position: absolute;
       left: 0;
@@ -867,7 +937,8 @@ export function createPetWindow(): void {
       width: 236px;
       box-sizing: border-box;
       padding: 3px 7px 8px;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Segoe UI Emoji",
+        "Segoe UI Symbol", sans-serif;
       cursor: default;
     }
     #bubbleLayer.show {
@@ -911,6 +982,7 @@ export function createPetWindow(): void {
       </div>
     </div>
     <div id="petLayer">
+      <button id="closePetButton" type="button" aria-label="隐藏宠物" title="隐藏宠物">×</button>
       <div id="taskTag"></div>
       <canvas id="pet"></canvas>
     </div>
@@ -922,6 +994,7 @@ export function createPetWindow(): void {
     const bubbleLayer = document.getElementById("bubbleLayer");
     const bubbleContent = document.getElementById("bubbleContent");
     const canvas = document.getElementById("pet");
+    const closePetButton = document.getElementById("closePetButton");
     const taskTag = document.getElementById("taskTag");
     const ctx = canvas.getContext("2d");
     const renderBuffer = document.createElement("canvas");
@@ -1006,6 +1079,18 @@ export function createPetWindow(): void {
       event.stopPropagation();
     });
 
+    for (const eventName of ["pointerdown", "pointerup", "dblclick", "contextmenu"]) {
+      closePetButton.addEventListener(eventName, function onClosePetPointerEvent(event) {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+    }
+    closePetButton.addEventListener("click", function onClosePetClick(event) {
+      event.preventDefault();
+      event.stopPropagation();
+      document.title = "pet-close:" + Date.now();
+    });
+
     function setFacing(direction) {
       if (direction === "left") {
         canvas.style.setProperty("--pet-facing", "-1");
@@ -1074,7 +1159,8 @@ export function createPetWindow(): void {
       // 鼠标移出窗口导致 setIgnoreMouseEvents 拦截了 pointerup），重置拖拽状态。
       if (pointerDown && event.buttons === 0) {
         pointerDown = false;
-        pointerMoved = false;
+        // 保留 pointerMoved：丢失的 pointerup 可能稍后补发。若这里清零，
+        // 补发的 pointerup 会把刚结束的拖拽误判为点击。
         document.body.classList.remove("dragging");
         document.title = "pet-pointer-up:" + Date.now();
         if (dragTitleFrame) {
@@ -1333,12 +1419,26 @@ export function createPetWindow(): void {
     }
   }
   const currentWindow = petWindow
-  const htmlPath = getPetWindowHtmlPath()
-  writeFileSync(htmlPath, html, "utf8")
-  currentWindow.loadFile(htmlPath)
+  const htmlPath = getPetWindowHtmlPath(currentWindow.id)
+  void writeFile(htmlPath, html, "utf8")
+    .then(() => {
+      if (petWindow !== currentWindow || currentWindow.isDestroyed()) {
+        return rm(htmlPath, { force: true })
+      }
+      return currentWindow.loadFile(htmlPath)
+    })
+    .catch((error) => {
+      console.warn("[Pets] Failed to prepare pet window:", error)
+      if (petWindow === currentWindow) closePetWindow()
+    })
   currentWindow.webContents.on("page-title-updated", (event, title) => {
     if (petWindow !== currentWindow) return
     event.preventDefault()
+    // title 只是 sandbox pet 页面向主进程传事件的通道。拖拽事件最多每帧一次，
+    // 不对其重复执行原生 setTitle；紧随其后的 pointer-up 会恢复固定标题。
+    if (!title.startsWith("pet-drag:")) {
+      currentWindow.setTitle("cmbdevclaw")
+    }
     // 宠物窗口启用 sandbox，不能直接访问 Electron API；统一通过 title 事件转发交互。
     if (title === "pet-ready") {
       showPetWindow()
@@ -1351,7 +1451,9 @@ export function createPetWindow(): void {
       petDragOffset = null
       petMouseInputPinnedUntil = Date.now() + 300
       if (Date.now() < suppressPetClickUntil) return
-      showMainWindowFromPet()
+      toggleMainWindowFromPet()
+    } else if (title.startsWith("pet-close:")) {
+      dismissPetForSession()
     } else if (title.startsWith("pet-task-tag-enter:")) {
       suppressPetClick()
       showPetTaskBubble()
@@ -1367,6 +1469,8 @@ export function createPetWindow(): void {
         petDragOffset = { x: pointerX - bounds.x, y: pointerY - bounds.y }
       }
     } else if (title.startsWith("pet-drag:")) {
+      // 只要收到过真实拖拽位移，就屏蔽紧随其后的合成 click。
+      suppressPetClick()
       const [, rawX, rawY] = title.split(":")
       const pointerX = Number(rawX)
       const pointerY = Number(rawY)
@@ -1401,7 +1505,6 @@ export function createPetWindow(): void {
     const direction = petMoveLastX === null || petX >= petMoveLastX ? "right" : "left"
     petMoveLastX = petX
     const now = Date.now()
-    if (now < petWindowLayoutChangeUntil) return
     // move 事件在拖拽中非常密集；气泡位置需要实时跟随，但动画状态不需要每次都注入 JS。
     if (now - lastPetMoveStateAt < 120) {
       return
@@ -1426,9 +1529,9 @@ export function createPetWindow(): void {
     petBubbleVisible = false
     petWindowLayout = { ...PET_WINDOW_RESERVED_LAYOUT }
     petWindowIgnoringMouseEvents = false
-    petWindowLayoutChangeUntil = 0
     petMouseInputPinnedUntil = 0
     lastPetMoveStateAt = 0
+    void rm(htmlPath, { force: true }).catch(() => undefined)
     petWindowOptions?.applyMacDockIcon()
   })
 }
@@ -1473,31 +1576,6 @@ function getPetBubbleScreenBounds(): Electron.Rectangle | null {
     width: PET_BUBBLE_WIDTH,
     height: PET_BUBBLE_HEIGHT
   }
-}
-
-function setPetWindowBubbleExpanded(expanded: boolean): void {
-  if (!PET_PLATFORM_POLICY.compactWhenBubbleHidden) return
-  if (!petWindow || petWindow.isDestroyed()) return
-
-  const nextLayout = expanded ? PET_WINDOW_RESERVED_LAYOUT : PET_WINDOW_COMPACT_LAYOUT
-  const nextSize = expanded
-    ? { width: PET_WINDOW_RESERVED_WIDTH, height: PET_WINDOW_RESERVED_HEIGHT }
-    : { width: PET_BODY_WIDTH, height: PET_BODY_HEIGHT }
-  const currentBounds = petWindow.getBounds()
-  if (
-    petWindowLayout.petLeft === nextLayout.petLeft &&
-    petWindowLayout.petTop === nextLayout.petTop &&
-    currentBounds.width === nextSize.width &&
-    currentBounds.height === nextSize.height
-  ) {
-    return
-  }
-
-  const nextBounds = resizeWindowAroundPetBody(currentBounds, petWindowLayout, nextLayout, nextSize)
-  petWindowLayout = { ...nextLayout }
-  // setBounds 会产生 move；短暂抑制由窗口扩缩误触发的 running 动画。
-  petWindowLayoutChangeUntil = Date.now() + 120
-  petWindow.setBounds(nextBounds, false)
 }
 
 function runPetWindowScript(script: string, action: string): void {
@@ -1550,7 +1628,6 @@ function showPetBubble(message: string, autoHideMs = PET_BUBBLE_AUTO_HIDE_MS): v
   if (!petWindow || petWindow.isDestroyed() || petWindow.webContents.isDestroyed()) return
 
   petBubbleVisible = true
-  setPetWindowBubbleExpanded(true)
   setPetWindowMouseEventsIgnored(false)
   runPetWindowScript(
     `if (window.setPetBubble) window.setPetBubble(${JSON.stringify(message)});`,
@@ -1628,7 +1705,6 @@ function hidePetBubble(reason = "unknown"): void {
     })
   )
   runPetWindowScript(`if (window.clearPetBubble) window.clearPetBubble();`, "hide pet bubble")
-  setPetWindowBubbleExpanded(false)
 }
 
 function startPetHoverPolling(): void {

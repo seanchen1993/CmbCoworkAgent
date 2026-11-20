@@ -35,7 +35,7 @@ const STATUS_CONFIG = {
 }
 
 export function TodoPanel(): React.JSX.Element {
-  const { currentThreadId } = useAppStore()
+  const currentThreadId = useAppStore((state) => state.currentThreadId)
   const threadState = useThreadState(currentThreadId)
   const todos = threadState?.todos ?? []
   const [completedExpanded, setCompletedExpanded] = useState(false)

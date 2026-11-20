@@ -1,3 +1,4 @@
+import { settleTraceCallStage, startTraceCallStage } from "./stage-usage-registry"
 import { createMiddleware } from "langchain"
 import type { TraceCollectorOptions } from "./collector"
 import {
@@ -7,7 +8,10 @@ import {
   type TraceCollector
 } from "./collector"
 import { SkillUsageDetector } from "../skill-evolution/usage-detector"
+import { readPathsForToolCall } from "../tool-call-read-paths"
+import { syncTaskSubagentSkillAttribution } from "../turn-attribution"
 import type { TraceChatMessage, TraceContext, TraceOutcome, TraceTokenUsage } from "./types"
+import { normalizeTraceTokenUsage } from "./token-usage"
 import { nowIsoLocal } from "../../util/local-time"
 import {
   HOOK_AGENT_OWNER_METADATA_KEY,
@@ -140,35 +144,9 @@ function normalizeMessage(message: unknown): TraceChatMessage {
   }
 }
 
-function normalizeTokenUsage(value: unknown): TraceTokenUsage | undefined {
-  const usage = asRecord(value)
-  if (!usage) return undefined
-  const finiteNumber = (candidate: unknown): number | undefined =>
-    typeof candidate === "number" && Number.isFinite(candidate) ? candidate : undefined
-  const inputTokens = finiteNumber(usage.input_tokens ?? usage.inputTokens)
-  const outputTokens = finiteNumber(usage.output_tokens ?? usage.outputTokens)
-  const totalTokens = finiteNumber(usage.total_tokens ?? usage.totalTokens)
-  const cacheReadTokens = finiteNumber(
-    usage.cache_read_input_tokens ?? usage.cacheReadInputTokens ?? usage.cacheReadTokens
-  )
-  const cacheCreationTokens = finiteNumber(
-    usage.cache_creation_input_tokens ?? usage.cacheCreationInputTokens ?? usage.cacheCreationTokens
-  )
-  if (
-    inputTokens === undefined &&
-    outputTokens === undefined &&
-    totalTokens === undefined &&
-    cacheReadTokens === undefined &&
-    cacheCreationTokens === undefined
-  ) {
-    return undefined
-  }
-  return { inputTokens, outputTokens, totalTokens, cacheReadTokens, cacheCreationTokens }
-}
-
 function responseTokenUsage(response: AnyRecord): TraceTokenUsage | undefined {
   const responseMetadata = asRecord(response.response_metadata)
-  return normalizeTokenUsage(
+  return normalizeTraceTokenUsage(
     response.usage_metadata ?? responseMetadata?.token_usage ?? responseMetadata?.usage
   )
 }
@@ -310,6 +288,28 @@ export class SoloTaskTraceManager {
     return Boolean(ownerId && this.observedOwnerIds.has(ownerId))
   }
 
+  /**
+   * Resolve the active child trace for a task-owned tool call. Task subagents
+   * share the parent's filesystem backend, so read_file uses this lookup to
+   * attribute successful constraint reads to the child rather than the parent.
+   */
+  getTraceContextForOwner(ownerId: string | undefined): TraceContext | undefined {
+    const normalizedOwnerId = ownerId?.trim()
+    if (!normalizedOwnerId) return undefined
+    const entry = this.active.get(normalizedOwnerId)
+    if (!entry) return undefined
+    try {
+      const context = entry.tracer.getTraceContext()
+      return {
+        ...context,
+        ...(context.harnessFeature ? { harnessFeature: { ...context.harnessFeature } } : {})
+      }
+    } catch (error) {
+      console.warn("[SoloTask] trace context lookup failed; using parent trace fallback:", error)
+      return undefined
+    }
+  }
+
   finishTask(ownerId: string, outcome: TraceOutcome, resultOrError?: unknown): void {
     try {
       if (this.finishedOwnerIds.has(ownerId)) return
@@ -351,9 +351,24 @@ export class SoloTaskTraceManager {
   }
 
   private syncSkills(entry: SoloTaskTraceEntry): void {
-    entry.tracer.setUsedSkills(entry.skillUsageDetector.getUsedSkillNames())
-    entry.tracer.setSkillSource(entry.skillUsageDetector.getUsedSkillSourceRefs())
+    const usedSkills = entry.skillUsageDetector.getUsedSkillNames()
+    const skillSource = entry.skillUsageDetector.getUsedSkillSourceRefs()
+    entry.tracer.setUsedSkills(usedSkills)
+    entry.tracer.setSkillSource(skillSource)
     entry.tracer.setEvolvedSkills(entry.skillUsageDetector.getUsedEvolvedSkillNames())
+    // Task sub-agents share the parent's filesystem backend, so recordGen files
+    // their generated code under the *parent* thread and reads the parent's
+    // adoption context. A skill this child read therefore has to travel up, or
+    // code written under an explicitly invoked plugin skill lands in the
+    // vibecoding bucket. Merged rather than superseded — see
+    // syncTaskSubagentSkillAttribution for why.
+    runTraceSideEffect("SoloTask adoption attribution", () => {
+      syncTaskSubagentSkillAttribution({
+        parentThreadId: this.parent.threadId,
+        currentRunSkills: usedSkills,
+        currentRunSkillSource: skillSource
+      })
+    })
   }
 
   private runSideEffect(scope: string, effect: () => void): boolean {
@@ -389,6 +404,7 @@ export class SoloTaskTraceManager {
     const entry = this.active.get(ownerId)
     if (!entry) return handler(request)
 
+    const pendingStage = startTraceCallStage(this.getTraceContextForOwner(ownerId))
     let llmNodeId: string | undefined
     const startedAt = nowIsoLocal()
     this.runSideEffect("SoloTask model start", () => {
@@ -404,6 +420,7 @@ export class SoloTaskTraceManager {
 
     try {
       const response = await handler(request)
+      const stageAttribution = await settleTraceCallStage(pendingStage)
       const modelRecorded = this.runSideEffect("SoloTask model result", () => {
         const responseRecord = asRecord(response) ?? {}
         const inputMessages = Array.isArray(request.messages)
@@ -429,6 +446,7 @@ export class SoloTaskTraceManager {
         const tokenUsage = responseTokenUsage(responseRecord)
 
         entry.tracer.recordModelCall({
+          stageAttribution,
           ...(messageId ? { messageId } : {}),
           startedAt,
           inputMessages,
@@ -477,20 +495,20 @@ export class SoloTaskTraceManager {
     const entry = this.active.get(ownerId)
     if (!entry) return handler(request)
 
+    const pendingStage = startTraceCallStage(this.getTraceContextForOwner(ownerId))
     const toolCall = asRecord(request.toolCall) ?? {}
     const toolCallId = typeof toolCall.id === "string" ? toolCall.id : undefined
     const toolName = typeof toolCall.name === "string" && toolCall.name ? toolCall.name : "unknown"
     const toolArgs = asRecord(toolCall.args) ?? {}
     let toolNodeId: string | undefined
     this.runSideEffect("SoloTask tool start", () => {
-      if (toolName === "read_file") {
-        const readPath =
-          (typeof toolArgs.path === "string" && toolArgs.path) ||
-          (typeof toolArgs.file_path === "string" && toolArgs.file_path) ||
-          ""
-        if (readPath && entry.skillUsageDetector.onReadFilePath(readPath)) this.syncSkills(entry)
+      let skillHit = false
+      for (const readPath of readPathsForToolCall(toolName, toolArgs)) {
+        if (entry.skillUsageDetector.onReadFilePath(readPath)) skillHit = true
       }
+      if (skillHit) this.syncSkills(entry)
       toolNodeId = entry.tracer.addToolNode({
+        stageAttribution: pendingStage,
         name: toolName,
         input: toolArgs,
         toolCallId,

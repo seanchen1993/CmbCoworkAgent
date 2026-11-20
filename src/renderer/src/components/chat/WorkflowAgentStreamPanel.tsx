@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef } from "react"
+import { SubagentSessionExportButton } from "./SubagentSessionExportButton"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { ArrowLeft, Sparkles } from "lucide-react"
 import { MessageBubble } from "./MessageBubble"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -13,6 +14,11 @@ import {
   messageVisibleReasoningLength
 } from "@/lib/message-display-visibility"
 import { buildToolResultAssociations } from "@/lib/worker-tool-result-key"
+import {
+  buildStreamPanelMessageWindow,
+  shiftStreamPanelMessageWindowEnd
+} from "@/lib/stream-panel-message-window"
+import { createWorkflowAgentMessageProjector } from "@/lib/workflow-agent-message-projection"
 import type { Message } from "@/types"
 import { cn } from "@/lib/utils"
 
@@ -66,8 +72,7 @@ function statusBadge(status: string | undefined): { label: string; className: st
     default:
       return {
         label: "历史快照",
-        className:
-          "border-stone-300/80 bg-stone-100/70 text-stone-700 dark:border-stone-700 dark:bg-stone-900/45 dark:text-stone-300"
+        className: "border-border bg-background-interactive/70 text-muted-foreground"
       }
   }
 }
@@ -84,6 +89,11 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
   const threadState = useThreadState(workflowAgentFocusView?.threadId ?? null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const isAtBottomRef = useRef(true)
+  const pendingWindowAnchorRef = useRef<{ messageId: string; viewportTop: number } | null>(null)
+  const [messageWindowSelection, setMessageWindowSelection] = useState<{
+    focusKey: string
+    end: number | null
+  }>({ focusKey: "", end: null })
 
   // Live status comes from the workflow run view (kept in ThreadState by the
   // workflow_progress events), falling back to the click-time status. CRITICAL:
@@ -116,6 +126,9 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
   const focusThreadId = workflowAgentFocusView?.threadId
   const focusRunId = workflowAgentFocusView?.runId
   const focusAgentIndex = workflowAgentFocusView?.agentIndex
+  const messageWindowFocusKey = `${focusThreadId ?? ""}\u0000${focusRunId ?? ""}\u0000${focusAgentIndex ?? -1}`
+  const messageWindowEnd =
+    messageWindowSelection.focusKey === messageWindowFocusKey ? messageWindowSelection.end : null
   useEffect(() => {
     if (focusThreadId == null || focusRunId == null || focusAgentIndex == null) return
     if (!isRunning) return
@@ -223,16 +236,24 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
     }
   }, [])
 
-  const messages = useMemo(
+  const convertedMessages = useMemo(
     () =>
       workflowAgentFocusView && focusSnapshot
-        ? transport.convertWorkflowAgentValuesSnapshot(
-            focusSnapshot,
-            `wfagent:${workflowAgentFocusView.runId}:${workflowAgentFocusView.agentIndex}`
-          )
+        ? transport.convertWorkflowAgentValuesSnapshot(focusSnapshot, messageWindowFocusKey)
         : [],
-    [transport, focusSnapshot, workflowAgentFocusView]
+    [transport, focusSnapshot, workflowAgentFocusView, messageWindowFocusKey]
   )
+  const [projectMessages] = useState(createWorkflowAgentMessageProjector)
+  const fullMessages = useMemo(
+    () => projectMessages(convertedMessages, messageWindowFocusKey),
+    [convertedMessages, messageWindowFocusKey, projectMessages]
+  )
+  const messageWindow = useMemo(
+    () => buildStreamPanelMessageWindow(fullMessages, messageWindowEnd),
+    [fullMessages, messageWindowEnd]
+  )
+  const isTailWindow = messageWindow.end >= fullMessages.length
+  const messages = messageWindow.messages
   const toolResults = useMemo(() => buildToolResultAssociations(messages), [messages])
   const { assistantDurationMsById, userSendTimeLabelById } = useMemo(
     () => buildMessageBubbleTimingMeta(messages),
@@ -257,7 +278,7 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
   }, [messages])
   const hasUserAfterHeadByIndex = useMemo(() => {
     const result = new Array<boolean>(messages.length)
-    let hasUserAfterHead = false
+    let hasUserAfterHead = messageWindow.end < fullMessages.length
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       result[index] = hasUserAfterHead
       if (!messageRendersNothing(messages[index]) && messages[index].role === "user") {
@@ -265,7 +286,7 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
       }
     }
     return result
-  }, [messages])
+  }, [fullMessages.length, messageWindow.end, messages])
   const visibleMessageLayout = useMemo(
     () => buildVisibleMessageLayout(messages, (message) => !messageRendersNothing(message)),
     [messages]
@@ -277,6 +298,53 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
     if (root.matches("[data-radix-scroll-area-viewport]")) return root
     return root.querySelector("[data-radix-scroll-area-viewport]") as HTMLDivElement | null
   }, [])
+
+  const shiftMessageWindow = useCallback(
+    (direction: "older" | "newer"): void => {
+      const viewport = getScrollViewport()
+      if (viewport) {
+        const rows = Array.from(
+          viewport.querySelectorAll<HTMLElement>("[data-workflow-agent-stream-message-id]")
+        )
+        const anchor = direction === "older" ? rows[0] : rows.at(-1)
+        if (anchor?.dataset.workflowAgentStreamMessageId) {
+          pendingWindowAnchorRef.current = {
+            messageId: anchor.dataset.workflowAgentStreamMessageId,
+            viewportTop: anchor.getBoundingClientRect().top
+          }
+        }
+      }
+      isAtBottomRef.current = false
+      setMessageWindowSelection({
+        focusKey: messageWindowFocusKey,
+        end: shiftStreamPanelMessageWindowEnd(messageWindow.end, fullMessages.length, direction)
+      })
+    },
+    [fullMessages.length, getScrollViewport, messageWindow.end, messageWindowFocusKey]
+  )
+
+  const showLatestMessageWindow = useCallback((): void => {
+    pendingWindowAnchorRef.current = null
+    setMessageWindowSelection({ focusKey: messageWindowFocusKey, end: null })
+    isAtBottomRef.current = true
+    void window.requestAnimationFrame(() => {
+      const viewport = getScrollViewport()
+      if (viewport) viewport.scrollTop = viewport.scrollHeight
+    })
+  }, [getScrollViewport, messageWindowFocusKey])
+
+  useLayoutEffect(() => {
+    const pendingAnchor = pendingWindowAnchorRef.current
+    if (!pendingAnchor) return
+    const viewport = getScrollViewport()
+    if (!viewport) return
+    const target = Array.from(
+      viewport.querySelectorAll<HTMLElement>("[data-workflow-agent-stream-message-id]")
+    ).find((row) => row.dataset.workflowAgentStreamMessageId === pendingAnchor.messageId)
+    pendingWindowAnchorRef.current = null
+    if (!target) return
+    viewport.scrollTop += target.getBoundingClientRect().top - pendingAnchor.viewportTop
+  }, [getScrollViewport, messageWindow.end, messageWindow.start])
 
   const scrollToBottom = useCallback(() => {
     const scroll = (): void => {
@@ -303,13 +371,15 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
     const viewport = getScrollViewport()
     if (!viewport) return
     const bottomDistance = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-    isAtBottomRef.current = bottomDistance < 50
-  }, [getScrollViewport])
+    isAtBottomRef.current = isTailWindow && bottomDistance < 50
+  }, [getScrollViewport, isTailWindow])
 
   const scrollSignature = useMemo(() => {
     const lastMessage = messages[visibleMessageLayout.lastVisibleMessageIndex]
     return [
-      messages.length,
+      fullMessages.length,
+      messageWindow.start,
+      messageWindow.end,
       lastMessage?.id ?? "",
       lastMessage?.role ?? "",
       messageContentLength(lastMessage?.content),
@@ -318,9 +388,18 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
       toolResults.size,
       isRunning ? "running" : "idle"
     ].join(":")
-  }, [isRunning, messages, toolResults.size, visibleMessageLayout.lastVisibleMessageIndex])
+  }, [
+    fullMessages.length,
+    isRunning,
+    messageWindow.end,
+    messageWindow.start,
+    messages,
+    toolResults.size,
+    visibleMessageLayout.lastVisibleMessageIndex
+  ])
 
   useEffect(() => {
+    pendingWindowAnchorRef.current = null
     isAtBottomRef.current = true
     return scrollToBottom()
   }, [scrollToBottom, workflowAgentFocusView?.runId, workflowAgentFocusView?.agentIndex])
@@ -386,6 +465,14 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
             </span>
           </div>
         </div>
+        <SubagentSessionExportButton
+          target={{
+            kind: "workflow",
+            threadId: workflowAgentFocusView.threadId,
+            runId: workflowAgentFocusView.runId,
+            agentIndex: workflowAgentFocusView.agentIndex
+          }}
+        />
         <span
           className={cn(
             "shrink-0 rounded-full border px-2 py-0.5 text-[11px] leading-none",
@@ -399,7 +486,45 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
       <ScrollArea ref={scrollRef} className="min-h-0 min-w-0 flex-1 overflow-hidden">
         <div className="mx-auto w-full min-w-0 max-w-3xl overflow-hidden px-4 py-6 pb-32">
           <div className="min-w-0 space-y-4 overflow-hidden">
-            {messages.length === 0 && (
+            {(messageWindow.start > 0 || messageWindow.end < fullMessages.length) && (
+              <div className="flex flex-wrap items-center justify-center gap-2 rounded-lg border border-border/60 bg-background/75 px-2 py-1.5 text-[11px] text-muted-foreground">
+                <span>
+                  当前显示 {messageWindow.start + 1}–{messageWindow.end} / {fullMessages.length}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  type="button"
+                  className="h-7 px-2 text-xs"
+                  disabled={messageWindow.start === 0}
+                  onClick={() => shiftMessageWindow("older")}
+                >
+                  前一页
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  type="button"
+                  className="h-7 px-2 text-xs"
+                  disabled={messageWindow.end >= fullMessages.length}
+                  onClick={() => shiftMessageWindow("newer")}
+                >
+                  后一页
+                </Button>
+                {messageWindow.end < fullMessages.length && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    type="button"
+                    className="h-7 px-2 text-xs"
+                    onClick={showLatestMessageWindow}
+                  >
+                    最新
+                  </Button>
+                )}
+              </div>
+            )}
+            {fullMessages.length === 0 && (
               <div className="rounded-xl border border-dashed border-border/70 bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
                 {isRunning
                   ? "正在等待子代理的工具调用……"
@@ -415,19 +540,22 @@ export function WorkflowAgentStreamPanel(): React.JSX.Element {
               const previousMessage = visibleMessageLayout.previousVisibleMessageByIndex[index]
               const isLastMessage = index === visibleMessageLayout.lastVisibleMessageIndex
               return (
-                <MessageBubble
-                  key={message.id}
-                  message={message}
-                  previousMessage={previousMessage}
-                  isStreaming={isRunning && isLastMessage}
-                  showAssistantMeta={showAssistantMetaByIndex[index] ?? true}
-                  toolResults={toolResults}
-                  threadId={workflowAgentFocusView.threadId}
-                  isLoading={isRunning}
-                  hasUserAfterHead={hasUserAfterHeadByIndex[index] ?? false}
-                  assistantDurationMs={assistantDurationMsById.get(message.id)}
-                  userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
-                />
+                <div key={message.id} data-workflow-agent-stream-message-id={message.id}>
+                  <MessageBubble
+                    message={message}
+                    previousMessage={previousMessage}
+                    isStreaming={
+                      isRunning && messageWindow.end >= fullMessages.length && isLastMessage
+                    }
+                    showAssistantMeta={showAssistantMetaByIndex[index] ?? true}
+                    toolResults={toolResults}
+                    threadId={workflowAgentFocusView.threadId}
+                    isLoading={isRunning}
+                    hasUserAfterHead={hasUserAfterHeadByIndex[index] ?? false}
+                    assistantDurationMs={assistantDurationMsById.get(message.id)}
+                    userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
+                  />
+                </div>
               )
             })}
             {isRunning && (

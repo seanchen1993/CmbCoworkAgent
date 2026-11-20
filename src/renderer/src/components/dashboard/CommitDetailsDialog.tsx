@@ -6,7 +6,6 @@ import {
   ExternalLink,
   FileWarning,
   GitCommit,
-  GitCompare,
   Info,
   Loader2,
   MessagesSquare,
@@ -27,6 +26,7 @@ import { Input } from "@/components/ui/input"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { TraceExplorer } from "./TraceHistoryDialog"
+import { DrilldownArrow } from "./DrilldownArrow"
 import { CommitAdoptionTraceDialog } from "./CommitAdoptionTraceDialog"
 import { UncommittedCodeAnalysisPanel, type UncommittedScope } from "./UncommittedCodeDialog"
 import type {
@@ -197,9 +197,7 @@ function CommitRow({
         >
           <div className="flex items-center gap-1 font-medium tabular-nums text-foreground">
             {formatPercent(item.codeAdoptionRate)}
-            {item.commitSha ? (
-              <GitCompare className="size-3 text-muted-foreground opacity-0 transition-opacity group-hover/trace:opacity-100" />
-            ) : null}
+            {item.commitSha ? <DrilldownArrow className="size-3" /> : null}
           </div>
           <div className="text-[10px] text-muted-foreground">
             {formatLines(item.codeAdoptedLines)} / {formatLines(item.codeEffectiveGeneratedLines)}{" "}
@@ -222,6 +220,7 @@ function CommitRow({
           >
             <MessagesSquare className="size-3 shrink-0" />
             <span className="truncate">查看会话</span>
+            <DrilldownArrow />
             {item.threadIds.length > 1 ? (
               <span className="shrink-0 rounded-full bg-muted px-1.5 text-[10px] text-muted-foreground">
                 {item.threadIds.length}
@@ -612,6 +611,7 @@ function NonGitReportRow({
           >
             <MessagesSquare className="size-3 shrink-0" />
             <span className="truncate">查看会话</span>
+            <DrilldownArrow />
           </button>
         ) : (
           <span className="text-xs text-muted-foreground">-</span>

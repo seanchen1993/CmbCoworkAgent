@@ -5,6 +5,8 @@ export const SUBAGENT_TRANSCRIPT_INLINE_BYTES = 512
 export const SUBAGENT_TRANSCRIPT_DESCRIPTION_BYTES = 1_024
 export const SUBAGENT_TRANSCRIPT_STARTUP_FIELD_BYTES = 512
 export const SUBAGENT_TRANSCRIPT_STARTUP_TOTAL_BYTES = 2_000_000
+/** Maximum recent execution buckets included in task-switch startup hydration. */
+export const SUBAGENT_TRANSCRIPT_STARTUP_BUCKET_LIMIT = 200
 export const MAX_SUBAGENT_TRANSCRIPT_PREVIEW_CHARS = 24_000
 export const SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY = "subagentTranscripts"
 
@@ -39,6 +41,18 @@ export interface SubagentTranscriptBlobRef {
   sha256: string
   bytes: number
   kind: SubagentTranscriptBlobKind
+}
+
+export function getSubagentTranscriptBlobReferenceHashKey(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return ""
+  const record = value as Record<string, unknown>
+  return (["content", "reasoning", "tool_calls"] as const)
+    .flatMap((field) => {
+      const ref = record[`${field}_ref`]
+      return isSubagentTranscriptBlobRef(ref, field) ? [ref.sha256] : []
+    })
+    .sort()
+    .join("\n")
 }
 
 export function projectSubagentTranscriptBoundaries(

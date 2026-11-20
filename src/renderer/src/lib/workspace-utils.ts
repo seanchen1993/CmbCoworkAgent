@@ -1,4 +1,5 @@
 import { toast } from "sonner"
+import { loadWorkspaceFilesDeduped, markWorkspaceFilesStale } from "./workspace-file-load"
 
 export type WorkspaceSelectionResult =
   | { status: "success"; path: string }
@@ -30,7 +31,10 @@ export async function selectWorkspaceFolder(
       return { status: "cancelled" }
     }
     setWorkspacePath(path)
-    const result = await window.api.workspace.loadFromDisk(currentThreadId)
+    markWorkspaceFilesStale(currentThreadId, path)
+    const result = await loadWorkspaceFilesDeduped(currentThreadId, path, {
+      requestTrailingRescan: true
+    })
     if (result.success && result.files) {
       setWorkspaceFiles(result.files)
     }

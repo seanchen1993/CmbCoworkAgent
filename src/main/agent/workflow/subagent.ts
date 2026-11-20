@@ -1,10 +1,17 @@
+import { randomUUID } from "crypto"
+import { TurnTraceRecorder } from "../trace/turn-trace-recorder"
+import {
+  withSubagentSessionCapture,
+  subagentSessionCallbacks
+} from "../../services/subagent-session-capture"
 import { HumanMessage, ToolMessage } from "@langchain/core/messages"
 import { DynamicStructuredTool, ToolInputParsingException } from "@langchain/core/tools"
 import { NodeInterrupt } from "@langchain/langgraph"
 import type { AgentShellAccess } from "../agent-registry"
 import {
   extractTextFromUnknownContent,
-  observeSkillUsageFromStream
+  observeSkillUsageFromStream,
+  WorkerValuesSnapshotAccumulator
 } from "../coordinator-worker-stream"
 import { SkillUsageDetector } from "../skill-evolution/usage-detector"
 import {
@@ -14,8 +21,12 @@ import {
   type TraceCollector
 } from "../trace/collector"
 import type { TraceContext, TraceNodeStatus, TraceOutcome } from "../trace/types"
-import { setAdoptionContext } from "../../services/adoption-tracker"
+import { createSubagentSkillAttribution } from "../turn-attribution"
 import { validateJsonSchemaValue } from "./json-schema"
+import {
+  WORKFLOW_AGENT_SNAPSHOT_MAX_MESSAGES,
+  type WorkflowAgentDisplaySnapshot
+} from "./agent-snapshot"
 import {
   WORKFLOW_STRUCTURED_OUTPUT_MAX_ATTEMPTS,
   WORKFLOW_SUBAGENT_MAX_RUNS,
@@ -90,6 +101,7 @@ export interface WorkflowSubagentDeps {
     extraSystemPrompt: string
     abortSignal: AbortSignal
     additionalTools?: DynamicStructuredTool[]
+    traceContext?: TraceContext
     /** agentType-resolved tool denylist (project tool names). Undefined = none. */
     disallowedTools?: string[]
     /** agentType-resolved shell policy. Undefined = full. */
@@ -129,13 +141,13 @@ export interface RunWorkflowSubagentRequest {
   /** Runtime checkout identity for the private worktree. */
   worktreeIsolation?: WorkflowWorktreeIsolationBoundary
   /**
-   * Best-effort display tap: invoked with each "values" snapshot (the graph state
-   * `{ messages: [...] }`) so the renderer can show this subagent's live tool stream.
+   * Best-effort display tap: invoked with the messages and prompt boundary from
+   * each values snapshot so the renderer can show this subagent's live tool stream.
    * PURELY additive — it never affects the returned result, the structured-stop
    * logic, or the journal. The callee guards it with try/catch, but callers MUST
    * keep it non-throwing and cheap. Undefined for all non-display callers.
    */
-  onValues?: (snapshot: unknown) => void
+  onValues?: (snapshot: WorkflowAgentDisplaySnapshot) => void
 }
 
 interface StructuredOutputLogContext {
@@ -188,6 +200,22 @@ function structuredOutputFailureError(message: string): Error {
 }
 
 export async function runWorkflowSubagent(
+  deps: WorkflowSubagentDeps,
+  request: RunWorkflowSubagentRequest
+): Promise<WorkflowSubagentResult> {
+  return withSubagentSessionCapture(
+    {
+      kind: "workflow",
+      threadId: deps.parentThreadId,
+      runId: request.runId,
+      agentIndex: request.agentIndex
+    },
+    request.label,
+    () => runWorkflowSubagentAttempts(deps, request)
+  )
+}
+
+async function runWorkflowSubagentAttempts(
   deps: WorkflowSubagentDeps,
   request: RunWorkflowSubagentRequest
 ): Promise<WorkflowSubagentResult> {
@@ -321,6 +349,10 @@ async function runOnce(
   const attemptSuffix = attempt > 1 ? `_r${attempt}` : ""
   const threadId = `${deps.parentThreadId}__wf_${runShort}_a${request.agentIndex}${attemptSuffix}`
   const agentId = `${request.runId}:agent:${request.agentIndex}`
+  const syncCodeSkills = createSubagentSkillAttribution({
+    threadId,
+    parentThreadId: deps.parentThreadId
+  })
 
   // Subagent lifetime signal: parent abort, plus optional per-agent timeout when
   // CMB_WORKFLOW_AGENT_TIMEOUT_MS is configured.
@@ -332,37 +364,43 @@ async function runOnce(
   timeoutTimer?.unref?.()
 
   const structured: { value: unknown; called: boolean } = { value: undefined, called: false }
+  const promptMessage = new HumanMessage({ content: request.prompt, id: randomUUID() })
+  let traceRecorder: TurnTraceRecorder | undefined
   let tracer: TraceCollector | undefined
   let latestSnapshot: unknown
+  let retryPrompt: { id: string; expectedIndex: number } | undefined
+  let retryPromptIndex: number | undefined
   let traceTerminalRecorded = false
   let traceOutcome: TraceOutcome = "success"
   let traceError: string | undefined
   const skillUsageDetector = new SkillUsageDetector()
+  const valuesSnapshotAccumulator = new WorkerValuesSnapshotAccumulator(request.prompt, {
+    deriveWorkerState: false
+  })
   const syncSkillAttribution = (): void => {
-    if (!tracer) return
     const usedSkills = skillUsageDetector.getUsedSkillNames()
     const skillSource = skillUsageDetector.getUsedSkillSourceRefs()
-    tracer.setUsedSkills(usedSkills)
-    tracer.setSkillSource(skillSource)
-    tracer.setEvolvedSkills(skillUsageDetector.getUsedEvolvedSkillNames())
-    setAdoptionContext(threadId, { usedSkills, skillSource })
+    tracer?.setUsedSkills(usedSkills)
+    tracer?.setSkillSource(skillSource)
+    tracer?.setEvolvedSkills(skillUsageDetector.getUsedEvolvedSkillNames())
+    syncCodeSkills({ usedSkills, skillSource })
   }
   const recordValuesSnapshot = (snapshot: unknown): void => {
     latestSnapshot = snapshot
+    traceRecorder?.onRawValues(snapshot)
+    const valuesContext = valuesSnapshotAccumulator.createContext("values", snapshot)
     runTraceSideEffect("Workflow Skill observer", () => {
-      if (
-        observeSkillUsageFromStream(
-          "values",
-          snapshot,
-          skillUsageDetector,
-          undefined,
-          request.prompt
-        )
-      ) {
+      if (observeSkillUsageFromStream("values", snapshot, skillUsageDetector, valuesContext)) {
         syncSkillAttribution()
       }
     })
-    request.onValues?.(snapshot)
+    if (request.onValues) {
+      const messages = snapshotMessages(snapshot)
+      if (retryPrompt && retryPromptIndex === undefined) {
+        retryPromptIndex = findRetryPromptIndex(messages, retryPrompt.id, retryPrompt.expectedIndex)
+      }
+      request.onValues({ messages, retryPromptIndex })
+    }
   }
 
   try {
@@ -372,6 +410,15 @@ async function runOnce(
     // Purge any stale per-thread state before creating the runtime.
     await deps.cleanupThread(threadId).catch(() => undefined)
     tracer = createWorkflowSubagentTrace(deps, request, threadId)
+    // Trace creation resets adoption context. Restore inherited Skills before
+    // the first tool can generate code, even if this agent never reads a Skill.
+    runTraceSideEffect("Workflow Skill initialization", syncSkillAttribution)
+    if (tracer)
+      traceRecorder = new TurnTraceRecorder({
+        tracer,
+        userMessageId: promptMessage.id,
+        requireUserMessageAnchor: true
+      })
 
     const additionalTools = request.schema
       ? [
@@ -406,6 +453,7 @@ async function runOnce(
       extraSystemPrompt,
       abortSignal: controller.signal,
       additionalTools,
+      traceContext: tracer?.getTraceContext() ?? deps.traceContext,
       label: request.label,
       disallowedTools: request.disallowedTools,
       shellAccess: request.shellAccess,
@@ -421,7 +469,7 @@ async function runOnce(
 
     const streamConfig = {
       configurable: { thread_id: threadId },
-      callbacks: [],
+      callbacks: subagentSessionCallbacks([]),
       signal: controller.signal,
       // "messages" is subscribed for its side effect, not for display: it attaches
       // LangGraph's StreamMessagesHandler (lc_prefer_streaming), which switches the
@@ -446,7 +494,7 @@ async function runOnce(
     let snapshot = await raceWithAbort(
       (async () =>
         consumeValuesStream(
-          await runtime.stream({ messages: [new HumanMessage(request.prompt)] }, streamConfig),
+          await runtime.stream({ messages: [promptMessage] }, streamConfig),
           controller.signal,
           stopAfterStructuredAccepted,
           recordValuesSnapshot
@@ -505,20 +553,20 @@ async function runOnce(
               "by itself, with input matching the required JSON Schema.]"
           })
       )
+      const retryPromptId = randomUUID()
+      const retryMessage = new HumanMessage({
+        id: retryPromptId,
+        content:
+          "You have not returned a valid structured result yet. Call the structured_output tool now, exactly once, with an input matching the required JSON Schema. Do not reply with plain text."
+      })
+      retryPrompt = {
+        id: retryPromptId,
+        expectedIndex: snapshotMessages(snapshot).length + repairMessages.length
+      }
       snapshot = await raceWithAbort(
         (async () =>
           consumeValuesStream(
-            await runtime.stream(
-              {
-                messages: [
-                  ...repairMessages,
-                  new HumanMessage(
-                    "You have not returned a valid structured result yet. Call the structured_output tool now, exactly once, with an input matching the required JSON Schema. Do not reply with plain text."
-                  )
-                ]
-              },
-              streamConfig
-            ),
+            await runtime.stream({ messages: [...repairMessages, retryMessage] }, streamConfig),
             controller.signal,
             stopAfterStructuredAccepted,
             recordValuesSnapshot
@@ -603,6 +651,7 @@ async function runOnce(
     traceError = describeWorkflowTraceError(error)
     throw error
   } finally {
+    valuesSnapshotAccumulator.reset()
     if (tracer) {
       const tracerToFinish = tracer
       runTraceSideEffect("Workflow", () => {
@@ -618,10 +667,7 @@ async function runOnce(
           traceTerminalRecorded = true
         }
       })
-      const traceSnapshot = latestSnapshot
-      finishTraceInBackground(tracerToFinish, traceOutcome, traceError, "Workflow", () => {
-        recordWorkflowTraceToolDetails(tracerToFinish, traceSnapshot)
-      })
+      finishTraceInBackground(tracerToFinish, traceOutcome, traceError, "Workflow")
     }
     if (timeoutTimer) clearTimeout(timeoutTimer)
     request.signal.removeEventListener("abort", onParentAbort)
@@ -657,6 +703,7 @@ export async function createRuntimeWithModelFallback(
     extraSystemPrompt: string
     abortSignal: AbortSignal
     additionalTools?: DynamicStructuredTool[]
+    traceContext?: TraceContext
     label: string
     disallowedTools?: string[]
     shellAccess?: AgentShellAccess
@@ -669,6 +716,7 @@ export async function createRuntimeWithModelFallback(
     extraSystemPrompt: options.extraSystemPrompt,
     abortSignal: options.abortSignal,
     additionalTools: options.additionalTools,
+    traceContext: options.traceContext,
     disallowedTools: options.disallowedTools,
     shellAccess: options.shellAccess,
     worktreeIsolation: options.worktreeIsolation
@@ -1794,6 +1842,31 @@ function structuredOutputInterruptMessage(snapshot: unknown): string | null {
 /** Consumes a [mode, data] stream and returns the last "values" snapshot. */
 /** Exported for the tap-isolation regression test (display-only onValues must not
  * change the return value or stop semantics; a throwing tap must be swallowed). */
+/**
+ * Stops the graph, not just our reading of it.
+ *
+ * Breaking out of a `for await` calls the iterator's `return()`, which cancels
+ * the ReadableStream we are reading — and nothing else. LangGraph aborts a run
+ * only from `IterableReadableStreamWithAbortSignal.cancel()`, and the source it
+ * builds has no cancel handler for `reader.cancel()` to reach, so the graph runs
+ * on: more model turns, more tool calls, unsupervised and billed, writing tokens
+ * into a controller we already closed (which is where the flood of
+ * "Controller is already closed" warnings came from).
+ *
+ * Cancels only this stream's own derived controller, never the caller's signal —
+ * aborting that would reject the raceWithAbort around this call and throw away
+ * the result we just accepted.
+ */
+async function stopGraphStream(stream: AsyncIterable<unknown>): Promise<void> {
+  const cancel = (stream as { cancel?: (reason?: unknown) => Promise<void> | void }).cancel
+  if (typeof cancel !== "function") return
+  try {
+    await cancel.call(stream)
+  } catch {
+    /* teardown is best-effort; the caller already has what it needs */
+  }
+}
+
 export async function consumeValuesStream(
   stream: AsyncIterable<unknown>,
   signal: AbortSignal,
@@ -1802,7 +1875,13 @@ export async function consumeValuesStream(
 ): Promise<unknown> {
   let lastValues: unknown
   for await (const chunk of stream) {
-    if (signal.aborted) break
+    // The config signal already tears the run down here, so this is belt and
+    // braces — but this file has long guarded against a stream that never
+    // honours that signal, and the cost of asking twice is nothing.
+    if (signal.aborted) {
+      await stopGraphStream(stream)
+      break
+    }
     if (!Array.isArray(chunk) || chunk.length < 2) continue
     const [mode, data] = chunk as [string, unknown]
     if (mode === "values") {
@@ -1820,7 +1899,13 @@ export async function consumeValuesStream(
       // Structured subagents can stop as soon as a schema-valid structured_output
       // call has been captured; invalid tool calls keep streaming so the model can
       // read the repair feedback and call the tool again.
-      if (shouldStop?.(lastValues)) break
+      //
+      // Nothing has aborted the run at this point — we are leaving early because
+      // we have the answer — so this is the path that actually needed stopping.
+      if (shouldStop?.(lastValues)) {
+        await stopGraphStream(stream)
+        break
+      }
     }
   }
   return lastValues
@@ -1834,6 +1919,7 @@ interface MessageLike {
   kwargs?: {
     additional_kwargs?: { tool_calls?: unknown[] }
     content?: unknown
+    id?: unknown
     name?: unknown
     status?: unknown
     tool_calls?: unknown[]
@@ -1853,6 +1939,24 @@ function snapshotMessages(snapshot: unknown): MessageLike[] {
   if (typeof snapshot !== "object" || snapshot === null) return []
   const messages = (snapshot as { messages?: unknown }).messages
   return Array.isArray(messages) ? (messages as MessageLike[]) : []
+}
+
+function findRetryPromptIndex(
+  messages: readonly MessageLike[],
+  promptId: string,
+  expectedIndex: number
+): number | undefined {
+  const isPrompt = (message?: MessageLike): boolean =>
+    message?.id === promptId || message?.kwargs?.id === promptId
+  if (isPrompt(messages[expectedIndex])) return expectedIndex
+
+  // The retry appends to the same checkpoint. A tool repair can shift the
+  // expected position, so check the recent values window until we see it once.
+  const oldestIndex = Math.max(0, messages.length - WORKFLOW_AGENT_SNAPSHOT_MAX_MESSAGES)
+  for (let index = messages.length - 1; index >= oldestIndex; index -= 1) {
+    if (isPrompt(messages[index])) return index
+  }
+  return undefined
 }
 
 function messageClassName(message: MessageLike): string {
@@ -2119,22 +2223,6 @@ export function extractWorkflowTraceToolDetails(snapshot: unknown): WorkflowTrac
       status: result?.status ?? "unknown"
     }
   })
-}
-
-function recordWorkflowTraceToolDetails(tracer: TraceCollector, snapshot: unknown): void {
-  for (const tool of extractWorkflowTraceToolDetails(snapshot)) {
-    const toolNodeId = tracer.addToolNode({
-      name: tool.name,
-      ...(tool.input !== undefined ? { input: tool.input } : {}),
-      ...(tool.toolCallId ? { toolCallId: tool.toolCallId } : {})
-    })
-    tracer.addToolResultNode({
-      parentId: toolNodeId,
-      ...(tool.toolCallId ? { toolCallId: tool.toolCallId } : {}),
-      ...(tool.output !== undefined ? { output: tool.output } : {}),
-      status: tool.status
-    })
-  }
 }
 
 /**

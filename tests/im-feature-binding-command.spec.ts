@@ -1,0 +1,1962 @@
+import assert from "node:assert/strict"
+import { mkdtemp, realpath, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import initSqlJs from "sql.js"
+import type { ThreadRow } from "../src/main/db"
+import { ImRemoteCapabilityGuard } from "../src/main/services/im/capability-guard"
+import { ImCardInteractionStore } from "../src/main/services/im/card-interaction-store"
+import { ImCardPublisher } from "../src/main/services/im/card-publisher"
+import { ImCommandRouter, parseImCommand } from "../src/main/services/im/command-router"
+import { ImConversationStateStore } from "../src/main/services/im/conversation-state"
+import { ImEventStore, type ImEventRecord } from "../src/main/services/im/event-store"
+import { ImFeatureBindingService } from "../src/main/services/im/feature-binding-service"
+import type {
+  ImExecutionPermitResult,
+  ImGatewayClientPort,
+  ImReplySubmissionResult
+} from "../src/main/services/im/gateway-client"
+import { ImInboxService } from "../src/main/services/im/inbox-service"
+import { ImIngressSequencer } from "../src/main/services/im/ingress-sequencer"
+import type { ImPersistenceDependencies } from "../src/main/services/im/persistence"
+import { ImReplyClient } from "../src/main/services/im/reply-client"
+import { ImSessionSwitchCards } from "../src/main/services/im/session-switch-cards"
+import { ImRemoteAccessService } from "../src/main/services/im/remote-access-service"
+import { ImRemoteGrantStore } from "../src/main/services/im/remote-grant-store"
+import { eventShortCode } from "../src/main/services/im/reply-segmentation"
+import {
+  ImSelectionContextError,
+  ImSelectionContextStore
+} from "../src/main/services/im/selection-context"
+import { ensureImServiceSchema } from "../src/main/services/im/schema"
+import type {
+  RemoteImAckV1,
+  RemoteImEventV1,
+  RemoteImReplyV1
+} from "../src/shared/im-gateway-contract"
+import { DEFAULT_IM_CHANNEL_ID } from "../src/shared/im-gateway-contract"
+
+class TestGateway implements ImGatewayClientPort {
+  readonly acknowledgements: RemoteImAckV1[] = []
+  readonly replies: RemoteImReplyV1[] = []
+
+  isAuthenticated(): boolean {
+    return true
+  }
+
+  async sendAcknowledgement(ack: RemoteImAckV1): Promise<void> {
+    this.acknowledgements.push(ack)
+  }
+
+  async acquireExecutionPermit(): Promise<ImExecutionPermitResult> {
+    return { status: "denied" }
+  }
+
+  async renewExecutionPermit(): Promise<ImExecutionPermitResult> {
+    return { status: "denied" }
+  }
+
+  async submitReply(reply: RemoteImReplyV1): Promise<ImReplySubmissionResult> {
+    this.replies.push(reply)
+    return { state: "accepted", platformReplyId: `reply-${this.replies.length}` }
+  }
+}
+
+function eventFixture(sequence: number, text: string): RemoteImEventV1 {
+  return {
+    schemaVersion: 1,
+    eventId: `command-${sequence}`,
+    platformMessageId: `platform-command-${sequence}`,
+    principalId: "principal-1",
+    conversationKey: "conversation-1",
+    conversationSeq: sequence,
+    message: { type: "text", text },
+    occurredAt: `2026-07-23T08:00:${String(sequence).padStart(2, "0")}.000Z`,
+    lease: { id: `lease-${sequence}`, expiresAt: "2026-07-23T09:00:00.000Z" }
+  }
+}
+
+async function createContext() {
+  const root = await mkdtemp(join(tmpdir(), "cmb-im-feature-"))
+  const SQL = await initSqlJs()
+  const database = new SQL.Database()
+  ensureImServiceSchema(database)
+  const clock = { now: Date.parse("2026-07-23T08:00:00.000Z") }
+  const persistence: ImPersistenceDependencies = {
+    getDatabase: () => database,
+    markDirty: () => undefined,
+    flushStrict: async () => undefined,
+    now: () => clock.now
+  }
+  const conversations = new ImConversationStateStore(persistence)
+  const events = new ImEventStore(persistence)
+  const selections = new ImSelectionContextStore(persistence, () => "selection-token", 60_000)
+  await conversations.ensureConversation({
+    conversationKey: "conversation-1",
+    principalId: "principal-1"
+  })
+
+  const threads = new Map<string, ThreadRow>()
+  const makeThread = (threadId: string, metadata?: Record<string, unknown>): ThreadRow => {
+    const row: ThreadRow = {
+      thread_id: threadId,
+      created_at: clock.now,
+      updated_at: clock.now,
+      title: typeof metadata?.title === "string" ? metadata.title : null,
+      status: "idle",
+      thread_values: null,
+      metadata: JSON.stringify(metadata ?? {})
+    }
+    threads.set(threadId, row)
+    return row
+  }
+  // Stands in for createThreadService. It records the metadata it is handed,
+  // because the thing that matters here is whether the IM path names a mode at
+  // all: naming one suppresses the Feature-config inheritance that
+  // thread-service applies (its hasOwnProperty guard), and this path used to
+  // name "normal" unconditionally.
+  const createdThreadMetadata: Array<Record<string, unknown>> = []
+  const makeThreadService = async (
+    metadata?: Record<string, unknown>
+  ): Promise<{ thread_id: string; metadata?: Record<string, unknown> }> => {
+    createdThreadMetadata.push({ ...(metadata ?? {}) })
+    const threadId = `generated-thread-${createdThreadMetadata.length}`
+    // The real path resolves the Feature's mode when the caller named none.
+    const resolved = {
+      ...(metadata ?? {}),
+      // Mirrors thread-service: a named mode wins, else the Feature's config,
+      // else normal + subagents — which is what the four words call Multi.
+      ...(metadata && "agentMode" in metadata
+        ? {}
+        : featureConfiguredAgentMode
+          ? { agentMode: featureConfiguredAgentMode }
+          : { agentMode: "normal", subagentsEnabled: true })
+    }
+    makeThread(threadId, resolved)
+    return { thread_id: threadId, metadata: resolved }
+  }
+  let featureConfiguredAgentMode: string | null = "workflow"
+  const updateLocalThread = (
+    threadId: string,
+    patch: Partial<Omit<ThreadRow, "thread_id" | "created_at">>
+  ): ThreadRow | null => {
+    const row = threads.get(threadId)
+    if (!row) return null
+    const updated = { ...row, ...patch, updated_at: clock.now }
+    threads.set(threadId, updated)
+    return updated
+  }
+  let id = 0
+  const featureCatalog = {
+    enabled: true,
+    projectMode: true,
+    projectExists: true,
+    projectStatus: "active",
+    compatible: true,
+    projectName: "支付平台",
+    detailArchived: false,
+    detailError: null as string | null,
+    readFailure: false,
+    projectReads: 0,
+    detailReads: 0,
+    runs: [
+      {
+        slug: "feature-pay",
+        title: "快捷支付",
+        location: "active",
+        featureStatus: "in_progress",
+        overallStatus: { label: "进行中", uiKind: "active" }
+      }
+    ]
+  }
+  const featureService = new ImFeatureBindingService({
+    getFeatureWorkspace: async () => root,
+    conversationState: conversations,
+    getSettings: () => ({ enabled: featureCatalog.enabled, remoteAccess: "inbox-and-features" }),
+    projectModeEnabled: async () => featureCatalog.projectMode,
+    listProjects: () => {
+      featureCatalog.projectReads++
+      return (
+        featureCatalog.projectExists
+          ? [
+              {
+                projectId: "project-secret-id",
+                name: featureCatalog.projectName,
+                lifecycle: {
+                  status: featureCatalog.projectStatus,
+                  createAt: "2026-07-23T00:00:00.000Z"
+                },
+                boardCompatibility: { compatible: featureCatalog.compatible }
+              }
+            ]
+          : []
+      ) as never
+    },
+    getProjectDetail: () => {
+      featureCatalog.detailReads++
+      if (featureCatalog.readFailure) throw new Error("test project temporarily unavailable")
+      return {
+        project: {
+          projectId: "project-secret-id",
+          name: "支付平台",
+          projectRootPath: root,
+          workspacePath: "/must-not-leak"
+        },
+        projectState: {
+          label: "active",
+          uiKind: featureCatalog.detailArchived ? "archived" : "active"
+        },
+        runs: featureCatalog.runs,
+        error: featureCatalog.detailError
+      } as never
+    },
+    getRunDetail: () => ({ sessions: [] }) as never,
+    buildFeatureContext: () => ({ featureId: "feature-pay" }) as never,
+    getThread: (threadId) => threads.get(threadId) ?? null,
+    createThread: makeThreadService as never,
+    createId: () => `generated-${++id}`
+  })
+  const inbox = new ImInboxService({
+    conversationState: conversations,
+    openworkDirectory: () => root,
+    createId: () => `inbox-${++id}`,
+    createThread: makeThread,
+    getThread: (threadId) => threads.get(threadId) ?? null,
+    ensureDirectory: async () => undefined
+  })
+  const grants = new ImRemoteGrantStore(persistence, () => `grant-${++id}`)
+  const access = new ImRemoteAccessService({
+    conversations,
+    grants,
+    features: featureService,
+    getThread: (threadId) => threads.get(threadId) ?? null,
+    deleteThread: (threadId) => {
+      threads.delete(threadId)
+    },
+    createId: () => `target-${++id}`,
+    getGoal: () => null,
+    coordinator: {
+      hasRunningWorkersForThread: () => false,
+      hasNotifications: () => false,
+      hasTerminalWorkerAwaitingNotificationForThread: () => false
+    },
+    workflow: { isBusyForThread: () => false },
+    hasPendingApproval: () => false,
+    hasPendingUserInput: () => false
+  })
+  return {
+    featureCatalog,
+    createdThreadMetadata,
+    setFeatureConfiguredAgentMode: (mode: string | null) => {
+      featureConfiguredAgentMode = mode
+    },
+    root,
+    database,
+    clock,
+    persistence,
+    conversations,
+    events,
+    selections,
+    threads,
+    updateLocalThread,
+    featureService,
+    grants,
+    access,
+    makeThread,
+    inbox
+  }
+}
+
+function selectionIndexContaining(list: string, marker: string): number {
+  const line = list.split("\n").find((candidate) => candidate.includes(marker))
+  const match = line?.match(/^(\d+)\./u)
+  if (!match) throw new Error(`selection containing ${marker} not found`)
+  return Number(match[1])
+}
+
+async function testSwitchBackByTheNameTheReplyAlreadyShows(): Promise<void> {
+  const context = await createContext()
+  const router = new ImCommandRouter({
+    conversations: context.conversations,
+    events: context.events,
+    inbox: context.inbox,
+    access: context.access,
+    selections: context.selections,
+    getCurrentEventId: () => null,
+    abortCurrent: () => false,
+    getThread: (threadId) => context.threads.get(threadId) ?? null
+  })
+  const commandInput = { conversationKey: "conversation-1", principalId: "principal-1" }
+  try {
+    await context.access.enableFeature({
+      principalId: commandInput.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+    const sessions = await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    const featureIndex = selectionIndexContaining(sessions, "（特性，可创建新会话）")
+    await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/绑定 ${featureIndex}`)!
+    })
+    const created = context.conversations.getActiveTarget("conversation-1")
+    assert.equal(created?.kind, "thread")
+    if (created?.kind !== "thread") throw new Error("thread target expected")
+
+    // Move away, the way a person does when a second task starts.
+    await router.handle({ ...commandInput, command: parseImCommand("/收件箱")! })
+    assert.equal(context.conversations.getActiveTarget("conversation-1")?.kind, "inbox")
+
+    // The name is the one the reply prefix prints; no number, nothing to look up.
+    const switched = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/切换 ${created.title}`)!
+    })
+    assert(switched.includes("已切换到"), switched)
+    assert.equal(
+      context.conversations.getActiveTarget("conversation-1")?.targetId,
+      created.targetId
+    )
+
+    // Case and spacing are forgiven, because people retype rather than copy.
+    await router.handle({ ...commandInput, command: parseImCommand("/收件箱")! })
+    const relaxed = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/切换   ${created.title.toUpperCase()}`)!
+    })
+    assert(relaxed.includes("已切换到"), relaxed)
+
+    const unknown = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/切换 不存在的会话")!
+    })
+    assert(unknown.includes("没有找到可切换的会话"), unknown)
+    assert(unknown.includes("/会话"), "a dead end must say where to look next")
+
+    // A Feature would CREATE a session; "switch" must never mean "start new".
+    const feature = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/切换 支付平台")!
+    })
+    assert(feature.includes("是特性，不是会话"), feature)
+    assert(feature.includes("/绑定"), feature)
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+/**
+ * A card submit is the numbered list, pressed.
+ *
+ * The property worth holding is that it reaches the same selection context the
+ * typed `/绑定 <编号>` reaches — so it cannot name a target that was never
+ * offered, and an index the list does not have is refused by the same code that
+ * refuses it for a typed command. The card adds an affordance, never authority.
+ */
+/**
+ * A delivered card replaces the notice rather than accompanying it.
+ *
+ * The numbered list is the card's own content, so printing it again underneath
+ * was the same thing said twice. An empty answer is how the router says it has
+ * nothing to add; the ingress turns that into no message at all.
+ */
+async function testADeliveredTargetCardSendsNoNoticeAtAll(): Promise<void> {
+  const context = await createContext()
+  const sent: string[] = []
+  const cards = new ImCardPublisher({
+    interactions: new ImCardInteractionStore(),
+    createIdempotencyKey: () => `idem-${sent.length}`,
+    gateway: {
+      isAuthenticated: () => true,
+      sendCard: async (card: { content: unknown }) => {
+        sent.push(JSON.stringify(card.content))
+        return { state: "accepted" } as const
+      }
+    } as never,
+    warn: () => undefined
+  })
+  const router = new ImCommandRouter({
+    conversations: context.conversations,
+    events: context.events,
+    inbox: context.inbox,
+    access: context.access,
+    selections: context.selections,
+    cards,
+    getCurrentEventId: () => null,
+    abortCurrent: () => false,
+    getThread: (threadId) => context.threads.get(threadId) ?? null
+  })
+  const commandInput = { conversationKey: "conversation-1", principalId: "principal-1" }
+  try {
+    await context.access.enableFeature({
+      principalId: commandInput.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+    const answer = await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    // Not empty: a control event has to finalize with at least one reply
+    // segment. An empty answer makes finalizeEventWithReplies throw
+    // OUTBOX_INCOMPLETE, the event never completes, and the gateway republishes
+    // this card every time the 90-second lease expires — forever.
+    assert.notEqual(answer, "", "a control command must always answer something")
+    assert(answer.includes("卡片"), answer)
+    // What it must not do is print the numbered list again; that is the card's.
+    assert(!/^\d+\. /mu.test(answer), answer)
+    assert.equal(sent.length, 1, "exactly one card carries the list")
+    // The numbers are in the option labels, which is the whole reason the text
+    // list can be dropped: a submit sends the same index the option shows.
+    assert(sent[0]!.includes("特性，可创建新会话"), sent[0])
+    assert(sent[0]!.match(/"text":"1\. /u), sent[0])
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testACardSubmitBindsExactlyWhatTypingWouldBind(): Promise<void> {
+  const context = await createContext()
+  const router = new ImCommandRouter({
+    conversations: context.conversations,
+    events: context.events,
+    inbox: context.inbox,
+    access: context.access,
+    selections: context.selections,
+    getCurrentEventId: () => null,
+    abortCurrent: () => false,
+    getThread: (threadId) => context.threads.get(threadId) ?? null
+  })
+  const commandInput = { conversationKey: "conversation-1", principalId: "principal-1" }
+  try {
+    await context.access.enableFeature({
+      principalId: commandInput.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+    const sessions = await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    let featureIndex = selectionIndexContaining(sessions, "（特性，可创建新会话）")
+
+    // An index the list never offered is refused by the selection context, not
+    // by the card — the same refusal a typed number out of range earns.
+    const outOfRange = await router.resolveTargetBindCard({
+      ...commandInput,
+      feedback: [{ key: "target", value: String(featureIndex + 99) }]
+    })
+    assert(outOfRange.includes("编号超出范围"), outOfRange)
+    assert.equal(context.createdThreadMetadata.length, 0, "a refused submit must create nothing")
+
+    // Nothing selected is a refusal too, not a bind of whatever came first.
+    const empty = await router.resolveTargetBindCard({
+      ...commandInput,
+      feedback: [{ key: "target", value: "" }]
+    })
+    assert(empty.includes("请先在卡片里选择"), empty)
+    assert.equal(context.createdThreadMetadata.length, 0)
+
+    // A mode the typed path rejects is rejected here with the same words.
+    const badMode = await router.resolveTargetBindCard({
+      ...commandInput,
+      feedback: [
+        { key: "target", value: String(featureIndex) },
+        { key: "mode", value: "agent_team" }
+      ]
+    })
+    assert(badMode.includes("模式无效"), badMode)
+    assert.equal(context.createdThreadMetadata.length, 0)
+
+    // The card's explicit 「跟随特性配置」 has to mean what omitting the word
+    // means, or the default would silently become Multi.
+    const inherited = await router.resolveTargetBindCard({
+      ...commandInput,
+      feedback: [
+        { key: "target", value: String(featureIndex) },
+        { key: "mode", value: "inherit" }
+      ]
+    })
+    assert(inherited.includes("已在【"), inherited)
+    const inheritedMode = context.createdThreadMetadata.at(-1)
+    assert.equal(context.createdThreadMetadata.length, 1)
+
+    // And an explicit mode reaches the same place the typed word reaches.
+    featureIndex = selectionIndexContaining(
+      await router.handle({ ...commandInput, command: parseImCommand("/会话")! }),
+      "（特性，可创建新会话）"
+    )
+    const team = await router.resolveTargetBindCard({
+      ...commandInput,
+      feedback: [
+        { key: "target", value: String(featureIndex) },
+        { key: "mode", value: "team" }
+      ]
+    })
+    assert(team.includes("Team 会话"), team)
+    assert.equal(context.createdThreadMetadata.at(-1)?.agentMode, "coordinator")
+    assert.notDeepEqual(
+      context.createdThreadMetadata.at(-1),
+      inheritedMode,
+      "an explicit mode must not produce the same thread the inherited default did"
+    )
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testBindModeOnlyAppliesWhereASessionIsCreated(): Promise<void> {
+  const context = await createContext()
+  const router = new ImCommandRouter({
+    conversations: context.conversations,
+    events: context.events,
+    inbox: context.inbox,
+    access: context.access,
+    selections: context.selections,
+    getCurrentEventId: () => null,
+    abortCurrent: () => false,
+    getThread: (threadId) => context.threads.get(threadId) ?? null
+  })
+  const commandInput = { conversationKey: "conversation-1", principalId: "principal-1" }
+  try {
+    await context.access.enableFeature({
+      principalId: commandInput.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+    const sessions = await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    let featureIndex = selectionIndexContaining(sessions, "（特性，可创建新会话）")
+    // The list is what a person reads immediately before typing /绑定, so the
+    // mode has to be offered here and not only under /帮助.
+    assert(sessions.includes(`/绑定 <编号> Solo / Multi / Team / Workflow`), sessions)
+
+    // The Feature's own words, so a person picks the shape of the work rather
+    // than translating between three vocabularies.
+    const bad = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/绑定 ${featureIndex} agent_team`)!
+    })
+    assert(bad.includes("模式无效"), bad)
+    assert(bad.includes("Solo / Multi / Team / Workflow"), bad)
+    assert.equal(context.createdThreadMetadata.length, 0, "an invalid mode must create nothing")
+
+    // Team is the word; coordinator is what the thread becomes.
+    await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
+    const team = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/绑定 ${featureIndex} Team`)!
+    })
+    assert.equal(context.createdThreadMetadata.at(-1)?.agentMode, "coordinator")
+    assert(team.includes("Team 会话"), team)
+
+    // Solo and Multi are the same mode and differ only in subagents. Naming
+    // just the mode would let Solo become Multi, because thread-service turns
+    // subagents on whenever nobody said otherwise — so both fields travel.
+    featureIndex = selectionIndexContaining(
+      await router.handle({ ...commandInput, command: parseImCommand("/会话")! }),
+      "（特性，可创建新会话）"
+    )
+    const solo = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/绑定 ${featureIndex} SOLO`)!
+    })
+    assert.equal(context.createdThreadMetadata.at(-1)?.agentMode, "normal")
+    assert.equal(context.createdThreadMetadata.at(-1)?.subagentsEnabled, false)
+    assert(solo.includes("Solo 会话"), solo)
+
+    featureIndex = selectionIndexContaining(
+      await router.handle({ ...commandInput, command: parseImCommand("/会话")! }),
+      "（特性，可创建新会话）"
+    )
+    const multi = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/绑定 ${featureIndex} multi`)!
+    })
+    assert.equal(context.createdThreadMetadata.at(-1)?.subagentsEnabled, true)
+    assert(multi.includes("Multi 会话"), multi)
+
+    // A Feature that configures nothing: no word, no config, and the shared
+    // path's own fallback is what the four words call Multi.
+    context.setFeatureConfiguredAgentMode(null)
+    featureIndex = selectionIndexContaining(
+      await router.handle({ ...commandInput, command: parseImCommand("/会话")! }),
+      "（特性，可创建新会话）"
+    )
+    const unconfigured = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/绑定 ${featureIndex}`)!
+    })
+    assert(
+      !("agentMode" in context.createdThreadMetadata.at(-1)!),
+      "an unqualified /绑定 must still leave the mode to the Feature"
+    )
+    assert(unconfigured.includes("Multi 会话"), unconfigured)
+
+    // An existing session is a different operation: its checkpoints and any
+    // running turn were produced under the mode it already has.
+    const listWithSession = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/会话")!
+    })
+    const sessionIndex = selectionIndexContaining(listWithSession, "（项目会话）")
+    const created = context.createdThreadMetadata.length
+    const refused = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/绑定 ${sessionIndex} workflow`)!
+    })
+    assert(refused.includes("模式只能在特性下新建会话时指定"), refused)
+    assert.equal(context.createdThreadMetadata.length, created, "a refusal must create nothing")
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testFeatureCreateGrantCreatesIndependentThreadGrants(): Promise<void> {
+  const context = await createContext()
+  const router = new ImCommandRouter({
+    conversations: context.conversations,
+    events: context.events,
+    inbox: context.inbox,
+    access: context.access,
+    selections: context.selections,
+    getCurrentEventId: () => null,
+    abortCurrent: () => false,
+    getThread: (threadId) => context.threads.get(threadId) ?? null
+  })
+  const commandInput = {
+    conversationKey: "conversation-1",
+    principalId: "principal-1"
+  }
+  try {
+    const retired = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/项目")!
+    })
+    assert(retired.includes("已合并为 /会话"))
+
+    await context.access.enableFeature({
+      principalId: commandInput.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+    const sessions = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/会话")!
+    })
+    assert(sessions.includes("支付平台 / 快捷支付"))
+    assert(!sessions.includes(context.root))
+    assert(!sessions.includes("project-secret-id"))
+    assert(!sessions.includes("must-not-leak"))
+    assert(sessions.includes("（特性，可创建新会话）"))
+
+    const bound = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/绑定 1")!
+    })
+    assert(bound.includes("会话并切换"))
+    // No mode word: the IM path must not name one, because naming one is what
+    // stops the Feature's own configuration from applying. This used to send
+    // "normal" unconditionally, so a workflow Feature produced an ordinary
+    // session from Zhaohu and a workflow one on the desktop.
+    assert(
+      !("agentMode" in context.createdThreadMetadata[0]),
+      "an unqualified /绑定 must leave the mode to the Feature"
+    )
+    // And the reply says what the session actually became, since nothing else
+    // in Zhaohu shows a session's mode.
+    assert(bound.includes("Workflow"), `the reply must name the mode: ${bound}`)
+    const firstTarget = context.conversations.getActiveTarget("conversation-1")
+    assert.equal(firstTarget?.kind, "thread")
+    if (firstTarget?.kind !== "thread") throw new Error("thread target expected")
+    const metadata = JSON.parse(context.threads.get(firstTarget.threadId)!.metadata!) as Record<
+      string,
+      unknown
+    >
+    assert.deepEqual(metadata.harnessFeature, {
+      projectId: "project-secret-id",
+      slug: "feature-pay",
+      source: "autobizdevops"
+    })
+    assert.deepEqual(metadata.imDeliveryContext, {
+      provider: DEFAULT_IM_CHANNEL_ID,
+      principalId: commandInput.principalId,
+      conversationKey: commandInput.conversationKey,
+      targetId: firstTarget.targetId
+    })
+    assert.equal(context.grants.getThreadGrant(firstTarget.threadId)?.state, "active")
+
+    const withFirstSession = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/会话")!
+    })
+    assert(withFirstSession.includes("（项目会话）"))
+    assert(withFirstSession.includes("（特性，可创建新会话）"))
+    const createIndex = selectionIndexContaining(withFirstSession, "（特性，可创建新会话）")
+
+    const secondBound = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/绑定 ${createIndex}`)!
+    })
+    assert(secondBound.includes("会话并切换"))
+    const secondTarget = context.conversations.getActiveTarget("conversation-1")
+    assert.equal(secondTarget?.kind, "thread")
+    if (secondTarget?.kind !== "thread") throw new Error("second thread target expected")
+    assert.notEqual(secondTarget.threadId, firstTarget.threadId)
+    assert.equal(context.grants.getThreadGrant(secondTarget.threadId)?.state, "active")
+    assert.equal(
+      context.grants
+        .listThreadGrants(commandInput.conversationKey)
+        .filter((candidate) => candidate.state === "active").length,
+      2
+    )
+
+    await context.access.disableFeature("project-secret-id", "feature-pay")
+    assert.equal(
+      context.grants.getFeatureGrant("project-secret-id", "feature-pay")?.state,
+      "revoked"
+    )
+    assert.equal(context.grants.getThreadGrant(firstTarget.threadId)?.state, "active")
+    assert.equal(context.grants.getThreadGrant(secondTarget.threadId)?.state, "active")
+    assert.equal(
+      context.conversations
+        .listTargets(commandInput.conversationKey)
+        .find((candidate) => candidate.snapshot.targetId === secondTarget.targetId)?.state,
+      "active"
+    )
+
+    const afterCreateDisabled = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/会话")!
+    })
+    assert(!afterCreateDisabled.includes("（特性，可创建新会话）"))
+    assert.equal(afterCreateDisabled.match(/（项目会话）/gu)?.length, 2)
+
+    const switched = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/收件箱")!
+    })
+    assert(switched.includes("已切换到【默认聊天】"))
+    assert.equal(context.conversations.getActiveTarget("conversation-1")?.kind, "inbox")
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testFeatureGrantIsPrincipalScopedAndUsesInvokingConversation(): Promise<void> {
+  const context = await createContext()
+  const firstRoute = {
+    conversationKey: "conversation-1",
+    principalId: "principal-1"
+  }
+  const secondRoute = {
+    conversationKey: "conversation-2",
+    principalId: "principal-1"
+  }
+  const foreignRoute = {
+    conversationKey: "conversation-foreign",
+    principalId: "principal-2"
+  }
+  try {
+    await context.conversations.ensureConversation(secondRoute)
+    await context.conversations.ensureConversation(foreignRoute)
+    const grant = await context.access.enableFeature({
+      principalId: firstRoute.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+
+    assert(!("conversationKey" in grant), "Feature grant must not retain a chat route")
+    for (const route of [firstRoute, secondRoute]) {
+      const targets = await context.access.listAuthorizedTargets(route)
+      assert(
+        targets.some(
+          (target) => target.kind === "feature_grant" && target.grantId === grant.grantId
+        ),
+        `Feature grant must be visible from ${route.conversationKey}`
+      )
+    }
+    assert.equal(
+      (await context.access.listAuthorizedTargets(foreignRoute)).some(
+        (target) => target.kind === "feature_grant"
+      ),
+      false,
+      "Feature grant must not cross principals"
+    )
+    await assert.rejects(() =>
+      context.access.bindFeatureGrant({
+        route: foreignRoute,
+        grantId: grant.grantId,
+        grantVersion: grant.grantVersion
+      })
+    )
+
+    const target = await context.access.bindFeatureGrant({
+      route: secondRoute,
+      grantId: grant.grantId,
+      grantVersion: grant.grantVersion
+    })
+    assert.equal(context.grants.getThreadGrant(target.threadId)?.conversationKey, "conversation-2")
+    assert.equal(context.conversations.getActiveTarget("conversation-2")?.targetId, target.targetId)
+    const metadata = JSON.parse(context.threads.get(target.threadId)!.metadata!) as Record<
+      string,
+      unknown
+    >
+    assert.equal(
+      (metadata.imDeliveryContext as Record<string, unknown>).conversationKey,
+      "conversation-2"
+    )
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testFeatureCreateGrantRevocationDoesNotRevokeCreatedSession(): Promise<void> {
+  const context = await createContext()
+  let projectModeAvailable = true
+  try {
+    const grant = await context.access.enableFeature({
+      principalId: "principal-1",
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+    const target = await context.access.bindFeatureGrant({
+      route: {
+        conversationKey: "conversation-1",
+        principalId: "principal-1"
+      },
+      grantId: grant.grantId,
+      grantVersion: grant.grantVersion
+    })
+    const event: ImEventRecord = {
+      eventId: "feature-event",
+      platformMessageId: "feature-platform",
+      conversationKey: "conversation-1",
+      conversationSeq: 1,
+      principalId: "principal-1",
+      leaseId: "lease",
+      leaseExpiresAt: context.clock.now + 60_000,
+      permitState: "unacquired",
+      permitExpiresAt: null,
+      messageText: "hello",
+      occurredAt: context.clock.now,
+      targetSnapshot: target,
+      state: "queued",
+      runId: null,
+      retryOfEventId: null,
+      resultText: null,
+      reasonCode: null,
+      retryable: null,
+      createdAt: context.clock.now,
+      updatedAt: context.clock.now,
+      acceptedAt: context.clock.now,
+      executionStartedAt: null,
+      finishedAt: null
+    }
+    const guard = new ImRemoteCapabilityGuard({
+      conversationState: context.conversations,
+      getThread: (threadId) => context.threads.get(threadId) ?? null,
+      updateThread: context.updateLocalThread,
+      getGoal: () => null,
+      coordinator: {
+        hasRunningWorkersForThread: () => false,
+        hasNotifications: () => false,
+        hasTerminalWorkerAwaitingNotificationForThread: () => false
+      },
+      workflow: { isBusyForThread: () => false },
+      hasPendingApproval: () => false,
+      hasPendingUserInput: () => false,
+      validateExistingFeatureThread: async () =>
+        (projectModeAvailable
+          ? {
+              valid: true,
+              project: { id: "project-secret-id", name: "支付平台" },
+              feature: {
+                projectId: "project-secret-id",
+                slug: "feature-pay",
+                title: "快捷支付",
+                status: "进行中"
+              },
+              workspacePath: context.root
+            }
+          : {
+              valid: false,
+              reasonCode: "REMOTE_FEATURE_UNAVAILABLE",
+              message: "Feature 已归档。"
+            }) as never,
+      grants: context.grants
+    })
+
+    await context.access.disableFeature("project-secret-id", "feature-pay")
+    const allowed = await guard.evaluate(event)
+    assert.equal(allowed.allowed, true, JSON.stringify(allowed))
+    assert.equal(context.grants.getThreadGrant(target.threadId)?.state, "active")
+    assert.equal(
+      context.grants.getFeatureGrant("project-secret-id", "feature-pay")?.state,
+      "revoked"
+    )
+    assert.equal(
+      context.conversations
+        .listTargets("conversation-1")
+        .find((candidate) => candidate.snapshot.targetId === target.targetId)?.state,
+      "active"
+    )
+
+    projectModeAvailable = false
+    const unavailable = await guard.evaluate(event)
+    assert.equal(unavailable.allowed, false)
+    assert.equal(unavailable.allowed ? null : unavailable.reasonCode, "REMOTE_FEATURE_UNAVAILABLE")
+    assert.equal(context.grants.getThreadGrant(target.threadId)?.state, "suspended")
+    assert.equal(
+      context.conversations
+        .listTargets("conversation-1")
+        .find((candidate) => candidate.snapshot.targetId === target.targetId)?.state,
+      "suspended"
+    )
+
+    await context.access.disableThread(target.threadId)
+    const revoked = await guard.evaluate(event)
+    assert.equal(revoked.allowed, false)
+    assert.equal(revoked.allowed ? null : revoked.reasonCode, "REMOTE_TARGET_INVALID")
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testDesktopThreadGrantBindsWithoutMutatingMetadata(): Promise<void> {
+  const context = await createContext()
+  const router = new ImCommandRouter({
+    conversations: context.conversations,
+    events: context.events,
+    inbox: context.inbox,
+    access: context.access,
+    selections: context.selections,
+    getThread: (id) => context.threads.get(id) ?? null
+  })
+  const route = {
+    conversationKey: "conversation-1",
+    principalId: "principal-1"
+  }
+  try {
+    const originalMetadata = {
+      title: "支付排障会话",
+      workspacePath: context.root,
+      agentMode: "normal"
+    }
+    context.makeThread("desktop-thread", originalMetadata)
+    await context.access.enableThread({ route, threadId: "desktop-thread" })
+    context.updateLocalThread("desktop-thread", { title: "支付排障会话（已更新）" })
+
+    const sessions = await router.handle({ ...route, command: parseImCommand("/会话")! })
+    assert(sessions.includes("支付排障会话（已更新）"))
+    assert(!sessions.includes("1. 支付排障会话（普通会话）"))
+    const bound = await router.handle({ ...route, command: parseImCommand("/绑定 1")! })
+    assert(bound.includes("支付排障会话（已更新）"))
+    const target = context.conversations.getActiveTarget(route.conversationKey)
+    assert.equal(target?.kind, "thread")
+    assert.equal(target?.threadId, "desktop-thread")
+    if (target?.kind !== "thread") throw new Error("thread target expected")
+    assert.equal(target.title, "支付排障会话（已更新）")
+    assert.deepEqual(
+      JSON.parse(context.threads.get("desktop-thread")!.metadata!),
+      originalMetadata,
+      "grant authority stays in dedicated tables and does not mutate desktop metadata"
+    )
+
+    const event: ImEventRecord = {
+      eventId: "desktop-thread-event",
+      platformMessageId: "desktop-thread-platform",
+      conversationKey: route.conversationKey,
+      conversationSeq: 1,
+      principalId: route.principalId,
+      leaseId: "lease",
+      leaseExpiresAt: context.clock.now + 60_000,
+      permitState: "unacquired",
+      permitExpiresAt: null,
+      messageText: "检查支付代码",
+      occurredAt: context.clock.now,
+      targetSnapshot: target,
+      state: "queued",
+      runId: null,
+      retryOfEventId: null,
+      resultText: null,
+      reasonCode: null,
+      retryable: null,
+      createdAt: context.clock.now,
+      updatedAt: context.clock.now,
+      acceptedAt: context.clock.now,
+      executionStartedAt: null,
+      finishedAt: null
+    }
+    const guard = new ImRemoteCapabilityGuard({
+      conversationState: context.conversations,
+      getThread: (threadId) => context.threads.get(threadId) ?? null,
+      getGoal: () => null,
+      coordinator: {
+        hasRunningWorkersForThread: () => false,
+        hasNotifications: () => false,
+        hasTerminalWorkerAwaitingNotificationForThread: () => false
+      },
+      workflow: { isBusyForThread: () => false },
+      hasPendingApproval: () => false,
+      hasPendingUserInput: () => false,
+      grants: context.grants
+    })
+    const allowed = await guard.evaluate(event)
+    assert.equal(allowed.allowed, true, JSON.stringify(allowed))
+
+    context.updateLocalThread("desktop-thread", { title: "支付排障会话（再次更新）" })
+    await context.conversations.refreshGrantTarget({
+      targetId: target.targetId,
+      grantId: target.grantId,
+      grantVersion: target.grantVersion,
+      workspacePath: target.workspacePath,
+      title: "支付排障会话（再次更新）"
+    })
+    const allowedAfterQueuedTitleChange = await guard.evaluate(event)
+    assert.equal(
+      allowedAfterQueuedTitleChange.allowed,
+      true,
+      "a mutable title change must not invalidate an already queued event"
+    )
+
+    const projectModeMetadata = {
+      title: "快捷支付 Project Mode 会话",
+      workspacePath: context.root,
+      agentMode: "normal",
+      harnessFeature: {
+        projectId: "project-secret-id",
+        slug: "feature-pay",
+        source: "autobizdevops"
+      }
+    }
+    context.makeThread("desktop-project-thread", projectModeMetadata)
+    await context.access.enableThread({ route, threadId: "desktop-project-thread" })
+    const projectModeGrant = (await context.access.listAuthorizedTargets(route)).find(
+      (candidate) =>
+        candidate.kind === "thread_grant" && candidate.threadId === "desktop-project-thread"
+    )
+    assert(projectModeGrant, "an existing Project Mode thread can be granted as a thread")
+    assert.equal(projectModeGrant.label, "快捷支付", "older sessions fall back to the Feature name")
+    assert.deepEqual(
+      JSON.parse(context.threads.get("desktop-project-thread")!.metadata!),
+      projectModeMetadata,
+      "granting a Project Mode thread preserves its harness context"
+    )
+    context.makeThread("project-stage-a", {
+      ...projectModeMetadata,
+      harnessFeature: { ...projectModeMetadata.harnessFeature, launchStageName: "Dev-代码实现" }
+    })
+    context.makeThread("project-stage-b", {
+      ...projectModeMetadata,
+      harnessFeature: { ...projectModeMetadata.harnessFeature, launchStageName: "Dev-代码实现" }
+    })
+    context.makeThread("project-stage-c", {
+      ...projectModeMetadata,
+      harnessFeature: { ...projectModeMetadata.harnessFeature, launchStageName: "Dev-代码实现" }
+    })
+    context.threads.get("project-stage-a")!.updated_at = Date.parse("2026-07-23T08:01:00Z")
+    context.threads.get("project-stage-b")!.updated_at = Date.parse("2026-07-23T08:02:00Z")
+    context.threads.get("project-stage-c")!.updated_at = Date.parse("2026-07-23T08:01:15Z")
+    await context.access.enableThread({ route, threadId: "project-stage-a" })
+    await context.access.enableThread({ route, threadId: "project-stage-b" })
+    await context.access.enableThread({ route, threadId: "project-stage-c" })
+    const stageTargets = (await context.access.listAuthorizedTargets(route)).filter(
+      (candidate) =>
+        candidate.kind === "thread_grant" && candidate.threadId.startsWith("project-stage-")
+    )
+    assert.deepEqual(
+      stageTargets.map((candidate) => candidate.label),
+      [
+        "快捷支付 · Dev-代码实现 · 07-23 16:01:00",
+        "快捷支付 · Dev-代码实现 · 07-23 16:01:15",
+        "快捷支付 · Dev-代码实现 · 07-23 16:02"
+      ]
+    )
+    await context.access.disableThread("project-stage-a")
+    await context.access.disableThread("project-stage-b")
+    await context.access.disableThread("project-stage-c")
+    await context.access.disableThread("desktop-project-thread")
+
+    const transientlyBusyAccess = new ImRemoteAccessService({
+      conversations: context.conversations,
+      grants: context.grants,
+      features: context.featureService,
+      getThread: (threadId) => context.threads.get(threadId) ?? null,
+      getGoal: () => ({ status: "active" }),
+      coordinator: {
+        hasRunningWorkersForThread: () => true,
+        hasNotifications: () => true,
+        hasTerminalWorkerAwaitingNotificationForThread: () => true
+      },
+      workflow: { isBusyForThread: () => true },
+      hasPendingApproval: () => true,
+      hasPendingUserInput: () => true
+    })
+    const deliveryTarget =
+      transientlyBusyAccess.validateThreadForCompletionDelivery("desktop-thread")
+    assert.equal(deliveryTarget.thread.thread_id, "desktop-thread")
+    assert.equal(deliveryTarget.workspacePath, await realpath(context.root))
+    assert.equal(
+      transientlyBusyAccess.validateThreadForRemoteAccess("desktop-thread").thread.thread_id,
+      "desktop-thread",
+      "grant structure must not depend on transient Goal/worker/workflow/HITL state"
+    )
+
+    for (const { label, ...executionProfile } of [
+      { label: "Solo", agentMode: "normal", subagentsEnabled: false },
+      { label: "Multi", agentMode: "normal", subagentsEnabled: true },
+      { label: "Team", agentMode: "coordinator" },
+      { label: "Workflow", agentMode: "workflow" }
+    ]) {
+      context.updateLocalThread("desktop-thread", {
+        metadata: JSON.stringify({ ...originalMetadata, ...executionProfile })
+      })
+      assert.equal(
+        context.access.validateThreadForCompletionDelivery("desktop-thread").thread.thread_id,
+        "desktop-thread"
+      )
+      assert.equal(
+        context.access.validateThreadForRemoteAccess("desktop-thread").thread.thread_id,
+        "desktop-thread",
+        `${label} mode is a supported execution snapshot for a granted Thread`
+      )
+      const supported = await guard.evaluate(event)
+      assert.equal(supported.allowed, true, `${label} should be remotely executable`)
+    }
+
+    context.updateLocalThread("desktop-thread", { metadata: JSON.stringify(originalMetadata) })
+    await context.grants.revokeThreadGrant("desktop-thread")
+    const revoked = await guard.evaluate(event)
+    assert.equal(revoked.allowed, false)
+    assert.equal(revoked.allowed ? null : revoked.reasonCode, "REMOTE_GRANT_INVALID")
+
+    await context.access.disableThread("desktop-thread")
+    assert.equal(
+      context.conversations.getSelectedTarget(route.conversationKey),
+      null,
+      "without an existing inbox, revocation clears the invalid active pointer"
+    )
+    const recovered = await router.handle({ ...route, command: parseImCommand("/收件箱")! })
+    assert(recovered.includes("已切换到【默认聊天】"))
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testControlIngressCompletesOutsideTurnQueueAndSelectionExpires(): Promise<void> {
+  const context = await createContext()
+  const gateway = new TestGateway()
+  const replyClient = new ImReplyClient(gateway, context.events, () => context.clock.now)
+  const ingress = new ImIngressSequencer({
+    conversationState: context.conversations,
+    eventStore: context.events,
+    inboxService: context.inbox,
+    replyClient,
+    emitAcknowledgement: (ack) => gateway.sendAcknowledgement(ack)
+  })
+  try {
+    const result = await ingress.receiveControlEvent(
+      eventFixture(1, "/当前"),
+      async () => "当前目标：收件箱"
+    )
+    assert.equal(result.event.state, "completed")
+    assert.deepEqual(
+      gateway.acknowledgements.map((ack) => ack.type),
+      ["received", "completed"]
+    )
+    assert.equal(gateway.replies[0].message.content, "当前目标：收件箱")
+
+    await context.selections.create("conversation-1", "project", [
+      { id: "project-1", label: "项目一" }
+    ])
+    context.clock.now += 60_001
+    await assert.rejects(
+      () => context.selections.select("conversation-1", "project", 1),
+      (error: unknown) =>
+        error instanceof ImSelectionContextError && error.code === "SELECTION_EXPIRED"
+    )
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testDeletedSelectedThreadFallsBackToInbox(): Promise<void> {
+  const context = await createContext()
+  const route = { conversationKey: "conversation-1", principalId: "principal-1" }
+  const gateway = new TestGateway()
+  const ingress = new ImIngressSequencer({
+    conversationState: context.conversations,
+    eventStore: context.events,
+    inboxService: context.inbox,
+    replyClient: new ImReplyClient(gateway, context.events, () => context.clock.now),
+    emitAcknowledgement: (ack) => gateway.sendAcknowledgement(ack)
+  })
+  try {
+    const inbox = await context.inbox.ensureInbox(route)
+    context.makeThread("deleting-thread", {
+      title: "待删除会话",
+      workspacePath: context.root,
+      agentMode: "normal"
+    })
+    const grant = await context.access.enableThread({ route, threadId: "deleting-thread" })
+    const target = await context.access.bindThreadGrant({
+      route,
+      grantId: grant.grantId,
+      grantVersion: grant.grantVersion
+    })
+    assert.equal(
+      context.conversations.getActiveTarget(route.conversationKey)?.targetId,
+      target.targetId
+    )
+
+    await context.access.disableThread("deleting-thread")
+    context.threads.delete("deleting-thread")
+    assert.equal(
+      context.conversations.getActiveTarget(route.conversationKey)?.targetId,
+      inbox.targetId,
+      "normal deletion immediately returns an active route to inbox"
+    )
+
+    // Reproduce a database left by the old implementation: the selected pointer
+    // still references a suspended target. New ingress must repair it before the
+    // event store freezes its target snapshot, including for control commands.
+    await context.conversations.updateTargetState(target.targetId, "active")
+    await context.conversations.setActiveTarget(route.conversationKey, target.targetId)
+    await context.conversations.updateTargetState(target.targetId, "suspended", "THREAD_DELETED")
+    const recovered = await ingress.receiveControlEvent(
+      eventFixture(9, "/当前"),
+      async () => "已恢复"
+    )
+    assert.equal(recovered.event.state, "completed")
+    assert.equal(recovered.event.targetSnapshot?.targetId, inbox.targetId)
+    assert.equal(
+      context.conversations.getActiveTarget(route.conversationKey)?.targetId,
+      inbox.targetId
+    )
+
+    // Even a corrupted legacy row that still marks a missing desktop Thread as
+    // active must recover before the next event snapshot is persisted.
+    await context.conversations.updateTargetState(target.targetId, "active")
+    await context.conversations.setActiveTarget(route.conversationKey, target.targetId)
+    const recoveredFromActiveMissing = await ingress.receiveControlEvent(
+      eventFixture(10, "/当前"),
+      async () => "再次恢复"
+    )
+    assert.equal(recoveredFromActiveMissing.event.state, "completed")
+    assert.equal(recoveredFromActiveMissing.event.targetSnapshot?.targetId, inbox.targetId)
+    assert.deepEqual(
+      context.conversations
+        .listTargets(route.conversationKey)
+        .find(({ snapshot }) => snapshot.targetId === target.targetId),
+      {
+        snapshot: target,
+        state: "suspended",
+        suspendReason: "TARGET_THREAD_MISSING"
+      }
+    )
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testExplicitRetryCreatesNewEventWithOriginalSnapshot(): Promise<void> {
+  const context = await createContext()
+  const gateway = new TestGateway()
+  const replyClient = new ImReplyClient(gateway, context.events, () => context.clock.now)
+  const ingress = new ImIngressSequencer({
+    conversationState: context.conversations,
+    eventStore: context.events,
+    inboxService: context.inbox,
+    replyClient,
+    emitAcknowledgement: (ack) => gateway.sendAcknowledgement(ack)
+  })
+  const router = new ImCommandRouter({
+    conversations: context.conversations,
+    events: context.events,
+    inbox: context.inbox,
+    access: context.access,
+    selections: context.selections
+  })
+  try {
+    const inbox = await context.inbox.ensureInbox({
+      conversationKey: "conversation-1",
+      principalId: "principal-1"
+    })
+    const originalRemote = eventFixture(1, "执行一次可能有副作用的任务")
+    await context.events.receiveEvent(originalRemote, inbox)
+    await context.events.queueEvent(originalRemote.eventId)
+    await context.events.recordExecutionPermit({
+      eventId: originalRemote.eventId,
+      leaseId: originalRemote.lease.id,
+      expiresAt: "2026-07-23T09:00:00.000Z"
+    })
+    await context.events.beginExecution(originalRemote.eventId, "run-original")
+    await context.events.handlePermitRevoked(originalRemote.eventId)
+
+    const code = eventShortCode(originalRemote.eventId)
+    const resolved = router.resolveRetryEvent("conversation-1", code)
+    assert("event" in resolved)
+    if (!("event" in resolved)) throw new Error("retry event expected")
+    const retryRemote = eventFixture(2, `/重试 ${code}`)
+    const queued = await ingress.receiveOrdinaryEvent(
+      { ...retryRemote, message: { type: "text", text: resolved.event.messageText } },
+      {
+        targetSnapshot: resolved.event.targetSnapshot!,
+        retryOfEventId: resolved.event.eventId
+      }
+    )
+    assert.equal(queued.event.state, "queued")
+    assert.equal(queued.event.retryOfEventId, originalRemote.eventId)
+    assert.equal(queued.event.messageText, "执行一次可能有副作用的任务")
+    assert.deepEqual(queued.event.targetSnapshot, inbox)
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+type TextModeContext = Awaited<ReturnType<typeof createContext>>
+
+/**
+ * A router whose resend is recorded, and a card publisher that reads the reply
+ * mode from this test's own store — the default reads the module singleton,
+ * which is the same store in production but a different one here.
+ */
+function textModeRouter(
+  context: TextModeContext,
+  resend: (conversationKey: string) => Promise<{ resent: number; failed: number }> = async () => ({
+    resent: 0,
+    failed: 0
+  })
+): { router: ImCommandRouter; sentCards: string[]; resendCalls: string[] } {
+  const sentCards: string[] = []
+  const resendCalls: string[] = []
+  const cards = new ImCardPublisher({
+    interactions: new ImCardInteractionStore(),
+    createIdempotencyKey: () => `idem-${sentCards.length}`,
+    usesTextReplies: (conversationKey) =>
+      context.conversations.getReplyMode(conversationKey) === "text",
+    gateway: {
+      isAuthenticated: () => true,
+      sendCard: async (card: { content: unknown }) => {
+        sentCards.push(JSON.stringify(card.content))
+        return { state: "accepted" } as const
+      }
+    } as never,
+    warn: () => undefined
+  })
+  const router = new ImCommandRouter({
+    conversations: context.conversations,
+    events: context.events,
+    inbox: context.inbox,
+    access: context.access,
+    selections: context.selections,
+    cards,
+    getCurrentEventId: () => null,
+    abortCurrent: () => false,
+    getThread: (threadId) => context.threads.get(threadId) ?? null,
+    resendPendingAsText: async (conversationKey) => {
+      resendCalls.push(conversationKey)
+      return resend(conversationKey)
+    },
+    warn: () => undefined
+  })
+  return { router, sentCards, resendCalls }
+}
+
+const TEXT_MODE_ROUTE = { conversationKey: "conversation-1", principalId: "principal-1" }
+
+function sendCommand(router: ImCommandRouter, text: string): Promise<string> {
+  return router.handle({ ...TEXT_MODE_ROUTE, command: parseImCommand(text)! })
+}
+
+/**
+ * /文字模式 is a switch, like a phone's night mode: the first send turns text
+ * on, the next turns it off. A switch is only usable if every reply names the
+ * mode now in force and the way back.
+ */
+async function testTheTextModeCommandIsASwitch(): Promise<void> {
+  const context = await createContext()
+  const { router, resendCalls } = textModeRouter(context)
+  try {
+    assert.equal(
+      context.conversations.getReplyMode("conversation-1"),
+      "card",
+      "cards are the default"
+    )
+
+    const on = await sendCommand(router, "/文字模式")
+    assert.equal(context.conversations.getReplyMode("conversation-1"), "text")
+    assert(on.includes("已切换为文字模式"), on)
+    assert(on.includes("回复仍保留排版"), on)
+    assert(on.includes("保留切换按钮"), on)
+    assert(on.includes("再发一次 /文字模式 可切回卡片"), on)
+    assert.deepEqual(
+      resendCalls,
+      ["conversation-1"],
+      "switching to text sends what the cards held back"
+    )
+
+    const off = await sendCommand(router, "/文字模式")
+    assert.equal(context.conversations.getReplyMode("conversation-1"), "card")
+    assert(off.includes("已切回卡片模式"), off)
+    assert.equal(
+      resendCalls.length,
+      1,
+      "switching back sends nothing: the text is already in the chat"
+    )
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+/**
+ * 开 and 关 state the mode instead of flipping it, so sending one twice is
+ * harmless. 开 in text mode still resends: that is how a reader recovers a
+ * notice whose first resend failed.
+ */
+async function testExplicitOnAndOffNeverFlipBack(): Promise<void> {
+  const context = await createContext()
+  const { router, resendCalls } = textModeRouter(context)
+  try {
+    assert.equal(await sendCommand(router, "/文字模式 关"), "当前已经是卡片模式。")
+    assert.equal(context.conversations.getReplyMode("conversation-1"), "card")
+
+    await sendCommand(router, "/文字模式 开")
+    const again = await sendCommand(router, "/文字模式 开")
+    assert.equal(
+      context.conversations.getReplyMode("conversation-1"),
+      "text",
+      "a second 开 is not a toggle"
+    )
+    assert(again.startsWith("当前已经是文字模式。"), again)
+    assert.equal(resendCalls.length, 2, "开 while already in text mode retries the resend")
+
+    await sendCommand(router, "/文字模式 关")
+    assert.equal(context.conversations.getReplyMode("conversation-1"), "card")
+
+    const usage = await sendCommand(router, "/文字模式 卡片")
+    assert(usage.startsWith("用法："), usage)
+    assert.equal(
+      context.conversations.getReplyMode("conversation-1"),
+      "card",
+      "a bad argument changes nothing"
+    )
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+/** The reply accounts for every held-back notice: resent, failed, or not attempted. */
+async function testTheSwitchReportsWhatWasResent(): Promise<void> {
+  const counted = await createContext()
+  try {
+    const { router } = textModeRouter(counted, async () => ({ resent: 2, failed: 1 }))
+    const answer = await sendCommand(router, "/文字模式")
+    assert(answer.includes("当前有 2 条待处理，已用文字重发。"), answer)
+    assert(answer.includes("另有 1 条重发失败，可发送 /文字模式 开 再试一次。"), answer)
+  } finally {
+    counted.database.close()
+    await rm(counted.root, { recursive: true, force: true })
+  }
+
+  const quiet = await createContext()
+  try {
+    const { router } = textModeRouter(quiet)
+    const answer = await sendCommand(router, "/文字模式")
+    assert(!answer.includes("待处理"), "nothing pending means nothing to report")
+  } finally {
+    quiet.database.close()
+    await rm(quiet.root, { recursive: true, force: true })
+  }
+
+  // A resend that throws must not undo the switch the reader asked for.
+  const broken = await createContext()
+  try {
+    const { router } = textModeRouter(broken, async () => {
+      throw new Error("disk full")
+    })
+    const answer = await sendCommand(router, "/文字模式")
+    assert.equal(broken.conversations.getReplyMode("conversation-1"), "text")
+    assert(answer.includes("已切换为文字模式"), answer)
+    assert(answer.includes("重发待处理时出错，可发送 /文字模式 开 再试一次。"), answer)
+  } finally {
+    broken.database.close()
+    await rm(broken.root, { recursive: true, force: true })
+  }
+}
+
+async function testCurrentStatusNamesTheReplyMode(): Promise<void> {
+  const context = await createContext()
+  const { router } = textModeRouter(context)
+  try {
+    await sendCommand(router, "/收件箱")
+    assert((await sendCommand(router, "/当前")).includes("展示方式：卡片"))
+    await sendCommand(router, "/文字模式")
+    assert((await sendCommand(router, "/当前")).includes("展示方式：文字"))
+    assert((await sendCommand(router, "/帮助")).includes("/文字模式"), "/帮助 lists the command")
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+/**
+ * In text mode the /会话 list goes out as the numbered text it always was, and
+ * no card is sent — the publisher refuses, and the router's own fallback does
+ * the rest. This is the path every card kind takes, checked end to end on one.
+ *
+ * Back in card mode, the reply under the card is the way here: the switch does
+ * not re-send a list, so it has to name both steps.
+ */
+async function testTextModeSendsTheTargetListAsText(): Promise<void> {
+  const context = await createContext()
+  const { router, sentCards } = textModeRouter(context)
+  try {
+    await context.access.enableFeature({
+      principalId: TEXT_MODE_ROUTE.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+    await sendCommand(router, "/文字模式")
+    const answer = await sendCommand(router, "/会话")
+    assert.equal(sentCards.length, 0, "text mode sends no card")
+    assert(/^1\. /mu.test(answer), answer)
+    assert(answer.includes("/绑定"), "the typed command is the way to choose")
+
+    await sendCommand(router, "/文字模式")
+    const underTheCard = await sendCommand(router, "/会话")
+    assert.equal(sentCards.length, 1, "back in card mode the list is a card again")
+    assert(underTheCard.includes("先发 /文字模式 开，再发 /会话"), underTheCard)
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testFeatureDeletionFiltersTextAndCardSelections(): Promise<void> {
+  const context = await createContext()
+  const { router, sentCards } = textModeRouter(context)
+  try {
+    const grant = await context.access.enableFeature({
+      principalId: TEXT_MODE_ROUTE.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+    await sendCommand(router, "/会话")
+    assert(sentCards.at(-1)!.includes("快捷支付"))
+
+    // Delete in project mode without touching the IM grant database. A card
+    // already delivered before deletion must still be rejected at bind time.
+    context.featureCatalog.runs = []
+    const stale = await router.resolveTargetBindCard({
+      ...TEXT_MODE_ROUTE,
+      feedback: [{ key: "target", value: "1" }]
+    })
+    assert(stale.includes("Feature 不存在或已归档"), stale)
+    assert.equal(context.createdThreadMetadata.length, 0)
+    const noTargets = await sendCommand(router, "/会话")
+    assert(noTargets.includes("当前没有已接入招乎"), noTargets)
+    assert.equal(sentCards.length, 1, "no empty/stale card is published")
+    assert.equal(context.grants.getFeatureGrantById(grant.grantId)?.state, "active")
+
+    // Other enabled Features must still be offered, using current titles rather
+    // than the grant's original snapshots; both card and text use this catalog.
+    context.featureCatalog.runs = [
+      {
+        slug: "feature-other",
+        title: "另一个特性",
+        location: "active",
+        featureStatus: "in_progress",
+        overallStatus: { label: "进行中", uiKind: "active" }
+      }
+    ]
+    await context.access.enableFeature({
+      principalId: TEXT_MODE_ROUTE.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-other"
+    })
+    context.featureCatalog.projectName = "支付平台新名称"
+    context.featureCatalog.runs[0]!.title = "另一个特性新名称"
+    await sendCommand(router, "/会话")
+    const card = sentCards.at(-1)!
+    assert(!card.includes("快捷支付"), card)
+    assert(card.includes("支付平台新名称 / 另一个特性新名称"), card)
+    await sendCommand(router, "/文字模式")
+    const text = await sendCommand(router, "/会话")
+    assert(!text.includes("快捷支付"), text)
+    assert(text.includes("支付平台新名称 / 另一个特性新名称"), text)
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testFeatureCatalogEligibilityAndRecovery(): Promise<void> {
+  const context = await createContext()
+  try {
+    const catalog = context.featureCatalog
+    const originalFeature = { ...catalog.runs[0]! }
+    const grant = await context.access.enableFeature({
+      principalId: TEXT_MODE_ROUTE.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+    catalog.runs.push({ ...originalFeature, slug: "feature-other", title: "其他特性" })
+    await context.access.enableFeature({
+      principalId: TEXT_MODE_ROUTE.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-other"
+    })
+    context.makeThread("desktop-existing", { title: "已有会话", workspacePath: context.root })
+    await context.access.enableThread({ route: TEXT_MODE_ROUTE, threadId: "desktop-existing" })
+    catalog.projectReads = catalog.detailReads = 0
+    assert.equal((await context.access.listAuthorizedTargets(TEXT_MODE_ROUTE)).length, 3)
+    assert.equal(catalog.projectReads, 1, "one project listing for multiple grants")
+    assert.equal(catalog.detailReads, 1, "one detail read per project, not per grant")
+
+    for (const feature of [
+      { ...originalFeature, location: "archived" },
+      { ...originalFeature, featureStatus: "archived" }
+    ]) {
+      catalog.runs[0] = feature
+      const targets = await context.access.listAuthorizedTargets(TEXT_MODE_ROUTE)
+      assert(!targets.some((target) => target.grantId === grant.grantId))
+      assert.equal(targets.length, 2, "other Feature and desktop session remain available")
+    }
+    catalog.runs[0] = originalFeature
+    const original = { ...catalog }
+    for (const patch of [
+      { projectExists: false },
+      { projectStatus: "archived" },
+      { compatible: false },
+      { detailArchived: true },
+      { detailError: "temporarily unavailable" },
+      { readFailure: true },
+      { enabled: false },
+      { projectMode: false }
+    ]) {
+      Object.assign(catalog, patch)
+      const targets = await context.access.listAuthorizedTargets(TEXT_MODE_ROUTE)
+      assert.equal(targets.length, 1, JSON.stringify(patch))
+      assert.equal(
+        targets[0]!.kind,
+        "thread_grant",
+        "Feature failure must not hide ordinary sessions"
+      )
+      assert.equal(context.grants.getFeatureGrantById(grant.grantId)?.state, "active")
+      Object.assign(catalog, original)
+      assert.equal(
+        (await context.access.listAuthorizedTargets(TEXT_MODE_ROUTE)).length,
+        3,
+        "catalog recovery must restore valid grants without re-enabling"
+      )
+    }
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testCurrentListsOnlyRouteAuthorizedRunningSessions(): Promise<void> {
+  const context = await createContext()
+  const inspected: string[] = []
+  let concurrent = 0
+  let peak = 0
+  const route = TEXT_MODE_ROUTE
+  try {
+    await context.inbox.ensureInbox(route)
+    for (let index = 0; index < 9; index++) {
+      context.makeThread(`running-${index}`, {
+        title: `运行会话 ${index}`,
+        workspacePath: context.root
+      })
+      await context.access.enableThread({ route, threadId: `running-${index}` })
+    }
+    await context.conversations.ensureConversation({
+      conversationKey: "other-route",
+      principalId: route.principalId
+    })
+    context.makeThread("private-thread", {
+      title: "其他招乎聊天的会话",
+      workspacePath: context.root
+    })
+    await context.access.enableThread({
+      route: { ...route, conversationKey: "other-route" },
+      threadId: "private-thread"
+    })
+    const router = new ImCommandRouter({
+      conversations: context.conversations,
+      events: context.events,
+      inbox: context.inbox,
+      access: context.access,
+      getThread: (id) => context.threads.get(id) ?? null,
+      readThreadActivity: async (thread) => {
+        inspected.push(thread.thread_id)
+        peak = Math.max(peak, ++concurrent)
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        concurrent--
+        const busy = thread.thread_id.startsWith("running-")
+        return { busy, label: busy ? "Team 子代理执行中" : "空闲", interaction: null }
+      }
+    })
+    const reads = context.featureCatalog.projectReads
+    const status = await sendCommand(router, "/当前")
+    assert(status.includes("当前目标：【默认聊天】"), status)
+    assert(status.includes("运行状态：空闲"), status)
+    assert(status.includes("【运行会话 8】：Team 子代理执行中"), status)
+    assert(!status.includes("其他招乎聊天的会话"), status)
+    assert(!inspected.includes("private-thread"))
+    assert.equal(inspected.length, 10, "one probe per visible thread, including the default chat")
+    assert.equal(peak, 4, "status probes have bounded concurrency")
+    assert.equal(context.featureCatalog.projectReads, reads, "status never scans feature catalogs")
+    assert.equal(parseImCommand("/默认")?.name, "inbox")
+    assert.equal(parseImCommand("/收件箱")?.name, "inbox", "old command remains compatible")
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testDefaultChatGuideSurvivesDuplicatesAndRestart(): Promise<void> {
+  const context = await createContext()
+  const gateway = new TestGateway()
+  const replyClient = new ImReplyClient(gateway, context.events, () => context.clock.now)
+  try {
+    const inbox = await context.inbox.ensureInbox(TEXT_MODE_ROUTE)
+    const makeIngress = (events: ImEventStore) =>
+      new ImIngressSequencer({
+        conversationState: context.conversations,
+        eventStore: events,
+        resolveTarget: async () => inbox,
+        replyClient
+      })
+    const ingress = makeIngress(context.events)
+    await ingress.receiveControlEvent(eventFixture(1, "/帮助"), async () => "帮助")
+    assert.equal(context.events.listOutbox().filter((row) => !row.eventId).length, 0)
+    const first = await ingress.receiveOrdinaryEvent(eventFixture(2, "你好"))
+    assert.equal(first.event.state, "queued", "guide does not consume the user's task")
+    const guides = () =>
+      context.events
+        .listOutbox()
+        .filter((row) => row.deliveryId.startsWith("im:default-chat-guide:"))
+    assert.equal(guides().length, 1)
+    assert(guides()[0].content.includes("不会自动连接到桌面已有的会话"))
+    assert(guides()[0].content.includes("/会话"))
+    await replyClient.sendPending()
+    assert.equal(
+      gateway.replies.filter((reply) => !reply.eventId).length,
+      1,
+      "the regular outbox delivers the guide"
+    )
+    await ingress.receiveOrdinaryEvent(eventFixture(2, "你好"))
+    await ingress.receiveOrdinaryEvent(eventFixture(3, "继续"))
+    // Recreate both services over persisted data, as on app restart.
+    const SQL = await initSqlJs()
+    const reopened = new SQL.Database(context.database.export())
+    try {
+      const events = new ImEventStore({ ...context.persistence, getDatabase: () => reopened })
+      await makeIngress(events).receiveOrdinaryEvent(eventFixture(4, "重启后继续"))
+      assert.equal(
+        events.listOutbox().filter((row) => row.deliveryId.startsWith("im:default-chat-guide:"))
+          .length,
+        1
+      )
+      assert.equal(events.countQueuedConversationEvents(TEXT_MODE_ROUTE.conversationKey), 3)
+    } finally {
+      reopened.close()
+    }
+    assert.equal(
+      guides().length,
+      1,
+      "ordinary messages and duplicate delivery never repeat onboarding"
+    )
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testSessionCodesSelectExactThreadsAndRecheckLiveGrants(): Promise<void> {
+  const context = await createContext()
+  const router = new ImCommandRouter({
+    conversations: context.conversations,
+    events: context.events,
+    inbox: context.inbox,
+    access: context.access,
+    selections: context.selections,
+    getThread: (id) => context.threads.get(id) ?? null
+  })
+  const route = TEXT_MODE_ROUTE
+  try {
+    const inbox = await context.inbox.ensureInbox(route)
+    for (const id of ["same-a", "same-b", "race"]) {
+      context.makeThread(id, { title: "接口排障", workspacePath: context.root })
+      await context.access.enableThread({ route, threadId: id })
+    }
+    const codeFor = (threadId: string, kind = "thread") =>
+      context.events.sessionLinks.prepare({
+        ...route,
+        threadId,
+        kind: kind as "thread" | "inbox",
+        label: "接口排障",
+        deliveryId: `result-${threadId}`
+      })
+    const a = codeFor("same-a"),
+      b = codeFor("same-b"),
+      race = codeFor("race")
+    const inboxCode = codeFor(inbox.threadId, "inbox")
+    assert.notEqual(a, b)
+    // ID switches must not scan every authorized session or the Feature catalog.
+    context.access.listAuthorizedTargets = async () => {
+      throw new Error("Unexpected full target scan")
+    }
+    const created = context.threads.size
+    assert((await sendCommand(router, `/切换 @${a.toLowerCase()}`)).includes("已切换到"))
+    assert.equal(context.conversations.getActiveTarget(route.conversationKey)?.threadId, "same-a")
+    assert((await sendCommand(router, `/切换 @${b}`)).includes("已切换到"))
+    assert.equal(context.conversations.getActiveTarget(route.conversationKey)?.threadId, "same-b")
+    const buttons = new ImSessionSwitchCards({
+      links: context.events.sessionLinks,
+      conversations: context.conversations,
+      switchSession: (input) =>
+        router.handle({ ...input, command: { name: "switch_target", argument: `@${input.code}` } })
+    })
+    try {
+      const card = context.events.sessionLinks.getCard("result-same-a")!
+      const click = {
+        schemaVersion: 1 as const,
+        receiptId: "exact-switch-click",
+        ...route,
+        interactionId: card.interaction_id,
+        tag: card.tag,
+        kind: "target_bind" as const,
+        feedback: [],
+        occurredAt: new Date(context.clock.now).toISOString()
+      }
+      assert((await buttons.handleReceipt(click))?.includes("已切换到"))
+      assert.equal(context.conversations.getActiveTarget(route.conversationKey)?.threadId, "same-a")
+      await sendCommand(router, `/切换 @${b}`)
+      assert(
+        (await buttons.handleReceipt({ ...click, receiptId: "old-card-again" }))?.includes("已处理")
+      )
+      assert.equal(
+        context.conversations.getActiveTarget(route.conversationKey)?.threadId,
+        "same-b",
+        "an old consumed card cannot switch the target again"
+      )
+    } finally {
+      await buttons.stop()
+    }
+    context.updateLocalThread("same-a", { title: "已经改名" })
+    assert((await sendCommand(router, `/切换 @${a}`)).includes("已经改名"))
+    assert.equal(context.conversations.getActiveTarget(route.conversationKey)?.threadId, "same-a")
+    assert((await sendCommand(router, `/切换 @${inboxCode}`)).includes("已切换到"))
+    assert.equal(
+      context.conversations.getActiveTarget(route.conversationKey)?.threadId,
+      inbox.threadId
+    )
+    assert.equal(context.threads.size, created, "switching a code never creates a new session")
+
+    await context.conversations.ensureConversation({ ...route, conversationKey: "another-chat" })
+    const outside = await router.handle({
+      ...route,
+      conversationKey: "another-chat",
+      command: parseImCommand(`/切换 @${a}`)!
+    })
+    assert(outside.includes("未找到"), outside)
+    assert((await sendCommand(router, "/切换 @INVALID")).includes("格式不正确"))
+    await context.access.disableThread("same-b")
+    assert((await sendCommand(router, `/切换 @${b}`)).includes("授权已失效"))
+    context.threads.delete("same-a")
+    assert((await sendCommand(router, `/切换 @${a}`)).includes("已删除"))
+
+    const switching = sendCommand(router, `/切换 @${race}`)
+    await context.access.disableThread("race")
+    assert((await switching).includes("授权已变化"))
+    assert.equal(
+      context.conversations.getActiveTarget(route.conversationKey)?.threadId,
+      inbox.threadId,
+      "revocation during a switch must win"
+    )
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+const tests: Array<[string, () => Promise<void>]> = [
+  [
+    "testSessionCodesSelectExactThreadsAndRecheckLiveGrants",
+    testSessionCodesSelectExactThreadsAndRecheckLiveGrants
+  ],
+  [
+    "testCurrentListsOnlyRouteAuthorizedRunningSessions",
+    testCurrentListsOnlyRouteAuthorizedRunningSessions
+  ],
+  [
+    "testDefaultChatGuideSurvivesDuplicatesAndRestart",
+    testDefaultChatGuideSurvivesDuplicatesAndRestart
+  ],
+  [
+    "testFeatureDeletionFiltersTextAndCardSelections",
+    testFeatureDeletionFiltersTextAndCardSelections
+  ],
+  ["testFeatureCatalogEligibilityAndRecovery", testFeatureCatalogEligibilityAndRecovery],
+  ["testTheTextModeCommandIsASwitch", testTheTextModeCommandIsASwitch],
+  ["testExplicitOnAndOffNeverFlipBack", testExplicitOnAndOffNeverFlipBack],
+  ["testTheSwitchReportsWhatWasResent", testTheSwitchReportsWhatWasResent],
+  ["testCurrentStatusNamesTheReplyMode", testCurrentStatusNamesTheReplyMode],
+  ["testTextModeSendsTheTargetListAsText", testTextModeSendsTheTargetListAsText],
+  ["testSwitchBackByTheNameTheReplyAlreadyShows", testSwitchBackByTheNameTheReplyAlreadyShows],
+  ["testBindModeOnlyAppliesWhereASessionIsCreated", testBindModeOnlyAppliesWhereASessionIsCreated],
+  [
+    "testACardSubmitBindsExactlyWhatTypingWouldBind",
+    testACardSubmitBindsExactlyWhatTypingWouldBind
+  ],
+  ["testADeliveredTargetCardSendsNoNoticeAtAll", testADeliveredTargetCardSendsNoNoticeAtAll],
+  [
+    "testFeatureCreateGrantCreatesIndependentThreadGrants",
+    testFeatureCreateGrantCreatesIndependentThreadGrants
+  ],
+  [
+    "testFeatureGrantIsPrincipalScopedAndUsesInvokingConversation",
+    testFeatureGrantIsPrincipalScopedAndUsesInvokingConversation
+  ],
+  [
+    "testFeatureCreateGrantRevocationDoesNotRevokeCreatedSession",
+    testFeatureCreateGrantRevocationDoesNotRevokeCreatedSession
+  ],
+  [
+    "testDesktopThreadGrantBindsWithoutMutatingMetadata",
+    testDesktopThreadGrantBindsWithoutMutatingMetadata
+  ],
+  [
+    "testControlIngressCompletesOutsideTurnQueueAndSelectionExpires",
+    testControlIngressCompletesOutsideTurnQueueAndSelectionExpires
+  ],
+  ["testDeletedSelectedThreadFallsBackToInbox", testDeletedSelectedThreadFallsBackToInbox],
+  [
+    "testExplicitRetryCreatesNewEventWithOriginalSnapshot",
+    testExplicitRetryCreatesNewEventWithOriginalSnapshot
+  ]
+]
+
+async function main(): Promise<void> {
+  for (const [name, test] of tests) {
+    await test()
+    console.log(`PASS ${name}`)
+  }
+  console.log("im-feature-binding-command.spec.ts passed")
+}
+
+main().catch((error) => {
+  console.error(error)
+  process.exitCode = 1
+})

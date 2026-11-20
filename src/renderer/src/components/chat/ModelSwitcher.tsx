@@ -1,19 +1,32 @@
-import { useState, useEffect, memo } from "react"
+import { useState, useEffect, memo, useMemo, useRef, useSyncExternalStore } from "react"
+import { useShallow } from "zustand/react/shallow"
 import { ChevronDown, Check, Key, Zap, Info } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Button } from "@/components/ui/button"
+import { ToggleThumb } from "@/components/ui/toggle-thumb"
 import { useAppStore } from "@/lib/store"
-import { useCurrentThread } from "@/lib/thread-context"
+import {
+  useThreadActions,
+  useThreadStateSelector,
+  type ThreadState
+} from "@/lib/thread-context"
 import { cn } from "@/lib/utils"
 import {
   resolveHydratedThreadModel,
   type ModelRoutingMode
 } from "../../../../shared/thread-model-selection"
 import { CustomModelDialog } from "./CustomModelDialog"
+import { IDLE_MODEL_OUTSIDE_HOURS_MESSAGE } from "../../../../shared/idle-model-service-window"
+import {
+  invalidateModelCatalogCache,
+  readModelCatalogCache,
+  subscribeModelCatalog,
+  updateCachedRoutingMode
+} from "@/lib/model-catalog-cache"
 
 function CustomIcon({ className }: { className?: string }): React.JSX.Element {
   return (
-    <svg className={className} viewBox="0 0 24 24" fill="curreColor">
+    <svg className={className} viewBox="0 0 24 24" fill="currentColor">
       <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z" />
     </svg>
   )
@@ -23,50 +36,40 @@ interface ModelSwitcherProps {
   threadId: string
 }
 
+const selectCurrentModel = (state: ThreadState): string => state.currentModel
+const selectRoutingResult = (state: ThreadState): ThreadState["routingResult"] =>
+  state.routingResult
+
 export const ModelSwitcher = memo(ModelSwitcherImpl)
 
 function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const [customDialogOpen, setCustomDialogOpen] = useState(false)
   const [dialogModelId, setDialogModelId] = useState<string | undefined>(undefined)
-  const [routingMode, setRoutingMode] = useState<ModelRoutingMode>("pinned")
-  const [routingModeLoaded, setRoutingModeLoaded] = useState(false)
-  const [defaultModelId, setDefaultModelId] = useState("")
-
-  const { models, loadModels, loadProviders } = useAppStore()
-  const { currentModel, restoreCurrentModel, setCurrentModel, routingResult } =
-    useCurrentThread(threadId)
-
-  // Load global routing mode on mount
-  useEffect(() => {
-    let cancelled = false
-    void window.api.routing
-      .getMode()
-      .then((mode) => {
-        if (!cancelled) setRoutingMode(mode)
-      })
-      .catch((error) => {
-        console.warn("[ModelSwitcher] Failed to load routing mode; using pinned:", error)
-      })
-      .finally(() => {
-        if (!cancelled) setRoutingModeLoaded(true)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  const { models, threads, loadModels } = useAppStore(
+    useShallow((state) => ({
+      models: state.models,
+      threads: state.threads,
+      loadModels: state.loadModels
+    }))
+  )
+  const modelCatalog = useSyncExternalStore(
+    subscribeModelCatalog,
+    readModelCatalogCache,
+    readModelCatalogCache
+  )
+  const routingMode: ModelRoutingMode = modelCatalog?.routingMode ?? "pinned"
+  const routingModeLoaded = modelCatalog !== null
+  const defaultModelId = modelCatalog?.defaultModelId ?? ""
+  const currentModel = useThreadStateSelector(threadId, selectCurrentModel) ?? ""
+  const routingResult = useThreadStateSelector(threadId, selectRoutingResult)
+  const threadActions = useThreadActions(threadId)
+  const restoreCurrentModel = threadActions?.restoreCurrentModel
+  const setCurrentModel = threadActions?.setCurrentModel
 
   useEffect(() => {
-    const reloadModels = (): void => {
-      void loadModels()
-      void loadProviders()
-      void window.api.models.getDefault().then(setDefaultModelId)
-    }
-    reloadModels()
-    return window.api.models.onChanged(() => {
-      reloadModels()
-    })
-  }, [loadModels, loadProviders])
+    void loadModels()
+  }, [loadModels])
 
   const selectedModel = models.find((m) => m.id === currentModel)
 
@@ -83,57 +86,73 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
     : null
   const routedTierLabel = routingResult?.resolvedTier === "economy" ? "经济" : routingResult?.resolvedTier === "premium" ? "强力" : null
 
-  const hydrationKey = routingModeLoaded ? `${threadId}:${routingMode}` : null
-  const [hydratedModelKey, setHydratedModelKey] = useState<string | null>(null)
+  const threadSummary = useMemo(
+    () => threads.find((thread) => thread.thread_id === threadId) ?? null,
+    [threadId, threads]
+  )
+  const hydratedModel = useMemo(
+    () =>
+      routingModeLoaded
+        ? resolveHydratedThreadModel(threadSummary?.metadata, routingMode)
+        : { modelId: null },
+    [routingMode, routingModeLoaded, threadSummary]
+  )
+  const restoredSelectionRef = useRef<{
+    threadId: string
+    routingMode: ModelRoutingMode
+    modelId: string | null
+  } | null>(null)
 
   useEffect(() => {
-    if (!hydrationKey) return
-    let cancelled = false
-    void window.api.threads
-      .get(threadId)
-      .then((thread) => {
-        if (cancelled) return
-        const hydrated = resolveHydratedThreadModel(thread?.metadata, routingMode)
-        if (hydrated.modelId) {
-          // Hydration only restores the model used by the current view. Persisting here
-          // would turn a read-only session open into an updated_at change.
-          restoreCurrentModel(hydrated.modelId)
-        }
-      })
-      .catch((error) => {
-        console.warn(`[ModelSwitcher] Failed to hydrate model for thread ${threadId}:`, error)
-      })
-      .finally(() => {
-        if (!cancelled) setHydratedModelKey(hydrationKey)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [hydrationKey, restoreCurrentModel, routingMode, threadId])
+    if (!routingModeLoaded || !restoreCurrentModel || !setCurrentModel) return
 
-  useEffect(() => {
-    if (!hydrationKey || hydratedModelKey !== hydrationKey || models.length === 0) return
+    const previous = restoredSelectionRef.current
+    const selectionChanged =
+      previous?.threadId !== threadId ||
+      previous.routingMode !== routingMode ||
+      previous.modelId !== hydratedModel.modelId
+    restoredSelectionRef.current = { threadId, routingMode, modelId: hydratedModel.modelId }
 
-    const hasValidSelection = currentModel && models.some((m) => m.id === currentModel)
-    if (!hasValidSelection && currentModel?.startsWith("custom:")) {
-      const legacyModelName = currentModel.slice("custom:".length)
-      const migrated = models.find((m) => m.model === legacyModelName)
-      if (migrated) {
-        setCurrentModel(migrated.id)
-        return
-      }
+    // Restore each persisted selection once. A fallback or manual choice updates
+    // local state before its metadata IPC completes; restoring the stale ID on
+    // every local change would fight that choice and can trigger React #185.
+    const candidate = selectionChanged
+      ? hydratedModel.modelId || currentModel
+      : currentModel || hydratedModel.modelId || ""
+    let resolvedModel = candidate
+
+    const hasValidSelection = candidate && models.some((model) => model.id === candidate)
+    if (!hasValidSelection && models.length > 0) {
+      const migrated = candidate.startsWith("custom:")
+        ? models.find((model) => model.model === candidate.slice("custom:".length))
+        : undefined
+      resolvedModel =
+        migrated?.id ??
+        models.find((model) => model.id === defaultModelId && model.available)?.id ??
+        models.find((model) => model.available)?.id ??
+        candidate
     }
 
-    if (!hasValidSelection) {
-      const preferred =
-        models.find((model) => model.id === defaultModelId && model.available) ??
-        models.find((model) => model.available)
-      if (preferred) setCurrentModel(preferred.id)
+    if (resolvedModel !== candidate) {
+      setCurrentModel(resolvedModel)
+    } else if (resolvedModel && resolvedModel !== currentModel) {
+      // Restoring an existing selection must not refresh the thread's updated_at.
+      restoreCurrentModel(resolvedModel)
     }
-  }, [models, currentModel, defaultModelId, setCurrentModel, hydratedModelKey, hydrationKey])
+  }, [
+    currentModel,
+    defaultModelId,
+    hydratedModel.modelId,
+    models,
+    restoreCurrentModel,
+    routingMode,
+    routingModeLoaded,
+    setCurrentModel,
+    threadId
+  ])
 
   function handleModelSelect(modelId: string): void {
-    setCurrentModel(modelId)
+    setCurrentModel?.(modelId)
     setOpen(false)
   }
 
@@ -144,14 +163,14 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
           <Button
             variant="ghost"
             size="sm"
-            className="h-7 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
+            className="h-8 gap-1.5 px-2 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground"
           >
             {routingMode === "auto" ? (
               <>
                 <Zap className="size-3.5 text-amber-500" />
-                <span className="font-mono text-amber-600 dark:text-amber-400">智能路由</span>
+                <span className="text-amber-600 dark:text-amber-400">智能路由</span>
                 {routedModelName && routedTierLabel && (
-                  <span className="font-mono text-muted-foreground">
+                  <span className="text-muted-foreground">
                     → {routedModelName}（{routedTierLabel}）
                   </span>
                 )}
@@ -159,7 +178,7 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
             ) : selectedModel ? (
               <>
                 <CustomIcon className="size-3.5" />
-                <span className="font-mono">{selectedModel.name}</span>
+                <span>{selectedModel.name}</span>
               </>
             ) : (
               <span>选择模型</span>
@@ -204,7 +223,7 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
               onClick={() => {
                 if (!canEnableRouting || !routingModeLoaded) return
                 const next: ModelRoutingMode = routingMode === "auto" ? "pinned" : "auto"
-                setRoutingMode(next)
+                updateCachedRoutingMode(next)
                 void window.api.routing.setMode(next)
               }}
               className={cn(
@@ -216,9 +235,9 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
                     : "cursor-pointer bg-muted-foreground/30"
               )}
             >
-              <span
+              <ToggleThumb
                 className={cn(
-                  "pointer-events-none inline-block h-3 w-3 transform rounded-full bg-white shadow transition",
+                  "inline-block h-3 w-3 transform shadow",
                   routingMode === "auto" ? "translate-x-3" : "translate-x-0"
                 )}
               />
@@ -231,15 +250,18 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
                 <button
                   key={model.id}
                   onClick={() => {
-                    if (model.available) handleModelSelect(model.id)
+                    if (model.selectable ?? model.available) handleModelSelect(model.id)
                   }}
-                  disabled={!model.available}
-                  title={model.available ? undefined : "请先在模型配置中填写 API 密钥"}
+                  disabled={!(model.selectable ?? model.available)}
+                  title={
+                    model.unavailableReason ??
+                    (model.available ? model.notice : "请先在模型配置中填写 API 密钥")
+                  }
                   className={cn(
                     "w-full flex items-center gap-1.5 px-2 py-1.5 rounded-sm text-xs transition-colors text-left font-mono disabled:cursor-not-allowed disabled:opacity-50",
                     currentModel === model.id
                       ? "bg-muted text-foreground"
-                      : model.available
+                      : (model.selectable ?? model.available)
                         ? "text-muted-foreground hover:text-foreground hover:bg-muted/50"
                         : "text-muted-foreground"
                   )}
@@ -247,7 +269,13 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
                   <CustomIcon className="size-3.5 shrink-0" />
                   <span className="flex-1 truncate">
                     {model.name}
-                    {!model.available ? "（未配置密钥）" : ""}
+                    {!model.available
+                      ? model.unavailableReason === IDLE_MODEL_OUTSIDE_HOURS_MESSAGE
+                        ? "（非服务时段）"
+                        : model.unavailableReason
+                          ? "（用户信息不完整）"
+                          : "（未配置密钥）"
+                      : ""}
                   </span>
                   <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[9px] text-muted-foreground">
                     {model.source === "builtin" ? "内置" : "自定义"}
@@ -257,6 +285,11 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
                   )}
                 </button>
               ))}
+              {selectedModel?.notice && (
+                <p className="px-2 py-1.5 text-[11px] leading-5 text-muted-foreground">
+                  {selectedModel.notice}
+                </p>
+              )}
 
               <button
                 onClick={() => {
@@ -293,14 +326,14 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
         open={customDialogOpen}
         selectedModelId={dialogModelId}
         onModelSaved={(modelId) => {
-          setCurrentModel(modelId)
+          setCurrentModel?.(modelId)
         }}
         onOpenChange={(isOpen) => {
           setCustomDialogOpen(isOpen)
           if (!isOpen) {
             setDialogModelId(undefined)
-            loadProviders()
-            loadModels()
+            invalidateModelCatalogCache()
+            void loadModels(true)
           }
         }}
       />

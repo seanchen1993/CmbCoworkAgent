@@ -1,0 +1,22 @@
+{
+  "properties": {
+    "cacheReadTokens": { "type": "long" },
+    "stageUsage": {
+      "type": "nested",
+      "dynamic": "strict",
+      "properties": {
+        "nodeName": { "type": "keyword", "ignore_above": 1024 },
+        "nodeStatus": { "type": "keyword", "ignore_above": 256 },
+        "toolCalls": { "type": "long" },
+        "modelCalls": { "type": "long" },
+        "inputTokens": { "type": "long" },
+        "outputTokens": { "type": "long" },
+        "totalTokens": { "type": "long" },
+        "userInputRequests": { "type": "long" },
+        "tokenUsageReportedCalls": { "type": "long" },
+        "cacheReadTokens": { "type": "long" },
+        "cacheUsageReportedCalls": { "type": "long" }
+      }
+    }
+  }
+}

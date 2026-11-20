@@ -1,12 +1,23 @@
-import { promises as fsp, readFileSync, statSync } from "fs"
-import { dirname, isAbsolute } from "path"
+import { promises as fsp } from "fs"
+import { dirname, isAbsolute, resolve } from "path"
 import fastGlob from "fast-glob"
+import {
+  openStableFileHandle,
+  readStableFileHandleBounded,
+  StableBoundedReadError,
+  type StableFileHandle
+} from "../../services/stable-file-handle"
 import { runWorkflowScriptInSandbox } from "./sandbox"
+import { withFileOperation } from "../file-operation-lock"
 import { validateWorkflowScript, MAX_WORKFLOW_SCRIPT_BYTES } from "./script"
 import { sha256Hex, type WorkflowRunStore } from "./run-store"
 import { resolveExistingWorkspacePath, resolveWorkspaceWritePath } from "./paths"
 import { assertSupportedJsonSchema } from "./json-schema"
-import { loadAgentProfiles, resolveProfileFromList } from "../agent-registry"
+import {
+  loadAgentProfilesAsync,
+  resolveProfileFromList,
+  type AgentProfile
+} from "../agent-registry"
 import {
   WORKFLOW_LOG_MAX_CHARS,
   WORKFLOW_MAX_AGENT_INVOCATIONS,
@@ -63,6 +74,9 @@ export interface WorkflowEngineOptions {
   emit: WorkflowProgressEmitter
   signal: AbortSignal
   maxConcurrency?: number
+  /** Immutable profile snapshot approved for this run. Direct engine callers
+   * may omit it; the engine then loads one asynchronously exactly once. */
+  agentProfiles?: readonly AgentProfile[]
   /** Resolves `workflow({ scriptPath })` to a child script source inside the workspace. */
   workspacePath: string
   /** True while a subagent of this run is blocked on a pending user approval. The
@@ -76,12 +90,10 @@ export interface WorkflowEngineOptions {
    * the user switched the thread's model would otherwise replay the OLD default
    * model's cached result instead of re-running on the new one. (#1) */
   defaultModelId?: string
-  /** Run-level exclusive file-write lock, shared with this run's subagent tool
-   * writes (both keyed on the parent threadId). Injected so a script writeFile() and
-   * a concurrent agent()'s tool write serialize TOGETHER instead of each in its own
-   * silo (fileWriteChain vs the tool-concurrency lock). Falls back to the local chain
-   * when absent (unit harness / embedded caller). (#2) */
-  runExclusiveFileWrite?: <T>(fn: () => Promise<T>) => Promise<T>
+  /** Admission shared with agent file tools, excluding unknown tool mutations.
+   * The legacy name is retained for embedded callers; per-file exclusivity is
+   * enforced below regardless of whether this admission callback is supplied. */
+  runExclusiveFileWrite?: <T>(fn: () => Promise<T>, signal?: AbortSignal) => Promise<T>
 }
 
 export interface WorkflowEngineResult {
@@ -131,6 +143,7 @@ export async function runWorkflowEngine(
 ): Promise<WorkflowEngineResult> {
   const startedAt = Date.now()
   const runId = options.runStore.state.runId
+  const agentProfiles = options.agentProfiles ?? (await loadAgentProfilesAsync(options.workspacePath))
   // Per-run limiter (NARROWable via maxConcurrency) composed UNDER the global
   // ceiling: a run is bounded by min(its own cap, the process-wide cap), and
   // concurrent runs can't collectively exceed the global cap. Order matters —
@@ -368,6 +381,7 @@ export async function runWorkflowEngine(
     })
     const globals = buildWorkflowGlobals({
       ...options,
+      agentProfiles,
       emit: emitWithHeartbeat,
       signal: lifetime.signal,
       shared,
@@ -469,7 +483,7 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
   // re-read .cmbcoworkagent/agents/ on every agent() call. A run therefore sees a
   // stable registry, consistent with the journal/hash contract (mid-run edits to
   // an agent file take effect on the next run, like editing the script would).
-  const registryProfiles = loadAgentProfiles(context.workspacePath)
+  const registryProfiles = context.agentProfiles ?? []
   // Shared resolution (exact, then case-insensitive for built-in NAMES even when
   // user-overridden) so a lowercase `explore` keeps working after an Explore.md
   // override — and identical to the Solo path's resolveAgentProfile.
@@ -1038,7 +1052,7 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
     if (context.childName) {
       throw new WorkflowFatalError("workflow() cannot be called from within a child workflow")
     }
-    const { source, name } = loadChildWorkflowSource(context.workspacePath, nameOrRef)
+    const { source, name } = await loadChildWorkflowSource(context.workspacePath, nameOrRef)
     let parsedChild: ParsedWorkflowScript
     try {
       parsedChild = validateWorkflowScript(source)
@@ -1072,14 +1086,13 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
   // enumerate work units (glob) and read/write files directly instead of burning a
   // subagent on it. Paths are confined to the workspace (realpath containment, plus
   // a symlink-parent defense on write); reads/writes are size-capped; writes are
-  // serialized so concurrent writeFile() calls can't interleave or race a mkdir.
+  // serialized per file across scripts and sandbox instances.
   const FILE_READ_MAX_BYTES = 1_048_576
   const FILE_WRITE_MAX_BYTES = 1_048_576
   // Default 10k; overridable SMALLER via CMB_WORKFLOW_GLOB_MAX for tests only.
   // Parsed/guarded in types so a bad value (negative / Infinity / non-numeric)
   // can neither disable nor raise the cap.
   const MAX_GLOB_RESULTS = getWorkflowGlobMax()
-  let fileWriteChain: Promise<void> = Promise.resolve()
   const readFile = async (filePath: unknown): Promise<string> => {
     throwIfAborted()
     if (typeof filePath !== "string") throw new TypeError("readFile(path) expects a string path")
@@ -1088,19 +1101,27 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
       filePath,
       `readFile "${filePath}"`
     )
-    const stat = await fsp.stat(resolved)
-    // Must be a REGULAR file: reading a FIFO/socket/device parks until a writer
-    // appears, tying up a libuv thread-pool slot indefinitely (and a sync read of
-    // one would freeze the main process). Reject anything non-regular up front.
-    if (!stat.isFile()) {
-      throw new WorkflowFatalError(`readFile "${filePath}" is not a regular file`)
-    }
-    if (stat.size > FILE_READ_MAX_BYTES) {
-      throw new WorkflowFatalError(
-        `readFile "${filePath}" is too large (${stat.size} bytes > ${FILE_READ_MAX_BYTES} limit)`
-      )
-    }
-    return await fsp.readFile(resolved, "utf-8")
+    return withFileOperation(
+      context.workspacePath,
+      resolved,
+      "read",
+      async () => {
+        const stat = await fsp.stat(resolved)
+        // Must be a REGULAR file: reading a FIFO/socket/device parks until a writer
+        // appears, tying up a libuv thread-pool slot indefinitely (and a sync read of
+        // one would freeze the main process). Reject anything non-regular up front.
+        if (!stat.isFile()) {
+          throw new WorkflowFatalError(`readFile "${filePath}" is not a regular file`)
+        }
+        if (stat.size > FILE_READ_MAX_BYTES) {
+          throw new WorkflowFatalError(
+            `readFile "${filePath}" is too large (${stat.size} bytes > ${FILE_READ_MAX_BYTES} limit)`
+          )
+        }
+        return await fsp.readFile(resolved, "utf-8")
+      },
+      signal
+    )
   }
   const exists = async (filePath: unknown): Promise<boolean> => {
     if (typeof filePath !== "string") throw new TypeError("exists(path) expects a string path")
@@ -1177,6 +1198,13 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
       `writeFile "${filePath}"`
     )
     const performWrite = async (): Promise<void> => {
+      throwIfAborted()
+      if (
+        resolveWorkspaceWritePath(context.workspacePath, filePath, `writeFile "${filePath}"`) !==
+        resolved
+      ) {
+        throw new WorkflowFatalError(`writeFile "${filePath}" changed while waiting for access`)
+      }
       await fsp.mkdir(dirname(resolved), { recursive: true })
       // If the target already exists it must be a REGULAR file: writing to an
       // existing FIFO/socket/device would block (the write parks for a reader),
@@ -1190,19 +1218,12 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
       }
       await fsp.writeFile(resolved, content, "utf-8")
     }
-    // Route through the run-level exclusive write lock when injected, so a script
-    // writeFile() and a subagent's tool write (both keyed on the parent threadId)
-    // serialize TOGETHER, not just within their own silos. Fall back to the local
-    // chain when no lock is injected (unit harness / embedded caller). (#2)
+    const write = () =>
+      withFileOperation(context.workspacePath, resolved, "write", performWrite, signal)
     if (context.runExclusiveFileWrite) {
-      await context.runExclusiveFileWrite(performWrite)
+      await context.runExclusiveFileWrite(write, signal)
     } else {
-      const write = fileWriteChain.then(performWrite)
-      fileWriteChain = write.then(
-        () => undefined,
-        () => undefined
-      )
-      await write
+      await write()
     }
   }
 
@@ -1389,10 +1410,10 @@ function recordAgentState(
   runStore.upsertAgent(record)
 }
 
-function loadChildWorkflowSource(
+async function loadChildWorkflowSource(
   workspacePath: string,
   nameOrRef: unknown
-): { source: string; name: string } {
+): Promise<{ source: string; name: string }> {
   // Only { scriptPath } is supported. (A by-name registry would need a save
   // mechanism that doesn't exist here, so accepting `name` would be a dead path
   // that always 404s and just confuses the model.)
@@ -1405,35 +1426,66 @@ function loadChildWorkflowSource(
   if (!scriptPath) {
     throw new TypeError('workflow() expects { scriptPath: "…" }')
   }
-  // Realpath-based containment check (blocks symlink escapes too).
-  const resolved = resolveExistingWorkspacePath(
-    workspacePath,
-    scriptPath,
-    `workflow "${scriptPath}"`
-  )
-  // Cap the size BEFORE reading the whole file synchronously — a script could
-  // point at a huge workspace file and stall/OOM the main process otherwise
-  // (mirrors the top-level scriptPath guard in tool.ts).
+  const requestedPath = resolve(workspacePath, scriptPath)
+  let opened: StableFileHandle
   try {
-    const st = statSync(resolved)
-    // Regular-file guard: a FIFO/socket/device would make the synchronous
-    // readFileSync below block the main process (a FIFO read parks for a writer).
-    if (!st.isFile()) {
-      throw new WorkflowScriptError(`workflow "${scriptPath}" is not a regular file`)
-    }
-    if (st.size > MAX_WORKFLOW_SCRIPT_BYTES) {
-      throw new WorkflowScriptError(
-        `workflow "${scriptPath}" is too large (${st.size} bytes > ${MAX_WORKFLOW_SCRIPT_BYTES} limit)`
+    // Resolve containment and acquire the read capability together. The helper
+    // uses O_NONBLOCK for special files, verifies a regular inode, and checks
+    // that the pathname still names that inode before returning. Every byte
+    // below is then read through this handle, so a pathname replacement cannot
+    // redirect execution to a different file after authorization.
+    opened = await openStableFileHandle(workspacePath, requestedPath)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : ""
+    if (/outside the trusted root/i.test(reason)) {
+      throw new WorkflowFatalError(
+        `workflow "${scriptPath}" must stay inside the workspace (got "${scriptPath}")`
       )
     }
-  } catch (error) {
-    if (error instanceof WorkflowScriptError) throw error
-    throw new WorkflowScriptError(`workflow "${scriptPath}" could not be read at ${resolved}`)
+    if (reason === "Cannot preview a directory" || /not a regular file/i.test(reason)) {
+      throw new WorkflowScriptError(`workflow "${scriptPath}" is not a regular file`)
+    }
+    throw new WorkflowScriptError(`workflow "${scriptPath}" not found at ${requestedPath}`)
   }
+
   try {
-    return { source: readFileSync(resolved, "utf-8"), name: scriptPath }
-  } catch {
-    throw new WorkflowScriptError(`workflow "${scriptPath}" not found at ${resolved}`)
+    return {
+      source: await readBoundedChildWorkflowScript(opened, scriptPath),
+      name: scriptPath
+    }
+  } catch (error) {
+    if (error instanceof WorkflowScriptError || error instanceof WorkflowFatalError) throw error
+    throw new WorkflowScriptError(`workflow "${scriptPath}" could not be read at ${requestedPath}`)
+  } finally {
+    await opened.handle.close().catch(() => undefined)
+  }
+}
+
+/** Map shared bounded-reader failures onto child-workflow error messages. */
+async function readBoundedChildWorkflowScript(
+  opened: StableFileHandle,
+  scriptPath: string
+): Promise<string> {
+  try {
+    return (await readStableFileHandleBounded(opened, MAX_WORKFLOW_SCRIPT_BYTES)).toString(
+      "utf8"
+    )
+  } catch (error) {
+    if (error instanceof StableBoundedReadError) {
+      if (error.failure === "initial-too-large") {
+        throw new WorkflowScriptError(
+          `workflow "${scriptPath}" is too large ` +
+            `(${error.observedSize} bytes > ${MAX_WORKFLOW_SCRIPT_BYTES} limit)`
+        )
+      }
+      if (error.failure === "grew-too-large") {
+        throw new WorkflowScriptError(
+          `workflow "${scriptPath}" is too large (exceeds ${MAX_WORKFLOW_SCRIPT_BYTES} limit)`
+        )
+      }
+      throw new WorkflowScriptError(`workflow "${scriptPath}" changed while it was being read`)
+    }
+    throw error
   }
 }
 

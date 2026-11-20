@@ -14,7 +14,10 @@ function buildMockUpdatedAt(createdAt: string): string {
   return new Date(timestamp + MOCK_UPDATED_AT_OFFSET_MS).toISOString()
 }
 
-function appendUpdatedAtToExtraJson(extraJson: string | undefined, updatedAt: string): string | undefined {
+function appendUpdatedAtToExtraJson(
+  extraJson: string | undefined,
+  updatedAt: string
+): string | undefined {
   if (!extraJson?.trim()) return extraJson
 
   try {
@@ -608,6 +611,22 @@ const BASE_MOCK_MARKET_DATA: Record<MarketItemType, MarketItem[]> = {
       description: "会议纪要整理技能，支持要点提炼、行动项识别和后续事项追踪。",
       filename: "com***ote.zip",
       created_at: "2026-04-23T02:34:00.000000+00:00"
+    },
+    {
+      name: "requirement-to-prd",
+      chinese_name: "需求转PRD",
+      category: "研发类场景/应用类研发",
+      featured: "",
+      version: "1.2.0",
+      user_id: "10010001 / 张三 / 总行信息技术部 / 研发效能中心",
+      guidance: "可直接提问：帮我把这段需求描述转换为结构化 PRD。",
+      ip: "127.0.0.1",
+      description: "将需求描述转换为结构化 PRD 文档的技能，支持字段拆解、验收点整理和优先级标注。",
+      filename: "requirement-to-prd-v1.2.0.zip",
+      created_at: "2026-05-01T03:00:00.000000+00:00",
+      extra_json: JSON.stringify({
+        grayUserIds: ["10010001"]
+      })
     }
   ],
   mcp: [

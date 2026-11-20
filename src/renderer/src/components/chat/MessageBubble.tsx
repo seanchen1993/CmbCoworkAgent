@@ -1,8 +1,14 @@
 import type { Message, HITLRequest, ToolCallState, ToolCallStatus } from "@/types"
 import { ToolCallRenderer } from "./ToolCallRenderer"
 import { StreamingMarkdown } from "./StreamingMarkdown"
-import { getToolLabel } from "@/lib/tool-labels"
-import { emitOpenResourcePreview } from "@/lib/resource-preview-events"
+import { useReasoningExpansion } from "./reasoning-expansion-context"
+import { getCollapsedToolCallSummary } from "../../../../shared/tool-call-summary"
+import { getSystemNoticePresentation, parseGoalNoticeText, systemNoticeBlockText } from "../../../../shared/goal-notice-presentation"
+import { stripThinkBlocksForDisplay } from "../../../../shared/think-block-display"
+import {
+  beginOpenResourcePreviewIntent,
+  emitOpenResourcePreview
+} from "@/lib/resource-preview-events"
 import React, { useEffect, useMemo, useRef, useState } from "react"
 import {
   ChevronDown,
@@ -40,12 +46,12 @@ import {
 } from "@/lib/coordinator-worker-tool-args"
 import { getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
 import { DurationShow } from "./DurationShow"
-import { isGoalClearAlias } from "../../../../shared/goal-slash"
+import { formatMessageTimeLabel, getAssistantStartTime } from "@/lib/message-bubble-timing"
+import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
+import { isGoalClearAlias, isGoalResumeDisplayText } from "../../../../shared/goal-slash"
+import { isImRemoteControlTranscriptMessageId } from "../../../../shared/im-remote-transcript"
 import { isResultlessCompletedToolCall } from "@/lib/tool-call-display-state"
-import {
-  normalizeVisibleReasoningText,
-  shouldAutoCollapseReasoning
-} from "@/lib/message-display-visibility"
+import { normalizeVisibleReasoningText } from "@/lib/message-display-visibility"
 import {
   areMessageRenderFieldsEqual,
   areMessageToolRenderInputsEqual
@@ -93,10 +99,7 @@ function parseGoalUserSetMessage(text: string): {
   if (!rest) return null
 
   const normalizedRest = rest.toLowerCase()
-  if (
-    ["status", "pause", "resume"].includes(normalizedRest) ||
-    isGoalClearAlias(normalizedRest)
-  )
+  if (["status", "pause", "resume"].includes(normalizedRest) || isGoalClearAlias(normalizedRest))
     return null
 
   let attachments: string | null = null
@@ -126,8 +129,7 @@ function parseGoalUserControlMessage(text: string): {
   description: string
   tone: "resume"
 } | null {
-  const normalized = text.trim().replace(/\s+/g, " ").toLowerCase()
-  if (normalized !== "/goal resume") return null
+  if (!isGoalResumeDisplayText(text)) return null
   return {
     label: "继续 Goal",
     description: "从上次暂停处继续推进目标",
@@ -164,36 +166,6 @@ function normalizeToolCallForDisplay<T extends { name: string; args?: Record<str
     ...toolCall,
     args: normalizeCoordinatorWorkerToolArgsForDisplay(toolCall.name, toolCall.args)
   }
-}
-
-function stripThinkBlocksForDisplay(text: string): string {
-  return text
-    .replace(/<think>[\s\S]*?<\/think>\s*/gi, "")
-    .replace(/^\s*<think>[\s\S]*$/i, "")
-    .replace(/^[\s\S]*?<\/think>\s*/i, "")
-}
-
-// 获取工具调用的简要描述
-function getToolCallSummary(toolCall: { name: string; args?: Record<string, unknown> }): string {
-  const label = getToolLabel(toolCall.name, {
-    args: toolCall.args,
-    showToolName: false
-  })
-  const args = toolCall.args || {}
-
-  // 获取主要参数用于显示
-  let param = ""
-  if (args.path || args.file_path) {
-    const path = (args.path || args.file_path) as string
-    param = path.split("/").pop() || path
-  } else if (args.command) {
-    const command = args.command as string
-    param = command.slice(0, 30) + (command.length > 30 ? "..." : "")
-  } else if (args.pattern || args.query) {
-    param = (args.pattern || args.query) as string
-  }
-
-  return param ? `${label}: ${param}` : label
 }
 
 function isHtmlRenderToolCall(toolCall: { name: string; args?: Record<string, unknown> }): boolean {
@@ -238,283 +210,53 @@ function hydrateToolCall(
 function getToolStatusMeta(status: ToolCallStatus): { label: string; className: string } {
   switch (status) {
     case "completed":
-      return { label: "OK", className: "bg-green-100 text-green-700 border border-green-200" }
+      return {
+        label: "OK",
+        className: "border border-status-nominal/25 bg-status-nominal/10 text-status-nominal"
+      }
     case "failed":
-      return { label: "ERROR", className: "bg-red-100 text-red-700 border border-red-200" }
+      return {
+        label: "ERROR",
+        className: "border border-status-critical/25 bg-status-critical/10 text-status-critical"
+      }
     case "awaiting_approval":
-      return { label: "APPROVAL", className: "bg-amber-100 text-amber-700 border border-amber-200" }
+      return {
+        label: "APPROVAL",
+        className: "border border-status-warning/25 bg-status-warning/10 text-status-warning"
+      }
     case "queued":
-      return { label: "QUEUED", className: "bg-slate-100 text-slate-600 border border-slate-200" }
+      return {
+        label: "QUEUED",
+        className: "border border-border bg-background-interactive text-muted-foreground"
+      }
     case "running":
       return {
         label: "RUNNING",
-        className: "bg-gray-100 text-gray-600 border border-gray-200 animate-pulse"
+        className:
+          "animate-pulse border border-border bg-background-interactive text-muted-foreground"
       }
     case "rejected":
       return {
         label: "REJECTED",
-        className: "bg-orange-100 text-orange-700 border border-orange-200"
+        className: "border border-status-warning/25 bg-status-warning/10 text-status-warning"
       }
     case "interrupted":
     default:
       return {
         label: "INTERRUPTED",
-        className: "bg-amber-100 text-amber-700 border border-amber-200"
+        className: "border border-status-warning/25 bg-status-warning/10 text-status-warning"
       }
   }
 }
 
-function getSystemNoticePresentation(text: string): {
-  icon: React.JSX.Element
-  text: string
-  tone: "success" | "warning" | "info"
-} {
-  const cleanText = text.replace(/^●\s*/, "")
-  const isGoalNotice =
-    cleanText.startsWith("Goal ") ||
-    cleanText.startsWith("继续 Goal") ||
-    cleanText.startsWith("当前没有 active goal") ||
-    cleanText.startsWith("没有可继续的 goal") ||
-    cleanText.startsWith("请写明 goal 目标") ||
-    cleanText.startsWith("附件和显式技能不会用于 /goal 控制命令") ||
-    cleanText.startsWith("该 /goal 命令") ||
-    cleanText.startsWith("当前线程正在运行") ||
-    cleanText.startsWith("你发送了新消息，active goal 已暂停")
-
-  if (cleanText.startsWith("✓ Goal 已完成")) {
-    return {
-      icon: <Check className="size-4" />,
-      text: cleanText.replace(/^✓\s*/, ""),
-      tone: "success"
-    }
-  }
-
-  if (
-    cleanText.startsWith("Goal 已暂停") ||
-    cleanText.startsWith("Ⅱ Goal 已暂停") ||
-    cleanText.startsWith("Goal 等待补充信息") ||
-    cleanText.startsWith("你发送了新消息，active goal 已暂停")
-  ) {
-    return {
-      icon: <Flag className="size-4" />,
-      text: cleanText.replace(/^Ⅱ\s*/, ""),
-      tone: "warning"
-    }
-  }
-
-  if (isGoalNotice) {
-    return {
-      icon: <Flag className="size-4" />,
-      text: cleanText.replace(/^Ⅱ\s*/, ""),
-      tone: "info"
-    }
-  }
-
-  return {
-    icon: <Info className="size-4" />,
-    text: cleanText,
-    tone: "info"
-  }
-}
-
-function parseGoalNoticeText(text: string): {
-  title: string
-  meta?: string
-  rows: Array<{ label?: string; text: string }>
-  actions: string[]
-} | null {
-  const cleanText = text.replace(/^●\s*/, "").replace(/^Ⅱ\s*/, "").trim()
-  const lines = cleanText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-  if (lines.length === 0) return null
-
-  const first = lines[0]
-  if (
-    !first.startsWith("Goal ") &&
-    !first.startsWith("继续 Goal") &&
-    !first.startsWith("当前没有 active goal") &&
-    !first.startsWith("没有可继续的 goal") &&
-    !first.startsWith("请写明 goal 目标") &&
-    !first.startsWith("附件和显式技能不会用于 /goal 控制命令") &&
-    !first.startsWith("该 /goal 命令") &&
-    !first.startsWith("当前线程正在运行") &&
-    !first.startsWith("你发送了新消息，active goal 已暂停")
-  ) {
-    return null
-  }
-
-  const rows: Array<{ label?: string; text: string }> = []
-  const actions: string[] = []
-
-  const pushActionText = (text: string): void => {
-    const normalized = text.replace(/[。.\s]+$/g, "")
-    for (const part of normalized.split(/[，,、；;·]/)) {
-      const trimmed = part.trim().replace(/^(可用|需要继续时发送|稍后发送|补充信息后请发送|用)\s*/, "")
-      if (trimmed.includes("/goal")) actions.push(trimmed)
-    }
-  }
-
-  const pushCommandSentence = (sentence: string): boolean => {
-    const commandIndex = sentence.indexOf("/goal")
-    if (commandIndex < 0) return false
-    const prefix = sentence
-      .slice(0, commandIndex)
-      .replace(/[，,；;\s]+$/g, "")
-      .trim()
-    const command = sentence.slice(commandIndex).replace(/[。.\s]+$/g, "").trim()
-    if (prefix && !/^(用|可用|需要继续时发送|稍后发送|补充信息后请发送)$/.test(prefix)) {
-      rows.push({ text: prefix })
-    }
-    if (command) actions.push(command)
-    return true
-  }
-
-  const pushActionLine = (line: string): boolean => {
-    if (!line.includes("/goal")) return false
-    pushActionText(line)
-    return true
-  }
-
-  const splitSentences = (body: string): string[] =>
-    body
-      .split(/(?<=[。.!！?？])\s*/)
-      .map((item) => item.trim())
-      .filter(Boolean)
-
-  const pushBodySentences = (body: string): void => {
-    for (const sentence of splitSentences(body)) {
-      if (pushCommandSentence(sentence)) continue
-      rows.push({ text: sentence.replace(/[。.\s]+$/g, "").trim() })
-    }
-  }
-
-  const setMatch = first.match(/^Goal 已设置(?:（([^）]+)）)?[。.]?\s*(.*)$/)
-  if (setMatch) {
-    const body = setMatch[2]?.trim() || ""
-    const actionIndex = body.indexOf("可用")
-    const description =
-      actionIndex >= 0 ? body.slice(0, actionIndex).replace(/[；;，,\s]+$/g, "").trim() : body
-    const actionText = actionIndex >= 0 ? body.slice(actionIndex) : ""
-    if (description) rows.push({ text: description })
-    if (actionText) pushActionText(actionText)
-    return { title: "Goal 已设置", meta: setMatch[1], rows, actions }
-  }
-
-  const noActiveMatch = first.match(/^当前没有 active goal[。.]?\s*(.*)$/)
-  if (noActiveMatch) {
-    const body = noActiveMatch[1]?.trim()
-    if (body) pushBodySentences(body)
-    return { title: "当前没有 active goal", rows, actions }
-  }
-
-  if (first === "没有可继续的 goal。" || first === "没有可继续的 goal") {
-    return { title: "没有可继续的 goal", rows, actions }
-  }
-
-  const invalidGoalMatch = first.match(/^(请写明 goal 目标\/完成条件)[，,。.]?\s*(.*)$/)
-  if (invalidGoalMatch) {
-    const body = invalidGoalMatch[2]?.trim()
-    if (body) pushBodySentences(body)
-    return { title: "请写明 Goal 目标", rows, actions }
-  }
-
-  const transportControlMatch = first.match(
-    /^(附件和显式技能不会用于 \/goal 控制命令)[，,。.]?\s*(.*)$/
-  )
-  if (transportControlMatch) {
-    const body = transportControlMatch[2]?.trim()
-    if (body) pushBodySentences(body)
-    return { title: "Goal 控制命令未发送上下文", rows, actions }
-  }
-
-  const unavailableGoalMatch = first.match(/^该 \/goal 命令需要在当前运行结束后发送[。.]?$/)
-  if (unavailableGoalMatch) {
-    rows.push({ text: "当前运行结束后再发送该命令" })
-    return { title: "Goal 命令暂不可用", rows, actions }
-  }
-
-  const preemptedGoalMatch = first.match(/^你发送了新消息，active goal 已暂停[。.]?\s*(.*)$/)
-  if (preemptedGoalMatch) {
-    const body = preemptedGoalMatch[1]?.trim()
-    if (body) pushBodySentences(body)
-    return { title: "active goal 已暂停", rows, actions }
-  }
-
-  const goalBusyMatch = first.match(/^(Goal 正在进行中)[，,]\s*(.*)$/)
-  if (goalBusyMatch) {
-    const body = goalBusyMatch[2]?.trim()
-    if (body) rows.push({ text: body.replace(/[。.\s]+$/g, "") })
-    return { title: goalBusyMatch[1], rows, actions }
-  }
-
-  const completeMatch = first.match(/^✓?\s*(Goal 已完成)(?:\s*\(([^)]+)\))?[：:]\s*(.*)$/)
-  if (completeMatch) {
-    const reason = completeMatch[3]?.trim()
-    if (reason) rows.push({ text: reason })
-    return { title: completeMatch[1], meta: completeMatch[2], rows, actions }
-  }
-
-  const goalAlreadyMatch = first.match(/^(Goal (?:已完成|已经暂停))(?:[，,。.]?\s*)(.*)$/)
-  if (goalAlreadyMatch && !goalAlreadyMatch[2]?.startsWith("：")) {
-    const body = goalAlreadyMatch[2]?.trim()
-    if (body) pushBodySentences(body)
-    return { title: goalAlreadyMatch[1], rows, actions }
-  }
-
-  const threadBusyMatch = first.match(/^当前线程正在运行[，,]\s*(.*)$/)
-  if (threadBusyMatch) {
-    const body = threadBusyMatch[1]?.trim()
-    if (body) pushBodySentences(body)
-    return { title: "当前线程正在运行", rows, actions }
-  }
-
-  const singleLineMatch = first.match(/^(Goal (?:等待补充信息|已暂停|已继续|当前状态|已清除))[：:]\s*(.*)$/)
-  if (singleLineMatch) {
-    const title = singleLineMatch[1]
-    let body = singleLineMatch[2]?.trim() || ""
-    const waitSplit = body.split("。补充信息后")
-    if (waitSplit.length > 1) {
-      body = waitSplit[0].trim()
-      actions.push("/goal resume", "/goal clear")
-    }
-    if (body) rows.push({ text: body })
-    return { title, rows, actions }
-  }
-
-  if (first.startsWith("Goal 已清除")) {
-    const body = first.replace(/^Goal 已清除[。:：，,\s]*/, "").trim()
-    if (body) rows.push({ text: body })
-    return { title: "Goal 已清除", rows, actions }
-  }
-
-  const continueMatch = first.match(/^(继续 Goal)(?:\s*\(([^)]+)\))?[：:]\s*(.*)$/)
-  if (continueMatch) {
-    const body = continueMatch[3]?.trim()
-    if (body) rows.push({ text: body })
-    return { title: continueMatch[1], meta: continueMatch[2], rows, actions }
-  }
-
-  const title = first
-  let meta: string | undefined
-  for (const line of lines.slice(1)) {
-    if (!meta && /^\d+s\s*·/.test(line)) {
-      meta = line
-      continue
-    }
-    if (pushActionLine(line)) continue
-    const labeled = line.match(/^(目标|完成条件|最近评估|暂停原因)[：:]\s*(.*)$/)
-    if (labeled) {
-      rows.push({ label: labeled[1], text: labeled[2].trim() })
-    } else {
-      rows.push({ text: line })
-    }
-  }
-  return { title, meta, rows, actions }
-}
-
-function GoalNoticeBody({ text }: { text: string }): React.JSX.Element {
+function GoalNoticeBody({ text, threadId }: { text: string; threadId?: string }): React.JSX.Element {
   const parsed = parseGoalNoticeText(text)
   if (!parsed) {
-    return <StreamingMarkdown isStreaming={false}>{text}</StreamingMarkdown>
+    return (
+      <StreamingMarkdown isStreaming={false} threadId={threadId}>
+        {text}
+      </StreamingMarkdown>
+    )
   }
 
   return (
@@ -530,7 +272,10 @@ function GoalNoticeBody({ text }: { text: string }): React.JSX.Element {
       {parsed.rows.length > 0 && (
         <div className="space-y-2">
           {parsed.rows.map((row, index) => (
-            <div key={index} className="grid gap-1 text-[14px] leading-6 sm:grid-cols-[4.5rem_minmax(0,1fr)]">
+            <div
+              key={index}
+              className="grid gap-1 text-[14px] leading-6 sm:grid-cols-[4.5rem_minmax(0,1fr)]"
+            >
               {row.label ? (
                 <>
                   <span className="text-muted-foreground">{row.label}</span>
@@ -565,6 +310,9 @@ interface ToolResultInfo {
 }
 
 interface MessageBubbleProps {
+  messageGeneration?: number
+  messageRevision?: number
+  searchLocation?: import("../../../../shared/chat-search-types").ChatSearchLocation
   message: Message
   previousMessage?: Message | null
   isStreaming?: boolean
@@ -592,6 +340,8 @@ interface MessageBubbleProps {
 const USER_MESSAGE_COLLAPSED_MAX_PX = 260
 
 function MessageBubbleImpl({
+  messageGeneration = 0,
+  messageRevision = 0,
   message,
   previousMessage,
   isStreaming = true,
@@ -610,7 +360,8 @@ function MessageBubbleImpl({
   isLoading,
   hasUserAfterHead = false,
   assistantDurationMs,
-  userSendTimeLabel = null
+  userSendTimeLabel = null,
+  searchLocation
 }: MessageBubbleProps): React.JSX.Element | null {
   const [collapsedTools, setCollapsedTools] = useState<Set<string>>(new Set())
   const [collapsedHtmlTools, setCollapsedHtmlTools] = useState<Set<string>>(new Set())
@@ -619,45 +370,61 @@ function MessageBubbleImpl({
   const [likedMessageId, setLikedMessageId] = useState<string | null>(null)
   const [dislikedMessageId, setDislikedMessageId] = useState<string | null>(null)
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false)
-  const [reasoningOpen, setReasoningOpen] = useState(false)
   // 超长用户消息折叠:默认收起,测量到内容超过阈值才显示"显示更多/收起"。
   const [userContentExpanded, setUserContentExpanded] = useState(false)
   const [userContentOverflow, setUserContentOverflow] = useState(false)
   const userContentRef = useRef<HTMLDivElement>(null)
-  const autoOpenedReasoningForMessageRef = useRef<string | null>(null)
-  const autoCollapsedReasoningForMessageRef = useRef<string | null>(null)
   const isUser = message.role === "user"
   const isTool = message.role === "tool"
   const isSystem = message.role === "system"
   const isForkingThisMessage = forkingMessageId === message.id
   const canForkFromMessage = message.role === "assistant" && Boolean(onForkFromMessage)
   const forkFromMessageDisabled = isLoading || Boolean(forkingMessageId)
-  const reasoningText = !isUser ? normalizeVisibleReasoningText(message.reasoning) : ""
+  const reasoningText = useMemo(
+    () => (!isUser ? normalizeVisibleReasoningText(message.reasoning) : ""),
+    [isUser, message.reasoning]
+  )
+  const displayMessageContent = useMemo<Message["content"]>(() => {
+    if (isUser || !reasoningText) return message.content
+    if (typeof message.content === "string") {
+      return stripThinkBlocksForDisplay(message.content)
+    }
+    if (!Array.isArray(message.content)) return message.content
+    let changed = false
+    const projected = message.content.map((block) => {
+      if (block.type !== "text" || !block.text) return block
+      const text = stripThinkBlocksForDisplay(block.text)
+      if (text === block.text) return block
+      changed = true
+      return { ...block, text }
+    })
+    return changed ? projected : message.content
+  }, [isUser, message.content, reasoningText])
   const visibleAssistantContentText = useMemo(() => {
     if (isUser) return ""
-    if (typeof message.content === "string") {
-      return reasoningText ? stripThinkBlocksForDisplay(message.content) : message.content
+    if (typeof displayMessageContent === "string") {
+      return displayMessageContent
     }
-    if (!Array.isArray(message.content)) return ""
-    return message.content
+    if (!Array.isArray(displayMessageContent)) return ""
+    return displayMessageContent
       .map((block) => {
         if (block.type !== "text" || !block.text) return ""
-        return reasoningText ? stripThinkBlocksForDisplay(block.text) : block.text
+        return block.text
       })
       .join("\n")
-  }, [isUser, message.content, reasoningText])
+  }, [displayMessageContent, isUser])
   const hasVisibleAssistantContent = visibleAssistantContentText.trim().length > 0
   const hasToolCalls = Boolean(message.tool_calls?.length)
-
-  useEffect(() => {
-    if (
-      message.role !== "user" &&
-      typeof message.content === "string" &&
-      message.content.includes("改用编辑方式整体替换文件内容。")
-    ) {
-      console.log(message, "message///")
-    }
-  }, [message])
+  // Resolve this before the first paint: mounting a collapsed row and opening it in an effect
+  // makes Virtuoso briefly measure the wrong height, especially for long reasoning messages.
+  const [reasoningOpen, toggleReasoning] = useReasoningExpansion(
+    `${threadId}:${message.role}:${message.id}`,
+    Boolean(reasoningText),
+    Boolean(isStreaming),
+    hasVisibleAssistantContent || hasToolCalls,
+    messageGeneration,
+    messageRevision
+  )
 
   // 测量用户消息内容高度,超过阈值才启用折叠。气泡宽度是 max-w-[80%],会随窗口/
   // 侧栏开合变化,因此除内容变化外还用 ResizeObserver 在宽度变化时重测——否则窄时
@@ -677,33 +444,17 @@ function MessageBubbleImpl({
     return () => observer.disconnect()
   }, [message.role, message.content])
 
-  useEffect(() => {
-    if (!isStreaming || !reasoningText) return
-    if (autoOpenedReasoningForMessageRef.current === message.id) return
-    autoOpenedReasoningForMessageRef.current = message.id
-    setReasoningOpen(true)
-  }, [isStreaming, message.id, reasoningText])
-
-  useEffect(() => {
-    if (
-      !shouldAutoCollapseReasoning({
-        isStreaming,
-        reasoningText,
-        hasVisibleAssistantContent,
-        hasToolCalls
-      })
-    )
-      return
-    if (autoCollapsedReasoningForMessageRef.current === message.id) return
-    autoCollapsedReasoningForMessageRef.current = message.id
-    setReasoningOpen(false)
-  }, [hasToolCalls, hasVisibleAssistantContent, isStreaming, message.id, reasoningText])
-
   // 判断是否显示 MessageHead：如果当前不是用户消息，且是第一条非用户消息
   const shouldShowMessageHead =
     !isUser &&
     !isSystem &&
     (!previousMessage || previousMessage.role === "user" || previousMessage.role === "system")
+
+  const assistantStartTime = shouldShowMessageHead ? getAssistantStartTime(message) : null
+  const assistantStartTimeLabel = useMemo(
+    () => (assistantStartTime === null ? null : formatMessageTimeLabel(assistantStartTime)),
+    [assistantStartTime]
+  )
 
   const duration = useMemo(() => {
     if (!shouldShowMessageHead || typeof assistantDurationMs !== "number") return 0
@@ -743,19 +494,39 @@ function MessageBubbleImpl({
     return null
   }
 
+  // Older App versions persisted remote approval and user-input receipts as system
+  // transcript messages. They are status UI, not conversation content; hide legacy rows.
+  if (isImRemoteControlTranscriptMessageId(message.id)) {
+    return null
+  }
+
+  const previewNotice = message.content_preview_notice ? (
+    <div data-chat-search-ignore className="mt-2 text-xs text-muted-foreground">
+      {message.content_preview_notice}
+    </div>
+  ) : null
+
   if (isSystem) {
-    const text = extractMessagePlainText(message.content).trim()
+    const text = Array.isArray(message.content)
+      ? message.content.map(systemNoticeBlockText).filter(Boolean).join("\n")
+      : message.content
     if (!text) return null
     const notice = getSystemNoticePresentation(text)
+    if (!notice.text) return null
+    const Icon = notice.tone === "success" ? Check : notice.goal ? Flag : Info
     return (
       <div className="my-3 flex justify-center">
         <div className={`liquid-glass-notice liquid-glass-notice--${notice.tone}`}>
           <div className="relative z-[1] flex items-start gap-3">
             <span className="liquid-glass-notice__icon" aria-hidden="true">
-              {notice.icon}
+              <Icon className="size-4" />
             </span>
-            <div className="liquid-glass-notice__body min-w-0 text-[15px] leading-7 [&_p]:my-0 [&_strong]:font-semibold">
-              <GoalNoticeBody text={notice.text} />
+            <div
+              data-chat-search-text
+              className="liquid-glass-notice__body min-w-0 text-[15px] leading-7 [&_p]:my-0 [&_strong]:font-semibold"
+            >
+              <GoalNoticeBody text={notice.text} threadId={threadId} />
+              {previewNotice}
             </div>
           </div>
         </div>
@@ -772,26 +543,30 @@ function MessageBubbleImpl({
   const goalUserSetMessage = isUser ? parseGoalUserSetMessage(plainTextForCopy) : null
   const goalUserControlMessage = isUser ? parseGoalUserControlMessage(plainTextForCopy) : null
 
-  const renderGoalUserSetContent = (goalMessage: NonNullable<typeof goalUserSetMessage>): React.ReactNode => (
-    <div className="space-y-2 text-left">
-      <div className="flex items-center gap-1.5 text-xs font-medium text-[#5f6b66]">
-        <span className="flex size-6 items-center justify-center rounded-full bg-white shadow-sm ring-1 ring-black/[0.05]">
+  const renderGoalUserSetContent = (
+    goalMessage: NonNullable<typeof goalUserSetMessage>
+  ): React.ReactNode => (
+    <div data-chat-search-text data-chat-search-block-index={0} data-chat-search-source-start={0}
+      data-chat-search-source-end={typeof message.content === "string" ? message.content.length : undefined}
+      className="space-y-2 text-left">
+      <div data-chat-search-block className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+        <span className="flex size-6 items-center justify-center rounded-full bg-background-interactive shadow-sm ring-1 ring-border">
           <Flag className="size-3.5 text-sky-600" />
         </span>
         <span>设为 Goal</span>
       </div>
-      <div className="whitespace-pre-wrap text-[15px] leading-7 text-foreground/95 break-all">
+      <div data-chat-search-block className="whitespace-pre-wrap text-[15px] leading-7 text-foreground/95 break-all">
         {goalMessage.objective}
       </div>
       {(goalMessage.attachments || goalMessage.skillName) && (
         <div className="flex flex-wrap gap-1.5 pt-0.5">
           {goalMessage.attachments && (
-            <span className="rounded-full border border-black/[0.05] bg-[#f7f7f5]/85 px-2 py-0.5 text-[11px] text-muted-foreground">
+            <span data-chat-search-block className="rounded-full border border-border bg-background-interactive/85 px-2 py-0.5 text-[11px] text-muted-foreground">
               附件：{goalMessage.attachments}
             </span>
           )}
           {goalMessage.skillName && (
-            <span className="rounded-full border border-black/[0.05] bg-[#f7f7f5]/85 px-2 py-0.5 text-[11px] text-muted-foreground">
+            <span data-chat-search-block className="rounded-full border border-border bg-background-interactive/85 px-2 py-0.5 text-[11px] text-muted-foreground">
               技能：{goalMessage.skillName}
             </span>
           )}
@@ -803,13 +578,15 @@ function MessageBubbleImpl({
   const renderGoalUserControlContent = (
     goalMessage: NonNullable<typeof goalUserControlMessage>
   ): React.ReactNode => (
-    <div className="flex items-center gap-2 text-left">
-      <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-white text-sky-700 shadow-[0_6px_18px_rgba(24,24,27,0.10)] ring-1 ring-black/[0.05]">
+    <div data-chat-search-text data-chat-search-block-index={0} data-chat-search-source-start={0}
+      data-chat-search-source-end={typeof message.content === "string" ? message.content.length : undefined}
+      className="flex items-center gap-2 text-left">
+      <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-background-interactive text-primary shadow-[0_6px_18px_rgba(0,0,0,0.10)] ring-1 ring-border">
         <PlayCircle className="size-4" />
       </span>
       <span className="min-w-0">
-        <span className="block text-sm font-semibold text-[#35433f]">{goalMessage.label}</span>
-        <span className="block text-xs text-muted-foreground">{goalMessage.description}</span>
+        <span data-chat-search-block className="block text-sm font-semibold text-foreground">{goalMessage.label}</span>
+        <span data-chat-search-block className="block text-xs text-muted-foreground">{goalMessage.description}</span>
       </span>
     </div>
   )
@@ -822,9 +599,8 @@ function MessageBubbleImpl({
       return renderGoalUserControlContent(goalUserControlMessage)
     }
 
-    if (typeof message.content === "string") {
-      const displayContent =
-        !isUser && reasoningText ? stripThinkBlocksForDisplay(message.content) : message.content
+    if (typeof displayMessageContent === "string") {
+      const displayContent = displayMessageContent
       // Empty content (after potentially stripping the trailing skill-use block below)
       if (!displayContent.trim()) {
         return null
@@ -843,19 +619,28 @@ function MessageBubbleImpl({
               <SkillChip label={skillContent.skillName} compact className="mr-2" />
             )}
             {browserContent.browserSelected && <BuiltinBrowserChip compact className="mr-2" />}
-            {browserContent.visibleText}
+            <span data-chat-search-text data-chat-search-block-index={0}
+              data-chat-search-source-start={0} data-chat-search-source-end={displayContent.length}
+            >{browserContent.visibleText}</span>
           </div>
         )
       }
-      return <StreamingMarkdown isStreaming={isStreaming}>{displayContent}</StreamingMarkdown>
+      return (
+        <StreamingMarkdown
+          isStreaming={isStreaming}
+          threadId={threadId}
+          searchLocation={searchLocation?.blockIndex === 0 ? searchLocation : undefined}
+        >
+          {displayContent}
+        </StreamingMarkdown>
+      )
     }
 
     // Handle content blocks
-    const renderedBlocks = message.content
+    const renderedBlocks = displayMessageContent
       .map((block, index) => {
         if (block.type === "text" && block.text) {
-          const displayText =
-            !isUser && reasoningText ? stripThinkBlocksForDisplay(block.text) : block.text
+          const displayText = block.text
           if (!displayText.trim()) return null
           // Use streaming markdown for assistant text blocks
           if (isUser) {
@@ -870,12 +655,20 @@ function MessageBubbleImpl({
                   <SkillChip label={skillContent.skillName} compact className="mr-2" />
                 )}
                 {browserContent.browserSelected && <BuiltinBrowserChip compact className="mr-2" />}
-                {browserContent.visibleText}
+                <span data-chat-search-text data-chat-search-block-index={index}
+                  data-chat-search-source-start={0} data-chat-search-source-end={displayText.length}
+                >{browserContent.visibleText}</span>
               </div>
             )
           }
           return (
-            <StreamingMarkdown key={index} isStreaming={isStreaming}>
+            <StreamingMarkdown
+              key={index}
+              isStreaming={isStreaming}
+              threadId={threadId}
+              searchBlockIndex={index}
+              searchLocation={searchLocation?.blockIndex === index ? searchLocation : undefined}
+            >
               {displayText}
             </StreamingMarkdown>
           )
@@ -887,7 +680,8 @@ function MessageBubbleImpl({
     return renderedBlocks.length > 0 ? renderedBlocks : null
   }
 
-  const content = renderContent()
+  const messageContent = renderContent()
+  const content = previewNotice ? <>{messageContent}{previewNotice}</> : messageContent
   const displayToolCalls = message.tool_calls?.map(normalizeToolCallForDisplay)
   const shouldShowAssistantActions =
     showAssistantMeta && !isLoading && Boolean(content || hasToolCalls)
@@ -978,15 +772,18 @@ function MessageBubbleImpl({
             className={cn(
               "min-w-0 max-w-full overflow-hidden rounded-lg p-3",
               goalUserSetMessage || goalUserControlMessage
-                ? "border border-black/[0.07] bg-white/86 shadow-[0_14px_42px_rgba(24,24,27,0.10),0_1px_0_rgba(255,255,255,0.88)_inset]"
+                ? "border border-border bg-background-elevated/90 shadow-[0_14px_42px_rgba(0,0,0,0.16)] dark:shadow-[0_14px_42px_rgba(0,0,0,0.30)]"
                 : "bg-primary/10"
             )}
           >
             <div
               ref={userContentRef}
+              data-chat-search-user-content-collapse-threshold={USER_MESSAGE_COLLAPSED_MAX_PX}
               className={cn(
                 "relative min-w-0 max-w-full overflow-hidden",
-                userContentOverflow && !userContentExpanded && "[mask-image:linear-gradient(to_bottom,black_60%,transparent)]"
+                userContentOverflow &&
+                  !userContentExpanded &&
+                  "[mask-image:linear-gradient(to_bottom,black_60%,transparent)]"
               )}
               style={
                 userContentOverflow && !userContentExpanded
@@ -999,6 +796,7 @@ function MessageBubbleImpl({
             {userContentOverflow && (
               <button
                 type="button"
+                data-chat-search-expand-user-content
                 onClick={() => setUserContentExpanded((prev) => !prev)}
                 className="mt-1.5 inline-flex items-center gap-1 text-xs text-muted-foreground/80 transition-colors hover:text-foreground"
                 aria-expanded={userContentExpanded}
@@ -1017,44 +815,52 @@ function MessageBubbleImpl({
               </button>
             )}
           </div>
-          <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+          <div className="flex max-w-full flex-wrap items-center justify-end gap-1">
             {userSendTimeLabel && (
-              <span className="px-1 text-xs text-muted-foreground/70">{userSendTimeLabel}</span>
+              <time
+                dateTime={userSendTimeLabel}
+                className="order-last px-1 text-xs whitespace-nowrap tabular-nums text-muted-foreground"
+                title="发送时间（本地时间）"
+              >
+                {userSendTimeLabel}
+              </time>
             )}
-            <button
-              type="button"
-              onClick={handleCopyMessage}
-              className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
-              title="复制消息"
-              aria-label="复制消息"
-            >
-              {copySuccess ? (
-                <Check className="size-3 text-status-nominal" />
-              ) : (
-                <Copy className="size-3" />
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={() => onEditUserMessage?.(message)}
-              className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
-              title="编辑后重新发送"
-              aria-label="编辑后重新发送"
-            >
-              <PencilLine className="size-3" />
-            </button>
-            {canSetGoalFromMessage && (
+            <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
               <button
                 type="button"
-                onClick={() => onSetGoalFromMessage?.(plainTextForCopy)}
-                className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
-                title="设为 Goal"
-                aria-label="设为 Goal"
+                onClick={handleCopyMessage}
+                className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+                title="复制消息"
+                aria-label="复制消息"
               >
-                <Flag className="size-3" />
-                <span className="text-[11px]">设为目标</span>
+                {copySuccess ? (
+                  <Check className="size-3 text-status-nominal" />
+                ) : (
+                  <Copy className="size-3" />
+                )}
               </button>
-            )}
+              <button
+                type="button"
+                onClick={() => onEditUserMessage?.(message)}
+                className="inline-flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+                title="编辑后重新发送"
+                aria-label="编辑后重新发送"
+              >
+                <PencilLine className="size-3" />
+              </button>
+              {canSetGoalFromMessage && (
+                <button
+                  type="button"
+                  onClick={() => onSetGoalFromMessage?.(plainTextForCopy)}
+                  className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+                  title="设为 Goal"
+                  aria-label="设为 Goal"
+                >
+                  <Flag className="size-3" />
+                  <span className="text-[11px]">设为目标</span>
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -1064,34 +870,18 @@ function MessageBubbleImpl({
   return (
     <div className="group overflow-hidden space-y-1.5">
       {shouldShowMessageHead && (
-        <div className="flex items-center gap-2 mb-4">
-          <svg className="size-5 shrink-0" viewBox="0 0 120 120" fill="none">
-            <defs>
-              <linearGradient id="chat-lobster" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" stopColor="#ff4d4d" />
-                <stop offset="100%" stopColor="#991b1b" />
-              </linearGradient>
-            </defs>
-            <path
-              d="M60 10 C30 10 15 35 15 55 C15 75 30 95 45 100 L45 110 L55 110 L55 100 C55 100 60 102 65 100 L65 110 L75 110 L75 100 C90 95 105 75 105 55 C105 35 90 10 60 10Z"
-              fill="url(#chat-lobster)"
-            />
-            <path
-              d="M20 45 C5 40 0 50 5 60 C10 70 20 65 25 55 C28 48 25 45 20 45Z"
-              fill="url(#chat-lobster)"
-            />
-            <path
-              d="M100 45 C115 40 120 50 115 60 C110 70 100 65 95 55 C92 48 95 45 100 45Z"
-              fill="url(#chat-lobster)"
-            />
-            <path d="M45 15 Q35 5 30 8" stroke="#ff4d4d" strokeWidth="3" strokeLinecap="round" />
-            <path d="M75 15 Q85 5 90 8" stroke="#ff4d4d" strokeWidth="3" strokeLinecap="round" />
-            <circle cx="45" cy="35" r="6" fill="#050810" />
-            <circle cx="75" cy="35" r="6" fill="#050810" />
-            <circle cx="46" cy="34" r="2.5" fill="#00e5cc" />
-            <circle cx="76" cy="34" r="2.5" fill="#00e5cc" />
-          </svg>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mb-4">
+          <CmbDevClawLogo className="size-5 shrink-0 object-contain" />
           <span className="text-xs font-medium text-muted-foreground">CMBDevClaw</span>
+          {assistantStartTimeLabel && (
+            <time
+              dateTime={assistantStartTimeLabel}
+              className="text-xs whitespace-nowrap tabular-nums text-muted-foreground"
+              title="回复开始时间（本地时间）"
+            >
+              开始于 {assistantStartTimeLabel}
+            </time>
+          )}
           {!shouldHideDuration && <DurationShow durationMs={duration} text="耗时" />}
         </div>
       )}
@@ -1100,7 +890,7 @@ function MessageBubbleImpl({
           <div className="px-3">
             <button
               type="button"
-              onClick={() => setReasoningOpen((open) => !open)}
+              onClick={toggleReasoning}
               className="inline-flex items-center gap-1.5 rounded-md border border-border/70 bg-muted/35 px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground"
               aria-expanded={reasoningOpen}
             >
@@ -1112,8 +902,11 @@ function MessageBubbleImpl({
               <span>思考</span>
             </button>
             {reasoningOpen && (
-              <div className="mt-2 rounded-md border border-border/70 bg-muted/25 px-3 py-2 text-sm text-muted-foreground">
-                <StreamingMarkdown isStreaming={Boolean(isStreaming)}>
+              <div
+                data-chat-search-ignore
+                className="mt-2 rounded-md border border-border/70 bg-muted/25 px-3 py-2 text-sm text-muted-foreground"
+              >
+                <StreamingMarkdown isStreaming={Boolean(isStreaming)} threadId={threadId}>
                   {reasoningText}
                 </StreamingMarkdown>
               </div>
@@ -1149,15 +942,15 @@ function MessageBubbleImpl({
                     ? "completed"
                     : isResultlessCompletedToolCall(resolvedToolCall)
                       ? "completed"
-                    : isStreaming
-                      ? "running"
-                      : "interrupted")
+                      : isStreaming
+                        ? "running"
+                        : "interrupted")
               const statusMeta = getToolStatusMeta(inferredStatus)
               const isHtmlTool = isHtmlRenderToolCall(resolvedToolCall)
               const isExpanded = isHtmlTool
                 ? collapsedHtmlTools.has(toolId)
                 : collapsedTools.has(toolId)
-              const summary = getToolCallSummary(resolvedToolCall)
+              const summary = getCollapsedToolCallSummary(resolvedToolCall)
               const previewPath = getToolPreviewPath(resolvedToolCall)
               const isOk = result !== undefined && !result?.is_error
 
@@ -1166,12 +959,13 @@ function MessageBubbleImpl({
                 const isBatch = (pendingApproval?.pendingCount ?? 1) > 1
                 // git commit is approved through the dedicated task-card dialog, so the
                 // inline approve/reject buttons are hidden to avoid a second (card-less) path.
-                const pendingOperation = (pendingApproval as unknown as {
-                  operation?: string
-                } | null)?.operation
+                const pendingOperation = (
+                  pendingApproval as unknown as {
+                    operation?: string
+                  } | null
+                )?.operation
                 const isGitCommitApproval = pendingOperation === "git_commit"
-                const isAutoGitPushApproval =
-                  autoApproveGitPush && pendingOperation === "git_push"
+                const isAutoGitPushApproval = autoApproveGitPush && pendingOperation === "git_push"
                 return (
                   <ToolCallRenderer
                     key={`${toolId}-${needsApproval ? "pending" : "done"}`}
@@ -1180,6 +974,7 @@ function MessageBubbleImpl({
                     isError={result?.is_error}
                     status={inferredStatus}
                     needsApproval={needsApproval}
+                    searchableSummary={summary}
                     showApprovalButtons={!isBatch && !isGitCommitApproval && !isAutoGitPushApproval}
                     onApprovalDecision={onApprovalDecision}
                     approvalTypes={
@@ -1207,28 +1002,74 @@ function MessageBubbleImpl({
                   className="rounded-sm border overflow-hidden border-border bg-background-elevated"
                 >
                   {/* 可折叠的工具标题 */}
-                  <button
-                    onClick={() => toggleToolExpansion(toolId, isHtmlTool)}
-                    className="flex w-full items-center gap-2 px-3 py-2 hover:bg-background-interactive transition-colors"
-                  >
-                    {isExpanded ? (
-                      <ChevronDown className="size-4 text-muted-foreground shrink-0" />
-                    ) : (
-                      <ChevronRight className="size-4 text-muted-foreground shrink-0" />
-                    )}
+                  <div className="flex w-full items-center hover:bg-muted/50 transition-colors">
+                    <button
+                      type="button"
+                      onClick={() => toggleToolExpansion(toolId, isHtmlTool)}
+                      className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2"
+                    >
+                      {isExpanded ? (
+                        <ChevronDown className="size-4 text-muted-foreground shrink-0" />
+                      ) : (
+                        <ChevronRight className="size-4 text-muted-foreground shrink-0" />
+                      )}
 
-                    <Wrench className="size-4 shrink-0 text-status-info" />
+                      <Wrench className="size-4 shrink-0 text-status-info" />
 
-                    <span className="text-xs font-medium min-w-0 max-w-[420px] truncate text-left">
-                      {summary}
-                    </span>
-                    <div className="ml-auto flex items-center gap-2 shrink-0">
+                      <span
+                        data-chat-search-text
+                        className="text-xs font-medium min-w-0 truncate text-left"
+                      >
+                        {summary}
+                      </span>
+                    </button>
+                    <div className="flex items-center gap-2 shrink-0 pr-3">
                       {previewPath && isOk && (
                         <button
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation()
-                            emitOpenResourcePreview({ threadId, filePath: previewPath })
+                            const intentId = beginOpenResourcePreviewIntent(threadId)
+                            void (async () => {
+                              const authorized =
+                                await window.api.workspace.authorizeToolFilePreview({
+                                  threadId,
+                                  toolCallId: resolvedToolCall.id
+                                })
+                              if (!authorized.success) {
+                                emitOpenResourcePreview({
+                                  threadId,
+                                  filePath: previewPath,
+                                  intentId,
+                                  toolCallId: resolvedToolCall.id
+                                })
+                                return
+                              }
+                              emitOpenResourcePreview({
+                                threadId,
+                                filePath: authorized.filePath,
+                                intentId,
+                                workspacePathKind: "absolute",
+                                toolCallId: resolvedToolCall.id,
+                                externalPreviewGrant: authorized.external
+                                  ? authorized.grant
+                                  : undefined,
+                                externalPreviewGrantExpiresAt: authorized.external
+                                  ? authorized.expiresAt
+                                  : undefined
+                              })
+                            })().catch((error) => {
+                              console.error(
+                                "[MessageBubble] Failed to authorize file preview:",
+                                error
+                              )
+                              emitOpenResourcePreview({
+                                threadId,
+                                filePath: previewPath,
+                                intentId,
+                                toolCallId: resolvedToolCall.id
+                              })
+                            })
                           }}
                           className="inline-flex items-center justify-center rounded border border-border/70 bg-background px-1.5 py-1 text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
                           title="在右侧资源预览中打开"
@@ -1245,7 +1086,7 @@ function MessageBubbleImpl({
                         {statusMeta.label}
                       </div>
                     </div>
-                  </button>
+                  </div>
 
                   {/* 展开的详细内容 */}
                   {isExpanded && (
@@ -1295,7 +1136,7 @@ function MessageBubbleImpl({
                       全部拒绝
                     </button>
                     <button
-                      className="px-3 py-1.5 text-xs bg-status-nominal text-background rounded-sm hover:bg-status-nominal/90 transition-colors"
+                      className="px-3 py-1.5 text-xs bg-status-nominal/15 text-status-nominal rounded-sm hover:bg-status-nominal/20 transition-colors"
                       onClick={(e) => {
                         e.stopPropagation()
                         onApprovalDecision("approve")
@@ -1310,7 +1151,6 @@ function MessageBubbleImpl({
         )}
         {shouldShowAssistantActions && (
           <div className="flex items-center gap-1 px-3 opacity-0 transition-opacity group-hover:opacity-100">
-            {/*<span className="text-[11px] text-muted-foreground">{createdAtLabel}</span>*/}
             <button
               type="button"
               onClick={handleCopyMessage}
@@ -1407,6 +1247,8 @@ function areMessageBubblePropsEqual(
 ): boolean {
   return (
     areMessageRenderFieldsEqual(previous.message, next.message) &&
+    (previous.message === next.message ||
+      getAssistantStartTime(previous.message) === getAssistantStartTime(next.message)) &&
     (previous.previousMessage?.role ?? null) === (next.previousMessage?.role ?? null) &&
     previous.isStreaming === next.isStreaming &&
     previous.showAssistantMeta === next.showAssistantMeta &&
@@ -1418,10 +1260,13 @@ function areMessageBubblePropsEqual(
     previous.onForkFromMessage === next.onForkFromMessage &&
     previous.forkingMessageId === next.forkingMessageId &&
     previous.threadId === next.threadId &&
+    previous.messageGeneration === next.messageGeneration &&
+    previous.messageRevision === next.messageRevision &&
     previous.isLoading === next.isLoading &&
     previous.hasUserAfterHead === next.hasUserAfterHead &&
     previous.assistantDurationMs === next.assistantDurationMs &&
     previous.userSendTimeLabel === next.userSendTimeLabel &&
+    previous.searchLocation === next.searchLocation &&
     areMessageToolRenderInputsEqual(previous.message, previous, next)
   )
 }

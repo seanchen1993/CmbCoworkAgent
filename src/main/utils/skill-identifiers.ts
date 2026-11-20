@@ -7,7 +7,9 @@ const SKILL_PACKAGE_EXTENSION_RE = /\.(zip|tar\.gz|tgz|md)$/i
 export function normalizeSkillVersion(version: string | undefined | null): string {
   const trimmed = typeof version === "string" ? version.trim() : ""
   if (!trimmed) return DEFAULT_SKILL_VERSION
-  return trimmed.startsWith("v") ? trimmed : `v${trimmed}`
+  // 兼容用户填写 v1.0.1 / V1.0.1 / 1.0.1，统一规范为小写 v 前缀
+  const stripped = trimmed.replace(/^[vV]+/, "")
+  return `v${stripped}`
 }
 
 export function normalizeSkillIdentifierText(raw: string): string {

@@ -1,9 +1,14 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import type { BrowserScriptExecutionState } from "../../src/shared/browser-types"
 import {
   getPlaybackStatusDetail,
   shouldShowPlaybackSummary
 } from "../../src/renderer/src/components/browser/BrowserPlaybackControl"
+import {
+  clearBrowserPlaybackHistory,
+  createBrowserPlaybackHistoryEntry,
+  formatPlaybackDuration
+} from "../../src/renderer/src/components/browser/browser-playback-history"
 
 describe("browser playback control", () => {
   it("suppresses inactive playback summaries while a recording session is active", () => {
@@ -51,5 +56,67 @@ describe("browser playback control", () => {
     }
 
     expect(getPlaybackStatusDetail(runningPlayback)).toBe("67%")
+  })
+
+  it("builds a completed playback history entry with duration and progress", () => {
+    expect(
+      createBrowserPlaybackHistoryEntry({
+        status: "completed",
+        label: "登录验证",
+        fileName: "login.spec.ts",
+        startedAt: "2026-10-15T08:00:00.000Z",
+        endedAt: "2026-10-15T08:00:02.000Z",
+        progressPercent: 100,
+        completedSteps: 5,
+        totalSteps: 5
+      })
+    ).toMatchObject({
+      scriptName: "登录验证",
+      fileName: "login.spec.ts",
+      runAt: "2026-10-15T08:00:00.000Z",
+      status: "completed",
+      progressPercent: 100,
+      completedSteps: 5,
+      totalSteps: 5,
+      durationMs: 2000
+    })
+  })
+
+  it("formats playback duration for the status line", () => {
+    expect(formatPlaybackDuration(2000)).toBe("2s")
+    expect(formatPlaybackDuration(1500)).toBe("1s")
+    expect(formatPlaybackDuration(999)).toBe("0s")
+  })
+
+  it("keeps playback error details in history", () => {
+    expect(
+      createBrowserPlaybackHistoryEntry({
+        status: "error",
+        fileName: "checkout.spec.ts",
+        startedAt: "2026-10-15T08:00:00.000Z",
+        endedAt: "2026-10-15T08:00:01.000Z",
+        error: "提交按钮不可见"
+      })
+    ).toMatchObject({
+      fileName: "checkout.spec.ts",
+      scriptName: "checkout.spec.ts",
+      status: "error",
+      error: "提交按钮不可见"
+    })
+  })
+
+  it("reports local storage clear failures", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    vi.stubGlobal("window", {
+      localStorage: {
+        removeItem: vi.fn(() => {
+          throw new Error("storage unavailable")
+        })
+      }
+    })
+
+    expect(clearBrowserPlaybackHistory()).toBe(false)
+    warn.mockRestore()
+    vi.unstubAllGlobals()
   })
 })

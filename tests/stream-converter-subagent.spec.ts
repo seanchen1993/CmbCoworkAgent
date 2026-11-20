@@ -645,6 +645,97 @@ async function testSchedulerFinalTranscriptAndTerminalCorrection(): Promise<void
   )
 }
 
+async function testInteriorTokensDoNotBroadcastFullSubagentHistory(): Promise<void> {
+  const converter = new StreamConverter("bounded-subagent-heartbeat-run")
+  const taskCalls = Array.from({ length: 2_000 }, (_, index) => ({
+    id: `bounded-task-${index}`,
+    name: "task",
+    args: { subagent_type: "implementer", description: `worker ${index}` }
+  }))
+  const registration = converter.processChunk(
+    "messages",
+    aiMessage("bounded-parent", taskCalls)
+  )
+  assert(latestSubagents(registration).length === 2_000, "all historical cards should register")
+
+  const ownerToolCallId = taskCalls.at(-1)!.id
+  for (let token = 0; token < 1_000; token += 1) {
+    const events = converter.processChunk("messages", [
+      {
+        id: ["langchain_core", "messages", "AIMessageChunk"],
+        kwargs: { id: "bounded-interior-answer", content: `token-${token}` }
+      },
+      {
+        langgraph_checkpoint_ns: "agent:tools:bounded-runtime",
+        cmb_subagent_owner_tool_call_id: ownerToolCallId
+      }
+    ])
+    assert(
+      events.every(
+        (event) =>
+          event.type !== "custom" ||
+          (event.data.type !== "subagents" && event.data.type !== "subagent_delta")
+      ),
+      "ordinary interior text tokens must not broadcast card snapshots or heartbeats"
+    )
+  }
+
+  const internals = converter as unknown as { activeSubagents: Map<string, unknown> }
+  const originalValues = internals.activeSubagents.values
+  Object.defineProperty(internals.activeSubagents, "values", {
+    configurable: true,
+    value(): never {
+      throw new Error("ordinary values frames must not enumerate all subagent cards")
+    }
+  })
+  try {
+    for (let frame = 0; frame < 1_000; frame += 1) {
+      const events = converter.processChunk("values", {
+        messages: [
+          {
+            id: ["langchain_core", "messages", "AIMessage"],
+            kwargs: { id: "bounded-values-answer", content: `frame-${frame}` }
+          }
+        ]
+      })
+      assert(
+        events.every((event) => event.type !== "custom" || event.data.type !== "subagents"),
+        "ordinary values content frames must not rebroadcast the complete card list"
+      )
+    }
+  } finally {
+    Object.defineProperty(internals.activeSubagents, "values", {
+      configurable: true,
+      value: originalValues
+    })
+  }
+
+  const toolBoundary = converter.processChunk("messages", [
+    {
+      id: ["langchain_core", "messages", "AIMessageChunk"],
+      kwargs: {
+        id: "bounded-interior-answer",
+        content: "",
+        tool_calls: [{ id: "bounded-inner-call", name: "read_file", args: {} }]
+      }
+    },
+    {
+      langgraph_checkpoint_ns: "agent:tools:bounded-runtime",
+      cmb_subagent_owner_tool_call_id: ownerToolCallId
+    }
+  ])
+  assert(
+    toolBoundary.some(
+      (event) => event.type === "custom" && event.data.type === "subagent_delta"
+    ),
+    "a real current-tool boundary should still emit one targeted card patch"
+  )
+  assert(
+    toolBoundary.every((event) => event.type !== "custom" || event.data.type !== "subagents"),
+    "a targeted current-tool patch must not clone the complete card list"
+  )
+}
+
 async function run(): Promise<void> {
   await testSubagentToolErrorsAreForwarded()
   console.log("PASS stream converter forwards subagent tool errors")
@@ -662,6 +753,8 @@ async function run(): Promise<void> {
   console.log("PASS stream converter scopes exact same parent/task occurrences")
   await testSchedulerFinalTranscriptAndTerminalCorrection()
   console.log("PASS stream converter persists stable finals and terminal corrections")
+  await testInteriorTokensDoNotBroadcastFullSubagentHistory()
+  console.log("PASS stream converter bounds interior heartbeat snapshots")
 }
 
 run().catch((error: Error) => {

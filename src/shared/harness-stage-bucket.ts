@@ -25,6 +25,12 @@ export type StageBucket = "plugin_constrained" | "vibecoding" | "unattributed"
 export const STAGE_IN_PROGRESS_LABEL = "进行中"
 export const STAGE_DONE_LABEL = "已完成"
 
+/** The same key is recorded on a turn and in the project's ordered workflow. */
+export function formatHarnessStageName(label: string, group?: string): string {
+  const name = label.trim()
+  return name && group?.trim() ? `${group.trim()}-${name}` : name
+}
+
 /** Extract the group segment from the historical `${group}-${label}` trace field. */
 export function extractHarnessNodeGroup(value: string | null | undefined): string | null {
   const normalized = value?.normalize("NFKC").trim() ?? ""

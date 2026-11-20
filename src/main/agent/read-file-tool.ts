@@ -1,6 +1,8 @@
 import { getCurrentTaskInput } from "@langchain/langgraph"
 import { tool as lcTool } from "langchain"
 import { z, type ZodTypeAny } from "zod"
+import { getCurrentHookAgentId, getHookAgentIdFromRequest } from "../hooks/execution-context"
+import type { TraceContext } from "./trace/types"
 import {
   getReadFileOutputCharLimit,
   READ_FILE_DEFAULT_LIMIT,
@@ -16,9 +18,15 @@ export type ReadableFilesystemBackend = {
     filePath: string,
     offset?: number,
     limit?: number,
-    options?: { maxFormattedContentChars?: number; includeLookahead?: boolean }
+    options?: {
+      maxFormattedContentChars?: number
+      includeLookahead?: boolean
+      traceContext?: TraceContext
+    }
   ): Promise<string> | string
 }
+
+export type ReadFileTraceContextResolver = (agentId: string) => TraceContext | undefined
 
 type RuntimeTool = {
   name?: string
@@ -36,6 +44,15 @@ function getToolRuntimeStore(config: unknown): unknown {
   return typeof config === "object" && config !== null && "store" in config
     ? (config as { store?: unknown }).store
     : undefined
+}
+
+export function resolveReadFileTraceContext(
+  config: unknown,
+  resolver?: ReadFileTraceContextResolver
+): TraceContext | undefined {
+  if (!resolver) return undefined
+  const ownerId = getHookAgentIdFromRequest(config) ?? getCurrentHookAgentId()
+  return ownerId ? resolver(ownerId) : undefined
 }
 
 function createReadFileDescription(): string {
@@ -63,11 +80,13 @@ export function patchRuntimeReadFileTool(params: {
     | ReadableFilesystemBackend
     | ((config: { state: unknown; store?: unknown }) => ReadableFilesystemBackend)
   toolTokenLimitBeforeEvict?: number
+  resolveTraceContextForAgent?: ReadFileTraceContextResolver
 }): void {
   const {
     middleware,
     filesystemBackend,
-    toolTokenLimitBeforeEvict = DEFAULT_TOOL_TOKEN_LIMIT_BEFORE_EVICT
+    toolTokenLimitBeforeEvict = DEFAULT_TOOL_TOKEN_LIMIT_BEFORE_EVICT,
+    resolveTraceContextForAgent
   } = params
   const middlewareTools = middleware.tools
   const readFileIdx = middlewareTools?.findIndex((t) => t.name === "read_file") ?? -1
@@ -104,9 +123,11 @@ export function patchRuntimeReadFileTool(params: {
             })
           : filesystemBackend
       const { file_path, offset = 0, limit = READ_FILE_DEFAULT_LIMIT } = input
+      const traceContext = resolveReadFileTraceContext(config, resolveTraceContextForAgent)
       let result = await resolvedBackend.read(file_path, offset, limit, {
         maxFormattedContentChars: getReadFileOutputCharLimit(toolTokenLimitBeforeEvict),
-        includeLookahead: true
+        includeLookahead: true,
+        ...(traceContext ? { traceContext } : {})
       })
       result = trimReadFileOutputLines(result, limit)
       return truncateReadFileOutputByChars(result, file_path, toolTokenLimitBeforeEvict)

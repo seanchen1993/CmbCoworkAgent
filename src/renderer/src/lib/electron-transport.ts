@@ -21,8 +21,10 @@ import { buildSubagentTaskInvocationIdentity } from "../../../shared/subagent-in
 import { extractVisibleReasoning } from "../../../shared/model-reasoning"
 import {
   advanceCompletedMessageContentRoute,
+  buildAvailableProviderOccurrenceId,
   buildMessageSameRoleDuplicateId,
   getMessageProviderOccurrence,
+  getMessageProviderOccurrenceIdentity,
   getMessageProviderSourceId,
   getMessageProviderTupleFromMetadata,
   getMessageRoleCollisionIdentity,
@@ -36,11 +38,30 @@ import {
 } from "../../../shared/message-role-collision"
 import { mergeStreamToolCallArgs } from "../../../shared/stream-tool-call-chunks"
 import {
+  readStreamMessageWireMode,
+  STREAM_MESSAGE_CONTENT_MODE_KEY,
+  STREAM_MESSAGE_REASONING_MODE_KEY,
+  STREAM_TOOL_CALL_ARGS_MODE_KEY,
+  type StreamMessageWireMode
+} from "../../../shared/stream-message-wire-mode"
+import {
   buildSubagentFinalSignature,
   fingerprintSubagentTranscriptContent as fingerprintTranscriptContent,
   projectSubagentDescription
 } from "../../../shared/subagent-transcript-storage"
 import { projectSubagentTranscriptBoundaries } from "./subagent-transcripts"
+import { CursorQueue } from "./cursor-queue"
+import {
+  coalesceSnapshotMessageAliases,
+  mergeWorkerProviderWireIds,
+  mergeWorkerToolCallSnapshot,
+  normalizeWorkflowSnapshotMessageIds
+} from "./snapshot-message-aliases"
+import { readWorkerToolResultError, workerToolCallSnapshot } from "./worker-message-content"
+import {
+  isLegacyTruncatedWorkflowIdentity,
+  WORKFLOW_PRECEDING_PROMPT_INDEX_KEY
+} from "../../../shared/workflow-agent-snapshot"
 
 export type StreamFallbackIndexBaselines = {
   ai: number
@@ -50,6 +71,12 @@ export type StreamFallbackIndexBaselines = {
 }
 
 type TransportAgentMode = "normal" | "coordinator" | "workflow"
+type AgentIPCEvent = Parameters<Parameters<typeof window.api.agent.streamAgent>[3]>[0]
+
+interface ElectronIPCTransportOptions {
+  managedAutoSendRunId?: string
+  onManagedAutoSendRunTerminal?: (runId: string) => void
+}
 
 /**
  * Usage metadata from LangChain model responses.
@@ -230,6 +257,8 @@ interface MessageMetadata {
   checkpoint_ns?: string
   name?: string
   [SUBAGENT_OWNER_METADATA_KEY]?: string
+  [STREAM_MESSAGE_CONTENT_MODE_KEY]?: StreamMessageWireMode
+  [STREAM_MESSAGE_REASONING_MODE_KEY]?: StreamMessageWireMode
 }
 
 function getSerializedMessageClassName(msg: SerializedMessageChunk): string {
@@ -279,27 +308,28 @@ export function transformSerializedValuesMessages(
   for (const msg of messages ?? []) {
     if (isSerializedSummarizationMessage(msg)) continue
     const className = getSerializedMessageClassName(msg)
-    if (className.includes("Human")) {
+    const kwargs = msg.kwargs || {}
+    const type: "ai" | "tool" | "system" | "human" =
+      className.includes("Tool") || kwargs.type === "tool"
+        ? "tool"
+        : className.includes("System") || kwargs.type === "system"
+          ? "system"
+          : className.includes("Human") || kwargs.type === "human" || kwargs.type === "user"
+            ? "human"
+            : "ai"
+    if (type === "human") {
       // Local user bubbles are appended before stream submit. Internal goal
       // prompts are hidden, but still need timing for transcript restore anchors.
       if (
         !isInternalGoalPromptMessage({
           role: "user",
-          content: extractSerializedContent(msg.kwargs?.content)
+          content: extractSerializedContent(kwargs.content)
         })
       ) {
         continue
       }
     }
 
-    const kwargs = msg.kwargs || {}
-    const type: "ai" | "tool" | "system" | "human" = className.includes("Tool")
-      ? "tool"
-      : className.includes("System")
-        ? "system"
-        : className.includes("Human")
-          ? "human"
-          : "ai"
     const content = extractSerializedContent(kwargs.content)
     const reasoning = type === "ai" ? extractVisibleReasoning(kwargs) : ""
     const isToolError =
@@ -308,10 +338,17 @@ export function transformSerializedValuesMessages(
         kwargs.is_error === true ||
         kwargs.additional_kwargs?.is_error === true)
     const providerTuple =
-      type === "ai"
+      type === "ai" || type === "tool"
         ? getMessageProviderTupleFromMetadata(kwargs.additional_kwargs)
         : undefined
-    const fallbackIndex = fallbackIndexes[type]++
+    const localFallbackIndex = fallbackIndexes[type]++
+    const rawAbsoluteIndex = kwargs.additional_kwargs?.[WORKER_SNAPSHOT_INDEX_MESSAGE_KEY]
+    const fallbackIndex =
+      typeof rawAbsoluteIndex === "number" &&
+      Number.isInteger(rawAbsoluteIndex) &&
+      rawAbsoluteIndex >= 0
+        ? rawAbsoluteIndex
+        : localFallbackIndex
     const id =
       kwargs.id ||
       (type === "tool" && kwargs.tool_call_id
@@ -450,6 +487,9 @@ const MAX_TRACKED_TOOL_CALL_NAMES = 300
 const MAX_TRACKED_TOOL_CALLS_PER_NAME = 50
 const MAX_TRACKED_MESSAGE_TOOL_CALLS = 1_000
 const MAX_TRACKED_TRANSCRIPT_SIGNATURE_THREADS = 64
+const MAX_TRACKED_SUBAGENT_EXECUTIONS = 2_000
+const MAX_TRACKED_SUBAGENT_EXECUTIONS_PER_TOOL_CALL = 50
+const MAX_TRACKED_SUBAGENT_SIGNATURES_PER_THREAD = 8_000
 const SUBAGENT_ASSISTANT_PREVIEW_SOURCE_CHARS = 24_000
 const SUBAGENT_ASSISTANT_SNAPSHOT_MIN_CHARS = 1_024
 const SUBAGENT_ASSISTANT_SNAPSHOT_MAX_INTERVAL_MS = 50
@@ -547,6 +587,18 @@ function isWorkerFallbackProviderSourceId(sourceId: string): boolean {
   )
 }
 
+function availableWorkerAssistantProviderId(
+  sourceId: string,
+  occurrence: number,
+  occupiedIds: Pick<ReadonlySet<string>, "has">
+): string {
+  const candidate =
+    occurrence > 1 ? buildMessageSameRoleDuplicateId(sourceId, "assistant", occurrence) : sourceId
+  // A different occurrence or provider can already occupy the proposed render ID.
+  if (!occupiedIds.has(candidate)) return candidate
+  return buildAvailableProviderOccurrenceId(sourceId, "assistant", occurrence, occupiedIds)
+}
+
 function getWorkerSnapshotFallbackIndex(
   message: SerializedMessageChunk,
   fallbackIndex: number
@@ -561,6 +613,8 @@ function getWorkerSnapshotFallbackIndex(
  * LangGraph agent runs in the main process.
  */
 export class ElectronIPCTransport implements UseStreamTransport {
+  constructor(private readonly options: ElectronIPCTransportOptions = {}) {}
+
   // Track current message ID for grouping tokens across chunks
   private currentMessageId: string | null = null
   private currentMessageIndex: number | null = null
@@ -578,6 +632,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
   private workerCurrentProviderSourceIds: Map<string, string> = new Map()
   private workerProviderOccurrenceCounts: Map<string, Map<string, number>> = new Map()
   private workerProviderReplayCandidates: Map<string, Map<string, Message[]>> = new Map()
+  private workerProviderWireOwners = new Map<string, Map<string, string | null>>()
   private workerProvisionalMessageIds: Map<
     string,
     { id: string; providerSourceId: string }
@@ -618,6 +673,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
   // Track active subagents by their tool_call_id
   private activeSubagents: Map<string, Subagent> = new Map()
+  private runningSubagentIds: Set<string> = new Set()
+  private subagentSnapshotVersion = 0
 
   // Track subagent-internal tool calls as a single aggregate activity count.
   private subagentToolCallIds: Set<string> = new Set()
@@ -638,6 +695,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
   // Canonical values/checkpoint identities survive stream boundaries. Live
   // identities are intentionally separate and reset for every foreground run.
   private subagentExecutionIdByInvocation = new Map<string, string>()
+  private currentMappedSubagentExecutionIds = new Set<string>()
+  private subagentInvocationMappingCountsByExecutionId = new Map<string, number>()
+  private subagentInvocationKeysByParentMessageId = new Map<string, Set<string>>()
+  private subagentExecutionStreamGenerationById = new Map<string, number>()
+  private subagentExecutionValuesGenerationById = new Map<string, number>()
+  private subagentValuesGeneration = 0
   private liveSubagentExecutionIdByInvocation = new Map<string, string>()
   private liveSubagentExecutionIdsByToolCallId = new Map<string, string[]>()
   private liveSubagentInvocationByParentTask = new Map<
@@ -652,6 +715,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
   // `::execution-N`) as bucket IDs. Reserve those IDs during hydration so a
   // newly observed live invocation cannot claim them before full values arrive.
   private seededSubagentExecutionIdsByToolCallId = new Map<string, string[]>()
+  private seededSubagentExecutionIds = new Set<string>()
   private claimedSeededSubagentExecutionIds = new Set<string>()
   private seededSubagentPromptFingerprintByExecutionId = new Map<string, string>()
   private subagentPromptInvocationIdentityByExecutionId = new Map<string, string>()
@@ -669,7 +733,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
   // shows the tool, and never downgrades real args back to {}.
   private subagentTranscriptToolCallsByMessage = new Map<
     string,
-    Map<string, { id: string; name: string; args: Record<string, unknown> }>
+    Map<string, { id: string; name: string; args: Record<string, unknown>; index?: number }>
   >()
 
   private subagentLogSequence = 0
@@ -708,6 +772,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
   private mainAssistantMessageIdAliases: Map<string, string> = new Map()
   private mainAssistantMessageIdByIndex: Map<number, string> = new Map()
   private mainAssistantIndexByObservedId: Map<string, number> = new Map()
+  private mainAssistantIndexByStreamScope = new Map<string, number>()
+  private mainAssistantScopedObservedIds = new Set<string>()
   private streamedMainAssistantIndexes: Set<number> = new Set()
   private mainAssistantProviderIdentityByIndex: Map<number, MainAssistantProviderIdentity> =
     new Map()
@@ -716,6 +782,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
   private sealedMainAssistantIndexes: Set<number> = new Set()
   private pendingIdlessCompletedAssistantRoute?: PendingIdlessCompletedAssistantRoute
   private mainMessageRoleCollisionBaseline = new Map<string, RoleCollisionMessage>()
+  private valuesParentOccurrenceCounts = new Map<string, number>()
+  private valuesParentOccurrenceByMessageIndex = new Map<
+    number,
+    { parentMessageId?: string; parentOccurrence: number }
+  >()
+  private valuesIdlessParentOccurrence = 0
 
   // Track accumulated tool call chunks (for streaming tool calls)
   private accumulatedToolCalls: Map<string, AccumulatedToolCall> = new Map()
@@ -752,6 +824,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
   async stream(payload: StreamPayload): Promise<AsyncGenerator<StreamEvent>> {
     // Reset state for new stream
     this.subagentStreamGeneration += 1
+    this.pruneSubagentExecutionIndexes()
     this.liveSubagentExecutionIdByInvocation.clear()
     this.liveSubagentExecutionIdsByToolCallId.clear()
     this.liveSubagentInvocationByParentTask.clear()
@@ -762,6 +835,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.workerCurrentProviderSourceIds.clear()
     this.workerProviderOccurrenceCounts.clear()
     this.workerProviderReplayCandidates.clear()
+    this.workerProviderWireOwners.clear()
     this.workerProvisionalMessageIds.clear()
     this.workerReplayPinnedMessageIds.clear()
     this.workerPendingPinnedReasoning.clear()
@@ -784,6 +858,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.workerCurrentTurnByThread.clear()
     this.workerInitialTurnAdoptionPending.clear()
     this.activeSubagents.clear()
+    this.runningSubagentIds.clear()
+    this.subagentSnapshotVersion = 0
     this.subagentToolCallIds.clear()
     this.subagentToolLogEntryIds.clear()
     this.subagentToolOwnerIds.clear()
@@ -803,6 +879,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.mainAssistantMessageIdAliases.clear()
     this.mainAssistantMessageIdByIndex.clear()
     this.mainAssistantIndexByObservedId.clear()
+    this.mainAssistantIndexByStreamScope.clear()
+    this.mainAssistantScopedObservedIds.clear()
     this.streamedMainAssistantIndexes.clear()
     this.mainAssistantProviderIdentityByIndex.clear()
     this.mainAssistantIndexByProviderIdentity.clear()
@@ -821,6 +899,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     const coordinatorInternalNotification =
       payload.config?.configurable?.coordinator_internal_notification === true
     const userMessageId = payload.config?.configurable?.hook_turn_id as string | undefined
+    const managedAutoSendRunId = this.options.managedAutoSendRunId
     if (!threadId) {
       return this.createErrorGenerator("MISSING_THREAD_ID", "Thread ID is required")
     }
@@ -840,7 +919,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       : (lastHumanMessage?.content ?? "")
 
     // Only require message content if not resuming
-    if (!messageContent && !hasResumeCommand) {
+    if (!messageContent && !hasResumeCommand && !managedAutoSendRunId) {
       return this.createErrorGenerator("MISSING_MESSAGE", "Message content is required")
     }
 
@@ -853,7 +932,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
       modelId,
       agentMode,
       coordinatorInternalNotification,
-      userMessageId
+      userMessageId,
+      managedAutoSendRunId
     )
   }
 
@@ -931,10 +1011,35 @@ export class ElectronIPCTransport implements UseStreamTransport {
     if (event.mode === "values") {
       const state = event.data as { messages?: SerializedMessageChunk[] }
       if (!Array.isArray(state.messages)) return []
-      return this.createFocusedCoordinatorWorkerEventsFromValues(
-        state.messages,
-        focused.workerThreadId
-      )
+      const messages =
+        (event.valuesSnapshotKind ?? "full") !== "full"
+          ? state.messages.flatMap((message) =>
+              this.createFocusedCoordinatorWorkerEvents({
+                parentThreadId,
+                checkpointNs: focused.workerThreadId,
+                className: this.getSerializedMessageClassName(message),
+                kwargs: message.kwargs,
+                valuesSnapshot: true
+              })
+                .filter((sdkEvent) => sdkEvent.event === "custom")
+                .map((sdkEvent) => sdkEvent.data as { type?: unknown; workerMessage?: unknown })
+                .filter((data) => data.type === "coordinator_worker_stream_message")
+                .map((data) => data.workerMessage)
+                .filter((message): message is Message =>
+                  Boolean(message && typeof message === "object")
+                )
+            )
+          : this.createFocusedCoordinatorWorkerEventsFromValues(
+              state.messages,
+              focused.workerThreadId
+            )
+      return messages.map((message) => ({
+        ...message,
+        ...((event.valuesSnapshotKind ?? "full") === "full" && { worker_snapshot_identity: true }),
+        // Legacy empty values rows may be sparse. Only a non-empty complete body
+        // supersedes older text; explicit wire snapshot clears are marked below.
+        ...(message.content.length > 0 && { worker_content_source: "values" as const })
+      }))
     }
 
     return this.processStreamEvent(event, "coordinator", focused.workerThreadId)
@@ -950,7 +1055,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     workerThreadId: string
   ): Message[] {
     if (event.mode !== "messages" || typeof event.workerTurn !== "number") return []
-    const [msgChunk] = event.data as [SerializedMessageChunk, MessageMetadata]
+    const [msgChunk, metadata] = event.data as [SerializedMessageChunk, MessageMetadata]
     const kwargs = msgChunk?.kwargs || {}
     const className = this.getSerializedMessageClassName(msgChunk)
     if (
@@ -963,6 +1068,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
     const scopeId = (rawId: string): string =>
       this.createFocusedWorkerMessageIdForTurn(workerThreadId, rawId, event.workerTurn!)
+    const providerTuple = getMessageProviderTupleFromMetadata(kwargs.additional_kwargs)
+    const scopedProviderTuple = providerTuple && {
+      ...providerTuple,
+      provider_source_id: scopeId(providerTuple.provider_source_id),
+      worker_provider_identity: true
+    }
     const staleTurnKey = `${workerThreadId}\u001f${event.workerTurn}`
     const content = this.extractContent(kwargs.content)
     if (this.isSerializedHumanMessage(msgChunk)) {
@@ -974,14 +1085,18 @@ export class ElectronIPCTransport implements UseStreamTransport {
         typeof kwargs.id === "string"
           ? kwargs.id
           : this.createStableFallbackMessageId({ type: "ai", content: `human:${content}` })
-      return [{ id: scopeId(rawId), role: "user", content, created_at: new Date() }]
+      return [
+        {
+          id: scopeId(rawId),
+          role: "user",
+          content,
+          ...scopedProviderTuple,
+          created_at: new Date()
+        }
+      ]
     }
 
     if (className.includes("ToolMessage") && kwargs.tool_call_id) {
-      const isError = this.isToolMessageError(kwargs)
-      this.staleWorkerCurrentMessageIdByTurn.delete(staleTurnKey)
-      this.staleWorkerCurrentProviderSourceIdByTurn.delete(staleTurnKey)
-      this.staleWorkerAssistantBoundaryByTurn.add(staleTurnKey)
       const rawId =
         typeof kwargs.id === "string"
           ? kwargs.id
@@ -991,33 +1106,120 @@ export class ElectronIPCTransport implements UseStreamTransport {
               toolCallId: kwargs.tool_call_id,
               toolName: kwargs.name
             })
-      return [
-        {
-          id: scopeId(rawId),
-          role: "tool",
-          content,
-          tool_call_id: kwargs.tool_call_id,
-          ...(kwargs.name && { name: kwargs.name }),
-          ...(kwargs.status && { status: kwargs.status }),
-          ...(isError && { is_error: true }),
-          created_at: new Date()
-        }
-      ]
+      const toolMessage = this.createWorkerToolResult(
+        scopeId(rawId),
+        content,
+        kwargs,
+        scopedProviderTuple
+      )
+      const toolResultIdentity = this.focusedWorkerToolResultIdentity(toolMessage)
+      const messages = useAppStore.getState().workerFocusMessages
+      const priorResult = messages.findLast(
+        (message) =>
+          message.role === "tool" &&
+          this.focusedWorkerToolResultIdentity(message) === toolResultIdentity
+      )
+      const assistantId = this.staleWorkerCurrentMessageIdByTurn.get(staleTurnKey)
+      const assistant = !this.staleWorkerAssistantBoundaryByTurn.has(staleTurnKey)
+        ? messages.findLast((message) =>
+            assistantId ? message.id === assistantId : message.id.startsWith(scopeId(""))
+          )
+        : undefined
+      const requestsCall =
+        this.workerAssistantRequestsCall(assistant, kwargs.tool_call_id) ||
+        (assistantId !== undefined &&
+          this.staleWorkerToolCallsByMessageId.get(assistantId)?.has(kwargs.tool_call_id) === true)
+      const resultUpdate = this.classifyWorkerToolResult(
+        toolMessage,
+        this.focusedWorkerToolResultSignature(toolMessage),
+        priorResult ? new Set([this.focusedWorkerToolResultSignature(priorResult)]) : undefined
+      )
+      if (!requestsCall && resultUpdate !== undefined) {
+        return resultUpdate === "correction" ? [toolMessage] : []
+      }
+      this.staleWorkerCurrentMessageIdByTurn.delete(staleTurnKey)
+      this.staleWorkerCurrentProviderSourceIdByTurn.delete(staleTurnKey)
+      this.staleWorkerAssistantBoundaryByTurn.add(staleTurnKey)
+      return [toolMessage]
     }
 
     if (!this.isSerializedAIMessage(msgChunk)) return []
     const isChunk = className.includes("Chunk")
+    const contentWireMode = readStreamMessageWireMode(
+      metadata?.[STREAM_MESSAGE_CONTENT_MODE_KEY]
+    )
+    const reasoningWireMode = readStreamMessageWireMode(
+      metadata?.[STREAM_MESSAGE_REASONING_MODE_KEY]
+    )
+    const explicitProviderSourceId = scopedProviderTuple?.provider_source_id
+    const observedMessageId = typeof kwargs.id === "string" ? scopeId(kwargs.id) : undefined
+    const storedMessages = useAppStore.getState().workerFocusMessages
+    const explicitMatch = scopedProviderTuple
+      ? storedMessages.find(
+          (message) =>
+            message.role === "assistant" &&
+            message.worker_provider_identity &&
+            getMessageProviderSourceId(message) === scopedProviderTuple.provider_source_id &&
+            getMessageProviderOccurrence(message) === scopedProviderTuple.provider_occurrence
+        )
+      : undefined
+    const explicitLegacyMatch =
+      scopedProviderTuple && observedMessageId && !explicitMatch
+        ? storedMessages.find(
+            (message) =>
+              message.role === "assistant" &&
+              !message.worker_provider_identity &&
+              message.id === observedMessageId &&
+              (getMessageProviderOccurrence(message) ?? 1) ===
+                scopedProviderTuple.provider_occurrence
+          )
+        : undefined
+    const currentMessageId = this.staleWorkerCurrentMessageIdByTurn.get(staleTurnKey)
+    const knownWireMatch =
+      !scopedProviderTuple &&
+      typeof kwargs.id === "string" &&
+      !this.staleWorkerAssistantBoundaryByTurn.has(staleTurnKey)
+        ? this.findStaleWorkerWireAlias(
+            storedMessages,
+            scopeId(""),
+            kwargs.id,
+            currentMessageId
+          )
+        : undefined
     let messageId: string
-    if (typeof kwargs.id === "string") {
-      const providerSourceId = scopeId(kwargs.id)
-      const currentMessageId = this.staleWorkerCurrentMessageIdByTurn.get(staleTurnKey)
-      if (
+    if (observedMessageId || explicitProviderSourceId) {
+      const providerSourceId =
+        explicitProviderSourceId ??
+        (knownWireMatch ? getMessageProviderSourceId(knownWireMatch) : observedMessageId!)
+      if (scopedProviderTuple) {
+        messageId =
+          explicitMatch?.id ??
+          explicitLegacyMatch?.id ??
+          availableWorkerAssistantProviderId(
+            providerSourceId,
+            scopedProviderTuple.provider_occurrence,
+            { has: (id) => storedMessages.some((message) => message.id === id) }
+          )
+      } else if (knownWireMatch) {
+        messageId = knownWireMatch.id
+      } else if (
         currentMessageId &&
-        this.staleWorkerCurrentProviderSourceIdByTurn.get(staleTurnKey) === providerSourceId
+        this.staleWorkerCurrentProviderSourceIdByTurn.get(staleTurnKey) === providerSourceId &&
+        !storedMessages.some(
+          (message) => message.id === currentMessageId && message.worker_provider_identity
+        )
       ) {
         messageId = currentMessageId
       } else if (this.staleWorkerAssistantBoundaryByTurn.has(staleTurnKey)) {
         messageId = this.allocateStaleWorkerProviderMessageId(providerSourceId)
+      } else if (
+        storedMessages.some(
+          (message) => message.id === providerSourceId && message.worker_provider_identity
+        )
+      ) {
+        messageId = availableWorkerAssistantProviderId(providerSourceId, 1, {
+          has: (id) => storedMessages.some((message) => message.id === id)
+        })
       } else {
         messageId = providerSourceId
       }
@@ -1036,52 +1238,108 @@ export class ElectronIPCTransport implements UseStreamTransport {
       this.staleWorkerCurrentProviderSourceIdByTurn.delete(staleTurnKey)
     }
     this.staleWorkerAssistantBoundaryByTurn.delete(staleTurnKey)
-    const storedMessage = useAppStore
-      .getState()
-      .workerFocusMessages.find((message) => message.id === messageId)
-    const storedContent =
-      typeof storedMessage?.content === "string" ? storedMessage.content : ""
+    const storedMessage = scopedProviderTuple
+      ? (explicitMatch ?? explicitLegacyMatch)
+      : storedMessages.find((message) => message.id === messageId)
+    const currentContent =
+      typeof storedMessage?.content === "string"
+        ? storedMessage.content
+        : (this.staleWorkerAssistantTextByMessageId.get(messageId) ?? "")
     let resolvedContent = content
-    if (isChunk && content) {
-      resolvedContent = this.mergeWorkerAssistantTextChunk(
-        this.staleWorkerAssistantTextByMessageId.get(messageId) ?? storedContent,
-        content
+    if (isChunk && (content || contentWireMode === "snapshot")) {
+      resolvedContent = this.mergeWorkerAssistantTextByWireMode(
+        currentContent,
+        content,
+        contentWireMode
       )
     } else if (!content) {
-      resolvedContent =
-        this.staleWorkerAssistantTextByMessageId.get(messageId) ?? storedContent
+      resolvedContent = currentContent
     }
-    if (resolvedContent) {
+    if (resolvedContent || contentWireMode === "snapshot") {
       this.staleWorkerAssistantTextByMessageId.set(messageId, resolvedContent)
     }
 
     const incomingReasoning = extractVisibleReasoning(kwargs)
-    const storedReasoning = storedMessage?.reasoning ?? ""
+    const currentReasoning =
+      storedMessage?.reasoning ?? this.staleWorkerAssistantReasoningByMessageId.get(messageId) ?? ""
     let reasoning = incomingReasoning
-    if (isChunk && incomingReasoning) {
-      reasoning = this.mergeWorkerAssistantTextChunk(
-        this.staleWorkerAssistantReasoningByMessageId.get(messageId) ?? storedReasoning,
-        incomingReasoning
+    if (isChunk && (incomingReasoning || reasoningWireMode === "snapshot")) {
+      reasoning = this.mergeWorkerAssistantTextByWireMode(
+        currentReasoning,
+        incomingReasoning,
+        reasoningWireMode
       )
     } else if (!incomingReasoning) {
-      reasoning =
-        this.staleWorkerAssistantReasoningByMessageId.get(messageId) ?? storedReasoning
+      reasoning = currentReasoning
     }
-    if (reasoning) {
+    if (reasoning || reasoningWireMode === "snapshot") {
       this.staleWorkerAssistantReasoningByMessageId.set(messageId, reasoning)
     }
-    const toolCalls = this.accumulateStaleWorkerToolCalls(messageId, kwargs)
-    if (!resolvedContent && !reasoning && toolCalls.length === 0) return []
+    const toolCallsAreSnapshot = !isChunk && Array.isArray(kwargs.tool_calls)
+    const toolCalls = this.accumulateStaleWorkerToolCalls(messageId, kwargs, toolCallsAreSnapshot)
+    if (
+      !resolvedContent &&
+      !reasoning &&
+      !toolCallsAreSnapshot &&
+      toolCalls.length === 0 &&
+      contentWireMode !== "snapshot" &&
+      reasoningWireMode !== "snapshot"
+    ) {
+      return []
+    }
     return [
       {
         id: messageId,
         role: "assistant",
         content: resolvedContent,
-        ...(reasoning && { reasoning }),
-        ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
+        ...(contentWireMode === "snapshot" && { worker_content_source: "snapshot" }),
+        // A late update belongs to this known old-turn slot, even when the store
+        // has already appended another user turn. Do not infer a new occurrence.
+        ...(scopedProviderTuple
+          ? scopedProviderTuple
+          : storedMessage?.role === "assistant" && {
+              provider_source_id: getMessageProviderSourceId(storedMessage),
+              provider_occurrence: getMessageProviderOccurrence(storedMessage) ?? 1,
+              worker_provider_identity: storedMessage.worker_provider_identity
+            }),
+        ...((scopedProviderTuple || knownWireMatch) &&
+          typeof kwargs.id === "string" && {
+            worker_provider_wire_ids: [kwargs.id]
+          }),
+        ...((reasoning || reasoningWireMode === "snapshot") && { reasoning }),
+        ...(toolCallsAreSnapshot
+          ? workerToolCallSnapshot(toolCalls)
+          : toolCalls.length > 0 && { tool_calls: toolCalls }),
         created_at: new Date()
       }
     ]
+  }
+
+  private findStaleWorkerWireAlias(
+    messages: readonly Message[],
+    turnPrefix: string,
+    wireId: string,
+    currentMessageId: string | undefined
+  ): Message | undefined {
+    const turnMessages = messages.filter((message) =>
+      getMessageProviderSourceId(message).startsWith(turnPrefix)
+    )
+    const matches = turnMessages.filter(
+      (message) =>
+        message.role === "assistant" &&
+        (message.worker_provider_wire_ids?.includes(wireId) || message.id === turnPrefix + wireId)
+    )
+    const [match] = matches
+    if (
+      matches.length === 1 &&
+      match.worker_provider_identity &&
+      match.worker_provider_wire_ids?.includes(wireId) &&
+      (!currentMessageId || currentMessageId === match.id) &&
+      turnMessages.at(-1) === match
+    ) {
+      return match
+    }
+    return undefined
   }
 
   private allocateStaleWorkerProviderMessageId(providerSourceId: string): string {
@@ -1113,32 +1371,47 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
   private accumulateStaleWorkerToolCalls(
     messageId: string,
-    kwargs: SerializedMessageChunk["kwargs"]
+    kwargs: SerializedMessageChunk["kwargs"],
+    toolCallsAreSnapshot: boolean
   ): NonNullable<Message["tool_calls"]> {
     let callsById = this.staleWorkerToolCallsByMessageId.get(messageId)
     if (!callsById) {
       callsById = new Map()
       this.staleWorkerToolCallsByMessageId.set(messageId, callsById)
     }
+    if (toolCallsAreSnapshot) {
+      const declaredIds = new Set(kwargs?.tool_calls?.map((call) => call.id))
+      for (const id of callsById.keys()) {
+        if (!declaredIds.has(id)) callsById.delete(id)
+      }
+      for (const [key, id] of this.staleWorkerToolCallChunkIndexToId) {
+        if (key.slice(0, key.lastIndexOf("\u001f")) === messageId && !declaredIds.has(id)) {
+          this.staleWorkerToolCallChunkIndexToId.delete(key)
+        }
+      }
+    }
 
     if (Array.isArray(kwargs?.tool_calls)) {
       for (const toolCall of kwargs.tool_calls) {
         if (!toolCall || typeof toolCall.id !== "string") continue
         const existing = callsById.get(toolCall.id)
+        const incomingArgs =
+          toolCall.args && typeof toolCall.args === "object" && !Array.isArray(toolCall.args)
+            ? toolCall.args
+            : undefined
+        const args = this.hasToolArgs(incomingArgs)
+          ? incomingArgs
+          : (existing?.args ?? incomingArgs)
         callsById.set(toolCall.id, {
           id: toolCall.id,
           name: toolCall.name || existing?.name,
           argsText: existing?.argsText ?? "",
-          ...(toolCall.args && typeof toolCall.args === "object" && !Array.isArray(toolCall.args)
-            ? { args: toolCall.args }
-            : existing?.args
-              ? { args: existing.args }
-              : {})
+          ...(args && { args })
         })
       }
     }
 
-    if (Array.isArray(kwargs?.tool_call_chunks)) {
+    if (!toolCallsAreSnapshot && Array.isArray(kwargs?.tool_call_chunks)) {
       for (const chunk of kwargs.tool_call_chunks) {
         const indexKey =
           typeof chunk.index === "number" ? `${messageId}\u001f${chunk.index}` : undefined
@@ -1149,10 +1422,20 @@ export class ElectronIPCTransport implements UseStreamTransport {
           this.staleWorkerToolCallChunkIndexToId.set(indexKey, chunk.id)
         }
         const existing = callsById.get(toolCallId)
-        const argsText = chunk.args
-          ? this.mergeToolCallChunkArgs(existing?.argsText ?? "", chunk.args)
+        const argsWireMode = readStreamMessageWireMode(
+          (chunk as unknown as Record<string, unknown>)[STREAM_TOOL_CALL_ARGS_MODE_KEY]
+        )
+        const hasArgsUpdate =
+          typeof chunk.args === "string" &&
+          (chunk.args.length > 0 || argsWireMode === "snapshot")
+        const argsText = hasArgsUpdate
+          ? this.mergeToolCallChunkArgs(
+              existing?.argsText ?? "",
+              chunk.args!,
+              argsWireMode
+            )
           : (existing?.argsText ?? "")
-        let args = existing?.args
+        let args = argsWireMode === "snapshot" && hasArgsUpdate ? undefined : existing?.args
         if (argsText) {
           try {
             const parsed = JSON.parse(argsText)
@@ -1187,9 +1470,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
    * array) into renderer `Message[]` for the live workflow tool-stream panel. Reuses
    * the proven coordinator values-mapper, but WITHOUT its `workerFocusView` coupling
    * (the workflow tap is keyed by runId+agentIndex, filtered by runId in
-   * WorkflowRunPanel's subscription). `values`
-   * snapshots are full-state latest-wins, so the caller REPLACES the agent's buffer
-   * — no append/dedup needed.
+   * WorkflowRunPanel's subscription). Both live values and the finished sidecar
+   * pass through this projection.
    */
   convertWorkflowAgentValuesSnapshot(
     snapshotMessages: unknown,
@@ -1198,7 +1480,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
     if (!Array.isArray(snapshotMessages) || snapshotMessages.length === 0) return []
     return this.createFocusedCoordinatorWorkerEventsFromValues(
       snapshotMessages as SerializedMessageChunk[],
-      syntheticThreadId
+      syntheticThreadId,
+      true
     )
   }
 
@@ -1217,10 +1500,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
     modelId?: string,
     agentMode?: TransportAgentMode,
     coordinatorInternalNotification = false,
-    userMessageId?: string
+    userMessageId?: string,
+    managedAutoSendRunId?: string
   ): AsyncGenerator<StreamEvent> {
     // Create a queue to buffer events from IPC
-    const eventQueue: QueuedStreamEvent[] = []
+    const eventQueue = new CursorQueue<QueuedStreamEvent>()
     const coalescedQueuedEvents = new Map<string, QueuedStreamEvent>()
     let resolveNext: ((value: StreamEvent | null) => void) | null = null
     let isDone = false
@@ -1228,7 +1512,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     let reachedDoneBoundary = false
 
     // Generate a run ID for this stream
-    const runId = crypto.randomUUID()
+    const runId = managedAutoSendRunId ?? crypto.randomUUID()
 
     // Emit metadata event first to establish run context
     yield {
@@ -1296,41 +1580,48 @@ export class ElectronIPCTransport implements UseStreamTransport {
     }
     this.deferredStreamEventSink = enqueueStreamEvent
 
-    const cleanup = window.api.agent.streamAgent(
-      threadId,
-      message,
-      command,
-      (ipcEvent) => {
-        if (terminalReceived) return
-        if (
-          ipcEvent.type === "custom" &&
-          (ipcEvent.data as { type?: unknown; mode?: unknown } | undefined)?.type === "agent_mode"
-        ) {
-          const nextMode = (ipcEvent.data as { mode?: unknown }).mode
-          if (nextMode === "normal" || nextMode === "coordinator") {
-            currentAgentMode = nextMode
-          }
+    const subscribeToIPCEvents = (onEvent: (ipcEvent: AgentIPCEvent) => void): (() => void) =>
+      managedAutoSendRunId
+        ? window.api.agent.observeManagedAutoSendStream(managedAutoSendRunId, onEvent)
+        : window.api.agent.streamAgent(
+            threadId,
+            message,
+            command,
+            onEvent,
+            modelId,
+            agentMode,
+            coordinatorInternalNotification,
+            userMessageId
+          )
+    const cleanup = subscribeToIPCEvents((ipcEvent) => {
+      if (terminalReceived) return
+      if (
+        ipcEvent.type === "custom" &&
+        (ipcEvent.data as { type?: unknown; mode?: unknown } | undefined)?.type === "agent_mode"
+      ) {
+        const nextMode = (ipcEvent.data as { mode?: unknown }).mode
+        if (nextMode === "normal" || nextMode === "coordinator") {
+          currentAgentMode = nextMode
         }
-        // Convert IPC events to SDK format
-        const sdkEvents = this.convertToSDKEvents(ipcEvent as IPCEvent, threadId, currentAgentMode)
+      }
+      // Convert IPC events to SDK format
+      const sdkEvents = this.convertToSDKEvents(ipcEvent as IPCEvent, threadId, currentAgentMode)
 
-        for (const sdkEvent of sdkEvents) {
-          if (sdkEvent.event === "done" || sdkEvent.event === "error") {
-            for (const recoveryEvent of this.createActiveSubagentAssistantLosslessEvents()) {
-              enqueueStreamEvent(recoveryEvent)
-            }
-            isDone = true
-            terminalReceived = true
+      for (const sdkEvent of sdkEvents) {
+        if (sdkEvent.event === "done" || sdkEvent.event === "error") {
+          for (const recoveryEvent of this.createActiveSubagentAssistantLosslessEvents()) {
+            enqueueStreamEvent(recoveryEvent)
           }
-          enqueueStreamEvent(sdkEvent)
-          if (terminalReceived) break
+          isDone = true
+          terminalReceived = true
+          if (managedAutoSendRunId) {
+            this.options.onManagedAutoSendRunTerminal?.(managedAutoSendRunId)
+          }
         }
-      },
-      modelId,
-      agentMode,
-      coordinatorInternalNotification,
-      userMessageId
-    )
+        enqueueStreamEvent(sdkEvent)
+        if (terminalReceived) break
+      }
+    })
 
     let cleanedUp = false
     const abortListener = (): void => {
@@ -1338,7 +1629,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       cleanupOnce()
       isDone = true
       terminalReceived = true
-      const durableTranscriptEvents = eventQueue.filter((queued) => {
+      const durableTranscriptEvents = eventQueue.toArray().filter((queued) => {
         if (queued.event.event !== "custom") return true
         const data = queued.event.data
         if (!data || typeof data !== "object") return true
@@ -1347,7 +1638,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
           String(type ?? "")
         )
       })
-      eventQueue.splice(0, eventQueue.length, ...durableTranscriptEvents)
+      eventQueue.replace(durableTranscriptEvents)
       coalescedQueuedEvents.clear()
       for (const queued of durableTranscriptEvents) {
         if (queued.coalesceKey) coalescedQueuedEvents.set(queued.coalesceKey, queued)
@@ -1380,7 +1671,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       while (!isDone || eventQueue.length > 0) {
         // Check for queued events first
         if (eventQueue.length > 0) {
-          const queued = eventQueue.shift()!
+          const queued = eventQueue.dequeue()!
           if (
             queued.coalesceKey &&
             coalescedQueuedEvents.get(queued.coalesceKey) === queued
@@ -1430,6 +1721,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
       if (!reachedDoneBoundary) {
         this.subagentStableTranscriptSignaturesByThread.delete(threadId)
       }
+      if (this.options.managedAutoSendRunId === managedAutoSendRunId) {
+        this.options.managedAutoSendRunId = undefined
+      }
     }
   }
 
@@ -1438,7 +1732,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
     transcripts: Readonly<Record<string, readonly Message[]>>
   ): void {
     const signatures = this.getSubagentStableTranscriptSignatures(threadId)
-    for (const [subagentId, messages] of Object.entries(transcripts)) {
+    const recentTranscripts = Object.entries(transcripts).slice(
+      -MAX_TRACKED_SUBAGENT_EXECUTIONS
+    )
+    for (const [subagentId, messages] of recentTranscripts) {
+      this.seededSubagentExecutionIds.add(subagentId)
       const scopedMatch = /^(.*)::(?:execution-\d+|invocation-[a-z0-9-]+)$/.exec(subagentId)
       const rawToolCallId = scopedMatch?.[1] ?? subagentId
       const legacyExecutionIds = this.seededSubagentExecutionIdsByToolCallId.get(rawToolCallId) ?? []
@@ -1452,7 +1750,13 @@ export class ElectronIPCTransport implements UseStreamTransport {
           }
           return legacyOrdinal(left) - legacyOrdinal(right)
         })
-        this.seededSubagentExecutionIdsByToolCallId.set(rawToolCallId, legacyExecutionIds)
+        this.seededSubagentExecutionIdsByToolCallId.set(
+          rawToolCallId,
+          keepRecentItems(
+            legacyExecutionIds,
+            MAX_TRACKED_SUBAGENT_EXECUTIONS_PER_TOOL_CALL
+          )
+        )
       }
       for (const message of messages) {
         if (typeof message.content !== "string") continue
@@ -1514,6 +1818,20 @@ export class ElectronIPCTransport implements UseStreamTransport {
         }
       }
     }
+    pruneSetToLimit(this.seededSubagentExecutionIds, MAX_TRACKED_SUBAGENT_EXECUTIONS)
+    pruneMapToLimit(
+      this.seededSubagentExecutionIdsByToolCallId,
+      MAX_TRACKED_SUBAGENT_EXECUTIONS
+    )
+    pruneMapToLimit(
+      this.seededSubagentPromptFingerprintByExecutionId,
+      MAX_TRACKED_SUBAGENT_EXECUTIONS
+    )
+    pruneMapToLimit(
+      this.subagentPromptInvocationIdentityByExecutionId,
+      MAX_TRACKED_SUBAGENT_EXECUTIONS
+    )
+    pruneMapToLimit(signatures, MAX_TRACKED_SUBAGENT_SIGNATURES_PER_THREAD)
   }
 
   private getStreamEventCoalesceKey(event: StreamEvent): string | undefined {
@@ -1802,12 +2120,15 @@ export class ElectronIPCTransport implements UseStreamTransport {
           break
         }
         if (data?.type === "stream_retry_reset") {
-          const discardedMessageIds = Array.isArray(data.discardedMessageIds)
+          const requestedDiscardedMessageIds = Array.isArray(data.discardedMessageIds)
             ? data.discardedMessageIds.filter((id): id is string => typeof id === "string")
             : []
-          this.resetMainStreamAttempt(discardedMessageIds)
           const messages = transformSerializedValuesMessages(
             Array.isArray(data.messages) ? (data.messages as SerializedMessageChunk[]) : []
+          )
+          const discardedMessageIds = this.resetMainStreamAttempt(
+            requestedDiscardedMessageIds,
+            messages
           )
           this.advanceFallbackIndexesFromValuesMessages(messages)
           // A values event replaces useStream's partial message state with the
@@ -1891,6 +2212,22 @@ export class ElectronIPCTransport implements UseStreamTransport {
     }
 
     return events.map((event) => {
+      if (
+        event.event === "custom" &&
+        event.data &&
+        typeof event.data === "object" &&
+        "type" in event.data &&
+        event.data.type === "coordinator_ai_snapshot_message" &&
+        "assistantMessage" in event.data
+      ) {
+        const message = event.data.assistantMessage as RoleCollisionMessage | undefined
+        if (message?.type !== "ai" || typeof message.id !== "string") return event
+        const normalizedMessage = normalizeMessages([message])[0]
+        return normalizedMessage === message
+          ? event
+          : { ...event, data: { ...event.data, assistantMessage: normalizedMessage } }
+      }
+
       if (event.event === "messages" && Array.isArray(event.data)) {
         const [message, metadata] = event.data as [RoleCollisionMessage, unknown]
         if (!message || typeof message !== "object" || typeof message.id !== "string") {
@@ -1933,9 +2270,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
   private createFocusedCoordinatorWorkerEventsFromValues(
     messages: SerializedMessageChunk[],
-    workerThreadId: string
+    workerThreadId: string,
+    workflowSnapshot = false
   ): Message[] {
     const converted: Message[] = []
+    const currentTurnWireIds = new Map<Message, string>()
     const currentWorkerTurn = this.workerCurrentTurnByThread.get(workerThreadId)
     const visibleHumanCount = messages.filter(
       (message) =>
@@ -1982,6 +2321,30 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
       const isAssistantMessage = this.isSerializedAIMessage(message)
       const content = this.extractContent(kwargs.content)
+      const hasLossyWorkflowIdentity =
+        workflowSnapshot &&
+        (isLegacyTruncatedWorkflowIdentity(
+          additionalKwargs?.[MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]
+        ) ||
+          isLegacyTruncatedWorkflowIdentity(kwargs.tool_call_id))
+      const explicitProviderTuple = hasLossyWorkflowIdentity
+        ? undefined
+        : getMessageProviderTupleFromMetadata(additionalKwargs)
+      const providerTuple =
+        explicitProviderTuple && !workflowSnapshot
+          ? {
+              ...explicitProviderTuple,
+              provider_source_id:
+                currentWorkerTurn !== undefined || visibleHumanCount > 0
+                  ? this.createFocusedWorkerMessageIdForTurn(
+                      workerThreadId,
+                      explicitProviderTuple.provider_source_id,
+                      messageWorkerTurn
+                    )
+                  : explicitProviderTuple.provider_source_id,
+              worker_provider_identity: true
+            }
+          : explicitProviderTuple
       const reasoning = isAssistantMessage ? extractVisibleReasoning(kwargs) : ""
       const toolCalls = this.isSerializedAIMessage(message)
         ? this.hydrateToolCallsWithAccumulatedArgs(kwargs.tool_calls ?? [], false)
@@ -2016,37 +2379,71 @@ export class ElectronIPCTransport implements UseStreamTransport {
           id: rawId,
           role: "user",
           content,
+          ...providerTuple,
+          worker_snapshot_index: snapshotIndex,
           created_at: new Date()
         })
         continue
       }
 
       if (this.isSerializedAIMessage(message)) {
-        converted.push({
+        const assistant: Message = {
           id: rawId,
           role: "assistant",
           content,
+          ...providerTuple,
+          ...(!workflowSnapshot &&
+            providerTuple &&
+            typeof kwargs.id === "string" && {
+              worker_provider_wire_ids: [kwargs.id]
+            }),
+          worker_snapshot_index: snapshotIndex,
           ...(reasoning && { reasoning }),
-          ...(toolCalls.length && { tool_calls: toolCalls as Message["tool_calls"] }),
+          ...(Array.isArray(kwargs.tool_calls) &&
+            workerToolCallSnapshot(toolCalls as NonNullable<Message["tool_calls"]>)),
           created_at: new Date()
-        })
+        }
+        converted.push(assistant)
+        if (
+          !workflowSnapshot &&
+          typeof kwargs.id === "string" &&
+          (currentWorkerTurn === undefined || messageWorkerTurn === currentWorkerTurn)
+        ) {
+          currentTurnWireIds.set(assistant, kwargs.id)
+        }
         continue
       }
 
       if (this.isSerializedToolMessage(message) && kwargs.tool_call_id) {
-        const isError = this.isToolMessageError(kwargs)
         converted.push({
-          id: rawId,
-          role: "tool",
-          content: this.extractContent(kwargs.content),
-          tool_call_id: kwargs.tool_call_id,
-          ...(kwargs.name && { name: kwargs.name }),
-          ...(kwargs.status && { status: kwargs.status }),
-          ...(isError && { is_error: true }),
-          created_at: new Date()
+          ...this.createWorkerToolResult(rawId, content, kwargs, providerTuple),
+          worker_snapshot_index: snapshotIndex
         })
       }
     }
+    if (workflowSnapshot) {
+      const first = messages[0]
+      const precedingPromptIndex =
+        first?.kwargs?.additional_kwargs?.[WORKFLOW_PRECEDING_PROMPT_INDEX_KEY]
+      return normalizeWorkflowSnapshotMessageIds(
+        coalesceSnapshotMessageAliases(converted, {
+          scope: workerThreadId,
+          precedingPromptIndex:
+            typeof precedingPromptIndex === "number" &&
+            Number.isSafeInteger(precedingPromptIndex) &&
+            precedingPromptIndex > 0 &&
+            precedingPromptIndex < getWorkerSnapshotFallbackIndex(first, 0)
+              ? precedingPromptIndex
+              : undefined
+        })
+      )
+    }
+    const completeSnapshot = this.reconcileWorkerSnapshotWireAliases(
+      workerThreadId,
+      converted,
+      currentTurnWireIds
+    )
+
     const previousActiveMessageId = this.workerCurrentMessageIds.get(workerThreadId)
     const previousActiveProviderSourceId = this.workerCurrentProviderSourceIds.get(workerThreadId)
     const workerFocusState = useAppStore.getState()
@@ -2058,19 +2455,19 @@ export class ElectronIPCTransport implements UseStreamTransport {
       (message) => message.role === "user"
     )
     const turnAwareBaseline = [...storeBaseline]
-    const turnAwareConverted = converted.map((message) => {
+    const precedingHistoryIds = new Set(
+      storeBaseline
+        .slice(0, latestStoredUserIndex + 1)
+        .filter((message) => message.role === "assistant")
+        .map((message) => message.id)
+    )
+    const turnAwareConverted = completeSnapshot.map((message) => {
       const isSnapshotFallbackId =
-        message.id.startsWith("worker-snapshot-") ||
-        message.id.includes("::worker-snapshot-")
-      const existingSameRoleIndex = storeBaseline.findIndex(
-        (candidate) => candidate.id === message.id && candidate.role === message.role
-      )
+        message.id.startsWith("worker-snapshot-") || message.id.includes("::worker-snapshot-")
       if (
         message.role !== "assistant" ||
         !isSnapshotFallbackId ||
-        latestStoredUserIndex < 0 ||
-        existingSameRoleIndex < 0 ||
-        existingSameRoleIndex > latestStoredUserIndex
+        !precedingHistoryIds.has(message.id)
       ) {
         turnAwareBaseline.push(message)
         return message
@@ -2140,6 +2537,13 @@ export class ElectronIPCTransport implements UseStreamTransport {
       ? useAppStore
           .getState()
           .workerFocusMessages.find((message) => message.id === previousActiveMessageId)
+      : undefined
+    const explicitActiveSnapshot = previousStoredMessage?.worker_provider_identity
+      ? activeProviderCandidates.find(
+          (message) =>
+            message.worker_provider_identity &&
+            message.provider_occurrence === previousStoredMessage.provider_occurrence
+        )
       : undefined
     const previousToolCallsById = new Map(
       (previousStoredMessage?.tool_calls ?? []).map((toolCall) => [toolCall.id, toolCall])
@@ -2247,41 +2651,47 @@ export class ElectronIPCTransport implements UseStreamTransport {
       `worker-live-${workerThreadId}-`
     )
     const activeSnapshotMessageId =
-      previousReplayPin?.id === previousActiveMessageId &&
+      explicitActiveSnapshot?.id ??
+      (previousReplayPin?.id === previousActiveMessageId &&
       activeProviderCandidates.some((message) => message.id === previousActiveMessageId)
         ? previousActiveMessageId
         : previousActiveRenderId?.startsWith("worker-snapshot-") &&
             assistantMessages.filter((message) => message.id === previousActiveMessageId).length === 1
           ? previousActiveMessageId
-        : activeRenderIdMatches.length === 1
-          ? activeRenderIdMatches[0].id
-        : contentMatches.length === 1
-          ? contentMatches[0].id
-          : unknownProviderMatches.length > 0
-            ? unknownProviderMatches.at(-1)?.id
-          : initialTurnAdoptionPending &&
-              !previousActiveProviderSourceId &&
-              previousActiveMessageIsUnscoped &&
-              assistantMessages.length === 1 &&
-              latestAssistantMessage
-            ? latestAssistantMessage.id
-            : previousActiveMessageIsUnscoped &&
-                previousActiveUsesFallbackId &&
-                activeProviderCandidates.length > 0
-              ? activeProviderCandidates.at(-1)?.id
-              : undefined
-    const preserveUnscopedActiveMessageId =
-      previousActiveMessageIsUnscoped &&
+          : activeRenderIdMatches.length === 1
+            ? activeRenderIdMatches[0].id
+            : contentMatches.length === 1
+              ? contentMatches[0].id
+              : unknownProviderMatches.length > 0
+                ? unknownProviderMatches.at(-1)?.id
+                : initialTurnAdoptionPending &&
+                    !previousActiveProviderSourceId &&
+                    previousActiveMessageIsUnscoped &&
+                    assistantMessages.length === 1 &&
+                    latestAssistantMessage
+                  ? latestAssistantMessage.id
+                  : previousActiveMessageIsUnscoped &&
+                      previousActiveUsesFallbackId &&
+                      activeProviderCandidates.length > 0
+                    ? activeProviderCandidates.at(-1)?.id
+                    : undefined)
+    const preserveActiveMessageId =
+      (previousActiveMessageIsUnscoped || explicitActiveSnapshot) &&
       Boolean(activeSnapshotMessageId) &&
-      activeSnapshotMessageId !== previousActiveMessageId
+      activeSnapshotMessageId !== previousActiveMessageId &&
+      !completeMessages.some((message) => message.id === previousActiveMessageId)
     const normalized = completeMessages.map((message) => {
       const activeMessage = message.id === activeSnapshotMessageId
       const renderNormalizedMessage =
-        activeMessage && preserveUnscopedActiveMessageId
+        activeMessage && preserveActiveMessageId
           ? {
               ...message,
               id: previousActiveMessageId!,
-              provider_source_id: getMessageProviderSourceId(message)
+              provider_source_id: getMessageProviderSourceId(message),
+              // A legacy snapshot can adopt an anonymous draft by partial text or call overlap.
+              // That match does not establish which of the draft's other calls were removed.
+              ...(!previousActiveProviderSourceId &&
+                !message.worker_provider_identity && { worker_tool_calls_source: undefined })
             }
           : message
       const normalizedMessage =
@@ -2309,9 +2719,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
       return {
         ...normalizedMessage,
-        tool_calls: this.hydrateToolCallsWithAccumulatedArgs(
-          normalizedMessage.tool_calls
-        ) as Message["tool_calls"]
+        tool_calls: mergeWorkerToolCallSnapshot(
+          previousStoredMessage?.tool_calls,
+          this.hydrateToolCallsWithAccumulatedArgs(
+            normalizedMessage.tool_calls
+          ) as Message["tool_calls"]
+        )
       }
     })
     this.syncFocusedWorkerProviderStateFromValues(
@@ -2323,6 +2736,116 @@ export class ElectronIPCTransport implements UseStreamTransport {
       this.workerInitialTurnAdoptionPending.delete(workerThreadId)
     }
     return normalized
+  }
+
+  private reconcileWorkerSnapshotWireAliases(
+    workerThreadId: string,
+    messages: readonly Message[],
+    wireIds: ReadonlyMap<Message, string>
+  ): Message[] {
+    const active = this.currentExplicitWorkerAssistant(workerThreadId)
+    const latestAssistantIndex = messages.findLastIndex((message) => message.role === "assistant")
+    const latestAssistant = messages[latestAssistantIndex]
+    const trailingRows = messages.slice(latestAssistantIndex + 1)
+    const latestCallIds = new Set(latestAssistant?.tool_calls?.map(({ id }) => id))
+    const isTerminalAssistantSequence = trailingRows.every(
+      (message) =>
+        message.role === "tool" &&
+        Boolean(message.tool_call_id && latestCallIds.has(message.tool_call_id))
+    )
+    const owners =
+      this.workerProviderWireOwners.get(workerThreadId) ?? new Map<string, string | null>()
+    const frameOwners = new Map<string, string | null>()
+    for (const [message, wireId] of wireIds) {
+      const identity = message.worker_provider_identity
+        ? getMessageProviderOccurrenceIdentity(message)
+        : null
+      if (frameOwners.has(wireId) && (!identity || frameOwners.get(wireId) !== identity)) {
+        if (identity || frameOwners.get(wireId) || owners.has(wireId)) {
+          owners.set(wireId, null)
+        }
+        frameOwners.set(wireId, null)
+      } else {
+        frameOwners.set(wireId, identity)
+      }
+    }
+    this.workerProviderWireOwners.set(workerThreadId, owners)
+    pruneMapToLimit(owners, MAX_TRACKED_EMITTED_MESSAGES)
+
+    const priorByIdentity = new Map<string, Message>()
+    const priorRenderIds = new Set<string>()
+    const priorCandidates = this.workerProviderReplayCandidates.get(workerThreadId)
+    for (const candidates of priorCandidates?.values() ?? []) {
+      for (const candidate of candidates) {
+        if (candidate.worker_provider_identity) {
+          priorRenderIds.add(candidate.id)
+          priorByIdentity.set(getMessageProviderOccurrenceIdentity(candidate), candidate)
+        }
+      }
+    }
+    const frameIdentities = new Set(
+      messages.filter((message) => message.worker_provider_identity).map(
+        getMessageProviderOccurrenceIdentity
+      )
+    )
+    let lastToolIndex = -Infinity
+    const reconciled = messages.map((message) => {
+      const snapshotIndex = message.worker_snapshot_index ?? -1
+      if (message.role === "tool") lastToolIndex = snapshotIndex
+      const wireId = wireIds.get(message)
+      if (!wireId || message.worker_provider_identity) return message
+
+      const owner = owners.get(wireId)
+      const previous = owner ? priorByIdentity.get(owner) : undefined
+      const isTerminalAssistant = message === latestAssistant && isTerminalAssistantSequence
+      if (owner && previous?.worker_provider_wire_ids?.includes(wireId) && !frameIdentities.has(owner)) {
+        const previousIndex = previous.worker_snapshot_index ?? -1
+        const previousCallIds = new Set(previous.tool_calls?.map(({ id }) => id))
+        const isKnownToolSlot =
+          snapshotIndex === previous.worker_snapshot_index &&
+          message.tool_calls?.some(({ id }) => id && previousCallIds.has(id))
+        // A streamed tool result clears the active assistant before the full values frame.
+        // The known wire ID and its own matching trailing results can still identify that row.
+        const followsKnownReply =
+          isTerminalAssistant &&
+          lastToolIndex < previousIndex &&
+          snapshotIndex >= previousIndex &&
+          (previous === active ||
+            (trailingRows.length > 0 &&
+              trailingRows.every(
+                (tool) => tool.tool_call_id && previousCallIds.has(tool.tool_call_id)
+              )))
+        if (isKnownToolSlot || followsKnownReply) {
+          frameIdentities.add(owner)
+          return {
+            ...message,
+            worker_provider_identity: true,
+            provider_source_id: previous.provider_source_id,
+            provider_occurrence: previous.provider_occurrence,
+            worker_provider_wire_ids: [wireId]
+          }
+        }
+      }
+      if (isTerminalAssistant && priorRenderIds.has(message.id)) {
+        // A raw wire ID may also be another reply's render ID. Keep an unconfirmed row separate.
+        const fallback = createWorkerSnapshotFallbackMessageId(snapshotIndex)
+        return { ...message, id: this.createFocusedWorkerTurnScopedMessageId(workerThreadId, fallback) }
+      }
+      return message
+    })
+    return coalesceSnapshotMessageAliases(reconciled).map((message) => {
+      if (!message.worker_provider_identity || message.role !== "assistant") return message
+      const previous = priorByIdentity.get(getMessageProviderOccurrenceIdentity(message))
+      return previous?.worker_provider_wire_ids
+        ? {
+            ...message,
+            worker_provider_wire_ids: mergeWorkerProviderWireIds(
+              previous.worker_provider_wire_ids,
+              message.worker_provider_wire_ids
+            )
+          }
+        : message
+    })
   }
 
   private nextMessageFallbackIndex(type: "ai" | "tool" | "system"): number {
@@ -2795,22 +3318,103 @@ export class ElectronIPCTransport implements UseStreamTransport {
     })
   }
 
-  private resetMainStreamAttempt(messageIds: string[]): void {
+  private resetMainStreamAttempt(
+    messageIds: string[],
+    stableMessages: RoleCollisionMessage[] = []
+  ): string[] {
     this.pendingIdlessCompletedAssistantRoute = undefined
     const discardedMessageIds = new Set([...messageIds, ...this.inFlightMainMessageIds])
     this.inFlightMainMessageIds.clear()
     for (const messageId of [...discardedMessageIds]) {
       discardedMessageIds.add(this.resolveMainAssistantMessageIdAlias(messageId))
     }
+    for (const [fromId, toId] of this.mainAssistantMessageIdAliases) {
+      const resolvedId = this.resolveMainAssistantMessageIdAlias(toId)
+      if (discardedMessageIds.has(resolvedId)) {
+        discardedMessageIds.add(fromId)
+        discardedMessageIds.add(toId)
+      }
+    }
+    const discardedDisplaySourceIds = new Set(discardedMessageIds)
+    // Completed-run aliases retain their exact logical slot rather than entering the
+    // ordinary alias map. Expand only observations of discarded slots, not every
+    // message with the same provider source.
+    for (const [observedId, index] of this.mainAssistantIndexByObservedId) {
+      const currentId = this.mainAssistantMessageIdByIndex.get(index)
+      if (currentId && discardedMessageIds.has(this.resolveMainAssistantMessageIdAlias(currentId))) {
+        discardedDisplaySourceIds.add(observedId)
+      }
+    }
+
+    // The UI receives role-collision IDs, while the producer may only know raw IDs.
+    // Resolve against the pre-reset baseline, before it is cleared below. Match concrete
+    // occurrence IDs rather than provider_source_id, which is shared by historical replies.
+    const baseline = [...this.mainMessageRoleCollisionBaseline.values()]
+    const stableIdentities = new Set([
+      ...stableMessages.map(getMessageRoleCollisionIdentity),
+      // User turns are appended locally and intentionally omitted from SDK values.
+      // Retrying model output must never discard those locally retained identities.
+      ...baseline
+        .filter((message) => message.role === "user" || message.type === "human")
+        .map(getMessageRoleCollisionIdentity)
+    ])
+    const discardedRenderIds = new Set<string>()
+    for (const messageId of discardedDisplaySourceIds) {
+      let matched = false
+      for (const role of ["user", "assistant", "system", "tool"]) {
+        const message = this.mainMessageRoleCollisionBaseline.get(
+          getMessageRoleCollisionIdentity({ id: messageId, role })
+        )
+        if (!message) continue
+        matched = true
+        if (!stableIdentities.has(getMessageRoleCollisionIdentity(message))) {
+          discardedRenderIds.add(message.id)
+        }
+      }
+      // Unobserved IDs here include assistant alias endpoints. A stable message of
+      // another role with the same raw ID does not make that assistant endpoint durable.
+      if (
+        !matched &&
+        !stableIdentities.has(getMessageRoleCollisionIdentity({ id: messageId, role: "assistant" }))
+      ) {
+        discardedRenderIds.add(messageId)
+      }
+    }
 
     const discardedAssistantIndexes = new Set<number>()
+    const retainedAssistants = normalizeCompleteMessageIds(stableMessages).filter(
+      (message) => message.role === "assistant" || message.type === "ai"
+    )
+    const retainedAssistantIds = new Set(retainedAssistants.map((message) => message.id))
+    const retainedProviderIdentities = new Set(
+      retainedAssistants.map((message) =>
+        this.mainAssistantProviderIdentityKey(
+          getMessageProviderSourceId(message),
+          getMessageProviderOccurrence(message) ?? 1
+        )
+      )
+    )
     for (const [index, messageId] of this.mainAssistantMessageIdByIndex) {
       if (!discardedMessageIds.has(this.resolveMainAssistantMessageIdAlias(messageId))) continue
+      // A raw provider id can name both a checkpointed tool call and the failed
+      // reply. Keep the completed slot so a resumed reply still gets occurrence
+      // N+1 instead of being merged into the earlier tool-call bubble.
+      const providerIdentity = this.mainAssistantProviderIdentityByIndex.get(index)
+      if (
+        retainedAssistantIds.has(messageId) ||
+        (providerIdentity &&
+          retainedProviderIdentities.has(
+            this.mainAssistantProviderIdentityKey(
+              providerIdentity.providerSourceId,
+              providerIdentity.providerOccurrence
+            )
+          ))
+      )
+        continue
       discardedAssistantIndexes.add(index)
       this.mainAssistantMessageIdByIndex.delete(index)
       this.streamedMainAssistantIndexes.delete(index)
       this.sealedMainAssistantIndexes.delete(index)
-      const providerIdentity = this.mainAssistantProviderIdentityByIndex.get(index)
       if (providerIdentity) {
         this.mainAssistantIndexByProviderIdentity.delete(
           this.mainAssistantProviderIdentityKey(
@@ -2824,6 +3428,15 @@ export class ElectronIPCTransport implements UseStreamTransport {
     for (const [observedId, index] of this.mainAssistantIndexByObservedId) {
       if (discardedMessageIds.has(observedId) || discardedAssistantIndexes.has(index)) {
         this.mainAssistantIndexByObservedId.delete(observedId)
+      }
+    }
+    this.mainAssistantScopedObservedIds.clear()
+    for (const [scope, index] of this.mainAssistantIndexByStreamScope) {
+      if (discardedAssistantIndexes.has(index)) {
+        this.mainAssistantIndexByStreamScope.delete(scope)
+      } else {
+        // Keys are local JSON tuples of [provider id, graph execution namespace].
+        this.mainAssistantScopedObservedIds.add((JSON.parse(scope) as [string, string])[0])
       }
     }
     for (const [fromId, toId] of this.mainAssistantMessageIdAliases) {
@@ -2884,6 +3497,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
     this.currentChunkMessageId = undefined
     this.resetCurrentAssistantMessage()
+    return [...discardedRenderIds]
   }
 
   /**
@@ -3050,6 +3664,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
           // limits are applied downstream without discarding the live tail.
           const thinkingChunk = this.extractContent(kwargs.content)
           const reasoningChunk = extractVisibleReasoning(kwargs)
+          const contentWireMode = readStreamMessageWireMode(
+            metadata?.[STREAM_MESSAGE_CONTENT_MODE_KEY]
+          )
+          const reasoningWireMode = readStreamMessageWireMode(
+            metadata?.[STREAM_MESSAGE_REASONING_MODE_KEY]
+          )
           let projectedThinking = assistantState.projectedContent
           let projectedReasoning = assistantState.projectedReasoning
           const chunkHasVisibleContent = /\S/.test(thinkingChunk)
@@ -3061,7 +3681,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
             this.updateSubagentAssistantContent(
               assistantState,
               thinkingChunk,
-              isCompleteAssistantSnapshot ? "snapshot" : "delta"
+              contentWireMode ?? (isCompleteAssistantSnapshot ? "snapshot" : "delta")
             )
             assistantState.hasVisibleContent ||= chunkHasVisibleContent
           }
@@ -3069,7 +3689,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
             this.updateSubagentAssistantReasoning(
               assistantState,
               reasoningChunk,
-              isCompleteAssistantSnapshot ? "snapshot" : "delta"
+              reasoningWireMode ?? (isCompleteAssistantSnapshot ? "snapshot" : "delta")
             )
             assistantState.hasVisibleReasoning ||= chunkHasVisibleReasoning
           }
@@ -3121,13 +3741,23 @@ export class ElectronIPCTransport implements UseStreamTransport {
             true,
             toolCallAccumulationScope
           )
-          const completedChunkCalls = this.completedToolCallsFromAccumulatedChunks(
-            kwargs.tool_call_chunks ?? [],
-            toolCallAccumulationScope
-          )
+          // Reserve the provider's slot before its arguments finish parsing.
+          // Parallel calls may finish JSON in a different order from their index.
+          const chunkCalls = (kwargs.tool_call_chunks ?? []).flatMap((chunk) => {
+            const id = this.resolveToolCallChunkId(chunk, toolCallAccumulationScope)
+            if (!id) return []
+            const parsed = this.parseAccumulatedToolCall(id, toolCallAccumulationScope)
+            return [{ id, name: chunk.name, ...parsed, index: chunk.index }]
+          })
           const transcriptToolCalls = this.accumulateSubagentTranscriptToolCalls(
             assistantState.transcriptMessageId,
-            [...hydratedTranscriptCalls, ...completedChunkCalls]
+            [
+              ...hydratedTranscriptCalls.map((call, index) => ({
+                ...call,
+                ...(isCompleteAssistantSnapshot && { index })
+              })),
+              ...chunkCalls
+            ]
           )
           // Update currentTool from the latest tool name (known before args
           // finish streaming) so the card reflects the in-flight tool promptly.
@@ -3139,8 +3769,16 @@ export class ElectronIPCTransport implements UseStreamTransport {
             if (latestToolName) {
               const sa = this.activeSubagents.get(subagentToolCallId)
               if (sa) {
+                const previousTool = sa.currentTool
                 sa.currentTool = latestToolName
-                events.push(this.createSubagentEvent())
+                if (previousTool !== latestToolName) {
+                  events.push(
+                    this.createSubagentPatchEvent(subagentToolCallId, {
+                      currentTool: latestToolName,
+                      lastActivityAt: new Date().toISOString()
+                    })
+                  )
+                }
               }
             }
 
@@ -3190,22 +3828,46 @@ export class ElectronIPCTransport implements UseStreamTransport {
           let content = this.extractContent(kwargs.content)
           const reasoning = extractVisibleReasoning(kwargs)
           const observedProviderMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
-          const idlessCompletedResolution =
-            !isCoordinatorMode
-              ? this.routePendingIdlessCompletedAssistant(
-                  observedProviderMessageId,
-                  content
+          // A provider can reuse its ID after tools while values replaces the old graph slot.
+          // The model execution namespace distinguishes those cycles without scanning history.
+          const explicitProviderTuple = getMessageProviderTupleFromMetadata(
+            kwargs.additional_kwargs
+          )
+          const explicitMessageIndex = explicitProviderTuple
+            ? (this.mainAssistantIndexByProviderIdentity.get(
+                this.mainAssistantProviderIdentityKey(
+                  explicitProviderTuple.provider_source_id!,
+                  explicitProviderTuple.provider_occurrence!
                 )
+              ) ?? this.nextMessageFallbackIndex("ai"))
+            : undefined
+          const streamScopeKey =
+            observedProviderMessageId && checkpointNs
+              ? JSON.stringify([observedProviderMessageId, checkpointNs])
               : undefined
+          const scopedMessageIndex = streamScopeKey
+            ? this.mainAssistantIndexByStreamScope.get(streamScopeKey)
+            : undefined
+          const startsNewScopedOccurrence =
+            !!streamScopeKey &&
+            scopedMessageIndex === undefined &&
+            this.mainAssistantScopedObservedIds.has(observedProviderMessageId!)
+          const idlessCompletedResolution = this.routePendingIdlessCompletedAssistant(
+            observedProviderMessageId,
+            content
+          )
           if (idlessCompletedResolution?.buffer) return events
           content = idlessCompletedResolution?.content ?? content
           const observedMessageIndex =
+            explicitMessageIndex ??
+            scopedMessageIndex ??
+            (startsNewScopedOccurrence ? this.nextMessageFallbackIndex("ai") : undefined) ??
             idlessCompletedResolution?.messageIndex ??
-            (!isCoordinatorMode && observedProviderMessageId
+            (observedProviderMessageId
               ? this.mainAssistantIndexByObservedId.get(observedProviderMessageId)
               : undefined)
           const currentToolCallIds =
-            !isCoordinatorMode && this.currentMessageId !== null
+            this.currentMessageId !== null
               ? this.observedMainToolCallIdsByMessageId.get(
                   this.resolveMainAssistantMessageIdAlias(this.currentMessageId)
                 )
@@ -3233,17 +3895,31 @@ export class ElectronIPCTransport implements UseStreamTransport {
             !incomingContinuesCurrentToolCall
               ? this.nextMessageFallbackIndex("ai")
               : (this.currentMessageIndex ?? this.nextMessageFallbackIndex("ai")))
-          const providerMessageId =
-            !isCoordinatorMode && observedProviderMessageId
-              ? this.resolveMainAssistantMessageIdAlias(observedProviderMessageId)
-              : observedProviderMessageId
-          const providerIdentity = !isCoordinatorMode
-            ? this.resolveMainAssistantProviderIdentity(
-                messageIndex,
-                observedProviderMessageId,
-                kwargs.additional_kwargs
-              )
-            : undefined
+          const providerMessageId = observedProviderMessageId
+            ? this.resolveMainAssistantMessageIdAlias(observedProviderMessageId)
+            : observedProviderMessageId
+          if (streamScopeKey && observedProviderMessageId) {
+            this.mainAssistantIndexByStreamScope.set(streamScopeKey, messageIndex)
+            this.mainAssistantScopedObservedIds.add(observedProviderMessageId)
+            pruneMapToLimit(this.mainAssistantIndexByStreamScope, MAX_TRACKED_EMITTED_MESSAGES)
+            pruneSetToLimit(this.mainAssistantScopedObservedIds, MAX_TRACKED_EMITTED_MESSAGES)
+            const sourceId = getMessageProviderSourceId({
+              id: observedProviderMessageId,
+              role: "assistant"
+            })
+            if (!this.mainAssistantHighestProviderOccurrence.has(sourceId)) {
+              this.rememberMainAssistantProviderIdentity(messageIndex, {
+                providerSourceId: sourceId,
+                providerOccurrence:
+                  getMessageProviderOccurrence({ id: observedProviderMessageId, role: "assistant" }) ?? 1
+              })
+            }
+          }
+          const providerIdentity = this.resolveMainAssistantProviderIdentity(
+            messageIndex,
+            observedProviderMessageId,
+            kwargs.additional_kwargs
+          )
           const occurrenceScopedProviderMessageId =
             providerIdentity &&
             observedProviderMessageId &&
@@ -3259,9 +3935,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
                 )
               : undefined
           const msgId =
-            (!isCoordinatorMode
-              ? this.mainAssistantMessageIdByIndex.get(messageIndex)
-              : undefined) ||
+            this.mainAssistantMessageIdByIndex.get(messageIndex) ||
             occurrenceScopedProviderMessageId ||
             providerMessageId ||
             this.currentMessageId ||
@@ -3272,17 +3946,15 @@ export class ElectronIPCTransport implements UseStreamTransport {
               content,
               toolCalls: kwargs.tool_calls
             })
-          if (!isCoordinatorMode) {
-            this.mainAssistantMessageIdByIndex.set(messageIndex, msgId)
-            this.streamedMainAssistantIndexes.add(messageIndex)
-            if (observedProviderMessageId) {
-              this.mainAssistantIndexByObservedId.set(observedProviderMessageId, messageIndex)
-            }
-            this.mainAssistantIndexByObservedId.set(msgId, messageIndex)
-            pruneMapToLimit(this.mainAssistantMessageIdByIndex, MAX_TRACKED_EMITTED_MESSAGES)
-            pruneMapToLimit(this.mainAssistantIndexByObservedId, MAX_TRACKED_EMITTED_MESSAGES)
-            pruneSetToLimit(this.streamedMainAssistantIndexes, MAX_TRACKED_EMITTED_MESSAGES)
+          this.mainAssistantMessageIdByIndex.set(messageIndex, msgId)
+          this.streamedMainAssistantIndexes.add(messageIndex)
+          if (observedProviderMessageId) {
+            this.mainAssistantIndexByObservedId.set(observedProviderMessageId, messageIndex)
           }
+          this.mainAssistantIndexByObservedId.set(msgId, messageIndex)
+          pruneMapToLimit(this.mainAssistantMessageIdByIndex, MAX_TRACKED_EMITTED_MESSAGES)
+          pruneMapToLimit(this.mainAssistantIndexByObservedId, MAX_TRACKED_EMITTED_MESSAGES)
+          pruneSetToLimit(this.streamedMainAssistantIndexes, MAX_TRACKED_EMITTED_MESSAGES)
           this.currentMessageId = msgId
           this.currentMessageIndex = messageIndex
           this.currentChunkMessageId = msgId
@@ -3294,17 +3966,34 @@ export class ElectronIPCTransport implements UseStreamTransport {
             kwargs.tool_call_chunks,
             isCoordinatorMode
           )
-          if (!isCoordinatorMode) {
-            this.rememberObservedMainToolCallIds(msgId, [
-              ...visibleToolCalls,
-              ...visibleToolCallChunks
-            ])
-          }
-          const contentDelta = this.prepareMainAssistantChunkContent(msgId, content)
-          const reasoningUpdate = this.prepareMainAssistantReasoning(msgId, reasoning)
+          this.rememberObservedMainToolCallIds(msgId, [
+            ...visibleToolCalls,
+            ...visibleToolCallChunks
+          ])
+          const contentWireMode = readStreamMessageWireMode(
+            metadata?.[STREAM_MESSAGE_CONTENT_MODE_KEY]
+          )
+          const reasoningWireMode = readStreamMessageWireMode(
+            metadata?.[STREAM_MESSAGE_REASONING_MODE_KEY]
+          )
+          const contentSnapshotUpdate =
+            contentWireMode === "snapshot"
+              ? this.prepareMainAssistantSnapshotUpdate(msgId, content, true)
+              : undefined
+          const contentDelta = contentSnapshotUpdate
+            ? contentSnapshotUpdate.kind === "delta"
+              ? contentSnapshotUpdate.content
+              : undefined
+            : this.prepareMainAssistantChunkContent(msgId, content, contentWireMode)
+          const reasoningUpdate = this.prepareMainAssistantReasoning(
+            msgId,
+            reasoning,
+            reasoningWireMode
+          )
 
           if (
             contentDelta !== undefined ||
+            contentSnapshotUpdate?.kind === "replace" ||
             reasoningUpdate !== undefined ||
             visibleToolCalls.length
           ) {
@@ -3312,36 +4001,47 @@ export class ElectronIPCTransport implements UseStreamTransport {
               this.rememberCompletedToolCallsForMessage(msgId, visibleToolCalls)
             }
             this.rememberEmittedMessage(msgId)
-            events.push({
-              event: "messages",
-              data: [
-                {
-                  id: msgId,
-                  type: "ai",
-                  content: contentDelta ?? "",
-                  ...(providerIdentity
-                    ? {
-                        provider_source_id: providerIdentity.providerSourceId,
-                        provider_occurrence: providerIdentity.providerOccurrence
-                      }
-                    : {}),
-                  ...(reasoningUpdate !== undefined && { reasoning: reasoningUpdate }),
-                  ...(visibleToolCalls.length && { tool_calls: visibleToolCalls })
-                },
-                {
-                  langgraph_node: metadata?.langgraph_node || "agent",
-                  langgraph_checkpoint_ns: metadata?.langgraph_checkpoint_ns,
-                  checkpoint_ns: metadata?.checkpoint_ns
-                }
-              ]
-            })
-            if (reasoningUpdate !== undefined) {
+            if (contentSnapshotUpdate?.kind === "replace") {
               events.push(
                 this.createCoordinatorAssistantSnapshotEvent({
                   id: msgId,
-                  reasoning: reasoningUpdate
+                  content: contentSnapshotUpdate.content,
+                  reasoning: reasoningUpdate,
+                  toolCalls: visibleToolCalls
                 })
               )
+            } else {
+              events.push({
+                event: "messages",
+                data: [
+                  {
+                    id: msgId,
+                    type: "ai",
+                    content: contentDelta ?? "",
+                    ...(providerIdentity
+                      ? {
+                          provider_source_id: providerIdentity.providerSourceId,
+                          provider_occurrence: providerIdentity.providerOccurrence
+                        }
+                      : {}),
+                    ...(reasoningUpdate !== undefined && { reasoning: reasoningUpdate }),
+                    ...(visibleToolCalls.length && { tool_calls: visibleToolCalls })
+                  },
+                  {
+                    langgraph_node: metadata?.langgraph_node || "agent",
+                    langgraph_checkpoint_ns: metadata?.langgraph_checkpoint_ns,
+                    checkpoint_ns: metadata?.checkpoint_ns
+                  }
+                ]
+              })
+              if (reasoningUpdate !== undefined) {
+                events.push(
+                  this.createCoordinatorAssistantSnapshotEvent({
+                    id: msgId,
+                    reasoning: reasoningUpdate
+                  })
+                )
+              }
             }
           }
 
@@ -3427,7 +4127,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
             const tokenUsageEvent = createTokenUsageEvent(usageMetadata)
             if (tokenUsageEvent) events.push(tokenUsageEvent)
           }
-          if (!isCoordinatorMode && this.sealedMainAssistantIndexes.has(messageIndex)) {
+          if (this.sealedMainAssistantIndexes.has(messageIndex)) {
             this.resetCurrentAssistantMessage()
           }
         }
@@ -3568,6 +4268,10 @@ export class ElectronIPCTransport implements UseStreamTransport {
                 ),
                 taskResultExecutionId
               )
+              pruneMapToLimit(
+                this.subagentTaskResultExecutionIdByIdentity,
+                MAX_TRACKED_SUBAGENT_EXECUTIONS
+              )
             }
             const completionEvents = this.processToolMessage({
               threadId,
@@ -3582,6 +4286,15 @@ export class ElectronIPCTransport implements UseStreamTransport {
       }
     } else if (mode === "values") {
       this.inFlightMainMessageIds.clear()
+      const subagentSnapshotVersionBefore = this.subagentSnapshotVersion
+      const valuesSnapshotKind = event.valuesSnapshotKind ?? "full"
+      const isIncrementalValuesSnapshot = valuesSnapshotKind !== "full"
+      if (!isIncrementalValuesSnapshot) {
+        this.subagentValuesGeneration += 1
+        this.valuesParentOccurrenceCounts.clear()
+        this.valuesParentOccurrenceByMessageIndex.clear()
+        this.valuesIdlessParentOccurrence = 0
+      }
       // Values mode returns full state with serialized LangChain messages
       const state = data as {
         messages?: SerializedMessageChunk[]
@@ -3623,25 +4336,55 @@ export class ElectronIPCTransport implements UseStreamTransport {
         }
       }
       const persistedTaskScopesByToolCallId = new Map<string, string[]>()
-      const parentOccurrenceCounts = new Map<string, number>()
-      let idlessParentOccurrence = 0
-      for (const rawMessage of state.messages ?? []) {
+      for (
+        let rawMessageIndex = 0;
+        rawMessageIndex < (state.messages?.length ?? 0);
+        rawMessageIndex += 1
+      ) {
+        const rawMessage = state.messages![rawMessageIndex]
         const className = getSerializedMessageClassName(rawMessage)
         if (!className.includes("AI")) continue
         const kwargs = rawMessage.kwargs ?? {}
         const parentMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
-        const providerOccurrence = getMessageProviderTupleFromMetadata(
-          kwargs.additional_kwargs
-        )?.provider_occurrence
+        const rawAbsoluteIndex = kwargs.additional_kwargs?.[WORKER_SNAPSHOT_INDEX_MESSAGE_KEY]
+        const absoluteMessageIndex =
+          typeof rawAbsoluteIndex === "number" &&
+          Number.isInteger(rawAbsoluteIndex) &&
+          rawAbsoluteIndex >= 0
+            ? rawAbsoluteIndex
+            : rawMessageIndex
+        const existingOccurrence = this.valuesParentOccurrenceByMessageIndex.get(
+          absoluteMessageIndex
+        )
         let parentOccurrence: number
-        if (providerOccurrence) {
-          parentOccurrence = providerOccurrence
-        } else if (parentMessageId) {
-          parentOccurrence = (parentOccurrenceCounts.get(parentMessageId) ?? 0) + 1
-          parentOccurrenceCounts.set(parentMessageId, parentOccurrence)
+        if (existingOccurrence && existingOccurrence.parentMessageId === parentMessageId) {
+          parentOccurrence = existingOccurrence.parentOccurrence
         } else {
-          idlessParentOccurrence += 1
-          parentOccurrence = idlessParentOccurrence
+          const providerOccurrence = getMessageProviderTupleFromMetadata(
+            kwargs.additional_kwargs
+          )?.provider_occurrence
+          if (providerOccurrence) {
+            parentOccurrence = providerOccurrence
+            if (parentMessageId) {
+              this.valuesParentOccurrenceCounts.set(
+                parentMessageId,
+                Math.max(
+                  this.valuesParentOccurrenceCounts.get(parentMessageId) ?? 0,
+                  parentOccurrence
+                )
+              )
+            }
+          } else if (parentMessageId) {
+            parentOccurrence = (this.valuesParentOccurrenceCounts.get(parentMessageId) ?? 0) + 1
+            this.valuesParentOccurrenceCounts.set(parentMessageId, parentOccurrence)
+          } else {
+            this.valuesIdlessParentOccurrence += 1
+            parentOccurrence = this.valuesIdlessParentOccurrence
+          }
+          this.valuesParentOccurrenceByMessageIndex.set(absoluteMessageIndex, {
+            parentMessageId,
+            parentOccurrence
+          })
         }
         for (let toolIndex = 0; toolIndex < (kwargs.tool_calls?.length ?? 0); toolIndex += 1) {
           const toolCall = kwargs.tool_calls![toolIndex]
@@ -3667,7 +4410,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       // that reused the same parent/task IDs, so unmatched live executions align
       // with the unmatched tail occurrences rather than the first raw-ID match.
       for (const [toolCallId, persistedScopes] of persistedTaskScopesByToolCallId) {
-        const mappedExecutionIds = new Set(this.subagentExecutionIdByInvocation.values())
+        const mappedExecutionIds = this.currentMappedSubagentExecutionIds
         const liveExecutionIds = (
           this.liveSubagentExecutionIdsByToolCallId.get(toolCallId) ?? []
         ).filter((executionId) => !mappedExecutionIds.has(executionId))
@@ -3676,10 +4419,17 @@ export class ElectronIPCTransport implements UseStreamTransport {
         const executionsToAdopt = liveExecutionIds.slice(-adoptionCount)
         const scopesToAdopt = persistedScopes.slice(-adoptionCount)
         for (let index = 0; index < adoptionCount; index += 1) {
-          this.subagentExecutionIdByInvocation.set(
-            JSON.stringify([toolCallId, scopesToAdopt[index]]),
-            executionsToAdopt[index]
-          )
+          if (
+            this.setSubagentInvocationMapping(
+              JSON.stringify([toolCallId, scopesToAdopt[index]]),
+              executionsToAdopt[index]
+            )
+          ) {
+            // Canonical identity adoption is a real reconciliation boundary:
+            // preserve the first values snapshot expected after an id-less live
+            // registration, while ordinary repeated values remain silent.
+            this.subagentSnapshotVersion += 1
+          }
         }
       }
 
@@ -3733,7 +4483,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
                     invocationScope,
                     true,
                     persistedInvocationScope,
-                    currentTurnStart > 0 && messageIndex >= currentTurnStart
+                    isIncrementalValuesSnapshot ||
+                      (currentTurnStart > 0 && messageIndex >= currentTurnStart)
                   )
                   snapshotExecutionIdByToolCallId.set(
                     toolCall.id,
@@ -3789,6 +4540,10 @@ export class ElectronIPCTransport implements UseStreamTransport {
                 ),
                 executionId
               )
+              pruneMapToLimit(
+                this.subagentTaskResultExecutionIdByIdentity,
+                MAX_TRACKED_SUBAGENT_EXECUTIONS
+              )
             }
             const existing = effectiveTerminalByExecutionId.get(executionId)
             if (!existing || isError || !existing.isError) {
@@ -3831,13 +4586,24 @@ export class ElectronIPCTransport implements UseStreamTransport {
           )
         }
 
-        // Emit subagent update if we have any
-        if (this.activeSubagents.size > 0) {
+        // Values frames repeat the complete task history. Only publish the full
+        // card set when reconciliation actually registered, hydrated, or
+        // completed a task; ordinary content/tail frames stay O(1) in S.
+        if (
+          this.activeSubagents.size > 0 &&
+          this.subagentSnapshotVersion !== subagentSnapshotVersionBefore
+        ) {
           events.push(this.createSubagentEvent())
         }
 
         if (isCoordinatorMode) {
-          events.push(...this.createCurrentTurnMessageEventsFromValues(state.messages, threadId))
+          events.push(
+            ...this.createCurrentTurnMessageEventsFromValues(
+              state.messages,
+              threadId,
+              transformedMessages.filter((message) => message.type === "ai")
+            )
+          )
         }
       }
 
@@ -3968,6 +4734,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     className: string
     kwargs: SerializedMessageChunk["kwargs"]
     metadata?: MessageMetadata
+    valuesSnapshot?: boolean
   }): StreamEvent[] {
     const focused = useAppStore.getState().workerFocusView
     if (
@@ -3983,14 +4750,28 @@ export class ElectronIPCTransport implements UseStreamTransport {
     if (kwargs.additional_kwargs?.cmb_internal_coordinator_notification === true) {
       return events
     }
-    // Scope tool-call-chunk stitching to this worker message (see processStreamEvent).
-    this.currentChunkMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
     const isHumanMessage =
       input.className.includes("HumanMessage") || kwargs.type === "human" || kwargs.type === "user"
     const isToolMessage = input.className.includes("ToolMessage") && !!kwargs.tool_call_id
     const isAIMessage = input.className.includes("AI") || input.className.includes("AIMessageChunk")
+    const providerTuple = getMessageProviderTupleFromMetadata(kwargs.additional_kwargs)
+    const explicitProviderSourceId = providerTuple
+      ? this.createFocusedWorkerTurnScopedMessageId(
+          focused.workerThreadId,
+          providerTuple.provider_source_id
+        )
+      : undefined
+    let scopedProviderTuple =
+      explicitProviderSourceId && providerTuple
+        ? {
+            ...providerTuple,
+            provider_source_id: explicitProviderSourceId,
+            worker_provider_identity: true
+          }
+        : undefined
 
     if (isHumanMessage) {
+      this.currentChunkMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
       for (const deferredToolMessage of this.takeFocusedWorkerDeferredToolMessages(
         focused.workerThreadId
       )) {
@@ -4005,6 +4786,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
       this.workerInitialTurnAdoptionPending.delete(focused.workerThreadId)
       this.workerProviderOccurrenceCounts.delete(focused.workerThreadId)
       this.workerProviderReplayCandidates.delete(focused.workerThreadId)
+      this.workerProviderWireOwners.delete(focused.workerThreadId)
       this.workerKnownToolMessageSignatures.delete(focused.workerThreadId)
       this.workerKnownToolResultCallIds.delete(focused.workerThreadId)
       this.resetFocusedWorkerTurnToolState()
@@ -4019,6 +4801,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
             id: msgId,
             role: "user",
             content,
+            ...scopedProviderTuple,
             created_at: new Date()
           })
         )
@@ -4028,12 +4811,21 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
     if (isAIMessage) {
       const isChunk = input.className.includes("Chunk")
+      const toolCallsAreSnapshot =
+        (!isChunk || input.valuesSnapshot === true) && Array.isArray(kwargs.tool_calls)
       const extractedContent = this.extractContent(kwargs.content)
       const extractedReasoning = extractVisibleReasoning(kwargs)
-      const providerSourceId =
+      const contentWireMode = readStreamMessageWireMode(
+        input.metadata?.[STREAM_MESSAGE_CONTENT_MODE_KEY]
+      )
+      const reasoningWireMode = readStreamMessageWireMode(
+        input.metadata?.[STREAM_MESSAGE_REASONING_MODE_KEY]
+      )
+      const observedMessageId =
         typeof kwargs.id === "string"
           ? this.createFocusedWorkerTurnScopedMessageId(focused.workerThreadId, kwargs.id)
           : undefined
+      let providerSourceId = explicitProviderSourceId ?? observedMessageId
       const replayToolCalls = this.focusedWorkerReplayToolCalls(kwargs)
       const deferredToolMessages = this.flushFocusedWorkerDeferredToolsBeforeAssistant(
         focused.workerThreadId,
@@ -4053,8 +4845,49 @@ export class ElectronIPCTransport implements UseStreamTransport {
           )
         )
       }
-      const resolvedProviderMessage = providerSourceId
-        ? deferredToolMessages.length > 0
+      const wireOwner =
+        !scopedProviderTuple && typeof kwargs.id === "string"
+          ? this.workerProviderWireOwners.get(focused.workerThreadId)?.get(kwargs.id)
+          : undefined
+      const currentProviderSourceId = this.workerCurrentProviderSourceIds.get(focused.workerThreadId)
+      const activeMatch =
+        !scopedProviderTuple && (wireOwner !== undefined || currentProviderSourceId === observedMessageId)
+          ? this.currentExplicitWorkerAssistant(focused.workerThreadId)
+          : undefined
+      if (activeMatch && typeof kwargs.id === "string" && !deferredToolMessages.length) {
+        if (
+          activeMatch.worker_provider_wire_ids?.includes(kwargs.id) &&
+          activeMatch.provider_source_id &&
+          wireOwner === getMessageProviderOccurrenceIdentity(activeMatch) &&
+          activeMatch.provider_occurrence !== undefined
+        ) {
+          providerSourceId = activeMatch.provider_source_id
+          scopedProviderTuple = {
+            provider_source_id: providerSourceId,
+            provider_occurrence: activeMatch.provider_occurrence,
+            worker_provider_identity: true
+          }
+        }
+      }
+      const protectDeclaredSlot = Boolean(
+        !scopedProviderTuple &&
+        observedMessageId &&
+        (activeMatch || currentProviderSourceId !== observedMessageId) &&
+        (wireOwner !== undefined ||
+          this.workerProviderReplayCandidates
+            .get(focused.workerThreadId)
+            ?.get(observedMessageId)
+            ?.some((message) => message.id === observedMessageId && message.worker_provider_identity))
+      )
+      const resolvedProviderMessage: FocusedWorkerResolvedProviderMessage | undefined =
+        scopedProviderTuple
+          ? this.resolveExplicitFocusedWorkerAssistant(
+              focused.workerThreadId,
+              scopedProviderTuple,
+              observedMessageId
+            )
+          : providerSourceId
+        ? deferredToolMessages.length > 0 || protectDeclaredSlot
           ? this.allocateFocusedWorkerProviderMessageId(
               focused.workerThreadId,
               providerSourceId,
@@ -4064,7 +4897,10 @@ export class ElectronIPCTransport implements UseStreamTransport {
                 toolCalls: replayToolCalls
               },
               undefined,
-              true
+              true,
+              protectDeclaredSlot
+                ? this.createWorkerLiveFallbackMessageId(focused.workerThreadId)
+                : undefined
             )
           : this.resolveFocusedWorkerProviderMessageId(
               focused.workerThreadId,
@@ -4087,10 +4923,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
       this.currentChunkMessageId = msgId
 
       let content = extractedContent
-      if (isChunk && extractedContent) {
-        content = this.mergeWorkerAssistantTextChunk(
+      if (isChunk && (extractedContent || contentWireMode === "snapshot")) {
+        content = this.mergeWorkerAssistantTextByWireMode(
           this.workerAssistantTextByMessageId.get(msgId) ?? "",
-          extractedContent
+          extractedContent,
+          contentWireMode
         )
         this.workerAssistantTextByMessageId.set(msgId, content)
       } else if (extractedContent) {
@@ -4106,8 +4943,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
             resolvedProviderMessage?.pendingReasoning ?? "",
             extractedReasoning
           )
-      if (isChunk && incomingReasoning) {
-        reasoning = this.mergeWorkerAssistantTextChunk(reasoning, incomingReasoning)
+      if (isChunk && (incomingReasoning || reasoningWireMode === "snapshot")) {
+        reasoning = this.mergeWorkerAssistantTextByWireMode(
+          reasoning,
+          incomingReasoning,
+          resolvedProviderMessage?.pendingReasoning ? undefined : reasoningWireMode
+        )
         this.workerAssistantReasoningByMessageId.set(msgId, reasoning)
       } else if (incomingReasoning) {
         reasoning = incomingReasoning
@@ -4115,13 +4956,19 @@ export class ElectronIPCTransport implements UseStreamTransport {
       }
 
       const toolCalls = this.hydrateToolCallsWithAccumulatedArgs(kwargs.tool_calls ?? [])
+      if (toolCallsAreSnapshot) this.pruneFocusedWorkerToolCallState(msgId, toolCalls)
       if (toolCalls.length) {
         this.rememberCompletedToolCallsForMessage(msgId, toolCalls)
       }
 
       if (
         !resolvedProviderMessage?.provisional &&
-        (content || reasoning || toolCalls.length > 0)
+        (content ||
+          reasoning ||
+          contentWireMode === "snapshot" ||
+          reasoningWireMode === "snapshot" ||
+          toolCallsAreSnapshot ||
+          toolCalls.length > 0)
       ) {
         for (const deferredToolMessage of this.takeFocusedWorkerDeferredToolMessages(
           focused.workerThreadId
@@ -4135,19 +4982,34 @@ export class ElectronIPCTransport implements UseStreamTransport {
         }
       }
 
-      if ((content || reasoning || toolCalls.length) && !resolvedProviderMessage?.provisional) {
+      if (
+        (content ||
+          reasoning ||
+          contentWireMode === "snapshot" ||
+          reasoningWireMode === "snapshot" ||
+          toolCallsAreSnapshot ||
+          toolCalls.length) &&
+        !resolvedProviderMessage?.provisional
+      ) {
         const workerMessage: Message = {
           id: msgId,
           role: "assistant",
           content,
+          ...(contentWireMode === "snapshot" && { worker_content_source: "snapshot" }),
           ...(resolvedProviderMessage?.providerSourceId && {
             provider_source_id: resolvedProviderMessage.providerSourceId
           }),
           ...(resolvedProviderMessage?.providerOccurrence && {
             provider_occurrence: resolvedProviderMessage.providerOccurrence
           }),
-          ...(reasoning && { reasoning }),
-          ...(toolCalls.length && { tool_calls: toolCalls as Message["tool_calls"] }),
+          ...(scopedProviderTuple && {
+            worker_provider_identity: true,
+            ...(typeof kwargs.id === "string" && { worker_provider_wire_ids: [kwargs.id] })
+          }),
+          ...((reasoning || reasoningWireMode === "snapshot") && { reasoning }),
+          ...(toolCallsAreSnapshot
+            ? workerToolCallSnapshot(toolCalls as NonNullable<Message["tool_calls"]>)
+            : toolCalls.length > 0 && { tool_calls: toolCalls as Message["tool_calls"] }),
           created_at: new Date()
         }
         this.rememberFocusedWorkerReplayCandidate(
@@ -4160,7 +5022,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
         )
       }
 
-      if (kwargs.tool_call_chunks?.length) {
+      if (!toolCallsAreSnapshot && kwargs.tool_call_chunks?.length) {
         this.accumulateToolCallChunks(kwargs.tool_call_chunks)
         const completedToolCalls = this.completedToolCallsFromAccumulatedChunks(
           kwargs.tool_call_chunks
@@ -4188,6 +5050,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
             ...(completedProviderSourceId && {
               provider_source_id: completedProviderSourceId
             }),
+            ...scopedProviderTuple,
+            ...(scopedProviderTuple &&
+              typeof kwargs.id === "string" && {
+                worker_provider_wire_ids: [kwargs.id]
+              }),
             ...(this.workerAssistantReasoningByMessageId.get(completedMessageId)
               ? { reasoning: this.workerAssistantReasoningByMessageId.get(completedMessageId) }
               : {}),
@@ -4212,7 +5079,6 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
     if (isToolMessage && kwargs.tool_call_id) {
       const content = this.extractContent(kwargs.content)
-      const isError = this.isToolMessageError(kwargs)
       const msgId =
         (typeof kwargs.id === "string"
           ? this.createFocusedWorkerTurnScopedMessageId(focused.workerThreadId, kwargs.id)
@@ -4226,55 +5092,65 @@ export class ElectronIPCTransport implements UseStreamTransport {
             toolName: kwargs.name
           })
         )
-      const toolResultSignature = this.focusedWorkerToolResultSignature({
-        content,
-        toolCallId: kwargs.tool_call_id,
-        name: kwargs.name,
-        status: kwargs.status,
-        isError
-      })
+      const toolMessage = this.createWorkerToolResult(msgId, content, kwargs, scopedProviderTuple)
+      const toolResultSignature = this.focusedWorkerToolResultSignature(toolMessage)
+      const toolResultIdentity = this.focusedWorkerToolResultIdentity(toolMessage)
       const knownToolMessageSignatures =
         this.workerKnownToolMessageSignatures.get(focused.workerThreadId) ?? new Map()
-      const knownSignaturesForId = knownToolMessageSignatures.get(msgId) ?? new Set<string>()
-      const isKnownToolReplay = knownSignaturesForId.has(toolResultSignature)
+      const knownSignaturesForId =
+        knownToolMessageSignatures.get(toolResultIdentity) ?? new Set<string>()
       const knownToolResultCallIds =
         this.workerKnownToolResultCallIds.get(focused.workerThreadId) ?? new Set<string>()
       const callWasKnown = knownToolResultCallIds.has(kwargs.tool_call_id)
-      const isKnownToolResultGrowth = this.isFocusedWorkerToolResultGrowth(
-        knownSignaturesForId,
-        {
-          content,
-          toolCallId: kwargs.tool_call_id,
-          name: kwargs.name,
-          status: kwargs.status,
-          isError
-        }
+      const resultUpdate = this.classifyWorkerToolResult(
+        toolMessage,
+        toolResultSignature,
+        knownSignaturesForId
       )
-      const provesRepeatedToolExecution =
-        callWasKnown && !isKnownToolReplay && !isKnownToolResultGrowth
-      const toolMessage: Message = {
-        id: msgId,
-        role: "tool",
-        content,
-        tool_call_id: kwargs.tool_call_id,
-        ...(kwargs.name && { name: kwargs.name }),
-        ...(kwargs.status && { status: kwargs.status }),
-        ...(isError && { is_error: true }),
-        created_at: new Date()
-      }
+      const provesRepeatedToolExecution = callWasKnown && resultUpdate === undefined
       const currentAmbiguousReplay = this.workerAmbiguousReplayPins.get(
         focused.workerThreadId
       )
       const deferredAmbiguousReplay = this.workerDeferredAmbiguousReplayPins.get(
         focused.workerThreadId
       )
+      const activeAssistantId = this.workerCurrentMessageIds.get(focused.workerThreadId)
+      const activeAssistant = this.currentFocusedWorkerAssistant(focused.workerThreadId)
+      const requestsCall =
+        this.workerAssistantRequestsCall(activeAssistant, kwargs.tool_call_id) ||
+        (activeAssistantId !== undefined &&
+          (this.completedToolCallsByMessageId.get(activeAssistantId)?.has(kwargs.tool_call_id) ||
+            (this.currentChunkMessageId === activeAssistantId &&
+              this.accumulatedToolCalls.has(kwargs.tool_call_id))))
+      knownSignaturesForId.add(toolResultSignature)
+      pruneSetToLimit(knownSignaturesForId, MAX_TRACKED_TOOL_CALLS)
+      knownToolMessageSignatures.set(toolResultIdentity, knownSignaturesForId)
+      pruneMapToLimit(knownToolMessageSignatures, MAX_TRACKED_MESSAGE_TOOL_CALLS)
+      this.workerKnownToolMessageSignatures.set(focused.workerThreadId, knownToolMessageSignatures)
+      knownToolResultCallIds.add(kwargs.tool_call_id)
+      pruneSetToLimit(knownToolResultCallIds, MAX_TRACKED_TOOL_CALLS)
+      this.workerKnownToolResultCallIds.set(focused.workerThreadId, knownToolResultCallIds)
+      if (
+        resultUpdate !== undefined &&
+        !requestsCall &&
+        (toolMessage.worker_provider_identity ||
+          (!currentAmbiguousReplay && !deferredAmbiguousReplay))
+      ) {
+        if (resultUpdate === "correction") {
+          events.push(
+            this.createCoordinatorWorkerStreamMessageEvent(focused.workerThreadId, toolMessage)
+          )
+        }
+        return events
+      }
+      this.currentChunkMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
       const repeatsDeferredPendingCall =
         Boolean(
           deferredAmbiguousReplay?.toolMessages.some(
             (message) => message.tool_call_id === kwargs.tool_call_id
           )
         ) &&
-        (isKnownToolReplay || isKnownToolResultGrowth)
+        resultUpdate !== undefined
       const shouldDeferAmbiguousTool =
         (!callWasKnown && Boolean(currentAmbiguousReplay || deferredAmbiguousReplay)) ||
         repeatsDeferredPendingCall
@@ -4328,20 +5204,6 @@ export class ElectronIPCTransport implements UseStreamTransport {
           )
         )
       }
-      knownSignaturesForId.add(toolResultSignature)
-      pruneSetToLimit(knownSignaturesForId, MAX_TRACKED_TOOL_CALLS)
-      knownToolMessageSignatures.set(msgId, knownSignaturesForId)
-      pruneMapToLimit(knownToolMessageSignatures, MAX_TRACKED_MESSAGE_TOOL_CALLS)
-      this.workerKnownToolMessageSignatures.set(
-        focused.workerThreadId,
-        knownToolMessageSignatures
-      )
-      knownToolResultCallIds.add(kwargs.tool_call_id)
-      pruneSetToLimit(knownToolResultCallIds, MAX_TRACKED_TOOL_CALLS)
-      this.workerKnownToolResultCallIds.set(
-        focused.workerThreadId,
-        knownToolResultCallIds
-      )
       this.workerCurrentMessageIds.delete(focused.workerThreadId)
       this.workerCurrentProviderSourceIds.delete(focused.workerThreadId)
       this.workerInitialTurnAdoptionPending.delete(focused.workerThreadId)
@@ -4418,6 +5280,55 @@ export class ElectronIPCTransport implements UseStreamTransport {
   ): string {
     const prefix = `worker-turn-${workerThreadId}-${workerTurn}::`
     return rawId.startsWith(prefix) ? rawId : `${prefix}${rawId}`
+  }
+
+  private resolveExplicitFocusedWorkerAssistant(
+    workerThreadId: string,
+    identity: { provider_source_id: string; provider_occurrence: number },
+    observedMessageId: string | undefined
+  ): FocusedWorkerResolvedProviderMessage {
+    const { provider_source_id: providerSourceId, provider_occurrence: providerOccurrence } =
+      identity
+    const candidates = this.workerProviderReplayCandidates.get(workerThreadId)
+    const sameOccurrence = (candidate: Message): boolean =>
+      (getMessageProviderOccurrence(candidate) ?? 1) === providerOccurrence
+    const sourceCandidates = candidates?.get(providerSourceId)
+    const prior =
+      sourceCandidates?.findLast(
+        (candidate) => candidate.worker_provider_identity && sameOccurrence(candidate)
+      ) ??
+      (observedMessageId
+        ? candidates
+            ?.get(observedMessageId)
+            ?.findLast(
+              (candidate) =>
+                candidate.id === observedMessageId &&
+                !candidate.worker_provider_identity &&
+                sameOccurrence(candidate)
+            )
+        : undefined)
+    const id =
+      prior?.id ??
+      availableWorkerAssistantProviderId(providerSourceId, providerOccurrence, {
+        has: (id) => {
+          const state = useAppStore.getState()
+          return (
+            this.workerAssistantTextByMessageId.has(id) ||
+            this.workerAssistantReasoningByMessageId.has(id) ||
+            this.completedToolCallsByMessageId.has(id) ||
+            (state.workerFocusMessagesThreadId === workerThreadId &&
+              state.workerFocusMessages.some((message) => message.id === id))
+          )
+        }
+      })
+    if (prior && this.workerCurrentMessageIds.get(workerThreadId) !== id) {
+      this.seedFocusedWorkerAssistantAccumulator(prior, true)
+    }
+    this.workerCurrentProviderSourceIds.set(workerThreadId, providerSourceId)
+    const counts = this.workerProviderOccurrenceCounts.get(workerThreadId) ?? new Map()
+    counts.set(providerSourceId, Math.max(counts.get(providerSourceId) ?? 0, providerOccurrence))
+    this.workerProviderOccurrenceCounts.set(workerThreadId, counts)
+    return { id, providerSourceId, providerOccurrence }
   }
 
   private resolveFocusedWorkerProviderMessageId(
@@ -4624,7 +5535,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
     providerSourceId: string,
     incoming: { content: string; reasoning: string; toolCalls: FocusedWorkerReplayToolCall[] },
     pendingReasoning?: string,
-    commitAsNew: boolean = false
+    commitAsNew: boolean = false,
+    distinctRenderId?: string
   ): FocusedWorkerResolvedProviderMessage {
     const replayCandidates =
       this.workerProviderReplayCandidates.get(workerThreadId)?.get(providerSourceId) ?? []
@@ -4635,9 +5547,10 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.workerCurrentProviderSourceIds.set(workerThreadId, providerSourceId)
     this.workerReplayPinnedMessageIds.delete(workerThreadId)
     const id =
-      occurrence > 1
+      distinctRenderId ??
+      (occurrence > 1
         ? buildMessageSameRoleDuplicateId(providerSourceId, "assistant", occurrence)
-        : providerSourceId
+        : providerSourceId)
     const provisional =
       !commitAsNew &&
       replayCandidates.some((candidate) =>
@@ -4648,7 +5561,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
     }
     return {
       id,
-      ...(occurrence > 1 && { providerSourceId }),
+      ...((distinctRenderId || occurrence > 1) && { providerSourceId }),
+      ...(distinctRenderId && { providerOccurrence: occurrence }),
       ...(provisional && { provisional: true }),
       ...(pendingReasoning && { pendingReasoning })
     }
@@ -5180,65 +6094,74 @@ export class ElectronIPCTransport implements UseStreamTransport {
     }
   }
 
-  private focusedWorkerToolResultSignature(input: {
-    content: unknown
-    toolCallId: string
-    name?: string
-    status?: string
-    isError: boolean
-  }): string {
+  private createWorkerToolResult(
+    id: string,
+    content: string,
+    kwargs: NonNullable<SerializedMessageChunk["kwargs"]>,
+    providerTuple?: Pick<
+      Message,
+      "provider_source_id" | "provider_occurrence" | "worker_provider_identity"
+    >
+  ): Message {
+    const isError = readWorkerToolResultError(
+      kwargs.status,
+      kwargs.is_error,
+      kwargs.additional_kwargs?.is_error
+    )
+    return {
+      id,
+      role: "tool",
+      content,
+      ...providerTuple,
+      tool_call_id: kwargs.tool_call_id,
+      ...(kwargs.name && { name: kwargs.name }),
+      ...(kwargs.status && { status: kwargs.status }),
+      ...(isError !== undefined && { is_error: isError }),
+      created_at: new Date()
+    }
+  }
+
+  private focusedWorkerToolResultIdentity(message: Message): string {
+    return JSON.stringify(
+      message.worker_provider_identity
+        ? ["provider", message.provider_source_id, message.provider_occurrence, message.tool_call_id]
+        : ["wire", message.id, message.tool_call_id]
+    )
+  }
+
+  private focusedWorkerToolResultSignature(message: Message): string {
     return JSON.stringify({
-      toolCallId: input.toolCallId,
-      name: input.name ?? "",
-      content: input.content,
-      status: input.status ?? "",
-      isError: input.isError
+      name: message.name ?? "",
+      content: message.content,
+      status: message.status ?? "",
+      isError: message.is_error
     })
   }
 
-  private isFocusedWorkerToolResultGrowth(
-    knownSignatures: ReadonlySet<string>,
-    input: {
-      content: unknown
-      toolCallId: string
-      name?: string
-      status?: string
-      isError: boolean
+  private classifyWorkerToolResult(
+    message: Message,
+    signature: string,
+    knownSignatures: ReadonlySet<string> | undefined
+  ): "replay" | "correction" | undefined {
+    if (!knownSignatures?.size) return undefined
+    if (knownSignatures.has(signature)) return "replay"
+    if (message.worker_provider_identity) return "correction"
+
+    // A reused wire ID can also belong to a new tool cycle. Without a declared
+    // occurrence, require compatible text to update the original result.
+    const content = message.content
+    if (typeof content !== "string") return undefined
+    for (const previousSignature of knownSignatures) {
+      const known = JSON.parse(previousSignature) as { name: string; content: unknown }
+      if (known.name && message.name && known.name !== message.name) continue
+      if (typeof known.content !== "string") continue
+      if (content.startsWith(known.content) || known.content.startsWith(content)) return "correction"
     }
-  ): boolean {
-    if (typeof input.content !== "string") return false
-    for (const signature of knownSignatures) {
-      try {
-        const known = JSON.parse(signature) as {
-          toolCallId?: unknown
-          name?: unknown
-          content?: unknown
-          status?: unknown
-          isError?: unknown
-        }
-        if (
-          known.toolCallId !== input.toolCallId ||
-          (typeof known.name === "string" &&
-            known.name &&
-            input.name &&
-            known.name !== input.name) ||
-          typeof known.content !== "string"
-        ) {
-          continue
-        }
-        if (
-          !known.content ||
-          !input.content ||
-          input.content.startsWith(known.content) ||
-          known.content.startsWith(input.content)
-        ) {
-          return true
-        }
-      } catch {
-        // Ignore malformed legacy signatures and require stronger repetition evidence.
-      }
-    }
-    return false
+    return undefined
+  }
+
+  private workerAssistantRequestsCall(message: Message | undefined, callId: string): boolean {
+    return message?.role === "assistant" && message.tool_calls?.some(({ id }) => id === callId) === true
   }
 
   private seedFocusedWorkerAssistantAccumulator(
@@ -5279,21 +6202,59 @@ export class ElectronIPCTransport implements UseStreamTransport {
     if (!providerSourceId) return
     const bySource = this.workerProviderReplayCandidates.get(workerThreadId) ?? new Map()
     const candidates = bySource.get(providerSourceId) ?? []
-    const existingIndex = candidates.findIndex((candidate) => candidate.id === message.id)
+    const existingIndex = candidates.findLastIndex((candidate) => candidate.id === message.id)
     if (existingIndex >= 0) {
       const existing = candidates[existingIndex]
       candidates[existingIndex] = {
         ...existing,
         ...message,
+        worker_provider_wire_ids: mergeWorkerProviderWireIds(
+          existing.worker_provider_wire_ids,
+          message.worker_provider_wire_ids
+        ),
         content: message.content || existing.content,
         reasoning: message.reasoning || existing.reasoning,
-        tool_calls: message.tool_calls?.length ? message.tool_calls : existing.tool_calls
+        tool_calls: message.worker_tool_calls_source
+          ? mergeWorkerToolCallSnapshot(existing.tool_calls, message.tool_calls)
+          : message.tool_calls?.length
+            ? message.tool_calls
+            : existing.tool_calls
       }
     } else {
       candidates.push(message)
     }
     bySource.set(providerSourceId, candidates)
     this.workerProviderReplayCandidates.set(workerThreadId, bySource)
+    this.registerWorkerWireOwners(workerThreadId, message)
+  }
+
+  private currentFocusedWorkerAssistant(workerThreadId: string): Message | undefined {
+    const sourceId = this.workerCurrentProviderSourceIds.get(workerThreadId)
+    const id = this.workerCurrentMessageIds.get(workerThreadId)
+    if (!sourceId || !id) return undefined
+    return this.workerProviderReplayCandidates
+      .get(workerThreadId)
+      ?.get(sourceId)
+      ?.findLast((message) => message.id === id)
+  }
+
+  private currentExplicitWorkerAssistant(workerThreadId: string): Message | undefined {
+    const current = this.currentFocusedWorkerAssistant(workerThreadId)
+    return current?.worker_provider_identity ? current : undefined
+  }
+
+  private registerWorkerWireOwners(workerThreadId: string, message: Message): void {
+    if (!message.worker_provider_identity || !message.worker_provider_wire_ids?.length) return
+    const owners =
+      this.workerProviderWireOwners.get(workerThreadId) ?? new Map<string, string | null>()
+    const identity = getMessageProviderOccurrenceIdentity(message)
+    for (const wireId of message.worker_provider_wire_ids) {
+      const previous = owners.get(wireId)
+      owners.delete(wireId)
+      owners.set(wireId, previous === undefined || previous === identity ? identity : null)
+    }
+    pruneMapToLimit(owners, MAX_TRACKED_EMITTED_MESSAGES)
+    this.workerProviderWireOwners.set(workerThreadId, owners)
   }
 
   private syncFocusedWorkerProviderStateFromValues(
@@ -5301,6 +6262,30 @@ export class ElectronIPCTransport implements UseStreamTransport {
     messages: readonly Message[],
     workerTurn: number | undefined
   ): void {
+    const activeMessageId = this.workerCurrentMessageIds.get(workerThreadId)
+    const prefix =
+      workerTurn === undefined ? undefined : `worker-turn-${workerThreadId}-${workerTurn}::`
+    const currentTurnMessages = prefix
+      ? messages.filter((message) => message.id.startsWith(prefix) || message.id === activeMessageId)
+      : messages
+    const knownToolMessageSignatures =
+      this.workerKnownToolMessageSignatures.get(workerThreadId) ?? new Map<string, Set<string>>()
+    const knownToolResultCallIds =
+      this.workerKnownToolResultCallIds.get(workerThreadId) ?? new Set<string>()
+    for (const message of currentTurnMessages) {
+      if (message.role !== "tool" || !message.tool_call_id) continue
+      const identity = this.focusedWorkerToolResultIdentity(message)
+      const signatures = knownToolMessageSignatures.get(identity) ?? new Set<string>()
+      signatures.add(this.focusedWorkerToolResultSignature(message))
+      pruneSetToLimit(signatures, MAX_TRACKED_TOOL_CALLS)
+      knownToolMessageSignatures.set(identity, signatures)
+      knownToolResultCallIds.add(message.tool_call_id)
+    }
+    pruneMapToLimit(knownToolMessageSignatures, MAX_TRACKED_MESSAGE_TOOL_CALLS)
+    pruneSetToLimit(knownToolResultCallIds, MAX_TRACKED_TOOL_CALLS)
+    this.workerKnownToolMessageSignatures.set(workerThreadId, knownToolMessageSignatures)
+    this.workerKnownToolResultCallIds.set(workerThreadId, knownToolResultCallIds)
+
     if (typeof workerTurn !== "number" || !Number.isFinite(workerTurn)) {
       const counts = new Map<string, number>()
       const seenProviderEvidence = new Set<string>()
@@ -5324,6 +6309,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
         if (message.role !== "assistant" || message.id.startsWith("worker-snapshot-")) continue
         const sourceId = getMessageProviderSourceId(message)
         registerProviderOccurrence(message)
+        this.registerWorkerWireOwners(workerThreadId, message)
         const candidates = replayCandidates.get(sourceId) ?? []
         candidates.push(message)
         replayCandidates.set(sourceId, candidates)
@@ -5338,6 +6324,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
         this.workerInitialTurnAdoptionPending.delete(workerThreadId)
         return
       }
+      if (latestMessage.worker_tool_calls_source === "snapshot") {
+        this.pruneFocusedWorkerToolCallState(latestMessage.id, latestMessage.tool_calls ?? [])
+      }
       if (!latestMessage.id.startsWith("worker-snapshot-")) return
       this.workerCurrentMessageIds.set(workerThreadId, latestMessage.id)
       this.workerCurrentProviderSourceIds.delete(workerThreadId)
@@ -5346,41 +6335,22 @@ export class ElectronIPCTransport implements UseStreamTransport {
       return
     }
 
-    const prefix = `worker-turn-${workerThreadId}-${workerTurn}::`
-    const activeMessageId = this.workerCurrentMessageIds.get(workerThreadId)
-    const currentTurnMessages = messages.filter(
-      (message) => message.id.startsWith(prefix) || message.id === activeMessageId
-    )
     this.workerProvisionalMessageIds.delete(workerThreadId)
     this.workerReplayPinnedMessageIds.delete(workerThreadId)
     this.workerPendingPinnedReasoning.delete(workerThreadId)
     this.workerAmbiguousReplayPins.delete(workerThreadId)
     this.workerDeferredAmbiguousReplayPins.delete(workerThreadId)
-    const knownToolMessageSignatures = new Map<string, Set<string>>()
-    const knownToolResultCallIds = new Set<string>()
-    for (const message of currentTurnMessages) {
-      if (message.role !== "tool" || !message.tool_call_id) continue
-      const signatures = knownToolMessageSignatures.get(message.id) ?? new Set<string>()
-      signatures.add(
-        this.focusedWorkerToolResultSignature({
-          content: message.content,
-          toolCallId: message.tool_call_id,
-          name: message.name,
-          status: message.status,
-          isError: message.is_error === true || message.status === "error"
-        })
-      )
-      knownToolMessageSignatures.set(message.id, signatures)
-      knownToolResultCallIds.add(message.tool_call_id)
-    }
-    this.workerKnownToolMessageSignatures.set(workerThreadId, knownToolMessageSignatures)
-    this.workerKnownToolResultCallIds.set(workerThreadId, knownToolResultCallIds)
     const counts = new Map<string, number>()
     const replayCandidates = new Map<string, Message[]>()
     for (const message of currentTurnMessages) {
       if (message.role !== "assistant") continue
       const sourceId = getMessageProviderSourceId(message)
-      counts.set(sourceId, (counts.get(sourceId) ?? 0) + 1)
+      this.registerWorkerWireOwners(workerThreadId, message)
+      const highestOccurrence = counts.get(sourceId) ?? 0
+      counts.set(
+        sourceId,
+        Math.max(highestOccurrence, getMessageProviderOccurrence(message) ?? highestOccurrence + 1)
+      )
       const candidates = replayCandidates.get(sourceId) ?? []
       candidates.push(message)
       replayCandidates.set(sourceId, candidates)
@@ -5408,6 +6378,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
       this.workerAssistantTextByMessageId.delete(previousMessageId)
       this.workerAssistantReasoningByMessageId.delete(previousMessageId)
       this.resetFocusedWorkerTurnToolState()
+    }
+    if (latestMessage.worker_tool_calls_source === "snapshot") {
+      this.pruneFocusedWorkerToolCallState(latestMessage.id, latestMessage.tool_calls ?? [])
     }
     this.workerCurrentMessageIds.set(workerThreadId, latestMessage.id)
     this.workerCurrentProviderSourceIds.set(
@@ -5439,6 +6412,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.resetWorkerCurrentAssistant(workerThreadId)
     this.workerProviderOccurrenceCounts.delete(workerThreadId)
     this.workerProviderReplayCandidates.delete(workerThreadId)
+    this.workerProviderWireOwners.delete(workerThreadId)
     this.workerKnownToolMessageSignatures.delete(workerThreadId)
     this.workerKnownToolResultCallIds.delete(workerThreadId)
     this.resetFocusedWorkerTurnToolState()
@@ -5527,10 +6501,10 @@ export class ElectronIPCTransport implements UseStreamTransport {
       this.workerKnownToolMessageSignatures.set(
         workerThreadId,
         new Map(
-          Array.from(knownToolMessageSignatures, ([messageId, signatures]) => [
-            messageId.startsWith(prefix) ? messageId : `${prefix}${messageId}`,
-            signatures
-          ])
+          Array.from(knownToolMessageSignatures, ([identity, signatures]) => {
+            const [kind, id, ...tuple] = JSON.parse(identity) as [string, string, ...unknown[]]
+            return [JSON.stringify([kind, scopeProviderSourceId(id), ...tuple]), signatures]
+          })
         )
       )
     }
@@ -5547,6 +6521,29 @@ export class ElectronIPCTransport implements UseStreamTransport {
     if (messageId) {
       this.workerAssistantTextByMessageId.delete(messageId)
       this.workerAssistantReasoningByMessageId.delete(messageId)
+    }
+  }
+
+  private pruneFocusedWorkerToolCallState(
+    messageId: string,
+    toolCalls: readonly { id?: string }[]
+  ): void {
+    const declaredIds = new Set(toolCalls.map((call) => call.id))
+    const completedCalls = this.completedToolCallsByMessageId.get(messageId)
+    if (completedCalls) {
+      for (const id of completedCalls.keys()) {
+        if (!declaredIds.has(id)) completedCalls.delete(id)
+      }
+    }
+    if (this.currentChunkMessageId !== messageId) return
+
+    for (const id of this.accumulatedToolCalls.keys()) {
+      if (!declaredIds.has(id)) this.accumulatedToolCalls.delete(id)
+    }
+    for (const [key, id] of this.toolCallChunkIndexToId) {
+      if (key.slice(0, key.lastIndexOf(":")) === messageId && !declaredIds.has(id)) {
+        this.toolCallChunkIndexToId.delete(key)
+      }
     }
   }
 
@@ -5582,12 +6579,28 @@ export class ElectronIPCTransport implements UseStreamTransport {
     return `${existing}${nextChunk}`
   }
 
+  private mergeWorkerAssistantTextByWireMode(
+    existing: string,
+    incoming: string,
+    wireMode?: StreamMessageWireMode
+  ): string {
+    if (wireMode === "delta") return `${existing}${incoming}`
+    if (wireMode === "snapshot") return incoming
+    return this.mergeWorkerAssistantTextChunk(existing, incoming)
+  }
+
   private prepareMainAssistantChunkContent(
     messageId: string,
-    incoming: string
+    incoming: string,
+    wireMode?: StreamMessageWireMode
   ): string | undefined {
     if (!incoming) return undefined
     const existing = this.mainAssistantTextByMessageId.get(messageId) ?? ""
+    if (wireMode === "delta") {
+      this.mainAssistantTextByMessageId.set(messageId, `${existing}${incoming}`)
+      pruneMapToLimit(this.mainAssistantTextByMessageId, MAX_TRACKED_EMITTED_MESSAGES)
+      return incoming
+    }
     const merged = this.mergeWorkerAssistantTextChunk(existing, incoming)
     if (merged === existing) return undefined
     this.mainAssistantTextByMessageId.set(messageId, merged)
@@ -5595,10 +6608,19 @@ export class ElectronIPCTransport implements UseStreamTransport {
     return merged.slice(existing.length)
   }
 
-  private prepareMainAssistantReasoning(messageId: string, incoming: string): string | undefined {
-    if (!incoming) return undefined
+  private prepareMainAssistantReasoning(
+    messageId: string,
+    incoming: string,
+    wireMode?: StreamMessageWireMode
+  ): string | undefined {
+    if (!incoming && wireMode !== "snapshot") return undefined
     const existing = this.mainAssistantReasoningByMessageId.get(messageId) ?? ""
-    const merged = this.mergeWorkerAssistantTextChunk(existing, incoming)
+    const merged =
+      wireMode === "delta"
+        ? `${existing}${incoming}`
+        : wireMode === "snapshot"
+          ? incoming
+          : this.mergeWorkerAssistantTextChunk(existing, incoming)
     if (merged === existing) return undefined
     this.mainAssistantReasoningByMessageId.set(messageId, merged)
     pruneMapToLimit(this.mainAssistantReasoningByMessageId, MAX_TRACKED_EMITTED_MESSAGES)
@@ -5607,10 +6629,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
   private prepareMainAssistantSnapshotUpdate(
     messageId: string,
-    snapshot: string
+    snapshot: string,
+    allowEmptyReplacement: boolean = false
   ): MainAssistantSnapshotUpdate {
-    if (!snapshot) return { kind: "skip" }
+    if (!snapshot && !allowEmptyReplacement) return { kind: "skip" }
     const existing = this.mainAssistantTextByMessageId.get(messageId) ?? ""
+    if (!snapshot && !existing) return { kind: "skip" }
     if (!existing) {
       this.mainAssistantTextByMessageId.set(messageId, snapshot)
       pruneMapToLimit(this.mainAssistantTextByMessageId, MAX_TRACKED_EMITTED_MESSAGES)
@@ -5803,13 +6827,15 @@ export class ElectronIPCTransport implements UseStreamTransport {
     // A task may already have been registered while its parent assistant still
     // used a renderer fallback ID. Carry that invocation mapping across provider
     // ID adoption before the values snapshot scans the same task call.
-    for (const [invocationKey, executionId] of [
-      ...this.subagentExecutionIdByInvocation.entries()
-    ]) {
+    const aliasedInvocationKeys = [
+      ...(this.subagentInvocationKeysByParentMessageId.get(canonicalFromId) ?? [])
+    ]
+    for (const invocationKey of aliasedInvocationKeys) {
+      const executionId = this.subagentExecutionIdByInvocation.get(invocationKey)
+      if (!executionId) continue
       try {
-        const [toolCallId, invocationScope] = JSON.parse(invocationKey) as [string, string]
-        if (invocationScope !== canonicalFromId) continue
-        this.subagentExecutionIdByInvocation.set(
+        const [toolCallId] = JSON.parse(invocationKey) as [string, string]
+        this.setSubagentInvocationMapping(
           JSON.stringify([toolCallId, canonicalToId]),
           executionId
         )
@@ -5880,7 +6906,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
 
   private createCurrentTurnMessageEventsFromValues(
     messages: SerializedMessageChunk[],
-    threadId: string
+    threadId: string,
+    canonicalAssistants: TransformedValuesMessage[]
   ): StreamEvent[] {
     const events: StreamEvent[] = []
     let currentTurnStart = 0
@@ -6017,6 +7044,22 @@ export class ElectronIPCTransport implements UseStreamTransport {
         ) {
           msgId = reusableCurrentMessageIdForIndex
         }
+        // Explicit provider occurrences already identify the logical model cycle.
+        // Do not route a replay back into another cycle that reused the raw ID.
+        const canonicalAssistant = canonicalAssistants[fallbackIndex]
+        if (canonicalAssistant?.provider_source_id && canonicalAssistant.provider_occurrence) {
+          const canonicalIndex = this.mainAssistantIndexByProviderIdentity.get(
+            this.mainAssistantProviderIdentityKey(
+              canonicalAssistant.provider_source_id,
+              canonicalAssistant.provider_occurrence
+            )
+          )
+          msgId =
+            (canonicalIndex !== undefined
+              ? this.mainAssistantMessageIdByIndex.get(canonicalIndex)
+              : undefined) ?? canonicalAssistant.id
+        }
+        const wasEmitted = this.hasEmittedMessage(msgId)
         const snapshotUpdate = this.prepareMainAssistantSnapshotUpdate(msgId, content)
         const reasoningUpdate = this.prepareMainAssistantReasoning(msgId, reasoning)
         if (
@@ -6026,11 +7069,11 @@ export class ElectronIPCTransport implements UseStreamTransport {
         )
           continue
         this.rememberEmittedMessage(msgId)
-        if (snapshotUpdate.kind === "replace") {
+        if (snapshotUpdate.kind === "replace" || (wasEmitted && visibleToolCalls.length > 0)) {
           events.push(
             this.createCoordinatorAssistantSnapshotEvent({
               id: msgId,
-              content: snapshotUpdate.content,
+              content: this.mainAssistantTextByMessageId.get(msgId) ?? "",
               reasoning: reasoningUpdate,
               toolCalls: visibleToolCalls
             })
@@ -6128,9 +7171,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
   }
 
   private hasRunningSubagent(): boolean {
-    return Array.from(this.activeSubagents.values()).some(
-      (subagent) => subagent.status === "running"
-    )
+    return this.runningSubagentIds.size > 0
   }
 
   /**
@@ -6192,24 +7233,27 @@ export class ElectronIPCTransport implements UseStreamTransport {
       }
       return this.currentSubagentOwnerHint
     }
-    const running = Array.from(this.activeSubagents.values()).filter(
-      (subagent) => subagent.status === "running"
-    )
+    if (this.runningSubagentIds.size === 0) return undefined
     if (ns) {
       // tier (a): ns embeds the toolCallId literally (e.g. "agent:tools:call_abc")
-      const matched = running.find(
-        (subagent) => subagent.toolCallId && ns.includes(subagent.toolCallId)
-      )
-      if (matched?.id) return matched.id
+      for (const executionId of this.runningSubagentIds) {
+        const subagent = this.activeSubagents.get(executionId)
+        if (subagent?.toolCallId && ns.includes(subagent.toolCallId)) return executionId
+      }
     }
     // tier (b): sole running subagent — unambiguous
-    if (running.length === 1) return running[0].id
+    if (this.runningSubagentIds.size === 1) {
+      return this.runningSubagentIds.values().next().value as string
+    }
     // tier (c): map stable LangGraph task UUID to earliest unattributed subagent
     if (ns) {
       if (taskUuid) {
         const attributed = new Set(this.taskUuidToSubagentToolCallId.values())
-        const unattributed = running
-          .filter((sa) => sa.id && !attributed.has(sa.id))
+        const unattributed = Array.from(this.runningSubagentIds)
+          .flatMap((executionId) => {
+            const subagent = this.activeSubagents.get(executionId)
+            return subagent && !attributed.has(executionId) ? [subagent] : []
+          })
           .sort((a, b) => (a.spawnIndex ?? 0) - (b.spawnIndex ?? 0))
         if (unattributed.length > 0 && unattributed[0].id) {
           this.taskUuidToSubagentToolCallId.set(taskUuid, unattributed[0].id)
@@ -6385,12 +7429,151 @@ export class ElectronIPCTransport implements UseStreamTransport {
         occurrence,
         invocationScope
       })
+      pruneMapToLimit(
+        this.liveSubagentInvocationByParentTask,
+        MAX_TRACKED_SUBAGENT_EXECUTIONS
+      )
     }
     const current = this.liveSubagentInvocationByParentTask.get(parentTaskKey)!
     return {
       key: JSON.stringify([toolCallId, current.invocationScope]),
       invocationScope: current.invocationScope
     }
+  }
+
+  private invocationParentMessageId(invocationKey: string): string | undefined {
+    try {
+      const parsed = JSON.parse(invocationKey) as unknown
+      if (!Array.isArray(parsed) || typeof parsed[1] !== "string") return undefined
+      // Persisted task-v1 identities are content hashes, not renderer message
+      // aliases. Only legacy/direct parent IDs participate in alias adoption.
+      return parsed[1].startsWith("task-v1-") ? undefined : parsed[1]
+    } catch {
+      return undefined
+    }
+  }
+
+  private decrementSubagentInvocationMapping(executionId: string): void {
+    const count = this.subagentInvocationMappingCountsByExecutionId.get(executionId) ?? 0
+    if (count <= 1) {
+      this.subagentInvocationMappingCountsByExecutionId.delete(executionId)
+      this.currentMappedSubagentExecutionIds.delete(executionId)
+      return
+    }
+    this.subagentInvocationMappingCountsByExecutionId.set(executionId, count - 1)
+  }
+
+  private deleteSubagentInvocationMapping(invocationKey: string): void {
+    const executionId = this.subagentExecutionIdByInvocation.get(invocationKey)
+    if (!executionId) return
+    this.subagentExecutionIdByInvocation.delete(invocationKey)
+    this.decrementSubagentInvocationMapping(executionId)
+    const parentMessageId = this.invocationParentMessageId(invocationKey)
+    if (!parentMessageId) return
+    const keys = this.subagentInvocationKeysByParentMessageId.get(parentMessageId)
+    if (!keys) return
+    keys.delete(invocationKey)
+    if (keys.size === 0) this.subagentInvocationKeysByParentMessageId.delete(parentMessageId)
+  }
+
+  private setSubagentInvocationMapping(invocationKey: string, executionId: string): boolean {
+    const previousExecutionId = this.subagentExecutionIdByInvocation.get(invocationKey)
+    if (previousExecutionId === executionId) return false
+    if (previousExecutionId) this.decrementSubagentInvocationMapping(previousExecutionId)
+
+    this.subagentExecutionIdByInvocation.set(invocationKey, executionId)
+    const nextCount =
+      (this.subagentInvocationMappingCountsByExecutionId.get(executionId) ?? 0) + 1
+    this.subagentInvocationMappingCountsByExecutionId.set(executionId, nextCount)
+    this.currentMappedSubagentExecutionIds.add(executionId)
+    const parentMessageId = this.invocationParentMessageId(invocationKey)
+    if (parentMessageId) {
+      const keys = this.subagentInvocationKeysByParentMessageId.get(parentMessageId) ?? new Set()
+      keys.add(invocationKey)
+      this.subagentInvocationKeysByParentMessageId.set(parentMessageId, keys)
+    }
+
+    while (this.subagentExecutionIdByInvocation.size > MAX_TRACKED_SUBAGENT_EXECUTIONS) {
+      const oldest = this.subagentExecutionIdByInvocation.keys().next()
+      if (oldest.done) break
+      this.deleteSubagentInvocationMapping(oldest.value)
+    }
+    return true
+  }
+
+  private shouldRetainSubagentExecutionIndex(executionId: string): boolean {
+    if (this.seededSubagentExecutionIds.has(executionId)) return true
+    if (this.runningSubagentIds.has(executionId)) return true
+    const streamGeneration = this.subagentExecutionStreamGenerationById.get(executionId)
+    if (
+      this.subagentStreamGeneration > 0 &&
+      streamGeneration !== undefined &&
+      streamGeneration >= this.subagentStreamGeneration - 1
+    ) {
+      return true
+    }
+    const valuesGeneration = this.subagentExecutionValuesGenerationById.get(executionId)
+    return (
+      this.subagentValuesGeneration > 0 &&
+      valuesGeneration !== undefined &&
+      valuesGeneration >= this.subagentValuesGeneration - 1
+    )
+  }
+
+  private pruneSubagentExecutionIndexes(): void {
+    for (const [invocationKey, executionId] of this.subagentExecutionIdByInvocation) {
+      if (!this.shouldRetainSubagentExecutionIndex(executionId)) {
+        this.deleteSubagentInvocationMapping(invocationKey)
+      }
+    }
+    for (const [identity, executionId] of this.subagentTaskResultExecutionIdByIdentity) {
+      if (!this.shouldRetainSubagentExecutionIndex(executionId)) {
+        this.subagentTaskResultExecutionIdByIdentity.delete(identity)
+      }
+    }
+    for (const [toolCallId, executionIds] of this.subagentExecutionIdsByToolCallId) {
+      const retained = executionIds.filter((executionId) =>
+        this.shouldRetainSubagentExecutionIndex(executionId)
+      )
+      if (retained.length > 0) {
+        this.subagentExecutionIdsByToolCallId.set(
+          toolCallId,
+          keepRecentItems(retained, MAX_TRACKED_SUBAGENT_EXECUTIONS_PER_TOOL_CALL)
+        )
+      } else {
+        this.subagentExecutionIdsByToolCallId.delete(toolCallId)
+      }
+    }
+    for (const [toolCallId, executionId] of this.currentSubagentExecutionIdByToolCallId) {
+      if (!this.shouldRetainSubagentExecutionIndex(executionId)) {
+        this.currentSubagentExecutionIdByToolCallId.delete(toolCallId)
+      }
+    }
+    for (const executionId of this.subagentPromptInvocationIdentityByExecutionId.keys()) {
+      if (!this.shouldRetainSubagentExecutionIndex(executionId)) {
+        this.subagentPromptInvocationIdentityByExecutionId.delete(executionId)
+      }
+    }
+    for (const executionId of this.subagentExecutionStreamGenerationById.keys()) {
+      if (!this.shouldRetainSubagentExecutionIndex(executionId)) {
+        this.subagentExecutionStreamGenerationById.delete(executionId)
+      }
+    }
+    for (const executionId of this.subagentExecutionValuesGenerationById.keys()) {
+      if (!this.shouldRetainSubagentExecutionIndex(executionId)) {
+        this.subagentExecutionValuesGenerationById.delete(executionId)
+      }
+    }
+
+    pruneMapToLimit(this.subagentExecutionIdsByToolCallId, MAX_TRACKED_SUBAGENT_EXECUTIONS)
+    pruneMapToLimit(
+      this.subagentTaskResultExecutionIdByIdentity,
+      MAX_TRACKED_SUBAGENT_EXECUTIONS
+    )
+    pruneMapToLimit(
+      this.subagentPromptInvocationIdentityByExecutionId,
+      MAX_TRACKED_SUBAGENT_EXECUTIONS
+    )
   }
 
   private registerSubagent(
@@ -6471,8 +7654,23 @@ export class ElectronIPCTransport implements UseStreamTransport {
         this.claimedSeededSubagentExecutionIds.add(executionId)
       }
       if (!executions.includes(executionId)) executions.push(executionId)
-      this.subagentExecutionIdsByToolCallId.set(toolCallId, executions)
-      invocationMap.set(invocationKey, executionId)
+      this.subagentExecutionIdsByToolCallId.set(
+        toolCallId,
+        keepRecentItems(executions, MAX_TRACKED_SUBAGENT_EXECUTIONS_PER_TOOL_CALL)
+      )
+      pruneMapToLimit(
+        this.subagentExecutionIdsByToolCallId,
+        MAX_TRACKED_SUBAGENT_EXECUTIONS
+      )
+      if (preferSeededLegacyExecution) {
+        this.setSubagentInvocationMapping(invocationKey, executionId)
+      } else {
+        this.liveSubagentExecutionIdByInvocation.set(invocationKey, executionId)
+        pruneMapToLimit(
+          this.liveSubagentExecutionIdByInvocation,
+          MAX_TRACKED_SUBAGENT_EXECUTIONS
+        )
+      }
       if (liveInvocation) {
         const parentTaskKey = JSON.stringify([invocationScope, toolCallId])
         const liveState = this.liveSubagentInvocationByParentTask.get(parentTaskKey)
@@ -6480,20 +7678,55 @@ export class ElectronIPCTransport implements UseStreamTransport {
         const liveExecutions =
           this.liveSubagentExecutionIdsByToolCallId.get(toolCallId) ?? []
         if (!liveExecutions.includes(executionId)) liveExecutions.push(executionId)
-        this.liveSubagentExecutionIdsByToolCallId.set(toolCallId, liveExecutions)
+        this.liveSubagentExecutionIdsByToolCallId.set(
+          toolCallId,
+          keepRecentItems(
+            liveExecutions,
+            MAX_TRACKED_SUBAGENT_EXECUTIONS_PER_TOOL_CALL
+          )
+        )
+        pruneMapToLimit(
+          this.liveSubagentExecutionIdsByToolCallId,
+          MAX_TRACKED_SUBAGENT_EXECUTIONS
+        )
       }
     }
+    this.subagentExecutionStreamGenerationById.set(
+      executionId,
+      this.subagentStreamGeneration
+    )
+    if (preferSeededLegacyExecution) {
+      this.subagentExecutionValuesGenerationById.set(
+        executionId,
+        this.subagentValuesGeneration
+      )
+    }
+    pruneMapToLimit(
+      this.subagentExecutionStreamGenerationById,
+      MAX_TRACKED_SUBAGENT_EXECUTIONS
+    )
+    pruneMapToLimit(
+      this.subagentExecutionValuesGenerationById,
+      MAX_TRACKED_SUBAGENT_EXECUTIONS
+    )
     this.currentSubagentExecutionIdByToolCallId.set(toolCallId, executionId)
+    pruneMapToLimit(
+      this.currentSubagentExecutionIdByToolCallId,
+      MAX_TRACKED_SUBAGENT_EXECUTIONS
+    )
     const observedLive = !preferSeededLegacyExecution || observedLiveFromSnapshot
     const existing = this.activeSubagents.get(executionId)
     if (existing) {
       const updated = observedLive && existing.observedLive !== true
       if (updated) existing.observedLive = true
+      if (updated) this.subagentSnapshotVersion += 1
       return { executionId, created: false, updated }
     }
     const subagent = this.createSubagentFromTask(executionId, toolCallId, args)
     if (observedLive) subagent.observedLive = true
     this.activeSubagents.set(executionId, subagent)
+    this.runningSubagentIds.add(executionId)
+    this.subagentSnapshotVersion += 1
     return { executionId, created: true, updated: false }
   }
 
@@ -6556,6 +7789,10 @@ export class ElectronIPCTransport implements UseStreamTransport {
     this.subagentPromptInvocationIdentityByExecutionId.set(
       executionId,
       invocationIdentity
+    )
+    pruneMapToLimit(
+      this.subagentPromptInvocationIdentityByExecutionId,
+      MAX_TRACKED_SUBAGENT_EXECUTIONS
     )
     return {
       event: "custom",
@@ -6695,12 +7932,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
    * by tool id. Keeps the tool call as soon as its name is known (so the
    * execution process renders it immediately, even before args finish
    * streaming) and upgrades the args in place when non-empty args arrive,
-   * without ever downgrading real args back to {}. Returns the full set in
-   * stable insertion order for re-emission every chunk.
+   * without ever downgrading real args back to {}. Provider indexes order known
+   * slots; index-less calls retain their relative arrival positions.
    */
   private accumulateSubagentTranscriptToolCalls(
     messageKey: string,
-    toolCalls: Array<{ id?: string; name?: string; args?: Record<string, unknown> }>
+    toolCalls: Array<{ id?: string; name?: string; args?: Record<string, unknown>; index?: number }>
   ): Array<{ id: string; name: string; args: Record<string, unknown> }> {
     let byToolId = this.subagentTranscriptToolCallsByMessage.get(messageKey)
     if (!byToolId) {
@@ -6714,12 +7951,27 @@ export class ElectronIPCTransport implements UseStreamTransport {
       byToolId.set(toolCall.id, {
         id: toolCall.id,
         name: toolCall.name || prev?.name || "",
+        index:
+          Number.isInteger(toolCall.index) && toolCall.index! >= 0 ? toolCall.index : prev?.index,
         args: this.hasToolArgs(toolCall.args) ? toolCall.args! : (prev?.args ?? toolCall.args ?? {})
       })
     }
 
     pruneMapToLimit(this.subagentTranscriptToolCallsByMessage, MAX_TRACKED_MESSAGE_TOOL_CALLS)
-    return Array.from(byToolId.values())
+    return this.getSubagentTranscriptToolCalls(messageKey)
+  }
+
+  private getSubagentTranscriptToolCalls(messageKey: string): CompletedToolCall[] {
+    const calls = Array.from(
+      this.subagentTranscriptToolCallsByMessage.get(messageKey)?.values() ?? []
+    )
+    const indexed = calls.filter((call) => call.index !== undefined)
+    indexed.sort((left, right) => left.index! - right.index!)
+    let indexedOffset = 0
+    return calls.map((call) => {
+      const ordered = call.index === undefined ? call : indexed[indexedOffset++]
+      return { id: ordered.id, name: ordered.name, args: ordered.args }
+    })
   }
 
   private rememberCompletedToolCallsForMessage(
@@ -6800,16 +8052,37 @@ export class ElectronIPCTransport implements UseStreamTransport {
       if (chunk.name) {
         accumulated.name = chunk.name
       }
-      if (chunk.args) {
+      const wireMode = readStreamMessageWireMode(
+        (chunk as unknown as Record<string, unknown>)[STREAM_TOOL_CALL_ARGS_MODE_KEY]
+      )
+      if (
+        typeof chunk.args === "string" &&
+        (chunk.args.length > 0 || wireMode === "snapshot")
+      ) {
         const previousArgs = accumulated.args
-        if (chunk.args === previousArgs && accumulated.parsedArgs) {
+        if (wireMode === "snapshot") {
+          if (chunk.args === previousArgs && accumulated.parsedArgs) continue
+          accumulated.args = chunk.args
+          accumulated.parsedArgs = undefined
+          accumulated.jsonDepth = 0
+          accumulated.jsonInString = false
+          accumulated.jsonEscaped = false
+          accumulated.jsonStarted = false
+          accumulated.jsonComplete = false
+          accumulated.jsonInvalid = false
+          scanAccumulatedToolCallJson(accumulated, chunk.args)
+          parseCompletedAccumulatedToolCall(accumulated)
+          continue
+        }
+        if (wireMode !== "delta" && chunk.args === previousArgs && accumulated.parsedArgs) {
           continue
         }
         const isCumulativeGrowth =
+          wireMode !== "delta" &&
           previousArgs.length > 0 &&
           chunk.args.length > previousArgs.length &&
           chunk.args.startsWith(previousArgs)
-        const mergedArgs = this.mergeToolCallChunkArgs(previousArgs, chunk.args)
+        const mergedArgs = this.mergeToolCallChunkArgs(previousArgs, chunk.args, wireMode)
         if (mergedArgs !== previousArgs) {
           // In auto mode the merger either accepts an explicit cumulative
           // prefix or appends this fragment. Scan only newly arrived bytes;
@@ -6837,8 +8110,12 @@ export class ElectronIPCTransport implements UseStreamTransport {
    *     old previous-chunk-equality guard dropped those and corrupted the JSON,
    *     which surfaced as empty RAW ARGUMENTS.
    */
-  private mergeToolCallChunkArgs(accumulated: string, chunk: string): string {
-    return mergeStreamToolCallArgs(accumulated, chunk)
+  private mergeToolCallChunkArgs(
+    accumulated: string,
+    chunk: string,
+    wireMode?: StreamMessageWireMode
+  ): string {
+    return mergeStreamToolCallArgs(accumulated, chunk, wireMode ?? "auto")
   }
 
   /**
@@ -7183,9 +8460,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     assistant.projectedReasoning = reasoning
     assistant.lastSnapshotLength = assistant.contentLength + assistant.reasoningLength
     assistant.lastSnapshotAt = Date.now()
-    const toolCalls = Array.from(
-      this.subagentTranscriptToolCallsByMessage.get(assistant.transcriptMessageId)?.values() ?? []
-    )
+    const toolCalls = this.getSubagentTranscriptToolCalls(assistant.transcriptMessageId)
     return [
       this.createSubagentLogEntryEvent({
         kind: "assistant",
@@ -7254,9 +8529,7 @@ export class ElectronIPCTransport implements UseStreamTransport {
     if (content === assistant.projectedContent && reasoning === assistant.projectedReasoning) {
       return []
     }
-    const toolCalls = Array.from(
-      this.subagentTranscriptToolCallsByMessage.get(assistant.transcriptMessageId)?.values() ?? []
-    )
+    const toolCalls = this.getSubagentTranscriptToolCalls(assistant.transcriptMessageId)
     return [
       this.createSubagentLogEntryEvent({
         kind: "assistant",
@@ -7334,9 +8607,9 @@ export class ElectronIPCTransport implements UseStreamTransport {
   private getSubagentStableTranscriptSignatures(threadId: string): Map<string, string> {
     const existing = this.subagentStableTranscriptSignaturesByThread.get(threadId)
     if (existing) {
-      // Refresh the thread-level LRU without imposing a per-thread entry cap.
-      // A per-entry FIFO cap creates a replay cliff when a full snapshot contains
-      // one more historical task than the cap.
+      // Refresh the thread-level LRU and retain enough signatures for a full
+      // 2k-task current turn without keeping lifetime transcript identities.
+      pruneMapToLimit(existing, MAX_TRACKED_SUBAGENT_SIGNATURES_PER_THREAD)
       this.subagentStableTranscriptSignaturesByThread.delete(threadId)
       this.subagentStableTranscriptSignaturesByThread.set(threadId, existing)
       return existing
@@ -7508,6 +8781,8 @@ export class ElectronIPCTransport implements UseStreamTransport {
         subagent.completedAt = new Date()
       }
       const stateChanged = previousStatus !== nextStatus || completedAtWasMissing
+      this.runningSubagentIds.delete(input.toolCallId)
+      if (stateChanged) this.subagentSnapshotVersion += 1
       if (input.emitSubagentEvent !== false && stateChanged) {
         events.push(this.createSubagentEvent())
       }
@@ -7570,6 +8845,16 @@ export class ElectronIPCTransport implements UseStreamTransport {
         type: "subagents",
         subagents: Array.from(this.activeSubagents.values())
       }
+    }
+  }
+
+  private createSubagentPatchEvent(
+    subagentId: string,
+    patch: Pick<Subagent, "currentTool" | "lastActivityAt">
+  ): StreamEvent {
+    return {
+      event: "custom",
+      data: { type: "subagent_delta", subagentId, subagentPatch: patch }
     }
   }
 

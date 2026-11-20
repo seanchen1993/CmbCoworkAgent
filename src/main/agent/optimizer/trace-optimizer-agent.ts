@@ -1,3 +1,4 @@
+import { findProtectedMarketRoot } from "../../services/market-content"
 import { ChatOpenAI } from "@langchain/openai"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import { existsSync, readFileSync } from "fs"
@@ -62,10 +63,12 @@ function readExistingCustomSkills(): string {
   const dir = getCustomSkillsDir()
   if (!existsSync(dir)) return "(no custom skills yet)"
   try {
-    const skills = discoverSkillsSync(dir).map((skill) => {
-      const content = readFileSync(skill.skillMdPath, "utf-8").slice(0, 400)
-      return `--- ${getDiscoveredSkillId(skill)} ---\n${content}`
-    })
+    const skills = discoverSkillsSync(dir)
+      .filter((skill) => !findProtectedMarketRoot(skill.skillMdPath))
+      .map((skill) => {
+        const content = readFileSync(skill.skillMdPath, "utf-8").slice(0, 400)
+        return `--- ${getDiscoveredSkillId(skill)} ---\n${content}`
+      })
     return skills.length ? skills.join("\n\n") : "(no custom skills yet)"
   } catch {
     return "(error reading skills)"

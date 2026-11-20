@@ -1,7 +1,9 @@
+import { MISSING_FEATURE_WORKSPACE } from "../../../shared/harness-feature-workspace"
 import type { HarnessRunDetailViewModel, HarnessWorkflowNextAction, Thread } from "@/types"
 import { setPendingHarnessNextAction } from "@/lib/harness-next-action"
 import { getHarnessRunNextAction } from "@/lib/harness-run-next-action"
 import { HARNESS_SOURCE } from "../../../shared/harness-board-types"
+import { toast } from "sonner"
 
 type CreateHarnessThread = (
   config: {
@@ -46,6 +48,15 @@ export async function createHarnessFeatureThread({
     setPendingHarnessNextAction(thread.thread_id, resolvedNextAction)
   }
 
+  const grant = await window.api.harnessBoard.ensureFeatureThreadImGrant({
+    projectId,
+    featureId: slug,
+    threadId: thread.thread_id
+  })
+  if (grant.required && !grant.granted) {
+    toast.error(grant.error || "会话已创建，但未能接入招乎")
+  }
+
   return thread
 }
 
@@ -53,5 +64,7 @@ export async function createHarnessFeatureThreadFromLatestRun(
   params: CreateHarnessFeatureThreadFromLatestRunParams
 ): Promise<Thread> {
   const runDetail = await window.api.harnessBoard.getRunDetail(params.projectId, params.slug)
-  return createHarnessFeatureThread({ ...params, runDetail })
+  const workspacePath = runDetail.run.resolvedSessionWorkspacePath
+  if (!workspacePath) throw new Error(MISSING_FEATURE_WORKSPACE)
+  return createHarnessFeatureThread({ ...params, workspacePath, runDetail })
 }

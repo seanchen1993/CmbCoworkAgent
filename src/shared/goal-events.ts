@@ -1,5 +1,10 @@
+import { isGoalClearAlias, splitGoalTransportPayload } from "./goal-slash"
+import { isInternalGoalPrompt } from "./transcript-visibility"
+
 export const GOAL_USER_MESSAGE_EVENT_PREFIX = "__cmb_goal_user_message__:"
+export const GOAL_USER_EVENT_MESSAGE_ID_PREFIX = "goal-user-event-"
 export const GOAL_UI_EVENT_LIMIT = 200
+export const GOAL_COMMAND_MATCH_WINDOW_MS = 5000
 export const RUNTIME_RESTORED_GOAL_PAUSE_NOTICE =
   "Goal 已暂停：应用重启后已暂停。继续请发送 /goal resume。"
 
@@ -25,6 +30,77 @@ export const STALE_CHECKPOINT_BOUNDARY_NOTICE_MESSAGES = [
 
 export function isGoalUserEventMessage(message: string): boolean {
   return message.trim().startsWith(GOAL_USER_MESSAGE_EVENT_PREFIX)
+}
+
+export function formatGoalUserEventMessage(message: string): string {
+  const trimmed = message.trim()
+  return trimmed.startsWith(GOAL_USER_MESSAGE_EVENT_PREFIX)
+    ? trimmed.slice(GOAL_USER_MESSAGE_EVENT_PREFIX.length).trim()
+    : trimmed
+}
+
+export function normalizedGoalCommandContent(content: string): string {
+  const { commandText } = splitGoalTransportPayload(content)
+  const lines: string[] = []
+  for (const line of commandText.split("\n")) {
+    if (/^\s*(?:启动附件：|显式技能：)/.test(line)) {
+      while (lines.length && !lines.at(-1)?.trim()) lines.pop()
+    } else {
+      lines.push(line)
+    }
+  }
+  return lines.join("\n").trim()
+}
+
+export function readGoalPromptXmlText(content: string, tag: string): string | null {
+  const openTag = `<${tag}>`
+  const start = content.indexOf(openTag)
+  if (start < 0) return null
+  const valueStart = start + openTag.length
+  const end = content.indexOf(`</${tag}>`, valueStart)
+  return end < 0 ? null : content.slice(valueStart, end).trim()
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
+}
+
+export interface GoalCommandScope {
+  activeWindowId: string | null
+  goalId: string | null
+  time: number
+}
+
+export function sameGoalCommandScope(left: GoalCommandScope, right: GoalCommandScope): boolean {
+  if (left.activeWindowId && right.activeWindowId) return left.activeWindowId === right.activeWindowId
+  if (left.goalId && right.goalId) return left.goalId === right.goalId
+  return Math.abs(left.time - right.time) <= GOAL_COMMAND_MATCH_WINDOW_MS
+}
+
+export function legacyGoalStartContent(role: string, content: unknown): string | null {
+  if (
+    typeof content !== "string" ||
+    !content.trimStart().startsWith("[Starting active goal]") ||
+    !isInternalGoalPrompt(role, content)
+  )
+    return null
+  const objective = readGoalPromptXmlText(content, "untrusted_objective")
+  return objective ? `/goal ${objective}` : "/goal"
+}
+
+/**
+ * Goal control events are persisted outside `thread_messages`, but some of
+ * them restore a visible user bubble. Keep presence guards and the renderer on
+ * the same definition so a restored `/goal` request cannot be mistaken for an
+ * empty conversation.
+ */
+export function isVisibleGoalUserEventMessage(message: unknown): boolean {
+  if (typeof message !== "string" || !isGoalUserEventMessage(message)) return false
+  const { commandText } = splitGoalTransportPayload(formatGoalUserEventMessage(message))
+  const trimmed = commandText.trim()
+  if (!/^\/goal(?:\s|$)/i.test(trimmed)) return false
+
+  const argument = trimmed.slice("/goal".length).trim().toLowerCase()
+  return (
+    argument !== "" && argument !== "status" && argument !== "pause" && !isGoalClearAlias(argument)
+  )
 }
 
 export function isStaleCheckpointBoundaryNoticeMessage(message: string): boolean {

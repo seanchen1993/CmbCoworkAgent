@@ -1,3 +1,4 @@
+import { BUILTIN_BROWSER_PROMPT_PREFIX, BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX } from "../src/shared/user-input-transport"
 /**
  * Unit tests for renderer slash-command filtering.
  *
@@ -164,7 +165,7 @@ function testBuiltinBrowserPromptFormatting(): void {
   const formatted = formatBuiltinBrowserPrompt("打开百度并搜索 CMB")
   assertEqual(
     formatted,
-    "使用内置浏览器 browser_*工具（不允许使用截图功能）：打开百度并搜索 CMB",
+    `${BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX}打开百度并搜索 CMB`,
     "built-in browser prompt should block screenshots by default"
   )
   assertEqual(
@@ -181,12 +182,12 @@ function testBuiltinBrowserPromptFormatting(): void {
   setBuiltinBrowserScreenshotEnabled(true)
   assertEqual(
     getBuiltinBrowserPromptPrefix(),
-    "使用内置浏览器 browser_*工具：",
+    BUILTIN_BROWSER_PROMPT_PREFIX,
     "enabled screenshot prompt should omit the screenshot restriction"
   )
   assertEqual(
     formatBuiltinBrowserPrompt("打开百度并搜索 CMB"),
-    "使用内置浏览器 browser_*工具：打开百度并搜索 CMB",
+    `${BUILTIN_BROWSER_PROMPT_PREFIX}打开百度并搜索 CMB`,
     "enabled screenshot prompt should keep the original browser prefix"
   )
   setBuiltinBrowserScreenshotEnabled(false)

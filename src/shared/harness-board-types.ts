@@ -1,3 +1,5 @@
+import type { ManagedRunModelSelection } from "./managed-run-model"
+
 export type HarnessUiKind =
   | "pending"
   | "active"
@@ -39,7 +41,7 @@ export type HarnessFeatureStatus =
 
 export type HarnessAdapterType = "plugin"
 
-/** Project-mode Solo subagent selection supplied by the bound plugin at runtime. */
+/** Project-mode inline task subagent selection supplied by the bound plugin at runtime. */
 export interface HarnessProjectModeSubagentConfig {
   /** App-bundled subagents to hide. An empty list means all bundled subagents are available. */
   disabledBuiltinSubagents: string[]
@@ -90,15 +92,8 @@ export interface HarnessAdapterRegistryItem extends HarnessAdapterSnapshot {
   developerName?: string
   developerSapId?: string
   organizationName?: string
-  pullKnowledgeAvailable?: boolean
+  supportsKnowledgeBaseContext?: boolean
   boardCompatibility: HarnessBoardCompatibility
-}
-
-export interface HarnessProjectConstraintSyncResult {
-  adapterId: string
-  adapterName: string
-  message?: string
-  path?: string
 }
 
 export interface HarnessKnowledgePreviewFile {
@@ -109,15 +104,13 @@ export interface HarnessKnowledgePreviewFile {
 }
 
 export interface HarnessKnowledgePreviewResult {
-  adapterId: string
-  adapterName: string
-  configured: boolean
   exists: boolean
   path?: string
   files: HarnessKnowledgePreviewFile[]
   error?: string
 }
 
+/** Single-directory feature snapshot; never refreshed from the global repository catalog. */
 export interface HarnessDeployUnitMapping {
   deployUnitIdMapping: string
   deployUnitId: string
@@ -125,11 +118,42 @@ export interface HarnessDeployUnitMapping {
   description?: string
 }
 
+/** Global multi-directory catalog entry used when configuring a feature. */
+export interface HarnessDeployUnitConfig {
+  deployUnitIdMapping: string
+  deployUnitId: string
+  description?: string
+  repositoryPaths: Array<{ pathId: string; localRepoPath: string }>
+}
+
+export type HarnessSessionWorkspace =
+  | { source: "directory"; path: string }
+  | { source: "deployUnit"; deployUnitId: string }
+
 export interface HarnessLeanTokenConfig {
   leanToken: string
 }
 
 export type HarnessSessionContextInjectionSource = "cmbdevclaw" | "plugin"
+
+export interface HarnessHumanGateSnapshot {
+  /** Alias of the Human Gate notificationId; retained by the managed-run event contract. */
+  gateId: string
+  status: "pending"
+  projectId: string
+  featureId: string
+  sourceThreadId: string
+  sourceManagedRunId?: string
+  hookId: string
+  message: string
+  createdAt: string
+}
+
+export interface HarnessHumanGateDecisionInput {
+  projectId: string
+  featureId: string
+  gateId: string
+}
 
 export interface HarnessAgentmdLoadStatusItem {
   deployUnitId: string
@@ -150,7 +174,9 @@ export interface HarnessFeatureDeployUnitBinding {
   projectId: string
   featureId: string
   selectedDeployUnitMappings: HarnessDeployUnitMapping[]
+  sessionWorkspace?: HarnessSessionWorkspace
   sessionContextInjectionSource: HarnessSessionContextInjectionSource
+  imManagementEnabled?: boolean
 }
 
 function normalizeHarnessText(value: unknown): string {
@@ -161,9 +187,7 @@ function isHarnessPlainObject(value: unknown): value is Record<string, unknown> 
   return Boolean(value) && typeof value === "object" && !Array.isArray(value)
 }
 
-export function normalizeHarnessAgentmdLoadStatus(
-  value: unknown
-): HarnessAgentmdLoadStatusItem[] {
+export function normalizeHarnessAgentmdLoadStatus(value: unknown): HarnessAgentmdLoadStatusItem[] {
   if (!Array.isArray(value)) return []
   const status: HarnessAgentmdLoadStatusItem[] = []
   for (const item of value) {
@@ -198,13 +222,16 @@ export interface HarnessProjectMetadata {
   description: string
   projectCode: string
   projectFromLean: boolean
+  isTestProject?: boolean
   projectDir: string
   systemId: string
   systemName: string
   workspacePath: string
-  sessionWorkspacePath?: string
+  knowledgeBaseIds?: string[]
   /** First feature-session run whose complete system-constraint set loaded successfully. */
   systemConstraintFirstLoadedAt?: string
+  /** 该项目第一次开启托管运行的时间。与上面那个约束标记同样是单调的，只写一次。 */
+  managedRunFirstStartedAt?: string
   "harness-adapter": HarnessAdapterSnapshot
   creator?: HarnessProjectCreatorMetadata
   lifecycle: {
@@ -220,12 +247,13 @@ export interface HarnessProjectCreateInput {
   name: string
   projectCode: string
   projectFromLean: boolean
+  isTestProject?: boolean
   projectDir: string
   description: string
   systemId: string
   systemName: string
   workspacePath: string
-  sessionWorkspacePath?: string
+  knowledgeBaseIds?: string[]
 }
 
 export interface HarnessEnterpriseProjectSearchInput {
@@ -311,6 +339,7 @@ export interface HarnessPipelineLabelQueryResult {
 
 export interface HarnessEnterpriseProjectDetailInput {
   prjCodeList: string[]
+  requestScope?: "board-batch" | "selected-project"
 }
 
 export interface HarnessEnterpriseProjectDetailItem extends HarnessEnterpriseProjectSearchItem {
@@ -325,6 +354,7 @@ export interface HarnessEnterpriseProjectDetailResult {
 
 export interface HarnessProjectReviewInput {
   projectCode: string
+  requestScope?: "selected-project"
 }
 
 export interface HarnessProjectReviewItem {
@@ -342,6 +372,7 @@ export interface HarnessProjectReviewResult {
 }
 
 export interface HarnessFeatureCreateInput {
+  sessionWorkspace: HarnessSessionWorkspace
   projectId: string
   feature: string
   selectedDeployUnits?: HarnessDeployUnitMapping[]
@@ -359,9 +390,48 @@ export interface HarnessFeatureCreateResult {
 }
 
 export interface HarnessFeatureDeployUnitUpdateInput {
+  sessionWorkspace: HarnessSessionWorkspace
   projectId: string
   featureId: string
   selectedDeployUnits: HarnessDeployUnitMapping[]
+}
+
+export interface HarnessFeatureImManagementUpdateInput {
+  projectId: string
+  featureId: string
+  enabled: boolean
+}
+
+export interface HarnessFeatureThreadGrantInput {
+  projectId: string
+  featureId: string
+  threadId: string
+}
+
+export interface HarnessFeatureThreadGrantResult {
+  required: boolean
+  granted: boolean
+  error?: string
+}
+
+export interface ManagedRunStartInput {
+  projectId: string
+  featureId: string
+  workspacePath: string
+  initialUserMessage?: string
+  existingThreadId?: string
+  modelSelection?: ManagedRunModelSelection
+}
+
+export interface ManagedRunStartValidationInput {
+  projectId: string
+  featureId: string
+}
+
+export interface ManagedRunStopInput {
+  projectId: string
+  featureId: string
+  runId: string
 }
 
 export interface HarnessSkipNodeInput {
@@ -369,6 +439,23 @@ export interface HarnessSkipNodeInput {
   slug: string
   nodeId: string
 }
+
+export interface HarnessRunArtifactRevealInput {
+  grant: string
+  filePath: string
+}
+
+export type HarnessRunArtifactRevealResult = { success: true } | { success: false; error: string }
+
+export interface HarnessRunArtifactGrantRefreshInput {
+  projectId: string
+  slug: string
+  filePath: string
+}
+
+export type HarnessRunArtifactGrantRefreshResult =
+  | { success: true; grant: string; expiresAt: number }
+  | { success: false; error: string }
 
 export interface HarnessSkipNodeResult {
   projectId: string
@@ -382,12 +469,13 @@ export interface HarnessProjectMetadataUpdateInput {
   name: string
   projectCode: string
   projectFromLean: boolean
+  isTestProject?: boolean
   projectDir: string
   description: string
   systemId: string
   systemName: string
   workspacePath: string
-  sessionWorkspacePath?: string
+  knowledgeBaseIds?: string[]
 }
 
 export interface HarnessProjectListItem {
@@ -396,12 +484,14 @@ export interface HarnessProjectListItem {
   description: string
   projectCode: string
   projectFromLean: boolean
+  isTestProject?: boolean
   projectDir: string
   systemId: string
   systemName: string
   workspacePath: string
-  sessionWorkspacePath?: string
+  knowledgeBaseIds: string[]
   systemConstraintFirstLoadedAt?: string
+  managedRunFirstStartedAt?: string
   harnessAdapter: {
     id: string
     name: string
@@ -411,11 +501,48 @@ export interface HarnessProjectListItem {
   boardCompatibility: HarnessBoardCompatibility
   supportsDeployUnits: boolean
   supportsSessionContextInjection: boolean
+  supportsKnowledgeBaseContext?: boolean
   lifecycle: {
     status: "active" | "archived"
     createAt: string
     /** Last lifecycle/metadata change (set on metadata edit and on archive). */
     updateAt?: string
+  }
+}
+
+export interface HarnessBoardCatalogPageInput {
+  requestScope?: "board" | "board-registry" | "board-sidebar" | "chat-binding"
+  projectCursor?: number
+  registryCursor?: number
+  projectLimit?: number
+  registryLimit?: number
+  query?: string
+  projectId?: string
+  projectIds?: string[]
+  includeProjects?: boolean
+  includeRegistry?: boolean
+}
+
+export interface HarnessBoardCatalogSummary {
+  totalProjects: number
+  matchedProjects: number
+  activeProjects: number
+  archivedProjects: number
+  totalRegistry: number
+}
+
+export interface HarnessBoardCatalogPageResult {
+  projects: HarnessProjectListItem[]
+  registry: HarnessAdapterRegistryItem[]
+  projectNextCursor: number | null
+  registryNextCursor: number | null
+  summary: HarnessBoardCatalogSummary
+  stats: {
+    durationMs: number
+    responseBytes: number
+    projectRows: number
+    registryRows: number
+    cancelled: boolean
   }
 }
 
@@ -428,6 +555,242 @@ export interface HarnessSessionBinding {
   lastActiveAt: string
   slug: string
   source: string
+}
+
+export type ManagedRunStatus = "running" | "failed" | "completed" | "cancelled"
+export type ManagedRunViewStatus = ManagedRunStatus | "corrupt"
+
+export const MANAGED_RUN_STATUS_LABELS: Record<ManagedRunViewStatus, string> = {
+  running: "托管运行中",
+  failed: "托管失败",
+  completed: "托管已完成",
+  cancelled: "托管已取消",
+  corrupt: "托管记录损坏"
+}
+
+export interface ManagedRunIdentity {
+  projectId: string
+  featureId: string
+  runId: string
+}
+
+export interface ManagedRunSnapshot {
+  version: 2.5
+  runId: string
+  projectId: string
+  featureId: string
+  status: ManagedRunStatus
+  workspacePath?: string
+  modelSelection?: ManagedRunModelSelection
+  currentSession?: {
+    threadId: string
+    workspacePath?: string
+  }
+  decisionBaseline?: {
+    nodeId: string
+    featureStateHash: string
+    featureStatus: HarnessFeatureStatus
+    nodeStatus: HarnessNodeStatus
+    nextActionHash: string
+  }
+  providerRetryCount: number
+  /** Absent in historical records; the store normalizes it to zero on read. */
+  totalRetryCount?: number
+  nextRetryAt?: string
+  failureReason?: string
+  cancellationReason?: string
+  startedAt: string
+  updatedAt: string
+  completedAt?: string
+  lastDecision?: {
+    policyResult: ManagedRunPolicyResult
+    decisionActor: ManagedRunDecisionActor
+    decisionChannel: ManagedRunDecisionChannel
+    decisionAction: ManagedRunDecisionAction
+    summary: string
+    createTime: string
+  }
+}
+
+export type ManagedRunDecisionChangedField =
+  | "currentNode"
+  | "featureStatus"
+  | "currentNodeStatus"
+  | "nextAction"
+
+export type ManagedBizRetryMode = "reuse_thread" | "new_thread"
+
+export interface ManagedRunDecisionFacts {
+  currentNodeId: string
+  featureStatus: HarnessFeatureStatus
+  currentNodeStatus: HarnessNodeStatus
+  slashSkill?: string
+  changedFields: ManagedRunDecisionChangedField[]
+  initialInspection: boolean
+  previousNodeId?: string
+  providerRetryCount: number
+  totalRetryCount?: number
+  contextInputTokens?: number
+  contextMaxTokens?: number
+  contextUsageRatio?: number
+  contextReuseThreshold?: number
+  contextReusable?: boolean
+  terminalOutcome?: AgentTurnEndEvent["outcome"]
+  terminalReason?: string
+}
+
+export type ManagedRunPolicyResult =
+  | {
+      type: "biz_progress"
+      proposedAction: "start_new_thread" | "continue_current_thread"
+      reasonCode: string
+      facts?: ManagedRunDecisionFacts
+      rule?: string
+    }
+  | {
+      type: "biz_retry"
+      proposedAction: "continue_current_thread" | "start_new_thread" | "fail_managed_run"
+      reasonCode: string
+      facts?: ManagedRunDecisionFacts
+      rule?: string
+    }
+  | {
+      type: "provider_retry"
+      proposedAction: "schedule_provider_retry" | "continue_current_thread" | "fail_managed_run"
+      reasonCode: string
+      facts?: ManagedRunDecisionFacts
+      rule?: string
+    }
+  | {
+      type: "human_gate"
+      proposedAction?: "fail_managed_run"
+      reasonCode: string
+      facts?: ManagedRunDecisionFacts
+      rule?: string
+    }
+  | {
+      type: "run_termination"
+      proposedAction:
+        | "stop_managed_run"
+        | "complete_managed_run"
+        | "fail_managed_run"
+        | "reject_human_gate"
+      reasonCode: string
+      facts?: ManagedRunDecisionFacts
+      rule?: string
+    }
+
+export type ManagedRunDecisionAction =
+  | "start_new_thread"
+  | "continue_current_thread"
+  | "schedule_provider_retry"
+  | "approve_human_gate"
+  | "reject_human_gate"
+  | "stop_managed_run"
+  | "complete_managed_run"
+  | "fail_managed_run"
+
+export type ManagedRunDecisionActor = "controller" | "user" | "system"
+export type ManagedRunDecisionChannel = "system" | "desktop" | "im"
+
+export type ManagedRunEventType =
+  | "decision_notification_created"
+  | "decision_notification_ended"
+  | "run_started"
+  | "managed_agent_turn_ended"
+  | "provider_retry_timer_elapsed"
+  | "human_gate_invoked"
+  | "run_stop_requested"
+  | "session_run_aborted"
+  | "run_interrupted_after_restart"
+  | "managed_run_decision"
+  | "session_created"
+  | "session_started"
+  | "session_continued"
+  | "provider_retry_scheduled"
+  | "human_gate_approved"
+  | "human_gate_rejected"
+  | "human_gate_conflict"
+  | "run_cancelled"
+  | "run_failed"
+  | "run_completed"
+
+export interface ManagedRunEvent {
+  version: 2.5
+  eventId: string
+  notificationId?: string
+  notificationStatus?: "pending" | "resolved" | "invalidated"
+  notificationAction?: "stop" | "continue" | "new_thread" | "approve" | "reject"
+  createTime: string
+  type: ManagedRunEventType
+  runId: string
+  scope: "global" | "stage"
+  nodeId?: string
+  threadId?: string
+  sourceThreadId?: string
+  targetThreadId?: string
+  sourceEventId?: string
+  sourceEventType?: ManagedRunEventType
+  decisionEventId?: string
+  policyResult?: ManagedRunPolicyResult
+  decisionActor?: ManagedRunDecisionActor
+  decisionChannel?: ManagedRunDecisionChannel
+  decisionAction?: ManagedRunDecisionAction
+  gateId?: string
+  reasonCode?: string
+  retryNumber?: number
+  retryAt?: string
+  delayMs?: number
+  previousStatus?: "running"
+  outcome?: AgentTurnEndEvent["outcome"]
+  endReason?: AgentTurnEndEvent["endReason"]
+  summary: string
+  [key: string]: unknown
+}
+
+export interface ManagedRunSummary extends Omit<ManagedRunSnapshot, "status"> {
+  status: ManagedRunViewStatus
+  corrupt?: boolean
+}
+
+export interface ManagedRunEventsPage {
+  events: ManagedRunEvent[]
+  nextCursor?: ManagedRunEventCursor
+  hasMore: boolean
+}
+
+export type ManagedRunEventCursor = string
+
+export interface ManagedRunChangeEvent {
+  projectId: string
+  featureId: string
+  run: ManagedRunSummary
+}
+
+export interface ManagedRunThreadCreatedEvent {
+  projectId: string
+  featureId: string
+  runId: string
+  threadId: string
+  thread: {
+    thread_id: string
+    created_at: Date
+    updated_at: Date
+    metadata?: Record<string, unknown>
+    status: "idle" | "busy" | "interrupted" | "error"
+    thread_values?: Record<string, unknown>
+    title?: string
+  }
+}
+
+export interface ManagedFeatureStatusSnapshot {
+  featureStatus: HarnessFeatureStatus
+  currentNodeId: string
+  currentNodeStatus: HarnessNodeStatus
+  isFinalNode: boolean
+  nextAction?: HarnessWorkflowNextAction
+  featureStateHash: string
+  nextActionHash: string
 }
 
 export interface HarnessWatchRef {
@@ -450,6 +813,8 @@ export interface HarnessFeatureSummary {
   location: "active" | "archived" | string
   featureStatus: HarnessFeatureStatus
   featureStatusLabel?: string
+  managedRunStatus?: ManagedRunViewStatus
+  managedRunThreadId?: string
   /**
    * Feature-level status for summary cards. Plugins can provide it explicitly;
    * otherwise the framework derives it from the current node and workflow.
@@ -474,7 +839,6 @@ export interface HarnessProjectDetailViewModel {
     systemId: string
     systemName: string
     workspacePath: string
-    sessionWorkspacePath?: string
     projectRootPath: string
   }
   adapterSnapshot: {
@@ -488,6 +852,7 @@ export interface HarnessProjectDetailViewModel {
     syncType: "invoke_session"
     nextAction: HarnessWorkflowNextAction
     knowledgePath?: string
+    knowledgeUnavailableReason?: string
   }
   watchRefs: HarnessWatchRef[]
   loading: boolean
@@ -523,6 +888,47 @@ export interface HarnessWorkflowNextAction {
     id?: string
     name?: string
   }
+}
+
+export interface AutoModeEventBase {
+  eventId: string
+  eventType: string
+  eventTime: string
+  threadId: string
+}
+
+export interface AgentTurnEndEvent extends AutoModeEventBase {
+  eventType: "agent_turn_end"
+  outcome: "success" | "error"
+  endReason: {
+    code: "normal" | "provider_error" | "hook_halt" | "failure_fuse" | "unknown"
+    message?: string
+    retryable?: boolean
+  }
+  contextUsage?: {
+    inputTokens: number
+    maxTokens: number
+  }
+  executionFacts?: AgentTurnExecutionFacts
+}
+
+export interface AgentTurnExecutionFacts {
+  /** Detached Dynamic Workflow runs successfully launched during this physical Turn. */
+  workflowLaunchedRunIds?: string[]
+}
+
+export interface ManagedRunSessionAction {
+  slashSkill: string
+  userMessage: string
+}
+
+export const AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL = "harnessBoard:managedAutoSendStreamStarted"
+
+export interface ManagedAutoSendStreamStartEvent {
+  runId: string
+  threadId: string
+  streamRequestId: string
+  agentMode?: "normal" | "coordinator" | "workflow"
 }
 
 export interface HarnessWorkflowStateDefinition {
@@ -621,6 +1027,14 @@ export interface HarnessRunNode {
 }
 
 export interface HarnessRunDetailViewModel {
+  artifactAccumulation?: {
+    syncType: "invoke_session"
+    nextAction: HarnessWorkflowNextAction
+  }
+  /** Main-issued, sender-bound capability for generated run artifacts. */
+  artifactPreviewGrant?: string
+  /** Absolute epoch milliseconds; the renderer renews lazily near this boundary. */
+  artifactPreviewGrantExpiresAt?: number
   project: {
     projectId: string
     name: string
@@ -628,7 +1042,6 @@ export interface HarnessRunDetailViewModel {
     projectDir: string
     systemId: string
     workspacePath: string
-    sessionWorkspacePath?: string
     projectRootPath: string
   }
   adapterSnapshot: {
@@ -655,9 +1068,13 @@ export interface HarnessRunDetailViewModel {
     overallStatus?: HarnessStatus
     skipNodeAvailable: boolean
     selectedDeployUnits: HarnessDeployUnitMapping[]
+    sessionWorkspace?: HarnessSessionWorkspace
+    resolvedSessionWorkspacePath?: string
     currentNodeId: string
     nodes: HarnessRunNode[]
     unmatchedHooks: HarnessHookLogView[]
+    managedRun?: ManagedRunSummary
+    imManagementEnabled?: boolean
   }
   sessions: HarnessSessionBinding[]
 }

@@ -11,7 +11,7 @@ import {
 import { getModelConfigByRef } from "../models/registry"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { TraceCollector } from "../agent/trace/collector"
-import { trySendChatXReply } from "./chatx"
+import { TurnTraceRecorder } from "../agent/trace/turn-trace-recorder"
 import {
   createAgentRuntime,
   closeCheckpointer,
@@ -19,17 +19,35 @@ import {
   retireThreadCheckpointers
 } from "../agent/runtime"
 import { purgeThreadCheckpointArtifacts } from "../storage"
-import { createThread as dbCreateThread, deleteThread as dbDeleteThread } from "../db"
+import {
+  createThread as dbCreateThread,
+  deleteThread as dbDeleteThread,
+  upsertThreadMessages
+} from "../db"
 import { StreamConverter } from "../agent/stream-converter"
 import { notifyAlways, stripThink } from "./notify"
 import { showPetCompletedTaskNotice } from "../pet"
 import { emitAppAttention } from "../app-attention-events"
+import {
+  assertLocalThreadRunLease,
+  claimLocalThreadRunLease,
+  releaseLocalThreadRunLease
+} from "../agent/thread-run-lease"
+import type { ScheduledTask } from "../types"
+import { executeImInboxScheduledTask } from "./im/inbox-scheduler"
+import { createStreamDataSerializer } from "../ipc/stream-data-serialization"
+import { ScheduledTranscript } from "./scheduled-transcript"
 import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
+import {
+  clearTrustedToolFilePreviewSourcesForThread,
+  collectTrustedToolFilePreviewScopeKeysForThread
+} from "./trusted-tool-file-preview"
 
 const TICK_INTERVAL_MS = 60_000
 const ONCE_EXPIRE_MS = 30 * 60_000 // once tasks older than 30 min are auto-disabled instead of executed
 let tickTimer: ReturnType<typeof setTimeout> | null = null
 let shuttingDown = false
+let additionalTick: ((now: Date) => Promise<void>) | undefined
 const runningTasks = new Set<string>()
 const activeAbortControllers = new Map<string, AbortController>()
 
@@ -68,7 +86,8 @@ function showTaskNotification(taskName: string, status: "ok" | "error", body?: s
   notifyAlways(title, text)
 }
 
-export function startScheduler(): void {
+export function startScheduler(onTick?: (now: Date) => Promise<void>): void {
+  additionalTick = onTick
   console.log("[Scheduler] Starting scheduler service")
   shuttingDown = false
   tick()
@@ -86,7 +105,7 @@ export function stopScheduler(): void {
   }
   // Abort only — run state (runningTasks / activeAbortControllers) is released
   // by each executeTask's finally AFTER its own cleanup and checkpointer close
-  // settle (same owner-finally principle as stopChatX/stopHeartbeat). Clearing
+  // settle (the same owner-finally principle as heartbeat). Clearing
   // here would make isTaskRunning()/cancelTask() lie during the unwind window,
   // and a stop→start could re-run a task whose previous run is still settling.
   console.log("[Scheduler] Stopped scheduler service")
@@ -118,6 +137,9 @@ function tick(): void {
   if (shuttingDown) return
   try {
     const now = new Date()
+    additionalTick?.(now).catch((error) => {
+      console.error("[Scheduler] Additional scheduled work failed:", error)
+    })
     const tasks = getScheduledTasks()
 
     for (const task of tasks) {
@@ -153,12 +175,68 @@ function broadcastToChannel(channel: string, data: unknown): void {
   }
 }
 
+async function executeManagedInboxTask(task: ScheduledTask): Promise<void> {
+  runningTasks.add(task.id)
+  const abortController = new AbortController()
+  activeAbortControllers.set(task.id, abortController)
+  notifyRenderer("scheduledTasks:changed")
+  const startedAt = new Date()
+  try {
+    const result = await executeImInboxScheduledTask(task, abortController.signal, {
+      occurrence: task.nextRunAt ?? undefined
+    })
+    if (result.status === "deferred") {
+      console.log(`[Scheduler] Deferred managed inbox reminder ${task.id}: ${result.reasonCode}`)
+      return
+    }
+
+    updateScheduledTaskRunResult(task.id, "ok", null)
+    recordRun(task.id, task.name, startedAt, "ok", null)
+    if (task.frequency === "once") setScheduledTaskEnabled(task.id, false)
+    showTaskNotification(task.name, "ok", result.text)
+    showPetCompletedTaskNotice(task.imDeliveryContext!.inboxThreadId, task.name)
+    emitAppAttention({
+      kind: "task-complete",
+      threadId: task.imDeliveryContext!.inboxThreadId,
+      key: `scheduled-task:${task.id}:${result.deliveryId}`
+    })
+  } catch (error) {
+    const cancelled =
+      abortController.signal.aborted ||
+      (error instanceof Error && (error.name === "AbortError" || /aborted/i.test(error.message)))
+    const message = cancelled
+      ? "Cancelled by user"
+      : error instanceof Error
+        ? error.message
+        : String(error)
+    updateScheduledTaskRunResult(task.id, "error", message)
+    recordRun(task.id, task.name, startedAt, "error", message)
+    if (!cancelled) {
+      showTaskNotification(task.name, "error", message)
+      emitAppAttention({
+        kind: "task-error",
+        threadId: task.imDeliveryContext!.inboxThreadId,
+        key: `scheduled-task:${task.id}:${startedAt.toISOString()}`
+      })
+    }
+  } finally {
+    runningTasks.delete(task.id)
+    activeAbortControllers.delete(task.id)
+    notifyRenderer("scheduledTasks:changed")
+    notifyRenderer("threads:changed")
+  }
+}
+
 async function executeTask(taskId: string): Promise<void> {
   if (shuttingDown) throw new Error("The application is quitting; scheduled tasks cannot start.")
   const tasks = getScheduledTasks()
   const task = tasks.find((t) => t.id === taskId)
   if (!task) throw new Error(`任务不存在: ${taskId}`)
   if (!task.enabled) return
+  if (task.imDeliveryContext) {
+    await executeManagedInboxTask(task)
+    return
+  }
 
   runningTasks.add(taskId)
   const abortController = new AbortController()
@@ -173,6 +251,7 @@ async function executeTask(taskId: string): Promise<void> {
   let threadCreated = false
   let hasStreamedContent = false
   let taskError: unknown = null
+  let transcriptPersisted = true
 
   // Hoisted so catch/finally blocks can access for routing feedback & trace
   let routingResult: Awaited<ReturnType<typeof resolveModel>> | null = null
@@ -190,9 +269,22 @@ async function executeTask(taskId: string): Promise<void> {
   const tracer = new TraceCollector(threadId, finalPrompt, task.modelId ?? "unknown", {
     triggerSource: schedulerSource
   })
-  const releaseCheckpointerPin = pinCheckpointer(threadId)
+  const schedulerRunId = uuid()
+  let leaseAcquired = false
+  let releaseCheckpointerPin: (() => void) | null = null
 
   try {
+    const leaseClaim = claimLocalThreadRunLease({
+      threadId,
+      owner: "scheduler",
+      runId: schedulerRunId
+    })
+    if (!leaseClaim.acquired) {
+      throw new Error(`Thread ${threadId} is already owned by ${leaseClaim.conflict.owner}`)
+    }
+    leaseAcquired = true
+    releaseCheckpointerPin = pinCheckpointer(threadId)
+
     const workspacePath = task.workDir
     if (!workspacePath) {
       await tracer.finish("error", "No workspace directory")
@@ -233,73 +325,119 @@ async function executeTask(taskId: string): Promise<void> {
       if (cfg?.model) tracer.setModelName(cfg.model)
     }
 
+    assertLocalThreadRunLease(threadId, "scheduler", schedulerRunId)
     const agent = await createAgentRuntime({
       threadId,
       workspacePath,
       modelId: effectiveModelId,
       enableAgentsPrompt: false,
       noSchedulerTool: true,
+      autoBackgroundHandoff: false,
       abortSignal: abortController.signal
     })
 
-    const converter = new StreamConverter()
-
-    const stream = await agent.stream(
-      { messages: [new HumanMessage(finalPrompt)] },
-      {
-        configurable: { thread_id: threadId },
-        signal: abortController.signal,
-        streamMode: ["messages", "values"],
-        recursionLimit: getAgentGraphRecursionLimit()
-      }
-    )
+    const userMessage = new HumanMessage({ id: uuid(), content: finalPrompt })
+    if (
+      upsertThreadMessages(threadId, [
+        {
+          id: userMessage.id!,
+          role: "user",
+          content: finalPrompt,
+          created_at: startedAt
+        }
+      ]) !== 1
+    ) {
+      throw new Error("Failed to persist scheduled task input")
+    }
+    hasStreamedContent = true
+    const converter = new StreamConverter(schedulerRunId, userMessage.id)
+    const serializeForRun = createStreamDataSerializer()
+    const transcript = new ScheduledTranscript(threadId)
+    // 定时任务此前只建了 tracer 就再没喂过它：整个流式循环一次 recordModelCall /
+    // recordToolCall 都没有，于是上报的 trace 是个空壳——token、模型调用、工具调用
+    // 全是 0，看板上只有调用次数和时间是真的。这里接上聊天路径同一个记录器。
+    const traceRecorder = new TurnTraceRecorder({ tracer, userMessageId: userMessage.id })
 
     let lastAssistantText = ""
-    for await (const chunk of stream) {
-      if (abortController.signal.aborted) break
-      const [mode, data] = chunk as [string, unknown]
-      const serialized = JSON.parse(JSON.stringify(data))
-      const events = converter.processChunk(mode, serialized)
-      for (const evt of events) {
-        broadcastToChannel(channel, evt)
+    try {
+      const stream = await agent.stream(
+        { messages: [userMessage] },
+        {
+          configurable: { thread_id: threadId },
+          signal: abortController.signal,
+          streamMode: ["messages", "values"],
+          recursionLimit: getAgentGraphRecursionLimit()
+        }
+      )
 
-        // Track token usage from stream events
-        if (evt.type === "custom") {
-          const customData = evt.data as Record<string, unknown>
-          if (customData.type === "token_usage") {
-            const usage = customData.usage as { inputTokens?: number } | undefined
-            if (usage?.inputTokens && usage.inputTokens > highWaterInputTokens) {
-              highWaterInputTokens = usage.inputTokens
+      for await (const chunk of stream) {
+        if (abortController.signal.aborted) break
+        const [mode, data] = chunk as [string, unknown]
+        // 记录器要的是完整快照，不能复用下面那个 frame：serializeForRun 是为了压
+        // IPC 体积存在的，values 帧会被投影成 tail/append 增量，messages 帧还会把
+        // tool_calls 删掉。喂增量进去，输入上下文窗口取不全、工具调用也会丢。
+        // 这里按 standard-turn-stream 的同一做法，单独深拷一份原始 data；深拷本身
+        // 也是必需的，LangChain 的 message 实例不直接暴露记录器要读的 kwargs。
+        traceRecorder.onStreamChunk(mode, JSON.parse(JSON.stringify(data)))
+        const frame = serializeForRun(mode, data)
+        const { data: serialized, valuesMessageIndexOffset, valuesSnapshotKind } = frame
+        const events = converter.processChunk(mode, serialized, {
+          valuesMessageIndexOffset,
+          valuesSnapshotScope: "turn",
+          valuesSnapshotKind
+        })
+        transcript.consume(mode, frame, events)
+        for (const evt of events) {
+          broadcastToChannel(channel, evt)
+
+          // Track token usage from stream events
+          if (evt.type === "custom") {
+            const customData = evt.data as Record<string, unknown>
+            if (customData.type === "token_usage") {
+              const usage = customData.usage as { inputTokens?: number } | undefined
+              if (usage?.inputTokens && usage.inputTokens > highWaterInputTokens) {
+                highWaterInputTokens = usage.inputTokens
+              }
+            }
+          }
+
+          // Track tool calls
+          if (evt.type === "message-delta" && evt.toolCalls && Array.isArray(evt.toolCalls)) {
+            toolCallCount += evt.toolCalls.length
+          }
+
+          // Track tool errors
+          if (evt.type === "tool-message") {
+            const content = typeof evt.content === "string" ? evt.content : ""
+            if (/error|exception|failed/i.test(content)) {
+              toolErrorCount++
+            }
+          }
+
+          // Capture last assistant text for notification
+          if (evt.type === "full-messages" || evt.type === "turn-messages") {
+            // 只取最后一条没有 tool_calls 的 assistant 消息（最终回复）
+            for (let index = evt.messages.length - 1; index >= 0; index -= 1) {
+              const candidate = evt.messages[index]
+              if (
+                candidate.role === "assistant" &&
+                (!Array.isArray(candidate.tool_calls) || candidate.tool_calls.length === 0)
+              ) {
+                if (candidate.content.trim()) lastAssistantText = candidate.content.trim()
+                break
+              }
             }
           }
         }
-
-        // Track tool calls
-        if (evt.type === "message-delta" && evt.toolCalls && Array.isArray(evt.toolCalls)) {
-          toolCallCount += evt.toolCalls.length
-        }
-
-        // Track tool errors
-        if (evt.type === "tool-message") {
-          const content = typeof evt.content === "string" ? evt.content : ""
-          if (/error|exception|failed/i.test(content)) {
-            toolErrorCount++
-          }
-        }
-
-        // Capture last assistant text for notification
-        if (evt.type === "full-messages") {
-          // 只取最后一条没有 tool_calls 的 assistant 消息（最终回复）
-          const finalMsgs = evt.messages.filter(
-            (m) =>
-              m.role === "assistant" &&
-              (!m.tool_calls || !Array.isArray(m.tool_calls) || m.tool_calls.length === 0)
-          )
-          const last = finalMsgs[finalMsgs.length - 1]
-          if (last?.content?.trim()) lastAssistantText = last.content.trim()
-        }
+        hasStreamedContent = true
       }
-      hasStreamedContent = true
+    } finally {
+      // Completion, cancellation and provider errors all retain the last
+      // displayed partial message before the renderer reloads durable history.
+      await transcript.finish().catch((error) => {
+        transcriptPersisted = false
+        throw error
+      })
     }
 
     if (!abortController.signal.aborted) {
@@ -331,10 +469,6 @@ async function executeTask(taskId: string): Promise<void> {
         threadId,
         key: `scheduled-task:${taskId}:${startedAt.toISOString()}`
       })
-      // If task is linked to a ChatX robot, send reply via HTTP
-      if (task.chatxRobotChatId && lastAssistantText) {
-        trySendChatXReply(task.chatxRobotChatId, lastAssistantText)
-      }
       console.log(`[Scheduler] Task completed: ${task.name}`)
     } else {
       updateScheduledTaskRunResult(taskId, "error", "Cancelled by user")
@@ -358,7 +492,9 @@ async function executeTask(taskId: string): Promise<void> {
   } catch (error) {
     taskError = error
     const isAbortError =
-      error instanceof Error && (error.name === "AbortError" || error.message.includes("aborted"))
+      transcriptPersisted &&
+      error instanceof Error &&
+      (error.name === "AbortError" || error.message.includes("aborted"))
     const errMsg = isAbortError
       ? "Cancelled by user"
       : error instanceof Error
@@ -402,7 +538,9 @@ async function executeTask(taskId: string): Promise<void> {
     if (threadCreated && !hasStreamedContent) {
       let rowDeleted = false
       try {
+        const previewScopeKeys = collectTrustedToolFilePreviewScopeKeysForThread(threadId)
         dbDeleteThread(threadId)
+        clearTrustedToolFilePreviewSourcesForThread(threadId, previewScopeKeys)
         rowDeleted = true
       } catch {
         // ignore cleanup errors
@@ -421,28 +559,38 @@ async function executeTask(taskId: string): Promise<void> {
       }
     }
   } finally {
-    releaseCheckpointerPin()
+    releaseCheckpointerPin?.()
     // Close FIRST, then release run state, then broadcast — two contracts at
-    // once: (1) owner-finally principle (same as chatx/heartbeat): the task
+    // once: (1) owner-finally principle (same as heartbeat): the task
     // counts as running until its checkpointer close settles, so a runNow in
     // the close window is refused instead of overlapping a still-settling
     // run; (2) renderer contract: runningTasks is deleted BEFORE the done/
     // error broadcast, so loadThreadHistory → isRunning never races back to
     // scheduledTaskLoading = true.
-    await closeCheckpointer(threadId).catch(() => {})
+    if (releaseCheckpointerPin) {
+      await closeCheckpointer(threadId).catch(() => {})
+    }
+    if (leaseAcquired) {
+      releaseLocalThreadRunLease(threadId, "scheduler", schedulerRunId)
+    }
     runningTasks.delete(taskId)
     activeAbortControllers.delete(taskId)
 
     // Now broadcast lifecycle event — renderer can safely call isRunning() = false
     if (taskError) {
       const isAbortError =
+        transcriptPersisted &&
         taskError instanceof Error &&
         (taskError.name === "AbortError" || taskError.message.includes("aborted"))
       if (isAbortError) {
         broadcastToChannel(channel, { type: "done" })
       } else {
         const errMsg = taskError instanceof Error ? taskError.message : String(taskError)
-        broadcastToChannel(channel, { type: "error", error: errMsg })
+        broadcastToChannel(channel, {
+          type: "error",
+          error: errMsg,
+          ...(transcriptPersisted ? {} : { transcriptPersisted: false })
+        })
       }
     } else {
       broadcastToChannel(channel, { type: "done" })

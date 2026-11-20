@@ -1,6 +1,10 @@
 import { BrowserWindow, type IpcMain } from "electron"
 import type { UserInputResponse } from "../types"
-import { acknowledgeUserInputRequest, submitUserInputResponse } from "../services/user-input"
+import {
+  acknowledgeUserInputRequest,
+  getPendingUserInputForThread,
+  submitUserInputResponse
+} from "../services/user-input"
 
 function isUserInputResponse(value: unknown): value is UserInputResponse {
   if (!value || typeof value !== "object") return false
@@ -19,6 +23,11 @@ function isUserInputAck(value: unknown): value is { requestId: string; threadId:
 }
 
 export function registerUserInputHandlers(ipcMain: IpcMain): void {
+  ipcMain.handle("userInput:getPending", (_event, threadId: unknown) => {
+    if (typeof threadId !== "string" || !threadId.trim()) return null
+    return getPendingUserInputForThread(threadId)
+  })
+
   ipcMain.on("userInput:ack", (event, ack: unknown) => {
     const senderWindow = BrowserWindow.getAllWindows().find(
       (win) => win.webContents.id === event.sender.id

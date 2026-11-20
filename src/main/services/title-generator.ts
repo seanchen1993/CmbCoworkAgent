@@ -49,6 +49,10 @@ export function generateTitle(message: string): string {
   return title
 }
 
+export function defaultThreadTitle(date = new Date()): string {
+  return `Thread ${date.toLocaleDateString()}`
+}
+
 /**
  * Check if the title generator is ready (always true for heuristic approach)
  */

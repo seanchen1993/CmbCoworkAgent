@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
+import { ToggleThumb } from "@/components/ui/toggle-thumb"
 import { cn } from "@/lib/utils"
 import type { ManagedSavedCodeExecTool, SavedCodeExecPreviewResult } from "@/types"
 
@@ -670,9 +671,9 @@ export function CodeExecToolsPanel(): React.JSX.Element {
                 )}
                 onClick={handleToggleCodeExecEnabled}
               >
-                <span
+                <ToggleThumb
                   className={cn(
-                    "pointer-events-none inline-block size-3 rounded-full bg-white shadow-sm transition-transform",
+                    "inline-block size-3",
                     codeExecEnabled ? "translate-x-3" : "translate-x-0"
                   )}
                 />

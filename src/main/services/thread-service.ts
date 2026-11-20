@@ -1,0 +1,137 @@
+import Store from "electron-store"
+import { v4 as uuid } from "uuid"
+import { createThread as dbCreateThread } from "../db"
+import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
+import {
+  buildHarnessFeatureAgentContext,
+  requireHarnessFeatureWorkspace,
+  resolveHarnessFeatureCurrentStage,
+  DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG
+} from "../harness-board/service"
+import { getOpenworkDir } from "../storage"
+import type { Thread } from "../types"
+import { getDefaultModel } from "../ipc/models"
+import { resolveRecentWorkspacePath } from "../ipc/recent-workspace"
+import { validateWorkspaceDirectory } from "./workspace-validation"
+
+const settingsStore = new Store({
+  name: "settings",
+  cwd: getOpenworkDir()
+})
+
+export async function createThreadService(
+  metadata?: Record<string, unknown>,
+  options: { managedWorkspace?: boolean } = {}
+): Promise<Thread> {
+  const threadId = uuid()
+  const nextMetadata: Record<string, unknown> = { ...(metadata ?? {}) }
+  const harnessFeatureMetadata =
+    nextMetadata.harnessFeature &&
+    typeof nextMetadata.harnessFeature === "object" &&
+    !Array.isArray(nextMetadata.harnessFeature)
+      ? (nextMetadata.harnessFeature as Record<string, unknown>)
+      : undefined
+  if (harnessFeatureMetadata) {
+    const projectId = harnessFeatureMetadata.projectId
+    const slug = harnessFeatureMetadata.slug
+    const launchStage =
+      typeof projectId === "string" && typeof slug === "string"
+        ? await resolveHarnessFeatureCurrentStage(projectId, slug)
+        : null
+    nextMetadata.harnessFeature = {
+      ...harnessFeatureMetadata,
+      ...(launchStage?.name ? { launchStageName: launchStage.name } : {}),
+      requestUserInputConfig: { ...DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG }
+    }
+  }
+
+  if (harnessFeatureMetadata && !options.managedWorkspace) {
+    const { projectId, slug } = harnessFeatureMetadata
+    if (typeof projectId !== "string" || typeof slug !== "string")
+      throw new Error("特性会话标识无效")
+    nextMetadata.workspacePath = await requireHarnessFeatureWorkspace(projectId, slug)
+  }
+
+  const hasWorkspacePath = Object.prototype.hasOwnProperty.call(nextMetadata, "workspacePath")
+  if (!hasWorkspacePath) {
+    // UNC/network paths can block the Electron main process when probed
+    // synchronously. Keep the shared creation path aligned with the UAT IPC
+    // behavior and recheck the setting after the bounded async probe.
+    const lastWorkspacePath = await resolveRecentWorkspacePath(() =>
+      settingsStore.get("workspacePath", null)
+    )
+    if (lastWorkspacePath) {
+      nextMetadata.workspacePath = lastWorkspacePath
+    }
+  }
+
+  // An explicit path must not bypass validation or be persisted as a broken session.
+  // null/undefined retain the existing workspace-less thread creation behavior.
+  if (nextMetadata.workspacePath !== null && nextMetadata.workspacePath !== undefined) {
+    await validateWorkspaceDirectory(nextMetadata.workspacePath)
+  }
+
+  let harnessContext: Awaited<ReturnType<typeof buildHarnessFeatureAgentContext>> = null
+  try {
+    const workspacePath =
+      typeof nextMetadata.workspacePath === "string" ? nextMetadata.workspacePath : undefined
+    harnessContext = await buildHarnessFeatureAgentContext(nextMetadata, {
+      workspacePath,
+      requestUserInputConfigSource: "plugin"
+    })
+    if (harnessFeatureMetadata && harnessContext?.agentConfig?.toolConfig?.requestUserInput) {
+      nextMetadata.harnessFeature = {
+        ...(nextMetadata.harnessFeature as Record<string, unknown>),
+        requestUserInputConfig: harnessContext.agentConfig.toolConfig.requestUserInput
+      }
+    }
+  } catch (error) {
+    console.warn("[Threads] Failed to resolve Harness request_user_input policy:", error)
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(nextMetadata, "agentMode")) {
+    try {
+      const initialAgentMode = harnessContext?.agentConfig?.agentMode
+      if (initialAgentMode === "solo") {
+        nextMetadata.agentMode = "normal"
+        nextMetadata.subagentsEnabled = false
+      }
+      if (initialAgentMode === "multi") {
+        nextMetadata.agentMode = "normal"
+        nextMetadata.subagentsEnabled = true
+      }
+      if (initialAgentMode === "agent_team") nextMetadata.agentMode = "coordinator"
+      if (initialAgentMode === "workflow") nextMetadata.agentMode = "workflow"
+    } catch (error) {
+      console.warn("[Threads] Failed to apply Harness initial agent mode:", error)
+    }
+  }
+  if (
+    getAgentModeFromMetadata(nextMetadata) === "normal" &&
+    typeof nextMetadata.subagentsEnabled !== "boolean"
+  ) {
+    nextMetadata.subagentsEnabled = true
+  }
+
+  const hasModel = Object.prototype.hasOwnProperty.call(nextMetadata, "model")
+  if (!hasModel) {
+    const defaultModelId = getDefaultModel()
+    if (defaultModelId) {
+      nextMetadata.model = defaultModelId
+    }
+  }
+
+  const title = (nextMetadata.title as string) || `Thread ${new Date().toLocaleDateString()}`
+  nextMetadata.title = title
+
+  const thread = dbCreateThread(threadId, nextMetadata, { newDurableTranscript: true })
+  return {
+    thread_id: thread.thread_id,
+    created_at: new Date(thread.created_at),
+    updated_at: new Date(thread.updated_at),
+    metadata: thread.metadata ? JSON.parse(thread.metadata) : undefined,
+    status: thread.status as Thread["status"],
+    thread_values: thread.thread_values ? JSON.parse(thread.thread_values) : undefined,
+    title
+  }
+}

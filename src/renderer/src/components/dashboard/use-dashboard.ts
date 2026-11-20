@@ -1,3 +1,12 @@
+import type {
+  EfficiencyDevComputeResult,
+  EfficiencyPluginFilter
+} from "../../../../shared/dashboard-efficiency-compute"
+import type { ProjectAttentionSortKey } from "../../../../shared/project-attention"
+import {
+  parseToolUsageAggs,
+  type DashboardToolUsageCoverage
+} from "../../../../shared/dashboard-tool-usage"
 /**
  * Dashboard data fetching hook
  */
@@ -9,6 +18,7 @@ import type {
   LocalGeneratedLineStatus,
   LocalGenAdoptionLines
 } from "../../../../shared/adoption-trace-types"
+import type { DashboardKnowledgeCommitRate } from "../../../../shared/dashboard-knowledge-commit-rate"
 
 // ─────────────────────────────────────────────────────────
 // Types
@@ -24,6 +34,7 @@ export interface TimeRange {
 }
 
 export interface OverviewData {
+  toolUsageCoverage?: DashboardToolUsageCoverage
   totalCalls: number
   activeUsers: number
   avgDurationMs: number
@@ -133,6 +144,8 @@ export interface DashboardTraceNode {
 }
 
 export interface DashboardTraceDetail {
+  threadSkillUsage?: import("../../../../shared/dashboard-thread-skills").DashboardThreadSkill[]
+  threadSkillUsageError?: string
   traceId: string
   threadId: string
   startedAt: string
@@ -177,6 +190,7 @@ export interface DashboardTraceDetail {
   totalToolCalls: number
   modelCallCount: number
   userInputRequestCount: number
+  userInputRequestCountComplete?: boolean
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
@@ -186,6 +200,9 @@ export interface DashboardTraceDetail {
   triggerSource?: string
   nodes?: DashboardTraceNode[]
   rawAvailable: boolean
+  /** true = 这是会话列表的摘要预览行，完整对话还在懒加载。渲染层不得把它当成
+   * 对话来渲染。 */
+  rawPending?: boolean
   rawError?: string
 }
 
@@ -333,6 +350,34 @@ export interface DashboardCodeStats {
   adoptionRate: number | null
 }
 
+/** 研发效能面板：改动落点分桶。unclassified 为该字段上线前的历史事件。 */
+export type DashboardEfficiencyChangeKind = "new" | "legacy" | "unclassified"
+
+export interface DashboardEfficiencyChangeKindStats extends DashboardCodeStats {
+  changeKind: DashboardEfficiencyChangeKind
+}
+
+export interface DashboardEfficiencyData extends EfficiencyDevComputeResult {
+  /** 指标 1 系统可扩展性。数据源未接入前 slope 恒为 null，由 pendingReason 说明原因。 */
+  scalability: {
+    slope: number | null
+    pendingReason: string
+  }
+  /** 指标 2 AI 编码有效性。 */
+  adoption: {
+    overall: DashboardCodeStats
+    byChangeKind: DashboardEfficiencyChangeKindStats[]
+    /** newRatio 分布，用于判断 0.7 阈值切在分布的什么位置。 */
+    newRatioHistogram: { from: number; docCount: number }[]
+    /** 未测量行占分母的比例。偏高说明采纳率被系统性低估（主因是 14 天归因窗口）。 */
+    unmeasuredRatio: number | null
+  }
+  meta: {
+    projectCount: number
+    truncated: boolean
+  }
+}
+
 export interface DashboardSkillDetail {
   stats: DashboardCodeStats
   traces: DashboardTraceDetail[]
@@ -353,10 +398,10 @@ export interface DashboardUserListItem {
   count: number
   lastActiveAt?: string
   avgDurationMs: number
-  totalToolCalls: number
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
+  codeStats: DashboardCodeStats | null
 }
 
 export interface DashboardUserListData {
@@ -379,6 +424,8 @@ export interface DashboardUserDetail {
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
+  /** 当前时间范围内该用户的代码生成、Commit 采纳与 Push 入库统计。 */
+  codeStats: DashboardCodeStats | null
   bySkill: Array<{ skill: string; count: number }>
   byModel: Array<{ model: string; count: number }>
   byOutcome: Array<{ outcome: string; count: number }>
@@ -446,6 +493,8 @@ export interface DashboardAwardTeamBenchmarkRow {
 }
 
 export interface DashboardProjectModeFeature {
+  totalDurationMs?: number | null
+  lastExecutedAt?: string | null
   slug: string
   title: string
   location?: string
@@ -454,6 +503,10 @@ export interface DashboardProjectModeFeature {
   summary?: string
   /** This-range code adoption sliced to this feature; absent/null if no code data. */
   codeStats?: DashboardCodeStats | null
+  /** Successful plugin system-constraint reads aggregated across this feature's stages. */
+  systemConstraintReads?: DashboardProjectModeConstraintReadStats | null
+  /** Runtime hook executions aggregated across this feature's stages. */
+  hookExecutions?: DashboardProjectModeHookStats | null
 }
 
 /** Sub-row of a stage: conversations + code adoption for one node status (进行中/已完成/...). */
@@ -463,12 +516,98 @@ export interface DashboardProjectModeNodeStatus {
   codeStats: DashboardCodeStats | null
 }
 
+export interface DashboardProjectModeConstraintReadStats {
+  traceCount: number
+  successfulReadCount: number
+  distinctFileCount: number
+  filesTruncated: boolean
+  files: Array<{ path: string; traceCount: number }>
+}
+
+export interface DashboardProjectModeHookStats {
+  executionCount: number
+  blockedCount: number
+  byEvent: Array<{ event: string; count: number }>
+}
+
+export interface DashboardProjectModeOperationalDetails {
+  constraintFiles: Array<{ path: string; traceCount: number }>
+  hookEvents: Array<{ event: string; count: number }>
+}
+
+export interface DashboardProjectModeOperationalDetailScope {
+  projectId: string
+  featureSlug?: string
+  nodeName?: string
+}
+
+export type DashboardProjectModeOperationalDetailsLoader = (
+  scope: DashboardProjectModeOperationalDetailScope
+) => Promise<DashboardProjectModeOperationalDetails>
+
+export interface DashboardProjectModeStageMetrics {
+  /** 主动触发的主 Agent 轮次数，与项目列表那一行的「对话数」同口径。 */
+  conversationCount: number
+  /**
+   * 归属到该阶段的 Agent 忙碌总时长。
+   *
+   * 不是「这个阶段花了多久」：trace 上的阶段是「这轮对话开始时特性处在哪一步」，
+   * 一个阶段可能跨三天而 Agent 只跑了 20 分钟。界面必须写明，否则会被当成阶段周期读。
+   */
+  totalDurationMs: number
+  avgDurationMs: number
+  p95DurationMs: number
+  p95Available?: boolean
+  runCost: {
+    toolCalls: number
+    modelCalls: number
+    /** 模型上报的总量；缓存子集不重复相加。 */
+    totalTokens: number
+    inputTokens: number
+    outputTokens: number
+    userInputRequests: number
+    userInputRequestDocs: number
+    traceDocs?: number
+  }
+}
+
+export interface DashboardProjectModeStageRow {
+  /** 原始 harnessNodeName，形如 `dev-编码实现`。 */
+  nodeName: string
+  /** 阶段大类，取不到时为 null（未归因桶就是这种）。 */
+  group: string | null
+  metrics: DashboardProjectModeStageMetrics
+}
+
+export interface DashboardProjectModeStageAnalysis {
+  durationAttribution?: { splitTurnCount: number; legacyTurnCount: number; truncated: boolean }
+  costAttribution?: {
+    callStartTraceCount: number
+    turnStartTraceCount: number
+    tokenUsageReportedCalls: number
+    modelCalls: number
+    truncated: boolean
+  }
+  projectId: string
+  total: DashboardProjectModeStageMetrics
+  stages: DashboardProjectModeStageRow[]
+}
+
+export type DashboardProjectModeStageAnalysisLoader = (
+  projectId: string,
+  featureSlug?: string
+) => Promise<DashboardProjectModeStageAnalysis>
+
 /** Per-stage (workflow node) breakdown of a feature: conversations + code adoption. */
 export interface DashboardProjectModeFeatureNode {
   /** Human-readable stage name (group-label, e.g. "Dev-代码实现"); no raw node id. */
   nodeName: string
   conversationCount: number
   codeStats: DashboardCodeStats | null
+  /** Successful model-facing reads of plugin-maintained `<plugin>/sys/**` files. */
+  systemConstraintReads?: DashboardProjectModeConstraintReadStats | null
+  /** Runtime hook executions attributed to this workflow stage. */
+  hookExecutions?: DashboardProjectModeHookStats | null
   /** Status-at-turn-time sub-breakdown within this stage (进行中/已完成/...). */
   byStatus: DashboardProjectModeNodeStatus[]
   /** Stage×skill 三桶拆分（插件约束（Harness）/ VibeCoding / 未归因）。 */
@@ -494,6 +633,7 @@ export interface DashboardProjectModeSkillCount {
 }
 
 export interface DashboardProjectModeToolUsage {
+  toolUsageCoverage?: DashboardToolUsageCoverage
   byTool: Array<{ tool: string; count: number }>
   byToolAll: Array<{ tool: string; count: number }>
   byToolFilteredAll: Array<{ tool: string; count: number }>
@@ -548,6 +688,9 @@ export interface DashboardStageBuckets {
 }
 
 export interface DashboardProjectModeProject {
+  /** 项目累计：最后主 Agent 执行结束时间减去创建时间；缺失或异常时为 null。 */
+  elapsedMs?: number | null
+  lastExecutedAt?: string | null
   projectId: string
   name: string
   description?: string
@@ -566,8 +709,33 @@ export interface DashboardProjectModeProject {
   compatible?: boolean
   compatibilityStatus?: string
   systemConstraintEverLoadedSuccessfully?: boolean
+  /** 是否至少开启过一次托管运行。终身事实，不随时间范围变化。 */
+  managedRunEverStarted?: boolean
+  /** 所选时间范围内开启的托管运行次数。与上面那个标记不同源，可能标记为真而次数为 0。 */
+  managedRunCount?: number
+  /** 运行开销各项，与「对话数」同口径（主动触发的主 Agent root trace）。 */
+  runCost?: {
+    toolCalls: number
+    modelCalls: number
+    /** 模型上报的总量；缓存子集不重复相加。 */
+    totalTokens: number
+    inputTokens: number
+    outputTokens: number
+    /**
+     * 恒为 0：`userInputRequestCount` 这个字段采集侧从未写入，索引里不存在，sum 缺字段
+     * 返回 0。界面上已经撤掉，等采集侧补上标量再恢复展示。
+     */
+    userInputRequests: number
+    userInputRequestDocs: number
+    traceDocs?: number
+  }
+  /** 带 userInputRequestCount 字段的文档是否覆盖全部轮次。字段目前恒缺失，所以恒为 false。 */
+  userInputRequestCountComplete?: boolean
   featureCount: number
   conversationCount: number
+  /** Forward-only count of main-Agent turns matching the technical-detail heuristic. */
+  suspectedTechnicalDetailConversationCount?: number
+  attentionMetric?: number | null
   /** Conversations attributed to a workflow node in the Dev group. */
   devStageConversationCount: number
   /** Distinct bound Features that contributed a Dev-stage conversation in the range. */
@@ -576,6 +744,10 @@ export interface DashboardProjectModeProject {
   features: DashboardProjectModeFeature[]
   topSkills: DashboardProjectModeSkillCount[]
   codeStats: DashboardCodeStats | null
+  /** Successful plugin system-constraint reads aggregated across all project features/stages. */
+  systemConstraintReads?: DashboardProjectModeConstraintReadStats | null
+  /** Runtime hook executions aggregated across all project features/stages. */
+  hookExecutions?: DashboardProjectModeHookStats | null
   stageBuckets: DashboardStageBuckets
 }
 
@@ -601,8 +773,10 @@ export interface DashboardProjectModeProjectCounts {
 }
 
 export type DashboardProjectModeProjectSortKey =
+  | ProjectAttentionSortKey
   | "featureCount"
   | "createdAt"
+  | "elapsedMs"
   | "conversationCount"
   | "generatedLines"
   | "archivedAt"
@@ -620,6 +794,8 @@ export interface DashboardProjectModeProjectPageData {
   creatorOrgKeyword: string
   sortBy: DashboardProjectModeProjectSortKey | null
   sortOrder: DashboardProjectModeProjectSortOrder
+  /** Whether the current viewer may receive and see the heuristic metric. */
+  showSuspectedTechnicalDetailMetric: boolean
   /**
    * True when more projects matched than the metric-sort enumeration cap, so the
    * ranking + total only cover the first N projects and the list / metrics are
@@ -631,6 +807,8 @@ export interface DashboardProjectModeProjectPageData {
 export interface DashboardProjectModeProjectPageOptions {
   upperOrgLv1?: string | string[] | null
   fromLeanOnly?: boolean | null
+  /** 仅统计创建时间落在所选时间范围内的项目；范围走同一次调用的 range 参数。 */
+  createdInRangeOnly?: boolean | null
   status?: DashboardProjectModeProjectStatus | null
   page?: number
   pageSize?: number
@@ -650,6 +828,10 @@ export interface DashboardProjectModeAdapter {
   projectCount: number
   featureCount: number
   conversationCount: number
+  /** 所选范围内主 Agent 主动对话按非空 sapId 去重。 */
+  userCount: number
+  /** 插件名下跨版本去重的人数，不能累加各版本的 userCount。 */
+  allVersionsUserCount: number
   codeStats: DashboardCodeStats | null
   stageBuckets: DashboardStageBuckets
 }
@@ -676,7 +858,7 @@ export interface DashboardProjectModeData {
   tools: DashboardProjectModeToolUsage
   analytics: DashboardProjectModeAnalytics
   projectCounts: DashboardProjectModeProjectCounts
-  projectPage: DashboardProjectModeProjectPageData
+  projectPage?: DashboardProjectModeProjectPageData
   projects: DashboardProjectModeProject[]
   /** 「仅精益项目」开关下精益项目 id 集被截断、遥测汇总可能不完整；开关关闭时恒为 false。 */
   leanTruncated: boolean
@@ -1321,9 +1503,7 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
       : null
   const codeAdoptionRate = codeMeasuredAdoptionRate
   const totalSkills = aggs.total_skills?.value ?? 0
-  const totalTools = aggs.total_tools?.value ?? 0
   const totalSkillCalls = aggs.total_skill_calls?.value ?? 0
-  const totalToolCalls = aggs.total_tool_calls?.value ?? 0
   const combinedSkillItems = combineSkillUsageBuckets(
     aggs.by_skill_all?.buckets ?? aggs.by_skill?.buckets ?? [],
     aggs.skill_source?.buckets
@@ -1373,33 +1553,7 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     }
   })
 
-  const byTool: OverviewData["byTool"] = (aggs.by_tool?.buckets ?? []).map((b: any) => ({
-    tool: b.key || "unknown",
-    count: b.doc_count
-  }))
-
-  const byToolAll: OverviewData["byToolAll"] = (aggs.by_tool_all?.buckets ?? []).map((b: any) => ({
-    tool: b.key || "unknown",
-    count: b.doc_count
-  }))
-
-  const byToolFilteredAll: OverviewData["byToolFilteredAll"] = (
-    aggs.by_tool_filtered_all?.buckets ??
-    aggs.by_tool?.buckets ??
-    []
-  ).map((b: any) => ({
-    tool: b.key || "unknown",
-    count: b.doc_count
-  }))
-
-  const byToolAllFull: OverviewData["byToolAllFull"] = (
-    aggs.by_tool_all_full?.buckets ??
-    aggs.by_tool_all?.buckets ??
-    []
-  ).map((b: any) => ({
-    tool: b.key || "unknown",
-    count: b.doc_count
-  }))
+  const toolUsage = parseToolUsageAggs(aggs)
 
   return {
     totalCalls,
@@ -1424,17 +1578,12 @@ function parseOverview(raw: any, granularity: Granularity): OverviewData {
     codePushedAdoptionRate,
     codeAdoptionRate,
     totalSkills,
-    totalTools,
     totalSkillCalls,
-    totalToolCalls,
     trend,
     bySkill,
     bySkillAll,
     bySkillAdoption,
-    byTool,
-    byToolAll,
-    byToolFilteredAll,
-    byToolAllFull
+    ...toolUsage
   }
 }
 
@@ -1700,6 +1849,31 @@ function parseAdvancedFeatures(raw: unknown): AdvancedFeaturesData {
   return { cards, source: root.source === "es" ? "es" : "mock" }
 }
 
+function isOverviewViewModel(value: unknown): value is OverviewData {
+  const record = value as Partial<OverviewData> | null
+  return Boolean(record && Array.isArray(record.trend) && Array.isArray(record.bySkillAll))
+}
+
+function isModelStatsViewModel(value: unknown): value is ModelStatsData {
+  const record = value as Partial<ModelStatsData> | null
+  return Boolean(record && Array.isArray(record.byModel) && Array.isArray(record.smartByTier))
+}
+
+function isUserStatsViewModel(value: unknown): value is UserStatsData {
+  const record = value as Partial<UserStatsData> | null
+  return Boolean(record && Array.isArray(record.topUsers) && Array.isArray(record.versionUsers))
+}
+
+function isProductivityViewModel(value: unknown): value is ProductivityData {
+  const record = value as Partial<ProductivityData> | null
+  return Boolean(record && Array.isArray(record.commitTrend) && typeof record.totalCommits === "number")
+}
+
+function isAdvancedFeaturesViewModel(value: unknown): value is AdvancedFeaturesData {
+  const record = value as Partial<AdvancedFeaturesData> | null
+  return Boolean(record && Array.isArray(record.cards))
+}
+
 function parseSkillEvalChecks(raw: any): DashboardSkillEvalRun["checks"] {
   return Array.isArray(raw)
     ? raw.map((item: any) => ({
@@ -1784,6 +1958,7 @@ function parseDashboardTraceDetail(raw: any): DashboardTraceDetail | undefined {
     ...(raw.triggerSource ? { triggerSource: String(raw.triggerSource) } : {}),
     nodes: Array.isArray(raw.nodes) ? raw.nodes : undefined,
     rawAvailable: raw.rawAvailable === true,
+    ...(raw.rawPending === true ? { rawPending: true } : {}),
     ...(raw.rawError ? { rawError: String(raw.rawError) } : {})
   }
 }
@@ -2139,13 +2314,46 @@ async function loadSkillEvalSummarySafely(
 // Hook
 // ─────────────────────────────────────────────────────────
 
-export function useDashboard() {
+const DASHBOARD_SKILL_EVAL_REQUEST_FAMILY = "dashboard:skillEvalSummary"
+const DASHBOARD_HOOK_REQUEST_FAMILIES = [
+  "dashboard:overview",
+  "dashboard:modelStats",
+  "dashboard:userStats",
+  "dashboard:productivity",
+  "dashboard:advancedFeatures",
+  "dashboard:orgOptions",
+  "dashboard:projectMode",
+  "dashboard:projectModeCodeStats",
+  "dashboard:knowledgeCommitRate",
+  "dashboard:projectModeProjects",
+  "dashboard:projectCodeTrace",
+  "dashboard:projectModeTraces",
+  "dashboard:projectModeFeatureNodes",
+  "dashboard:pluginAggregate",
+  "dashboard:userProfiles",
+  "dashboard:queryAllUser",
+  DASHBOARD_SKILL_EVAL_REQUEST_FAMILY
+] as const
+
+function isCancelledDashboardResult(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "cancelled" in value &&
+    value.cancelled === true
+  )
+}
+
+export function useDashboard(initialOrgLv1List: string[]) {
   const [granularity, setGranularity] = useState<Granularity>("day")
   const [range, setRange] = useState<TimeRange>(() => getDefaultRange("day"))
-  // 顶部「室筛选」支持多选 LV1 组织；空数组表示全部。
-  const [selectedOrgLv1List, setSelectedOrgLv1List] = useState<string[]>([])
+  // 首次查询直接带入主进程按当前账号解析的默认室；后续仍支持多选和清除。
+  const [selectedOrgLv1List, setSelectedOrgLv1List] = useState<string[]>(initialOrgLv1List)
   // 项目运营概览「仅精益项目」全局开关：仅统计绑定了企业（精益）项目的项目。
   const [fromLeanProjectsOnly, setFromLeanProjectsOnly] = useState(false)
+  // 项目运营概览「仅本期新建」全局开关：仅统计创建时间落在当前所选时间范围内的项目。
+  // 默认开启以收窄查询范围，和「仅精益项目」互相独立，可叠加，也可手动关闭。
+  const [createdInRangeProjectsOnly, setCreatedInRangeProjectsOnly] = useState(true)
   const [loading, setLoading] = useState(false)
   const [userStatsLoading, setUserStatsLoading] = useState(false)
   const [skillEvalLoading, setSkillEvalLoading] = useState(false)
@@ -2168,7 +2376,12 @@ export function useDashboard() {
     Partial<Record<DashboardProjectModeProjectStatus, string>>
   >({})
   const [projectModeLoading, setProjectModeLoading] = useState(false)
+  const [projectListLoading, setProjectListLoading] = useState(false)
   const [projectModeError, setProjectModeError] = useState<string | null>(null)
+  const [efficiency, setEfficiency] = useState<DashboardEfficiencyData | null>(null)
+  const [efficiencyPluginFilter, setEfficiencyPluginFilter] = useState<EfficiencyPluginFilter>({})
+  const [efficiencyLoading, setEfficiencyLoading] = useState(false)
+  const [efficiencyError, setEfficiencyError] = useState<string | null>(null)
   // 「生产效能代码指标」source 局部筛选：当前选中的来源（null = 全部，用 projectMode 自带口径），
   // 以及按 source 换数得到的代码采纳覆盖值（仅替换该区两个子模块，不动其它面板维度）。
   const [projectModeCodeSource, setProjectModeCodeSource] = useState<string | null>(null)
@@ -2177,18 +2390,46 @@ export function useDashboard() {
     skillCodeStats: DashboardCodeStats | null
   } | null>(null)
   const [projectModeCodeStatsLoading, setProjectModeCodeStatsLoading] = useState(false)
+  // 「知识文档入库率」来自知识库服务而非 ES，单独取数，失败或慢都不拖累面板其它部分。
+  const [knowledgeCommitRate, setKnowledgeCommitRate] =
+    useState<DashboardKnowledgeCommitRate | null>(null)
+  const [knowledgeCommitRateLoading, setKnowledgeCommitRateLoading] = useState(false)
+  const [knowledgeCommitRateError, setKnowledgeCommitRateError] = useState<string | null>(null)
   // 顶部全量组织（LV1）筛选可选项，随时间范围刷新。
-  const [orgOptions, setOrgOptions] = useState<string[]>([])
+  const [orgOptions, setOrgOptions] = useState<string[]>(initialOrgLv1List)
 
   const fetchIdRef = useRef(0)
   const userStatsFetchIdRef = useRef(0)
   const skillEvalFetchIdRef = useRef(0)
   const orgOptionsFetchIdRef = useRef(0)
   const projectModeFetchIdRef = useRef(0)
+  const projectListScopeRef = useRef<string | null>(null)
+  const projectOverviewRangeRef = useRef<string | null>(null)
   const projectModeCodeStatsFetchIdRef = useRef(0)
+  const knowledgeCommitRateFetchIdRef = useRef(0)
+  const efficiencyFetchIdRef = useRef(0)
   const projectModeProjectPageFetchIdRef = useRef<
     Record<DashboardProjectModeProjectStatus, number>
   >({ active: 0, archived: 0 })
+
+  useEffect(() => {
+    return () => {
+      fetchIdRef.current += 1
+      userStatsFetchIdRef.current += 1
+      skillEvalFetchIdRef.current += 1
+      orgOptionsFetchIdRef.current += 1
+      projectModeFetchIdRef.current += 1
+      projectModeCodeStatsFetchIdRef.current += 1
+      knowledgeCommitRateFetchIdRef.current += 1
+      projectModeProjectPageFetchIdRef.current.active += 1
+      projectModeProjectPageFetchIdRef.current.archived += 1
+      if (typeof window.api.dashboard.cancelRequests === "function") {
+        void window.api.dashboard
+          .cancelRequests([...DASHBOARD_HOOK_REQUEST_FAMILIES])
+          .catch(() => undefined)
+      }
+    }
+  }, [])
 
   const fetchAll = useCallback(async (r: TimeRange, g: Granularity, orgList: string[]) => {
     const id = ++fetchIdRef.current
@@ -2196,36 +2437,61 @@ export function useDashboard() {
     setError(null)
 
     const orgOpts = { upperOrgLv1: orgList }
-    try {
-      const [ovRes, msRes, usRes, prRes, afRes] = await Promise.all([
-        window.api.dashboard.overview(r, g, orgOpts),
-        window.api.dashboard.modelStats(r, g, orgOpts),
-        window.api.dashboard.userStats(r, g, orgOpts),
-        window.api.dashboard.productivity(r, g, orgOpts),
-        window.api.dashboard.advancedFeatures(r, g, orgOpts)
-      ])
-
-      // Stale check
-      if (id !== fetchIdRef.current) return
-
-      if (!ovRes.success) throw new Error(ovRes.error ?? "获取概览数据失败")
-      if (!msRes.success) throw new Error(msRes.error ?? "获取模型数据失败")
-      if (!usRes.success) throw new Error(usRes.error ?? "获取用户数据失败")
-      if (!prRes.success) throw new Error(prRes.error ?? "获取生产力数据失败")
-      if (!afRes.success) throw new Error(afRes.error ?? "获取高级特性数据失败")
-
-      setOverview(parseOverview(ovRes.data, g))
-      setModelStats(parseModelStats(msRes.data))
-      setProductivity(parseProductivity(prRes.data, g, r))
-      // 仅选中单个组织时 userStats 进入 LV0 下钻视图，否则按 LV1 展示。
-      setUserStats(parseUserStats(usRes.data, orgList.length === 1 ? orgList[0] : null))
-      setAdvancedFeatures(parseAdvancedFeatures(afRes.data))
-    } catch (e) {
-      if (id !== fetchIdRef.current) return
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      if (id === fetchIdRef.current) setLoading(false)
+    const errors: unknown[] = []
+    const runEndpoint = async (
+      request: Promise<{ success: boolean; data?: unknown; error?: string }>,
+      fallbackError: string,
+      commit: (data: unknown) => void
+    ): Promise<void> => {
+      try {
+        const result = await request
+        if (id !== fetchIdRef.current || isCancelledDashboardResult(result)) return
+        if (!result.success) throw new Error(result.error ?? fallbackError)
+        commit(result.data)
+      } catch (endpointError) {
+        if (id === fetchIdRef.current) errors.push(endpointError)
+      }
     }
+
+    await Promise.all([
+      runEndpoint(window.api.dashboard.overview(r, g, orgOpts), "获取概览数据失败", (data) => {
+        setOverview(isOverviewViewModel(data) ? data : parseOverview(data, g))
+      }),
+      runEndpoint(window.api.dashboard.modelStats(r, g, orgOpts), "获取模型数据失败", (data) => {
+        setModelStats(isModelStatsViewModel(data) ? data : parseModelStats(data))
+      }),
+      runEndpoint(window.api.dashboard.userStats(r, g, orgOpts), "获取用户数据失败", (data) => {
+        const selectedOrg = orgList.length === 1 ? orgList[0] : null
+        setUserStats(
+          isUserStatsViewModel(data) ? data : parseUserStats(data, selectedOrg)
+        )
+      }),
+      runEndpoint(
+        window.api.dashboard.productivity(r, g, orgOpts),
+        "获取生产力数据失败",
+        (data) => {
+          setProductivity(
+            isProductivityViewModel(data) ? data : parseProductivity(data, g, r)
+          )
+        }
+      ),
+      runEndpoint(
+        window.api.dashboard.advancedFeatures(r, g, orgOpts),
+        "获取高级特性数据失败",
+        (data) => {
+          setAdvancedFeatures(
+            isAdvancedFeaturesViewModel(data) ? data : parseAdvancedFeatures(data)
+          )
+        }
+      )
+    ])
+
+    if (id !== fetchIdRef.current) return
+    if (errors.length > 0) {
+      const firstError = errors[0]
+      setError(firstError instanceof Error ? firstError.message : String(firstError))
+    }
+    setLoading(false)
   }, [])
 
   const fetchUserStatsOnly = useCallback(
@@ -2237,8 +2503,11 @@ export function useDashboard() {
       try {
         const result = await window.api.dashboard.userStats(r, g, { upperOrgLv1: orgLv1 })
         if (id !== userStatsFetchIdRef.current) return
+        if (isCancelledDashboardResult(result)) return
         if (!result.success) throw new Error(result.error ?? "获取用户数据失败")
-        setUserStats(parseUserStats(result.data, orgLv1))
+        setUserStats(
+          isUserStatsViewModel(result.data) ? result.data : parseUserStats(result.data, orgLv1)
+        )
       } catch (e) {
         if (id !== userStatsFetchIdRef.current) return
         setError(e instanceof Error ? e.message : String(e))
@@ -2249,40 +2518,108 @@ export function useDashboard() {
     []
   )
 
+  // Project-mode + Lean scope stays fixed; only compute accepts stage/plugin filters.
+  const fetchEfficiency = useCallback(
+    async (r: TimeRange, orgList: string[]) => {
+      const id = ++efficiencyFetchIdRef.current
+      setEfficiencyLoading(true)
+      setEfficiencyError(null)
+      try {
+        const result = await window.api.dashboard.efficiency(r, {
+          upperOrgLv1: orgList,
+          ...efficiencyPluginFilter
+        })
+        if (id !== efficiencyFetchIdRef.current) return
+        if (!result.success) throw new Error(result.error ?? "获取研发效能数据失败")
+        setEfficiency(result.data ?? null)
+      } catch (e) {
+        if (id !== efficiencyFetchIdRef.current) return
+        setEfficiencyError(e instanceof Error ? e.message : String(e))
+        setEfficiency(null)
+      } finally {
+        if (id === efficiencyFetchIdRef.current) setEfficiencyLoading(false)
+      }
+    },
+    [efficiencyPluginFilter]
+  )
+
   const fetchProjectMode = useCallback(
-    async (r: TimeRange, g: Granularity, orgList: string[], leanOnly = false) => {
+    async (
+      r: TimeRange,
+      g: Granularity,
+      orgList: string[],
+      leanOnly = false,
+      createdInRangeOnly = false,
+      refreshProjects = false
+    ) => {
+      const listScope = JSON.stringify([
+        orgList,
+        leanOnly,
+        createdInRangeOnly,
+        createdInRangeOnly ? r : null
+      ])
+      const preserveList =
+        !refreshProjects &&
+        !createdInRangeOnly &&
+        projectListScopeRef.current === listScope &&
+        projectOverviewRangeRef.current !== JSON.stringify(r)
       const id = ++projectModeFetchIdRef.current
+      setProjectListLoading(!preserveList)
       setProjectModeLoading(true)
       setProjectModeError(null)
-      // 时间/组织/精益口径变了：source 候选会变，回到「全部来源」并作废在途的换数请求。
+      // 时间/组织/精益/新建口径变了：source 候选会变，回到「全部来源」并作废在途的换数请求。
       projectModeCodeStatsFetchIdRef.current += 1
       setProjectModeCodeSource(null)
       setProjectModeCodeStatsOverride(null)
       setProjectModeCodeStatsLoading(false)
+      if (!preserveList) {
+        projectModeProjectPageFetchIdRef.current.active += 1
+        projectModeProjectPageFetchIdRef.current.archived += 1
+        setProjectModeProjectPageLoading({ active: false, archived: false })
+        setProjectModeProjectPageError({})
+        if (typeof window.api.dashboard.cancelRequests === "function") {
+          void window.api.dashboard
+            .cancelRequests(["dashboard:projectModeProjects"])
+            .catch(() => undefined)
+        }
+      }
+      if (typeof window.api.dashboard.cancelRequests === "function") {
+        void window.api.dashboard
+          .cancelRequests(["dashboard:projectModeCodeStats"])
+          .catch(() => undefined)
+      }
 
       try {
         const result = await window.api.dashboard.projectMode(r, g, {
           upperOrgLv1: orgList,
-          fromLeanOnly: leanOnly
+          fromLeanOnly: leanOnly,
+          createdInRangeOnly,
+          refreshProjects,
+          skipProjectList: preserveList
         })
         if (id !== projectModeFetchIdRef.current) return
         if (!result.success) throw new Error(result.error ?? "获取项目模式数据失败")
         const nextProjectMode = (result.data as DashboardProjectModeData) ?? null
-        projectModeProjectPageFetchIdRef.current.active += 1
-        projectModeProjectPageFetchIdRef.current.archived += 1
         setProjectMode(nextProjectMode)
-        setProjectModeProjectPages(
-          nextProjectMode?.projectPage
-            ? { [nextProjectMode.projectPage.status]: nextProjectMode.projectPage }
-            : {}
-        )
-        setProjectModeProjectPageError({})
-        setProjectModeProjectPageLoading({ active: false, archived: false })
+        projectOverviewRangeRef.current = JSON.stringify(r)
+        if (!preserveList) {
+          setProjectModeProjectPages(
+            nextProjectMode?.projectPage
+              ? { [nextProjectMode.projectPage.status]: nextProjectMode.projectPage }
+              : {}
+          )
+          projectListScopeRef.current = nextProjectMode?.projectPage ? listScope : null
+          setProjectModeProjectPageError({})
+          setProjectModeProjectPageLoading({ active: false, archived: false })
+        }
       } catch (e) {
         if (id !== projectModeFetchIdRef.current) return
         setProjectModeError(e instanceof Error ? e.message : String(e))
       } finally {
-        if (id === projectModeFetchIdRef.current) setProjectModeLoading(false)
+        if (id === projectModeFetchIdRef.current) {
+          setProjectModeLoading(false)
+          setProjectListLoading(false)
+        }
       }
     },
     []
@@ -2295,6 +2632,11 @@ export function useDashboard() {
       setProjectModeCodeSource(source)
       if (!source) {
         projectModeCodeStatsFetchIdRef.current += 1
+        if (typeof window.api.dashboard.cancelRequests === "function") {
+          void window.api.dashboard
+            .cancelRequests(["dashboard:projectModeCodeStats"])
+            .catch(() => undefined)
+        }
         setProjectModeCodeStatsOverride(null)
         setProjectModeCodeStatsLoading(false)
         return
@@ -2304,7 +2646,11 @@ export function useDashboard() {
       try {
         const result = await window.api.dashboard.projectModeCodeStats(
           range,
-          { upperOrgLv1: selectedOrgLv1List, fromLeanOnly: fromLeanProjectsOnly },
+          {
+            upperOrgLv1: selectedOrgLv1List,
+            fromLeanOnly: fromLeanProjectsOnly,
+            createdInRangeOnly: createdInRangeProjectsOnly
+          },
           source
         )
         if (id !== projectModeCodeStatsFetchIdRef.current) return
@@ -2318,8 +2664,28 @@ export function useDashboard() {
         if (id === projectModeCodeStatsFetchIdRef.current) setProjectModeCodeStatsLoading(false)
       }
     },
-    [range, selectedOrgLv1List, fromLeanProjectsOnly]
+    [range, selectedOrgLv1List, fromLeanProjectsOnly, createdInRangeProjectsOnly]
   )
+
+  // 「知识文档入库率」随时间范围 / 室筛选重拉。旧值属于上一组筛选，开始取数时先清掉，
+  // 免得新筛选下短暂显示旧数字。带版本号防竞态。
+  const fetchKnowledgeCommitRate = useCallback(async (r: TimeRange, orgList: string[]) => {
+    const id = ++knowledgeCommitRateFetchIdRef.current
+    setKnowledgeCommitRate(null)
+    setKnowledgeCommitRateError(null)
+    setKnowledgeCommitRateLoading(true)
+    try {
+      const result = await window.api.dashboard.knowledgeCommitRate(r, { upperOrgLv1: orgList })
+      if (id !== knowledgeCommitRateFetchIdRef.current || isCancelledDashboardResult(result)) return
+      if (!result.success) throw new Error(result.error ?? "获取知识文档入库率失败")
+      setKnowledgeCommitRate(result.data ?? null)
+    } catch (e) {
+      if (id !== knowledgeCommitRateFetchIdRef.current) return
+      setKnowledgeCommitRateError(e instanceof Error ? e.message : String(e))
+    } finally {
+      if (id === knowledgeCommitRateFetchIdRef.current) setKnowledgeCommitRateLoading(false)
+    }
+  }, [])
 
   const fetchProjectModeProjectPage = useCallback(
     async (
@@ -2341,6 +2707,7 @@ export function useDashboard() {
         const result = await window.api.dashboard.projectModeProjects(range, {
           upperOrgLv1: selectedOrgLv1List,
           fromLeanOnly: fromLeanProjectsOnly,
+          createdInRangeOnly: createdInRangeProjectsOnly,
           status,
           page,
           pageSize,
@@ -2368,7 +2735,7 @@ export function useDashboard() {
         }
       }
     },
-    [range, selectedOrgLv1List, fromLeanProjectsOnly]
+    [range, selectedOrgLv1List, fromLeanProjectsOnly, createdInRangeProjectsOnly]
   )
 
   const fetchSkillEvalPage = useCallback(
@@ -2391,6 +2758,12 @@ export function useDashboard() {
       setError(null)
 
       try {
+        if (typeof window.api.dashboard.cancelRequests === "function") {
+          await window.api.dashboard
+            .cancelRequests([DASHBOARD_SKILL_EVAL_REQUEST_FAMILY])
+            .catch(() => undefined)
+          if (id !== skillEvalFetchIdRef.current) return
+        }
         const requestOptions: DashboardSkillEvalOptions = {
           recentPage: page,
           recentPageSize: SKILL_EVAL_RECENT_PAGE_SIZE,
@@ -2529,12 +2902,14 @@ export function useDashboard() {
       try {
         const result = await window.api.dashboard.orgOptions(range)
         if (id !== orgOptionsFetchIdRef.current) return
-        if (result.success) setOrgOptions(result.data ?? [])
+        // 即使本室在所选时间没有 Trace，也保留选项，清除后仍可重新选择。
+        if (result.success)
+          setOrgOptions(Array.from(new Set([...initialOrgLv1List, ...(result.data ?? [])])))
       } catch {
-        if (id === orgOptionsFetchIdRef.current) setOrgOptions([])
+        if (id === orgOptionsFetchIdRef.current) setOrgOptions(initialOrgLv1List)
       }
     })()
-  }, [range])
+  }, [initialOrgLv1List, range])
 
   const changeGranularity = useCallback((g: Granularity) => {
     setGranularity(g)
@@ -2556,17 +2931,26 @@ export function useDashboard() {
     setRange({ from, to })
   }, [])
 
-  const refresh = useCallback(() => {
-    const nextRange = getRefreshRange(range, granularity)
-    if (nextRange.from !== range.from || nextRange.to !== range.to) {
-      setRange(nextRange)
-      return
-    }
-    fetchAll(range, granularity, selectedOrgLv1List)
-  }, [fetchAll, range, granularity, selectedOrgLv1List])
+  const refresh = useCallback(
+    (reloadPlatform = true): TimeRange => {
+      const nextRange = getRefreshRange(range, granularity)
+      if (nextRange.from !== range.from || nextRange.to !== range.to) {
+        setRange(nextRange)
+      } else if (reloadPlatform) {
+        void fetchAll(range, granularity, selectedOrgLv1List)
+      }
+      return nextRange
+    },
+    [fetchAll, range, granularity, selectedOrgLv1List]
+  )
 
   const clearSkillEval = useCallback(() => {
     ++skillEvalFetchIdRef.current
+    if (typeof window.api.dashboard.cancelRequests === "function") {
+      void window.api.dashboard
+        .cancelRequests([DASHBOARD_SKILL_EVAL_REQUEST_FAMILY])
+        .catch(() => undefined)
+    }
     setSkillEval(null)
     setSkillEvalLoading(false)
   }, [])
@@ -2598,6 +2982,8 @@ export function useDashboard() {
     selectedOrgLv1List,
     fromLeanProjectsOnly,
     setFromLeanProjectsOnly,
+    createdInRangeProjectsOnly,
+    setCreatedInRangeProjectsOnly,
     orgOptions,
     loading,
     userStatsLoading,
@@ -2611,11 +2997,22 @@ export function useDashboard() {
     skillEval,
     projectMode,
     projectModeLoading,
+    projectListLoading,
     projectModeError,
+    efficiency,
+    efficiencyPluginFilter,
+    setEfficiencyPluginFilter,
+    efficiencyLoading,
+    efficiencyError,
+    fetchEfficiency,
     projectModeCodeSource,
     projectModeCodeStatsOverride,
     projectModeCodeStatsLoading,
     selectProjectModeCodeSource,
+    knowledgeCommitRate,
+    knowledgeCommitRateLoading,
+    knowledgeCommitRateError,
+    fetchKnowledgeCommitRate,
     projectModeProjectPages,
     projectModeProjectPageLoading,
     projectModeProjectPageError,

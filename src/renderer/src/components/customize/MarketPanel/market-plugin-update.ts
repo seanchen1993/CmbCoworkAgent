@@ -1,4 +1,5 @@
 import type { PluginMetadata } from "@/types"
+export { findInstalledPluginForMarketItem } from "@/lib/market-plugin-identity"
 import { marketApi, type MarketItem } from "../../../api/market"
 import {
   isMarketVersionDifferent,
@@ -14,23 +15,6 @@ export interface MarketPluginUpdateInfo {
 
 export function getMarketPluginItemName(item: Pick<MarketItem, "name" | "id">): string {
   return item.name?.trim() || item.id?.trim() || ""
-}
-
-export function findInstalledPluginForMarketItem(
-  pluginsMetadata: PluginMetadata[],
-  item: MarketItem
-): PluginMetadata | undefined {
-  const candidates = new Set(
-    [item.name, item.id, item.chinese_name]
-      .map((value) => value?.trim())
-      .filter((value): value is string => Boolean(value))
-  )
-  return pluginsMetadata.find(
-    (plugin) =>
-      candidates.has(plugin.name) ||
-      candidates.has(plugin.id) ||
-      (item.filename ? plugin.path.includes(item.filename) : false)
-  )
 }
 
 export async function deleteInstalledMarketPlugin(plugin: PluginMetadata): Promise<void> {
@@ -67,18 +51,7 @@ export async function installMarketPluginUpdate(
     return { success: false, error: "Item name is required for update install" }
   }
 
-  try {
-    const pluginsMetadata = await window.api.plugins.list()
-    const existingPlugin = findInstalledPluginForMarketItem(pluginsMetadata, item)
-
-    if (existingPlugin) {
-      console.log(`Deleting existing plugin: ${existingPlugin.id}`)
-      await deleteInstalledMarketPlugin(existingPlugin)
-    }
-  } catch (deleteError) {
-    console.warn("Failed to delete existing plugin, continuing with install:", deleteError)
-  }
-
+  // The main installer replaces the identified plugin with rollback on failure.
   const response = await marketApi.downloadItem(
     itemName,
     "plugin",

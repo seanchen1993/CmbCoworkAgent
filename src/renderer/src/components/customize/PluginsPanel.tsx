@@ -1,4 +1,7 @@
+import { ProjectPluginDevelopmentGuide } from "@/components/customize/ProjectPluginDevelopmentGuide"
+import { canReadPluginSource } from "../../../../shared/market-source-access"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { notifyMarketPublished } from "@/lib/market-change-events"
 import {
   ExternalLink,
   FileEdit,
@@ -29,6 +32,8 @@ import {
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
+import { revalidatePluginCatalog } from "@/lib/app-catalog-cache"
+import { SKILL_PLUGIN_CATALOG_RENDER_BATCH } from "@/lib/skill-plugin-catalog"
 import type { PluginMetadata, PluginManifest } from "@/types"
 import { marketApi, type MarketItem } from "../../api/market"
 import {
@@ -340,13 +345,13 @@ function UploadPluginDialog(props: {
           </DialogDescription>
         </DialogHeader>
         {PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL && (
-          <div className="mt-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+          <div className="mt-4 rounded-md border border-status-info/25 bg-status-info/10 px-3 py-2 text-sm text-status-info">
             <span>需要创建插件？可以先下载插件模板文件，按模板结构修改后再上传。</span>
             <a
               href={PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL}
               target="_blank"
               rel="noreferrer"
-              className="ml-1 inline-flex items-center gap-1 font-medium text-blue-700 underline-offset-2 hover:underline"
+              className="ml-1 inline-flex items-center gap-1 font-medium text-primary underline-offset-2 hover:underline"
             >
               下载插件模板
               <ExternalLink className="size-3.5" />
@@ -424,7 +429,7 @@ export function PluginsPanel(): React.JSX.Element {
   // "not market" so offline users still see their local plugins' internals.
   const [marketPluginsLoaded, setMarketPluginsLoaded] = useState(false)
   const [marketPluginsLoadFailed, setMarketPluginsLoadFailed] = useState(false)
-  const [uploadedPluginNames, setUploadedPluginNames] = useState<Set<string>>(() =>
+  const [uploadedPluginNames] = useState<Set<string>>(() =>
     readUploadedItemNamesFromStorage("plugin")
   )
   const [localUploadedPluginNames, setLocalUploadedPluginNames] = useState<Set<string>>(() =>
@@ -432,6 +437,9 @@ export function PluginsPanel(): React.JSX.Element {
   )
   const [searchQuery, setSearchQuery] = useState("")
   const [debouncedQuery, setDebouncedQuery] = useState("")
+  const [visiblePluginLimit, setVisiblePluginLimit] = useState(
+    SKILL_PLUGIN_CATALOG_RENDER_BATCH
+  )
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const loggedPluginSelectionRef = useRef<string | null>(null)
   const originMigrationDoneRef = useRef(false)
@@ -440,12 +448,9 @@ export function PluginsPanel(): React.JSX.Element {
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [fileEditorOpen, setFileEditorOpen] = useState(false)
 
-  // 市场下载的 Plugin 不再隐藏 Skill/Hook/MCP 详情，统一展示组件详情。
-  // 历史上这里会对 origin === "market" 的插件隐藏详情；现按需求恒为可见。
-  // 保留入参以兼容调用点签名（恒返回 false）。
+  // Source access follows the origin persisted by the main process.
   const shouldHidePluginDetails = useCallback((plugin: PluginMetadata | null): boolean => {
-    void plugin
-    return false
+    return !!plugin && !canReadPluginSource(plugin)
   }, [])
 
   // Clean up debounce timer on unmount
@@ -456,11 +461,16 @@ export function PluginsPanel(): React.JSX.Element {
   const handleSearchChange = useCallback((value: string) => {
     setSearchQuery(value)
     clearTimeout(debounceTimer.current)
-    debounceTimer.current = setTimeout(() => setDebouncedQuery(value), 200)
+    debounceTimer.current = setTimeout(() => {
+      setDebouncedQuery(value)
+      setVisiblePluginLimit(SKILL_PLUGIN_CATALOG_RENDER_BATCH)
+    }, 200)
   }, [])
 
-  const refreshPlugins = useCallback(() => {
-    window.api.plugins.list().then(setPlugins).catch(console.error)
+  const refreshPlugins = useCallback(async (): Promise<PluginMetadata[]> => {
+    const snapshot = await revalidatePluginCatalog(useAppStore.getState().pluginVersion)
+    setPlugins(snapshot.plugins)
+    return snapshot.plugins
   }, [])
 
   const loadMarketPlugins = useCallback(async () => {
@@ -493,11 +503,9 @@ export function PluginsPanel(): React.JSX.Element {
         markLocalUploadedPluginNameInStorage(pluginName)
         setLocalUploadedPluginNames(readLocalUploadedPluginNamesFromStorage())
       }
-      window.api.plugins
-        .list()
+      bumpPluginVersion()
+      void refreshPlugins()
         .then((list) => {
-          setPlugins(list)
-          bumpPluginVersion()
           if (selectedPlugin) {
             const updated = list.find(
               (p) => p.id === selectedPlugin.id || p.name === selectedPlugin.name
@@ -519,7 +527,7 @@ export function PluginsPanel(): React.JSX.Element {
         })
         .catch(console.error)
     },
-    [bumpPluginVersion, selectedPlugin, shouldHidePluginDetails]
+    [bumpPluginVersion, refreshPlugins, selectedPlugin, shouldHidePluginDetails]
   )
 
   const shouldHideSelectedPluginDetails = shouldHidePluginDetails(selectedPlugin)
@@ -531,7 +539,7 @@ export function PluginsPanel(): React.JSX.Element {
   }, [fileEditorOpen, selectedPlugin, shouldHideSelectedPluginDetails])
 
   useEffect(() => {
-    refreshPlugins()
+    void refreshPlugins().catch(console.error)
   }, [refreshPlugins])
 
   useEffect(() => {
@@ -569,7 +577,8 @@ export function PluginsPanel(): React.JSX.Element {
         const result = await window.api.plugins.setOriginsBatch(updates)
         if (result?.success) {
           originMigrationDoneRef.current = true
-          refreshPlugins()
+          bumpPluginVersion()
+          void refreshPlugins().catch(console.error)
         }
       } catch (error) {
         console.warn("[PluginsPanel] Failed to backfill plugin origin:", error)
@@ -584,7 +593,8 @@ export function PluginsPanel(): React.JSX.Element {
     marketPluginsLoaded,
     plugins,
     refreshPlugins,
-    uploadedPluginNames
+    uploadedPluginNames,
+    bumpPluginVersion
   ])
 
   const loadDetail = useCallback(
@@ -655,8 +665,8 @@ export function PluginsPanel(): React.JSX.Element {
       try {
         const newEnabled = !plugin.enabled
         await window.api.plugins.setEnabled(plugin.id, newEnabled)
-        refreshPlugins()
         bumpPluginVersion()
+        void refreshPlugins().catch(console.error)
         if (selectedPlugin?.id === plugin.id) {
           setSelectedPlugin((prev) => (prev ? { ...prev, enabled: newEnabled } : prev))
         }
@@ -701,8 +711,8 @@ export function PluginsPanel(): React.JSX.Element {
           setSelectedPlugin(null)
           setDetail(null)
         }
-        refreshPlugins()
         bumpPluginVersion()
+        void refreshPlugins().catch(console.error)
       } else {
         setErrorMsg(res.error || "卸载失败")
       }
@@ -765,6 +775,8 @@ export function PluginsPanel(): React.JSX.Element {
     )
   }, [plugins, debouncedQuery])
 
+  const visiblePlugins = filteredPlugins.slice(0, visiblePluginLimit)
+
   return (
     <>
       {/* Left panel - plugin list */}
@@ -799,12 +811,14 @@ export function PluginsPanel(): React.JSX.Element {
                 variant="ghost"
                 size="sm"
                 className="h-7 w-7 p-0 shrink-0"
+                aria-label="安装 Plugin"
                 onClick={() => setUploadDialogOpen(true)}
               >
                 <Plus className="size-4" />
               </Button>
             </div>
           </div>
+          <ProjectPluginDevelopmentGuide entry="plugins" />
         </div>
         <ScrollArea className="flex-1">
           <div className="p-2 space-y-1">
@@ -829,10 +843,13 @@ export function PluginsPanel(): React.JSX.Element {
                 )}
               </div>
             ) : (
-              filteredPlugins.map((plugin) => {
-                const isMarketPlugin = Boolean(resolvePluginMarketInfo(plugin, marketPluginMap))
-                return (
-                  <button
+              <>
+                {visiblePlugins.map((plugin) => {
+                  const isMarketPlugin = Boolean(
+                    resolvePluginMarketInfo(plugin, marketPluginMap)
+                  )
+                  return (
+                    <button
                     key={plugin.id}
                     className={cn(
                       "w-full text-left rounded-md border border-border/70 p-2.5 transition-colors",
@@ -897,9 +914,24 @@ export function PluginsPanel(): React.JSX.Element {
                         </span>
                       )}
                     </div>
-                  </button>
-                )
-              })
+                    </button>
+                  )
+                })}
+                {visiblePlugins.length < filteredPlugins.length && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="w-full text-xs"
+                    onClick={() =>
+                      setVisiblePluginLimit(
+                        (limit) => limit + SKILL_PLUGIN_CATALOG_RENDER_BATCH
+                      )
+                    }
+                  >
+                    加载更多（剩余 {filteredPlugins.length - visiblePlugins.length}）
+                  </Button>
+                )}
+              </>
             )}
           </div>
         </ScrollArea>
@@ -913,7 +945,9 @@ export function PluginsPanel(): React.JSX.Element {
         onToggleHookEnabled={handleToggleHookEnabled}
         onDelete={handleDeleteRequest}
         onPublish={
-          selectedPlugin && !shouldHideSelectedPluginDetails
+          selectedPlugin &&
+          (selectedPlugin.origin === "local" || selectedPlugin.sourceAccess === "owner") &&
+          !shouldHideSelectedPluginDetails
             ? () => openPublishDialog(selectedPlugin)
             : undefined
         }
@@ -929,7 +963,7 @@ export function PluginsPanel(): React.JSX.Element {
         }
         hideComponentDetails={shouldHideSelectedPluginDetails}
         onEditFiles={
-          selectedPlugin && !shouldHideSelectedPluginDetails
+          selectedPlugin && canReadPluginSource(selectedPlugin) && !shouldHideSelectedPluginDetails
             ? () => setFileEditorOpen(true)
             : undefined
         }
@@ -973,13 +1007,17 @@ export function PluginsPanel(): React.JSX.Element {
           if (!open) setPublishTarget(null)
         }}
         onSuccess={({ name, mode }) => {
-          setUploadedPluginNames(readUploadedItemNamesFromStorage("plugin"))
-          void loadMarketPlugins()
+          notifyMarketPublished("plugin")
           toast.success(
             mode === "update"
               ? `Plugin「${name}」更新发布成功，已跳转到应用市场。`
               : `Plugin「${name}」发布成功，已跳转到应用市场。`
           )
+          useAppStore.setState({
+            marketInitialTab: "plugin",
+            marketInitialSkillSearchQuery: name.trim(),
+            marketInitialSkillDetailName: null
+          })
           setShowCustomizeView(true, "market")
         }}
       />
@@ -1009,10 +1047,11 @@ export function PluginDetailPanel(props: {
     onPublish,
     publishLabel = "发布到市场",
     hideActions = false,
-    hideComponentDetails = false,
+    hideComponentDetails: requestedHideComponentDetails = false,
     isMarketPlugin = false,
     onEditFiles
   } = props
+  const hideComponentDetails = requestedHideComponentDetails || !canReadPluginSource(plugin)
 
   if (!plugin) {
     return (

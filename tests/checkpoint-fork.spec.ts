@@ -9,7 +9,9 @@ import assert from "assert"
 import { mkdtemp, rm } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
+import { HumanMessage, type BaseMessage } from "@langchain/core/messages"
 import type { RunnableConfig } from "@langchain/core/runnables"
+import { Annotation, Command, END, START, StateGraph, interrupt } from "@langchain/langgraph"
 import type {
   Checkpoint,
   CheckpointMetadata,
@@ -17,6 +19,7 @@ import type {
 } from "@langchain/langgraph-checkpoint"
 import { SqlJsSaver } from "../src/main/checkpointer/sqljs-saver"
 import {
+  applyForkReplayMessages,
   buildForkableCheckpointSummary,
   buildVisibleForkableCheckpointList,
   describeCheckpointForkability,
@@ -458,6 +461,21 @@ function makeForkBoundaryMetadata(
   } as CheckpointMetadata
 }
 
+function testReplayDoesNotRepeatMessagesAlreadyInTheCheckpoint(): void {
+  const tuple = makeTuple({ checkpoint: makeCheckpoint("recovered") })
+  const next = { id: "assistant-next", type: "ai", content: "more output" }
+  const replay = applyForkReplayMessages(tuple, [
+    { id: "assistant-1", type: "ai", content: "hi" },
+    next,
+    next
+  ])
+  assert(replay)
+  assert.deepEqual(deriveCheckpointTranscriptIndex(replay.checkpoint).visibleMessageIds, [
+    "user-1", "assistant-1", "assistant-next"
+  ])
+  assert.equal(deriveCheckpointTranscriptIndex(tuple.checkpoint).visibleMessageIds.length, 2)
+}
+
 function makeInterruptedForkBoundaryMetadata(
   checkpointId: string,
   step = 1,
@@ -474,6 +492,445 @@ function makeInterruptedForkBoundaryMetadata(
     outcome: "interrupted"
   }
   return metadata as CheckpointMetadata
+}
+
+async function testRetentionAfterFirstInterruptedMarker(dir: string): Promise<void> {
+  const filePath = join(dir, "interrupted-boundary-retention.sqlite")
+  const thread = "interrupted-retention"
+  const options = { maxRootCheckpoints: 3, maxRootForkBoundaryCheckpoints: 2 }
+  let saver = new SqlJsSaver(filePath, undefined, options)
+  const checkpoint = (step: number): Checkpoint =>
+    makeCheckpoint("cp-" + step, new Date(Date.UTC(2026, 6, 8, 1, 0, step)).toISOString())
+  const ids = async (): Promise<string[]> => {
+    const result: string[] = []
+    for await (const tuple of saver.list(config(thread))) result.push(tuple.checkpoint.id)
+    return result
+  }
+  try {
+    for (let step = 1; step <= 5; step += 1) {
+      await saver.put(config(thread), checkpoint(step), makeMetadata(step))
+    }
+    await saver.updateCheckpointMetadata(config(thread), () =>
+      makeInterruptedForkBoundaryMetadata("cp-5", 5, "assistant-1")
+    )
+    await saver.close()
+    saver = new SqlJsSaver(filePath, undefined, options)
+    await saver.put(config(thread), checkpoint(6), makeMetadata(6))
+    assert.deepEqual(await ids(), ["cp-6", "cp-5", "cp-4", "cp-3", "cp-2"])
+
+    await saver.put(config(thread), checkpoint(7), makeForkBoundaryMetadata("cp-7", 7))
+    await saver.put(config(thread), checkpoint(8), makeMetadata(8))
+    await saver.put(config(thread), checkpoint(9), makeMetadata(9))
+    await saver.close()
+    saver = new SqlJsSaver(filePath, undefined, options)
+    assert.deepEqual(
+      await ids(),
+      ["cp-9", "cp-8", "cp-7", "cp-5", "cp-4"],
+      "unmarked checkpoints between markers must not displace the legacy archive"
+    )
+  } finally {
+    await saver.close()
+  }
+}
+
+async function testRetentionExcludesIntermediateSnapshotsOfFirstInterruptedTurn(
+  dir: string
+): Promise<void> {
+  const file = join(dir, "interrupted-turn-origin.sqlite")
+  const thread = "interrupted-turn-origin"
+  const options = { maxRootCheckpoints: 3, maxRootForkBoundaryCheckpoints: 2 }
+  const older = [
+    { id: "user-old", type: "human", content: "older request" },
+    { id: "assistant-old", type: "ai", content: "older answer" },
+    { id: "user-old-2", type: "human", content: "second older request" },
+    { id: "assistant-old-2", type: "ai", content: "second older answer" }
+  ]
+  // A bounded repair can leave a suffix with no shared raw prefix with the archived checkpoint.
+  const recent = [
+    { id: "user-recovered", type: "human", content: "recovered request" },
+    { id: "assistant-recovered", type: "ai", content: "recovered answer" }
+  ]
+  const start = { id: "user-new", type: "human", content: "new request" }
+  const steer = { id: "user-steer", type: "human", content: "steer within this turn" }
+  const partial = {
+    id: "assistant-partial", type: "ai", content: "working"
+  }
+  const stopped = { id: "assistant-stopped", type: "ai", content: "stopped" }
+  const snapshots = [
+    ["older-safe", older],
+    ["graph-input", recent],
+    ["new-partial", [...recent, start, partial]],
+    ["new-progress", [...recent, start, partial, steer]],
+    ["interrupted", [...recent, start, partial, steer, stopped]]
+  ] as const
+  const save = async (writer: SqlJsSaver, id: string, step: number, messages: readonly unknown[], parent?: string) => {
+    const value = makeCheckpoint(id, new Date(Date.UTC(2026, 6, 8, 1, 0, step)).toISOString())
+    value.channel_values.messages = [...messages]
+    const metadata = makeMetadata(step)
+    if (id === "graph-input") {
+      metadata.source = "input"
+      value.channel_values.__start__ = { messages: [start] }
+    }
+    await writer.put(config(thread, parent), value, metadata)
+  }
+  let saver = new SqlJsSaver(file, undefined, options)
+  try {
+    for (const [index, [id, messages]] of snapshots.entries()) {
+      await save(saver, id, index, messages, snapshots[index - 1]?.[0])
+    }
+    await saver.updateCheckpointMetadata(config(thread), () => {
+      const value = makeInterruptedForkBoundaryMetadata("interrupted", 4, "assistant-stopped")
+      return {
+        ...value,
+        cmb_fork_boundary: {
+          ...(value as Record<string, unknown>).cmb_fork_boundary as Record<string, unknown>,
+          turnId: `resume:${thread}:1760000000000`
+        }
+      } as CheckpointMetadata
+    })
+    await saver.close()
+    saver = new SqlJsSaver(file, undefined, options)
+    await save(saver, "next-input", 5, [
+      ...snapshots[4][1], { id: "user-next", type: "human", content: "later request" }
+    ], "interrupted")
+    const retained: CheckpointTuple[] = []
+    for await (const tuple of saver.list(config(thread))) retained.push(tuple)
+    assert.deepEqual(retained.map((tuple) => tuple.checkpoint.id), [
+      "next-input", "interrupted", "new-progress", "older-safe"
+    ])
+    assert.equal(await saver.getForkTurnUserId(thread, "interrupted"), undefined)
+    const visible = buildVisibleForkableCheckpointList(retained, {
+      activeRun: false,
+      pendingApproval: false,
+      legacyFallbackMode: "older_than_marker"
+    })
+    assert.deepEqual(visible.map((checkpoint) => checkpoint.checkpointId), [
+      "interrupted", "older-safe"
+    ])
+  } finally {
+    await saver.close()
+  }
+}
+
+async function testRetentionProtectsLegacyCheckpointsBeforeFirstMarker(dir: string): Promise<void> {
+  const file = join(dir, "legacy-fork-candidates.sqlite")
+  const thread = "legacy-fork-candidates"
+  const options = { maxRootCheckpoints: 3, maxRootForkBoundaryCheckpoints: 2 }
+  let saver = new SqlJsSaver(file, undefined, options)
+  const older = [
+    { id: "user-old", type: "human", content: "older request" },
+    { id: "assistant-old", type: "ai", content: "older answer" }
+  ]
+  const save = async (
+    id: string, second: number, extra: unknown[] = [], state?: "input" | "interrupted"
+  ) => {
+    const value = makeCheckpoint(id, new Date(Date.UTC(2026, 6, 8, 1, 0, second)).toISOString())
+    value.channel_values.messages = [...older, ...extra]
+    const metadata = makeMetadata(second)
+    if (state === "interrupted") value.channel_values.__interrupt__ = [{ value: "awaiting approval" }]
+    if (state === "input") {
+      metadata.source = "input"
+      value.channel_values.__start__ = {
+        messages: [{ id: "stopped-input", type: "human", content: "stopped before first node" }]
+      }
+    }
+    await saver.put(config(thread), value, metadata)
+  }
+  try {
+    await save("older-safe", 1)
+    const secondBoundary = [
+      { id: "second-user", type: "human", content: "second completed request" },
+      { id: "second-assistant", type: "ai", content: "second completed answer" }
+    ]
+    await save("second-safe", 2, secondBoundary)
+    for (let step = 3; step <= 5; step += 1) {
+      await save("legacy-unsettled-" + step, step, secondBoundary, step === 5 ? "input" : "interrupted")
+    }
+    const openCheckpoint = saver.getTuple.bind(saver)
+    let ownsRun = true
+    saver.getTuple = async (runnableConfig) => {
+      const tuple = await openCheckpoint(runnableConfig)
+      ownsRun = false
+      return tuple
+    }
+    await saver.captureLegacyForkCheckpointIds(thread, undefined, () => ownsRun)
+    assert.equal(await saver.getLegacyForkCheckpointIds(thread), undefined)
+    saver.getTuple = openCheckpoint
+    await saver.captureLegacyForkCheckpointIds(thread)
+    const working = { id: "user-working", type: "human", content: "working request" }
+    for (let step = 6; step <= 13; step += 1) {
+      await save("working-" + step, step, [
+        ...secondBoundary,
+        working,
+        { id: "assistant-working-" + step, type: "ai", content: "partial reply" }
+      ])
+    }
+    await saver.close()
+    saver = new SqlJsSaver(file, undefined, options)
+    await saver.captureLegacyForkCheckpointIds(thread)
+    const legacyCheckpointIds = await saver.getLegacyForkCheckpointIds(thread)
+    assert.deepEqual(legacyCheckpointIds, new Set(["second-safe", "older-safe"]))
+    assert(await saver.hasCheckpoint(thread, "older-safe"), "the first run cannot evict the old point")
+    const visible = async () => {
+      const tuples: CheckpointTuple[] = []
+      for await (const tuple of saver.list(config(thread))) tuples.push(tuple)
+      return buildVisibleForkableCheckpointList(tuples, {
+        activeRun: false,
+        pendingApproval: false,
+        legacyCheckpointIds,
+        unsafeLatestCheckpointId: "working-13"
+      }).map((checkpoint) => checkpoint.checkpointId)
+    }
+    assert.deepEqual(await visible(), ["second-safe", "older-safe"])
+    await saver.updateCheckpointMetadata(config(thread), () =>
+      makeInterruptedForkBoundaryMetadata("working-13", 13, "assistant-working-13")
+    )
+    await save("later-run", 14, [{ id: "user-later", type: "human", content: "later request" }])
+    assert.deepEqual(await visible(), ["second-safe", "older-safe"])
+  } finally {
+    await saver.close()
+  }
+}
+
+async function testUnusableStopsDoNotDisplaceStableArchive(dir: string): Promise<void> {
+  const thread = "unusable-stops"
+  const saver = new SqlJsSaver(join(dir, thread + ".sqlite"), undefined, {
+    maxRootCheckpoints: 1,
+    maxRootForkBoundaryCheckpoints: 1
+  })
+  try {
+    await saver.put(
+      config(thread), makeCheckpoint("safe", "2026-07-08T01:00:00.000Z"),
+      makeForkBoundaryMetadata("safe")
+    )
+    const stopped = makeCheckpoint("stopped", "2026-07-08T01:01:00.000Z")
+    stopped.channel_values.messages = [{ id: "user-stop", type: "human", content: "request only" }]
+    await saver.put(config(thread, "safe"), stopped, makeInterruptedForkBoundaryMetadata("stopped"))
+    await saver.put(
+      config(thread, "stopped"), makeCheckpoint("new-run", "2026-07-08T01:02:00.000Z"),
+      makeMetadata(3)
+    )
+    assert(await saver.hasCheckpoint(thread, "safe"))
+    assert(!(await saver.hasCheckpoint(thread, "stopped")))
+  } finally {
+    await saver.close()
+  }
+}
+
+async function testLegacyCompletionSurvivesMissingContinuationOrigin(dir: string): Promise<void> {
+  for (const capture of [false, true]) {
+    const thread = "legacy-missing-input-" + capture
+    const saver = new SqlJsSaver(join(dir, thread + ".sqlite"), undefined, {
+      maxRootCheckpoints: 2, maxRootForkBoundaryCheckpoints: 1
+    })
+    const before = [
+      { id: "previous-user", type: "human", content: "completed request" },
+      { id: "previous-answer", type: "ai", content: "completed reply" }
+    ]
+    const current = { id: "current-user", type: "human", content: "resumed request" }
+    const stable = makeCheckpoint("stable", "2026-07-08T01:00:00.000Z")
+    stable.channel_values = { messages: before, __pregel_tasks: [[], []] }
+    const active = makeCheckpoint("active", "2026-07-08T01:01:00.000Z")
+    active.channel_values = {
+      messages: [...before, current, { id: "partial", type: "ai", content: "still in graph" }],
+      __pregel_tasks: [[], []],
+      "branch:to:afterModel": null
+    }
+    try {
+      await saver.put(config(thread), stable, makeMetadata(1))
+      await saver.put(config(thread, "missing-input"), active, makeMetadata(2))
+      if (capture) {
+        await saver.captureLegacyForkCheckpointIds(thread, null)
+        assert.deepEqual(await saver.getLegacyForkCheckpointIds(thread), new Set(["stable"]))
+      }
+      const stopped = makeCheckpoint("stopped", "2026-07-08T01:02:00.000Z")
+      stopped.channel_values.messages = [
+        ...before, current, { id: "stop-reply", type: "ai", content: "stopped reply" }
+      ]
+      const metadata = makeInterruptedForkBoundaryMetadata("stopped", 3, "stop-reply")
+      await saver.put(config(thread, "active"), stopped, {
+        ...metadata,
+        cmb_fork_boundary: {
+          ...(metadata as Record<string, unknown>).cmb_fork_boundary as Record<string, unknown>,
+          turnId: `resume:${thread}:1760000000000`
+        }
+      } as CheckpointMetadata)
+      const next = makeCheckpoint("continue", "2026-07-08T01:03:00.000Z")
+      next.channel_values.messages = [{ id: "next-user", type: "human", content: "next turn" }]
+      await saver.put(config(thread, "stopped"), next, makeMetadata(4))
+      assert(await saver.hasCheckpoint(thread, "stable"))
+      assert(!(await saver.hasCheckpoint(thread, "active")))
+      const tuples: CheckpointTuple[] = []
+      for await (const tuple of saver.list(config(thread))) tuples.push(tuple)
+      const listed = buildVisibleForkableCheckpointList(tuples, {
+        activeRun: false,
+        pendingApproval: false,
+        legacyFallbackMode: "older_than_marker",
+        legacyCheckpointIds: await saver.getLegacyForkCheckpointIds(thread)
+      })
+      assert.deepEqual(listed.map((point) => point.checkpointId), ["stopped", "stable"])
+    } finally {
+      await saver.close()
+    }
+  }
+}
+
+async function testDamagedHistoricalReplayDoesNotBlockRetention(dir: string): Promise<void> {
+  const { DatabaseSync } = await import("node:sqlite")
+  const thread = "damaged-old-replay"
+  const file = join(dir, thread + ".sqlite")
+  let saver = new SqlJsSaver(file, undefined, { maxRootCheckpoints: 3 })
+  await saver.put(config(thread), makeCheckpoint("damaged", "2026-07-08T01:00:00.000Z"), makeMetadata(1))
+  const input = makeCheckpoint("old-input", "2026-07-08T01:01:00.000Z")
+  input.channel_values.__start__ = { messages: [
+    { id: "durable-reply", type: "ai", content: "replayed output" },
+    { id: "new-user", type: "human", content: "new turn" }
+  ] }
+  await saver.put(config(thread, "damaged"), input, { ...makeMetadata(2), source: "input" })
+  await saver.put(config(thread), makeCheckpoint("healthy", "2026-07-08T01:02:00.000Z"), makeMetadata(3))
+  await saver.close()
+  const database = new DatabaseSync(file)
+  try {
+    database.prepare("DELETE FROM checkpoint_message_snapshots WHERE checkpoint_id = ?").run("damaged")
+  } finally {
+    database.close()
+  }
+  saver = new SqlJsSaver(file, undefined, { maxRootCheckpoints: 3, maxRootForkBoundaryCheckpoints: 2 })
+  try {
+    assert.equal((await saver.getTuple(config(thread)))?.checkpoint.id, "healthy")
+    await saver.captureLegacyForkCheckpointIds(thread)
+    assert((await saver.getLegacyForkCheckpointIds(thread))?.has("healthy"))
+    for (let minute = 3; minute <= 9; minute += 1) {
+      const time = new Date(Date.UTC(2026, 6, 8, 1, minute)).toISOString()
+      await saver.put(config(thread), makeCheckpoint("healthy-" + minute, time), makeMetadata(minute))
+    }
+    const ids: string[] = []
+    for await (const tuple of saver.list(config(thread))) ids.push(tuple.checkpoint.id)
+    assert(ids.length <= 5, "unreadable historical replay cannot disable root pruning")
+    assert(ids.includes("healthy"))
+    assert(!ids.includes("damaged") && !ids.includes("old-input"))
+  } finally {
+    await saver.close()
+  }
+}
+
+async function testDamagedForkOriginDoesNotBlockGraphResume(dir: string): Promise<void> {
+  const { DatabaseSync } = await import("node:sqlite")
+  const file = join(dir, "damaged-fork-origin.sqlite")
+  const saver = new SqlJsSaver(file, undefined, { maxRootCheckpoints: 10 })
+  const state = Annotation.Root({ messages: Annotation<BaseMessage[]>(), approved: Annotation<string>() })
+  const graph = new StateGraph(state)
+    .addNode("approval", () => ({ approved: interrupt<string>("approve") }))
+    .addEdge(START, "approval")
+    .addEdge("approval", END)
+    .compile({ checkpointer: saver })
+  try {
+    for (const column of ["metadata", "checkpoint"] as const) {
+      const threadId = "bad-input-" + column
+      const threadConfig = config(threadId)
+      await graph.invoke({ messages: [new HumanMessage({ id: "first", content: "request" })] }, threadConfig)
+      const latest = await saver.getTuple(threadConfig)
+      assert(latest?.parentConfig && latest.pendingWrites?.length)
+      const input = await saver.getTuple(latest.parentConfig)
+      assert.equal(input?.metadata?.source, "input")
+      assert(input)
+      assert.equal(await saver.getForkTurnUserId(threadId, latest.checkpoint.id), "first")
+      const database = new DatabaseSync(file)
+      try {
+        database.prepare(`UPDATE checkpoints SET ${column} = ? WHERE thread_id = ? AND checkpoint_id = ?`)
+          .run("bad-json", threadId, input.checkpoint.id)
+      } finally {
+        database.close()
+      }
+      assert.equal(await saver.getForkTurnUserId(threadId, latest.checkpoint.id), undefined)
+      const resumed = await graph.invoke(new Command({ resume: "approved" }), threadConfig)
+      assert.equal(resumed.approved, "approved")
+    }
+  } finally {
+    await saver.close()
+  }
+}
+
+async function testInlineInterruptedMarkersOnlyDecodeWhenChanged(dir: string): Promise<void> {
+  const { DatabaseSync } = await import("node:sqlite")
+  const file = join(dir, "inline-interrupted-marker-cache.sqlite")
+  const thread = "legacy-inline-marker-cache"
+  const saver = new SqlJsSaver(file, undefined, { maxRootCheckpoints: 1, maxRootForkBoundaryCheckpoints: 2 })
+  const checkpoint = (id: string, minute: number) =>
+    makeCheckpoint(id, new Date(Date.UTC(2026, 6, 8, 1, minute)).toISOString())
+  try {
+    await saver.initialize()
+    // Isolate marker eligibility from old-era boundary inference.
+    await saver.recordCopiedLegacyForkCheckpointIds(thread, [])
+    const old = checkpoint("inline-stop", 0)
+    old.channel_values.messages = [
+      { id: "legacy-user", type: "human", content: "request" },
+      { id: "legacy-answer", type: "ai", content: "x".repeat(100_000) }
+    ]
+    const metadata = makeInterruptedForkBoundaryMetadata(old.id, 0, "legacy-answer")
+    const [type, payload] = await saver.serde.dumpsTyped(old)
+    const [, encodedMetadata] = await saver.serde.dumpsTyped(metadata)
+    const database = new DatabaseSync(file)
+    try {
+      database.prepare(`INSERT INTO checkpoints
+        (thread_id, checkpoint_ns, checkpoint_id, type, checkpoint, metadata, checkpoint_ts, fork_boundary_marker)
+        VALUES (?, '', ?, ?, ?, ?, ?, 1)`)
+        .run(thread, old.id, type, payload, encodedMetadata, old.ts)
+      let blobReads = 0
+      const serde = saver.serde
+      saver.serde = {
+        dumpsTyped: (value) => serde.dumpsTyped(value),
+        loadsTyped: (format, value) => {
+          if (value.length === payload.length) blobReads += 1
+          return serde.loadsTyped(format, value)
+        }
+      }
+      for (let step = 1; step <= 3; step += 1) {
+        await saver.put(config(thread), checkpoint("active-" + step, step), makeMetadata(step))
+      }
+      assert.equal(blobReads, 1, "unchanged inline marker must not deserialize on every root write")
+      assert(await saver.hasCheckpoint(thread, old.id))
+
+      // The same row and metadata can receive a new payload on another writer.
+      old.channel_values.messages = [
+        { id: "legacy-user", type: "human", content: "request without a reply" }
+      ]
+      const [, invalidPayload] = await serde.dumpsTyped(old)
+      database.prepare("UPDATE checkpoints SET checkpoint = ? WHERE checkpoint_id = ?")
+        .run(invalidPayload, old.id)
+      await saver.put(config(thread), checkpoint("active-4", 4), makeMetadata(4))
+      assert(!(await saver.hasCheckpoint(thread, old.id)), "external payload change invalidates cached eligibility")
+    } finally {
+      database.close()
+    }
+  } finally {
+    await saver.close()
+  }
+}
+
+async function testLegacyArchiveSurvivesEvictionOfAnOversizedMarker(dir: string): Promise<void> {
+  const thread = "oversized-marker-handoff"
+  const file = join(dir, thread + ".sqlite")
+  let saver = new SqlJsSaver(file, undefined, { maxRootCheckpoints: 3 })
+  try {
+    await saver.put(config(thread), makeCheckpoint("legacy", "2026-07-08T01:00:00.000Z"), makeMetadata(1))
+    const large = makeCheckpoint("large", "2026-07-08T01:01:00.000Z")
+    large.channel_values.messages = [
+      { id: "new-user", type: "human", content: "new prompt" },
+      { id: "large-reply", type: "ai", content: "x".repeat(10_000) }
+    ]
+    await saver.put(config(thread), large, makeForkBoundaryMetadata("large"))
+    await saver.close()
+    saver = new SqlJsSaver(file, undefined, {
+      maxRootCheckpoints: 1, maxRootForkBoundaryCheckpoints: 2, maxRootForkBoundaryBytes: 1_500
+    })
+    await saver.put(config(thread), makeCheckpoint("live", "2026-07-08T01:02:00.000Z"), makeMetadata(3))
+    assert(!(await saver.hasCheckpoint(thread, "large")))
+    assert(await saver.hasCheckpoint(thread, "legacy"))
+    assert.deepEqual(await saver.getLegacyForkCheckpointIds(thread), new Set(["legacy"]))
+  } finally {
+    await saver.close()
+  }
 }
 
 async function testTupleCopyToNewThread(dir: string): Promise<void> {
@@ -1786,9 +2243,19 @@ async function main(): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "checkpoint-fork-"))
   try {
     testCheckpointAuthorityMergeKeepsCompleteCheckpointContent()
+    testReplayDoesNotRepeatMessagesAlreadyInTheCheckpoint()
     testDurableTranscriptMergeKeepsMessagesAfterCheckpoint()
     await testTupleCopyToNewThread(dir)
     await testConfigurableCheckpointRetention(dir)
+    await testRetentionAfterFirstInterruptedMarker(dir)
+    await testRetentionExcludesIntermediateSnapshotsOfFirstInterruptedTurn(dir)
+    await testRetentionProtectsLegacyCheckpointsBeforeFirstMarker(dir)
+    await testUnusableStopsDoNotDisplaceStableArchive(dir)
+    await testLegacyCompletionSurvivesMissingContinuationOrigin(dir)
+    await testDamagedHistoricalReplayDoesNotBlockRetention(dir)
+    await testDamagedForkOriginDoesNotBlockGraphResume(dir)
+    await testInlineInterruptedMarkersOnlyDecodeWhenChanged(dir)
+    await testLegacyArchiveSurvivesEvictionOfAnOversizedMarker(dir)
     await testMetadataUpdatePreservesCheckpointShape(dir)
     testThreadValuesFiltering()
     testRepeatedTaskInvocationForkFilteringPreservesSidecarRefs()

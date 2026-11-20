@@ -42,11 +42,11 @@ const OUTPUT_STYLE_OPTIONS: OutputStyleOption[] = [
     label: "标准",
     description: "保持日常回复方式，不额外调整表达。",
     icon: AlignLeft,
-    iconClassName: "text-slate-600 dark:text-slate-300",
+    iconClassName: "text-muted-foreground",
     iconBackgroundClassName: "bg-slate-500/10",
     selectedClassName:
-      "border-slate-300/80 bg-slate-100/70 ring-slate-200/70 dark:border-slate-500/40 dark:bg-slate-500/10 dark:ring-slate-500/20",
-    selectedCheckClassName: "bg-slate-600 dark:bg-slate-400"
+      "border-border bg-background-interactive/70 ring-border",
+    selectedCheckClassName: "bg-muted-foreground"
   },
   {
     value: "concise",
@@ -90,7 +90,7 @@ function OutputStyleSwitcherImpl({
   disabled = false
 }: OutputStyleSwitcherProps): JSX.Element {
   const threads = useAppStore((state) => state.threads)
-  const updateThread = useAppStore((state) => state.updateThread)
+  const patchThreadMetadata = useAppStore((state) => state.patchThreadMetadata)
   const [open, setOpen] = useState(false)
   const [pendingStyle, setPendingStyle] = useState<AgentOutputStyle | null>(null)
 
@@ -113,12 +113,8 @@ function OutputStyleSwitcherImpl({
 
       setPendingStyle(nextStyle)
       try {
-        const latestThread = await window.api.threads.get(threadId)
-        const latestMetadata = latestThread?.metadata ?? currentThread?.metadata ?? {}
-        await updateThread(threadId, {
-          metadata: {
-            ...(currentThread?.metadata ?? {}),
-            ...latestMetadata,
+        await patchThreadMetadata(threadId, {
+          set: {
             outputStyle: nextStyle,
             // Preserve compatibility with builds that only understand the old flag.
             conciseModeEnabled: nextStyle === "concise"
@@ -134,7 +130,7 @@ function OutputStyleSwitcherImpl({
         setPendingStyle(null)
       }
     },
-    [currentStyle, currentThread?.metadata, disabled, pendingStyle, threadId, updateThread]
+    [currentStyle, disabled, patchThreadMetadata, pendingStyle, threadId]
   )
 
   return (
@@ -159,7 +155,8 @@ function OutputStyleSwitcherImpl({
               <ActiveIcon className="size-3.5" />
             )}
           </span>
-          <span className="font-medium">{activeOption.label}</span>
+          <span className="font-medium text-foreground">输出风格</span>
+          <span className="ml-auto text-[11px] font-medium">{activeOption.label}</span>
           <ChevronDown className="size-3 opacity-70" />
         </Button>
       </PopoverTrigger>

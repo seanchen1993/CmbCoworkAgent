@@ -1,11 +1,30 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react"
+import {
+  createWorkerSignatureMatches,
+  parseWorkerTurnScopedId,
+  resolveWorkerSnapshotContent,
+  sameWorkerRoleAndToolCall
+} from "@/lib/worker-message-content"
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type CSSProperties
+} from "react"
 import { ArrowLeft, Loader2, Workflow } from "lucide-react"
 import { MessageBubble } from "./MessageBubble"
+import { SubagentSessionExportButton } from "./SubagentSessionExportButton"
 import { HookLogChip, HookLogModal } from "./HookLogViews"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { useThreadContext, useThreadState, type HookLogBucket } from "@/lib/thread-context"
-import { useAppStore } from "@/lib/store"
+import {
+  applyWorkerFocusTailUpdateToMergedMessages,
+  enrichWorkerProviderIdentities,
+  useAppStore
+} from "@/lib/store"
 import { buildMessageBubbleTimingMeta } from "@/lib/message-bubble-timing"
 import {
   buildVisibleMessageLayout,
@@ -14,17 +33,29 @@ import {
 } from "@/lib/message-display-visibility"
 import { buildToolResultAssociations } from "@/lib/worker-tool-result-key"
 import {
+  mergeWorkerProviderWireIds,
+  applyWorkerToolCallSnapshot,
+  restoreSnapshotAliasCallsWithResults
+} from "@/lib/snapshot-message-aliases"
+import {
   buildWorkerCheckpointHistory,
+  canMatchWorkerCheckpointIdentity,
   checkpointHistoryMessageMatchesSparseLive,
   isExplicitWorkerOccurrenceAfter,
   isCompleteWorkerSnapshotCoveringHistory,
   mergeWorkerCheckpointSparseContent,
   normalizeWorkerMessagesAfterHistory,
+  preserveWorkerHistoryMessageIdentities,
   MAX_WORKER_HISTORY_MESSAGES
 } from "@/lib/worker-checkpoint-history"
-import type { Message } from "@/types"
+import type { Message, ToolCall } from "@/types"
 import { cn } from "@/lib/utils"
 import {
+  buildWorkerMessageWindow,
+  WORKER_MESSAGE_WINDOW_SIZE
+} from "@/lib/worker-message-window"
+import {
+  getMessageProviderOccurrence,
   getMessageProviderSourceId,
   MESSAGE_SAME_ROLE_DUPLICATE_MARKER,
   normalizeAppendedMessageIds,
@@ -33,12 +64,18 @@ import {
 } from "../../../../shared/message-role-collision"
 
 const MAX_WORKER_SIGNATURE_CHARS = 512
+const MAX_DETACHED_WORKER_HOOK_BUCKETS = 80
 const EMPTY_WORKER_HOOK_LOG_BUCKETS: HookLogBucket[] = []
+const WORKER_MESSAGE_ROW_STYLE: CSSProperties = {
+  contentVisibility: "auto",
+  containIntrinsicSize: "auto 180px"
+}
 
 type ThreadHistoryEntry = {
   checkpoint?: {
     channel_values?: {
       messages?: unknown[]
+      __cmb_original_message_count?: number
     }
   }
 }
@@ -47,12 +84,6 @@ function isWorkerSnapshotMessageId(id: string): boolean {
   const scopeIndex = id.lastIndexOf("::")
   const unscopedId = scopeIndex >= 0 ? id.slice(scopeIndex + 2) : id
   return unscopedId.startsWith("worker-snapshot-")
-}
-
-function parseWorkerTurnScopedId(id: string): { rawId: string; turn: number } | undefined {
-  const match = /^worker-turn-.*-(\d+)::(.+)$/.exec(id)
-  if (!match) return undefined
-  return { rawId: match[2], turn: Number(match[1]) }
 }
 
 function workerTransportSourceId(message: Message): string {
@@ -71,7 +102,13 @@ function workerTransportRenderId(message: Message): string {
 }
 
 function workerTransportIdentityKey(message: Message, turnKey: string): string {
-  return [turnKey, message.role, workerTransportSourceId(message)].join("\u001f")
+  return [turnKey, message.role, workerTransportSourceId(message), message.tool_call_id].join(
+    "\u001f"
+  )
+}
+
+function workerExplicitOccurrenceKey(message: Message, turnKey: string): string {
+  return `${workerTransportIdentityKey(message, turnKey)}\u001f${message.provider_occurrence ?? 1}`
 }
 
 function repeatedWorkerTransportIdentityKeys(
@@ -95,26 +132,34 @@ function findSameWorkerTransportIdentityIndex(
   messages: readonly Message[],
   message: Message,
   turnKeys: readonly string[],
-  turnKey: string
+  turnKey: string,
+  claimed: ReadonlySet<number>
 ): number | undefined {
   const renderId = workerTransportRenderId(message)
+  const occurrence = getMessageProviderOccurrence(message)
+  const canMatch = (candidate: Message, candidateIndex: number): boolean =>
+    !claimed.has(candidateIndex) &&
+    turnKeys[candidateIndex] === turnKey &&
+    sameWorkerRoleAndToolCall(candidate, message) &&
+    canMatchWorkerCheckpointIdentity(candidate, message) &&
+    (occurrence === undefined || (getMessageProviderOccurrence(candidate) ?? 1) === occurrence)
   const exactIndex = messages.findIndex(
     (candidate, candidateIndex) =>
-      turnKeys[candidateIndex] === turnKey &&
-      candidate.role === message.role &&
-      workerTransportRenderId(candidate) === renderId
+      canMatch(candidate, candidateIndex) && workerTransportRenderId(candidate) === renderId
   )
   if (exactIndex >= 0) return exactIndex
 
-  if (renderId.includes(MESSAGE_SAME_ROLE_DUPLICATE_MARKER)) return undefined
+  if (occurrence === undefined && renderId.includes(MESSAGE_SAME_ROLE_DUPLICATE_MARKER)) {
+    return undefined
+  }
 
   const sourceId = workerTransportSourceId(message)
   const providerMatches = messages.flatMap((candidate, candidateIndex) =>
-    turnKeys[candidateIndex] === turnKey &&
-    candidate.role === message.role &&
-    workerTransportSourceId(candidate) === sourceId &&
-    (parseWorkerTurnScopedId(candidate.id) !== undefined ||
-      parseWorkerTurnScopedId(message.id) !== undefined)
+    canMatch(candidate, candidateIndex) &&
+    (Boolean(candidate.worker_provider_identity) !== Boolean(message.worker_provider_identity) ||
+      (workerTransportSourceId(candidate) === sourceId &&
+        (parseWorkerTurnScopedId(candidate.id) !== undefined ||
+          parseWorkerTurnScopedId(message.id) !== undefined)))
       ? [candidateIndex]
       : []
   )
@@ -230,32 +275,22 @@ function isCompatibleWorkerToolResultReplay(a: Message, b: Message): boolean {
   return areWorkerContentsCompatible(a.content, b.content)
 }
 
-function findCompatibleWorkerReplayIndex(
+function findWorkerReplayIndex(
   messages: Message[],
   message: Message,
-  turnKeys?: readonly string[],
-  turnKey?: string
+  turnKeys: readonly string[],
+  turnKey: string,
+  claimed: ReadonlySet<number>
 ): number | undefined {
-  const index = messages.findIndex(
-    (item, candidateIndex) =>
-      (turnKey === undefined || turnKeys?.[candidateIndex] === turnKey) &&
-      (isCompatibleWorkerAssistantToolReplay(item, message) ||
-        isCompatibleWorkerToolResultReplay(item, message))
-  )
-  return index >= 0 ? index : undefined
-}
-
-function findSameWorkerAssistantTextIndex(
-  messages: Message[],
-  message: Message,
-  turnKeys?: readonly string[],
-  turnKey?: string
-): number | undefined {
-  const index = messages.findIndex(
-    (item, candidateIndex) =>
-      (turnKey === undefined || turnKeys?.[candidateIndex] === turnKey) &&
-      isSameWorkerAssistantText(item, message)
-  )
+  if (message.worker_provider_identity) return undefined
+  const matches = (item: Message, candidateIndex: number): boolean =>
+    !claimed.has(candidateIndex) &&
+    turnKeys[candidateIndex] === turnKey &&
+    !item.worker_provider_identity &&
+    (isCompatibleWorkerAssistantToolReplay(item, message) ||
+      isCompatibleWorkerToolResultReplay(item, message) ||
+      isSameWorkerAssistantText(item, message))
+  const index = messages.findIndex(matches)
   return index >= 0 ? index : undefined
 }
 
@@ -286,40 +321,21 @@ function workerTurnKeys(
 }
 
 function relativeWorkerTurnKeys(messages: readonly Message[], turnOffset: number): string[] {
-  let currentTurn = turnOffset
-  return messages.map((message) => {
-    if (message.role === "user") currentTurn += 1
-    return currentTurn > 0
-      ? `__cmb-worker-turn-${currentTurn}__`
-      : WORKER_PRE_USER_TURN_KEY
-  })
+  return workerTurnKeys(
+    messages,
+    turnOffset > 0 ? `__cmb-worker-turn-${turnOffset}__` : WORKER_PRE_USER_TURN_KEY
+  )
 }
 
-function workerTurnSignatureKey(turnKey: string, signature: string | undefined): string | undefined {
+function workerTurnSignatureKey(turnKey: string, message: Message): string | undefined {
+  if (message.worker_provider_identity) return undefined
+  const signature = workerFocusMessageSignature(message)
   return signature ? `${turnKey}\u0000${signature}` : undefined
 }
 
 function incrementSignatureCount(map: Map<string, number>, signature: string | undefined): void {
   if (!signature) return
   map.set(signature, (map.get(signature) ?? 0) + 1)
-}
-
-function takeWindowedSignatureMatch(
-  indexes: number[] | undefined,
-  remainingBySignature: Map<string, number>,
-  signature: string | undefined
-): number | undefined {
-  if (!indexes?.length || !signature) return undefined
-  const remaining = remainingBySignature.get(signature) ?? 0
-  if (remaining <= 0) return indexes.shift()
-
-  // If the same text appears in multiple worker turns, live messages usually
-  // belong to the most recent slice. Match the last N compatible snapshots
-  // instead of blindly consuming the oldest one.
-  const matchPosition = Math.max(0, indexes.length - remaining)
-  const [index] = indexes.splice(matchPosition, 1)
-  remainingBySignature.set(signature, remaining - 1)
-  return index
 }
 
 const WORKER_THINKING_MESSAGES = [
@@ -355,14 +371,30 @@ const WORKER_THINKING_MESSAGES = [
   "就快好了..."
 ]
 
+function mergeWorkerProviderIdentity(history: Message, live: Message): Partial<Message> {
+  const declared = live.worker_provider_identity ? live : history
+  if (!declared.worker_provider_identity) return {}
+  return {
+    worker_provider_identity: true,
+    provider_source_id: declared.provider_source_id,
+    provider_occurrence: declared.provider_occurrence,
+    worker_provider_wire_ids: mergeWorkerProviderWireIds(
+      history.worker_provider_wire_ids,
+      live.worker_provider_wire_ids
+    )
+  }
+}
+
 function mergeCheckpointAlignedWorkerMessage(
   historyMessage: Message,
   liveMessage: Message,
-  id: string
+  id: string,
+  earlierAliasToolCalls: Map<Message, readonly ToolCall[]>
 ): Message {
-  return {
+  const merged = {
     ...historyMessage,
     ...liveMessage,
+    ...mergeWorkerProviderIdentity(historyMessage, liveMessage),
     id,
     content: mergeWorkerCheckpointSparseContent(historyMessage, liveMessage),
     reasoning: liveMessage.reasoning ?? historyMessage.reasoning,
@@ -375,21 +407,30 @@ function mergeCheckpointAlignedWorkerMessage(
     status: liveMessage.status ?? historyMessage.status,
     is_error: liveMessage.is_error ?? historyMessage.is_error
   }
+  return applyWorkerToolCallSnapshot(historyMessage, liveMessage, merged, earlierAliasToolCalls)
 }
 
-function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Message[] {
+// eslint-disable-next-line react-refresh/only-export-components -- exercise the panel's merge with real stream data
+export function mergeWorkerHistoryWithLiveMessages(
+  checkpoint: Message[],
+  liveMessages: Message[]
+): Message[] {
+  const baseMessages = enrichWorkerProviderIdentities(checkpoint, liveMessages)
+  const earlierAliasToolCalls = new Map<Message, readonly ToolCall[]>()
   if (isCompleteWorkerSnapshotCoveringHistory(baseMessages, liveMessages)) {
     const normalizedLiveMessages = normalizeCompleteMessageIds(liveMessages)
     const historyOffset = normalizedLiveMessages.length - baseMessages.length
-    return normalizedLiveMessages.map((liveMessage, index) => {
+    const alignedMessages = normalizedLiveMessages.map((liveMessage, index) => {
       if (index < historyOffset) return liveMessage
       const historyMessage = baseMessages[index - historyOffset]
       return mergeCheckpointAlignedWorkerMessage(
         historyMessage,
         liveMessage,
-        liveMessage.id
+        liveMessage.id,
+        earlierAliasToolCalls
       )
     })
+    return restoreSnapshotAliasCallsWithResults(alignedMessages, earlierAliasToolCalls)
   }
   const replayPrefixLength = findWorkerHistorySuffixReplayPrefixLength(
     baseMessages,
@@ -403,24 +444,29 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
       return mergeCheckpointAlignedWorkerMessage(
         historyMessage,
         liveMessages[index - historyOffset],
-        historyMessage.id
+        historyMessage.id,
+        earlierAliasToolCalls
       )
     })
     const appendedTail = normalizeWorkerMessagesAfterHistory(
       alignedMessages,
       liveMessages.slice(replayPrefixLength)
     )
-    return appendedTail.length > 0
-      ? mergeMessages(alignedMessages, appendedTail)
+    const merged = appendedTail.length > 0
+      ? mergeWorkerHistoryWithLiveMessages(alignedMessages, appendedTail)
       : alignedMessages
+    return restoreSnapshotAliasCallsWithResults(merged, earlierAliasToolCalls)
   }
   const normalizedBaseMessages = normalizeCompleteMessageIds(baseMessages)
   const normalizedLiveMessages = normalizeAppendedMessageIds(
     normalizedBaseMessages,
-    normalizeCompleteMessageIds(
-      normalizeMessageRoleCollisionIds(normalizedBaseMessages, liveMessages)
+    preserveWorkerHistoryMessageIdentities(
+      normalizedBaseMessages,
+      normalizeCompleteMessageIds(
+        normalizeMessageRoleCollisionIds(normalizedBaseMessages, liveMessages)
+      )
     ),
-    { splitAssistantAfterTool: true }
+    { splitAssistantAfterTool: true, preserveWorkerSnapshotIdentities: true }
   )
   if (normalizedBaseMessages.length === 0) return normalizedLiveMessages
   if (normalizedLiveMessages.length === 0) return normalizedBaseMessages
@@ -444,8 +490,14 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
         latestWorkerTurnKey(normalizedBaseMessages)
       )
   const indexById = new Map(merged.map((message, index) => [message.id, index]))
-  const snapshotIndexesBySignature = new Map<string, number[]>()
-  const liveIndexesBySignature = new Map<string, number[]>()
+  const claimed = new Set<number>()
+  const explicitIndexes = new Map<string, number | null>()
+  const addExplicitIndex = (message: Message, turnKey: string, index: number): void => {
+    const key = workerExplicitOccurrenceKey(message, turnKey)
+    explicitIndexes.set(key, explicitIndexes.has(key) ? null : index)
+  }
+  const snapshotSignatureMatches = createWorkerSignatureMatches(merged)
+  const liveSignatureMatches = createWorkerSignatureMatches(merged)
   const incomingLiveCountsBySignature = new Map<string, number>()
   const incomingSnapshotCountsBySignature = new Map<string, number>()
   const repeatedLiveTransportIdentities = repeatedWorkerTransportIdentityKeys(
@@ -453,10 +505,7 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
     liveTurnKeys
   )
   normalizedLiveMessages.forEach((message, index) => {
-    const signature = workerTurnSignatureKey(
-      liveTurnKeys[index],
-      workerFocusMessageSignature(message)
-    )
+    const signature = workerTurnSignatureKey(liveTurnKeys[index], message)
     if (isWorkerNonSnapshotMessageId(message.id)) {
       incrementSignatureCount(incomingLiveCountsBySignature, signature)
     }
@@ -465,72 +514,65 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
     }
   })
   merged.forEach((message, index) => {
-    const signature = workerTurnSignatureKey(
-      mergedTurnKeys[index],
-      workerFocusMessageSignature(message)
-    )
-    if (signature && isWorkerSnapshotMessageId(message.id)) {
-      const indexes = snapshotIndexesBySignature.get(signature) ?? []
-      indexes.push(index)
-      snapshotIndexesBySignature.set(signature, indexes)
+    if (message.worker_provider_identity) {
+      addExplicitIndex(message, mergedTurnKeys[index], index)
     }
-    if (signature && isWorkerNonSnapshotMessageId(message.id)) {
-      const indexes = liveIndexesBySignature.get(signature) ?? []
-      indexes.push(index)
-      liveIndexesBySignature.set(signature, indexes)
-    }
+    const signature = workerTurnSignatureKey(mergedTurnKeys[index], message)
+    if (!signature) return
+    const matches = isWorkerSnapshotMessageId(message.id)
+      ? snapshotSignatureMatches
+      : liveSignatureMatches
+    matches.add(signature, index)
   })
 
   normalizedLiveMessages.forEach((live, liveIndex) => {
     const turnKey = liveTurnKeys[liveIndex]
-    const signature = workerTurnSignatureKey(
-      turnKey,
-      workerFocusMessageSignature(live)
-    )
+    const signature = workerTurnSignatureKey(turnKey, live)
+    const existingIndex = indexById.get(live.id)
     const index =
-      indexById.get(live.id) ??
-      findSameWorkerTransportIdentityIndex(merged, live, mergedTurnKeys, turnKey) ??
+      (existingIndex !== undefined &&
+      sameWorkerRoleAndToolCall(merged[existingIndex], live) &&
+      canMatchWorkerCheckpointIdentity(merged[existingIndex], live)
+        ? existingIndex
+        : undefined) ??
+      (live.worker_provider_identity
+        ? explicitIndexes.get(workerExplicitOccurrenceKey(live, turnKey))
+        : undefined) ??
+      findSameWorkerTransportIdentityIndex(merged, live, mergedTurnKeys, turnKey, claimed) ??
       (signature && isWorkerNonSnapshotMessageId(live.id)
-        ? takeWindowedSignatureMatch(
-            snapshotIndexesBySignature.get(signature),
-            incomingLiveCountsBySignature,
-            signature
-          )
+        ? snapshotSignatureMatches.take(signature, incomingLiveCountsBySignature, live, claimed)
         : undefined) ??
       (signature && isWorkerSnapshotMessageId(live.id)
-        ? takeWindowedSignatureMatch(
-            liveIndexesBySignature.get(signature),
-            incomingSnapshotCountsBySignature,
-            signature
-          )
+        ? liveSignatureMatches.take(signature, incomingSnapshotCountsBySignature, live, claimed)
         : undefined) ??
-      findCompatibleWorkerReplayIndex(merged, live, mergedTurnKeys, turnKey) ??
-      findSameWorkerAssistantTextIndex(merged, live, mergedTurnKeys, turnKey)
+      findWorkerReplayIndex(merged, live, mergedTurnKeys, turnKey, claimed)
     if (index === undefined) {
       indexById.set(live.id, merged.length)
-      if (signature && isWorkerSnapshotMessageId(live.id)) {
-        const indexes = snapshotIndexesBySignature.get(signature) ?? []
-        indexes.push(merged.length)
-        snapshotIndexesBySignature.set(signature, indexes)
-      }
-      if (signature && isWorkerNonSnapshotMessageId(live.id)) {
-        const indexes = liveIndexesBySignature.get(signature) ?? []
-        indexes.push(merged.length)
-        liveIndexesBySignature.set(signature, indexes)
-      }
+      claimed.add(merged.length)
       merged.push(live)
       mergedTurnKeys.push(turnKey)
+      if (live.worker_provider_identity) {
+        addExplicitIndex(live, turnKey, merged.length - 1)
+      }
+      if (signature) {
+        const matches = isWorkerSnapshotMessageId(live.id)
+          ? snapshotSignatureMatches
+          : liveSignatureMatches
+        matches.add(signature, merged.length - 1)
+      }
       return
     }
 
     const existing = merged[index]
+    claimed.add(index)
     const id = existing.id
     const incomingDefinesRepeatedOccurrence = repeatedLiveTransportIdentities.has(
       workerTransportIdentityKey(live, turnKey)
     )
-    merged[index] = {
+    const updated: Message = {
       ...existing,
       ...live,
+      ...mergeWorkerProviderIdentity(existing, live),
       id,
       content: resolveWorkerPanelContent(
         existing,
@@ -556,11 +598,15 @@ function mergeMessages(baseMessages: Message[], liveMessages: Message[]): Messag
         ? live.is_error
         : (live.is_error ?? existing.is_error)
     }
+    merged[index] = applyWorkerToolCallSnapshot(existing, live, updated, earlierAliasToolCalls)
+    if (live.worker_provider_identity && !existing.worker_provider_identity) {
+      addExplicitIndex(merged[index], mergedTurnKeys[index], index)
+    }
     indexById.set(id, index)
     indexById.set(live.id, index)
   })
 
-  return merged
+  return restoreSnapshotAliasCallsWithResults(merged, earlierAliasToolCalls)
 }
 
 function findWorkerHistorySuffixReplayPrefixLength(
@@ -676,7 +722,8 @@ function workerMessagePreview(message: Message): string {
 function buildWorkerHookLogBuckets(
   messages: Message[],
   hookLogBuckets: HookLogBucket[],
-  workerThreadId: string | undefined
+  workerThreadId: string | undefined,
+  userTurnOffset = 0
 ): {
   bucketById: Map<string, HookLogBucket>
   bucketByMessageId: Map<string, HookLogBucket>
@@ -692,7 +739,7 @@ function buildWorkerHookLogBuckets(
 
   const userMessages = messages.filter((message) => message.role === "user")
   const userMessageByTurn = new Map<number, Message>()
-  userMessages.forEach((message, index) => userMessageByTurn.set(index + 1, message))
+  userMessages.forEach((message, index) => userMessageByTurn.set(userTurnOffset + index + 1, message))
 
   const upsertBucket = (bucket: HookLogBucket): HookLogBucket => {
     const existing = bucketById.get(bucket.turnId)
@@ -739,6 +786,10 @@ function buildWorkerHookLogBuckets(
         continue
       }
 
+      // A known turn outside the mounted page belongs to another page. Keeping all of those
+      // as detached chips would recreate the large DOM that windowing is meant to avoid.
+      if (workerTurn !== undefined) continue
+
       const turnLabel = workerTurn ? `第 ${workerTurn} 轮` : "未匹配轮次"
       upsertBucket({
         turnId: `worker-hook:${workerThreadId}:${workerTurn ?? "unknown"}`,
@@ -750,7 +801,12 @@ function buildWorkerHookLogBuckets(
     }
   }
 
-  return { bucketById, bucketByMessageId, detachedBuckets, totalEntryCount }
+  return {
+    bucketById,
+    bucketByMessageId,
+    detachedBuckets: detachedBuckets.slice(-MAX_DETACHED_WORKER_HOOK_BUCKETS),
+    totalEntryCount
+  }
 }
 
 function messageContentLength(content: Message["content"] | undefined): number {
@@ -844,6 +900,8 @@ function resolveWorkerPanelContent(
   incomingMessage: Message,
   incomingDefinesRepeatedOccurrence: boolean = false
 ): Message["content"] {
+  const snapshotContent = resolveWorkerSnapshotContent(existingMessage, incomingMessage)
+  if (snapshotContent !== undefined) return snapshotContent
   if (incomingDefinesRepeatedOccurrence) return incomingMessage.content ?? ""
 
   if (isWorkerNonSnapshotMessageId(existingMessage.id) && existingMessage.id === incomingMessage.id) {
@@ -861,16 +919,65 @@ function resolveWorkerPanelContent(
   return preferIncomingContent(existingMessage.content, incomingMessage.content)
 }
 
+interface WorkerPanelMessageMergeCache {
+  historyMessages: Message[]
+  liveMessages: Message[]
+  liveContentVersion: number
+  liveTail: Message | undefined
+  messages: Message[]
+}
+
+function mergeWorkerPanelMessages(
+  historyMessages: Message[],
+  liveMessages: Message[],
+  liveContentVersion: number,
+  previous?: WorkerPanelMessageMergeCache
+): WorkerPanelMessageMergeCache {
+  if (
+    previous?.historyMessages === historyMessages &&
+    previous.liveMessages === liveMessages &&
+    previous.liveContentVersion !== liveContentVersion
+  ) {
+    const messages = applyWorkerFocusTailUpdateToMergedMessages(
+      previous.messages,
+      previous.liveTail,
+      liveMessages
+    )
+    if (messages) {
+      return {
+        historyMessages,
+        liveMessages,
+        liveContentVersion,
+        liveTail: liveMessages.at(-1),
+        messages
+      }
+    }
+  }
+
+  return {
+    historyMessages,
+    liveMessages,
+    liveContentVersion,
+    liveTail: liveMessages.at(-1),
+    messages: mergeWorkerHistoryWithLiveMessages(historyMessages, liveMessages)
+  }
+}
+
 export function WorkerStreamPanel(): React.JSX.Element {
   const workerFocusView = useAppStore((state) => state.workerFocusView)
   const workerFocusMessages = useAppStore((state) => state.workerFocusMessages)
+  const workerFocusMessagesContentVersion = useAppStore(
+    (state) => state.workerFocusMessagesContentVersion
+  )
   const closeWorkerFocusView = useAppStore((state) => state.closeWorkerFocusView)
+  const requestOpenRightPanelAgents = useAppStore((state) => state.requestOpenRightPanelAgents)
   const threadContext = useThreadContext()
   const [historyMessages, setHistoryMessages] = useState<Message[]>([])
   const [truncatedHistoryCount, setTruncatedHistoryCount] = useState(0)
   const [loadingHistory, setLoadingHistory] = useState(false)
   const [thinkingMessageIndex, setThinkingMessageIndex] = useState(0)
   const [openHookLogBucketId, setOpenHookLogBucketId] = useState<string | null>(null)
+  const [messageWindowEnd, setMessageWindowEnd] = useState<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const thinkingCycleRef = useRef(-1)
   const wasRunningRef = useRef(false)
@@ -879,6 +986,14 @@ export function WorkerStreamPanel(): React.JSX.Element {
   const previousHistoryLoadRef = useRef<{
     workerThreadId: string
     turns?: number
+  } | null>(null)
+  const userTurnOffsetCacheRef = useRef<{
+    key: string
+    value: number
+  } | null>(null)
+  const hookWindowMessagesCacheRef = useRef<{
+    key: string
+    messages: Message[]
   } | null>(null)
   const threadState = useThreadState(workerFocusView?.threadId ?? null)
   const currentWorker = threadState?.coordinatorWorkers.find(
@@ -902,6 +1017,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
       [focusedParentThreadId, threadContext]
     )
   )
+  const messageMergeCacheRef = useRef<WorkerPanelMessageMergeCache | undefined>(undefined)
 
   useEffect(() => {
     const workerThreadId = workerFocusView?.workerThreadId
@@ -931,7 +1047,13 @@ export function WorkerStreamPanel(): React.JSX.Element {
         }
 
         const history = buildWorkerCheckpointHistory(rawMessages, workerThreadId)
-        setTruncatedHistoryCount(history.truncatedCount)
+        const originalMessageCount =
+          latestCheckpoint?.checkpoint?.channel_values?.__cmb_original_message_count
+        const workerOmittedCount =
+          typeof originalMessageCount === "number" && originalMessageCount > rawMessages.length
+            ? originalMessageCount - rawMessages.length
+            : 0
+        setTruncatedHistoryCount(workerOmittedCount + history.truncatedCount)
         setHistoryMessages(history.messages)
       } catch (error) {
         console.error("[WorkerStreamPanel] Failed to load worker checkpoint:", error)
@@ -949,36 +1071,89 @@ export function WorkerStreamPanel(): React.JSX.Element {
     }
   }, [currentWorker?.status, currentWorker?.turns, workerFocusView?.workerThreadId])
 
-  const messages = useMemo(
-    () => mergeMessages(historyMessages, workerFocusMessages),
-    [historyMessages, workerFocusMessages]
+  const messages = useMemo(() => {
+    const nextCache = mergeWorkerPanelMessages(
+      historyMessages,
+      workerFocusMessages,
+      workerFocusMessagesContentVersion,
+      messageMergeCacheRef.current
+    )
+    messageMergeCacheRef.current = nextCache
+    return nextCache.messages
+  }, [historyMessages, workerFocusMessages, workerFocusMessagesContentVersion])
+  const messageWindow = useMemo(
+    () => buildWorkerMessageWindow(messages, messageWindowEnd),
+    [messageWindowEnd, messages, workerFocusMessagesContentVersion]
   )
+  const messageWindowStart = messageWindow.start
+  const effectiveMessageWindowEnd = messageWindow.end
+  const windowMessages = messageWindow.messages
+  const userTurnOffsetKey = [
+    messageWindowStart,
+    messages.length,
+    messages[0]?.id ?? "",
+    messages[messageWindowStart - 1]?.id ?? ""
+  ].join(":")
+  if (userTurnOffsetCacheRef.current?.key !== userTurnOffsetKey) {
+    let count = 0
+    for (let index = 0; index < messageWindowStart; index += 1) {
+      if (messages[index]?.role === "user") count += 1
+    }
+    userTurnOffsetCacheRef.current = { key: userTurnOffsetKey, value: count }
+  }
+  const userTurnOffset = userTurnOffsetCacheRef.current.value
+  const windowMessageStructureKey = useMemo(
+    () =>
+      windowMessages
+        .map((message) =>
+          [
+            message.role,
+            message.id,
+            message.role === "user" ? workerMessagePreview(message) : ""
+          ].join("\u0000")
+        )
+        .join("\u0001"),
+    [windowMessages]
+  )
+  if (hookWindowMessagesCacheRef.current?.key !== windowMessageStructureKey) {
+    hookWindowMessagesCacheRef.current = {
+      key: windowMessageStructureKey,
+      messages: windowMessages
+    }
+  }
+  const hookWindowMessages = hookWindowMessagesCacheRef.current.messages
   const workerHookLogs = useMemo(
     () =>
       buildWorkerHookLogBuckets(
-        messages,
+        hookWindowMessages,
         parentHookLogBuckets,
-        workerFocusView?.workerThreadId
+        workerFocusView?.workerThreadId,
+        userTurnOffset
       ),
-    [messages, parentHookLogBuckets, workerFocusView?.workerThreadId]
+    [
+      parentHookLogBuckets,
+      userTurnOffset,
+      hookWindowMessages,
+      workerFocusView?.workerThreadId
+    ]
   )
   const openHookLogBucket = openHookLogBucketId
     ? (workerHookLogs.bucketById.get(openHookLogBucketId) ?? null)
     : null
   const visibleMessageLayout = useMemo(
     () =>
-      buildVisibleMessageLayout(messages, (message) => {
+      buildVisibleMessageLayout(windowMessages, (message) => {
         if (!messageRendersNothing(message)) return true
         if (message.role !== "user") return false
         return Boolean(workerHookLogs.bucketByMessageId.get(message.id)?.entries.length)
       }),
-    [messages, workerHookLogs.bucketByMessageId]
+    [windowMessages, workerHookLogs.bucketByMessageId]
   )
   const showAssistantMetaByIndex = useMemo(() => {
-    const result = new Array<boolean>(messages.length)
+    const result = new Array<boolean>(windowMessages.length)
     let nextVisibleMessage: Message | null = null
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const message = messages[index]
+    for (let index = windowMessages.length - 1; index >= 0; index -= 1) {
+      const message = windowMessages[index]
       const hasHookLogChip =
         message.role === "user" &&
         Boolean(workerHookLogs.bucketByMessageId.get(message.id)?.entries.length)
@@ -993,12 +1168,12 @@ export function WorkerStreamPanel(): React.JSX.Element {
       nextVisibleMessage = message
     }
     return result
-  }, [messages, workerHookLogs.bucketByMessageId])
+  }, [windowMessages, workerHookLogs.bucketByMessageId])
   const hasUserAfterHeadByIndex = useMemo(() => {
-    const result = new Array<boolean>(messages.length)
-    let hasUserAfterHead = false
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const message = messages[index]
+    const result = new Array<boolean>(windowMessages.length)
+    let hasUserAfterHead = effectiveMessageWindowEnd < messages.length
+    for (let index = windowMessages.length - 1; index >= 0; index -= 1) {
+      const message = windowMessages[index]
       result[index] = hasUserAfterHead
       const hasHookLogChip =
         message.role === "user" &&
@@ -1008,13 +1183,16 @@ export function WorkerStreamPanel(): React.JSX.Element {
       }
     }
     return result
-  }, [messages, workerHookLogs.bucketByMessageId])
+  }, [effectiveMessageWindowEnd, messages.length, windowMessages, workerHookLogs.bucketByMessageId])
 
   const { assistantDurationMsById, userSendTimeLabelById } = useMemo(
-    () => buildMessageBubbleTimingMeta(messages),
-    [messages]
+    () => buildMessageBubbleTimingMeta(windowMessages),
+    [windowMessages]
   )
-  const toolResults = useMemo(() => buildToolResultAssociations(messages), [messages])
+  const toolResults = useMemo(
+    () => buildToolResultAssociations(windowMessages),
+    [windowMessages]
+  )
   const getScrollViewport = useCallback((): HTMLDivElement | null => {
     const root = scrollRef.current
     if (!root) return null
@@ -1051,7 +1229,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
     isAtBottomRef.current = bottomDistance < 50
   }, [getScrollViewport])
   const scrollSignature = useMemo(() => {
-    const lastMessage = messages[visibleMessageLayout.lastVisibleMessageIndex]
+    const lastMessage = windowMessages[visibleMessageLayout.lastVisibleMessageIndex]
     return [
       messages.length,
       lastMessage?.id ?? "",
@@ -1066,6 +1244,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
     ].join(":")
   }, [
     messages,
+    workerFocusMessagesContentVersion,
     toolResults.size,
     workerFocusMessages.length,
     workerHookLogs.totalEntryCount,
@@ -1080,6 +1259,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
 
   useEffect(() => {
     setOpenHookLogBucketId(null)
+    setMessageWindowEnd(null)
   }, [workerFocusView?.workerThreadId])
 
   useEffect(() => {
@@ -1151,14 +1331,17 @@ export function WorkerStreamPanel(): React.JSX.Element {
             variant="ghost"
             size="sm"
             type="button"
-            onClick={() => closeWorkerFocusView()}
+            onClick={() => {
+              requestOpenRightPanelAgents(workerFocusView.threadId)
+              closeWorkerFocusView()
+            }}
             className="h-7 w-9 p-0"
             title="返回"
             aria-label="返回"
           >
             <ArrowLeft className="size-6" strokeWidth={1} />
           </Button>
-          <Workflow className="size-3.5 shrink-0 text-stone-500" />
+          <Workflow className="size-3.5 shrink-0 text-muted-foreground" />
           <div className="min-w-0 truncate text-sm font-semibold text-foreground">
             Worker 工具流
             <span className="ml-2 text-xs font-normal text-muted-foreground">
@@ -1166,12 +1349,19 @@ export function WorkerStreamPanel(): React.JSX.Element {
             </span>
           </div>
         </div>
+        <SubagentSessionExportButton
+          target={{
+            kind: "worker",
+            threadId: workerFocusView.threadId,
+            workerThreadId: workerFocusView.workerThreadId
+          }}
+        />
         <span
           className={cn(
             "shrink-0 rounded-full border px-2 py-0.5 text-[11px] leading-none",
             isRunning
               ? "border-blue-300/60 bg-blue-500/10 text-blue-700 dark:text-blue-300"
-              : "border-stone-300/80 bg-stone-100/70 text-stone-700 dark:border-stone-700 dark:bg-stone-900/45 dark:text-stone-300"
+              : "border-border bg-background-interactive/70 text-muted-foreground"
           )}
         >
           {isRunning ? "实时运行中" : "历史快照"}
@@ -1198,6 +1388,61 @@ export function WorkerStreamPanel(): React.JSX.Element {
                 checkpoint 消息；更早的 {truncatedHistoryCount} 条历史未在面板加载。
               </div>
             )}
+            {(messageWindowStart > 0 || effectiveMessageWindowEnd < messages.length) && (
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                <span>
+                  当前渲染第 {messageWindowStart + 1}–{effectiveMessageWindowEnd} 条，共{" "}
+                  {messages.length} 条
+                </span>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  {messageWindowStart > 0 && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 px-2 text-xs"
+                      onClick={() => {
+                        isAtBottomRef.current = false
+                        setMessageWindowEnd(messageWindowStart)
+                      }}
+                    >
+                      更早
+                    </Button>
+                  )}
+                  {effectiveMessageWindowEnd < messages.length && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 px-2 text-xs"
+                      onClick={() => {
+                        const nextEnd = Math.min(
+                          messages.length,
+                          effectiveMessageWindowEnd + WORKER_MESSAGE_WINDOW_SIZE
+                        )
+                        setMessageWindowEnd(nextEnd >= messages.length ? null : nextEnd)
+                      }}
+                    >
+                      较新
+                    </Button>
+                  )}
+                  {effectiveMessageWindowEnd < messages.length && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 px-2 text-xs"
+                      onClick={() => {
+                        setMessageWindowEnd(null)
+                        isAtBottomRef.current = true
+                      }}
+                    >
+                      最新
+                    </Button>
+                  )}
+                </div>
+              </div>
+            )}
             {workerHookLogs.detachedBuckets.length > 0 && (
               <div className="flex flex-wrap gap-2">
                 {workerHookLogs.detachedBuckets.map((bucket) => (
@@ -1209,7 +1454,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
                 ))}
               </div>
             )}
-            {messages.map((message, index) => {
+            {windowMessages.map((message, index) => {
               const hookLogBucketForTurn =
                 message.role === "user" ? workerHookLogs.bucketByMessageId.get(message.id) : null
               if (messageRendersNothing(message) && !hookLogBucketForTurn?.entries.length) {
@@ -1219,7 +1464,11 @@ export function WorkerStreamPanel(): React.JSX.Element {
               const isLastMessage = index === visibleMessageLayout.lastVisibleMessageIndex
 
               return (
-                <div key={message.id}>
+                <div
+                  key={message.id}
+                  data-worker-message-row="true"
+                  style={WORKER_MESSAGE_ROW_STYLE}
+                >
                   <MessageBubble
                     message={message}
                     previousMessage={previousMessage}

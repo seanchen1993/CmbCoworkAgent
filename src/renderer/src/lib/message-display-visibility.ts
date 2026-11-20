@@ -1,11 +1,12 @@
 import type { Message } from "../types"
 
-export function normalizeVisibleReasoningText(reasoning: string | undefined): string {
-  if (!reasoning) return ""
-  return reasoning
-    .replace(/^\s*<think>\s*/i, "")
-    .replace(/\s*<\/think>\s*$/i, "")
-    .trim()
+import { systemNoticeBlockText } from "../../../shared/goal-notice-presentation"
+import { normalizeVisibleReasoningText } from "../../../shared/transcript-reasoning"
+
+export { normalizeVisibleReasoningText } from "../../../shared/transcript-reasoning"
+
+export function hasVisibleReasoningText(reasoning: string | undefined): boolean {
+  return normalizeVisibleReasoningText(reasoning).length > 0
 }
 
 export function messageVisibleReasoningLength(
@@ -34,25 +35,20 @@ export function shouldAutoCollapseReasoning({
   )
 }
 
-function getAssistantOrUserVisibleText(content: Message["content"]): string {
-  if (typeof content === "string") return content
-  if (!Array.isArray(content)) return ""
-  return content
-    .map((block) => (block.type === "text" ? (block.text ?? "") : ""))
-    .filter(Boolean)
-    .join("\n")
+function hasNonWhitespace(value: string | undefined): boolean {
+  return typeof value === "string" && /\S/.test(value)
 }
 
-function getSystemVisibleText(content: Message["content"]): string {
-  if (typeof content === "string") return content
-  if (!Array.isArray(content)) return ""
-  return content
-    .map((block) => {
-      if (block.type === "text") return block.text ?? ""
-      return typeof block.content === "string" ? block.content : ""
-    })
-    .filter(Boolean)
-    .join("\n")
+function hasAssistantOrUserVisibleText(content: Message["content"]): boolean {
+  if (typeof content === "string") return hasNonWhitespace(content)
+  if (!Array.isArray(content)) return false
+  return content.some((block) => block.type === "text" && hasNonWhitespace(block.text))
+}
+
+function hasSystemVisibleText(content: Message["content"]): boolean {
+  if (typeof content === "string") return hasNonWhitespace(content)
+  if (!Array.isArray(content)) return false
+  return content.some((block) => hasNonWhitespace(systemNoticeBlockText(block)))
 }
 
 // Keep this aligned with MessageBubble's actual render branches. Tool results
@@ -61,15 +57,13 @@ export function messageRendersNothing(message: Message): boolean {
   if (message.role === "tool") return true
   if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) return false
 
-  const visibleText =
+  const hasVisibleText =
     message.role === "system"
-      ? getSystemVisibleText(message.content)
-      : getAssistantOrUserVisibleText(message.content)
-  if (visibleText.trim().length > 0) return false
+      ? hasSystemVisibleText(message.content)
+      : hasAssistantOrUserVisibleText(message.content)
+  if (hasVisibleText) return false
 
-  return (
-    message.role !== "assistant" || normalizeVisibleReasoningText(message.reasoning).length === 0
-  )
+  return message.role !== "assistant" || !hasVisibleReasoningText(message.reasoning)
 }
 
 export function messageHasVisibleRow(

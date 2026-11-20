@@ -1,0 +1,7 @@
+{
+  "type": "failed",
+  "eventId": "event-0001",
+  "leaseId": "lease-0001",
+  "retryable": true,
+  "reasonCode": "REMOTE_RUNTIME_FAILED"
+}

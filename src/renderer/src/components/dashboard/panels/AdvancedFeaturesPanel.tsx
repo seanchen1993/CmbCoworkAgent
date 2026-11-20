@@ -7,7 +7,6 @@ import {
   Bot,
   Webhook,
   Terminal,
-  Command,
   type LucideIcon
 } from "lucide-react"
 import type {
@@ -15,6 +14,7 @@ import type {
   AdvancedFeatureCard,
   AdvancedFeatureTone
 } from "../use-dashboard"
+import { InfoHint } from "./dashboard-shared"
 
 const CARD_ICON: Record<string, LucideIcon> = {
   heartbeat: Activity,
@@ -22,10 +22,9 @@ const CARD_ICON: Record<string, LucideIcon> = {
   lsp: Code,
   optimizer: Sparkles,
   evolvedUsage: GitBranch,
-  chatx: Bot,
+  im: Bot,
   hooks: Webhook,
-  programmatic: Terminal,
-  claudeCode: Command
+  programmatic: Terminal
 }
 
 const CARD_ICON_COLOR: Record<string, string> = {
@@ -34,10 +33,9 @@ const CARD_ICON_COLOR: Record<string, string> = {
   lsp: "bg-blue-500",
   optimizer: "bg-amber-500",
   evolvedUsage: "bg-teal-500",
-  chatx: "bg-sky-500",
+  im: "bg-sky-500",
   hooks: "bg-indigo-500",
-  programmatic: "bg-emerald-500",
-  claudeCode: "bg-stone-800"
+  programmatic: "bg-emerald-500"
 }
 
 const TONE_CLASS: Record<AdvancedFeatureTone, string> = {
@@ -62,7 +60,27 @@ function FeatureCard({ card }: { card: AdvancedFeatureCard }) {
           <Icon className="size-4 text-white" />
         </div>
         <div className="min-w-0">
-          <div className="text-xs font-medium text-foreground truncate">{card.label}</div>
+          <div className="flex items-center gap-1 text-xs font-medium text-foreground">
+            <span className="truncate">{card.label}</span>
+            {card.key === "im" && (
+              <InfoHint
+                content={
+                  <div className="space-y-2 leading-relaxed">
+                    <p>按所选时间范围统计。</p>
+                    <p>
+                      处理完成：收到的消息中，本轮任务正常执行结束的次数，不代表整个项目完成，也不保证回复已送达。
+                    </p>
+                    <p>
+                      回复条数：针对收到的消息发出的回复，长回复拆成多条时分别计数；包含失败、取消时的提示，以及发送失败或结果未确认的回复。主动推送和审批/提问卡片单独统计。
+                    </p>
+                    <p>
+                      一次任务可能产生多条回复，因此两项不一一对应。“异常”表示发送失败或结果未确认的条数，已包含在发出条数中。
+                    </p>
+                  </div>
+                }
+              />
+            )}
+          </div>
           <div className="flex items-baseline gap-1.5">
             <span className="text-xl font-bold leading-tight text-foreground tabular-nums">
               {formatNumber(card.value)}

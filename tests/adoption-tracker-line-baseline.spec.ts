@@ -8,9 +8,12 @@
 import {
   buildAdoptionLineBaseline,
   countNetGeneratedLines,
+  countNetLineChanges,
   isCodeFile,
   evaluateAdoptionLineBaselines
 } from "../src/main/services/adoption-tracker.ts"
+import { shellEditLineFragments } from "../src/main/services/adoption-lines.ts"
+import { attributeChangeKind } from "../src/main/services/change-kind-classifier.ts"
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message)
@@ -108,6 +111,22 @@ function testEditReplacementProducesNewAndSupersededLines(): void {
   )
 }
 
+function testReplacementIsClassifiedAsLegacy(): void {
+  const rewrite = editBaseline(
+    ["const oldName = 1", "return oldName"].join("\n"),
+    ["const newName = 1", "return newName"].join("\n")
+  )
+  const attribution = attributeChangeKind(
+    rewrite.generatedLineHashes.length,
+    rewrite.supersededLineHashes.length
+  )
+
+  assert(rewrite.generatedLineHashes.length === 2, "rewrite should contain two new-only lines")
+  assert(rewrite.supersededLineHashes.length === 2, "rewrite should contain two old-only lines")
+  assert(attribution.newRatio === 0, "equal-size rewrite should have a zero new ratio")
+  assert(attribution.changeKind === "legacy", "equal-size rewrite should be classified as legacy")
+}
+
 function testReplaceAllOccurrencesAreExpanded(): void {
   const baseline = editBaseline("status = OLD;", "status = NEW;", 3)
 
@@ -131,6 +150,50 @@ function testAgentAppendDoesNotSupersedePreviousGeneration(): void {
 
   assertCounts(newerResult, { generated: 1, effective: 1, adopted: 1 }, "append newer row")
   assertCounts(olderResult, { generated: 2, effective: 2, adopted: 2 }, "append older row")
+}
+
+function shellBaseline(before: string, after: string) {
+  const fragments = shellEditLineFragments(before, after)
+  assert(fragments !== null, "shell edit should produce fragments")
+  return buildAdoptionLineBaseline({ tool: "execute", ...fragments! })
+}
+
+function testShellEditKeepsOnlyChangedLines(): void {
+  const before = ["import a from 'a'", "", "export function f() {", "  return 1", "}"].join("\n")
+  const after = [
+    "import a from 'a'",
+    "",
+    "export function f() {",
+    "  return 2",
+    "}",
+    "export const g = 3"
+  ].join("\n")
+  const fragments = shellEditLineFragments(before, after)
+  assertStringArray(
+    fragments!.generatedContent.split("\n"),
+    ["  return 2", "export const g = 3"],
+    "shell edit generated lines"
+  )
+  assertStringArray(fragments!.oldString.split("\n"), ["  return 1"], "shell edit old lines")
+  assert(
+    shellEditLineFragments(before, before.replace("return 1", "return   1")) === null,
+    "a whitespace-only shell edit should record nothing"
+  )
+}
+
+function testShellReplacementSupersedesPreviousGeneration(): void {
+  const older = writeBaseline(["line A", "line B", "line C"].join("\n"))
+  const newer = shellBaseline(
+    ["line A", "line B", "line C"].join("\n"),
+    ["line A", "line D", "line C"].join("\n")
+  )
+  const [newerResult, olderResult] = evaluateAdoptionLineBaselines(
+    [newer, older],
+    ["line A", "line D", "line C"].join("\n")
+  )
+
+  assertCounts(newerResult, { generated: 1, effective: 1, adopted: 1 }, "shell newer row")
+  assertCounts(olderResult, { generated: 3, effective: 2, adopted: 2 }, "shell older row")
 }
 
 function testAgentReplacementSupersedesPreviousGeneration(): void {
@@ -203,6 +266,15 @@ function testOversizeCountUsesNetGeneratedLines(): void {
     }) === 25_000,
     "replaceAll net count should scale without expanding the baseline"
   )
+
+  const rewrite = countNetLineChanges({
+    tool: "edit_file",
+    generatedContent: "status = NEW;",
+    oldString: "status = OLD;",
+    occurrences: 25_000
+  })
+  assert(rewrite.generatedLineCount === 25_000, "replaceAll should count new-only lines")
+  assert(rewrite.deletedLineCount === 25_000, "replaceAll should count replaced old-only lines")
 }
 
 function testInternalWorkflowScriptsAreNotCode(): void {
@@ -227,12 +299,18 @@ function run(): void {
   console.log("PASS edit context is not generated")
   testEditReplacementProducesNewAndSupersededLines()
   console.log("PASS edit replacement produces new and superseded lines")
+  testReplacementIsClassifiedAsLegacy()
+  console.log("PASS edit replacement is classified as legacy")
   testReplaceAllOccurrencesAreExpanded()
   console.log("PASS replaceAll occurrence expansion")
   testAgentAppendDoesNotSupersedePreviousGeneration()
   console.log("PASS agent append does not supersede previous generation")
   testAgentReplacementSupersedesPreviousGeneration()
   console.log("PASS agent replacement supersedes previous generation")
+  testShellEditKeepsOnlyChangedLines()
+  console.log("PASS shell edit records only changed lines")
+  testShellReplacementSupersedesPreviousGeneration()
+  console.log("PASS shell replacement supersedes previous generation")
   testHumanModificationKeepsEffectiveButNotAdoptedLine()
   console.log("PASS human modification preserves effective denominator")
   testAgentDeletionSupersedesPreviousGeneration()

@@ -47,7 +47,9 @@ function IconPopoverButton({
   ...props
 }: IconPopoverButtonProps): React.JSX.Element {
   const [uncontrolledOpen, setUncontrolledOpen] = React.useState(false)
+  const [portalContainer, setPortalContainer] = React.useState<HTMLElement | null>(null)
   const closeTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  const buttonRef = React.useRef<HTMLButtonElement | null>(null)
   const open = controlledOpen ?? uncontrolledOpen
 
   const setOpen = React.useCallback(
@@ -78,6 +80,13 @@ function IconPopoverButton({
   }, [clearCloseTimer, setOpen])
 
   React.useEffect(() => clearCloseTimer, [clearCloseTimer])
+
+  React.useEffect(() => {
+    if (!open) return
+    setPortalContainer(
+      buttonRef.current?.closest<HTMLElement>('[data-slot="dialog-content"]') ?? null
+    )
+  }, [open])
 
   const handleClick = React.useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
@@ -110,6 +119,7 @@ function IconPopoverButton({
       <PopoverAnchor asChild>
         <button
           {...props}
+          ref={buttonRef}
           type={type}
           aria-disabled={disabled}
           tabIndex={disabled ? -1 : tabIndex}
@@ -145,6 +155,7 @@ function IconPopoverButton({
         side={side}
         align={align}
         sideOffset={sideOffset}
+        portalContainer={portalContainer}
         className={cn("w-auto max-w-48 px-2.5 py-1.5 text-xs", popoverClassName)}
         onOpenAutoFocus={(event) => event.preventDefault()}
         onCloseAutoFocus={(event) => event.preventDefault()}

@@ -9,7 +9,7 @@ const badgeVariants = cva(
       variant: {
         default: "border-transparent bg-primary text-primary-foreground",
         secondary: "border-transparent bg-secondary text-secondary-foreground",
-        destructive: "border-transparent bg-destructive text-white",
+        destructive: "border-transparent bg-destructive text-destructive-foreground",
         outline: "border-border text-foreground",
         // Status variants with 15% bg opacity
         nominal: "border-status-nominal/30 bg-status-nominal/15 text-status-nominal",

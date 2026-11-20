@@ -1,12 +1,8 @@
 import { getMcpConnectors, upsertMcpConnector } from "../../storage"
-import {
-  BUILTIN_BROWSER_LOG_PREFIX,
-  type BrowserCdpConfig
-} from "../../../shared/browser-types"
+import { type BrowserCdpConfig } from "../../../shared/browser-types"
 import { getCurrentBrowserCdpPort } from "./browser-cdp"
 
 const PLAYWRIGHT_MCP_NAME = "In-app-browser"
-const BROWSER_MAIN_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[Main]`
 const MANAGED_PLAYWRIGHT_MCP_COMMAND = "npx"
 const MANAGED_PLAYWRIGHT_MCP_LAZY_LOAD = false
 
@@ -55,7 +51,6 @@ export async function autoRegisterPlaywrightMcpConnector(cdpPort: number | null)
       enabled: false,
       lazyLoad: MANAGED_PLAYWRIGHT_MCP_LAZY_LOAD
     })
-    console.info(`${BROWSER_MAIN_LOG_PREFIX} Disabled Playwright MCP connector because Browser CDP is turned off.`)
     return
   }
 
@@ -72,9 +67,6 @@ export async function autoRegisterPlaywrightMcpConnector(cdpPort: number | null)
     enabled: true,
     lazyLoad: MANAGED_PLAYWRIGHT_MCP_LAZY_LOAD
   })
-  console.info(
-    `${BROWSER_MAIN_LOG_PREFIX} ${existing ? "Synced" : "Auto-registered"} Playwright MCP connector on port ${cdpPort}.`
-  )
 }
 
 export async function syncPlaywrightMcpConnectorForBrowserCdpConfig(
@@ -102,9 +94,6 @@ export async function syncPlaywrightMcpConnectorForBrowserCdpConfig(
       enabled: false,
       lazyLoad: MANAGED_PLAYWRIGHT_MCP_LAZY_LOAD
     })
-    console.info(
-      `${BROWSER_MAIN_LOG_PREFIX} Synced Playwright MCP connector disabled state from Browser CDP config.`
-    )
     return { invalidateCapabilities: true }
   }
 
@@ -126,9 +115,6 @@ export async function syncPlaywrightMcpConnectorForBrowserCdpConfig(
       enabled: true,
       lazyLoad: MANAGED_PLAYWRIGHT_MCP_LAZY_LOAD
     })
-    console.info(
-      `${BROWSER_MAIN_LOG_PREFIX} Synced Playwright MCP connector enabled state from Browser CDP config; runtimePort=${runtimePort}.`
-    )
   }
 
   return { invalidateCapabilities: runtimePort !== null }

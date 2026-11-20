@@ -19,7 +19,20 @@
  */
 
 import initSqlJs, { Database as SqlJsDatabase } from "sql.js"
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
+import { randomUUID } from "crypto"
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from "fs"
 import { dirname, join } from "path"
 import { getOpenworkDir } from "../storage"
 import { TRACE_OBSERVABILITY_SCHEMA_VERSION } from "../agent/trace/types"
@@ -39,22 +52,271 @@ function getAdoptionIndexPath(): string {
 let db: SqlJsDatabase | null = null
 let saveTimer: ReturnType<typeof setTimeout> | null = null
 let dirty = false
+let primarySnapshotIdentity: SnapshotIdentity | null = null
+let primaryNeedsFsync = false
+let durabilityRepairPending = false
+let saveRetryAttempt = 0
+let lastSaveFailureLogAt = 0
+const SQLITE_FILE_HEADER = Buffer.from("SQLite format 3\0", "utf8")
+const SAVE_DEBOUNCE_MS = 500
+const SAVE_RETRY_INITIAL_MS = 1_000
+const SAVE_RETRY_MAX_MS = 30_000
+const SAVE_FAILURE_LOG_INTERVAL_MS = 30_000
+
+interface SnapshotIdentity {
+  dev: number
+  ino: number
+  size: number
+  mtimeMs: number
+  ctimeMs: number
+}
+
+interface AdoptionSnapshotPaths {
+  primary: string
+  primaryTemp: string
+}
+
+type SnapshotReplace = (source: string, destination: string) => void
+type SnapshotFsync = (fileDescriptor: number) => void
+let snapshotReplaceForTest: SnapshotReplace | null = null
+let snapshotFsyncForTest: SnapshotFsync | null = null
+
+function getAdoptionSnapshotPaths(): AdoptionSnapshotPaths {
+  const primary = getAdoptionIndexPath()
+  return {
+    primary,
+    primaryTemp: `${primary}.tmp`
+  }
+}
+
+function cleanupAdoptionSnapshotTemps(paths = getAdoptionSnapshotPaths()): void {
+  try {
+    rmSync(paths.primaryTemp, { force: true })
+  } catch {
+    // A stale temp is harmless; the next atomic write will retry cleanup.
+  }
+}
+
+function snapshotIdentity(path: string): SnapshotIdentity {
+  const stats = statSync(path)
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    size: stats.size,
+    mtimeMs: stats.mtimeMs,
+    ctimeMs: stats.ctimeMs
+  }
+}
+
+function snapshotIdentityFromDescriptor(fileDescriptor: number): SnapshotIdentity {
+  const stats = fstatSync(fileDescriptor)
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    size: stats.size,
+    mtimeMs: stats.mtimeMs,
+    ctimeMs: stats.ctimeMs
+  }
+}
+
+function sameSnapshotIdentity(left: SnapshotIdentity, right: SnapshotIdentity): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs
+  )
+}
+
+function fsyncFileBestEffort(fileDescriptor: number): void {
+  try {
+    const fsyncSnapshot = snapshotFsyncForTest ?? fsyncSync
+    fsyncSnapshot(fileDescriptor)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code
+    if (code !== "EINVAL" && code !== "ENOSYS" && code !== "ENOTSUP") throw error
+  }
+}
+
+function fsyncDirectoryBestEffort(directory: string): void {
+  let directoryDescriptor: number | undefined
+  try {
+    directoryDescriptor = openSync(directory, "r")
+    fsyncFileBestEffort(directoryDescriptor)
+  } catch {
+    // Windows does not allow opening directories this way. The file itself was
+    // fsynced before rename, so directory syncing is an optional durability step.
+  } finally {
+    if (directoryDescriptor !== undefined) {
+      try {
+        closeSync(directoryDescriptor)
+      } catch {
+        // Best effort only.
+      }
+    }
+  }
+}
+
+function replaceSnapshotAtomically(
+  destination: string,
+  tempPath: string,
+  snapshot: Uint8Array,
+  durable: boolean
+): void {
+  const directory = dirname(destination)
+  if (!existsSync(directory)) mkdirSync(directory, { recursive: true })
+  rmSync(tempPath, { force: true })
+
+  let fileDescriptor: number | undefined
+  try {
+    fileDescriptor = openSync(tempPath, "w", 0o600)
+    writeFileSync(fileDescriptor, snapshot)
+    if (durable) fsyncFileBestEffort(fileDescriptor)
+    closeSync(fileDescriptor)
+    fileDescriptor = undefined
+    const replaceSnapshot = snapshotReplaceForTest ?? renameSync
+    replaceSnapshot(tempPath, destination)
+    primarySnapshotIdentity = snapshotIdentity(destination)
+    primaryNeedsFsync = !durable
+    if (durable) fsyncDirectoryBestEffort(directory)
+  } finally {
+    if (fileDescriptor !== undefined) {
+      try {
+        closeSync(fileDescriptor)
+      } catch {
+        // Preserve the original write error.
+      }
+    }
+    try {
+      rmSync(tempPath, { force: true })
+    } catch {
+      // Best-effort cleanup after a failed replacement.
+    }
+  }
+}
+
+function persistAdoptionSnapshot(snapshot: Uint8Array, durable: boolean): void {
+  const paths = getAdoptionSnapshotPaths()
+  replaceSnapshotAtomically(paths.primary, paths.primaryTemp, snapshot, durable)
+}
+
+function persistDirtyAdoptionIndex(durable: boolean): void {
+  if (!db || !dirty) return
+  const snapshot = db.export()
+  persistAdoptionSnapshot(snapshot, durable)
+  dirty = false
+}
+
+function isCurrentPrimarySnapshot(path: string): boolean {
+  if (!primarySnapshotIdentity) return false
+  try {
+    return sameSnapshotIdentity(snapshotIdentity(path), primarySnapshotIdentity)
+  } catch {
+    return false
+  }
+}
+
+function fsyncCurrentPrimarySnapshot(path: string): boolean {
+  if (!primarySnapshotIdentity) return false
+  let fileDescriptor: number | undefined
+  try {
+    // FlushFileBuffers requires a writable descriptor on Windows.
+    fileDescriptor = openSync(path, "r+")
+    if (
+      !sameSnapshotIdentity(snapshotIdentityFromDescriptor(fileDescriptor), primarySnapshotIdentity)
+    ) {
+      return false
+    }
+    fsyncFileBestEffort(fileDescriptor)
+    if (!isCurrentPrimarySnapshot(path)) return false
+    primaryNeedsFsync = false
+    fsyncDirectoryBestEffort(dirname(path))
+    return true
+  } catch {
+    return false
+  } finally {
+    if (fileDescriptor !== undefined) {
+      try {
+        closeSync(fileDescriptor)
+      } catch {
+        // The durability decision was already made from fsync and identity checks.
+      }
+    }
+  }
+}
+
+function ensureDurablePrimarySnapshot(): void {
+  if (!db) return
+  const primary = getAdoptionSnapshotPaths().primary
+  if (!isCurrentPrimarySnapshot(primary)) {
+    persistAdoptionSnapshot(db.export(), true)
+    dirty = false
+    return
+  }
+  if (primaryNeedsFsync && !fsyncCurrentPrimarySnapshot(primary)) {
+    persistAdoptionSnapshot(db.export(), true)
+    dirty = false
+  }
+}
+
+/** Test-only failure injection for the final atomic replace operation. */
+export function setAdoptionIndexSnapshotReplaceForTest(replace: SnapshotReplace | null): void {
+  if (process.env.NODE_ENV !== "test") return
+  snapshotReplaceForTest = replace
+}
+
+/** Test-only durability probe for distinguishing debounced and explicit saves. */
+export function setAdoptionIndexSnapshotFsyncForTest(fsync: SnapshotFsync | null): void {
+  if (process.env.NODE_ENV !== "test") return
+  snapshotFsyncForTest = fsync
+}
+
+function saveRetryDelay(attempt: number): number {
+  return Math.min(SAVE_RETRY_INITIAL_MS * 2 ** Math.max(0, attempt - 1), SAVE_RETRY_MAX_MS)
+}
+
+function warnSaveFailure(message: string, error: unknown): void {
+  const now = Date.now()
+  if (lastSaveFailureLogAt !== 0 && now - lastSaveFailureLogAt < SAVE_FAILURE_LOG_INTERVAL_MS)
+    return
+  lastSaveFailureLogAt = now
+  console.warn(message, error)
+}
+
+function armSaveTimer(delay: number): void {
+  saveTimer = setTimeout(() => {
+    saveTimer = null
+    if (!db || (!dirty && !durabilityRepairPending)) return
+    try {
+      if (durabilityRepairPending) {
+        if (dirty) persistDirtyAdoptionIndex(true)
+        else persistAdoptionSnapshot(db.export(), true)
+        ensureDurablePrimarySnapshot()
+        durabilityRepairPending = false
+      } else {
+        persistDirtyAdoptionIndex(false)
+      }
+      saveRetryAttempt = 0
+      lastSaveFailureLogAt = 0
+    } catch (error) {
+      saveRetryAttempt = Math.min(saveRetryAttempt + 1, 16)
+      warnSaveFailure("[AdoptionIndex] save failed; retry scheduled:", error)
+      armSaveTimer(saveRetryDelay(saveRetryAttempt))
+    }
+  }, delay)
+  if (typeof saveTimer.unref === "function") saveTimer.unref()
+}
 
 function scheduleSave(): void {
   if (!db) return
   dirty = true
+  if (saveRetryAttempt > 0) {
+    if (!saveTimer) armSaveTimer(saveRetryDelay(saveRetryAttempt))
+    return
+  }
   if (saveTimer) clearTimeout(saveTimer)
-  saveTimer = setTimeout(() => {
-    if (db && dirty) {
-      try {
-        const data = db.export()
-        writeFileSync(getAdoptionIndexPath(), Buffer.from(data))
-        dirty = false
-      } catch (e) {
-        console.warn("[AdoptionIndex] save failed:", e)
-      }
-    }
-  }, 500)
+  armSaveTimer(SAVE_DEBOUNCE_MS)
 }
 
 // ─────────────────────────────────────────────────────────
@@ -64,7 +326,7 @@ function scheduleSave(): void {
 export interface GenIndexRow {
   event_id: string
   file_path: string
-  /** Tool that produced this generation ("write_file" | "edit_file"); null on legacy rows. */
+  /** Tool that produced this generation ("write_file" | "edit_file" | "execute"); null on legacy rows. */
   tool: string | null
   content_fingerprint: string | null
   shard_file: string
@@ -93,6 +355,10 @@ export interface GenIndexRow {
   /** Adapter plugin bound to the project at gen time, so adoption can be sliced by plugin version. */
   harness_adapter_name: string | null
   harness_adapter_version: string | null
+  /** Generation-time unit attribution; preserved through later commit/push measurement. */
+  harness_deploy_unit_id?: string | null
+  /** JSON array of feature-bound units, not a per-unit allocation. */
+  harness_deploy_unit_ids?: string | null
   observability_schema_version: number | null
   trace_kind: string | null
   execution_mode: string | null
@@ -116,6 +382,15 @@ export interface GenIndexRow {
   workflow_agent_index: number | null
   workflow_phase: string | null
   workflow_agent_label: string | null
+  /**
+   * Added-line share of this generation, `generated / (generated + deleted)`.
+   * Persisted raw (not just the derived label) so the bucketing threshold can
+   * be re-tuned later without re-collecting. Null on rows written before the
+   * column existed, and on generations that touched no lines.
+   */
+  new_ratio: number | null
+  /** "new" | "legacy", derived from `new_ratio`. Null on pre-migration rows. */
+  change_kind: string | null
 }
 
 export interface AdoptLineDetailsRow {
@@ -176,6 +451,13 @@ export interface EventOutboxRow {
   delivered_at: number | null
 }
 
+export interface MarkOutboxFailureOptions {
+  /** Increment attempts for a report that actually reached the reporter. */
+  consumeAttempt?: boolean
+  /** Ignore stale completions unless this process still owns the sending claim. */
+  requireSending?: boolean
+}
+
 export type CommitJobStatus = "pending" | "processing" | "completed"
 
 export interface CommitJobInput {
@@ -210,6 +492,17 @@ export interface AdoptionMeasurementWrite {
   detailsLimits?: AdoptLineDetailsLimits
 }
 
+/** A per-file rollup event (`code_commit_file`) derived from several measurement writes. */
+export interface AdoptionFileEventWrite {
+  /**
+   * Every generation the rollup was computed from. The event is enqueued only
+   * when all of them close in the same transaction; otherwise the transaction
+   * fails so the job re-measures without the generations measured elsewhere.
+   */
+  genEventIds: string[]
+  outboxEvent: EventOutboxInput
+}
+
 export interface AdoptionMeasurementCommitResult {
   success: boolean
   measuredCount: number
@@ -220,20 +513,43 @@ export interface AdoptionMeasurementCommitResult {
 // Lifecycle
 // ─────────────────────────────────────────────────────────
 
-export async function initializeAdoptionIndex(): Promise<void> {
-  if (db) return
+class CorruptAdoptionSnapshotError extends Error {}
 
-  const dbPath = getAdoptionIndexPath()
+function isAdoptionSnapshotCorrupt(error: unknown): boolean {
+  // sql.js reports SQLite errors by message, without a numeric result code.
+  return (
+    error instanceof CorruptAdoptionSnapshotError ||
+    (error instanceof Error &&
+      /^(?:file is not a database$|database disk image is malformed$|malformed database schema\b)/.test(
+        error.message
+      ))
+  )
+}
+
+function openAdoptionDatabase(
+  SQL: Awaited<ReturnType<typeof initSqlJs>>,
+  snapshot?: Buffer
+): SqlJsDatabase {
+  if (snapshot && !snapshot.subarray(0, SQLITE_FILE_HEADER.length).equals(SQLITE_FILE_HEADER)) {
+    throw new CorruptAdoptionSnapshotError("invalid SQLite header")
+  }
+  const db = new SQL.Database(snapshot)
   try {
-    const SQL = await initSqlJs()
+    if (snapshot) {
+      // SQLite can zero-fill a short final page and still report quick_check = ok.
+      const [pageSize, pageCount] = db.exec("PRAGMA page_size; PRAGMA page_count")
+      const expectedBytes = Number(pageSize.values[0][0]) * Number(pageCount.values[0][0])
+      if (snapshot.length < expectedBytes) {
+        throw new CorruptAdoptionSnapshotError("truncated SQLite snapshot")
+      }
+    }
 
-    if (existsSync(dbPath)) {
-      const buffer = readFileSync(dbPath)
-      db = new SQL.Database(buffer)
-    } else {
-      const dir = dirname(dbPath)
-      if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-      db = new SQL.Database()
+    // Legacy snapshots can have a valid header but damaged data pages. Check
+    // them once on upgrade, without scanning a healthy index on every launch.
+    if (db.exec("PRAGMA user_version")[0]?.values[0]?.[0] === 0) {
+      const result = db.exec("PRAGMA quick_check(1)")[0]?.values[0]?.[0]
+      if (result !== "ok") throw new CorruptAdoptionSnapshotError(`SQLite quick_check: ${result}`)
+      db.run("PRAGMA user_version = 1")
     }
 
     db.run(`
@@ -261,6 +577,8 @@ export async function initializeAdoptionIndex(): Promise<void> {
         harness_node_status TEXT,
         harness_adapter_name TEXT,
         harness_adapter_version TEXT,
+        harness_deploy_unit_id TEXT,
+        harness_deploy_unit_ids TEXT,
         observability_schema_version INTEGER,
         trace_kind TEXT,
         execution_mode TEXT,
@@ -283,7 +601,9 @@ export async function initializeAdoptionIndex(): Promise<void> {
         workflow_run_id TEXT,
         workflow_agent_index INTEGER,
         workflow_phase TEXT,
-        workflow_agent_label TEXT
+        workflow_agent_label TEXT,
+        new_ratio REAL,
+        change_kind TEXT
       )
     `)
 
@@ -318,6 +638,8 @@ export async function initializeAdoptionIndex(): Promise<void> {
       "harness_node_status TEXT",
       "harness_adapter_name TEXT",
       "harness_adapter_version TEXT",
+      "harness_deploy_unit_id TEXT",
+      "harness_deploy_unit_ids TEXT",
       "observability_schema_version INTEGER",
       "trace_kind TEXT",
       "execution_mode TEXT",
@@ -340,12 +662,16 @@ export async function initializeAdoptionIndex(): Promise<void> {
       "workflow_run_id TEXT",
       "workflow_agent_index INTEGER",
       "workflow_phase TEXT",
-      "workflow_agent_label TEXT"
+      "workflow_agent_label TEXT",
+      "new_ratio REAL",
+      "change_kind TEXT"
     ]) {
       try {
         db.run(`ALTER TABLE gen_events ADD COLUMN ${col}`)
-      } catch {
-        // column already exists — safe to ignore
+      } catch (error) {
+        if (!(error instanceof Error && error.message.startsWith("duplicate column name:"))) {
+          throw error
+        }
       }
     }
 
@@ -367,7 +693,6 @@ export async function initializeAdoptionIndex(): Promise<void> {
             OR root_thread_id IS NULL)`,
       [TRACE_OBSERVABILITY_SCHEMA_VERSION]
     )
-    if (db.getRowsModified() > 0) scheduleSave()
 
     db.run(
       `CREATE INDEX IF NOT EXISTS idx_gen_file_pending
@@ -425,39 +750,136 @@ export async function initializeAdoptionIndex(): Promise<void> {
          ON commit_jobs(status, next_attempt_at, created_at)`
     )
 
-    scheduleSave()
-    console.log("[AdoptionIndex] initialized at", dbPath)
-  } catch (e) {
-    console.warn("[AdoptionIndex] init failed (tracker will degrade gracefully):", e)
-    db = null
+    // Sticky per-thread active skills for code-generation attribution. Lives
+    // here rather than in memory alone because a thread routinely spans an app
+    // restart (work stops for the night, resumes the next morning): with an
+    // in-memory-only set, every generation between the restart and the next
+    // SKILL.md read lost its skill attribution and was misfiled as vibecoding.
+    // See proposal-window.ts for the supersede/merge policy this table stores.
+    db.run(`
+      CREATE TABLE IF NOT EXISTS thread_active_skills (
+        thread_id TEXT PRIMARY KEY,
+        skills_json TEXT NOT NULL,
+        skill_source_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `)
+    db.run(
+      `CREATE INDEX IF NOT EXISTS idx_thread_active_skills_updated_at
+         ON thread_active_skills(updated_at)`
+    )
+
+    return db
+  } catch (error) {
+    db.close()
+    throw error
   }
 }
 
-export function flushAdoptionIndex(): boolean {
+export async function initializeAdoptionIndex(): Promise<boolean> {
+  if (db) return true
+  const paths = getAdoptionSnapshotPaths()
+  const dbPath = paths.primary
+  try {
+    const SQL = await initSqlJs()
+    if (db) return true
+    mkdirSync(dirname(dbPath), { recursive: true })
+    cleanupAdoptionSnapshotTemps(paths)
+
+    let backupPath: string | undefined
+    if (statSync(dbPath, { throwIfNoEntry: false })) {
+      const snapshot = readFileSync(dbPath)
+      try {
+        db = openAdoptionDatabase(SQL, snapshot)
+        primarySnapshotIdentity = snapshotIdentity(dbPath)
+      } catch (error) {
+        if (!isAdoptionSnapshotCorrupt(error)) throw error
+        backupPath = `${dbPath}.corrupt.${Date.now()}-${randomUUID()}`
+        renameSync(dbPath, backupPath)
+        console.warn(`[AdoptionIndex] archived corrupt index at ${backupPath}`, error)
+      }
+    }
+
+    db ??= openAdoptionDatabase(SQL)
+    if (backupPath) {
+      persistAdoptionSnapshot(db.export(), true)
+      console.log("[AdoptionIndex] rebuilt index at", dbPath)
+    } else {
+      scheduleSave()
+    }
+    console.log("[AdoptionIndex] initialized at", dbPath)
+    return true
+  } catch (e) {
+    console.warn("[AdoptionIndex] init failed (tracker will degrade gracefully):", e)
+    if (saveTimer) {
+      clearTimeout(saveTimer)
+      saveTimer = null
+    }
+    try {
+      db?.close()
+    } catch {
+      // Best effort after a partially initialized sql.js database.
+    }
+    db = null
+    dirty = false
+    primarySnapshotIdentity = null
+    primaryNeedsFsync = false
+    durabilityRepairPending = false
+    saveRetryAttempt = 0
+    lastSaveFailureLogAt = 0
+    cleanupAdoptionSnapshotTemps(paths)
+    return false
+  }
+}
+
+function flushAdoptionIndexInternal(retryOnFailure: boolean): boolean {
   if (saveTimer) {
     clearTimeout(saveTimer)
     saveTimer = null
   }
-  if (db && dirty) {
+  if (db) {
     try {
-      const data = db.export()
-      writeFileSync(getAdoptionIndexPath(), Buffer.from(data))
-      dirty = false
+      if (dirty) persistDirtyAdoptionIndex(true)
+      ensureDurablePrimarySnapshot()
+      durabilityRepairPending = false
+      saveRetryAttempt = 0
+      lastSaveFailureLogAt = 0
       return true
     } catch (e) {
-      console.warn("[AdoptionIndex] flush failed:", e)
+      warnSaveFailure("[AdoptionIndex] flush failed:", e)
+      durabilityRepairPending = true
+      if (retryOnFailure && !saveTimer) {
+        saveRetryAttempt = Math.min(saveRetryAttempt + 1, 16)
+        armSaveTimer(saveRetryDelay(saveRetryAttempt))
+      }
       return false
     }
   }
   return db !== null
 }
 
-export function closeAdoptionIndex(): void {
-  flushAdoptionIndex()
+export function flushAdoptionIndex(): boolean {
+  return flushAdoptionIndexInternal(true)
+}
+
+export function closeAdoptionIndex(): boolean {
+  const hadDatabase = db !== null
+  const flushed = flushAdoptionIndexInternal(false)
+  if (hadDatabase && !flushed) {
+    console.warn("[AdoptionIndex] closing without a verified durable primary snapshot")
+  }
   if (db) {
     db.close()
     db = null
   }
+  dirty = false
+  primarySnapshotIdentity = null
+  primaryNeedsFsync = false
+  durabilityRepairPending = false
+  saveRetryAttempt = 0
+  lastSaveFailureLogAt = 0
+  cleanupAdoptionSnapshotTemps()
+  return !hadDatabase || flushed
 }
 
 // ─────────────────────────────────────────────────────────
@@ -480,12 +902,14 @@ export function insertGenEvent(row: GenIndexRow): boolean {
         generated_lines_blob, created_at, measured,
         used_skills, skill_source, thread_id, trace_id, model_id, model_name,
         harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version,
+        harness_deploy_unit_id, harness_deploy_unit_ids,
         observability_schema_version, trace_kind, execution_mode, root_trace_id, root_thread_id,
         parent_trace_id, parent_thread_id, parent_span_id, link_type, subagent_kind, subagent_run_id,
         subagent_thread_id, handoff_action, handoff_source_agent, handoff_target_agent,
         coordinator_worker_id, coordinator_worker_turn, coordinator_worker_role, coordinator_worker_workload,
-        workflow_run_id, workflow_agent_index, workflow_phase, workflow_agent_label)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        workflow_run_id, workflow_agent_index, workflow_phase, workflow_agent_label,
+        new_ratio, change_kind)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.event_id,
         row.file_path,
@@ -510,6 +934,8 @@ export function insertGenEvent(row: GenIndexRow): boolean {
         row.harness_node_status,
         row.harness_adapter_name,
         row.harness_adapter_version,
+        row.harness_deploy_unit_id ?? null,
+        row.harness_deploy_unit_ids ?? null,
         row.observability_schema_version,
         row.trace_kind,
         row.execution_mode,
@@ -532,7 +958,9 @@ export function insertGenEvent(row: GenIndexRow): boolean {
         row.workflow_run_id,
         row.workflow_agent_index,
         row.workflow_phase,
-        row.workflow_agent_label
+        row.workflow_agent_label,
+        row.new_ratio ?? null,
+        row.change_kind ?? null
       ]
     )
     scheduleSave()
@@ -568,11 +996,13 @@ export function findPendingGensForFile(
             line_hashes, old_line_hashes, generated_lines_blob, created_at, measured,
             used_skills, skill_source, thread_id, trace_id, model_id, model_name,
             harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version,
+            harness_deploy_unit_id, harness_deploy_unit_ids,
             observability_schema_version, trace_kind, execution_mode, root_trace_id, root_thread_id,
             parent_trace_id, parent_thread_id, parent_span_id, link_type, subagent_kind, subagent_run_id,
             subagent_thread_id, handoff_action, handoff_source_agent, handoff_target_agent,
             coordinator_worker_id, coordinator_worker_turn, coordinator_worker_role, coordinator_worker_workload,
             workflow_run_id, workflow_agent_index, workflow_phase, workflow_agent_label,
+            new_ratio, change_kind,
             tool
        FROM gen_events
       WHERE file_path = ? AND measured = 0 AND created_at >= ?${hasMax ? " AND created_at <= ?" : ""}
@@ -604,11 +1034,13 @@ export function getGenRowByEventId(eventId: string): GenIndexRow | null {
             line_hashes, old_line_hashes, generated_lines_blob, created_at, measured,
             used_skills, skill_source, thread_id, trace_id, model_id, model_name,
             harness_project_id, harness_feature_slug, harness_node_name, harness_node_status, harness_adapter_name, harness_adapter_version,
+            harness_deploy_unit_id, harness_deploy_unit_ids,
             observability_schema_version, trace_kind, execution_mode, root_trace_id, root_thread_id,
             parent_trace_id, parent_thread_id, parent_span_id, link_type, subagent_kind, subagent_run_id,
             subagent_thread_id, handoff_action, handoff_source_agent, handoff_target_agent,
             coordinator_worker_id, coordinator_worker_turn, coordinator_worker_role, coordinator_worker_workload,
             workflow_run_id, workflow_agent_index, workflow_phase, workflow_agent_label,
+            new_ratio, change_kind,
             tool
        FROM gen_events
       WHERE event_id = ?`
@@ -619,6 +1051,78 @@ export function getGenRowByEventId(eventId: string): GenIndexRow | null {
     return stmt.getAsObject() as unknown as GenIndexRow
   } finally {
     stmt.free()
+  }
+}
+
+/** A thread's persisted sticky active-skill set. */
+export interface ThreadActiveSkillsRow {
+  skills: string[]
+  skillSource: string[]
+}
+
+function parseStringArray(value: unknown): string[] {
+  if (typeof value !== "string" || !value) return []
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Persist a thread's active-skill set, replacing any prior row. Callers own the
+ * supersede-vs-merge decision (see proposal-window.ts); this only stores it.
+ */
+export function upsertThreadActiveSkills(
+  threadId: string,
+  skills: string[],
+  skillSource: string[]
+): void {
+  if (!db || !threadId) return
+  try {
+    db.run(
+      `INSERT OR REPLACE INTO thread_active_skills
+         (thread_id, skills_json, skill_source_json, updated_at)
+       VALUES (?, ?, ?, ?)`,
+      [threadId, JSON.stringify(skills), JSON.stringify(skillSource), Date.now()]
+    )
+    scheduleSave()
+  } catch (e) {
+    console.warn("[AdoptionIndex] upsertThreadActiveSkills failed:", e)
+  }
+}
+
+/** Read back a thread's persisted active-skill set, or null when it has none. */
+export function getThreadActiveSkillsRow(threadId: string): ThreadActiveSkillsRow | null {
+  if (!db || !threadId) return null
+  const stmt = db.prepare(
+    `SELECT skills_json, skill_source_json FROM thread_active_skills WHERE thread_id = ?`
+  )
+  stmt.bind([threadId])
+  try {
+    if (!stmt.step()) return null
+    const row = stmt.getAsObject() as { skills_json?: unknown; skill_source_json?: unknown }
+    const skills = parseStringArray(row.skills_json)
+    if (skills.length === 0) return null
+    return { skills, skillSource: parseStringArray(row.skill_source_json) }
+  } catch (e) {
+    console.warn("[AdoptionIndex] getThreadActiveSkillsRow failed:", e)
+    return null
+  } finally {
+    stmt.free()
+  }
+}
+
+/** Retention for the sticky-skill table: drop rows untouched since `cutoff`. */
+export function deleteThreadActiveSkillsOlderThan(cutoff: number): void {
+  if (!db) return
+  try {
+    db.run(`DELETE FROM thread_active_skills WHERE updated_at < ?`, [cutoff])
+    scheduleSave()
+  } catch (e) {
+    console.warn("[AdoptionIndex] deleteThreadActiveSkillsOlderThan failed:", e)
   }
 }
 
@@ -794,7 +1298,8 @@ export function enqueueEventOutbox(event: EventOutboxInput, flushNow = true): bo
  */
 export function commitAdoptionMeasurements(
   writes: AdoptionMeasurementWrite[],
-  commitJobId?: string
+  commitJobId?: string,
+  fileEvents: AdoptionFileEventWrite[] = []
 ): AdoptionMeasurementCommitResult {
   if (!db) return { success: false, measuredCount: 0, enqueuedCount: 0 }
   let measuredCount = 0
@@ -802,6 +1307,7 @@ export function commitAdoptionMeasurements(
   let detailsLimits: AdoptLineDetailsLimits | undefined
   try {
     db.run("BEGIN TRANSACTION")
+    const closedGenEventIds = new Set<string>()
     for (const write of writes) {
       db.run(
         `UPDATE gen_events
@@ -811,12 +1317,20 @@ export function commitAdoptionMeasurements(
         [write.genEventId]
       )
       if (db.getRowsModified() <= 0) continue
+      closedGenEventIds.add(write.genEventId)
       measuredCount += 1
       if (write.details) insertAdoptLineDetailsRow(write.genEventId, write.details)
       if (write.detailsLimits) detailsLimits = write.detailsLimits
       if (write.outboxEvent) {
         if (insertOutboxEventUnsafe(write.outboxEvent)) enqueuedCount += 1
       }
+    }
+    for (const fileEvent of fileEvents) {
+      const stale = fileEvent.genEventIds.find((id) => !closedGenEventIds.has(id))
+      if (stale !== undefined) {
+        throw new Error(`file rollup is stale: generation ${stale} was measured concurrently`)
+      }
+      if (insertOutboxEventUnsafe(fileEvent.outboxEvent)) enqueuedCount += 1
     }
     if (commitJobId) {
       const now = Date.now()
@@ -1014,7 +1528,7 @@ export function markOutboxSending(eventId: string): boolean {
     const now = Date.now()
     db.run(
       `UPDATE event_outbox
-          SET status = 'sending', attempts = attempts + 1, updated_at = ?
+          SET status = 'sending', updated_at = ?
         WHERE event_id = ? AND status IN ('pending', 'retry')`,
       [now, eventId]
     )
@@ -1046,19 +1560,23 @@ export function getAdoptLineDetails(
   }
 }
 
-export function markOutboxDelivered(eventId: string): void {
-  if (!db) return
+export function markOutboxDelivered(eventId: string): boolean {
+  if (!db) return false
   try {
     const now = Date.now()
     db.run(
       `UPDATE event_outbox
-          SET status = 'delivered', delivered_at = ?, updated_at = ?, last_error = NULL
-        WHERE event_id = ?`,
+          SET status = 'delivered', attempts = attempts + 1,
+              delivered_at = ?, updated_at = ?, last_error = NULL
+        WHERE event_id = ? AND status = 'sending'`,
       [now, now, eventId]
     )
-    scheduleSave()
+    const changed = db.getRowsModified() > 0
+    if (changed) scheduleSave()
+    return changed
   } catch (e) {
     console.warn("[AdoptionIndex] markOutboxDelivered failed:", e)
+    return false
   }
 }
 
@@ -1066,20 +1584,59 @@ export function markOutboxFailed(
   eventId: string,
   error: string,
   nextAttemptAt: number,
-  permanent: boolean
-): void {
-  if (!db) return
+  permanent: boolean,
+  options: MarkOutboxFailureOptions = {}
+): boolean {
+  if (!db) return false
+  try {
+    const now = Date.now()
+    const consumeAttempt = options.consumeAttempt === true ? 1 : 0
+    const sendingGuard = options.requireSending === true ? " AND status = 'sending'" : ""
+    db.run(
+      `UPDATE event_outbox
+          SET status = ?, attempts = attempts + ?, next_attempt_at = ?,
+              last_error = ?, updated_at = ?
+        WHERE event_id = ?${sendingGuard}`,
+      [
+        permanent ? "dead_letter" : "retry",
+        consumeAttempt,
+        nextAttemptAt,
+        error.slice(0, 2000),
+        now,
+        eventId
+      ]
+    )
+    const changed = db.getRowsModified() > 0
+    if (changed) scheduleSave()
+    return changed
+  } catch (e) {
+    console.warn("[AdoptionIndex] markOutboxFailed failed:", e)
+    return false
+  }
+}
+
+/**
+ * Return a claimed row to retry without consuming an upload attempt. This is
+ * reserved for reporter-side admission/backoff decisions where fetch was never
+ * called. Restricting the update to `sending` prevents a stale completion from
+ * rolling back a newer delivery state.
+ */
+export function markOutboxDeferred(eventId: string, error: string, nextAttemptAt: number): boolean {
+  if (!db) return false
   try {
     const now = Date.now()
     db.run(
       `UPDATE event_outbox
-          SET status = ?, next_attempt_at = ?, last_error = ?, updated_at = ?
-        WHERE event_id = ?`,
-      [permanent ? "dead_letter" : "retry", nextAttemptAt, error.slice(0, 2000), now, eventId]
+          SET status = 'retry', next_attempt_at = ?, last_error = ?, updated_at = ?
+        WHERE event_id = ? AND status = 'sending'`,
+      [nextAttemptAt, error.slice(0, 2000), now, eventId]
     )
-    scheduleSave()
+    const changed = db.getRowsModified() > 0
+    if (changed) scheduleSave()
+    return changed
   } catch (e) {
-    console.warn("[AdoptionIndex] markOutboxFailed failed:", e)
+    console.warn("[AdoptionIndex] markOutboxDeferred failed:", e)
+    return false
   }
 }
 

@@ -1,10 +1,12 @@
+import { appendUpdateLog, updaterLog } from "./logger"
 import { app } from "electron"
 import { spawn } from "child_process"
-import { chmodSync, writeFileSync } from "fs"
+import { chmodSync, closeSync, openSync, writeFileSync } from "fs"
 import { basename, join, dirname } from "path"
 import { getUpdatesDir } from "./downloader"
 import { clearPendingUpdateChain, writePendingUpdateChain } from "./update-chain"
 import { canCompleteWithAsar } from "./update-marker"
+import { bashLoggingHeader, powerShellLoggingLauncher, withPowerShellLogging } from "./script-logging"
 
 const isWindows = process.platform === "win32"
 const isLinux = process.platform === "linux"
@@ -88,17 +90,30 @@ function makeUpdateMarkerJson(
  * Prefix with BOM so install paths containing non-ASCII characters are safe.
  */
 export function writePowerShellScript(ps1Path: string, content: string): void {
-  const normalized = content.startsWith("\n") ? content.slice(1) : content
+  const normalized = withPowerShellLogging(content)
   writeFileSync(ps1Path, `\uFEFF${normalized}`, "utf-8")
 }
 
-function writePs1Launcher(ps1Path: string): string {
+export function writePs1Launcher(ps1Path: string): string {
   const ps1FileName = basename(ps1Path)
   const logFileName = `${basename(ps1Path, ".ps1")}.launcher.log`
   const launcherPath = ps1Path.replace(/\.ps1$/i, ".cmd")
-  const launcherContent = `@echo off\r
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0${ps1FileName}" > "%~dp0${logFileName}" 2>&1\r
-`
+  const psLauncherPath = ps1Path.replace(/\.ps1$/i, ".launcher.ps1")
+  writeFileSync(
+    psLauncherPath,
+    `\uFEFF${powerShellLoggingLauncher(ps1FileName, logFileName)}`,
+    "utf-8"
+  )
+  const launcherContent = [
+    "@echo off",
+    "setlocal DisableDelayedExpansion",
+    `>> "%~dp0${logFileName}" echo [%time%] launch-dispatch`,
+    `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0${basename(psLauncherPath)}"`,
+    'set "UPDATER_EXIT_CODE=%errorlevel%"',
+    `>> "%~dp0${logFileName}" echo [%time%] powershell-exit code=%UPDATER_EXIT_CODE%`,
+    "exit /b %UPDATER_EXIT_CODE%",
+    ""
+  ].join("\r\n")
   writeFileSync(launcherPath, launcherContent, "ascii")
   return launcherPath
 }
@@ -110,14 +125,21 @@ powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0${
  */
 export function launchDetachedPowerShellScript(ps1Path: string): void {
   const launcherPath = writePs1Launcher(ps1Path)
-  const child = spawn("cmd.exe", ["/c", launcherPath], {
+  const logPath = ps1Path.replace(/\.ps1$/i, ".launcher.log")
+  appendUpdateLog(logPath, "log", ["launch-requested", { script: ps1Path }])
+  updaterLog.log("[Updater] Launching PowerShell script:", { ps1Path, launcherPath, logPath })
+  const child = spawn("cmd.exe", ["/d", "/c", launcherPath], {
     cwd: dirname(launcherPath),
     detached: true,
     stdio: "ignore",
     windowsHide: true
   })
   child.on("error", (err) => {
-    console.error("[Updater] Failed to spawn PowerShell launcher:", err)
+    appendUpdateLog(logPath, "error", ["launch-failed", err])
+    updaterLog.error("[Updater] Failed to spawn PowerShell launcher:", err)
+  })
+  child.on("spawn", () => {
+    appendUpdateLog(logPath, "log", ["launcher-spawned", { pid: child.pid }])
   })
   child.unref()
 }
@@ -131,7 +153,7 @@ export function launchDetachedPowerShellScript(ps1Path: string): void {
  *   5. Cleans up temp file
  *   6. Restarts the application
  */
-function generateUpdatePs1(
+export function generateUpdatePs1(
   newAsarPath: string,
   fromVersion: string,
   toVersion: string
@@ -144,6 +166,7 @@ function generateUpdatePs1(
   const markerJson = makeUpdateMarkerJson(fromVersion, toVersion)
 
   return `
+Write-UpdateStage ("Install context: {0}" -f ${toPsString(markerJson)})
 $exeBaseName = ${toPsString(exeBaseName)}
 $appAsarPath = ${toPsString(appAsarPath)}
 $backupPath  = ${toPsString(backupPath)}
@@ -152,6 +175,7 @@ $markerPath  = ${toPsString(markerPath)}
 $exePath     = ${toPsString(exePath)}
 $exeDir      = Split-Path -Parent $exePath
 
+Write-UpdateStage ("Waiting for process to exit: {0}" -f $exeBaseName)
 # Wait for process to exit (up to 30s)
 $n = 0
 while ((Get-Process -Name $exeBaseName -ErrorAction SilentlyContinue) -and $n -lt 30) {
@@ -159,20 +183,24 @@ while ((Get-Process -Name $exeBaseName -ErrorAction SilentlyContinue) -and $n -l
   $n++
 }
 if (Get-Process -Name $exeBaseName -ErrorAction SilentlyContinue) {
+  Write-UpdateStage "Process still running after 30s; aborting"
   exit 1
 }
 
+Write-UpdateStage ("Backing up ASAR: {0} -> {1}" -f $appAsarPath, $backupPath)
 # Backup
 if (Test-Path $appAsarPath) {
   try {
     Copy-Item -Path $appAsarPath -Destination $backupPath -Force -ErrorAction Stop
   } catch {
+    Write-UpdateStage ("Operation failed: {0}; position={1}" -f $_.Exception.Message, $_.InvocationInfo.PositionMessage)
     exit 1
   }
 }
 
+Write-UpdateStage ("Replacing ASAR: {0} -> {1}" -f $newAsarPath, $appAsarPath)
 # Replace with retry
-if (-not (Test-Path $newAsarPath)) { exit 1 }
+if (-not (Test-Path $newAsarPath)) { Write-UpdateStage "New ASAR not found"; exit 1 }
 $retry = 0
 $ok = $false
 while ($retry -lt 5 -and -not $ok) {
@@ -180,15 +208,18 @@ while ($retry -lt 5 -and -not $ok) {
     Copy-Item -Path $newAsarPath -Destination $appAsarPath -Force -ErrorAction Stop
     $ok = $true
   } catch {
+    Write-UpdateStage ("Operation failed: {0}; position={1}" -f $_.Exception.Message, $_.InvocationInfo.PositionMessage)
     $retry++
     Start-Sleep -Seconds 2
   }
 }
 if (-not $ok) {
+  Write-UpdateStage "ASAR replacement exhausted retries; restoring backup"
   if (Test-Path $backupPath) { Copy-Item -Path $backupPath -Destination $appAsarPath -Force -ErrorAction SilentlyContinue }
   exit 1
 }
 
+Write-UpdateStage ("Writing install marker: {0}" -f ${toPsString(markerJson)})
 # Write marker
 Set-Content -Path $markerPath -Value ${toPsString(markerJson)} -Encoding UTF8 -ErrorAction Stop
 
@@ -196,7 +227,9 @@ Set-Content -Path $markerPath -Value ${toPsString(markerJson)} -Encoding UTF8 -E
 if (Test-Path $newAsarPath) { Remove-Item -Path $newAsarPath -Force -ErrorAction SilentlyContinue }
 
 # Restart
-Start-Process -FilePath $exePath -WorkingDirectory $exeDir -WindowStyle Normal
+Write-UpdateStage ("Restart requested: {0}" -f $exePath)
+$restarted = Start-Process -FilePath $exePath -WorkingDirectory $exeDir -WindowStyle Normal -PassThru -ErrorAction Stop
+Write-UpdateStage ("Restart spawned: pid={0}; startup self-check pending" -f $restarted.Id)
 `
 }
 
@@ -218,6 +251,7 @@ $markerPath     = ${toPsString(markerPath)}
 $exePath        = ${toPsString(exePath)}
 $exeDir         = Split-Path -Parent $exePath
 
+Write-UpdateStage ("Waiting for process to exit: {0}" -f $exeBaseName)
 # Wait for process to exit (up to 30s)
 $n = 0
 while ((Get-Process -Name $exeBaseName -ErrorAction SilentlyContinue) -and $n -lt 30) {
@@ -225,13 +259,16 @@ while ((Get-Process -Name $exeBaseName -ErrorAction SilentlyContinue) -and $n -l
   $n++
 }
 if (Get-Process -Name $exeBaseName -ErrorAction SilentlyContinue) {
+  Write-UpdateStage "Process still running after 30s; aborting"
   exit 1
 }
 
+Write-UpdateStage ("Restoring ASAR: {0} -> {1}" -f $backupAsarPath, $appAsarPath)
 # Rollback
 try {
   Copy-Item -Path $backupAsarPath -Destination $appAsarPath -Force -ErrorAction Stop
 } catch {
+  Write-UpdateStage ("Operation failed: {0}; position={1}" -f $_.Exception.Message, $_.InvocationInfo.PositionMessage)
   exit 1
 }
 
@@ -239,7 +276,9 @@ try {
 if (Test-Path $markerPath) { Remove-Item -Path $markerPath -Force -ErrorAction SilentlyContinue }
 
 # Restart
-Start-Process -FilePath $exePath -WorkingDirectory $exeDir -WindowStyle Normal
+Write-UpdateStage ("Restart requested: {0}" -f $exePath)
+$restarted = Start-Process -FilePath $exePath -WorkingDirectory $exeDir -WindowStyle Normal -PassThru -ErrorAction Stop
+Write-UpdateStage ("Restart spawned: pid={0}; startup self-check pending" -f $restarted.Id)
 `
 }
 
@@ -271,14 +310,32 @@ function writeBashScript(shPath: string, content: string): void {
  */
 function launchDetachedBashScript(shPath: string): void {
   const logPath = shPath.replace(/\.sh$/i, ".log")
-  const child = spawn("bash", [shPath], {
-    cwd: dirname(shPath),
-    detached: true,
-    stdio: ["ignore", "ignore", "ignore"],
-    env: { ...process.env, UPDATE_LOG: logPath }
-  })
+  appendUpdateLog(logPath, "log", ["launch-requested", { script: shPath }])
+  updaterLog.log("[Updater] Launching bash script:", { shPath, logPath })
+  let logFd: number | undefined
+  try {
+    // Capture errors before the script's own redirection (including syntax errors).
+    logFd = openSync(logPath, "a", 0o600)
+  } catch (err) {
+    updaterLog.warn("[Updater] Could not open bash output log:", err)
+  }
+  let child: ReturnType<typeof spawn>
+  try {
+    child = spawn("bash", [shPath], {
+      cwd: dirname(shPath),
+      detached: true,
+      stdio: ["ignore", logFd ?? "ignore", logFd ?? "ignore"],
+      env: { ...process.env, UPDATE_LOG: logPath }
+    })
+  } finally {
+    if (logFd !== undefined) closeSync(logFd)
+  }
   child.on("error", (err) => {
-    console.error("[Updater] Failed to spawn bash script:", err)
+    appendUpdateLog(logPath, "error", ["launch-failed", err])
+    updaterLog.error("[Updater] Failed to spawn bash script:", err)
+  })
+  child.on("spawn", () => {
+    appendUpdateLog(logPath, "log", ["script-spawned", { pid: child.pid }])
   })
   child.unref()
 }
@@ -286,7 +343,7 @@ function launchDetachedBashScript(shPath: string): void {
 /**
  * Generate ASAR update bash script for Linux/UOS.
  */
-function generateUpdateSh(
+export function generateUpdateSh(
   newAsarPath: string,
   fromVersion: string,
   toVersion: string
@@ -309,8 +366,10 @@ EXE=${toBashString(exePath)}
 PROC_NAME=${toBashString(processName)}
 LOG_FILE="\${UPDATE_LOG:-/tmp/cmbdevclaw-update.log}"
 
-exec > "$LOG_FILE" 2>&1
+${bashLoggingHeader()}
+update_stage ${toBashString(markerJson)}
 
+update_stage "Waiting for process to exit: $PROC_NAME"
 # Wait for process to exit (up to 30s)
 n=0
 while { pgrep -x "$PROC_NAME" > /dev/null 2>&1 || pgrep -x "CMBDevClaw.bin" > /dev/null 2>&1; } && [ $n -lt 30 ]; do
@@ -322,11 +381,13 @@ if pgrep -x "$PROC_NAME" > /dev/null 2>&1 || pgrep -x "CMBDevClaw.bin" > /dev/nu
   exit 1
 fi
 
+update_stage "Backing up ASAR: $APP_ASAR -> $BACKUP"
 # Backup
 if [ -f "$APP_ASAR" ]; then
   cp -f "$APP_ASAR" "$BACKUP" || exit 1
 fi
 
+update_stage "Replacing ASAR: $NEW_ASAR -> $APP_ASAR"
 # Replace with retry
 if [ ! -f "$NEW_ASAR" ]; then echo "New asar not found"; exit 1; fi
 ok=0
@@ -343,6 +404,7 @@ if [ $ok -eq 0 ]; then
   exit 1
 fi
 
+update_stage "Writing install marker: $MARKER"
 # Write marker
 printf '%s\n' ${toBashString(markerJson)} > "$MARKER"
 
@@ -350,7 +412,9 @@ printf '%s\n' ${toBashString(markerJson)} > "$MARKER"
 rm -f "$NEW_ASAR"
 
 # Restart
+update_stage "Restart requested: $EXE"
 nohup "$EXE" --no-sandbox > /dev/null 2>&1 &
+update_stage "Restart spawned: pid=$!; startup self-check pending"
 `
 }
 
@@ -373,8 +437,9 @@ EXE=${toBashString(exePath)}
 PROC_NAME=${toBashString(processName)}
 LOG_FILE="\${UPDATE_LOG:-/tmp/cmbdevclaw-rollback.log}"
 
-exec > "$LOG_FILE" 2>&1
+${bashLoggingHeader()}
 
+update_stage "Waiting for process to exit: $PROC_NAME"
 # Wait for process to exit (up to 30s)
 n=0
 while { pgrep -x "$PROC_NAME" > /dev/null 2>&1 || pgrep -x "CMBDevClaw.bin" > /dev/null 2>&1; } && [ $n -lt 30 ]; do
@@ -386,6 +451,7 @@ if pgrep -x "$PROC_NAME" > /dev/null 2>&1 || pgrep -x "CMBDevClaw.bin" > /dev/nu
   exit 1
 fi
 
+update_stage "Restoring ASAR: $BACKUP -> $APP_ASAR"
 # Rollback
 cp -f "$BACKUP" "$APP_ASAR" || exit 1
 
@@ -393,7 +459,9 @@ cp -f "$BACKUP" "$APP_ASAR" || exit 1
 rm -f "$MARKER"
 
 # Restart
+update_stage "Restart requested: $EXE"
 nohup "$EXE" --no-sandbox > /dev/null 2>&1 &
+update_stage "Restart spawned: pid=$!; startup self-check pending"
 `
 }
 
@@ -443,7 +511,8 @@ PRODUCT_BIN="$PRODUCT_WRAPPER.bin"
 STAGE_MARKER="$STAGE_DIR/resources/update-marker.json"
 LOG_FILE="\${UPDATE_LOG:-/tmp/cmbdevclaw-full-update.log}"
 
-exec > "$LOG_FILE" 2>&1
+${bashLoggingHeader()}
+update_stage ${toBashString(markerJson)}
 
 validate_archive_paths() {
   awk '
@@ -458,6 +527,7 @@ validate_archive_paths() {
   '
 }
 
+update_stage "Waiting for process to exit: $PROC_NAME"
 # Wait for process to exit (up to 30s)
 n=0
 while { pgrep -x "$PROC_NAME" > /dev/null 2>&1 || pgrep -x "CMBDevClaw.bin" > /dev/null 2>&1; } && [ $n -lt 30 ]; do
@@ -469,6 +539,7 @@ if pgrep -x "$PROC_NAME" > /dev/null 2>&1 || pgrep -x "CMBDevClaw.bin" > /dev/nu
   exit 1
 fi
 
+update_stage "Preparing full update: zip=$ZIP appDir=$APP_DIR"
 # Prepare a complete staged app before touching the live installation.
 rm -rf "$TEMP_DIR"
 rm -rf "$STAGE_DIR"
@@ -514,6 +585,7 @@ else
   fi
 fi
 
+update_stage "Staging extracted files: $SOURCE_DIR -> $STAGE_DIR"
 cp -a "$SOURCE_DIR"/. "$STAGE_DIR"/ || { echo "Stage copy failed"; exit 1; }
 
 # Repair Linux launcher layout and executable bits. Zip archives produced on
@@ -557,6 +629,7 @@ UPDATED_EXE="$APP_DIR/$REAL_BIN"
 mkdir -p "$(dirname "$STAGE_MARKER")"
 printf '%s\n' ${toBashString(markerJson)} > "$STAGE_MARKER"
 
+update_stage "Swapping installation; backup=$BACKUP_DIR"
 # Swap directories so stale files cannot remain in the new app directory.
 rm -rf "$BACKUP_DIR"
 mv "$APP_DIR" "$BACKUP_DIR" || exit 1
@@ -572,7 +645,9 @@ rm -rf "$TEMP_DIR"
 rm -f "$ZIP"
 
 # Restart
+update_stage "Restart requested: $UPDATED_EXE"
 nohup "$UPDATED_EXE" --no-sandbox > /dev/null 2>&1 &
+update_stage "Restart spawned: pid=$!; startup self-check pending"
 `
 }
 
@@ -586,7 +661,7 @@ nohup "$UPDATED_EXE" --no-sandbox > /dev/null 2>&1 &
  *   6. Cleans up temp dir and zip file
  *   7. Restarts the application
  */
-function generateFullZipUpdatePs1(
+export function generateFullZipUpdatePs1(
   zipPath: string,
   appDir: string,
   exePath: string,
@@ -609,6 +684,7 @@ function generateFullZipUpdatePs1(
   )
 
   return `
+Write-UpdateStage ("Install context: {0}" -f ${toPsString(markerJson)})
 $exeBaseName = ${toPsString(exeBaseName)}
 $zipPath     = ${toPsString(zipPath)}
 $appDir      = ${toPsString(appDir)}
@@ -621,6 +697,7 @@ $stageDir    = Join-Path (Split-Path -Parent $appDir) ((Split-Path -Leaf $appDir
 $stageMarkerPath = Join-Path $stageDir 'resources\\update-marker.json'
 $exeFileName = Split-Path -Leaf $exePath
 
+Write-UpdateStage ("Waiting for process to exit: {0}" -f $exeBaseName)
 # Wait for process to exit (up to 30s)
 $n = 0
 while ((Get-Process -Name $exeBaseName -ErrorAction SilentlyContinue) -and $n -lt 30) {
@@ -628,22 +705,27 @@ while ((Get-Process -Name $exeBaseName -ErrorAction SilentlyContinue) -and $n -l
   $n++
 }
 if (Get-Process -Name $exeBaseName -ErrorAction SilentlyContinue) {
+  Write-UpdateStage "Process still running after 30s; aborting"
   exit 1
 }
 
+Write-UpdateStage ("Preparing full update: zip={0}; appDir={1}; marker={2}" -f $zipPath, $appDir, ${toPsString(markerJson)})
 # Prepare a complete staged app before touching the live installation.
 if (Test-Path -LiteralPath $tempDir) { Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction Stop }
 if (Test-Path -LiteralPath $stageDir) { Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction Stop }
 New-Item -ItemType Directory -Path $stageDir -Force -ErrorAction Stop | Out-Null
 
+Write-UpdateStage ("Extracting ZIP: {0}" -f $zipPath)
 # Extract zip
 try {
   Expand-Archive -LiteralPath $zipPath -DestinationPath $tempDir -Force -ErrorAction Stop
 } catch {
+  Write-UpdateStage ("Operation failed: {0}; position={1}" -f $_.Exception.Message, $_.InvocationInfo.PositionMessage)
   Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
   exit 1
 }
 
+Write-UpdateStage ("Staging extracted files: {0}; marker={1}" -f $stageDir, ${toPsString(markerJson)})
 # Copy extracted files into stage and write marker before the directory swap.
 try {
   Get-ChildItem -LiteralPath $tempDir -Force | Copy-Item -Destination $stageDir -Recurse -Force -ErrorAction Stop
@@ -655,11 +737,13 @@ try {
   New-Item -ItemType Directory -Path $stageMarkerDir -Force -ErrorAction Stop | Out-Null
   Set-Content -LiteralPath $stageMarkerPath -Value ${toPsString(markerJson)} -Encoding UTF8 -ErrorAction Stop
 } catch {
+  Write-UpdateStage ("Operation failed: {0}; position={1}" -f $_.Exception.Message, $_.InvocationInfo.PositionMessage)
   Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
   exit 1
 }
 
+Write-UpdateStage ("Swapping installation; backup={0}" -f $backupDir)
 # Swap directories. The previous installation is moved aside as .bak, so stale
 # files cannot remain in the new app directory and rollback material stays intact.
 try {
@@ -668,11 +752,13 @@ try {
   try {
     Move-Item -LiteralPath $stageDir -Destination $appDir -Force -ErrorAction Stop
   } catch {
+    Write-UpdateStage ("Operation failed: {0}; position={1}" -f $_.Exception.Message, $_.InvocationInfo.PositionMessage)
     if (Test-Path -LiteralPath $appDir) { Remove-Item -LiteralPath $appDir -Recurse -Force -ErrorAction SilentlyContinue }
     Move-Item -LiteralPath $backupDir -Destination $appDir -Force -ErrorAction SilentlyContinue
     throw
   }
 } catch {
+  Write-UpdateStage ("Operation failed: {0}; position={1}" -f $_.Exception.Message, $_.InvocationInfo.PositionMessage)
   Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
   exit 1
@@ -683,7 +769,9 @@ Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
 
 # Restart
-Start-Process -FilePath $exePath -WorkingDirectory $exeDir -WindowStyle Normal
+Write-UpdateStage ("Restart requested: {0}" -f $exePath)
+$restarted = Start-Process -FilePath $exePath -WorkingDirectory $exeDir -WindowStyle Normal -PassThru -ErrorAction Stop
+Write-UpdateStage ("Restart spawned: pid={0}; startup self-check pending" -f $restarted.Id)
 `
 }
 
@@ -693,28 +781,28 @@ Start-Process -FilePath $exePath -WorkingDirectory $exeDir -WindowStyle Normal
  */
 export function installAsarUpdate(newAsarPath: string, toVersion: string): void {
   const fromVersion = app.getVersion()
-  console.log(`[Updater] Installing ASAR update: ${fromVersion} → ${toVersion}`)
-  console.log("[Updater] New ASAR source:", newAsarPath)
-  console.log("[Updater] Target ASAR:", getAppAsarPath())
-  console.log("[Updater] Backup path:", getBackupPath())
-  console.log("[Updater] EXE path:", getExePath())
-  console.log("[Updater] Platform:", process.platform)
+  updaterLog.log(`[Updater] Installing ASAR update: ${fromVersion} → ${toVersion}`)
+  updaterLog.log("[Updater] New ASAR source:", newAsarPath)
+  updaterLog.log("[Updater] Target ASAR:", getAppAsarPath())
+  updaterLog.log("[Updater] Backup path:", getBackupPath())
+  updaterLog.log("[Updater] EXE path:", getExePath())
+  updaterLog.log("[Updater] Platform:", process.platform)
 
   if (isWindows) {
     const ps1Content = generateUpdatePs1(newAsarPath, fromVersion, toVersion)
     const ps1Path = join(getUpdatesDir(), "update.ps1")
     writePowerShellScript(ps1Path, ps1Content)
-    console.log("[Updater] Generated update.ps1 at", ps1Path)
+    updaterLog.log("[Updater] Generated update.ps1 at", ps1Path)
     launchDetachedPowerShellScript(ps1Path)
   } else {
     const shContent = generateUpdateSh(newAsarPath, fromVersion, toVersion)
     const shPath = join(getUpdatesDir(), "update.sh")
     writeBashScript(shPath, shContent)
-    console.log("[Updater] Generated update.sh at", shPath)
+    updaterLog.log("[Updater] Generated update.sh at", shPath)
     launchDetachedBashScript(shPath)
   }
 
-  console.log("[Updater] Spawned update script, quitting app...")
+  updaterLog.log("[Updater] Spawned update script, quitting app...")
   app.quit()
 }
 
@@ -754,11 +842,11 @@ export function installFullUpdate(
     const exePath = getExePath()
     const appDir = dirname(exePath)
     const fromVersion = app.getVersion()
-    console.log(`[Updater] Installing full zip update: ${fromVersion} → ${toVersion}`)
-    console.log("[Updater] zip path:", filePath)
-    console.log("[Updater] app dir:", appDir)
-    console.log("[Updater] exe path:", exePath)
-    console.log("[Updater] Platform:", process.platform)
+    updaterLog.log(`[Updater] Installing full zip update: ${fromVersion} → ${toVersion}`)
+    updaterLog.log("[Updater] zip path:", filePath)
+    updaterLog.log("[Updater] app dir:", appDir)
+    updaterLog.log("[Updater] exe path:", exePath)
+    updaterLog.log("[Updater] Platform:", process.platform)
 
     if (isWindows) {
       const ps1Content = generateFullZipUpdatePs1(
@@ -773,7 +861,7 @@ export function installFullUpdate(
       )
       const ps1Path = join(getUpdatesDir(), "full-update.ps1")
       writePowerShellScript(ps1Path, ps1Content)
-      console.log("[Updater] Generated full-update.ps1 at", ps1Path)
+      updaterLog.log("[Updater] Generated full-update.ps1 at", ps1Path)
       launchDetachedPowerShellScript(ps1Path)
     } else if (isLinux) {
       const shContent = generateFullZipUpdateSh(
@@ -788,32 +876,32 @@ export function installFullUpdate(
       )
       const shPath = join(getUpdatesDir(), "full-update.sh")
       writeBashScript(shPath, shContent)
-      console.log("[Updater] Generated full-update.sh at", shPath)
+      updaterLog.log("[Updater] Generated full-update.sh at", shPath)
       launchDetachedBashScript(shPath)
     } else {
       throw new Error(`当前平台暂不支持完整 zip 更新: ${process.platform}`)
     }
 
-    console.log("[Updater] Spawned full-update script, quitting app...")
+    updaterLog.log("[Updater] Spawned full-update script, quitting app...")
   } else if (ext === "deb" && isLinux) {
     // .deb mode: install via dpkg (Linux/UOS)
-    console.log("[Updater] Installing .deb package:", filePath)
+    updaterLog.log("[Updater] Installing .deb package:", filePath)
     const child = spawn("bash", ["-c", `sudo dpkg -i '${escapeBashLiteral(filePath)}' && rm -f '${escapeBashLiteral(filePath)}'`], {
       detached: true,
       stdio: "ignore"
     })
     child.unref()
-    console.log("[Updater] Spawned dpkg installer, quitting app...")
+    updaterLog.log("[Updater] Spawned dpkg installer, quitting app...")
   } else if (ext === "exe" && isWindows) {
     // .exe mode: launch NSIS installer directly (requires company whitelist)
-    console.log("[Updater] Launching NSIS installer:", filePath)
+    updaterLog.log("[Updater] Launching NSIS installer:", filePath)
     const child = spawn(filePath, [], {
       detached: true,
       stdio: "ignore",
       windowsHide: false // Show the NSIS UI
     })
     child.unref()
-    console.log("[Updater] Spawned installer, quitting app...")
+    updaterLog.log("[Updater] Spawned installer, quitting app...")
   } else {
     throw new Error(`不支持的完整更新包格式: ${filePath}`)
   }

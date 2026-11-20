@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
+import { useAppStore } from "@/lib/store"
 import {
   ArrowLeft,
   ArrowRight,
@@ -17,6 +18,7 @@ import {
   RotateCcw,
   Settings2,
   ShieldAlert,
+  SquareArrowOutUpRight,
   Terminal,
   Trash2,
   Video,
@@ -27,6 +29,11 @@ import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { hasOpenModalDialog, MODAL_DIALOG_CHANGE_EVENT } from "@/lib/modal-dialog"
 import { BrowserScriptRecordingControls } from "./BrowserScriptRecordingControls"
 import { BrowserCdpConfigCard } from "./BrowserCdpConfigCard"
+import {
+  BrowserOptionsMenu,
+  MAX_BROWSER_ZOOM_FACTOR,
+  MIN_BROWSER_ZOOM_FACTOR
+} from "./BrowserOptionsMenu"
 import {
   BUILTIN_BROWSER_LOG_PREFIX,
   BROWSER_SESSION_ID,
@@ -50,6 +57,7 @@ const EMPTY_STATE: BrowserState = {
   isLoading: false,
   canGoBack: false,
   canGoForward: false,
+  zoomFactor: 1,
   visible: false,
   created: false,
   consoleEntries: []
@@ -63,6 +71,12 @@ const BROWSER_CONSOLE_TOGGLE_BUTTON_CLASSNAME =
   "h-8 min-w-8 shrink-0 rounded-md px-1 transition-colors hover:bg-muted"
 const BROWSER_PANEL_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[BrowserPanel]`
 const APP_DOWNLOAD_URL = import.meta.env.VITE_APP_DOWNLOAD_URL?.trim()
+const AUTO_COOKIE_IMPORT_RETRY_DELAYS_MS = [1500, 4000, 8000] as const
+const AUTO_COOKIE_IMPORT_RETRYABLE_ERROR_CODES = new Set([
+  "extension_not_connected",
+  "import_timeout",
+  "import_in_progress"
+])
 
 function isInitialBrowserPage(url: string): boolean {
   return !url || url === "about:blank"
@@ -70,6 +84,18 @@ function isInitialBrowserPage(url: string): boolean {
 
 function getBrowserAddressValue(url: string): string {
   return isInitialBrowserPage(url) ? "" : url
+}
+
+function normalizeExternalBrowserUrl(input: string): string {
+  const value = input.trim()
+  if (!value) return ""
+  if (/^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?(?:\/|$)/i.test(value)) {
+    return `http://${value}`
+  }
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value)) {
+    return value
+  }
+  return `https://${value}`
 }
 
 function isSameBounds(a: BrowserBounds | null, b: BrowserBounds): boolean {
@@ -80,19 +106,8 @@ function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function formatBounds(bounds: BrowserBounds | null | undefined): string {
-  if (!bounds) return "(none)"
-  return `${bounds.x},${bounds.y} ${bounds.width}x${bounds.height}`
-}
-
-function formatRect(rect: DOMRect | null | undefined): string {
-  if (!rect) return "(none)"
-  return `${Math.round(rect.left)},${Math.round(rect.top)} ${Math.round(rect.width)}x${Math.round(rect.height)}`
-}
-
-function describeBrowserState(state: BrowserState | null | undefined): string {
-  if (!state) return "(none)"
-  return `created=${state.created} visible=${state.visible} loading=${state.isLoading} url=${state.url || "(empty)"} title=${state.title || "(empty)"}`
+function isAutomaticCookieImportRetryable(errorCode: string | undefined): boolean {
+  return Boolean(errorCode && AUTO_COOKIE_IMPORT_RETRYABLE_ERROR_CODES.has(errorCode))
 }
 
 function detectRendererZoomLevel(): number {
@@ -119,6 +134,7 @@ function browserStatesEqual(a: BrowserState, b: BrowserState): boolean {
     a.isLoading === b.isLoading &&
     a.canGoBack === b.canGoBack &&
     a.canGoForward === b.canGoForward &&
+    a.zoomFactor === b.zoomFactor &&
     a.visible === b.visible &&
     a.created === b.created &&
     (a.error ?? "") === (b.error ?? "") &&
@@ -129,54 +145,54 @@ function browserStatesEqual(a: BrowserState, b: BrowserState): boolean {
 
 function BrowserWelcomePanel(): React.JSX.Element {
   return (
-    <div className="absolute inset-0 z-20 overflow-y-auto bg-[radial-gradient(circle_at_12%_0%,rgba(234,179,8,0.11),transparent_34%),radial-gradient(circle_at_100%_100%,rgba(14,116,144,0.08),transparent_42%),#fcfcfb]">
+    <div className="absolute inset-0 z-20 overflow-y-auto bg-background-elevated">
       <div className="mx-auto flex min-h-full max-w-xl flex-col justify-center px-4 py-2">
         <div className="mb-2">
-          <div className="mb-3 flex size-12 items-center justify-center rounded-xl border border-stone-200/80 bg-white text-stone-700 shadow-[0_8px_24px_rgba(41,37,36,0.08)]">
+          <div className="mb-3 flex size-12 items-center justify-center rounded-xl border border-border bg-background-elevated text-foreground shadow-[0_8px_24px_rgba(0,0,0,0.12)]">
             <Globe2 className="size-8 animate-[spin_12s_linear_infinite]" strokeWidth={1.7} />
           </div>
-          <p className="text-[10px] font-semibold tracking-[0.18em] text-stone-500">
+          <p className="text-[10px] font-semibold tracking-[0.18em] text-muted-foreground">
             IN-APP BROWSER
           </p>
-          <h2 className="mt-1.5 text-lg font-semibold tracking-tight text-stone-900">
+          <h2 className="mt-1.5 text-lg font-semibold tracking-tight text-foreground">
             让 AI 在网页中，完成最后一公里
           </h2>
-          <p className="mt-2  text-xs leading-5 text-stone-600">
+          <p className="mt-2 text-xs leading-5 text-muted-foreground">
             在上方地址栏输入 Web URL、本地服务地址或工作区 HTML 路径，按 Enter 即刻开始。
           </p>
         </div>
 
-        <div className="overflow-hidden rounded-xl border border-stone-200/90 bg-white/90 shadow-[0_14px_38px_rgba(41,37,36,0.06)]">
-          <div className="border-b border-stone-100 px-4 py-3">
-            <p className="text-xs font-semibold text-stone-800">一个浏览器，贯通开发与验证</p>
-            <p className="mt-0.5 text-[11px] text-stone-500">
+        <div className="overflow-hidden rounded-xl border border-border bg-background-elevated shadow-[0_14px_38px_rgba(0,0,0,0.08)]">
+          <div className="border-b border-border px-4 py-3">
+            <p className="text-xs font-semibold text-foreground">一个浏览器，贯通开发与验证</p>
+            <p className="mt-0.5 text-[11px] text-muted-foreground">
               预览页面、复用登录态、驱动自动化，让每次网页任务更快闭环。
             </p>
           </div>
 
-          <div className="divide-y divide-stone-100">
+          <div className="divide-y divide-border">
             <div className="flex gap-3 px-4 py-3">
-              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-violet-50 text-violet-700">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-violet-50 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">
                 <Terminal className="size-3.5" strokeWidth={1.8} />
               </span>
               <div className="min-w-0">
-                <p className="text-xs font-medium text-stone-800">代码一改，效果即见</p>
-                <p className="mt-1 text-[11px] leading-4 text-stone-500">
-                  运行 <code className="font-mono text-[10px] text-stone-700">npm run dev</code>
+                <p className="text-xs font-medium text-foreground">代码一改，效果即见</p>
+                <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                  运行 <code className="font-mono text-[10px] text-foreground">npm run dev</code>
                   后直接打开{" "}
-                  <code className="font-mono text-[10px] text-stone-700">localhost:8080</code>
+                  <code className="font-mono text-[10px] text-foreground">localhost:8080</code>
                   。AI 生成代码的同时，页面变化实时呈现，无需反复切换浏览器。
                 </p>
               </div>
             </div>
 
             <div className="flex gap-3 px-4 py-3">
-              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-amber-50 text-amber-700">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-amber-50 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300">
                 <Settings2 className="size-3.5" strokeWidth={1.8} />
               </span>
               <div className="min-w-0">
-                <p className="text-xs font-medium text-stone-800">把网页操作交给 AI</p>
-                <p className="mt-1 text-[11px] leading-4 text-stone-500">
+                <p className="text-xs font-medium text-foreground">把网页操作交给 AI</p>
+                <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
                   开启内置浏览器控制后，AI
                   可在任务中浏览页面、填写表单、点击操作并验证结果。并且支持Iframe。
                 </p>
@@ -184,17 +200,17 @@ function BrowserWelcomePanel(): React.JSX.Element {
             </div>
 
             <div className="flex gap-3 px-4 py-3">
-              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-sky-50 text-sky-700">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-sky-50 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300">
                 <KeyRound className="size-3.5" strokeWidth={1.8} />
               </span>
               <div className="min-w-0">
-                <p className="text-xs font-medium text-stone-800">登录一次，连续工作</p>
-                <p className="mt-1 text-[11px] leading-4 text-stone-500">
+                <p className="text-xs font-medium text-foreground">登录一次，连续工作</p>
+                <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
                   导入已有 Chrome 登录数据，减少重复扫码与登录。首次使用需安装浏览器插件，
                   {APP_DOWNLOAD_URL ? (
                     <a
                       href={APP_DOWNLOAD_URL}
-                      className="text-purple-500 underline underline-offset-2 hover:text-purple-700"
+                      className="text-primary underline underline-offset-2 hover:text-primary/80"
                       onClick={(event) => {
                         event.preventDefault()
                         void window.electron.openExternal(APP_DOWNLOAD_URL)
@@ -211,12 +227,12 @@ function BrowserWelcomePanel(): React.JSX.Element {
             </div>
 
             <div className="flex gap-3 px-4 py-3">
-              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">
                 <Bot className="size-3.5" strokeWidth={1.8} />
               </span>
               <div className="min-w-0">
-                <p className="text-xs font-medium text-stone-800">每次验证，都值得复用</p>
-                <p className="mt-1 text-[11px] leading-4 text-stone-500">
+                <p className="text-xs font-medium text-foreground">每次验证，都值得复用</p>
+                <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
                   录制人工操作，把高频验证沉淀为可复用的测试案例，让下次验证从已有流程开始。
                 </p>
               </div>
@@ -230,7 +246,7 @@ function BrowserWelcomePanel(): React.JSX.Element {
           description="在此开启 AI 浏览器操控和 Chrome 登录数据导入；保存后重启应用即可生效。"
         />
 
-        <div className="mt-4 text-[11px] text-stone-500">
+        <div className="mt-4 text-[11px] text-muted-foreground">
           从一个链接开始，让每次网页任务更快完成。
         </div>
       </div>
@@ -254,21 +270,46 @@ export function BrowserPanel({
   const isUrlFocusedRef = useRef(false)
   const lastInitialNavigationRef = useRef<string | null>(null)
   const pendingSyncReasonRef = useRef<string | null>(null)
-  const lastObservedStateRef = useRef<BrowserState | null>(null)
   const consoleScrollerRef = useRef<HTMLDivElement>(null)
   const [state, setState] = useState<BrowserState>(EMPTY_STATE)
+  const [panelError, setPanelError] = useState<string | null>(null)
   const [urlInput, setUrlInput] = useState("")
   const [isUrlFocused, setIsUrlFocused] = useState(false)
   const [isCapturing, setIsCapturing] = useState(false)
   const [isResettingHome, setIsResettingHome] = useState(false)
   const [isImportingBrowserProfile, setIsImportingBrowserProfile] = useState(false)
+  const [isBrowserProfileImportSuccessful, setIsBrowserProfileImportSuccessful] = useState(false)
+  const [isBrowserProfileImportFailed, setIsBrowserProfileImportFailed] = useState(false)
   const [isProfileImportRuntimeEnabled, setIsProfileImportRuntimeEnabled] = useState(false)
   const [copiedConsole, setCopiedConsole] = useState(false)
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [recordingBoxOpen, setRecordingBoxOpen] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [isHiddenByModalDialog, setIsHiddenByModalDialog] = useState(false)
+  const importFeedbackTimerRef = useRef<number | null>(null)
+  const autoImportTriggeredRef = useRef(false)
   const showBrowserWelcome = isInitialBrowserPage(state.url)
+
+  const markBrowserProfileImportFeedback = useCallback((successful: boolean) => {
+    setIsBrowserProfileImportSuccessful(successful)
+    setIsBrowserProfileImportFailed(!successful)
+    if (importFeedbackTimerRef.current !== null) {
+      window.clearTimeout(importFeedbackTimerRef.current)
+    }
+    importFeedbackTimerRef.current = window.setTimeout(() => {
+      importFeedbackTimerRef.current = null
+      setIsBrowserProfileImportSuccessful(false)
+      setIsBrowserProfileImportFailed(false)
+    }, 1000)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (importFeedbackTimerRef.current !== null) {
+        window.clearTimeout(importFeedbackTimerRef.current)
+      }
+    }
+  }, [])
 
   const applyBrowserState = useCallback((nextState: BrowserState) => {
     isSessionCreatedRef.current = nextState.created
@@ -277,8 +318,57 @@ export function BrowserPanel({
   }, [])
 
   const reportBrowserError = useCallback((error: string) => {
-    setState((current) => (current.error === error ? current : { ...current, error }))
+    setPanelError(error)
   }, [])
+
+  const reportBrowserNotice = useCallback((message: string) => {
+    setPanelError(message)
+  }, [])
+
+  const clearBrowserError = useCallback(() => {
+    setPanelError(null)
+    setState((current) => (current.error ? { ...current, error: undefined } : current))
+  }, [])
+
+  const clearPanelError = useCallback(() => {
+    setPanelError(null)
+  }, [])
+
+  const runAutomaticCookieImport = useCallback(async (): Promise<void> => {
+    for (let attempt = 0; attempt <= AUTO_COOKIE_IMPORT_RETRY_DELAYS_MS.length; attempt += 1) {
+      const result = await window.api.browser.importProfileData({
+        autoImport: attempt === 0,
+        importCookies: true,
+        sourceBrowser: "chrome"
+      })
+      if (result.errorCode === "import_in_progress") return
+      if (result.success) {
+        clearPanelError()
+        markBrowserProfileImportFeedback(true)
+        return
+      }
+
+      const message =
+        result.errorCode === "extension_not_connected"
+          ? "Chrome 插件尚未连接"
+          : result.errorCode === "permission_required"
+            ? "Chrome 插件尚未授权读取 Cookie"
+            : result.error || "自动导入 Cookie 未完成"
+      const retryDelay = AUTO_COOKIE_IMPORT_RETRY_DELAYS_MS[attempt]
+      console.warn(
+        `${BROWSER_PANEL_LOG_PREFIX} Automatic Cookie import attempt ${attempt + 1} failed: ${message}`
+      )
+      if (retryDelay === undefined || !isAutomaticCookieImportRetryable(result.errorCode)) {
+        reportBrowserError(
+          `未能自动导入 Cookie：${message}。请重启 Chrome 后点击钥匙按钮手动重试。`
+        )
+        markBrowserProfileImportFeedback(false)
+        return
+      }
+      reportBrowserNotice(`自动导入 Cookie 暂未完成：${message}，正在重试...`)
+      await new Promise((resolve) => window.setTimeout(resolve, retryDelay))
+    }
+  }, [clearPanelError, markBrowserProfileImportFeedback, reportBrowserError, reportBrowserNotice])
 
   useEffect(() => {
     let cancelled = false
@@ -303,43 +393,24 @@ export function BrowserPanel({
   }, [reportBrowserError])
 
   useEffect(() => {
-    console.info(
-      `${BROWSER_PANEL_LOG_PREFIX} Subscribing to Browser state channel for ${BROWSER_SESSION_ID}.`
-    )
     const unsubscribe = window.api.browser.onState((nextState) => {
-      const previousState = lastObservedStateRef.current
-      if (!previousState || !browserStatesEqual(previousState, nextState)) {
-        console.info(
-          `${BROWSER_PANEL_LOG_PREFIX} State update for ${BROWSER_SESSION_ID}: prev={${describeBrowserState(previousState)}} next={${describeBrowserState(nextState)}}.`
-        )
-      }
-      lastObservedStateRef.current = nextState
       applyBrowserState(nextState)
       if (!isUrlFocusedRef.current) {
         setUrlInput(getBrowserAddressValue(nextState.url))
       }
     })
     return () => {
-      console.info(
-        `${BROWSER_PANEL_LOG_PREFIX} Unsubscribing Browser state channel for ${BROWSER_SESSION_ID}.`
-      )
       unsubscribe()
     }
   }, [applyBrowserState])
 
   const syncBounds = useCallback(
-    (reason: string) => {
+    (_reason: string) => {
       if (!isSessionCreatedRef.current) {
-        console.info(
-          `${BROWSER_PANEL_LOG_PREFIX} Skip bounds sync for ${BROWSER_SESSION_ID}; reason=${reason}; session not created.`
-        )
         return
       }
       const element = viewportRef.current
       if (!element) {
-        console.info(
-          `${BROWSER_PANEL_LOG_PREFIX} Skip bounds sync for ${BROWSER_SESSION_ID}; reason=${reason}; viewport missing.`
-        )
         return
       }
       const rect = element.getBoundingClientRect()
@@ -359,9 +430,6 @@ export function BrowserPanel({
       const initialBrowserPage = isInitialBrowserPageRef.current
       const visible = layoutVisible && !modalDialogOpen && !initialBrowserPage
       if (!layoutVisible && hasVisibleBoundsRef.current) {
-        console.info(
-          `${BROWSER_PANEL_LOG_PREFIX} Skip bounds sync for ${BROWSER_SESSION_ID}; reason=${reason}; viewport hidden after first visible; rect=${formatRect(rect)} zoom=${zoomLevel} lastBounds=${formatBounds(lastBoundsRef.current)}.`
-        )
         return
       }
       if (
@@ -370,14 +438,9 @@ export function BrowserPanel({
       ) {
         return
       }
-      const previousBounds = lastBoundsRef.current
-      const previousVisible = lastBrowserViewVisibleRef.current
       lastBoundsRef.current = bounds
       lastBrowserViewVisibleRef.current = visible
       if (layoutVisible) hasVisibleBoundsRef.current = true
-      console.info(
-        `${BROWSER_PANEL_LOG_PREFIX} Syncing bounds for ${BROWSER_SESSION_ID}; reason=${reason}; rect=${formatRect(rect)} zoom=${zoomLevel} nextBounds=${formatBounds(bounds)} nextVisible=${visible} modalDialogOpen=${modalDialogOpen} initialBrowserPage=${initialBrowserPage} prevBounds=${formatBounds(previousBounds)} prevVisible=${previousVisible ?? "(none)"} hasVisibleOnce=${hasVisibleBoundsRef.current}.`
-      )
       void window.api.browser
         .setBounds(bounds, visible)
         .then(applyBrowserState)
@@ -414,10 +477,6 @@ export function BrowserPanel({
       }
     }
 
-    console.info(
-      `${BROWSER_PANEL_LOG_PREFIX} Mounting BrowserPanel for ${BROWSER_SESSION_ID}; workspacePath=${workspacePath || "(none)"} initialUrl=${initialUrl || "(none)"} reloadToken=${reloadToken ?? "(none)"}.`
-    )
-    console.info(`${BROWSER_PANEL_LOG_PREFIX} Attaching Browser session ${BROWSER_SESSION_ID}.`)
     window.api.browser
       .attach({ workspacePath, visible: false })
       .then((nextState) => {
@@ -425,9 +484,20 @@ export function BrowserPanel({
         applyBrowserState(nextState)
         if (!isUrlFocusedRef.current) setUrlInput(getBrowserAddressValue(nextState.url))
         scheduleStabilizedSync()
-        console.info(
-          `${BROWSER_PANEL_LOG_PREFIX} Browser session ${BROWSER_SESSION_ID} attached with state={${describeBrowserState(nextState)}}.`
-        )
+        void window.api.browser
+          .isProfileImportRuntimeEnabled()
+          .then((enabled) => {
+            if (cancelled || !enabled || autoImportTriggeredRef.current) return null
+            autoImportTriggeredRef.current = true
+            return runAutomaticCookieImport()
+          })
+          .catch((error) => {
+            if (cancelled) return
+            const message = formatError(error) || "自动导入 Cookie 失败"
+            console.warn(`${BROWSER_PANEL_LOG_PREFIX} Automatic Cookie import failed: ${message}`)
+            reportBrowserError(`自动导入 Cookie 未完成：${message}`)
+            markBrowserProfileImportFeedback(false)
+          })
       })
       .catch((error) => {
         console.error(`${BROWSER_PANEL_LOG_PREFIX} Browser attach failed: ${formatError(error)}`)
@@ -442,9 +512,6 @@ export function BrowserPanel({
     window.addEventListener("scroll", handleScroll, true)
 
     return () => {
-      console.info(
-        `${BROWSER_PANEL_LOG_PREFIX} Unmounting BrowserPanel for ${BROWSER_SESSION_ID}; lastBounds=${formatBounds(lastBoundsRef.current)} lastVisible=${lastBrowserViewVisibleRef.current ?? "(none)"} localState={${describeBrowserState(lastObservedStateRef.current)}}.`
-      )
       cancelled = true
       for (const timer of timers) window.clearTimeout(timer)
       observer.disconnect()
@@ -454,7 +521,16 @@ export function BrowserPanel({
         window.cancelAnimationFrame(frame)
       }
     }
-  }, [applyBrowserState, initialUrl, reloadToken, reportBrowserError, syncBounds, workspacePath])
+  }, [
+    applyBrowserState,
+    initialUrl,
+    markBrowserProfileImportFeedback,
+    reloadToken,
+    reportBrowserError,
+    runAutomaticCookieImport,
+    syncBounds,
+    workspacePath
+  ])
 
   useEffect(() => {
     if (!state.created) return
@@ -502,6 +578,7 @@ export function BrowserPanel({
   useEffect(() => {
     if (!isFullscreen) return
     const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.defaultPrevented || useAppStore.getState().showCustomizeView) return
       if (event.key === "Escape") {
         setIsFullscreen(false)
       }
@@ -530,7 +607,6 @@ export function BrowserPanel({
     if (lastInitialNavigationRef.current === key) return
     lastInitialNavigationRef.current = key
 
-    console.info(`${BROWSER_PANEL_LOG_PREFIX} Opening initial URL ${target}.`)
     window.api.browser
       .navigate(target, { workspacePath })
       .then((nextState) => {
@@ -542,9 +618,6 @@ export function BrowserPanel({
         if (!isUrlFocusedRef.current) {
           setUrlInput(nextState.url || target)
         }
-        console.info(
-          `${BROWSER_PANEL_LOG_PREFIX} Initial URL opened as ${nextState.url || target}.`
-        )
       })
       .catch((error) => {
         console.error(`${BROWSER_PANEL_LOG_PREFIX} Initial URL open failed: ${formatError(error)}`)
@@ -565,7 +638,6 @@ export function BrowserPanel({
           return
         }
         setUrlInput(nextState.url || target)
-        console.info(`${BROWSER_PANEL_LOG_PREFIX} Navigated to ${nextState.url || target}.`)
       } catch (error) {
         console.error(`${BROWSER_PANEL_LOG_PREFIX} Navigation failed: ${formatError(error)}`)
         reportBrowserError(formatError(error) || "页面加载失败")
@@ -660,43 +732,78 @@ export function BrowserPanel({
       })
       if (!result.success) {
         if (result.cancelled) return
-        if (result.errorCode === "native_host_not_registered") {
-          reportBrowserError(result.error || "请重启应用")
-        } else if (result.errorCode === "extension_not_connected") {
-          reportBrowserError("Chrome插件未连接！")
-        } else if (result.errorCode === "permission_required") {
-          reportBrowserError("Chrome插件未授权！")
-        } else {
-          reportBrowserError(result.error || "浏览器数据导入失败")
-        }
+        const message =
+          result.errorCode === "native_host_not_registered"
+            ? result.error || "请重启应用"
+            : result.errorCode === "extension_not_connected"
+              ? "Chrome插件未连接！"
+              : result.errorCode === "permission_required"
+                ? "Chrome插件未授权！"
+                : result.error
+                  ? `${result.error}。请重启 Chrome 后再手动重试。`
+                  : "浏览器数据导入失败，请重启 Chrome 后再手动重试。"
+        reportBrowserError(message)
+        markBrowserProfileImportFeedback(false)
         return
       }
 
       applyBrowserState(await window.api.browser.getState())
-      const importedCookies = result.importedCookies ?? 0
-      const importedLocalStorage = result.importedLocalStorage ?? 0
-      const skipped = (result.skippedCookies ?? 0) + (result.skippedLocalStorage ?? 0)
-      const summary = `导入 Cookie ${importedCookies} 条，localStorage ${importedLocalStorage} 条`
-      const profileLabel = result.profileDirectory ? `（${result.profileDirectory}）` : ""
-      const message =
-        skipped > 0 ? `${summary}${profileLabel}，跳过 ${skipped} 条` : `${summary}${profileLabel}`
-      if (result.warning) {
-        toast.warning(`${result.warning}（${message}）`, { duration: 12_000 })
-      } else {
-        toast.success(message, { duration: 10_000 })
-      }
+      clearPanelError()
+      markBrowserProfileImportFeedback(true)
     } catch (error) {
-      console.error(
-        `${BROWSER_PANEL_LOG_PREFIX} Browser profile import failed: ${formatError(error)}`
-      )
-      reportBrowserError(formatError(error) || "浏览器数据导入失败")
+      const message = formatError(error) || "浏览器数据导入失败"
+      console.error(`${BROWSER_PANEL_LOG_PREFIX} Browser profile import failed: ${message}`)
+      reportBrowserError(message)
+      markBrowserProfileImportFeedback(false)
     } finally {
       setIsImportingBrowserProfile(false)
     }
-  }, [applyBrowserState, isProfileImportRuntimeEnabled, reportBrowserError, state.created])
+  }, [
+    applyBrowserState,
+    clearPanelError,
+    isProfileImportRuntimeEnabled,
+    markBrowserProfileImportFeedback,
+    reportBrowserError,
+    state.created
+  ])
+
+  const openCurrentUrlInExternalBrowser = useCallback(async () => {
+    const target = normalizeExternalBrowserUrl(urlInput || state.url)
+    if (!target || isInitialBrowserPage(target)) {
+      reportBrowserError("当前没有可打开的 URL")
+      return
+    }
+
+    try {
+      await window.electron.openExternal(target)
+    } catch (error) {
+      console.error(
+        `${BROWSER_PANEL_LOG_PREFIX} External browser open failed: ${formatError(error)}`
+      )
+      reportBrowserError(formatError(error) || "在浏览器打开失败")
+    }
+  }, [reportBrowserError, state.url, urlInput])
+
+  const updateBrowserZoom = useCallback(
+    async (zoomFactor: number) => {
+      if (!state.created) return
+      try {
+        const normalizedZoomFactor = Math.min(
+          MAX_BROWSER_ZOOM_FACTOR,
+          Math.max(MIN_BROWSER_ZOOM_FACTOR, Math.round(zoomFactor * 100) / 100)
+        )
+        applyBrowserState(await window.api.browser.setZoomFactor(normalizedZoomFactor))
+      } catch (error) {
+        console.error(`${BROWSER_PANEL_LOG_PREFIX} Zoom update failed: ${formatError(error)}`)
+        reportBrowserError(formatError(error) || "页面缩放失败")
+      }
+    },
+    [applyBrowserState, reportBrowserError, state.created]
+  )
 
   const consoleCount = state.consoleEntries.length
   const latestConsoleEntry = consoleCount > 0 ? state.consoleEntries[consoleCount - 1] : null
+  const visibleError = panelError || state.error
   const consoleToggleTitle = latestConsoleEntry ? `控制台 (${consoleCount})` : "控制台"
   const browserProfileImportDisabled =
     isImportingBrowserProfile || !state.created || !isProfileImportRuntimeEnabled
@@ -707,6 +814,9 @@ export function BrowserPanel({
       : !state.created
         ? "内置浏览器尚未就绪"
         : "导入浏览器数据"
+  const externalBrowserUrl = normalizeExternalBrowserUrl(urlInput || state.url)
+  const externalBrowserOpenDisabled =
+    !externalBrowserUrl || isInitialBrowserPage(externalBrowserUrl)
   const toggleFullscreen = (): void => {
     setIsFullscreen((prev) => !prev)
   }
@@ -714,6 +824,11 @@ export function BrowserPanel({
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background">
       <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border bg-background-elevated px-2">
+        <BrowserOptionsMenu
+          browserCreated={state.created}
+          zoomFactor={state.zoomFactor}
+          onZoomChange={(zoomFactor) => void updateBrowserZoom(zoomFactor)}
+        />
         <IconPopoverButton
           className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
           icon={<ArrowLeft className="size-4" strokeWidth={1.8} />}
@@ -792,6 +907,10 @@ export function BrowserPanel({
           icon={
             isImportingBrowserProfile ? (
               <Loader2 className="size-4 animate-spin" strokeWidth={1.8} />
+            ) : isBrowserProfileImportFailed ? (
+              <X className="size-4 text-destructive" strokeWidth={2} />
+            ) : isBrowserProfileImportSuccessful ? (
+              <Check className="size-4 text-green-500" strokeWidth={2} />
             ) : (
               <KeyRound className="size-4" strokeWidth={1.8} />
             )
@@ -800,6 +919,14 @@ export function BrowserPanel({
           aria-label="导入浏览器数据"
           disabled={browserProfileImportDisabled}
           onClick={() => void importBrowserProfileData()}
+        />
+        <IconPopoverButton
+          className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+          icon={<SquareArrowOutUpRight className="size-4" strokeWidth={1.8} />}
+          popoverContent="在浏览器打开"
+          aria-label="在浏览器打开"
+          disabled={externalBrowserOpenDisabled}
+          onClick={() => void openCurrentUrlInExternalBrowser()}
         />
         <IconPopoverButton
           className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
@@ -817,25 +944,32 @@ export function BrowserPanel({
         />
       </div>
 
-      {state.error && (
+      {visibleError && (
         <div className="flex shrink-0 items-center gap-2 border-b border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           <ShieldAlert className="size-4 shrink-0" strokeWidth={1.8} />
-          <span className="min-w-0 truncate">{state.error}</span>
+          <span className="min-w-0 flex-1 truncate">{visibleError}</span>
+          <IconPopoverButton
+            className="size-6 shrink-0 rounded transition-colors hover:bg-destructive/10"
+            icon={<X className="size-3.5" strokeWidth={2} />}
+            popoverContent="关闭错误提示"
+            aria-label="关闭错误提示"
+            onClick={clearBrowserError}
+          />
         </div>
       )}
 
-      <div className="relative min-h-0 flex-1 bg-white">
+      <div className="relative min-h-0 flex-1 bg-background">
         {/* Keep the welcome panel mounted so any dialogs launched from it are not
             immediately unmounted by the BrowserView modal-hide guard. */}
         {showBrowserWelcome && <BrowserWelcomePanel />}
         {isHiddenByModalDialog && (
-          <div className="absolute inset-0 z-20 flex items-center justify-center bg-[radial-gradient(circle_at_top,#f5f5f4,transparent_58%),linear-gradient(135deg,#fafaf9,#f5f5f4)] p-6">
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-background p-6">
             <div className="max-w-xs text-center">
-              <div className="mx-auto mb-3 flex size-10 items-center justify-center rounded-full border border-stone-200 bg-white text-stone-500 shadow-sm">
+              <div className="mx-auto mb-3 flex size-10 items-center justify-center rounded-full border border-border bg-background-elevated text-muted-foreground shadow-sm">
                 <EyeOff className="size-4" strokeWidth={1.8} />
               </div>
-              <p className="text-sm font-medium text-stone-800">浏览器已暂时隐藏</p>
-              <p className="mt-1.5 text-xs leading-5 text-stone-500">
+              <p className="text-sm font-medium text-foreground">浏览器已暂时隐藏</p>
+              <p className="mt-1.5 text-xs leading-5 text-muted-foreground">
                 为确保当前弹窗完整显示，内置浏览器会在关闭弹窗后自动恢复。
               </p>
             </div>
@@ -915,8 +1049,8 @@ export function BrowserPanel({
             className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
             side="left"
             icon={<Video className="size-4" strokeWidth={1.8} />}
-            popoverContent="录制脚本"
-            aria-label="录制脚本"
+            popoverContent="自动化操作"
+            aria-label="自动化操作"
             aria-pressed={recordingBoxOpen}
             onClick={() => setRecordingBoxOpen((open) => !open)}
           />
@@ -924,7 +1058,7 @@ export function BrowserPanel({
       </div>
 
       {consoleOpen && (
-        <div className="shrink-0 border-t border-border bg-white">
+        <div className="shrink-0 border-t border-border bg-background-elevated">
           <div className="flex h-9 items-center justify-between gap-2 px-3 text-[11px] text-muted-foreground">
             <div className="flex min-w-0 items-center gap-2">
               <Terminal className="size-3.5 shrink-0" strokeWidth={1.8} />
@@ -969,10 +1103,10 @@ export function BrowserPanel({
           </div>
           <div
             ref={consoleScrollerRef}
-            className="h-44 overflow-auto border-t border-border/70 bg-white px-3 py-2 font-mono text-[11px] leading-5 text-slate-900"
+            className="h-44 overflow-auto border-t border-border/70 bg-background px-3 py-2 font-mono text-[11px] leading-5 text-foreground"
           >
             {consoleCount === 0 ? (
-              <div className="flex h-full items-center justify-center text-slate-500">
+              <div className="flex h-full items-center justify-center text-muted-foreground">
                 暂无 console 输出
               </div>
             ) : (
@@ -1007,7 +1141,7 @@ function getConsoleLevelClass(level: BrowserConsoleEntry["level"]): string {
     case "debug":
       return "text-violet-600"
     default:
-      return "text-slate-600"
+      return "text-muted-foreground"
   }
 }
 
@@ -1017,10 +1151,10 @@ function ConsoleRow({ entry }: { entry: BrowserConsoleEntry }): React.JSX.Elemen
 
   return (
     <div className="grid grid-cols-[64px_48px_minmax(0,1fr)] gap-3 py-1">
-      <span className="text-slate-500">{formatConsoleTime(entry.timestamp)}</span>
+      <span className="text-muted-foreground">{formatConsoleTime(entry.timestamp)}</span>
       <span className={getConsoleLevelClass(entry.level)}>{entry.level.toUpperCase()}</span>
-      <div className="min-w-0 whitespace-pre-wrap break-words text-slate-900">
-        {sourceLabel && <span className="mr-2 text-slate-500">{sourceLabel}</span>}
+      <div className="min-w-0 whitespace-pre-wrap break-words text-foreground">
+        {sourceLabel && <span className="mr-2 text-muted-foreground">{sourceLabel}</span>}
         {entry.message}
       </div>
     </div>

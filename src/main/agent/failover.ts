@@ -1,3 +1,4 @@
+import { isModelAvailable } from "../../shared/model-catalog"
 import { getModelConfigByRef, getModelConfigs, toModelRef } from "../models/registry"
 
 // ─── PR-12 / PR-17 — minimal API error classifier ─────────────────────────────
@@ -13,6 +14,9 @@ export type ApiErrorCode =
   | "rate_limit"
   | "server_error"
   | "network_error"
+  | "empty_response"
+  | "local_storage_error"
+  | "harness_context_unavailable"
   | "unknown"
 
 // ─── Gateway status-code dictionary ──────────────────────────────────────────
@@ -47,6 +51,7 @@ const STATUS_CODE_INFO: Record<number, StatusInfo> = {
     hint: "输入过长，请减少输入或稍后重试"
   },
   433: { category: "rate_limit", label: "输出 Token 数限流", hint: "请稍后重试" },
+  434: { category: "invalid_request", label: "码豆余额不足", hint: "请充值后重试" },
   480: { category: "invalid_request", label: "请求参数异常", hint: "请检查请求参数" },
   481: { category: "invalid_request", label: "目标模型不存在", hint: "请检查模型名称是否正确" },
   482: { category: "invalid_request", label: "模型不支持该用途", hint: "请更换模型或调整用途" },
@@ -93,6 +98,13 @@ const STREAM_DISCONNECT_CODES = new Set([
 const STREAM_DISCONNECT_MESSAGE_RE =
   /\bterminated\b|\bstream\b.*\b(closed|disconnected|terminated|reset)\b|\b(premature close|body stream|other side closed|socket hang up|connection reset)\b/i
 
+// LangChain throws this from BaseChatModel when a streaming call produced no
+// aggregatable chunk at all (HTTP 200, but an empty or non-SSE body). The
+// upstream check runs *after* its own signal.aborted branch, so reaching this
+// message means the turn produced no message and no tool call — nothing was
+// executed that a resume could duplicate.
+const EMPTY_MODEL_RESPONSE_RE = /received empty response from chat model/i
+
 type ErrorLike = {
   name?: unknown
   message?: unknown
@@ -103,6 +115,18 @@ type ErrorLike = {
 function asErrorLike(value: unknown): ErrorLike | null {
   if (!value || (typeof value !== "object" && typeof value !== "function")) return null
   return value as ErrorLike
+}
+
+function findErrorWithCode(error: unknown, code: string): unknown | null {
+  const visited = new Set<object>()
+  let current: unknown = error
+  while (true) {
+    const detail = asErrorLike(current)
+    if (!detail || visited.has(detail as object)) return null
+    visited.add(detail as object)
+    if (detail.code === code) return current
+    current = detail.cause
+  }
 }
 
 function isAbortLikeError(error: unknown): boolean {
@@ -156,7 +180,47 @@ export function isStreamDisconnectLikeError(error: unknown): boolean {
 }
 
 /**
- * Map an arbitrary error value to one of six coarse buckets. Order matters:
+ * Match the "model returned nothing" failure: headers said 200 but the body
+ * yielded no chunk LangChain could aggregate. Distinct from a disconnect —
+ * nothing was interrupted, the response was simply empty.
+ */
+export function isEmptyModelResponseError(error: unknown): boolean {
+  const visited = new Set<object>()
+  const chain: ErrorLike[] = []
+  let current: unknown = error
+  while (true) {
+    const detail = asErrorLike(current)
+    if (!detail || visited.has(detail as object)) break
+    visited.add(detail as object)
+    chain.push(detail)
+    current = detail.cause
+  }
+
+  // Cancellation wins, same as isStreamDisconnectLikeError: a wrapper that
+  // looks empty must never outrank an AbortError the user caused.
+  if (chain.some((detail) => isAbortLikeError(detail))) return false
+
+  // Message-only signal, so restrict it to real Error instances — classifyApiError
+  // also runs over arbitrary tool output (hooks/tool-failure.ts), which must not
+  // be reclassified because it happens to quote this sentence.
+  return chain.some(
+    (detail) =>
+      detail instanceof Error &&
+      typeof detail.message === "string" &&
+      EMPTY_MODEL_RESPONSE_RE.test(detail.message)
+  )
+}
+
+/**
+ * Stream failures that can be recovered by re-running the current model from
+ * the LangGraph checkpoint, without replaying the user's whole turn.
+ */
+export function isResumableStreamFailure(error: unknown): boolean {
+  return isStreamDisconnectLikeError(error) || isEmptyModelResponseError(error)
+}
+
+/**
+ * Map an arbitrary error value to one of the coarse buckets. Order matters:
  * status code > rate-limit text > server text > network code/text > unknown.
  */
 export function classifyApiError(error: unknown): ApiErrorCode {
@@ -180,6 +244,7 @@ export function classifyApiError(error: unknown): ApiErrorCode {
   const code = (error as { code?: unknown }).code
   if (typeof code === "string" && NETWORK_CODES.has(code)) return "network_error"
   if (isStreamDisconnectLikeError(error)) return "network_error"
+  if (isEmptyModelResponseError(error)) return "empty_response"
 
   const msg = (error instanceof Error ? error.message : String(error)).toLowerCase()
   if (RATE_LIMIT_MESSAGE_TOKENS.some((t) => msg.includes(t))) return "rate_limit"
@@ -192,7 +257,7 @@ export function classifyApiError(error: unknown): ApiErrorCode {
 // ─── Error classification ────────────────────────────────────────────────────
 
 // Status codes that are NOT retryable — switching model won't help
-const NON_RETRYABLE_STATUS_CODES = new Set([400, 401, 403])
+const NON_RETRYABLE_STATUS_CODES = new Set([400, 401, 403, 434])
 
 const RETRYABLE_NETWORK_CODES = new Set([
   "ECONNREFUSED",
@@ -244,6 +309,10 @@ export function isRetryableApiError(error: unknown): boolean {
 
   if (isStreamDisconnectLikeError(error)) return true
 
+  // Empty model response — the upstream produced nothing; another attempt or
+  // another model is exactly what can fix it.
+  if (isEmptyModelResponseError(error)) return true
+
   // Check HTTP status code (may be on error.status, error.response?.status, etc.)
   const status = getStatusCode(error)
   if (status !== null) {
@@ -269,19 +338,42 @@ export function isRetryableApiError(error: unknown): boolean {
   return false
 }
 
-function getStatusCode(error: unknown): number | null {
-  if (!error || typeof error !== "object") return null
-  // Direct status property
-  if ("status" in error && typeof (error as { status: unknown }).status === "number") {
-    return (error as { status: number }).status
+/** Shared same-model HTTP retry policy, originally defined by the runtime fetch wrapper. */
+const RETRYABLE_NON_5XX_STATUS = new Set([408, 409, 429, 432, 433])
+
+export function isRetryableStatus(status: number): boolean {
+  return status >= 500 || RETRYABLE_NON_5XX_STATUS.has(status)
+}
+
+/** Reuse the runtime's same-model policy and the existing API error classifier. */
+export function isRetryableManagedProviderError(error: unknown): boolean {
+  if (!error || isAbortLikeError(error)) return false
+  const status = getStatusCode(error)
+  if (status !== null) {
+    return isRetryableStatus(status)
   }
-  // Nested response.status (axios-style)
-  if ("response" in error) {
-    const resp = (error as { response: unknown }).response
-    if (resp && typeof resp === "object" && "status" in resp) {
-      const s = (resp as { status: unknown }).status
-      if (typeof s === "number") return s
+  const visited = new Set<object>()
+  let current: unknown = error
+  while (current && typeof current === "object" && !visited.has(current)) {
+    visited.add(current)
+    const category = classifyApiError(current)
+    if (category !== "unknown") {
+      return ["network_error", "server_error", "rate_limit", "empty_response"].includes(category)
     }
+    current = (current as { cause?: unknown }).cause
+  }
+  return false
+}
+
+function getStatusCode(error: unknown): number | null {
+  const visited = new Set<object>()
+  let current = error
+  while (current && typeof current === "object" && !visited.has(current)) {
+    visited.add(current)
+    const detail = current as { status?: unknown; response?: { status?: unknown }; cause?: unknown }
+    if (typeof detail.status === "number") return detail.status
+    if (typeof detail.response?.status === "number") return detail.response.status
+    current = detail.cause
   }
   return null
 }
@@ -314,6 +406,7 @@ export interface ApiErrorDetail {
 const ERROR_DETAIL_MAX_BODY = 800
 /** Body keys commonly used by gateways/relays to carry the human reason. */
 const BODY_REASON_KEYS = [
+  "errorMsg",
   "message",
   "msg",
   "detail",
@@ -425,6 +518,76 @@ export function extractErrorDetail(
   error: unknown,
   fetchDetail?: { status?: number; requestId?: string; rawBody?: string }
 ): ApiErrorDetail {
+  const deployUnitContextLimitError = findErrorWithCode(
+    error,
+    "HARNESS_DEPLOY_UNIT_CONTEXT_LIMIT_EXCEEDED"
+  )
+  if (deployUnitContextLimitError) {
+    const deployUnitContextLimitMessage = cleanProviderMessage(deployUnitContextLimitError)
+    return {
+      code: "harness_context_unavailable",
+      statusLabel: "Harness 仓库上下文超限",
+      hint: "请减少发布单元；框架模式最多 64 个，插件注入模式最多 512 个。",
+      reason:
+        deployUnitContextLimitMessage ??
+        "Harness 发布单元上下文超过安全上限，已阻止不完整执行。",
+      providerMessage: deployUnitContextLimitMessage
+    }
+  }
+  const sessionContextLimitError = findErrorWithCode(
+    error,
+    "HARNESS_SESSION_CONTEXT_LIMIT_EXCEEDED"
+  )
+  if (sessionContextLimitError) {
+    const sessionContextLimitMessage = cleanProviderMessage(sessionContextLimitError)
+    return {
+      code: "harness_context_unavailable",
+      statusLabel: "Harness 上下文超限",
+      hint: "请缩短插件返回的 session_context_inject 内容，再重新运行任务。",
+      reason:
+        sessionContextLimitMessage ??
+        "Harness session_context_inject 超过安全上限，已阻止不完整执行。",
+      providerMessage: sessionContextLimitMessage
+    }
+  }
+  const harnessContextError = findErrorWithCode(error, "HARNESS_AGENT_CONTEXT_UNAVAILABLE")
+  if (harnessContextError) {
+    const harnessContextCause = asErrorLike(harnessContextError)?.cause
+    const harnessContextMessage =
+      cleanProviderMessage(harnessContextCause) ?? cleanProviderMessage(harnessContextError)
+    return {
+      code: "harness_context_unavailable",
+      statusLabel: "Harness 上下文不可用",
+      hint: "请重试；如仍失败，请检查 Harness 配置、项目目录和后台 Worker 日志。",
+      reason: harnessContextMessage ?? "Harness 上下文加载失败，请重试后再运行任务。",
+      providerMessage: harnessContextMessage
+    }
+  }
+  const localStorageError = findErrorWithCode(
+    error,
+    "LOCAL_CHECKPOINT_MESSAGE_RECOVERY_FAILED"
+  )
+  if (localStorageError) {
+    const localStorageMessage = cleanProviderMessage(localStorageError)
+    return {
+      code: "local_storage_error",
+      statusLabel: "本地会话存储错误",
+      hint: "请先重启应用后重试；如仍失败，请导出日志排查本地 checkpoint。",
+      reason:
+        localStorageMessage ??
+        "本地会话消息索引不完整，自动恢复失败，但已保存的会话消息没有被删除。",
+      providerMessage: localStorageMessage
+    }
+  }
+  if (!fetchDetail?.status && isEmptyModelResponseError(error)) {
+    return {
+      code: "empty_response",
+      statusLabel: "模型返回空响应",
+      hint: "已自动重试并尝试备用模型，仍未取得输出；请稍后重试或更换模型。",
+      reason: "模型接口返回成功，但响应体没有任何可用内容。",
+      providerMessage: cleanProviderMessage(error)
+    }
+  }
   const status = fetchDetail?.status ?? getStatusCode(error) ?? statusFromMessage(error)
   const info = getStatusInfo(status)
   const code =
@@ -475,7 +638,7 @@ export function buildOrderedChain(
   primaryTier: "premium" | "economy",
   allowFailover = true
 ): string[] {
-  const configs = getModelConfigs()
+  const configs = getModelConfigs().filter(isModelAvailable)
   const chain: string[] = []
   const seen = new Set<string>()
 
@@ -517,7 +680,7 @@ export function buildOrderedChain(
       const tier = cfg.tier ?? "premium"
       // Only add if not downgrading
       if (primaryTier === "premium" && tier === "economy") continue
-      if (cfg.apiKey) add(id)
+      if (isModelAvailable(cfg)) add(id)
     }
   }
 

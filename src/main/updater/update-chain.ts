@@ -1,3 +1,4 @@
+import { updaterLog } from "./logger"
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "fs"
 import { join } from "path"
 import { getUpdatesDir } from "./downloader"
@@ -37,7 +38,7 @@ export function readPendingUpdateChain(): PendingUpdateChain | null {
     const raw = readFileSync(statePath, "utf-8").replace(/^\uFEFF/, "")
     return parsePendingUpdateChain(JSON.parse(raw))
   } catch (err) {
-    console.warn("[Updater] Failed to read pending update chain:", err)
+    updaterLog.warn("[Updater] Failed to read pending update chain:", err)
     return null
   }
 }
@@ -51,7 +52,7 @@ export function writePendingUpdateChain(state: Omit<PendingUpdateChain, "created
     )
     return true
   } catch (err) {
-    console.warn("[Updater] Failed to persist pending update chain:", err)
+    updaterLog.warn("[Updater] Failed to persist pending update chain:", err)
     return false
   }
 }
@@ -62,7 +63,7 @@ export function clearPendingUpdateChain(): void {
     if (!existsSync(statePath)) return
     unlinkSync(statePath)
   } catch (err) {
-    console.warn("[Updater] Failed to clear pending update chain:", err)
+    updaterLog.warn("[Updater] Failed to clear pending update chain:", err)
   }
 }
 

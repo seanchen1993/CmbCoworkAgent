@@ -1,50 +1,8 @@
 import { useEffect, useState, useMemo } from "react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { VirtualList } from "@/components/ui/virtual-list"
-import { createHighlighterCore, type HighlighterCore } from "shiki/core"
-import { createJavaScriptRegexEngine } from "shiki/engine/javascript"
-
-// Import bundled themes and languages
-import githubLight from "shiki/themes/github-light.mjs"
-import langTypescript from "shiki/langs/typescript.mjs"
-import langTsx from "shiki/langs/tsx.mjs"
-import langJavascript from "shiki/langs/javascript.mjs"
-import langJsx from "shiki/langs/jsx.mjs"
-import langPython from "shiki/langs/python.mjs"
-import langJson from "shiki/langs/json.mjs"
-import langCss from "shiki/langs/css.mjs"
-import langHtml from "shiki/langs/html.mjs"
-import langMarkdown from "shiki/langs/markdown.mjs"
-import langYaml from "shiki/langs/yaml.mjs"
-import langBash from "shiki/langs/bash.mjs"
-import langSql from "shiki/langs/sql.mjs"
-
-// Singleton highlighter instance (using JS engine - no WASM needed)
-let highlighterPromise: Promise<HighlighterCore> | null = null
-
-async function getHighlighter(): Promise<HighlighterCore> {
-  if (!highlighterPromise) {
-    highlighterPromise = createHighlighterCore({
-      themes: [githubLight],
-      langs: [
-        langTypescript,
-        langTsx,
-        langJavascript,
-        langJsx,
-        langPython,
-        langJson,
-        langCss,
-        langHtml,
-        langMarkdown,
-        langYaml,
-        langBash,
-        langSql
-      ],
-      engine: createJavaScriptRegexEngine()
-    })
-  }
-  return highlighterPromise
-}
+import { shouldSoftWrapCodePreview } from "@/lib/code-preview-layout"
+import { requestCodeHighlight } from "./code-highlight-client"
 
 interface CodeViewerProps {
   filePath: string
@@ -54,6 +12,7 @@ interface CodeViewerProps {
 const VIRTUAL_SCROLL_LINE_THRESHOLD = 100
 const CODE_LINE_HEIGHT = 22
 const CODE_OVERSCAN_LINES = 16
+const MAX_HIGHLIGHT_CONTENT_CHARS = 64 * 1024
 
 // Map file extensions to Shiki language identifiers (only languages we've loaded)
 const SUPPORTED_LANGS = new Set([
@@ -99,53 +58,31 @@ function getLanguage(ext: string | undefined): string | null {
 }
 
 export function CodeViewer({ filePath, content }: CodeViewerProps) {
-  const [highlightedHtml, setHighlightedHtml] = useState<string | null>(null)
+  const [highlighted, setHighlighted] = useState<{ key: string; html: string } | null>(null)
 
   // Get file extension for syntax highlighting
   const fileName = filePath.split("/").pop() || filePath
   const ext = fileName.includes(".") ? fileName.split(".").pop()?.toLowerCase() : undefined
   const language = useMemo(() => getLanguage(ext), [ext])
   const lines = useMemo(() => content.split("\n"), [content])
+  const shouldSoftWrap = useMemo(() => shouldSoftWrapCodePreview(lines), [lines])
   const shouldVirtualize = lines.length > VIRTUAL_SCROLL_LINE_THRESHOLD
   const lineCount = lines.length
+  const highlightKey =
+    language !== null && !shouldVirtualize && content.length <= MAX_HIGHLIGHT_CONTENT_CHARS
+      ? `${language}\u0000${content}`
+      : null
+  const highlightedHtml = highlighted?.key === highlightKey ? highlighted.html : null
 
   // Highlight code with Shiki
   useEffect(() => {
-    let cancelled = false
-
-    async function highlight() {
-      if (language === null || shouldVirtualize) {
-        setHighlightedHtml(null)
-        return
-      }
-
-      try {
-        console.log("[CodeViewer] Starting highlight for", language)
-        const highlighter = await getHighlighter()
-
-        if (cancelled) return
-
-        const html = highlighter.codeToHtml(content, {
-          lang: language,
-          theme: "github-light"
-        })
-
-        if (cancelled) return
-
-        console.log("[CodeViewer] Highlighting complete, html length:", html.length)
-        setHighlightedHtml(html)
-      } catch (e) {
-        console.error("[CodeViewer] Shiki highlighting failed:", e)
-        setHighlightedHtml(null)
-      }
-    }
-
-    highlight()
-
-    return () => {
-      cancelled = true
-    }
-  }, [content, language, shouldVirtualize])
+    if (!highlightKey || !language) return
+    const request = requestCodeHighlight(content, language)
+    void request.promise
+      .then((html) => setHighlighted({ key: highlightKey, html }))
+      .catch(() => undefined)
+    return request.cancel
+  }, [content, highlightKey, language])
 
   return (
     <div className="flex h-full flex-1 flex-col min-h-0 overflow-hidden">
@@ -181,7 +118,10 @@ export function CodeViewer({ filePath, content }: CodeViewerProps) {
         <ScrollArea className="flex-1 min-h-0">
           <div className="shiki-wrapper">
             {highlightedHtml ? (
-              <div className="shiki-content" dangerouslySetInnerHTML={{ __html: highlightedHtml }} />
+              <div
+                className={`shiki-content ${shouldSoftWrap ? "shiki-content-soft-wrap" : ""}`}
+                dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+              />
             ) : (
               // Fallback plain text rendering
               <pre className="p-4 text-sm font-mono leading-relaxed whitespace-pre-wrap break-all">

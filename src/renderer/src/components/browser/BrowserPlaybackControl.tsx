@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { AlertTriangle, ArrowLeft, Check, Copy, Loader2, Square, X } from "lucide-react"
+import { AlertTriangle, ArrowLeft, Check, Copy, FileCode2, Loader2, Square, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import type { BrowserScriptExecutionState } from "../../../../shared/browser-types"
+import { formatPlaybackDuration } from "./browser-playback-history"
 
 interface BrowserPlaybackControlProps {
   playbackState: BrowserScriptExecutionState
@@ -14,18 +15,19 @@ interface BrowserPlaybackControlProps {
   isCancellingPlayback: boolean
   onCancelPlayback: () => void
   onExitPlaybackMode?: () => void
+  onOpenScriptDetail?: () => void
 }
 
 function getPlaybackStatusText(state: BrowserScriptExecutionState): string {
   switch (state.status) {
     case "running":
-      return "正在回放中"
+      return "运行中"
     case "completed":
-      return "回放完成"
+      return "运行完成"
     case "error":
-      return "回放异常"
+      return "运行异常"
     case "cancelled":
-      return "回放已终止"
+      return "运行已终止"
     default:
       return "回放就绪"
   }
@@ -51,7 +53,7 @@ export function getPlaybackStatusDetail(state: BrowserScriptExecutionState): str
     const percent = Math.max(0, Math.min(100, Math.round(state.progressPercent)))
     return `${percent}%`
   }
-  return state.label || state.fileName || "当前脚本"
+  return state.label || state.fileName || "当前操作"
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
@@ -73,8 +75,10 @@ export function BrowserPlaybackControl({
   preferFallbackStatusWhenPlaybackInactive = false,
   isCancellingPlayback,
   onCancelPlayback,
-  onExitPlaybackMode
+  onExitPlaybackMode,
+  onOpenScriptDetail
 }: BrowserPlaybackControlProps): React.JSX.Element {
+  const [elapsedNow, setElapsedNow] = useState(() => Date.now())
   const [dismissedErrorKey, setDismissedErrorKey] = useState<string | null>(null)
   const [copiedErrorKey, setCopiedErrorKey] = useState<string | null>(null)
   const playbackHasOutput = playbackModeActive
@@ -82,8 +86,19 @@ export function BrowserPlaybackControl({
     : shouldShowPlaybackSummary(playbackState, preferFallbackStatusWhenPlaybackInactive)
   const playbackStatusActive = playbackState.status === "running"
   const playbackDetailLabel = getPlaybackStatusDetail(playbackState)
+  const playbackStepLabel = `${Math.max(0, playbackState.completedSteps ?? 0)}/${Math.max(0, playbackState.totalSteps ?? 0)} 步`
   const playbackScriptLabel =
     playbackLabelOverride?.trim() || playbackState.label?.trim() || playbackState.fileName?.trim()
+  const startedAtMs = playbackState.startedAt ? Date.parse(playbackState.startedAt) : Number.NaN
+  const endedAtMs = playbackState.endedAt ? Date.parse(playbackState.endedAt) : Number.NaN
+  const playbackDurationMs = Number.isFinite(startedAtMs)
+    ? Math.max(
+        0,
+        (playbackState.status === "running" || !Number.isFinite(endedAtMs)
+          ? elapsedNow
+          : endedAtMs) - startedAtMs
+      )
+    : 0
   const playbackErrorKey = useMemo(() => {
     const errorMessage = playbackState.status === "error" ? playbackState.error?.trim() : ""
     if (!errorMessage) return null
@@ -99,11 +114,18 @@ export function BrowserPlaybackControl({
   const statusDotClassName = playbackHasOutput
     ? getPlaybackStatusDotClassName(playbackState.status)
     : fallbackDotClassName
+  const playbackStatusDetail = `${getPlaybackStatusText(playbackState)} - ${playbackDetailLabel} - 执行步骤 ${playbackStepLabel} - 耗时 ${formatPlaybackDuration(playbackDurationMs)}`
   const statusLine = playbackHasOutput
     ? playbackModeActive && playbackScriptLabel
-      ? `"${playbackScriptLabel}"脚本 - ${getPlaybackStatusText(playbackState)} · ${playbackDetailLabel}`
-      : `${getPlaybackStatusText(playbackState)} · ${playbackDetailLabel}`
+      ? `“${playbackScriptLabel}”操作 - ${playbackStatusDetail}`
+      : playbackStatusDetail
     : fallbackStatusText
+
+  useEffect(() => {
+    if (playbackState.status !== "running") return
+    const intervalId = window.setInterval(() => setElapsedNow(Date.now()), 1000)
+    return () => window.clearInterval(intervalId)
+  }, [playbackState.startedAt, playbackState.status])
 
   useEffect(() => {
     if (!copiedErrorKey) return
@@ -126,8 +148,8 @@ export function BrowserPlaybackControl({
   }, [playbackErrorKey, playbackErrorMessage])
 
   return (
-    <div className={'w-full'}>
-      <div className={'w-full'}>
+    <div className={"w-full"}>
+      <div className={"w-full"}>
         {showPlaybackError ? (
           <div
             className="flex min-w-0 items-center gap-1 overflow-hidden text-[10px] leading-none text-destructive"
@@ -170,49 +192,81 @@ export function BrowserPlaybackControl({
         ) : null}
       </div>
 
-      <div className={'flex justify-between'}>
+      <div className={"flex justify-between"}>
         <div className="flex min-w-0 flex-1 flex-col justify-center gap-1 overflow-hidden">
           <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
             <span className={cn("size-2 shrink-0 rounded-full", statusDotClassName)} />
-            <span
-              className={cn(
-                "truncate text-[11px] text-foreground",
-                playbackModeActive ? "max-w-[320px]" : "max-w-full"
-              )}
-              title={statusLine}
-            >
-              {statusLine}
-            </span>
+            {playbackHasOutput && playbackModeActive && playbackScriptLabel ? (
+              <span
+                className="flex min-w-0 items-center text-[11px] text-foreground"
+                title={statusLine}
+              >
+                <span className="min-w-0 max-w-[140px] truncate">“{playbackScriptLabel}”操作</span>
+                <span className="shrink-0">{` - ${playbackStatusDetail}`}</span>
+              </span>
+            ) : (
+              <span className="truncate text-[11px] text-foreground" title={statusLine}>
+                {statusLine}
+              </span>
+            )}
           </div>
         </div>
 
         {playbackModeActive && playbackStatusActive ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            className="h-8 rounded-md px-2.5 text-[11px] text-muted-foreground hover:text-foreground"
-            disabled={isCancellingPlayback}
-            onClick={onCancelPlayback}
-          >
-            {isCancellingPlayback ? (
-              <Loader2 className="size-3 animate-spin" strokeWidth={1.8} />
-            ) : (
-              <Square className="size-3 text-red-500" strokeWidth={1.8} />
-            )}
-            {isCancellingPlayback ? "终止中..." : "终止回放"}
-          </Button>
+          <div className="flex shrink-0 items-center">
+            {onOpenScriptDetail ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="h-8 rounded-md px-2.5 text-[11px] text-muted-foreground hover:text-foreground"
+                onClick={onOpenScriptDetail}
+              >
+                <FileCode2 className="size-3" strokeWidth={1.8} />
+                查看详情
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="h-8 rounded-md px-2.5 text-[11px] text-muted-foreground hover:text-foreground"
+              disabled={isCancellingPlayback}
+              onClick={onCancelPlayback}
+            >
+              {isCancellingPlayback ? (
+                <Loader2 className="size-3 animate-spin" strokeWidth={1.8} />
+              ) : (
+                <Square className="size-3 text-red-500" strokeWidth={1.8} />
+              )}
+              {isCancellingPlayback ? "终止中..." : "终止回放"}
+            </Button>
+          </div>
         ) : playbackModeActive ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            className="h-8 rounded-md px-2.5 text-[11px] text-muted-foreground hover:text-foreground"
-            onClick={onExitPlaybackMode}
-          >
-            <ArrowLeft className="size-3" strokeWidth={1.8} />
-            返回
-          </Button>
+          <div className="flex shrink-0 items-center">
+            {onOpenScriptDetail ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="h-8 rounded-md px-2.5 text-[11px] text-muted-foreground hover:text-foreground"
+                onClick={onOpenScriptDetail}
+              >
+                <FileCode2 className="size-3" strokeWidth={1.8} />
+                查看详情
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="h-8 rounded-md px-2.5 text-[11px] text-muted-foreground hover:text-foreground"
+              onClick={onExitPlaybackMode}
+            >
+              <ArrowLeft className="size-3" strokeWidth={1.8} />
+              返回
+            </Button>
+          </div>
         ) : null}
       </div>
     </div>

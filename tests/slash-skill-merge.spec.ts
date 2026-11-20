@@ -36,7 +36,8 @@ function run(): void {
     id: "plugin:demo/same-name",
     name: "same-name",
     source: "user",
-    pluginId: "demo"
+    pluginId: "demo",
+    isProjectModePlugin: true
   })
 
   const withDisabledLocal = mergeChatSkills(
@@ -70,7 +71,8 @@ function run(): void {
     id: "plugin:other/same-name",
     name: "same-name",
     source: "user",
-    pluginId: "other"
+    pluginId: "other",
+    isProjectModePlugin: true
   })
   const sameNameAcrossPlugins = mergeChatSkills(
     [],

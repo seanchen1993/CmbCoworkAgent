@@ -1,0 +1,797 @@
+import assert from "node:assert/strict"
+import { WebSocketServer, type WebSocket } from "ws"
+import type { RemoteImEventV1 } from "../src/shared/im-gateway-contract"
+import { ImGatewayWsClient } from "../src/main/services/im/gateway-ws-client"
+import {
+  isImGatewayUrlAllowed,
+  normalizeImGatewayUrlOverride
+} from "../src/main/services/im/gateway-url"
+import type { ImEventRecord } from "../src/main/services/im/event-store"
+
+interface Envelope {
+  schemaVersion: number
+  type: string
+  commandId?: string
+  payload: Record<string, unknown>
+}
+
+async function waitFor(predicate: () => boolean, label: string, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${label}`)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+}
+
+function base64UrlJson(value: Record<string, unknown>): string {
+  return Buffer.from(JSON.stringify(value), "utf8")
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+}
+
+function unsignedJwt(expiresAtMs: number): string {
+  return `${base64UrlJson({ alg: "none", typ: "JWT" })}.${base64UrlJson({
+    exp: Math.floor(expiresAtMs / 1_000)
+  })}.signature`
+}
+
+async function main(): Promise<void> {
+  assert.equal(
+    normalizeImGatewayUrlOverride("  wss://gateway.example.com/ws/desktop  "),
+    "wss://gateway.example.com/ws/desktop"
+  )
+  assert.equal(normalizeImGatewayUrlOverride(null), null)
+  assert.equal(isImGatewayUrlAllowed("ws://localhost:8080/ws/desktop"), true)
+  assert.equal(isImGatewayUrlAllowed("ws://10.0.0.8/ws/desktop"), false)
+  assert.equal(isImGatewayUrlAllowed("wss://user:secret@gateway.example.com/ws/desktop"), false)
+  assert.throws(() => normalizeImGatewayUrlOverride("https://gateway.example.com/ws/desktop"))
+  assert.throws(() => normalizeImGatewayUrlOverride("wss://gateway.example.com/ws#token"))
+
+  const insecureRemoteClient = new ImGatewayWsClient({
+    url: () => "ws://10.0.0.8/ws",
+    token: () => "token",
+    appVersion: "test",
+    onRemoteEvent: () => undefined
+  })
+  insecureRemoteClient.start()
+  assert.equal(insecureRemoteClient.getStatus().connectionState, "error")
+  assert(insecureRemoteClient.getStatus().lastError?.includes("必须使用 WSS"))
+  insecureRemoteClient.stop()
+
+  const server = new WebSocketServer({
+    host: "127.0.0.1",
+    port: 0,
+    verifyClient: (info, done) => {
+      const token = String(info.req.headers.authorization ?? "")
+      if (token.startsWith("Bearer expired-token")) {
+        done(false, 401, "Unauthorized")
+        return
+      }
+      done(true)
+    }
+  })
+  await new Promise<void>((resolve, reject) => {
+    server.once("listening", resolve)
+    server.once("error", reject)
+  })
+  const address = server.address()
+  assert(address && typeof address === "object")
+
+  let socket: WebSocket | null = null
+  let authorization = ""
+  const receivedTypes: string[] = []
+  const remoteEvents: RemoteImEventV1[] = []
+  const revokedEventIds: string[] = []
+  let routesReconciledBeforeOnline = false
+  let confirmedProactiveRoute: string | null = null
+  let mismatchNextPermit = false
+  let missingRobotHelloCount = 0
+  const cardFrames: string[] = []
+  const receiptAcks: string[] = []
+  let receiptSocket: WebSocket | null = null
+  let defaultRouteExtensionHelloCount = 0
+  let markdownExtensionHelloCount = 0
+  let markdownTokenHelloCount = 0
+  let offerMarkdown = true
+  const replyTypes: unknown[] = []
+  server.on("connection", (connected, request) => {
+    socket = connected
+    const connectionAuthorization = String(request.headers.authorization ?? "")
+    if (connectionAuthorization === "Bearer receipt-token") receiptSocket = connected
+    authorization = connectionAuthorization
+    connected.on("message", (raw) => {
+      const envelope = JSON.parse(String(raw)) as Envelope
+      receivedTypes.push(envelope.type)
+      if (envelope.type === "HELLO") {
+        const protocolExtensions = Array.isArray(envelope.payload.protocolExtensions)
+          ? envelope.payload.protocolExtensions
+          : []
+        if (protocolExtensions.includes("sync-default-route-v1")) {
+          defaultRouteExtensionHelloCount += 1
+        }
+        if (protocolExtensions.includes("markdown-reply-v1")) {
+          markdownExtensionHelloCount += 1
+        }
+        if (connectionAuthorization === "Bearer markdown-token") markdownTokenHelloCount += 1
+        if (connectionAuthorization === "Bearer missing-robot-token") {
+          missingRobotHelloCount += 1
+          connected.send(
+            JSON.stringify({
+              schemaVersion: 1,
+              type: "ERROR",
+              commandId: envelope.commandId,
+              sentAt: new Date().toISOString(),
+              payload: { reasonCode: "ROBOT_OPEN_ID_NOT_CONFIGURED" }
+            })
+          )
+          connected.close(1008, "robot OpenID is not configured")
+          return
+        }
+        connected.send(
+          JSON.stringify({
+            schemaVersion: 1,
+            type: "WELCOME",
+            commandId: envelope.commandId,
+            sentAt: new Date().toISOString(),
+            payload: {
+              sessionId: "session-1",
+              principalId: "opaque-principal",
+              serverTime: new Date().toISOString(),
+              heartbeatIntervalSeconds: 60,
+              // Only a gateway with markdown answers the extension; every other
+              // WELCOME here is the released shape, with no such key at all.
+              ...(connectionAuthorization === "Bearer markdown-token" && offerMarkdown
+                ? { protocolExtensions: ["markdown-reply-v1"] }
+                : connectionAuthorization === "Bearer malformed-extension-token"
+                  ? { protocolExtensions: "markdown-reply-v1" }
+                  : {})
+            }
+          })
+        )
+      } else if (envelope.type === "SYNC_REQUEST") {
+        connected.send(
+          JSON.stringify({
+            schemaVersion: 1,
+            type: "SYNC_STATE",
+            commandId: envelope.commandId,
+            sentAt: new Date().toISOString(),
+            payload: {
+              ...(connectionAuthorization === "Bearer legacy-ambiguous-token"
+                ? {}
+                : { defaultConversationKey: "conversation-remote" }),
+              routes: [
+                {
+                  principalId: "opaque-principal",
+                  conversationKey: "conversation-remote",
+                  state: "active"
+                },
+                {
+                  principalId: "opaque-principal",
+                  conversationKey: "conversation-historical",
+                  state: "active"
+                }
+              ]
+            }
+          })
+        )
+      } else if (envelope.type === "EXECUTION_PERMIT_ACQUIRE") {
+        connected.send(
+          JSON.stringify({
+            schemaVersion: 1,
+            type: "PERMIT_RESULT",
+            commandId: envelope.commandId,
+            sentAt: new Date().toISOString(),
+            payload: {
+              eventId: mismatchNextPermit ? "wrong-event-id" : envelope.payload.eventId,
+              status: "GRANTED",
+              leaseId: "renewed-lease",
+              expiresAt: new Date(Date.now() + 60_000).toISOString()
+            }
+          })
+        )
+      } else if (envelope.type === "CARD_SEND" && connectionAuthorization === "Bearer card-token") {
+        cardFrames.push("CARD_SEND")
+        const commandId = envelope.commandId
+        // Held open so an update can be issued while the send is in flight.
+        setTimeout(() => {
+          connected.send(
+            JSON.stringify({
+              schemaVersion: 1,
+              type: "CARD_ACCEPTED",
+              commandId,
+              sentAt: new Date().toISOString(),
+              payload: { interactionId: "interaction-1", state: "ACCEPTED" }
+            })
+          )
+        }, 150)
+      } else if (envelope.type === "CARD_RECEIPT_ACK") {
+        receiptAcks.push(String(envelope.payload.receiptId ?? ""))
+      } else if (envelope.type === "CARD_UPDATE") {
+        cardFrames.push("CARD_UPDATE")
+        connected.send(
+          JSON.stringify({
+            schemaVersion: 1,
+            type: "CARD_ACCEPTED",
+            commandId: envelope.commandId,
+            sentAt: new Date().toISOString(),
+            payload: { interactionId: "interaction-1", state: "ACCEPTED" }
+          })
+        )
+      } else if (envelope.type === "CARD_SEND") {
+        // A gateway built before cards fails WsMessageType.valueOf and answers
+        // with an unknown-type rejection rather than CARD_ACCEPTED.
+        connected.send(
+          JSON.stringify({
+            schemaVersion: 1,
+            type: "ERROR",
+            commandId: envelope.commandId,
+            sentAt: new Date().toISOString(),
+            payload: { reasonCode: "INVALID_PAYLOAD", message: "Unknown message type" }
+          })
+        )
+      } else if (envelope.type === "REMOTE_REPLY") {
+        replyTypes.push((envelope.payload.message as Record<string, unknown>).type)
+        const segment = envelope.payload.segment as Record<string, unknown>
+        connected.send(
+          JSON.stringify({
+            schemaVersion: 1,
+            type: "REPLY_ACCEPTED",
+            commandId: envelope.commandId,
+            sentAt: new Date().toISOString(),
+            payload: {
+              deliveryId: envelope.payload.deliveryId,
+              idempotencyKey: envelope.payload.idempotencyKey,
+              segmentIndex: segment.index,
+              state: "ACCEPTED",
+              platformReplyId: "platform-reply-1"
+            }
+          })
+        )
+      }
+    })
+  })
+
+  const client = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws`,
+    token: () => "identity-token-do-not-log",
+    appVersion: "test",
+    onRemoteEvent: (event) => {
+      confirmedProactiveRoute = event.conversationKey
+      remoteEvents.push(event)
+    },
+    onLeaseRevoked: (payload) => {
+      if (typeof payload.eventId === "string") revokedEventIds.push(payload.eventId)
+    },
+    onRoutesSynchronized: (routes, principalId, defaultConversationKey) => {
+      assert.equal(client.getStatus().connectionState, "connecting")
+      assert.equal(principalId, "opaque-principal")
+      assert.equal(defaultConversationKey, "conversation-remote")
+      assert.equal(routes.length, 2)
+      confirmedProactiveRoute = defaultConversationKey
+      routesReconciledBeforeOnline = true
+    },
+    isProactiveRouteConfirmed: (conversationKey, principalId) =>
+      principalId === "opaque-principal" && conversationKey === confirmedProactiveRoute
+  })
+  client.start()
+  await waitFor(() => client.isAuthenticated(), "authenticated WSS")
+  assert.equal(authorization, "Bearer identity-token-do-not-log")
+  assert.equal(client.getStatus().lastHandshakeStatus, 101)
+  assert(receivedTypes.includes("HELLO"))
+  assert.equal(defaultRouteExtensionHelloCount, 1)
+  // Asked for on every connection; a WELCOME that does not answer it — every
+  // gateway released before markdown — leaves the desktop on text.
+  assert.equal(markdownExtensionHelloCount, 1)
+  assert.equal(client.supportsMarkdownReplies(), false)
+  await waitFor(() => client.getStatus().routes.length === 2, "route sync")
+  assert.equal(client.getStatus().principalId, "opaque-principal")
+  assert.equal(client.getStatus().routes[0].principalId, "opaque-principal")
+  assert.equal(client.getStatus().routes[0].state, "active")
+  assert.equal(routesReconciledBeforeOnline, true)
+  const defaultRouteReply = await client.submitReply({
+    schemaVersion: 1,
+    deliveryId: "delivery-after-default-route-confirmation",
+    conversationKey: "conversation-remote",
+    idempotencyKey: "delivery-after-default-route-confirmation:reply:0",
+    segment: { index: 0, count: 1 },
+    message: { type: "text", content: "route confirmed by gateway sync" }
+  })
+  assert.equal(defaultRouteReply.platformReplyId, "platform-reply-1")
+
+  const event: RemoteImEventV1 = {
+    schemaVersion: 1,
+    eventId: "event-ws-1",
+    platformMessageId: "platform-ws-1",
+    principalId: "opaque-principal",
+    conversationKey: "conversation-remote",
+    conversationSeq: 1,
+    message: { type: "text", text: "hello" },
+    occurredAt: new Date().toISOString(),
+    lease: { id: "lease-original", expiresAt: new Date(Date.now() + 60_000).toISOString() }
+  }
+  socket!.send(
+    JSON.stringify({
+      schemaVersion: 1,
+      type: "REMOTE_EVENT",
+      messageId: "push-event-ws-1",
+      sentAt: new Date().toISOString(),
+      payload: { event }
+    })
+  )
+  await waitFor(() => remoteEvents.length === 1, "remote event")
+
+  const persistedEvent: ImEventRecord = {
+    eventId: event.eventId,
+    platformMessageId: event.platformMessageId,
+    conversationKey: event.conversationKey,
+    conversationSeq: event.conversationSeq,
+    principalId: event.principalId,
+    leaseId: event.lease.id,
+    leaseExpiresAt: Date.parse(event.lease.expiresAt),
+    permitState: "unacquired",
+    permitExpiresAt: null,
+    messageText: event.message.text,
+    occurredAt: Date.parse(event.occurredAt),
+    targetSnapshot: null,
+    state: "queued",
+    runId: null,
+    retryOfEventId: null,
+    resultText: null,
+    reasonCode: null,
+    retryable: null,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    acceptedAt: Date.now(),
+    executionStartedAt: null,
+    finishedAt: null
+  }
+  const permit = await client.acquireExecutionPermit(persistedEvent)
+  assert.equal(permit.status, "granted")
+  assert.equal(permit.leaseId, "renewed-lease")
+
+  const reply = await client.submitReply({
+    schemaVersion: 1,
+    deliveryId: "delivery-ws-1",
+    eventId: event.eventId,
+    conversationKey: event.conversationKey,
+    idempotencyKey: "delivery-ws-1:reply:0",
+    segment: { index: 0, count: 1 },
+    message: { type: "text", content: "done" }
+  })
+  assert.equal(reply.platformReplyId, "platform-reply-1")
+
+  const proactiveReply = await client.submitReply({
+    schemaVersion: 1,
+    deliveryId: "delivery-after-route-confirmation",
+    conversationKey: event.conversationKey,
+    idempotencyKey: "delivery-after-route-confirmation:reply:0",
+    segment: { index: 0, count: 1 },
+    message: { type: "text", content: "route confirmed by inbound event" }
+  })
+  assert.equal(proactiveReply.platformReplyId, "platform-reply-1")
+
+  socket!.send(
+    JSON.stringify({
+      schemaVersion: 1,
+      type: "LEASE_REVOKED",
+      messageId: "push-lease-revoked-1",
+      sentAt: new Date().toISOString(),
+      payload: { eventId: event.eventId, reasonCode: "LEASE_REVOKED" }
+    })
+  )
+  await waitFor(() => revokedEventIds.length === 1, "lease revocation")
+
+  mismatchNextPermit = true
+  await assert.rejects(
+    client.acquireExecutionPermit({ ...persistedEvent, eventId: "event-ws-mismatched-result" }),
+    /连接已中断/
+  )
+
+  await waitFor(() => client.isAuthenticated(), "automatic reconnect after transport failure")
+  const helloCountBeforeSupersede = receivedTypes.filter((type) => type === "HELLO").length
+  socket!.send(
+    JSON.stringify({
+      schemaVersion: 1,
+      type: "ERROR",
+      sentAt: new Date().toISOString(),
+      payload: { reasonCode: "SESSION_SUPERSEDED" }
+    })
+  )
+  await waitFor(
+    () =>
+      client.getStatus().connectionState === "error" &&
+      client.getStatus().lastError?.includes("新的桌面连接") === true,
+    "superseded session fence"
+  )
+  await waitFor(() => client.getStatus().lastCloseCode === 4001, "superseded close diagnostics")
+  await new Promise((resolve) => setTimeout(resolve, 1_200))
+  assert.equal(
+    receivedTypes.filter((type) => type === "HELLO").length,
+    helloCountBeforeSupersede,
+    "superseded desktop must not reconnect automatically"
+  )
+
+  client.stop()
+
+  let legacyDefaultConversationKey: string | null | undefined
+  const legacyAmbiguousClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws`,
+    token: () => "legacy-ambiguous-token",
+    appVersion: "test",
+    onRemoteEvent: () => undefined,
+    onRoutesSynchronized: (_routes, _principalId, defaultConversationKey) => {
+      legacyDefaultConversationKey = defaultConversationKey
+    },
+    isProactiveRouteConfirmed: () => false
+  })
+  legacyAmbiguousClient.start()
+  await waitFor(() => legacyAmbiguousClient.getStatus().routes.length === 2, "legacy route sync")
+  assert.equal(legacyDefaultConversationKey, null)
+  await assert.rejects(
+    legacyAmbiguousClient.submitReply({
+      schemaVersion: 1,
+      deliveryId: "delivery-legacy-ambiguous-route",
+      conversationKey: "conversation-remote",
+      idempotencyKey: "delivery-legacy-ambiguous-route:reply:0",
+      segment: { index: 0, count: 1 },
+      message: { type: "text", content: "must remain fail closed" }
+    }),
+    /同步会话路由/
+  )
+  legacyAmbiguousClient.stop()
+
+  const nearExpiryToken = unsignedJwt(Date.now() + 90_000)
+  let nearExpiryRefreshCount = 0
+  const nearExpiryClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws`,
+    token: () => nearExpiryToken,
+    appVersion: "test",
+    onAuthenticationRequired: async () => {
+      nearExpiryRefreshCount += 1
+      return false
+    },
+    onRemoteEvent: () => undefined
+  })
+  nearExpiryClient.start()
+  await waitFor(() => nearExpiryClient.isAuthenticated(), "valid near-expiry JWT handshake")
+  assert.equal(nearExpiryRefreshCount, 0)
+  assert.equal(authorization, `Bearer ${nearExpiryToken}`)
+  nearExpiryClient.stop()
+
+  let preflightToken = unsignedJwt(Date.now() - 60_000)
+  let preflightRefreshCount = 0
+  const preflightRefreshingClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws`,
+    token: () => preflightToken,
+    appVersion: "test",
+    onAuthenticationRequired: async () => {
+      preflightRefreshCount += 1
+      preflightToken = "preflight-refreshed-token"
+      return true
+    },
+    onRemoteEvent: () => undefined
+  })
+  preflightRefreshingClient.start()
+  await waitFor(
+    () => preflightRefreshingClient.isAuthenticated(),
+    "authentication refresh before expired JWT handshake"
+  )
+  assert.equal(preflightRefreshCount, 1)
+  assert.equal(authorization, "Bearer preflight-refreshed-token")
+  preflightRefreshingClient.stop()
+
+  let refreshingToken = "expired-token"
+  let authenticationRefreshCount = 0
+  const refreshingClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws`,
+    token: () => refreshingToken,
+    appVersion: "test",
+    onAuthenticationRequired: async () => {
+      authenticationRefreshCount += 1
+      refreshingToken = `refreshed-token-${authenticationRefreshCount}`
+      return true
+    },
+    onRemoteEvent: () => undefined
+  })
+  refreshingClient.start()
+  await waitFor(() => refreshingClient.isAuthenticated(), "authentication refresh after 401")
+  assert.equal(authenticationRefreshCount, 1)
+  assert.equal(authorization, "Bearer refreshed-token-1")
+
+  socket!.send(
+    JSON.stringify({
+      schemaVersion: 1,
+      type: "ERROR",
+      sentAt: new Date().toISOString(),
+      payload: { reasonCode: "AUTH_REQUIRED" }
+    })
+  )
+  await waitFor(() => authenticationRefreshCount === 2, "AUTH_REQUIRED refresh callback")
+  await waitFor(
+    () => refreshingClient.isAuthenticated() && authorization === "Bearer refreshed-token-2",
+    "authentication refresh after session expiry"
+  )
+  refreshingClient.stop()
+
+  let transientRefreshToken = "expired-token-transient-refresh"
+  let transientRefreshCount = 0
+  const transientRefreshClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws`,
+    token: () => transientRefreshToken,
+    appVersion: "test",
+    onAuthenticationRequired: async () => {
+      transientRefreshCount += 1
+      if (transientRefreshCount === 1) return false
+      transientRefreshToken = "recovered-after-transient-refresh-failure"
+      return true
+    },
+    onRemoteEvent: () => undefined
+  })
+  transientRefreshClient.start()
+  await waitFor(
+    () => transientRefreshCount === 1 && transientRefreshClient.getStatus().lastError !== null,
+    "automatic authentication refresh retry scheduling"
+  )
+  assert.equal(transientRefreshClient.getStatus().authenticationFailed, false)
+  assert.match(transientRefreshClient.getStatus().lastError ?? "", /自动重试/)
+  await waitFor(
+    () => transientRefreshClient.isAuthenticated(),
+    "authentication recovery after a transient refresh failure",
+    4_000
+  )
+  assert.equal(transientRefreshCount, 2)
+  assert.equal(authorization, "Bearer recovered-after-transient-refresh-failure")
+  transientRefreshClient.stop()
+
+  const missingRobotClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws`,
+    token: () => "missing-robot-token",
+    appVersion: "test",
+    onRemoteEvent: () => undefined
+  })
+  missingRobotClient.start()
+  await waitFor(
+    () => missingRobotClient.getStatus().lastError?.includes("机器人 OpenID") === true,
+    "missing robot OpenID diagnostic"
+  )
+  await new Promise((resolve) => setTimeout(resolve, 1_200))
+  assert.equal(missingRobotHelloCount, 1, "gateway configuration errors must not reconnect-loop")
+  missingRobotClient.stop()
+
+  // UAT runs a gateway that predates cards. A card must degrade there without
+  // stalling: the approval it decorates has already been published as text with
+  // a working short code, and waiting out a 15s command timeout for every
+  // notification would be a regression the old path never had.
+  const legacyGatewayClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws`,
+    token: () => "token",
+    appVersion: "test",
+    onRemoteEvent: () => undefined
+  })
+  legacyGatewayClient.start()
+  await waitFor(() => legacyGatewayClient.isAuthenticated(), "legacy gateway session")
+  const startedAt = Date.now()
+  const cardResult = await legacyGatewayClient.sendCard({
+    schemaVersion: 1,
+    interactionId: "interaction-legacy",
+    conversationKey: "conversation-1",
+    idempotencyKey: "idem-legacy",
+    tag: "L".repeat(32),
+    kind: "approval",
+    content: [{ type: "title", content: "需要批准" }]
+  })
+  assert.equal(cardResult.state, "rejected")
+  assert.equal(cardResult.reasonCode, "INVALID_PAYLOAD")
+  assert(
+    Date.now() - startedAt < 3_000,
+    "an old gateway must reject a card immediately, not through the command timeout"
+  )
+  legacyGatewayClient.stop()
+
+  // A gate can be decided on the desktop while its card is still being sent.
+  // The update used to be refused as a command already in flight and dropped
+  // with nothing left to retry, leaving a decided request showing live buttons.
+  const overlappingClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws`,
+    token: () => "card-token",
+    appVersion: "test",
+    onRemoteEvent: () => undefined
+  })
+  overlappingClient.start()
+  await waitFor(() => overlappingClient.isAuthenticated(), "card session")
+  const sending = overlappingClient.sendCard({
+    schemaVersion: 1,
+    interactionId: "interaction-1",
+    conversationKey: "conversation-1",
+    idempotencyKey: "idem-card-1",
+    tag: "O".repeat(32),
+    kind: "approval",
+    content: [{ type: "title", content: "需要批准" }]
+  })
+  const updating = overlappingClient.updateCard({
+    schemaVersion: 1,
+    interactionId: "interaction-1",
+    cardVersion: 2,
+    content: [{ type: "title", content: "已在桌面处理" }]
+  })
+  assert.deepEqual(await sending, { state: "accepted" })
+  assert.deepEqual(
+    await updating,
+    { state: "accepted" },
+    "an update issued during the send must be queued behind it, not refused"
+  )
+  assert.deepEqual(
+    cardFrames,
+    ["CARD_SEND", "CARD_UPDATE"],
+    "the update must reach the gateway, and only after the send"
+  )
+  overlappingClient.stop()
+
+  // A receipt this desktop cannot parse is permanent: the same bytes will not
+  // become readable, and the gateway redelivers without a cap. Acknowledging it
+  // is what stops a desktop one version behind a new card kind from retrying
+  // the same frame every five minutes forever.
+  const receiptClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws/desktop`,
+    token: () => "receipt-token",
+    appVersion: "test",
+    onRemoteEvent: () => undefined,
+    onCardReceipt: async () => {
+      handledReceipts += 1
+    }
+  })
+  let handledReceipts = 0
+  receiptClient.start()
+  await waitFor(
+    () => receiptClient.getStatus().connectionState === "online",
+    "the receipt client to come online"
+  )
+  assert(receiptSocket, "the receipt client must have a server-side socket")
+  const pushReceipt = (receipt: Record<string, unknown>): void => {
+    receiptSocket?.send(
+      JSON.stringify({
+        schemaVersion: 1,
+        type: "CARD_RECEIPT",
+        messageId: `msg-${receiptAcks.length}-${Math.random()}`,
+        sentAt: new Date().toISOString(),
+        payload: { receipt }
+      })
+    )
+  }
+
+  // A kind this desktop does not know is NOT unreadable: it only chooses the
+  // wording of a closing card, so the click is still applied. This is the
+  // property that keeps a desktop one version behind a new card kind working,
+  // and it is pinned here because the discard path below looks like a place
+  // someone would later "tidy" it into.
+  pushReceipt({
+    schemaVersion: 1,
+    receiptId: "receipt-future-kind",
+    interactionId: "interaction-0",
+    tag: "tag-0",
+    kind: "a_kind_from_the_future",
+    principalId: "opaque-principal",
+    conversationKey: "conversation-1",
+    feedback: [],
+    occurredAt: new Date().toISOString()
+  })
+  await waitFor(() => handledReceipts === 1, "the unknown-kind receipt to be routed")
+  assert(
+    !receiptAcks.includes("receipt-future-kind"),
+    "an unknown kind must be routed and answered, never discarded"
+  )
+
+  // Structurally invalid is the permanent case: a receipt with no tag cannot be
+  // matched to a card by any version, so redelivering it only burns a delivery
+  // slot every five minutes for the life of the row.
+  pushReceipt({
+    schemaVersion: 1,
+    receiptId: "receipt-unreadable",
+    interactionId: "interaction-1",
+    principalId: "opaque-principal",
+    conversationKey: "conversation-1",
+    feedback: [],
+    occurredAt: new Date().toISOString()
+  })
+  await waitFor(() => receiptAcks.includes("receipt-unreadable"), "the unreadable receipt ack")
+  assert.equal(handledReceipts, 1, "an unreadable receipt must never reach the router")
+
+  // Someone else's receipt is a different case: not ours to retire, and the
+  // gateway would refuse the acknowledgement anyway. It must be left to be
+  // redelivered to the desktop it belongs to.
+  pushReceipt({
+    schemaVersion: 1,
+    receiptId: "receipt-not-ours",
+    interactionId: "interaction-2",
+    tag: "tag-2",
+    kind: "approval",
+    principalId: "somebody-else",
+    conversationKey: "conversation-1",
+    feedback: [],
+    occurredAt: new Date().toISOString()
+  })
+  // A readable receipt after it proves the connection is still carrying frames,
+  // so the absence of the ack above is a decision and not a dropped socket.
+  pushReceipt({
+    schemaVersion: 1,
+    receiptId: "receipt-ours",
+    interactionId: "interaction-3",
+    tag: "tag-3",
+    kind: "approval",
+    principalId: "opaque-principal",
+    conversationKey: "conversation-1",
+    feedback: [],
+    occurredAt: new Date().toISOString()
+  })
+  await waitFor(() => handledReceipts === 2, "the readable receipt to be routed")
+  assert(
+    !receiptAcks.includes("receipt-not-ours"),
+    "a receipt for another principal must not be acknowledged away"
+  )
+  assert.equal(
+    receiptClient.getStatus().connectionState,
+    "online",
+    "neither receipt may drop the session"
+  )
+  receiptClient.stop()
+
+  // A gateway that answers markdown-reply-v1 lets the desktop send markdown on
+  // that connection, and only that one: restarted with the switch off, it
+  // stops answering, and the very next connection is back to text.
+  const markdownClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws/desktop`,
+    token: () => "markdown-token",
+    appVersion: "test",
+    onRemoteEvent: () => undefined
+  })
+  markdownClient.start()
+  await waitFor(
+    () => markdownClient.getStatus().connectionState === "online",
+    "the markdown client to come online"
+  )
+  assert.equal(markdownClient.supportsMarkdownReplies(), true)
+  await markdownClient.submitReply({
+    schemaVersion: 1,
+    deliveryId: "delivery-markdown",
+    conversationKey: "conversation-remote",
+    idempotencyKey: "delivery-markdown:reply:0",
+    segment: { index: 0, count: 1 },
+    message: { type: "markdown", content: "## 结论\n\n- 第一" }
+  })
+  assert.equal(replyTypes.at(-1), "markdown")
+  offerMarkdown = false
+  markdownClient.reconnect()
+  await waitFor(
+    () => markdownTokenHelloCount === 2 && markdownClient.getStatus().connectionState === "online",
+    "the markdown client to reconnect"
+  )
+  assert.equal(markdownClient.supportsMarkdownReplies(), false)
+  markdownClient.stop()
+
+  // Not an array of strings: the WELCOME is refused like any other malformed
+  // one, rather than read as a half-answer.
+  const malformedClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws/desktop`,
+    token: () => "malformed-extension-token",
+    appVersion: "test",
+    onRemoteEvent: () => undefined
+  })
+  malformedClient.start()
+  await waitFor(
+    () => malformedClient.getStatus().lastCloseCode === 1007,
+    "the malformed WELCOME to be refused"
+  )
+  assert.equal(malformedClient.isAuthenticated(), false)
+  assert.equal(malformedClient.supportsMarkdownReplies(), false)
+  malformedClient.stop()
+
+  await new Promise<void>((resolve) => server.close(() => resolve()))
+  console.log("im-gateway-ws-client.spec.ts passed")
+}
+
+main().catch((error) => {
+  console.error(error)
+  process.exitCode = 1
+})

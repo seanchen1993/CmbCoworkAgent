@@ -1,9 +1,12 @@
+import { isModelAvailable } from "../../shared/model-catalog"
+import { getModelClientOptions } from "../models/connection"
 import { HumanMessage, SystemMessage } from "@langchain/core/messages"
 import { ChatOpenAI } from "@langchain/openai"
 import { sanitizeMcpExampleValue } from "../mcp/tool-example-store"
 import type { CustomModelConfig } from "../storage"
 import { getDefaultModelConfig, getModelConfigByRef } from "../models/registry"
 import type { CodeExecMcpCall } from "./types"
+import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 
 const MAX_SAVED_TOOL_METADATA_ERROR_LENGTH = 100
 const SAVED_TOOL_REWRITE_SYSTEM_PROMPT = `
@@ -290,7 +293,7 @@ export async function generateSavedToolRewrite(input: {
   mcpCalls: CodeExecMcpCall[]
 }): Promise<SavedToolRewriteResult> {
   const config = resolveSidecarModelConfig(input.modelId)
-  if (!config?.apiKey) {
+  if (!isModelAvailable(config)) {
     const error = "缺少可用于工具改写的模型配置或 API Key"
     return { rewrite: null, error }
   }
@@ -298,12 +301,11 @@ export async function generateSavedToolRewrite(input: {
   const model = new ChatOpenAI({
     model: config.model,
     apiKey: config.apiKey,
-    configuration: { baseURL: config.baseUrl },
+    ...getModelClientOptions(config),
     maxTokens: config.maxOutputTokens,
-    temperature: config.temperature,
-    topP: config.topP,
+    ...samplingFields(config.model, { temperature: config.temperature, topP: config.topP }),
     modelKwargs: {
-      ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+      ...topKModelKwargs(config.model, config.topK)
     },
     streaming: false
   })

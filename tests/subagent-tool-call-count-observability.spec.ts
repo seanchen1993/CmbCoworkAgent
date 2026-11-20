@@ -31,28 +31,17 @@ function assertNotIncludes(source: string, unexpected: string, message: string):
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const runtimeSource = readFileSync(join(__dirname, "../src/main/agent/runtime.ts"), "utf8")
-const workflowSubagentSource = readFileSync(
-  join(__dirname, "../src/main/agent/workflow/subagent.ts"),
-  "utf8"
+const readSource = (relativePath: string): string =>
+  readFileSync(join(__dirname, relativePath), "utf8").replace(/\r\n/g, "\n")
+const runtimeSource = readSource("../src/main/agent/runtime.ts")
+const workflowSubagentSource = readSource("../src/main/agent/workflow/subagent.ts")
+const traceCollectorSource = readSource("../src/main/agent/trace/collector.ts")
+const soloTaskTraceSource = readSource("../src/main/agent/trace/solo-task.ts")
+const agentIpcSource = readSource("../src/main/ipc/agent.ts")
+const chatContainerSource = readSource(
+  "../src/renderer/src/components/chat/ChatContainer.tsx"
 )
-const traceCollectorSource = readFileSync(
-  join(__dirname, "../src/main/agent/trace/collector.ts"),
-  "utf8"
-)
-const soloTaskTraceSource = readFileSync(
-  join(__dirname, "../src/main/agent/trace/solo-task.ts"),
-  "utf8"
-)
-const agentIpcSource = readFileSync(join(__dirname, "../src/main/ipc/agent.ts"), "utf8")
-const chatContainerSource = readFileSync(
-  join(__dirname, "../src/renderer/src/components/chat/ChatContainer.tsx"),
-  "utf8"
-)
-const adoptionTrackerSource = readFileSync(
-  join(__dirname, "../src/main/services/adoption-tracker.ts"),
-  "utf8"
-)
+const adoptionTrackerSource = readSource("../src/main/services/adoption-tracker.ts")
 
 function testCoordinatorWorkerWritesToolCallCount(): void {
   assertIncludes(
@@ -158,6 +147,16 @@ function testSubagentAdoptionAttributionWiring(): void {
     workflowSubagentSource,
     "observeSkillUsageFromStream(",
     "workflow subagent should observe Skill reads from cumulative values snapshots"
+  )
+  assertIncludes(
+    workflowSubagentSource,
+    "new WorkerValuesSnapshotAccumulator(request.prompt",
+    "workflow subagent should keep one values accumulator per attempt"
+  )
+  assertIncludes(
+    workflowSubagentSource,
+    'valuesSnapshotAccumulator.createContext("values", snapshot)',
+    "workflow subagent should reuse its values accumulator across cumulative snapshots"
   )
 }
 
@@ -459,7 +458,7 @@ function testDetachedRuntimeLoopGuardLifecycle(): void {
   )
   assertIncludes(
     runtimeSource,
-    "clearActionStationarityTurn(\n        workerInput.workerThreadId,\n        workerActionStationarityTurnId",
+    "clearActionStationarityTurn(workerInput.workerThreadId, workerActionStationarityTurnId)",
     "background coordinator workers should clean their own loop-guard state"
   )
   assertIncludes(

@@ -2,14 +2,19 @@ import type { DynamicStructuredTool } from "@langchain/core/tools"
 import type { SubAgent } from "deepagents"
 import { tool } from "langchain"
 import { z } from "zod"
+import {
+  resolveAgentModeFromMetadata,
+  type AgentMode
+} from "../../shared/agent-mode-metadata"
 import type {
   CoordinatorWorkerContinuationIntent,
   CoordinatorWorkerRole,
   CoordinatorWorkerSnapshot,
   CoordinatorWorkerWorkload
 } from "./coordinator-worker-manager"
+import { TASK_COMPLETION_AND_REPETITION_PROMPT } from "./system-prompt"
 
-export type AgentMode = "normal" | "coordinator" | "workflow"
+export type { AgentMode } from "../../shared/agent-mode-metadata"
 
 const COORDINATOR_BASE_DIR = ".cmbdevclaw/coordinator"
 const THREAD_ID_PATTERN = /^[A-Za-z0-9_-]+$/
@@ -358,27 +363,42 @@ function isSelectedSkillPromptBlock(block: string): boolean {
 }
 
 export function getAgentModeFromMetadata(metadata: Record<string, unknown>): AgentMode {
-  if (metadata.agentMode === "normal") {
-    return "normal"
+  return resolveAgentModeFromMetadata(metadata)
+}
+
+/**
+ * IPC run requests carry the renderer's last-known mode only as a routing hint.
+ * A different value is stale because persistent mode changes have their own
+ * guarded metadata mutation path.
+ */
+export function resolveCurrentAgentModeRequest(
+  requestedMode: unknown,
+  currentMode: AgentMode
+): AgentMode | undefined {
+  if (
+    (requestedMode === "normal" ||
+      requestedMode === "workflow" ||
+      requestedMode === "coordinator") &&
+    requestedMode === currentMode
+  ) {
+    return requestedMode
   }
-  if (metadata.agentMode === "workflow") {
-    return "workflow"
-  }
-  if (metadata.agentMode === "coordinator" || truthy(metadata.coordinatorMode)) {
-    return "coordinator"
-  }
-  return "normal"
+  return undefined
 }
 
 export function resolveCoordinatorModeRequest(
   message: string,
-  metadata: Record<string, unknown>
+  metadata: Record<string, unknown>,
+  options: { allowForcedRequests?: boolean } = {}
 ): CoordinatorRequest {
   const prefixPattern = /^\s*(?:\[coordinator\]|#coordinator)\s*[:-]?\s*/i
   const hasPrefix = prefixPattern.test(message)
-  const strippedMessage = hasPrefix ? message.replace(prefixPattern, "") : message
+  const allowForcedRequests = options.allowForcedRequests !== false
+  const strippedMessage = hasPrefix && allowForcedRequests
+    ? message.replace(prefixPattern, "")
+    : message
 
-  if (hasPrefix) {
+  if (hasPrefix && allowForcedRequests) {
     return {
       enabled: true,
       message: strippedMessage.trimStart(),
@@ -387,7 +407,7 @@ export function resolveCoordinatorModeRequest(
     }
   }
 
-  if (isCoordinatorModeForcedByEnvironment()) {
+  if (allowForcedRequests && isCoordinatorModeForcedByEnvironment()) {
     return {
       enabled: true,
       message,
@@ -469,6 +489,10 @@ You orchestrate software engineering work across async workers. Your goal is to 
 
 Every message you send is to the user. Worker results and system notifications are internal signals, not conversation partners. Never thank or acknowledge notifications; summarize new information for the user when it matters.
 
+${TASK_COMPLETION_AND_REPETITION_PROMPT}
+
+Coordinator worker launch or continuation is an asynchronous handoff, not a completion claim. Ending the current turn after a successful worker action does not mean the user's request is finished. Continue from task notifications until the whole request passes the required verification or is genuinely blocked.
+
 ## 1. Role
 
 - Answer directly when possible. Do not delegate work that you can complete without tools.
@@ -511,7 +535,7 @@ When calling start_worker:
 - Use workload="verify" for independent verification that may run tests/build/lint. Use workload="write" for file-changing workers. If workload is omitted for an implementer, the compatibility fallback is write, matching Claude Code's general worker capability model; do not rely on this fallback.
 - Only verifier workers may use workload="verify". Verification must stay independent, so do not repurpose an implementer as a verifier by changing only the workload.
 - Never combine role="verifier" with workload="write"; verification must stay independent.
-- read_only workers do not receive direct write_file/edit_file tools, but they DO keep execute + task_output — execute is gated to provably read-only commands (ls, git log/diff/status, find, cat, head, tail; plus build-tool read-only inspection subcommands like npm ls, go list, cargo tree, mvn dependency:tree, gradle dependencies, dotnet list, and any tool's --version/--help; mutating/unknown commands and installs/builds are rejected). So a read_only worker can inspect dependencies — do NOT escalate to a verify/write worker just to read a dependency tree or run an inspection subcommand.
+- read_only workers keep execute and monitor. Direct write_file and edit_file are reserved for workers with write access. Use monitor to wait for a background command to finish. execute is gated to provably read-only commands (ls, git log/diff/status, find, cat, head, tail; plus build-tool read-only inspection subcommands like npm ls, go list, cargo tree, mvn dependency:tree, gradle dependencies, dotnet list, and any tool's --version/--help; mutating/unknown commands and installs/builds are rejected). So a read_only worker can inspect dependencies — do NOT escalate to a verify/write worker just to read a dependency tree or run an inspection subcommand.
 - verify workers can run validation commands, but do not receive direct write_file/edit_file tools and must not intentionally modify workspace files. If a verifier needs a throwaway script or harness, it may write only to /tmp or $TMPDIR and should clean it up.
 - verify workers do not run concurrently with write workers; wait for write task-notifications before launching final verification.
 - write workers receive normal workspace write access subject to the app's usual approval, hook, and policy checks. Do not split overlapping file-changing work across multiple write workers; continue the same implementer when context helps.

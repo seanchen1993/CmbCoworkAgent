@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "deliveryId": "event-invalid-segment-reply",
+  "eventId": "event-invalid-segment",
+  "conversationKey": "conversation-opaque-001",
+  "idempotencyKey": "event-invalid-segment-reply:reply:1",
+  "segment": { "index": 1, "count": 1 },
+  "message": { "type": "text", "content": "index must be lower than count" }
+}

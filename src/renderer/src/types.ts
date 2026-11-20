@@ -66,8 +66,12 @@ export interface ModelConfig {
   model: string
   description?: string
   available: boolean
+  /** Selection is separate from whether a request can be sent right now. */
+  selectable?: boolean
   source: ProviderId
-  origin?: "remote" | "fallback"
+  origin?: "remote" | "fallback" | "local"
+  notice?: string
+  unavailableReason?: string
   maxTokens?: number
   /** Routing tier — absent means premium */
   tier?: "premium" | "economy"
@@ -90,8 +94,6 @@ import type {
   HeartbeatConfig,
   PluginMetadata,
   PluginManifest,
-  ChatXConfig,
-  ChatXRobotConfig,
   LspConfig,
   LspDiagnostic,
   LspLocation,
@@ -141,7 +143,6 @@ import type {
   HarnessHookLogView,
   HarnessNodeStatus,
   HarnessProjectCreateInput,
-  HarnessProjectConstraintSyncResult,
   HarnessKnowledgePreviewFile,
   HarnessKnowledgePreviewResult,
   HarnessProjectReviewInput,
@@ -156,6 +157,8 @@ import type {
   HarnessDynamicWorkflowTemplate,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
+  HarnessBoardCatalogPageInput,
+  HarnessBoardCatalogPageResult,
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
@@ -191,8 +194,6 @@ export type {
   HeartbeatConfig,
   PluginMetadata,
   PluginManifest,
-  ChatXConfig,
-  ChatXRobotConfig,
   LspConfig,
   LspDiagnostic,
   LspLocation,
@@ -238,7 +239,6 @@ export type {
   HarnessHookLogView,
   HarnessNodeStatus,
   HarnessProjectCreateInput,
-  HarnessProjectConstraintSyncResult,
   HarnessKnowledgePreviewFile,
   HarnessKnowledgePreviewResult,
   HarnessProjectReviewInput,
@@ -252,6 +252,8 @@ export type {
   HarnessDynamicWorkflowTemplate,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
+  HarnessBoardCatalogPageInput,
+  HarnessBoardCatalogPageResult,
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
@@ -285,10 +287,27 @@ export type StreamEvent =
 
 export interface Message {
   id: string
+  /** Durable transcript order. Present on messages read from thread_messages pages. */
+  ordinal?: number
+  /** A rendered Goal event occupies the position immediately before its durable anchor. */
+  transcript_anchor_message_id?: string
   provider_source_id?: string
   provider_occurrence?: number
+  /** Renderer-only provenance for Team worker content; absent for partial fragments. */
+  worker_content_source?: "values" | "snapshot"
+  /** Complete tool-call list for this worker message, including a deliberate empty list. */
+  worker_tool_calls_source?: "snapshot"
+  /** This worker identity has appeared in a complete ordered values frame. */
+  worker_snapshot_identity?: boolean
+  /** Absolute position in the producer's complete values frame. */
+  worker_snapshot_index?: number
+  /** The worker identity supplied by the producer, before occurrence inference. */
+  worker_provider_identity?: boolean
+  /** Recent wire IDs observed for this explicitly identified worker reply. */
+  worker_provider_wire_ids?: readonly string[]
   role: "user" | "assistant" | "system" | "tool"
   content: string | ContentBlock[]
+  content_preview_notice?: string
   content_priority?: number
   // A bounded in-flight projection keeps the stream responsive while retaining
   // enough identity to reconcile it with a later lossless snapshot.
@@ -297,6 +316,12 @@ export interface Message {
   // Large transcript fields are persisted out-of-line. The renderer keeps the
   // hydrated value for display and the reference for compact subsequent saves.
   content_ref?: SubagentTranscriptBlobRef
+  /** Renderer-only acknowledgement/journal metadata for live subagent text. */
+  content_persisted_length?: number
+  content_pending_delta?: string
+  content_stream_delta?: string
+  /** Renderer-only full replacement awaiting persistence acknowledgement. */
+  content_stream_snapshot?: boolean
   // Internal transcript aliases used to collapse a provisional subagent
   // assistant row into its stable task-completion row across reloads/replays.
   replaced_message_ids?: string[]
@@ -319,6 +344,10 @@ export interface Message {
   reasoning_is_projection?: boolean
   reasoning_full_length?: number
   reasoning_ref?: SubagentTranscriptBlobRef
+  reasoning_persisted_length?: number
+  reasoning_pending_delta?: string
+  reasoning_stream_delta?: string
+  reasoning_stream_snapshot?: boolean
   tool_calls?: ToolCall[]
   tool_calls_ref?: SubagentTranscriptBlobRef
   // For tool messages - links result to its tool call
@@ -355,6 +384,8 @@ export interface QueuedMessage {
   attachmentModelBlocks?: string
   attachmentDisplayPrefix?: string
   skillBlock?: string
+  skillName?: string
+  skillDescription?: string
   builtinBrowser?: boolean
   modelId?: string
   handoffRequestedAt?: Date
@@ -369,6 +400,9 @@ export interface GoalEvent {
   active_window_id?: string | null
   message: string
   created_at: Date | string | number
+  /** Durable location of the matching Goal turn (or its first runtime message). */
+  transcript_ordinal?: number | null
+  transcript_message_id?: string | null
 }
 
 export interface GoalSnapshot {
@@ -497,6 +531,7 @@ export interface GrepMatch {
 }
 
 export interface SkillMetadata {
+  contentOrigin?: "local" | "market" | "builtin"
   id?: string
   name: string
   description: string
@@ -505,6 +540,8 @@ export interface SkillMetadata {
   relativePath?: string
   pluginId?: string
   pluginName?: string
+  /** True when the owning plugin exposes board_core/board_config.json. */
+  isProjectModePlugin?: boolean
   /** Skill version from SKILL.md frontmatter, defaults to "v1.0.0" */
   version: string
   license?: string | null
@@ -521,3 +558,16 @@ export type {
   HookInjectUserContext,
   HookUserContextField
 } from "../../main/hooks/types"
+export type {
+  BuiltinRobotConnectionState,
+  BuiltinRobotDiagnostics,
+  BuiltinRobotFeatureGrantStatus,
+  BuiltinRobotIdentityState,
+  BuiltinRobotFeatureBindingStatus,
+  BuiltinRobotGrantableFeature,
+  BuiltinRobotRemoteAccessOverview,
+  BuiltinRobotRouteStatus,
+  BuiltinRobotSettings,
+  BuiltinRobotStatus,
+  BuiltinRobotThreadGrantStatus
+} from "../../main/types"

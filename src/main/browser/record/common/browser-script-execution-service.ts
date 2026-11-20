@@ -93,7 +93,14 @@ function getExecutionFileName(input: BrowserScriptExecutionInput): string {
 function createExecutionState(
   input: BrowserScriptExecutionInput,
   status: BrowserScriptExecutionState["status"],
-  options?: { error?: string; startedAt?: string; endedAt?: string; progressPercent?: number }
+  options?: {
+    error?: string
+    startedAt?: string
+    endedAt?: string
+    progressPercent?: number
+    completedSteps?: number
+    totalSteps?: number
+  }
 ): BrowserScriptExecutionState {
   return {
     status,
@@ -103,7 +110,9 @@ function createExecutionState(
     startedAt: options?.startedAt,
     endedAt: options?.endedAt,
     error: options?.error,
-    progressPercent: options?.progressPercent
+    progressPercent: options?.progressPercent,
+    completedSteps: options?.completedSteps,
+    totalSteps: options?.totalSteps
   }
 }
 
@@ -206,16 +215,24 @@ function buildInstrumentedExecutionScript(source: string): { source: string; tot
 
   const pieces: string[] = []
   let cursor = 0
-  for (const [index, statement] of statements.entries()) {
+  let completedStepIndex = 0
+  for (const statement of statements) {
+    const statementSource = source.slice(statement.start, statement.end)
     pieces.push(source.slice(cursor, statement.end))
-    pieces.push(`\nawait __updatePlaybackProgress(${index + 1});`)
+    const isPlaybackStep =
+      statement.type !== "VariableDeclaration" ||
+      /\b(?:page|browser|context)\s*(?:\.|\[)/u.test(statementSource)
+    if (isPlaybackStep) {
+      completedStepIndex += 1
+      pieces.push(`\nawait __updatePlaybackProgress(${completedStepIndex});`)
+    }
     cursor = statement.end
   }
   pieces.push(source.slice(cursor))
 
   return {
     source: pieces.join(""),
-    totalSteps: statements.length
+    totalSteps: completedStepIndex
   }
 }
 
@@ -406,7 +423,9 @@ export async function executeRecordingScriptInBuiltinBrowser(
   let completedSteps = 0
   const runningState = createExecutionState(input, "running", {
     startedAt,
-    progressPercent: clampProgressPercent(completedSteps, totalSteps)
+    progressPercent: clampProgressPercent(completedSteps, totalSteps),
+    completedSteps,
+    totalSteps
   })
   emitBrowserScriptExecutionState(runningState)
 
@@ -422,16 +441,7 @@ export async function executeRecordingScriptInBuiltinBrowser(
     cancel: async () => {
       if (executionController.cancelled) return false
       executionController.cancelled = true
-      emitBrowserScriptExecutionState(
-        createExecutionState(input, "cancelled", {
-          startedAt,
-          endedAt: new Date().toISOString()
-        })
-      )
       rejectCancellation?.(new BrowserScriptExecutionCancelledError())
-      if (browserConnection) {
-        await closeBrowserConnection(browserConnection).catch(() => undefined)
-      }
       return true
     }
   }
@@ -446,7 +456,9 @@ export async function executeRecordingScriptInBuiltinBrowser(
     emitBrowserScriptExecutionState(
       createExecutionState(input, "running", {
         startedAt,
-        progressPercent: clampProgressPercent(completedSteps, totalSteps)
+        progressPercent: clampProgressPercent(completedSteps, totalSteps),
+        completedSteps,
+        totalSteps
       })
     )
   }
@@ -489,11 +501,10 @@ export async function executeRecordingScriptInBuiltinBrowser(
       createExecutionState(input, "completed", {
         startedAt,
         endedAt: new Date().toISOString(),
-        progressPercent: clampProgressPercent(totalSteps || completedSteps || 1, totalSteps)
+        progressPercent: clampProgressPercent(totalSteps || completedSteps || 1, totalSteps),
+        completedSteps: totalSteps || completedSteps,
+        totalSteps
       })
-    )
-    console.info(
-      `${BROWSER_SCRIPT_EXECUTION_LOG_PREFIX} Executed recorded script in the in-app browser.`
     )
   } catch (error) {
     if (isBrowserScriptExecutionCancelledError(error) || executionController.cancelled) {
@@ -501,7 +512,9 @@ export async function executeRecordingScriptInBuiltinBrowser(
         createExecutionState(input, "cancelled", {
           startedAt,
           endedAt: new Date().toISOString(),
-          progressPercent: clampProgressPercent(completedSteps, totalSteps)
+          progressPercent: clampProgressPercent(completedSteps, totalSteps),
+          completedSteps,
+          totalSteps
         })
       )
       throw new BrowserScriptExecutionCancelledError()
@@ -513,7 +526,9 @@ export async function executeRecordingScriptInBuiltinBrowser(
         error: message,
         startedAt,
         endedAt: new Date().toISOString(),
-        progressPercent: clampProgressPercent(completedSteps, totalSteps)
+        progressPercent: clampProgressPercent(completedSteps, totalSteps),
+        completedSteps,
+        totalSteps
       })
     )
     console.error(

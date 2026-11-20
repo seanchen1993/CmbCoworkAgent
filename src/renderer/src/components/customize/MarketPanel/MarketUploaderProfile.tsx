@@ -31,7 +31,9 @@ export function renderUploaderProfile(
   if (!profile) {
     return (
       <span
-        className={multiline ? "min-w-0 whitespace-normal break-all leading-relaxed" : "truncate"}
+        className={
+          multiline ? "min-w-0 whitespace-normal break-all leading-relaxed" : "min-w-0 truncate"
+        }
       >
         {fallbackUserId || "—"}
       </span>
@@ -46,17 +48,17 @@ export function renderUploaderProfile(
     return (
       <span className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-1 gap-y-0.5 whitespace-normal leading-relaxed">
         <span className="min-w-0 break-words">{userName}</span>
-        <span className="break-all text-[#a09f98]">（{sapId}）</span>
-        <span className="min-w-0 break-words text-[#a09f98]">{orgName}</span>
+        <span className="break-all text-muted-foreground">（{sapId}）</span>
+        <span className="min-w-0 break-words text-muted-foreground">{orgName}</span>
       </span>
     )
   }
 
   return (
-    <span className="inline-flex min-w-0 items-center gap-1">
-      <span className="truncate">{userName}</span>
-      <span className="text-[#a09f98] shrink-0">（{sapId}）</span>
-      <span className="text-[#a09f98] shrink-0">{orgName}</span>
+    <span className="flex w-0 min-w-0 max-w-full flex-1 items-center gap-1 overflow-hidden">
+      <span className="min-w-0 truncate">{userName}</span>
+      <span className="min-w-0 shrink truncate text-muted-foreground">（{sapId}）</span>
+      <span className="min-w-0 flex-1 truncate text-muted-foreground">{orgName}</span>
     </span>
   )
 }

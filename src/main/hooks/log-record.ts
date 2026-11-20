@@ -1,5 +1,9 @@
 import { getHookLoggingConfig } from "../storage"
-import { redactLogValue } from "../log-redaction"
+import {
+  redactAndTruncateSensitiveText,
+  redactLogValue,
+  redactSensitiveText
+} from "../log-redaction"
 import { persistHookExecutionRecord } from "./persistence"
 import type { ScopeSkipReason } from "./scope"
 import type { HookConfig, HookEvent, HookResult, HookType } from "./types"
@@ -12,12 +16,16 @@ const MAX_ADDITIONAL_CONTEXT_PREVIEW_CHARS = 4_000
 // since diagnostic mode also writes the untruncated record to jsonl this
 // preview just needs to be wide enough to be useful at a glance.
 const MAX_STDIN_PREVIEW_CHARS = 32_000
+const MAX_DIAGNOSTIC_STDIN_CHARS = 64 * 1024
 const USER_CONTEXT_SECRET_KEYS = new Set(["yst_id_token"])
 
 function truncatePreview(text: string | undefined, maxChars: number): string {
   if (!text) return ""
-  if (text.length <= maxChars) return text
-  return `${text.slice(0, maxChars)}\n...[truncated ${text.length - maxChars} chars]`
+  return redactAndTruncateSensitiveText(
+    text,
+    maxChars,
+    (omittedChars) => `\n...[truncated ${omittedChars} chars]`
+  )
 }
 
 function maybePreview(text: string | undefined, maxChars: number, preview: boolean): string {
@@ -27,6 +35,13 @@ function maybePreview(text: string | undefined, maxChars: number, preview: boole
 
 function redactHookStdinPayload(text: string | undefined): string | undefined {
   if (!text) return text
+  if (text.length > MAX_DIAGNOSTIC_STDIN_CHARS) {
+    return redactAndTruncateSensitiveText(
+      text,
+      MAX_DIAGNOSTIC_STDIN_CHARS,
+      (omittedChars) => `\n...[truncated ${omittedChars} chars]`
+    )
+  }
   try {
     const parsed = JSON.parse(text) as unknown
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return text
@@ -41,10 +56,7 @@ function redactHookStdinPayload(text: string | undefined): string | undefined {
     }
     return JSON.stringify({ ...payload, user_context: userContext })
   } catch {
-    return text.replace(
-      /("(?:yst_id_token|[^"]*token[^"]*)"\s*:\s*")[^"]*(")/gi,
-      "$1[redacted]$2"
-    )
+    return redactSensitiveText(text)
   }
 }
 
@@ -121,7 +133,7 @@ function buildLabel(hook: HookConfig, diagnostic: boolean): string {
         : (hook.command ?? "")
   // In diagnostic mode the modal shows the full command separately; for the
   // chip-list label we still want something readable, so cap to 120 chars.
-  return diagnostic ? text.slice(0, 120) : text.slice(0, 60)
+  return redactAndTruncateSensitiveText(text, diagnostic ? 120 : 60, "…")
 }
 
 function buildExecutedEnvelope(

@@ -80,6 +80,10 @@ flowchart LR
 | `src/main/db/index.ts` | sql.js 线程元数据存储 |
 | `src/renderer/src/App.tsx` | 顶层布局（Thread / Kanban / Customize） |
 | `src/renderer/src/components/customize/*` | 自定义中心各能力面板 |
+| `docs/chatx-im-robot-api-compact-reference.md` | 招乎 IM 机器人接口能力精简参考，供 Agent 和开发快速检索 |
+| `docs/chatx-unified-builtin-robot-v1-design.md` | ChatX 统一内置机器人 V1 架构、协议、安全与 clean-cut 改造方案 |
+| `docs/chatx-project-feature-binding-v1-design.md` | 统一机器人绑定 Project Mode Feature 的领域模型、运行链路与生命周期设计 |
+| `docs/chatx-unified-bot-collaboration-brief.md` | ChatX 方案的多智能体协作上下文、并行评审任务与交付模板 |
 | `docs/claude-code-push-commit-tech-reference.md` | Claude Code `commit/push` 技术方案分析与本项目落地参考 |
 
 ## 数据存储
@@ -172,6 +176,7 @@ npm run dist
 | `VITE_CHATX_HTTP_URL` | ChatX HTTP 回调地址 |
 | `VITE_CHATX_CHANNEL` | ChatX channel |
 | `VITE_CHATX_CALLBACK_URL` | 机器人平台回调地址基址 |
+| `VITE_UNIFIED_IM_GATEWAY_WS_URL` | 内置统一机器人 Desktop WSS 默认地址，当前为 `wss://devclaw-im-gateway.paasst.cmbchina.cn/ws/desktop`；联调时可在 App 的“联调信息”中覆盖 |
 | `VITE_LOGIN_PT` | 登录环境标识 |
 | `VITE_INTRUCTION_URL` | 使用说明地址（前端展示） |
 | `VITE_APP_DOWNLOAD_URL` | 应用下载地址（前端展示） |

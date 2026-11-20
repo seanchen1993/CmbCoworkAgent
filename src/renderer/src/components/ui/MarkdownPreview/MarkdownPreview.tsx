@@ -6,9 +6,6 @@ import rehypeHighlight from "rehype-highlight"
 import { Copy, Check, FolderOpen, Eye, Code2, ChevronDown, ChevronUp } from "lucide-react"
 import { cn } from "@/lib/utils"
 
-// Import highlight.js CSS for code syntax highlighting
-import "highlight.js/styles/github.css"
-
 interface MarkdownPreviewProps {
   content: string
   path?: string
@@ -25,9 +22,23 @@ interface MarkdownPreviewProps {
   readBinaryFile?: (resolvedPath: string) => Promise<string | null>
 }
 
+/**
+ * 仅完整地址（http/https/mailto）允许跳转。
+ * 相对路径、盘符路径（D:/）、锚点等非完整地址一律不跳转。
+ */
+function isExternalHref(href: string | undefined): href is string {
+  if (!href) return false
+  try {
+    const url = new URL(href)
+    return url.protocol === "http:" || url.protocol === "https:" || url.protocol === "mailto:"
+  } catch {
+    return false
+  }
+}
+
 // Hoisted to module scope so prop identities stay stable across renders.
 // Wide tables must scroll horizontally instead of overflowing the preview
-// (same treatment as StreamingMarkdown / DashboardAnalysisMarkdown).
+// (same treatment as StreamingMarkdown).
 const MARKDOWN_COMPONENTS: Components = {
   // `node` is destructured out so it isn't spread onto the DOM element.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -36,6 +47,16 @@ const MARKDOWN_COMPONENTS: Components = {
       <div className="streaming-markdown-table-wrap">
         <table {...props}>{children}</table>
       </div>
+    )
+  },
+  // 非完整地址不渲染成链接，避免点击后触发同窗口默认跳转。
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  a({ node: _node, href, children, ...props }) {
+    if (!isExternalHref(href)) return <span {...props}>{children}</span>
+    return (
+      <a href={href} {...props}>
+        {children}
+      </a>
     )
   }
 }
@@ -76,7 +97,7 @@ function safeDecodeUri(value: string): string {
 
 /**
  * 把 markdown 文件里的相对图片路径解析为可读取的路径。
- * - mdPath 为绝对路径时返回绝对路径（外部文件走 requestExternalFileRead）；
+ * - mdPath 为绝对路径时返回绝对路径（外部文件由 main 签发的 grant 约束）；
  * - mdPath 为工作区相对路径时返回工作区相对路径（走 readBinaryFile）。
  * 支持 `./`、`../`、子目录；越界（`..` 超出根）时收敛到根。
  */
@@ -121,17 +142,15 @@ function MarkdownImage({
   mdPath: string
   readBinaryFile?: (resolvedPath: string) => Promise<string | null>
 } & React.ImgHTMLAttributes<HTMLImageElement>): React.JSX.Element {
-  const [dataUrl, setDataUrl] = useState<string | undefined>(undefined)
+  const [loadedImage, setLoadedImage] = useState<{ src: string; url: string } | null>(null)
+  const directUrl = src && (hasProtocol(src) || src.startsWith("data:")) ? src : undefined
 
   useEffect(() => {
     let cancelled = false
     if (!src) return
 
     // 远程/内联图片直接渲染，无需本地读取。
-    if (hasProtocol(src) || src.startsWith("data:")) {
-      setDataUrl(src)
-      return
-    }
+    if (hasProtocol(src) || src.startsWith("data:")) return
     if (!readBinaryFile) return
 
     const resolved = resolveMarkdownImagePath(mdPath, src)
@@ -140,9 +159,13 @@ function MarkdownImage({
     readBinaryFile(resolved)
       .then((base64) => {
         if (cancelled || !base64) return
+        if (hasProtocol(base64) || base64.startsWith("data:")) {
+          setLoadedImage({ src, url: base64 })
+          return
+        }
         const ext = resolved.split(".").pop()?.toLowerCase() ?? ""
         const mime = IMAGE_MIME_BY_EXT[ext] ?? "image/png"
-        setDataUrl(`data:${mime};base64,${base64}`)
+        setLoadedImage({ src, url: `data:${mime};base64,${base64}` })
       })
       .catch(() => {})
 
@@ -151,7 +174,8 @@ function MarkdownImage({
     }
   }, [src, mdPath, readBinaryFile])
 
-  return <img src={dataUrl ?? src ?? ""} alt={alt ?? ""} {...props} />
+  const loadedUrl = loadedImage && loadedImage.src === src ? loadedImage.url : undefined
+  return <img src={directUrl ?? loadedUrl ?? src ?? ""} alt={alt ?? ""} {...props} />
 }
 
 export function MarkdownPreview({
@@ -225,7 +249,7 @@ export function MarkdownPreview({
   }, [path])
 
   const modeToggle = (
-    <div className="inline-flex items-center rounded-md border border-gray-200 bg-white dark:bg-gray-900 dark:border-gray-700">
+    <div className="inline-flex items-center rounded-md border border-border bg-background-elevated">
       <button
         type="button"
         onClick={() => setInternalViewMode("preview")}
@@ -233,8 +257,8 @@ export function MarkdownPreview({
         className={cn(
           "px-2 py-1 text-xs transition-colors",
           currentViewMode === "preview"
-            ? "bg-gray-200 text-gray-900 dark:bg-gray-700 dark:text-gray-100"
-            : "text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+            ? "bg-background-interactive text-foreground"
+            : "text-muted-foreground hover:text-foreground"
         )}
       >
         预览
@@ -244,10 +268,10 @@ export function MarkdownPreview({
         onClick={() => setInternalViewMode("source")}
         aria-pressed={currentViewMode === "source"}
         className={cn(
-          "border-l border-gray-200 dark:border-gray-700 px-2 py-1 text-xs transition-colors",
+          "border-l border-border px-2 py-1 text-xs transition-colors",
           currentViewMode === "source"
-            ? "bg-gray-200 text-gray-900 dark:bg-gray-700 dark:text-gray-100"
-            : "text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+            ? "bg-background-interactive text-foreground"
+            : "text-muted-foreground hover:text-foreground"
         )}
       >
         源码
@@ -259,32 +283,32 @@ export function MarkdownPreview({
     <div className={cn("w-full", className)}>
       {/* 简化的头部 */}
       {showHeader && (
-        <div className="flex items-center justify-between gap-2 p-3 bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
+        <div className="flex items-center justify-between gap-2 border-b border-border bg-background-interactive p-3">
           <div className="flex items-center gap-2">
             <button
               onClick={toggleExpanded}
-              className="p-1 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 rounded"
+              className="rounded p-1 text-muted-foreground hover:bg-background-elevated hover:text-foreground"
               title={isExpanded ? "收起预览" : "展开预览"}
             >
               {isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
             </button>
             {currentViewMode === "preview" ? (
-              <Eye className="h-4 w-4 text-gray-500" />
+              <Eye className="h-4 w-4 text-muted-foreground" />
             ) : (
-              <Code2 className="h-4 w-4 text-gray-500" />
+              <Code2 className="h-4 w-4 text-muted-foreground" />
             )}
             <span className="text-sm font-medium">
               Markdown{currentViewMode === "preview" ? "预览" : "源码"}
             </span>
             {path && (
-              <span className="text-xs text-gray-500 font-mono">{path.split(/[/\\]/).pop()}</span>
+              <span className="font-mono text-xs text-muted-foreground">{path.split(/[/\\]/).pop()}</span>
             )}
           </div>
           <div className="flex items-center gap-1">
             {showModeToggle ? modeToggle : null}
             <button
               onClick={handleCopy}
-              className="p-1.5 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 rounded"
+              className="rounded p-1.5 text-muted-foreground hover:bg-background-elevated hover:text-foreground"
               title="复制内容"
             >
               {copySuccess ? (
@@ -296,7 +320,7 @@ export function MarkdownPreview({
             {path && (
               <button
                 onClick={handleOpenFolder}
-                className="p-1.5 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 rounded"
+                className="rounded p-1.5 text-muted-foreground hover:bg-background-elevated hover:text-foreground"
                 title="打开文件夹"
               >
                 <FolderOpen className="h-4 w-4" />
@@ -308,8 +332,8 @@ export function MarkdownPreview({
       {!showHeader && showModeToggle && (
         <div
           className={cn(
-            "flex items-center justify-end p-2 border-b border-gray-200",
-            whiteBackground ? "bg-white" : "bg-gray-50 dark:bg-gray-800 dark:border-gray-700"
+            "flex items-center justify-end border-b border-border p-2",
+            whiteBackground ? "bg-background-elevated" : "bg-background-interactive"
           )}
         >
           {modeToggle}
@@ -320,7 +344,7 @@ export function MarkdownPreview({
       {isExpanded ? (
         currentViewMode === "preview" ? (
           <div
-            className={`p-6 max-w-none ${whiteBackground ? "bg-white prose prose-gray" : "prose prose-gray dark:prose-invert"}`}
+            className={`markdown-preview max-w-none p-6 ${whiteBackground ? "bg-background-elevated prose prose-gray dark:prose-invert" : "prose prose-gray dark:prose-invert"}`}
           >
             <div className="streaming-markdown text-sm leading-relaxed overflow-auto">
               <ReactMarkdown
@@ -333,14 +357,19 @@ export function MarkdownPreview({
             </div>
           </div>
         ) : (
-          <div className={cn("p-4", whiteBackground ? "bg-white" : "bg-gray-50 dark:bg-gray-900")}>
-            <pre className="text-xs font-mono leading-relaxed whitespace-pre overflow-x-auto text-gray-700 dark:text-gray-200">
+          <div
+            className={cn(
+              "p-4",
+              whiteBackground ? "bg-background-elevated" : "bg-background-interactive"
+            )}
+          >
+            <pre className="overflow-x-auto whitespace-pre font-mono text-xs leading-relaxed text-foreground">
               {content ?? ""}
             </pre>
           </div>
         )
       ) : (
-        <div className="px-4 py-2 text-sm text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800">
+        <div className="bg-background-interactive px-4 py-2 text-sm text-muted-foreground">
           <div className="truncate">
             {content.split("\n")[0] ||
               (currentViewMode === "preview" ? "Markdown 内容已收起..." : "Markdown 源码已收起...")}

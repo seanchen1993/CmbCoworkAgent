@@ -84,10 +84,10 @@ function fileBadge(
 }
 
 const TONE_CLASS: Record<string, string> = {
-  green: "border-emerald-200 bg-emerald-50 text-emerald-700",
-  amber: "border-amber-200 bg-amber-50 text-amber-700",
-  blue: "border-blue-200 bg-blue-50 text-blue-700",
-  red: "border-red-200 bg-red-50 text-red-700",
+  green: "border-status-nominal/25 bg-status-nominal/10 text-status-nominal",
+  amber: "border-status-warning/25 bg-status-warning/10 text-status-warning",
+  blue: "border-status-info/25 bg-status-info/10 text-status-info",
+  red: "border-status-critical/25 bg-status-critical/10 text-status-critical",
   muted: "border-border bg-muted/40 text-muted-foreground"
 }
 
@@ -379,7 +379,7 @@ export function SkillBundleMergeEditor({
               <div className="grid h-[calc(100%-40px)] min-h-0 grid-cols-[minmax(0,1fr)_340px]">
                 <div className="flex min-h-0 flex-col">
                   {isEdited && (
-                    <div className="flex items-center justify-between gap-2 border-b border-blue-200 bg-blue-50/60 px-3 py-1.5 text-[11px] text-blue-700">
+                    <div className="flex items-center justify-between gap-2 border-b border-status-info/25 bg-status-info/10 px-3 py-1.5 text-[11px] text-status-info">
                       <span>该文件已手动编辑，分块选择已停用。</span>
                       <button
                         type="button"
@@ -391,7 +391,7 @@ export function SkillBundleMergeEditor({
                     </div>
                   )}
                   {selectedHasConflict && (
-                    <div className="border-b border-red-200 bg-red-50/70 px-3 py-1.5 text-[11px] text-red-700">
+                    <div className="border-b border-status-critical/25 bg-status-critical/10 px-3 py-1.5 text-[11px] text-status-critical">
                       存在未解决的合并冲突，请在下方文本中处理 <code>{"<<<<<<<"}</code> /{" "}
                       <code>{"======="}</code> / <code>{">>>>>>>"}</code> 标记。
                     </div>
@@ -482,13 +482,13 @@ export function SkillBundleMergeEditor({
                               <div className="space-y-1.5 p-2">
                                 <div>
                                   <div className="mb-1 text-[11px] text-muted-foreground">旧版</div>
-                                  <pre className="max-h-24 overflow-auto rounded bg-red-50/70 p-2 font-mono text-[11px] leading-4 text-red-950">
+                                  <pre className="max-h-24 overflow-auto rounded bg-status-critical/10 p-2 font-mono text-[11px] leading-4 text-status-critical">
                                     {renderPreviewLines(region.baseLines)}
                                   </pre>
                                 </div>
                                 <div>
                                   <div className="mb-1 text-[11px] text-muted-foreground">新版</div>
-                                  <pre className="max-h-24 overflow-auto rounded bg-emerald-50/70 p-2 font-mono text-[11px] leading-4 text-emerald-950">
+                                  <pre className="max-h-24 overflow-auto rounded bg-status-nominal/10 p-2 font-mono text-[11px] leading-4 text-status-nominal">
                                     {renderPreviewLines(region.candidateLines)}
                                   </pre>
                                 </div>
