@@ -9,7 +9,6 @@ import { createHash } from "crypto"
 import type { ReviewDecision } from "../types"
 import { getApprovalRules, addApprovalRule } from "../storage"
 import { matchesApprovalPattern } from "./exec-policy"
-import { getModCallContext } from "../mods/context"
 
 export class ApprovalStore {
   /** Session-level cache (cleared when the process restarts) */
@@ -24,8 +23,7 @@ export class ApprovalStore {
    */
   makeKey(command: string, cwd: string, sandboxMode: string): string {
     // Normalise whitespace before hashing
-    const modScope = getModCallContext()?.approvalFingerprint
-    const normalised = `${command.trim()}|${cwd}|${sandboxMode}${modScope ? `|mod:${modScope}` : ""}`
+    const normalised = `${command.trim()}|${cwd}|${sandboxMode}`
     return createHash("sha256").update(normalised).digest("hex").slice(0, 32)
   }
 
@@ -74,9 +72,8 @@ export class ApprovalStore {
       commandForPatternMatch?: string
     }
   ): Promise<ReviewDecision> {
-    const modScoped = Boolean(getModCallContext()?.approvalFingerprint)
-    const allowPermanentMatch = !modScoped && (options?.allowPermanentMatch ?? true)
-    const allowPermanentStore = !modScoped && (options?.allowPermanentStore ?? true)
+    const allowPermanentMatch = options?.allowPermanentMatch ?? true
+    const allowPermanentStore = options?.allowPermanentStore ?? true
     const commandForPatternMatch = options?.commandForPatternMatch ?? patternKey
 
     // 1. Check session cache

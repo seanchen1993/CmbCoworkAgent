@@ -29,10 +29,7 @@ import type {
 } from "../types"
 import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
 import { notifyHooksChanged } from "../hooks/notifications"
-import { getModsManager } from "../mods/manager"
 import { discoverSkills } from "../skills/discovery"
-import { parseModManifest } from "../../shared/mods/validation"
-import { resolveModFile } from "../mods/loader"
 import { decodeArchiveEntryName } from "../skills/archive"
 import {
   DEFAULT_PLUGIN_HOOKS_PATH,
@@ -53,7 +50,6 @@ interface ParsedPlugin {
   mcpServerDetails: PluginMcpServerDetail[]
   hookCount: number
   hookPath: string
-  modCount: number
   name: string
 }
 
@@ -251,15 +247,6 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
     }
   }
 
-  let modCount = 0
-  if (manifest?.mods) {
-    const moduleManifest = resolveModFile(dirPath, manifest.mods)
-    if ((await fs.stat(moduleManifest)).size > 32_768) throw new Error("MODS_MANIFEST_SIZE")
-    const moduleText = await fs.readFile(moduleManifest, "utf8")
-    parseModManifest(JSON.parse(moduleText))
-    modCount = 1
-  }
-
   return {
     manifest,
     manifestRelPath,
@@ -268,7 +255,6 @@ async function parsePluginDir(dirPath: string, fallbackName?: string): Promise<P
     mcpServerDetails,
     hookCount,
     hookPath,
-    modCount,
     name
   }
 }
@@ -279,7 +265,7 @@ function formatAuthor(author: PluginManifest["author"]): string {
   return author.name || ""
 }
 
-export async function installPluginFromDir(
+async function installPluginFromDir(
   dirPath: string,
   fallbackName?: string,
   origin?: "market" | "local",
@@ -297,10 +283,9 @@ export async function installPluginFromDir(
     if (
       parsed.skillNames.length === 0 &&
       Object.keys(parsed.mcpConfigs).length === 0 &&
-      parsed.hookCount === 0 &&
-      parsed.modCount === 0
+      parsed.hookCount === 0
     ) {
-      return { success: false, error: "未检测到有效的 skills、MCP 配置、hooks 或 CMB Mods 清单" }
+      return { success: false, error: "未检测到有效的 skills、MCP 配置或 hooks" }
     }
 
     const pluginsDir = getPluginsDir()
@@ -396,7 +381,6 @@ export async function installPluginFromDir(
       mcpServerCount: Object.keys(parsed.mcpConfigs).length,
       hookCount: parsed.hookCount,
       hookPath: parsed.hookPath,
-      ...(parsed.modCount ? { modCount: parsed.modCount } : {}),
       origin: resolvedOrigin,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now
@@ -406,7 +390,6 @@ export async function installPluginFromDir(
     invalidateEnabledSkillsCache()
     await invalidateGlobalMcpCapabilityService("plugin:update")
     notifyHooksChanged("plugin-installed")
-    getModsManager()?.pluginsChanged()
 
     return { success: true, pluginName: parsed.name }
   } catch (e) {
@@ -812,7 +795,6 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
           invalidateEnabledSkillsCache()
           await invalidateGlobalMcpCapabilityService("plugin:delete")
           notifyHooksChanged("plugin-deleted")
-          getModsManager()?.pluginsChanged()
           return { success: true }
         } catch (e) {
           return { success: false, error: e instanceof Error ? e.message : "删除失败" }
@@ -833,7 +815,6 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
       try {
         const { id, enabled } = payload
         setPluginEnabled(id, enabled)
-        getModsManager()?.pluginsChanged()
         invalidateEnabledSkillsCache()
         await invalidateGlobalMcpCapabilityService("plugin:setEnabled")
         notifyHooksChanged("plugin-enabled-changed")

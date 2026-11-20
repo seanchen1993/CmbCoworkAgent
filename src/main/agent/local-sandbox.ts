@@ -1,6 +1,3 @@
-import { attachModBackend, protectCurrentModData, protectCurrentModResult } from "../mods/adapters"
-import { authorizeCurrentModInput } from "../mods/manager"
-import { getModCallContext } from "../mods/context"
 /**
  * LocalSandbox: Execute shell commands locally on the host machine.
  *
@@ -2116,15 +2113,6 @@ export class LocalSandbox
     this._virtualMode = this.virtualMode
     this._cwd = this.cwd
     this._maxFileSizeBytes = (options.maxFileSizeMb ?? 10) * 1024 * 1024
-    attachModBackend(this, () => ({
-      workspace: this.workingDir,
-      threadId: this.runId,
-      turnId: this._hookTurnId ?? this.runId,
-      agentId: getModCallContext()?.identity.agentId ?? this.agentId,
-      readOnly: this.readOnlyShellEnforced || readOnlyShellExecutionContext.getStore() === true,
-      signal: this.abortSignal,
-      activePluginIds: this._hookScope?.activePluginIds
-    }))
   }
 
   /**
@@ -2868,9 +2856,6 @@ export class LocalSandbox
   }
 
   private async runHooks(event: HookEvent, context: HookContext): Promise<HookResult | null> {
-    if (event !== "PreToolUse" && context.toolResult !== undefined) {
-      context = { ...context, toolResult: protectCurrentModData(context.toolResult) }
-    }
     const hookContext: HookContext = {
       ...context,
       ...(this.pluginOutputDir && !context.pluginOutputDir
@@ -3042,9 +3027,6 @@ export class LocalSandbox
     }
     const preResult = await this.runHooks("PreToolUse", context)
     throwIfHookHalt("PreToolUse", preResult, `${toolName} was stopped by a PreToolUse hook`)
-    if (toolName !== "execute" && !preResult?.blocked && preResult?.decision !== "block") {
-      await authorizeCurrentModInput(`host:${toolName}`, LocalSandbox.mergeUpdatedInput(toolArgs, preResult?.updatedInput))
-    }
     return preResult
   }
 
@@ -3069,7 +3051,7 @@ export class LocalSandbox
     })
     throwIfHookHalt("PostToolUse", postResult, `${toolName} was stopped by a PostToolUse hook`)
     const feedback = LocalSandbox.formatPostHookTextFeedback(postResult)
-    return protectCurrentModResult(feedback ? `${toolResult}\n\n${feedback}` : toolResult)
+    return feedback ? `${toolResult}\n\n${feedback}` : toolResult
   }
 
   private getSkillHookKey(skill: SkillLifecycleMatch): string {
@@ -4868,7 +4850,6 @@ export class LocalSandbox
       if (this.isAborted) {
         return { error: "文件写入已取消。" }
       }
-      getModCallContext()?.assertLive?.()
       const r = await super.write(effectiveFilePath, effectiveContent)
       if (!r.error) {
         await this.recordReadTime(resolvedPath)
@@ -5176,11 +5157,9 @@ export class LocalSandbox
             }
           }
           if (managedCapability) {
-            getModCallContext()?.assertLive?.()
             await this.writeStableFileHandleEncoded(managedCapability, expectedContent, encoding)
             await this.recordStableReadTime(managedCapability)
           } else {
-            getModCallContext()?.assertLive?.()
             await this.writeFileEncoded(resolvedPath, expectedContent, encoding)
             await this.recordReadTime(resolvedPath)
           }
@@ -6696,7 +6675,6 @@ export class LocalSandbox
     {
       id: string
       threadId: string
-      modAgentId?: string
       command: string
       cwd: string
       startedAt: number
@@ -6946,13 +6924,11 @@ export class LocalSandbox
     if (taskAbortController.signal.aborted) {
       return LocalSandbox.backgroundStartCancelledMessage()
     }
-    await authorizeCurrentModInput("host:execute", { command: effectiveCommand, cwd: effectiveCwd })
     const taskId = randomUUID().slice(0, 8)
     const task = {
       id: taskId,
       threadId: this.runId,
       command: effectiveCommand,
-      modAgentId: getModCallContext()?.identity.agentId,
       cwd: effectiveCwd,
       startedAt: Date.now(),
       completed: false as boolean,
@@ -7129,25 +7105,22 @@ export class LocalSandbox
     capReached?: boolean
   } | null {
     const task = LocalSandbox.backgroundTasks.get(taskId)
-    if (!task || task.threadId !== this.runId) return null
-    const modContext = getModCallContext()
-    if (modContext && task.modAgentId && task.modAgentId !== modContext.identity.agentId) return null
+    if (!task) return null
     const elapsedSeconds = Math.round((Date.now() - task.startedAt) / 1000)
     if (!task.completed) {
       return {
         completed: false,
         elapsedSeconds,
-        command: protectCurrentModData(task.command),
+        command: task.command,
         cwd: task.cwd,
-        partialOutput: getModCallContext()?.protectedOutput ? "[Output pending policy check]" : task.partialOutput,
+        partialOutput: task.partialOutput,
         partialTruncated: task.partialTruncated,
         idleSeconds: Math.round((Date.now() - task.lastOutputAt) / 1000)
       }
     }
     return {
       completed: true,
-      output: task.result?.truncated && getModCallContext()?.protectedOutput
-        ? "[Truncated output suppressed]" : protectCurrentModData(task.result?.output),
+      output: task.result?.output,
       exitCode: task.result?.exitCode,
       elapsedSeconds,
       capReached: task.result?.capReached
@@ -7351,7 +7324,6 @@ export class LocalSandbox
 
     // If an orchestrator is configured, delegate to it for approval + sandbox retry.
     // The orchestrator calls back into executeRaw() for actual execution.
-    await authorizeCurrentModInput("host:execute", { command: effectiveCommand, cwd: effectiveCwd })
     if (this.orchestrator) {
       const result = await shellFileCaptureContext.run(true, () =>
         this.orchestrator!.execute(
@@ -7518,7 +7490,6 @@ export class LocalSandbox
     cwd?: string,
     options?: ExecuteRawOptions
   ): Promise<LocalExecuteResponse> {
-    getModCallContext()?.assertLive?.()
     const effectiveSandboxMode = (sandboxModeOverride ?? this.windowsSandbox) as WindowsSandboxMode
     const effectiveTimeout = timeoutMs ?? this.timeout
     const effectiveCwd = this.resolveExecutionCwd(cwd)
@@ -7533,7 +7504,7 @@ export class LocalSandbox
           `[HarnessMode][LocalSandbox] project plugin hook sandbox bypass check: allowed=${shouldBypassSandboxForProjectPluginHook} mode=${effectiveSandboxMode} pluginRoot="${this.pluginRoot}"`
         )
       }
-      if (shouldBypassSandboxForProjectPluginHook && !this.worktreeIsolation && !getModCallContext()) {
+      if (shouldBypassSandboxForProjectPluginHook && !this.worktreeIsolation) {
         const outsideShellSyntax = await LocalSandbox.resolveCommandShellSyntax("none")
         const outsideSafety = assessCommandSafety(command, effectiveCwd, {
           shellSyntax: outsideShellSyntax
@@ -7592,7 +7563,7 @@ export class LocalSandbox
 
     // On Windows, spawn can transiently fail with EPERM (antivirus file lock, handle
     // contention). Retry up to SPAWN_RETRY_COUNT times with a short delay.
-    const maxAttempts = isWindows && !getModCallContext() ? LocalSandbox.SPAWN_RETRY_COUNT + 1 : 1
+    const maxAttempts = isWindows ? LocalSandbox.SPAWN_RETRY_COUNT + 1 : 1
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const result = await this.executeOnce(
         effectiveCommand,
@@ -7633,9 +7604,6 @@ export class LocalSandbox
       overrideAbortSignal,
       options
     )
-    const modSignal = getModCallContext()?.signal
-    if (modSignal) overrideAbortSignal = overrideAbortSignal
-      ? AbortSignal.any([overrideAbortSignal, modSignal]) : modSignal
     const effectiveCwd = this.resolveExecutionCwd(options?.cwd)
     const cwdError = this.validateExecutionCwd(effectiveCwd)
     if (cwdError) {

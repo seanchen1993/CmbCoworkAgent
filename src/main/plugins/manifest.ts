@@ -49,8 +49,7 @@ export function validatePluginManifest(raw: unknown): PluginManifest | null {
           ? obj.skills.filter((s): s is string => typeof s === "string")
           : undefined,
     mcpServers: typeof obj.mcpServers === "string" ? obj.mcpServers : undefined,
-    hooks: typeof obj.hooks === "string" ? obj.hooks : undefined,
-    mods: typeof obj.mods === "string" ? obj.mods : undefined
+    hooks: typeof obj.hooks === "string" ? obj.hooks : undefined
   }
 }
 

@@ -39,7 +39,7 @@ const HeartbeatPanel = lazy(() =>
   import("./HeartbeatPanel").then((m) => ({ default: m.HeartbeatPanel }))
 )
 const PluginsPanel = lazy(() => import("./PluginsPanel").then((m) => ({ default: m.PluginsPanel })))
-const ModsPanel = lazy(() => import("./ModsPanel").then((m) => ({ default: m.ModsPanel })))
+const MarketPanel = lazy(() => import("./MarketPanel").then((m) => ({ default: m.MarketPanel })))
 const SandboxPanel = lazy(() => import("./SandboxPanel").then((m) => ({ default: m.SandboxPanel })))
 const EvolutionPanel = lazy(() =>
   import("./EvolutionPanel").then((m) => ({ default: m.EvolutionPanel }))
@@ -287,10 +287,8 @@ export function CustomizeView(): React.JSX.Element {
           <div className="flex flex-1 min-w-0 min-h-0 overflow-hidden">
             <PluginsPanel />
           </div>
-        ) : activeTab === "mods" ? (
-          <div className="flex flex-1 min-w-0 min-h-0 overflow-y-auto">
-            <ModsPanel threadId={currentThreadId} />
-          </div>
+        ) : activeTab === "scheduled" ? (
+          <ScheduledPanel />
         ) : activeTab === "heartbeat" ? (
           <HeartbeatPanel />
         ) : activeTab === "memory" ? (

@@ -28,7 +28,6 @@ function copyResources(): { name: string; closeBundle: () => void } {
       const srcSkills = resolve("skills")
       const destSkills = resolve("out/skills")
       mirrorRequiredDirectorySync(srcSkills, destSkills)
-      mirrorRequiredDirectorySync(resolve("resources/mods"), resolve("out/resources/mods"))
 
       // Playwright vendored 录制器生成文件在主进程 bundle 中仍通过
       // require("./generated/*.js") 加载，因此这里把源码副本同步到
@@ -96,16 +95,11 @@ export default defineConfig({
           "browser-native-host": "src/main/browser/chrome/browser-native-host-entry.ts",
           "pty-host": "src/main/pty-host.ts",
           "code-exec-helper": "src/main/code-exec/helper-entry.ts",
-          "mod-host": "src/main/mods/host-entry.ts",
-          // Test-only exports share the production module instances. Absent in normal builds.
-          ...(process.env.CMB_MODS_E2E === "1"
-            ? { "mods-e2e": "tests/support/mods-e2e-entry.ts" }
-            : {})
         },
         formats: ["cjs"]
       },
       rollupOptions: {
-        external: ["electron", "node-pty", "quickjs-emscripten", "esbuild"],
+        external: ["electron", "node-pty"],
         plugins: [copyResources()]
       }
     }
