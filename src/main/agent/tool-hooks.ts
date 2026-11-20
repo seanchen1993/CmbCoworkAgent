@@ -326,7 +326,7 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
           workspace: options.workspacePath,
           threadId: options.threadId,
           turnId: options.hookTurnId ?? options.threadId,
-          agentId,
+          agentId: options.agentId,
           activePluginIds: options.hookScope.activePluginIds
         })),
         ...functionToolContexts(request.messages)

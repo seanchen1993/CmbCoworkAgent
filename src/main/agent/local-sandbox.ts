@@ -351,11 +351,6 @@ function gitConfigEnvironmentPreamble(
  * Options for LocalSandbox configuration.
  */
 export interface LocalSandboxOptions {
-  /** Host grant/policy realm; file operations still use rootDir. */
-  modWorkspace?: string
-  /** Runtime capabilities must also constrain SDK calls that bypass model middleware. */
-  modBlockedToolNames?: ReadonlySet<string>
-  modReadOnly?: boolean
   /** Host-created command-only context; a model turn replaces it with its own full runtime. */
   modCommandOnly?: boolean
   onModBinding?: (release: () => void) => void
@@ -2130,16 +2125,11 @@ export class LocalSandbox
     if (mode !== permissionProbe) {
       const release = attachModBackend(this, () => ({
         commandOnly: options.modCommandOnly,
-        workspace: options.modWorkspace ?? this.workingDir,
-        executionWorkspace: this.workingDir,
-        blockedToolNames: options.modBlockedToolNames,
+        workspace: this.workingDir,
         threadId: this.runId,
         turnId: this._hookTurnId ?? this.runId,
         agentId: getModCallContext()?.identity.agentId ?? this.agentId,
-        readOnly:
-          options.modReadOnly === true ||
-          this.readOnlyShellEnforced ||
-          readOnlyShellExecutionContext.getStore() === true,
+        readOnly: this.readOnlyShellEnforced || readOnlyShellExecutionContext.getStore() === true,
         signal: this.abortSignal,
         activePluginIds: this._hookScope?.activePluginIds
       }))

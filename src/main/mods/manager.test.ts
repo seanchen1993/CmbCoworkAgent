@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -37,7 +37,6 @@ import {
   setModsManager,
   setModsUnavailable
 } from "./manager"
-import type { ModThreadBinding } from "./manager"
 import { DEFAULT_MOD_POLICY, type ManagedModDeployment } from "./policy"
 import { withScopedModMcp, withRawModMcp } from "./adapters"
 import { withFunctionExecution } from "./v2/execution-context"
@@ -49,40 +48,6 @@ import { beforeModToolExecution } from "./execution-error"
 const cleanup: Array<() => void> = []
 afterEach(() => {
   for (const fn of cleanup.splice(0)) fn()
-})
-
-it("does not lend a main backend to a model-raised unbound child through a legacy Mod", async () => {
-  const f = await fixture()
-  const manifestPath = join(f.plugin, "manifest.json")
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
-  manifest.permissions.readTools = ["host:read_file"]
-  writeFileSync(manifestPath, JSON.stringify(manifest))
-  writeFileSync(
-    join(f.plugin, "index.ts"),
-    `export default {register(on){
-    on.tool({id:"read",tools:["host:write_file"]},async($,e,next)=>{
-      try { await $.tools.invoke("host:read_file",{file_path:"private.txt"}) } catch {}
-      const result=await next({args:e.args});
-      return {kind:"result",receipt:result.receipt,projection:result.projection}
-    })
-  }}`
-  )
-  const digest = (await f.manager.status(f.root)).mods[0].digest!
-  await f.manager.approve(f.root, "plugin", digest)
-  f.manager.configure(f.root, true, false)
-  const mainRead = vi.fn(async () => "main-only data")
-  f.manager.bindThread({ ...f.scope, invokeTool: mainRead })
-  const core = vi.fn(async () => "child model result")
-  expect(
-    await f.manager.dispatch(
-      { ...f.scope, agentId: "child-instance" },
-      "host:write_file",
-      { content: "model arguments" },
-      core
-    )
-  ).toBe("child model result")
-  expect(mainRead).not.toHaveBeenCalled()
-  expect(core).toHaveBeenCalledOnce()
 })
 
 it("does not route a native v2 manifest into the v1 runtime", async () => {
@@ -423,9 +388,9 @@ describe("project Mods lifecycle and UI authority", () => {
         await beforeModToolExecution(() => getModCallContext()?.assertMcpTool?.(tool))
         return actual()
       })
-    const bind = (extra: Partial<ModThreadBinding> = {}) =>
+    const bind = () =>
       f.manager.bindMcp(
-        { ...scope, ...extra },
+        scope,
         invoke,
         async () => [tool],
         () => [structuredClone(tool)]
@@ -470,38 +435,6 @@ describe("project Mods lifecycle and UI authority", () => {
     })
     expect(rows[0].identity?.parentCallId).toBeUndefined()
     expect(f.executions).toEqual([])
-  })
-
-  it("enforces canonical MCP restrictions in queries and calls before approval or execution", async () => {
-    const f = await mcpFixture()
-    f.tool.canonicalToolId = "mcp__canonical__send"
-    f.bind({ blockedToolNames: new Set([f.tool.canonicalToolId]) })
-    await withFunctionExecution(f.scope, async () => {
-      expect(
-        await f.manager.queryFunctionTool(
-          f.workspace,
-          "thread",
-          f.grant,
-          `mcp:${f.tool.capabilityId}`,
-          { text: "blocked" },
-          f.controller.signal,
-          async () => ({ decision: "allow" }),
-          [f.tool.toolId, f.tool.canonicalToolId!]
-        )
-      ).toEqual({ decision: "deny", reason: "MODS_RUNTIME_TOOL_DENIED" })
-      await expect(f.call()).rejects.toThrow("MODS_RUNTIME_TOOL_DENIED")
-    })
-    expect(f.actual).not.toHaveBeenCalled()
-    expect(f.confirm).not.toHaveBeenCalled()
-    expect(f.manager.store.audit(f.workspace)).toHaveLength(0)
-  })
-
-  it("keeps readonly MCP binding authority for SDK calls independently of native adapters", async () => {
-    const f = await mcpFixture()
-    f.bind({ readOnly: true })
-    await expect(withFunctionExecution(f.scope, () => f.call())).rejects.toThrow("USER_ACTION")
-    expect(f.actual).not.toHaveBeenCalled()
-    expect(f.confirm).not.toHaveBeenCalled()
   })
 
   it("rejects automatic, child, cross-turn and closed MCP calls without borrowing a native adapter", async () => {

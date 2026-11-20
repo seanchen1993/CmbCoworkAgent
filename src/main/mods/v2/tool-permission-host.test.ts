@@ -87,8 +87,7 @@ it("resolves cached MCP metadata exactly and denies ambiguous aliases without pr
     "mcp:server/tool",
     { value: 1 },
     expect.any(AbortSignal),
-    expect.any(Function),
-    ["mcp__canonical", "mcp__canonical"]
+    expect.any(Function)
   )
   peek.mockReturnValue([tool, { ...tool, capabilityId: "other/tool" }])
   expect(await call("mcp__canonical")).toEqual({

@@ -28,7 +28,6 @@ export async function queryFunctionToolPermission(
   if (!isModObject(input.input)) return { decision: "deny", reason: "MODS_TOOL_ARGUMENTS" }
   const name = String(input.tool)
   let target: string
-  let toolNames: string[] = []
   let args = input.input
   if (registered) target = `function:${registered.name}`
   else if (isNativeFunctionTool(name)) {
@@ -59,7 +58,6 @@ export async function queryFunctionToolPermission(
         reason: matches.length ? "MODS_TOOL_AMBIGUOUS" : "MODS_TOOL_UNAVAILABLE"
       }
     target = `mcp:${matches[0].capabilityId}`
-    toolNames = [matches[0].toolId, matches[0].canonicalToolId ?? matches[0].toolId]
   }
   return manager.queryFunctionTool(
     workspace,
@@ -79,7 +77,6 @@ export async function queryFunctionToolPermission(
         abortSignal: signal
       })
       return query(tool.slice(5), value)
-    },
-    toolNames
+    }
   )
 }
