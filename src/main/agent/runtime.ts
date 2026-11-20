@@ -7,7 +7,6 @@ import { createTaskModelOutcomeMiddleware, withTaskModelOutcome } from "./task-m
 import { withScopedModMcp, publishCurrentModResult } from "../mods/adapters"
 import { authorizeCurrentModInput, getModsManager } from "../mods/manager"
 import { getModCallContext } from "../mods/context"
-import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 import { ModError } from "../mods/errors"
 import { collectRuntimeToolCatalog } from "./runtime-tool-catalog"
 import type { FunctionToolInfo } from "../../shared/mods/v2/tools"
@@ -1127,7 +1126,6 @@ export function createScopedMcpCapabilityService(
     readOnly?: boolean
     blockedToolNames?: ReadonlySet<string>
     executionWorkspace?: string
-    runtimeAuthority?: ModRuntimeAuthority
     onModBinding?: (release: () => void) => void
     agentId?: string
     turnId?: string
@@ -1356,19 +1354,12 @@ export function createScopedMcpCapabilityService(
       const pluginId = extractPluginIdFromProviderKey(tool?.providerKey)
       if (!tool) return service.invoke(idOrAlias, args)
 
-      const modCall = getModCallContext(),
-        modExecution = currentFunctionExecution()
       const modResult = await withScopedModMcp(
         {
           workspace: baseContext.workspacePath,
           threadId: baseContext.threadId,
           turnId: baseContext.turnId ?? baseContext.threadId,
-          agentId: modCall?.identity.agentId ?? modExecution?.agentId ?? baseContext.agentId,
-          runtimeAuthority: modCall
-            ? modCall.runtimeAuthority
-            : modExecution
-              ? modExecution.runtimeAuthority
-              : baseContext.runtimeAuthority,
+          agentId: getModCallContext()?.identity.agentId ?? baseContext.agentId,
           blockedToolNames: baseContext.blockedToolNames,
           permissionToolName: tool.toolId,
           permissionToolAliases: [tool.toolId, tool.canonicalToolId ?? tool.toolId],
@@ -1566,7 +1557,6 @@ export function createScopedMcpCapabilityService(
   const releaseModBinding = getModsManager()?.bindMcp(
     {
       workspace: baseContext.workspacePath,
-      runtimeAuthority: baseContext.runtimeAuthority,
       executionWorkspace: baseContext.executionWorkspace,
       blockedToolNames: baseContext.blockedToolNames,
       threadId: baseContext.threadId,
@@ -1984,42 +1974,35 @@ function taskInvocationOwnerId(config: { toolCall?: { id?: unknown }; toolCallId
  * with the ToolCall as input re-establishes `config.toolCall` inside it (see
  * @langchain/core tools `invoke`), preserving its Command/result contract.
  */
-export type ModTaskExecution = <T>(
-  input: { agentId: string; subagentType?: string; signal?: AbortSignal },
-  run: () => Promise<T>
-) => Promise<T>
-
 export function wrapTaskToolWithOwnerMetadata(
   taskTool: DynamicStructuredTool,
   soloTaskTraceManager?: SoloTaskTraceManager,
-  captureThreadId?: string,
-  runModTask?: ModTaskExecution
+  captureThreadId?: string
 ): DynamicStructuredTool {
   return tool(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     async (input: Record<string, unknown>, config: any) => {
       const invocationOwner = taskInvocationOwnerId(config)
       const ownerId = invocationOwner.explicit
-      const metadata = { ...(config?.metadata ?? {}) }
-      const configurable = { ...(config?.configurable ?? {}) }
-      // A nested id-less task must not inherit its parent's renderer identity.
-      delete metadata[SUBAGENT_OWNER_METADATA_KEY]
-      delete configurable[SUBAGENT_OWNER_METADATA_KEY]
-      if (ownerId) {
-        metadata[SUBAGENT_OWNER_METADATA_KEY] = ownerId
-        configurable[SUBAGENT_OWNER_METADATA_KEY] = ownerId
-      }
       const patchedConfig = {
         ...config,
         // Only a real tool-call id may be exposed as renderer attribution.
         // The generated fallback exists solely inside configurable so an
         // id-less invocation receives its own stationarity scope without
         // pretending to be a UI task id.
-        metadata,
+        ...(ownerId
+          ? {
+              metadata: {
+                ...(config?.metadata ?? {}),
+                [SUBAGENT_OWNER_METADATA_KEY]: ownerId
+              }
+            }
+          : {}),
         configurable: {
-          ...configurable,
+          ...(config?.configurable ?? {}),
           [ACTION_STATIONARITY_OWNER_CONFIG_KEY]: invocationOwner.stationarity,
-          [SUBAGENT_SUMMARIZATION_OWNER_CONFIG_KEY]: invocationOwner.stationarity
+          [SUBAGENT_SUMMARIZATION_OWNER_CONFIG_KEY]: invocationOwner.stationarity,
+          ...(ownerId ? { [SUBAGENT_OWNER_METADATA_KEY]: ownerId } : {})
         }
       }
       const taskInput =
@@ -2043,25 +2026,13 @@ export function wrapTaskToolWithOwnerMetadata(
             ...patchedConfig,
             callbacks: subagentSessionCallbacks(patchedConfig.callbacks)
           })
-        const execute = () =>
-          captureThreadId && ownerId
-            ? withSubagentSessionCapture(
-                { kind: "multi", threadId: captureThreadId, subagentId: ownerId },
-                typeof taskInput.description === "string" ? taskInput.description : "子代理",
-                invoke
-              )
-            : taskTool.invoke(config?.toolCall ?? input, patchedConfig)
-        const result = await (runModTask
-          ? runModTask(
-              {
-                agentId: ownerId ?? `mod-task:${invocationOwner.stationarity}`,
-                subagentType:
-                  typeof taskInput.subagent_type === "string" ? taskInput.subagent_type : undefined,
-                signal: config?.signal
-              },
-              execute
+        const result = await (captureThreadId && ownerId
+          ? withSubagentSessionCapture(
+              { kind: "multi", threadId: captureThreadId, subagentId: ownerId },
+              typeof taskInput.description === "string" ? taskInput.description : "子代理",
+              invoke
             )
-          : execute())
+          : taskTool.invoke(config?.toolCall ?? input, patchedConfig))
         const sanitizedResult = stripTaskSubagentSummarizationState(result)
         if (ownerId) soloTaskTraceManager?.finishTask(ownerId, "success", sanitizedResult)
         return sanitizedResult
@@ -2092,14 +2063,13 @@ export function wrapTaskToolWithOwnerMetadata(
 function stampSubagentOwnerMetadata<T>(
   middleware: T,
   soloTaskTraceManager?: SoloTaskTraceManager,
-  captureThreadId?: string,
-  runModTask?: ModTaskExecution
+  captureThreadId?: string
 ): T {
   const mw = middleware as { tools?: DynamicStructuredTool[] }
   if (Array.isArray(mw.tools) && mw.tools.length > 0) {
     mw.tools = mw.tools.map((t) =>
       t?.name === "task"
-        ? wrapTaskToolWithOwnerMetadata(t, soloTaskTraceManager, captureThreadId, runModTask)
+        ? wrapTaskToolWithOwnerMetadata(t, soloTaskTraceManager, captureThreadId)
         : t
     )
   }
@@ -2225,7 +2195,6 @@ function assembleDeepAgent(
     mainBlockedToolNames = [],
     managedExecution = false,
     registrySubagentSpecs = [],
-    modRuntimeAuthority,
     // Windows shell kind the runtime's commands execute in (derived from the
     // sandbox). Threaded into the read-only execute gate so Windows PowerShell
     // read-only cmdlets (Get-Content, …) aren't false-blocked. "unknown" =
@@ -2868,18 +2837,6 @@ function assembleDeepAgent(
       ...processedSubagents.map((s: any) => (s && typeof s.name === "string" ? s.name : undefined))
     ].filter((name): name is string => Boolean(name))
   )
-  const modAgentAccess = new Map<
-    string,
-    { blockedToolNames: ReadonlySet<string>; readOnly: boolean; tools?: FunctionToolInfo[] }
-  >()
-  if (
-    includeGeneralPurposeSubagent &&
-    !processedSubagents.some((subagent) => subagent?.name === GENERAL_PURPOSE_SUBAGENT.name)
-  )
-    modAgentAccess.set(GENERAL_PURPOSE_SUBAGENT.name, {
-      blockedToolNames: new Set(),
-      readOnly: false
-    })
   const registrySubagents = (
     registrySubagentSpecs as Array<{
       name: string
@@ -2897,10 +2854,6 @@ function assembleDeepAgent(
     .map((spec) => {
       const disallowed = spec.disallowedTools ?? []
       const shell: AgentShellAccess = spec.shellAccess ?? "full"
-      modAgentAccess.set(spec.name, {
-        blockedToolNames: registryAgentBlockedTools(disallowed, shell),
-        readOnly: shell === "read_only"
-      })
       // read_only AND none are both restricted roles. Outside project mode they
       // preserve the existing omitClaudeMd-style behavior; project mode may
       // explicitly share the main agent's already-resolved project context with
@@ -2939,22 +2892,6 @@ function assembleDeepAgent(
   const unresolvedSubagents = includeGeneralPurposeSubagent
     ? [generalPurposeSubagent, ...processedSubagents, ...registrySubagents]
     : [...processedSubagents, ...registrySubagents]
-  const modManager = getModsManager()
-  const runModTask: ModTaskExecution | undefined =
-    modRuntimeAuthority && modManager
-      ? (input, run) => {
-          const execution = currentFunctionExecution()
-          const parent = execution ? execution.runtimeAuthority : modRuntimeAuthority
-          if (!parent) throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
-          const access = input.subagentType ? modAgentAccess.get(input.subagentType) : undefined
-          return modManager.withSharedAgent(parent, input.agentId, input.signal, access, () =>
-            readOnlyShellExecutionContext.run(
-              readOnlyShellExecutionContext.getStore() === true || access?.readOnly === true,
-              run
-            )
-          )
-        }
-      : undefined
   // Task-tool subagents have role-specific prompts and do not inherit the main
   // BASE_SYSTEM_PROMPT. Apply the shared completion/repetition contract at the
   // common exit so general-purpose, registry, and custom string-prompt agents
@@ -3129,8 +3066,7 @@ function assembleDeepAgent(
                 systemPrompt: taskSystemPrompt
               } as Parameters<typeof createSubAgentMiddleware>[0]),
               soloTaskTraceManager,
-              threadId,
-              runModTask
+              threadId
             )
           ]
         : []),
@@ -4944,14 +4880,6 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     )
   }
 
-  const modRuntimeAuthority = getModsManager()?.createRuntimeAuthority({
-    workspace: workspacePath,
-    threadId,
-    agentId,
-    turnId: hookTurnId ?? threadId,
-    signal: options.abortSignal
-  }).authority
-
   // The directory this agent's FILE TOOLS are rooted at. Equal to workspacePath for
   // every ordinary runtime; a private git worktree for an isolated workflow agent.
   // Host-side derivations (hooks, thread data, memory, registry, adoption) keep
@@ -5168,12 +5096,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     rootDir: fileRoot,
     agentId,
     modWorkspace: workspacePath,
-    modRuntimeAuthority,
     modBlockedToolNames,
-    modDelegatedBlockedToolNames: new Set([
-      ...runtimeBlockedToolNames,
-      ...(options.filesystemAccess ? blockedToolNamesForAccess(options.filesystemAccess) : [])
-    ]),
     modReadOnly,
     worktreeIsolation: options.worktreeIsolation,
     virtualMode: false,
@@ -5669,7 +5592,6 @@ The workspace root is: ${fileRoot}`
     {
       workspacePath,
       executionWorkspace: fileRoot,
-      runtimeAuthority: modRuntimeAuthority,
       blockedToolNames: modBlockedToolNames,
       readOnly: modReadOnly,
       signal: options.abortSignal,
@@ -6053,7 +5975,6 @@ The workspace root is: ${fileRoot}`
     ...eagerMcpMetadata.map((tool) => tool.toolId)
   ])
   const toolHookMiddleware = createToolHookMiddleware({
-    runtimeAuthority: modRuntimeAuthority,
     workspacePath,
     threadId: options.threadId,
     agentId,
@@ -7117,7 +7038,6 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     toolConcurrencyQueueId: options.toolConcurrencyQueueId ?? options.threadId ?? workspacePath,
     toolHookMiddleware,
     onFailureFuseNotice,
-    modRuntimeAuthority,
     onContextCompaction,
     // PR-12 — closure captures threadId / workspacePath / hookScope so
     // createDeepAgent's middleware can fire-and-forget the PostToolUseFailure

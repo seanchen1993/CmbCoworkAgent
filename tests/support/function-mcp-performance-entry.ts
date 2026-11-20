@@ -10,7 +10,6 @@ import type { McpCapabilityTool } from "../../src/main/mcp/capability-types"
 declare const __MODS_MCP_SDK__: boolean
 declare const __MODS_MATCHED_PUBLICATION__: boolean
 declare const __MODS_MCP_ROUTING__: boolean
-declare const __MODS_RUNTIME_AUTHORITY__: boolean
 const route = __MODS_MCP_ROUTING__
   ? (await import("../../src/main/mods/v2/mcp-tool-routing")).routeFunctionMcp
   : undefined
@@ -34,13 +33,8 @@ const scope = {
   turnId: "turn",
   leased: true,
   immediate: false,
-  userInitiated: true,
-  runtimeAuthority: undefined as
-    | import("../../src/main/mods/runtime-instance").ModRuntimeAuthority
-    | undefined
+  userInitiated: true
 }
-if (__MODS_RUNTIME_AUTHORITY__)
-  scope.runtimeAuthority = manager.createRuntimeAuthority(scope).authority
 const tool: McpCapabilityTool = {
   capabilityId: "perf:echo",
   providerKey: "perf",

@@ -48,8 +48,6 @@ import {
 import { functionToolCheckInput, validateToolCheckResult } from "./tool-check"
 import { constrainToolPermission, type ToolPermissionResult } from "../../../shared/tool-permission"
 import { validateRegisteredToolInput } from "./tool-schema"
-import { functionCallAgent, withFunctionAgentExecution } from "./host-call"
-import { currentFunctionExecution } from "./execution-context"
 
 export interface FunctionSessionHost {
   threadId: string
@@ -72,7 +70,6 @@ export interface FunctionSessionHost {
     registered?: RegisteredFunctionTool
   ): Promise<ToolPermissionResult>
   listTools?(signal: AbortSignal): Promise<FunctionToolInfo[]>
-  filterTools?(tools: FunctionToolInfo[]): FunctionToolInfo[]
   registeredTool?(
     owner: FunctionPlugin,
     input: ModObject,
@@ -115,19 +112,6 @@ export class FunctionSession {
     this.dispatcher = new FunctionDispatcher(plugins)
     this.clients = new FunctionClients({
       assertLive: () => this.assertLive(),
-      // Mounted surfaces outlive the event that created them. A host timer is a fresh
-      // read-only entry; it never inherits a click's lease or user-write authority.
-      background: (run) =>
-        withFunctionAgentExecution(
-          {
-            workspace: host.workspace,
-            threadId: host.threadId,
-            userInitiated: false,
-            leased: false,
-            immediate: true
-          },
-          run
-        ),
       changed: () => this.panes.notify(),
       publish: (value) => this.host.publish(value, this.controller.signal),
       load: (plugin, module) => {
@@ -196,7 +180,7 @@ export class FunctionSession {
 
   start(): Promise<void> {
     this.starting ??= this.dispatch("session.start", {
-      cwd: this.host.cwd?.() ?? this.host.workspace,
+      cwd: this.host.workspace,
       surface: "desktop",
       isInteractive: true
     }).then(() => {})
@@ -205,7 +189,6 @@ export class FunctionSession {
 
   private assertLive(plugin?: FunctionPlugin): void {
     this.controller.signal.throwIfAborted()
-    currentFunctionExecution()
     this.host.assertLive(plugin)
     if (plugin?.guest.stats.disposed) throw new ModFunctionError("MODS_UNLOADED")
   }
@@ -473,7 +456,7 @@ export class FunctionSession {
           // Only the wire omits the undefined field; the guest restores { value: undefined }.
           return value === undefined ? {} : { value }
         }
-        if (event === "session.start") return { cwd: this.host.cwd?.() ?? this.host.workspace }
+        if (event === "session.start") return { cwd: this.host.workspace }
         if (event === "command.run") return {}
         if (event === "command.describe")
           return {
@@ -568,12 +551,7 @@ export class FunctionSession {
               (toolInput, toolSignal, core) =>
                 this.dispatch(
                   "tool.call",
-                  {
-                    ...toolInput,
-                    ...(functionCallAgent(this.host.workspace, this.host.threadId) !== "main"
-                      ? { agentId: functionCallAgent(this.host.workspace, this.host.threadId) }
-                      : {})
-                  },
+                  toolInput,
                   toolSignal,
                   { plugin: plugin.name, registration: source.registration },
                   depth + 2,
@@ -614,11 +592,10 @@ export class FunctionSession {
             const registered = this.tools.list()
             if (registered.some((tool) => native.some((entry) => entry.name === tool.name)))
               throw new ModFunctionError("MODS_TOOL_NAME_COLLISION")
-            const tools = [
+            return [
               ...native,
               ...registered.map(({ name, description, mcp }) => ({ name, description, mcp }))
-            ]
-            return (this.host.filterTools?.(tools) ?? tools) as unknown as ModJson
+            ] as unknown as ModJson
           }
         },
         turnHeld
@@ -660,8 +637,6 @@ export class FunctionSession {
       const input = { ...args[0] }
       delete input.tool_use_id
       delete input.agentId
-      const agentId = functionCallAgent(this.host.workspace, this.host.threadId)
-      if (agentId !== "main") input.agentId = agentId
       if (this.tools.get(String(input.tool)))
         return this.runRegisteredTool(
           { ...input, tool_use_id: randomUUID() },

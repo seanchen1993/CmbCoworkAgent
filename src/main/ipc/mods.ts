@@ -22,7 +22,11 @@ import { FunctionRuntimeClient } from "../mods/v2/runtime-client"
 import { scheduleFunctionCommand } from "../mods/v2/command-scheduler"
 import type { FunctionUiAction } from "../../shared/mods/v2/ui"
 import type { FunctionClientAction } from "../../shared/mods/v2/ui"
-import { scheduleFunctionTool, withFunctionExecution } from "../mods/v2/execution-context"
+import {
+  scheduleFunctionTool,
+  withFunctionExecution,
+  functionExecutionAgent
+} from "../mods/v2/execution-context"
 import { functionSdkToolInput } from "../mods/v2/tool-sdk"
 import type { FunctionMcpToolDispatch } from "../mods/v2/mcp-sdk"
 import { routeFunctionMcp } from "../mods/v2/mcp-tool-routing"
@@ -79,7 +83,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
   setModsManager(manager)
   const registeredTools = new FunctionRegisteredTools(manager.store, {
     assertScope: (workspace, threadId) => {
-      manager.functionToolAgent(workspace, threadId)
+      if (functionExecutionAgent() !== "main") throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
       if (!manager.isEnabled(workspace) || writableThreadScope(threadId) !== workspace)
         throw new ModError("MODS_CALL_SCOPE_CHANGED")
     },
@@ -123,15 +127,13 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       plugins: getPlugins,
       fileScope: (workspace, threadId) =>
         functionFileScope(manager, assertStandaloneThread, workspace, threadId),
-      filterTools: (workspace, threadId, tools) =>
-        manager.filterFunctionTools(workspace, threadId, tools),
       registeredTool: (...args) => registeredTools.call(...args),
       listTools: async (workspace, threadId, signal) => {
         signal.throwIfAborted()
-        const agentId = manager.functionToolAgent(workspace, threadId)
+        if (functionExecutionAgent() !== "main") throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
         if (writableThreadScope(threadId) !== workspace)
           throw new ModError("MODS_CALL_SCOPE_CHANGED")
-        return manager.functionToolCatalog(workspace, threadId, agentId)
+        return manager.functionToolCatalog(workspace, threadId, functionExecutionAgent())
       },
       completeModel: (...args) => models.complete(...args),
       checkTool: (workspace, threadId, grant, input, signal, registered) => {
@@ -170,7 +172,8 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
               throw new ModError("MODS_CALL_SCOPE_CHANGED")
             manager.store.assertGrant(grant)
             const execution = functionExecutionScope(workspace, threadId)
-            manager.functionToolAgent(workspace, threadId)
+            if ((execution?.agentId ?? "main") !== "main")
+              throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
             const invoke = () =>
               manager.invokeFunctionTool(
                 workspace,
@@ -280,7 +283,8 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
           throw new ModError("MODS_CALL_SCOPE_CHANGED")
         manager.store.assertGrant(grant)
         const execution = functionExecutionScope(workspace, threadId)
-        manager.functionToolAgent(workspace, threadId)
+        if ((execution?.agentId ?? "main") !== "main")
+          throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
         const invoke = () => run(operationSignal, readOnly, userInitiated)
         if (execution?.turnId) return invoke()
         assertStandaloneThread(threadId)
@@ -309,7 +313,6 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     toolCall: (binding, input, core) =>
       withFunctionExecution(
         {
-          runtimeAuthority: binding.runtimeAuthority,
           workspace: binding.workspace,
           threadId: binding.threadId,
           agentId: binding.agentId,
@@ -413,7 +416,6 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       const workspace = writableScope(event, input?.threadId)
       return withFunctionExecution(
         {
-          ...manager.functionUserScope(workspace, input.threadId),
           workspace,
           threadId: input.threadId,
           leased: false,
@@ -435,7 +437,6 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       const workspace = writableScope(event, input?.threadId)
       return withFunctionExecution(
         {
-          ...manager.functionUserScope(workspace, input.threadId),
           workspace,
           threadId: input.threadId,
           leased: false,
@@ -481,7 +482,6 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     ) => {
       const workspace = writableScope(event, input?.threadId)
       if (input.descriptor?.apiVersion === "cmb.mods/v2") {
-        const executionScope = manager.functionUserScope(workspace, input.threadId)
         if (!input.args || typeof input.args.text !== "string" || input.args.text.length > 32000)
           throw new ModError("MODS_COMMAND_ARGS")
         const descriptor = (await functions.commands(workspace, input.threadId)).find(
@@ -505,7 +505,6 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
               throw new ModError("MODS_CALL_SCOPE_CHANGED")
             return withFunctionExecution(
               {
-                ...executionScope,
                 workspace,
                 threadId: input.threadId,
                 leased: !descriptor.immediate,

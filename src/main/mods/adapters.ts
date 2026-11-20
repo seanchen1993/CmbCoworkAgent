@@ -11,7 +11,6 @@ import { encodeModJson } from "../../shared/mods/validation"
 import { FunctionToolResults } from "./v2/tool-result"
 import type { ToolMessage } from "@langchain/core/messages"
 import { ModFunctionError } from "../../shared/mods/v2/contracts"
-import { assertModRuntimeAuthority } from "./runtime-instance"
 
 const nativeNames = new Set([
   "ls",
@@ -39,12 +38,6 @@ export function withModToolCall<T, R extends ToolRequest>(
     return handler(request)
   const tool = request.toolCall
   const agentId = getHookAgentIdFromRequest(request) ?? binding.agentId ?? "main"
-  if (binding.runtimeAuthority)
-    assertModRuntimeAuthority(binding.runtimeAuthority, {
-      ...binding,
-      workspace: manager.workspaceKey(binding.workspace),
-      agentId
-    })
   const callId = tool.id ?? randomUUID()
   const identity = {
     callId: `${binding.threadId}:${binding.turnId}:${agentId}:${callId}`,
@@ -68,7 +61,6 @@ export function withModToolCall<T, R extends ToolRequest>(
           }
     const currentBinding = { ...binding, agentId, signal }
     const context = {
-      runtimeAuthority: binding.runtimeAuthority,
       identity: currentIdentity,
       toolId: `host:${tool.name}`,
       routeClaimed: false,
@@ -161,11 +153,7 @@ const backendMethods: Record<string, MethodSpec> = {
 }
 
 /** Only host-owned backend methods receive this wrapper; guests never get the instance. */
-export function attachModBackend(
-  instance: object,
-  binding: () => ModThreadBinding,
-  owner = binding()
-): () => void {
+export function attachModBackend(instance: object, binding: () => ModThreadBinding): () => void {
   const record = instance as Record<string, unknown>
   const originalMethods = new Map<string, (...args: unknown[]) => Promise<unknown>>()
   for (const [name, spec] of Object.entries(backendMethods)) {
@@ -218,9 +206,10 @@ export function attachModBackend(
       }
     })
   }
+  const scope = binding()
   return (
     getModsManager()?.bindThread({
-      ...owner,
+      ...scope,
       ...(typeof record.queryToolPermission === "function"
         ? {
             queryTool: (tool: string, input: Record<string, unknown>) =>
