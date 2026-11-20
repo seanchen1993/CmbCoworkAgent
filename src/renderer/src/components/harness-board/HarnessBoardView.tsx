@@ -2535,7 +2535,9 @@ function EnterpriseProjectSearchInput({
           onFocus={() => {
             if (keyword) setOpen(true)
           }}
-          placeholder={`输入${searchLabel}搜索`}
+          placeholder={
+            searchField === "code" ? "输入项目编号搜索，存在 T+1 延迟" : `输入${searchLabel}搜索`
+          }
           className={harnessProjectCreateInputClassName}
           aria-autocomplete="list"
           aria-invalid={ariaInvalid ? true : undefined}
