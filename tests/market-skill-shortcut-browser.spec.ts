@@ -163,13 +163,16 @@ async function main(): Promise<void> {
     ].entries()) {
       await page.evaluate((view) => window.shortcutFixture.openView(view), view)
       await button.hover()
+      if (view === "workspace-plugins") {
+        await workspaceGuide.getByText("项", { exact: true }).waitFor()
+      }
       await button.click()
       await page.locator('form[data-thread="dev-' + (index + 1) + '"]').waitFor()
       assert.equal(
         await page.getByLabel("技能", { exact: true }).textContent(),
         "project-plugin-author"
       )
-      assert.equal(await draft.inputValue(), "")
+      assert.equal(await draft.inputValue(), "帮我创造项目模式插件")
     }
     assert.deepEqual(await page.evaluate(() => window.shortcutFixture.createdWorkspaces()), [
       "/recent",
@@ -215,6 +218,7 @@ async function main(): Promise<void> {
       "/recent",
       "/chosen"
     ])
+    assert.equal(await draft.inputValue(), "帮我创造项目模式插件")
 
     await page.evaluate(() => window.shortcutFixture.openView("plugins"))
     await development.waitFor()

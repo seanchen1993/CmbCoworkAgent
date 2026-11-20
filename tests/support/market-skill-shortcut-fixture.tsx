@@ -36,6 +36,9 @@ let selectedWorkspace: string | null = null
 const createdWorkspaces: string[] = []
 const fixtureThreadContext = {
   getThreadActions: (threadId: string) => ({
+    setDraftInput: (text: string) => {
+      drafts.set(threadId, { ...drafts.get(threadId), text })
+    },
     setDraftSkill: (selection: SkillMetadata) => {
       drafts.set(threadId, { ...drafts.get(threadId), skill: selection.name })
     }

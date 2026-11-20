@@ -198,7 +198,7 @@ async function main(): Promise<void> {
     await guide.getByRole("button", { name: "安装并开始", exact: true }).click()
     await settings.waitFor({ state: "hidden" })
     await page.getByText(name, { exact: true }).waitFor()
-    assert.equal(await composer.inputValue(), "")
+    assert.equal(await composer.inputValue(), "帮我创造项目模式插件")
     assert.equal(downloads, 1)
     assert.equal(catalogReads, startupReads, "using the guide must not request the catalog again")
     const installed = await page.evaluate(
@@ -224,7 +224,7 @@ async function main(): Promise<void> {
     await page.getByRole("button", { name: "开始开发", exact: true }).click()
     await composer.waitFor()
     await page.getByText(name, { exact: true }).waitFor()
-    assert.equal(await composer.inputValue(), "")
+    assert.equal(await composer.inputValue(), "帮我创造项目模式插件")
     assert.equal(downloads, 1, "starting an already installed skill does not download it again")
     console.log(
       "PASS market details share the launcher and preserve the original draft and attachment"
@@ -236,6 +236,7 @@ async function main(): Promise<void> {
     if (!(await workspaceShortcut.isVisible())) {
       await page.getByRole("button", { name: /^(?:工作目录)$/ }).click()
     }
+    await workspaceShortcut.getByText("项", { exact: true }).waitFor()
     await workspaceShortcut.click()
 
     await page.waitForFunction(async (title) => {
@@ -243,7 +244,7 @@ async function main(): Promise<void> {
       return threads.filter((thread) => thread.metadata?.title === title).length === 3
     }, entry)
     await page.getByText(name, { exact: true }).waitFor()
-    assert.equal(await composer.inputValue(), "")
+    assert.equal(await composer.inputValue(), "帮我创造项目模式插件")
     assert.equal(downloads, 1)
     assert.deepEqual(
       await page.evaluate(

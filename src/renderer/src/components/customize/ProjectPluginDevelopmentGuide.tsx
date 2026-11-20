@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react"
-import { CircleHelp } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -66,7 +65,9 @@ export function ProjectPluginDevelopmentGuide({
     const state = useAppStore.getState()
     if (state.accountRevision !== accountRevision) return false
     state.addThreadSummary(thread)
-    getThreadActions(thread.thread_id).setDraftSkill(skill)
+    const actions = getThreadActions(thread.thread_id)
+    actions.setDraftSkill(skill)
+    actions.setDraftInput("帮我创造项目模式插件")
     if (!isCurrent()) return false
     await state.selectThread(thread.thread_id)
     return true
@@ -133,7 +134,7 @@ export function ProjectPluginDevelopmentGuide({
       size={iconOnly ? "icon" : "sm"}
       className={
         iconOnly
-          ? "mr-2 size-7 shrink-0 text-muted-foreground"
+          ? "size-7 shrink-0 text-muted-foreground"
           : entry === "project"
             ? "h-auto justify-start p-0 text-xs"
             : undefined
@@ -151,7 +152,12 @@ export function ProjectPluginDevelopmentGuide({
       }
     >
       {iconOnly ? (
-        <CircleHelp className="size-4" aria-hidden />
+        <span
+          className="grid size-4 place-items-center rounded border border-current text-[11px] font-medium leading-none"
+          aria-hidden="true"
+        >
+          项
+        </span>
       ) : entry === "market" ? (
         "开始开发"
       ) : (
