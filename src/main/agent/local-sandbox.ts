@@ -2156,7 +2156,6 @@ export class LocalSandbox
               ? execution.runtimeAuthority
               : runtimeAuthority,
           agentId: call?.identity.agentId ?? execution?.agentId ?? owner.agentId,
-          turnId: call?.identity.turnId ?? execution?.turnId ?? owner.turnId,
           readOnly:
             options.modReadOnly === true ||
             this.readOnlyShellEnforced ||

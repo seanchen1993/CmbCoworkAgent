@@ -3,8 +3,6 @@ export function register(on) {
   let last
   let starts = 0
   let completions = 0
-  let lastChild
-  let childCompletions = 0
   on("session.start", {}, async ($, e, next) => {
     await $.command.register({
       name: "claw-turn",
@@ -21,18 +19,7 @@ export function register(on) {
   })
   on("turn.complete", async ($, e, next) => {
     const result = await next(e)
-    if (e.agentId) {
-      lastChild = {
-        agentId: e.agentId,
-        turnId: e.turnId,
-        reason: e.reason,
-        answer: e.answer,
-        durationMs: e.durationMs,
-        usage: e.usage
-      }
-      childCompletions++
-      return result
-    }
+    if (e.agentId) return result
     if (active === e.turnId) active = undefined
     last = {
       turnId: e.turnId,
@@ -56,14 +43,7 @@ export function register(on) {
     if (e.args.trim() !== "abort")
       return {
         text: JSON.stringify(
-          {
-            active: active ?? null,
-            last: last ?? null,
-            starts,
-            completions,
-            lastChild: lastChild ?? null,
-            childCompletions
-          },
+          { active: active ?? null, last: last ?? null, starts, completions },
           null,
           2
         )

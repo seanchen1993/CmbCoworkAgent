@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest"
-import {
-  childTurnStreamOwner,
-  isCoordinatorWorkerStreamChunk,
-  isMainTurnMessageStream
-} from "./main-turn-stream"
+import { isCoordinatorWorkerStreamChunk, isMainTurnMessageStream } from "./main-turn-stream"
 
 describe("main turn stream attribution", () => {
   it.each([
@@ -13,8 +9,7 @@ describe("main turn stream attribution", () => {
     { langgraph_checkpoint_ns: "main__worker__a:model" },
     { thread_id: "main__worker__a" },
     { langgraph_thread_id: "main__worker__a" },
-    { configurable: { thread_id: "main__worker__a" } },
-    { cmb_subagent_owner_tool_call_id: "actual-child" }
+    { configurable: { thread_id: "main__worker__a" } }
   ])("excludes non-main metadata %j", (metadata) => {
     expect(isMainTurnMessageStream("messages", [{ content: "private" }, metadata], "main")).toBe(
       false
@@ -37,22 +32,5 @@ describe("main turn stream attribution", () => {
     )
     expect(isMainTurnMessageStream("values", payload, "main")).toBe(false)
     expect(isMainTurnMessageStream("messages", {}, "main")).toBe(false)
-  })
-
-  it("uses only host task metadata for child attribution and excludes summarizer interiors", () => {
-    const message = { type: "ai", content: "child", cmb_subagent_owner_tool_call_id: "spoofed" }
-    expect(childTurnStreamOwner("messages", [message, {}])).toBeUndefined()
-    const metadata = { cmb_subagent_owner_tool_call_id: "actual-child" }
-    expect(childTurnStreamOwner("messages", [message, metadata])).toBe("actual-child")
-    expect(childTurnStreamOwner("values", [message, metadata])).toBeUndefined()
-    expect(
-      childTurnStreamOwner("messages", [message, { ...metadata, tags: ["cmb:context-compaction"] }])
-    ).toBeUndefined()
-    expect(
-      childTurnStreamOwner("messages", [
-        { ...message, additional_kwargs: { lc_source: "summarization" } },
-        metadata
-      ])
-    ).toBeUndefined()
   })
 })

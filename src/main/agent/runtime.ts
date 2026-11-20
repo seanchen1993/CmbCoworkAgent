@@ -5,10 +5,7 @@ import { foregroundToolPolicy } from "./foreground-tool-policy"
 import { AsyncRWLock, AsyncSemaphore } from "./async-lock"
 import { createTaskModelOutcomeMiddleware, withTaskModelOutcome } from "./task-model-outcome"
 import { withScopedModMcp, publishCurrentModResult } from "../mods/adapters"
-import {
-  createFunctionChildTurnMiddleware,
-  createFunctionSessionViewMiddleware
-} from "./mods-session-view"
+import { createFunctionSessionViewMiddleware } from "./mods-session-view"
 import { authorizeCurrentModInput, getModsManager } from "../mods/manager"
 import { getModCallContext } from "../mods/context"
 import type { ModRuntimeAuthority } from "../mods/runtime-instance"
@@ -1367,11 +1364,7 @@ export function createScopedMcpCapabilityService(
         {
           workspace: baseContext.workspacePath,
           threadId: baseContext.threadId,
-          turnId:
-            modCall?.identity.turnId ??
-            modExecution?.turnId ??
-            baseContext.turnId ??
-            baseContext.threadId,
+          turnId: baseContext.turnId ?? baseContext.threadId,
           agentId: modCall?.identity.agentId ?? modExecution?.agentId ?? baseContext.agentId,
           runtimeAuthority: modCall
             ? modCall.runtimeAuthority
@@ -2813,7 +2806,6 @@ function assembleDeepAgent(
     `${toolConcurrencyQueueId}:subagent`
   )
 
-  const modManager = getModsManager()
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const subagentMiddleware: any[] = [
     ...(soloTaskTraceManager ? [soloTaskTraceManager.middleware] : []),
@@ -2842,10 +2834,7 @@ function assembleDeepAgent(
     // Same malformed tool-call recovery as the main agent — task subagents call
     // the same OpenAI-compatible endpoint and can be handed truncated JSON too.
     createMalformedToolCallRecoveryMiddleware(),
-    createPatchToolCallsMiddleware(),
-    ...(modRuntimeAuthority && modManager?.isActive(modRuntimeAuthority.workspace)
-      ? [createFunctionChildTurnMiddleware(modManager)]
-      : [])
+    createPatchToolCallsMiddleware()
   ]
 
   // Manual general-purpose subagent so AGENTS.md can be injected into its
@@ -2954,6 +2943,7 @@ function assembleDeepAgent(
   const unresolvedSubagents = includeGeneralPurposeSubagent
     ? [generalPurposeSubagent, ...processedSubagents, ...registrySubagents]
     : [...processedSubagents, ...registrySubagents]
+  const modManager = getModsManager()
   const runModTask: ModTaskExecution | undefined =
     modRuntimeAuthority && modManager
       ? (input, run) => {
@@ -2961,17 +2951,11 @@ function assembleDeepAgent(
           const parent = execution ? execution.runtimeAuthority : modRuntimeAuthority
           if (!parent) throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
           const access = input.subagentType ? modAgentAccess.get(input.subagentType) : undefined
-          return modManager.withSharedAgent(
-            parent,
-            input.agentId,
-            input.signal,
-            access,
-            () =>
-              readOnlyShellExecutionContext.run(
-                readOnlyShellExecutionContext.getStore() === true || access?.readOnly === true,
-                run
-              ),
-            modTurnRunId
+          return modManager.withSharedAgent(parent, input.agentId, input.signal, access, () =>
+            readOnlyShellExecutionContext.run(
+              readOnlyShellExecutionContext.getStore() === true || access?.readOnly === true,
+              run
+            )
           )
         }
       : undefined

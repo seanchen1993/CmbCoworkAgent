@@ -265,7 +265,6 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
       if (!manager?.isActive(options.workspacePath)) return handler(request)
       const execution = currentFunctionExecution()
       const runtimeAuthority = execution ? execution.runtimeAuthority : options.runtimeAuthority
-      const turnId = execution?.turnId ?? options.hookTurnId ?? options.threadId
       const agentId =
         getHookAgentIdFromRequest(request) ?? execution?.agentId ?? options.agentId ?? "main"
       const nativeTools = collectRuntimeToolCatalog(request.tools)
@@ -274,7 +273,7 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
           runtimeAuthority,
           workspace: options.workspacePath,
           threadId: options.threadId,
-          turnId,
+          turnId: options.hookTurnId ?? options.threadId,
           agentId
         },
         nativeTools
@@ -287,7 +286,7 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
           threadId: options.threadId,
           agentId,
           userInitiated: false,
-          turnId,
+          turnId: options.hookTurnId ?? options.threadId,
           leased: true,
           immediate: false
         },
@@ -318,7 +317,7 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
           runtimeAuthority,
           workspace: options.workspacePath,
           threadId: options.threadId,
-          turnId,
+          turnId: options.hookTurnId ?? options.threadId,
           agentId,
           activePluginIds: options.hookScope.activePluginIds
         })),
@@ -341,7 +340,7 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
           runtimeAuthority,
           workspace: options.workspacePath,
           threadId: options.threadId,
-          turnId: execution?.turnId ?? options.hookTurnId ?? options.threadId,
+          turnId: options.hookTurnId ?? options.threadId,
           agentId: execution?.agentId ?? options.agentId,
           activePluginIds: options.hookScope.activePluginIds,
           signal: request.runtime?.signal

@@ -33,12 +33,8 @@ import {
   functionCallAuthority,
   withFunctionAgentExecution
 } from "./v2/host-call"
-import { currentFunctionExecution, functionExecutionScope } from "./v2/execution-context"
-import {
-  FunctionTurnLifecycle,
-  type FunctionTurnBinding,
-  type FunctionChildTurnObserver
-} from "./v2/turn-lifecycle"
+import { functionExecutionScope, withFreshFunctionExecution } from "./v2/execution-context"
+import { FunctionTurnLifecycle, type FunctionTurnBinding } from "./v2/turn-lifecycle"
 import type {
   FunctionTurnStart,
   FunctionTurnComplete,
@@ -117,23 +113,12 @@ interface StoredCard {
 }
 
 export class ModsManager {
-  private readonly childTurnObservers = new WeakMap<
-    ModRuntimeAuthority,
-    FunctionChildTurnObserver
-  >()
-
-  observeSharedAgentTurn(response: unknown): void {
-    const authority = currentFunctionExecution()?.runtimeAuthority
-    if (!authority) return
-    this.childTurnObservers.get(authority)?.observe(response)
-  }
-
   readonly functionTurns = new FunctionTurnLifecycle({
     isBusy: (threadId) => !!getLocalThreadRunLease(threadId),
     onIdle: (listener) => onLocalThreadRunLeaseReleased((lease) => listener(lease.threadId)),
     error: (error) => console.warn("[Mods] Turn completion failed:", error),
     start: (binding, input, signal) =>
-      withFunctionAgentExecution(
+      withFreshFunctionExecution(
         {
           workspace: binding.workspace,
           threadId: binding.threadId,
@@ -151,7 +136,7 @@ export class ModsManager {
         }
       ),
     complete: (binding, input, signal) =>
-      withFunctionAgentExecution(
+      withFreshFunctionExecution(
         {
           workspace: binding.workspace,
           threadId: binding.threadId,
@@ -824,8 +809,7 @@ export class ModsManager {
     access:
       | { blockedToolNames: ReadonlySet<string>; readOnly: boolean; tools?: FunctionToolInfo[] }
       | undefined,
-    run: () => Promise<T>,
-    parentRunId?: string
+    run: () => Promise<T>
   ): Promise<T> {
     parent.assertLive()
     const parentBinding = this.bindings.get(`${parent.threadId}:${parent.agentId}`)
@@ -836,7 +820,7 @@ export class ModsManager {
     const identity = {
       workspace: parent.workspace,
       threadId: parent.threadId,
-      turnId: randomUUID(),
+      turnId: parent.turnId,
       agentId
     }
     // Opaque/custom agents retain their native lifecycle but receive no inferred SDK authority.
@@ -849,7 +833,7 @@ export class ModsManager {
     const instance = this.runtimeAuthorities.create(identity, signal, parent, parentCallId)
     const binding: ModThreadBinding = {
       ...parentBinding,
-      ...identity,
+      agentId,
       runtimeAuthority: instance.authority,
       blockedToolNames: new Set([
         ...(parentBinding.delegatedBlockedToolNames ?? parentBinding.blockedToolNames ?? []),
@@ -867,8 +851,6 @@ export class ModsManager {
       }
     }
     const releases: Array<() => void> = []
-    let turn: FunctionChildTurnObserver | undefined
-    let completed = false
     try {
       releases.push(this.bindThread(binding))
       if (access.tools) this.bindFunctionToolCatalog(binding, access.tools)
@@ -890,17 +872,7 @@ export class ModsManager {
           )
         )
       }
-      if (this.isEnabled(parent.workspace)) {
-        turn = this.functionTurns.startChild({
-          ...identity,
-          runId: `child:${identity.turnId}`,
-          parentRunId,
-          signal: binding.signal ?? new AbortController().signal,
-          assertCurrent: () => binding.assertLive?.()
-        })
-        this.childTurnObservers.set(instance.authority, turn)
-      }
-      const result = await withFunctionAgentExecution(
+      return await withFunctionAgentExecution(
         {
           ...identity,
           runtimeAuthority: instance.authority,
@@ -910,21 +882,14 @@ export class ModsManager {
         },
         run
       )
-      completed = true
-      return result
     } finally {
-      try {
-        turn?.finish(completed ? "answer" : "error")
-      } finally {
-        this.childTurnObservers.delete(instance.authority)
-        for (const release of releases.reverse()) release()
-        const catalogKey = JSON.stringify([parent.workspace, parent.threadId, agentId])
-        if (
-          this.functionToolCatalogs.get(catalogKey)?.binding.runtimeAuthority === instance.authority
-        )
-          this.functionToolCatalogs.delete(catalogKey)
-        instance.release()
-      }
+      for (const release of releases.reverse()) release()
+      const catalogKey = JSON.stringify([parent.workspace, parent.threadId, agentId])
+      if (
+        this.functionToolCatalogs.get(catalogKey)?.binding.runtimeAuthority === instance.authority
+      )
+        this.functionToolCatalogs.delete(catalogKey)
+      instance.release()
     }
   }
 

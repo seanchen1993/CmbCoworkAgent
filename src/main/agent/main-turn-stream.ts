@@ -11,19 +11,6 @@ function metadata(mode: string, payload: unknown): Record<string, unknown> | und
   return mode === "messages" && Array.isArray(payload) ? object(payload[1]) : undefined
 }
 
-export function childTurnStreamOwner(mode: string, payload: unknown): string | undefined {
-  if (
-    mode !== "messages" ||
-    !Array.isArray(payload) ||
-    isContextCompactionStreamPayload(mode, payload) ||
-    isSerializedSummarizationMessage(payload[0])
-  )
-    return undefined
-  // Host-stamped task invocation metadata, not the provider message's content/kwargs.
-  const owner = metadata(mode, payload)?.cmb_subagent_owner_tool_call_id
-  return typeof owner === "string" && owner.trim() ? owner.trim() : undefined
-}
-
 export function isCoordinatorWorkerStreamChunk(
   mode: string,
   payload: unknown,
@@ -47,7 +34,6 @@ export function isMainTurnMessageStream(mode: string, payload: unknown, threadId
   if (
     isContextCompactionStreamPayload(mode, payload) ||
     isSerializedSummarizationMessage(payload[0]) ||
-    childTurnStreamOwner(mode, payload) !== undefined ||
     isCoordinatorWorkerStreamChunk(mode, payload, threadId)
   )
     return false
