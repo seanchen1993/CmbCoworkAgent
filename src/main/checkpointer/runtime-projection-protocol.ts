@@ -80,7 +80,7 @@ export type CheckpointRuntimeProjectionWorkerRequest =
   | CheckpointRuntimeProjectionShutdownRequest
   | {
       type: "read-session-transcript"
-      projection: "messages" | "turns" | "usage"
+      projection: "messages" | "turns"
       requestId: number
       databasePath: string
       threadId: string

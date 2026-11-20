@@ -106,8 +106,7 @@ describe("heartbeat timer invalidation", () => {
         functionTurns: lifecycle,
         releaseExpiredRuntimeBindings: vi.fn(),
         bindFunctionSession: vi.fn(),
-        updateFunctionSessionMessages: vi.fn(),
-        updateFunctionSessionRequest: vi.fn()
+        updateFunctionSessionMessages: vi.fn()
       }
       mocks.manager = manager
       mocks.resolveModel.mockResolvedValue(null)
@@ -159,7 +158,7 @@ describe("heartbeat timer invalidation", () => {
           model: new HeartbeatModel({}),
           tools: [],
           middleware: [
-          createFunctionSessionViewMiddleware(
+            createFunctionSessionViewMiddleware(
               manager as unknown as ModsManager,
               authority,
               "heartbeat-provider",

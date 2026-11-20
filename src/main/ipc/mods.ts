@@ -1,4 +1,4 @@
-import { compactFunctionSession, queryFunctionSessionRead } from "../mods/v2/session-read-host"
+import { queryFunctionSessionRead } from "../mods/v2/session-read-host"
 import { queryFunctionToolCatalog } from "../mods/v2/tool-catalog-host"
 import { app, dialog, type BrowserWindow, type IpcMain, type IpcMainInvokeEvent } from "electron"
 import { join } from "node:path"
@@ -150,7 +150,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         manager.functionTurns.abort(workspace, threadId, turnId)
         recordFunctionCancellationReceipt()
       },
-      readSession: (workspace, threadId, method, signal, usageArgs) =>
+      readSession: (workspace, threadId, method, signal) =>
         queryFunctionSessionRead(
           manager,
           assertStandaloneThread,
@@ -161,21 +161,6 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
           workspace,
           threadId,
           method,
-          signal,
-          undefined,
-          usageArgs
-        ),
-      compactSession: (workspace, threadId, instructions, signal) =>
-        compactFunctionSession(
-          manager,
-          assertStandaloneThread,
-          () => {
-            if (writableThreadScope(threadId) !== workspace)
-              throw new ModError("MODS_CALL_SCOPE_CHANGED")
-          },
-          workspace,
-          threadId,
-          instructions,
           signal
         ),
       listTools: async (workspace, threadId, signal) => {

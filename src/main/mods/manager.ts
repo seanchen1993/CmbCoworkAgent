@@ -34,7 +34,6 @@ import {
   withFunctionAgentExecution
 } from "./v2/host-call"
 import { currentFunctionExecution, functionExecutionScope } from "./v2/execution-context"
-import type { FunctionSessionCompactor } from "../agent/mods-session-view"
 import {
   FunctionTurnLifecycle,
   type FunctionTurnBinding,
@@ -181,34 +180,20 @@ export class ModsManager {
     ModRuntimeAuthority,
     {
       model: string
-      contextWindow?: number
-      compact?: FunctionSessionCompactor
-      contextState?: { _summarizationEvent?: unknown }
       messages?: readonly unknown[]
-      request?: {
-        messages: readonly unknown[]
-        systemMessage?: unknown
-        tools?: readonly unknown[]
-      }
     }
   >()
 
-  bindFunctionSession(
-    authority: ModRuntimeAuthority,
-    model: string,
-    contextWindow?: number,
-    compact?: FunctionSessionCompactor
-  ): void {
+  bindFunctionSession(authority: ModRuntimeAuthority, model: string): void {
     authority.assertLive()
     if (authority.agentId !== "main" || this.runtimeAuthorities.get(authority) !== authority)
       throw new ModError("MODS_RUNTIME_SCOPE_CHANGED")
-    this.functionSessions.set(authority, { model, contextWindow, compact })
+    this.functionSessions.set(authority, { model })
   }
 
   updateFunctionSessionMessages(
     authority: ModRuntimeAuthority,
-    messages: readonly unknown[],
-    contextState?: { _summarizationEvent?: unknown }
+    messages: readonly unknown[]
   ): void {
     authority.assertLive()
     const view = this.functionSessions.get(authority)
@@ -216,22 +201,6 @@ export class ModsManager {
       throw new ModError("MODS_SESSION_UNAVAILABLE")
     // Graph message reducers replace the array; retain that exact engine snapshot.
     view.messages = messages
-    view.contextState = contextState
-  }
-
-  updateFunctionSessionRequest(
-    authority: ModRuntimeAuthority,
-    request: { messages?: readonly unknown[]; systemMessage?: unknown; tools?: readonly unknown[] }
-  ): void {
-    authority.assertLive()
-    const view = this.functionSessions.get(authority)
-    if (!view || this.runtimeAuthorities.get(authority) !== authority)
-      throw new ModError("MODS_SESSION_UNAVAILABLE")
-    view.request = {
-      messages: [...(request.messages ?? view.messages ?? [])],
-      systemMessage: request.systemMessage,
-      tools: request.tools ? [...request.tools] : undefined
-    }
   }
 
   /** Claude's session view is the main conversation, even during a shared child tool call. */
@@ -267,10 +236,6 @@ export class ModsManager {
     return {
       model: view?.model,
       messages: view?.messages,
-      contextWindow: view?.contextWindow,
-      compact: view?.compact,
-      contextState: view?.contextState,
-      request: view?.request,
       bound: !!authority,
       assertLive,
       release: query.release

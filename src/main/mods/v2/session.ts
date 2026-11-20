@@ -66,12 +66,7 @@ export interface FunctionSessionHost {
   threadId: string
   workspace: string
   cwd?(): string
-  readSession?(
-    method: FunctionSessionReadMethod,
-    signal: AbortSignal,
-    usageArgs?: import("../../../shared/mods/v2/session").FunctionSessionUsageArgs
-  ): Promise<ModJson>
-  compactSession?(instructions: string, signal: AbortSignal): Promise<ModJson>
+  readSession?(method: FunctionSessionReadMethod, signal: AbortSignal): Promise<ModJson>
   abortTurn?(plugin: FunctionPlugin, turnId: string, signal: AbortSignal): Promise<void>
   assertLive(plugin?: FunctionPlugin): void
   uiChanged?(): void
