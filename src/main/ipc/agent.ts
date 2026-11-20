@@ -1185,35 +1185,6 @@ export async function cancelAndWaitForAgentThreadRun(
   return waitForReplacedRunToSettle(threadId)
 }
 
-function cancelFunctionAgentTurn(
-  threadId: string,
-  runToken: string,
-  controller: AbortController,
-  window: BrowserWindow | null,
-  channel: string
-): void {
-  throwIfPhysicalStreamRunIsInactive(threadId, runToken, controller.signal)
-  try {
-    LocalSandbox.cancelBackgroundTasks(threadId)
-  } catch (error) {
-    console.warn("[Agent] Failed to cancel background tasks for function turn:", error)
-  }
-  try {
-    flushPendingStreamTranscriptMessages(threadId, runToken)
-  } catch (error) {
-    console.warn("[Agent] Failed to flush function turn transcript:", error)
-  }
-  // Keep the controller registered until settlement; a new message must await cleanup.
-  controller.abort()
-  try {
-    handleAutoModeAgentCancelled(threadId)
-  } catch (error) {
-    console.warn("[Agent] Failed to pause auto mode after function turn cancellation:", error)
-  }
-  // SDK cancellation has no local stop-button handler to complete the renderer stream.
-  if (window) safeSendToWindow(window, channel, { type: "done" })
-}
-
 async function waitForReplacedRunToSettle(threadId: string): Promise<"settled" | "timed_out"> {
   const settled = activeRunSettled.get(threadId)
   if (!settled) return "settled"
@@ -1904,7 +1875,6 @@ function releaseAbandonedContinuationTurnState(
 }
 
 interface PhysicalAgentRunSettlementOptions {
-  functionTurnReason?: "answer" | "error"
   kind: "invoke" | "resume" | "interrupt"
   threadId: string
   runToken: string
@@ -1923,7 +1893,6 @@ interface PhysicalAgentRunSettlementOptions {
 }
 
 async function settlePhysicalAgentRun({
-  functionTurnReason,
   kind,
   threadId,
   runToken,
@@ -1987,24 +1956,9 @@ async function settlePhysicalAgentRun({
       },
       ...criticalBeforeReleasePhases,
       {
-        name: "settle-function-turn-facts",
-        run: () => {
-          const turns = getModsManager()?.functionTurns
-          if (functionTurnReason || controller.signal.aborted || turnStateShouldDispose)
-            turns?.finish(threadId, runToken, {
-              reason: functionTurnReason ?? (controller.signal.aborted ? "aborted" : "error")
-            })
-          else turns?.suspend(threadId, runToken)
-        }
-      },
-      {
         name: "render-mod-turn-summary",
         shouldRun: terminalRunOwnsSharedResources,
         run: () => getModsManager()?.finishTurn(threadId)
-      },
-      {
-        name: "release-expired-mod-runtime-bindings",
-        run: () => getModsManager()?.releaseExpiredRuntimeBindings(threadId)
       },
       {
         name: "release-active-controller",
@@ -4233,13 +4187,6 @@ function persistAndForwardPhysicalRunStreamChunk(
   // every chunk until a values/terminal event lets a long answer accumulate
   // thousands of deltas and makes final coalescing quadratic in output length.
   const messageId = persistStreamTranscriptChunk(threadId, runToken, mode, payload)
-  if (!shouldSkipMainTranscriptStreamPayload(mode, payload, threadId))
-    getModsManager()?.functionTurns.observeStream(
-      threadId,
-      runToken,
-      payload,
-      streamPayloadContentMode(payload)
-    )
   if (mode === "values") {
     // Graph values are the ordered authority for final fields. Persist them at
     // the active-run fence so delayed renderer echoes cannot restore old text,
@@ -8036,19 +7983,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             try {
               soloTaskTraceManager?.setModelId(candidateId)
               agent = await invokeRuntimeFactory.create(candidateId)
-              if (workspacePath)
-                await getModsManager()?.startFunctionTurn({
-                  workspace: workspacePath,
-                  threadId,
-                  runId: runToken,
-                  turnId: ensureTurnId(turnState, threadId, "invoke"),
-                  text: effectiveMessage,
-                  signal: abortController.signal,
-                  cancel: () =>
-                    cancelFunctionAgentTurn(threadId, runToken, abortController, window, channel),
-                  assertCurrent: () =>
-                    throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
-                })
               throwIfInvokeAborted()
               // First attempt sends the message; subsequent attempts resume from checkpoint
               const input = isFirstAttempt ? { messages: humanMessages } : null
@@ -9932,11 +9866,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // catch's documented halt semantics; the run stays re-discoverable.
           await settlePhysicalAgentRun({
             kind: "invoke",
-            functionTurnReason: autoModeTerminal
-              ? autoModeTerminal.outcome === "success"
-                ? "answer"
-                : "error"
-              : undefined,
             threadId,
             runToken,
             controller: abortController,
@@ -10918,19 +10847,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             if (abortController.signal.aborted) break
             try {
               const resumeAgent = await resumeRuntimeFactory.create(candidateId)
-              if (workspacePath)
-                await getModsManager()?.startFunctionTurn({
-                  workspace: workspacePath,
-                  threadId,
-                  runId: runToken,
-                  turnId: ensureTurnId(turnState, threadId, "resume"),
-                  text: "",
-                  signal: abortController.signal,
-                  cancel: () =>
-                    cancelFunctionAgentTurn(threadId, runToken, abortController, window, channel),
-                  assertCurrent: () =>
-                    throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
-                })
               throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
               resumeStream = await resumeAgent.stream(
                 new Command({ resume: resumeValue }),
@@ -11410,11 +11326,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           clearTurnCompletionGateState(threadId, runToken)
           await settlePhysicalAgentRun({
             kind: "resume",
-            functionTurnReason: resumeAutoModeTerminal
-              ? resumeAutoModeTerminal.outcome === "success"
-                ? "answer"
-                : "error"
-              : undefined,
             threadId,
             runToken,
             controller: abortController,
@@ -12085,19 +11996,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             if (abortController.signal.aborted) break
             try {
               const intAgent = await interruptRuntimeFactory.create(candidateId)
-              if (workspacePath)
-                await getModsManager()?.startFunctionTurn({
-                  workspace: workspacePath,
-                  threadId,
-                  runId: runToken,
-                  turnId: ensureTurnId(turnState, threadId, "interrupt"),
-                  text: "",
-                  signal: abortController.signal,
-                  cancel: () =>
-                    cancelFunctionAgentTurn(threadId, runToken, abortController, window, channel),
-                  assertCurrent: () =>
-                    throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
-                })
               throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
               intStream = await intAgent.stream(null, interruptStreamConfig)
               throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
@@ -12577,11 +12475,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         clearTurnCompletionGateState(threadId, runToken)
         await settlePhysicalAgentRun({
           kind: "interrupt",
-          functionTurnReason: interruptAutoModeTerminal
-            ? interruptAutoModeTerminal.outcome === "success"
-              ? "answer"
-              : "error"
-            : undefined,
           threadId,
           runToken,
           controller: abortController,

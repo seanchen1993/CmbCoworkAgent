@@ -9,7 +9,6 @@
     "./registered-tools.ts",
     "./mcp.ts",
     "./tool-check.ts",
-    "./session-info.ts",
-    "./turns.ts"
+    "./session-info.ts"
   ]
 }

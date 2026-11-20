@@ -6,8 +6,7 @@ import type { ModRuntimeAuthority } from "../mods/runtime-instance"
 export function createFunctionSessionViewMiddleware(
   manager: ModsManager,
   authority: ModRuntimeAuthority,
-  model: string,
-  runId?: string
+  model: string
 ) {
   manager.bindFunctionSession(authority, model)
   const capture = (state: { messages: readonly unknown[] }) => {
@@ -25,7 +24,6 @@ export function createFunctionSessionViewMiddleware(
     },
     afterModel: (state) => {
       capture(state)
-      if (runId) manager.functionTurns.observe(authority.threadId, runId, state.messages.at(-1))
       return undefined
     },
     wrapModelCall: async (request, handler) => {
