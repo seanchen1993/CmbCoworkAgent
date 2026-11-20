@@ -1,4 +1,5 @@
 import { groupInstalledPlugins } from "@/lib/installed-plugin-groups"
+import { ProjectPluginDevelopmentGuide } from "@/components/customize/ProjectPluginDevelopmentGuide"
 import { canReadPluginSource } from "../../../../shared/market-source-access"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { PluginDetailOwner } from "@/lib/plugin-detail-owner"
@@ -868,12 +869,14 @@ export function PluginsPanel(): React.JSX.Element {
                 variant="ghost"
                 size="sm"
                 className="h-7 w-7 p-0 shrink-0"
+                aria-label="安装 Plugin"
                 onClick={() => setUploadDialogOpen(true)}
               >
                 <Plus className="size-4" />
               </Button>
             </div>
           </div>
+          <ProjectPluginDevelopmentGuide entry="plugins" />
         </div>
         <ScrollArea className="min-h-0 flex-1">
           <div className="p-2 space-y-1">

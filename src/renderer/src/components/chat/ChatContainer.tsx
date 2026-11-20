@@ -103,7 +103,7 @@ import {
   Check,
   SlidersHorizontal
 } from "lucide-react"
-import type { FileAttachment, HarnessRunDetailViewModel, QueuedMessage } from "@/types"
+import type { HarnessRunDetailViewModel, QueuedMessage } from "@/types"
 import { ChatMessageScrollArea } from "./ChatMessageScrollArea"
 import { Button } from "@/components/ui/button"
 import {
@@ -242,8 +242,7 @@ import {
   retainMentionedWorkspaceFilesForWorkspace,
   resolveAtFileAttachments,
   collectPendingAtFileMentions,
-  resolveAtFileSelection,
-  type MentionedWorkspaceFile
+  resolveAtFileSelection
 } from "@/features/mentions/atFileAttachments"
 import { MentionFileChip } from "@/features/mentions/MentionFileChip"
 import { DEFAULT_IM_CHANNEL_ID } from "../../../../shared/im-gateway-contract"
@@ -2397,6 +2396,8 @@ export function ChatContainer({
     harnessAgentmdLoadStatus,
     currentModel: threadModel,
     draftInput: input,
+    draftAttachments: attachments,
+    draftMentionedFiles: mentionedFiles,
     harnessNextActionDialogTips,
     draftSkill: selectedSkill,
     workspaceFiles,
@@ -2449,6 +2450,8 @@ export function ChatContainer({
     clearHookInterruption,
     setContextReminder,
     setDraftInput: setInput,
+    setDraftAttachments: setAttachments,
+    setDraftMentionedFiles: setMentionedFiles,
     readPromptDraft,
     applyPromptDraft,
     captureModelSelectionIntent,
@@ -2458,6 +2461,7 @@ export function ChatContainer({
     draftBuiltinBrowser: selectedBuiltinBrowser,
     setDraftBuiltinBrowser: setSelectedBuiltinBrowser
   } = useCurrentThread(threadId)
+  const isLoading = streamData.isLoading || scheduledTaskLoading
   const chatFlowController = useChatFlow(threadId, currentForkWorkspacePath,
     chatWorkbenchAvailable && modsChatEnabled && !readOnly && isOrdinaryFlowMetadata(currentThread?.metadata))
   const chatFlow = chatWorkbenchAvailable ? chatFlowController : { ...chatFlowController, choice: null }
@@ -2473,18 +2477,24 @@ export function ChatContainer({
   const reloadMissingThread = useCallback(() => {
     void useAppStore.getState().loadThreads().catch(() => {})
   }, [])
+  const initialTranscriptPending = chatScrollUiState.mode === "initializing" &&
+    historyConversationPresence !== "empty" && !isLoading
   const modsChatScope = useMemo(
-    () => ({
-      threadId,
-      ...modsChatState,
-      prefetchHistory:
-        surface === "default" && !readOnly &&
-        isDevelopmentThreadMetadata(currentThread?.metadata),
-      // Unbound chats need directory selection; only failed reads offer a retry.
-      error: hasCurrentThread ? modsChatState.error : undefined,
-      retry: currentForkWorkspacePath ? modsChatState.retry
-        : hasCurrentThread ? undefined : reloadMissingThread
-    }),
+    () => {
+      const prefetchHistory = surface === "default" && !readOnly &&
+        isDevelopmentThreadMetadata(currentThread?.metadata)
+      return {
+        threadId,
+        ...modsChatState,
+        prefetchHistory,
+        // Share the existing limited background lane until the initial reading position settles.
+        prioritizeInitialHistory: prefetchHistory && initialTranscriptPending,
+        // Unbound chats need directory selection; only failed reads offer a retry.
+        error: hasCurrentThread ? modsChatState.error : undefined,
+        retry: currentForkWorkspacePath ? modsChatState.retry
+          : hasCurrentThread ? undefined : reloadMissingThread
+      }
+    },
     [
       threadId,
       modsChatState,
@@ -2493,7 +2503,8 @@ export function ChatContainer({
       reloadMissingThread,
       surface,
       readOnly,
-      currentThread
+      currentThread,
+      initialTranscriptPending
     ]
   )
   const functionTurnNotices = useFunctionTurnNotices(threadId, modsChatEnabled)
@@ -2652,7 +2663,6 @@ export function ChatContainer({
   const hasRunningCoordinatorWorker = coordinatorWorkers.some(
     (worker) => worker.status === "running"
   )
-  const isLoading = streamData.isLoading || scheduledTaskLoading
   const isHarnessContextReminderEnabled =
     surface === "harness-project" && Boolean(harnessFeatureBinding) && !readOnly
   const agentModeSwitchDisabledReason = !canChangeAgentMode
@@ -2800,12 +2810,10 @@ export function ChatContainer({
   )
 
   // ── File attachments state ──
-  const [attachments, setAttachments] = useState<FileAttachment[]>([])
-  const [mentionedFiles, setMentionedFiles] = useState<MentionedWorkspaceFile[]>([])
   const [attachmentLoading, setAttachmentLoading] = useState(false)
   const [dragOver, setDragOver] = useState(false)
-  const attachmentsRef = useRef<FileAttachment[]>([])
-  const mentionedFilesRef = useRef<MentionedWorkspaceFile[]>([])
+  const attachmentsRef = useRef(attachments)
+  const mentionedFilesRef = useRef(mentionedFiles)
   const activeAtFilePreviewTokensRef = useRef(new Set<string>())
 
   // Keep ref in sync with state
@@ -2822,7 +2830,7 @@ export function ChatContainer({
       mentionedFilesRef.current = retained
       return retained
     })
-  }, [workspacePath])
+  }, [setMentionedFiles, workspacePath])
   useEffect(
     () => () => {
       for (const requestToken of activeAtFilePreviewTokensRef.current) {
@@ -2934,7 +2942,7 @@ export function ChatContainer({
         setAttachmentLoading(false)
       }
     },
-    [setError, clearError, attachmentLoading, threadId]
+    [setError, clearError, attachmentLoading, setAttachments, threadId]
   )
 
   const handleAttachClick = useCallback(async () => {
@@ -2954,10 +2962,10 @@ export function ChatContainer({
 
   const removeAttachment = useCallback((index: number) => {
     setAttachments((prev) => prev.filter((_, i) => i !== index))
-  }, [])
+  }, [setAttachments])
   const removeMentionedFile = useCallback((index: number) => {
     setMentionedFiles((prev) => prev.filter((_, i) => i !== index))
-  }, [])
+  }, [setMentionedFiles])
 
   const dropZoneRef = useRef<HTMLDivElement>(null)
 
@@ -5023,6 +5031,12 @@ export function ChatContainer({
 
   useLayoutEffect(() => {
     const anchor = pendingChatSessionAnchorRef.current
+    if (anchor?.threadId === threadId && pendingDurableSearchRevealIdRef.current) {
+      // The saved viewport can outlive a remount while a durable reveal is pending.
+      // Only the reveal owns positioning until the target is ready or the user cancels.
+      clearSessionRestore()
+      return
+    }
     if (
       !anchor ||
       anchor.threadId !== threadId ||
@@ -5962,7 +5976,7 @@ export function ChatContainer({
         setError("@文件暂时不可用，请直接发送消息或改用普通附件。")
       }
     },
-    [atFileMentions.mode, clearError, input, setError, setInput, workspacePath, threadId]
+    [atFileMentions.mode, clearError, input, setError, setInput, setMentionedFiles, workspacePath, threadId]
   )
 
   const appendVisibleUserMessageWithTime = useCallback(
@@ -6069,6 +6083,7 @@ export function ChatContainer({
     setError,
     setAttachments,
     setInput,
+    setMentionedFiles,
     setSelectedSkill,
     appendVisibleUserMessageWithTime,
     stream,
@@ -9147,6 +9162,7 @@ export function ChatContainer({
                     virtuosoRef={virtuosoRef}
                     navigatorVirtualRangeRef={virtualRangeRef}
                     initialTopMostItemIndex={initialMessageLocation}
+                    deferInitialHistoryReads={modsChatEnabled && modsChatScope.prioritizeInitialHistory}
                     onInitialVirtualItemsRendered={handleInitialVirtualItemsRendered}
                     onContentHeightChanged={handleContentHeightChanged}
                     onAtBottomStateChange={handleVirtualAtBottomStateChange}

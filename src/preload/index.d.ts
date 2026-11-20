@@ -7,6 +7,7 @@ import type { WindowPresentationBridge } from "../shared/window-presentation"
 import type { DashboardToolUsageCoverage } from "../shared/dashboard-tool-usage"
 import type { DashboardThreadTraceScope } from "../shared/dashboard-thread-trace-scope"
 import type { DashboardKnowledgeCommitRate } from "../shared/dashboard-knowledge-commit-rate"
+import type { MarketSkillCatalogPage } from "../shared/market-skill-catalog"
 import type { ProjectAgentRunListener } from "../shared/project-agent-run"
 import type { ProjectReportApi } from "../shared/project-analysis-report"
 import type {
@@ -131,6 +132,12 @@ import type {
   SubagentTranscriptBlobExportResult,
   SubagentTranscriptBlobField
 } from "../main/types"
+import type {
+  MarketSkillShortcutBinding,
+  MarketSkillShortcutResult,
+  MarketSkillShortcutSelection,
+  MarketSkillShortcutSkillState
+} from "../shared/market-skill-shortcut"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import type {
@@ -1118,6 +1125,8 @@ interface CustomAPI {
     onConversationNotice(callback: (event: import("../shared/mods/v2/conversation-notice")
       .FunctionConversationNoticeEvent) => void): () => void
     chatDisplayCapability(threadId: string, expectedWorkspace: string | null): Promise<boolean>
+    chatPresentationCapability?(threadId: string, expectedWorkspace: string):
+      Promise<boolean | import("../shared/mods/v2/sites").ModsChatDisplayDecision>
     builtinCatalog(): Promise<import("../shared/mods/builtins").DevClawBuiltinStatus[]>
     builtinAdvisor(threadId: string, expectedWorkspace: string,
       action: "view" | "enable" | "disable" | "analyze" | "cancel" | "dismiss"):
@@ -1987,7 +1996,18 @@ interface CustomAPI {
     }) => Promise<{ canceled: boolean; filePaths: string[] }>
     supportedExtensions: () => Promise<string[]>
   }
+  marketSkillShortcut: {
+    get: () => Promise<MarketSkillShortcutResult<MarketSkillShortcutBinding>>
+    resolve: (selection: MarketSkillShortcutSelection) => Promise<
+      MarketSkillShortcutResult<MarketSkillShortcutSkillState<SkillMetadata>>
+    >
+    install: (selection: MarketSkillShortcutSelection) => Promise<
+      MarketSkillShortcutResult<MarketSkillShortcutSkillState<SkillMetadata>>
+    >
+  }
   skills: {
+    marketCatalog: () => Promise<MarketSkillCatalogPage>
+    onMarketCatalogChanged: (callback: () => void) => () => void
     catalog: {
       read: (
         input: SkillPluginCatalogPageInput,
