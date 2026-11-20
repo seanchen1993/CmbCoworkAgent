@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto"
-import { AsyncResource } from "node:async_hooks"
 import { utilityProcess, type UtilityProcess } from "electron"
 import type { ModJson, ModObject } from "../../../shared/mods/types"
 import { encodeModJson, parseModJson } from "../../../shared/mods/validation"
@@ -195,7 +194,7 @@ export class FunctionRuntimeClient {
       }
       this.pending.set(id, {
         runtimeId: data.runtimeId,
-        host: host ? AsyncResource.bind(host) : undefined,
+        host,
         resolve,
         reject,
         controller,

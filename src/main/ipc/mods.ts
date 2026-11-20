@@ -18,9 +18,6 @@ import { FunctionRuntimeClient } from "../mods/v2/runtime-client"
 import { scheduleFunctionCommand } from "../mods/v2/command-scheduler"
 import type { FunctionUiAction } from "../../shared/mods/v2/ui"
 import type { FunctionClientAction } from "../../shared/mods/v2/ui"
-import { scheduleFunctionTool, withFunctionExecution } from "../mods/v2/execution-context"
-import { functionToolTarget } from "../mods/v2/tool-sdk"
-import { randomUUID } from "node:crypto"
 
 export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWindow | null): void {
   let manager: ModsManager
@@ -74,36 +71,6 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       assertThread: (workspace, threadId) => {
         if (writableThreadScope(threadId) !== workspace)
           throw new ModError("MODS_CALL_SCOPE_CHANGED")
-      },
-      callTool: (workspace, threadId, grant, input, signal) => {
-        const { target, args } = functionToolTarget(input)
-        return scheduleFunctionTool(
-          queue,
-          workspace,
-          threadId,
-          target,
-          signal,
-          async (operationSignal, readOnly, userInitiated) => {
-            if (writableThreadScope(threadId) !== workspace)
-              throw new ModError("MODS_CALL_SCOPE_CHANGED")
-            manager.store.assertGrant(grant)
-            const cleanup = await ensureCommandBinding(workspace, threadId, operationSignal)
-            try {
-              return await manager.invokeFunctionTool(
-                workspace,
-                threadId,
-                grant,
-                target,
-                args,
-                operationSignal,
-                readOnly,
-                userInitiated
-              )
-            } finally {
-              await cleanup?.()
-            }
-          }
-        )
       },
       scheduleCommand: (workspace, threadId, command, signal, run) =>
         scheduleFunctionCommand(queue, workspace, threadId, command, signal, run),
@@ -179,21 +146,6 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       throw new ModError("MODS_THREAD_READ_ONLY")
     return workspace
   }
-  async function ensureCommandBinding(workspace: string, threadId: string, signal: AbortSignal) {
-    if (!manager.needsCommandBinding(threadId)) return undefined
-    const thread = getThreadCore(threadId)!
-    const metadata =
-      typeof thread.metadata === "string" ? JSON.parse(thread.metadata) : thread.metadata
-    if (
-      resolveAgentModeFromMetadata(metadata) !== "normal" ||
-      metadata?.harnessProjectId ||
-      metadata?.featureId ||
-      metadata?.workflowRunId ||
-      metadata?.parentThreadId
-    )
-      throw new ModError("MODS_THREAD_CONTEXT_REQUIRED")
-    return bindStandaloneModCommand(workspace, threadId, `function-tools:${randomUUID()}`, signal)
-  }
   ipcMain.handle("mods:commands", async (event, threadId: string) => {
     const workspace = scope(event, threadId)
     return [
@@ -208,20 +160,10 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     "mods:function-client-act",
     (event, input: { threadId: string; action: FunctionClientAction }) => {
       const workspace = writableScope(event, input?.threadId)
-      return withFunctionExecution(
-        {
-          workspace,
-          threadId: input.threadId,
-          leased: false,
-          immediate: false,
-          userInitiated: ["press", "submit", "select", "key"].includes(input.action?.kind)
-        },
-        () =>
-          functions.clientAct(
-            workspace,
-            input.threadId,
-            parseModJson(encodeModJson(input.action)) as unknown as FunctionClientAction
-          )
+      return functions.clientAct(
+        workspace,
+        input.threadId,
+        parseModJson(encodeModJson(input.action)) as unknown as FunctionClientAction
       )
     }
   )
@@ -229,20 +171,10 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     "mods:function-ui-act",
     (event, input: { threadId: string; action: FunctionUiAction }) => {
       const workspace = writableScope(event, input?.threadId)
-      return withFunctionExecution(
-        {
-          workspace,
-          threadId: input.threadId,
-          leased: false,
-          immediate: false,
-          userInitiated: true
-        },
-        () =>
-          functions.act(
-            workspace,
-            input.threadId,
-            parseModJson(encodeModJson(input.action)) as unknown as FunctionUiAction
-          )
+      return functions.act(
+        workspace,
+        input.threadId,
+        parseModJson(encodeModJson(input.action)) as unknown as FunctionUiAction
       )
     }
   )
@@ -297,16 +229,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
           async (signal) => {
             if (writableScope(event, input.threadId) !== workspace)
               throw new ModError("MODS_CALL_SCOPE_CHANGED")
-            return withFunctionExecution(
-              {
-                workspace,
-                threadId: input.threadId,
-                leased: !descriptor.immediate,
-                immediate: descriptor.immediate === true,
-                userInitiated: true
-              },
-              () => functions.runCommand(workspace, input.threadId, descriptor, text, signal)
-            )
+            return functions.runCommand(workspace, input.threadId, descriptor, text, signal)
           },
           { immediate: descriptor.immediate === true, inlineResult: true }
         ).job

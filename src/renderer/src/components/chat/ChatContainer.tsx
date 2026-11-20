@@ -5471,21 +5471,15 @@ export function ChatContainer({
     if (slash.mode.kind === "slash" && !isBareGoalSlashCommandInput(trimmedInput)) return
     if (readOnly) return
     if (contextReminderPending) return
-    if (modCommands.mayHandle(trimmedInput)) {
+    if (/^\/mod(?:\s|$)/i.test(trimmedInput) || modCommands.handles(trimmedInput)) {
       if (historyLoading) return
-      try {
-        const handled = await modCommands.submit(trimmedInput, () => {
-          if (hasPendingFilePayload || selectedSkill || selectedBuiltinBrowser)
-            throw new Error("Mods 命令接收文本参数，请先移除附件、技能和浏览器选择。")
-        })
-        if (handled) {
-          setInput("")
-          return
-        }
-      } catch (error) {
-        setError(error instanceof Error ? error.message : "Mods 命令提交失败")
+      if (hasPendingFilePayload || selectedSkill || selectedBuiltinBrowser) {
+        setError("Mods 命令接收文本参数，请先移除附件、技能和浏览器选择。")
         return
       }
+      try { if (await modCommands.submit(trimmedInput)) setInput("") }
+      catch (error) { setError(error instanceof Error ? error.message : "Mods 命令提交失败") }
+      return
     }
     // A plain (non-/goal) message submitted while the thread is busy — running,
     // or a tool approval is pending — is parked in the draft queue instead of
