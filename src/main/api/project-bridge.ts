@@ -83,6 +83,16 @@ async function projectAdapterInput(value: unknown) {
   })
 }
 
+function projectCreatorInput(input: unknown): NonNullable<HarnessProjectCreateInput["creator"]> {
+  const value = requireObject(input)
+  allowedKeys(value, ["sapId", "ystId", "userName", "orgName", "pathName"])
+  if (Object.values(value).some((item) => typeof item !== "string"))
+    throw new ApiInputError(400, "invalid_request", "creator 的字段必须是 string")
+  if (!Object.values(value).some((item) => typeof item === "string" && item.trim()))
+    throw new ApiInputError(400, "invalid_request", "creator 至少需要一个非空字段")
+  return value as NonNullable<HarnessProjectCreateInput["creator"]>
+}
+
 async function projectInput(body: Record<string, unknown>): Promise<HarnessProjectCreateInput> {
   allowedKeys(body, [
     "harness-adapter",
@@ -94,7 +104,8 @@ async function projectInput(body: Record<string, unknown>): Promise<HarnessProje
     "systemId",
     "systemName",
     "workspacePath",
-    "sessionWorkspacePath"
+    "sessionWorkspacePath",
+    "creator"
   ])
   const fields = Object.fromEntries(
     [
@@ -111,13 +122,15 @@ async function projectInput(body: Record<string, unknown>): Promise<HarnessProje
     throw new ApiInputError(400, "invalid_request", "projectFromLean 必须是 boolean")
   if (body.sessionWorkspacePath !== undefined && typeof body.sessionWorkspacePath !== "string")
     throw new ApiInputError(400, "invalid_request", "sessionWorkspacePath 必须是 string")
+  const creator = body.creator === undefined ? undefined : projectCreatorInput(body.creator)
   const adapter = await projectAdapterInput(body["harness-adapter"])
   return {
     ...fields,
     adapterId: adapter.id,
     adapterType: adapter.type,
     projectFromLean: body.projectFromLean,
-    sessionWorkspacePath: body.sessionWorkspacePath
+    sessionWorkspacePath: body.sessionWorkspacePath,
+    creator
   } as HarnessProjectCreateInput
 }
 
@@ -140,7 +153,8 @@ export async function apiUpdateProject(projectId: string, body: Record<string, u
     "description",
     "systemId",
     "systemName",
-    "sessionWorkspacePath"
+    "sessionWorkspacePath",
+    "creator"
   ])
   const existing = await requireProject(projectId)
   const input: HarnessProjectCreateInput = {
@@ -174,6 +188,7 @@ export async function apiUpdateProject(projectId: string, body: Record<string, u
     input.adapterId = adapter.id
     input.adapterType = adapter.type
   }
+  if ("creator" in body) input.creator = projectCreatorInput(body.creator)
   const project = await updateProject(projectId, input)
   projectChanged(project.projectId)
   return project

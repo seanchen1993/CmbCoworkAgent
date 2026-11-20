@@ -1814,6 +1814,17 @@ function normalizeProjectCreator(value: unknown): HarnessProjectCreatorMetadata 
   return Object.values(creator).some((item) => item.trim()) ? creator : null
 }
 
+function projectCreatorFromInput(
+  creator: NonNullable<HarnessProjectCreateInput["creator"]>
+): HarnessProjectCreatorMetadata | undefined {
+  return (
+    normalizeProjectCreator({
+      ...creator,
+      ...deriveUpperOrgLevelsFromPath(creator.pathName)
+    }) ?? undefined
+  )
+}
+
 function createUniqueDeployUnitMappingId(seenIds: Set<string>): string {
   let id = uuid()
   while (seenIds.has(id)) {
@@ -3393,7 +3404,7 @@ export async function createHarnessProject(
     workspacePath: input.workspacePath.trim(),
     sessionWorkspacePath: input.sessionWorkspacePath?.trim() || undefined,
     "harness-adapter": harnessAdapter,
-    creator: getCurrentProjectCreator(),
+    creator: input.creator ? projectCreatorFromInput(input.creator) : getCurrentProjectCreator(),
     lifecycle: {
       status: "active",
       createAt: new Date().toISOString()
@@ -3593,6 +3604,7 @@ export async function updateHarnessProjectMetadata(
       workspacePath: existing.workspacePath,
       sessionWorkspacePath: input.sessionWorkspacePath?.trim() || undefined,
       "harness-adapter": harnessAdapter,
+      creator: input.creator ? projectCreatorFromInput(input.creator) : existing.creator,
       lifecycle: { ...existing.lifecycle, updateAt: new Date().toISOString() }
     }
     store.projects[index] = updated
