@@ -131,8 +131,6 @@ export interface ModStatus {
 export interface ModWorkspaceStatus {
   functionMods?: import("./v2/commands").FunctionPluginStatus[]
   workspace: string
-  /** Application-level switch; false prevents all Mod runtime interception. */
-  globalEnabled?: boolean
   enabled: boolean
   outputPolicy: boolean
   mods: ModStatus[]

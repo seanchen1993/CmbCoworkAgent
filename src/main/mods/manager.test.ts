@@ -115,10 +115,7 @@ it("does not route a native v2 manifest into the v1 runtime", async () => {
   }
 })
 
-async function fixture(
-  deployment?: ManagedModDeployment,
-  globalEnabled: () => boolean = () => true
-) {
+async function fixture(deployment?: ManagedModDeployment) {
   const root = mkdtempSync(join(tmpdir(), "cmb-mods-manager-"))
   const plugin = join(root, "plugin")
   mkdirSync(join(plugin, ".codex-plugin"), { recursive: true })
@@ -163,15 +160,7 @@ async function fixture(
   const notify = vi.fn()
   const plugins = [{ id: "plugin", name: "Review", path: plugin, enabled: true }]
   const control = join(root, "control.sqlite")
-  const manager = new ModsManager(
-    control,
-    () => plugins,
-    confirm,
-    notify,
-    undefined,
-    deployment,
-    globalEnabled
-  )
+  const manager = new ModsManager(control, () => plugins, confirm, notify, undefined, deployment)
   cleanup.push(() => {
     manager.close()
     if (
@@ -222,23 +211,6 @@ async function fixture(
 }
 
 describe("project Mods lifecycle and UI authority", () => {
-  it("honors the application switch and falls through to the native path when disabled", async () => {
-    let globalEnabled = true
-    const f = await fixture(undefined, () => globalEnabled)
-    await f.enable()
-    expect((await f.manager.status(f.root)).globalEnabled).toBe(true)
-    expect(f.manager.isEnabled(f.root)).toBe(true)
-    globalEnabled = false
-    f.manager.invalidateAll()
-    expect((await f.manager.status(f.root)).globalEnabled).toBe(false)
-    expect(f.manager.isEnabled(f.root)).toBe(false)
-    expect(f.manager.isActive(f.root)).toBe(false)
-    expect(f.manager.protects(f.root)).toBe(false)
-    expect(await f.dispatch()).toBe("text")
-    expect(await f.manager.commands(f.root, f.scope.threadId)).toEqual([])
-    await f.manager.finishTurn(f.scope.threadId)
-  })
-
   it("queries real permissions without approval, execution or receipt writes", async () => {
     const f = await fixture()
     f.manager.configure(f.root, true, false)
