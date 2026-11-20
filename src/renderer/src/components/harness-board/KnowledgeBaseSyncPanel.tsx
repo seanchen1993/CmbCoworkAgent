@@ -302,6 +302,7 @@ export function KnowledgeBaseSyncPanel({
                 {expanded && (
                   <KnowledgePreviewPanel
                     knowledgeBaseId={item.idKey}
+                    previewRevision={item.previewRevision}
                     preview={previews[item.idKey] ?? null}
                     loading={loadingPreviewIds.has(item.idKey)}
                     selectedPath={selectedPreviewPaths[item.idKey] ?? null}
