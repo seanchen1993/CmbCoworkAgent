@@ -621,7 +621,9 @@ export function CustomModelDialog({
           : defaultModelDraftId === currentModelStorageId
             ? savedModelId
             : defaultModelDraftId
-      await window.api.models.setDefault(nextDefaultModelId)
+      if (allConfigs.length === 0 || nextDefaultModelId !== defaultModelId) {
+        await window.api.models.setDefault(nextDefaultModelId)
+      }
       setDefaultModelId(nextDefaultModelId)
       setDefaultModelDraftId(nextDefaultModelId)
       const refreshed = await loadModelItems()
@@ -773,13 +775,9 @@ export function CustomModelDialog({
                       >
                         <div className="flex items-center gap-1.5">
                           <span className="min-w-0 flex-1 truncate font-medium">{item.name}</span>
-                          {item.source === "builtin" && (
+                          {item.source === "builtin" && item.origin !== "local" && (
                             <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[9px]">
-                              {item.origin === "remote"
-                                ? "后台"
-                                : item.origin === "local"
-                                  ? "闲时"
-                                  : "兜底"}
+                              {item.origin === "remote" ? "后台" : "兜底"}
                             </span>
                           )}
                         </div>

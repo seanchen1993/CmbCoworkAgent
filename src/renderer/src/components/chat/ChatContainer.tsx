@@ -1,6 +1,5 @@
 import { finishThreadSearchNavigation, isCurrentThreadSearchNavigation, useThreadSearch, type DurableSearchNavigation } from "@/lib/thread-search-navigation"
 import { projectHumanGate } from "../../../../shared/harness-notifications"
-import { IDLE_MODEL_OUTSIDE_HOURS_MESSAGE } from "../../../../shared/idle-model-service-window"
 import { IDLE_MODEL_SAP_REQUIRED_MESSAGE } from "../../../../shared/model-catalog"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
 import { BizRetryDecisionCard } from "@/components/harness-board/BizRetryNotice"
@@ -1030,7 +1029,6 @@ const RECOVERABLE_QUEUE_ERRORS = new Set([
   QUEUE_MODEL_REQUIRED_ERROR,
   QUEUE_MODEL_MISSING_ERROR,
   QUEUE_MODEL_UNAVAILABLE_ERROR,
-  IDLE_MODEL_OUTSIDE_HOURS_MESSAGE,
   IDLE_MODEL_SAP_REQUIRED_MESSAGE,
   QUEUE_WORKSPACE_REQUIRED_ERROR
 ])

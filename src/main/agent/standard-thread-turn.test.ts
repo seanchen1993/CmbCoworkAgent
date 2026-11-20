@@ -36,7 +36,6 @@ import {
   prepareStandardThreadRuntimeFactory
 } from "./standard-thread-turn"
 import { extractErrorDetail } from "./failover"
-import { IdleModelServiceHoursError } from "../../shared/idle-model-service-window"
 import * as runtime from "./runtime"
 import type { CreateAgentRuntimeOptions } from "./runtime"
 import { claimLocalThreadRunLease, releaseLocalThreadRunLease } from "./thread-run-lease"
@@ -51,16 +50,8 @@ describe("managed model routing", () => {
     routingMocks.resolveModel.mockReset()
   })
 
-  it("preserves service-hours rejections instead of treating them as routing failures", async () => {
-    routingMocks.resolveModel.mockRejectedValue(new IdleModelServiceHoursError())
-    await expect(resolveStandardTurnRouting({
-      taskSource: "chat", threadId: "ordinary", requestedModelId: "builtin:idle-ultra",
-      routingMode: "pinned"
-    })).rejects.toMatchObject({ status: 400, code: "idle_model_outside_service_hours" })
-  })
-
   it.each([undefined, "resume", "interrupt"] as const)(
-    "pins Ultra without automatic routing or failover for continuation %s",
+    "pins Pro without automatic routing or failover for continuation %s",
     async (continuation) => {
       routingMocks.managedModel.mockReturnValue("builtin:idle-ultra")
       const routing = await resolveStandardTurnRouting({
@@ -95,13 +86,13 @@ describe("managed model routing", () => {
     )
   })
 
-  it("surfaces an unavailable Ultra error without falling back to ordinary routing", async () => {
+  it("surfaces an unavailable Pro error without falling back to ordinary routing", async () => {
     routingMocks.managedModel.mockImplementation(() => {
-      throw new Error("内置 Ultra 模型不可用")
+      throw new Error("码豆模型PRO不可用")
     })
     await expect(
       resolveStandardTurnRouting({ taskSource: "chat", threadId: "managed" })
-    ).rejects.toThrow("Ultra 模型不可用")
+    ).rejects.toThrow("码豆模型PRO不可用")
     expect(routingMocks.resolveModel).not.toHaveBeenCalled()
   })
 })

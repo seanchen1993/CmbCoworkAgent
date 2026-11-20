@@ -1,14 +1,13 @@
 import { createHash, randomUUID } from "node:crypto"
-import { IDLE_MODEL_MODE, isValidSapId, type ModelTransport } from "../../shared/model-catalog"
-import { getUserInfo } from "../storage"
 import {
-  isIdleModelOutsideServiceHours,
-  IDLE_MODEL_OUTSIDE_HOURS_CODE,
-  IDLE_MODEL_OUTSIDE_HOURS_MESSAGE,
-  type IdleModelServiceHoursConfig
-} from "../../shared/idle-model-service-window"
+  IDLE_MODEL_MODE,
+  IDLE_MODEL_NAME,
+  isValidSapId,
+  type ModelTransport
+} from "../../shared/model-catalog"
+import { getUserInfo } from "../storage"
 
-interface ModelConnectionConfig extends IdleModelServiceHoursConfig {
+interface ModelConnectionConfig {
   baseUrl: string
   apiKey?: string
   transport?: ModelTransport
@@ -20,23 +19,6 @@ interface ModelConnectionOptions {
 }
 
 const MAX_IDLE_SESSION_ID_LENGTH = 36
-
-/** A local non-retryable response: no network call, failover, or compaction recovery. */
-export function getIdleModelServiceHoursRejection(
-  config: IdleModelServiceHoursConfig
-): Response | undefined {
-  if (!isIdleModelOutsideServiceHours(config)) return
-  return new Response(
-    JSON.stringify({
-      error: {
-        message: IDLE_MODEL_OUTSIDE_HOURS_MESSAGE,
-        code: IDLE_MODEL_OUTSIDE_HOURS_CODE,
-        type: "invalid_request_error"
-      }
-    }),
-    { status: 400, headers: { "content-type": "application/json" } }
-  )
-}
 
 export function getModelClientOptions(
   config: ModelConnectionConfig,
@@ -51,7 +33,7 @@ export function getModelClientOptions(
 export function requireIdleModelSapId(): string {
   const sapId = getUserInfo()?.sapId
   if (!isValidSapId(sapId)) {
-    throw new Error("闲时模型需要当前登录用户的八位 SAP 员工编号，请完善用户信息后重试。")
+    throw new Error(`${IDLE_MODEL_NAME}需要当前登录用户的八位 SAP 员工编号，请完善用户信息后重试。`)
   }
   return sapId.trim()
 }
@@ -65,7 +47,7 @@ export function getModelConnection(
     return { baseURL: config.baseUrl, ...(options.fetch ? { fetch: options.fetch } : {}) }
   }
   requireIdleModelSapId()
-  if (!config.apiKey) throw new Error("闲时模型网关密钥未配置")
+  if (!config.apiKey) throw new Error(`${IDLE_MODEL_NAME}网关密钥未配置`)
   const originalSessionId = options.sessionId || randomUUID()
   // Hash the whole ID so child threads with the same parent keep distinct sessions.
   const sessionId =
@@ -79,8 +61,6 @@ export function getModelConnection(
   return {
     baseURL: config.baseUrl,
     fetch: async (input, init) => {
-      const rejection = getIdleModelServiceHoursRejection(config)
-      if (rejection) return rejection
       let sapId: string
       try {
         sapId = requireIdleModelSapId()
