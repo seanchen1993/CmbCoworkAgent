@@ -255,6 +255,10 @@ export interface HarnessProjectCreateInput {
   systemName: string
   workspacePath?: string
   knowledgeBaseIds?: string[]
+  creator?: Pick<
+    HarnessProjectCreatorMetadata,
+    "sapId" | "ystId" | "userName" | "orgName" | "pathName"
+  >
 }
 
 export interface HarnessEnterpriseProjectSearchInput {
@@ -477,6 +481,7 @@ export interface HarnessProjectMetadataUpdateInput {
   systemName: string
   workspacePath: string
   knowledgeBaseIds?: string[]
+  creator?: HarnessProjectCreateInput["creator"]
 }
 
 export interface HarnessProjectListItem {

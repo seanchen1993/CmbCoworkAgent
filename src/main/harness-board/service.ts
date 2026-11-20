@@ -1869,6 +1869,17 @@ function normalizeProjectCreator(value: unknown): HarnessProjectCreatorMetadata 
   return Object.values(creator).some((item) => item.trim()) ? creator : null
 }
 
+function projectCreatorFromInput(
+  creator: NonNullable<HarnessProjectCreateInput["creator"]>
+): HarnessProjectCreatorMetadata | undefined {
+  return (
+    normalizeProjectCreator({
+      ...creator,
+      ...deriveUpperOrgLevelsFromPath(creator.pathName)
+    }) ?? undefined
+  )
+}
+
 function getCurrentProjectCreator(): HarnessProjectCreatorMetadata | undefined {
   const userInfo = getUserInfo()
   const orgLevels = deriveUpperOrgLevelsFromPath(userInfo?.pathName)
@@ -3476,7 +3487,7 @@ export async function createHarnessProject(
     workspacePath: workspacePath || getDefaultHarnessWorkspacePath(),
     knowledgeBaseIds,
     "harness-adapter": harnessAdapter,
-    creator: getCurrentProjectCreator(),
+    creator: input.creator ? projectCreatorFromInput(input.creator) : getCurrentProjectCreator(),
     lifecycle: {
       status: "active",
       createAt: formatGmt8Timestamp()
@@ -3739,6 +3750,7 @@ export async function updateHarnessProjectMetadata(
       workspacePath: existing.workspacePath,
       knowledgeBaseIds,
       "harness-adapter": harnessAdapter,
+      creator: input.creator ? projectCreatorFromInput(input.creator) : existing.creator,
       lifecycle: { ...existing.lifecycle, updateAt: formatGmt8Timestamp() }
     }
     store.projects[index] = updated

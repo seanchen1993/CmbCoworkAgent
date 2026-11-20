@@ -81,6 +81,16 @@ async function projectAdapterInput(value: unknown) {
   })
 }
 
+function projectCreatorInput(input: unknown): NonNullable<HarnessProjectCreateInput["creator"]> {
+  const value = requireObject(input)
+  allowedKeys(value, ["sapId", "ystId", "userName", "orgName", "pathName"])
+  if (Object.values(value).some((item) => typeof item !== "string"))
+    throw new ApiInputError(400, "invalid_request", "creator 的字段必须是 string")
+  if (!Object.values(value).some((item) => typeof item === "string" && item.trim()))
+    throw new ApiInputError(400, "invalid_request", "creator 至少需要一个非空字段")
+  return value as NonNullable<HarnessProjectCreateInput["creator"]>
+}
+
 async function projectInput(body: Record<string, unknown>): Promise<HarnessProjectCreateInput> {
   allowedKeys(body, [
     "harness-adapter",
@@ -91,7 +101,8 @@ async function projectInput(body: Record<string, unknown>): Promise<HarnessProje
     "description",
     "systemId",
     "systemName",
-    "workspacePath"
+    "workspacePath",
+    "creator"
   ])
   const fields = Object.fromEntries(
     [
@@ -106,12 +117,14 @@ async function projectInput(body: Record<string, unknown>): Promise<HarnessProje
   ) as Pick<HarnessProjectCreateInput, "name" | "projectCode" | "projectDir" | "description" | "systemId" | "systemName" | "workspacePath">
   if (typeof body.projectFromLean !== "boolean")
     throw new ApiInputError(400, "invalid_request", "projectFromLean 必须是 boolean")
+  const creator = body.creator === undefined ? undefined : projectCreatorInput(body.creator)
   const adapter = await projectAdapterInput(body["harness-adapter"])
   return {
     ...fields,
     adapterId: adapter.id,
     adapterType: adapter.type,
-    projectFromLean: body.projectFromLean
+    projectFromLean: body.projectFromLean,
+    creator
   } as HarnessProjectCreateInput
 }
 
@@ -133,7 +146,8 @@ export async function apiUpdateProject(projectId: string, body: Record<string, u
     "projectFromLean",
     "description",
     "systemId",
-    "systemName"
+    "systemName",
+    "creator"
   ])
   const existing = await requireProject(projectId)
   const input: HarnessProjectMetadataUpdateInput = {
@@ -162,6 +176,7 @@ export async function apiUpdateProject(projectId: string, body: Record<string, u
     input.adapterId = adapter.id
     input.adapterType = adapter.type
   }
+  if ("creator" in body) input.creator = projectCreatorInput(body.creator)
   const project = await updateProject(projectId, input)
   projectChanged(project.projectId)
   return project

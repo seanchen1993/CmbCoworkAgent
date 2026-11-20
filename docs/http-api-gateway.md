@@ -762,11 +762,19 @@ curl -s $BASE/v1/threads/$TID/messages
   "systemId": "PAY",
   "systemName": "支付平台",
   "workspacePath": "/Users/me/projects",
-  "sessionWorkspacePath": "/Users/me/repos/payment"
+  "creator": {
+    "sapId": "10010001",
+    "ystId": "383331",
+    "userName": "张三",
+    "orgName": "开发组",
+    "pathName": "总行/信息技术部/某中心/某团队/某室/开发组"
+  }
 }
 ```
 
-除 `sessionWorkspacePath` 外，上述字段必填。仅接受适配器 `name`，按去除首尾空格后的名称精确匹配已安装插件，校验 board 配置及兼容性，服务端生成完整 id/name/version/type 快照。未安装报错，同名多候选报错，不自动安装或选择版本。
+除 `creator` 外，上述字段必填。`creator` 为可选对象，支持示例中的五个字符串字段，至少需要一个非空字段；传入后使用该对象中的创建人信息，未传的子字段留空。服务端根据 `pathName` 按现有组织层级规则推导 `upperOrgLv0` 和 `upperOrgLv1`，无法推导时为空。不传 `creator` 时使用本机当前登录用户作为创建人。
+
+仅接受适配器 `name`，按去除首尾空格后的名称精确匹配已安装插件，校验 board 配置及兼容性，服务端生成完整 id/name/version/type 快照。未安装报错，同名多候选报错，不自动安装或选择版本。
 
 编辑使用 `PUT /v1/projects/:projectId`，按部分更新处理，只需提交要修改的字段：
 
@@ -785,8 +793,8 @@ curl -s $BASE/v1/threads/$TID/messages
 | `projectFromLean` | boolean | 保留原值；显式 false 正常更新 |
 | `systemId` | string | 保留原值 |
 | `systemName` | string | 保留原值 |
-| `sessionWorkspacePath` | string | 保留原值；显式空字符串表示清除 |
 | `harness-adapter` | `{ "name": "插件名称" }` | 使用原适配器绑定；传入时按名称解析 |
+| `creator` | 对象，字段与创建请求相同 | 保留原值；传入时整体替换，并根据 `pathName` 重新推导组织层级 |
 
 所有编辑字段均可选，显式 null 不表示保留或清除，而是参数错误。空对象不修改业务字段，仍遵循现有更新服务更新时间和快照上报的行为。项目存放目录由服务端从原 metadata 读取，不属于编辑入参；传入不可编辑字段返回 400。编辑仅更新现有元数据，不移动目录或重新初始化项目。
 
