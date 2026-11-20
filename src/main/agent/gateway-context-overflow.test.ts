@@ -8,7 +8,7 @@ import { createCmbSummarizationMiddleware } from "./context-summarization-middle
 const OVERFLOW_MESSAGE = "模型服务内部异常或当前任务上下文超过最大限度"
 const config = {
   id: "idle-ultra",
-  model: "ultra",
+  model: "pro",
   apiKey: "gateway-test-key",
   baseUrl: "http://gateway.example.test/pattern/llm/v1",
   transport: "idle-gateway" as const

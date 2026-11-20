@@ -38,7 +38,6 @@ import {
 } from "./goals/internal-prompt"
 import { buildOrderedChain } from "./failover"
 import { getManagedRunModelOverride } from "../harness-board/managed-run-model"
-import { IdleModelServiceHoursError } from "../../shared/idle-model-service-window"
 import { activateSkillLifecycle, formatSkillHookContext } from "./skill-lifecycle/activation"
 import { parseSkillUseBlock, type ParsedSkillUseBlock } from "./skill-lifecycle/marker"
 import { SkillLifecycleRegistry, type SkillLifecycleMatch } from "./skill-lifecycle/registry"
@@ -778,6 +777,7 @@ export async function resolveStandardTurnRouting(
       result: {
         resolvedModelId: managedModelId,
         resolvedTier: "premium",
+        // Retain the existing routing reason in telemetry.
         routeReason: "managed-ultra",
         fallbackChain: [],
         layer: "pinned"
@@ -795,7 +795,7 @@ export async function resolveStandardTurnRouting(
     continuation: input.continuation,
     routingMode: input.routingMode ?? getGlobalRoutingMode()
   }).catch((error) => {
-    if (error instanceof SelectedModelUnavailableError || error instanceof IdleModelServiceHoursError) throw error
+    if (error instanceof SelectedModelUnavailableError) throw error
     return null
   })
   const effectiveModelId = result?.resolvedModelId ?? input.requestedModelId

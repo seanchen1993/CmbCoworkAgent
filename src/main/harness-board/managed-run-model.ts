@@ -1,8 +1,7 @@
 import { getThreadCore } from "../db"
 import { getModelConfigByRef } from "../models/registry"
-import { isModelAvailable } from "../../shared/model-catalog"
-import { assertIdleModelServiceHours } from "../../shared/idle-model-service-window"
-import { MANAGED_ULTRA_MODEL_REF } from "../../shared/managed-run-model"
+import { IDLE_MODEL_NAME, isModelAvailable } from "../../shared/model-catalog"
+import { MANAGED_IDLE_MODEL_REF } from "../../shared/managed-run-model"
 import { managedRunStore } from "./managed-run-store"
 import { readHarnessFeatureMetadata } from "./service"
 
@@ -33,13 +32,12 @@ export function getManagedRunModelOverride(
   if (run.currentSession?.threadId !== threadId && !managedExecution) return undefined
   // A new session is already bound to the run before currentSession is updated.
   // The existing managedExecution launch marker covers that first turn only.
-  const config = getModelConfigByRef(MANAGED_ULTRA_MODEL_REF)
-  assertIdleModelServiceHours(config)
+  const config = getModelConfigByRef(MANAGED_IDLE_MODEL_REF)
   const unavailableReason = config?.unavailableReason
   if (!isModelAvailable(config)) {
     throw new Error(
-      `内置 Ultra 模型不可用：${unavailableReason || "请检查内置模型配置和登录用户信息"}`
+      `${IDLE_MODEL_NAME}不可用：${unavailableReason || "请检查内置模型配置和登录用户信息"}`
     )
   }
-  return MANAGED_ULTRA_MODEL_REF
+  return MANAGED_IDLE_MODEL_REF
 }

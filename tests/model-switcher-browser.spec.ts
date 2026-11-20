@@ -261,29 +261,26 @@ async function main(): Promise<void> {
       (window as unknown as FixtureWindow).modelSwitcherFixture.idleCatalog()
     )
     await page.getByRole("button", { name: "Local A", exact: true }).click()
-    const idleOption = page.getByRole("button", { name: /闲时模型 Ultra/ })
-    assert.equal(await idleOption.isEnabled(), true, "idle model is selectable during service hours")
+    const idleOption = page.getByRole("button", { name: /码豆模型PRO/ })
+    assert.equal(await idleOption.isEnabled(), true)
     await idleOption.click()
     assert.equal((await settle()).currentModel, "builtin:idle-ultra")
-    await page.getByRole("button", { name: "闲时模型 Ultra", exact: true }).click()
-    assert.equal(await page.getByText(/闲时服务时间：22:00–次日 07:00/).isVisible(), true)
+    await page.getByRole("button", { name: "码豆模型PRO", exact: true }).click()
+    assert.equal(await page.getByText(/全天可用/).count(), 0)
     await page.evaluate(() =>
       (window as unknown as FixtureWindow).modelSwitcherFixture.idleCatalog(false)
     )
-    const closedIdleOption = page.getByRole("button", { name: /闲时模型 Ultra.*非服务时段/ })
-    await closedIdleOption.waitFor()
-    assert.equal(await closedIdleOption.isEnabled(), true)
-    await page.getByRole("button", { name: /^Local A/ }).click()
-    await page.getByRole("button", { name: "Local A", exact: true }).click()
-    await closedIdleOption.click()
+    const unavailableIdleOption = page.getByRole("button", {
+      name: /码豆模型PRO.*用户信息不完整/
+    })
+    await unavailableIdleOption.waitFor()
+    assert.equal(
+      await unavailableIdleOption.isDisabled(),
+      true,
+      "missing identity still prevents selection"
+    )
     assert.equal((await settle()).currentModel, "builtin:idle-ultra")
     assert.equal((await settle()).writes.at(-1), "builtin:idle-ultra")
-    await page.getByRole("button", { name: "闲时模型 Ultra", exact: true }).click()
-    await page.evaluate(() =>
-      (window as unknown as FixtureWindow).modelSwitcherFixture.idleCatalog(false, false)
-    )
-    await settle()
-    assert.equal(await closedIdleOption.isDisabled(), true, "missing credentials or identity still prevent selection")
     await page.evaluate(() =>
       (window as unknown as FixtureWindow).modelSwitcherFixture.idleCatalog(true)
     )
@@ -291,20 +288,30 @@ async function main(): Promise<void> {
     await page.evaluate(() =>
       (window as unknown as FixtureWindow).modelSwitcherFixture.showIdleSettings()
     )
-    await page.locator('input[value="ultra"]').waitFor()
-    assert.equal(await page.locator('input[value="ultra"]').isDisabled(), true)
+    await page.locator('input[value="pro"]').waitFor()
+    assert.equal(await page.locator('input[value="pro"]').isDisabled(), true)
     assert.equal(await page.locator('input[value="128000"]').isDisabled(), true)
-    assert.equal(await page.getByText(/闲时服务时间：22:00–次日 07:00/).isVisible(), true)
-    const nameInput = page.locator('input[value="闲时模型 Ultra"]')
-    await nameInput.fill("未保存的闲时名称")
+    assert.equal(await page.getByRole("button", { name: "码豆模型PRO", exact: true }).count(), 1)
+    assert.equal(await page.getByText(/全天可用/).count(), 0)
+    assert.equal(await page.getByRole("button", { name: /测试连接/ }).isEnabled(), true)
+    const nameInput = page.locator('input[value="码豆模型PRO"]')
+    await nameInput.fill("未保存的模型名称")
     await page.evaluate(() =>
       (window as unknown as FixtureWindow).modelSwitcherFixture.idleCatalog(false)
     )
-    await page.getByText(/当前为非服务时段/).waitFor()
+    await page.getByText(/请先完善当前用户的八位 SAP 员工编号/).waitFor()
     assert.equal(await page.getByRole("button", { name: /测试连接/ }).isDisabled(), true)
-    assert.equal(await page.locator('input[value="未保存的闲时名称"]').count(), 1)
+    assert.equal(await page.locator('input[value="未保存的模型名称"]').count(), 1)
     assert.equal((await settle()).currentModel, "builtin:idle-ultra")
-    console.log("PASS idle model: preselection outside hours, blocked calls, and preserved drafts")
+    await page.getByRole("button", { name: "保存", exact: true }).click()
+    await settle()
+    assert.deepEqual(
+      await page.evaluate(() =>
+        (window as unknown as FixtureWindow).modelSwitcherFixture.readSettingsWrites()
+      ),
+      { names: ["未保存的模型名称"], defaults: [] }
+    )
+    console.log("PASS Pro model: selection, identity checks, locked context, and settings save")
   } finally {
     await app.close()
   }

@@ -1,6 +1,7 @@
 import { useId } from "react"
 import { Info } from "lucide-react"
 import type { ManagedRunModelSelection } from "../../../../shared/managed-run-model"
+import { IDLE_MODEL_NAME } from "../../../../shared/model-catalog"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { ManagedRunRadioOption } from "./ManagedRunRadioOption"
 
@@ -30,41 +31,29 @@ export function ManagedRunModelField({
               </button>
             </TooltipTrigger>
             <TooltipContent side="top" className="z-[70] max-w-72 text-xs leading-5">
-              默认模型：使用默认模型 内置 Ultra：使用夜间闲时算力
+              托管可沿用默认模型，也可固定使用{IDLE_MODEL_NAME}。
             </TooltipContent>
           </Tooltip>
         </TooltipProvider>
       </div>
-      <div className="min-w-0">
-        <div role="radiogroup" aria-labelledby={groupId} className="flex flex-wrap gap-x-5">
-          {(
-            [
-              { value: "default", label: "默认模型" },
-              { value: "ultra", label: "内置 Ultra" }
-            ] as const
-          ).map((option) => (
-            <ManagedRunRadioOption
-              key={option.value}
-              name={groupId}
-              value={option.value}
-              checked={value === option.value}
-              onChange={() => onChange(option.value)}
-              disabled={disabled}
-            >
-              {option.label}
-              {option.value === "ultra" && (
-                <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                  夜间
-                </span>
-              )}
-            </ManagedRunRadioOption>
-          ))}
-        </div>
-        {value === "ultra" && (
-          <p className="mt-1 text-xs leading-5 text-muted-foreground">
-            22:00–次日 07:00 可用
-          </p>
-        )}
+      <div role="radiogroup" aria-labelledby={groupId} className="min-w-0 flex flex-wrap gap-x-5">
+        {(
+          [
+            { value: "default", label: "默认模型" },
+            { value: "ultra", label: IDLE_MODEL_NAME }
+          ] as const
+        ).map((option) => (
+          <ManagedRunRadioOption
+            key={option.value}
+            name={groupId}
+            value={option.value}
+            checked={value === option.value}
+            onChange={() => onChange(option.value)}
+            disabled={disabled}
+          >
+            {option.label}
+          </ManagedRunRadioOption>
+        ))}
       </div>
     </div>
   )
