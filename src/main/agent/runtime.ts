@@ -1331,7 +1331,6 @@ export function createScopedMcpCapabilityService(
   }
 
   const scopedService: McpCapabilityService = {
-    configuredServerNames: () => service.configuredServerNames?.() ?? [],
     listTools: async () => (await getScopedToolSnapshot()).tools,
     peekTools: () => {
       // Never initialize a connection; the underlying service rejects stale config fingerprints.
