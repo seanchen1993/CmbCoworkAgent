@@ -2958,10 +2958,6 @@ const api = {
       threadId: string,
       action: import("../shared/mods/v2/ui").FunctionUiAction
     ): Promise<void> => ipcRenderer.invoke("mods:function-ui-act", { threadId, action }),
-    clientAct: (
-      threadId: string,
-      action: import("../shared/mods/v2/ui").FunctionClientAction
-    ): Promise<void> => ipcRenderer.invoke("mods:function-client-act", { threadId, action }),
     approveFunction: (threadId: string, pluginId: string, digest: string): Promise<void> =>
       ipcRenderer.invoke("mods:approve-function", { threadId, pluginId, digest }),
     revokeFunction: (threadId: string, name: string): Promise<void> =>

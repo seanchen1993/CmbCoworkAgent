@@ -13,12 +13,7 @@ import { FunctionSession, SESSION_CAPABILITIES, type FunctionSessionHost } from 
 import type { FunctionPlugin } from "./dispatcher"
 import { normalizePluginRelativePath, readPluginManifest } from "../../plugins/manifest"
 import { resolveModFile } from "../loader"
-import type {
-  FunctionPaneSnapshot,
-  FunctionUiAction,
-  FunctionClientAction
-} from "../../../shared/mods/v2/ui"
-import { CLIENT_BOOTSTRAP } from "./client-bootstrap"
+import type { FunctionPaneSnapshot, FunctionUiAction } from "../../../shared/mods/v2/ui"
 
 interface Snapshot {
   compiled: CompiledFunctionPlugin
@@ -267,23 +262,6 @@ export class FunctionModsManager {
           threadId,
           assertLive,
           uiChanged: () => this.host.changed(threadId),
-          loadClient: async (name, module) => {
-            const snapshot = current.snapshots.get(name)
-            if (!snapshot || !Object.hasOwn(snapshot.compiled.clients, module))
-              throw new ModFunctionError("MODS_CLIENT_MODULE_UNAPPROVED")
-            assertLive()
-            const guest = await current.client.load(
-              CLIENT_BOOTSTRAP + "\n" + snapshot.compiled.clients[module],
-              { plugin: name }
-            )
-            try {
-              assertLive()
-              return guest
-            } catch (error) {
-              await guest.dispose()
-              throw error
-            }
-          },
           scheduleCommand: this.host.scheduleCommand
             ? (command, signal, run) => {
                 assertLive()
@@ -401,17 +379,6 @@ export class FunctionModsManager {
     if (!entry || !this.host.enabled(workspace)) throw new ModFunctionError("MODS_UI_STALE_ACTION")
     await entry.loading
     await entry.session!.panes.act(action)
-  }
-
-  async clientAct(
-    workspace: string,
-    threadId: string,
-    action: FunctionClientAction
-  ): Promise<void> {
-    const entry = this.sessions.get(JSON.stringify([workspace, threadId]))
-    if (!entry || !this.host.enabled(workspace)) throw new ModFunctionError("MODS_CLIENT_UNMOUNTED")
-    await entry.loading
-    await entry.session!.clients.act(action)
   }
 
   async runCommand(
