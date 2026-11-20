@@ -1,4 +1,3 @@
-import { collectRuntimeToolCatalog } from "./runtime-tool-catalog"
 import { ToolMessage } from "@langchain/core/messages"
 import { Command, isCommand } from "@langchain/langgraph"
 import { createMiddleware } from "langchain"
@@ -267,7 +266,24 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
       const runtimeAuthority = execution ? execution.runtimeAuthority : options.runtimeAuthority
       const agentId =
         getHookAgentIdFromRequest(request) ?? execution?.agentId ?? options.agentId ?? "main"
-      const nativeTools = collectRuntimeToolCatalog(request.tools)
+      const nativeTools = request.tools.flatMap((entry) => {
+        const value = entry as {
+          name?: unknown
+          description?: unknown
+          function?: { name?: unknown; description?: unknown }
+        }
+        const name = value.name ?? value.function?.name
+        const description = value.description ?? value.function?.description
+        return typeof name === "string"
+          ? [
+              {
+                name,
+                description: typeof description === "string" ? description : "",
+                mcp: name.startsWith("mcp__")
+              }
+            ]
+          : []
+      })
       manager.bindFunctionToolCatalog(
         {
           runtimeAuthority,

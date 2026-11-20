@@ -1,4 +1,3 @@
-import { queryFunctionToolCatalog } from "../mods/v2/tool-catalog-host"
 import { app, dialog, type BrowserWindow, type IpcMain, type IpcMainInvokeEvent } from "electron"
 import { join } from "node:path"
 import { writeFile } from "node:fs/promises"
@@ -140,15 +139,10 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       registeredTool: (...args) => registeredTools.call(...args),
       listTools: async (workspace, threadId, signal) => {
         signal.throwIfAborted()
+        const agentId = manager.functionToolAgent(workspace, threadId)
         if (writableThreadScope(threadId) !== workspace)
           throw new ModError("MODS_CALL_SCOPE_CHANGED")
-        return queryFunctionToolCatalog(
-          manager,
-          assertStandaloneThread,
-          workspace,
-          threadId,
-          signal
-        )
+        return manager.functionToolCatalog(workspace, threadId, agentId)
       },
       completeModel: (...args) => models.complete(...args),
       checkTool: (workspace, threadId, grant, input, signal, registered) => {
