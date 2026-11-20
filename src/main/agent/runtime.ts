@@ -1,15 +1,7 @@
-import { NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY } from "../../shared/graph-transcript-boundary"
-import { pinForegroundCheckpointOpen, preemptBackgroundThreadMutation } from "../ipc/thread-run-mutation-lock"
 import { createStageUsageMiddleware } from "./trace/stage-usage-middleware"
-import {
-  createSubagentLifecycleMiddleware,
-  type SubagentLifecycleCallbacks
-} from "./subagent-lifecycle-middleware"
 import { randomUUID } from "crypto"
-import { AsyncLocalStorage } from "node:async_hooks"
 import { TurnTraceRecorder } from "./trace/turn-trace-recorder"
 import { AsyncRWLock, AsyncSemaphore } from "./async-lock"
-import { validateWorkspaceDirectory } from "../services/workspace-validation"
 /* eslint-disable @typescript-eslint/no-unused-vars */
 // Runtime: agent lifecycle and middleware orchestration
 import {
@@ -22,7 +14,6 @@ import {
 } from "deepagents"
 import { withModelResponseDiagnostics } from "./model-response-diagnostics"
 import {
-  getDbPath,
   getThreadCheckpointPath,
   deleteThreadCheckpoint,
   getEnabledSkillsSources,
@@ -44,40 +35,22 @@ import {
 } from "../storage"
 import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
 import { samplingFields, topKModelKwargs } from "../models/sampling-params"
-import { getIdleModelServiceHoursRejection, getModelClientOptions } from "../models/connection"
-import type { ModelTransport } from "../../shared/model-catalog"
-import type { IdleModelEnvironment } from "../../shared/idle-model-service-window"
-import {
-  createCmbSummarizationMiddleware,
-  isGatewayContextOverflow
-} from "./context-summarization-middleware"
+import { createCmbSummarizationMiddleware } from "./context-summarization-middleware"
 import {
   createTurnCompletionGateMiddleware,
   type TurnCompletionRecoveryCallback
 } from "./turn-completion-integrity"
-import {
-  GOAL_CONTINUATION_BOUNDARY_METADATA_KEY,
-  GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY
-} from "./goals/internal-prompt"
-import { goalManager } from "./goals/runtime"
 import { getProjectThreadDataDirectory } from "./context-history-path"
 import {
   withSubagentSessionCapture,
   subagentSessionCallbacks
 } from "../services/subagent-session-capture"
 import { withRawApiCallCapture } from "../services/llm-api-request-capture"
-import { createCompactionDiagnosticSink } from "../services/context-compaction-diagnostics"
 import { runWithTrustedToolFilePreviewContext } from "../services/trusted-tool-file-preview"
 
 import { ChatOpenAI, ChatOpenAICompletions } from "@langchain/openai"
-import {
-  DynamicStructuredTool,
-  ToolInputParsingException,
-  tool,
-  type ToolRunnableConfig
-} from "@langchain/core/tools"
+import { DynamicStructuredTool, ToolInputParsingException, tool } from "@langchain/core/tools"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
-import { bootstrapLegacyCheckpointTranscriptInWorker } from "../checkpointer/runtime-projection-client"
 import { recoverMainCheckpointMessages } from "./checkpoint-message-recovery"
 import {
   LocalSandbox,
@@ -87,16 +60,6 @@ import {
   type SkillHookContextProvider
 } from "./local-sandbox"
 import { approvalMatchesRuntimeThread } from "./approval-thread-match"
-import {
-  createShellTaskMonitorTools,
-  getShellTaskOwnerId,
-  SHELL_TASK_OWNER_CONFIG_KEY
-} from "./shell-monitor-tool"
-import {
-  expandShellTaskMonitorToolDenials,
-  isShellTaskMonitorToolName,
-  SHELL_TASK_MONITOR_TOOL_NAMES
-} from "./shell-task-monitor"
 import { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
 import { combineSkillMiddlewareSources, createRefreshingSkillsMiddleware } from "./skill-sources"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
@@ -154,13 +117,8 @@ import {
   humanInTheLoopMiddleware,
   tool as lcTool
 } from "langchain"
-import { HumanMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages"
-import {
-  patchConfig,
-  raceWithSignal,
-  Runnable,
-  type RunnableConfig
-} from "@langchain/core/runnables"
+import { HumanMessage, ToolMessage } from "@langchain/core/messages"
+import { Runnable } from "@langchain/core/runnables"
 import { Command, isGraphBubbleUp } from "@langchain/langgraph"
 import { z } from "zod"
 
@@ -195,10 +153,6 @@ import {
   flushStrict,
   getThreadCore,
   getThreadMessageIdentityContext,
-  getThreadMessageProviderOccurrencesBeforeUser,
-  getThreadTranscriptBoundaryOrdinal,
-  hasUnresolvedLegacyTranscriptSlots,
-  hasPendingGoalTranscriptOrder,
   moveThreadMessagesAfterAnchor,
   moveThreadMessagesAfterLastNonAssistant,
   replaceThreadMessageId,
@@ -276,81 +230,15 @@ export {
 } from "./current-run-message-queue"
 export type { CurrentRunQueuedMessage } from "./current-run-message-queue"
 
-type CurrentRunTranscriptFlush = (
-  threadId: string,
-  runToken: string
-) => (userMessageId: string | undefined) => void
-
-let flushTranscriptBeforeCurrentRunInjection: CurrentRunTranscriptFlush | null = null
+let flushTranscriptBeforeCurrentRunInjection:
+  | ((threadId: string, runToken: string) => void)
+  | null = null
 
 export function setCurrentRunTranscriptFlushBeforeInjection(
-  flush: CurrentRunTranscriptFlush
+  flush: (threadId: string, runToken: string) => void
 ): void {
   flushTranscriptBeforeCurrentRunInjection = flush
 }
-
-/** Stage the graph input. The main-stream values fence owns its SQLite reservation. */
-export function createPhysicalScopedGateRecoveryMessage(
-  threadId: string,
-  runToken: string | undefined,
-  messages: readonly BaseMessage[],
-  prompt: string
-): HumanMessage {
-  const parent = messages.findLast(HumanMessage.isInstance)
-  const goalBoundary =
-    parent?.additional_kwargs[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] === true &&
-    Boolean(goalManager.getActive(threadId))
-  const notificationBoundary =
-    parent?.additional_kwargs[NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY] === true
-  if (
-    !parent?.id ||
-    (!goalBoundary && !notificationBoundary) ||
-    !runToken ||
-    !isCurrentRunMessageQueueOwner(threadId, runToken)
-  ) {
-    return new HumanMessage(prompt)
-  }
-
-  // The graph can produce another repair while the consumer is still
-  // processing the previous gate frame. Carry its known durable ancestor.
-  const durableParentId =
-    getThreadTranscriptBoundaryOrdinal(threadId, parent.id) !== undefined
-      ? parent.id
-      : parent.additional_kwargs[GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]
-  if (typeof durableParentId !== "string" || !durableParentId) return new HumanMessage(prompt)
-
-  return new HumanMessage({
-    content: prompt,
-    id: randomUUID(),
-    additional_kwargs: {
-      ...(goalBoundary && { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true }),
-      ...(notificationBoundary && { [NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY]: true }),
-      [GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]: durableParentId
-    }
-  })
-}
-
-/** Settle provisional transcript order before model deltas claim provider identities. */
-function prepareLegacyScopedProviderHistory(
-  threadId: string,
-  scopedTurn: boolean
-): Promise<void> | undefined {
-  const pending = () => hasPendingGoalTranscriptOrder(threadId) ||
-    (scopedTurn && hasUnresolvedLegacyTranscriptSlots(threadId))
-  if (!pending()) return undefined
-  return bootstrapLegacyCheckpointTranscriptInWorker(
-    getThreadCheckpointPath(threadId),
-    getDbPath(),
-    threadId
-  ).then(({ stats }) => {
-    // No checkpoint ID means there is no recoverable source. An orphaned
-    // ordinal-only marker alone should not keep future Goal turns blocked.
-    if (hasPendingGoalTranscriptOrder(threadId) || (stats.checkpointId !== null && pending())) {
-      throw new Error("会话历史仍在恢复，请稍后继续。")
-    }
-  })
-}
-
 import { ToolOrchestrator } from "./tool-orchestrator"
 import { classifyCommandConcurrency, isReadOnlyShellCommand } from "./exec-policy"
 import type { WindowsShellKind } from "./windows-safe-commands"
@@ -425,6 +313,11 @@ import {
   type CoordinatorWorkerTurnPlanningState
 } from "./coordinator-mode"
 import {
+  createAllowedSkillsBackend,
+  parseAllowedNames,
+  resolveAllowedSkillRootDirs
+} from "./library/requirement-mode"
+import {
   coordinatorWorkerManager,
   type CoordinatorWorkerSnapshot,
   type CoordinatorWorkerContinuationIntent,
@@ -462,7 +355,7 @@ import {
   type WorkerValuesSnapshotContext
 } from "./coordinator-worker-stream"
 import { createSubagentSkillAttribution } from "./turn-attribution"
-import { buildOrderedChain, isRetryableApiError, isRetryableStatus } from "./failover"
+import { buildOrderedChain, isRetryableApiError } from "./failover"
 import { resolveModel } from "../routing"
 import { patchRuntimeReadFileTool, resolveReadFileTraceContext } from "./read-file-tool"
 import { createWorkflowTool } from "./workflow/tool"
@@ -492,32 +385,7 @@ import {
 import { SOLO_TASK_OWNER_METADATA_KEY, type SoloTaskTraceManager } from "./trace/solo-task"
 import type { TraceContext, TraceOutcome } from "./trace/types"
 
-export { createGradedToolConcurrencyMiddleware }
-
 export const MANAGED_EXECUTE_TIMEOUT_MS = 20 * 60 * 1000
-const SHELL_BACKGROUND_AFTER_MS = 60_000
-const shellMonitorDeniedContext = new AsyncLocalStorage<boolean>()
-
-const BACKGROUND_EXEC_MANAGED_GUIDANCE = `
-### 长时间命令执行
-
-托管会话中的 execute 以前台方式运行，最长等待 20 分钟，返回最终执行结果。
-`
-
-const BACKGROUND_EXEC_GUIDANCE = `
-### 长时间命令执行
-
-execute 默认从进程启动开始等待 60 秒。命令仍在运行时会继续在后台运行，并返回 task_id。
-- 使用 monitor({ task_id: "..." }) 监听终态并获取退出码和输出。依赖命令结果的后续步骤必须等到终态。
-- 如需立即在后台启动，传入 run_in_background: true。传入 false 时按前台时限运行。
-`
-
-const BACKGROUND_EXEC_OPT_IN_GUIDANCE = `
-### 长时间命令执行
-
-execute 默认按前台时限运行。传入 run_in_background: true 可立即在后台启动并返回 task_id。
-- 使用 monitor({ task_id: "..." }) 监听终态并获取退出码和输出。依赖命令结果的后续步骤必须等到终态。
-`
 
 function isAbortError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
@@ -628,12 +496,13 @@ coordinatorWorkerManager.setWorkerApprovalProbe(hasPendingApprovalForRuntimeThre
 // ─── Tool concurrency: AsyncRWLock (writer-preferring) ──────────────────────
 //
 // Mirrors Codex's `ToolCallRuntime` model (codex-rs/core/src/tools/parallel.rs):
-//   - shared (read lock): reads and file tools with backend resource locking
+//   - shared (read lock): tools that are safe to run concurrently (reads)
 //   - exclusive (write lock): side-effecting tools that must run alone
-//   - bypass: task orchestration, bounded separately from resource access
+//   - bypass: tools we have no classification for — pass through without locking
 //
-// This gate covers the handler, including its hooks/approvals. File tools share
-// it and acquire their per-file resource lock only AFTER approval in the backend.
+// Approval events are NOT serialized by this lock — they fire immediately from
+// each tool task. The renderer's pendingApprovals[] queue owns UI ordering.
+// Execution is what this lock gates.
 
 type ToolConcurrencyTier = "exclusive" | "shared" | "bypass"
 
@@ -641,8 +510,8 @@ type ToolConcurrencyTier = "exclusive" | "shared" | "bypass"
  * Tools that mutate cross-tool shared state (tool registry, scheduler, skill
  * files). These must run one-at-a-time across the entire thread — write lock.
  *
- * Unknown shell commands remain exclusive. File mutations instead use the
- * backend's shared workspace gate and canonical per-file lock.
+ * Note: mutating shell / file I/O tools are also exclusive. Only commands that
+ * are provably read-only are allowed to overlap with other read-only work.
  */
 const EXCLUSIVE_TOOL_NAMES = new Set([
   "code_exec",
@@ -650,7 +519,9 @@ const EXCLUSIVE_TOOL_NAMES = new Set([
   "manage_scheduler",
   "manage_skill",
   "workflow",
-  "invoke_deferred_tool"
+  "invoke_deferred_tool",
+  "write_file",
+  "edit_file"
 ])
 
 /**
@@ -667,10 +538,11 @@ const SHARED_TOOL_NAMES = new Set([
   "grep",
   "search_tool",
   "inspect_tool",
+  "task_output",
   "view_image",
-  // Different files can progress independently, including while awaiting approval.
-  "write_file",
-  "edit_file"
+  // Subagent task calls may run concurrently. Subagent-internal tools use the
+  // separate subagent concurrency gate below, so file writes remain exclusive.
+  "task"
 ])
 
 const MAX_PARALLEL_TASK_SUBAGENTS = 3
@@ -731,7 +603,6 @@ function classifyToolConcurrency(
 ): ToolConcurrencyTier {
   const toolName = toolCall?.name
   if (!toolName) return "exclusive" // safety default: unknown → write lock
-  if (toolName === "task") return "bypass"
 
   if (EXCLUSIVE_TOOL_NAMES.has(toolName)) return "exclusive"
   if (toolName === "execute") {
@@ -797,7 +668,7 @@ function getTaskConcurrencyLimiter(queueId: string): AsyncSemaphore {
   return limiter
 }
 
-function createGradedToolConcurrencyMiddleware(queueId: string, shellMonitors?: WeakSet<object>) {
+function createGradedToolConcurrencyMiddleware(queueId: string) {
   const lock = getToolConcurrencyLock(queueId)
   const taskLimiter = getTaskConcurrencyLimiter(queueId)
   return createMiddleware({
@@ -808,18 +679,12 @@ function createGradedToolConcurrencyMiddleware(queueId: string, shellMonitors?: 
       const toolCall = request.toolCall as
         | { id?: string; name?: string; args?: unknown }
         | undefined
-      if (
-        (request.tool && shellMonitors?.has(request.tool)) ||
-        shouldFastRejectActiveWorkflow(queueId, toolCall)
-      ) {
-        // A shell monitor can wait while the process continues under its own workspace lease.
+      if (shouldFastRejectActiveWorkflow(queueId, toolCall)) {
         return handler(request)
       }
       const tier = classifyToolConcurrency(toolCall)
       if (tier === "bypass") {
-        // A task waits for its entire child run. Holding a resource lock here
-        // would block parent tools and deadlock children sharing this queue.
-        return taskLimiter.run(async () => handler(request), signal)
+        return handler(request)
       }
       const label = `${toolCall?.name ?? "unknown"}:${toolCall?.id ?? "no-id"}`
       const waitStart = Date.now()
@@ -832,6 +697,10 @@ function createGradedToolConcurrencyMiddleware(queueId: string, shellMonitors?: 
             signal?.throwIfAborted()
             return handler(request)
           }, signal)
+
+        if (toolCall?.name === "task") {
+          return taskLimiter.run(runSharedTool, signal)
+        }
 
         return runSharedTool()
       }
@@ -898,10 +767,7 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
   if (!context?.runToken) {
     throw new Error("Current-run transcript flush is missing its physical run token")
   }
-  const commitTranscriptInjection = flushTranscriptBeforeCurrentRunInjection(
-    threadId,
-    context.runToken
-  )
+  flushTranscriptBeforeCurrentRunInjection(threadId, context.runToken)
   // afterModel runs before the outer stream consumer receives the final AI
   // message. Resolve and migrate the exact provider occurrence before writing
   // the completed reply so a reused raw provider id cannot overwrite history.
@@ -932,22 +798,13 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
     ],
     32
   )
-  const anchor = context.anchorMessage
-  let durableAnchorMessageId: string | undefined
-  if (anchor) {
-    durableAnchorMessageId = resolveCurrentRunInjectionAnchorId(
-      durableMessagesBeforeCompletedAssistant,
-      anchor
-    )
-    if (
-      !durableAnchorMessageId &&
-      anchor.role === "user" &&
-      getThreadTranscriptBoundaryOrdinal(threadId, anchor.id) !== undefined
-    ) {
-      durableAnchorMessageId = anchor.id
-    }
-  }
-  if (anchor && !durableAnchorMessageId) {
+  const durableAnchorMessageId = context.anchorMessage
+    ? resolveCurrentRunInjectionAnchorId(
+        durableMessagesBeforeCompletedAssistant,
+        context.anchorMessage
+      )
+    : undefined
+  if (context.anchorMessage && !durableAnchorMessageId) {
     throw new Error("Cannot resolve current-run injection predecessor in durable transcript")
   }
   const completedAssistantIdentity = completedAssistantMessage
@@ -1014,7 +871,6 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
     moveThreadMessagesAfterLastNonAssistant(threadId, transcriptMessageIds)
   }
   await flushStrict()
-  commitTranscriptInjection(messages.at(-1)?.id)
   // Persistence above is still valid if a replacement run took ownership while
   // fsync was in flight, but old-run stream events are not: they would append the
   // injected user turn after the replacement's optimistic bubble and reset its
@@ -1170,7 +1026,6 @@ export function getCapturedSystemPromptPreview(
 
 export { calculateSummarizationTriggerTokens }
 export const CONTEXT_COMPACTION_MAX_OUTPUT_TOKENS = 20_000
-const CONTEXT_COMPACTION_RECOVERY_MAX_OUTPUT_TOKENS = 1_024
 // Used only after the summary request itself reports context overflow. Normal compaction
 // sends the complete old history so user intent is not discarded before summarization.
 const SUMMARY_OVERFLOW_RETRY_TARGET_RATIO = 0.65
@@ -1523,7 +1378,6 @@ export function createScopedMcpCapabilityService(
         pluginWorkspace: baseContext.pluginWorkspace,
         featureId: baseContext.featureId,
         harnessProjectId: baseContext.harnessProjectId,
-        harnessAdapterId: baseContext.harnessAdapterId,
         harnessAdapterName: baseContext.harnessAdapterName,
         harnessAdapterVersion: baseContext.harnessAdapterVersion,
         harnessNodeName: baseContext.harnessNodeName,
@@ -1900,13 +1754,7 @@ export function createAgentToolGuardMiddleware(
           status: "error"
         })
       }
-      if (name === "execute") {
-        const runExecute = () =>
-          blocked.has("monitor")
-            ? shellMonitorDeniedContext.run(true, () => handler(request))
-            : handler(request)
-        if (shellAccess !== "read_only") return runExecute()
-
+      if (name === "execute" && shellAccess === "read_only") {
         const command = extractExecuteCommand(request.toolCall?.args)
         if (command !== null && !isReadOnlyShellCommand(command, "", windowsShell)) {
           return new ToolMessage({
@@ -1922,7 +1770,7 @@ export function createAgentToolGuardMiddleware(
         // post-hook gate still fires if a PreToolUse hook rewrites this safe
         // command into a build/write one. AsyncLocalStorage scopes it to this
         // call — concurrent write-capable sibling subagents are unaffected.
-        return readOnlyShellExecutionContext.run(true, runExecute)
+        return readOnlyShellExecutionContext.run(true, () => handler(request))
       }
       return handler(request)
     }
@@ -1938,16 +1786,10 @@ export function createAgentToolGuardMiddleware(
  * hard-rejecting use the same set so a recovered tool call cannot bypass the
  * advertised policy.
  */
-function runtimeToolDenylist(disallowedTools: readonly string[]): Set<string> {
-  return expandShellTaskMonitorToolDenials(
-    new Set(disallowedTools.map((name) => name.trim()).filter(Boolean))
-  )
-}
-
 export function createRuntimeToolDenylistMiddleware(
   disallowedTools: readonly string[]
 ): ReturnType<typeof createMiddleware> {
-  const blocked = runtimeToolDenylist(disallowedTools)
+  const blocked = new Set(disallowedTools.map((name) => name.trim()).filter(Boolean))
   return createMiddleware({
     name: "runtimeToolDenylist",
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2083,23 +1925,13 @@ function taskInvocationOwnerId(config: { toolCall?: { id?: unknown }; toolCallId
 export function wrapTaskToolWithOwnerMetadata(
   taskTool: DynamicStructuredTool,
   soloTaskTraceManager?: SoloTaskTraceManager,
-  captureThreadId?: string,
-  cancelOwnedShellTasks?: (ownerId: string) => Promise<void>
+  captureThreadId?: string
 ): DynamicStructuredTool {
-  // The tool() helper aborts before its callback settles. The Task invocation
-  // must keep its own cleanup fence before reporting success, failure or abort.
-  return new DynamicStructuredTool({
-    name: taskTool.name,
-    description: taskTool.description,
-    schema: taskTool.schema,
-    func: async (input, runManager, parentConfig) => {
-      const config = patchConfig(parentConfig, {
-        callbacks: runManager?.getChild()
-      }) as ToolRunnableConfig & { toolCallId?: unknown }
-      config.signal?.throwIfAborted()
+  return tool(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async (input: Record<string, unknown>, config: any) => {
       const invocationOwner = taskInvocationOwnerId(config)
       const ownerId = invocationOwner.explicit
-      const shellTaskOwnerId = randomUUID()
       const patchedConfig = {
         ...config,
         // Only a real tool-call id may be exposed as renderer attribution.
@@ -2116,13 +1948,15 @@ export function wrapTaskToolWithOwnerMetadata(
           : {}),
         configurable: {
           ...(config?.configurable ?? {}),
-          [SHELL_TASK_OWNER_CONFIG_KEY]: { id: shellTaskOwnerId },
           [ACTION_STATIONARITY_OWNER_CONFIG_KEY]: invocationOwner.stationarity,
           [SUBAGENT_SUMMARIZATION_OWNER_CONFIG_KEY]: invocationOwner.stationarity,
           ...(ownerId ? { [SUBAGENT_OWNER_METADATA_KEY]: ownerId } : {})
         }
       }
-      const taskInput = (config.toolCall?.args ?? input) as Record<string, unknown>
+      const taskInput =
+        config?.toolCall?.args && typeof config.toolCall.args === "object"
+          ? (config.toolCall.args as Record<string, unknown>)
+          : input
       if (ownerId) {
         soloTaskTraceManager?.startTask({
           ownerId,
@@ -2140,18 +1974,13 @@ export function wrapTaskToolWithOwnerMetadata(
             ...patchedConfig,
             callbacks: subagentSessionCallbacks(patchedConfig.callbacks)
           })
-        const execution =
-          captureThreadId && ownerId
-            ? withSubagentSessionCapture(
-                { kind: "multi", threadId: captureThreadId, subagentId: ownerId },
-                typeof taskInput.description === "string" ? taskInput.description : "子代理",
-                invoke
-              )
-            : taskTool.invoke(config?.toolCall ?? input, patchedConfig)
-        const result = await raceWithSignal(execution, config.signal).finally(() =>
-          cancelOwnedShellTasks?.(shellTaskOwnerId)
-        )
-        config.signal?.throwIfAborted()
+        const result = await (captureThreadId && ownerId
+          ? withSubagentSessionCapture(
+              { kind: "multi", threadId: captureThreadId, subagentId: ownerId },
+              typeof taskInput.description === "string" ? taskInput.description : "子代理",
+              invoke
+            )
+          : taskTool.invoke(config?.toolCall ?? input, patchedConfig))
         const sanitizedResult = stripTaskSubagentSummarizationState(result)
         if (ownerId) soloTaskTraceManager?.finishTask(ownerId, "success", sanitizedResult)
         return sanitizedResult
@@ -2165,8 +1994,14 @@ export function wrapTaskToolWithOwnerMetadata(
         }
         throw error
       }
+    },
+    {
+      name: taskTool.name,
+      description: taskTool.description,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      schema: (taskTool as any).schema
     }
-  })
+  ) as unknown as DynamicStructuredTool
 }
 
 /**
@@ -2176,23 +2011,13 @@ export function wrapTaskToolWithOwnerMetadata(
 function stampSubagentOwnerMetadata<T>(
   middleware: T,
   soloTaskTraceManager?: SoloTaskTraceManager,
-  captureThreadId?: string,
-  shellSandbox?: LocalSandbox
+  captureThreadId?: string
 ): T {
   const mw = middleware as { tools?: DynamicStructuredTool[] }
   if (Array.isArray(mw.tools) && mw.tools.length > 0) {
-    const cancelOwnedShellTasks = shellSandbox
-      ? (ownerId: string) =>
-          LocalSandbox.cancelOwnedBackgroundTasksAndWait(shellSandbox.runId, ownerId)
-      : undefined
     mw.tools = mw.tools.map((t) =>
       t?.name === "task"
-        ? wrapTaskToolWithOwnerMetadata(
-            t,
-            soloTaskTraceManager,
-            captureThreadId,
-            cancelOwnedShellTasks
-          )
+        ? wrapTaskToolWithOwnerMetadata(t, soloTaskTraceManager, captureThreadId)
         : t
     )
   }
@@ -2230,59 +2055,6 @@ function markFilesystemWriteToolAsUserInitiated(middleware: {
   ) as unknown as DynamicStructuredTool
 }
 
-interface RuntimeToolFailure {
-  toolName: string | undefined
-  toolCallId: string | undefined
-  toolArgs: unknown
-  signal: ToolFailureSignal
-}
-
-/** Dispatch tool exceptions using the owning runtime's hook scope and failure fuse. */
-export function createRuntimeToolFailureHandler(
-  baseContext: HookContext & { sessionId: string },
-  resolveHooks: (
-    event: HookEvent,
-    context: HookContext
-  ) => ReturnType<typeof resolveEnabledHooksForRun>,
-  onHookResult?: HookResultCallback
-): (input: RuntimeToolFailure) => FailureFuseDecision | undefined {
-  return ({ toolName, toolCallId, toolArgs, signal }) => {
-    const { sessionId: threadId, turnId } = baseContext
-    const decision = turnId
-      ? recordToolFailure({
-          threadId,
-          turnId,
-          toolName,
-          toolCallId,
-          toolArgs,
-          signal,
-          mode: getFailureFuseMode()
-        })
-      : undefined
-    const context: HookContext = {
-      ...baseContext,
-      toolName,
-      toolArgs:
-        toolArgs && typeof toolArgs === "object" && !Array.isArray(toolArgs)
-          ? (toolArgs as Record<string, unknown>)
-          : undefined,
-      toolResult: JSON.stringify({
-        error: signal.message,
-        error_type: signal.errorType,
-        failure_kind: signal.kind,
-        is_interrupt: signal.isInterrupt,
-        is_timeout: signal.isTimeout,
-        tool_use_id: toolCallId
-      })
-    }
-    const event = "PostToolUseFailure"
-    runHooks(resolveHooks(event, context), event, context, onHookResult).catch((error) =>
-      console.warn("[Hooks] PostToolUseFailure hook error:", error)
-    )
-    return decision
-  }
-}
-
 /**
  * Custom version of deepagents' createDeepAgent.
  *
@@ -2293,16 +2065,15 @@ export function createRuntimeToolFailureHandler(
  *   - Accepts custom argument-truncation thresholds so large-context models
  *     don't trim old edit/write tool args after a fixed 20 messages.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<any> {
+export function createDeepAgent(params: Parameters<typeof assembleDeepAgent>[0] = {}): DeepAgent {
+  return assembleDeepAgent(params)
+}
+
+function assembleDeepAgent(params: Record<string, unknown>): DeepAgent {
   const {
     model = "claude-sonnet-4-5-20250929",
     summarizationModel = model,
     summarizationFallbackModel,
-    summarizationOverflowModel,
-    summarizationMaxOutputTokens,
-    summarizationOverflowMaxOutputTokens,
-    onCompactionDiagnostic,
     tools = [],
     systemPrompt,
     middleware: customMiddleware = [],
@@ -2316,13 +2087,14 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     name,
     memory,
     skills,
+    allowedSkillRootDirs,
     filesystemSystemPrompt,
+    mainFilesystemToolDescriptions,
     summarizationTrigger,
     summarizationKeep,
     toolTokenLimitBeforeEvict,
     trimTokensToSummarize,
     summarizationMaxInputTokens,
-    summarizationModelInputBudgetTokens,
     summarizationPostCompactionInputBudgetTokens,
     summarizationSummaryPrompt,
     summarizationHistoryPathPrefix,
@@ -2340,7 +2112,6 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     filesystemAccess,
     mainBlockedToolNames = [],
     managedExecution = false,
-    autoBackgroundHandoff = true,
     registrySubagentSpecs = [],
     // Windows shell kind the runtime's commands execute in (derived from the
     // sandbox). Threaded into the read-only execute gate so Windows PowerShell
@@ -2349,7 +2120,6 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     windowsShellKind = "unknown",
     toolConcurrencyQueueId = "default",
     toolHookMiddleware,
-    subagentLifecycleMiddleware,
     threadId,
     onTaskSubagentPromptsResolved,
     currentRunMessageQueueOwnerToken,
@@ -2370,7 +2140,12 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
   }: {
     onFinalSystemPrompt?: (prompt: string) => void
     onTaskSubagentPromptsResolved?: (prompts: Array<{ name: string; systemPrompt: string }>) => void
-    onToolFailureSignal?: (input: RuntimeToolFailure) => FailureFuseDecision | void
+    onToolFailureSignal?: (input: {
+      toolName: string | undefined
+      toolCallId: string | undefined
+      toolArgs: unknown
+      signal: ToolFailureSignal
+    }) => FailureFuseDecision | void
     onFailureFuseNotice?: FailureFuseNoticeCallback
     onTurnCompletionRecovery?: TurnCompletionRecoveryCallback
     turnCompletionTodoGateEnabled?: boolean
@@ -2422,9 +2197,13 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const filesystemBackend = backend ? backend : (config: any) => new StateBackend(config)
+  const skillsBackend =
+    allowedSkillRootDirs !== undefined
+      ? createAllowedSkillsBackend(filesystemBackend, skills ?? [], allowedSkillRootDirs)
+      : filesystemBackend
   const skillsMiddlewareArray =
     skills != null && skills.length > 0
-      ? [createRefreshingSkillsMiddleware({ backend: filesystemBackend, sources: skills })]
+      ? [createRefreshingSkillsMiddleware({ backend: skillsBackend, sources: skills })]
       : []
 
   const memoryMiddlewareArray =
@@ -2451,9 +2230,6 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
   // the CmbCowork summarization middleware compute them from the model profile.
   const summarizationBaseOptions = {
     backend: filesystemBackend,
-    summaryMaxOutputTokens: summarizationMaxOutputTokens,
-    overflowMaxOutputTokens: summarizationOverflowMaxOutputTokens,
-    onDiagnostic: onCompactionDiagnostic,
     historyPathPrefix: summarizationHistoryPathPrefix ?? "/conversation_history",
     ...(summarizationLegacyHistoryPathPrefix && {
       legacyHistoryPathPrefix: summarizationLegacyHistoryPathPrefix
@@ -2462,9 +2238,6 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     ...(trimTokensToSummarize != null && { trimTokensToSummarize }),
     ...(summarizationMaxInputTokens != null && {
       maxInputTokens: summarizationMaxInputTokens
-    }),
-    ...(summarizationModelInputBudgetTokens != null && {
-      summaryModelInputBudgetTokens: summarizationModelInputBudgetTokens
     }),
     ...(summarizationPostCompactionInputBudgetTokens != null && {
       postCompactionInputBudgetTokens: summarizationPostCompactionInputBudgetTokens
@@ -2478,12 +2251,6 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
   const mainSummarizationOptions = {
     ...summarizationBaseOptions,
     model: configureContextCompactionModel(summarizationModel, onContextCompaction),
-    ...(summarizationOverflowModel && {
-      overflowModel: configureContextCompactionModel(
-        summarizationOverflowModel,
-        onContextCompaction
-      )
-    }),
     ...(summarizationFallbackModel && {
       fallbackModel: configureContextCompactionModel(
         summarizationFallbackModel,
@@ -2495,25 +2262,16 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     ...summarizationBaseOptions,
     stateOwnerConfigKey: SUBAGENT_SUMMARIZATION_OWNER_CONFIG_KEY,
     model: configureContextCompactionModel(summarizationModel),
-    ...(summarizationOverflowModel && {
-      overflowModel: configureContextCompactionModel(summarizationOverflowModel)
-    }),
     ...(summarizationFallbackModel && {
       fallbackModel: configureContextCompactionModel(summarizationFallbackModel)
     })
   }
 
-  const shellMonitors = new WeakSet<object>()
-  const shellTaskBackend = backend instanceof LocalSandbox ? backend : undefined
-  const runtimeShellMonitorBlocked =
-    !shellTaskBackend ||
-    mainBlockedToolNames.some(isShellTaskMonitorToolName) ||
-    (filesystemAccess && blockedToolNamesForAccess(filesystemAccess).has("monitor"))
-
   // Create filesystem middleware and patch upstream tool defaults/descriptions.
   const createFsMiddleware = (
     fsSystemPrompt = filesystemSystemPrompt,
-    fsToolStrategy = toolStrategy
+    fsToolStrategy = toolStrategy,
+    toolDescriptions?: Record<string, string>
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ): any => {
     // For any restricted leaf runtime — coordinator worker (workload) OR registry
@@ -2531,8 +2289,11 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
         : fsSystemPrompt
     const mw = createFilesystemMiddleware({
       backend: filesystemBackend,
-      ...(fsToolStrategy !== "standard" && {
-        customToolDescriptions: SHELL_FIRST_TOOL_DESCRIPTIONS
+      ...((fsToolStrategy !== "standard" || toolDescriptions) && {
+        customToolDescriptions: {
+          ...(fsToolStrategy !== "standard" ? SHELL_FIRST_TOOL_DESCRIPTIONS : {}),
+          ...toolDescriptions
+        }
       }),
       ...(effectiveFsPrompt && { systemPrompt: effectiveFsPrompt }),
       ...(toolTokenLimitBeforeEvict != null && { toolTokenLimitBeforeEvict })
@@ -2542,6 +2303,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       middleware: mw,
       filesystemBackend,
       toolTokenLimitBeforeEvict,
+      description: toolDescriptions?.read_file,
       ...(soloTaskTraceManager
         ? {
             resolveTraceContextForAgent: (agentId: string) =>
@@ -2566,9 +2328,13 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       console.warn("[Runtime] grep tool schema patch skipped: tool or pattern field not found")
     }
 
-    const sandbox = filesystemBackend as LocalSandbox
-    const originalExecute = mw.tools?.find((tool) => tool.name === "execute")
-    if (originalExecute) {
+    // Replace the default execute tool with a version that supports run_in_background.
+    // Long-running commands (builds, dependency downloads) can be started in background
+    // and their output retrieved later via task_output tool.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const executeIdx = mw.tools?.findIndex((t: any) => t.name === "execute") ?? -1
+    if (executeIdx >= 0) {
+      const oldExecute = mw.tools![executeIdx]
       const formatExecuteResponse = (result: import("deepagents").ExecuteResponse): string => {
         const parts = [result.output]
         if (result.exitCode !== null) {
@@ -2578,10 +2344,22 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
         if (result.truncated) parts.push("\n[Output was truncated due to size limits]")
         return parts.join("")
       }
-      const runExecute = async (
-        input: { command: string; cwd?: string; run_in_background?: boolean },
-        config?: RunnableConfig
-      ): Promise<string> => {
+      const runExecute = async (input: {
+        command: string
+        cwd?: string
+        run_in_background?: boolean
+      }): Promise<string> => {
+        const sandbox = filesystemBackend as LocalSandbox
+        // Read-only runtimes keep execute but may only run PROVABLY read-only
+        // commands — gated per command by isReadOnlyShellCommand. Covers both
+        // the registry path (shellAccess "read_only", e.g. Explore) and the
+        // coordinator read-only worker (workload "read_only"). Stronger than
+        // CC's prompt-only constraint AND stronger than plain "safe": "safe" is
+        // the auto-approve tier (so this never surfaces an extra prompt) but it
+        // also auto-approves build/install/codegen (npm install, cargo build,
+        // make, go run, javac …), which WRITE the tree / run arbitrary code.
+        // isReadOnlyShellCommand additionally rejects those while keeping the
+        // tools' inspection subcommands (npm ls, go list, mvn dependency:tree).
         const readOnlyShell =
           filesystemAccess?.shellAccess === "read_only" ||
           filesystemAccess?.workload === "read_only"
@@ -2591,88 +2369,181 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
         ) {
           return readOnlyExecuteBlockMessage(windowsShellKind)
         }
-        if (!shellTaskBackend) {
-          if (input.cwd?.trim() && typeof sandbox.execute === "function") {
+        if (input.run_in_background) {
+          if (managedExecution) {
             return formatExecuteResponse(await sandbox.execute(input.command, input.cwd))
           }
-          const result: unknown = await originalExecute.invoke({ command: input.command })
-          return typeof result === "string" ? result : (JSON.stringify(result) ?? String(result))
+          return sandbox.executeBackground(input.command, input.cwd)
         }
-        const canMonitor = !runtimeShellMonitorBlocked && !shellMonitorDeniedContext.getStore()
-        const canRunInBackground = canMonitor && !managedExecution
-        const ownerId = getShellTaskOwnerId(config)
-        if (canRunInBackground && input.run_in_background === true) {
-          return shellTaskBackend.executeBackground(
-            input.command,
-            input.cwd,
-            ownerId,
-            config?.signal
-          )
+        if (input.cwd?.trim()) {
+          return formatExecuteResponse(await sandbox.execute(input.command, input.cwd))
         }
-        const execution = await shellTaskBackend.executeForTool(input.command, input.cwd, {
-          ownerId,
-          backgroundAfterMs:
-            canRunInBackground && autoBackgroundHandoff && input.run_in_background === undefined
-              ? SHELL_BACKGROUND_AFTER_MS
-              : undefined,
-          signal: config?.signal
-        })
-        return execution.status === "background"
-          ? execution.output
-          : formatExecuteResponse(execution.result)
+        // Delegate to original execute handler for foreground execution
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const result = await (oldExecute as any).invoke(input)
+        if (typeof result === "string") return result
+        try {
+          return JSON.stringify(result) ?? String(result)
+        } catch {
+          return String(result)
+        }
       }
       const customExecute = lcTool(
         async (
           input: { command: string; cwd?: string; run_in_background?: boolean },
-          config?: RunnableConfig
+          config?: unknown
         ): Promise<string> => {
+          // Task subagents share this sandbox: their shell reads report to their
+          // own trace, resolved the way read_file resolves it.
           const traceContext = soloTaskTraceManager
             ? resolveReadFileTraceContext(config, (agentId) =>
                 soloTaskTraceManager.getTraceContextForOwner(agentId)
               )
             : undefined
           return traceContext
-            ? executeTraceContext.run(traceContext, () => runExecute(input, config))
-            : runExecute(input, config)
+            ? executeTraceContext.run(traceContext, () => runExecute(input))
+            : runExecute(input)
         },
         {
           name: "execute",
-          description: originalExecute.description,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          description: (oldExecute as any).description,
           schema: z.object({
             command: z.string().describe("The shell command to execute"),
             cwd: z
               .string()
               .optional()
               .describe(
-                "Optional working directory. Use the skill directory for scripts and resources referenced by a SKILL.md."
+                "Optional working directory for the command. Use the skill directory when running scripts or resources referenced by a SKILL.md."
               ),
             run_in_background: z
               .boolean()
               .optional()
               .describe(
                 managedExecution
-                  ? "Managed sessions wait in the foreground up to 20 minutes and return the final command result."
-                  : runtimeShellMonitorBlocked
-                    ? "This session runs commands in the foreground."
-                    : autoBackgroundHandoff
-                      ? "Omit for automatic background handoff after 60 seconds. Set true to start in the background or false to stay in the foreground. Use monitor with the returned task ID to wait for the final result."
-                      : "Set true to start in the background and use monitor with the returned task ID. Commands run in the foreground by default."
+                  ? "Managed sessions always execute in the foreground. This flag is accepted for compatibility but still waits up to 20 minutes and returns the final command result instead of a task ID."
+                  : "Set to true to run the command in the background. Returns a task ID immediately. " +
+                      "Use this for long-running commands like builds, dependency downloads, or test suites. " +
+                      "Retrieve the result later with the task_output tool."
               )
           })
         }
       )
-      mw.tools = mw.tools!.map((tool) =>
-        tool === originalExecute ? customExecute : tool
-      ) as typeof mw.tools
+      mw.tools![executeIdx] = customExecute
+      console.log("[Runtime] execute tool patched: added run_in_background support")
     }
 
-    const monitorTools = shellTaskBackend ? createShellTaskMonitorTools(shellTaskBackend) : []
-    for (const monitorTool of monitorTools) shellMonitors.add(monitorTool)
+    // Add task_output tool for retrieving background task results.
+    // Mirrors Claude Code's TaskOutput: blocks internally (100ms poll loop)
+    // until the task completes or the timeout expires, so the LLM only needs
+    // one tool call per check instead of burning tokens on repeated polls.
+    const taskOutputTool = lcTool(
+      async (input: { task_id: string; block?: boolean; timeout?: number }) => {
+        const sandbox = filesystemBackend as LocalSandbox
+        const toolArgs: Record<string, unknown> = { ...input }
+        const preResult = await sandbox.runPreToolUseHookForTool("task_output", toolArgs)
+        if (preResult?.blocked || preResult?.decision === "block") {
+          return `[Hook blocked] ${preResult.stdout || preResult.reason || "task_output was blocked by a hook"}`
+        }
+        const effectiveArgs = mergeUpdatedInput(toolArgs, preResult?.updatedInput)
+        const taskId =
+          typeof effectiveArgs.task_id === "string" && effectiveArgs.task_id.trim()
+            ? effectiveArgs.task_id
+            : input.task_id
+        if (!taskId || typeof taskId !== "string") {
+          return "Error: Invalid task id."
+        }
+        const block =
+          typeof effectiveArgs.block === "boolean" ? effectiveArgs.block : input.block !== false
+        const timeout =
+          typeof effectiveArgs.timeout === "number" && Number.isFinite(effectiveArgs.timeout)
+            ? Math.max(0, effectiveArgs.timeout)
+            : (input.timeout ?? 30_000)
+
+        const readTaskOutputText = async (): Promise<string> => {
+          // Non-blocking: return immediately
+          if (!block) {
+            const result = sandbox.getTaskOutput(taskId)
+            if (!result) return `Error: No background task found with id "${taskId}".`
+            if (!result.completed) {
+              return JSON.stringify({
+                retrieval_status: "not_ready",
+                elapsed: result.elapsedSeconds,
+                command: result.command,
+                partialOutput: result.partialOutput,
+                partialTruncated: result.partialTruncated,
+                idleSeconds: result.idleSeconds
+              })
+            }
+            const status = result.exitCode === 0 ? "succeeded" : "failed"
+            return `${result.output ?? "<no output>"}\n[Command ${status} with exit code ${result.exitCode}, elapsed: ${result.elapsedSeconds}s]`
+          }
+
+          // Blocking: poll with progressive interval until completed, timeout, or abort.
+          // First 2s at 100ms for snappy response, then 500ms to reduce CPU spin.
+          const start = Date.now()
+          while (Date.now() - start < timeout) {
+            if (sandbox.isAborted) {
+              return "Task polling aborted: conversation was cancelled by user."
+            }
+            const result = sandbox.getTaskOutput(taskId)
+            if (!result) return `Error: No background task found with id "${taskId}".`
+            if (result.completed) {
+              const status = result.exitCode === 0 ? "succeeded" : "failed"
+              return `${result.output ?? "<no output>"}\n[Command ${status} with exit code ${result.exitCode}, elapsed: ${result.elapsedSeconds}s]`
+            }
+            const elapsed = Date.now() - start
+            await new Promise<void>((r) => setTimeout(r, elapsed < 2000 ? 100 : 500))
+          }
+
+          // Timeout — return current status so the LLM can decide to call again
+          const final = sandbox.getTaskOutput(taskId)
+          if (!final) return `Error: No background task found with id "${taskId}".`
+          if (final.completed) {
+            const status = final.exitCode === 0 ? "succeeded" : "failed"
+            return `${final.output ?? "<no output>"}\n[Command ${status} with exit code ${final.exitCode}, elapsed: ${final.elapsedSeconds}s]`
+          }
+          return JSON.stringify({
+            retrieval_status: "timeout",
+            elapsed: final.elapsedSeconds,
+            command: final.command,
+            partialOutput: final.partialOutput,
+            partialTruncated: final.partialTruncated,
+            idleSeconds: final.idleSeconds
+          })
+        }
+
+        const resultText = await readTaskOutputText()
+        return sandbox.applyPostToolUseHookToText("task_output", effectiveArgs, resultText)
+      },
+      {
+        name: "task_output",
+        description:
+          "Retrieve the output of a background task started with execute(run_in_background=true). " +
+          "By default blocks up to 30 seconds waiting for the task to complete. " +
+          "If the task finishes within the timeout, returns the full output. " +
+          "If it times out, returns current status — call again to continue waiting. " +
+          "Set block=false for a non-blocking status check.",
+        schema: z.object({
+          task_id: z
+            .string()
+            .describe("The task ID returned by execute when run_in_background was true"),
+          block: z.boolean().optional().describe("Whether to wait for completion (default: true)"),
+          timeout: z
+            .number()
+            .min(0)
+            .max(600_000)
+            .optional()
+            .describe("Max wait time in ms (default: 30000)")
+        })
+      }
+    )
     const guardedTools = applyCoordinatorWorkerFilesystemAccess(
-      [...(mw.tools || []), ...monitorTools],
+      [...(mw.tools || []), taskOutputTool],
       filesystemAccess
     )
     mw.tools = guardedTools as typeof mw.tools
+    console.log("[Runtime] task_output tool added")
 
     return mw
   }
@@ -2761,15 +2632,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
         // check on a recovered ToolMessage doesn't re-fire.
         let failureFuseDecision: FailureFuseDecision | void = undefined
         if (onToolFailureSignal && toolCallId && !hasFailureFired(toolCallId)) {
-          // ToolNode wraps schema errors with the requested tool name and a
-          // stack. Use the same validation error for both shell monitor aliases.
-          const failure =
-            isShellTaskMonitorToolName(toolName) &&
-            error instanceof ToolInvocationError &&
-            error.toolError instanceof ToolInputParsingException
-              ? error.toolError
-              : error
-          const signal = toolFailureSignalFromThrow(failure, { aborted })
+          const signal = toolFailureSignalFromThrow(error, { aborted })
           markFailureFired(toolCallId)
           failureFuseDecision = onToolFailureSignal({
             toolName,
@@ -2820,13 +2683,10 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
 
   // Base middleware for custom subagents (no skills — custom subagents must define their own)
 
-  const gradedToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(
-    toolConcurrencyQueueId,
-    shellMonitors
-  )
+  const gradedToolConcurrencyMiddleware =
+    createGradedToolConcurrencyMiddleware(toolConcurrencyQueueId)
   const subagentToolConcurrencyMiddleware = createGradedToolConcurrencyMiddleware(
-    toolConcurrencyQueueId,
-    shellMonitors
+    `${toolConcurrencyQueueId}:subagent`
   )
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2895,7 +2755,6 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ...processedSubagents.map((s: any) => (s && typeof s.name === "string" ? s.name : undefined))
     ].filter((name): name is string => Boolean(name))
   )
-  const readOnlySubagentNames = new Set<string>()
   const registrySubagents = (
     registrySubagentSpecs as Array<{
       name: string
@@ -2913,7 +2772,6 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     .map((spec) => {
       const disallowed = spec.disallowedTools ?? []
       const shell: AgentShellAccess = spec.shellAccess ?? "full"
-      if (shell === "read_only") readOnlySubagentNames.add(spec.name)
       // read_only AND none are both restricted roles. Outside project mode they
       // preserve the existing omitClaudeMd-style behavior; project mode may
       // explicitly share the main agent's already-resolved project context with
@@ -2957,7 +2815,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
   // common exit so general-purpose, registry, and custom string-prompt agents
   // receive the same guidance exactly once. Opaque Runnable agents own their
   // prompt assembly and cannot be safely rewritten here.
-  const availableSubagents = unresolvedSubagents.map((subagent) => {
+  const availableSubagents = unresolvedSubagents.map((subagent: any) => {
     if (
       Runnable.isRunnable(subagent) ||
       !subagent ||
@@ -2975,12 +2833,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
               ...(subagent.middleware ?? []),
               // Per-role tail: the shared filesystem tools are never mutated,
               // and the guard has already removed unavailable tools by this point.
-              createToolStrategyTurnReminderMiddleware(
-                toolStrategy,
-                readOnlySubagentNames.has(subagent.name)
-                  ? { ...filesystemAccess, shellAccess: "read_only" }
-                  : filesystemAccess
-              )
+              createToolStrategyTurnReminderMiddleware(toolStrategy, filesystemAccess)
             ]
           }
         : {})
@@ -3056,7 +2909,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     ? [createOutputStyleTurnReminderMiddleware(effectiveOutputStyle)]
     : []
 
-  return createAgent({
+  const agentOptions = {
     model,
     systemPrompt: finalSystemPrompt,
     tools,
@@ -3081,7 +2934,9 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
         : []),
       ...(threadId ? [createTrustedToolFilePreviewContextMiddleware(threadId)] : []),
       ...(mainTodosEnabled ? [todoListMiddleware()] : []),
-      ...(mainFilesystemEnabled ? [createFsMiddleware("\n", mainToolStrategy)] : []),
+      ...(mainFilesystemEnabled
+        ? [createFsMiddleware("\n", mainToolStrategy, mainFilesystemToolDescriptions)]
+        : []),
       ...postFsToolDocStripMiddleware,
       // The filesystem middleware appends execute documentation dynamically;
       // run the transport denylist after it so the docs and tool disappear
@@ -3090,9 +2945,6 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ...(threadId ? [createTaskMmdMiddleware({ threadId, scope: "main" })] : []),
       createSkillHookContextMiddleware(filesystemBackend),
       gradedToolConcurrencyMiddleware,
-      // Parent-only: observe rejected/recovered task results, and gate the next model
-      // after task results are checkpointed. Never share this queue with children.
-      ...(subagentLifecycleMiddleware ? [subagentLifecycleMiddleware] : []),
       ...(toolHookMiddleware ? [toolHookMiddleware] : []),
       toolErrorMiddleware,
       ...(mainSubagentsEnabled
@@ -3108,8 +2960,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
                 systemPrompt: taskSystemPrompt
               } as Parameters<typeof createSubAgentMiddleware>[0]),
               soloTaskTraceManager,
-              threadId,
-              shellTaskBackend
+              threadId
             )
           ]
         : []),
@@ -3123,31 +2974,13 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       createTurnCompletionGateMiddleware({
         ownerRunToken: currentRunMessageQueueOwnerToken,
         todoGateEnabled: mainTodosEnabled && turnCompletionTodoGateEnabled,
-        onRecovery: onTurnCompletionRecovery,
-        createRecoveryMessage: (threadId, messages, prompt) =>
-          createPhysicalScopedGateRecoveryMessage(
-            threadId,
-            currentRunMessageQueueOwnerToken,
-            messages,
-            prompt
-          )
+        onRecovery: onTurnCompletionRecovery
       }),
       // Inject user messages steered into the running turn. Placed BEFORE
       // summarization (injected turns should participate in context management)
       // and BEFORE humanInTheLoop (a steered message must never race a pending
       // tool-approval interrupt). See createCurrentRunMessageQueueMiddleware.
-      createCurrentRunMessageQueueMiddleware(
-        currentRunMessageQueueOwnerToken,
-        (threadId, boundaryId, sourceId) => {
-          const previous = getThreadMessageProviderOccurrencesBeforeUser(threadId, boundaryId, [
-            sourceId
-          ])
-          return previous === undefined
-            ? undefined
-            : previous.find((entry) => entry.role === "assistant")?.provider_occurrence ?? 0
-        },
-        prepareLegacyScopedProviderHistory
-      ),
+      createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken),
       createCmbSummarizationMiddleware(mainSummarizationOptions),
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
       // Recover from malformed/truncated tool-call JSON (deepseek et al.): promote
@@ -3166,14 +2999,16 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ...(toolStrategy !== "standard"
         ? [createToolStrategyTurnReminderMiddleware(toolStrategy, filesystemAccess)]
         : []),
-      ...systemPromptPreviewCaptureMiddleware
+      ...systemPromptPreviewCaptureMiddleware,
     ],
     ...(responseFormat != null && { responseFormat }),
     contextSchema,
     checkpointer,
     store,
     name
-  } as unknown as Parameters<typeof createAgent>[0])
+  }
+  const agent = createAgent(agentOptions as unknown as Parameters<typeof createAgent>[0])
+  return agent
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -3316,7 +3151,6 @@ export function getSystemPrompt(
   options: {
     includeBackgroundExec?: boolean
     managedForegroundExec?: boolean
-    autoBackgroundHandoff?: boolean
     includeSubagents?: boolean
     includeMemory?: boolean
     includeCurrentTime?: boolean
@@ -3375,13 +3209,42 @@ ${effectiveToolStrategy !== "standard" ? "- Inspect the workspace root with tool
 - Always use full absolute paths for all file operations
 `
 
+  // The background-exec guidance documents running builds/installs/tests through
+  // execute (run_in_background). Omit it for runtimes whose execute tool has been
+  // removed (shellAccess "none" registry agents, scoped write workers) — otherwise
+  // the prompt tells the agent to call a tool it doesn't have, contradicting its
+  // tool list and the worker's own access note. Omit it for read_only too:
+  // execute is present, but isReadOnlyShellCommand rejects builds/installs/tests.
   const backgroundExecSection = !includeBackgroundExec
     ? ""
     : managedForegroundExec
-      ? BACKGROUND_EXEC_MANAGED_GUIDANCE
-      : options.autoBackgroundHandoff === false
-        ? BACKGROUND_EXEC_OPT_IN_GUIDANCE
-        : BACKGROUND_EXEC_GUIDANCE
+      ? `
+### 长时间命令执行
+
+**重要提示：** 当前是托管会话，execute 始终以前台方式运行，最长等待 20 分钟。即使传入 \`run_in_background: true\`，命令也不会返回 task_id，而是等待成功、失败、取消或超时后直接返回结果。
+
+- 项目编译、依赖安装、测试套件、代码生成和 Docker 构建均可直接调用 execute。
+- 不要为托管会话轮询 task_output；当前 Tool Call 会一直等待命令结算。
+- 命令运行超过 20 分钟时，按现有前台超时行为终止并返回超时结果。
+`
+      : `
+### 长时间命令执行
+
+**重要提示：** execute 工具默认超时 60 秒。对于可能超过 60 秒的命令，**必须**使用 \`run_in_background: true\` 参数：
+- 项目编译/构建：mvn, gradle, npm run build, dotnet build, cargo build, make 等
+- 依赖安装：mvn dependency:resolve, npm install, pip install, go mod download 等
+- 测试套件：mvn test, npm test, pytest, cargo test 等
+- 代码生成、Docker 构建等耗时操作
+
+使用方法：
+1. 调用 execute({ command: "mvn clean package -DskipTests", run_in_background: true })
+2. 获得 task_id 后，调用 task_output({ task_id: "..." }) 获取结果
+3. task_output 默认会阻塞等待最多 30 秒，如果任务在 30 秒内完成则直接返回结果
+4. 如果返回 timeout，再次调用 task_output 继续等待即可
+5. 对于预计非常长的任务，可以设置更大的 timeout：task_output({ task_id: "...", timeout: 120000 })
+
+**切勿**对编译、安装依赖等命令使用前台执行，否则会因超时被终止。
+`
 
   const sandboxSection =
     windowsSandbox === "readonly"
@@ -3689,69 +3552,58 @@ async function getCheckpointerInternal(
     checkpointers.set(threadId, cached)
     return cached
   }
+  const dbPath = getThreadCheckpointPath(threadId)
   const bornRetireEpoch = retireEpochOf(threadId)
-  const releaseCheckpointOpen = pinForegroundCheckpointOpen(threadId)
-  try {
-    await preemptBackgroundThreadMutation(threadId)
-    if (isRetiredThreadId(threadId) || retireEpochOf(threadId) !== bornRetireEpoch) {
-      throw new Error(`[Runtime] Thread was deleted while waiting to open its checkpoint: ${threadId}`)
-    }
-    const opened = checkpointers.get(threadId)
-    if (opened) return opened
-    const dbPath = getThreadCheckpointPath(threadId)
-    const isSubThreadCheckpoint = threadId.includes("__")
-    const checkpointer = new SqlJsSaver(dbPath, undefined, {
-      maxRootCheckpoints: isSubThreadCheckpoint ? 1 : MAIN_THREAD_MAX_ROOT_CHECKPOINTS,
-      maxRootForkBoundaryCheckpoints: isSubThreadCheckpoint
-        ? 0
-        : MAIN_THREAD_MAX_FORK_BOUNDARY_CHECKPOINTS,
-      maxRootForkBoundaryBytes: isSubThreadCheckpoint ? 0 : MAIN_THREAD_MAX_FORK_BOUNDARY_BYTES,
-      maxNonRootCheckpoints: 1,
-      recoverMissingCheckpointMessages: isSubThreadCheckpoint
-        ? undefined
-        : recoverMainCheckpointMessages
-    })
-    await checkpointer.initialize()
-    // Re-check AFTER the awaits above: a deletion landing while this instance
-    // was initializing scans the three registries, but this instance is in none
-    // of them yet — caching it would hand a live, writable saver for a deleted
-    // thread (setup() has already queued an async persist). The tombstone check
-    // alone is NOT enough: a revive (fixed-id recreation) landing before
-    // initialize() returned clears it, yet this saver was born of the PREVIOUS
-    // incarnation — the retire epoch catches that, revive-immune.
-    if (isRetiredThreadId(threadId) || retireEpochOf(threadId) !== bornRetireEpoch) {
-      await checkpointer.retire()
-      // initialize() may itself have WRITTEN to disk before this check:
-      // openRecoveredSqliteDatabase persists a recovered .bak/.tmp back to the
-      // live .sqlite, and the deletion's purge has already swept. retire() only
-      // gates FUTURE writes — re-sweep the recovery's write here, so the dead
-      // incarnation's transcript can't bleed into a revived id across a crash.
-      //
-      // BEST-EFFORT MITIGATION, not an ownership proof (accepted residual): a
-      // cached entry does mean a revived saver owns the file (skip), but the
-      // converse is heuristic — a revived saver can itself be mid-initialize and
-      // not cached yet, and this sweep could then eat its files. That residual
-      // is bounded: during its own init the new incarnation can hold NO user
-      // data on disk (post-purge there is nothing to recover, and new content
-      // only arrives via put() after init; its in-memory db is authoritative and
-      // any next write rewrites the whole file). Strictly closing the window
-      // needs an init-in-flight lease — declined per ROI for a five-condition
-      // race with bounded, self-healing fallout.
-      if (isRetiredThreadId(threadId) || !checkpointers.has(threadId)) {
-        try {
-          deleteThreadCheckpoint(threadId)
-        } catch (e) {
-          console.warn(`[Runtime] post-refusal checkpoint re-sweep failed for ${threadId}:`, e)
-        }
+  const isSubThreadCheckpoint = threadId.includes("__")
+  const checkpointer = new SqlJsSaver(dbPath, undefined, {
+    maxRootCheckpoints: isSubThreadCheckpoint ? 1 : MAIN_THREAD_MAX_ROOT_CHECKPOINTS,
+    maxRootForkBoundaryCheckpoints: isSubThreadCheckpoint
+      ? 0
+      : MAIN_THREAD_MAX_FORK_BOUNDARY_CHECKPOINTS,
+    maxRootForkBoundaryBytes: isSubThreadCheckpoint ? 0 : MAIN_THREAD_MAX_FORK_BOUNDARY_BYTES,
+    maxNonRootCheckpoints: 1,
+    recoverMissingCheckpointMessages: isSubThreadCheckpoint
+      ? undefined
+      : recoverMainCheckpointMessages
+  })
+  await checkpointer.initialize()
+  // Re-check AFTER the awaits above: a deletion landing while this instance
+  // was initializing scans the three registries, but this instance is in none
+  // of them yet — caching it would hand a live, writable saver for a deleted
+  // thread (setup() has already queued an async persist). The tombstone check
+  // alone is NOT enough: a revive (fixed-id recreation) landing before
+  // initialize() returned clears it, yet this saver was born of the PREVIOUS
+  // incarnation — the retire epoch catches that, revive-immune.
+  if (isRetiredThreadId(threadId) || retireEpochOf(threadId) !== bornRetireEpoch) {
+    await checkpointer.retire()
+    // initialize() may itself have WRITTEN to disk before this check:
+    // openRecoveredSqliteDatabase persists a recovered .bak/.tmp back to the
+    // live .sqlite, and the deletion's purge has already swept. retire() only
+    // gates FUTURE writes — re-sweep the recovery's write here, so the dead
+    // incarnation's transcript can't bleed into a revived id across a crash.
+    //
+    // BEST-EFFORT MITIGATION, not an ownership proof (accepted residual): a
+    // cached entry does mean a revived saver owns the file (skip), but the
+    // converse is heuristic — a revived saver can itself be mid-initialize and
+    // not cached yet, and this sweep could then eat its files. That residual
+    // is bounded: during its own init the new incarnation can hold NO user
+    // data on disk (post-purge there is nothing to recover, and new content
+    // only arrives via put() after init; its in-memory db is authoritative and
+    // any next write rewrites the whole file). Strictly closing the window
+    // needs an init-in-flight lease — declined per ROI for a five-condition
+    // race with bounded, self-healing fallout.
+    if (isRetiredThreadId(threadId) || !checkpointers.has(threadId)) {
+      try {
+        deleteThreadCheckpoint(threadId)
+      } catch (e) {
+        console.warn(`[Runtime] post-refusal checkpoint re-sweep failed for ${threadId}:`, e)
       }
-      throw new Error(`[Runtime] Thread was deleted during checkpointer init; refused: ${threadId}`)
     }
-    checkpointers.set(threadId, checkpointer)
-    evictIdleCheckpointers()
-    return checkpointer
-  } finally {
-    releaseCheckpointOpen()
+    throw new Error(`[Runtime] Thread was deleted during checkpointer init; refused: ${threadId}`)
   }
+  checkpointers.set(threadId, checkpointer)
+  evictIdleCheckpointers()
+  return checkpointer
 }
 
 export async function getCheckpointer(threadId: string): Promise<SqlJsSaver> {
@@ -3815,16 +3667,6 @@ export async function closeCheckpointer(threadId: string): Promise<void> {
   })
   closingCheckpointers.set(threadId, closing)
   await closing
-}
-
-export async function cleanupChildRuntimeResources(
-  threadId: string
-): Promise<PromiseSettledResult<void>[]> {
-  await LocalSandbox.cancelBackgroundTasksAndWait(threadId)
-  return Promise.allSettled([
-    LocalSandbox.revokeGrantedAclsForRun(threadId),
-    closeCheckpointer(threadId)
-  ])
 }
 
 /**
@@ -3955,6 +3797,14 @@ export async function retireThreadCheckpointers(threadId: string): Promise<void>
 // Single source of truth for same-model retry logic. SDK-level retry is
 // disabled (maxRetries: 0) so this is the only layer that retries.
 
+/** Specific non-5xx status codes that should trigger a retry on the SAME model/endpoint.
+ *  All 5xx are also retryable (handled by isRetryableStatus below). */
+const RETRYABLE_NON_5XX_STATUS = new Set([408, 409, 429, 432, 433])
+
+function isRetryableStatus(status: number): boolean {
+  return status >= 500 || RETRYABLE_NON_5XX_STATUS.has(status)
+}
+
 const DEFAULT_RETRY_MAX_ATTEMPTS = 6 // 1 initial + 5 retries (used when caller does not specify)
 const RETRY_BASE_DELAY_MS = 1000 // exponential: 1s, 2s, 4s, 8s
 /** Per-attempt timeout — guards against half-open / stalled connections
@@ -4021,7 +3871,7 @@ export interface ModelRetryHooks {
 /**
  * Build a retrying fetch wrapper. Retries on:
  *   - Network errors thrown by fetch
- *   - HTTP errors allowed by the shared isRetryableStatus policy
+ *   - HTTP status in RETRYABLE_NON_5XX_STATUS (or >= 500)
  *   - Per-attempt timeout (half-open / stalled connection guard)
  * Does NOT retry on:
  *   - Parent signal abort (user cancelled) — propagated immediately
@@ -4032,11 +3882,10 @@ export interface ModelRetryHooks {
  * does not poison the next one (avoids the "stuck signal" pitfall that
  * happens when SDK-level timeout aborts the shared signal).
  */
-function createRetryingFetch(
+export function createRetryingFetch(
   hooks?: ModelRetryHooks,
   maxAttempts: number = DEFAULT_RETRY_MAX_ATTEMPTS,
-  capture?: { threadId?: string },
-  beforeAttempt?: () => Response | undefined
+  capture?: { threadId?: string }
 ): typeof fetch {
   const totalAttempts = Math.max(1, maxAttempts)
   const maxRetries = totalAttempts - 1
@@ -4086,14 +3935,6 @@ function createRetryingFetch(
         const requestedStream =
           typeof init?.body === "string" && init.body.includes('"stream":true')
         const attemptStartedAt = Date.now()
-        // Recheck after backoff, immediately before each actual HTTP attempt.
-        const rejection = beforeAttempt?.()
-        if (rejection) {
-          cleanup()
-          await captureFetchError(rejection)
-          if (attempt > 1) hooks?.onRetrySuccess?.()
-          return rejection
-        }
         // Observe only attempts submitted to fetch, after cancellation checks.
         const sendFetch = capture ? withRawApiCallCapture(fetch, capture.threadId) : fetch
         const res = await sendFetch(input, { ...init, signal: attemptCtrl.signal })
@@ -4116,24 +3957,11 @@ function createRetryingFetch(
           `[Runtime] fetch headers in ${Date.now() - attemptStartedAt}ms: status=${res.status}, stream requested=${requestedStream}, content-type=${res.headers.get("content-type") ?? "unknown"}, request-id=${res.headers.get("x-request-id") ?? "unknown"}`
         )
 
-        // 580 also represents context overflow. Let summarization reduce the
-        // request before trying it again instead of repeating an oversized body.
-        let contextOverflow = false
-        if (res.status === 580) {
-          try {
-            contextOverflow = isGatewayContextOverflow({
-              status: res.status,
-              responseBody: await res.clone().text()
-            })
-          } catch {
-            // Unreadable error bodies retain the normal server-error policy.
-          }
-        }
-
-        // Success, non-retryable error, or overflow handled by summarization.
-        if (!isRetryableStatus(res.status) || contextOverflow) {
+        // Success or non-retryable error — return as-is.
+        if (!isRetryableStatus(res.status)) {
           await captureFetchError(res)
-          // Clear any previous retry indicator when this retry loop ends.
+          // If this is a successful retry (not the first attempt), notify the UI
+          // so the retry indicator can be cleared immediately.
           if (attempt > 1) hooks?.onRetrySuccess?.()
           return res
         }
@@ -4360,6 +4188,9 @@ async function runWorkerStopHooksWithRevision({
   return false
 }
 
+/** Default fetch (no UI hooks) for model instances without a UI context (e.g. skill generation). */
+const defaultRetryingFetch = createRetryingFetch()
+
 type ModelInstancePurpose = "agent" | "context-compaction"
 
 function localCompactionTokenCount(content: unknown): number {
@@ -4407,8 +4238,6 @@ export function getModelInstance(
     enableThinking?: boolean
     enableThinkingEffort?: boolean
     thinkingEffort?: "low" | "high" | "max"
-    transport?: ModelTransport
-    idleModelEnvironment?: IdleModelEnvironment
   },
   retryHooks?: ModelRetryHooks,
   maxRetryAttempts?: number,
@@ -4441,16 +4270,12 @@ export function getModelInstance(
   // return empty content, so keep thinking exclusive to normal agent calls.
   const enableThinking = purpose === "agent" && thinkingConfigured
   const enableThinkingEffort = enableThinking && customConfig.enableThinkingEffort === true
-  const beforeAttempt =
-    customConfig.transport === "idle-gateway"
-      ? () => getIdleModelServiceHoursRejection(customConfig)
-      : undefined
-  const modelFetch = createRetryingFetch(
-    retryHooks,
-    maxRetryAttempts,
-    { threadId: captureThreadId },
-    beforeAttempt
-  )
+  const modelFetch =
+    purpose === "agent"
+      ? createRetryingFetch(retryHooks, maxRetryAttempts, { threadId: captureThreadId })
+      : retryHooks || maxRetryAttempts !== undefined
+        ? createRetryingFetch(retryHooks, maxRetryAttempts)
+        : defaultRetryingFetch
 
   const baseFields = {
     model: resolvedModel,
@@ -4481,14 +4306,14 @@ export function getModelInstance(
             ...(enableThinking ? { thinking: { type: "enabled" } } : {})
           })
     },
-    ...getModelClientOptions(customConfig, {
-      sessionId: captureThreadId,
+    configuration: {
+      baseURL: customConfig.baseUrl,
       fetch: withModelResponseDiagnostics(
         modelFetch,
         { model: resolvedModel, purpose },
         (diagnostic) => console.log("[Runtime][ModelResponse]", JSON.stringify(diagnostic))
       )
-    })
+    }
   }
 
   let model: ChatOpenAI
@@ -4577,8 +4402,6 @@ export interface CreateAgentRuntimeOptions {
   turnCompletionTodoGateEnabled?: boolean
   /** Optional UI thread ID for approval prompts. Async worker runtimes keep their own checkpoint thread but surface approvals on the parent thread UI. */
   approvalThreadId?: string
-  /** Parent conversation owning this child runtime's shell tasks for deletion. */
-  shellParentThreadId?: string
   /** Optional model ID from thread/runtime config */
   modelId?: string
   /** Workspace path - REQUIRED for agent to operate on files */
@@ -4586,8 +4409,6 @@ export interface CreateAgentRuntimeOptions {
   /** ManagedRun execution boundary. Forces detached shell execution into a
    * foreground Tool Call with the managed timeout and is inherited by leaf runtimes. */
   managedExecution?: boolean
-  /** Allow omitted run_in_background to hand off after the foreground wait. Defaults to true. */
-  autoBackgroundHandoff?: boolean
   /** Turn-local observer invoked only after a Dynamic Workflow launch succeeds. */
   onWorkflowLaunched?: (runId: string) => void
   /** Recorded on any background task this turn launches — a workflow run or a
@@ -4599,6 +4420,12 @@ export interface CreateAgentRuntimeOptions {
   worktreeIsolation?: WorkflowWorktreeIsolationBoundary
   /** Extra content appended to the system prompt (e.g. HEARTBEAT.md context) */
   extraSystemPrompt?: string
+  /** Domain-owned base instructions, replacing generic coding guidance only. */
+  baseSystemPrompt?: string
+  /** Domain-specific guidance for main-agent file tools; never inherited by Task subagents. */
+  mainFilesystemToolDescriptions?: Record<string, string>
+  /** Domain-specific middleware for the main agent only. */
+  mainMiddleware?: Array<ReturnType<typeof createMiddleware>>
   /** Plugin-provided runtime context for skill artifact paths and feature bindings. */
   pluginPromptInject?: string
   /** Optional plugin output directory exposed to hook commands as PLUGIN_OUTPUT_DIR. */
@@ -4691,6 +4518,10 @@ export interface CreateAgentRuntimeOptions {
   soloTaskTraceManager?: SoloTaskTraceManager
   /** Disable the synchronous deepagents task tool for leaf runtimes such as coordinator async workers. */
   disableSubagents?: boolean
+  /** Explicit session skill allowlist. Undefined preserves all available skills; [] hides all. */
+  allowedSkillNames?: string[]
+  /** Explicit session expert allowlist. Undefined preserves all available experts; [] disables all. */
+  allowedExpertNames?: string[]
   /** Optional filesystem access limits for leaf runtimes: coordinator async
    * workers (workload/ownedFiles) or registry agents (disallowedTools/shellAccess). */
   filesystemAccess?: CoordinatorWorkerFilesystemAccess
@@ -4710,8 +4541,6 @@ export interface CreateAgentRuntimeOptions {
   onHookResult?: HookResultCallback
   /** Callback invoked when repeated tool failures should be shown to the user. */
   onFailureFuseNotice?: FailureFuseNoticeCallback
-  /** Shared with stream delivery; gates the parent graph after task completion. */
-  subagentLifecycle?: SubagentLifecycleCallbacks
   /** Foreground-only callback for the main agent's context compaction lifecycle. */
   onContextCompaction?: ContextCompactionLifecycleCallback
   /**
@@ -4748,14 +4577,17 @@ export interface CreateAgentRuntimeOptions {
   skillUseTracker?: SkillUseTracker
   /** Callback invoked after successful write/edit/upload filesystem operations. */
   onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
+  /** Optional domain check on effective write_file/edit_file content before any write. */
+  validateFileWrite?: (filePath: string, content: string) => string | undefined
   /** Extra tools appended to the runtime tool list (e.g. a workflow subagent's structured_output). */
   additionalTools?: DynamicStructuredTool[]
   /**
    * Overrides the tool-concurrency queue id. Tools sharing a queue serialize
-   * unknown tool/shell mutations via a module-level lock. File tools share
-   * admission and rely on backend per-file resource locks across instances.
-   * Workflow subagents pass the parent thread id; isolated worktrees use their
-   * own root. Defaults to the runtime's own thread id.
+   * their EXCLUSIVE operations (write_file/edit_file/writing execute) via a
+   * module-level lock. Workflow subagents pass the parent thread id so their
+   * file writes serialize across the whole run — parallel agents can't clobber
+   * the same file — while reads still run concurrently. Defaults to the
+   * runtime's own thread id (per-runtime isolation, the original behavior).
    */
   toolConcurrencyQueueId?: string
   /**
@@ -4783,11 +4615,59 @@ export interface RuntimeInteractionWaitHooks {
 // Create agent runtime with configured model and checkpointer
 export type AgentRuntime = ReturnType<typeof createAgent>
 
-export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Promise<DeepAgent> {
-  // Old sessions can retain workspace paths from another machine or deleted directories.
-  await validateWorkspaceDirectory(options.workspacePath)
-  options.abortSignal?.throwIfAborted()
+type RuntimeTool = {
+  name?: string
+  func?: unknown
+  invoke?: unknown
+}
+function createRuntimeBaseTools(
+  options: CreateAgentRuntimeOptions,
+  fileRoot: string,
+  runtimePolicy: RuntimePromptToolPolicy
+): RuntimeTool[] {
+  const { workspacePath } = options
+  const extraTools: RuntimeTool[] = []
+  if (options.enableRequestUserInput) {
+    extraTools.push(
+      createRequestUserInputTool({
+        threadId: options.threadId,
+        abortSignal: options.abortSignal,
+        allowDeferredRenderer: options.allowDeferredUserInputRenderer,
+        interactionWaitHooks: options.interactionWaitHooks,
+        requestUserInputConfig: options.requestUserInputConfig
+      })
+    )
+  }
+  if (!options.noSchedulerTool && !runtimePolicy.isProjectMode) {
+    extraTools.push(
+      createSchedulerTool({
+        workspacePath,
+        modelId: options.modelId,
+        threadId: options.threadId,
+        imDeliveryContext: options.imDeliveryContext ?? null
+      })
+    )
+  }
+  if (!options.noSkillEvolutionTool) {
+    extraTools.push(createSkillEvolutionTool({ threadId: options.threadId }))
+  }
 
+  // Conditionally inject Java LSP tool
+  try {
+    const lspConfig = getLspConfig()
+    // LSP indexes the sources the agent edits, so it follows the file root.
+    if (lspConfig.enabled && detectJavaProject(fileRoot)) {
+      extraTools.push(createLspTool({ workspacePath: fileRoot }))
+      console.log("[Runtime] Java LSP tool injected for:", fileRoot)
+    }
+  } catch (e) {
+    console.warn("[Runtime] Failed to check LSP config:", e)
+  }
+
+  return extraTools
+}
+
+export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Promise<DeepAgent> {
   // Snapshot once per runtime. Nested runtimes inherit this preference, NOT the
   // parent's role-filtered effective value. Rebuilt top-level runtimes read anew.
   const toolStrategy = normalizeAgentToolStrategy(options.toolStrategy ?? getAgentToolStrategy())
@@ -4832,6 +4712,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     traceContext,
     soloTaskTraceManager,
     disableSubagents = false,
+    allowedSkillNames,
+    allowedExpertNames,
     disableMcpTools = false,
     blockedToolNames = [],
     onHookResult,
@@ -4851,7 +4733,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     onFileMutation
   } = options
   const approvalThreadId = requestedApprovalThreadId ?? threadId
-  const runtimeBlockedToolNames = runtimeToolDenylist(blockedToolNames)
+  const runtimeBlockedToolNames = new Set(
+    blockedToolNames.map((name) => name.trim()).filter(Boolean)
+  )
   const isCoordinatorMode = agentMode === "coordinator"
   const isWorkflowMode = agentMode === "workflow"
   const outputStyle =
@@ -4889,7 +4773,6 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     }
   })()
   const managedExecution = options.managedExecution === true
-  const autoBackgroundHandoff = options.autoBackgroundHandoff !== false
   const memoryEnabledForThread =
     inheritedMemoryEnabled ?? isThreadMemoryEnabled(runtimeThreadMetadata)
   const runtimePolicy = createRuntimePromptToolPolicy({
@@ -4908,6 +4791,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // and every leaf runtime through the existing mainSubagentsEnabled policy.
   const projectModeTaskSubagentConfig =
     runtimePolicy.isProjectMode && mainSubagentsEnabled ? subagentConfig : undefined
+  // Session-scoped expert allowlist. Requirement conversations persist
+  // `allowedExperts` in thread metadata; undefined keeps the full registry.
+  const sessionAllowedExpertNames =
+    allowedExpertNames ?? parseAllowedNames(runtimeThreadMetadata, "allowedExperts")
 
   console.log("[Runtime] Creating agent runtime...")
   console.log("[Runtime] Thread ID:", threadId)
@@ -4955,19 +4842,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     customConfig,
     retryHooks,
     maxRetryAttempts,
-    "context-compaction",
-    threadId
-  )
-  const recoveryMaxOutputTokens = Math.min(
-    customConfig.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
-    CONTEXT_COMPACTION_RECOVERY_MAX_OUTPUT_TOKENS
-  )
-  const contextCompactionOverflowModel = getModelInstance(
-    { ...customConfig, maxOutputTokens: recoveryMaxOutputTokens },
-    retryHooks,
-    maxRetryAttempts,
-    "context-compaction",
-    threadId
+    "context-compaction"
   )
   const projectThreadDataDirectory = await getProjectThreadDataDirectory(workspacePath, threadId)
   const conversationHistoryPathPrefix = path.join(
@@ -5015,18 +4890,21 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       return undefined
     }
   }
-  const registrySubagentSpecs = mainSubagentsEnabled
-    ? (await loadAgentProfilesAsync(workspacePath, projectModeTaskSubagentConfig)).map(
-        (profile) => ({
-          name: profile.name,
-          description: profile.description,
-          systemPrompt: profile.systemPrompt,
-          disallowedTools: profile.disallowedTools,
-          shellAccess: profile.shellAccess,
-          model: resolveRegistryModelInstance(profile.model)
-        })
-      )
+  const allRegistryProfiles = mainSubagentsEnabled
+    ? await loadAgentProfilesAsync(workspacePath, projectModeTaskSubagentConfig)
     : []
+  const registryProfiles =
+    sessionAllowedExpertNames === undefined
+      ? allRegistryProfiles
+      : allRegistryProfiles.filter((profile) => sessionAllowedExpertNames.includes(profile.name))
+  const registrySubagentSpecs = registryProfiles.map((profile) => ({
+    name: profile.name,
+    description: profile.description,
+    systemPrompt: profile.systemPrompt,
+    disallowedTools: profile.disallowedTools,
+    shellAccess: profile.shellAccess,
+    model: resolveRegistryModelInstance(profile.model)
+  }))
 
   const checkpointer = await getCheckpointer(threadId)
   console.log("[Runtime] Checkpointer ready for thread:", threadId)
@@ -5129,6 +5007,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     projectCode,
     projectDir,
     onFileMutation,
+    validateFileWrite: options.validateFileWrite,
     // Shell file telemetry follows Bash First exactly where the prompts apply
     // it (same snapshot, readonly-sandbox downgrade and role limits); standard
     // keeps the old file-tool-only path.
@@ -5143,7 +5022,6 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     ),
     abortSignal: options.abortSignal,
     runId: threadId,
-    shellParentThreadId: options.shellParentThreadId,
     // Foreground turns on the same thread can overlap briefly during bounded
     // replacement. Keep background-task ownership logical, but scope ACL
     // ownership to the physical run so predecessor cleanup cannot revoke a
@@ -5185,10 +5063,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // because the user stepped away. They are resolved by an explicit user
   // decision, or by the run abort signal when the user stops/cancels the turn.
   const APPROVAL_TIMEOUT_MS: number | null = null
-  const requestApproval = async (
-    req: ApprovalRequest,
-    signal = options.abortSignal
-  ): Promise<ApprovalDecision> => {
+  const requestApproval = async (req: ApprovalRequest): Promise<ApprovalDecision> => {
     // IPC fires immediately; the renderer owns the queue (pendingApprovals[]).
     // Multiple concurrent tool calls each register their own resolver here —
     // the renderer shows them one at a time, but the events are not serialized
@@ -5209,7 +5084,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       })
       const cleanup = (): void => {
         if (timeoutId) clearTimeout(timeoutId)
-        signal?.removeEventListener("abort", onAbort)
+        options.abortSignal?.removeEventListener("abort", onAbort)
       }
       const resolveOnce = (decision: ApprovalDecision): void => {
         if (settled) return
@@ -5246,7 +5121,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         rejectPending("abort")
       }
 
-      if (signal?.aborted) {
+      if (options.abortSignal?.aborted) {
         resolve({ type: "reject", tool_call_id: req.tool_call?.id ?? req.id })
         return
       }
@@ -5272,8 +5147,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         runtimeThreadId: threadId,
         resolve: (decision) => pendingApprovals.get(req.id)?.resolve(decision)
       })
-      signal?.addEventListener("abort", onAbort, { once: true })
-      if (signal?.aborted) {
+      options.abortSignal?.addEventListener("abort", onAbort, { once: true })
+      if (options.abortSignal?.aborted) {
         onAbort()
         return
       }
@@ -5353,29 +5228,32 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   )
   backend.setOrchestrator(orchestrator)
 
-  // Document the handoff in runtimes that can run and monitor shell commands.
-  const blockedFilesystemTools = options.filesystemAccess
-    ? blockedToolNamesForAccess(options.filesystemAccess)
-    : undefined
+  // The background-exec guidance ("use run_in_background for builds/installs/
+  // tests/codegen") must only be injected when the runtime can ACTUALLY run those:
+  //  - execute removed (shellAccess "none" registry agents, scoped write workers)
+  //    → it would document a tool they don't have; AND
+  //  - read_only runtimes → they KEEP execute but isReadOnlyShellCommand BLOCKS
+  //    builds/installs/tests, so the guidance would steer the agent into commands
+  //    the gate rejects (contradicting its access prompt). Suppress it there too.
+  // The main agent (no filesystemAccess), verify, and whole-workspace write keep it.
   const executeToolAvailable =
     !runtimeBlockedToolNames.has("execute") &&
-    !runtimeBlockedToolNames.has("monitor") &&
-    !blockedFilesystemTools?.has("execute") &&
-    !blockedFilesystemTools?.has("monitor")
+    (options.filesystemAccess
+      ? !blockedToolNamesForAccess(options.filesystemAccess).has("execute")
+      : true)
   const isReadOnlyRuntime =
     options.filesystemAccess?.shellAccess === "read_only" ||
     options.filesystemAccess?.workload === "read_only"
   // The prompt must name the directory the agent actually works in, or an isolated
   // agent would be told the host workspace is its root and write outside its
   // worktree (the sandbox would refuse, so it would just fail confusingly).
-  let systemPrompt = getSystemPrompt(fileRoot, windowsSandbox, {
+  let systemPrompt = options.baseSystemPrompt ?? getSystemPrompt(fileRoot, windowsSandbox, {
     toolStrategy: windowsSandbox === "readonly" ? "standard" : toolStrategy,
     filesystemAccess: options.filesystemAccess,
     blockedToolNames: runtimeBlockedToolNames,
     filesystemEnabled: !isCoordinatorMode,
     includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
     managedForegroundExec: managedExecution,
-    autoBackgroundHandoff,
     includeSubagents: mainSubagentsEnabled,
     includeMemory: runtimePolicy.includeMemory,
     includeCurrentTime: runtimePolicy.includeCurrentTime
@@ -5537,6 +5415,12 @@ The workspace root is: ${fileRoot}`
   console.log("[Runtime] Plugin skills sources count:", pluginSkillsSources.length)
 
   const allSkillsSources = combineSkillMiddlewareSources(skillsSources, pluginSkillsSources)
+  const sessionAllowedSkillNames =
+    allowedSkillNames ?? parseAllowedNames(runtimeThreadMetadata, "allowedSkills")
+  const allowedSkillRootDirs =
+    sessionAllowedSkillNames === undefined
+      ? undefined
+      : await resolveAllowedSkillRootDirs(allSkillsSources, sessionAllowedSkillNames)
   const skillLifecycleSources = [...skillLifecycleRootSources, ...pluginSkillSourceMetadata]
   backend.setHiddenSkillDirs(getDisabledSkillDirs())
   backend.setSkillLifecycleRegistry(
@@ -5679,49 +5563,7 @@ The workspace root is: ${fileRoot}`
     }
   }
 
-  type RuntimeTool = {
-    name?: string
-    func?: unknown
-    invoke?: unknown
-  }
-  const extraTools: RuntimeTool[] = []
-  if (options.enableRequestUserInput) {
-    extraTools.push(
-      createRequestUserInputTool({
-        threadId: options.threadId,
-        abortSignal: options.abortSignal,
-        allowDeferredRenderer: options.allowDeferredUserInputRenderer,
-        interactionWaitHooks: options.interactionWaitHooks,
-        requestUserInputConfig: options.requestUserInputConfig
-      })
-    )
-  }
-  if (!options.noSchedulerTool && !runtimePolicy.isProjectMode) {
-    extraTools.push(
-      createSchedulerTool({
-        workspacePath,
-        modelId: options.modelId,
-        threadId: options.threadId,
-        imDeliveryContext: options.imDeliveryContext ?? null
-      })
-    )
-  }
-  if (!options.noSkillEvolutionTool) {
-    extraTools.push(createSkillEvolutionTool({ threadId: options.threadId }))
-  }
-
-  // Conditionally inject Java LSP tool
-  try {
-    const lspConfig = getLspConfig()
-    // LSP indexes the sources the agent edits, so it follows the file root.
-    if (lspConfig.enabled && detectJavaProject(fileRoot)) {
-      extraTools.push(createLspTool({ workspacePath: fileRoot }))
-      console.log("[Runtime] Java LSP tool injected for:", fileRoot)
-    }
-  } catch (e) {
-    console.warn("[Runtime] Failed to check LSP config:", e)
-  }
-
+  const extraTools = createRuntimeBaseTools(options, fileRoot, runtimePolicy)
   if (!disableMcpTools && !isConstrainedCoordinatorWorker) {
     extraTools.push(
       ...(await createInAppBrowserTools(allMcpTools, {
@@ -5776,6 +5618,7 @@ The workspace root is: ${fileRoot}`
 
   if (isWorkflowMode) {
     const workflowAgentProfiles = await loadAgentProfilesAsync(workspacePath)
+    const worktreeSubagentThreads = new Set<string>()
     // Dynamic Workflows: the model writes a JS orchestration script; the run
     // executes in the BACKGROUND (detached from this turn — the manager owns
     // its abort), each agent() runs as a one-shot leaf runtime on its own
@@ -5795,10 +5638,12 @@ The workspace root is: ${fileRoot}`
         readYoloMode: getYoloMode,
         approvalStore,
         requestApproval,
-        // Share admission with file tools; the engine and backend acquire the
-        // same per-file lock. Unknown tools/shell still exclude both paths.
-        runExclusiveFileWrite: <T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> =>
-          getToolConcurrencyLock(threadId).read(fn, signal),
+        // Run-level exclusive file-write lock keyed on this (parent) threadId — the
+        // SAME lock the run's subagent tool writes use (toolConcurrencyQueueId =
+        // threadId). Injected so a script writeFile() and a concurrent agent()'s
+        // tool write serialize TOGETHER, not each in its own silo. (#2)
+        runExclusiveFileWrite: <T>(fn: () => Promise<T>): Promise<T> =>
+          getToolConcurrencyLock(threadId).write(fn),
         agentProfiles: workflowAgentProfiles,
         subagentDeps: {
           traceContext,
@@ -5825,7 +5670,6 @@ The workspace root is: ${fileRoot}`
               agentId: subagentOptions.agentId,
               actionStationarityTurnId: subagentOptions.threadId,
               approvalThreadId: threadId,
-              shellParentThreadId: threadId,
               workspacePath,
               ...(worktreeIsolation ? { worktreeIsolation } : {}),
               modelId: subagentOptions.modelId,
@@ -5887,9 +5731,18 @@ The workspace root is: ${fileRoot}`
               projectDir,
               pluginOutputDir,
               additionalTools: subagentOptions.additionalTools,
-              // Shared workspace agents coordinate unknown tools with the parent;
-              // different files proceed concurrently under backend resource locks.
-              // Isolated worktrees have independent tool and workspace gates.
+              // Subagents SHARING the workspace share the parent thread's tool-
+              // concurrency queue so their file writes serialize across the run (no
+              // two parallel agents clobber the same file); reads still run
+              // concurrently. Also serializes with any foreground edit the user
+              // makes on this thread while the run is in flight.
+              //
+              // An ISOLATED agent gets its own queue, keyed on its worktree. Its
+              // writes cannot collide with anything outside that directory, so
+              // holding the shared lock would serialize a fan-out that is safe to
+              // run in parallel — which is the entire point of asking for a
+              // worktree. Writes WITHIN one worktree stay serialized, because the
+              // key is the worktree and one worktree hosts exactly one agent.
               toolConcurrencyQueueId: worktreeIsolation?.workspaceRoot ?? threadId,
               // acceptEdits: the user approved the whole workflow at launch, so
               // its background subagents must not re-prompt per file edit
@@ -5898,14 +5751,32 @@ The workspace root is: ${fileRoot}`
               // Only shared-workspace mutations belong to the parent's commit
               // scope. Isolated worktrees retain their own generation records.
               onFileMutation: worktreeIsolation ? undefined : onFileMutation,
-              managedExecution,
-              autoBackgroundHandoff
+              managedExecution
             })
+            if (worktreeIsolation) worktreeSubagentThreads.add(subagentOptions.threadId)
             return subagentRuntime as unknown as WorkflowSubagentRuntime
           },
           cleanupThread: async (workflowThreadId: string): Promise<void> => {
             clearActionStationarityTurn(workflowThreadId, workflowThreadId)
-            const resourceCleanupResults = await cleanupChildRuntimeResources(workflowThreadId)
+            // Kill any run_in_background tasks the subagent started so they don't
+            // outlive the run (coordinator workers cancel theirs the same way via
+            // cancelBackgroundTasks — without this a backgrounded process leaks
+            // CPU/memory/file writes after the workflow completes or is cancelled).
+            const processCleanupResults = worktreeSubagentThreads.delete(workflowThreadId)
+              ? await Promise.allSettled([
+                  LocalSandbox.cancelBackgroundTasksAndWait(workflowThreadId)
+                ])
+              : (LocalSandbox.cancelBackgroundTasks(workflowThreadId), [])
+            for (const result of processCleanupResults) {
+              if (result.status === "rejected") {
+                console.warn("[Workflow] Subagent process cleanup error:", result.reason)
+              }
+            }
+            // Release resources after any worktree-specific process drain.
+            const resourceCleanupResults = await Promise.allSettled([
+              LocalSandbox.revokeGrantedAclsForRun(workflowThreadId),
+              closeCheckpointer(workflowThreadId)
+            ])
             for (const result of resourceCleanupResults) {
               if (result.status === "rejected") {
                 console.warn("[Workflow] Subagent cleanup error:", result.reason)
@@ -5964,7 +5835,7 @@ The workspace root is: ${fileRoot}`
     "glob",
     "grep",
     "execute",
-    ...SHELL_TASK_MONITOR_TOOL_NAMES,
+    "task_output",
     "search_tool",
     "inspect_tool",
     "invoke_deferred_tool",
@@ -6092,18 +5963,6 @@ The workspace root is: ${fileRoot}`
   }
 
   const coordinatorWorkerRunner: CoordinatorWorkerRunner = async (workerInput) => {
-    return withSubagentSessionCapture(
-      {
-        kind: "worker",
-        threadId: workerInput.parentThreadId,
-        workerThreadId: workerInput.workerThreadId
-      },
-      workerInput.description,
-      () => runCoordinatorWorkerTurn(workerInput)
-    )
-  }
-
-  const runCoordinatorWorkerTurn: CoordinatorWorkerRunner = async (workerInput) => {
     const syncWorkerCodeSkills = createSubagentSkillAttribution({
       threadId: workerInput.workerThreadId,
       parentThreadId: workerInput.parentThreadId
@@ -6132,7 +5991,7 @@ The workspace root is: ${fileRoot}`
         return "Access limits: verifier worker. You can inspect files, run validation commands, and use available browser automation skills/tools for UI/runtime verification when present, but write_file, edit_file, and the deferred-tool bridge (search/inspect/invoke_deferred) are unavailable. Eager MCP tools (if any are connected) ARE available for direct single-tool calls. Do not create, modify, or delete files in the project workspace. If a temporary script or harness is necessary, write it only under /tmp or $TMPDIR and clean it up."
       }
       if (workerInput.ownedFiles.length > 0) {
-        return `Access limits: scoped write worker. write_file and edit_file are limited to owned_files (${workerInput.ownedFiles.join(", ")}). execute, task_output, monitor, and the deferred-tool bridge (search/inspect/invoke_deferred) are unavailable, so do not claim to have run shell or deferred-tool checks. Eager MCP tools (if any are connected) ARE available for direct single-tool calls. File edits may still require explicit user approval; if write_file or edit_file is denied/blocked, do not loop the same call and instead report the blocking file/action back to the coordinator.`
+        return `Access limits: scoped write worker. write_file and edit_file are limited to owned_files (${workerInput.ownedFiles.join(", ")}). execute, task_output, and the deferred-tool bridge (search/inspect/invoke_deferred) are unavailable, so do not claim to have run shell or deferred-tool checks. Eager MCP tools (if any are connected) ARE available for direct single-tool calls. File edits may still require explicit user approval; if write_file or edit_file is denied/blocked, do not loop the same call and instead report the blocking file/action back to the coordinator.`
       }
       return "Access limits: write worker. You may edit workspace files as needed for the assigned implementation. File edits may still require explicit user approval; if write_file or edit_file is denied/blocked, do not loop the same call and instead report the blocking file/action back to the coordinator."
     })()
@@ -6324,7 +6183,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         : undefined
       const streamConfig = {
         configurable: { thread_id: workerInput.workerThreadId },
-        callbacks: subagentSessionCallbacks([]),
+        callbacks: [],
         signal: workerInput.abortSignal,
         streamMode: ["messages", "values"] as ("messages" | "values")[],
         recursionLimit: getAgentGraphRecursionLimit()
@@ -6442,10 +6301,8 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             toolStrategy,
             actionStationarityTurnId: workerActionStationarityTurnId,
             approvalThreadId: workerInput.parentThreadId,
-            shellParentThreadId: workerInput.parentThreadId,
             workspacePath,
             managedExecution,
-            autoBackgroundHandoff,
             modelId: candidateId,
             extraSystemPrompt: `${workerRolePrompt}\n\n${workerMetadataPrompt}`,
             noSchedulerTool: true,
@@ -6517,10 +6374,8 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             toolStrategy,
             actionStationarityTurnId: workerActionStationarityTurnId,
             approvalThreadId: workerInput.parentThreadId,
-            shellParentThreadId: workerInput.parentThreadId,
             workspacePath,
             managedExecution,
-            autoBackgroundHandoff,
             modelId: nextCandidate,
             extraSystemPrompt: `${workerRolePrompt}\n\n${workerMetadataPrompt}`,
             noSchedulerTool: true,
@@ -6576,10 +6431,8 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             threadId: workerInput.workerThreadId,
             actionStationarityTurnId: workerActionStationarityTurnId,
             approvalThreadId: workerInput.parentThreadId,
-            shellParentThreadId: workerInput.parentThreadId,
             workspacePath,
             managedExecution,
-            autoBackgroundHandoff,
             modelId: usedWorkerModelId ?? modelId,
             extraSystemPrompt: `${workerRolePrompt}\n\n${handoffMetadataPrompt}`,
             noSchedulerTool: true,
@@ -6717,7 +6570,11 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         )
       }
       workerInput.abortSignal.removeEventListener("abort", cancelWorkerBackgroundTasks)
-      const cleanupResults = await cleanupChildRuntimeResources(workerInput.workerThreadId)
+      const cleanupResults = await Promise.allSettled([
+        Promise.resolve().then(cancelWorkerBackgroundTasks),
+        LocalSandbox.revokeGrantedAclsForRun(workerInput.workerThreadId),
+        closeCheckpointer(workerInput.workerThreadId)
+      ])
       for (const result of cleanupResults) {
         if (result.status === "rejected") {
           console.warn("[CoordinatorWorker] Worker cleanup error:", result.reason)
@@ -6977,20 +6834,12 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     : combinedAgentsPrompt
 
   const agent = createDeepAgent({
-    middleware: traceContext?.harnessFeature ? [createStageUsageMiddleware(traceContext)] : [],
-    subagentLifecycleMiddleware: options.subagentLifecycle
-      ? createSubagentLifecycleMiddleware(options.subagentLifecycle)
-      : undefined,
+    middleware: [
+      ...(traceContext?.harnessFeature ? [createStageUsageMiddleware(traceContext)] : []),
+      ...(options.mainMiddleware ?? [])
+    ],
     model,
     summarizationModel: contextCompactionModel,
-    summarizationOverflowModel: contextCompactionOverflowModel,
-    summarizationMaxOutputTokens: summaryMaxOutputTokens,
-    summarizationOverflowMaxOutputTokens: recoveryMaxOutputTokens,
-    onCompactionDiagnostic: createCompactionDiagnosticSink(projectThreadDataDirectory, {
-      threadId,
-      modelId: customConfig.id,
-      model: customConfig.model
-    }),
     tools: mainTools,
     subagentDefaultTools: workerTools,
     subagents: coordinatorSubagents,
@@ -7001,6 +6850,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     toolStrategy: windowsSandbox === "readonly" ? "standard" : toolStrategy,
     onFinalSystemPrompt,
     filesystemSystemPrompt,
+    mainFilesystemToolDescriptions: options.mainFilesystemToolDescriptions,
     subagentExtraSystemPrompt: taskSubagentExtraSystemPrompt,
     subagentExtraSystemPromptForRestrictedRoles: projectModeTaskSubagentsInheritFullContext,
     mainTodosEnabled: !isCoordinatorMode,
@@ -7009,7 +6859,6 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     filesystemAccess: options.filesystemAccess,
     mainBlockedToolNames: [...runtimeBlockedToolNames],
     managedExecution,
-    autoBackgroundHandoff,
     registrySubagentSpecs,
     // The runtime's commands execute via the sandbox; on Windows with a sandbox
     // that's PowerShell. Pass that to the read-only execute gate so PS read-only
@@ -7019,8 +6868,11 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       process.platform === "win32" && windowsSandbox !== "none" ? "powershell" : "unknown",
     taskSystemPrompt: isCoordinatorMode ? buildCoordinatorTaskPrompt(threadId) : TASK_TOOL_PROMPT,
     includeGeneralPurposeSubagent:
-      !isCoordinatorMode && isGeneralPurposeSubagentEnabled(projectModeTaskSubagentConfig),
+      sessionAllowedExpertNames === undefined &&
+      !isCoordinatorMode &&
+      isGeneralPurposeSubagentEnabled(projectModeTaskSubagentConfig),
     skills: mainSkillSources,
+    allowedSkillRootDirs,
     memory: mainMemorySources,
     // The orchestrator handles execute/file approval internally via IPC. In YOLO
     // mode it skips initial approvals but still prompts before sandbox escape.
@@ -7035,7 +6887,6 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     toolTokenLimitBeforeEvict: toolEvictLimit,
     trimTokensToSummarize: summaryOverflowRetryTarget,
     summarizationMaxInputTokens: maxTokens,
-    summarizationModelInputBudgetTokens: summaryInputBudget,
     summarizationPostCompactionInputBudgetTokens: mainModelInputBudget,
     summarizationSummaryPrompt: CMB_COWORK_SUMMARY_PROMPT,
     summarizationHistoryPathPrefix: conversationHistoryPathPrefix,
@@ -7055,8 +6906,27 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     toolHookMiddleware,
     onFailureFuseNotice,
     onContextCompaction,
-    onToolFailureSignal: createRuntimeToolFailureHandler(
-      {
+    // PR-12 — closure captures threadId / workspacePath / hookScope so
+    // createDeepAgent's middleware can fire-and-forget the PostToolUseFailure
+    // hook chain without knowing per-thread context.
+    onToolFailureSignal: (input: {
+      toolName: string | undefined
+      toolCallId: string | undefined
+      toolArgs: unknown
+      signal: ToolFailureSignal
+    }): FailureFuseDecision | void => {
+      const failureFuseDecision = hookTurnId
+        ? recordToolFailure({
+            threadId,
+            turnId: hookTurnId,
+            toolName: input.toolName,
+            toolCallId: input.toolCallId,
+            toolArgs: input.toolArgs,
+            signal: input.signal,
+            mode: getFailureFuseMode()
+          })
+        : undefined
+      const context: HookContext = {
         workspacePath,
         sessionId: threadId,
         agentId,
@@ -7072,11 +6942,29 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         harnessNodeStatus,
         projectCode,
         projectDir,
-        ...isolatedWorkspaceHookContext
-      },
-      resolveHooksForContext,
-      onHookResult
-    )
+        ...isolatedWorkspaceHookContext,
+        toolName: input.toolName,
+        toolArgs:
+          input.toolArgs && typeof input.toolArgs === "object" && !Array.isArray(input.toolArgs)
+            ? (input.toolArgs as Record<string, unknown>)
+            : undefined,
+        toolResult: JSON.stringify({
+          error: input.signal.message,
+          error_type: input.signal.errorType,
+          failure_kind: input.signal.kind,
+          is_interrupt: input.signal.isInterrupt,
+          is_timeout: input.signal.isTimeout,
+          tool_use_id: input.toolCallId
+        })
+      }
+      runHooks(
+        resolveHooksForContext("PostToolUseFailure", context),
+        "PostToolUseFailure",
+        context,
+        onHookResult
+      ).catch((e) => console.warn("[Hooks] PostToolUseFailure hook error:", e))
+      return failureFuseDecision
+    }
   })
 
   console.log("[Runtime] Agent created with skills parameter:", mainSkillSources)

@@ -36,12 +36,10 @@ async function verifyApp(executable, isolated, workspace, env) {
     await page.getByRole("button", { name: "自定义设置", exact: true }).waitFor({ timeout: 30_000 })
     const preload = await page.evaluate(async () => ({
       threads: typeof window.api?.threads?.create,
-      mods: typeof window.api?.mods?.status,
       design: typeof window.api?.design?.sessions?.create
     }))
     assert.deepEqual(preload, {
       threads: "function",
-      mods: "function",
       design: "function"
     })
     console.log("PASS packaged Electron renderer and preload")
@@ -128,15 +126,10 @@ async function main() {
   const entries = new Set(asar.listPackage(archive).map((entry) => entry.replace(/^\//, "")))
   for (const entry of [
     "out/main/index.js",
-    "out/main/mod-host.js",
-    "out/main/function-mod-host.js",
-    "out/main/mods-cli.js",
     "out/main/code-exec-helper.js",
     "out/preload/index.js",
     "out/renderer/index.html",
-    "out/skills",
-    "out/resources/mods",
-    "out/resources/mods-policy.json"
+    "out/skills"
   ]) {
     assert.ok(entries.has(entry), `Missing packaged resource: ${entry}`)
   }
@@ -149,7 +142,7 @@ async function main() {
   )
   await access(esbuild, constants.X_OK)
   assert.equal(run("/usr/bin/lipo", ["-archs", esbuild]), "arm64")
-  console.log("PASS packaged Mods, skills, design resources and ARM64 esbuild")
+  console.log("PASS packaged skills, design resources and ARM64 esbuild")
 
   const isolated = await mkdtemp(join(tmpdir(), "cmb-macos-package-"))
   try {

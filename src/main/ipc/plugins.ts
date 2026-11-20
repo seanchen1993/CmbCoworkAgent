@@ -269,17 +269,10 @@ async function installPluginFromDir(
   dirPath: string,
   fallbackName?: string,
   origin?: "market" | "local",
-  versionOverride?: string,
-  requireMods = false
+  versionOverride?: string
 ): Promise<{ success: boolean; pluginName?: string; error?: string }> {
   try {
     const parsed = await parsePluginDir(dirPath, fallbackName)
-    if (requireMods && parsed.modCount === 0) {
-      return {
-        success: false,
-        error: "未检测到 Mods 模块，请选择包含 Mods 的插件包。普通插件请在“插件”页面安装。"
-      }
-    }
     if (
       parsed.skillNames.length === 0 &&
       Object.keys(parsed.mcpConfigs).length === 0 &&
@@ -619,8 +612,7 @@ async function installPluginFromZip(
   buffer: ArrayBuffer,
   fileName?: string,
   origin?: "market" | "local",
-  versionOverride?: string,
-  requireMods = false
+  versionOverride?: string
 ): Promise<{ success: boolean; pluginName?: string; error?: string }> {
   try {
     const extracted = await extractZipToTemp(buffer, getPluginsDir(), "_temp_")
@@ -638,9 +630,7 @@ async function installPluginFromZip(
           : rootName
 
       // Parse and install (the real copy lands in getPluginsDir() via installPluginFromDir)
-      return await installPluginFromDir(
-        pluginRoot, fallbackName, origin, versionOverride, requireMods
-      )
+      return await installPluginFromDir(pluginRoot, fallbackName, origin, versionOverride)
     } finally {
       // Clean up temp directory regardless of install outcome
       if (existsSync(tempDir)) {
@@ -720,7 +710,6 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
         fileName: string
         origin?: "market" | "local"
         version?: string
-        requireMods?: boolean
       }
     ): Promise<{ success: boolean; pluginName?: string; error?: string }> => {
       const { buffer, fileName, origin, version } = payload
@@ -739,9 +728,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
         origin === "market" || origin === "local" ? origin : "local"
       await pluginMutex.acquire()
       try {
-        return await installPluginFromZip(
-          buffer, fileName, sanitizedOrigin, version, payload.requireMods === true
-        )
+        return await installPluginFromZip(buffer, fileName, sanitizedOrigin, version)
       } finally {
         pluginMutex.release()
       }
@@ -750,12 +737,10 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "plugins:installFromDir",
-    async (
-      _event, requireMods?: boolean
-    ): Promise<{ success: boolean; pluginName?: string; error?: string }> => {
+    async (): Promise<{ success: boolean; pluginName?: string; error?: string }> => {
       const result = await dialog.showOpenDialog({
         properties: ["openDirectory"],
-        title: requireMods === true ? "选择 Mods 插件目录" : "选择 Plugin 目录"
+        title: "选择 Plugin 目录"
       })
       if (result.canceled || result.filePaths.length === 0) {
         return { success: false, error: "已取消" }
@@ -765,9 +750,7 @@ export function registerPluginHandlers(ipcMain: IpcMain): void {
         // Both settings pages select a local folder. Pass "local" explicitly so
         // it can override any sticky "market" tag from a prior install of
         // the same plugin.
-        return await installPluginFromDir(
-          result.filePaths[0], undefined, "local", undefined, requireMods === true
-        )
+        return await installPluginFromDir(result.filePaths[0], undefined, "local")
       } finally {
         pluginMutex.release()
       }
