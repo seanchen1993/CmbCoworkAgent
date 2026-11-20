@@ -8,7 +8,7 @@ import { ModError } from "./errors"
 import { openStableFileHandle, readStableFileHandleBounded } from "../services/stable-file-handle"
 
 let compiler: typeof import("esbuild") | undefined
-export function modCompiler(): typeof import("esbuild") {
+function modCompiler(): typeof import("esbuild") {
   if (!compiler) {
     const require = createRequire(join(__dirname, "mods-loader.cjs"))
     // esbuild uses spawn, which cannot execute an ASAR virtual path. Load its
