@@ -21,6 +21,22 @@ export interface DesignStyleSnapshot {
   spacing: string[]
   radius: string[]
   viewport: { width: number; height: number }
+  layout: Partial<
+    Record<
+      "page" | "header" | "navigation" | "main" | "sidebar" | "footer",
+      {
+        width: number
+        left: number
+        display: string
+        position: string
+        maxWidth: string
+        padding: string
+        gap: string
+        flexDirection: string
+        background: string
+      }
+    >
+  >
 }
 
 /** Runs in the page's isolated world; reads computed styles, never form values or page text. */
@@ -92,13 +108,40 @@ export function extractDesignStyleSnapshot(): DesignStyleSnapshot {
     const element = [...document.querySelectorAll(selector)].find(visible)
     if (element) elements[key as keyof typeof elements] = sample(element)
   }
+  const regionSelectors = {
+    page: "body",
+    header: 'body > header,[role="banner"]',
+    navigation: 'nav,[role="navigation"]',
+    main: 'main,[role="main"]',
+    sidebar: 'aside,[role="complementary"]',
+    footer: 'body > footer,[role="contentinfo"]'
+  }
+  const layout: DesignStyleSnapshot["layout"] = {}
+  for (const [key, selector] of Object.entries(regionSelectors)) {
+    const element = [...document.querySelectorAll(selector)].find(visible)
+    if (!element) continue
+    const rect = element.getBoundingClientRect()
+    const style = getComputedStyle(element)
+    layout[key as keyof typeof layout] = {
+      width: Math.round(rect.width),
+      left: Math.round(rect.left),
+      display: style.display,
+      position: style.position,
+      maxWidth: style.maxWidth,
+      padding: style.padding,
+      gap: style.gap,
+      flexDirection: style.flexDirection,
+      background: style.backgroundColor
+    }
+  }
   return {
     body: sample(document.body || document.documentElement),
     elements,
     colors: top(colors, 8),
     spacing: top(spacing, 8),
     radius: top(radius, 6),
-    viewport: { width: innerWidth, height: innerHeight }
+    viewport: { width: innerWidth, height: innerHeight },
+    layout
   }
 }
 

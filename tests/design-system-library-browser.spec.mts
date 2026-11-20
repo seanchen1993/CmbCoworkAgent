@@ -103,6 +103,7 @@ try {
         onSystemExtractionProgress: () => () => {},
         cancelSystemExtraction: async () => true,
         openImportBrowser: async () => ({ success: true }),
+        controlImportInteractions: async () => ({ recording: false, count: 0 }),
         extractSystem: (request: unknown) =>
           new Promise((resolve) => {
             host.lastExtractionRequest = request
@@ -167,8 +168,9 @@ try {
   assert.equal(library.list().filter((item) => item.isLatest).length, 2)
   await page.getByRole("button", { name: "更换设计系统", exact: true }).click()
   await page.getByRole("button", { name: "从网页提取", exact: true }).click()
+  assert.equal(await page.getByRole("radio", { name: "AI 生成设计规范" }).isChecked(), true)
   await page.getByRole("textbox", { name: "页面链接", exact: true }).fill("https://example.com")
-  await page.getByRole("button", { name: "开始提取", exact: true }).click()
+  await page.getByRole("button", { name: "生成 design.md", exact: true }).click()
   await page.getByRole("button", { name: "取消提取", exact: true }).click()
   await page.evaluate(() => (window as any).finishExtraction())
   assert.equal(
@@ -176,9 +178,11 @@ try {
     0,
     "Late extraction cannot reopen the editor"
   )
-  await page.getByRole("button", { name: "开始提取", exact: true }).click()
+  await page.getByRole("button", { name: "生成 design.md", exact: true }).click()
+  assert.equal(await page.evaluate(() => (window as any).lastExtractionRequest.mode), "ai")
   await page.evaluate(() => (window as any).finishExtraction())
   await page.getByRole("textbox", { name: "名称", exact: true }).waitFor()
+  await page.getByText("design.md 已生成，可直接下载或保存后用于设计。").waitFor()
   const screenshotDirectory = process.env.DESIGN_SYSTEM_QA_DIR || temporary
   fs.mkdirSync(screenshotDirectory, { recursive: true })
   await page.screenshot({
@@ -198,12 +202,14 @@ try {
   assert.equal(await page.getByRole("button", { name: "用于本次设计", exact: true }).count(), 0)
   await page.getByRole("button", { name: "从网页提取", exact: true }).click()
   await page.getByRole("button", { name: "内置浏览器当前页", exact: true }).click()
+  await page.getByRole("radio", { name: "仅提取样式" }).check()
   await page.getByRole("button", { name: "确认浏览器页面", exact: true }).click()
   await page.getByRole("button", { name: "确认页面并提取规范", exact: true }).click()
   assert.equal(
     await page.evaluate(() => (window as any).lastExtractionRequest.source),
     "current-browser"
   )
+  assert.equal(await page.evaluate(() => (window as any).lastExtractionRequest.mode), "styles")
   await page.evaluate(() => {
     const host = window as any
     host.extractionFailure = { success: false, needsUserAction: true, error: "请完成登录" }
@@ -222,11 +228,15 @@ try {
   // Run the actual computed-style extractor against a real rendered page.
   const stylesPage = await browser.newPage({ viewport: { width: 1200, height: 800 } })
   await stylesPage.setContent(
-    '<style>body{background:rgb(245,246,247);color:rgb(20,30,40);font:16px/24px sans-serif}button{padding:12px 24px;border-radius:10px;background:rgb(40,80,160);color:white}</style><h1>工作台</h1><button>保存</button><input type="password" value="secret-password">'
+    '<style>body{background:rgb(245,246,247);color:rgb(20,30,40);font:16px/24px sans-serif}main{display:grid;max-width:960px;margin:auto;gap:16px}button{padding:12px 24px;border-radius:10px;background:rgb(40,80,160);color:white}</style><main><h1>工作台</h1><button>保存</button><input type="password" value="secret-password"></main>'
   )
   await stylesPage.evaluate("window.__name = (target) => target")
   const snapshot = await stylesPage.evaluate(extractDesignStyleSnapshot)
   assert.equal(snapshot.elements.button!.borderRadius, "10px")
+  assert.equal(snapshot.layout.main?.display, "grid")
+  assert.equal(snapshot.layout.main?.width, 960)
+  assert.equal(snapshot.layout.main?.gap, "16px")
+  assert.doesNotMatch(JSON.stringify(snapshot), /工作台|secret-password/)
   const markdown = buildDesignSystemMarkdown("工作台", "https://example.com", snapshot)
   assert.match(markdown, /rgb\(40, 80, 160\)/)
   assert.match(markdown, /12px 24px/)

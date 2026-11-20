@@ -50,6 +50,8 @@ export interface DesignSystemExtractionRequest {
   requestId: string
   source: "url" | "current-browser"
   url?: string
+  mode?: "ai" | "styles"
+  modelId?: string | null
 }
 
 export interface DesignSystemExtractionProgress {

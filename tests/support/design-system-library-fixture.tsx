@@ -34,7 +34,10 @@ function Fixture() {
   return (
     <>
       {confirmation && (
-        <div data-testid="browser-confirmation">
+        <div
+          data-testid="browser-confirmation"
+          style={{ position: "fixed", inset: "0 0 auto", zIndex: 50 }}
+        >
           <BrowserPageConfirmationBar loading={false} url="https://example.com" />
         </div>
       )}

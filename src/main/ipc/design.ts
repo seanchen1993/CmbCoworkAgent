@@ -3409,7 +3409,7 @@ export function registerDesignHandlers(): void {
   )
 
   ipcMain.handle("design:list-systems", async (): Promise<DesignSystemInfo[]> => listDesignSystems())
-  registerDesignSystemLibraryHandlers(personalDesignSystemLibrary, getDesignSystemById)
+  registerDesignSystemLibraryHandlers(personalDesignSystemLibrary, getDesignSystemById, getModel)
 
   ipcMain.handle("design:list-templates", async (): Promise<DesignTemplateInfo[]> =>
     Promise.all(listDesignTemplates(templatePackages).map((item) =>

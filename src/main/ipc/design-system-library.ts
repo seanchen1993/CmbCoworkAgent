@@ -12,7 +12,8 @@ import {
   designSystemFileDraft,
   validateDesignSystemContent
 } from "../services/design/system-library"
-import { captureDesignPage } from "../services/design/page-capture"
+import { abortableCapture, captureDesignPage } from "../services/design/page-capture"
+import { generateDesignSystemMarkdown } from "../services/design/system-markdown-generation"
 import { buildDesignSystemMarkdown } from "../services/design/system-style-snapshot"
 import { capturePublicUrl } from "../services/design/capture-assets"
 
@@ -22,7 +23,8 @@ export function registerDesignSystemLibraryHandlers(
     info?: import("../../shared/design-system").DesignSystemInfo
     content?: string
     error?: string
-  }
+  },
+  getModel: (modelId?: string) => Parameters<typeof generateDesignSystemMarkdown>[0] | null
 ): void {
   const jobs = new Map<string, { owner: number; controller: AbortController }>()
   const watched = new Set<number>()
@@ -123,7 +125,9 @@ export function registerDesignSystemLibraryHandlers(
           !input ||
           typeof input.requestId !== "string" ||
           !/^[\w-]{1,80}$/.test(input.requestId) ||
-          !["url", "current-browser"].includes(input.source)
+          !["url", "current-browser"].includes(input.source) ||
+          (input.mode !== undefined && input.mode !== "ai" && input.mode !== "styles") ||
+          (input.modelId != null && typeof input.modelId !== "string")
         )
           throw new Error("提取请求无效")
         if (
@@ -136,33 +140,57 @@ export function registerDesignSystemLibraryHandlers(
           if (!["http:", "https:"].includes(url.protocol) || url.username || url.password)
             throw new Error("请输入不含账号密码的 HTTP 或 HTTPS 链接")
         }
+        const model = input.mode === "ai" ? getModel(input.modelId ?? undefined) : null
+        if (input.mode === "ai" && !model)
+          throw new Error("当前没有可用模型，请在设置中配置模型，或选择仅提取样式")
+
         watch(event.sender)
         controller = new AbortController()
         jobs.set(input.requestId, { owner: event.sender.id, controller })
-        timer = setTimeout(() => controller!.abort(new Error("提取超时，请检查页面后重试")), 60_000)
+        const signal = controller.signal
+        const progress = (message: string) => {
+          if (!signal.aborted && !event.sender.isDestroyed())
+            event.sender.send(DESIGN_SYSTEM_EXTRACTION_PROGRESS, {
+              requestId: input.requestId,
+              message
+            })
+        }
+        const timeout = (delay: number, message: string) =>
+          setTimeout(() => controller?.abort(new Error(message)), delay)
+        timer = timeout(60_000, "提取超时，请检查页面后重试")
         page = await captureDesignPage(
-          { ...input, workspacePath: "" },
-          controller.signal,
-          (_stage, message) => {
-            if (!event.sender.isDestroyed())
-              event.sender.send(DESIGN_SYSTEM_EXTRACTION_PROGRESS, {
-                requestId: input.requestId,
-                message
-              })
-          },
+          { requestId: input.requestId, source: input.source, url: input.url, workspacePath: "" },
+          signal,
+          (_stage, message) => progress(message),
           { includeDesignStyles: true }
         )
-        controller.signal.throwIfAborted()
+        signal.throwIfAborted()
         page.assertCurrent()
-        if (page.snapshot.restrictedReason)
-          return { success: false, needsUserAction: true, error: page.snapshot.restrictedReason }
-        if (!page.styles) throw new Error("无法读取页面样式，请重试")
-        const sourceUrl = capturePublicUrl(page.snapshot.url)
-        const content = buildDesignSystemMarkdown(page.snapshot.title, sourceUrl, page.styles)
+        const { snapshot, styles } = page
+        if (snapshot.restrictedReason)
+          return { success: false, needsUserAction: true, error: snapshot.restrictedReason }
+        if (!styles) throw new Error("无法读取页面样式，请重试")
+        const sourceUrl = capturePublicUrl(snapshot.url)
+        let content: string
+        if (model) {
+          page.dispose()
+          page = undefined
+          clearTimeout(timer)
+          timer = timeout(120_000, "AI 生成设计规范超时，请重试或选择仅提取样式")
+          progress("正在根据页面样式和布局生成 design.md…")
+          const markdown = await abortableCapture(
+            generateDesignSystemMarkdown(model, styles, signal),
+            signal
+          )
+          signal.throwIfAborted()
+          content = `${markdown}\n\n## 来源\n\n${sourceUrl}\n`
+        } else {
+          content = buildDesignSystemMarkdown(snapshot.title, sourceUrl, styles)
+        }
         return {
           success: true,
           draft: {
-            name: page.snapshot.title.trim().slice(0, 80) || "网页设计规范",
+            name: snapshot.title.trim().slice(0, 80) || "网页设计规范",
             content,
             source: "web",
             sourceUrl

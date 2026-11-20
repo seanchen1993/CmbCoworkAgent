@@ -4314,6 +4314,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
       systems={designSystems}
       mode={systemLibrary.mode}
       initialId={systemLibrary.id}
+      modelId={systemLibrary.sessionId ? ts.selectedModelId : undefined}
       onChanged={loadDesignSystems}
       onSelect={(system) => {
         if (systemLibrary.mode !== "select") return

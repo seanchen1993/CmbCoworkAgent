@@ -23,6 +23,7 @@ import {
 import {
   DESIGN_SYSTEM_MAX_BYTES,
   type DesignSystemDraft,
+  type DesignSystemExtractionRequest,
   type DesignSystemInfo
 } from "../../../../shared/design-system"
 
@@ -45,6 +46,7 @@ export function DesignSystemLibraryDialog({
   systems,
   mode,
   initialId,
+  modelId,
   onChanged,
   onSelect,
   onClose
@@ -52,6 +54,7 @@ export function DesignSystemLibraryDialog({
   systems: DesignSystemInfo[]
   mode: DesignSystemLibraryMode
   initialId?: string | null
+  modelId?: string | null
   onChanged: () => Promise<void>
   onSelect: (system: DesignSystemInfo | null) => void
   onClose: () => void
@@ -68,6 +71,8 @@ export function DesignSystemLibraryDialog({
   const [draft, setDraft] = useState<DesignSystemDraft | null>(null)
   const [url, setUrl] = useState("")
   const [captureSource, setCaptureSource] = useState<"url" | "current-browser">("url")
+  const [extractionMode, setExtractionMode] =
+    useState<NonNullable<DesignSystemExtractionRequest["mode"]>>("ai")
   const [busy, setBusy] = useState(false)
   const [reading, setReading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -299,13 +304,19 @@ export function DesignSystemLibraryDialog({
       const result = await window.api.design.extractSystem({
         requestId,
         source,
-        url: source === "url" ? url.trim() : undefined
+        url: source === "url" ? url.trim() : undefined,
+        mode: extractionMode,
+        modelId: extractionMode === "ai" ? modelId : undefined
       })
       if (!mounted.current || token !== operation.current || result.canceled) return
       if (!result.success || !result.draft) throw new Error(result.error || "提取设计规范失败")
       acceptDraft(result.draft, false)
       clearBrowser()
-      setMessage("提取完成。请检查规范，可在线修改或下载后重新上传。")
+      setMessage(
+        extractionMode === "ai"
+          ? "design.md 已生成，可直接下载或保存后用于设计。"
+          : "样式已提取，可编辑、下载或保存。"
+      )
     } catch (reason) {
       if (mounted.current && token === operation.current) {
         const text = reason instanceof Error ? reason.message : "提取失败"
@@ -314,7 +325,7 @@ export function DesignSystemLibraryDialog({
           updateBrowserPageConfirmation(confirmationId.current, {
             phase: "ready",
             error: text,
-            message: "请完成登录或调整目标页面后重试。"
+            message: "可重新确认页面，或返回更改生成方式。"
           })
       }
     } finally {
@@ -344,10 +355,14 @@ export function DesignSystemLibraryDialog({
     setBrowserPageConfirmation({
       id,
       phase: captureSource === "url" ? "opening" : "ready",
-      title: "确认当前页面后提取设计规范",
-      confirmLabel: "确认页面并提取规范",
-      busyLabel: "正在提取规范…",
-      message: "请完成登录并进入目标页面，确认后提取设计规范。",
+      title: "确认设计规范的来源页面",
+      confirmLabel: extractionMode === "ai" ? "确认页面并生成规范" : "确认页面并提取规范",
+      busyLabel: extractionMode === "ai" ? "正在生成规范…" : "正在提取规范…",
+      cancelLabel: extractionMode === "ai" ? "取消生成" : "取消提取",
+      message:
+        extractionMode === "ai"
+          ? "进入目标页面后确认，页面样式和布局将发送给所配置的模型。"
+          : "进入目标页面后确认，提取当前页面的样式。",
       onConfirm: () => {
         void extract("current-browser")
       },
@@ -687,9 +702,26 @@ export function DesignSystemLibraryDialog({
                       />
                     </label>
                   )}
-                  <p className="text-xs leading-5 text-muted-foreground">
-                    提取当前页面的实际样式生成规范草稿。需要登录时，请在内置浏览器中完成登录并确认目标页面。
-                  </p>
+                  <fieldset className="space-y-2 text-sm" disabled={busy}>
+                    <legend className="mb-2">生成方式</legend>
+                    {(["ai", "styles"] as const).map((value) => (
+                      <label key={value} className="flex items-center gap-2">
+                        <input
+                          type="radio"
+                          name="design-system-extraction-mode"
+                          value={value}
+                          checked={extractionMode === value}
+                          onChange={() => setExtractionMode(value)}
+                        />
+                        {value === "ai" ? "AI 生成设计规范" : "仅提取样式"}
+                      </label>
+                    ))}
+                    {extractionMode === "ai" && (
+                      <p className="text-xs leading-5 text-muted-foreground">
+                        将页面样式和布局发送给所配置的模型，生成可复用的设计规则和 CSS 示例。
+                      </p>
+                    )}
+                  </fieldset>
                   <div className="flex flex-wrap gap-2">
                     <Button
                       disabled={busy || (captureSource === "url" && !url.trim())}
@@ -698,7 +730,11 @@ export function DesignSystemLibraryDialog({
                       }
                     >
                       {busy && <LoaderCircle className="size-4 animate-spin" />}
-                      {captureSource === "url" ? "开始提取" : "确认浏览器页面"}
+                      {captureSource === "current-browser"
+                        ? "确认浏览器页面"
+                        : extractionMode === "ai"
+                          ? "生成 design.md"
+                          : "开始提取"}
                     </Button>
                     {captureSource === "url" && (
                       <Button
