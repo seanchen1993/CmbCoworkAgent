@@ -12,7 +12,6 @@ function fixture() {
   const busy = new Set<string>()
   const starts: string[] = []
   const ends: FunctionTurnComplete[] = []
-  const anchors: Array<string | undefined> = []
   const error = vi.fn()
   let idle!: (threadId: string) => void
   let now = 10
@@ -22,9 +21,8 @@ function fixture() {
       start: async (_binding, input) => {
         starts.push(input.turnId)
       },
-      complete: async (_binding, input, _signal, anchorMessageId) => {
+      complete: async (_binding, input) => {
         ends.push(input)
-        anchors.push(anchorMessageId)
       },
       isBusy: (threadId) => busy.has(threadId),
       onIdle: (listener) => {
@@ -53,7 +51,6 @@ function fixture() {
     binding,
     starts,
     ends,
-    anchors,
     busy,
     error,
     dispose,
@@ -65,16 +62,6 @@ function fixture() {
 }
 
 describe("function turn lifecycle", () => {
-  it("dispatches a host message anchor separately from the public hook event", async () => {
-    const f = fixture()
-    await f.lifecycle.start(f.binding())
-    f.lifecycle.observe("thread", "run", new AIMessage({ id: "actual", content: "answer" }))
-    f.lifecycle.finish("thread", "run", { reason: "answer" })
-    await tick()
-    expect(f.anchors).toEqual(["actual"])
-    expect(f.ends[0]).not.toHaveProperty("anchorMessageId")
-    f.lifecycle.close()
-  })
   it.each(["answer", "error", "aborted"] as const)(
     "keeps refusal ahead of %s except for explicit cancellation",
     async (reason) => {

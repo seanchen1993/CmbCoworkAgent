@@ -2052,7 +2052,7 @@ export function wrapTaskToolWithOwnerMetadata(
             ...patchedConfig,
             callbacks: subagentSessionCallbacks(patchedConfig.callbacks)
           })
-        const invokeCaptured = () =>
+        const execute = () =>
           captureThreadId && ownerId
             ? withSubagentSessionCapture(
                 { kind: "multi", threadId: captureThreadId, subagentId: ownerId },
@@ -2060,7 +2060,6 @@ export function wrapTaskToolWithOwnerMetadata(
                 invoke
               )
             : taskTool.invoke(config?.toolCall ?? input, patchedConfig)
-        const execute = () => withTaskModelOutcome(invokeCaptured, config?.signal)
         const result = await (runModTask
           ? runModTask(
               {
@@ -2844,7 +2843,6 @@ function assembleDeepAgent(
     // the same OpenAI-compatible endpoint and can be handed truncated JSON too.
     createMalformedToolCallRecoveryMiddleware(),
     createPatchToolCallsMiddleware(),
-    createTaskModelOutcomeMiddleware(),
     ...(modRuntimeAuthority && modManager?.isActive(modRuntimeAuthority.workspace)
       ? [createFunctionChildTurnMiddleware(modManager)]
       : [])

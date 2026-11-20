@@ -150,7 +150,7 @@ export class ModsManager {
           )
         }
       ),
-    complete: (binding, input, signal, anchorMessageId) =>
+    complete: (binding, input, signal) =>
       withFunctionAgentExecution(
         {
           workspace: binding.workspace,
@@ -164,8 +164,7 @@ export class ModsManager {
             binding.workspace,
             binding.threadId,
             input,
-            signal,
-            anchorMessageId
+            signal
           )
         }
       )
@@ -263,8 +262,7 @@ export class ModsManager {
       workspace: string,
       threadId: string,
       input: FunctionTurnComplete,
-      signal: AbortSignal,
-      anchorMessageId?: string
+      signal: AbortSignal
     ): Promise<FunctionTurnResult>
     invalidate(workspace: string): void
     closeThread(threadId: string): void

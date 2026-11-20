@@ -949,7 +949,7 @@ it("serves a registered tool and nested file SDK inside a real deepagents task w
   }
 })
 
-it.each(["error", "cancel", "refusal"])(
+it.each(["error", "cancel"])(
   "reports a real shared graph's %s even when the main graph can recover",
   async (ending) => {
     const f = fixture()
@@ -976,19 +976,9 @@ it.each(["error", "cancel", "refusal"])(
             f.controller.abort()
             f.controller.signal.throwIfAborted()
           }
-          if (ending === "refusal") {
-            const message = new AIMessage({
-              content: "",
-              response_metadata: { finish_reason: "content_filter" }
-            })
-            return { generations: [{ message, text: "" }] }
-          }
           throw new Error("controlled child model failure")
         }
-        const taskResult = messages.at(-1)
-        if (ending === "refusal" && ToolMessage.isInstance(taskResult))
-          expect(taskResult.status).toBe("error")
-        const message = ToolMessage.isInstance(taskResult)
+        const message = ToolMessage.isInstance(messages.at(-1))
           ? new AIMessage("parent recovered")
           : new AIMessage({
               content: "",
@@ -1038,15 +1028,11 @@ it.each(["error", "cancel", "refusal"])(
     expect(completions[0]).toMatchObject({
       agentId: "failing-child",
       answer: "",
-      reason: ending === "cancel" ? "aborted" : ending,
+      reason: ending === "cancel" ? "aborted" : "error",
       isAborted: ending === "cancel"
     })
     expect(completions[0].turnId).not.toBe(parent.turnId)
     expect(completions[0].usage).toBeUndefined()
-    if (ending === "refusal") {
-      expect(completions[0]).toHaveProperty("refusal", { category: null, explanation: null })
-      expect(result).not.toBeInstanceOf(Error)
-    }
   }
 )
 
