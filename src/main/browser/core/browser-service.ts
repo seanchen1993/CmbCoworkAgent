@@ -33,6 +33,7 @@ import type {
   BrowserConsoleLevel,
   BrowserDownloadRecord,
   BrowserDownloadsChangedPayload,
+  BrowserDeviceSize,
   BrowserDeviceViewport,
   BrowserNavigateOptions,
   BrowserProfileImportSkipReason,
@@ -61,16 +62,13 @@ const VIEWPORT_SYNC_TIMEOUT_MS = 10_000
 const configuredDownloadSessions = new WeakSet<Session>()
 
 /**
- * Device preview scale is a renderer layout detail, not part of the emulated CSS
- * viewport. The renderer may legitimately recompute it when the restored panel
- * has a different amount of vertical space (window size, console, title bar,
- * display scaling, and so on). Width and height are the replay contract; waiting
- * for the recorded scale can otherwise turn a completed sync into a permanent
- * mismatch.
+ * Device preview scale is a renderer layout detail, not part of the recorded
+ * viewport. Width and height are the replay contract; the renderer computes the
+ * scale from the space available in the current panel.
  */
 export function deviceViewportMatchesRequested(
   current: BrowserDeviceViewport | null | undefined,
-  requested: BrowserDeviceViewport | null | undefined
+  requested: BrowserDeviceSize | null | undefined
 ): boolean {
   if (!current || !requested) return current === requested
   return current.width === requested.width && current.height === requested.height
@@ -477,7 +475,7 @@ function getChannel(sessionId: string): string {
 
 export class BrowserService {
   private activeSession: BrowserSession | null = null
-  private pendingDeviceViewport: BrowserDeviceViewport | undefined
+  private pendingDeviceViewport: BrowserDeviceSize | undefined
   private readonly downloadRecords: BrowserDownloadRecord[] = []
   private hasUnreadCompletedDownload = false
 
@@ -839,7 +837,7 @@ export class BrowserService {
   }
 
   async waitForDeviceViewport(
-    viewport?: BrowserDeviceViewport,
+    viewport?: BrowserDeviceSize,
     isCancelled: () => boolean = () => false
   ): Promise<void> {
     if (!viewport) return
@@ -1012,7 +1010,7 @@ export class BrowserService {
     threadId?: string,
     panelWidth?: number,
     restoreDefaultPanelWidth = false,
-    deviceViewport?: BrowserDeviceViewport
+    deviceViewport?: BrowserDeviceSize
   ): void {
     this.pendingDeviceViewport = deviceViewport ? { ...deviceViewport } : undefined
     if (deviceViewport) {

@@ -140,7 +140,6 @@ function browserStatesEqual(a: BrowserState, b: BrowserState): boolean {
     a.created === b.created &&
     a.pendingDeviceViewport?.width === b.pendingDeviceViewport?.width &&
     a.pendingDeviceViewport?.height === b.pendingDeviceViewport?.height &&
-    a.pendingDeviceViewport?.scale === b.pendingDeviceViewport?.scale &&
     (a.error ?? "") === (b.error ?? "") &&
     a.consoleEntries.length === b.consoleEntries.length &&
     getLastConsoleEntryId(a.consoleEntries) === getLastConsoleEntryId(b.consoleEntries)

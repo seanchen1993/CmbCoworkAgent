@@ -648,8 +648,6 @@ export function BrowserRecordingListDialog({
                                         <span>
                                           {entry.deviceViewport.width} ×{" "}
                                           {entry.deviceViewport.height}
-                                          <br />
-                                          {entry.deviceViewport.scale.toFixed(2)}×
                                         </span>
                                       ) : (
                                         <span>—</span>

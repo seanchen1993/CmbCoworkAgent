@@ -11,6 +11,11 @@ export interface BrowserDeviceViewport {
   scale: number
 }
 
+export interface BrowserDeviceSize {
+  width: number
+  height: number
+}
+
 export interface BrowserRecordingEnvironment {
   panelWidth?: number
   deviceViewport?: BrowserDeviceViewport
@@ -47,7 +52,7 @@ export interface BrowserState {
   visible: boolean
   created: boolean
   consoleEntries: BrowserConsoleEntry[]
-  pendingDeviceViewport?: BrowserDeviceViewport
+  pendingDeviceViewport?: BrowserDeviceSize
   error?: string
 }
 
@@ -223,7 +228,7 @@ export interface BrowserScriptLibraryEntry {
   displayName: string
   fileName: string
   hasVariables?: boolean
-  deviceViewport?: BrowserDeviceViewport
+  deviceViewport?: BrowserDeviceSize
   isEdited?: boolean
   recordingSource: BrowserRecordingSource
   threadId: string

@@ -7,7 +7,7 @@ describe("deviceViewportMatchesRequested", () => {
     expect(
       deviceViewportMatchesRequested(
         { width: 390, height: 844, scale: 0.7 },
-        { width: 390, height: 844, scale: 0.625 }
+        { width: 390, height: 844 }
       )
     ).toBe(true)
   })
@@ -16,7 +16,7 @@ describe("deviceViewportMatchesRequested", () => {
     expect(
       deviceViewportMatchesRequested(
         { width: 393, height: 852, scale: 0.625 },
-        { width: 390, height: 844, scale: 0.625 }
+        { width: 390, height: 844 }
       )
     ).toBe(false)
   })
@@ -37,13 +37,11 @@ describe("BrowserService device viewport lifecycle", () => {
 
     service.requestPanel(undefined, undefined, false, {
       width: 390,
-      height: 844,
-      scale: 0.625
+      height: 844
     })
     expect(service.getState().pendingDeviceViewport).toEqual({
       width: 390,
-      height: 844,
-      scale: 0.625
+      height: 844
     })
 
     expect(service.detach().pendingDeviceViewport).toBeUndefined()
@@ -53,7 +51,7 @@ describe("BrowserService device viewport lifecycle", () => {
     const service = new BrowserService(() => null)
 
     await expect(
-      service.waitForDeviceViewport({ width: 390, height: 844, scale: 0.625 }, () => true)
+      service.waitForDeviceViewport({ width: 390, height: 844 }, () => true)
     ).resolves.toBeUndefined()
   })
 })

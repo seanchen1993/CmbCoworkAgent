@@ -1,5 +1,5 @@
 import { type RefObject, useCallback, useRef, useState } from "react"
-import type { BrowserDeviceViewport } from "../../../../shared/browser-types"
+import type { BrowserDeviceSize, BrowserDeviceViewport } from "../../../../shared/browser-types"
 import type { BrowserDeviceSettings } from "./BrowserDeviceToolbar"
 
 const DEVICE_PREVIEW_PADDING = 12
@@ -14,7 +14,7 @@ export interface BrowserDevicePreviewLayout {
 
 export function useBrowserDevicePreview(onClose: () => void): {
   deviceFrameRef: RefObject<HTMLDivElement | null>
-  applyViewport: (viewport: BrowserDeviceViewport | undefined) => void
+  applyViewport: (viewport: BrowserDeviceSize | undefined) => void
   getLayout: (rect: DOMRect) => BrowserDevicePreviewLayout
   getRecordingViewport: () => BrowserDeviceViewport | undefined
   reset: () => void
@@ -45,16 +45,16 @@ export function useBrowserDevicePreview(onClose: () => void): {
     [onClose]
   )
 
-  const applyViewport = useCallback((viewport: BrowserDeviceViewport | undefined) => {
+  const applyViewport = useCallback((viewport: BrowserDeviceSize | undefined) => {
     if (!viewport) return
     const current = settingsRef.current
     const nextSettings =
       current.open &&
       current.width === viewport.width &&
       current.height === viewport.height &&
-      current.scale === viewport.scale
+      current.scale === undefined
         ? current
-        : { open: true, ...viewport }
+        : { open: true, ...viewport, scale: undefined }
     // syncBounds can run before React commits the state update. Keep the
     // imperative layout source current so a visible toolbar and BrowserView
     // metrics cannot temporarily disagree.

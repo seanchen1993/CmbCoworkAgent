@@ -12,7 +12,7 @@ import type {
   BrowserScriptExecutionInput,
   BrowserScriptExecutionState,
   BrowserState,
-  BrowserDeviceViewport
+  BrowserDeviceSize
 } from "../../../../shared/browser-types"
 
 const BROWSER_SCRIPT_EXECUTION_LOG_PREFIX = "[内置浏览器][BrowserScriptExecution]"
@@ -321,7 +321,7 @@ async function connectInAppBrowser(options: {
   threadId?: string | null
   workspacePath?: string | null
   panelWidth?: number
-  deviceViewport?: BrowserDeviceViewport
+  deviceViewport?: BrowserDeviceSize
   isCancelled: () => boolean
 }): Promise<{
   browser: PlaywrightBrowser
@@ -475,11 +475,12 @@ export async function executeRecordingScriptInBuiltinBrowser(
   }
 
   try {
+    const deviceViewport = extractScriptRecordingDeviceViewport(script)
     const { browser, context, page } = await connectInAppBrowser({
       threadId: input.threadId,
       workspacePath: input.workspacePath,
-      panelWidth: extractScriptRecordingPanelWidth(script),
-      deviceViewport: extractScriptRecordingDeviceViewport(script),
+      panelWidth: deviceViewport ? undefined : extractScriptRecordingPanelWidth(script),
+      deviceViewport,
       isCancelled: () => executionController.cancelled
     })
     const wrapPlaybackValue = createUploadAwarePlaybackWrapper(input.workspacePath)
