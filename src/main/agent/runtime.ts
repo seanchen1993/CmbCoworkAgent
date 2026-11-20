@@ -33,6 +33,7 @@ import {
   StateBackend
 } from "deepagents"
 import { withModelResponseDiagnostics } from "./model-response-diagnostics"
+import { contextWindowFromError } from "./context-compaction-recovery"
 import { withModelStreamCancellation } from "./model-stream-cancellation"
 import { buildPersonalIdentityPrompt, isPersonalMemoryEnabled } from "./personal-context"
 import {
@@ -4247,6 +4248,41 @@ export interface ModelRetryHooks {
   onFetchError?: (info: FetchErrorInfo) => void
 }
 
+/** LAILAS embeds the provider error as JSON text after a human-readable prefix. */
+function normalizeLailasInputOverflow(response: Response, rawBody: string): Response {
+  try {
+    const envelope = JSON.parse(rawBody)
+    if (
+      envelope?.returnCode !== "LAILAS1485" ||
+      envelope.error != null ||
+      typeof envelope.errorMsg !== "string"
+    ) return response
+
+    const start = envelope.errorMsg.indexOf("{")
+    if (start < 0) return response
+    const error = JSON.parse(envelope.errorMsg.slice(start))?.error
+    if (
+      error?.code !== 400 ||
+      error.param !== "input_tokens" ||
+      typeof error.message !== "string" ||
+      !contextWindowFromError(error.message) ||
+      !/\byour prompt contains (?:at least )?[\d,]+ input tokens\b/i.test(error.message)
+    ) return response
+
+    const headers = new Headers(response.headers)
+    headers.delete("content-length")
+    headers.delete("content-encoding")
+    headers.set("content-type", "application/json")
+    return new Response(JSON.stringify({ ...envelope, error }), {
+      status: response.status,
+      statusText: response.statusText,
+      headers
+    })
+  } catch {
+    return response
+  }
+}
+
 /**
  * Build a retrying fetch wrapper. Retries on:
  *   - Network errors thrown by fetch
@@ -4277,16 +4313,17 @@ function createRetryingFetch(
     // gateway codes (480/485/…) or non-OpenAI bodies this clone is the only place
     // the real reason survives. Called both for non-retryable statuses and when
     // the retry budget is exhausted on a retryable status (432/433/429/5xx).
-    const captureFetchError = async (res: Response): Promise<void> => {
-      if (res.status < 400 || !hooks?.onFetchError) return
+    const prepareErrorResponse = async (res: Response): Promise<Response> => {
+      if (res.status !== 485 && !hooks?.onFetchError) return res
       const requestId = res.headers.get("x-request-id") ?? undefined
+      let rawBody: string | undefined
       try {
-        const rawBody = await res.clone().text()
-        hooks.onFetchError({ status: res.status, requestId, rawBody })
+        rawBody = await res.clone().text()
       } catch {
-        // Body capture is best-effort — never block the real response.
-        hooks.onFetchError({ status: res.status, requestId })
+        // The SDK still receives the original response when its body cannot be read.
       }
+      hooks?.onFetchError?.({ status: res.status, requestId, rawBody })
+      return res.status === 485 && rawBody ? normalizeLailasInputOverflow(res, rawBody) : res
     }
 
     for (let attempt = 1; attempt <= totalAttempts; attempt++) {
@@ -4352,18 +4389,17 @@ function createRetryingFetch(
 
         // Success, non-retryable error, or overflow handled by summarization.
         if (!isRetryableStatus(res.status) || contextOverflow) {
-          await captureFetchError(res)
+          const response = res.status >= 400 ? await prepareErrorResponse(res) : res
           // Clear any previous retry indicator when this retry loop ends.
           if (attempt > 1) hooks?.onRetrySuccess?.()
-          return res
+          return response
         }
 
         // Retryable HTTP status.
         if (attempt >= totalAttempts) {
           // Retry budget exhausted — capture the body so the real reason still
           // reaches the UI, then return so the caller sees the real status.
-          await captureFetchError(res)
-          return res
+          return await prepareErrorResponse(res)
         }
 
         // Drain body to free the connection before retrying.

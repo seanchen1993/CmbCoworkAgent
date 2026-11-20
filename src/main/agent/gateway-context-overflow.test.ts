@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { HumanMessage, type BaseMessage } from "@langchain/core/messages"
 import { Command } from "@langchain/langgraph"
+import { configureContextCompactionModel } from "./context-compaction"
+import { contextWindowFromError } from "./context-compaction-recovery"
 import * as storage from "../storage"
 import { getModelInstance } from "./runtime"
 import { createCmbSummarizationMiddleware } from "./context-summarization-middleware"
@@ -43,6 +45,157 @@ function summaryResponse(): Response {
     }
   )
 }
+
+const modelError = {
+  message:
+    "This model's maximum context length is 1048576 tokens. However, you requested " +
+    "1 output tokens and your prompt contains at least 1048576 input tokens, " +
+    "for a total of at least 1048577 tokens. (parameter=input_tokens, value=1048576)",
+  type: "BadRequestError",
+  param: "input_tokens",
+  code: 400
+}
+const lailasEnvelope = {
+  returnCode: "LAILAS1485",
+  errorMsg: "输入参数异常. " + JSON.stringify({ error: modelError })
+}
+const customConfig = {
+  id: "custom",
+  model: "deepseek-v4-flash",
+  apiKey: "test",
+  baseUrl: "https://example.test/v1"
+}
+
+describe("LAILAS gateway errors on ordinary model connections", () => {
+  it("shortens a rejected summary and continues the latest task without a UI error hook", async () => {
+    const requests: Array<{ stream?: boolean; messages: unknown[] }> = []
+    vi.stubGlobal("fetch", async (_url: unknown, init: RequestInit) => {
+      const body = JSON.parse(String(init.body))
+      requests.push(body)
+      if (requests.length === 1)
+        return new Response(JSON.stringify(lailasEnvelope), { status: 485 })
+      return body.stream ? summaryResponse() : finalResponse()
+    })
+    const phases: string[] = []
+    const model = getModelInstance(customConfig, undefined, 1, "context-compaction")
+    const middleware = createCmbSummarizationMiddleware({
+      model: configureContextCompactionModel(model, (event) =>
+        phases.push(event.phase)
+      ) as typeof model,
+      backend: {
+        write: async (path: string) => ({ path }),
+        downloadFiles: async () => []
+      } as never,
+      trigger: { type: "messages", value: 4 },
+      keep: { type: "messages", value: 1 },
+      trimTokensToSummarize: 650_000,
+      maxInputTokens: 1_000_000
+    }) as unknown as {
+      wrapModelCall: (
+        request: unknown,
+        next: (request: { messages: BaseMessage[] }) => Promise<unknown>
+      ) => Promise<Command>
+    }
+    const history = Array.from(
+      { length: 10 },
+      (_, i) =>
+        new HumanMessage("Historical request " + i + " " + "historical information ".repeat(120))
+    )
+    const agent = getModelInstance(customConfig, undefined, 1, "agent")
+    const result = await middleware.wrapModelCall(
+      {
+        messages: [...history, new HumanMessage("LATEST_TASK")],
+        state: {},
+        tools: []
+      },
+      (request) => agent.invoke(request.messages)
+    )
+    expect(result).toBeInstanceOf(Command)
+    expect(phases).toEqual(["started", "failed", "started", "completed"])
+    expect(requests.map((body) => Boolean(body.stream))).toEqual([true, true, false])
+    expect(Buffer.byteLength(JSON.stringify(requests[1].messages))).toBeLessThan(
+      Buffer.byteLength(JSON.stringify(requests[0].messages))
+    )
+    expect(JSON.stringify(requests[2].messages)).toContain("LATEST_TASK")
+  })
+
+  it.each([
+    { body: lailasEnvelope, expected: modelError.message, limit: 1048576 },
+    {
+      body: { ...lailasEnvelope, errorMsg: "输入参数异常. invalid input" },
+      expected: "no body",
+      limit: undefined
+    },
+    { body: { ...lailasEnvelope, returnCode: "OTHER485" }, expected: "no body", limit: undefined },
+    {
+      body: { ...lailasEnvelope, errorMsg: "输入参数异常. {invalid json" },
+      expected: "no body",
+      limit: undefined
+    },
+    {
+      body: {
+        ...lailasEnvelope,
+        errorMsg: JSON.stringify({
+          error: {
+            ...modelError,
+            message: "Invalid input_tokens value. Maximum context length is 1048576 tokens."
+          }
+        })
+      },
+      expected: "no body",
+      limit: undefined
+    },
+    {
+      body: { ...lailasEnvelope, error: { message: "another provider error" } },
+      expected: "another provider error",
+      limit: undefined
+    }
+  ])(
+    "preserves the raw diagnostics and SDK status for $expected",
+    async ({ body, expected, limit }) => {
+      const rawBody = JSON.stringify(body)
+      const response = new Response(rawBody, {
+        status: 485,
+        headers: {
+          "content-type": "application/json",
+          "x-request-id": "original-request"
+        }
+      })
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => response)
+      )
+      const clone = vi.spyOn(response, "clone")
+      const onFetchError = vi.fn()
+      const model = getModelInstance(customConfig, { onFetchError }, 1, "agent")
+      const error = await model.invoke("hello").catch((err: unknown) => err)
+      expect(error).toMatchObject({ message: expect.stringContaining(expected) })
+      const sdkError = error instanceof Error ? error.cause ?? error : error
+      expect(sdkError).toMatchObject({ status: 485, requestID: "original-request" })
+      expect(contextWindowFromError(error)).toBe(limit)
+      expect(clone).toHaveBeenCalledTimes(1)
+      expect(onFetchError).toHaveBeenCalledExactlyOnceWith({
+        status: 485,
+        requestId: "original-request",
+        rawBody
+      })
+    }
+  )
+
+  it("keeps a successful non-streaming response on the zero-clone path", async () => {
+    const response = finalResponse()
+    const clone = vi.spyOn(response, "clone")
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => response)
+    )
+    const onFetchError = vi.fn()
+    const model = getModelInstance(customConfig, { onFetchError }, 1, "agent")
+    expect((await model.invoke("hello")).content).toBe("RECOVERED")
+    expect(clone).not.toHaveBeenCalled()
+    expect(onFetchError).not.toHaveBeenCalled()
+  })
+})
 
 function finalResponse(): Response {
   return new Response(
