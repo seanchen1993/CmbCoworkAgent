@@ -178,6 +178,7 @@ import {
   type BotGroupMessage,
   type BotGroupHistoryCursor,
   type BotConversationActivity,
+  type BotReadKind,
   type SendBotGroupMessageInput
 } from "../../shared/bots/contracts"
 
@@ -1023,7 +1024,7 @@ export class BotStore {
       row.source_json == null ? null : parseBotChannelSource(JSON.parse(String(row.source_json)))
     if (source?.transport === "im" && !source.personal)
       this.noteActivity("im", source.bindingId, preview, attention)
-    // A per-Bot clock makes explicit bulk-read acknowledgements safe across multiple works.
+    // Task activity versions share the Bot clock for overview and bulk-read acknowledgements.
     this.noteActivity("work-bot", String(row.bot_id), preview, false)
     const clock = this.rows(
       "SELECT version,updated_at,preview FROM bot_activity WHERE kind='work-bot' AND id=?",
@@ -1050,6 +1051,7 @@ export class BotStore {
       `SELECT c.id AS bot_id,c.version,latest.updated_at,latest.preview,
       EXISTS(SELECT 1 FROM bot_work_items w JOIN bot_activity a ON a.kind='work' AND a.id=w.id
         WHERE w.bot_id=c.id AND w.detached=0 AND a.attention_version>a.seen_version
+          AND a.attention_version>c.seen_version
           AND (COALESCE(json_extract(w.source_json,'$.transport'),'')!='im'
             OR json_extract(w.source_json,'$.personal')=1)) AS unread
       FROM bot_activity c JOIN bots b ON b.id=c.id
@@ -1106,6 +1108,7 @@ export class BotStore {
       JOIN bot_activity clock ON clock.kind='work-bot' AND clock.id=w.bot_id
       JOIN bots b ON b.id=w.bot_id
       WHERE a.kind='work' AND a.attention_version>a.seen_version AND w.detached=0
+        AND a.attention_version>clock.seen_version
         AND (COALESCE(json_extract(w.source_json,'$.transport'),'')!='im'
           OR json_extract(w.source_json,'$.personal')=1)
       UNION ALL SELECT 1 FROM bot_activity a JOIN bot_im_routes r ON r.id=a.id
@@ -1130,12 +1133,12 @@ export class BotStore {
     })
   }
 
-  markRead(kind: "bot" | "group" | "work" | "im", id: string, throughVersion: number): void {
-    if (kind !== "bot" && kind !== "group" && kind !== "work" && kind !== "im")
+  markRead(kind: BotReadKind, id: string, throughVersion: number): void {
+    if (kind !== "bot" && kind !== "group" && kind !== "work" && kind !== "im" && kind !== "work-bot")
       throw new BotError("INVALID_INPUT", "会话类型无效")
     if (!Number.isSafeInteger(throughVersion) || throughVersion < 1)
       throw new BotError("INVALID_INPUT", "已读位置无效")
-    if (kind === "bot") this.getBot(id)
+    if (kind === "bot" || kind === "work-bot") this.getBot(id)
     else if (kind === "group") this.getGroup(id)
     else if (kind === "im") {
       const route = this.imGateway.binding(id)
@@ -1516,7 +1519,7 @@ export class BotStore {
     if (!threadIds.length) return []
     return this.rows(
       `SELECT w.id,w.bot_id,w.thread_id,w.audience_key,w.source_json,w.conversation_json,w.workspace_json,
-        (json_extract(w.control_json,'$.user')=1 AND COALESCE(json_extract(w.control_json,'$.settling'),0)=0) AS user_controlled,
+        (json_extract(w.control_json,'$.user')=1 AND NOT (json_extract(w.control_json,'$.settling') IS 1 AND json_type(w.control_json,'$.stopTaskIds') IS NOT NULL)) AS user_controlled,
         EXISTS(SELECT 1 FROM bot_tasks t INDEXED BY bot_tasks_thread_state WHERE t.thread_id=w.thread_id AND t.state='running'
           AND t.bot_id=w.bot_id AND t.work_id=w.id AND t.injected_into IS NULL) AS working,
         b.name,b.color,b.shape,b.archived FROM bot_work_items w JOIN bots b ON b.id=w.bot_id
@@ -2344,8 +2347,8 @@ export class BotStore {
       const receipt = this.workCommand(`control:${input.operationId}`, fingerprint, () => {
         if (work.version !== input.expectedVersion)
           throw new BotError("CONFLICT", "任务已变化，请刷新后重试")
-        if (input.action === "return" && work.userControl && !work.userControl.settling) {
-          if (this.isHeldWorkReviewRepair(work.id, this.workResultReview(work.id)) &&
+        if (input.action === "return" && work.userControl) {
+          if (!work.userControl.settling && this.isHeldWorkReviewRepair(work.id, this.workResultReview(work.id)) &&
               this.rows(`SELECT 1 FROM bot_tasks t WHERE work_id=? AND bot_id=? AND thread_id=?
                 AND state IN ('queued','running','waiting_user') AND json_extract(origin_json,'$.kind')='user'
                 AND NOT EXISTS (SELECT 1 FROM bot_work_items w, json_each(w.control_json,'$.heldTaskIds') h
@@ -2437,8 +2440,8 @@ export class BotStore {
     this.assertWorkNotDeleting(work)
     if (bot.archived || bot.deleting || work.source || work.audienceKey !== "desktop" ||
         (work.conversation && work.conversation.state !== "bound") ||
-        !work.userControl || work.userControl.settling)
-      throw new BotError("CONFLICT", "请在接管完成后核对待办")
+        !work.userControl)
+      throw new BotError("CONFLICT", "请先获取控制权再核对待办")
     const items = this.rows(`SELECT t.id,t.message,t.origin_json FROM bot_work_items w,
       json_each(w.control_json,'$.heldTaskIds') held JOIN bot_tasks t ON t.id=held.value
       WHERE w.id=? AND t.work_id=w.id AND t.state='queued' ${taskId ? "AND t.id=?" : ""}
@@ -3462,7 +3465,7 @@ export class BotStore {
       throw new BotError("CONFLICT", "原任务会话尚未就绪或已解除关联")
     return {
       kind: "thread", id: work?.threadId ?? bot.threadId, botId: bot.id, work,
-      readOnly: Boolean(work && (!work.userControl || work.userControl.settling))
+      readOnly: Boolean(work && (!work.userControl || work.userControl.stopping))
     }
   }
 
@@ -3804,7 +3807,7 @@ export class BotStore {
     const target = this.getWork(botId, workId)
     if (target.threadId !== row.thread_id || target.conversation?.state !== "bound" ||
         target.conversation.ref.kind !== "local_thread" || target.conversation.ref.threadId !== row.thread_id ||
-        !target.userControl || target.userControl.settling)
+        !target.userControl || target.userControl.stopping)
       throw unavailable()
     this.assertWorkNotDeleting(target)
     verifyWorkConversationThread(target, row, JSON.parse(row.metadata || "{}"))
@@ -4294,7 +4297,8 @@ export class BotStore {
       if (work?.userControl && origin.kind === "work" &&
           !(origin.dispatch === "repair" && work.userControl.settling && !work.userControl.stopping))
         throw new BotError("CONFLICT", "任务由用户接管，归还控制权后才能继续自动派工")
-      if (work?.userControl?.settling && origin.kind === "user")
+      if (work?.userControl?.settling && origin.kind === "user" &&
+          (work.userControl.stopping || mockSource || input.skillDraftFromMain))
         throw new BotError("CONFLICT", "正在等待原任务结算，控制权移交后可发送；草稿可以保留")
       if (work && botTaskGroupId({ origin }))
         throw new BotError("INVALID_INPUT", "工作与群会话目标不能混用")
@@ -7115,7 +7119,7 @@ export class BotStore {
       const prior = this.workResultReview(work.id)
       // While the user owns the composer, their own reply cannot replace
       // an explicitly held repair. The pending item is managed on hand-back.
-      if (task.origin.kind === "user" && work.userControl && !work.userControl.settling &&
+      if (task.origin.kind === "user" && work.userControl &&
           this.isHeldWorkReviewRepair(work.id, prior)) return false
       const forwardedFollowUp = task.origin.kind === "work" && task.origin.dispatch === "follow_up"
       const newerInput = (forwardedFollowUp || task.origin.kind === "user") &&
@@ -7142,7 +7146,8 @@ export class BotStore {
         return false
       }
       const control = work.userControl
-      const userOwned = control && (!control.settling || control.stopping)
+      const userOwned = control && (!control.settling || control.stopping ||
+        (task.origin.kind === "user" && task.requestId !== `work-start-${work.id}`))
       if (userOwned && !continuing) return false
       let authorityTaskId = task.id
       let sourceTaskIds: string[] | undefined

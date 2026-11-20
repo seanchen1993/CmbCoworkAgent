@@ -131,21 +131,20 @@ export function BotConversation({
   const mounted = useRef(true)
   const currentWork = useRef(work)
   currentWork.current = work
-  const userOwnsComposer = Boolean(work?.userControl && !work.userControl.settling)
+  const userOwnsComposer = Boolean(work?.userControl && !work.userControl.stopping)
+  // Older tasks may need binding before their settings can be changed. Input uses the existing task directly.
   const settingsWorkId = client.hostId === "local" && userOwnsComposer && work?.audienceKey === "desktop" &&
+    (!work.userControl?.settling || work.conversation?.state === "bound") &&
     !work.source && !work.deletionPending && !work.deletionCommitted &&
     work.conversation?.state !== "detaching" && work.conversation?.state !== "detached"
     ? work.id : undefined
   const hasBoundWorkSettings = useAppStore(state => Boolean(settingsWorkId && work &&
     state.threads.some(thread => matchesBoundBotWorkThreadSummary(thread, work))))
-  const supplementRun = useRef<string | undefined>(undefined)
-  supplementRun.current = work && !work.userControl && !work.source && !work.deletionPending && !work.deletionCommitted
-    ? tasks.find(task => active(task) && task.botId === bot.id && task.workId === work.id && task.threadId === work.threadId)?.id : undefined
   const inputBlockedReason = () => {
     const target = currentWork.current
     if (!target || target.source || target.audienceKey !== "desktop") return null
-    if (target.userControl?.settling) return "正在等待原任务结算，草稿已保留。"
-    if (!target.userControl && !supplementRun.current) return "此任务由 Bot 管理，请先获取控制权，或回主对话补充要求。"
+    if (target.userControl?.stopping) return "正在停止原任务，草稿已保留。"
+    if (!target.userControl) return "此任务由 Bot 管理，请先获取控制权，或回主对话补充要求。"
     return null
   }
   useEffect(() => {
@@ -302,7 +301,7 @@ export function BotConversation({
         // Only previously targeted drafts need the target-specific recovery path.
         if (draft.botSkillTarget) return dispatchSkill(draft)
       }
-      return sender.send(draft, client.hostId === "local" ? validateSkill : undefined, client, supplementRun.current)
+      return sender.send(draft, client.hostId === "local" ? validateSkill : undefined, client)
     },
     [sender, work, workDirectory, client.hostId, dispatchSkill, validateSkill]
   )
@@ -328,7 +327,7 @@ export function BotConversation({
   useEffect(() => {
     sender.stopPreparing()
     return () => sender.stopPreparing()
-  }, [sender, work?.userControl?.settling, work?.userControl?.stopping])
+  }, [sender, userOwnsComposer])
   const reconcileDrafts = useCallback<NonNullable<ManagedChatTurn["reconcileDrafts"]>>(
     (drafts) => sender.reconcile(drafts),
     [sender]
@@ -383,7 +382,7 @@ export function BotConversation({
     const isCurrent = () => {
       const latest = currentWork.current
       return !disposed && latest?.id === settingsWorkId && latest.threadId === threadId &&
-        Boolean(latest.userControl && !latest.userControl.settling) &&
+        Boolean(latest.userControl && !latest.userControl.stopping) &&
         !latest.deletionPending && !latest.deletionCommitted &&
         latest.conversation?.state !== "detaching" && latest.conversation?.state !== "detached"
     }
@@ -462,6 +461,7 @@ export function BotConversation({
       ownerConversation: work?.conversation?.state === "bound" && (!userOwnsComposer || hasBoundWorkSettings),
       ...(work && !work.source ? {
         composerHeader: <BotWorkControl key={work.id} bot={bot} work={work} client={client} onOpenBot={linkControlOwner ? onOpenBot : undefined}
+          onStopReply={running && !work.userControl ? cancel : undefined}
           beforeChange={() => sender.stopPreparing()}
           onControlChanged={changed => setControlFocusRequest(previous => ({
             id: (previous?.id ?? 0) + 1, target: changed.userControl ? "composer" : "control"
@@ -469,7 +469,6 @@ export function BotConversation({
         controlFocusRequest,
         composerReadOnlyReason: inputBlockedReason() ?? undefined,
         userOwnsComposer,
-        showReadOnlyStop: Boolean(running),
         controlColor: botWorkControlColor(bot.color)
       } : {}),
       ...(!work

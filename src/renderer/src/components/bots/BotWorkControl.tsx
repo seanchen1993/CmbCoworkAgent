@@ -12,11 +12,12 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 export const botWorkControlColor = (color: string) => `color-mix(in srgb, ${color} 45%, white)`
 
 /** Displays authoritative work state; a click does not optimistically claim ownership. */
-export function BotWorkControl({ bot, work, client, onOpenBot, beforeChange, onControlChanged }: {
+export function BotWorkControl({ bot, work, client, onOpenBot, onStopReply, beforeChange, onControlChanged }: {
   bot: BotDefinition
   work: BotWorkItem
   client: BotClient
   onOpenBot?(botId: string): void
+  onStopReply?(): Promise<void>
   beforeChange(): void
   onControlChanged?(work: BotWorkItem): void
 }) {
@@ -25,14 +26,14 @@ export function BotWorkControl({ bot, work, client, onOpenBot, beforeChange, onC
   const controlButton = useRef<HTMLButtonElement>(null)
   const [pending, setPending] = useState<BotWorkControlPending | null>(null)
   if (!client.works?.control || work.source || work.audienceKey !== "desktop" || work.deletionPending) return null
-  const owned = Boolean(work.userControl), settling = work.userControl?.settling === true
+  const owned = Boolean(work.userControl), stopping = work.userControl?.stopping === true
   const change = async (action: BotWorkControlInput["action"], confirmed?: BotWorkControlPending) => {
     if (operationPending.current || !client.works?.control) return
     operationPending.current = true
     setBusy(true)
     try {
       beforeChange()
-      if (action === "return" && !settling && !confirmed && client.works.controlPending) {
+      if (action === "return" && !confirmed && client.works.controlPending) {
         const current = await client.works.controlPending(bot.id, work.id)
         if (current.items.length) {
           setPending(current)
@@ -85,25 +86,24 @@ export function BotWorkControl({ bot, work, client, onOpenBot, beforeChange, onC
     }
   }
   const ownerContent = <>
-    {settling ? <Loader2 size={18} className="bot-task-control-spinner" aria-hidden="true" /> :
+    {stopping ? <Loader2 size={18} className="bot-task-control-spinner" aria-hidden="true" /> :
       <BotAvatar color={bot.color} shape={bot.shape} size={24} animated={false} />}
-    <span role="status">{work.userControl?.stopping ? "正在停止原任务…" : settling ? "等待原任务结算…" :
+    <span role="status">{stopping ? "正在停止原任务…" :
       owned ? "您拥有控制权" : <>由 <strong>{bot.name}</strong> 管理</>}</span>
   </>
-  return <><div className="bot-task-control" data-control-state={settling ? "settling" : owned ? "user" : "bot"}
+  return <><div className="bot-task-control" data-control-state={stopping ? "stopping" : owned ? "user" : "bot"}
     style={{ "--bot-control-color": botWorkControlColor(bot.color) } as CSSProperties}>
     <div className="bot-task-control-row">
-      {onOpenBot && !settling ? <button type="button" className="bot-task-control-owner"
+      {onOpenBot && !stopping ? <button type="button" className="bot-task-control-owner"
         onClick={() => onOpenBot(bot.id)} aria-label={`返回 ${bot.name} 主对话`} title={`返回 ${bot.name} 主对话`}>
         {ownerContent}
       </button> : <span className="bot-task-control-owner">{ownerContent}</span>}
       <div className="bot-task-control-actions">
-        {settling && !work.userControl?.stopping &&
-          <button type="button" className="bot-task-control-secondary" disabled={busy || bot.archived || bot.deleting}
-            onClick={() => void change("stop_and_take")}>停止并接管</button>}
+        {onStopReply && <button type="button" className="bot-task-control-secondary" disabled={busy}
+          onClick={() => void onStopReply().catch(error => toast.error(botErrorMessage(error, "停止回复失败，请重试")))}>停止回复</button>}
         <button ref={controlButton} type="button" className="bot-task-control-action" disabled={busy || bot.archived || bot.deleting}
           title={owned && work.userControl?.heldInputs ? `核对 ${work.userControl.heldInputs} 条待办后归还` : undefined}
-          onClick={() => void change(owned ? "return" : "take")}>{busy ? "处理中…" : settling ? "取消接管" : owned ? "归还控制权" : "获取控制权"}</button>
+          onClick={() => void change(owned ? "return" : "take")}>{busy ? "处理中…" : owned ? "归还控制权" : "获取控制权"}</button>
       </div>
     </div>
   </div>

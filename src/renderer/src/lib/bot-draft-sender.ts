@@ -219,8 +219,7 @@ export class BotDraftSender {
   async send(
     expected: QueuedMessage,
     validateSkill?: (selection: BotSkillSelection) => Promise<boolean>,
-    quoteClient: Partial<Pick<BotClient, "messageReply">> = this.client,
-    supplementRunId?: string
+    quoteClient: Partial<Pick<BotClient, "messageReply">> = this.client
   ): Promise<void> {
     if (this.sending.has(expected.id)) return
     const draft = this.queue.getQueuedMessage(expected.id)
@@ -255,7 +254,7 @@ export class BotDraftSender {
         }
         if (!isCurrent()) return
       }
-      const target = draft.botHandoffTarget ?? (this.target && { ...this.target, ...(supplementRunId ? { runId: supplementRunId } : {}) })
+      const target = draft.botHandoffTarget ?? this.target
       let persistenceError: string | null = "消息未能保存，未发送。"
       this.queue.updateQueuedMessage(
         draft.id,
@@ -274,7 +273,7 @@ export class BotDraftSender {
           botId: this.botId,
           requestId: draft.id,
           message,
-          ...(target?.runId ? { supplementRunId: target.runId } : {}),
+          ...(draft.botHandoffTarget?.runId ? { supplementRunId: draft.botHandoffTarget.runId } : {}),
           ...(mentions?.length ? { mentions } : {}),
           ...(inputFileIds?.length ? { inputFileIds } : {}),
           ...(explicitSkill ? { explicitSkill } : {}),

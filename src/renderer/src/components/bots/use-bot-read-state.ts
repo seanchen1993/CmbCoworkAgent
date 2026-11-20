@@ -1,11 +1,11 @@
 import { useEffect } from "react"
 import { toast } from "sonner"
-import type { BotClient, BotConversationActivity } from "../../../../shared/bots/contracts"
+import type { BotClient, BotConversationActivity, BotReadKind } from "../../../../shared/bots/contracts"
 
 /** Acknowledge only the version actually presented in a visible, focused conversation. */
 export function useBotReadState(
-  client: BotClient,
-  activity: BotConversationActivity | undefined,
+  client: Pick<BotClient, "markRead">,
+  activity: (Pick<BotConversationActivity, "id" | "version" | "unread"> & { kind: BotReadKind }) | undefined,
   presented = true
 ) {
   useEffect(() => {

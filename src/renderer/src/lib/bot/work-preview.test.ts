@@ -54,6 +54,7 @@ function renderPreview(
   state.previewHistory = { owner: JSON.stringify([work.botId, work.id, work.threadId, work.audienceKey, work.source?.grantVersion, work.conversation?.ref]), reply }
   return renderToStaticMarkup(createElement(ThreadProvider, {
     children: createElement(BotWorkPreview, {
+      client: { markRead: vi.fn() }, foreground: true,
       work, title: work.title, directoryError: null, backLabel: "返回任务列表", activeTask,
       onBack() {}, onOpen() {}, onOpenMain() {}, onRetry() {}
     })

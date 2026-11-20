@@ -48,6 +48,7 @@ export interface BotWorkSummary {
     /** Display only: an acknowledged result's required service has stopped. */
     unavailableDependency?: true }
   /** Absent on existing work: the Bot retains its original management behavior. */
+  /** Presence grants input control immediately. Settling tracks outstanding work from before takeover. */
   userControl?: { settling: boolean; heldInputs: number; stopping?: true }
   version: number
   createdAt: number

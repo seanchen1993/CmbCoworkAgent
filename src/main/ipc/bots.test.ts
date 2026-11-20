@@ -1304,6 +1304,8 @@ describe("Bot IPC boundaries", () => {
     expect(fixture.markRead).not.toHaveBeenCalled()
     call("bots:mark-read", "local", "group", "a", 2)
     expect(fixture.markRead).toHaveBeenCalledWith("group", "a", 2)
+    call("bots:mark-read", "local", "work-bot", "a", 7)
+    expect(fixture.markRead).toHaveBeenCalledWith("work-bot", "a", 7)
   })
   it("rejects unknown hosts, unsafe identities and unversioned memory mutations before side effects", () => {
     const call = register()

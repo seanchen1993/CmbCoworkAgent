@@ -967,14 +967,16 @@ async function main() {
       let threadId = bot.threadId
       if (kind === "bot-work") {
         const result = await page.evaluate(async botId => (window as any).api.bots.works.create({
-          botId, operationId: crypto.randomUUID(), title: "运行中补充验收任务", goal: "STEER_HOLD_bot-work"
+          botId, operationId: crypto.randomUUID(), title: "运行中补充验收任务", goal: "准备补充验收"
         }), bot.id)
         threadId = result.work.threadId
         await page.getByRole("button", { name: "进入任务：运行中补充验收任务", exact: true }).click()
-      } else {
-        await fill(`STEER_HOLD_${kind}`)
-        await send()
+        const task = page.locator(`[data-chat-thread-id="${threadId}"]`)
+        await task.getByRole("button", { name: "获取控制权", exact: true }).click()
+        await task.locator('[data-control-state="user"]').waitFor()
       }
+      await fill(`STEER_HOLD_${kind}`)
+      await send()
       await wait(() => !!releaseOrdinaryTurn, `${kind} model in flight`)
       const chat = page.locator(`[data-chat-thread-id="${threadId}"]`)
       await chat.getByText(`STEER_HOLD_${kind}`, { exact: true }).first().waitFor()
@@ -992,7 +994,7 @@ async function main() {
           return supplements.every(message => queued.some(task => task.message === message))
         }, { threadId, supplements })
       }
-      assert.equal(requests.filter(item => item.user.includes(`STEER_HOLD_${kind}`)).length, 1)
+      assert.equal(requests.filter(item => item.user.startsWith(`STEER_HOLD_${kind}`)).length, 1)
       releaseOrdinaryTurn!()
       await chat.getByText("STEER_AFTER_BOUNDARY", { exact: true }).waitFor({ timeout: 90000 })
       await idle()

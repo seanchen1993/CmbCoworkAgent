@@ -966,7 +966,6 @@ export interface ManagedChatTurn {
   submit: NonNullable<ReturnType<typeof useThreadStream>["stream"]>["submit"]
   cancel(): Promise<void>
   stopLabel?: string
-  showReadOnlyStop?: boolean
   busy: boolean
   /** Detached work may be busy while the inbox can immediately handle another message. */
   busySubmitLabel?: string
@@ -9444,10 +9443,7 @@ export function ChatContainer({
                     unreadCount={chatScrollUiState.unreadCount}
                     onScrollToBottom={scrollToConversationBottom}
                   />
-                  <div className="bot-task-readonly-controls">
-                    {managedTurn?.composerHeader}
-                    {isLoading && managedTurn?.showReadOnlyStop !== false && stopGenerationButton}
-                  </div>
+                  {managedTurn?.composerHeader}
                 </div>
               ) : (
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">

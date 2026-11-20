@@ -2,6 +2,7 @@
  * Holds both sides of a steer boundary so transient duplicate bubbles cannot
  * disappear before assertions. No real model, gateway or user profile is used. */
 import assert from "node:assert/strict"
+import { EventEmitter, once } from "node:events"
 import { createServer } from "node:http"
 import { createRequire } from "node:module"
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
@@ -21,8 +22,10 @@ async function main() {
     results: unknown[] = []
   let app: Awaited<ReturnType<typeof _electron.launch>> | undefined, page: Page | undefined
   let passed = false
-  let workerTokenSent!: () => void
-  const firstWorkerToken = new Promise<void>(resolve => { workerTokenSent = resolve })
+  const firstTokens = new EventEmitter()
+  const waitForToken = async (turn: string) => {
+    if (!gates.has(turn)) await once(firstTokens, turn, { signal: AbortSignal.timeout(30000) })
+  }
   const model = createServer(async (req, res) => {
     try {
       let raw = ""
@@ -30,14 +33,12 @@ async function main() {
       const body = JSON.parse(raw)
       const user = [...body.messages].reverse().find((m: any) => m.role === "user")
       const text = typeof user?.content === "string" ? user.content : JSON.stringify(user?.content)
-      // Work-result reporting includes the original request inside its JSON.
-      // It is a new notification, not another held user execution.
-      const match = /<bot_runtime_context event="task_result(?:_review)?">/.test(text ?? "") || text?.trimStart().startsWith('{"workId":') || text?.trimStart().startsWith('{"kind":"host_work_result"')
-        ? null
-        : /STEER_(START|SECOND)_(bot-main|bot-work)/.exec(text ?? "")
+      // Only the current user instruction holds a turn. Reviews and memory prompts quote earlier instructions.
+      const match = /^STEER_(MANAGED|START|SECOND)_(bot-main|bot-work)\b/.exec(text?.trimStart() ?? "")
       const stage = match?.[1],
         kind = match?.[2]
-      const marker = match ? `${stage === "START" ? "BEFORE" : "AFTER"}_${kind}` : "READY"
+      const marker = stage === "MANAGED" ? "MANAGED_WORK_IN_PROGRESS" :
+        match ? `${stage === "START" ? "BEFORE" : "AFTER"}_${kind}` : "READY"
       requests.push(match?.[0] ?? "other")
       const reply = {
         id: match ? "reused-provider-id" : `ready-${requests.length}`,
@@ -49,8 +50,11 @@ async function main() {
           `data: ${JSON.stringify({ ...reply, choices: [{ index: 0, delta, finish_reason }] })}\n\n`
         )
       frame({ content: marker })
-      if (kind === "bot-work" && stage === "START") workerTokenSent()
-      if (match) await new Promise<void>((done) => gates.set(`${stage}_${kind}`, done))
+      if (match) await new Promise<void>((done) => {
+        const turn = `${stage}_${kind}`
+        gates.set(turn, done)
+        firstTokens.emit(turn)
+      })
       frame({}, "stop")
       res.end("data: [DONE]\n\n")
     } catch (error) {
@@ -171,14 +175,48 @@ async function main() {
               botId,
               operationId: crypto.randomUUID(),
               title: "流式补充验收任务",
-              goal: "STEER_START_bot-work"
+              goal: "STEER_MANAGED_bot-work"
             }),
           bot.id
         )
         threadId = result.work.threadId
         // Exercise a task that is already streaming while its chat is still closed.
-        await Promise.race([firstWorkerToken, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error("worker did not stream")), 30000); timer.unref() })])
+        await waitForToken("MANAGED_bot-work")
         await page.getByRole("button", { name: "进入任务：流式补充验收任务", exact: true }).click()
+        const task = page.locator(`[data-chat-thread-id="${threadId}"]`)
+        const assertReadOnly = async () => {
+          const bar = task.locator('.bot-task-readonly-footer [data-control-state="bot"]')
+          await bar.getByRole("button", { name: "获取控制权", exact: true }).waitFor()
+          assert.equal(await task.locator("form textarea, form [contenteditable=true], [data-composer-actions]").count(), 0)
+          assert.equal(await task.getByRole("button", { name: "停止生成", exact: true }).count(), 0)
+        }
+        await assertReadOnly()
+        await page.getByRole("button", { name: "任务更多操作", exact: true }).click()
+        await page.getByRole("button", { name: "在对话模式打开", exact: true }).click()
+        await page.locator("[data-linked-bot-thread]").waitFor()
+        await assertReadOnly()
+        await task.getByRole("button", { name: "停止回复", exact: true }).waitFor()
+        await page.screenshot({ path: join(evidence, "managed-conversation.png") })
+        await task.getByRole("button", { name: "获取控制权", exact: true }).click()
+        const editor = task.locator('textarea, [role="textbox"][contenteditable="true"]').last()
+        await editor.waitFor()
+        assert.equal(await task.getByRole("button", { name: "停止并接管" }).count(), 0)
+        await task.getByRole("button", { name: "归还控制权", exact: true }).click()
+        await assertReadOnly()
+        await page.getByRole("button", { name: "返回 Bot 任务", exact: true }).click()
+        await page.locator("[data-linked-bot-thread]").waitFor({ state: "detached" })
+        await assertReadOnly()
+        await task.getByRole("button", { name: "获取控制权", exact: true }).click()
+        await editor.fill("接管后补充：只整理今天的记录")
+        await editor.press("Enter")
+        await task.locator(".bot-composer-queue").getByText("1 条补充待接收").waitFor()
+        gates.get("MANAGED_bot-work")!()
+        await idle()
+        const supplement = await page.evaluate(async thread => (await window.api.bots.snapshot()).tasks.filter(t =>
+          t.threadId === thread && t.message === "接管后补充：只整理今天的记录"), threadId)
+        assert.equal(supplement.length, 1)
+        assert.equal(supplement[0].injectedInto, result.task.id)
+        assert.equal(requests.filter(key => key === "STEER_MANAGED_bot-work").length, 1)
       }
       const chat = page.locator(`[data-chat-thread-id="${threadId}"]`)
       const input = chat.locator('textarea, [role="textbox"][contenteditable="true"]').last()
@@ -220,11 +258,11 @@ async function main() {
         }
         sample()
       }, kind)
-      if (kind === "bot-main") {
-        await fill(`STEER_START_${kind}`)
-        await chat.locator('button[type="submit"]').last().click()
-      }
-      await chat.getByText(`BEFORE_${kind}`, { exact: true }).waitFor()
+      await fill(`STEER_START_${kind}`)
+      await chat.locator('button[type="submit"]').last().click()
+      await waitForToken(`START_${kind}`)
+      if (kind === "bot-work") await chat.getByText(`BEFORE_${kind}`, { exact: true }).waitFor()
+      else assert.equal(await chat.getByText(`BEFORE_${kind}`, { exact: true }).count(), 0, "main chat waits for classified replies")
       await fill(`WITHDRAW_${kind}`)
       await input.press("Enter")
       const notice = chat.locator(".bot-composer-queue")
@@ -248,6 +286,11 @@ async function main() {
       await notice.getByText("2 条补充待接收", { exact: true }).waitFor()
       await page.screenshot({ path: join(evidence, `${kind}-pending.png`) })
       gates.get(`START_${kind}`)!()
+      await waitForToken(`SECOND_${kind}`)
+      if (kind === "bot-main") {
+        assert.equal(await chat.getByText(`AFTER_${kind}`, { exact: true }).count(), 0)
+        gates.get(`SECOND_${kind}`)!()
+      }
       await chat.getByText(`AFTER_${kind}`, { exact: true }).waitFor()
       await notice.waitFor({ state: "hidden" })
       await settle()
@@ -265,10 +308,10 @@ async function main() {
       }, expected)
       assert.ok(
         liveOrder.every((index, position) => index >= 0 && (!position || index > liveOrder[position - 1])),
-        "steer messages appear in order while the second reply is still streaming"
+        "steer messages appear in order when the second reply becomes visible"
       )
-      await page.screenshot({ path: join(evidence, `${kind}-streaming.png`) })
-      gates.get(`SECOND_${kind}`)!()
+      await page.screenshot({ path: join(evidence, `${kind}-reply.png`) })
+      if (kind === "bot-work") gates.get(`SECOND_${kind}`)!()
       await idle()
       const observed = await page.evaluate(() => {
         const observation = (window as any).__steerObservation
@@ -309,6 +352,15 @@ async function main() {
       await chat.getByText(`AFTER_${kind}`, { exact: true }).waitFor()
       for (const value of expected)
         assert.equal(await chat.getByText(value, { exact: true }).count(), 1)
+      if (kind === "bot-work") {
+        await fill("保留的未发送草稿")
+        await chat.getByRole("button", { name: "归还控制权", exact: true }).click()
+        await chat.locator('.bot-task-readonly-footer [data-control-state="bot"]').waitFor()
+        assert.equal(await input.count(), 0)
+        await chat.getByRole("button", { name: "获取控制权", exact: true }).click()
+        await input.waitFor()
+        assert.equal(await input.evaluate(el => el instanceof HTMLTextAreaElement ? el.value : el.textContent), "保留的未发送草稿")
+      }
       results[results.length - 1] = {
         kind,
         ...observed,

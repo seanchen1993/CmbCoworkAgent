@@ -6,7 +6,7 @@ import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import { createRequire } from "node:module"
 import { build } from "esbuild"
-import { _electron } from "playwright"
+import { _electron, type Page } from "playwright"
 import { DatabaseSync } from "node:sqlite"
 import { NativeSqliteAdapter } from "../src/main/db/native-sqlite-adapter"
 import { BotStore } from "../src/main/bots/store"
@@ -60,6 +60,45 @@ function previewTasks(
   } finally {
     db.close()
   }
+}
+
+async function verifyPrivateSidebar(page: Page) {
+  // A private Bot badge includes work activity. Entering from a group acknowledges only its overview.
+  await page.evaluate(() => {
+    const f = (window as any).fixture
+    f.setView({ pinnedBotIds: ["bot"] })
+    f.personalIm = [{ botId: "bot", connected: true }]
+    f.workActivity = [{ botId: "bot", version: 21, updatedAt: Date.now(), preview: "任务已回复", unread: true }]
+    f.bump()
+  })
+  const privateRow = page.locator('[data-bot-row-key="bot:bot"]')
+  const privateDot = privateRow.locator(".bot-unread-dot")
+  await privateDot.waitFor()
+  await privateRow.click()
+  assert.equal(await page.getByTestId("private-conversation").innerText(), "私人主对话")
+  await privateDot.waitFor({ state: "detached" })
+  const connection = page.getByRole("status").filter({ hasText: "已连接招呼" })
+  await connection.locator('[data-online="true"]').waitFor()
+  assert.equal(await connection.innerText(), "已连接招呼")
+  await page.locator('[data-bot-row-key="im:group-b"]').click()
+  await page.evaluate(() => {
+    const f = (window as any).fixture
+    Object.assign(f.workActivity[0], { version: 22, unread: true })
+    f.personalIm[0].connected = false
+    f.setView({ pinnedBotIds: [] })
+    f.bump()
+  })
+  await privateDot.waitFor()
+  await privateRow.click()
+  await privateDot.waitFor({ state: "detached" })
+  await page.getByRole("status").filter({ hasText: "招呼已离线" }).locator('[data-online="false"]').waitFor()
+  await page.evaluate(() => {
+    const f = (window as any).fixture
+    f.personalIm = []
+    f.bump()
+  })
+  await page.getByText("招呼已离线", { exact: true }).waitFor({ state: "detached" })
+  console.log("PASS: pinned and unpinned Bot overview read cursors and personal connection status")
 }
 
 async function main() {
@@ -132,11 +171,11 @@ async function main() {
               else if (a.path === "./BotConversationTools")
                 contents = `export const BotConversationTools=({children,conversationThreadId,executionDetails})=><div data-testid="execution-tools" data-thread={conversationThreadId} data-details={executionDetails}>{children}</div>;`
               else if (a.path === "./BotWorkPreview")
-                contents = `export const BotWorkPreview=()=>null;export const isWorkDeletionPending=()=>false;export const BOT_WORK_DELETION_PENDING_MESSAGE="删除待完成";`
+                contents = `export const BotWorkPreview=({work,onOpen})=><button disabled={!work} onClick={onOpen}>打开任务对话</button>;export const isWorkDeletionPending=()=>false;export const BOT_WORK_DELETION_PENDING_MESSAGE="删除待完成";`
               else if (a.path === "./BotMessageFilePreview")
                 contents = `export const BotMessageFilePreview=()=>null;`
               else if (a.path === "./BotConversation")
-                contents = `export const BotConversation=({work})=><div data-testid="private-conversation">{work?.id==='work-a'?'任务对话：演示准备清单':'私人主对话'}</div>;`
+                contents = `export const BotConversation=({work})=><div data-testid="private-conversation"><span>{work?.id==='work-a'?'任务对话：演示准备清单':'私人主对话'}</span></div>;`
               else
                 contents = [
                   "BotSkillSelect", "BotUnlinkDialog", "BotWorkPreview",
@@ -208,6 +247,11 @@ async function main() {
       console.error(error.stack)
     })
     await page.getByLabel("产品协作群消息记录").waitFor()
+    if (process.argv.includes("--private-sidebar")) {
+      await verifyPrivateSidebar(page)
+      assert.deepEqual(errors, [])
+      return
+    }
     await page.getByText("已整理好本周的项目进展。", { exact: true }).last().waitFor()
     await page.waitForFunction(() =>
       (window as any).fixture.reads.some((args: any[]) => args[0] === "im" && args[1] === "group-a")
@@ -429,6 +473,7 @@ async function main() {
     await page.getByText("早些时候：我们先明确本周的演示范围。").waitFor()
     assert.equal(await page.getByRole("button", { name: "查看更早消息", exact: true }).count(), 0)
     await page.getByRole("button", { name: "查看独立任务", exact: true }).click()
+    await page.getByRole("button", { name: "打开任务对话", exact: true }).click()
     await page.getByTestId("private-conversation").getByText("任务对话：演示准备清单").waitFor()
     await page.evaluate(() => {
       const f = (window as any).fixture
@@ -486,7 +531,7 @@ async function main() {
     await page.evaluate(() => {
       ;(window as any).fixture.holdWork = true
     })
-    await details.getByRole("button", { name: /演示准备清单/ }).click()
+    await details.getByRole("button", { name: "进入任务：演示准备清单", exact: true }).click()
     await page.waitForFunction(() => typeof (window as any).fixture.releaseWork === "function")
     // The destination is still the group while its task details are loading.
     assert.equal(
@@ -979,6 +1024,7 @@ async function main() {
     await page.locator('[data-bot-row-key="im:group-a"]').click()
     await page.getByText("接入已解除，历史消息仍可查看", { exact: true }).waitFor()
     await page.getByRole("button", { name: "查看独立任务", exact: true }).first().click()
+    await page.getByRole("button", { name: "打开任务对话", exact: true }).click()
     await page.getByTestId("private-conversation").getByText("任务对话：演示准备清单").waitFor()
     await page.locator(".bot-personal-header[data-task]").getByRole("button", { name: "返回群聊「产品协作群」", exact: true }).click()
     await page.getByLabel("产品协作群消息记录").waitFor()
@@ -1190,6 +1236,7 @@ async function main() {
     console.log(
       "PASS: revoked-only group deletion, cancellation, state-change guard, no undo, persistence and retained task return without restoring the list entry"
     )
+    await verifyPrivateSidebar(page)
     assert.deepEqual(errors, [])
     console.log(
       "PASS: IM group workspace routing, private/work return links, scoped read state, paging, late responses, offline/revoked history, management, retry and light/dark/compact layout"

@@ -109,7 +109,7 @@ describe("sidebar work owners", () => {
       )
     ).toThrow("批次")
   })
-  it("reports user control only after the original execution has settled", async () => {
+  it("reports user control immediately while the original execution is running", async () => {
     const { host, store, work, bot } = await fixture()
     const [task] = store.pendingTasksForThread(work.threadId)
     store.transition(task.id, "running")
@@ -117,7 +117,7 @@ describe("sidebar work owners", () => {
       botId: bot.id, workId: work.id, expectedVersion: work.version, operationId: "take", action: "take"
     })
     expect(control.userControl?.settling).toBe(true)
-    expect(botThreadOwners(host, [work.threadId])[0]).not.toHaveProperty("userControlled")
+    expect(botThreadOwners(host, [work.threadId])[0].userControlled).toBe(true)
 
     store.transition(task.id, "completed")
     expect(store.finishWorkControlHandoffs(new Set())).toBe(true)

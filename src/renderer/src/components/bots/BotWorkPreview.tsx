@@ -19,7 +19,8 @@ import { parseBotHistoryFileDelivery } from "../../../../shared/bots/file-delive
 import { parseBotMessageReply, projectBotReplyInput } from "../../../../shared/bots/message-reply"
 import { BOT_ROUTINE_SILENT, isBotRoutineSilent } from "../../../../shared/bots/routine-silence"
 import { botContinuationTaskId } from "../../../../shared/bots/task-continuation"
-import type { BotMessageOrigin, BotTask } from "../../../../shared/bots/contracts"
+import { useBotReadState } from "./use-bot-read-state"
+import type { BotClient, BotMessageOrigin, BotTask } from "../../../../shared/bots/contracts"
 import { isLocalBotWork, type BotWorkItem } from "../../../../shared/bots/work"
 import { isVisibleTranscriptMessage, mergeCheckpointAuthorityTranscriptMessages } from "../../../../shared/checkpoint-transcript"
 import { projectVisibleChatSearchContent } from "../../../../shared/chat-search-visible-content"
@@ -275,11 +276,14 @@ function matchesPreviewThread(thread: Thread | null, work: BotWorkItem): boolean
 
 type History = {
   owner: string
+  activityVersion?: number
   reply?: PreviewReply | null
   error?: boolean
 }
 
 export function BotWorkPreview({
+  client,
+  foreground,
   work,
   title,
   directoryError,
@@ -290,6 +294,8 @@ export function BotWorkPreview({
   onOpenMain,
   onRetry
 }: {
+  client: Pick<BotClient, "markRead">
+  foreground: boolean
   work: BotWorkItem | null
   title: string
   directoryError: string | null
@@ -316,6 +322,12 @@ export function BotWorkPreview({
     ? JSON.stringify([work.botId, work.id, work.threadId, work.audienceKey, work.source?.grantVersion, link?.ref])
     : null
   const visibleHistory = history?.owner === owner ? history : null
+  // A newer snapshot can arrive while the previous version of the reply is still on screen.
+  const previewReady = canRead
+    ? Boolean(visibleHistory && !visibleHistory.error && visibleHistory.activityVersion === work?.activity?.version)
+    : Boolean(work && !work.threadInitialized && isLocalBotWork(work) && (!link || link.state === "bound") &&
+        !deletionPending && !work.deletionCommitted)
+  useBotReadState(client, work?.activity, foreground && previewReady)
   const task = activeTask && activeTask.threadId === work?.threadId &&
     (activeTask.state === "running" || activeTask.state === "waiting_user") ? activeTask : undefined
   const liveThreadId = owner && verifiedOwner === owner && task ? task.threadId : null
@@ -419,7 +431,7 @@ export function BotWorkPreview({
       if (disposed) return
       const reply = messages === page.messages && firstReply ? firstReply :
         projectBotWorkPreviewReply(messages, truncated, hasOlderRows, origins)
-      setHistory({ owner, reply })
+      setHistory({ owner, reply, activityVersion: work.activity?.version })
     })().catch(() => {
       if (disposed) return
       if (!verified) setVerifiedOwner(null)

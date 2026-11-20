@@ -45,7 +45,7 @@ function takeWork(store: BotStore, work: { botId: string; id: string }) {
 }
 
 describe("persisted local user message reactions", () => {
-  it("keeps task feedback read-only until takeover settles, then saves it without waking the Host", async () => {
+  it("allows task feedback immediately after takeover and saves it without waking the Host", async () => {
     const f = fixture(), id = "native:message.1"
     const { work, task } = f.store.createWork({
       botId: f.bot.id, operationId: "controlled-reaction", title: "Report", goal: "Draft a report"
@@ -59,7 +59,7 @@ describe("persisted local user message reactions", () => {
       ...target, action, operationId: action, expectedVersion: f.store.getWork(f.bot.id, work.id).version
     })
     expect(control("take").userControl?.settling).toBe(true)
-    expect(() => f.store.setMessageReaction(target, id, "👍", true)).toThrow("控制权")
+    expect(f.store.messageReactions(target, [id]).items[0].canReact).toBe(true)
     f.store.settle(task.id, "completed", null, "Report ready")
     expect(f.store.finishWorkControlHandoffs(new Set())).toBe(true)
 

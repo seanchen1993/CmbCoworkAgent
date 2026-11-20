@@ -63,6 +63,8 @@ function seed(database: string) {
       const { work, task } = store.createWork({ botId: bot.id, operationId: "isolation-" + index,
         title: "同名周报", goal: marker, imConversationId })
       store.transition(task.id, "running")
+      store.transition(task.id, "waiting_user")
+      store.transition(task.id, "running")
       store.transition(task.id, "completed")
       return { id: work.id, threadId: work.threadId, marker }
     })
@@ -191,6 +193,7 @@ async function main() {
       const body = row.getByRole("button", { name: "预览任务：同名周报" })
       const arrow = row.getByRole("button", { name: "进入任务：同名周报" })
       await arrow.waitFor()
+      await row.locator(".bot-work-unread").waitFor()
       assert.equal(await targetPane.getByText("同名周报", { exact: true }).count(), 1)
       const origin = index ? page.getByLabel((index === 1 ? imTitle : "资料协作群") + "消息记录", { exact: true })
         : page.locator('[data-chat-thread-id="' + bot.threadId + '"]')
@@ -200,6 +203,10 @@ async function main() {
       if (index === 2) await body.locator(".bot-work-state-icon").click()
       const preview = page.getByRole("region", { name: "任务预览" })
       await preview.getByText(current.marker + "已完成", { exact: true }).waitFor()
+      await row.locator(".bot-work-unread").waitFor({ state: "detached" })
+      const unreadByTask = await page.evaluate(async ({ botId, ids }) => Promise.all(ids.map(async id =>
+        (await window.api.bots.works!.get(botId, id)).activity?.unread)), { botId: bot.id, ids: sameName.map(w => w.id) })
+      assert.deepEqual(unreadByTask, sameName.map((_, i) => i > index))
       assert.ok(await origin.isVisible(), "预览时保留原主对话")
       for (const foreign of sameName.filter(w => w !== current)) {
         assert.equal(await targetPane.locator('[data-work-id="' + foreign.id + '"]').count(), 0)

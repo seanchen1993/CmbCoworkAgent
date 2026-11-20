@@ -956,6 +956,28 @@ describe("durable local independent works", () => {
     expect(() => f.store.workSummaries(f.peer.id, [old.work.id])).toThrow()
     expect(() => f.store.workSummaries(f.bot.id, Array(41).fill(old.work.id))).toThrow()
   })
+  it("clears the Bot overview dot through its own version while keeping individual tasks unread", () => {
+    const f = fixture()
+    const first = f.create("first")
+    finish(f.store, first.task.id)
+    const overview = () => f.store.workActivities().find(activity => activity.botId === f.bot.id)!
+    const firstVersion = overview().version
+    expect(overview().unread).toBe(true)
+    f.store.markRead("work-bot", f.bot.id, firstVersion)
+    expect(overview().unread).toBe(false)
+    expect(f.store.getWork(f.bot.id, first.work.id).activity!.unread).toBe(true)
+    expect(f.store.hasUnread()).toBe(false)
+
+    const second = f.create("second")
+    finish(f.store, second.task.id)
+    f.store.markRead("work-bot", f.bot.id, firstVersion)
+    expect(overview().unread).toBe(true)
+    expect(f.store.hasUnread()).toBe(true)
+    f.store.markRead("work", second.work.id, f.store.getWork(f.bot.id, second.work.id).activity!.version)
+    expect(overview().unread).toBe(false)
+    expect(f.store.getWork(f.bot.id, first.work.id).activity!.unread).toBe(true)
+  })
+
   it("acknowledges only the displayed main/work boundary and preserves newer activity against late bulk reads", () => {
     const f = fixture(),
       a = f.create("a"),

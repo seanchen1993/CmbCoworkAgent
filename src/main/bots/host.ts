@@ -62,6 +62,7 @@ import {
   botTaskAcceptsUserInput,
   botTaskWorkFamily,
   type BotChangeEvent,
+  type BotReadKind,
   type BotDefinition,
   type BotSnapshot,
   type BotTask,
@@ -1793,7 +1794,7 @@ export class LocalBotHost {
     this.requireRunning()
     return this.store.requestReceipts(botId, checks, workId)
   }
-  markRead(kind: "bot" | "group" | "work" | "im", id: string, throughVersion: number): void {
+  markRead(kind: BotReadKind, id: string, throughVersion: number): void {
     this.requireRunning()
     this.store.markRead(kind, id, throughVersion)
     this.changed()
@@ -2580,8 +2581,7 @@ export class LocalBotHost {
     return task
   }
 
-  /** A live run accepts a targeted text supplement. Starting a new task turn
-   * from its desktop composer requires user control. */
+  /** Direct input from a private desktop task composer requires user control. */
   sendDesktopMessage(input: SendBotMessageInput): BotTask | Promise<BotTask> {
     this.assertDesktopWorkInputControl(input)
     if (input.workId && !input.skillDraftFromMain && input.inputFileIds?.length) {
@@ -2616,17 +2616,12 @@ export class LocalBotHost {
       return
     }
     if (work.source || work.audienceKey !== "desktop") return
-    if (work.userControl?.settling)
-      throw new BotError("CONFLICT", "正在等待原任务结算，控制权移交后可发送；草稿已保留。")
-    if (input.supplementRunId) {
-      const run = this.active.get(input.supplementRunId)
-      if (run && !run.controller.signal.aborted && run.task.botId === work.botId &&
-          run.task.workId === work.id && run.task.threadId === work.threadId &&
-          !input.explicitSkill && !input.inputFileIds?.length && !work.deletionPending && !work.deletionCommitted) return
-      throw new BotError("CONFLICT", "原运行已变化，草稿已保留。请回主对话继续交办，或获取任务控制权后发送。")
-    }
+    if (work.userControl?.stopping)
+      throw new BotError("CONFLICT", "正在停止原任务，草稿已保留。")
     if (!work.userControl)
       throw new BotError("CONFLICT", "此任务由 Bot 管理，请先获取控制权，或在主 Bot 对话补充要求。草稿已保留。")
+    if (input.supplementRunId)
+      throw new BotError("CONFLICT", "这条补充来自旧版输入框，草稿已保留。请核对后重新发送。")
   }
 
   private async sendWithSelectedSkill(input: SendBotMessageInput, beforeSend: () => void): Promise<BotTask> {
@@ -2973,7 +2968,7 @@ export class LocalBotHost {
       const work = this.getWork(botId, workId)
       // The button was shown using an idle foreground snapshot. Never stop a
       // reply that was accepted before that click reached the Host.
-      if (!work.userControl || work.userControl.settling ||
+      if (!work.userControl || work.userControl.stopping ||
           [...this.active.values()].some(({ task }) => task.threadId === work.threadId) ||
           this.store.pendingWorkFamily(botId, workId, true).some(task =>
             task.workId === workId && task.threadId === work.threadId && task.origin.kind === "user"))

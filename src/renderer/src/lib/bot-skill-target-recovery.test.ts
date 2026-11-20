@@ -64,6 +64,7 @@ vi.mock("../components/bots/BotWorkQuestions", () => ({ BotWorkQuestions: () => 
 
 import { ChatContainer } from "@/components/chat/ChatContainer"
 import { BotConversation } from "../components/bots/BotConversation"
+import { BotWorkControl } from "../components/bots/BotWorkControl"
 import { BotSkillTargetDialog } from "../components/bots/BotSkillTargetDialog"
 import { DialogContent } from "../components/ui/dialog"
 
@@ -179,14 +180,31 @@ it("sends a fresh slash selection through the main host without a destination di
   expect(f.create).not.toHaveBeenCalled()
 })
 
+it.each(["running", "waiting_user"] as const)("enables input in a %s task as soon as control is taken", async state => {
+  const f = fixture()
+  const running = { id: "active-run", botId: f.work.botId, workId: f.work.id, threadId: f.work.threadId,
+    state, origin: { kind: "user" } } as BotTask
+  const turn = (work: BotWorkItem) =>
+    find<Parameters<typeof ChatContainer>[0]>(f.render(work, [running]), ChatContainer)!.props.managedTurn!
+  const managed = turn(f.work)
+  expect(managed.composerReadOnlyReason).toContain("获取控制权")
+  await expect(managed.submitDraft!(f.original)).rejects.toThrow("获取控制权")
+  expect(f.send).not.toHaveBeenCalled()
+  expect(f.queued()).toEqual(f.original)
+  expect(turn({ ...f.work, userControl: { settling: true, heldInputs: 0 } }).composerReadOnlyReason).toBeUndefined()
+  expect(turn({ ...f.work, userControl: { settling: false, heldInputs: 0 } }).composerReadOnlyReason).toBeUndefined()
+  expect(turn(f.work).composerReadOnlyReason).toContain("获取控制权")
+})
+
 it("stops only the running reply from a managed task, preserving the queued follow-up", async () => {
   const f = fixture()
   const running = { id: "running-task", state: "running", threadId: f.work.threadId,
     workId: f.work.id, message: "Original work", origin: { kind: "user" } } as BotTask
   const queued = { ...running, id: "pending-supplement", state: "queued" as const }
   const chat = find<Parameters<typeof ChatContainer>[0]>(f.render(f.work, [queued, running]), ChatContainer)!
-  expect(chat.props.managedTurn!.showReadOnlyStop).toBe(true)
-  await chat.props.managedTurn!.cancel()
+  const bar = find<Parameters<typeof BotWorkControl>[0]>(chat.props.managedTurn!.composerHeader, BotWorkControl)!
+  expect(bar.props.onStopReply).toBeDefined()
+  await bar.props.onStopReply!()
   expect(f.cancel).toHaveBeenCalledExactlyOnceWith(running.id)
   expect(f.stopConversation).not.toHaveBeenCalled()
 })
@@ -194,7 +212,9 @@ it("stops only the running reply from a managed task, preserving the queued foll
 it("keeps the work busy without offering to stop a reply when only background activity remains", () => {
   const f = fixture()
   const chat = find<Parameters<typeof ChatContainer>[0]>(f.render(f.work, [], true), ChatContainer)!
-  expect(chat.props.managedTurn).toMatchObject({ busy: true, showReadOnlyStop: false })
+  expect(chat.props.managedTurn!.busy).toBe(true)
+  const bar = find<Parameters<typeof BotWorkControl>[0]>(chat.props.managedTurn!.composerHeader, BotWorkControl)!
+  expect(bar.props.onStopReply).toBeUndefined()
 })
 
 it.each([
@@ -273,7 +293,7 @@ it.each(["accepted", "absent"] as const)(
   }
 )
 
-it.each([undefined, { settling: true, heldInputs: 1 }])(
+it.each([undefined, { settling: true, stopping: true as const, heldInputs: 1 }])(
   "keeps managed task drafts intact and refuses direct retry while control is %j", async userControl => {
     const f = fixture()
     const task = { ...f.work, userControl }

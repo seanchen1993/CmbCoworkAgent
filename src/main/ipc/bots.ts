@@ -716,7 +716,7 @@ export function registerBotHandlers(
     "bots:mark-read",
     (_event, hostId: unknown, kind: unknown, id: unknown, version: unknown) => {
       if (
-        (kind !== "bot" && kind !== "group" && kind !== "work" && kind !== "im") ||
+        (kind !== "bot" && kind !== "group" && kind !== "work" && kind !== "im" && kind !== "work-bot") ||
         !Number.isSafeInteger(version) ||
         Number(version) < 1
       )

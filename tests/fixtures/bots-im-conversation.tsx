@@ -78,6 +78,7 @@ const work = {
   botId: bot.id,
   threadId: "task-a",
   parentThreadId: "im-a",
+  audienceKey: "im:group-a",
   title: "演示准备清单",
   goal: "准备演示",
   state: "active",
@@ -112,6 +113,8 @@ const f = ((window as any).fixture = {
   memoryReads: [] as any[],
   memoryWrites: [] as any[],
   bots: [bot],
+  workActivity: [] as Array<{ botId: string; version: number; unread: boolean; updatedAt: number; preview: string }>,
+  personalIm: [] as Array<{ botId: string; connected: boolean }>,
   activities: [
     {
       kind: "bot",
@@ -197,7 +200,8 @@ const client = {
     tasks: f.tasks.map((task) => ({ ...task })),
     backgroundThreads: [...f.backgroundThreads],
     activities: f.activities.map((activity) => ({ ...activity })),
-    workActivity: [],
+    workActivity: f.workActivity.map(activity => ({ ...activity })),
+    personalIm: f.personalIm.map(entry => ({ ...entry })),
     schedules: f.schedules.map(schedule => ({ ...schedule })),
     revision
   }),
@@ -213,7 +217,8 @@ const client = {
       group.activity.unread = false
       f.bump()
     }
-    const activity = kind === "bot" ? f.activities.find((item) => item.id === id) : undefined
+    const activity = kind === "work-bot" ? f.workActivity.find(item => item.botId === id)
+      : kind === "bot" ? f.activities.find(item => item.id === id) : undefined
     if (activity?.unread && version >= activity.version) {
       activity.unread = false
       f.bump()

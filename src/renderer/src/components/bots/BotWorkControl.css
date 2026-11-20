@@ -54,8 +54,6 @@
   opacity: 1;
 }
 .bot-task-control[data-control-state="user"] button:focus-visible { outline-color: currentColor; }
-.bot-task-readonly-controls { display: flex; align-items: center; gap: 10px; }
-.bot-task-readonly-controls > .bot-task-control { flex: 1; }
 .bot-task-readonly-footer { padding-top: 4px; }
 .bot-task-control-spinner { animation: bot-control-spin 1s linear infinite; }
 @keyframes bot-control-spin { to { transform: rotate(360deg); } }

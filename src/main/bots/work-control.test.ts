@@ -44,7 +44,7 @@ async function fixture() {
   await vi.waitFor(() => expect(starts).toContain(task.id))
   const control = (action: "take" | "stop_and_take" | "return", operationId: string = action) => host.changeWorkControl({
     botId: bot.id, workId: work.id, action, operationId,
-    ...(action === "return" && store.getWork(bot.id, work.id).userControl?.settling === false
+    ...(action === "return" && store.getWork(bot.id, work.id).userControl
       ? { confirmedTaskIds: host.workControlPending(bot.id, work.id).items.map(item => item.taskId) } : {}),
     expectedVersion: store.getWork(bot.id, work.id).version
   })
@@ -52,18 +52,20 @@ async function fixture() {
 }
 
 describe("user control of Bot work", () => {
-  it("accepts a desktop correction only for its original active run", async () => {
+  it("requires desktop control even with a live run ID and never replays a legacy supplement into a later run", async () => {
     const f = await fixture()
     const draft = { botId: f.bot.id, workId: f.work.id, requestId: "live-note", message: "Use the revised heading" }
-    expect(() => f.host.sendDesktopMessage({ ...draft, supplementRunId: "earlier-run" })).toThrow("原运行已变化")
-    expect(() => f.host.sendDesktopMessage(draft)).toThrow("获取控制权")
-    const accepted = await f.host.sendDesktopMessage({ ...draft, supplementRunId: f.task.id })
-    expect(accepted.threadId).toBe(f.task.threadId)
-    expect(f.store.getWork(f.bot.id, f.work.id).userControl).toBeUndefined()
+    const legacy = { ...draft, supplementRunId: f.task.id }
+    expect(() => f.host.sendDesktopMessage(legacy)).toThrow("获取控制权")
+    expect(f.control("take").userControl?.settling).toBe(true)
+    expect(() => f.host.sendDesktopMessage(legacy)).toThrow("旧版输入框")
     f.finishes.get(f.task.id)!({ state: "completed", result: "Finished" })
-    await vi.waitFor(() => expect(f.store.getTask(f.task.id).state).toBe("completed"))
-    expect(() => f.host.sendDesktopMessage({ ...draft, requestId: "late-note", supplementRunId: f.task.id }))
-      .toThrow("原运行已变化")
+    await vi.waitFor(() => expect(f.store.getWork(f.bot.id, f.work.id).userControl?.settling).toBe(false))
+    expect(() => f.host.sendDesktopMessage(legacy)).toThrow("旧版输入框")
+    expect(f.store.recentTasks().some(task => task.requestId === draft.requestId)).toBe(false)
+    expect(await f.host.sendDesktopMessage(draft)).toMatchObject({ threadId: f.work.threadId, workId: f.work.id })
+    f.control("return")
+    expect(() => f.host.sendDesktopMessage({ ...draft, requestId: "after-return" })).toThrow("获取控制权")
   })
 
   it("stops a main conversation's retained peer command without stopping an independent work on the same Bot", async () => {
@@ -180,25 +182,26 @@ describe("user control of Bot work", () => {
     expect(f.starts.filter(started => started === id)).toHaveLength(cancel ? 1 : 0)
   })
 
-  it("keeps the desktop composer closed until the original execution finishes handing over", async () => {
+  it("steers the running task immediately after takeover and queues skill execution once", async () => {
     const f = await fixture()
     const input = { botId: f.bot.id, workId: f.work.id, requestId: "manual-desktop", message: "Correct the report" }
     const skill = { ...input, requestId: "manual-desktop-skill", explicitSkill: { name: "review", path: "/registered/review/SKILL.md" } }
     expect(() => f.host.sendDesktopMessage(input)).toThrow("先获取控制权")
     expect(f.control("take").userControl?.settling).toBe(true)
-    expect(() => f.host.sendDesktopMessage(input)).toThrow("等待原任务结算")
-    expect(() => f.host.sendDesktopMessage(skill)).toThrow("等待原任务结算")
-    f.finishes.get(f.task.id)!({ state: "completed", result: "Report ready" })
-    await vi.waitFor(() => expect(f.store.getWork(f.bot.id, f.work.id).userControl?.settling).toBe(false))
-    const legacyResult = f.store.recentTasks().find(turn => turn.origin.kind === "work_result" &&
-      turn.origin.executionTaskId === f.task.id && !turn.origin.review)
-    expect(legacyResult).toBeDefined()
-    expect(f.starts).toContain(legacyResult!.id)
+    f.host.onSteeringReady(f.task.id)
+    const supplement = await f.host.sendDesktopMessage(input)
+    await vi.waitFor(() => expect(f.injections.has(supplement.id)).toBe(true))
+    expect(f.injections.get(supplement.id)!.inject()).toBe(true)
+    expect(f.store.getTask(supplement.id).injectedInto).toBe(f.task.id)
+    expect(f.signals.get(f.task.id)?.aborted).toBe(false)
     const accepted = await f.host.sendDesktopMessage(skill)
+    expect(f.starts).not.toContain(accepted.id)
+    f.finishes.get(f.task.id)!({ state: "completed", result: "Report ready" })
     expect(accepted).toMatchObject({ workId: f.work.id, threadId: f.work.threadId,
       origin: { kind: "user", explicitSkill: skill.explicitSkill } })
     await vi.waitFor(() => expect(f.starts).toContain(accepted.id))
-    expect(f.store.recentTasks().filter(task => task.requestId === input.requestId)).toHaveLength(0)
+    expect(f.store.recentTasks().filter(task => task.requestId === input.requestId)).toHaveLength(1)
+    expect(f.starts).not.toContain(supplement.id)
   })
 
   it("rechecks takeover after selected-skill attachment verification before admitting the input", async () => {
@@ -325,7 +328,7 @@ describe("user control of Bot work", () => {
     expect(f.control("take").userControl).toEqual({ settling: true, heldInputs: 1 })
     expect(f.signals.get(f.task.id)?.aborted).toBe(false)
     expect(f.store.getTask(queued.id).state).toBe("queued")
-    expect(() => f.host.send({ botId: f.bot.id, workId: f.work.id, requestId: "too-early", message: "User edit" })).toThrow("等待原任务结算")
+    expect(f.host.workControlPending(f.bot.id, f.work.id).items.map(item => item.taskId)).toEqual([queued.id])
     f.finishes.get(f.task.id)!({ state: "completed", result: "Done" })
     await vi.waitFor(() => expect(f.store.getWork(f.bot.id, f.work.id).userControl?.settling).toBe(false))
     expect(f.starts).not.toContain(queued.id)

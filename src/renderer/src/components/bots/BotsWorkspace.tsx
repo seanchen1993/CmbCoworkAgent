@@ -1027,14 +1027,27 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
   useEffect(() => {
     setSuppressedRead(null)
   }, [selectedConversationKey, newChat])
+  const foreground = useAppStore((state) => state.mainView === "bots" && !state.showCustomizeView)
+  const canAcknowledge = foreground && !newChat && suppressedRead !== selectedConversationKey
+  const conversationActivity = activeWorkId
+    ? selectedWork?.activity
+    : selectedIm
+      ? undefined
+      : mainActivityByConversation.get(selectedConversationKey)
+  useBotReadState(client, conversationActivity, canAcknowledge)
+
+  const privateMainId = !selectedIm && !activeWorkId ? selected?.id : undefined
+  const overview = privateMainId
+    ? snapshot?.workActivity?.find((item) => item.botId === privateMainId)
+    : undefined
   useBotReadState(
     client,
-    newChat || (Boolean(selectedIm) && !activeWorkId) || suppressedRead === selectedConversationKey
-      ? undefined
-      : activeWorkId
-        ? selectedWork?.activity
-        : mainActivityByConversation.get(selectedConversationKey)
+    overview && { kind: "work-bot", id: overview.botId, version: overview.version, unread: overview.unread },
+    canAcknowledge
   )
+  const personalIm = privateMainId
+    ? snapshot?.personalIm?.find((entry) => entry.botId === privateMainId)
+    : undefined
   const carryGroupDraft = async (
     group: BotGroup,
     isCurrent: () => boolean,
@@ -1717,9 +1730,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
           aria-label={bot.name}
           onClick={() => {
             setSuppressedRead(null)
-            closeNewChat()
-            setSelectedId(bot.id)
-            setGroupId(null)
+            openPrivateMain(bot.id)
           }}
         >
           <BotRuntimeAvatar
@@ -2009,9 +2020,7 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                         aria-label={`${bot.name}，已置顶`}
                         onClick={() => {
                           setSuppressedRead(null)
-                          closeNewChat()
-                          setSelectedId(bot.id)
-                          setGroupId(null)
+                          openPrivateMain(bot.id)
                         }}
                       >
                         <BotRuntimeAvatar
@@ -2431,14 +2440,14 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
                 </button>
                 </div>
               </header>
-              {!activeWorkId &&
-                snapshot?.personalIm?.some((entry) => entry.botId === selected.id) && (
-                  <div className="bot-work-source" role="note">
-                    本人招乎私聊已关联 · 主对话回复和任务结果会同步到招乎
-                    {!snapshot.personalIm.find((entry) => entry.botId === selected.id)?.connected &&
-                      " · 当前离线，待重新连接后同步"}
-                  </div>
-                )}
+              {personalIm && (
+                <div className="bot-im-context" role="status">
+                  <span>
+                    <span className="bot-im-connection-dot" data-online={personalIm.connected} aria-hidden="true" />
+                    {personalIm.connected ? "已连接招呼" : "招呼已离线"}
+                  </span>
+                </div>
+              )}
               {!activeWorkId && <BotWorkAttention client={client} works={[...works.priority, ...works.items.filter(item => !works.priority.some(p => p.id === item.id))]} onWork={id => selectWork(id)} />}
               {activeWorkId && !selectedWork ? (
                 <div className="bot-empty" role="status">
@@ -2503,6 +2512,8 @@ function BotWorkspaceForHost({ client }: { client: BotClient }) {
         </main>
             {preview && selected && (
                 <BotWorkPreview
+                  client={client}
+                  foreground={foreground}
                   key={JSON.stringify([preview.hostId, preview.botId, preview.audience, preview.workId])}
                   title={preview.title}
                   work={previewWork?.deletionCommitted ? null : previewWork}

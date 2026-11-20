@@ -413,7 +413,7 @@ export interface BotSchedule extends BotScheduleInput {
 }
 
 export interface SendBotMessageInput {
-  /** A plain correction to this exact live desktop work run, without taking ownership. */
+  /** Older desktop drafts retained this run ID. Never replay them as new task turns. */
   supplementRunId?: string
   botId: string
   workId?: string
@@ -466,6 +466,9 @@ export interface BotSnapshot {
   personalIm?: Array<{ botId: string; connected: boolean }>
   imConversations?: import("./im-channel").BotImConversation[]
 }
+
+/** The overview has its own read cursor; opening a Bot does not mark its task conversations read. */
+export type BotReadKind = BotConversationActivity["kind"] | "work-bot"
 
 /** Bounded list metadata, not a second transcript. Revisions also survive clock changes. */
 export interface BotConversationActivity {
@@ -660,7 +663,7 @@ export interface BotClient {
     imConversationId?: string
   ): Promise<BotExchangePage>
   markUnread(kind: "bot" | "group", id: string): Promise<void>
-  markRead(kind: "bot" | "group" | "work" | "im", id: string, throughVersion: number): Promise<void>
+  markRead(kind: BotReadKind, id: string, throughVersion: number): Promise<void>
   open(botId: string, workId?: string): Promise<{ threadId: string }>
   listMemory(botId: string, groupId?: string): Promise<BotMemory[]>
   writeMemory(botId: string, input: WriteBotMemoryInput): Promise<BotMemory>

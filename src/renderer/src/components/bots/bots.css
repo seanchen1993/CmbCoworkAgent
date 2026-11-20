@@ -3968,13 +3968,6 @@ button.bot-inline-mention:focus-visible {
   color: var(--bot-muted);
 }
 
-.bot-work-source {
-  padding: 8px 20px;
-  color: var(--bot-muted);
-  background: var(--bot-elevated);
-  border-bottom: 1px solid var(--bot-line);
-  font-size: 12px;
-}
 /* Private chat uses the same atomic mention editor inside the original composer. */
 .bot-private-input {
   padding: 14px 94px 14px 46px;
