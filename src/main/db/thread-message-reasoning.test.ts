@@ -21,6 +21,7 @@ import { mergeCheckpointAuthorityTranscriptMessages } from "../../shared/checkpo
 import { normalizeVisibleReasoningText } from "../../renderer/src/lib/message-display-visibility"
 import { stripThinkBlocksForDisplay } from "../../shared/think-block-display"
 import { bootstrapLegacyCheckpointTranscript } from "../checkpointer/runtime-projection-store"
+import { sqliteRecoveryFamilyKey } from "./sqlite-recovery-family"
 import type { Message } from "../types"
 import {
   resolveStreamTranscriptFlush,
@@ -575,6 +576,7 @@ describe("durable thread reasoning", () => {
         })
       )
     checkpointDb.close()
+    const sourceKey = sqliteRecoveryFamilyKey(checkpointPath)
     const bootstrap = bootstrapLegacyCheckpointTranscript(
       checkpointPath,
       storageState.databasePath,
@@ -584,16 +586,13 @@ describe("durable thread reasoning", () => {
     )
     const durable = db.getThreadMessages(threadId)
     expect(bootstrap.stats.migratedMessages).toBe(2)
+    expect(sqliteRecoveryFamilyKey(checkpointPath)).toBe(sourceKey)
     const check = new DatabaseSync(checkpointPath, { readOnly: true })
-    const snapshots = check.prepare("SELECT suffix FROM checkpoint_message_snapshots").all()
-    expect(
-      snapshots.some((row) =>
-        Buffer.from(row.suffix as Uint8Array)
-          .toString()
-          .includes("测试思考 A")
-      )
-    ).toBe(true)
-    check.close()
+    try {
+      expect(check.prepare("SELECT suffix FROM checkpoint_message_snapshots").all()).toEqual([])
+      expect(String(check.prepare("SELECT checkpoint FROM checkpoints").get()?.checkpoint))
+        .toContain("测试思考 A")
+    } finally { check.close() }
     expect(durable.map((message) => message.reasoning)).toEqual(
       fixtures.map((message) => message.reasoning)
     )

@@ -3,6 +3,7 @@ import {
   buildKnowledgeProjectQueries,
   fetchKnowledgeProjectAggregates,
   fetchKnowledgeAccumulation,
+  fetchKnowledgeOrgDistribution,
   parseKnowledgeDistribution,
   parseKnowledgeProjectStats,
   parseKnowledgeTotals,
@@ -35,11 +36,12 @@ describe("knowledge overview scope", () => {
   it("restricts members to their own room even when they request other rooms", () => {
     const member = { ...admin, admin: false }
     expect(resolveKnowledgeOverviewScope({ ...member, requestedRooms: [] }, ids)).toEqual({
-      orgIds: ["1"]
+      orgIds: ["1"],
+      orgRoom: { id: "1", name: "本室" }
     })
     expect(
       resolveKnowledgeOverviewScope({ ...member, requestedRooms: ["本室", "乙室(成都)"] }, ids)
-    ).toEqual({ orgIds: ["1"] })
+    ).toEqual({ orgIds: ["1"], orgRoom: { id: "1", name: "本室" } })
     expect(
       resolveKnowledgeOverviewScope({ ...member, requestedRooms: ["乙室(成都)"] }, ids)
     ).toEqual({ orgIds: [], unavailableReason: "noAccess" })
@@ -96,7 +98,9 @@ describe("knowledge APIs", () => {
       peak = Math.max(peak, active)
       expect(init.method).toBe("POST")
       expect(init.headers).toEqual({ "Content-Type": "application/json" })
-      expect(JSON.parse(init.body as string)).toEqual({ orgIds: ["1", "2"] })
+      expect(JSON.parse(init.body as string)).toEqual({
+        orgIds: url.endsWith("org-distribution") ? null : ["1", "2"]
+      })
       await new Promise((resolve) => setTimeout(resolve, 1))
       active--
       return response(url)
@@ -118,6 +122,70 @@ describe("knowledge APIs", () => {
     expect(data.totals?.totalNum).toBe(806)
     expect(data.errors).toEqual({})
   })
+  it("restricts multi-room roots to their IDs and requests groups with the single numeric room ID", async () => {
+    const request = vi.fn(async (_url: string, init: RequestInit) => {
+      const { orgIds } = JSON.parse(String(init.body))
+      if (orgIds === null)
+        return Response.json([
+          { id: "1", name: "甲室", value: 9 },
+          { id: 3, name: "其他室", value: 10 },
+          { id: 2, name: "乙室", value: 4 },
+          { id: null, name: null, value: 2 }
+        ])
+      expect(orgIds).toEqual([1])
+      return Response.json([
+        { id: "11", name: "开发组", value: 3 },
+        { id: 11, name: "开发组", value: 1 },
+        { id: 12, name: "开发组", value: 3 },
+        { id: null, name: null, value: 2 }
+      ])
+    })
+    expect(
+      await fetchKnowledgeOrgDistribution(
+        "http://kb.test",
+        ["1", "2"],
+        undefined,
+        request as typeof fetch
+      )
+    ).toEqual([
+      { id: "1", name: "甲室", value: 9 },
+      { id: "2", name: "乙室", value: 4 }
+    ])
+    expect(
+      await fetchKnowledgeOrgDistribution(
+        "http://kb.test",
+        ["1"],
+        undefined,
+        request as typeof fetch
+      )
+    ).toEqual([
+      { id: "11", name: "开发组", value: 4 },
+      { id: "12", name: "开发组", value: 3 },
+      { id: null, name: "未归属组", value: 2 }
+    ])
+    expect(
+      await fetchKnowledgeOrgDistribution("http://kb.test", [], undefined, request as typeof fetch)
+    ).toEqual([])
+    expect(request).toHaveBeenCalledTimes(2)
+  })
+  it("reports a room aggregate returned for a group request as an error", async () => {
+    const room = { id: "992391", name: "零售基础客群经营开发室(成都)", value: 747 }
+    const request = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const { orgIds } = JSON.parse(String(init?.body))
+      if (orgIds === null) return Response.json([room])
+      expect(orgIds).toEqual([992391])
+      return Response.json([{ ...room, id: 992391 }])
+    })
+    const rooms = await fetchKnowledgeOrgDistribution("http://kb.test", null, undefined, request)
+    expect(rooms).toEqual([room])
+    await expect(
+      fetchKnowledgeOrgDistribution("http://kb.test", [rooms[0].id!], undefined, request)
+    ).rejects.toThrow("组分布接口返回了室汇总")
+    expect(request.mock.calls.map(([url]) => url)).toEqual([
+      "http://kb.test/knowledge/org-distribution",
+      "http://kb.test/knowledge/org-distribution"
+    ])
+  })
   it("sends null for all and keeps a failed section from erasing successful sections", async () => {
     const request = vi.fn(async (url: string, init: RequestInit) => {
       expect(JSON.parse(init.body as string)).toEqual({ orgIds: null })
@@ -134,7 +202,7 @@ describe("knowledge APIs", () => {
     expect(data.users).toBeNull()
     expect(data.errors.users).toContain("HTTP 500")
     expect(data.totals?.totalNum).toBe(806)
-    expect(data.orgs).toEqual([{ name: "未归属", value: 806 }])
+    expect(data.orgs).toEqual([{ name: "未归属室", value: 806 }])
   })
   it("propagates cancellation rather than presenting it as a failed or empty result", async () => {
     const controller = new AbortController()

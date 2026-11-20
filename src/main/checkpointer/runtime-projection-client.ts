@@ -1,5 +1,7 @@
+import type { LegacySearchBootstrapGuard } from "./runtime-projection-protocol"
 import type { Worker } from "node:worker_threads"
 import { existsSync } from "node:fs"
+import { hasSqliteRecoverySidecar } from "../db/sqlite-recovery-family"
 import type {
   CheckpointRuntimeProjectionStats,
   LegacyCheckpointTranscriptMigrationStats,
@@ -18,6 +20,7 @@ interface PendingRequest {
   cancellation?: Int32Array
   bootstrapThreadId?: string
   foregroundKey?: string
+  drainCancellation?: boolean
 }
 
 export interface LegacyCheckpointTranscriptBootstrapResult {
@@ -49,6 +52,12 @@ export class CheckpointRuntimeProjectionWorkerUnavailableError extends Error {
 
 export function isCheckpointRuntimeProjectionCancelled(error: unknown): boolean {
   return error instanceof Error && error.name === CHECKPOINT_RUNTIME_PROJECTION_CANCELLED
+}
+
+function checkpointProjectionCancelled(): Error {
+  const error = new Error("Checkpoint runtime projection request cancelled")
+  error.name = CHECKPOINT_RUNTIME_PROJECTION_CANCELLED
+  return error
 }
 
 export function isCheckpointRuntimeProjectionSchemaNotReady(error: unknown): boolean {
@@ -103,6 +112,10 @@ export class CheckpointRuntimeProjectionClient {
       this.foregroundRequests.get(pending.foregroundKey) === response.requestId
     ) {
       this.foregroundRequests.delete(pending.foregroundKey)
+    }
+    if (pending.cancellation && Atomics.load(pending.cancellation, 0)) {
+      pending.reject(checkpointProjectionCancelled())
+      return
     }
     if (!response.ok) {
       const error = new Error(response.error.message)
@@ -203,6 +216,7 @@ export class CheckpointRuntimeProjectionClient {
           messageDatabasePath: string
           threadId: string
           checkpointNs: string
+          searchGuard?: LegacySearchBootstrapGuard
         }
       | {
           type: "inspect-transcript-presence"
@@ -214,14 +228,26 @@ export class CheckpointRuntimeProjectionClient {
       cancellable?: boolean
       bootstrapThreadId?: string
       foregroundKey?: string
+      signal?: AbortSignal
+      drainCancellation?: boolean
     } = {}
   ): Promise<unknown> {
+    const signal = options.signal
+    if (signal?.aborted) throw checkpointProjectionCancelled()
     if (this.closing) {
       throw new CheckpointRuntimeProjectionWorkerUnavailableError(
         "Checkpoint runtime projection client is closing"
       )
     }
-    const worker = await this.getWorker()
+    const opening = this.getWorker()
+    const worker = signal
+      ? await new Promise<Worker>((resolve, reject) => {
+          const abort = () => reject(checkpointProjectionCancelled())
+          signal.addEventListener("abort", abort, { once: true })
+          void opening.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort))
+        })
+      : await opening
+    if (signal?.aborted) throw checkpointProjectionCancelled()
     // close() can start while getWorker() yields, even when the Worker was
     // already available through Promise.resolve(). Re-check before retaining a
     // pending request: close() has already drained the table by then and the
@@ -241,23 +267,24 @@ export class CheckpointRuntimeProjectionClient {
       const previous = previousId === undefined ? undefined : this.pending.get(previousId)
       if (previous) {
         if (previous.cancellation) Atomics.store(previous.cancellation, 0, 1)
-        // Latest-intent callers no longer need the superseded result. Reject and
-        // release its retained main-process bookkeeping immediately; the worker
-        // still observes the shared cancellation flag and its eventual response
-        // is safely ignored. This keeps rapid thread/workspace switching at one
-        // retained request per foreground scope instead of waiting behind legacy
-        // multi-megabyte scans.
-        this.pending.delete(previousId!)
-        const cancelled = new Error("Checkpoint runtime projection request cancelled")
-        cancelled.name = CHECKPOINT_RUNTIME_PROJECTION_CANCELLED
-        previous.reject(cancelled)
+        // Bootstrap holds a thread mutation lock until the Worker has closed
+        // its SQLite handles. Superseded read-only requests can retire early.
+        if (!previous.drainCancellation) {
+          this.pending.delete(previousId!)
+          previous.reject(checkpointProjectionCancelled())
+        }
       }
       this.foregroundRequests.set(options.foregroundKey, requestId)
     }
+    const abort = () => {
+      if (cancellation) Atomics.store(cancellation, 0, 1)
+    }
+    signal?.addEventListener("abort", abort, { once: true })
     return new Promise((resolve, reject) => {
       this.pending.set(requestId, {
         resolve,
         reject,
+        drainCancellation: options.drainCancellation,
         ...(cancellation ? { cancellation } : {}),
         ...(options.bootstrapThreadId
           ? { bootstrapThreadId: options.bootstrapThreadId }
@@ -285,7 +312,7 @@ export class CheckpointRuntimeProjectionClient {
           )
         )
       }
-    })
+    }).finally(() => signal?.removeEventListener("abort", abort))
   }
 
   ensureRuntimeProjection(
@@ -348,7 +375,8 @@ export class CheckpointRuntimeProjectionClient {
     databasePath: string,
     threadId: string,
     checkpointNs = "",
-    foregroundKey?: string | number
+    foregroundKey?: string | number,
+    signal?: AbortSignal
   ): Promise<unknown | null> {
     return this.request(
       {
@@ -357,9 +385,12 @@ export class CheckpointRuntimeProjectionClient {
         threadId,
         checkpointNs
       },
-      foregroundKey === undefined
-        ? {}
-        : { cancellable: true, foregroundKey: String(foregroundKey) }
+      {
+        cancellable: foregroundKey !== undefined || !!signal,
+        drainCancellation: true,
+        foregroundKey: foregroundKey === undefined ? undefined : String(foregroundKey),
+        signal
+      }
     ).then((value) => value ?? null)
   }
 
@@ -368,7 +399,8 @@ export class CheckpointRuntimeProjectionClient {
     messageDatabasePath: string,
     threadId: string,
     checkpointNs = "",
-    foregroundKey?: string | number
+    foregroundKey?: string | number,
+    options?: { guard?: LegacySearchBootstrapGuard; signal?: AbortSignal }
   ): Promise<LegacyCheckpointTranscriptBootstrapResult> {
     return this.request(
       {
@@ -376,11 +408,14 @@ export class CheckpointRuntimeProjectionClient {
         databasePath,
         messageDatabasePath,
         threadId,
-        checkpointNs
+        checkpointNs,
+        searchGuard: options?.guard
       },
       {
         cancellable: true,
+        drainCancellation: true,
         bootstrapThreadId: threadId,
+        signal: options?.signal,
         ...(foregroundKey === undefined ? {} : { foregroundKey: String(foregroundKey) })
       }
     ).then((value) => value as LegacyCheckpointTranscriptBootstrapResult)
@@ -496,14 +531,18 @@ export function readLatestCheckpointRuntimeTupleInWorker(
   databasePath: string,
   threadId: string,
   checkpointNs = "",
-  foregroundKey?: string | number
+  foregroundKey?: string | number,
+  signal?: AbortSignal
 ): Promise<unknown | null> {
-  if (!existsSync(databasePath)) return Promise.resolve(null)
+  if (!existsSync(databasePath) && !hasSqliteRecoverySidecar(databasePath)) {
+    return Promise.resolve(null)
+  }
   return getDefaultClient().readLatestRuntimeTuple(
     databasePath,
     threadId,
     checkpointNs,
-    foregroundKey
+    foregroundKey,
+    signal
   )
 }
 
@@ -512,9 +551,10 @@ export function bootstrapLegacyCheckpointTranscriptInWorker(
   messageDatabasePath: string,
   threadId: string,
   checkpointNs = "",
-  foregroundKey?: string | number
+  foregroundKey?: string | number,
+  signal?: AbortSignal
 ): Promise<LegacyCheckpointTranscriptBootstrapResult> {
-  if (!existsSync(databasePath)) {
+  if (!existsSync(databasePath) && !hasSqliteRecoverySidecar(databasePath)) {
     return Promise.resolve(emptyLegacyCheckpointBootstrapResult())
   }
   return getDefaultClient().bootstrapLegacyTranscript(
@@ -522,7 +562,8 @@ export function bootstrapLegacyCheckpointTranscriptInWorker(
     messageDatabasePath,
     threadId,
     checkpointNs,
-    foregroundKey
+    foregroundKey,
+    { signal }
   )
 }
 

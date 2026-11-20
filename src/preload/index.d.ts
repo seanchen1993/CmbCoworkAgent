@@ -25,8 +25,10 @@ import type {
   ManagedRunScheduleIdentity,
   ManagedRunScheduleChange
 } from "../shared/managed-run-schedule"
+import type { ThreadSearchOpenRequest, ThreadSearchPage, ThreadSearchStartRequest, ThreadSearchWindow } from "../shared/thread-search-types"
 import type {
   KnowledgeAccumulationData,
+  KnowledgeOrgItem,
   KnowledgeActiveDetails,
   KnowledgeFileReaders,
   KnowledgeProjectStats,
@@ -1215,6 +1217,12 @@ interface CustomAPI {
     onWorkflowAgentStream: (threadId: string, callback: (payload: unknown) => void) => () => void
   }
   threads: {
+    searchEnabled: boolean
+    searchStart: (request: ThreadSearchStartRequest) => Promise<ThreadSearchPage>
+    searchContinue: (cursor: string) => Promise<ThreadSearchPage>
+    searchCancel: (id?: string) => Promise<void>
+    searchSummary: (request: ThreadSearchOpenRequest) => Promise<Thread | null>
+    searchTargetWindow: (request: ThreadSearchOpenRequest) => Promise<ThreadSearchWindow>
     list: () => Promise<Thread[]>
     listPage: (options?: ThreadSummaryPageOptions) => Promise<ThreadSummaryPage>
     listGroupIds: (options: ThreadGroupIdsOptions) => Promise<ThreadGroupIdsResult>
@@ -1277,9 +1285,13 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     getHistory: (threadId: string) => Promise<unknown[]>
     getLatestCheckpoint: (threadId: string) => Promise<unknown | null>
-    getLatestCheckpointRuntimeState: (threadId: string) => Promise<unknown | null>
+    getLatestCheckpointRuntimeState: (
+      threadId: string,
+      options?: { requestScope?: "foreground-hydration" }
+    ) => Promise<unknown | null>
     bootstrapLegacyCheckpointTranscript: (
-      threadId: string
+      threadId: string,
+      options?: { requestScope?: "foreground-hydration" }
     ) => Promise<ThreadLegacyCheckpointBootstrapResult | null>
     getGoalEvents: (
       threadId: string,
@@ -2719,6 +2731,24 @@ interface CustomAPI {
     knowledgeAccumulation: (opts?: { upperOrgLv1?: string | string[] | null }) => Promise<{
       success: boolean
       data?: KnowledgeAccumulationData
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeOrgGroups: (
+      roomId: string,
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{
+      success: boolean
+      data?: KnowledgeOrgItem[]
+      error?: string
+      cancelled?: boolean
+    }>
+    knowledgeRoomPeople: (
+      roomId: string,
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{
+      success: boolean
+      data?: KnowledgeUserDetails
       error?: string
       cancelled?: boolean
     }>

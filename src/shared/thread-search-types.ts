@@ -1,0 +1,95 @@
+import type { ThreadMessagesPage } from "../main/types"
+import type { ThreadGoalHydrationEvent } from "../main/thread-metadata-hydration/protocol"
+import type { ChatSearchLocation } from "./chat-search-types"
+import type { ThreadIncarnationSnapshot } from "./thread-incarnation"
+
+export const THREAD_SEARCH_QUERY_LIMIT = 256
+export const THREAD_SEARCH_TARGET_ID_BYTE_LIMIT = 4096
+
+export type ThreadSearchTarget =
+  | {
+      kind: "durableMessage"
+      messageId: string
+      ordinalHint: number
+      structureEpoch: number
+      location: ChatSearchLocation
+    }
+  | {
+      kind: "goalEvent"
+      eventId: string
+      anchorMessageId: string | null
+      ordinalHint: number | null
+      structureEpoch: number
+      location: ChatSearchLocation
+    }
+
+export interface ThreadSearchStartRequest {
+  query: string
+  workspacePath?: string | null
+  limit?: number
+}
+
+export interface ThreadSearchContinueRequest {
+  cursor: string
+}
+
+interface ThreadSearchResultSummary {
+  threadId: string
+  incarnation: ThreadIncarnationSnapshot
+  title: string
+  workspacePath: string | null
+  remoteInbox?: boolean
+  frozenUpdatedAt: number
+  snippet: string
+  snippetRanges: Array<{ start: number; end: number }>
+}
+
+export type ThreadSearchResult = ThreadSearchResultSummary &
+  (
+    | { matchedBy: "title"; target: null; navigation: "threadOnly" }
+    | { matchedBy: "message"; target: ThreadSearchTarget; navigation: "exact" }
+    | { matchedBy: "message"; target: ThreadSearchTarget | null; navigation: "threadOnly" }
+  )
+
+export type SearchCoverageReason =
+  | "legacy-unverified"
+  | "legacy-foreground-required"
+  | "legacy-pending"
+  | "oversized-row"
+  | "projection-truncated"
+  | "candidate-limit"
+  | "scan-budget"
+  | "unavailable-source"
+  | "changed-during-search"
+
+export interface ThreadSearchPage {
+  sessionId: string
+  results: ThreadSearchResult[]
+  nextCursor: string | null
+  scanStatus: "running" | "complete" | "cancelled" | "expired" | "failed" | "limited"
+  coverage: {
+    basis: "durable-visible"
+    completeness: "complete" | "partial" | "unknown"
+    reasons: SearchCoverageReason[]
+    pendingThreads: number
+    failedThreads: number
+    skippedRows: number
+  }
+  scannedThreads: number
+}
+
+export interface ThreadSearchOpenRequest {
+  threadId: string
+  incarnation: ThreadIncarnationSnapshot
+  target?: ThreadSearchTarget | null
+  residentMessageIds?: readonly string[]
+}
+
+export type ThreadSearchWindow =
+  | {
+      status: "resolved"
+      page: ThreadMessagesPage
+      structureEpoch: number
+      goalEvent?: ThreadGoalHydrationEvent
+    }
+  | { status: "threadOnly" | "notFound" | "staleIdentity" | "changed" | "failed" }

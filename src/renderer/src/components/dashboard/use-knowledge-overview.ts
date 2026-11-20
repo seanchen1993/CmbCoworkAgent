@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react"
 import type {
-  KnowledgeAccumulationData,
   KnowledgeProjectStats,
   KnowledgeRecentConstraintFiles
 } from "../../../../shared/dashboard-knowledge-overview"
 import type { TimeRange } from "./use-dashboard"
+import { useKnowledgeDetails } from "./use-knowledge-details"
+
+const loadAccumulation = (rooms: string[]) =>
+  window.api.dashboard.knowledgeAccumulation({ upperOrgLv1: rooms })
 
 export function useKnowledgeOverview(
   enabled: boolean,
@@ -13,9 +16,13 @@ export function useKnowledgeOverview(
   refreshKey: number,
   createdInRangeOnly = false
 ) {
-  const [accumulation, setAccumulation] = useState<KnowledgeAccumulationData | null>(null)
-  const [accumulationLoading, setAccumulationLoading] = useState(false)
-  const [accumulationError, setAccumulationError] = useState<string | null>(null)
+  const accumulation = useKnowledgeDetails(
+    enabled,
+    rooms,
+    "dashboard:knowledgeAccumulation",
+    loadAccumulation,
+    refreshKey
+  )
   const [projects, setProjects] = useState<KnowledgeProjectStats | null>(null)
   const [projectsLoading, setProjectsLoading] = useState(false)
   const [projectsError, setProjectsError] = useState<string | null>(null)
@@ -23,34 +30,6 @@ export function useKnowledgeOverview(
     useState<KnowledgeRecentConstraintFiles | null>(null)
   const [recentConstraintFilesLoading, setRecentConstraintFilesLoading] = useState(false)
   const [recentConstraintFilesError, setRecentConstraintFilesError] = useState<string | null>(null)
-
-  // These four APIs do not accept dates. Date navigation must not repeat them.
-  useEffect(() => {
-    if (!enabled) return
-    let cancelled = false
-    const load = async (): Promise<void> => {
-      setAccumulationLoading(true)
-      setAccumulation(null)
-      setAccumulationError(null)
-      try {
-        const result = await window.api.dashboard.knowledgeAccumulation({ upperOrgLv1: rooms })
-        if (cancelled || result.cancelled) return
-        if (!result.success || !result.data) throw new Error(result.error ?? "获取知识沉淀数据失败")
-        setAccumulation(result.data)
-      } catch (error) {
-        if (!cancelled) setAccumulationError(error instanceof Error ? error.message : String(error))
-      } finally {
-        if (!cancelled) setAccumulationLoading(false)
-      }
-    }
-    void load()
-    return () => {
-      cancelled = true
-      void window.api.dashboard
-        .cancelRequests(["dashboard:knowledgeAccumulation"])
-        .catch(() => undefined)
-    }
-  }, [enabled, rooms, refreshKey])
 
   const projectRangeKey = createdInRangeOnly ? JSON.stringify(range) : "null"
   useEffect(() => {
@@ -119,9 +98,10 @@ export function useKnowledgeOverview(
   }, [enabled, rooms, refreshKey])
 
   return {
-    accumulation,
-    accumulationLoading,
-    accumulationError,
+    accumulation: accumulation.data,
+    accumulationLoading: accumulation.loading,
+    accumulationError: accumulation.error,
+    retryAccumulation: accumulation.retry,
     projects,
     projectsLoading,
     projectsError,

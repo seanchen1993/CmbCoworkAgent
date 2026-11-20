@@ -109,6 +109,7 @@ function makeVirtualListProps(
     visibleMessageIndexes: messages.map((_message, index) => index),
     lastUserMessageIndex: messageCount > 0 ? messageCount - 1 : -1,
     contentVersion: 0,
+    historyWindowRevision: 0,
     historyHasMore: false,
     historyPageLoading: false,
     historyRemainingCount: 0,

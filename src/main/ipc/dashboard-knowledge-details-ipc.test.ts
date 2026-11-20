@@ -23,7 +23,11 @@ const source = createSourceFile(
 const names = [
   "resolveKnowledgeRequestScope",
   "getKnowledgeConstraintFields",
+  "requireKnowledgeDrilldownRoom",
+  "fetchKnowledgeOrgGroups",
+  "fetchKnowledgeRoomPeople",
   "fetchKnowledgeActiveDetails",
+  "fetchKnowledgePeopleForScope",
   "fetchKnowledgeUserDetails",
   "fetchKnowledgeRecentConstraintFileDetails",
   "fetchKnowledgeRecentConstraintFiles",
@@ -128,7 +132,10 @@ function fixture() {
       ]),
     fetchKnowledgeActiveList: fetchUpdates,
     fetchKnowledgeUserDetailList: fetchUserDetails,
+    fetchKnowledgeOrgDistribution: vi.fn(async () => []),
     api: {} as {
+      fetchKnowledgeOrgGroups: (id: string, opts?: { upperOrgLv1?: string[] }) => Promise<unknown>
+      fetchKnowledgeRoomPeople: (id: string, opts?: { upperOrgLv1?: string[] }) => Promise<unknown>
       fetchKnowledgeUserDetails: (opts?: { upperOrgLv1?: string[] }) => Promise<unknown>
       fetchKnowledgeActiveDetails: (opts?: { upperOrgLv1?: string[] }) => Promise<unknown>
       fetchKnowledgeRecentConstraintFiles: (opts?: { upperOrgLv1?: string[] }) => Promise<unknown>
@@ -178,6 +185,25 @@ describe("knowledge detail scope and query reuse", () => {
     await expect(f.api.fetchKnowledgeReadReaders(file, opts)).rejects.toThrow("access denied")
     expect(f.query).toHaveBeenCalledTimes(4)
   })
+  it.each(["fetchKnowledgeOrgGroups", "fetchKnowledgeRoomPeople"] as const)(
+    "%s uses the clicked room ID and rejects IDs outside the allowed scope",
+    async (method) => {
+      const f = fixture()
+      const request =
+        method === "fetchKnowledgeOrgGroups" ? f.fetchKnowledgeOrgDistribution : f.fetchUserDetails
+      await f.api[method]("2")
+      expect(request).toHaveBeenCalledExactlyOnceWith("http://kb.test", ["2"], undefined)
+      request.mockClear()
+      await expect(f.api[method]("2", { upperOrgLv1: ["甲室"] })).rejects.toThrow("当前范围")
+      await expect(f.api[method]("")).rejects.toThrow("当前范围")
+      f.access.admin = false
+      await expect(f.api[method]("2")).rejects.toThrow("当前范围")
+      await expect(f.api[method]("2", { upperOrgLv1: ["乙室"] })).rejects.toThrow("当前范围")
+      expect(request).not.toHaveBeenCalled()
+      await f.api[method]("1")
+      expect(request).toHaveBeenCalledExactlyOnceWith("http://kb.test", ["1"], undefined)
+    }
+  )
   it.each(["fetchKnowledgeActiveDetails", "fetchKnowledgeUserDetails"] as const)(
     "%s shares room mapping and never sends null for denied or unmapped scopes",
     async (method) => {

@@ -1,5 +1,7 @@
 import { buildStreamingMarkdownPreview } from "./streaming-markdown-preview"
+import { systemNoticeBlockText } from "./goal-notice-presentation"
 import { getCollapsedToolCallSummary } from "./tool-call-summary"
+import { hasLegacyStructuredTranscriptNotice } from "./thread-message-content"
 import type { ChatSearchPlan, ChatSearchSourceSegment } from "./chat-search-types"
 
 export const CHAT_SEARCH_INPUT_LIMIT = 256 * 1024
@@ -14,6 +16,8 @@ export function createChatSearchPlan(
   const segments: ChatSearchSourceSegment[] = []
   const middles: Array<{ text: string; blockIndex: number; start: number; end: number }> = []
   const semanticBlocks = new Set<number>()
+  const legacyProjectionTruncated =
+    Array.isArray(content) && hasLegacyStructuredTranscriptNotice(content)
   let remaining = CHAT_SEARCH_INPUT_LIMIT
   let truncated = false
   const append = (text: string, blockIndex: number, start: number, end: number): void => {
@@ -55,19 +59,29 @@ export function createChatSearchPlan(
     middles.push({ text, blockIndex, start: preview.head.length, end: tailStart })
   }
   if (typeof content === "string") select(content, 0)
+  else if (Array.isArray(content) && role === "system") {
+    const parts: string[] = []
+    let units = 0
+    const bodyBlocks = content.length - Number(legacyProjectionTruncated)
+    for (let index = 0; index < Math.min(bodyBlocks, CHAT_SEARCH_BLOCK_LIMIT); index += 1) {
+      const text = systemNoticeBlockText(content[index])
+      if (!text) continue
+      units += text.length + Number(parts.length > 0)
+      if (units > remaining) break
+      parts.push(text)
+    }
+    truncated = units > remaining || bodyBlocks > CHAT_SEARCH_BLOCK_LIMIT
+    if (!truncated) select(parts.join("\n"), 0)
+  }
   else if (Array.isArray(content)) {
-    const count = Math.min(content.length, CHAT_SEARCH_BLOCK_LIMIT)
-    truncated = content.length > count
+    const bodyBlocks = content.length - Number(legacyProjectionTruncated)
+    const count = Math.min(bodyBlocks, CHAT_SEARCH_BLOCK_LIMIT)
+    truncated = bodyBlocks > count
     const textBlocks: Array<{ text: string; index: number }> = []
     for (let index = 0; index < count; index += 1) {
       const block = content[index] as { type?: unknown; text?: unknown; content?: unknown } | null
       if (!block || typeof block !== "object") continue
-      const text =
-        block.type === "text" && typeof block.text === "string"
-          ? block.text
-          : role === "system"
-            ? block.content
-            : null
+      const text = block.type === "text" ? block.text : null
       if (typeof text === "string") textBlocks.push({ text, index })
     }
     // Reserve both ends of the message before spending the budget on intervening blocks.
@@ -82,7 +96,7 @@ export function createChatSearchPlan(
   return {
     role,
     segments,
-    truncated,
+    truncated: truncated || legacyProjectionTruncated,
     ...(options.stripThink ? { stripThink: true } : {}),
     ...(role === "user" && typeof content === "string" ? { cleanAttachments: true } : {})
   }

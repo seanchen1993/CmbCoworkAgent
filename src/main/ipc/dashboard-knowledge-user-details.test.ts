@@ -23,6 +23,17 @@ describe("user knowledge detail list", () => {
       parseKnowledgeUserDetails([{ ...row, userName: " 张三 ", roomName: null }])[0]
     ).toMatchObject({ userName: "张三", roomName: "" })
   })
+  it("keeps room and group IDs, distinguishing old records from an explicitly unassigned group", () => {
+    const result = parseKnowledgeUserDetails([
+      row,
+      { ...row, roomId: 990511, groupId: " 992242 ", groupName: " 一组 " },
+      { ...row, groupId: null, groupName: null }
+    ])
+    expect(result[0]).not.toHaveProperty("groupId")
+    expect(result[1]).toMatchObject({ roomId: "990511", groupId: "992242", groupName: "一组" })
+    expect(result[2]).toMatchObject({ groupId: null, groupName: null })
+    expect(result[2]).not.toHaveProperty("roomId")
+  })
   it.each([
     null,
     {},

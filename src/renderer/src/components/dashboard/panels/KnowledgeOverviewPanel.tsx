@@ -7,15 +7,12 @@ import {
   Eye,
   FileText,
   FolderKanban,
-  Loader2,
   Trash2,
   Wrench,
   Zap
 } from "lucide-react"
-import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip as ChartTooltip } from "recharts"
 import type {
   KnowledgeAccumulationData,
-  KnowledgeDistributionItem,
   KnowledgeProjectStats,
   KnowledgeRecentConstraintFiles
 } from "../../../../../shared/dashboard-knowledge-overview"
@@ -26,11 +23,10 @@ import type {
 import { Button } from "@/components/ui/button"
 import { InfoHint } from "./dashboard-shared"
 import { KnowledgeActiveDetailsDialog } from "../KnowledgeActiveDetailsDialog"
+import { Distribution, KnowledgeOrgDistribution, Status } from "./KnowledgeDistribution"
+import { useKnowledgePeople } from "../use-knowledge-details"
 import { KnowledgeUserDetailsTable } from "../KnowledgeUserDetailsTable"
 
-const COLORS = ["#3b82f6", "#14b8a6", "#8b5cf6", "#f59e0b", "#f97316", "#94a3b8"]
-const distributionColor = (index: number): string =>
-  COLORS[index] ?? `hsl(${(index * 137.508) % 360} 65% 50%)`
 const SCOPE_NOTES: Record<DashboardKnowledgeCommitRateUnavailableReason, string> = {
   multipleRooms: "多选室时不展示",
   unclassified: "未归属没有室编号",
@@ -76,123 +72,11 @@ function StatCard({
   )
 }
 
-function Status({
-  loading,
-  error,
-  empty
-}: {
-  loading: boolean
-  error?: string | null
-  empty?: boolean
-}): React.JSX.Element | null {
-  if (loading)
-    return (
-      <div className="flex h-40 items-center justify-center gap-2 text-xs text-muted-foreground">
-        <Loader2 className="size-4 animate-spin" />
-        加载中
-      </div>
-    )
-  if (error)
-    return (
-      <div
-        role="alert"
-        className="flex h-40 items-center justify-center px-4 text-xs text-destructive"
-      >
-        {error}
-      </div>
-    )
-  if (empty)
-    return (
-      <div className="flex h-40 items-center justify-center text-xs text-muted-foreground">
-        暂无数据
-      </div>
-    )
-  return null
-}
-
-function Distribution({
-  title,
-  items,
-  loading,
-  error
-}: {
-  title: string
-  items: KnowledgeDistributionItem[] | null
-  loading: boolean
-  error?: string | null
-}): React.JSX.Element {
-  const rows = items ?? []
-  const total = rows.reduce((sum, row) => sum + row.value, 0)
-  return (
-    <div className="flex h-[clamp(240px,38vh,320px)] min-w-0 flex-col rounded-xl border border-border bg-card p-4">
-      <div className="text-xs font-medium">{title}</div>
-      {loading || error || total === 0 ? (
-        <Status loading={loading} error={error} empty={total === 0} />
-      ) : (
-        <div className="mt-3 flex min-h-0 flex-1 items-center gap-3">
-          <div className="relative h-44 w-40 shrink-0">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie
-                  data={rows}
-                  dataKey="value"
-                  nameKey="name"
-                  innerRadius={49}
-                  outerRadius={70}
-                  stroke="none"
-                >
-                  {rows.map((row, index) => (
-                    <Cell key={`${row.name}-${index}`} fill={distributionColor(index)} />
-                  ))}
-                </Pie>
-                <ChartTooltip
-                  formatter={(value, name) => [
-                    typeof value === "number" ? number(value) : "—",
-                    name ?? "未归属"
-                  ]}
-                  contentStyle={{ maxWidth: 280, whiteSpace: "normal", overflowWrap: "anywhere" }}
-                />
-              </PieChart>
-            </ResponsiveContainer>
-            <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
-              <span className="text-base font-semibold">{number(total)}</span>
-              <span className="text-[10px] text-muted-foreground">总数</span>
-            </div>
-          </div>
-          <div
-            className="max-h-full min-h-0 min-w-0 flex-1 space-y-2.5 overflow-y-auto overscroll-contain py-1 pr-2"
-            tabIndex={0}
-            role="region"
-            aria-label={`${title}图例，共 ${rows.length} 类`}
-          >
-            {rows.map((row, index) => (
-              <div key={`${row.name}-${index}`} className="flex items-center gap-1.5 text-[10px]">
-                <span
-                  className="size-2 shrink-0 rounded-sm"
-                  style={{ backgroundColor: distributionColor(index) }}
-                />
-                <span className="min-w-0 flex-1 truncate" title={row.name}>
-                  {row.name}
-                </span>
-                <span className="shrink-0 whitespace-nowrap font-medium tabular-nums">
-                  {number(row.value)}
-                </span>
-                <span className="w-10 shrink-0 text-right text-muted-foreground">
-                  {percent(row.value / total)}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
 export function KnowledgeOverviewPanel({
   accumulation,
   accumulationLoading,
   accumulationError,
+  retryAccumulation,
   projects,
   projectsLoading,
   projectsError,
@@ -210,6 +94,7 @@ export function KnowledgeOverviewPanel({
   accumulation: KnowledgeAccumulationData | null
   accumulationLoading: boolean
   accumulationError: string | null
+  retryAccumulation: () => void
   projects: KnowledgeProjectStats | null
   projectsLoading: boolean
   projectsError: string | null
@@ -225,6 +110,7 @@ export function KnowledgeOverviewPanel({
   onCreatedInRangeOnlyChange?: (value: boolean) => void
 }): React.JSX.Element {
   const [detailsOpen, setDetailsOpen] = useState(false)
+  const people = useKnowledgePeople(rooms, refreshKey)
   const totals = accumulation?.totals ?? undefined
   const users = accumulation?.users?.slice(0, 20) ?? []
   const maxUser = Math.max(1, ...users.map((row) => row.value))
@@ -431,8 +317,11 @@ export function KnowledgeOverviewPanel({
               </div>
             )}
           </div>
-          <Distribution
-            title="部门分布情况"
+          <KnowledgeOrgDistribution
+            key={JSON.stringify([rooms, refreshKey])}
+            rooms={rooms}
+            initialRoom={accumulation?.orgRoom}
+            retry={scopeNote ? undefined : retryAccumulation}
             items={accumulation?.orgs ?? null}
             loading={accumulationLoading}
             error={sectionError("orgs")}
@@ -445,11 +334,7 @@ export function KnowledgeOverviewPanel({
           />
         </div>
       </section>
-      <KnowledgeUserDetailsTable
-        key={JSON.stringify(rooms)}
-        rooms={rooms}
-        refreshKey={refreshKey}
-      />
+      <KnowledgeUserDetailsTable key={JSON.stringify(rooms)} people={people} />
       {detailsOpen && (
         <KnowledgeActiveDetailsDialog
           key={JSON.stringify([rooms, refreshKey])}

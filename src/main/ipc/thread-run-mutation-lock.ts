@@ -15,10 +15,57 @@ const threadRunMutationLock = new AsyncKeyedLock({
   label: "Thread mutation queue"
 })
 
+let cancelBackgroundMutation: ((threadId: string) => Promise<void>) | undefined
+const foregroundCheckpointOpens = new Map<string, number>()
+const publishingThreads = new Set<string>()
+
+export function stageThreadPublication(threadId: string): () => void {
+  publishingThreads.add(threadId)
+  return () => {
+    publishingThreads.delete(threadId)
+  }
+}
+
+export function isThreadPublicationPending(threadId: string): boolean {
+  return publishingThreads.has(threadId)
+}
+
+export function registerBackgroundThreadMutationCancellation(
+  cancel: (threadId: string) => Promise<void>
+) {
+  cancelBackgroundMutation = cancel
+}
+
+export async function preemptBackgroundThreadMutation(threadId: string): Promise<void> {
+  await cancelBackgroundMutation?.(threadId)
+}
+
+export function pinForegroundCheckpointOpen(threadId: string): () => void {
+  foregroundCheckpointOpens.set(threadId, (foregroundCheckpointOpens.get(threadId) ?? 0) + 1)
+  return () => {
+    const remaining = (foregroundCheckpointOpens.get(threadId) ?? 1) - 1
+    if (remaining) foregroundCheckpointOpens.set(threadId, remaining)
+    else foregroundCheckpointOpens.delete(threadId)
+  }
+}
+
+export function isForegroundCheckpointOpening(threadId: string): boolean {
+  return foregroundCheckpointOpens.has(threadId)
+}
+
+export function tryBackgroundThreadMutationLock<T>(
+  threadId: string,
+  operation: () => Promise<T>
+): Promise<T> | undefined {
+  if (threadRunMutationLock.has(threadId)) return undefined
+  return threadRunMutationLock.withKey(threadId, operation)
+}
+
 export function withThreadRunMutationLock<T>(
   threadId: string,
   operation: () => Promise<T>
 ): Promise<T> {
+  void cancelBackgroundMutation?.(threadId)
   return threadRunMutationLock.withKey(threadId, operation)
 }
 

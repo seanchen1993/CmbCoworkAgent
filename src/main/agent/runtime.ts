@@ -1,3 +1,5 @@
+import { NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY } from "../../shared/graph-transcript-boundary"
+import { pinForegroundCheckpointOpen, preemptBackgroundThreadMutation } from "../ipc/thread-run-mutation-lock"
 import { createStageUsageMiddleware } from "./trace/stage-usage-middleware"
 import {
   createSubagentLifecycleMiddleware,
@@ -196,6 +198,7 @@ import {
   getThreadMessageProviderOccurrencesBeforeUser,
   getThreadTranscriptBoundaryOrdinal,
   hasUnresolvedLegacyTranscriptSlots,
+  hasPendingGoalTranscriptOrder,
   moveThreadMessagesAfterAnchor,
   moveThreadMessagesAfterLastNonAssistant,
   replaceThreadMessageId,
@@ -287,19 +290,23 @@ export function setCurrentRunTranscriptFlushBeforeInjection(
 }
 
 /** Stage the graph input. The main-stream values fence owns its SQLite reservation. */
-export function createPhysicalGoalGateRecoveryMessage(
+export function createPhysicalScopedGateRecoveryMessage(
   threadId: string,
   runToken: string | undefined,
   messages: readonly BaseMessage[],
   prompt: string
 ): HumanMessage {
   const parent = messages.findLast(HumanMessage.isInstance)
+  const goalBoundary =
+    parent?.additional_kwargs[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] === true &&
+    Boolean(goalManager.getActive(threadId))
+  const notificationBoundary =
+    parent?.additional_kwargs[NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY] === true
   if (
     !parent?.id ||
-    parent.additional_kwargs[GOAL_CONTINUATION_BOUNDARY_METADATA_KEY] !== true ||
+    (!goalBoundary && !notificationBoundary) ||
     !runToken ||
-    !isCurrentRunMessageQueueOwner(threadId, runToken) ||
-    !goalManager.getActive(threadId)
+    !isCurrentRunMessageQueueOwner(threadId, runToken)
   ) {
     return new HumanMessage(prompt)
   }
@@ -316,15 +323,21 @@ export function createPhysicalGoalGateRecoveryMessage(
     content: prompt,
     id: randomUUID(),
     additional_kwargs: {
-      [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true,
+      ...(goalBoundary && { [GOAL_CONTINUATION_BOUNDARY_METADATA_KEY]: true }),
+      ...(notificationBoundary && { [NOTIFICATION_TRANSCRIPT_BOUNDARY_METADATA_KEY]: true }),
       [GOAL_GATE_PARENT_BOUNDARY_METADATA_KEY]: durableParentId
     }
   })
 }
 
-/** An upgraded ordinal-only migration must recover its identities before a Goal model streams. */
-function prepareLegacyGoalProviderHistory(threadId: string): Promise<void> | undefined {
-  if (!hasUnresolvedLegacyTranscriptSlots(threadId)) return undefined
+/** Settle provisional transcript order before model deltas claim provider identities. */
+function prepareLegacyScopedProviderHistory(
+  threadId: string,
+  scopedTurn: boolean
+): Promise<void> | undefined {
+  const pending = () => hasPendingGoalTranscriptOrder(threadId) ||
+    (scopedTurn && hasUnresolvedLegacyTranscriptSlots(threadId))
+  if (!pending()) return undefined
   return bootstrapLegacyCheckpointTranscriptInWorker(
     getThreadCheckpointPath(threadId),
     getDbPath(),
@@ -332,8 +345,8 @@ function prepareLegacyGoalProviderHistory(threadId: string): Promise<void> | und
   ).then(({ stats }) => {
     // No checkpoint ID means there is no recoverable source. An orphaned
     // ordinal-only marker alone should not keep future Goal turns blocked.
-    if (stats.checkpointId !== null && hasUnresolvedLegacyTranscriptSlots(threadId)) {
-      throw new Error("Goal 历史仍在恢复，请稍后继续。")
+    if (hasPendingGoalTranscriptOrder(threadId) || (stats.checkpointId !== null && pending())) {
+      throw new Error("会话历史仍在恢复，请稍后继续。")
     }
   })
 }
@@ -3112,7 +3125,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
         todoGateEnabled: mainTodosEnabled && turnCompletionTodoGateEnabled,
         onRecovery: onTurnCompletionRecovery,
         createRecoveryMessage: (threadId, messages, prompt) =>
-          createPhysicalGoalGateRecoveryMessage(
+          createPhysicalScopedGateRecoveryMessage(
             threadId,
             currentRunMessageQueueOwnerToken,
             messages,
@@ -3133,7 +3146,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
             ? undefined
             : previous.find((entry) => entry.role === "assistant")?.provider_occurrence ?? 0
         },
-        prepareLegacyGoalProviderHistory
+        prepareLegacyScopedProviderHistory
       ),
       createCmbSummarizationMiddleware(mainSummarizationOptions),
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
@@ -3676,58 +3689,69 @@ async function getCheckpointerInternal(
     checkpointers.set(threadId, cached)
     return cached
   }
-  const dbPath = getThreadCheckpointPath(threadId)
   const bornRetireEpoch = retireEpochOf(threadId)
-  const isSubThreadCheckpoint = threadId.includes("__")
-  const checkpointer = new SqlJsSaver(dbPath, undefined, {
-    maxRootCheckpoints: isSubThreadCheckpoint ? 1 : MAIN_THREAD_MAX_ROOT_CHECKPOINTS,
-    maxRootForkBoundaryCheckpoints: isSubThreadCheckpoint
-      ? 0
-      : MAIN_THREAD_MAX_FORK_BOUNDARY_CHECKPOINTS,
-    maxRootForkBoundaryBytes: isSubThreadCheckpoint ? 0 : MAIN_THREAD_MAX_FORK_BOUNDARY_BYTES,
-    maxNonRootCheckpoints: 1,
-    recoverMissingCheckpointMessages: isSubThreadCheckpoint
-      ? undefined
-      : recoverMainCheckpointMessages
-  })
-  await checkpointer.initialize()
-  // Re-check AFTER the awaits above: a deletion landing while this instance
-  // was initializing scans the three registries, but this instance is in none
-  // of them yet — caching it would hand a live, writable saver for a deleted
-  // thread (setup() has already queued an async persist). The tombstone check
-  // alone is NOT enough: a revive (fixed-id recreation) landing before
-  // initialize() returned clears it, yet this saver was born of the PREVIOUS
-  // incarnation — the retire epoch catches that, revive-immune.
-  if (isRetiredThreadId(threadId) || retireEpochOf(threadId) !== bornRetireEpoch) {
-    await checkpointer.retire()
-    // initialize() may itself have WRITTEN to disk before this check:
-    // openRecoveredSqliteDatabase persists a recovered .bak/.tmp back to the
-    // live .sqlite, and the deletion's purge has already swept. retire() only
-    // gates FUTURE writes — re-sweep the recovery's write here, so the dead
-    // incarnation's transcript can't bleed into a revived id across a crash.
-    //
-    // BEST-EFFORT MITIGATION, not an ownership proof (accepted residual): a
-    // cached entry does mean a revived saver owns the file (skip), but the
-    // converse is heuristic — a revived saver can itself be mid-initialize and
-    // not cached yet, and this sweep could then eat its files. That residual
-    // is bounded: during its own init the new incarnation can hold NO user
-    // data on disk (post-purge there is nothing to recover, and new content
-    // only arrives via put() after init; its in-memory db is authoritative and
-    // any next write rewrites the whole file). Strictly closing the window
-    // needs an init-in-flight lease — declined per ROI for a five-condition
-    // race with bounded, self-healing fallout.
-    if (isRetiredThreadId(threadId) || !checkpointers.has(threadId)) {
-      try {
-        deleteThreadCheckpoint(threadId)
-      } catch (e) {
-        console.warn(`[Runtime] post-refusal checkpoint re-sweep failed for ${threadId}:`, e)
-      }
+  const releaseCheckpointOpen = pinForegroundCheckpointOpen(threadId)
+  try {
+    await preemptBackgroundThreadMutation(threadId)
+    if (isRetiredThreadId(threadId) || retireEpochOf(threadId) !== bornRetireEpoch) {
+      throw new Error(`[Runtime] Thread was deleted while waiting to open its checkpoint: ${threadId}`)
     }
-    throw new Error(`[Runtime] Thread was deleted during checkpointer init; refused: ${threadId}`)
+    const opened = checkpointers.get(threadId)
+    if (opened) return opened
+    const dbPath = getThreadCheckpointPath(threadId)
+    const isSubThreadCheckpoint = threadId.includes("__")
+    const checkpointer = new SqlJsSaver(dbPath, undefined, {
+      maxRootCheckpoints: isSubThreadCheckpoint ? 1 : MAIN_THREAD_MAX_ROOT_CHECKPOINTS,
+      maxRootForkBoundaryCheckpoints: isSubThreadCheckpoint
+        ? 0
+        : MAIN_THREAD_MAX_FORK_BOUNDARY_CHECKPOINTS,
+      maxRootForkBoundaryBytes: isSubThreadCheckpoint ? 0 : MAIN_THREAD_MAX_FORK_BOUNDARY_BYTES,
+      maxNonRootCheckpoints: 1,
+      recoverMissingCheckpointMessages: isSubThreadCheckpoint
+        ? undefined
+        : recoverMainCheckpointMessages
+    })
+    await checkpointer.initialize()
+    // Re-check AFTER the awaits above: a deletion landing while this instance
+    // was initializing scans the three registries, but this instance is in none
+    // of them yet — caching it would hand a live, writable saver for a deleted
+    // thread (setup() has already queued an async persist). The tombstone check
+    // alone is NOT enough: a revive (fixed-id recreation) landing before
+    // initialize() returned clears it, yet this saver was born of the PREVIOUS
+    // incarnation — the retire epoch catches that, revive-immune.
+    if (isRetiredThreadId(threadId) || retireEpochOf(threadId) !== bornRetireEpoch) {
+      await checkpointer.retire()
+      // initialize() may itself have WRITTEN to disk before this check:
+      // openRecoveredSqliteDatabase persists a recovered .bak/.tmp back to the
+      // live .sqlite, and the deletion's purge has already swept. retire() only
+      // gates FUTURE writes — re-sweep the recovery's write here, so the dead
+      // incarnation's transcript can't bleed into a revived id across a crash.
+      //
+      // BEST-EFFORT MITIGATION, not an ownership proof (accepted residual): a
+      // cached entry does mean a revived saver owns the file (skip), but the
+      // converse is heuristic — a revived saver can itself be mid-initialize and
+      // not cached yet, and this sweep could then eat its files. That residual
+      // is bounded: during its own init the new incarnation can hold NO user
+      // data on disk (post-purge there is nothing to recover, and new content
+      // only arrives via put() after init; its in-memory db is authoritative and
+      // any next write rewrites the whole file). Strictly closing the window
+      // needs an init-in-flight lease — declined per ROI for a five-condition
+      // race with bounded, self-healing fallout.
+      if (isRetiredThreadId(threadId) || !checkpointers.has(threadId)) {
+        try {
+          deleteThreadCheckpoint(threadId)
+        } catch (e) {
+          console.warn(`[Runtime] post-refusal checkpoint re-sweep failed for ${threadId}:`, e)
+        }
+      }
+      throw new Error(`[Runtime] Thread was deleted during checkpointer init; refused: ${threadId}`)
+    }
+    checkpointers.set(threadId, checkpointer)
+    evictIdleCheckpointers()
+    return checkpointer
+  } finally {
+    releaseCheckpointOpen()
   }
-  checkpointers.set(threadId, checkpointer)
-  evictIdleCheckpointers()
-  return checkpointer
 }
 
 export async function getCheckpointer(threadId: string): Promise<SqlJsSaver> {

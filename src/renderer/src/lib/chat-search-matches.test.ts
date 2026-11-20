@@ -24,6 +24,21 @@ describe("incremental stable chat search matcher", () => {
       .reduce((sum, doc) => sum + doc.text.length, 0)).toBeLessThanOrEqual(4 * 1024 * 1024)
     expect(boundChatSearchCorpus(bounded).truncated).toBe(true)
   })
+  it.each([1000, 12000])("retains rendered Goal sidecars across the shared row and byte cap (%s)", (units) => {
+    const goal = { messageId: "goal-user-event-123", text: "unique goal text", sortIndex: 3 }
+    const saved = Array.from({ length: 510 }, (_, index) => ({
+      messageId: `saved-${index}`, text: "ordinary text", textUnits: units, sortIndex: index + 10
+    }))
+    const bounded = boundChatSearchCorpus(corpus([goal, ...saved]))
+    expect(bounded.truncated).toBe(true)
+    expect(bounded.stableDocuments).toContain(goal)
+    expect(bounded.stableDocuments).toContain(saved[509])
+    expect(bounded.stableDocuments.length).toBeLessThanOrEqual(500)
+    expect(createChatSearchMatcher()(bounded, "unique goal text")).toMatchObject([
+      { messageId: goal.messageId }
+    ])
+  })
+
   it("reveals a resident durable result even when the bounded local corpus omitted it", () => {
     const localCorpus = corpus([{ messageId: "local-only", text: "needle" }])
     const residentIndexes = new Map([["resident-outside-local-corpus", 501]])
