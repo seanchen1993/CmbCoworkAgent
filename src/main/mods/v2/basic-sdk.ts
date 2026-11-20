@@ -1,4 +1,3 @@
-import type { FunctionSessionReadMethod } from "../../../shared/mods/v2/session"
 import type { ModJson, ModObject } from "../../../shared/mods/types"
 import type { FunctionCommand } from "../../../shared/mods/v2/commands"
 import { isModObject, ModFunctionError } from "../../../shared/mods/v2/contracts"
@@ -13,11 +12,6 @@ export const SESSION_CAPABILITIES = [
   "session.cwd",
   "session.surface",
   "session.surfaces",
-  "session.repo",
-  "session.model",
-  "session.messages",
-  "session.turns",
-  "session.authorize",
   "clock.now",
   "clock.sleep",
   "store.get",
@@ -75,18 +69,6 @@ export function validateBasicInput(name: string, value: ModObject): void {
 }
 
 export function validateBasicResult(name: string, value: ModJson | undefined): void {
-  const toolUse = (call: ModJson): boolean =>
-    isModObject(call) &&
-    typeof call.tool_use_id === "string" &&
-    typeof call.tool === "string" &&
-    isModObject(call.input) &&
-    (call.text === undefined || typeof call.text === "string") &&
-    (call.isError === undefined || call.isError === true)
-  const toolResult = (answer: ModJson): boolean =>
-    isModObject(answer) &&
-    typeof answer.tool_use_id === "string" &&
-    typeof answer.text === "string" &&
-    typeof answer.isError === "boolean"
   const fileStat = (entry: ModJson | undefined): boolean =>
     isModObject(entry) &&
     ["file", "dir", "other"].includes(String(entry.kind)) &&
@@ -106,37 +88,7 @@ export function validateBasicResult(name: string, value: ModJson | undefined): v
         value.some(
           (entry) => !fileStat(entry) || !isModObject(entry) || typeof entry.name !== "string"
         ))) ||
-    (name === "session.authorize" &&
-      value !== null &&
-      (!isModObject(value) ||
-        typeof value.handle !== "string" ||
-        !["bearer", "api-key"].includes(String(value.kind)))) ||
-    (name === "session.repo" &&
-      value !== null &&
-      (!isModObject(value) ||
-        typeof value.root !== "string" ||
-        (value.remote !== null && typeof value.remote !== "string") ||
-        typeof value.internal !== "boolean" ||
-        (value.name !== null && typeof value.name !== "string"))) ||
-    ((name === "session.id" || name === "session.cwd" || name === "session.model") &&
-      typeof value !== "string") ||
-    (name === "session.turns" &&
-      (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)) ||
-    (name === "session.messages" &&
-      (!Array.isArray(value) ||
-        value.length > 4096 ||
-        value.some(
-          (entry) =>
-            !isModObject(entry) ||
-            !["user", "assistant"].includes(String(entry.role)) ||
-            typeof entry.text !== "string" ||
-            !Array.isArray(entry.toolUses) ||
-            entry.toolUses.some((call) => !toolUse(call)) ||
-            (entry.toolResults !== undefined &&
-              (entry.role !== "user" ||
-                !Array.isArray(entry.toolResults) ||
-                entry.toolResults.some((answer) => !toolResult(answer))))
-        ))) ||
+    ((name === "session.id" || name === "session.cwd") && typeof value !== "string") ||
     (name === "session.surface" && value !== "desktop") ||
     (name === "session.surfaces" &&
       (!Array.isArray(value) || value.some((surface) => surface !== "desktop"))) ||
@@ -169,7 +121,6 @@ export async function runBasicSdk(
     registry: Map<string, FunctionCommand>
     signal: AbortSignal
     state?: FunctionStateAccess
-    readSession?(method: FunctionSessionReadMethod, signal: AbortSignal): Promise<ModJson>
     files?: FunctionFileAccess
   }
 ): Promise<ModJson | undefined> {
@@ -192,16 +143,6 @@ export async function runBasicSdk(
       return undefined
     }
     if (method === "store.keys") return context.state.keys(signal)
-  }
-  if (method === "session.authorize") return null
-  if (
-    method === "session.repo" ||
-    method === "session.model" ||
-    method === "session.messages" ||
-    method === "session.turns"
-  ) {
-    if (!context.readSession) throw new ModFunctionError("MODS_SESSION_UNAVAILABLE")
-    return context.readSession(method, signal)
   }
   if (method === "session.id") return context.threadId
   if (method === "session.cwd") return context.workspace

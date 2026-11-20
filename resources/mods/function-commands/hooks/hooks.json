@@ -8,7 +8,6 @@
     "./model-tools.ts",
     "./registered-tools.ts",
     "./mcp.ts",
-    "./tool-check.ts",
-    "./session-info.ts"
+    "./tool-check.ts"
   ]
 }
