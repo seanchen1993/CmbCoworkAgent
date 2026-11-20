@@ -79,8 +79,7 @@ interface FunctionManagerHost {
     threadId: string,
     grant: ModGrant,
     input: ModObject,
-    signal: AbortSignal,
-    dispatch: import("./mcp-sdk").FunctionMcpToolDispatch
+    signal: AbortSignal
   ): Promise<ModObject>
   checkTool?(
     workspace: string,
@@ -355,18 +354,11 @@ export class FunctionModsManager {
             assertLive(plugin)
             return result
           },
-          callMcp: async (plugin, input, signal, dispatch) => {
+          callMcp: async (plugin, input, signal) => {
             assertLive(plugin)
             if (!this.host.callMcp) throw new ModFunctionError("MODS_MCP_UNAVAILABLE")
             const grant = current.snapshots.get(plugin.name)!.grant
-            const result = await this.host.callMcp(
-              workspace,
-              threadId,
-              grant,
-              input,
-              signal,
-              dispatch
-            )
+            const result = await this.host.callMcp(workspace, threadId, grant, input, signal)
             assertLive(plugin)
             return result
           },

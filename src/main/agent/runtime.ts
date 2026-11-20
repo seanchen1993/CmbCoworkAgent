@@ -273,8 +273,7 @@ import type {
   McpCapabilityTool,
   McpInvocationResult
 } from "../mcp/capability-types"
-import { buildAliasMaps } from "../mcp/aliasing"
-import { scopedMcpTools } from "../mcp/scoped-tools"
+import { buildAliasMaps, buildScopedToolAliases } from "../mcp/aliasing"
 import {
   closeGlobalMcpCapabilityService,
   getGlobalMcpCapabilityService
@@ -1143,6 +1142,10 @@ export function createScopedMcpCapabilityService(
     forceSyncWorkspaceHooks?: boolean
   }
 ): McpCapabilityService {
+  const getEffectivePriority = (tool: McpCapabilityTool): number => {
+    return tool.priority ?? (tool.sourceKind === "connector" ? 100 : 50)
+  }
+
   let scopedSnapshotCache: {
     key: string
     tools: McpCapabilityTool[]
@@ -1189,7 +1192,15 @@ export function createScopedMcpCapabilityService(
       return { tools: [...scopedSnapshotCache.tools], maps: scopedSnapshotCache.maps }
     }
 
-    const scopedTools = scopedMcpTools(baseSnapshot.tools, hookScope.activePluginIds)
+    const tools = baseSnapshot.tools.map((tool) => {
+      const pluginId = extractPluginIdFromProviderKey(tool.providerKey)
+      const isInactiveScopedPlugin =
+        tool.scope === "plugin-active" &&
+        pluginId &&
+        !hookScope.activePluginIds.has(pluginId.toLowerCase())
+      return isInactiveScopedPlugin ? { ...tool, visibility: "lazy" as const } : tool
+    })
+    const scopedTools = buildScopedToolAliases(tools, getEffectivePriority)
     const maps = buildAliasMaps(scopedTools)
     scopedSnapshotCache = { key: cacheKey, tools: scopedTools, maps }
     return { tools: [...scopedTools], maps }
@@ -1328,11 +1339,6 @@ export function createScopedMcpCapabilityService(
 
   const scopedService: McpCapabilityService = {
     listTools: async () => (await getScopedToolSnapshot()).tools,
-    peekTools: () => {
-      // Never initialize a connection; the underlying service rejects stale config fingerprints.
-      const current = service.peekTools?.()
-      return current ? scopedMcpTools(current, hookScope.activePluginIds) : null
-    },
     getSnapshot: async () => {
       const baseSnapshot = await getBaseToolSnapshot()
       const scopedSnapshot = await getScopedToolSnapshot()
@@ -1559,8 +1565,7 @@ export function createScopedMcpCapabilityService(
       readOnly: baseContext.readOnly
     },
     (id, args) => scopedService.invoke(id, args),
-    () => scopedService.listTools(),
-    () => scopedService.peekTools!()
+    () => scopedService.listTools()
   )
   if (releaseModBinding) baseContext.onModBinding?.(releaseModBinding)
   return scopedService

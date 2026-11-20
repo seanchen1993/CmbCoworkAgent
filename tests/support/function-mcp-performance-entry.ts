@@ -9,10 +9,6 @@ import type { McpCapabilityTool } from "../../src/main/mcp/capability-types"
 
 declare const __MODS_MCP_SDK__: boolean
 declare const __MODS_MATCHED_PUBLICATION__: boolean
-declare const __MODS_MCP_ROUTING__: boolean
-const route = __MODS_MCP_ROUTING__
-  ? (await import("../../src/main/mods/v2/mcp-tool-routing")).routeFunctionMcp
-  : undefined
 const workspace = mkdtempSync(join(tmpdir(), "mods-mcp-perf-"))
 const manager = new ModsManager(
   join(workspace, "control.sqlite"),
@@ -88,47 +84,26 @@ try {
     const before = performance.now()
     const signal = new AbortController().signal
     const result = await withFunctionExecution(scope, () =>
-      route
-        ? route(
+      __MODS_MCP_SDK__
+        ? manager.invokeFunctionMcp(
+            workspace,
+            "thread",
+            grant,
             { server: "Perf", tool: "echo", args: {} },
             signal,
-            (input, signal, core) => core(input, signal),
-            {
-              resolve: (input, signal) =>
-                manager.resolveFunctionMcp(workspace, "thread", grant, input, signal),
-              invoke: (input, signal, fingerprint) =>
-                manager.invokeFunctionMcp(
-                  workspace,
-                  "thread",
-                  grant,
-                  input,
-                  signal,
-                  false,
-                  true,
-                  fingerprint
-                )
-            }
+            false,
+            true
           )
-        : __MODS_MCP_SDK__
-          ? manager.invokeFunctionMcp(
-              workspace,
-              "thread",
-              grant,
-              { server: "Perf", tool: "echo", args: {} },
-              signal,
-              false,
-              true
-            )
-          : manager.invokeFunctionTool(
-              workspace,
-              "thread",
-              grant,
-              "mcp:perf:echo",
-              {},
-              signal,
-              false,
-              true
-            )
+        : manager.invokeFunctionTool(
+            workspace,
+            "thread",
+            grant,
+            "mcp:perf:echo",
+            {},
+            signal,
+            false,
+            true
+          )
     )
     assert(JSON.stringify(result).includes("echo"))
     if (!__MODS_MCP_SDK__ && __MODS_MATCHED_PUBLICATION__)

@@ -32,19 +32,11 @@ import { resolve } from "node:path"
 import { FunctionClients } from "./clients"
 import type { FunctionGuest, ModOrigin } from "../../../shared/mods/v2/contracts"
 import { randomUUID } from "node:crypto"
-import {
-  functionSdkToolInput,
-  validateFunctionToolResult,
-  validateModelToolInput
-} from "./tool-sdk"
+import { functionToolTarget, validateFunctionToolResult, validateModelToolInput } from "./tool-sdk"
 import { functionModelRequest, validateFunctionModelText } from "./model-sdk"
 import { FunctionToolRegistry, functionToolSpec } from "./tool-registry"
 import type { FunctionToolInfo, RegisteredFunctionTool } from "../../../shared/mods/v2/tools"
-import {
-  functionMcpInput,
-  validateFunctionMcpResult,
-  type FunctionMcpToolDispatch
-} from "./mcp-sdk"
+import { functionMcpInput, validateFunctionMcpResult } from "./mcp-sdk"
 import { functionToolCheckInput, validateToolCheckResult } from "./tool-check"
 import { constrainToolPermission, type ToolPermissionResult } from "../../../shared/tool-permission"
 import { validateRegisteredToolInput } from "./tool-schema"
@@ -56,12 +48,7 @@ export interface FunctionSessionHost {
   uiChanged?(): void
   loadClient?(plugin: string, module: string): Promise<FunctionGuest>
   callTool?(plugin: FunctionPlugin, input: ModObject, signal: AbortSignal): Promise<ModObject>
-  callMcp?(
-    plugin: FunctionPlugin,
-    input: ModObject,
-    signal: AbortSignal,
-    dispatch: FunctionMcpToolDispatch
-  ): Promise<ModObject>
+  callMcp?(plugin: FunctionPlugin, input: ModObject, signal: AbortSignal): Promise<ModObject>
   checkTool?(
     plugin: FunctionPlugin,
     input: ModObject,
@@ -385,7 +372,7 @@ export class FunctionSession {
           if (presentation?.modelTool) {
             validateModelToolInput(value)
             this.tools.validate(value)
-          } else functionSdkToolInput(value)
+          } else functionToolTarget(value)
         }
         if (name === "model.complete") functionModelRequest(value)
         if (name === "mcp.call") functionMcpInput(value)
@@ -543,22 +530,7 @@ export class FunctionSession {
           core: (value, signal) => {
             this.assertLive(plugin)
             if (!this.host.callMcp) throw new ModFunctionError("MODS_MCP_UNAVAILABLE")
-            return this.host.callMcp(
-              plugin,
-              value,
-              signal,
-              (toolInput, toolSignal, core) =>
-                this.dispatch(
-                  "tool.call",
-                  toolInput,
-                  toolSignal,
-                  { plugin: plugin.name, registration: source.registration },
-                  depth + 2,
-                  undefined,
-                  turnHeld ?? "tool.call",
-                  { core }
-                ) as Promise<ModObject>
-            )
+            return this.host.callMcp(plugin, value, signal)
           }
         },
         turnHeld
@@ -644,7 +616,7 @@ export class FunctionSession {
           depth + 1,
           turnHeld ?? "tool.call"
         )
-      functionSdkToolInput(input)
+      functionToolTarget(input)
       const result = await this.dispatch(
         "tool.call",
         { ...input, tool_use_id: randomUUID() },
