@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 const mocks = vi.hoisted(() => ({
   resolve: vi.fn(),
-  validate: vi.fn(async (workspace: string) => workspace),
   stage: vi.fn(),
   create: vi.fn((threadId: string, metadata: Record<string, unknown>) => ({
     thread_id: threadId,
@@ -18,7 +17,6 @@ vi.mock("electron-store", () => ({
     }
   }
 }))
-vi.mock("./workspace-validation", () => ({ validateWorkspaceDirectory: mocks.validate }))
 vi.mock("../db", () => ({ createThread: mocks.create }))
 vi.mock("../storage", () => ({ getOpenworkDir: () => "/unused" }))
 vi.mock("../ipc/models", () => ({ getDefaultModel: () => null }))
@@ -42,7 +40,6 @@ describe("new thread workspace policy", () => {
       workspacePath: "/old",
       harnessFeature: { projectId: "p", slug: "f" }
     })
-    expect(mocks.validate).toHaveBeenCalledWith("/feature")
     expect(mocks.create).toHaveBeenCalledWith(
       expect.any(String),
       expect.objectContaining({

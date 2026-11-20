@@ -1,9 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
 import { existsSync, realpathSync, writeFileSync } from "node:fs"
-import {
-  validateWorkspaceDirectory,
-  WorkspaceValidationError
-} from "../services/workspace-validation"
 import { basename } from "node:path"
 import type {
   ModCard,
@@ -584,34 +580,14 @@ export class ModsManager {
     }
   }
 
-  /** Prime without blocking Electron, and reject stale canonical grants before a new runtime. */
-  async prepareWorkspace(workspace: string): Promise<void> {
-    const real = await validateWorkspaceDirectory(workspace)
-    const key = process.platform === "win32" ? real.toLowerCase() : real
-    const cached = this.canonical.get(workspace)
-    if (cached && cached !== key) {
-      throw new WorkspaceValidationError(workspace, "实际路径已变化，请重启应用并重新选择工作区")
-    }
-    this.cacheWorkspaceKey(workspace, key)
-  }
-
-  private cacheWorkspaceKey(workspace: string, key: string): void {
-    if (this.canonical.size >= 100) this.canonical.clear()
-    this.canonical.set(workspace, key)
-    this.canonical.set(key, key)
-  }
-
   workspaceKey(workspace: string): string {
     const cached = this.canonical.get(workspace)
     if (cached) return cached
-    let real: string
-    try {
-      real = realpathSync(workspace)
-    } catch {
-      throw new WorkspaceValidationError(workspace, "不存在或不可访问")
-    }
+    const real = realpathSync(workspace)
     const key = process.platform === "win32" ? real.toLowerCase() : real
-    this.cacheWorkspaceKey(workspace, key)
+    if (this.canonical.size >= 100) this.canonical.clear()
+    this.canonical.set(workspace, key)
+    this.canonical.set(key, key)
     return key
   }
 
@@ -629,14 +605,12 @@ export class ModsManager {
   }
 
   isActive(workspace: string): boolean {
-    if (this.policy.required) return true
     if (!this.globalEnabled()) return false
     const value = this.config(this.workspaceKey(workspace))
     return value.enabled || value.policy
   }
 
   protects(workspace: string): boolean {
-    if (this.policy.required) return true
     if (!this.globalEnabled()) return false
     return this.config(this.workspaceKey(workspace)).policy
   }
