@@ -135,7 +135,9 @@ describe("create project in a managed directory", () => {
     await writeFile(scriptPath, `${workingScript}\nprocess.exit(1)`)
     const createInput = { ...automaticInput(), projectId: previewProjectId }
 
-    await expect(createHarnessProject(createInput)).rejects.toThrow("插件「plugin」执行失败")
+    await expect(createHarnessProject(createInput)).rejects.toThrow(
+      "插件「plugin」执行「create_project」失败"
+    )
     const initialized = JSON.parse(await readFile(join(preview, "initialized.json"), "utf8"))
     expect(initialized).toEqual({ workspacePath, projectDir: previewProjectId })
     await expect(readFile(storePath())).rejects.toMatchObject({ code: "ENOENT" })
@@ -214,6 +216,20 @@ console.log(JSON.stringify({
       .split("\n")
       .map((line) => JSON.parse(line))
     expect(calls).toEqual(supportsBatch ? [projectIds] : [[first.projectId], [second.projectId]])
+  })
+
+  it("identifies project_status when the plugin returns no project status", async () => {
+    const { projectId } = await createHarnessProject(automaticInput())
+    await writeFile(
+      join(state.root, "plugin", "inspect.cjs"),
+      "console.log(JSON.stringify({ workflow: {}, projects: {} }))"
+    )
+    await writeProjectCreateCommand("", `"${process.execPath}" "\${pluginPath}/inspect.cjs"`)
+
+    const details = await getHarnessProjectDetails([projectId])
+    expect(details[projectId].error).toBe(
+      "插件「plugin」执行「project_status」失败，请联系插件开发者"
+    )
   })
 })
 
@@ -302,7 +318,7 @@ describe("create project in a selected directory", () => {
     })
   })
 
-  it("shows the plugin name and logs the original command failure", async () => {
+  it("shows the plugin and command names and logs the original failure", async () => {
     const logs = vi.spyOn(console, "error").mockImplementation(() => {})
     try {
       await writeFile(
@@ -311,7 +327,7 @@ describe("create project in a selected directory", () => {
       )
 
       await expect(createHarnessProject(input())).rejects.toMatchObject({
-        message: "插件「plugin」执行失败，请联系插件开发者"
+        message: "插件「plugin」执行「create_project」失败，请联系插件开发者"
       })
       expect(logs).toHaveBeenCalledWith(expect.stringContaining("exit 1: spawn python ENOENT"))
       await expect(readFile(storePath())).rejects.toMatchObject({ code: "ENOENT" })
@@ -324,7 +340,7 @@ describe("create project in a selected directory", () => {
     ["python", "请安装最新版 Python 3"],
     ["python3", "请安装最新版 Python 3"],
     ["python.exe", "请安装最新版 Python 3"],
-    ["missing-plugin-command", "插件「plugin」执行失败，请联系插件开发者"]
+    ["missing-plugin-command", "插件「plugin」执行「create_project」失败，请联系插件开发者"]
   ])("shows the appropriate message when %s cannot start", async (command, message) => {
     const emptyPath = join(state.root, "empty-path")
     await mkdir(emptyPath)
