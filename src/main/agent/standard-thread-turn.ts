@@ -820,8 +820,7 @@ export function prepareStandardThreadRuntimeFactory(
         },
         input.remotePolicy
       ),
-      modelId,
-      modTurnRunId: input.runLease.runId
+      modelId
     }
   }
   return {

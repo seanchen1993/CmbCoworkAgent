@@ -37,7 +37,6 @@ import type { ScheduledTask } from "../types"
 import { executeImInboxScheduledTask } from "./im/inbox-scheduler"
 import { createStreamDataSerializer } from "../ipc/stream-data-serialization"
 import { ScheduledTranscript } from "./scheduled-transcript"
-import { FunctionTurnRun } from "../mods/v2/turn-run"
 import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
 import {
   clearTrustedToolFilePreviewSourcesForThread,
@@ -267,7 +266,6 @@ async function executeTask(taskId: string): Promise<void> {
   })
   const schedulerRunId = uuid()
   let leaseAcquired = false
-  let functionTurn: FunctionTurnRun | undefined
   let releaseCheckpointerPin: (() => void) | null = null
 
   try {
@@ -323,18 +321,16 @@ async function executeTask(taskId: string): Promise<void> {
     }
 
     assertLocalThreadRunLease(threadId, "scheduler", schedulerRunId)
-    const userMessage = new HumanMessage({ id: uuid(), content: finalPrompt })
     const agent = await createAgentRuntime({
       threadId,
       workspacePath,
       modelId: effectiveModelId,
       enableAgentsPrompt: false,
       noSchedulerTool: true,
-      hookTurnId: userMessage.id,
-      modTurnRunId: schedulerRunId,
       abortSignal: abortController.signal
     })
 
+    const userMessage = new HumanMessage({ id: uuid(), content: finalPrompt })
     if (
       upsertThreadMessages(threadId, [
         {
@@ -348,17 +344,6 @@ async function executeTask(taskId: string): Promise<void> {
       throw new Error("Failed to persist scheduled task input")
     }
     hasStreamedContent = true
-    functionTurn = new FunctionTurnRun({
-      workspace: workspacePath,
-      threadId,
-      runId: schedulerRunId,
-      turnId: userMessage.id!,
-      text: finalPrompt,
-      owner: "scheduler",
-      signal: abortController.signal,
-      cancel: () => abortController.abort()
-    })
-    await functionTurn.start()
     const converter = new StreamConverter(schedulerRunId, userMessage.id)
     const serializeForRun = createStreamDataSerializer()
     const transcript = new ScheduledTranscript(threadId)
@@ -389,7 +374,6 @@ async function executeTask(taskId: string): Promise<void> {
         // 也是必需的，LangChain 的 message 实例不直接暴露记录器要读的 kwargs。
         traceRecorder.onStreamChunk(mode, JSON.parse(JSON.stringify(data)))
         const frame = serializeForRun(mode, data)
-        functionTurn.observeStream(mode, frame.data)
         const { data: serialized, valuesMessageIndexOffset, valuesSnapshotKind } = frame
         const events = converter.processChunk(mode, serialized, {
           valuesMessageIndexOffset,
@@ -581,7 +565,6 @@ async function executeTask(taskId: string): Promise<void> {
       await closeCheckpointer(threadId).catch(() => {})
     }
     if (leaseAcquired) {
-      functionTurn?.finish(taskError ? "error" : "answer")
       releaseLocalThreadRunLease(threadId, "scheduler", schedulerRunId)
     }
     runningTasks.delete(taskId)
