@@ -1,9 +1,0 @@
-[*]
-@isomorphic/**
-@protocol/**
-@utils/crypto.ts
-@utils/debug.ts
-@utils/debugLogger.ts
-@utils/stackTrace.ts
-@utils/zones.ts
-node_modules/colors/safe

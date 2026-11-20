@@ -1,3 +1,0 @@
-# The maintained database and DuckDB sidecar files (WAL, compaction temp).
-*.duckdb
-*.duckdb.*
