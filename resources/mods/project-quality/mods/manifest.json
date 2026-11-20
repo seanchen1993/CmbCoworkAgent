@@ -10,7 +10,6 @@
     "readTools": [],
     "writeTools": ["host:execute"],
     "context": ["project.name"],
-    "store": false,
-    "artifacts": true
+    "store": false
   }
 }

@@ -2976,28 +2976,6 @@ const api = {
       resolution: "confirmed-success" | "confirmed-failure"
     ): Promise<void> => ipcRenderer.invoke("mods:reconcile", { threadId, callId, resolution }),
     backup: (): Promise<boolean> => ipcRenderer.invoke("mods:backup"),
-    artifact: (threadId: string, id: string): Promise<{ label: string; text: string }> =>
-      ipcRenderer.invoke("mods:artifact", { threadId, id }),
-    saveArtifact: (threadId: string, id: string): Promise<boolean> =>
-      ipcRenderer.invoke("mods:save-artifact", { threadId, id }),
-    commands: (threadId: string): Promise<import("../shared/mods/types").ModCommandDescriptor[]> =>
-      ipcRenderer.invoke("mods:commands", threadId),
-    enqueue: (
-      threadId: string,
-      descriptor: import("../shared/mods/types").ModCommandDescriptor,
-      args: import("../shared/mods/types").ModObject
-    ): Promise<import("../shared/mods/types").ModCommandJob> =>
-      ipcRenderer.invoke("mods:enqueue", { threadId, descriptor, args }),
-    jobs: (threadId: string): Promise<import("../shared/mods/types").ModCommandJob[]> =>
-      ipcRenderer.invoke("mods:jobs", threadId),
-    cancelJob: (threadId: string, id: string): Promise<void> =>
-      ipcRenderer.invoke("mods:cancel-job", { threadId, id }),
-    onJobsChanged: (callback: (event: { threadId: string }) => void): (() => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, payload: { threadId: string }): void =>
-        callback(payload)
-      ipcRenderer.on("mods:jobs-changed", listener)
-      return () => ipcRenderer.removeListener("mods:jobs-changed", listener)
-    },
     onCardsChanged: (callback: (event: { threadId: string }) => void): (() => void) => {
       const listener = (_event: Electron.IpcRendererEvent, value: { threadId: string }): void =>
         callback(value)

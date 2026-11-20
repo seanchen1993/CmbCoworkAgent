@@ -349,8 +349,6 @@ function gitConfigEnvironmentPreamble(
  * Options for LocalSandbox configuration.
  */
 export interface LocalSandboxOptions {
-  /** Host-created command-only context; a model turn replaces it with its own full runtime. */
-  modCommandOnly?: boolean
   /** Root directory for file operations and command execution (default: process.cwd()) */
   rootDir?: string
   /** Dynamic-workflow checkout identity and best-effort Git/path guards. */
@@ -2119,7 +2117,6 @@ export class LocalSandbox
     this._cwd = this.cwd
     this._maxFileSizeBytes = (options.maxFileSizeMb ?? 10) * 1024 * 1024
     attachModBackend(this, () => ({
-      commandOnly: options.modCommandOnly,
       workspace: this.workingDir,
       threadId: this.runId,
       turnId: this._hookTurnId ?? this.runId,

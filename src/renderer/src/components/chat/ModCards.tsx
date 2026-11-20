@@ -5,23 +5,17 @@ import { getModCards, subscribeModCards } from "@/lib/mod-cards-store"
 
 export function ModCards({
   threadId,
-  callId,
-  slot
+  callId
 }: {
   threadId: string
-  callId?: string
-  slot?: "turn.summary"
+  callId: string
 }): React.JSX.Element | null {
   const subscribe = useCallback(
     (listener: () => void) => subscribeModCards(threadId, listener),
     [threadId]
   )
   const snapshot = useCallback(() => getModCards(threadId), [threadId])
-  const all = useSyncExternalStore(subscribe, snapshot)
-  const summaryCallId = slot ? all.filter((card) => card.slot === slot).at(-1)?.callId : undefined
-  const cards = all.filter((card) =>
-    slot ? card.slot === slot && card.callId === summaryCallId : card.callId === callId
-  )
+  const cards = useSyncExternalStore(subscribe, snapshot).filter((card) => card.callId === callId)
   const [busy, setBusy] = useState<string | null>(null)
   const [used, setUsed] = useState<Set<string>>(new Set())
   const [result, setResult] = useState("")
@@ -39,34 +33,6 @@ export function ModCards({
   }
   function render(node: ModUiNode, key: string): React.ReactNode {
     switch (node.type) {
-      case "artifact-link":
-        return (
-          <span key={key} className="inline-flex gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() =>
-                void window.api.mods.artifact(threadId, node.artifactId).then(
-                  (artifact) => setResult(`${artifact.label}\n${artifact.text}`),
-                  (error) => setResult(String(error))
-                )
-              }
-            >
-              {node.label}
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() =>
-                void window.api.mods
-                  .saveArtifact(threadId, node.artifactId)
-                  .catch((error) => setResult(String(error)))
-              }
-            >
-              导出文本
-            </Button>
-          </span>
-        )
       case "text":
         return (
           <p key={key} className="whitespace-pre-wrap break-words">
@@ -133,11 +99,7 @@ export function ModCards({
   }
   if (cards.length === 0) return null
   return (
-    <div
-      className={`${slot ? "rounded-lg border bg-background/95 max-h-64 overflow-auto" : "border-t"} p-3 space-y-3 text-xs`}
-      data-mod-cards
-    >
-      {slot && <p className="font-medium">最近一次扩展总结</p>}
+    <div className="border-t p-3 space-y-3 text-xs" data-mod-cards>
       {cards.map((card) => (
         <section key={card.id} data-mod-card={card.modId} className="space-y-2">
           <p className="text-muted-foreground">由 {card.name} 提供</p>
