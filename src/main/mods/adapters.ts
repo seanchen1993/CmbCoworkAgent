@@ -52,14 +52,7 @@ export function withModToolCall<T, R extends ToolRequest>(
     routeClaimed: false,
     protectedOutput: manager.protects(binding.workspace),
     readOnly: binding.readOnly ?? false,
-    signal: binding.signal,
-    protectData: manager.protects(binding.workspace)
-      ? <V>(value: V): V => manager.policy.observer(value)
-      : undefined,
-    publish: manager.protects(binding.workspace)
-      ? <V>(value: V): Promise<V> =>
-          manager.publish(binding.workspace, value, callId, binding.signal)
-      : undefined
+    signal: binding.signal
   }
   return modCallContext.run(context, async () => {
     const delegated =
@@ -72,7 +65,7 @@ export function withModToolCall<T, R extends ToolRequest>(
           tool.args ?? {},
           (args) => handler({ ...request, toolCall: { ...tool, args } })
         )
-    return manager.publish(binding.workspace, value, callId, binding.signal)
+    return filterModResult(value, manager.protects(binding.workspace), callId)
   })
 }
 
@@ -177,17 +170,7 @@ export function protectCurrentModResult<T>(value: T): T {
 }
 
 export function protectCurrentModData<T>(value: T): T {
-  const policy = getModCallContext()?.protectData
-  if (policy) return policy(value)
   return getModCallContext()?.protectedOutput ? (filterModData(value, true) as T) : value
-}
-
-export async function publishCurrentModResult<T>(value: T): Promise<T> {
-  const context = getModCallContext()
-  context?.assertLive?.()
-  return context?.publish
-    ? context.publish(value, "before-observers")
-    : protectCurrentModResult(value)
 }
 
 export function currentModInput(value: unknown): ModObject {

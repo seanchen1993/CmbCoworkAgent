@@ -1457,7 +1457,7 @@ export function createScopedMcpCapabilityService(
           })
 
           if (pluginId) hookScope.activatePlugin(pluginId)
-          const result = await publishCurrentModResult(
+          const result = protectCurrentModResult(
             await invokeMcpToolWithPlaywrightInAppBrowserSupport({
               tool,
               workspacePath: baseContext.workspacePath,

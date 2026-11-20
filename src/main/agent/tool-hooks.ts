@@ -1,7 +1,7 @@
 import { ToolMessage } from "@langchain/core/messages"
 import { Command, isCommand } from "@langchain/langgraph"
 import { createMiddleware } from "langchain"
-import { withModToolCall, publishCurrentModResult } from "../mods/adapters"
+import { withModToolCall, protectCurrentModResult } from "../mods/adapters"
 import { authorizeCurrentModInput, getModsManager } from "../mods/manager"
 import type { HookContext, HookResultCallback } from "../hooks/runner"
 import { runHooksEnriched } from "../hooks/required-skill"
@@ -322,7 +322,7 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
 
             const toolArgs = mergeUpdatedInput(baseToolArgs, preResult?.updatedInput)
             await authorizeCurrentModInput(`host:${toolName}`, toolArgs)
-            const result = await publishCurrentModResult(
+            const result = protectCurrentModResult(
               await handler({
                 ...request,
                 toolCall: toolCall ? { ...toolCall, args: toolArgs } : toolCall,

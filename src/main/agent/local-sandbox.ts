@@ -1,4 +1,4 @@
-import { attachModBackend, protectCurrentModData, publishCurrentModResult } from "../mods/adapters"
+import { attachModBackend, protectCurrentModData, protectCurrentModResult } from "../mods/adapters"
 import { authorizeCurrentModInput } from "../mods/manager"
 import { getModCallContext } from "../mods/context"
 /**
@@ -2869,7 +2869,7 @@ export class LocalSandbox
 
   private async runHooks(event: HookEvent, context: HookContext): Promise<HookResult | null> {
     if (event !== "PreToolUse" && context.toolResult !== undefined) {
-      context = { ...context, toolResult: await publishCurrentModResult(context.toolResult) }
+      context = { ...context, toolResult: protectCurrentModData(context.toolResult) }
     }
     const hookContext: HookContext = {
       ...context,
@@ -3069,7 +3069,7 @@ export class LocalSandbox
     })
     throwIfHookHalt("PostToolUse", postResult, `${toolName} was stopped by a PostToolUse hook`)
     const feedback = LocalSandbox.formatPostHookTextFeedback(postResult)
-    return publishCurrentModResult(feedback ? `${toolResult}\n\n${feedback}` : toolResult)
+    return protectCurrentModResult(feedback ? `${toolResult}\n\n${feedback}` : toolResult)
   }
 
   private getSkillHookKey(skill: SkillLifecycleMatch): string {

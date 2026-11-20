@@ -65,10 +65,6 @@ export interface ModDispatchRequest {
   assertScope?: () => void
   context?: Record<string, ModJson>
   onCard?: (card: ModCard) => void
-  policyDigest?: string
-  publish?: <T>(value: T, stage: "before-observers" | "final") => Promise<T>
-  protectData?: <T>(value: T) => T
-  admit?: (args: Record<string, unknown>) => Promise<void>
 }
 
 const readTools = new Set([
@@ -207,16 +203,9 @@ export class ModEngine {
         if (corePromise) throw new ModError("MODS_CORE_ALREADY_STARTED")
         corePromise = (async () => {
           this.assertLive(request, selected)
-          this.store.claim(
-            request.identity.callId,
-            request.toolId,
-            request.args,
-            request.identity,
-            args
-          )
+          this.store.claim(request.identity.callId, request.toolId, args, request.identity)
+          executed = true
           try {
-            await request.admit?.(args)
-            executed = true
             const context = {
               identity: request.identity,
               toolId: request.toolId,
@@ -226,13 +215,10 @@ export class ModEngine {
               readOnly: request.readOnly ?? false,
               originMod: request.identity.modId,
               authorize: request.authorize,
-              policyDigest: request.policyDigest,
-              publish: request.publish,
-              protectData: request.protectData,
               userInitiated: request.userInitiated,
               assertLive: () => this.assertLive(request, selected),
               approvalFingerprint:
-                `${request.identity.threadId}:${request.identity.turnId}:${request.identity.agentId}:${request.identity.modId ?? "model"}:${request.identity.grantEpoch}:${request.policyDigest ?? "none"}|` +
+                `${request.identity.threadId}:${request.identity.turnId}:${request.identity.agentId}:${request.identity.modId ?? "model"}:${request.identity.grantEpoch}|` +
                 selected
                   .map((mod) => `${mod.grant.modId}:${mod.grant.digest}:${mod.grant.epoch}`)
                   .join("|")
@@ -241,9 +227,7 @@ export class ModEngine {
             const failed = this.failed(actual)
             this.store.settle(request.identity.callId, failed ? "failed" : "succeeded")
             this.assertLive(request, selected)
-            actual = request.publish
-              ? await request.publish(actual, "before-observers")
-              : filterModResult(actual, request.protectedOutput, toolCallId)
+            actual = filterModResult(actual, request.protectedOutput, toolCallId)
             receipt = randomUUID()
             return {
               receipt,
@@ -252,7 +236,7 @@ export class ModEngine {
             }
           } catch (error) {
             coreFailure = error
-            this.store.settle(request.identity.callId, executed ? "unknown" : "not_started")
+            this.store.settle(request.identity.callId, "unknown")
             throw error
           }
         })()
@@ -316,9 +300,7 @@ export class ModEngine {
         const transformed = same
           ? actual
           : replaceModProjection(actual, result.projection, toolCallId)
-        const published = request.publish
-          ? await request.publish(transformed, "final")
-          : filterModResult(transformed, request.protectedOutput, toolCallId)
+        const published = filterModResult(transformed, request.protectedOutput, toolCallId)
         const render = () => this.render(request, selected, projectModResult(published, toolCallId))
         if (chain.length === 0 && selected.length > 0) await this.exclusive(request, render)
         else await render()
@@ -383,9 +365,7 @@ export class ModEngine {
         request.identity.origin === "user-action"
       )
       this.store.assertGrant(mod.grant)
-      const safe = request.publish
-        ? await request.publish(value, "final")
-        : filterModResult(value, request.protectedOutput)
+      const safe = filterModResult(value, request.protectedOutput)
       return {
         receipt: randomUUID(),
         execution: this.failed(value) ? "failed" : "succeeded",
@@ -395,29 +375,16 @@ export class ModEngine {
     if (method === "context.get") {
       if (typeof args.field !== "string" || !permissions.context.includes(args.field))
         throw new ModError("MODS_CONTEXT_DENIED")
-      const value = request.context?.[args.field] ?? null
-      return request.publish
-        ? await request.publish(value, "final")
-        : filterModData(value, request.protectedOutput)
+      return filterModData(request.context?.[args.field] ?? null, request.protectedOutput)
     }
     const namespace = `${mod.grant.workspace}\u001f${mod.compiled.manifest.id}\u001f${mod.compiled.digest}`
     if (method.startsWith("store.")) {
       if (!permissions.store || typeof args.key !== "string")
         throw new ModError("MODS_STORE_DENIED")
-      if (method === "store.get") {
-        const value = this.store.read(namespace, args.key)
-        return request.publish
-          ? await request.publish(value, "final")
-          : filterModData(value, request.protectedOutput)
-      }
+      if (method === "store.get")
+        return filterModData(this.store.read(namespace, args.key), request.protectedOutput)
       if (method === "store.set")
-        this.store.write(
-          namespace,
-          args.key,
-          request.publish
-            ? await request.publish(args.value, "final")
-            : filterModData(args.value, request.protectedOutput)
-        )
+        this.store.write(namespace, args.key, filterModData(args.value, request.protectedOutput))
       else if (method === "store.delete") this.store.delete(namespace, args.key)
       else throw new ModError("MODS_CAPABILITY_UNKNOWN")
       return null
@@ -454,13 +421,8 @@ export class ModEngine {
               const block = record(item)
               if (typeof block.text !== "string" || block.text.length > 4000)
                 throw new ModError("MODS_CONTEXT_LIMIT")
-              const text = `[Mod: ${mod.compiled.manifest.name}]\n${block.text}`
               blocks.push(
-                String(
-                  request.publish
-                    ? await request.publish(text, "final")
-                    : filterModData(text, request.protectedOutput)
-                )
+                `[Mod: ${mod.compiled.manifest.name}]\n${String(filterModData(block.text, request.protectedOutput))}`
               )
             }
           } catch (error) {
@@ -498,9 +460,7 @@ export class ModEngine {
         request.signal
       )
       this.assertLive(request, [mod])
-      return request.publish
-        ? await request.publish(projection(value), "final")
-        : (filterModData(projection(value), request.protectedOutput) as unknown as ModProjection)
+      return filterModData(projection(value), request.protectedOutput) as unknown as ModProjection
     })
   }
 
@@ -531,11 +491,7 @@ export class ModEngine {
             },
             request.signal
           )
-          const safeNodes = parseModUi(
-            request.publish
-              ? await request.publish(nodes, "final")
-              : filterModData(nodes, request.protectedOutput)
-          )
+          const safeNodes = parseModUi(filterModData(nodes, request.protectedOutput))
           this.assertLive(request, [mod])
           request.onCard({
             id: randomUUID(),
