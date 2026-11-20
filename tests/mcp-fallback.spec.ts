@@ -280,7 +280,7 @@ async function testBotScopeSurvivesRuntimeFallback(): Promise<void> {
   const scope = createHookScope()
   scope.activatePlugin("docs")
   const scoped = createScopedMcpCapabilityService(
-    createBotMcpScope(base),
+    createBotMcpScope(base, "execution"),
     scope,
     () => [],
     undefined,

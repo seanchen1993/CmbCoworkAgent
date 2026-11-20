@@ -512,6 +512,16 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
     ? cases.filter(c => process.env.BOT_ROUTING_CASE!.split(",").includes(c.id))
     : cases
   assert.ok(selected.length, "unknown case")
+  const fetchReceipts = join(root, "web-fetch-calls.txt")
+  if (selected.some(test => test.id === "browser-lookup")) {
+    const profile = join(root, "profile")
+    await mkdir(profile, { recursive: true })
+    await writeFile(fetchReceipts, "")
+    await writeFile(join(profile, "mcp-connectors.json"), JSON.stringify([{
+      id: "test-url-reader", name: "web-fetch", kind: "stdio", enabled: true, lazyLoad: false,
+      command: process.execPath, args: [resolve("tests/support/bot-web-fetch-fixture.mjs"), fetchReceipts]
+    }]))
+  }
   if (selected.some(test => test.skill || test.naturalSkill))
     await installSlashSkillFixture(root)
   if (selected.some(test => test.id.startsWith("ops-log-"))) {
@@ -958,6 +968,9 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
       const mainRequests = wire.communicationRequests.filter(r => r.at >= start && r.user.includes(message))
       const result = {
         ...test,
+        ...(test.id === "browser-lookup" ? {
+          externalReaderCalls: (await readFile(fetchReceipts, "utf8")).split("\n").filter(Boolean).length
+        } : {}),
         actual,
         followsPreference: actual === test.preferred,
         seconds: +((Date.now() - start) / 1000).toFixed(1),
@@ -1100,6 +1113,14 @@ async function main(archive: Awaited<ReturnType<typeof createBotExperimentArchiv
         const { result, data } = await turn(bot, test, test.message(directory), test.skill?.(directory))
         await archive.checkpoint(report(), `verify:${test.id}`)
         await test.verify?.(directory, result, data)
+        if (test.id === "browser-lookup") {
+          const executor = wire.firstRequestByRole.executor
+          assert.match(executor.system, /mcp__\w+__web_fetch/i, "the competing reader must actually be installed and discoverable")
+          assert.ok(!executor.tools.some(name => name.endsWith("__web_fetch")), "the reader must not be a first-choice tool")
+          const main = wire.firstRequestByRole.communication
+          assert.ok(!main.system.includes("__web_fetch") && !main.tools.some(name => name.endsWith("__web_fetch")))
+          assert.equal(result.externalReaderCalls, 0, "no external MCP fetch may precede or duplicate the built-in read")
+        }
         result.validation = "passed"
         await save()
         if (test.id === "library-brief") {

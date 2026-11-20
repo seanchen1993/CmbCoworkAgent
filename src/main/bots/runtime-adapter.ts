@@ -1817,7 +1817,7 @@ export function createLocalBotRunPort(
                 botSkillDispatch: selectedMainBotSkill(task),
                 ...(simulated
                   ? {}
-                  : { capabilityService: createBotMcpScope(getGlobalMcpCapabilityService()) }),
+                  : { capabilityService: createBotMcpScope(getGlobalMcpCapabilityService(), communication ? "communication" : "execution") }),
                 signal,
                 localRunLease: { owner: "bot", runId: task.id, managedExternally: true },
                 // Reuse notification claiming/acknowledgement; scheduler dispatches Bot summaries back into the host queue.
