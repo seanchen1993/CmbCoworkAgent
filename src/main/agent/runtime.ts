@@ -1121,9 +1121,6 @@ export function createScopedMcpCapabilityService(
   baseContext: {
     workspacePath: string
     threadId: string
-    signal?: AbortSignal
-    readOnly?: boolean
-    onModBinding?: (release: () => void) => void
     agentId?: string
     turnId?: string
     pluginOutputDir?: string
@@ -1364,9 +1361,7 @@ export function createScopedMcpCapabilityService(
           threadId: baseContext.threadId,
           turnId: baseContext.turnId ?? baseContext.threadId,
           agentId: getModCallContext()?.identity.agentId ?? baseContext.agentId,
-          activePluginIds: hookScope.activePluginIds,
-          ...(baseContext.signal ? { signal: baseContext.signal } : {}),
-          ...(baseContext.readOnly === undefined ? {} : { readOnly: baseContext.readOnly })
+          activePluginIds: hookScope.activePluginIds
         },
         tool,
         args,
@@ -1543,31 +1538,25 @@ export function createScopedMcpCapabilityService(
       return modResult
     },
     invalidate: async (reason) => {
-      releaseModBinding?.()
       scopedSnapshotCache = null
       baseSnapshotCache = null
       await service.invalidate(reason)
     },
     close: async () => {
-      releaseModBinding?.()
       scopedSnapshotCache = null
       baseSnapshotCache = null
       await service.close()
     }
   }
-  const releaseModBinding = getModsManager()?.bindMcp(
+  getModsManager()?.bindMcp(
     {
       workspace: baseContext.workspacePath,
       threadId: baseContext.threadId,
       turnId: baseContext.turnId ?? baseContext.threadId,
-      agentId: baseContext.agentId,
-      signal: baseContext.signal,
-      readOnly: baseContext.readOnly
+      agentId: baseContext.agentId
     },
-    (id, args) => scopedService.invoke(id, args),
-    () => scopedService.listTools()
+    (id, args) => scopedService.invoke(id, args)
   )
-  if (releaseModBinding) baseContext.onModBinding?.(releaseModBinding)
   return scopedService
 }
 
