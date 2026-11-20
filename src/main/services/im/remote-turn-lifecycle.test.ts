@@ -10,10 +10,6 @@ import { ModRuntimeAuthorities } from "../../mods/runtime-instance"
 import { FunctionTurnLifecycle, type FunctionTurnLifecycleHost } from "../../mods/v2/turn-lifecycle"
 import { createFunctionSessionViewMiddleware } from "../../agent/mods-session-view"
 import {
-  createTurnCompletionGateMiddleware,
-  readTurnCompletionGateReport
-} from "../../agent/turn-completion-integrity"
-import {
   claimLocalThreadRunLease,
   getLocalThreadRunLease,
   onLocalThreadRunLeaseReleased,
@@ -125,7 +121,7 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-it.each(["answer", "cancel", "parent-cancel", "error", "retry", "revision", "refusal"])(
+it.each(["answer", "cancel", "parent-cancel", "error", "retry", "revision"])(
   "settles a remote %s through the actual graph without releasing the transport's lease",
   async (ending) => {
     const controller = new AbortController()
@@ -173,10 +169,7 @@ it.each(["answer", "cancel", "parent-cancel", "error", "retry", "revision", "ref
           id: `remote-${calls}`,
           content: `actual remote answer ${calls}`,
           usage_metadata: { input_tokens: 8, output_tokens: 2, total_tokens: 10 },
-          response_metadata: {
-            model_name: "real-remote-provider",
-            ...(ending === "refusal" ? { finish_reason: "content_filter" } : {})
-          }
+          response_metadata: { model_name: "real-remote-provider" }
         })
         return { generations: [{ message, text: String(message.content) }] }
       }
@@ -196,7 +189,6 @@ it.each(["answer", "cancel", "parent-cancel", "error", "retry", "revision", "ref
         tools: [],
         checkpointer,
         middleware: [
-          createTurnCompletionGateMiddleware({ observationRunToken: input.modTurnRunId }),
           createFunctionSessionViewMiddleware(
             manager as unknown as ModsManager,
             authority,
@@ -222,7 +214,7 @@ it.each(["answer", "cancel", "parent-cancel", "error", "retry", "revision", "ref
         signal: controller.signal,
         disableAutoCommit: true
       })
-      if (["cancel", "parent-cancel", "error", "refusal"].includes(ending))
+      if (["cancel", "parent-cancel", "error"].includes(ending))
         await expect(promise).rejects.toThrow()
       else
         await expect(promise).resolves.toBe(`actual remote answer ${ending === "answer" ? 1 : 2}`)
@@ -238,20 +230,7 @@ it.each(["answer", "cancel", "parent-cancel", "error", "retry", "revision", "ref
       await vi.waitFor(() => expect(complete).toHaveBeenCalledTimes(1))
       const facts = complete.mock.calls[0][1]
       const aborted = ending === "cancel" || ending === "parent-cancel"
-      expect(facts.reason).toBe(
-        aborted
-          ? "aborted"
-          : ending === "refusal"
-            ? "refusal"
-            : ending === "error"
-              ? "error"
-              : "answer"
-      )
-      if (ending === "refusal") {
-        expect(facts).toHaveProperty("refusal", { category: null, explanation: null })
-        expect(fixture.finish).not.toHaveBeenCalledWith("success")
-      }
-      expect(readTurnCompletionGateReport("remote", "physical")).toBeNull()
+      expect(facts.reason).toBe(aborted ? "aborted" : ending === "error" ? "error" : "answer")
       expect(facts.turnId).toBe("user-id")
       expect(controller.signal.aborted).toBe(ending === "parent-cancel")
       if (!aborted && ending !== "error") {

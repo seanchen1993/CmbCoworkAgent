@@ -8803,8 +8803,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           if (!abortController.signal.aborted) {
             while (!abortController.signal.aborted) {
               const completionOutcome = await runCompletionHooksWithRevision({
-                hasTerminalModelRefusal: () =>
-                  !!readTurnCompletionGateReport(threadId, runToken)?.refusal,
                 threadId,
                 workspacePath: workspacePath ?? undefined,
                 turnId: turnState.turnId,
@@ -8850,10 +8848,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 }
               })
               throwIfInvokeAborted()
-              if (readTurnCompletionGateReport(threadId, runToken)?.refusal) {
-                pauseActiveGoalForRuntimeStop("Model provider refused the request.")
-                break
-              }
 
               if (completionOutcome === "failed") {
                 clearCoordinatorNotificationSelectedSkillsOnExit = true
@@ -11155,8 +11149,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (!abortController.signal.aborted) {
             const completionOutcome = await runCompletionHooksWithRevision({
-              hasTerminalModelRefusal: () =>
-                !!readTurnCompletionGateReport(threadId, runToken)?.refusal,
               threadId,
               workspacePath: workspacePath ?? undefined,
               turnId: turnState.turnId,
@@ -12310,8 +12302,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           if (!abortController.signal.aborted) {
             const completionOutcome = await runCompletionHooksWithRevision({
-              hasTerminalModelRefusal: () =>
-                !!readTurnCompletionGateReport(threadId, runToken)?.refusal,
               threadId,
               workspacePath: workspacePath ?? undefined,
               turnId: turnState.turnId,

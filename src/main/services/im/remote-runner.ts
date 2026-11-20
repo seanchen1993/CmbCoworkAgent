@@ -1,11 +1,6 @@
 import { HumanMessage } from "@langchain/core/messages"
 import { randomUUID } from "node:crypto"
 import { FunctionTurnRun } from "../../mods/v2/turn-run"
-import {
-  assertNoTurnModelRefusal,
-  clearTurnCompletionGateState,
-  readTurnCompletionGateReport
-} from "../../agent/turn-completion-integrity"
 import { getAgentGraphRecursionLimit } from "../../../shared/agent-runtime-limits"
 import {
   closeCheckpointer,
@@ -571,13 +566,11 @@ export async function executePreparedRemoteStandardTurn(
     }
     if (lastError) throw lastError
     if (!agent) throw new Error("No IM runtime could be created")
-    assertNoTurnModelRefusal(threadId, runId)
 
     let revision = 0
     const completion = internalNotificationTurn
       ? "passed"
       : await runCompletionHooksWithRevision({
-          hasTerminalModelRefusal: () => !!readTurnCompletionGateReport(threadId, runId)?.refusal,
           threadId,
           workspacePath,
           turnId: userMessageId,
@@ -633,7 +626,6 @@ export async function executePreparedRemoteStandardTurn(
     }
 
     await streamConsumer.flush()
-    assertNoTurnModelRefusal(threadId, runId)
     const finalText = streamConsumer.getFinalAssistantText().trim() || "处理完成。"
     attribution.sync()
     await tracer.finish("success")
@@ -659,7 +651,6 @@ export async function executePreparedRemoteStandardTurn(
     throw error
   } finally {
     functionTurn.finish(completionSucceeded ? "answer" : "error")
-    clearTurnCompletionGateState(threadId, runId)
     if (!completionSucceeded) discardAgentAutoCommitTracking(threadId)
     releasePin()
     await closeCheckpointer(threadId).catch(() => undefined)
