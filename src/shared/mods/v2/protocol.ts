@@ -13,7 +13,6 @@ export type FunctionRequest = {
 } & (
   | { type: "load"; code: string; options: ModObject }
   | { type: "match"; registration: string; event: ModObject }
-  | { type: "release-ui"; generation: string }
   | {
       type: "invoke"
       registration: string

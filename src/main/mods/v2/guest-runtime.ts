@@ -17,9 +17,6 @@ import {
   type FunctionRegistration
 } from "../../../shared/mods/v2/contracts"
 import { FUNCTION_GUEST_BOOTSTRAP } from "./guest-bootstrap"
-import { modCompiler } from "../loader"
-
-let compiledBootstrap: string | undefined
 
 interface InvocationFrame {
   id: string
@@ -32,7 +29,7 @@ interface InvocationFrame {
   detach(): void
 }
 
-/** A persistent guest. SDK calls carry their continuation's frame; next stays dispatch-bound. */
+/** A persistent, cooperatively scheduled guest. SDK calls capture a frame, never an active global. */
 export class FunctionGuestRuntime {
   readonly registrations: FunctionRegistration[] = []
   private readonly frames = new Map<string, InvocationFrame>()
@@ -87,15 +84,8 @@ export class FunctionGuestRuntime {
     context.setProp(context.global, "__functionHost", host)
     host.dispose()
     try {
-      // Native await bypasses Promise.then; lowering both sources makes continuation identity
-      // explicit. Compilation happens only on load, outside the guest's execution slices.
-      const compiler = modCompiler()
-      compiledBootstrap ??= compiler.transformSync(FUNCTION_GUEST_BOOTSTRAP, {
-        target: "es2016"
-      }).code
-      const program = compiler.transformSync(code, { target: "es2016" }).code
-      guest.evaluate(compiledBootstrap).dispose()
-      guest.evaluate(program).dispose()
+      guest.evaluate(FUNCTION_GUEST_BOOTSTRAP).dispose()
+      guest.evaluate(code).dispose()
       const registration = guest.evaluate(
         `__functionRegister(${JSON.stringify(encodeModJson(options))})`
       )
@@ -148,10 +138,6 @@ export class FunctionGuestRuntime {
     } finally {
       result.dispose()
     }
-  }
-
-  releaseUi(generation: string): void {
-    this.evaluate(`__functionReleaseUi(${JSON.stringify(generation)})`).dispose()
   }
 
   invoke(
