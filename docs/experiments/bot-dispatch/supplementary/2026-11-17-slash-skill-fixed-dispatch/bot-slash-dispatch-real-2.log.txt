@@ -1,0 +1,8 @@
+Persistent experiment record: <repository>/docs/experiments/bot-dispatch/runs/20261117T112516Z-f381f06f/record.json
+{"case":"slash-skill-natural","actual":"independent","preferred":"independent","seconds":22,"mainSeconds":2.8,"dispatchSeconds":2.7,"mainModelRequests":1,"finishesDispatchBatch":true,"budgetHandoff":false,"tools":["bot_skill_dispatch"]}
+{"case":"slash-skill","actual":"independent","preferred":"independent","seconds":17.6,"mainSeconds":1.6,"dispatchSeconds":1.6,"mainModelRequests":1,"finishesDispatchBatch":true,"budgetHandoff":false,"tools":["bot_skill_dispatch"]}
+{"case":"slash-skill-revision","actual":"continue","preferred":"continue","seconds":13,"mainSeconds":2.3,"mainModelRequests":1,"finishesDispatchBatch":true,"budgetHandoff":false,"tools":["bot_work_send"]}
+{"case":"slash-skill-reselect","actual":"continue","preferred":"continue","seconds":12.8,"mainSeconds":1.9,"mainModelRequests":1,"finishesDispatchBatch":true,"budgetHandoff":false,"tools":["bot_skill_dispatch"]}
+{"case":"greeting","actual":"inline","preferred":"inline","seconds":1.3,"mainSeconds":1.1,"mainModelRequests":1,"finishesDispatchBatch":false,"budgetHandoff":false,"tools":[]}
+{"case":"short-shell","actual":"inline","preferred":"inline","seconds":4.7,"mainSeconds":4.6,"mainModelRequests":3,"finishesDispatchBatch":false,"budgetHandoff":false,"tools":["execute","execute"]}
+Routing evaluation report: <temp>/bot-integration-build-hp3IWA/artifacts/routing-1794914717003.json

@@ -119,6 +119,7 @@ import type {
   ThreadGroupIdsOptions,
   ThreadGroupIdsResult,
   ThreadDeleteOptions,
+  ThreadDeleteResult,
   ThreadMessagesPage,
   ThreadMessagesPageOptions,
   ThreadLegacyCheckpointBootstrapResult,
@@ -270,6 +271,7 @@ import type {
   CloseToTrayPromptEvent,
   WindowCloseBehavior
 } from "../shared/close-to-tray"
+import type { StartupView } from "../shared/startup-view"
 import type { AgentRuntimeSettings, AgentToolStrategy } from "../shared/agent-runtime-limits"
 
 interface ElectronAPI {
@@ -288,6 +290,8 @@ interface ElectronAPI {
   getWindowCloseBehavior: () => Promise<WindowCloseBehavior>
   setWindowCloseBehavior: (behavior: WindowCloseBehavior) => Promise<WindowCloseBehavior>
   onWindowCloseBehaviorChanged: (callback: (behavior: WindowCloseBehavior) => void) => () => void
+  getStartupView: () => Promise<StartupView>
+  setStartupView: (view: StartupView) => Promise<StartupView>
   getGitChangeNoticeEnabled: () => Promise<boolean>
   setGitChangeNoticeEnabled: (enabled: boolean) => Promise<boolean>
   getAgentRuntimeSettings: () => Promise<AgentRuntimeSettings>
@@ -1083,6 +1087,7 @@ interface DashboardPluginAggregate {
 }
 
 interface CustomAPI {
+  bots: import("../shared/bots/contracts").BotClient
   uiGuides: {
     getState(config: UiGuideConfig): Promise<UiGuideState>
     recordDisplay(config: UiGuideConfig): Promise<boolean>
@@ -1266,7 +1271,7 @@ interface CustomAPI {
       threadId: string,
       transcripts: Record<string, unknown>
     ) => Promise<Record<string, unknown>>
-    delete: (threadId: string, options?: ThreadDeleteOptions) => Promise<void>
+    delete: (threadId: string, options?: ThreadDeleteOptions) => Promise<ThreadDeleteResult>
     getMessages: (threadId: string) => Promise<Message[]>
     getMessagesPage: (
       threadId: string,
@@ -2924,6 +2929,21 @@ interface CustomAPI {
         pushedOnly: boolean
         items: DashboardCommitDetail[]
       }
+      error?: string
+    }>
+    botOverview: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{ success: boolean; data?: import("../shared/bots/telemetry").BotOverviewData; error?: string }>
+    botActiveUsers: (
+      range: { from: string; to: string },
+      granularity: "day" | "week" | "month" | "custom",
+      opts?: { upperOrgLv1?: string | string[] | null },
+      cursor?: string
+    ) => Promise<{
+      success: boolean
+      data?: import("../shared/bots/telemetry").BotActiveUsersPage
       error?: string
     }>
     overview: (

@@ -6,6 +6,8 @@ import {
 } from "../src/renderer/src/lib/live-display-message-projection"
 import type { LiveStreamMessage } from "../src/renderer/src/lib/live-stream-messages"
 import { createIncrementalToolDerivationProjector } from "../src/renderer/src/lib/message-render-stability"
+import { botMessageHasEntranceBody } from "../src/renderer/src/lib/bot-message-entrance"
+import { messageHasVisibleRow } from "../src/renderer/src/lib/message-display-visibility"
 import type { Message } from "../src/renderer/src/types"
 
 let stableFieldsReadable = true
@@ -202,5 +204,60 @@ const contentToolProjection = projectToolMessages(
 )
 assert.equal(contentToolProjection.messages, initialToolProjection.messages)
 assert.equal(contentToolProjection.version, initialToolProjection.version)
+
+// Bot thinking is invisible, including inline <think> content. Its first visible body
+// must publish a visibility revision without scanning the unchanged history on every token.
+const projectBotLive = createLiveDisplayMessageProjector()
+const projectBotVisibility = createDynamicLiveVisibilityProjector()
+let botVisibilityChecks = 0
+const botVisible = (message: Message, supplemental: boolean): boolean => {
+  botVisibilityChecks += 1
+  return (
+    messageHasVisibleRow(message, supplemental) &&
+    (message.role !== "assistant" ||
+      Boolean(message.tool_calls?.length) ||
+      botMessageHasEntranceBody(message))
+  )
+}
+const noChip = (): boolean => false
+const botHistory: Message[] = [
+  { id: "human", role: "user", content: "read a file", created_at: new Date(0) }
+]
+const renderBotFrame = (content: string, hasVisibleRow: typeof botVisible | null = botVisible) => {
+  const live = projectBotLive(botHistory, [
+    { id: "thinking", type: "ai", reasoning: "private reasoning", content }
+  ])
+  return projectBotVisibility({
+    live,
+    displayMessages: live.messages,
+    displayIndexById: live.indexById,
+    displayContentVersion: live.contentVersion,
+    displayStructureVersion: live.structureVersion,
+    hasHookLogChip: noChip,
+    hasVisibleRow: hasVisibleRow ?? undefined
+  })
+}
+const thinkingOnly = renderBotFrame("<think>private")
+assert.deepEqual(thinkingOnly.orderedVisibleIndexes, [])
+const thinkingVersion = thinkingOnly.version
+for (let i = 0; i < 30; i += 1) {
+  const frame = renderBotFrame(`<think>private-${i}`)
+  assert.equal(frame.version, thinkingVersion)
+  assert.deepEqual(frame.orderedVisibleIndexes, [])
+}
+const body = renderBotFrame("<think>private</think>文件内容")
+assert.ok(body.version > thinkingVersion)
+assert.deepEqual(body.orderedVisibleIndexes, [0])
+const bodyVersion = body.version
+botVisibilityChecks = 0
+for (let i = 0; i < 30; i += 1) {
+  assert.equal(renderBotFrame(`<think>private</think>文件内容${i}`).version, bodyVersion)
+}
+assert.equal(botVisibilityChecks, 30, "only the changed live row is checked per token")
+assert.deepEqual(
+  renderBotFrame("<think>private", null).orderedVisibleIndexes,
+  [0],
+  "ordinary workbench still renders its reasoning row"
+)
 
 console.log("live display message projection tests passed")

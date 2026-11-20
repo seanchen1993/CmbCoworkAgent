@@ -1,0 +1,46 @@
+{"test":"stream-converter-internal-turn","exitCode":0}
+PASS testTheNotificationPromptNeverBecomesAUserBubble
+PASS testTheOtherMessagesKeepTheirFallbackIds
+stream-converter-internal-turn.spec.ts passed
+
+
+{"test":"stream-message-ids","exitCode":1}
+✓ testExplicitIdWins
+✓ testSummarizationMessagesUseStructuralFiltering
+✓ testFallbackIdIsStableForSameValuesMessage
+✓ testFallbackIdIgnoresGrowingContent
+✓ testFallbackIdChangesWhenStructuralIdentityChanges
+✓ testSystemFallbackIdIsDistinctFromAssistant
+✓ testMessagesAndValuesFallbackIdsAlignForAssistantAndTool
+✓ testSyntheticCheckpointBaselineIncludesCoordinatorCurrentTurnIds
+✓ testCoordinatorCurrentTurnValuesUpdatesGrowingAssistantContent
+✓ testNormalValuesSnapshotAliasesChangedProviderMessageId
+✓ testNormalValuesSnapshotsCollapseRepeatedProviderIdChanges
+✓ testCurrentRunCompletedAliasSealsProviderOccurrenceAcrossDelayedChunk
+✓ testCurrentRunCompletedAliasReservesSlotBeforeFirstAssistantChunk
+✓ testSparseValuesKeepsCurrentRunProviderOccurrences
+✓ testCurrentRunCompletedAliasAcceptsStableSourceIdForKnownSlot
+✓ testIdlessCurrentRunCompletionReservesStableSlot
+
+<repo>/tests/stream-message-ids.spec.ts:32
+    throw new Error(`${message}: expected ${String(expected)}, got ${String(actual)}`)
+          ^
+
+Error: the stable completed bubble should replace the pre-boundary partial: expected first final, got first 
+    at assertEqual (<repo>/tests/stream-message-ids.spec.ts:32:11)
+    at testIdlessCurrentRunCompletionRekeysPreBoundaryPartial (<repo>/tests/stream-message-ids.spec.ts:1315:3)
+    at <anonymous> (<repo>/tests/stream-message-ids.spec.ts:3104:3)
+    at Object.<anonymous> (<repo>/tests/stream-message-ids.spec.ts:3106:1)
+    at Module._compile (node:internal/modules/cjs/loader:1781:14)
+    at Object.transformer (<home>/.codex/worktrees/devclaw-bot-integration/cmbCowork/node_modules/tsx/dist/register-OY9cqBEN.cjs:9:3619)
+    at Module.load (node:internal/modules/cjs/loader:1505:32)
+    at Function._load (node:internal/modules/cjs/loader:1309:12)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:254:19)
+    at loadCJSModuleWithModuleLoad (node:internal/modules/esm/translators:335:3)
+
+Node.js v22.23.5
+
+{"test":"stream-fallback-baselines","exitCode":0}
+stream fallback baseline tests passed
+
+

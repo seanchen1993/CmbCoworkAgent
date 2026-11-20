@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { formatSkillUseBlock } from "./skill-use-block"
 import {
+  BOT_BROWSER_PROMPT_PREFIX,
   BUILTIN_BROWSER_INSTRUCTIONS_CLOSE,
   BUILTIN_BROWSER_INSTRUCTIONS_OPEN,
   BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX,
@@ -43,6 +44,9 @@ describe("stripUserInputTransportDecorations", () => {
   })
 
   it("peels the browser prefix, then a coordinator token inside it", () => {
+    expect(stripUserInputTransportDecorations(`${BOT_BROWSER_PROMPT_PREFIX}打开首页`)).toBe(
+      "打开首页"
+    )
     expect(
       stripUserInputTransportDecorations(`${BUILTIN_BROWSER_PROMPT_PREFIX}[coordinator] 打开首页`)
     ).toBe("打开首页")

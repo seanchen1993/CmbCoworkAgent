@@ -1,0 +1,122 @@
+{
+  "originalSha256": "96d4681bf1aa5ee5862059936da2a1cfde09a9717fb1b15cd3e35725d5b78ba2",
+  "transformation": "Vitest suite totals and per-file summaries; all failed assertions retained; paths redacted",
+  "startTime": 1794911336256,
+  "success": true,
+  "numTotalTests": 507,
+  "numPassedTests": 507,
+  "numFailedTests": 0,
+  "numPendingTests": 0,
+  "files": [
+    {
+      "name": "src/main/agent/bot-communication-prompt.test.ts",
+      "status": "passed",
+      "startTime": 1794911340116,
+      "endTime": 1794911340120.7224,
+      "total": 2,
+      "passed": 2,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/agent/bot-turn-context.test.ts",
+      "status": "passed",
+      "startTime": 1794911337165,
+      "endTime": 1794911337255.0059,
+      "total": 4,
+      "passed": 4,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/agent/opening-reply-reminder.test.ts",
+      "status": "passed",
+      "startTime": 1794911337218,
+      "endTime": 1794911337310.6235,
+      "total": 12,
+      "passed": 12,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/agent/pinned-model-routing.test.ts",
+      "status": "passed",
+      "startTime": 1794911338958,
+      "endTime": 1794911338961.7578,
+      "total": 4,
+      "passed": 4,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/agent/runtime-tool-allowlist.test.ts",
+      "status": "passed",
+      "startTime": 1794911338139,
+      "endTime": 1794911338140.9478,
+      "total": 1,
+      "passed": 1,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/agent/runtime-tool-concurrency.test.ts",
+      "status": "passed",
+      "startTime": 1794911337362,
+      "endTime": 1794911337587.0378,
+      "total": 14,
+      "passed": 14,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/agent/standard-thread-turn.test.ts",
+      "status": "passed",
+      "startTime": 1794911340118,
+      "endTime": 1794911340145.253,
+      "total": 21,
+      "passed": 21,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/agent/turn-completion-integrity.test.ts",
+      "status": "passed",
+      "startTime": 1794911337778,
+      "endTime": 1794911337796.1604,
+      "total": 60,
+      "passed": 60,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/prompt.test.ts",
+      "status": "passed",
+      "startTime": 1794911337130,
+      "endTime": 1794911337155.2483,
+      "total": 36,
+      "passed": 36,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/runtime-adapter.test.ts",
+      "status": "passed",
+      "startTime": 1794911338601,
+      "endTime": 1794911349062.961,
+      "total": 338,
+      "passed": 338,
+      "failed": [],
+      "message": ""
+    },
+    {
+      "name": "src/main/bots/work-result.test.ts",
+      "status": "passed",
+      "startTime": 1794911337853,
+      "endTime": 1794911338514.3618,
+      "total": 15,
+      "passed": 15,
+      "failed": [],
+      "message": ""
+    }
+  ]
+}

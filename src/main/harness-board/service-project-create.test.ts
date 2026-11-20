@@ -16,9 +16,12 @@ vi.mock("./catalog-client", () => ({}))
 import {
   archiveHarnessProject,
   createHarnessProject,
+  deleteHarnessProject,
+  refreshFollowedHarnessProjects,
   updateHarnessProjectMetadata
 } from "./service"
 import { initializeHarnessConfigV2 } from "./config-v2"
+import { onHarnessFeatureCatalogChange } from "./feature-catalog-lifecycle"
 
 const input = () => ({
   adapterId: "plugin",
@@ -61,6 +64,29 @@ fs.writeFileSync(path.join(process.argv[2], process.argv[3], 'initialized.json')
 afterEach(() => rm(state.root, { recursive: true, force: true }))
 
 describe("create project in a selected directory", () => {
+  it("notifies after committed deletion and recovers missed deletions from an intact registry", async () => {
+    const created = await createHarnessProject(input())
+    const changed = vi.fn()
+    const unsubscribe = onHarnessFeatureCatalogChange(changed)
+    try {
+      await archiveHarnessProject(created.projectId)
+      await expect(deleteHarnessProject("unknown")).rejects.toThrow("not found")
+      expect(changed).not.toHaveBeenCalled()
+      await deleteHarnessProject(created.projectId)
+      expect(changed.mock.calls).toEqual([[created.projectId, new Set()]])
+      changed.mockClear()
+      await refreshFollowedHarnessProjects([created.projectId])
+      expect(changed.mock.calls).toEqual([[created.projectId, new Set()]])
+      changed.mockClear()
+      await writeFile(storePath(), JSON.stringify({ projects: [{}] }))
+      await refreshFollowedHarnessProjects([created.projectId])
+      await rm(storePath())
+      await refreshFollowedHarnessProjects([created.projectId])
+      expect(changed).not.toHaveBeenCalled()
+    } finally {
+      unsubscribe()
+    }
+  })
   it.each([true, false])(
     "persists the explicit test project selection: %s",
     async (isTestProject) => {

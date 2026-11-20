@@ -128,7 +128,8 @@ describe("theme surface policy", () => {
       const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
       const rule = css.match(new RegExp(`${escapedSelector}\\s*\\{([\\s\\S]*?)\\}`))?.[1]
       expect(rule, `${selector} must exist`).toBeDefined()
-      expect(rule, `${selector} must use theme variables`).toContain("var(--")
+      // currentColor inherits the already themed message color (including Bot bubbles).
+      expect(rule, `${selector} must use theme variables or inherited color`).toMatch(/var\(--|currentColor/)
     }
   })
 

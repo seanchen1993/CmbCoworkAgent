@@ -1,0 +1,64 @@
+src/main/agent/stream-converter-snapshots.test.ts(9,8): error TS6307: File '<repo>/src/renderer/src/lib/subagent-transcripts.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+  The file is in the program because:
+    Imported via "../../renderer/src/lib/subagent-transcripts" from file '<repo>/src/main/agent/stream-converter-snapshots.test.ts'
+    Imported via "../../renderer/src/lib/subagent-transcripts" from file '<repo>/src/main/db/thread-subagent-text-snapshots.test.ts'
+src/main/agent/trace/cloud-upload-integrity.test.ts(132,20): error TS6307: File '<repo>/src/renderer/src/components/trace/TraceConversation.tsx' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+src/main/at-file-mentions-support.test.ts(2,53): error TS6307: File '<repo>/src/renderer/src/features/mentions/useAtFileMentions.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+src/main/bots/group-consumed-input.test.ts(6,37): error TS6307: File '<repo>/src/renderer/src/lib/bot-group-question.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+  The file is in the program because:
+    Imported via "../../renderer/src/lib/bot-group-question" from file '<repo>/src/main/bots/group-consumed-input.test.ts'
+    Imported via "../../renderer/src/lib/bot-group-question" from file '<repo>/src/main/bots/peer-feedback.test.ts'
+src/main/bots/host.test.ts(10,40): error TS6307: File '<repo>/src/renderer/src/lib/bot-group-mentions.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+src/main/db/thread-message-forward-page.test.ts(7,8): error TS6307: File '<repo>/src/renderer/src/lib/thread-message-pages.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+  The file is in the program because:
+    Imported via "../../renderer/src/lib/thread-message-pages" from file '<repo>/src/main/db/thread-message-forward-page.test.ts'
+    Imported via "../../renderer/src/lib/thread-message-pages" from file '<repo>/src/main/thread-message-hydration/client.test.ts'
+src/main/db/thread-message-reasoning.test.ts(21,47): error TS6307: File '<repo>/src/renderer/src/lib/message-display-visibility.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+src/main/ipc/dashboard-project-metrics.test.ts(2,42): error TS6307: File '<repo>/src/renderer/src/components/dashboard/panels/project-metric-export.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+src/main/workspace-file-load.test.ts(43,26): error TS6307: File '<repo>/src/renderer/src/lib/workspace-file-load.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+src/renderer/src/components/trace/TraceConversation.tsx(3,20): error TS6307: File '<repo>/src/renderer/src/lib/utils.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+  The file is in the program because:
+    Imported via "@/lib/utils" from file '<repo>/src/renderer/src/components/trace/TraceConversation.tsx'
+    Imported via "@/lib/utils" from file '<repo>/src/renderer/src/features/slash-commands/skill-chip.tsx'
+src/renderer/src/components/trace/TraceConversation.tsx(4,36): error TS6307: File '<repo>/src/renderer/src/features/builtin-browser/BuiltinBrowserChip.tsx' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+src/renderer/src/components/trace/TraceConversation.tsx(5,55): error TS6307: File '<repo>/src/renderer/src/features/builtin-browser/chat-integration.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+src/renderer/src/components/trace/TraceConversation.tsx(10,8): error TS6307: File '<repo>/src/renderer/src/features/slash-commands/skill-marker.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+src/renderer/src/components/trace/TraceConversation.tsx(15,45): error TS6307: File '<repo>/src/renderer/src/components/trace/trace-project-node-summary.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+src/renderer/src/features/builtin-browser/BuiltinBrowserChip.tsx(3,27): error TS6307: File '<repo>/src/renderer/src/features/slash-commands/skill-chip.tsx' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+src/renderer/src/features/builtin-browser/chat-integration.ts(5,8): error TS6307: File '<repo>/src/renderer/src/features/builtin-browser/builtin-browser.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+src/renderer/src/features/mentions/useAtFileMentions.ts(5,30): error TS6307: File '<repo>/src/renderer/src/lib/file-types.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+  The file is in the program because:
+    Imported via "@/lib/file-types" from file '<repo>/src/renderer/src/features/mentions/useAtFileMentions.ts'
+    Imported via "@/lib/file-types" from file '<repo>/src/renderer/src/features/mentions/at-file-mention-index.ts'
+src/renderer/src/features/mentions/useAtFileMentions.ts(6,31): error TS6307: File '<repo>/src/renderer/src/types.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+  The file is in the program because:
+    Imported via "@/types" from file '<repo>/src/renderer/src/features/mentions/useAtFileMentions.ts'
+    Imported via "@/types" from file '<repo>/src/renderer/src/features/mentions/at-file-mention-index.ts'
+    Imported via "../types" from file '<repo>/src/renderer/src/lib/subagent-transcripts.ts'
+    Imported via "../../renderer/src/types" from file '<repo>/src/main/agent/stream-converter-snapshots.test.ts'
+    Imported via "@/types" from file '<repo>/src/renderer/src/lib/bot-group-question.ts'
+    Imported via "../types" from file '<repo>/src/renderer/src/lib/thread-message-pages.ts'
+    Imported via "@/types" from file '<repo>/src/renderer/src/lib/live-stream-transcript.ts'
+    Imported via "@/types" from file '<repo>/src/renderer/src/lib/goal-notice-messages.ts'
+    Imported via "@/types" from file '<repo>/src/renderer/src/lib/goal-transcript.ts'
+    Imported via "@/types" from file '<repo>/src/renderer/src/lib/live-stream-messages.ts'
+    Imported via "../types" from file '<repo>/src/renderer/src/lib/message-display-visibility.ts'
+    Imported via "../../renderer/src/types" from file '<repo>/src/main/db/thread-subagent-text-snapshots.test.ts'
+src/renderer/src/features/mentions/useAtFileMentions.ts(11,8): error TS6307: File '<repo>/src/renderer/src/features/mentions/at-file-mention-index.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+  The file is in the program because:
+    Imported via "./at-file-mention-index" from file '<repo>/src/renderer/src/features/mentions/useAtFileMentions.ts'
+    Imported via "./at-file-mention-index" from file '<repo>/src/renderer/src/features/mentions/useAtFileMentions.ts'
+src/renderer/src/lib/goal-notice-messages.ts(7,49): error TS6307: File '<repo>/src/renderer/src/lib/goal-transport-summary.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+src/renderer/src/lib/live-stream-transcript.ts(7,45): error TS6307: File '<repo>/src/renderer/src/lib/goal-notice-messages.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+  The file is in the program because:
+    Imported via "./goal-notice-messages" from file '<repo>/src/renderer/src/lib/live-stream-transcript.ts'
+    Imported via "./goal-notice-messages" from file '<repo>/src/renderer/src/lib/goal-transcript.ts'
+src/renderer/src/lib/live-stream-transcript.ts(8,78): error TS6307: File '<repo>/src/renderer/src/lib/goal-transcript.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+src/renderer/src/lib/live-stream-transcript.ts(13,8): error TS6307: File '<repo>/src/renderer/src/lib/live-stream-messages.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+src/renderer/src/lib/thread-message-pages.ts(2,46): error TS6307: File '<repo>/src/renderer/src/lib/message-display-order.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+src/renderer/src/lib/thread-message-pages.ts(3,48): error TS6307: File '<repo>/src/renderer/src/lib/live-stream-transcript.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+src/renderer/src/lib/workspace-file-load.ts(21,8): error TS6307: File '<repo>/src/renderer/src/lib/workspace-file-tree-projection.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.
+  The file is in the program because:
+    Imported via "./workspace-file-tree-projection" from file '<repo>/src/renderer/src/lib/workspace-file-load.ts'
+    Imported via "../renderer/src/lib/workspace-file-tree-projection" from file '<repo>/src/main/workspace-file-load.test.ts'
+src/shared/commit-adoption-trace-logic.test.ts(2,46): error TS6307: File '<repo>/src/renderer/src/components/dashboard/commit-adoption-trace-logic.ts' is not listed within the file list of project '<repo>/tsconfig.node.json'. Projects must list all files or use an 'include' pattern.

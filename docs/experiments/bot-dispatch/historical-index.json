@@ -1,0 +1,186 @@
+[
+  {
+    "runId": "20261116T034925Z-import-fe464b98",
+    "startedAt": "2026-11-16T03:49:25.036Z",
+    "rows": 6,
+    "status": "failure-recorded",
+    "name": "routing-1794800965036.json",
+    "notes": "浏览器关闭导致未完成；不能将未跑到的用例计为通过。"
+  },
+  {
+    "runId": "20261116T035957Z-import-b9450721",
+    "startedAt": "2026-11-16T03:59:57.713Z",
+    "rows": 10,
+    "status": "no-failure-recorded",
+    "name": "routing-1794801597713.json",
+    "notes": "历史单轮记录，完整输入、处理路线及回复见 report；缺失的指标不推算。"
+  },
+  {
+    "runId": "20261116T040433Z-import-37599f38",
+    "startedAt": "2026-11-16T04:04:33.709Z",
+    "rows": 1,
+    "status": "no-failure-recorded",
+    "name": "routing-1794801873709.json",
+    "notes": "历史单轮记录，完整输入、处理路线及回复见 report；缺失的指标不推算。"
+  },
+  {
+    "runId": "20261116T041334Z-import-5b80f4ed",
+    "startedAt": "2026-11-16T04:13:34.637Z",
+    "rows": 1,
+    "status": "no-failure-recorded",
+    "name": "routing-1794802414637.json",
+    "notes": "历史单轮记录，完整输入、处理路线及回复见 report；缺失的指标不推算。"
+  },
+  {
+    "runId": "20261116T042140Z-import-fefbb14f",
+    "startedAt": "2026-11-16T04:21:40.492Z",
+    "rows": 1,
+    "status": "no-failure-recorded",
+    "name": "routing-1794802900492.json",
+    "notes": "历史单轮记录，完整输入、处理路线及回复见 report；缺失的指标不推算。"
+  },
+  {
+    "runId": "20261116T042621Z-import-fd737079",
+    "startedAt": "2026-11-16T04:26:21.175Z",
+    "rows": 1,
+    "status": "no-failure-recorded",
+    "name": "routing-1794803181175.json",
+    "notes": "历史单轮记录，完整输入、处理路线及回复见 report；缺失的指标不推算。"
+  },
+  {
+    "runId": "20261116T042829Z-import-3291f9c1",
+    "startedAt": "2026-11-16T04:28:29.010Z",
+    "rows": 1,
+    "status": "no-failure-recorded",
+    "name": "routing-1794803309010.json",
+    "notes": "历史单轮记录，完整输入、处理路线及回复见 report；缺失的指标不推算。"
+  },
+  {
+    "runId": "20261116T043245Z-import-ddfcac5f",
+    "startedAt": "2026-11-16T04:32:45.134Z",
+    "rows": 4,
+    "status": "failure-recorded",
+    "name": "routing-1794803565134.json",
+    "notes": "完成后继续的状态断言失败，保留当次 completed 与预期 active 的差异。"
+  },
+  {
+    "runId": "20261116T043359Z-import-fc26cbe8",
+    "startedAt": "2026-11-16T04:33:59.859Z",
+    "rows": 11,
+    "status": "no-failure-recorded",
+    "name": "routing-1794803639859.json",
+    "notes": "历史单轮记录，完整输入、处理路线及回复见 report；缺失的指标不推算。"
+  },
+  {
+    "runId": "20261116T043903Z-import-5633b6d1",
+    "startedAt": "2026-11-16T04:39:03.817Z",
+    "rows": 4,
+    "status": "no-failure-recorded",
+    "name": "routing-1794803943817.json",
+    "notes": "历史单轮记录，完整输入、处理路线及回复见 report；缺失的指标不推算。"
+  },
+  {
+    "runId": "20261116T044100Z-import-1192132a",
+    "startedAt": "2026-11-16T04:41:00.823Z",
+    "rows": 11,
+    "status": "no-failure-recorded",
+    "name": "routing-1794804060823.json",
+    "notes": "历史单轮记录，完整输入、处理路线及回复见 report；缺失的指标不推算。"
+  },
+  {
+    "runId": "20261116T044909Z-import-07bae816",
+    "startedAt": "2026-11-16T04:49:09.167Z",
+    "rows": 4,
+    "status": "no-failure-recorded",
+    "name": "routing-1794804549167.json",
+    "notes": "历史单轮记录，完整输入、处理路线及回复见 report；缺失的指标不推算。"
+  },
+  {
+    "runId": "20261116T045629Z-import-f736cb0b",
+    "startedAt": "2026-11-16T04:56:29.769Z",
+    "rows": 4,
+    "status": "no-failure-recorded",
+    "name": "routing-1794804989769.json",
+    "notes": "历史单轮记录，完整输入、处理路线及回复见 report；缺失的指标不推算。"
+  },
+  {
+    "runId": "20261116T105539Z-import-0ac2ec11",
+    "startedAt": "2026-11-16T10:55:39.910Z",
+    "rows": 7,
+    "status": "no-failure-recorded",
+    "name": "routing-1794826539910.json",
+    "notes": "历史单轮记录，完整输入、处理路线及回复见 report；缺失的指标不推算。"
+  },
+  {
+    "runId": "20261116T113816Z-import-f0697610",
+    "startedAt": "2026-11-16T11:38:16.252Z",
+    "rows": 18,
+    "status": "failure-recorded",
+    "name": "routing-1794829096252.json",
+    "notes": "业务执行后截图超时：重复查找已隐藏的 Bots 模式入口；后续定向复测修正了测试导航。该轮没有记录 budgetHandoff，不能按 false 统计。"
+  },
+  {
+    "runId": "20261116T115229Z-import-4ebfb644",
+    "startedAt": "2026-11-16T11:52:29.187Z",
+    "rows": 1,
+    "status": "no-failure-recorded",
+    "name": "routing-1794829949187.json",
+    "notes": "历史单轮记录，完整输入、处理路线及回复见 report；缺失的指标不推算。"
+  },
+  {
+    "runId": "20261116T115308Z-import-93ac2fd6",
+    "startedAt": "2026-11-16T11:53:08.250Z",
+    "rows": 9,
+    "status": "no-failure-recorded",
+    "name": "routing-1794829988250.json",
+    "notes": "历史单轮记录，完整输入、处理路线及回复见 report；缺失的指标不推算。"
+  },
+  {
+    "runId": "20261116T115535Z-import-dff7c92a",
+    "startedAt": "2026-11-16T11:55:35.615Z",
+    "rows": 1,
+    "status": "no-failure-recorded",
+    "name": "routing-1794830135615.json",
+    "notes": "历史单轮记录，完整输入、处理路线及回复见 report；缺失的指标不推算。"
+  },
+  {
+    "runId": "20261116T123543Z-import-e2ac294b",
+    "startedAt": "2026-11-16T12:35:43.365Z",
+    "rows": 18,
+    "status": "failure-recorded",
+    "name": "routing-1794832543365.json",
+    "notes": "18 条业务结果没有 error；套件末尾仍使用旧提示词标记检测，guided=0 导致脚本失败。3 个复杂案例明确记录预算兜底。"
+  },
+  {
+    "runId": "20261116T124707Z-import-97a06340",
+    "startedAt": "2026-11-16T12:47:07.278Z",
+    "rows": 2,
+    "status": "no-failure-recorded",
+    "name": "routing-1794833227278.json",
+    "notes": "历史单轮记录，完整输入、处理路线及回复见 report；缺失的指标不推算。"
+  },
+  {
+    "runId": "20261116T125435Z-import-b7b8b4b1",
+    "startedAt": "2026-11-16T12:54:35.457Z",
+    "rows": 3,
+    "status": "failure-recorded",
+    "name": "routing-1794833675457.json",
+    "notes": "修代码用例因答案 5 后附带状态说明而提前取消；CSV CLI 改写了样本导致 44000 与预期 43000 不符。后续分别调整格式判据、明确保留输入并校验文件不变。"
+  },
+  {
+    "runId": "20261116T130059Z-import-17a1f0a7",
+    "startedAt": "2026-11-16T13:00:59.227Z",
+    "rows": 18,
+    "status": "failure-recorded",
+    "name": "routing-1794834059227.json",
+    "notes": "18 条业务结果没有 error；末尾把后台命令完成通知也计入主沟通轮，mainPlanner=1 导致套件失败。后续按实际角色统计，保留此轮原始数值。"
+  },
+  {
+    "runId": "20261116T131018Z-import-bdb5b5d6",
+    "startedAt": "2026-11-16T13:10:18.811Z",
+    "rows": 4,
+    "status": "no-failure-recorded",
+    "name": "routing-1794834618811.json",
+    "notes": "最终定向复测：短 Shell、修代码、CSV CLI、后台命令；实际 Node 测试和样本 CLI 校验通过。"
+  }
+]

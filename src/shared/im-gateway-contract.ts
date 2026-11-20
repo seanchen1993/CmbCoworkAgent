@@ -332,6 +332,10 @@ export type ImCardInteractionKind =
   | "biz_retry"
 
 export interface RemoteImCardSendV1 {
+  /** Original Bot event freezes the question's audience and binding grant. */
+  botEventId?: string
+  /** Desktop-origin group work pins its binding grant without an inbound event. */
+  botBindingRef?: string
   schemaVersion: typeof IM_GATEWAY_SCHEMA_VERSION
   interactionId: string
   conversationKey: string
@@ -430,13 +434,19 @@ export function assertRemoteImCardSendV1(value: unknown): asserts value is Remot
       "kind",
       "content"
     ],
-    [],
+    ["botEventId", "botBindingRef"],
     "card"
   )
   assertSchemaVersion(card.schemaVersion)
   requireNonEmptyString(card.interactionId, "card.interactionId")
   requireNonEmptyString(card.conversationKey, "card.conversationKey")
   requireNonEmptyString(card.idempotencyKey, "card.idempotencyKey")
+  if (card.botEventId !== undefined) requireNonEmptyString(card.botEventId, "card.botEventId")
+  if (card.botBindingRef !== undefined) {
+    const ref = requireNonEmptyString(card.botBindingRef, "card.botBindingRef")
+    if (card.botEventId !== undefined || ref.length > 64 || !/^binding:[A-Za-z0-9_-]+:[1-9][0-9]*$/u.test(ref))
+      throw new ImGatewayContractError("INVALID_PAYLOAD", "card binding reference is invalid")
+  }
   const tag = requireNonEmptyString(card.tag, "card.tag")
   if (!/^[A-Za-z0-9_-]{16,128}$/u.test(tag)) {
     throw new ImGatewayContractError(

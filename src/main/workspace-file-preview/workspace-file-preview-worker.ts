@@ -37,7 +37,8 @@ parentPort.on("message", (request: WorkspaceFilePreviewWorkerRequest) => {
           request.source,
           request.workspacePath,
           request.offset,
-          cancellation
+          cancellation,
+          request.officePreview
         )
         parentPort?.postMessage({
           type: "read-text-result",

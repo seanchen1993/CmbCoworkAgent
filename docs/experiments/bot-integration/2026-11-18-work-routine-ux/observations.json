@@ -1,0 +1,30 @@
+{
+  "receipt": {
+    "panelOpen": true,
+    "targetOpened": false,
+    "targetInList": false,
+    "visibleRoutines": 4
+  },
+  "createFocus": false,
+  "createEscapeDismissed": false,
+  "taskBackButtons": [
+    {
+      "text": "交付助手",
+      "accessibleName": "返回 交付助手 主对话"
+    },
+    {
+      "text": "返回主对话",
+      "accessibleName": "返回主对话"
+    },
+    {
+      "text": "由 交付助手 管理",
+      "accessibleName": "返回 交付助手 主对话"
+    }
+  ],
+  "nativeDeleteConfirmation": true,
+  "pauseResumeAndEditSaved": true,
+  "routineCreateFocus": true,
+  "routineCreatedAndEscWorks": true,
+  "workCompleted": true,
+  "workCreatedAndPreviewed": true
+}

@@ -1,0 +1,27 @@
+{
+  "startedAt": "2026-11-17T12:44:12.464Z",
+  "case": "preview",
+  "args": [
+    "--import",
+    "tsx",
+    "tests/bots-browser-preview-browser.spec.ts"
+  ],
+  "head": "f91771b435c57c6548bb3292566161b3d7d52ef4",
+  "branch": "codex/merge-uat-into-bot-beta",
+  "workingTree": "?? docs/experiments/bot-performance/\n?? scripts/run-bot-performance-review.mjs\n?? tests/bot-performance-browser.spec.ts\n?? tests/bot-performance-review.spec.ts\n?? tests/support/bot-performance-browser-fixture.tsx",
+  "kind": "local synthetic or regression; no production load",
+  "node": "v22.23.5",
+  "platform": "darwin",
+  "arch": "arm64",
+  "cpu": "Apple M2",
+  "sourceHashes": {
+    "scripts/run-bot-performance-review.mjs": "672c2b89669ddebed66c654f0c55d1145c6b376d93bf51fd4e607f0c29775b33",
+    "tests/bot-performance-review.spec.ts": "7a81492808a77ab7bb35d1f28c9cf85520f1bc2cd1343c5d63daadeca4659b07",
+    "tests/bot-performance-browser.spec.ts": "0865e0120e2f61ea1c91f8a615bd0d4e3a3db56f4eafb4d6fdb7507c582e7328",
+    "tests/support/bot-performance-browser-fixture.tsx": "dcb8db4cdc034ad0a7eb7665a518fcc2d65f51971e241459097da92cded1fbdc"
+  },
+  "exitCode": 0,
+  "signal": null,
+  "seconds": 1.529,
+  "finishedAt": "2026-11-17T12:44:14.065Z"
+}

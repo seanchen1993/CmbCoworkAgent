@@ -15,6 +15,7 @@ const dependencies = vi.hoisted(() => ({
   rootDir: "",
   send: vi.fn(),
   createSession: vi.fn(),
+  prepareSession: vi.fn(),
   startSession: vi.fn(),
   startPrepared: vi.fn()
 }))
@@ -51,7 +52,7 @@ vi.mock("./managed-feature-status", () => ({
 }))
 vi.mock("./auto-mode-action-executor", () => ({
   ManagedActionValidationError: class extends Error {},
-  prepareManagedHarnessSession: async () => ({}),
+  prepareManagedHarnessSession: dependencies.prepareSession,
   createManagedHarnessSession: dependencies.createSession,
   startManagedHarnessSession: dependencies.startSession,
   prepareManagedBizRetryRun: () => ({}),
@@ -86,6 +87,7 @@ beforeEach(async () => {
     threadId: "created",
     thread: { thread_id: "created" }
   })
+  dependencies.prepareSession.mockResolvedValue({})
   dependencies.startSession.mockResolvedValue(undefined)
   dependencies.startPrepared.mockResolvedValue(undefined)
   notifications = (await import("../services/notification-service")).notificationService
@@ -149,6 +151,72 @@ function choose(action = "new_thread") {
 }
 
 describe("Biz Retry decision failures and input liveness", () => {
+  it.each(["continue", "new_thread", "stop"])(
+    "executes a Bot-origin %s choice through IM in the same managed run",
+    async (choice) => {
+      const operationId = "b".repeat(64)
+      runStore.updateSnapshot({ ...run, botOperationId: operationId })
+      const result = await decide(
+        {
+          notificationId,
+          action: choice,
+          ...(choice === "continue" ? { message: "继续校验" } : {})
+        },
+        {
+          channel: "im",
+          isCurrent: () => true,
+          context: { route: { principalId: "owner", conversationKey: "group" } }
+        }
+      )
+      expect(result.applied).toBe(true)
+      expect(notifications.get(notificationId)?.channel).toBe("im")
+      expect(runStore.getRun(run).snapshot?.botOperationId).toBe(operationId)
+      if (choice === "continue")
+        expect(dependencies.startPrepared.mock.calls[0][2]).toBe(operationId)
+      if (choice === "new_thread")
+        expect(dependencies.createSession.mock.calls[0][0]).toMatchObject({
+          runId: run.runId,
+          botOperationId: operationId,
+          imRoute: { principalId: "owner", conversationKey: "group" }
+        })
+      if (choice === "stop") expect(runStore.getRun(run).snapshot?.status).toBe("cancelled")
+    }
+  )
+
+  it.each(["continue", "new_thread", "stop"])(
+    "rechecks a revoked IM route inside the Feature lock for %s",
+    async (choice) => {
+      expect(
+        (
+          await decide(
+            { notificationId, action: choice },
+            { channel: "im", isCurrent: () => false }
+          )
+        ).applied
+      ).toBe(false)
+      expect(dependencies.startPrepared).not.toHaveBeenCalled()
+      expect(dependencies.createSession).not.toHaveBeenCalled()
+      expect(runStore.getRun(run).snapshot?.status).toBe("running")
+      expect(notifications.get(notificationId)?.status).toBe("pending")
+    }
+  )
+
+  it("does not create a new thread if its group is unbound while preparing the skill", async () => {
+    let current = true
+    dependencies.prepareSession.mockImplementationOnce(async () => {
+      current = false
+      return {}
+    })
+    const result = await decide(
+      { notificationId, action: "new_thread" },
+      { channel: "im", isCurrent: () => current }
+    )
+    expect(result.applied).toBe(false)
+    expect(dependencies.createSession).not.toHaveBeenCalled()
+    expect(dependencies.startSession).not.toHaveBeenCalled()
+    expect(runStore.getRun(run).snapshot?.totalRetryCount).toBe(0)
+  })
+
   it.each(["continue", "new_thread"])(
     "records executed counts and local budget for %s",
     async (choice) => {

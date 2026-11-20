@@ -1,0 +1,27 @@
+
+ RUN  v3.2.4 <repository>
+
+(node:57133) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | src/main/bots/work-tools.test.ts > work Runtime tools > reuses and reopens the same work atomically, and keeps replay and audience protection
+BotError: 任务状态已改变：completed
+    at <repository>/src/main/bots/store.ts:3333:15
+    at BotStore.transaction (<repository>/src/main/bots/store.ts:633:22)
+    at BotStore.transition (<repository>/src/main/bots/store.ts:3326:17)
+    at <repository>/src/main/bots/store.ts:4275:25
+    at BotStore.transaction (<repository>/src/main/bots/store.ts:633:22)
+    at BotStore.settle (<repository>/src/main/bots/store.ts:4250:10)
+    at <repository>/src/main/bots/store.ts:4236:12
+    at BotStore.transaction (<repository>/src/main/bots/store.ts:633:22)
+    at BotStore.settleRun (<repository>/src/main/bots/store.ts:4219:10)
+    at LocalBotHost.execute (<repository>/src/main/bots/host.ts:2148:22) {
+  code: 'CONFLICT'
+}
+
+ ✓ src/main/bots/work-tools.test.ts (12 tests) 1075ms
+
+ Test Files  1 passed (1)
+      Tests  12 passed (12)
+   Start at  19:28:33
+   Duration  2.41s (transform 501ms, setup 0ms, collect 1.03s, tests 1.08s, environment 0ms, prepare 73ms)
+

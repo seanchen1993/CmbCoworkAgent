@@ -1,0 +1,3648 @@
+
+ RUN  v3.2.4 <repo>
+
+(node:82597) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:82596) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > creates desktop work in an empty bound group, executes once and returns results only there
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-b08b40b8-2fcb-40fb-9234-2b61b06dfa2e',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > creates desktop work in an empty bound group, executes once and returns results only there
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-d6cd4896-f775-4b6e-a699-6dfbeda729f8',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > creates desktop work in an empty bound group, executes once and returns results only there
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-7fbc3842-e62e-4c3e-9b5e-acaedb6f64ab',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > delivers a Feature update after the dispatching turn ended, once and only to the originating group
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-52ae9748-a5c2-421a-8d76-f5182cca1f2d',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > delivers a Feature update after the dispatching turn ended, once and only to the originating group
+[Bot IM] reply delivery started {
+  deliveryId: 'im-feature-decision-1',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > publishes the settled IM delivery state accepted and keeps empty delivery ticks quiet
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-59b05e89-9870-450b-8a63-116461f881cb',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+langsmith/experimental/sandbox is in alpha. This feature is experimental, and breaking changes are expected.
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > publishes the settled IM delivery state unknown and keeps empty delivery ticks quiet
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-75a24644-0cd9-4511-9b7a-e8bc8c6ac8ac',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] Custom model: o07-test-model baseUrl: https://o07.invalid/v1
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 1/5 after 1000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 2/5 after 2000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 3/5 after 4000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 4/5 after 8000ms
+
+stderr | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch timeout "timeout after 60000ms", retry 5/5 after 16000ms
+
+stdout | src/main/bots/host.test.ts > Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host
+[Runtime] fetch headers in 0ms: status=200, stream requested=false, content-type=application/json, request-id=unknown
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > publishes the settled IM delivery state pending and keeps empty delivery ticks quiet
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-e24e69b2-0c3e-4486-a118-783fd745e80c',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > publishes the settled IM delivery state blocked and keeps empty delivery ticks quiet
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-cb2d3b71-89db-4ac3-98f4-08513ae874c3',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > runs two IM groups and private chat concurrently while preserving approvals, thread order and reply routes
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-9e6f29cc-b29d-437b-801e-4f394d95b864',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > runs two IM groups and private chat concurrently while preserving approvals, thread order and reply routes
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-7c7d38b4-9bc3-450a-883d-c94655532f76',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > runs two IM groups and private chat concurrently while preserving approvals, thread order and reply routes
+[Bot IM] reply delivery started {
+  deliveryId: 'im-personal-ee120819-66a0-4892-9ca2-2881ce2ed3d0',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > runs two IM groups and private chat concurrently while preserving approvals, thread order and reply routes
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-2eb69e7f-5909-4338-9d97-31ddba4136fd',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > runs two IM groups and private chat concurrently while preserving approvals, thread order and reply routes
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-451ba868-eccd-444e-af63-84bb20389a25',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > publishes one opening before completion, exposes the group execution thread and cancels only that group
+[Bot IM] reply delivery started {
+  deliveryId: 'im-opening-2b8926bb-6a81-4333-b9b1-0332dad2c1c5',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+ ✓ src/main/bots/host.test.ts (175 tests) 17004ms
+   ✓ stops the whole group including completed peer owners (worker first: false)  306ms
+   ✓ Bot control state > fails after the original six fetch watchdog attempts and recovers on the same Bot host  4238ms
+   ✓ stops only the running descendants of an intermediate collaborator (dispatch complete: true, task stop: false)  1784ms
+(node:82639) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > delivers an opening and the final result once in dm
+[Bot IM] reply delivery started {
+  deliveryId: 'im-opening-bcfdb593-3a11-492f-adc8-fcf173f43b9b',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > delivers an opening and the final result once in dm
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-bcfdb593-3a11-492f-adc8-fcf173f43b9b',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > delivers an opening and the final result once in group
+[Bot IM] reply delivery started {
+  deliveryId: 'im-opening-0c8e8a76-4d29-44e1-a802-82e9943fd178',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > delivers an opening and the final result once in group
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-0c8e8a76-4d29-44e1-a802-82e9943fd178',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-a1719466-e83e-4db3-a49f-4eed184941e6',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-10ec0cbea25337571722ad81c3697cf5880d226fd0dcd5ddf6c9c9028b5cbeb0',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:1e78a9d2aea1',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:1e78a9d2aea1',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:1e78a9d2aea1',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-762a35cfce1a37f5f422a96b858d691bc3b6784696477dc3d4b0d7fd300ca1fa',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:c3e912bb7e77',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:c3e912bb7e77',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:c3e912bb7e77',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-9b9410e3e08b19283c7ad709ad1c104b1e02aa9fdbd4ee0151568022053945bf',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:c0fd5b5f01b4',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:c0fd5b5f01b4',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:c0fd5b5f01b4',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-9dd8872f8f570a5239435e25a8b74e736fed25681fb9ceb286046f5f338bf522',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:188eeaea7276',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:188eeaea7276',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:188eeaea7276',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-aaff2d4b1aea07a8ae0dcd0f2c4c397dc715af70c8e29fe56a9b29d659fe978e',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:1e456f2601b6',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:1e456f2601b6',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:1e456f2601b6',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-c8f134c901125ab4ad1e0c671b8e855567bd65aaa80e44af215759902fbf1bb9',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:38ad2fbe128f',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:38ad2fbe128f',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:38ad2fbe128f',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-cd2c81f19829350464bedad6915ed6177305df71af3562f579067f2073e2242b',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:88cb0b06f174',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:88cb0b06f174',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:88cb0b06f174',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-ef8ff107d1dc345d3ca599bf9a7c76ec33022f6080c42bcf3d33f3a884ddd933',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:cf2b55c1388f',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:cf2b55c1388f',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:cf2b55c1388f',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-27b292300075adb2911dea6c69c2d1e69dab43de0713589ad2bf67833f0c04d7',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:11eca79982f1',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:11eca79982f1',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:11eca79982f1',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-30f125a30fdb1439bc03c46cb3b5e27f4909cd29e349d496f4bc77e85fc183dd',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:da59a164037b',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:da59a164037b',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:da59a164037b',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-32b2f8a50d65a762bb30bbda0f2ca38f96f748137ee53d866889fea451ee2aa0',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:2d8bb9597234',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:2d8bb9597234',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:2d8bb9597234',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-59fe63c42adcc282c685c67b1ca18706a3088f14f8b2a98df27d1d757d9203b2',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:3b11d39b60d9',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:3b11d39b60d9',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:3b11d39b60d9',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-6e3222db0ccc94c026f325031e5d19f1592aca927533b47a4b1ca5c928d02817',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:410c0218b73e',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:410c0218b73e',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:410c0218b73e',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-9fb9a3da3ad9fb314eabfad0b27358f3cc6806371c3ce05e27ed0aae23dfff63',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:3d15594fda65',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:3d15594fda65',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:3d15594fda65',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-f5d1b75e1f4e28d845882bbeca65e28b5732da6b759883747f71fda2aa6a9ea2',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:45d17a85cec5',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:45d17a85cec5',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:45d17a85cec5',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-db2d0a2753e3b3c219d2480b94d398c17fbe73f8577aa020f7f959c89d021740',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:aeaa26f86d8a',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:aeaa26f86d8a',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:aeaa26f86d8a',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > uses one durable acknowledgement for accepted dispatch in dm
+[Bot IM] reply delivery started {
+  deliveryId: 'im-opening-9df74891-6ac2-431a-bbdd-87b93e4d33fd',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > uses one durable acknowledgement for accepted dispatch in group
+[Bot IM] reply delivery started {
+  deliveryId: 'im-opening-3b67b930-4d29-46db-8317-c7bd3c2b499d',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-ef3ecb72-06e4-4ee2-a973-46584aa506fd',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-375c03eff05771b900389126dfa449e9dc689b8ccf6f70445c44992de011d503',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:0d1b665bd736',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:0d1b665bd736',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:0d1b665bd736',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-6fe5b32c1adc999b0142c9c3dd99372da901fe3c91da646f160d3dd28734a699',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:0347c49992f9',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:0347c49992f9',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:0347c49992f9',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-b778ed5372c00da58415e33bb8aa33e8c4682467318f5971bf15233c9e65d0ae',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:1afcaf2df97f',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:1afcaf2df97f',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:1afcaf2df97f',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-c7de96457f785581d6cd1bbf24466391a2b031ddeda9b5c9c475e6174730fd48',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:418e6611ac28',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:418e6611ac28',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:418e6611ac28',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-fa9babe3eb192c99aa6d0945f486b234a1716e4cbffa562462e51eda830d7714',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:4b61c16dce6c',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:4b61c16dce6c',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:4b61c16dce6c',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-2d28e7d2d638af6c3e1a4227dab12367ca8b38a07d06a9cab602912c8d51e442',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:7b8ef2d79f82',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:7b8ef2d79f82',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:7b8ef2d79f82',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-2f5f5bc62b56dbb9fa2f2df02866815513a4c92c68b24a1091fb3afa0360e0d6',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:c52c5ec0f103',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:c52c5ec0f103',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:c52c5ec0f103',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-8fccdc84ae7162973e76c34cfd9ab5897b4b04abdfef6736fb2c5e4f965afce4',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:0442e7135f59',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:0442e7135f59',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:0442e7135f59',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-03df7e688962f247e3b2031942651ef0465cc55a2c8bc0523d068bb14416ff56',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:3f5c4fc1e8b7',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:3f5c4fc1e8b7',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:3f5c4fc1e8b7',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-3471171dec5ce4f65881ce3a4cac8098fe06288552a1f9ccaa7ee052416db441',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:db5253118e4f',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:db5253118e4f',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:db5253118e4f',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-479aff143397473a0a5b81fffd5e2420df75b6fe03ac7d9817a71103736d52e7',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:29beed514783',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:29beed514783',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:29beed514783',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-751882f173b21b14d1519f77e637ae19164db0e86af65c15104e893511a166d2',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:d9eaa9ed1d63',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:d9eaa9ed1d63',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:d9eaa9ed1d63',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-ac6a02c8229bc7bc94dc686d7c07393befd0c22a9014511ed480635eb2036a25',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:06d3ba0883c2',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:06d3ba0883c2',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:06d3ba0883c2',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-d5508dff5dbbb742f9913ac8ea8a9b8384931d5739f5dd422d783dccaab3f7f2',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:8f50e879a57a',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:8f50e879a57a',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:8f50e879a57a',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-e3f2875d980f87bd9a8b73ae33c98420dd495bb573e7fe428c4ba4476438f11f',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:a2488dae8cf7',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:a2488dae8cf7',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:a2488dae8cf7',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-e4f5f280fe7e6397cd01ff163b6c46d5be345f38d38c43322ab46c22a25af72f',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:80c5c2f67d0e',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:80c5c2f67d0e',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:80c5c2f67d0e',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > delivers the fallback when dispatch had no opening and preserves genuine failure
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-0d44fef5-717f-463a-a7df-4ec9837244e4',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > delivers the fallback when dispatch had no opening and preserves genuine failure
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-4e5d9a59-9444-4570-9e3f-fd5d29ea7a98',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > returns asynchronous Bot collaboration to its original IM group without touching private threads
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-417d67b1-1398-4183-aeb0-cdd2ce2901e6',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > returns asynchronous Bot collaboration to its original IM group without touching private threads
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-4fa51b11-795a-45c3-ac78-b3430792299c',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-personal-530fb724-d987-44b9-9648-61dc45831234',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-0d4972a46285f95e9be65036e2b2accc0f10d795215edc6c39a1a86a1e87a659',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:16a180189add',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:16a180189add',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:16a180189add',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-19aea1a084a040aae113af4e5671c3d47dcf3421ac34f71436c95cb4ef42841b',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:d3bd185d424e',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:d3bd185d424e',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:d3bd185d424e',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-3bbbc3c437edb0dffdbf409b62dc086ec8e18918de4e1e80427d130728c6c2cf',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:8ea8c6d4de23',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:8ea8c6d4de23',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:8ea8c6d4de23',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-6e51d66b8d8613338827171c6214ab27d28dc8381732d7cc17d3d171919d773c',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:5cc69f7855b6',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:5cc69f7855b6',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:5cc69f7855b6',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-7478f2b8734a82064ee140c26e7b102456ae1086f49f7d697ab8c440fbe757f2',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:3bb668d36491',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:3bb668d36491',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:3bb668d36491',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-8c2db744749123579d909b6a1c6d632d74a020fb7cc990cf3040682659702363',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:93a3b6793b60',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:93a3b6793b60',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:93a3b6793b60',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-c53f1453fb0c0fb64750cddd1f35f856f376c50c00d637cb757fc86772985793',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:52f707c27d86',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:52f707c27d86',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:52f707c27d86',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-f64679ee453eb07b12b634c650ccaea8eedb8419f04b9932e313f1fc72328088',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:5ba337284825',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:5ba337284825',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:5ba337284825',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-03866e8af0d6e998b5837070e61de945d9e024920952472c0b6bc8511ec1c701',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:8c32f12176bc',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:8c32f12176bc',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:8c32f12176bc',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-1249d558eacc6193c0eb2e3b4556d6be03585cd83245e03c986b05f79234f71c',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:b32a6209ac6a',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:b32a6209ac6a',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:b32a6209ac6a',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-234ae0c74107ff431cf93d8004a18b3c84912aa111af2e522af7fde9c7808945',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:047096e73af4',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:047096e73af4',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:047096e73af4',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-29fdc8b53e6261cf09fb1007d20ea1acbb3b8d60869f27f4f8ed8c548ea1ebbb',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:3321637acfbd',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:3321637acfbd',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:3321637acfbd',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-77dea80a536c1cf850c06e92516b82f31d4c234bf6ecbcbead7f5baf465e6dba',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:8884bc16ef5a',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:8884bc16ef5a',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:8884bc16ef5a',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-c957e6dedbed77b7caac9f7c425e0a2f8cb0a1135d63c976815137aa4a81a86f',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:f72092861dbe',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:f72092861dbe',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:f72092861dbe',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-cd54d518241785a88d21b1a733cde8f9d59f99c22486e153e205093ba1cc85a9',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:8a6962d776bd',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:8a6962d776bd',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:8a6962d776bd',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-bfbe730aceb9fd7fbf49b83935ae06ab1afe52b8eb01d2060c3682d1b201588d',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:15d7411c7695',
+  uploadId: undefined,
+  bytes: 68,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:15d7411c7695',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/runtime-adapter.test.ts > Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:15d7411c7695',
+  uploadId: 'upload',
+  bytes: 68,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > keeps nested collaborator integration private until the original IM owner replies
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-537ecb19-45c0-4468-aa06-3ecfb330a104',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > keeps nested collaborator integration private until the original IM owner replies
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-f34a398b-6db4-4c98-9350-4f3005b096f7',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > returns a peer workflow completed summary privately before the IM owner integrates it
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-7118b897-75e2-4689-bfcd-a48d68e304f0',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > returns a peer workflow completed summary privately before the IM owner integrates it
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-06e333cf-bf91-49f0-b7ee-f82f05d4cbe5',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > returns a peer workflow failed summary privately before the IM owner integrates it
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-79839cec-98bf-40e8-9513-e076885d7292',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > returns a peer workflow failed summary privately before the IM owner integrates it
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-73729daa-39a9-4945-98ca-aaa7cd7f8668',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+ ✓ src/main/bots/runtime-adapter.test.ts (338 tests) 10725ms
+   ✓ Bot Runtime integration > delivers both eight-file batches from the real tool through group Runtime and IM exactly once  2287ms
+   ✓ Bot Runtime integration > delivers both eight-file batches from the real tool through dm Runtime and IM exactly once  2272ms
+   ✓ Bot Runtime integration > delivers both eight-file batches from the real tool through app Runtime and IM exactly once  2569ms
+(node:82676) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > sends Markdown for dm without changing segment identity on explicit downgrade
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-3caff5cb-c3c6-4afc-804e-606192f26b5e',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stderr | src/main/bots/peer-background.test.ts
+langsmith/experimental/sandbox is in alpha. This feature is experimental, and breaking changes are expected.
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=false, receiptFirst=false)
+[LocalSandbox] executeRaw: command=""/private/tmp/node-v22.23.5-darwin-arm64/bin/node" "<temporary> cwd="<temporary> effectiveMode=none override=undefined timeout=7200000ms overrideAbort=true
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=false, receiptFirst=false)
+[LocalSandbox] executeOnce: spawned pid=82679 shell=zsh at +1ms
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=false, receiptFirst=false)
+[LocalSandbox] executeRaw: command=""/private/tmp/node-v22.23.5-darwin-arm64/bin/node" "<temporary> cwd="<temporary> effectiveMode=none override=undefined timeout=7200000ms overrideAbort=true
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=false, receiptFirst=false)
+[LocalSandbox] executeOnce: spawned pid=82680 shell=zsh at +0ms
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=false, receiptFirst=false)
+[LocalSandbox] cancelling background task b1609c05-f7d8-425f-86c7-9adbde3712b5 (command: "/private/tmp/node-v22.23.5-darwin-arm64/bin/node" "<temporary> for thread group-2c24226b-9947-4780-b6bd-9cd2b934eed0-1e33eaf4-25af-4616-b229-bb71933b2dc2
+[LocalSandbox] killTree: killing pid=82680, platform=darwin
+[LocalSandbox] killTree: SIGTERM → pid=82680
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=false, receiptFirst=false)
+[LocalSandbox] event=close pid=82680 code=null signal=SIGTERM at +53ms resolved=false
+[LocalSandbox] collectAndResolve: pid=82680, reason=abort, code=null, signal=SIGTERM, elapsed=53ms, bytes=0
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > sends Markdown for group without changing segment identity on explicit downgrade
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-2cb84f66-eeac-418a-a671-f0bcaa5d7cc8',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > refreshes group names after messages and notifies the UI without moving history or works
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-abc73f04-efb1-41a1-909c-3f3f3c1dcea6',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > refreshes group names after messages and notifies the UI without moving history or works
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-ac5ee80d-043e-45e1-9481-e93f37beffc9',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > refreshes group names after messages and notifies the UI without moving history or works
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-769ef150-6433-431f-8ef4-e9290ecf8c7d',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > coalesces group name refreshes, reads every binding page and ignores message replays
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-0d715b20-e1ee-425e-8269-8392bb01a5df',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > coalesces group name refreshes, reads every binding page and ignores message replays
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-1ef3406c-b9bf-4803-9ef1-3becd46597a4',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > coalesces group name refreshes, reads every binding page and ignores message replays
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-521430b6-a584-4ba0-b513-223560f071a6',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > coalesces group name refreshes, reads every binding page and ignores message replays
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-88d54634-2393-439a-84d1-56ecba604ab0',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > coalesces group name refreshes, reads every binding page and ignores message replays
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-a9bb8bae-c0d4-4ee4-8d09-2fc20d03cf87',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > coalesces group name refreshes, reads every binding page and ignores message replays
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-adfa6b59-5cc7-4f5e-8388-67a2d99f2f50',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > coalesces group name refreshes, reads every binding page and ignores message replays
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-b037a1de-a647-46b4-917d-30fdd54dbe01',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > coalesces group name refreshes, reads every binding page and ignores message replays
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-e5038f28-8088-4a3d-aec2-7045e57e3fee',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > coalesces group name refreshes, reads every binding page and ignores message replays
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-fe8e6cf9-3139-4b39-ba88-977a86402556',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > keeps group execution available when a name refresh fails and recovers on the next sync
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-5b429a8b-9c68-443a-bfc4-d7882a6683c4',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=false, receiptFirst=false)
+[LocalSandbox] event=close pid=82679 code=0 signal=null at +319ms resolved=false
+[LocalSandbox] collectAndResolve: pid=82679, reason=normal, code=0, signal=null, elapsed=319ms, bytes=0
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=false, receiptFirst=false)
+[LocalSandbox] background task 95898191-2259-488d-b5ac-e13fed0a6597 completed: exitCode=0
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=false)
+[LocalSandbox] executeRaw: command=""/private/tmp/node-v22.23.5-darwin-arm64/bin/node" "<temporary> cwd="<temporary> effectiveMode=none override=undefined timeout=7200000ms overrideAbort=true
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=false)
+[LocalSandbox] executeOnce: spawned pid=82681 shell=zsh at +0ms
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=false)
+[LocalSandbox] executeRaw: command=""/private/tmp/node-v22.23.5-darwin-arm64/bin/node" "<temporary> cwd="<temporary> effectiveMode=none override=undefined timeout=7200000ms overrideAbort=true
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=false)
+[LocalSandbox] executeOnce: spawned pid=82682 shell=zsh at +0ms
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=false)
+[LocalSandbox] first data at +29ms pid=82682
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=false)
+[LocalSandbox] event=close pid=82682 code=0 signal=null at +31ms resolved=false
+[LocalSandbox] collectAndResolve: pid=82682, reason=normal, code=0, signal=null, elapsed=31ms, bytes=15
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=false)
+[LocalSandbox] background task cc94aeb6-a031-4277-ae8e-112b59bcb78e completed: exitCode=0
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=false)
+[LocalSandbox] executeRaw: command=""/private/tmp/node-v22.23.5-darwin-arm64/bin/node" "<temporary> cwd="<temporary> effectiveMode=none override=undefined timeout=7200000ms overrideAbort=true
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=false)
+[LocalSandbox] executeOnce: spawned pid=82683 shell=zsh at +1ms
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=false)
+[LocalSandbox] cancelling background task 883c8104-9e5b-4d6a-8aff-6a60e3365d05 (command: "/private/tmp/node-v22.23.5-darwin-arm64/bin/node" "<temporary> for thread group-722f6146-30f2-44f1-843f-a1a6a3d96b62-fd45cd86-449e-4f8c-9b04-931a2d170bab
+[LocalSandbox] killTree: killing pid=82683, platform=darwin
+[LocalSandbox] killTree: SIGTERM → pid=82683
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=false)
+[LocalSandbox] event=close pid=82683 code=null signal=SIGTERM at +10ms resolved=false
+[LocalSandbox] collectAndResolve: pid=82683, reason=abort, code=null, signal=SIGTERM, elapsed=10ms, bytes=0
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=false)
+[LocalSandbox] event=close pid=82681 code=0 signal=null at +276ms resolved=false
+[LocalSandbox] collectAndResolve: pid=82681, reason=normal, code=0, signal=null, elapsed=276ms, bytes=0
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=false)
+[LocalSandbox] background task 2d143065-1a98-4c72-8105-91e59d0c35fa completed: exitCode=0
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=true)
+[LocalSandbox] executeRaw: command=""/private/tmp/node-v22.23.5-darwin-arm64/bin/node" "<temporary> cwd="<temporary> effectiveMode=none override=undefined timeout=7200000ms overrideAbort=true
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=true)
+[LocalSandbox] executeOnce: spawned pid=82684 shell=zsh at +0ms
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=true)
+[LocalSandbox] executeRaw: command=""/private/tmp/node-v22.23.5-darwin-arm64/bin/node" "<temporary> cwd="<temporary> effectiveMode=none override=undefined timeout=7200000ms overrideAbort=true
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=true)
+[LocalSandbox] executeOnce: spawned pid=82685 shell=zsh at +1ms
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=true)
+[LocalSandbox] first data at +29ms pid=82685
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=true)
+[LocalSandbox] event=close pid=82685 code=0 signal=null at +31ms resolved=false
+[LocalSandbox] collectAndResolve: pid=82685, reason=normal, code=0, signal=null, elapsed=31ms, bytes=15
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=true)
+[LocalSandbox] background task 35f6da65-8c35-4dd2-a6af-98ffbad56e23 completed: exitCode=0
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=true)
+[LocalSandbox] executeRaw: command=""/private/tmp/node-v22.23.5-darwin-arm64/bin/node" "<temporary> cwd="<temporary> effectiveMode=none override=undefined timeout=7200000ms overrideAbort=true
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=true)
+[LocalSandbox] executeOnce: spawned pid=82686 shell=zsh at +0ms
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=true)
+[LocalSandbox] event=close pid=82684 code=0 signal=null at +52ms resolved=false
+[LocalSandbox] collectAndResolve: pid=82684, reason=normal, code=0, signal=null, elapsed=52ms, bytes=0
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=true)
+[LocalSandbox] background task 88c73473-60ba-45e0-bd52-69b706b479df completed: exitCode=0
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=true)
+[LocalSandbox] event=close pid=82686 code=0 signal=null at +50ms resolved=false
+[LocalSandbox] collectAndResolve: pid=82686, reason=normal, code=0, signal=null, elapsed=50ms, bytes=0
+
+stdout | src/main/bots/peer-background.test.ts > single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=true)
+[LocalSandbox] background task d5ce7970-2327-4297-bf30-c18e5c1c6546 completed: exitCode=0
+
+stdout | src/main/bots/peer-background.test.ts > retains the peer request until a real finite command exits (0), then returns once
+[LocalSandbox] executeRaw: command=""/private/tmp/node-v22.23.5-darwin-arm64/bin/node" "<temporary> cwd="<temporary> effectiveMode=none override=undefined timeout=7200000ms overrideAbort=true
+
+stdout | src/main/bots/peer-background.test.ts > retains the peer request until a real finite command exits (0), then returns once
+[LocalSandbox] executeOnce: spawned pid=82687 shell=zsh at +1ms
+
+stdout | src/main/bots/peer-background.test.ts > retains the peer request until a real finite command exits (0), then returns once
+[LocalSandbox] first data at +335ms pid=82687
+
+stdout | src/main/bots/peer-background.test.ts > retains the peer request until a real finite command exits (0), then returns once
+[LocalSandbox] event=close pid=82687 code=0 signal=null at +339ms resolved=false
+[LocalSandbox] collectAndResolve: pid=82687, reason=normal, code=0, signal=null, elapsed=339ms, bytes=14
+
+stdout | src/main/bots/peer-background.test.ts > retains the peer request until a real finite command exits (0), then returns once
+[LocalSandbox] background task 48e62215-c639-4ee9-ab3b-7268d005bc78 completed: exitCode=0
+
+stdout | src/main/bots/peer-background.test.ts > retains the peer request until a real finite command exits (7), then returns once
+[LocalSandbox] executeRaw: command=""/private/tmp/node-v22.23.5-darwin-arm64/bin/node" "<temporary> cwd="<temporary> effectiveMode=none override=undefined timeout=7200000ms overrideAbort=true
+
+stdout | src/main/bots/peer-background.test.ts > retains the peer request until a real finite command exits (7), then returns once
+[LocalSandbox] executeOnce: spawned pid=82688 shell=zsh at +0ms
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > runs a wire-valid opaque sender once in dm and preserves its frozen source
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-27200af1-666c-42ea-be92-4aac83a4bdeb',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/peer-background.test.ts > retains the peer request until a real finite command exits (7), then returns once
+[LocalSandbox] first data at +337ms pid=82688
+
+stdout | src/main/bots/peer-background.test.ts > retains the peer request until a real finite command exits (7), then returns once
+[LocalSandbox] event=close pid=82688 code=7 signal=null at +342ms resolved=false
+[LocalSandbox] collectAndResolve: pid=82688, reason=normal, code=7, signal=null, elapsed=342ms, bytes=14
+
+stdout | src/main/bots/peer-background.test.ts > retains the peer request until a real finite command exits (7), then returns once
+[LocalSandbox] background task f4e4fd2a-79c8-41fd-9d38-0596db90e560 completed: exitCode=7
+
+stdout | src/main/bots/peer-background.test.ts > checks a live HTTP service and returns the verified result without waiting for service exit
+[LocalSandbox] executeRaw: command=""/private/tmp/node-v22.23.5-darwin-arm64/bin/node" "<temporary> cwd="<temporary> effectiveMode=none override=undefined timeout=7200000ms overrideAbort=true
+
+stdout | src/main/bots/peer-background.test.ts > checks a live HTTP service and returns the verified result without waiting for service exit
+[LocalSandbox] executeOnce: spawned pid=82689 shell=zsh at +0ms
+
+stdout | src/main/bots/peer-background.test.ts > checks a live HTTP service and returns the verified result without waiting for service exit
+[LocalSandbox] cancelling background task 140a3f69-1f4f-4dee-9d02-661c76db8f27 (command: "/private/tmp/node-v22.23.5-darwin-arm64/bin/node" "<temporary> for thread group-34a550ed-05b8-4d29-9228-d0d579ea71a4-1ea90059-53b7-46d1-b6f5-44a42f377dbf
+[LocalSandbox] killTree: killing pid=82689, platform=darwin
+[LocalSandbox] killTree: SIGTERM → pid=82689
+
+stdout | src/main/bots/peer-background.test.ts > checks a live HTTP service and returns the verified result without waiting for service exit
+[LocalSandbox] event=close pid=82689 code=null signal=SIGTERM at +67ms resolved=false
+[LocalSandbox] collectAndResolve: pid=82689, reason=abort, code=null, signal=SIGTERM, elapsed=67ms, bytes=0
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > runs a wire-valid opaque sender once in group and preserves its frozen source
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-107835c7-623a-49ca-a48a-4cc8a66b4ee6',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/peer-background.test.ts > honors hook-updated service notification policy and keeps native background behavior unchanged
+[LocalSandbox] executeRaw: command=""/private/tmp/node-v22.23.5-darwin-arm64/bin/node" "<temporary> cwd="<temporary> effectiveMode=none override=undefined timeout=7200000ms overrideAbort=true
+
+stdout | src/main/bots/peer-background.test.ts > honors hook-updated service notification policy and keeps native background behavior unchanged
+[LocalSandbox] executeOnce: spawned pid=82691 shell=zsh at +1ms
+
+stdout | src/main/bots/peer-background.test.ts > honors hook-updated service notification policy and keeps native background behavior unchanged
+[LocalSandbox] first data at +32ms pid=82691
+
+stdout | src/main/bots/peer-background.test.ts > honors hook-updated service notification policy and keeps native background behavior unchanged
+[LocalSandbox] event=close pid=82691 code=0 signal=null at +34ms resolved=false
+[LocalSandbox] collectAndResolve: pid=82691, reason=normal, code=0, signal=null, elapsed=34ms, bytes=12
+
+stdout | src/main/bots/peer-background.test.ts > honors hook-updated service notification policy and keeps native background behavior unchanged
+[LocalSandbox] background task 7ea08744-3d1c-426d-926c-7909dd653d27 completed: exitCode=0
+
+stdout | src/main/bots/peer-background.test.ts > honors hook-updated service notification policy and keeps native background behavior unchanged
+[LocalSandbox] executeRaw: command=""/private/tmp/node-v22.23.5-darwin-arm64/bin/node" "<temporary> cwd="<temporary> effectiveMode=none override=undefined timeout=7200000ms overrideAbort=true
+
+stdout | src/main/bots/peer-background.test.ts > honors hook-updated service notification policy and keeps native background behavior unchanged
+[LocalSandbox] executeOnce: spawned pid=82692 shell=zsh at +0ms
+
+stdout | src/main/bots/peer-background.test.ts > honors hook-updated service notification policy and keeps native background behavior unchanged
+[LocalSandbox] first data at +35ms pid=82692
+
+stdout | src/main/bots/peer-background.test.ts > honors hook-updated service notification policy and keeps native background behavior unchanged
+[LocalSandbox] event=close pid=82692 code=0 signal=null at +37ms resolved=false
+[LocalSandbox] collectAndResolve: pid=82692, reason=normal, code=0, signal=null, elapsed=37ms, bytes=14
+
+stdout | src/main/bots/peer-background.test.ts > honors hook-updated service notification policy and keeps native background behavior unchanged
+[LocalSandbox] background task 13bf0855-6028-4573-b4b1-9221345a3e44 completed: exitCode=0
+
+stdout | src/main/bots/peer-background.test.ts > direct group service stays tracked, allows review, and does not spawn a cleanup turn (exit 0)
+[LocalSandbox] executeRaw: command=""/private/tmp/node-v22.23.5-darwin-arm64/bin/node" "<temporary> cwd="<temporary> effectiveMode=none override=undefined timeout=7200000ms overrideAbort=true
+
+stdout | src/main/bots/peer-background.test.ts > direct group service stays tracked, allows review, and does not spawn a cleanup turn (exit 0)
+[LocalSandbox] executeOnce: spawned pid=82693 shell=zsh at +0ms
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > keeps existing unscoped sender sources readable and redelivery idempotent
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-c62df492-c52c-48da-93c9-630fa8e811be',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > preserves the actual completed execution outcome in the gateway acknowledgement without replay
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-52fcbdaf-35ca-4514-8447-6648599b8317',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > preserves the actual failed execution outcome in the gateway acknowledgement without replay
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-5da2f5b7-583b-4225-a7c0-5b73723bc120',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/peer-background.test.ts > direct group service stays tracked, allows review, and does not spawn a cleanup turn (exit 0)
+[LocalSandbox] event=close pid=82693 code=0 signal=null at +3063ms resolved=false
+[LocalSandbox] collectAndResolve: pid=82693, reason=normal, code=0, signal=null, elapsed=3063ms, bytes=0
+
+stdout | src/main/bots/peer-background.test.ts > direct group service stays tracked, allows review, and does not spawn a cleanup turn (exit 0)
+[LocalSandbox] background task 9de810ff-5809-4ac8-b9f2-5beb2495ba03 completed: exitCode=0
+
+stdout | src/main/bots/peer-background.test.ts > direct group service stays tracked, allows review, and does not spawn a cleanup turn (exit 7)
+[LocalSandbox] executeRaw: command=""/private/tmp/node-v22.23.5-darwin-arm64/bin/node" "<temporary> cwd="<temporary> effectiveMode=none override=undefined timeout=7200000ms overrideAbort=true
+
+stdout | src/main/bots/peer-background.test.ts > direct group service stays tracked, allows review, and does not spawn a cleanup turn (exit 7)
+[LocalSandbox] executeOnce: spawned pid=82697 shell=zsh at +1ms
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > preserves the actual outcome_unknown execution outcome in the gateway acknowledgement without replay
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-92a1a29f-22c8-45cc-8ed9-553d4b3fee6e',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > shares owner DM with the main thread, isolates groups, and deduplicates received events
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-6fe0a11e-e1c5-4485-a921-c275ba344210',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > shares owner DM with the main thread, isolates groups, and deduplicates received events
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-c735f4e7-6d89-42aa-8403-2a00f447f092',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > mirrors only new main-thread replies to the owner's DM, never to groups
+[Bot IM] reply delivery started {
+  deliveryId: 'im-personal-845233de-95a1-4c69-8a56-225059b79218',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/peer-background.test.ts > direct group service stays tracked, allows review, and does not spawn a cleanup turn (exit 7)
+[LocalSandbox] event=close pid=82697 code=7 signal=null at +3063ms resolved=false
+[LocalSandbox] collectAndResolve: pid=82697, reason=normal, code=7, signal=null, elapsed=3063ms, bytes=0
+
+stdout | src/main/bots/peer-background.test.ts > direct group service stays tracked, allows review, and does not spawn a cleanup turn (exit 7)
+[LocalSandbox] background task c090caf9-7fb7-49c6-a739-5aa741df4cb0 completed: exitCode=7
+
+stdout | src/main/bots/peer-background.test.ts > direct group finite jobs still notify exactly once with the real result (exit 0)
+[LocalSandbox] executeRaw: command=""/private/tmp/node-v22.23.5-darwin-arm64/bin/node" "<temporary> cwd="<temporary> effectiveMode=none override=undefined timeout=7200000ms overrideAbort=true
+
+stdout | src/main/bots/peer-background.test.ts > direct group finite jobs still notify exactly once with the real result (exit 0)
+[LocalSandbox] executeOnce: spawned pid=82701 shell=zsh at +0ms
+
+stdout | src/main/bots/peer-background.test.ts > direct group finite jobs still notify exactly once with the real result (exit 0)
+[LocalSandbox] first data at +330ms pid=82701
+
+stdout | src/main/bots/peer-background.test.ts > direct group finite jobs still notify exactly once with the real result (exit 0)
+[LocalSandbox] event=close pid=82701 code=0 signal=null at +332ms resolved=false
+[LocalSandbox] collectAndResolve: pid=82701, reason=normal, code=0, signal=null, elapsed=332ms, bytes=14
+
+stdout | src/main/bots/peer-background.test.ts > direct group finite jobs still notify exactly once with the real result (exit 0)
+[LocalSandbox] background task 306c94ea-4662-4d2e-9b04-6da2ead4c5f1 completed: exitCode=0
+
+stdout | src/main/bots/peer-background.test.ts > direct group finite jobs still notify exactly once with the real result (exit 7)
+[LocalSandbox] executeRaw: command=""/private/tmp/node-v22.23.5-darwin-arm64/bin/node" "<temporary> cwd="<temporary> effectiveMode=none override=undefined timeout=7200000ms overrideAbort=true
+
+stdout | src/main/bots/peer-background.test.ts > direct group finite jobs still notify exactly once with the real result (exit 7)
+[LocalSandbox] executeOnce: spawned pid=82702 shell=zsh at +0ms
+
+stdout | src/main/bots/peer-background.test.ts > direct group finite jobs still notify exactly once with the real result (exit 7)
+[LocalSandbox] first data at +2114ms pid=82702
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > wakes an idle Host's authorized local IM work after reconnect by list
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-1fa3a71a-da55-48ab-b987-02ae02ab986d',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > wakes an idle Host's authorized local IM work after reconnect by list
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-614c8423-5af9-4e1e-b37e-40d115f8d97c',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/peer-background.test.ts > direct group finite jobs still notify exactly once with the real result (exit 7)
+[LocalSandbox] event=close pid=82702 code=7 signal=null at +2117ms resolved=false
+[LocalSandbox] collectAndResolve: pid=82702, reason=normal, code=7, signal=null, elapsed=2117ms, bytes=14
+
+stdout | src/main/bots/peer-background.test.ts > direct group finite jobs still notify exactly once with the real result (exit 7)
+[LocalSandbox] background task dac370a5-acca-417a-80be-ec0e384bf5cb completed: exitCode=7
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > wakes an idle Host's authorized local IM work after reconnect by list
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-1aea69fc-3321-474d-8a2e-b51a5b4363ef',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+ ✓ src/main/bots/peer-background.test.ts (19 tests) 13009ms
+   ✓ single-task Stop preserves earlier jobs even with a shared authorization source (notification=false, receiptFirst=false)  406ms
+   ✓ single-task Stop preserves earlier jobs even with a shared authorization source (notification=true, receiptFirst=false)  355ms
+   ✓ retains the peer request until a real finite command exits (0), then returns once  403ms
+   ✓ retains the peer request until a real finite command exits (7), then returns once  419ms
+   ✓ reports interruption after restart without replaying an owned command (notify=false)  1625ms
+   ✓ direct group service stays tracked, allows review, and does not spawn a cleanup turn (exit 0)  3134ms
+   ✓ direct group service stays tracked, allows review, and does not spawn a cleanup turn (exit 7)  3153ms
+   ✓ direct group finite jobs still notify exactly once with the real result (exit 0)  391ms
+   ✓ direct group finite jobs still notify exactly once with the real result (exit 7)  2179ms
+(node:82703) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > keeps completed events terminal when a late lease revocation arrives
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-ae6fd675-c561-4b33-ad60-b6c5ed813b10',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > retains an uncertain platform result without retrying or claiming delivery
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-0880ef6a-bf8b-43ca-bddc-2f280e3847c0',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers independent-work attachments only to their original dm
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-5eacae17-6238-4fc3-b6ee-2fbcf8f72e52',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-2375e864-2b72-481d-922f-0ca8fefb1ff8:file:0',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:f639d03d9073',
+  uploadId: undefined,
+  bytes: 19,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers independent-work attachments only to their original dm
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-2375e864-2b72-481d-922f-0ca8fefb1ff8',
+  fileCount: 0,
+  hasText: false,
+  fileTransportAvailable: true
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers independent-work attachments only to their original dm
+[Bot IM] reply delivery started {
+  deliveryId: 'im-personal-dff82e50-19fc-4ff1-b915-1f33ab710fed',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers independent-work attachments only to their original dm
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:f639d03d9073',
+  uploadId: 'mock-reply-2375e864-2b72-481d-922f-0ca8fefb1ff8:file:0',
+  bytes: 19,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers independent-work attachments only to their original dm
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:f639d03d9073',
+  uploadId: 'mock-reply-2375e864-2b72-481d-922f-0ca8fefb1ff8:file:0',
+  bytes: 19,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers independent-work attachments only to their original group
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-00ebf5be-42ce-4940-9bab-648bf18de681',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-e71f356a-df7e-4926-b049-a405517e3e93:file:0',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:d671f03d735f',
+  uploadId: undefined,
+  bytes: 19,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers independent-work attachments only to their original group
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-e71f356a-df7e-4926-b049-a405517e3e93',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers independent-work attachments only to their original group
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:d671f03d735f',
+  uploadId: 'mock-reply-e71f356a-df7e-4926-b049-a405517e3e93:file:0',
+  bytes: 19,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers independent-work attachments only to their original group
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:d671f03d735f',
+  uploadId: 'mock-reply-e71f356a-df7e-4926-b049-a405517e3e93:file:0',
+  bytes: 19,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+ ✓ src/main/bots/command-capacity.test.ts (31 tests) 10059ms
+   ✓ refills capacity when delayed user-message injection frees a slot during a long run  370ms
+   ✓ pending outcomes survive receipt pruning and drain in bounded batches without losing early failures  499ms
+   ✓ distinguishes active-turn shutdown from explicit Stop (shutdown=false, admitted=true)  362ms
+   ✓ distinguishes active-turn shutdown from explicit Stop (shutdown=true, admitted=true)  300ms
+   ✓ skips a withdrawn full batch and wakes again for the next valid saved result  302ms
+   ✓ resumes unrelated saved results after member releases queued capacity  312ms
+   ✓ resumes unrelated saved results after group-delete releases queued capacity  2030ms
+   ✓ resumes unrelated saved results after schedule-disable releases queued capacity  307ms
+   ✓ resumes unrelated saved results after mock-revoke releases queued capacity  305ms
+   ✓ resumes unrelated saved results after archive releases queued capacity  308ms
+   ✓ refills capacity released by retiring an invalid group post inside the pump  305ms
+(node:82708) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stdout | src/main/bots/im-channel.test.ts > hides host paths in group replies while retaining local attachment records
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-9fa36253-384e-4d39-8462-c82df43b6d1e',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-9fa36253-384e-4d39-8462-c82df43b6d1e:file:0',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:7e12b207d3f3',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-channel.test.ts > hides host paths in group replies while retaining local attachment records
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:7e12b207d3f3',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'gateway_begin',
+  state: 'accepted',
+  reused: true
+}
+
+stdout | src/main/bots/im-wire.test.ts > routes group through WebSocket
+[IM] Gateway session session: Agent replies go out as text.
+
+stdout | src/main/bots/im-channel.test.ts > hides host paths in dm replies while retaining local attachment records
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-164bd9c7-9605-4518-85e6-43891f22e182',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-164bd9c7-9605-4518-85e6-43891f22e182:file:0',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:c09b21c5f44a',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-channel.test.ts > hides host paths in dm replies while retaining local attachment records
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:c09b21c5f44a',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'gateway_begin',
+  state: 'accepted',
+  reused: true
+}
+
+stdout | src/main/bots/im-wire.test.ts > routes group through WebSocket
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-49b52d66-f5ad-4ce2-9f2f-08c2c9a66ddd',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-49b52d66-f5ad-4ce2-9f2f-08c2c9a66ddd:file:0',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:2f8ca1df870e',
+  uploadId: undefined,
+  bytes: 80000,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-wire.test.ts > routes group through WebSocket
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:2f8ca1df870e',
+  uploadId: 'upload',
+  bytes: 80000,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/im-wire.test.ts > routes group through WebSocket
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:2f8ca1df870e',
+  uploadId: 'upload',
+  bytes: 80000,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/im-wire.test.ts > routes group through WebSocket
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-9afef136-6827-4e97-b12e-abfd32fd940f',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-9afef136-6827-4e97-b12e-abfd32fd940f:file:0',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:42e1c0bc5881',
+  uploadId: undefined,
+  bytes: 80000,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-channel.test.ts > hides host paths in mirror replies while retaining local attachment records
+[Bot IM] reply delivery started {
+  deliveryId: 'im-personal-b1b1983c-7c41-4f31-8791-ddd7e0fdfaeb',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'im-personal-b1b1983c-7c41-4f31-8791-ddd7e0fdfaeb:file:0',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:70c8695a4ce0',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-channel.test.ts > hides host paths in mirror replies while retaining local attachment records
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:70c8695a4ce0',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'gateway_begin',
+  state: 'accepted',
+  reused: true
+}
+
+stdout | src/main/bots/im-wire.test.ts > routes group through WebSocket
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:42e1c0bc5881',
+  uploadId: 'upload',
+  bytes: 80000,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/im-wire.test.ts > routes group through WebSocket
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:42e1c0bc5881',
+  uploadId: 'upload',
+  bytes: 80000,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > keeps the local file and reports an old gateway's missing attachment capability
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-1a77ba58-a5b0-4ff7-9e6e-35cbec3caa40',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-1a77ba58-a5b0-4ff7-9e6e-35cbec3caa40:file:0',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > keeps text responsive during a file upload, records final receipts and retries only the failed file
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-d74659cc-aba6-46af-8760-8a6f64ba6e9a',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-3100fbb5880d40cb4cdd33f682d08833c5e9c8d3ebc6a3879b496f05d05d0eb4',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:49da897a016b',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-channel.test.ts > keeps text responsive during a file upload, records final receipts and retries only the failed file
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-5847a3e2-83b5-4c46-b3d1-d64f287511b4',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+
+stdout | src/main/bots/im-channel.test.ts > keeps text responsive during a file upload, records final receipts and retries only the failed file
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:49da897a016b',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'gateway_begin',
+  state: 'accepted',
+  reused: true
+}
+
+stdout | src/main/bots/im-channel.test.ts > keeps text responsive during a file upload, records final receipts and retries only the failed file
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-553b2abb7deed2dfa05a8d16cf4f833cab452d6cd5e921ba6aa0caa050ba5072',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:898e024494d4',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-channel.test.ts > keeps text responsive during a file upload, records final receipts and retries only the failed file
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:898e024494d4',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'gateway_begin',
+  state: 'accepted',
+  reused: true
+}
+
+stdout | src/main/bots/im-channel.test.ts > keeps text responsive during a file upload, records final receipts and retries only the failed file
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-3100fbb5880d40cb4cdd33f682d08833c5e9c8d3ebc6a3879b496f05d05d0eb4',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:49da897a016b',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-channel.test.ts > keeps text responsive during a file upload, records final receipts and retries only the failed file
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:49da897a016b',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'gateway_begin',
+  state: 'accepted',
+  reused: true
+}
+
+stdout | src/main/bots/im-wire.test.ts > routes group through WebSocket
+[IM] Gateway session session: Agent replies go out as text.
+
+stdout | src/main/bots/im-wire.test.ts > routes dm through WebSocket
+[IM] Gateway session session: Agent replies go out as text.
+
+stdout | src/main/bots/im-channel.test.ts > retains uncertain file receipts without automatic or manual resend
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-6f33525e-372c-4722-b7d3-6451419e4d17',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-55725c597ed067be830b6733f93cf39ac9f18933c56721728805bd5e2a1b4ba0',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:fcfc03bceaab',
+  uploadId: undefined,
+  bytes: 1,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-channel.test.ts > retains uncertain file receipts without automatic or manual resend
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:fcfc03bceaab',
+  uploadId: undefined,
+  bytes: 1,
+  stage: 'gateway_begin',
+  state: 'unknown',
+  reused: true
+}
+
+stdout | src/main/bots/im-wire.test.ts > routes dm through WebSocket
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-b33e7970-89f0-4523-bd92-705549a8089c',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-b33e7970-89f0-4523-bd92-705549a8089c:file:0',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:003276fc8aad',
+  uploadId: undefined,
+  bytes: 80000,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-wire.test.ts > routes dm through WebSocket
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:003276fc8aad',
+  uploadId: 'upload',
+  bytes: 80000,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/im-wire.test.ts > routes dm through WebSocket
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:003276fc8aad',
+  uploadId: 'upload',
+  bytes: 80000,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/im-wire.test.ts > routes dm through WebSocket
+[Bot IM] reply delivery started {
+  deliveryId: 'im-personal-5dd240a6-6551-4471-b7e9-b47f3992dfcd:file:0',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:1bb044066553',
+  uploadId: undefined,
+  bytes: 80000,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-wire.test.ts > routes dm through WebSocket
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:1bb044066553',
+  uploadId: 'upload',
+  bytes: 80000,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/im-wire.test.ts > routes dm through WebSocket
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:1bb044066553',
+  uploadId: 'upload',
+  bytes: 80000,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/im-wire.test.ts > routes dm through WebSocket
+[Bot IM] reply delivery started {
+  deliveryId: 'im-personal-5dd240a6-6551-4471-b7e9-b47f3992dfcd',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+
+stdout | src/main/bots/im-channel.test.ts > backs off only a transiently failed file while the next file can be delivered
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-5ad5552b-c7a1-4858-94e6-e8f962b9ac9f',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-acb1bd642efd8c905e1b55e697664e22010734a470220529eaddffe435780594',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:5279ec559442',
+  uploadId: undefined,
+  bytes: 1,
+  stage: 'validate'
+}
+
+stderr | src/main/bots/im-channel.test.ts > backs off only a transiently failed file while the next file can be delivered
+[Bot IM file] failed {
+  deliveryRef: 'sha256:5279ec559442',
+  uploadId: undefined,
+  bytes: 1,
+  stage: 'gateway_begin',
+  reasonCode: 'FILE_TRANSFER_FAILED',
+  permanent: false,
+  outcomeUnknown: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > backs off only a transiently failed file while the next file can be delivered
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-b8c94356e8dac9bd2aea5c6fd1fd5849e08b4a07c50f3b3a0d9d6c717a0e8569',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:d9124ba325dc',
+  uploadId: undefined,
+  bytes: 1,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-channel.test.ts > backs off only a transiently failed file while the next file can be delivered
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:d9124ba325dc',
+  uploadId: undefined,
+  bytes: 1,
+  stage: 'gateway_begin',
+  state: 'accepted',
+  reused: true
+}
+
+stdout | src/main/bots/im-wire.test.ts > routes dm through WebSocket
+[IM] Gateway session session: Agent replies go out as text.
+
+ ✓ src/main/bots/im-wire.test.ts (2 tests) 8974ms
+   ✓ routes group through WebSocket  6880ms
+   ✓ routes dm through WebSocket  2093ms
+(node:82715) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stdout | src/main/bots/im-channel.test.ts > delivers browser takeover notices for dm direct and independent runs to their original audience
+[Bot IM] reply delivery started {
+  deliveryId: 'im-browser-help-72e3015a-0aed-4dbb-95e7-7a3be099d0ac-7',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers browser takeover notices for dm direct and independent runs to their original audience
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-72e3015a-0aed-4dbb-95e7-7a3be099d0ac',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers browser takeover notices for dm direct and independent runs to their original audience
+[Bot IM] reply delivery started {
+  deliveryId: 'im-browser-help-0a6f00f2-18ae-45f6-b18c-d78e6e2c0a58-7',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers browser takeover notices for dm direct and independent runs to their original audience
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-07e42be4-ac9c-42d8-b025-6a944ed76d1d',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers browser takeover notices for group direct and independent runs to their original audience
+[Bot IM] reply delivery started {
+  deliveryId: 'im-browser-help-f965247e-4a61-4c6d-86e7-ed0cbd74fa87-7',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers browser takeover notices for group direct and independent runs to their original audience
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-f965247e-4a61-4c6d-86e7-ed0cbd74fa87',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers browser takeover notices for group direct and independent runs to their original audience
+[Bot IM] reply delivery started {
+  deliveryId: 'im-browser-help-6a7e27ea-6155-4617-b35a-f178ced56dd0-7',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers browser takeover notices for group direct and independent runs to their original audience
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-c2c8ff1d-bc9f-4389-89bc-1a4d1c76539a',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > private Bot handoff to a Zhaohu group > uses the target Bot's existing group thread, only forwards the brief, and delivers replies to that group
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-8dc387bf-900d-47d5-8f79-1aabc310877e',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > private Bot handoff to a Zhaohu group > uses the target Bot's existing group thread, only forwards the brief, and delivers replies to that group
+[Bot IM] reply delivery started {
+  deliveryId: 'c8d89007-ff24-4789-bd6c-d27d7673185b',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > private Bot handoff to a Zhaohu group > uses the target Bot's existing group thread, only forwards the brief, and delivers replies to that group
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-18bfb53f-417e-4308-8944-b0a9c4c2d101',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+ ✓ src/main/bots/im-channel.test.ts (125 tests) 67609ms
+   ✓ authenticated IM on the existing Bot host > creates desktop work in an empty bound group, executes once and returns results only there  2041ms
+   ✓ authenticated IM on the existing Bot host > delivers a Feature update after the dispatching turn ended, once and only to the originating group  1041ms
+   ✓ authenticated IM on the existing Bot host > publishes the settled IM delivery state accepted and keeps empty delivery ticks quiet  3373ms
+   ✓ authenticated IM on the existing Bot host > publishes the settled IM delivery state unknown and keeps empty delivery ticks quiet  2081ms
+   ✓ authenticated IM on the existing Bot host > publishes the settled IM delivery state pending and keeps empty delivery ticks quiet  2088ms
+   ✓ authenticated IM on the existing Bot host > publishes the settled IM delivery state blocked and keeps empty delivery ticks quiet  2100ms
+   ✓ authenticated IM on the existing Bot host > runs two IM groups and private chat concurrently while preserving approvals, thread order and reply routes  2361ms
+   ✓ authenticated IM on the existing Bot host > publishes one opening before completion, exposes the group execution thread and cancels only that group  1063ms
+   ✓ authenticated IM on the existing Bot host > delivers an opening and the final result once in dm  1036ms
+   ✓ authenticated IM on the existing Bot host > delivers an opening and the final result once in group  1039ms
+   ✓ authenticated IM on the existing Bot host > uses one durable acknowledgement for accepted dispatch in dm  1056ms
+   ✓ authenticated IM on the existing Bot host > uses one durable acknowledgement for accepted dispatch in group  1052ms
+   ✓ authenticated IM on the existing Bot host > delivers the fallback when dispatch had no opening and preserves genuine failure  1068ms
+   ✓ authenticated IM on the existing Bot host > returns asynchronous Bot collaboration to its original IM group without touching private threads  1052ms
+   ✓ authenticated IM on the existing Bot host > keeps nested collaborator integration private until the original IM owner replies  1381ms
+   ✓ authenticated IM on the existing Bot host > returns a peer workflow completed summary privately before the IM owner integrates it  1054ms
+   ✓ authenticated IM on the existing Bot host > returns a peer workflow failed summary privately before the IM owner integrates it  1036ms
+   ✓ authenticated IM on the existing Bot host > sends Markdown for dm without changing segment identity on explicit downgrade  1034ms
+   ✓ authenticated IM on the existing Bot host > sends Markdown for group without changing segment identity on explicit downgrade  1027ms
+   ✓ authenticated IM on the existing Bot host > runs a wire-valid opaque sender once in dm and preserves its frozen source  1036ms
+   ✓ authenticated IM on the existing Bot host > runs a wire-valid opaque sender once in group and preserves its frozen source  2367ms
+   ✓ authenticated IM on the existing Bot host > keeps existing unscoped sender sources readable and redelivery idempotent  1038ms
+   ✓ authenticated IM on the existing Bot host > preserves the actual completed execution outcome in the gateway acknowledgement without replay  1051ms
+   ✓ authenticated IM on the existing Bot host > preserves the actual failed execution outcome in the gateway acknowledgement without replay  1049ms
+   ✓ authenticated IM on the existing Bot host > preserves the actual outcome_unknown execution outcome in the gateway acknowledgement without replay  1055ms
+   ✓ authenticated IM on the existing Bot host > shares owner DM with the main thread, isolates groups, and deduplicates received events  1076ms
+   ✓ authenticated IM on the existing Bot host > mirrors only new main-thread replies to the owner's DM, never to groups  1057ms
+   ✓ authenticated IM on the existing Bot host > wakes an idle Host's authorized local IM work after reconnect by list  1898ms
+   ✓ authenticated IM on the existing Bot host > wakes an idle Host's authorized local IM work after reconnect by periodic sync  1044ms
+   ✓ authenticated IM on the existing Bot host > keeps completed events terminal when a late lease revocation arrives  1025ms
+   ✓ authenticated IM on the existing Bot host > retains an uncertain platform result without retrying or claiming delivery  1037ms
+   ✓ delivers independent-work attachments only to their original dm  2154ms
+   ✓ delivers independent-work attachments only to their original group  3202ms
+   ✓ hides host paths in group replies while retaining local attachment records  1028ms
+   ✓ hides host paths in dm replies while retaining local attachment records  1038ms
+   ✓ hides host paths in mirror replies while retaining local attachment records  1045ms
+   ✓ keeps the local file and reports an old gateway's missing attachment capability  1048ms
+   ✓ keeps text responsive during a file upload, records final receipts and retries only the failed file  3751ms
+   ✓ retains uncertain file receipts without automatic or manual resend  1051ms
+   ✓ backs off only a transiently failed file while the next file can be delivered  1046ms
+   ✓ delivers browser takeover notices for dm direct and independent runs to their original audience  2056ms
+   ✓ delivers browser takeover notices for group direct and independent runs to their original audience  2045ms
+   ✓ private Bot handoff to a Zhaohu group > uses the target Bot's existing group thread, only forwards the brief, and delivers replies to that group  1038ms
+(node:82719) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/main/bots/group-discussion.test.ts (146 tests | 1 failed) 5700ms
+   ✓ public group turn admission > broadcasts default only to active members after archive 29ms
+   ✓ public group turn admission > broadcasts everyone only to active members after archive 23ms
+   ✓ public group turn admission > rejects explicit archived recipients without silently delivering a partial assignment 23ms
+   ✓ public group turn admission > does not save a broadcast when no active member remains 21ms
+   ✓ public group turn admission > rejects a pre-deletion member snapshot and accepts the refreshed group 22ms
+   ✓ public group turn admission > restoring a skipped member requires a new handoff: none 25ms
+   ✓ public group turn admission > restoring a skipped member requires a new handoff: specific 23ms
+   ✓ public group turn admission > restoring a skipped member requires a new handoff: everyone 23ms
+   ✓ public group turn admission > does not hide an explicit archived mention inside an everyone broadcast 21ms
+   ✓ public group turn admission > runs initial members concurrently while a later group request waits 26ms
+   ✓ public group turn admission > delivers a later peer message to a member already running on the initial request 24ms
+   ✓ public group turn admission > delivers an unread peer handoff even when the recipient posted afterwards 33ms
+   ✓ public group turn admission > does not wake a member just because it published its own latest message 28ms
+   ✓ public group turn admission > does not tell every recipient to answer when the user assigns distinct roles 22ms
+   ✓ public group turn admission > waits for an active archived member to physically finish 23ms
+   ✓ public group turn admission > waits for an active deleting member to physically finish 23ms
+   ✓ public group turn admission > bounds dispatch evidence without truncating the original user request or inventing old evidence 38ms
+   ✓ public group turn admission > supplies fresh public evidence to a later-starting member without rewriting the request 26ms
+   ✓ public group turn admission > runs both initial members without blocking on a separate private conversation 30ms
+   ✓ public group turn admission > allows another room and peer jobs during a public turn, then delivers the peer receipt 27ms
+   ✓ public group turn admission > releases the next member after turn completion while a detached command continues 24ms
+   ✓ public group turn admission > delivers an explicit peer handoff while the sender's background command is running 26ms
+   ✓ public group turn admission > delivers an explicit peer handoff while its source group turn is still running 28ms
+   ✓ public group turn admission > does not start an extra peer while an initial turn is unaddressed 24ms
+   ✓ public group turn admission > does not start an extra peer while an initial turn is waiting user 24ms
+   ✓ public group turn admission > keeps a started handoff and original turn intact when a new request arrives 27ms
+   ✓ public group turn admission > does not wake unrelated members during a background command: no mention 23ms
+   ✓ public group turn admission > does not wake unrelated members during a background command: command owner 23ms
+   ✓ public group turn admission > keeps a second explicitly named peer eligible during the same background command 27ms
+   ✓ public group turn admission > does not block later turns after cancelled 23ms
+   ✓ public group turn admission > does not block later turns after failed 23ms
+   ✓ public group turn admission > does not block later turns after interrupted 23ms
+   ✓ initial group snapshot watermark > delivers newly seen peer messages once while retaining later peer contributions 30ms
+   ✓ initial group snapshot watermark > does not mark an oversized peer message as read when it was omitted from the snapshot 22ms
+   ✓ initial group snapshot watermark > keeps the watermark when a snapshot contains newer messages but omits older ones 25ms
+   ✓ initial group snapshot watermark > does not advance the watermark when resuming a checkpoint with a newer snapshot 25ms
+   ✓ initial group snapshot watermark > retains previously dispatched peer evidence for a new request after failed 25ms
+   ✓ initial group snapshot watermark > retains previously dispatched peer evidence for a new request after cancelled 24ms
+   ✓ initial group snapshot watermark > retains previously dispatched peer evidence for a new request after interrupted 24ms
+   ✓ initial group snapshot watermark > preserves peer evidence and avoids replay after restarting with a running first turn 27ms
+   ✓ initial group snapshot watermark > preserves peer evidence and avoids replay after restarting with a checkpoint first turn 27ms
+   ✓ initial group snapshot watermark > delivers new peer evidence arriving during checkpoint after the turn resumes 24ms
+   ✓ initial group snapshot watermark > delivers new peer evidence arriving during waiting_user after the turn resumes 23ms
+   ✓ quoted author's optional notification > keeps the direct atomic target and separately notifies only the exact persisted author 20ms
+   ✓ quoted author's optional notification > preserves the full current request and the existing 8000-character quote boundary 20ms
+   ✓ quoted author's optional notification > retains file references in an explicit old quote with body "" 23ms
+   ✓ quoted author's optional notification > retains file references in an explicit old quote with body "Original text" 23ms
+   ✓ quoted author's optional notification > adds no extra notification for a same author quote 19ms
+   ✓ quoted author's optional notification > adds no extra notification for a user quote 20ms
+   ✓ quoted author's optional notification > skips a archived optional author while sending the original direct request 23ms
+   ✓ quoted author's optional notification > skips a deleting optional author while sending the original direct request 21ms
+   ✓ quoted author's optional notification > retains same-group and removed-author validation before any notification 20ms
+   ✓ quoted author's optional notification > counts an unselected author once inside the existing eight-member initial turn budget 22ms
+   ✓ quoted author's optional notification > allows the notified author to pass without a public bubble, unread activity or further turns 23ms
+   ✓ quoted author's optional notification > cancels only the obsolete queued author notification on a new user message 21ms
+   ✓ quoted author's optional notification > does not cancel an author's already-running authorized work when another request arrives 22ms
+   ✓ quoted author's optional notification > does not cancel an author's started work deferred at an existing model checkpoint 21ms
+   ✓ quoted author's optional notification > stops queued notifications through the original group Stop path and preserves a restarted queue 26ms
+   ✓ private-to-group messages on the existing room queue > routes a background callback's delegated handoff without mixing another request 31ms
+   ✓ private-to-group messages on the existing room queue > posts as the actual Bot and holds the seed until its own cursor is activated 25ms
+   ✓ private-to-group messages on the existing room queue > keeps the old human cursor and work intact, then activates waiting posts by public ordinal 28ms
+   ✓ private-to-group messages on the existing room queue > routes exact @handoffs within the Bot anchor without consuming another assignment's late mentions 24ms
+   ✓ private-to-group messages on the existing room queue > retries only the exact delivery and never restarts it or replaces a newer human cursor 23ms
+   ✓ private-to-group messages on the existing room queue > withdraws a queued Bot post on stop 21ms
+   ✓ private-to-group messages on the existing room queue > withdraws a queued Bot post on membership 21ms
+   ✓ private-to-group messages on the existing room queue > withdraws a queued Bot post on delete 26ms
+   ✓ private-to-group messages on the existing room queue > withdraws a queued Bot post on archive 23ms
+   ✓ private-to-group messages on the existing room queue > rejects non-user, mock, foreign-group and cross-room sends before any public side effect 24ms
+   ✓ private-to-group messages on the existing room queue > isolates a pending private anchor beyond the last fifty public rows 37ms
+   ✓ private-to-group messages on the existing room queue > keeps unrelated group-post-prefixed work in the room busy fence 21ms
+   × private-to-group messages on the existing room queue > uses the queued-state and exact sender/request indexes without materializing task history 27ms
+     → near "undefined": syntax error
+   ✓ private-to-group messages on the existing room queue > preserves the selected group identity through the original command continuation source 22ms
+   ✓ private-to-group messages on the existing room queue > retains legitimate handoffs after more than three command continuation hops 33ms
+   ✓ private-to-group messages on the existing room queue > keeps a real handoff routable after fifty-five later progress messages 39ms
+   ✓ private-to-group messages on the existing room queue > reserves one ordinary queue slot so 499 deferred posts cannot deadlock the older room  1297ms
+   ✓ private-to-group messages on the existing room queue > lets the original Host work finish before claiming the separately posted member task 183ms
+   ✓ bounded group discussion on the existing Bot queue > retains the complete long peer message for a handoff turn 37ms
+   ✓ bounded group discussion on the existing Bot queue > retains the complete long peer message for a direct turn 27ms
+   ✓ bounded group discussion on the existing Bot queue > bounds direct shared history by whole messages and marks omitted records 24ms
+   ✓ bounded group discussion on the existing Bot queue > retains all eight file references in a public peer handoff 22ms
+   ✓ bounded group discussion on the existing Bot queue > preserves combined public file text and references in a handoff turn 22ms
+   ✓ bounded group discussion on the existing Bot queue > preserves combined public file text and references in a direct turn 22ms
+   ✓ bounded group discussion on the existing Bot queue > places historical room references before the exact current user request 24ms
+   ✓ bounded group discussion on the existing Bot queue > publishes explicit room messages once with real membership and persisted mention IDs 25ms
+   ✓ bounded group discussion on the existing Bot queue > keeps internal handoffs and callbacks private while preserving the real peer result 26ms
+   ✓ bounded group discussion on the existing Bot queue > routes an explicit @all handoff to the remaining room members only 23ms
+   ✓ bounded group discussion on the existing Bot queue > routes an explicit @everyone handoff to the remaining room members only 23ms
+   ✓ bounded group discussion on the existing Bot queue > routes an explicit @所有人 handoff to the remaining room members only 23ms
+   ✓ bounded group discussion on the existing Bot queue > does not hide failures or permit a private or removed member task to speak into a room 25ms
+   ✓ bounded group discussion on the existing Bot queue > does not dispatch an unaddressed member after a selected member completes solo work 22ms
+   ✓ bounded group discussion on the existing Bot queue > does not select pasted user handles, plain names, unknown handles or an earlier assignment 24ms
+   ✓ bounded group discussion on the existing Bot queue > does not guess a handoff between members with the same display name 22ms
+   ✓ bounded group discussion on the existing Bot queue > keeps a persisted handoff bound to its ID after a rename and beyond the visible history page 22ms
+   ✓ bounded group discussion on the existing Bot queue > rechecks a legacy queued cursor without bypassing active task cleanup 23ms
+   ✓ bounded group discussion on the existing Bot queue > rechecks a legacy running cursor without bypassing active task cleanup 23ms
+   ✓ bounded group discussion on the existing Bot queue > rechecks a legacy waiting_user cursor without bypassing active task cleanup 24ms
+   ✓ bounded group discussion on the existing Bot queue > does not cancel a newer discussion when an older group request is retried 25ms
+   ✓ bounded group discussion on the existing Bot queue > keeps the review participation rule after peer data without changing direct replies 20ms
+   ✓ bounded group discussion on the existing Bot queue > keeps the full current request and whole newest peer records within the message budget 3ms
+   ✓ bounded group discussion on the existing Bot queue > does not relabel an older room task as newly delivered context for a fresh request 25ms
+   ✓ bounded group discussion on the existing Bot queue > settles a (pass) review without bubbles, unread or another round 25ms
+   ✓ bounded group discussion on the existing Bot queue > settles a pass review without bubbles, unread or another round 25ms
+   ✓ bounded group discussion on the existing Bot queue > settles a PASS. review without bubbles, unread or another round 26ms
+   ✓ bounded group discussion on the existing Bot queue > settles a （pass） review without bubbles, unread or another round 24ms
+   ✓ bounded group discussion on the existing Bot queue > settles a （ＰＡＳＳ）． review without bubbles, unread or another round 23ms
+   ✓ bounded group discussion on the existing Bot queue > settles a ( pass ) review without bubbles, unread or another round 23ms
+   ✓ bounded group discussion on the existing Bot queue > feeds new shared evidence to the original author and stops after a pass, without private turns 24ms
+   ✓ bounded group discussion on the existing Bot queue > waits for all selected members and actual peer handoff receipts before reviewing 27ms
+   ✓ bounded group discussion on the existing Bot queue > does not resurrect initial failed/cancelled work or activate historical groups on migration 24ms
+   ✓ bounded group discussion on the existing Bot queue > reuses a queued review across Store restart and never replays an interrupted review 26ms
+   ✓ bounded group discussion on the existing Bot queue > publishes one interruption result when recovering a running group review without replaying it 25ms
+   ✓ bounded group discussion on the existing Bot queue > publishes one interruption result when recovering a waiting_user group review without replaying it 29ms
+   ✓ bounded group discussion on the existing Bot queue > reports interrupted initial group work only to its room and preserves queued work 25ms
+   ✓ bounded group discussion on the existing Bot queue > uses stable member IDs despite duplicate names, caps all selected/review calls at ten, and bounds rounds 35ms
+   ✓ bounded group discussion on the existing Bot queue > keeps a direct reply (pass) visible 21ms
+   ✓ bounded group discussion on the existing Bot queue > keeps a direct reply pass visible 21ms
+   ✓ bounded group discussion on the existing Bot queue > keeps a direct reply PASS. visible 20ms
+   ✓ bounded group discussion on the existing Bot queue > keeps a direct reply （pass） visible 21ms
+   ✓ bounded group discussion on the existing Bot queue > keeps a direct reply （ＰＡＳＳ）． visible 21ms
+   ✓ bounded group discussion on the existing Bot queue > keeps a direct reply ( pass ) visible 21ms
+   ✓ bounded group discussion on the existing Bot queue > preserves the original 24-handoff limit and exact retries for explicit group work 26ms
+   ✓ bounded group discussion on the existing Bot queue > keeps optional discussion in its bounded room turns without starting a second relay chain 21ms
+   ✓ bounded group discussion on the existing Bot queue > does not consume a review cursor while the ordinary queue is full  341ms
+   ✓ bounded group discussion on the existing Bot queue > cancels queued reviews on membership change and does not revive them after a new user message 26ms
+   ✓ bounded group discussion on the existing Bot queue > aborts an active review on a new group request, preserving cleanup and the new assignment 132ms
+   ✓ group discussion budget feedback > retains the limit reason across refresh/restart/retry/rename, then clears it on a new instruction 54ms
+   ✓ group discussion budget feedback > does not turn natural settling, cancellation or failure into a budget warning 73ms
+   ✓ group discussion budget feedback > clears a stale warning on explicit stop or member change without changing other groups 93ms
+   ✓ group public activity and dispatch budgets > wakes only the named reviewer after all initial members have finished 35ms
+   ✓ group public activity and dispatch budgets > retains the original ten-dispatch limit for an old cursor without post data 26ms
+   ✓ group public activity and dispatch budgets > preserves an already owed review when initial work published ten messages 29ms
+   ✓ group public activity and dispatch budgets > counts new text, file and question records once without blocking explicit file resend 26ms
+   ✓ group public activity and dispatch budgets > does not charge a new request for a late old task or its command notification 27ms
+   ✓ group public activity and dispatch budgets > keeps one dispatch across checkpoint resume and fences restart without replay 32ms
+   ✓ group public activity and dispatch budgets > preserves distinct per-round request identities for mutual mentions and remains bounded 46ms
+   ✓ group public budget additional controls > allows all seven assigned reviewers after one producer result in an eight-member room 55ms
+   ✓ group public budget additional controls > does not allow bonus dispatch after ten posts and the original ten dispatches 41ms
+   ✓ group public budget additional controls > charges a current group delegate and its command notification to their root 28ms
+   ✓ bounded explicit handoffs after open discussion > delivers an unread explicit review to the owner within the existing budget, once across restart 34ms
+   ✓ bounded explicit handoffs after open discussion > does not extend unaddressed conversation past the existing round limit 28ms
+   ✓ bounded explicit handoffs after open discussion > does not continue a cancelled handoff 27ms
+   ✓ bounded explicit handoffs after open discussion > does not continue a failed handoff 27ms
+   ✓ bounded explicit handoffs after open discussion > does not revive the previous assignment after a new user request 27ms
+   ✓ bounded explicit handoffs after open discussion > keeps the 24-dispatch hard ceiling even when the public post count is low 29ms
+   ✓ bounded explicit handoffs after open discussion > cancels the queued post-limit handoff without affecting independent work 36ms
+   ✓ bounded explicit handoffs after open discussion > does not repeat an explicit post already consumed through the live feedback inbox 28ms
+(node:82724) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/work-projection.test.ts (5 tests) 3159ms
+   ✓ work activity projection query boundaries > seeks the existing family index for list, detail and summaries despite unrelated private history  2626ms
+(node:82727) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/nested-replies.test.ts (85 tests) 4030ms
+   ✓ nested private collaboration result return > retains the upstream record while a late child is live and prunes the completed family through the existing policy  314ms
+(node:82729) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/history-retention.test.ts (12 tests) 2024ms
+   ✓ Bot control history retention > preserves recent delivered file references and original bytes across history pruning and reopening  301ms
+ ✓ src/main/bots/workflow-ownership.test.ts (42 tests) 1865ms
+(node:82735) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/browser-host-entry.test.ts (11 tests) 2866ms
+   ✓ Bot browser native window lifecycle > reports only the latest existing claim token and rejects invalid show tokens  316ms
+   ✓ Bot browser native window lifecycle > captures only the exact native target while preserving hidden windows and claim tokens  315ms
+   ✓ Bot browser native window lifecycle > allows one unfinished native capture per target and releases it when settled  472ms
+(node:82740) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/steering.test.ts (27 tests) 3306ms
+(node:82742) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/performance-regression.test.ts (10 tests) 1579ms
+   ✓ invalidates peer commands/workflows and bounds large transaction notifications  316ms
+(node:82744) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/work.test.ts (28 tests) 3117ms
+   ✓ durable local independent works > unlimited admission isolates independent works (same Bot: false)  1791ms
+(node:82746) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stdout | src/main/bots/peer-feedback.test.ts > the real queue preserves peer identity without replacing the user's history or StopHook request
+[Runtime] Injected 1 queued current-run message(s) in beforeModel for thread peer-test
+
+stdout | src/main/bots/peer-feedback.test.ts > the actual graph preserves feedback order and final checks (reused provider ID=false)
+[Runtime] Injected 1 queued current-run message(s) in afterModel for thread peer-real-graph-false
+
+stdout | src/main/bots/peer-feedback.test.ts > the actual graph preserves feedback order and final checks (reused provider ID=true)
+[Runtime] Injected 1 queued current-run message(s) in afterModel for thread peer-real-graph-true
+
+stdout | src/main/bots/peer-feedback.test.ts > peer feedback with checkpoint-only predecessors > injects pure peer in beforeModel without requiring a visible tool row and preserves assistant identity
+[Runtime] Injected 1 queued current-run message(s) in beforeModel for thread peer-invisible-beforeModel
+
+stdout | src/main/bots/peer-feedback.test.ts > peer feedback with checkpoint-only predecessors > injects pure peer in afterModel without requiring a visible tool row and preserves assistant identity
+[Runtime] Injected 1 queued current-run message(s) in afterModel for thread peer-invisible-afterModel
+
+stdout | src/main/bots/peer-feedback.test.ts > peer feedback with checkpoint-only predecessors > classifies the actual batch after a user message is withdrawn
+[Runtime] Injected 1 queued current-run message(s) in beforeModel for thread peer-withdrawn-user
+
+ ✓ src/main/bots/peer-feedback.test.ts (40 tests) 1494ms
+(node:82756) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/feature-follow.test.ts (31 tests) 1274ms
+(node:82758) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/foreground-continuation.test.ts (31 tests) 1341ms
+(node:82760) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/browser.test.ts (118 tests) 1170ms
+stderr | src/main/bots/tools.test.ts > retains the ordinary empty-final and unfinished-todo checks after a real reaction
+[TurnCompletionGate] reaction-protection retry 1/2: empty_response — 模型返回空回复（finish_reason=stop）
+
+(node:82765) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/background-commands.test.ts (41 tests) 1011ms
+ ✓ src/main/bots/tools.test.ts (36 tests) 1065ms
+   ✓ delivers a large verified public peer result without relaxing external imports  554ms
+   ✓ delivers a large verified internal peer result without relaxing external imports  337ms
+ ✓ src/main/services/im/bot-file-delivery.test.ts (10 tests) 999ms
+   ✓ bounds a slow transport to four chunks in flight and verifies every acknowledgement  561ms
+(node:82769) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:82771) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | src/main/bots/work-tools.test.ts > work Runtime tools > reuses and reopens the same work atomically, and keeps replay and audience protection
+BotError: 任务状态已改变：completed
+    at <repo>/src/main/bots/store.ts:3360:15
+    at BotStore.transaction (<repo>/src/main/bots/store.ts:650:22)
+    at BotStore.transition (<repo>/src/main/bots/store.ts:3353:17)
+    at <repo>/src/main/bots/store.ts:4302:25
+    at BotStore.transaction (<repo>/src/main/bots/store.ts:650:22)
+    at BotStore.settle (<repo>/src/main/bots/store.ts:4277:10)
+    at <repo>/src/main/bots/store.ts:4263:12
+    at BotStore.transaction (<repo>/src/main/bots/store.ts:650:22)
+    at BotStore.settleRun (<repo>/src/main/bots/store.ts:4246:10)
+    at LocalBotHost.execute (<repo>/src/main/bots/host.ts:2207:22) {
+  code: 'CONFLICT'
+}
+
+ ✓ src/main/bots/host-work-status.test.ts (5 tests) 864ms
+ ✓ src/main/bots/work-tools.test.ts (12 tests) 805ms
+(node:82774) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:82775) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/conversation-link-service.test.ts (26 tests) 736ms
+ ✓ src/main/bots/mock-channel.test.ts (12 tests) 789ms
+(node:82778) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:82779) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/group-consumed-input.test.ts (7 tests) 625ms
+ ✓ src/main/ipc/bots.test.ts (28 tests) 613ms
+(node:82785) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:82786) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/message-reactions.test.ts (17 tests) 585ms
+stderr | src/main/bots/telemetry.test.ts > Bot event delivery > sends the existing HTTP envelope and retries an ambiguous response with the same eventId
+[EventReporter] Upload failed: 503 Service Unavailable
+
+ ✓ src/main/bots/telemetry.test.ts (21 tests) 570ms
+(node:82791) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/renderer/src/lib/bot-exchange-refresh.test.ts (3 tests) 468ms
+ ✓ src/main/bots/work-result.test.ts (15 tests) 519ms
+(node:82797) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/files.test.ts (11 tests) 372ms
+   ✓ Bot files > saves delivered files above the import cap without relaxing internal copies  335ms
+(node:82799) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/group-history.test.ts (9 tests) 380ms
+(node:82801) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/message-mentions.test.ts (14 tests) 401ms
+ ✓ src/main/bots/exchange-scope.test.ts (3 tests) 336ms
+(node:82806) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/renderer/src/lib/bot-memory-panel.test.ts (6 tests) 315ms
+(node:82808) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/renderer/src/lib/bot-group-retry-store.test.ts (12 tests) 310ms
+ ✓ src/main/bots/workspace-host.test.ts (6 tests) 252ms
+ ✓ src/renderer/src/lib/bot-grok-avatar-kernel.test.ts (5 tests) 243ms
+stderr | src/main/agent/bot-skill-selection.test.ts
+langsmith/experimental/sandbox is in alpha. This feature is experimental, and breaking changes are expected.
+
+(node:82812) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/electron-browser-engine.test.ts (7 tests) 220ms
+(node:82818) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stdout | src/main/agent/bot-skill-selection.test.ts > refreshes a checkpointed catalog when all becomes selected, none, or all again
+[Runtime] read_file tool patched: default limit=2000
+[Runtime] grep schema patched: "Regex pattern to search for" → "Text pattern to search for (literal, not regex)"
+[Runtime] execute tool patched: added run_in_background support
+[Runtime] task_output tool added
+
+stdout | src/main/agent/bot-skill-selection.test.ts > refreshes a checkpointed catalog when all becomes selected, none, or all again
+[Runtime] read_file tool patched: default limit=2000
+[Runtime] grep schema patched: "Regex pattern to search for" → "Text pattern to search for (literal, not regex)"
+[Runtime] execute tool patched: added run_in_background support
+[Runtime] task_output tool added
+
+stdout | src/main/agent/bot-skill-selection.test.ts > refreshes a checkpointed catalog when all becomes selected, none, or all again
+[Runtime] read_file tool patched: default limit=2000
+[Runtime] grep schema patched: "Regex pattern to search for" → "Text pattern to search for (literal, not regex)"
+[Runtime] execute tool patched: added run_in_background support
+[Runtime] task_output tool added
+
+stdout | src/main/agent/bot-skill-selection.test.ts > refreshes a checkpointed catalog when all becomes selected, none, or all again
+[Runtime] read_file tool patched: default limit=2000
+[Runtime] grep schema patched: "Regex pattern to search for" → "Text pattern to search for (literal, not regex)"
+[Runtime] execute tool patched: added run_in_background support
+[Runtime] task_output tool added
+
+ ✓ src/main/bots/request-receipts.test.ts (4 tests) 238ms
+stdout | src/main/agent/bot-skill-selection.test.ts > task subagents with their own skill sources receive the selected catalog and file loader
+[Runtime] read_file tool patched: default limit=2000
+[Runtime] grep schema patched: "Regex pattern to search for" → "Text pattern to search for (literal, not regex)"
+[Runtime] execute tool patched: added run_in_background support
+[Runtime] task_output tool added
+
+ ✓ src/main/agent/bot-skill-selection.test.ts (9 tests) 240ms
+(node:82820) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/local-service.test.ts (12 tests) 176ms
+(node:82824) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/renderer/src/lib/bot-office-file-preview.test.ts (18 tests) 196ms
+(node:82826) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/introduction.test.ts (7 tests) 176ms
+ ✓ src/main/bots/stopped-task-context.test.ts (6 tests) 773ms
+   ✓ Bot stopped task context > keeps stopped group work in scope after rejoining, excluding private, other rooms and members  608ms
+(node:82828) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:82830) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/message-reply.test.ts (4 tests) 155ms
+(node:82833) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/renderer/src/lib/bot-draft-sender.test.ts (24 tests) 154ms
+ ✓ src/renderer/src/lib/bot-im-dialog-history.test.ts (3 tests) 107ms
+ ✓ src/main/bots/notification-dispatch.test.ts (7 tests) 145ms
+ ✓ src/main/bots/memory.test.ts (15 tests) 101ms
+(node:82839) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stdout | src/main/bots/memory-summary-adapter.test.ts > Bot automatic memory verification > runs the original extractor before an independent approval of false
+[Bots] Automatic memory proposal rejected { botId: 'a', operations: 1 }
+
+stdout | src/main/bots/thread-message-replies.test.ts
+Initializing database at: <temporary>
+Database initialized successfully
+
+stdout | src/main/bots/memory-summary-adapter.test.ts > Bot automatic memory verification > does not persist an unapproved or invalid verdict: {"approved":false}
+[Bots] Automatic memory proposal rejected { botId: 'a', operations: 1 }
+
+stdout | src/main/bots/memory-summary-adapter.test.ts > Bot automatic memory verification > does not persist an unapproved or invalid verdict: {"approved":true}
+[Bots] Automatic memory proposal rejected { botId: 'a', operations: 1 }
+
+stdout | src/main/bots/memory-summary-adapter.test.ts > Bot automatic memory verification > does not persist an unapproved or invalid verdict: {"userFacts":[{"quote":"Prefer TypeScript","kind":"preference","fact":"Prefer TypeScript"}],"reviews":[],"approved":true}
+[Bots] Automatic memory proposal rejected { botId: 'a', operations: 1 }
+
+stdout | src/main/bots/memory-summary-adapter.test.ts > Bot automatic memory verification > does not persist an unapproved or invalid verdict: {"userFacts":[{"quote":"Prefer TypeScript","kind":"preference","fact":"Prefer TypeScript"}],"reviews":[{"index":0,"factIndexes":[0]},{"index":1,"factIndexes":[0]}],"approved":true}
+[Bots] Automatic memory proposal rejected { botId: 'a', operations: 1 }
+
+stdout | src/main/bots/memory-summary-adapter.test.ts > Bot automatic memory verification > does not persist an unapproved or invalid verdict: {"userFacts":[{"quote":"Assistant-only task ID","kind":"preference","fact":"Prefer TypeScript"}],"reviews":[{"index":0,"factIndexes":[0]}],"approved":true}
+[Bots] Automatic memory proposal rejected { botId: 'a', operations: 1 }
+
+stdout | src/main/bots/memory-summary-adapter.test.ts > Bot automatic memory verification > does not persist an unapproved or invalid verdict: {"userFacts":[{"quote":"Prefer TypeScript","kind":"task_event","fact":"Prefer TypeScript"}],"reviews":[{"index":0,"factIndexes":[0]}],"approved":true}
+[Bots] Automatic memory proposal rejected { botId: 'a', operations: 1 }
+
+stdout | src/main/bots/memory-summary-adapter.test.ts > Bot automatic memory verification > does not persist an unapproved or invalid verdict: {"userFacts":[{"quote":"Prefer TypeScript","kind":["preference"],"fact":"Prefer TypeScript"}],"reviews":[{"index":0,"factIndexes":[0]}],"approved":true}
+[Bots] Automatic memory proposal rejected { botId: 'a', operations: 1 }
+
+stdout | src/main/bots/memory-summary-adapter.test.ts > Bot automatic memory verification > does not persist an unapproved or invalid verdict: {"userFacts":[{"quote":"Prefer TypeScript","kind":"preference","fact":"Prefer TypeScript"}],"reviews":[{"index":0,"factIndexes":[1]}],"approved":true}
+[Bots] Automatic memory proposal rejected { botId: 'a', operations: 1 }
+
+stdout | src/main/bots/memory-summary-adapter.test.ts > Bot automatic memory verification > does not persist an unapproved or invalid verdict: {"userFacts":[{"quote":"Prefer TypeScript","kind":"preference","fact":"Prefer TypeScript"}],"reviews":[{"index":0,"factIndexes":[]}],"approved":true}
+[Bots] Automatic memory proposal rejected { botId: 'a', operations: 1 }
+
+stdout | src/main/bots/memory-summary-adapter.test.ts > Bot automatic memory verification > does not persist an unapproved or invalid verdict: {"userFacts":[{"quote":" ","kind":"preference","fact":"Prefer TypeScript"}],"reviews":[{"index":0,"factIndexes":[0]}],"approved":true}
+[Bots] Automatic memory proposal rejected { botId: 'a', operations: 1 }
+
+stdout | src/main/bots/memory-summary-adapter.test.ts > Bot automatic memory verification > does not persist an unapproved or invalid verdict: {"userFacts":[{"quote":"Prefer TypeScript","kind":"preference","fact":"Prefer TypeScript"}],"reviews":[{"index":-1,"factIndexes":[0]}],"approved":true}
+[Bots] Automatic memory proposal rejected { botId: 'a', operations: 1 }
+
+stdout | src/main/bots/memory-summary-adapter.test.ts > Bot automatic memory verification > does not persist an unapproved or invalid verdict: {"userFacts":[{"quote":"Prefer TypeScript","kind":"preference","fact":"Prefer TypeScript"}],"reviews":[{"index":0.5,"factIndexes":[0]}],"approved":true}
+[Bots] Automatic memory proposal rejected { botId: 'a', operations: 1 }
+
+stdout | src/main/bots/memory-summary-adapter.test.ts > Bot automatic memory verification > does not persist an unapproved or invalid verdict: {"approved":"true"}
+[Bots] Automatic memory proposal rejected { botId: 'a', operations: 1 }
+
+stdout | src/main/bots/memory-summary-adapter.test.ts > Bot automatic memory verification > does not persist an unapproved or invalid verdict: {"approved":true,"unexpected":"override"}
+[Bots] Automatic memory proposal rejected { botId: 'a', operations: 1 }
+
+stdout | src/main/bots/memory-summary-adapter.test.ts > Bot automatic memory verification > does not persist an unapproved or invalid verdict: [{"approved":true}]
+[Bots] Automatic memory proposal rejected { botId: 'a', operations: 1 }
+
+stdout | src/main/bots/memory-summary-adapter.test.ts > Bot automatic memory verification > does not persist an unapproved or invalid verdict: unparseable
+[Bots] Automatic memory proposal rejected { botId: 'a', operations: 1 }
+
+stdout | src/main/bots/memory-summary-adapter.test.ts > Bot automatic memory verification > does not persist an unapproved or invalid verdict: 
+[Bots] Automatic memory proposal rejected { botId: 'a', operations: 1 }
+
+ ✓ src/main/bots/memory-summary-adapter.test.ts (53 tests) 88ms
+ ✓ src/main/bots/thread-message-replies.test.ts (3 tests) 97ms
+stderr | src/main/bots/group-delivery.test.ts > formal group delivery > does not let a prior progress receipt waive an empty length final
+[TurnCompletionGate] group-g-a retry 1/2: missing_delivery — 本轮未确认正式消息交付
+
+stderr | src/main/bots/group-delivery.test.ts > formal group delivery > does not let a prior progress receipt waive an empty max_tokens final
+[TurnCompletionGate] group-g-a retry 1/2: missing_delivery — 本轮未确认正式消息交付
+
+stderr | src/main/bots/group-delivery.test.ts > formal group delivery > does not let a prior progress receipt waive an empty max_output_tokens final
+[TurnCompletionGate] group-g-a retry 1/2: missing_delivery — 本轮未确认正式消息交付
+
+stderr | src/main/bots/group-delivery.test.ts > formal group delivery > does not let a prior progress receipt waive an empty model_length final
+[TurnCompletionGate] group-g-a retry 1/2: missing_delivery — 本轮未确认正式消息交付
+
+stderr | src/main/bots/group-delivery.test.ts > formal group delivery > does not let a prior progress receipt waive an empty content_filter_length final
+[TurnCompletionGate] group-g-a retry 1/2: missing_delivery — 本轮未确认正式消息交付
+
+ ✓ src/main/bots/group-delivery.test.ts (41 tests) 69ms
+ ✓ src/renderer/src/lib/bot-transcript-rehype.test.ts (21 tests) 83ms
+(node:82849) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/conversation-link.test.ts (3 tests) 70ms
+ ✓ src/main/bots/memory-tools.test.ts (14 tests) 87ms
+ ✓ src/main/ipc/bot-im-file-export.test.ts (14 tests) 58ms
+stderr | src/main/bots/workflow-tool-surface.test.ts
+langsmith/experimental/sandbox is in alpha. This feature is experimental, and breaking changes are expected.
+
+(node:82851) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/renderer/src/lib/bot-autolink-remark.test.ts (21 tests) 64ms
+ ✓ src/renderer/src/lib/bot-group-history-consumer.test.ts (4 tests) 57ms
+stdout | src/main/bots/workflow-tool-surface.test.ts > Bot workflow block=true preserves actual task execution and communication tools
+[Runtime] read_file tool patched: default limit=2000
+[Runtime] grep schema patched: "Regex pattern to search for" → "Text pattern to search for (literal, not regex)"
+[Runtime] execute tool patched: added run_in_background support
+[Runtime] task_output tool added
+
+ ✓ src/main/bots/browser-profile.test.ts (4 tests) 57ms
+stdout | src/main/bots/workflow-tool-surface.test.ts > Bot workflow block=false preserves actual task execution and communication tools
+[Runtime] read_file tool patched: default limit=2000
+[Runtime] grep schema patched: "Regex pattern to search for" → "Text pattern to search for (literal, not regex)"
+[Runtime] execute tool patched: added run_in_background support
+[Runtime] task_output tool added
+
+ ✓ src/main/bots/workflow-tool-surface.test.ts (2 tests) 64ms
+stderr | src/main/bots/introduction-delivery.test.ts > Bot introduction choice delivery > keeps the real completion budget after an answered choice and length final
+[TurnCompletionGate] thread-a retry 1/2: missing_delivery — 本轮未确认正式消息交付
+
+stderr | src/main/bots/introduction-delivery.test.ts > Bot introduction choice delivery > keeps the real completion budget after an answered choice and length final
+[TurnCompletionGate] thread-a retry 2/2: missing_delivery — 本轮未确认正式消息交付
+
+stderr | src/main/bots/introduction-delivery.test.ts > Bot introduction choice delivery > keeps the real completion budget after an answered choice and length final
+[TurnCompletionGate] thread-a exhausted 2 retries: missing_delivery — 本轮未确认正式消息交付
+
+stderr | src/main/bots/introduction-delivery.test.ts > Bot introduction choice delivery > keeps the real completion budget after an answered choice and max_tokens final
+[TurnCompletionGate] thread-a retry 1/2: missing_delivery — 本轮未确认正式消息交付
+
+stderr | src/main/bots/introduction-delivery.test.ts > Bot introduction choice delivery > keeps the real completion budget after an answered choice and max_tokens final
+[TurnCompletionGate] thread-a retry 2/2: missing_delivery — 本轮未确认正式消息交付
+
+stderr | src/main/bots/introduction-delivery.test.ts > Bot introduction choice delivery > keeps the real completion budget after an answered choice and max_tokens final
+[TurnCompletionGate] thread-a exhausted 2 retries: missing_delivery — 本轮未确认正式消息交付
+
+stderr | src/main/bots/introduction-delivery.test.ts > Bot introduction choice delivery > keeps the real completion budget after an answered choice and max_output_tokens final
+[TurnCompletionGate] thread-a retry 1/2: missing_delivery — 本轮未确认正式消息交付
+
+stderr | src/main/bots/introduction-delivery.test.ts > Bot introduction choice delivery > keeps the real completion budget after an answered choice and max_output_tokens final
+[TurnCompletionGate] thread-a retry 2/2: missing_delivery — 本轮未确认正式消息交付
+
+stderr | src/main/bots/introduction-delivery.test.ts > Bot introduction choice delivery > keeps the real completion budget after an answered choice and max_output_tokens final
+[TurnCompletionGate] thread-a exhausted 2 retries: missing_delivery — 本轮未确认正式消息交付
+
+stderr | src/main/bots/introduction-delivery.test.ts > Bot introduction choice delivery > keeps the real completion budget after an answered choice and model_length final
+[TurnCompletionGate] thread-a retry 1/2: missing_delivery — 本轮未确认正式消息交付
+
+stderr | src/main/bots/introduction-delivery.test.ts > Bot introduction choice delivery > keeps the real completion budget after an answered choice and model_length final
+[TurnCompletionGate] thread-a retry 2/2: missing_delivery — 本轮未确认正式消息交付
+
+stderr | src/main/bots/introduction-delivery.test.ts > Bot introduction choice delivery > keeps the real completion budget after an answered choice and model_length final
+[TurnCompletionGate] thread-a exhausted 2 retries: missing_delivery — 本轮未确认正式消息交付
+
+stderr | src/main/bots/introduction-delivery.test.ts > Bot introduction choice delivery > keeps the real completion budget after an answered choice and content_filter_length final
+[TurnCompletionGate] thread-a retry 1/2: missing_delivery — 本轮未确认正式消息交付
+
+stderr | src/main/bots/introduction-delivery.test.ts > Bot introduction choice delivery > keeps the real completion budget after an answered choice and content_filter_length final
+[TurnCompletionGate] thread-a retry 2/2: missing_delivery — 本轮未确认正式消息交付
+
+stderr | src/main/bots/introduction-delivery.test.ts > Bot introduction choice delivery > keeps the real completion budget after an answered choice and content_filter_length final
+[TurnCompletionGate] thread-a exhausted 2 retries: missing_delivery — 本轮未确认正式消息交付
+
+stdout | src/main/agent/bot-dispatch-feedback.test.ts > Bot dispatch feedback > delivers a steer injected during dispatch instead of ending on the previous receipt
+[Runtime] Injected 1 queued current-run message(s) in beforeModel for thread feedback-steer
+
+ ✓ src/main/agent/bot-dispatch-feedback.test.ts (8 tests) 43ms
+stderr | src/main/bots/introduction-delivery.test.ts > Bot introduction choice delivery > uses only the original two completion retries when the model keeps omitting the choice
+[TurnCompletionGate] thread-a retry 1/2: missing_delivery — 本轮未确认正式消息交付
+
+stderr | src/main/bots/introduction-delivery.test.ts > Bot introduction choice delivery > uses only the original two completion retries when the model keeps omitting the choice
+[TurnCompletionGate] thread-a retry 2/2: missing_delivery — 本轮未确认正式消息交付
+
+stderr | src/main/bots/introduction-delivery.test.ts > Bot introduction choice delivery > uses only the original two completion retries when the model keeps omitting the choice
+[TurnCompletionGate] thread-a exhausted 2 retries: missing_delivery — 本轮未确认正式消息交付
+
+ ✓ src/main/bots/introduction-delivery.test.ts (27 tests) 55ms
+ ✓ src/main/agent/bot-turn-context.test.ts (4 tests) 45ms
+ ✓ src/main/agent/bot-skill-dispatch.test.ts (7 tests) 44ms
+(node:82871) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/renderer/src/lib/bot-emoji-catalog.test.ts (2 tests) 48ms
+ ✓ src/main/agent/file-operation-lock.test.ts (29 tests) 30ms
+ ✓ src/main/bots/group-mentions.test.ts (5 tests) 37ms
+(node:82876) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stdout | src/main/bots/work-history.test.ts
+Initializing database at: <temporary>
+Database initialized successfully
+
+ ✓ src/main/bots/work-history.test.ts (6 tests) 36ms
+ ✓ src/renderer/src/lib/bot-schedule-panel.test.ts (10 tests) 23ms
+ ✓ src/main/bots/prompt.test.ts (36 tests) 18ms
+ ✓ src/renderer/src/lib/bot-sidebar-view.test.ts (23 tests) 18ms
+ ✓ src/renderer/src/lib/bot-workspace-profiles.test.ts (1 test) 13ms
+ ✓ src/renderer/src/lib/bot-mention-remark.test.ts (4 tests) 14ms
+ ✓ src/renderer/src/lib/bot-group-drafts.test.ts (21 tests) 13ms
+(node:82888) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/ipc/bot-files.test.ts (27 tests) 15ms
+ ✓ src/renderer/src/lib/bot-group-search.test.ts (12 tests) 11ms
+ ✓ src/renderer/src/lib/bot-conversation-draft.test.ts (10 tests) 9ms
+ ✓ src/renderer/src/lib/bot-question-input-render.test.ts (3 tests) 12ms
+ ✓ src/renderer/src/lib/bot-execution-visibility.test.ts (61 tests) 12ms
+ ✓ src/renderer/src/lib/bot-group-settings-render.test.ts (3 tests) 11ms
+ ✓ src/renderer/src/lib/bot-group-editor.test.ts (27 tests) 11ms
+ ✓ src/renderer/src/lib/bot-conversation-transition.test.ts (5 tests) 8ms
+ ✓ src/main/bots/workspace.test.ts (6 tests) 10ms
+ ✓ src/renderer/src/lib/bot-exchange-view.test.ts (3 tests) 9ms
+ ✓ src/renderer/src/lib/bot-question-history.test.ts (27 tests) 8ms
+ ✓ src/renderer/src/lib/bot-json-preview.test.ts (7 tests) 8ms
+ ✓ src/main/bots/feature-steering.test.ts (9 tests) 9ms
+ ✓ src/renderer/src/lib/bot-chat-recipients.test.ts (11 tests) 7ms
+ ✓ src/renderer/src/lib/bot-work-client.test.ts (4 tests) 7ms
+ ✓ src/renderer/src/lib/bot-im-consumer-scope.test.ts (4 tests) 6ms
+ ✓ src/main/ipc/dashboard-bot-metrics.test.ts (8 tests) 7ms
+ ✓ src/main/bots/work-status.test.ts (12 tests) 5ms
+ ✓ src/main/bots/mcp-scope.test.ts (7 tests) 5ms
+ ✓ src/renderer/src/lib/bot-task-view.test.ts (15 tests) 5ms
+ ✓ src/renderer/src/lib/bot-new-chat-files.test.ts (4 tests) 6ms
+ ✓ src/renderer/src/lib/bot-im-history.test.ts (12 tests) 5ms
+ ✓ src/shared/bots/message-mentions.test.ts (16 tests) 11ms
+ ✓ src/renderer/src/lib/bot-routine-visibility.test.ts (13 tests) 5ms
+ ✓ src/renderer/src/lib/bot-private-mentions.test.ts (6 tests) 5ms
+ ✓ src/shared/bots/message-reply.test.ts (16 tests) 4ms
+ ✓ src/renderer/src/lib/bot-group-mentions.test.ts (18 tests) 4ms
+ ✓ src/renderer/src/lib/bot-group-history.test.ts (8 tests) 4ms
+ ✓ src/renderer/src/lib/bot-tool-result-status.test.ts (28 tests) 4ms
+ ✓ src/shared/bots/file-delivery.test.ts (4 tests) 4ms
+ ✓ src/main/bots/memory-maintainer.test.ts (3 tests) 4ms
+ ✓ src/shared/bots/browser-scope-validation.test.ts (17 tests) 4ms
+ ✓ src/renderer/src/lib/bot-schedule-view.test.ts (6 tests) 4ms
+ ✓ src/shared/bots/context-budget.test.ts (22 tests) 3ms
+ ✓ src/renderer/src/lib/bot-animation-lifecycle.test.ts (2 tests) 3ms
+ ✓ src/renderer/src/lib/bot-group-question.test.ts (16 tests) 3ms
+ ✓ src/shared/bots/client-registry.test.ts (3 tests) 3ms
+ ✓ src/shared/bots/message-reactions.test.ts (3 tests) 3ms
+ ✓ src/renderer/src/lib/bot-workspace-display.test.ts (9 tests) 3ms
+ ✓ src/main/bots/mock-runtime-policy.test.ts (3 tests) 3ms
+ ✓ src/main/bots/work-input.test.ts (2 tests) 3ms
+ ✓ src/renderer/src/lib/bot-linked-conversation.test.ts (3 tests) 3ms
+ ✓ src/renderer/src/lib/bot-message-mentions.test.ts (3 tests) 3ms
+ ✓ src/renderer/src/lib/bot-message-entrance.test.ts (4 tests) 3ms
+ ✓ src/main/bots/browser-window-focus.test.ts (3 tests) 3ms
+ ✓ src/renderer/src/lib/bot-avatar-mood.test.ts (6 tests) 2ms
+ ✓ src/renderer/src/lib/bot-browser-help-history.test.ts (5 tests) 2ms
+ ✓ src/renderer/src/lib/bot-library-view.test.ts (1 test) 2ms
+ ✓ src/renderer/src/lib/bot-profile-event.test.ts (6 tests) 2ms
+ ✓ src/renderer/src/lib/bot-group-message-view.test.ts (3 tests) 2ms
+ ✓ src/main/bots/skill-policy.test.ts (5 tests) 2ms
+ ✓ src/renderer/src/lib/bot-delivered-file-references.test.ts (2 tests) 2ms
+ ✓ src/renderer/src/lib/bot-sidebar-unreads.test.ts (3 tests) 2ms
+ ✓ src/renderer/src/lib/bot-create-shortcut.test.ts (5 tests) 2ms
+ ✓ src/renderer/src/lib/bot-inline-reasoning.test.ts (2 tests) 2ms
+ ✓ src/renderer/src/lib/bot-background-task-status.test.ts (5 tests) 2ms
+ ✓ src/renderer/src/lib/bot-error-message.test.ts (3 tests) 2ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/main/bots/group-discussion.test.ts > private-to-group messages on the existing room queue > uses the queued-state and exact sender/request indexes without materializing task history
+Error: near "undefined": syntax error
+ ❯ NativeSqliteAdapter.exec src/main/db/native-sqlite-adapter.ts:205:19
+    203|     } catch (error) {
+    204|       if (bindings !== undefined) throw error
+    205|       this.native.exec(sql)
+       |                   ^
+    206|       return []
+    207|     }
+ ❯ src/main/bots/group-discussion.test.ts:1352:10
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 133 passed (134)
+      Tests  1 failed | 2584 passed (2585)
+   Start at  22:36:23
+   Duration  110.46s (transform 5.95s, setup 0ms, collect 23.39s, tests 176.78s, environment 11ms, prepare 5.83s)
+

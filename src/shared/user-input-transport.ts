@@ -12,6 +12,7 @@ import { SKILL_USE_TAG_NAME } from "./skill-use-block"
 // feature that prepends them) so main-process consumers, which must not import
 // renderer modules, share one spelling with the composer.
 
+export const BOT_BROWSER_PROMPT_PREFIX = "使用 Bot 浏览器 bot_browser 工具："
 export const LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX = "使用内置浏览器 browser_*工具："
 export const LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX =
   "使用内置浏览器 browser_*工具（不允许使用截图功能）："
@@ -61,6 +62,8 @@ export function stripUserInputTransportDecorations(content: string): string {
   const browserText = stripBuiltinBrowserInstructions(text)
   if (browserText !== null) {
     text = browserText
+  } else if (text.startsWith(BOT_BROWSER_PROMPT_PREFIX)) {
+    text = text.slice(BOT_BROWSER_PROMPT_PREFIX.length)
   } else if (text.startsWith(LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX)) {
     text = text.slice(LEGACY_BUILTIN_BROWSER_NO_SCREENSHOT_PROMPT_PREFIX.length)
   } else if (text.startsWith(LEGACY_BUILTIN_BROWSER_PROMPT_PREFIX)) {

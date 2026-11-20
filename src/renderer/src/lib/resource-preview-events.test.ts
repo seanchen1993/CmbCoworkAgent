@@ -87,6 +87,25 @@ describe("resource preview events", () => {
     cleanup()
   })
 
+  it("keeps sent content and the original Markdown image base as separate workspace paths", () => {
+    installWindow("darwin")
+    const received: OpenResourcePreviewDetail[] = []
+    const cleanup = onOpenResourcePreview((detail) => received.push(detail))
+    emitOpenResourcePreview({
+      threadId: "bot-thread",
+      filePath: "/workspace/.bot-deliveries/hash/report.md",
+      markdownBasePath: "/workspace/reports/report.md",
+      workspacePathKind: "absolute"
+    })
+    expect(received[0]).toMatchObject({
+      filePath: "/workspace/.bot-deliveries/hash/report.md",
+      markdownBasePath: "/workspace/reports/report.md",
+      workspacePathKind: "absolute"
+    })
+    expect(received[0].externalPreviewGrant).toBeUndefined()
+    cleanup()
+  })
+
   it("does not let an unissued numeric intent poison later preview ordering", () => {
     installWindow("linux")
     let received: OpenResourcePreviewDetail | null = null

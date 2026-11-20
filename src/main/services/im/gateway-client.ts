@@ -25,6 +25,8 @@ export interface ImReplySubmissionResult {
  * using the short code that was published alongside it.
  */
 export interface ImCardSubmissionResult {
+  /** Optional durable platform delivery state, returned by gateways with Bot cards. */
+  deliveryState?: "pending" | "sent" | "unknown"
   state: "accepted" | "rejected"
   reasonCode?: GatewayReasonCodeV1 | string
   /**

@@ -31,7 +31,15 @@ const dependencies = vi.hoisted(() => ({
   getThread: vi.fn(),
   getThreadCore: vi.fn(),
   modelConfig: vi.fn(),
+  botBind: vi.fn(),
+  botTurn: vi.fn(),
+  botChanged: vi.fn(),
   assertScheduleCanStart: vi.fn()
+}))
+vi.mock("../bots/feature-service", () => ({
+  bindManagedFeatureSession: dependencies.botBind,
+  startFeatureTurn: dependencies.botTurn,
+  publishFeatureRun: dependencies.botChanged
 }))
 vi.mock("../models/registry", () => ({
   getModelConfigByRef: dependencies.modelConfig
@@ -271,6 +279,56 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }))
 
 describe("start managed mode with an existing session", () => {
+  it("durably claims a Bot-owned run before submission and transfers the same origin to its next project session", async () => {
+    const operationId = "b".repeat(64)
+    const claimed = vi.fn()
+    dependencies.botTurn.mockImplementation(
+      async (id, request, _delivery, _context, startStream) => {
+        startStream()
+        expect(id).toBe(operationId)
+        expect(claimed).toHaveBeenCalledTimes(1)
+        return { threadId: request.threadId, completion: Promise.resolve() }
+      }
+    )
+    const run = await startManagedRun(
+      {
+        projectId: "project",
+        featureId: "feature",
+        existingThreadId: "origin",
+        workspacePath: root,
+        delivery
+      },
+      { operationId, authorize: vi.fn(), created: claimed }
+    )
+    expect(run.status).toBe("running")
+    expect(dependencies.store!.getRun(run).snapshot?.botOperationId).toBe(operationId)
+    expect(dependencies.botBind).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: run.runId }),
+      "origin",
+      operationId
+    )
+    feature = {
+      ...feature,
+      currentNodeId: "dev.review",
+      featureStateHash: `v1:sha256:${"f".repeat(64)}`
+    }
+    await handleAutoModeAgentTurnEnd({
+      threadId: "origin",
+      outcome: "success",
+      endReason: { code: "normal" },
+      delivery
+    })
+    expect(dependencies.botBind).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: run.runId, nodeId: "dev.review" }),
+      "created",
+      operationId
+    )
+    expect(dependencies.botTurn).toHaveBeenCalledTimes(2)
+    expect(dependencies.grant).not.toHaveBeenCalled()
+    await stopManagedRun(run)
+    expect(dependencies.store!.getRun(run).snapshot?.status).toBe("cancelled")
+  })
+
   it("allows managed UAT Ultra sessions outside production service hours", async () => {
     await start({ modelSelection: "ultra" })
     vi.useFakeTimers({ toFake: ["Date"] })

@@ -1,0 +1,62 @@
+import { BotError, type BotMessageMention } from "./contracts"
+import { parseBotInputFileIds } from "./input-files"
+
+/** Validate selected identities against exact text, never infer identity from an @name. */
+export function parseBotMessageMentions(
+  message: string,
+  input: unknown,
+  leading = 0
+): BotMessageMention[] {
+  if (input === undefined) return []
+  if (!Array.isArray(input) || input.length > 128)
+    throw new BotError("INVALID_INPUT", "Bot 提及格式无效")
+  let previousEnd = 0
+  return input.map((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      throw new BotError("INVALID_INPUT", "Bot 提及格式无效")
+    const item = value as Record<string, unknown>
+    const start = Number(item.start) - leading,
+      end = Number(item.end) - leading
+    const group = item.kind === "group"
+    const id = group ? item.groupId : item.botId
+    if (item.groupSource !== undefined && (!group || !["app", "zhaohu"].includes(String(item.groupSource))))
+      throw new BotError("INVALID_INPUT", "群聊来源无效")
+    if (
+      !Number.isSafeInteger(item.start) ||
+      !Number.isSafeInteger(item.end) ||
+      start < previousEnd ||
+      end <= start ||
+      end > message.length ||
+      typeof id !== "string" ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(id) ||
+      (group ? "botId" in item : item.kind !== undefined || "groupId" in item) ||
+      typeof item.label !== "string" ||
+      !item.label ||
+      item.label.length > 200 ||
+      item.label !== item.label.trim() ||
+      item.label.includes("\0") ||
+      message.slice(start, end) !== `@${item.label}`
+    )
+      throw new BotError("INVALID_INPUT", "Bot 提及与原消息不一致，请重新选择")
+    previousEnd = end
+    return group
+      ? { start, end, kind: "group", groupId: id, ...(item.groupSource === undefined ? {} : { groupSource: item.groupSource as "app" | "zhaohu" }), label: item.label }
+      : { start, end, botId: id, label: item.label }
+  })
+}
+
+/** Old sends retain their exact digest bytes. New sends bind both text and selected identities. */
+export function canonicalBotMessageInput(
+  message: string,
+  mentions?: readonly BotMessageMention[],
+  inputFileIds?: readonly string[],
+  explicitSkill?: import("./skill-selection").BotSkillSelection
+): string {
+  const selected = parseBotMessageMentions(message, mentions)
+  const files = parseBotInputFileIds(inputFileIds)
+  if (explicitSkill) return "\0bot-skill-v1:" + JSON.stringify([message, selected, files, explicitSkill.name, explicitSkill.path])
+  // NUL is forbidden in a real message, so literal JSON prose cannot alias a
+  // structured attachment request. Preserve the pre-existing no-file bytes.
+  if (files.length) return "\0bot-input-v1:" + JSON.stringify([message, selected, files])
+  return selected.length ? JSON.stringify([message, selected]) : message
+}

@@ -1,0 +1,980 @@
+
+ RUN  v3.2.4 <repo>
+
+(node:73232) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:73231) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/main/bots/background-commands.test.ts (41 tests) 1091ms
+(node:73437) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > creates desktop work in an empty bound group, executes once and returns results only there
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-8956d2eb-bedf-4df8-8bb7-6dc331c2cafc',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+ ✓ src/main/bots/message-reactions.test.ts (17 tests) 579ms
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > creates desktop work in an empty bound group, executes once and returns results only there
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-e406f800-274a-4a28-86a9-b1fc790fe103',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > creates desktop work in an empty bound group, executes once and returns results only there
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-f65b54b7-c38e-4e52-a9da-653ee8ccb8bd',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > delivers a Feature update after the dispatching turn ended, once and only to the originating group
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-ea0d5cff-633d-440e-9ac7-a0908536e541',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > delivers a Feature update after the dispatching turn ended, once and only to the originating group
+[Bot IM] reply delivery started {
+  deliveryId: 'im-feature-decision-1',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > publishes the settled IM delivery state accepted and keeps empty delivery ticks quiet
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-bc1fd81f-2aa4-4b89-8398-a9962b112aa2',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > publishes the settled IM delivery state unknown and keeps empty delivery ticks quiet
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-597352b1-c2fe-47bf-809e-842c52e1b560',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > publishes the settled IM delivery state pending and keeps empty delivery ticks quiet
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-fa418553-8082-4560-8db3-cab6853bc7ca',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > publishes the settled IM delivery state blocked and keeps empty delivery ticks quiet
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-f4a0ac8e-c7d4-4e36-ae64-6e674f44e2ca',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > runs two IM groups and private chat concurrently while preserving approvals, thread order and reply routes
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-eb8ca4f6-86ed-4abf-8c70-ef6a84b8efb2',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > runs two IM groups and private chat concurrently while preserving approvals, thread order and reply routes
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-9366269a-fafc-46e4-9893-5e8b8a98dae6',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > runs two IM groups and private chat concurrently while preserving approvals, thread order and reply routes
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-a29fc655-2551-43d3-90fb-54b01824f0f9',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > runs two IM groups and private chat concurrently while preserving approvals, thread order and reply routes
+[Bot IM] reply delivery started {
+  deliveryId: 'im-personal-50482028-c8a4-44f2-be57-23605b74fe7e',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > runs two IM groups and private chat concurrently while preserving approvals, thread order and reply routes
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-134b3c68-2dcc-49a4-a696-1bd41db4ed89',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > publishes one opening before completion, exposes the group execution thread and cancels only that group
+[Bot IM] reply delivery started {
+  deliveryId: 'im-opening-c0db001c-f7c5-4a38-bd9d-48cbb019bf0b',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > delivers an opening and the final result once in dm
+[Bot IM] reply delivery started {
+  deliveryId: 'im-opening-acfffaea-bfb9-4108-a371-d3ed275a4f6f',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > delivers an opening and the final result once in dm
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-acfffaea-bfb9-4108-a371-d3ed275a4f6f',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > delivers an opening and the final result once in group
+[Bot IM] reply delivery started {
+  deliveryId: 'im-opening-356f4635-3130-490d-bfd3-8f07092d31fa',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > delivers an opening and the final result once in group
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-356f4635-3130-490d-bfd3-8f07092d31fa',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > uses one durable acknowledgement for accepted dispatch in dm
+[Bot IM] reply delivery started {
+  deliveryId: 'im-opening-49cdfb4c-ae38-4746-84f6-d8322b0c8bcb',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > uses one durable acknowledgement for accepted dispatch in group
+[Bot IM] reply delivery started {
+  deliveryId: 'im-opening-3f7de681-36bf-4660-9d03-838bd366efbd',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > delivers the fallback when dispatch had no opening and preserves genuine failure
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-4196bcac-1c9e-4e1e-b9e9-54dc7a3a48a4',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > delivers the fallback when dispatch had no opening and preserves genuine failure
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-f4e9ab18-68d0-4638-bd07-81faf9d2c0b6',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > returns asynchronous Bot collaboration to its original IM group without touching private threads
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-26dd0903-6f86-4446-bd2e-9b4e6fdaff78',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > returns asynchronous Bot collaboration to its original IM group without touching private threads
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-82e49d67-e314-46aa-a9dc-83c36ec26c5e',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > keeps nested collaborator integration private until the original IM owner replies
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-67bde696-f3fc-44e0-b14b-c3278ff27327',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > keeps nested collaborator integration private until the original IM owner replies
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-052baf2c-1aaa-4079-a624-ae48a5a4936b',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > returns a peer workflow completed summary privately before the IM owner integrates it
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-69f219f2-562c-49d7-9282-51da6e4ecc61',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > returns a peer workflow completed summary privately before the IM owner integrates it
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-d62d120c-ef7a-47fc-8e85-a64c058d13ac',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > returns a peer workflow failed summary privately before the IM owner integrates it
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-29289eca-7222-4b42-80ea-8876f531b4cc',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > returns a peer workflow failed summary privately before the IM owner integrates it
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-6a715ec6-e143-464c-8eca-4267a292038e',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > sends Markdown for dm without changing segment identity on explicit downgrade
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-be7a6971-428d-42db-99f9-c968d7adc5b0',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > sends Markdown for group without changing segment identity on explicit downgrade
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-cf903177-85ef-4d32-a9ca-90fb9d525bad',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > refreshes group names after messages and notifies the UI without moving history or works
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-80112a83-f53b-438c-bd07-e433c6a11ecd',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > refreshes group names after messages and notifies the UI without moving history or works
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-d0a3e898-fa79-4330-93e3-b5323c30302d',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > refreshes group names after messages and notifies the UI without moving history or works
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-e356277a-ddcb-49f1-8a1d-f6cf60c636f1',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > coalesces group name refreshes, reads every binding page and ignores message replays
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-139861f2-c77f-40eb-ba7c-414a269e2d04',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > coalesces group name refreshes, reads every binding page and ignores message replays
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-1f8b8253-5878-468a-8d70-2c91ec449edb',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > coalesces group name refreshes, reads every binding page and ignores message replays
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-36df6a33-b512-4912-bfc3-75d4d133e9e4',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > coalesces group name refreshes, reads every binding page and ignores message replays
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-5519ea95-6ab1-4d01-b99d-ec6462ad81a9',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > coalesces group name refreshes, reads every binding page and ignores message replays
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-94420b43-84e2-407a-9956-4c6d105f9bb6',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > coalesces group name refreshes, reads every binding page and ignores message replays
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-9c2fe952-3225-4e57-bd05-3769a7b20f53',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > coalesces group name refreshes, reads every binding page and ignores message replays
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-d0f402d9-e9ba-434a-b21a-e371f0d4603e',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > coalesces group name refreshes, reads every binding page and ignores message replays
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-dace277f-32dd-4968-bae6-bb87f99bac37',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > coalesces group name refreshes, reads every binding page and ignores message replays
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-e6dc0681-09a6-468c-bfe7-8fbb956c78e3',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > keeps group execution available when a name refresh fails and recovers on the next sync
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-2936e1a5-ce9a-4710-8c52-8246115a2628',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > runs a wire-valid opaque sender once in dm and preserves its frozen source
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-917a2f70-04b6-4cbc-9b1f-796382247857',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > runs a wire-valid opaque sender once in group and preserves its frozen source
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-a1f51a76-02ec-496f-af60-6db1d4908c99',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > keeps existing unscoped sender sources readable and redelivery idempotent
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-8144f6e7-f7c9-41b7-8676-adf007b24197',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > preserves the actual completed execution outcome in the gateway acknowledgement without replay
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-06ffa393-6c5b-43d4-b78f-43d458b79bf4',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > preserves the actual failed execution outcome in the gateway acknowledgement without replay
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-8069a23f-963f-4514-9049-28c118b39afe',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > preserves the actual outcome_unknown execution outcome in the gateway acknowledgement without replay
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-1ca569ae-556a-4b31-ac05-3fe2205d7339',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > shares owner DM with the main thread, isolates groups, and deduplicates received events
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-0c39c771-4423-4b6d-9fda-f33644198d0e',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > shares owner DM with the main thread, isolates groups, and deduplicates received events
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-fc0b6a3e-6975-47af-8335-6137c375d201',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > mirrors only new main-thread replies to the owner's DM, never to groups
+[Bot IM] reply delivery started {
+  deliveryId: 'im-personal-b5c1e3c7-7df6-4b05-b493-20d38f1820ed',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > keeps completed events terminal when a late lease revocation arrives
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-fdf93f6a-5a11-46ad-9845-78eb5b4d1165',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > authenticated IM on the existing Bot host > retains an uncertain platform result without retrying or claiming delivery
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-77535662-b477-45eb-a5b6-55b6e771dca6',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers independent-work attachments only to their original dm
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-04fb5ff1-ad1e-4587-b49f-90845766fab3',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-398eae8d-7e9e-4879-b868-469e8b35a96d:file:0',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:85895fc5a4e0',
+  uploadId: undefined,
+  bytes: 19,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers independent-work attachments only to their original dm
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-398eae8d-7e9e-4879-b868-469e8b35a96d',
+  fileCount: 0,
+  hasText: false,
+  fileTransportAvailable: true
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers independent-work attachments only to their original dm
+[Bot IM] reply delivery started {
+  deliveryId: 'im-personal-78a5ba95-b2ed-431d-b031-29a8cb078955',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers independent-work attachments only to their original dm
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:85895fc5a4e0',
+  uploadId: 'mock-reply-398eae8d-7e9e-4879-b868-469e8b35a96d:file:0',
+  bytes: 19,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers independent-work attachments only to their original dm
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:85895fc5a4e0',
+  uploadId: 'mock-reply-398eae8d-7e9e-4879-b868-469e8b35a96d:file:0',
+  bytes: 19,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers independent-work attachments only to their original group
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-4bef14b0-80d7-4479-87ad-70d842d65042',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-211652ca-13eb-4559-9883-08ad258e1a02:file:0',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:851bea1e8fd2',
+  uploadId: undefined,
+  bytes: 19,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers independent-work attachments only to their original group
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-211652ca-13eb-4559-9883-08ad258e1a02',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers independent-work attachments only to their original group
+[Bot IM file] transferred to gateway {
+  deliveryRef: 'sha256:851bea1e8fd2',
+  uploadId: 'mock-reply-211652ca-13eb-4559-9883-08ad258e1a02:file:0',
+  bytes: 19,
+  stage: 'platform_upload_and_enqueue'
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers independent-work attachments only to their original group
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:851bea1e8fd2',
+  uploadId: 'mock-reply-211652ca-13eb-4559-9883-08ad258e1a02:file:0',
+  bytes: 19,
+  stage: 'platform_upload_and_enqueue',
+  state: 'accepted',
+  reused: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > hides host paths in group replies while retaining local attachment records
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-fef58799-94d8-4e4a-9b12-b94f488977c6',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-fef58799-94d8-4e4a-9b12-b94f488977c6:file:0',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:e7b7529f701c',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-channel.test.ts > hides host paths in group replies while retaining local attachment records
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:e7b7529f701c',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'gateway_begin',
+  state: 'accepted',
+  reused: true
+}
+
+stdout | src/main/bots/im-channel.test.ts > hides host paths in dm replies while retaining local attachment records
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-18ed21a0-48cd-42f7-a0bb-bf7e98206be4',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-18ed21a0-48cd-42f7-a0bb-bf7e98206be4:file:0',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:c058887b5ec1',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-channel.test.ts > hides host paths in dm replies while retaining local attachment records
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:c058887b5ec1',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'gateway_begin',
+  state: 'accepted',
+  reused: true
+}
+
+stdout | src/main/bots/im-channel.test.ts > hides host paths in mirror replies while retaining local attachment records
+[Bot IM] reply delivery started {
+  deliveryId: 'im-personal-879df2d0-1d34-4dcf-b7c0-4fb237025126',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'im-personal-879df2d0-1d34-4dcf-b7c0-4fb237025126:file:0',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:16a7fe003a87',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-channel.test.ts > hides host paths in mirror replies while retaining local attachment records
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:16a7fe003a87',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'gateway_begin',
+  state: 'accepted',
+  reused: true
+}
+
+stdout | src/main/bots/im-channel.test.ts > keeps the local file and reports an old gateway's missing attachment capability
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-4a1f1545-bd00-4549-8b3d-616a57976593',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-4a1f1545-bd00-4549-8b3d-616a57976593:file:0',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > keeps text responsive during a file upload, records final receipts and retries only the failed file
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-a9cdce2b-0e3e-4a92-988b-821f8e81df70',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-3d06df25cee6d8e7844453413915da64730f3591c6087ec0252e6e793e64888a',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:4410ee1a8c58',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-channel.test.ts > keeps text responsive during a file upload, records final receipts and retries only the failed file
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-f70f9c81-e264-4441-a5ed-1f174e46a3e6',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+
+stdout | src/main/bots/im-channel.test.ts > keeps text responsive during a file upload, records final receipts and retries only the failed file
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:4410ee1a8c58',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'gateway_begin',
+  state: 'accepted',
+  reused: true
+}
+
+stdout | src/main/bots/im-channel.test.ts > keeps text responsive during a file upload, records final receipts and retries only the failed file
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-4854318c07be8a3ffa3b11fae19b706d61c568fc0c88aced3cb73bb9c30a3da8',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:acd34a11eda3',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-channel.test.ts > keeps text responsive during a file upload, records final receipts and retries only the failed file
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:acd34a11eda3',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'gateway_begin',
+  state: 'accepted',
+  reused: true
+}
+
+stdout | src/main/bots/im-channel.test.ts > keeps text responsive during a file upload, records final receipts and retries only the failed file
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-3d06df25cee6d8e7844453413915da64730f3591c6087ec0252e6e793e64888a',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:4410ee1a8c58',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-channel.test.ts > keeps text responsive during a file upload, records final receipts and retries only the failed file
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:4410ee1a8c58',
+  uploadId: undefined,
+  bytes: 3,
+  stage: 'gateway_begin',
+  state: 'accepted',
+  reused: true
+}
+
+stdout | src/main/bots/im-channel.test.ts > retains uncertain file receipts without automatic or manual resend
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-670c5f38-f4f5-4965-8876-564704af2810',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-2bf72f9eecc90284cd9b2c8d0520b5d7ba643e08d633d98a34f3584792002e94',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:bffada8962b8',
+  uploadId: undefined,
+  bytes: 1,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-channel.test.ts > retains uncertain file receipts without automatic or manual resend
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:bffada8962b8',
+  uploadId: undefined,
+  bytes: 1,
+  stage: 'gateway_begin',
+  state: 'unknown',
+  reused: true
+}
+
+stdout | src/main/bots/im-channel.test.ts > backs off only a transiently failed file while the next file can be delivered
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-57729657-ea68-43de-a267-cce44a8ef0d0',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: true
+}
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-3cff47975d7ec640cd0affb57a8b6ebbff1bff66d6329bceb9f0b169acf01333',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:ad53d3ff6d4a',
+  uploadId: undefined,
+  bytes: 1,
+  stage: 'validate'
+}
+
+stdout | src/main/bots/im-channel.test.ts > backs off only a transiently failed file while the next file can be delivered
+[Bot IM file] receipt {
+  deliveryRef: 'sha256:ad53d3ff6d4a',
+  uploadId: undefined,
+  bytes: 1,
+  stage: 'gateway_begin',
+  state: 'accepted',
+  reused: true
+}
+
+stdout | src/main/bots/im-channel.test.ts > backs off only a transiently failed file while the next file can be delivered
+[Bot IM] reply delivery started {
+  deliveryId: 'im-file-a26042da494416119f9d361d3cab598db18e7b6c64395a988785a19e474d0e91',
+  fileCount: 1,
+  hasText: false,
+  fileTransportAvailable: true
+}
+[Bot IM file] started {
+  deliveryRef: 'sha256:64e25310f3ca',
+  uploadId: undefined,
+  bytes: 1,
+  stage: 'validate'
+}
+
+stderr | src/main/bots/im-channel.test.ts > backs off only a transiently failed file while the next file can be delivered
+[Bot IM file] failed {
+  deliveryRef: 'sha256:64e25310f3ca',
+  uploadId: undefined,
+  bytes: 1,
+  stage: 'gateway_begin',
+  reasonCode: 'FILE_TRANSFER_FAILED',
+  permanent: false,
+  outcomeUnknown: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers browser takeover notices for dm direct and independent runs to their original audience
+[Bot IM] reply delivery started {
+  deliveryId: 'im-browser-help-be6e8511-de85-4393-9750-5ca8a73543cb-7',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers browser takeover notices for dm direct and independent runs to their original audience
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-be6e8511-de85-4393-9750-5ca8a73543cb',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers browser takeover notices for dm direct and independent runs to their original audience
+[Bot IM] reply delivery started {
+  deliveryId: 'im-browser-help-048de80f-8fdb-49a0-ac0a-e0cb893c2662-7',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers browser takeover notices for dm direct and independent runs to their original audience
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-9168b28f-5fe4-4914-b5b9-afc16dfa4089',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers browser takeover notices for group direct and independent runs to their original audience
+[Bot IM] reply delivery started {
+  deliveryId: 'im-browser-help-afaec3a8-5fbb-4803-b292-6ccfd13770c3-7',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers browser takeover notices for group direct and independent runs to their original audience
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-afaec3a8-5fbb-4803-b292-6ccfd13770c3',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers browser takeover notices for group direct and independent runs to their original audience
+[Bot IM] reply delivery started {
+  deliveryId: 'im-browser-help-edf2803a-7ce9-4842-82b2-e113773e936b-7',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > delivers browser takeover notices for group direct and independent runs to their original audience
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-b7ca0247-5f2c-4f01-bd3c-09e14c10b990',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > private Bot handoff to a Zhaohu group > uses the target Bot's existing group thread, only forwards the brief, and delivers replies to that group
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-59ede4b8-e548-4997-a9e9-f7fea051274d',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > private Bot handoff to a Zhaohu group > uses the target Bot's existing group thread, only forwards the brief, and delivers replies to that group
+[Bot IM] reply delivery started {
+  deliveryId: 'e6ea5644-c288-4ca6-a6bb-a9561b28707e',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+stdout | src/main/bots/im-channel.test.ts > private Bot handoff to a Zhaohu group > uses the target Bot's existing group thread, only forwards the brief, and delivers replies to that group
+[Bot IM] reply delivery started {
+  deliveryId: 'mock-reply-8365dd2d-b1e3-4468-b858-7fcd9cbd188f',
+  fileCount: 0,
+  hasText: true,
+  fileTransportAvailable: false
+}
+
+ ✓ src/main/bots/im-channel.test.ts (125 tests) 68087ms
+   ✓ authenticated IM on the existing Bot host > creates desktop work in an empty bound group, executes once and returns results only there  2049ms
+   ✓ authenticated IM on the existing Bot host > delivers a Feature update after the dispatching turn ended, once and only to the originating group  1041ms
+   ✓ authenticated IM on the existing Bot host > publishes the settled IM delivery state accepted and keeps empty delivery ticks quiet  2092ms
+   ✓ authenticated IM on the existing Bot host > publishes the settled IM delivery state unknown and keeps empty delivery ticks quiet  2471ms
+   ✓ authenticated IM on the existing Bot host > publishes the settled IM delivery state pending and keeps empty delivery ticks quiet  2087ms
+   ✓ authenticated IM on the existing Bot host > publishes the settled IM delivery state blocked and keeps empty delivery ticks quiet  2121ms
+   ✓ authenticated IM on the existing Bot host > runs two IM groups and private chat concurrently while preserving approvals, thread order and reply routes  1075ms
+   ✓ authenticated IM on the existing Bot host > publishes one opening before completion, exposes the group execution thread and cancels only that group  1075ms
+   ✓ authenticated IM on the existing Bot host > delivers an opening and the final result once in dm  1876ms
+   ✓ authenticated IM on the existing Bot host > delivers an opening and the final result once in group  1045ms
+   ✓ authenticated IM on the existing Bot host > uses one durable acknowledgement for accepted dispatch in dm  1046ms
+   ✓ authenticated IM on the existing Bot host > uses one durable acknowledgement for accepted dispatch in group  1056ms
+   ✓ authenticated IM on the existing Bot host > delivers the fallback when dispatch had no opening and preserves genuine failure  2046ms
+   ✓ authenticated IM on the existing Bot host > returns asynchronous Bot collaboration to its original IM group without touching private threads  1039ms
+   ✓ authenticated IM on the existing Bot host > keeps nested collaborator integration private until the original IM owner replies  2605ms
+   ✓ authenticated IM on the existing Bot host > returns a peer workflow completed summary privately before the IM owner integrates it  1047ms
+   ✓ authenticated IM on the existing Bot host > returns a peer workflow failed summary privately before the IM owner integrates it  1035ms
+   ✓ authenticated IM on the existing Bot host > sends Markdown for dm without changing segment identity on explicit downgrade  1037ms
+   ✓ authenticated IM on the existing Bot host > sends Markdown for group without changing segment identity on explicit downgrade  1037ms
+   ✓ authenticated IM on the existing Bot host > runs a wire-valid opaque sender once in dm and preserves its frozen source  1038ms
+   ✓ authenticated IM on the existing Bot host > runs a wire-valid opaque sender once in group and preserves its frozen source  1050ms
+   ✓ authenticated IM on the existing Bot host > keeps existing unscoped sender sources readable and redelivery idempotent  1036ms
+   ✓ authenticated IM on the existing Bot host > preserves the actual completed execution outcome in the gateway acknowledgement without replay  1050ms
+   ✓ authenticated IM on the existing Bot host > preserves the actual failed execution outcome in the gateway acknowledgement without replay  1040ms
+   ✓ authenticated IM on the existing Bot host > preserves the actual outcome_unknown execution outcome in the gateway acknowledgement without replay  2044ms
+   ✓ authenticated IM on the existing Bot host > shares owner DM with the main thread, isolates groups, and deduplicates received events  1051ms
+   ✓ authenticated IM on the existing Bot host > mirrors only new main-thread replies to the owner's DM, never to groups  1053ms
+   ✓ authenticated IM on the existing Bot host > wakes an idle Host's authorized local IM work after reconnect by periodic sync  1041ms
+   ✓ authenticated IM on the existing Bot host > keeps completed events terminal when a late lease revocation arrives  1034ms
+   ✓ authenticated IM on the existing Bot host > retains an uncertain platform result without retrying or claiming delivery  1059ms
+   ✓ defers an IM completion at full Bot capacity and rechecks revocation before admission (revoke=true)  2059ms
+   ✓ delivers independent-work attachments only to their original dm  2189ms
+   ✓ delivers independent-work attachments only to their original group  2180ms
+   ✓ hides host paths in group replies while retaining local attachment records  1052ms
+   ✓ hides host paths in dm replies while retaining local attachment records  1039ms
+   ✓ hides host paths in mirror replies while retaining local attachment records  2051ms
+   ✓ keeps the local file and reports an old gateway's missing attachment capability  1037ms
+   ✓ keeps text responsive during a file upload, records final receipts and retries only the failed file  2048ms
+   ✓ retains uncertain file receipts without automatic or manual resend  1036ms
+   ✓ backs off only a transiently failed file while the next file can be delivered  1045ms
+   ✓ delivers browser takeover notices for dm direct and independent runs to their original audience  2057ms
+   ✓ delivers browser takeover notices for group direct and independent runs to their original audience  3408ms
+   ✓ private Bot handoff to a Zhaohu group > uses the target Bot's existing group thread, only forwards the brief, and delivers replies to that group  1054ms
+
+ Test Files  3 passed (3)
+      Tests  183 passed (183)
+   Start at  21:32:46
+   Duration  71.76s (transform 1.04s, setup 0ms, collect 2.96s, tests 69.76s, environment 0ms, prepare 3.80s)
+

@@ -1,0 +1,154 @@
+--- tests/bots-task-routing-app.spec.ts
++++ tests/bookclub-probe.ts
+@@ -412,7 +412,61 @@
+   const mainPrefixes = new Map<string, { system: string; tools: string; messages: any[] }>()
+   const reviewedFixtureFiles = new Map<string, Set<string>>()
+   const deliveryInputs = new Map<string, { requiredFiles?: string[]; stagedFiles?: string[]; selectionReason?: string }>()
++  const revisionText = "刚才的读书会改成下午四点，仍是90分钟，请更新原来的 plan.md 并交给我。"
++  const revisionWire: any[] = []
++  const diagnosticIntervention = { kind: "controlled real-model probe: omit finishTurn on first revision send only", firstSendSeen: false, firstKey: null as string | null, originally: null as boolean | null, changed: false }
++  function removeFirstRevisionFinish(payload: string, isSse: boolean): string {
++    const firstSend = (name: string, args: string, replace: (s: string) => void) => {
++      if (diagnosticIntervention.firstSendSeen || name !== "bot_work_send") return
++      const input = JSON.parse(args)
++      diagnosticIntervention.firstSendSeen = true
++      diagnosticIntervention.firstKey = input.requestKey ?? null
++      diagnosticIntervention.originally = input.finishTurn ?? null
++      if (input.finishTurn !== true) return
++      delete input.finishTurn
++      diagnosticIntervention.changed = true
++      replace(JSON.stringify(input))
++    }
++    if (!isSse) {
++      const packet = JSON.parse(payload)
++      for (const c of packet.choices ?? []) for (const tc of c.message?.tool_calls ?? [])
++        firstSend(tc.function.name, tc.function.arguments, s => { tc.function.arguments = s })
++      return diagnosticIntervention.changed ? JSON.stringify(packet) : payload
++    }
++    const lines = payload.split("\n")
++    const decoded = new Map<number, any>()
++    const tools = new Map<string, {name: string; pieces: any[]}>()
++    for (let i=0; i<lines.length; i++) {
++      if (!lines[i].startsWith("data:")) continue
++      const raw = lines[i].slice(5).trim()
++      if (!raw || raw === "[DONE]") continue
++      const event = JSON.parse(raw)
++      decoded.set(i, event)
++      for (const choice of event.choices ?? []) for (const tc of choice.delta?.tool_calls ?? []) {
++        const id = String(choice.index) + "/" + String(tc.index ?? 0)
++        const acc = tools.get(id) ?? { name: "", pieces: [] }
++        if (tc.function?.name) acc.name += tc.function.name
++        if (typeof tc.function?.arguments === "string") acc.pieces.push(tc.function)
++        tools.set(id,acc)
++      }
++    }
++    for (const c of tools.values()) firstSend(c.name,c.pieces.map(p => p.arguments).join(""), s => {
++      c.pieces.forEach(p => { p.arguments = "" }); c.pieces[c.pieces.length-1].arguments = s
++    })
++    if (!diagnosticIntervention.changed) return payload
++    for (const [i,event] of decoded) lines[i] = "data: " + JSON.stringify(event)
++    return lines.join("\n")
++  }
++  function publicReceipt(content: unknown) {
++    try {
++      const item = JSON.parse(String(content))
++      if (item.kind !== "bot-work-receipt") return { error: item.error ?? null, kind: item.kind ?? null }
++      const receipt = item.receipt ?? {}, task = receipt.task ?? receipt
++      return { kind: item.kind, operation: item.operation, id: task.id, workId: task.workId, threadId: task.threadId, state: task.state, dispatch: task.origin?.dispatch }
++    } catch { return { parsed: false } }
++  }
+   const wire = {
++    revisionWire, diagnosticIntervention,
+     reviewRequests: [] as string[][],
+     reportPrefixChecks: [] as Array<{
+       privatePreview: boolean; changedSchemas: string[]; role: "review" | "report"; systemUnchanged: boolean; toolsUnchanged: boolean; toolChoice: unknown;
+@@ -425,7 +479,7 @@
+       temperature?: number; topP?: number; maxTokens?: number; seed?: number; thinking?: unknown; parallelToolCalls?: boolean; streaming?: boolean
+     }>
+   }
+-  // Transparent forwarding: no prompt/tool rewriting and no model decisions mocked.
++  // Forward real model traffic. This diagnostic removes a single optional flag only on the first revision send.
+   let providerPaymentRequired = false
+   const relay = createServer(async (req, res) => {
+     try {
+@@ -451,6 +505,15 @@
+         : inputText.includes('<bot_runtime_context event="task_result">') ? "report"
+         : ['user_request', 'introduction'].some(event => inputText.includes(`<bot_runtime_context event="${event}">`)) ? "communication"
+         : create ? "other-main" : "other"
++      if (role === "communication" && inputText.includes(revisionText) && activeTurn?.id === "revision") {
++        const boundary = body.messages.lastIndexOf(latestInput)
++        const tail = body.messages.slice(boundary + 1)
++        revisionWire.push({
++          at: new Date().toISOString(), choice: body.tool_choice ?? "default", endsWith: body.messages.at(-1)?.role,
++          reminder: tail.filter((m: any) => m.role === "user").map((m: any) => String(m.content).startsWith("<bot_reply_reminder>") ? m.content : "other user input"),
++          preceding: tail.flatMap((m: any) => m.role === "assistant" ? (m.tool_calls ?? []).map((c: any) => ({ name: c.function?.name, id: c.id })) : m.role === "tool" ? [{ id: m.tool_call_id, receipt: publicReceipt(m.content) }] : [])
++        })
++      }
+       const botIdentity = (body.messages ?? []).filter((m: any) => m.role === "system")
+         .map((m: any) => typeof m.content === "string" ? m.content : (m.content ?? []).map((p: any) => p.text ?? "").join("\n"))
+         .join("\n").match(/Your stable Bot ID is "([^"]+)"/)?.[1]
+@@ -528,7 +591,10 @@
+       res.writeHead(response.status, {
+         "content-type": response.headers.get("content-type") ?? "application/json"
+       })
+-      await pipeline(Readable.fromWeb(response.body as any), res)
++      if (role === "communication" && inputText.includes(revisionText) && activeTurn?.id === "revision" && !diagnosticIntervention.firstSendSeen && response.ok) {
++        const payload = await response.text()
++        res.end(removeFirstRevisionFinish(payload, (response.headers.get("content-type") ?? "").includes("event-stream")))
++      } else await pipeline(Readable.fromWeb(response.body as any), res)
+     } catch {
+       if (!res.headersSent) res.writeHead(502)
+       res.end("real-model relay failed")
+@@ -848,6 +914,14 @@
+             typeof m.content === "string" &&
+             (m.content.startsWith("Foreground execution budget reached.") || m.content.includes('"kind":"bot-foreground-continuation"'))
+         ),
++        ...(test.id === "revision" ? {
++          transcript: mainMessages.map((m: any) => ({
++            role: m.role, name: m.name, id: m.id,
++            ...(m.role === "assistant" ? { calls: (m.tool_calls ?? []).map((c: any) => ({ id: c.id, name: c.name, args: c.args })) } : {}),
++            ...(m.role === "tool" ? { callId: m.tool_call_id, receipt: publicReceipt(m.content) } : {})
++          })),
++          workRuns: tasks.filter((t: any) => t.workId && t.origin?.kind === "work").map((t: any) => ({ id: t.id, state: t.state, workId: t.workId, threadId: t.threadId })),
++        } : {}),
+         message,
+         tools: [...new Set(allTools.map((c: any) => c.name))],
+         mainTools: tools,
+@@ -1037,6 +1111,21 @@
+             "revision must execute in the existing task"
+           )
+           assert.deepEqual(follow.result.workIds.slice().sort(), initialIds)
++          const actualFile = await readFile(join(directory, "plan.md"), "utf8")
++          const fileLink = [...follow.result.reply.matchAll(/\[([^\]]*plan\.md)\]\((#bot-history\/[^)\s]+)\)/gi)].at(-1)?.[2]
++          const linked = fileLink && parseBotWorkAttachmentHref(fileLink)
++          let deliveredFile: string | undefined
++          if (linked) {
++            const {callId, fileIndex, ...history} = linked
++            const filePath = await page.evaluate(async ({botId, history, callId, fileIndex}) => {
++              const api = (window as any).api.bots
++              const source = await api.works.resolveSource(botId, history)
++              return (await api.authorizeDeliveredFile({threadId: source.threadId, assistantMessageId: source.messageId, callId, fileIndex})).filePath
++            }, {botId: bot.id, history, callId, fileIndex})
++            deliveredFile = await readFile(filePath, "utf8")
++          }
++          Object.assign(follow.result, { artifact: { workspaceHas16h: /16[:：]00|四点|下午\s*4/.test(actualFile), deliveredHas16h: !!deliveredFile && /16[:：]00|四点|下午\s*4/.test(deliveredFile), sameBytes: actualFile === deliveredFile, sha256: deliveredFile && experimentSha256(deliveredFile) }, originalWorkId: work.id, sameWorkerThread: follow.result.workRuns.every((run: any) => run.threadId === work.threadId) })
++          await save()
+           assertRevisionDispatch(follow.result, work.id)
+           assert.match(
+             await readFile(join(directory, "plan.md"), "utf8"),
+@@ -1044,6 +1133,7 @@
+           )
+           follow.result.validation = "passed"
+           await save()
++          if (test.id === "event-plan") continue
+           const status = await turn(
+             bot,
+             { id: "status", label: "查进度不重启执行", preferred: "inline" },
+@@ -1164,6 +1254,7 @@
+     repository: resolve("."),
+     selectedCases: process.env.BOT_ROUTING_CASE?.split(",") ?? cases.map((c) => c.id)
+   })
++  await cp(join(dirname(process.argv[1]), "probe.patch"), join(archive.directory, "probe.patch"))
+   console.log("Persistent experiment record:", join(archive.directory, "record.json"))
+   try {
+     await main(archive)

@@ -1,0 +1,11 @@
+{
+  "label": "stream-final",
+  "args": [
+    "--import",
+    "tsx",
+    "tests/stream-message-ids.spec.ts"
+  ],
+  "exitCode": 0,
+  "seconds": 0.68,
+  "log": "stream-final.log.txt"
+}

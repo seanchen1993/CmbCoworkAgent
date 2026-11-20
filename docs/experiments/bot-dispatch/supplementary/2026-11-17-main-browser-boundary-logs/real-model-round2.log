@@ -1,0 +1,4 @@
+Persistent experiment record: <repository>/docs/experiments/bot-dispatch/runs/20261117T073517Z-9257ffe4/record.json
+{"case":"browser-lookup","stage":"main-idle","seconds":5.1,"workCreated":true}
+{"case":"browser-lookup","actual":"independent","preferred":"independent","seconds":9.2,"mainSeconds":4.9,"dispatchSeconds":3.3,"budgetHandoff":false,"tools":["bot_work_create"]}
+Routing evaluation report: <isolated-build>/artifacts/routing-1794900917960.json

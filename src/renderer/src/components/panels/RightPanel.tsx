@@ -40,6 +40,7 @@ import {
   Maximize2,
   Minimize2,
   EyeOff,
+  Download,
   Loader2,
   Copy,
   Check,
@@ -120,6 +121,7 @@ import type {
   ToolFilePreviewGrantResult,
   WorkspaceFilePreviewWorkspacePathKind
 } from "../../../../shared/workspace-file-preview"
+import type { BotDeliveredFileSource } from "../../../../shared/bots/file-delivery"
 import {
   getRightPanelSkillProjection,
   getRightPanelSkillProjectionAsync,
@@ -372,6 +374,8 @@ interface PreviewExternalAuthorization {
   projectId?: string
   slug?: string
   toolCallId?: string
+  botDeliverySource?: BotDeliveredFileSource
+  markdownBasePath?: string
 }
 
 type SuccessfulToolFilePreviewGrant = Extract<
@@ -405,6 +409,7 @@ function previewExternalAuthorizationIdentity(authorization: PreviewExternalAuth
     authorization.projectId ?? "",
     authorization.slug ?? "",
     authorization.toolCallId ?? "",
+    authorization.botDeliverySource ? JSON.stringify(authorization.botDeliverySource) : "",
     authorization.filePath
   ].join("\u0000")
 }
@@ -628,11 +633,12 @@ export function RightPanel({
     const current = previewExternalAuthorizationRef.current
     if (!current) throw new Error("当前外部文件预览没有可信来源授权")
     const renewable = toHarnessArtifactPreviewAuthorization(current)
-    const toolGrantFresh = current.toolCallId
+    const botDeliverySource = current.botDeliverySource
+    const receiptGrantFresh = current.toolCallId || botDeliverySource
       ? isHarnessPluginRunArtifactGrantFresh(current.grant, current.expiresAt)
       : false
-    if (toolGrantFresh) return current.grant
-    if (!current.toolCallId && !renewable) return current.grant
+    if (receiptGrantFresh) return current.grant
+    if (!current.toolCallId && !botDeliverySource && !renewable) return current.grant
     if (renewable && isHarnessPluginRunArtifactGrantFresh(renewable.grant, renewable.expiresAt)) {
       return renewable.grant
     }
@@ -643,8 +649,14 @@ export function RightPanel({
       const marker = {}
       const promise = (async (): Promise<PreviewExternalAuthorization> => {
         try {
-          let refreshed: { grant: string; expiresAt: number; filePath: string }
-          if (current.toolCallId) {
+          let refreshed: { grant: string; expiresAt?: number; filePath: string }
+          if (botDeliverySource) {
+            const client = window.api.bots
+            if (!client?.authorizeDeliveredFile) throw new Error("原交付附件无法续签，请重新打开。")
+            refreshed = await client.authorizeDeliveredFile(botDeliverySource)
+            if (refreshed.filePath !== current.filePath)
+              throw new Error("原交付附件路径已变化，请重新打开。")
+          } else if (current.toolCallId) {
             const result = await window.api.workspace.authorizeToolFilePreview({
               threadId: current.threadId,
               toolCallId: current.toolCallId
@@ -660,7 +672,10 @@ export function RightPanel({
             refreshed = result
           }
           const latest = previewExternalAuthorizationRef.current
-          if (!latest || previewExternalAuthorizationIdentity(latest) !== identity) {
+          if (
+            !latest ||
+            (botDeliverySource ? latest !== current : previewExternalAuthorizationIdentity(latest) !== identity)
+          ) {
             throw new Error("文件预览已切换，已忽略过期授权续签")
           }
           if (
@@ -675,7 +690,10 @@ export function RightPanel({
             grant: refreshed.grant,
             expiresAt: refreshed.expiresAt
           }
-          replacePreviewExternalAuthorization(next)
+          // A Bot viewer is paging with this resolver. Changing its rendered
+          // grant would reload page one even though the snapshot is unchanged.
+          if (botDeliverySource) previewExternalAuthorizationRef.current = next
+          else replacePreviewExternalAuthorization(next)
           return next
         } finally {
           if (previewExternalGrantRefreshPromiseRef.current?.marker === marker) {
@@ -1418,6 +1436,8 @@ export function RightPanel({
       externalPreviewProjectId,
       externalPreviewSlug,
       toolCallId,
+      botDeliverySource,
+      markdownBasePath,
       intentId
     } = request
     if (
@@ -1431,14 +1451,15 @@ export function RightPanel({
       return
     }
     latestPreviewIntentIdRef.current = intentId
+    const deliverySource = botDeliverySource?.threadId === threadId ? botDeliverySource : undefined
     const shouldUseExternalAuthorization = Boolean(
       externalPreviewGrant &&
-        !resolveResourcePreviewPaths(
+        (deliverySource || !resolveResourcePreviewPaths(
           filePath,
           workspacePath ?? null,
           window.electron.process.platform,
           workspacePathKind
-        ).inWorkspace
+        ).inWorkspace)
     )
     previewThreadIdRef.current = threadId
     setPreviewPath(filePath)
@@ -1453,7 +1474,8 @@ export function RightPanel({
             expiresAt: externalPreviewGrantExpiresAt,
             projectId: externalPreviewProjectId,
             slug: externalPreviewSlug,
-            toolCallId
+            toolCallId,
+            ...(deliverySource ? { botDeliverySource: deliverySource, markdownBasePath } : {})
           }
         : null
     )
@@ -2078,6 +2100,8 @@ export function RightPanel({
                 workspacePath={workspacePath ?? null}
                 threadId={currentThreadId ?? ""}
                 externalPreviewGrant={previewExternalGrant ?? undefined}
+                botDeliveryMarkdown={previewExternalAuthorizationForCurrentThread?.botDeliverySource}
+                markdownBasePath={previewExternalAuthorizationForCurrentThread?.markdownBasePath}
                 resolveExternalPreviewGrant={
                   previewExternalAuthorizationForCurrentThread
                     ? resolveCurrentExternalPreviewGrant
@@ -3038,6 +3062,8 @@ function ResourcePreview({
   workspacePath,
   threadId,
   externalPreviewGrant,
+  botDeliveryMarkdown,
+  markdownBasePath,
   resolveExternalPreviewGrant,
   reloadToken,
   onReload,
@@ -3049,6 +3075,8 @@ function ResourcePreview({
   workspacePath: string | null
   threadId: string
   externalPreviewGrant?: string
+  botDeliveryMarkdown?: BotDeliveredFileSource
+  markdownBasePath?: string
   resolveExternalPreviewGrant?: () => Promise<string>
   reloadToken: number
   onReload?: () => void
@@ -3059,6 +3087,8 @@ function ResourcePreview({
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [previewMode, setPreviewMode] = useState<"preview" | "source">("preview")
   const [copySuccess, setCopySuccess] = useState(false)
+  const [savingDelivery, setSavingDelivery] = useState(false)
+  const deliverySavePending = useRef(false)
   const extension = getPathExtension(filePath).toLowerCase()
   const supportsSourceView = extension === "md" || extension === "markdown" || extension === "mdx"
   const filePreviewMode =
@@ -3075,24 +3105,38 @@ function ResourcePreview({
       ),
     [filePath, workspacePath, workspacePathKind]
   )
-  const previewFileSource = useMemo(
-    () =>
-      selectResourcePreviewFileSource(
-        resolved,
-        !resolved.inWorkspace && Boolean(externalPreviewGrant || resolveExternalPreviewGrant)
-      ),
-    [externalPreviewGrant, resolveExternalPreviewGrant, resolved]
-  )
   const hasExternalPreviewAuthorization = Boolean(
     externalPreviewGrant || resolveExternalPreviewGrant
   )
-  const canRevealInFolder = resolved.inWorkspace || hasExternalPreviewAuthorization
+  // A formal snapshot keeps its receipt-scoped reads even when its storage is inside the workspace.
+  const usesExternalPreviewAuthorization =
+    hasExternalPreviewAuthorization && (!resolved.inWorkspace || Boolean(botDeliveryMarkdown))
+  const previewFileSource = useMemo(
+    () => selectResourcePreviewFileSource(resolved, usesExternalPreviewAuthorization),
+    [resolved, usesExternalPreviewAuthorization]
+  )
+  const canRevealInFolder = !botDeliveryMarkdown && (resolved.inWorkspace || hasExternalPreviewAuthorization)
   const isCopyableText = previewFileType.type === "code" || previewFileType.type === "text"
   const canCopyContent = isCopyableText && (resolved.inWorkspace || Boolean(externalPreviewGrant))
   const copyUnavailableReason = isCopyableText
     ? "外部文件未获得可信来源授权"
     : "当前文件类型不支持复制"
   const fullPath = resolved.fullPath
+
+  const saveDelivery = async () => {
+    if (!botDeliveryMarkdown || deliverySavePending.current) return
+    deliverySavePending.current = true
+    setSavingDelivery(true)
+    try {
+      if (!window.api.bots?.exportDeliveredFile) throw new Error("原交付附件无法保存，请重新打开。")
+      await window.api.bots.exportDeliveredFile(botDeliveryMarkdown)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "文件保存失败，请重试")
+    } finally {
+      deliverySavePending.current = false
+      setSavingDelivery(false)
+    }
+  }
 
   const openInFolder = useCallback(async () => {
     if (!canRevealInFolder) {
@@ -3151,13 +3195,13 @@ function ResourcePreview({
       const requestToken =
         globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
       const lane = `right-panel-copy:${threadId}`
-      const source = resolved.inWorkspace
+      const source = resolved.inWorkspace && !usesExternalPreviewAuthorization
         ? { threadId, filePath: resolved.workspaceFilePath }
         : {
             externalGrant: resolveExternalPreviewGrant
               ? await resolveExternalPreviewGrant()
               : externalPreviewGrant!,
-            filePath: resolved.fullPath
+            filePath: previewFileSource.externalFullPath ?? resolved.fullPath
           }
       const chunks: string[] = []
       let totalBytes = 0
@@ -3198,7 +3242,15 @@ function ResourcePreview({
       console.error("[ResourcePreview] Failed to copy file content:", error)
       toast.error("复制失败，请重试")
     }
-  }, [canCopyContent, externalPreviewGrant, resolveExternalPreviewGrant, resolved, threadId])
+  }, [
+    canCopyContent,
+    externalPreviewGrant,
+    previewFileSource.externalFullPath,
+    resolveExternalPreviewGrant,
+    resolved,
+    threadId,
+    usesExternalPreviewAuthorization
+  ])
 
   useEffect(() => {
     if (!isFullscreen) return
@@ -3309,7 +3361,16 @@ function ResourcePreview({
           >
             <EyeOff className="size-3.5" />
           </button>
-          <button
+          {botDeliveryMarkdown ? <button
+            data-testid="resource-preview-save-delivery"
+            onClick={() => void saveDelivery()}
+            disabled={savingDelivery}
+            className="inline-flex items-center justify-center rounded-md px-1.5 py-1 text-[11px] text-muted-foreground enabled:hover:text-foreground enabled:hover:bg-background-interactive transition-colors disabled:opacity-40"
+            title="保存副本"
+            aria-label="保存副本"
+          >
+            {savingDelivery ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
+          </button> : <button
             data-testid="resource-preview-reveal"
             onClick={openInFolder}
             disabled={!canRevealInFolder}
@@ -3320,7 +3381,7 @@ function ResourcePreview({
             }
           >
             <FolderOpen className="size-3.5" />
-          </button>
+          </button>}
         </div>
       </div>
 
@@ -3335,6 +3396,8 @@ function ResourcePreview({
             externalFullPath={previewFileSource.externalFullPath}
             workspacePathKind={previewFileSource.workspacePathKind}
             externalPreviewGrant={externalPreviewGrant}
+            markdownBasePath={markdownBasePath}
+            botDeliveryMarkdown={botDeliveryMarkdown}
             resolveExternalPreviewGrant={resolveExternalPreviewGrant}
             reloadToken={reloadToken}
             previewMode={filePreviewMode}

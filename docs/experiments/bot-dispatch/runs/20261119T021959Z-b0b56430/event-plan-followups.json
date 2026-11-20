@@ -1,0 +1,104 @@
+{
+  "kind": "same-live-electron-and-real-model-followups",
+  "sourceRun": "20261119T021959Z-b0b56430",
+  "builtAt": "2026-11-19T02:09:19.725Z",
+  "preexistingWorkCount": 2,
+  "initialWorkOperations": [
+    {
+      "tool": "bot_work_create",
+      "requestKey": "sunday-reading-club-20261119"
+    },
+    {
+      "tool": "bot_work_create",
+      "requestKey": "noop-placeholder"
+    },
+    {
+      "tool": "bot_work_stop",
+      "requestKey": "stop-placeholder-accidental"
+    }
+  ],
+  "originalTaskReused": true,
+  "initialInputReplayed": false,
+  "method": "Used the running disposable app for three new user messages. Retained parent links were resolved through bots.works.resolveSource and bots.authorizeDeliveredFile, and their bytes hashed.",
+  "retainedPlanVersions": [
+    {
+      "sha256": "7e111ac2aca3f2be23e5f1fdd5a771fc824fff0495a5bce2beddecfd07ee7ba3",
+      "contains16h": false,
+      "contains17h": false
+    },
+    {
+      "sha256": "e280a3ef59ca7a95752b4b4cab9d520b31286b9ef036b97732c0481c392284fa",
+      "contains16h": true,
+      "contains17h": false
+    },
+    {
+      "sha256": "ed36e4505dba6f23f1ae682383f32ca35b50776f6218e1e01ae2b710e2291891",
+      "contains16h": false,
+      "contains17h": true
+    }
+  ],
+  "cases": [
+    {
+      "case": "event-plan/revision",
+      "validation": "failed",
+      "route": "continue",
+      "parentPublications": 1,
+      "intendedSameTask": true,
+      "acceptedSendCalls": 7,
+      "distinctRequestKeys": 7,
+      "workOperations": [
+        {
+          "tool": "bot_work_send",
+          "requestKey": "update-time-1600-20261119"
+        },
+        {
+          "tool": "bot_work_send",
+          "requestKey": "noop-ack-20261119"
+        },
+        {
+          "tool": "bot_work_send",
+          "requestKey": "clarify-noop-20261119"
+        },
+        {
+          "tool": "bot_work_send",
+          "requestKey": "final-narrow-20261119"
+        },
+        {
+          "tool": "bot_work_send",
+          "requestKey": "quiet-finish-1600"
+        },
+        {
+          "tool": "bot_work_send",
+          "requestKey": "last-1600-ack"
+        },
+        {
+          "tool": "bot_work_send",
+          "requestKey": "deliver-updated-plan-1600"
+        }
+      ],
+      "error": "Expected one send to the original task, observed repeated sends under new request keys. The revised 16:00 plan was delivered."
+    },
+    {
+      "case": "event-plan/status",
+      "route": "inline",
+      "mainSeconds": 4.9,
+      "endToEndSeconds": 4.9,
+      "mainTools": [],
+      "parentPublications": 0,
+      "rebuiltInitialCase": false,
+      "validation": "passed"
+    },
+    {
+      "case": "event-plan/reopen",
+      "route": "continue",
+      "mainSeconds": 5.4,
+      "endToEndSeconds": 20.2,
+      "mainTools": [
+        "bot_work_send"
+      ],
+      "parentPublications": 1,
+      "rebuiltInitialCase": false,
+      "validation": "passed"
+    }
+  ]
+}

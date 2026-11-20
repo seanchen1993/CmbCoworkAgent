@@ -1,0 +1,4182 @@
+import type { BotWorkHistoryPort } from "../../shared/bots/work-history"
+import { botMemoryContext } from "../../shared/bots/memory-scope"
+import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { execFileSync } from "node:child_process"
+import type { BotWorkWorkspacePort } from "../../shared/bots/work"
+import { DatabaseSync } from "node:sqlite"
+import assert from "node:assert/strict"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import { NativeSqliteAdapter } from "../db/native-sqlite-adapter"
+import { BotStore } from "./store"
+import { LocalBotHost, type BotRunLease, type BotRunPort } from "./host"
+import { BotImChannelService, type BotImGatewayClient } from "../services/im/bot-channel-service"
+import { BotImGatewayStore, botImScopeId } from "./im-gateway-store"
+import {
+  assertBotImBinding,
+  assertBotImEvent,
+  type BotImBinding,
+  type BotImEvent
+} from "../../shared/bots/im-channel"
+import type { BotTask } from "../../shared/bots/contracts"
+import { BOT_ROUTINE_SILENT } from "../../shared/bots/routine-silence"
+import { buildBotPrompt } from "./prompt"
+import { parseBotMockSource } from "./mock-channel-validation"
+import { canSteerBotTask } from "./continuation"
+import { BOT_EVENTS } from "../../shared/bots/telemetry"
+import { createBotWorkTools } from "./work-tools"
+import { createBotScheduleTools } from "./tools"
+
+const interactionCommand = vi.hoisted(() => vi.fn(async () => undefined))
+vi.mock("../services/im/bot-interaction-command", () => ({
+  handleBotImInteractionCommand: interactionCommand
+}))
+const cleanups: (() => Promise<void>)[] = []
+afterEach(async () => {
+  try {
+    for (const close of cleanups.splice(0)) await close()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+const eventually = async (condition: () => boolean) => {
+  const until = Date.now() + 4500
+  while (!condition()) {
+    if (Date.now() > until) throw new Error("condition timed out")
+    await new Promise((r) => setTimeout(r, 10))
+  }
+}
+function fixture(
+  execute?: (
+    task: BotTask,
+    host: LocalBotHost,
+    signal: AbortSignal,
+    waiting: (value: boolean) => void
+  ) => ReturnType<BotRunLease["execute"]>,
+  externalBindingId?: string,
+  available: () => boolean = () => true,
+  workspaces?: BotWorkWorkspacePort,
+  workHistory?: BotWorkHistoryPort,
+  concurrency = 2,
+  workRuntimeStatus?: BotRunPort["workRuntimeStatus"],
+  routinePublisher?: BotRunPort["scheduleObservationPublication"]
+) {
+  const db = new NativeSqliteAdapter(new DatabaseSync(":memory:")),
+    store = new BotStore(db)
+  const bot = store.create({
+    name: "IM Bot",
+    instructions: "Write text",
+    color: "#123456",
+    modelRef: null
+  })
+  const calls: BotTask[] = [],
+    errors: unknown[] = []
+  const cancelBackground = vi.fn(async (_threadId: string) => {})
+  const cancelBackgroundCommands = vi.fn(async (_ids: readonly string[]) => {})
+  const cancelWorkflowInstances = vi.fn(async (runs: readonly import("../agent/workflow/run-manager").WorkflowRunReference[]) => {
+    for (const run of runs) host.retireWorkflow(run)
+  })
+  const host: LocalBotHost = new LocalBotHost(
+    store,
+    {
+      workspaces,
+      workHistory,
+      workRuntimeStatus,
+      scheduleObservationPublication: routinePublisher,
+      cancelBackground,
+      cancelBackgroundCommands,
+      cancelWorkflowInstances,
+      onAvailable: () => () => {},
+      acquire: (_bot, task) =>
+        available()
+          ? {
+              release() {},
+              execute: async (signal, waiting) => {
+                calls.push(task)
+                if (task.mockSource) host.mockExecution(task)
+                return execute
+                  ? execute(task, host, signal, waiting)
+                  : { state: "completed", result: `reply:${task.message}` }
+              }
+            }
+          : null
+    },
+    concurrency,
+    (error) => errors.push(error),
+    routinePublisher ? (input, from) => input.runAt ?? new Date(from.getTime() + 300_000).toISOString() : undefined
+  )
+  const remote = new Map<string, BotImBinding>()
+  const createOperations = new Map<string, string>()
+  let sequence = 0
+  const client = {
+    getStatus: () => ({ principalId: "owner" }) as ReturnType<BotImGatewayClient["getStatus"]>,
+    supportsBotChannel: () => true,
+    supportsMarkdownReplies: vi.fn(() => false),
+    botBindingCommand: vi.fn<BotImGatewayClient["botBindingCommand"]>(
+      async (command, operationId) => {
+        if (command.action === "list")
+          return {
+            items: [...remote.values()].filter((binding) => binding.botId === command.botId),
+            before: null
+          }
+        if (command.action === "revoke") {
+          const result = {
+            ...remote.get(command.bindingId)!,
+            version: command.expectedVersion + 1,
+            state: "revoked" as const
+          }
+          remote.set(result.id, result)
+          return result
+        }
+        const known = operationId && createOperations.get(operationId)
+        if (known) return remote.get(known)!
+        sequence++
+        const binding: BotImBinding = {
+          id: externalBindingId ?? `binding-${sequence}`,
+          botId: command.botId,
+          kind: command.kind,
+          label: command.label,
+          version: 1,
+          state: "pending",
+          conversationKey: null,
+          createdAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 600000).toISOString(),
+          instruction: "/绑定Bot abcdefghijklmnopqrstuvwx"
+        }
+        remote.set(binding.id, binding)
+        if (operationId) createOperations.set(operationId, binding.id)
+        return binding
+      }
+    ),
+    sendAcknowledgement: vi.fn<BotImGatewayClient["sendAcknowledgement"]>(async () => {}),
+    acquireBotPermit: vi.fn<BotImGatewayClient["acquireBotPermit"]>(async () => ({
+      status: "granted",
+      expiresAt: new Date(Date.now() + 90000).toISOString(),
+      leaseId: "lease"
+    })),
+    renewBotPermit: vi.fn<BotImGatewayClient["renewBotPermit"]>(async () => ({
+      status: "granted",
+      expiresAt: new Date(Date.now() + 90000).toISOString(),
+      leaseId: "lease"
+    })),
+    submitReply: vi.fn<BotImGatewayClient["submitReply"]>(async () => ({ state: "accepted" }))
+  } satisfies BotImGatewayClient
+  const service = new BotImChannelService(
+    client,
+    "realm",
+    () => host,
+    (error) => errors.push(error),
+    () => false
+  )
+  service.start()
+  cleanups.push(async () => {
+    service.stop()
+    await host.stop()
+    db.close()
+  })
+  const binding = async (kind: "dm" | "group" = "group") => {
+    const value = await service.create(bot.id, kind, `create-${sequence}`)
+    const active: BotImBinding = { ...value, state: "active", conversationKey: `convo-${value.id}` }
+    delete active.instruction
+    remote.set(value.id, active)
+    await service.list(bot.id)
+    return active
+  }
+  const event = (binding: BotImBinding, id = "event", text = "Hello"): BotImEvent => ({
+    route: {
+      bindingId: binding.id,
+      botId: bot.id,
+      kind: binding.kind,
+      label: binding.label,
+      version: binding.version,
+      senderId: "member-a"
+    },
+    event: {
+      schemaVersion: 1,
+      eventId: id,
+      platformMessageId: `platform-${id}`,
+      principalId: "owner",
+      conversationKey: binding.conversationKey!,
+      conversationSeq: 1,
+      message: { type: "text", text },
+      occurredAt: new Date().toISOString(),
+      redelivered: false,
+      lease: { id: "lease", expiresAt: new Date(Date.now() + 90000).toISOString() }
+    }
+  })
+  return {
+    db,
+    store,
+    bot,
+    host,
+    calls,
+    errors,
+    service,
+    client,
+    binding,
+    event,
+    remote,
+    cancelBackground,
+    cancelBackgroundCommands,
+    cancelWorkflowInstances
+  }
+}
+
+describe("authenticated IM on the existing Bot host", () => {
+  it.each((["dm", "group"] as const).flatMap(kind => [false, true].map(confirm => ({ kind, confirm }))))(
+    "delivers the parent summary and staged file exactly once to the originating $kind (approval=$confirm)", async ({ kind, confirm }) => {
+    const f = fixture(undefined, undefined, () => false)
+    const binding = await f.binding(kind), foreign = await f.binding("group")
+    await f.service.receive(f.event(binding, "source", confirm ? "Send report.md after I approve" : "Send report.md"))
+    const parent = f.store.recentTasks().find(t => t.origin.kind === "mock" && !!t.mockSource)!
+    f.store.transition(parent.id, "running")
+    f.store.recordPreparedInput(parent.id, parent.message)
+    const { work, task } = f.store.createWork({ botId: f.bot.id, operationId: "report", title: "Report", goal: "Write report" },
+      { taskId: parent.id, key: "report", callId: "report", delivery: { confirmBeforeSending: confirm, requiredFiles: ["report.md"] } })
+    f.store.transition(parent.id, "completed")
+    f.store.transition(task.id, "running")
+    f.store.recordPreparedInput(task.id, task.message)
+    expect(f.store.armWorkResultReview(task.id, "original-incarnation", false, true)).toBe(true)
+    const file = { name: "report.md", filePath: "/work/report.md", size: 8, attachmentPath: "/saved/report.md" }
+    f.store.recordWorkResultEvidence(task.id, { callId: "formal", files: [file], assistantMessageId: "card" })
+    f.store.settle(task.id, "completed", null, "Final report", [file])
+    f.store.flushReplies()
+    const publications = () => f.store.recentTasks().filter(t => t.origin.kind === "work_result")
+    const report = publications().find(t => t.origin.kind === "work_result" && t.origin.review?.phase === "review")!
+    expect(report.threadId).toBe(parent.threadId)
+    expect(f.store.im.fileStatuses(f.bot.id, work.threadId, "formal")).toEqual([])
+    expect(f.service.history(f.bot.id, binding.id).items.some(i => i.text === "Final report")).toBe(false)
+    f.store.transition(report.id, "running")
+    expect(f.store.getWorkResultReview(report.id)).toMatchObject({ outcome: { text: "Final report" }, retainedFiles: { names: ["report.md"] } })
+    const finalText = "本周报告已整理好，详见附件。"
+    f.store.commitWorkResultReview(report.id, null, [], [], undefined, { messageId: "parent-reply", finalText })
+    f.store.settle(report.id, "completed", null, finalText)
+    f.store.flushReplies()
+    if (confirm) {
+      const waiting = publications().find(t => t.origin.kind === "work_result" && t.origin.review?.phase === "confirm")!
+      expect(waiting.threadId).toBe(work.threadId)
+      f.store.transition(waiting.id, "running")
+      expect(f.store.pendingResultConfirmation(waiting.id)).toMatchObject({ summary: finalText, attachments: [{ file }] })
+      expect(f.service.history(f.bot.id, binding.id).items.some(i => i.text === finalText)).toBe(false)
+      expect(f.store.im.fileStatuses(f.bot.id, work.threadId, "formal")).toEqual([])
+      f.store.resolveResultConfirmation(waiting.id, true)
+      f.store.settle(waiting.id, "completed", null)
+      f.store.flushReplies()
+    }
+    const delivery = publications().find(t => t.origin.kind === "work_result" && t.origin.review?.phase === "publish")!
+    expect(delivery.threadId).toBe(parent.threadId)
+    f.store.transition(delivery.id, "running")
+    expect(f.store.acknowledgeWorkResultPublication(delivery.id)).toBe(true)
+    expect(f.store.acknowledgeWorkResultPublication(delivery.id)).toBe(false)
+    expect(f.store.im.fileStatuses(f.bot.id, work.threadId, "formal")).toHaveLength(1)
+    expect(f.store.publishedWorkDelivery(f.store.getWork(f.bot.id, work.id))).toMatchObject({
+      files: [{ name: "report.md", imState: "pending" }], fileCount: 1
+    })
+    const messages = f.service.history(f.bot.id, binding.id).items.map(i => i.text)
+    expect(messages).not.toContain("Final report")
+    expect(messages.filter(text => text === finalText)).toHaveLength(1)
+    expect(f.service.history(f.bot.id, foreign.id).items).toHaveLength(0)
+  })
+
+  it("reports a pre-execution failure to the originating group without releasing held material", async () => {
+    const f = fixture(undefined, undefined, () => false)
+    const binding = await f.binding("group")
+    await f.service.receive(f.event(binding, "source", "Confirm before sending"))
+    const parent = f.store.recentTasks().find(item => item.origin.kind === "mock")!
+    f.store.transition(parent.id, "running")
+    f.store.recordPreparedInput(parent.id, parent.message)
+    const { task } = f.store.createWork({ botId: f.bot.id, operationId: "held", title: "Report", goal: "Draft" },
+      { taskId: parent.id, key: "held", callId: "held", delivery: { confirmBeforeSending: true } })
+    f.store.transition(parent.id, "completed")
+    f.store.transition(task.id, "running")
+    f.store.settle(task.id, "failed", "private diagnostic", "private unfinished text")
+    const messages = f.service.history(f.bot.id, binding.id).items.map(item => item.text)
+    expect(messages.some(text => text?.includes("原任务查看详情"))).toBe(true)
+    expect(messages.join(" ")).not.toContain("private")
+  })
+
+  it("keeps same-name task deletion and routine observations within the private chat or the originating group", async () => {
+    const f = fixture(undefined, undefined, () => false)
+    const routes = [await f.binding("dm"), await f.binding(), await f.binding()]
+    const title = "同名周报"
+    const surfaces: Array<{ work: ReturnType<BotStore["getWork"]>; parent: BotTask }> = []
+    for (const route of routes) {
+      const groupId = botImScopeId("realm", "owner", route.id)
+      const { work } = f.store.createWork({ botId: f.bot.id, operationId: "new-" + groupId, title,
+        goal: "Prepare weekly report", ...(route.kind === "group" ? { imConversationId: groupId } : {}) })
+      const message = "删除任务「同名周报」"
+      await f.service.receive(f.event(route, "delete-" + groupId, message))
+      const parent = f.store.recentTasks().find(task => task.origin.kind === "mock" && task.mockSource?.bindingId === groupId)!
+      f.store.transition(parent.id, "running")
+      f.store.recordPreparedInput(parent.id, message)
+      surfaces.push({ work, parent: f.store.getTask(parent.id) })
+    }
+    for (const { work, parent } of surfaces) {
+      expect(createBotWorkTools(parent, () => f.host, new AbortController().signal).some(tool => tool.name === "bot_work_delete")).toBe(true)
+      expect(f.store.listWorks(f.bot.id, undefined, title, work.audienceKey).items.map(item => item.id)).toEqual([work.id])
+      expect(f.store.explicitWorkDeletionRequest(parent.id, work)).toBe(parent.id)
+      const save = (target: string) => f.store.saveSchedule(f.bot.id, { name: title, frequency: "once", enabled: true,
+        runAt: "2099-01-01T10:00:00Z", message: "查看周报状态" }, "2099-01-01T10:00:00Z", undefined, parent.id,
+        undefined, { input: { workId: target, mode: "report" }, source: { taskId: parent.id, callId: "watch-" + target, key: "watch-" + target } })
+      for (const { work: foreign } of surfaces.filter(item => item.work.id !== work.id)) {
+        expect(f.store.explicitWorkDeletionRequest(parent.id, foreign)).toBeUndefined()
+        expect(() => save(foreign.id)).toThrow()
+        expect(() => f.store.beginWorkDeletion({ botId: f.bot.id, workId: foreign.id, threadId: foreign.threadId,
+          audienceKey: foreign.audienceKey, version: foreign.version, incarnation: null },
+          { taskId: parent.id, callId: "wrong-" + foreign.id, key: "wrong-" + foreign.id })).toThrow()
+        expect(f.store.workDeletionRecord(f.bot.id, foreign.id)).toBeUndefined()
+      }
+      const monitor = save(work.id)
+      expect(monitor.audienceKey).toBe(work.audienceKey)
+      f.store.fireSchedule(monitor, null, true)
+      expect(f.store.pendingScheduledWorkPublications().filter(item => item.observedWorkId === work.id)
+        .map(item => item.threadId)).toEqual([parent.threadId])
+    }
+    const { parent, work } = surfaces[1]
+    const stopping = f.store.beginWorkDeletion({ botId: f.bot.id, workId: work.id, threadId: work.threadId,
+      audienceKey: work.audienceKey, version: work.version, incarnation: null },
+      { taskId: parent.id, callId: "delete", key: "delete" })
+    f.store.advanceWorkDeletion(f.store.advanceWorkDeletion(stopping, "ready"), "deleted")
+    for (const { work: candidate } of surfaces)
+      expect(f.store.listWorks(f.bot.id, undefined, title, candidate.audienceKey).items.map(item => item.id))
+        .toEqual(candidate.id === work.id ? [] : [candidate.id])
+  })
+
+  it("fires a routine created in the App group panel on its own task and returns the result only to that group", async () => {
+    const f = fixture(async task => ({ state: "completed", result: task.origin.kind === "schedule" ? "已生成本群周报" : "例行结果已整理" }))
+    const route = await f.binding(), other = await f.binding()
+    const groupId = botImScopeId("realm", "owner", route.id)
+    const routine = f.store.saveSchedule(f.bot.id, { name: "同名周报", message: "整理周报", enabled: true,
+      frequency: "once", runAt: "2099-01-01T10:00:00Z" }, "2099-01-01T10:00:00Z", undefined, undefined,
+      { imConversationId: groupId, operationId: "app-group-routine" })
+    f.store.fireSchedule(routine, null)
+    f.host.resume()
+    await eventually(() => f.calls.some(task => task.origin.kind === "schedule" && f.store.getTask(task.id).state === "completed"))
+    const execution = f.calls.find(task => task.origin.kind === "schedule")!
+    expect(execution.workId).toBe(routine.workId)
+    expect(execution.mockSource?.bindingId).toBe(groupId)
+    await eventually(() => f.client.submitReply.mock.calls.some(([reply]) => reply.conversationKey === route.conversationKey))
+    expect(f.client.submitReply.mock.calls.every(([reply]) => reply.conversationKey === route.conversationKey)).toBe(true)
+    expect(f.service.history(f.bot.id, other.id).items).toEqual([])
+    expect(f.errors).toEqual([])
+  })
+
+  it("creates desktop work in an empty bound group, executes once and returns results only there", async () => {
+    const resolve = vi.fn(async () => ({ kind: "directory" as const, path: "/projects/report" }))
+    const f = fixture(undefined, undefined, () => true, { resolve, projects: async () => ({ items: [], nextCursor: null }) })
+    const group = await f.binding(), other = await f.binding()
+    const groupId = botImScopeId("realm", "owner", group.id)
+    const otherId = botImScopeId("realm", "owner", other.id)
+    const input = { botId: f.bot.id, imConversationId: groupId, operationId: "desktop-group-create", title: "评审准备", goal: "整理评审要点" }
+    expect(f.host.imConversationHistory(f.bot.id, groupId).items).toEqual([])
+    const receipt = await f.host.createWork(input)
+    const source = receipt.work.source!
+    assert.ok(source.desktopWorkId)
+    expect(source).toMatchObject({ transport: "im", desktopWorkId: receipt.work.id, bindingId: groupId })
+    expect(source.eventId).toBeUndefined()
+    expect(source.senderId).toBeUndefined()
+    expect(receipt.work.parentThreadId).toBe(f.store.im.thread(source))
+    expect(botMemoryContext(receipt.task)).toEqual({ groupId })
+    expect(() => f.store.im.validateSource({ ...source, desktopWorkId: "missing" }, f.bot.id)).toThrow("所属群")
+    expect((await f.host.createWork(input)).work.id).toBe(receipt.work.id)
+    expect(resolve).not.toHaveBeenCalled()
+    await expect(f.host.createWork({ ...input, imConversationId: otherId })).rejects.toThrow()
+    await expect(f.host.createWork({ ...input, imConversationId: undefined })).rejects.toThrow()
+    await eventually(() => f.client.submitReply.mock.calls.some(([r]) => r.message.content === "reply:整理评审要点"))
+    expect(f.calls.filter((t) => t.workId === receipt.work.id)).toHaveLength(1)
+    expect(f.host.listWorks(f.bot.id).items).toEqual([])
+    expect(f.host.imConversationWorks(f.bot.id, otherId).items).toEqual([])
+    expect(f.host.imConversationWorks(f.bot.id, groupId).items.map(w => w.id)).toEqual([receipt.work.id])
+    expect(f.host.imConversationHistory(f.bot.id, groupId).items.every(m => m.kind !== "user")).toBe(true)
+
+    const custom = await f.host.createWork({ ...input, operationId: "custom-group-work", workspace: { kind: "directory", path: "/projects/report" } })
+    expect(custom.work.workspace?.path).toBe("/projects/report")
+    expect(resolve).toHaveBeenCalledTimes(1)
+    f.host.send({ botId: f.bot.id, workId: receipt.work.id, requestId: "desktop-group-more", message: "补充验收标准" })
+    await eventually(() => f.client.submitReply.mock.calls.some(([r]) => r.message.content === "reply:补充验收标准"))
+    expect(f.client.submitReply.mock.calls.every(([r]) => r.conversationKey === group.conversationKey)).toBe(true)
+    expect(f.client.acquireBotPermit).not.toHaveBeenCalled()
+    expect(f.errors).toEqual([])
+  })
+
+  it("rejects another Bot's group, personal routes and revoked bindings, including revocation during workspace selection", async () => {
+    let release!: () => void
+    const resolve = vi.fn(async () => {
+      await new Promise<void>(done => { release = done })
+      return { kind: "directory" as const, path: "/projects/report" }
+    })
+    const f = fixture(undefined, undefined, () => true, { resolve, projects: async () => ({ items: [], nextCursor: null }) })
+    const group = await f.binding(), dm = await f.binding("dm")
+    const groupId = botImScopeId("realm", "owner", group.id)
+    const input = { botId: f.bot.id, imConversationId: groupId, operationId: "scope-check", title: "核对范围", goal: "汇总要点" }
+    const otherBot = f.store.create({ name: "另一个 Bot", instructions: "", color: "#123456", modelRef: null })
+    await expect(f.host.createWork({ ...input, botId: otherBot.id })).rejects.toThrow("招乎群会话不存在")
+    await expect(f.host.createWork({ ...input, imConversationId: botImScopeId("realm", "owner", dm.id) })).rejects.toThrow("招乎群会话不存在")
+    const creating = f.host.createWork({ ...input, workspace: { kind: "directory", path: "/projects/report" } })
+    await f.service.revoke(f.bot.id, group.id, group.version)
+    release()
+    await expect(creating).rejects.toThrow("请先绑定此招乎群")
+    await expect(f.host.createWork(input)).rejects.toThrow("请先绑定此招乎群")
+    expect(f.host.imConversationWorks(f.bot.id, groupId).items).toEqual([])
+    expect(f.calls).toEqual([])
+  })
+
+  it("delivers a Feature update after the dispatching turn ended, once and only to the originating group", async () => {
+    const f = fixture()
+    const group = await f.binding("group")
+    await f.binding("group")
+    await f.service.receive(f.event(group, "feature-source"))
+    await eventually(
+      () => f.calls.length === 1 && f.store.getTask(f.calls[0].id).state === "completed"
+    )
+    const task = f.store.getTask(f.calls[0].id)
+    f.host.imChannel.featureNotice(task, "decision-1", "项目正在等待字段确认")
+    f.host.imChannel.featureNotice(task, "decision-1", "项目正在等待字段确认")
+    await eventually(() =>
+      f.client.submitReply.mock.calls.some(([r]) => r.message.content === "项目正在等待字段确认")
+    )
+    const sent = f.client.submitReply.mock.calls
+      .map(([r]) => r)
+      .filter((r) => r.message.content === "项目正在等待字段确认")
+    expect(sent.map((r) => r.conversationKey)).toEqual([group.conversationKey])
+    expect(f.errors).toEqual([])
+  })
+  it.each([null, "Original IM input", "Allowed replacement", ""])("retains owner DM input admission without desktop grants (%s)", async body => {
+    const f = fixture(async (task, host) => {
+      host.beginInputPreparation(task.id, task.id)
+      expect(host.inputProjections(task.botId, task.threadId, [task.requestId]).get(task.requestId)).toBeNull()
+      if (body === null) return { state: "failed", error: "Hook rejected input" }
+      host.recordPreparedInput(task.id, task.id, body)
+      return { state: "completed", result: "Done" }
+    })
+    const binding = await f.binding("dm")
+    await f.service.receive(f.event(binding, "admission", "Original IM input"))
+    await eventually(() => f.calls.length === 1 && ["completed", "failed"].includes(f.store.getTask(f.calls[0].id).state))
+    const task = f.store.getTask(f.calls[0].id)
+    expect(task.origin).toMatchObject({ kind: "mock" })
+    expect(task.origin).not.toHaveProperty("allowedInputFileIds")
+    expect(task.mockSource).toMatchObject({ transport: "im", personal: true, audienceKey: "desktop" })
+    expect(task.threadId).toBe(f.bot.threadId)
+    expect(f.host.inputProjections(f.bot.id, f.bot.threadId, [task.requestId])).toEqual(new Map([[task.requestId, body]]))
+    expect(new BotStore(f.db).inputProjections(f.bot.id, f.bot.threadId, [task.requestId])).toEqual(new Map([[task.requestId, body]]))
+    expect(f.errors).toEqual([])
+  })
+
+  it.each([null, "Allowed replacement"])("keeps stopped owner DM facts without replaying refused input (%s)", async body => {
+    const f = fixture(undefined, undefined, () => false)
+    const binding = await f.binding("dm")
+    await f.service.receive(f.event(binding, "stopped-input", "PRIVATE ORIGINAL"))
+    const task = f.store.recentTasks().find(task => task.mockSource)!
+    f.store.transition(task.id, "running")
+    f.store.beginInputPreparation(task.id)
+    if (body !== null) f.store.recordPreparedInput(task.id, body)
+    f.store.transition(task.id, "interrupted")
+    const current = f.store.enqueue({ botId: f.bot.id, requestId: "after-restart", message: "Only reply hello" })
+    const restored = new BotStore(f.db)
+    expect(restored.stoppedTaskContext(current.id)).toEqual([
+      { taskId: task.id, state: "interrupted", source: "mock", messagePreview: body ?? "" }
+    ])
+    expect(() => restored.recordPreparedInput(task.id, "Too late")).toThrow("已停止")
+    expect(restored.inputProjections(f.bot.id, f.bot.threadId, [task.requestId])).toEqual(new Map([[task.requestId, body]]))
+  })
+
+  it.each(["group", "personal", "work"] as const)("routes stopped background activity to the IM %s owner", async (scope) => {
+    const f = fixture(undefined, undefined, () => false)
+    const own = f.host.send({ botId: f.bot.id, requestId: "baseline", message: "Private baseline" })
+    f.store.transition(own.id, "running")
+    f.store.settle(own.id, "completed", null, "Private outcome")
+    const binding = await f.binding(scope === "personal" ? "dm" : "group")
+    await f.service.receive(f.event(binding, "command-source"))
+    let source = f.store.recentTasks().find(task => task.mockSource)!
+    f.store.transition(source.id, "running")
+    if (scope === "work") {
+      const work = f.store.createWork(
+        { botId: f.bot.id, operationId: "work", title: "Work", goal: "Run" },
+        { taskId: source.id, callId: "create", key: "create" }
+      )
+      f.store.settle(source.id, "completed", null, "Work created")
+      source = work.task
+      f.store.transition(source.id, "running")
+    }
+    f.host.commandLifecycle(source.id).accepted({ id: "command", threadId: source.threadId, command: "node check.js", cwd: "/synthetic", startedAt: Date.now() })
+    f.store.settle(source.id, "completed", null, "Started")
+    const before = f.store.activities()
+    f.cancelBackground.mockImplementation(async (threadId) => {
+      expect(threadId).toBe(source.threadId)
+      f.host.commandLifecycle(source.id).settled({ id: "command", threadId, output: "", exitCode: null, truncated: false, cancelled: true })
+    })
+    if (scope === "group") f.host.stopImConversation(f.bot.id, source.mockSource!.bindingId)
+    else f.host.stopConversation(f.bot.id, undefined, source.workId)
+    await eventually(() => f.store.activeCommandThreads().length === 0)
+    const activity = f.store.activities()
+    const main = (items: typeof activity) => items.find(item => item.kind === "bot" && item.id === f.bot.id)
+    if (scope === "personal") expect(main(activity)?.preview).toBe("后台任务已停止")
+    else {
+      expect(main(activity)).toEqual(main(before))
+      expect(f.host.snapshot().imConversations?.find(item => item.bindingId === binding.id)?.activity.preview).toBe("后台任务已停止")
+    }
+    if (scope === "work") expect(f.store.getWork(f.bot.id, source.workId!).activity?.preview).toBe("后台任务已停止")
+    expect(f.errors).toEqual([])
+  })
+  it("publishes idle IM disconnect once and refreshes again on reconnect", async () => {
+    const f = fixture(), binding = await f.binding()
+    const views: boolean[] = []
+    const unsubscribe = f.host.subscribe(() => {
+      views.push(Boolean(f.host.snapshot().imConversations?.find(item => item.bindingId === binding.id)?.connected))
+    })
+    try {
+      expect(f.host.snapshot().imConversations?.find(item => item.bindingId === binding.id)?.connected).toBe(true)
+      f.service.disconnected()
+      expect(views).toEqual([false])
+      const revision = f.host.snapshot().revision
+      f.service.disconnected()
+      expect(views).toEqual([false])
+      expect(f.host.snapshot().revision).toBe(revision)
+      await f.service.list(f.bot.id)
+      expect(views).toEqual([false, true])
+      expect(f.calls).toEqual([])
+      expect(f.client.submitReply).not.toHaveBeenCalled()
+      expect(f.errors).toEqual([])
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it("publishes newly queued IM input while the current turn waits, without duplicate input events", async () => {
+    const f = fixture(async (_task, _host, signal, waiting) => {
+      waiting(true)
+      await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }))
+      return { state: "completed" }
+    }), binding = await f.binding()
+    await f.service.receive(f.event(binding, "waiting"))
+    await eventually(() => f.store.recentTasks().some(task => task.state === "waiting_user"))
+    const views: string[][] = []
+    const unsubscribe = f.host.subscribe(() => {
+      views.push(f.service.history(f.bot.id, binding.id).items.map(item => item.text))
+    })
+    try {
+      const second = f.event(binding, "queued", "second input")
+      await f.service.receive(second)
+      expect(f.store.recentTasks().some(task => task.message === "second input" && task.state === "queued")).toBe(true)
+      expect(views.some(texts => texts.includes("second input"))).toBe(true)
+      views.length = 0
+      await f.service.receive(second)
+      expect(views).toEqual([])
+      expect(f.calls).toHaveLength(1)
+      expect(f.errors).toEqual([])
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it.each(["accepted", "unknown", "pending", "blocked"] as const)(
+    "publishes the settled IM delivery state %s and keeps empty delivery ticks quiet",
+    async (state) => {
+      const f = fixture(), binding = await f.binding()
+      if (state === "unknown") f.client.submitReply.mockResolvedValue({ state: "platform_unknown" })
+      if (state === "pending") f.client.submitReply.mockRejectedValue(new Error("offline"))
+      if (state === "blocked") {
+        const { ImGatewayCommandError } = await import("../services/im/gateway-ws-client")
+        f.client.submitReply.mockRejectedValue(new ImGatewayCommandError("denied", { permanent: true }))
+      }
+      const views: string[][] = []
+      const unsubscribe = f.host.subscribe(() => {
+        views.push(f.service.history(f.bot.id, binding.id).items.filter(item => item.kind === "bot").map(item => item.state!))
+      })
+      try {
+        await f.service.receive(f.event(binding, "delivery"))
+        await eventually(() => f.client.submitReply.mock.calls.length === 1)
+        await eventually(() => f.service.history(f.bot.id, binding.id).items.some(item => item.kind === "bot" && item.state === state))
+        expect(views.some(states => states.includes("sending"))).toBe(true)
+        // Pending is already observed at settlement; assert that the last event reflects the final result.
+        expect(views.at(-1)).toContain(state)
+        const count = views.length
+        await new Promise(resolve => setTimeout(resolve, 1050))
+        expect(views).toHaveLength(count)
+        expect(f.client.submitReply).toHaveBeenCalledTimes(1)
+        expect(f.calls).toHaveLength(1)
+      } finally {
+        unsubscribe()
+      }
+    }
+  )
+
+  it("revoking a binding aborts its admitted peer without stopping unrelated work or treating offline as revoke", async () => {
+    let peerId = ""
+    const signals = new Map<string, AbortSignal>()
+    const f = fixture(async (task, host, signal) => {
+      if (task.origin.kind === "mock") {
+        host.delegate(task.id, peerId, "Long review", "peer")
+        return { state: "completed", result: "Dispatched" }
+      }
+      signals.set(task.id, signal)
+      await new Promise<void>(resolve => {
+        signal.addEventListener("abort", () => resolve(), { once: true })
+        if (signal.aborted) resolve()
+      })
+      return { state: "completed", result: "Done" }
+    })
+    peerId = f.host.create({ name: "Peer", instructions: "", color: "#123456", modelRef: null }).id
+    const binding = await f.binding()
+    await f.service.receive(f.event(binding, "revoke-execution"))
+    await eventually(() => f.calls.some(task => task.origin.kind === "bot" && signals.has(task.id)))
+    const peer = f.calls.find(task => task.origin.kind === "bot")!
+    const unrelated = f.host.send({ botId: f.bot.id, requestId: "local", message: "Local work" })
+    await eventually(() => signals.has(unrelated.id))
+    f.host.setImOnline(f.bot.id, peer.mockSource!.bindingId, false)
+    expect(signals.get(peer.id)!.aborted).toBe(false)
+    await f.service.revoke(f.bot.id, binding.id, binding.version)
+    await eventually(() => f.store.getTask(peer.id).state === "cancelled")
+    expect(signals.get(peer.id)!.aborted).toBe(true)
+    expect(signals.get(unrelated.id)!.aborted).toBe(false)
+    expect(f.cancelBackground).not.toHaveBeenCalled()
+    expect(f.errors).toEqual([])
+  })
+
+  it("revoking a binding cleans its finished peer's commands and workflow by source, preserving another binding", async () => {
+    let peerId = ""
+    const f = fixture(async (task, host) => {
+      if (task.origin.kind === "mock") {
+        host.delegate(task.id, peerId, "Launch background", "peer")
+        return { state: "completed", result: "Dispatched" }
+      }
+      host.commandLifecycle(task.id).accepted({ id: `cmd-${task.id}`, threadId: task.threadId, command: "service", cwd: "/synthetic", startedAt: 1 })
+      host.acceptWorkflow(task.id, { threadId: task.threadId, runId: `wf-${task.id}`, workspacePath: "/synthetic", startedAt: "2026-10-31T00:00:00.003Z" })
+      return { state: "completed", result: "Started" }
+    })
+    peerId = f.host.create({ name: "Peer", instructions: "", color: "#123456", modelRef: null }).id
+    const first = await f.binding(), second = await f.binding()
+    await f.service.receive(f.event(first, "background-one"))
+    await f.service.receive(f.event(second, "background-two"))
+    await eventually(() => f.calls.filter(task => task.origin.kind === "bot" && f.store.getTask(task.id).state === "completed").length === 2)
+    const peers = f.calls.filter(task => task.origin.kind === "bot")
+    const one = peers.find(task => task.mockSource!.bindingId === botImScopeId("realm", "owner", first.id))!
+    const two = peers.find(task => task.id !== one.id)!
+    await f.service.revoke(f.bot.id, first.id, first.version)
+    await eventually(() => f.cancelWorkflowInstances.mock.calls.length > 0)
+    expect(f.cancelBackgroundCommands.mock.calls.flatMap(([ids]) => [...ids])).toContain(`cmd-${one.id}`)
+    expect(f.cancelBackgroundCommands.mock.calls.flatMap(([ids]) => [...ids])).not.toContain(`cmd-${two.id}`)
+    expect(f.store.workflowReferences(one.threadId)).toEqual([])
+    expect(f.store.workflowReferences(two.threadId)).toHaveLength(1)
+    expect(f.cancelBackground).not.toHaveBeenCalled()
+    expect(f.errors).toEqual([])
+  })
+
+  it("runs two IM groups and private chat concurrently while preserving approvals, thread order and reply routes", async () => {
+    const finish = new Map<string, () => void>()
+    const waiting = new Map<string, (value: boolean) => void>()
+    const f = fixture(
+      async (task, _host, signal, onWaiting) => {
+        waiting.set(task.id, onWaiting)
+        await new Promise<void>((resolve) => {
+          finish.set(task.id, resolve)
+          signal.addEventListener("abort", () => resolve(), { once: true })
+        })
+        return { state: "completed", result: `result:${task.message}` }
+      },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      Number.POSITIVE_INFINITY
+    )
+    const a = await f.binding(),
+      b = await f.binding(),
+      dm = await f.binding("dm")
+    try {
+      await f.service.receive(f.event(a, "a-1", "A first"))
+      await eventually(() => f.calls.length === 1)
+      const first = f.calls[0]
+      waiting.get(first.id)!(true)
+      await f.service.receive(f.event(a, "a-2", "A second"))
+      await f.service.receive(f.event(b, "b-1", "B first"))
+      const own = f.host.send({
+        botId: f.bot.id,
+        requestId: "local-private",
+        message: "Local private"
+      })
+      await eventually(() => f.calls.length === 3)
+      await f.service.receive(f.event(dm, "dm-1", "IM private"))
+      const pending = f.store.recentTasks()
+      const second = pending.find((t) => t.message === "A second")!
+      const other = pending.find((t) => t.message === "B first")!
+      const imPrivate = pending.find((t) => t.message === "IM private")!
+      expect(f.store.getTask(first.id).state).toBe("waiting_user")
+      expect(f.store.getTask(second.id).state).toBe("queued")
+      expect(f.store.getTask(other.id).state).toBe("running")
+      expect(f.store.getTask(own.id).state).toBe("running")
+      expect(f.store.getTask(imPrivate.id).state).toBe("queued")
+      expect(imPrivate.threadId).toBe(own.threadId)
+      expect(new Set([first.threadId, other.threadId, own.threadId]).size).toBe(3)
+      expect(botMemoryContext(first)).not.toEqual(botMemoryContext(other))
+      // Exercise the renderer's actual snapshot, not full store rows: the group
+      // stop control needs the IM source even when message bodies are projected.
+      const snapshot = f.host.snapshot()
+      const conversation = snapshot.imConversations!.find((item) => item.bindingId === a.id)!
+      const visibleGroupTasks = snapshot.tasks.filter(
+        (task) =>
+          task.mockSource?.transport === "im" &&
+          task.mockSource.bindingId === conversation.id &&
+          task.botId === f.bot.id &&
+          !task.workId &&
+          ["queued", "running", "waiting_user"].includes(task.state)
+      )
+      expect(visibleGroupTasks.map((task) => task.id).sort()).toEqual([first.id, second.id].sort())
+      expect(snapshot.tasks.find((task) => task.id === other.id)?.mockSource).toEqual(
+        other.mockSource
+      )
+      expect(snapshot.tasks.find((task) => task.id === own.id)?.mockSource).toBeUndefined()
+      f.host.stopImConversation(f.bot.id, botImScopeId("realm", "owner", a.id))
+      await eventually(() => f.store.getTask(first.id).state === "cancelled")
+      expect(f.store.getTask(second.id).state).toBe("cancelled")
+      expect(f.store.getTask(other.id).state).toBe("running")
+      expect(f.store.getTask(own.id).state).toBe("running")
+      finish.get(other.id)!()
+      finish.get(own.id)!()
+      await eventually(() => f.calls.some((t) => t.id === imPrivate.id))
+      finish.get(imPrivate.id)!()
+      await eventually(() => f.store.getTask(imPrivate.id).state === "completed")
+      await vi.waitFor(
+        () =>
+          expect(
+            f.client.submitReply.mock.calls.some(([r]) => r.message.content === "result:IM private")
+          ).toBe(true),
+        { timeout: 10000 }
+      )
+      const replies = f.client.submitReply.mock.calls.map(([r]) => r)
+      for (const [text, binding] of [
+        ["result:B first", b],
+        ["result:Local private", dm],
+        ["result:IM private", dm]
+      ] as const) {
+        expect(replies).toContainEqual(
+          expect.objectContaining({
+            conversationKey: binding.conversationKey,
+            message: expect.objectContaining({ content: text })
+          })
+        )
+      }
+      expect(
+        replies
+          .filter((r) => r.message.content === "已停止")
+          .every((r) => r.conversationKey === a.conversationKey)
+      ).toBe(true)
+      expect(f.calls.filter((t) => t.id === second.id)).toHaveLength(0)
+      expect(f.errors).toEqual([])
+    } finally {
+      for (const resolve of finish.values()) resolve()
+    }
+  }, 15000)
+  it("publishes one opening before completion, exposes the group execution thread and cancels only that group", async () => {
+    const f = fixture(async (task, host, signal) => {
+      host.imChannel.openingReply(task.id, "我先检查当前目录。")
+      host.imChannel.openingReply(task.id, "重复快照不应再次发送")
+      await new Promise<void>((resolve) =>
+        signal.addEventListener("abort", () => resolve(), { once: true })
+      )
+      return { state: "completed" }
+    })
+    const group = await f.binding()
+    await f.service.receive(f.event(group, "opening"))
+    await eventually(() => f.calls.length === 1)
+    await eventually(() =>
+      f.client.submitReply.mock.calls.some(([reply]) => reply.message.content.includes("我先检查"))
+    )
+    expect(f.store.getTask(f.calls[0].id).state).toBe("running")
+    const history = f.service.history(f.bot.id, group.id)
+    expect(history.items.filter((entry) => entry.kind === "bot")).toHaveLength(1)
+    expect(f.host.snapshot().imConversations).toEqual([
+      expect.objectContaining({ bindingId: group.id, threadId: f.calls[0].threadId })
+    ])
+    const privateTask = f.host.send({
+      botId: f.bot.id,
+      requestId: "private-after-group",
+      message: "Private"
+    })
+    expect(f.store.getTask(privateTask.id).state).toBe("queued")
+    await eventually(() => f.calls.some((task) => task.id === privateTask.id))
+    expect(f.store.getTask(f.calls[0].id).state).toBe("running")
+    expect(f.store.getTask(privateTask.id).state).toBe("running")
+    f.host.stopImConversation(f.bot.id, botImScopeId("realm", "owner", group.id))
+    await eventually(() => f.store.getTask(f.calls[0].id).state === "cancelled")
+    await eventually(() => f.calls.some((task) => task.id === privateTask.id))
+    expect(f.store.getTask(privateTask.id).state).toBe("running")
+    f.host.cancel(privateTask.id)
+  })
+  it("stops queued group turns with a reply, excludes private and independent work, and validates ownership", async () => {
+    const f = fixture(undefined, undefined, () => false)
+    const a = await f.binding(),
+      b = await f.binding()
+    await f.service.receive(f.event(a, "queued-a"))
+    await f.service.receive(f.event(b, "queued-b"))
+    const localA = botImScopeId("realm", "owner", a.id)
+    const pending = f.store.recentTasks()
+    const creator = pending.find((task) => task.mockSource?.bindingId === localA)!
+    const otherGroup = pending.find((task) => task.id !== creator.id)!
+    f.store.transition(creator.id, "running")
+    const work = f.store.createWork(
+      { botId: f.bot.id, operationId: "independent", title: "Separate work", goal: "Keep working" },
+      { taskId: creator.id, callId: "create", key: "create" }
+    )
+    f.store.settle(creator.id, "completed", null, "Work admitted")
+    await f.service.receive(f.event(a, "queued-stop"))
+    const own = f.store
+      .recentTasks()
+      .find(
+        (task) => task.mockSource?.bindingId === localA && task.id !== creator.id && !task.workId
+      )!
+    const privateTask = f.host.send({
+      botId: f.bot.id,
+      requestId: "private-queued",
+      message: "private"
+    })
+    const otherBot = f.store.create({
+      name: "Other",
+      instructions: "",
+      color: "#123456",
+      modelRef: null
+    })
+    expect(() => f.host.stopImConversation(otherBot.id, localA)).toThrow("不存在")
+    f.host.stopImConversation(f.bot.id, localA)
+    expect(f.store.getTask(own.id).state).toBe("cancelled")
+    expect(f.store.getTask(otherGroup.id).state).toBe("queued")
+    expect(f.store.getTask(privateTask.id).state).toBe("queued")
+    expect(f.store.getTask(work.task.id).state).toBe("queued")
+    const replies = f.service
+      .history(f.bot.id, a.id)
+      .items.filter(
+        (entry) => entry.kind === "bot" && entry.replyToMessageId === own.mockSource!.messageId
+      )
+    expect(replies).toEqual([expect.objectContaining({ text: "已停止" })])
+    f.host.stopImConversation(f.bot.id, localA)
+    expect(
+      f.service
+        .history(f.bot.id, a.id)
+        .items.filter(
+          (entry) => entry.kind === "bot" && entry.replyToMessageId === own.mockSource!.messageId
+        )
+    ).toHaveLength(1)
+  })
+  it.each(["dm", "group"] as const)(
+    "delivers an opening and the final result once in %s",
+    async (kind) => {
+      const f = fixture(async (task, host) => {
+        host.imChannel.openingReply(task.id, "我先查看相关文件。")
+        host.imChannel.openingReply(task.id, "Repeated snapshot")
+        return { state: "completed", result: "已整理完成。" }
+      })
+      const binding = await f.binding(kind)
+      await f.service.receive(f.event(binding, "opening-final"))
+      await eventually(() => f.client.submitReply.mock.calls.length === 2)
+      expect(f.client.submitReply.mock.calls.map(([reply]) => reply.message.content)).toEqual([
+        "我先查看相关文件。",
+        "已整理完成。"
+      ])
+      expect(
+        f.client.submitReply.mock.calls.every(
+          ([reply]) => reply.conversationKey === binding.conversationKey
+        )
+      ).toBe(true)
+      const task = f.store.getTask(f.calls[0].id)
+      f.host.imChannel.openingReply(task.id, "Late replay")
+      f.host.imChannel.settle(task, "completed", "Final replay")
+      expect(
+        f.service.history(f.bot.id, binding.id).items.filter((entry) => entry.kind === "bot")
+      ).toHaveLength(2)
+    }
+  )
+  it.each(["dm", "group"] as const)("uses one durable acknowledgement for accepted dispatch in %s", async kind => {
+    const f = fixture(async (task, host) => {
+      host.imChannel.openingReply(task.id, "我来核对数据，整理好后发给你。")
+      host.imChannel.openingReply(task.id, "Repeated snapshot")
+      return { state: "completed", result: "我来核对数据，整理好后发给你。", dispatchAcknowledged: true }
+    })
+    const binding = await f.binding(kind)
+    await f.service.receive(f.event(binding, "dispatch-once"))
+    await eventually(() => f.calls.length === 1 && f.store.getTask(f.calls[0].id).state === "completed")
+    await eventually(() => f.client.submitReply.mock.calls.length === 1)
+    const task = f.store.getTask(f.calls[0].id)
+    f.host.imChannel.settle(task, "completed", "Repeated receipt", undefined, true)
+    expect(f.service.history(f.bot.id, binding.id).items.filter(x => x.kind === "bot")).toHaveLength(1)
+    expect(f.client.submitReply.mock.calls[0][0].message.content).toBe("我来核对数据，整理好后发给你。")
+  })
+  it("delivers the fallback when dispatch had no opening and preserves genuine failure", async () => {
+    const f = fixture(async (task, host) => {
+      if (task.message.includes("failed")) {
+        host.imChannel.openingReply(task.id, "我来处理。")
+        return { state: "failed", error: "目录不存在，任务未创建。", dispatchAcknowledged: true }
+      }
+      return { state: "completed", result: "我会继续处理，结果会发回这里。", dispatchAcknowledged: true }
+    })
+    const binding = await f.binding()
+    await f.service.receive(f.event(binding, "silent-dispatch"))
+    await eventually(() => f.client.submitReply.mock.calls.length === 1)
+    expect(f.client.submitReply.mock.calls[0][0].message.content).toBe("我会继续处理，结果会发回这里。")
+    await f.service.receive(f.event(binding, "failed", "failed"))
+    await eventually(() => f.client.submitReply.mock.calls.some(([r]) => r.message.content.includes("目录不存在")))
+  })
+  it("migrates existing reply receipts and preserves separate opening/final idempotency", async () => {
+    const f = fixture()
+    const binding = await f.binding()
+    await f.service.receive(f.event(binding, "old"))
+    await eventually(
+      () => f.calls.length === 1 && f.store.getTask(f.calls[0].id).state === "completed"
+    )
+    const before = f.service.history(f.bot.id, binding.id).items
+    // Recreate the released schema to exercise an actual upgrade with retained receipts.
+    f.db.run(`DROP INDEX bot_im_outbox_pending; DROP INDEX bot_im_outbox_page;
+      ALTER TABLE bot_im_outbox RENAME TO upgraded_outbox;
+      CREATE TABLE bot_im_outbox (
+        id TEXT PRIMARY KEY,bot_id TEXT NOT NULL,binding_id TEXT NOT NULL,grant_version INTEGER NOT NULL,
+        conversation_id TEXT NOT NULL,reply_to_message_id TEXT NOT NULL,source_task_id TEXT UNIQUE NOT NULL,
+        work_id TEXT,text TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL);
+      INSERT INTO bot_im_outbox SELECT id,bot_id,binding_id,grant_version,conversation_id,reply_to_message_id,source_task_id,work_id,text,state,created_at FROM upgraded_outbox;
+      DROP TABLE upgraded_outbox;`)
+    const reopened = new BotStore(f.db)
+    expect(reopened.im.history(f.bot.id, botImScopeId("realm", "owner", binding.id)).items).toEqual(
+      before
+    )
+    const task = reopened.getTask(f.calls[0].id)
+    reopened.im.settle(task, "completed", "should not replace final")
+    expect(reopened.im.history(f.bot.id, botImScopeId("realm", "owner", binding.id)).items).toEqual(
+      before
+    )
+  })
+
+  it("removes inactive configurations durably without deleting group history or task records", async () => {
+    const f = fixture(),
+      binding = await f.binding()
+    await f.service.receive(f.event(binding, "retained", "保留这段群聊记录"))
+    await eventually(
+      () => f.calls.length === 1 && f.store.getTask(f.calls[0].id).state === "completed"
+    )
+    const taskId = f.calls[0].id
+    expect(() => f.service.remove(f.bot.id, binding.id)).toThrow("只能删除")
+    const revoked = await f.service.revoke(f.bot.id, binding.id, binding.version)
+    f.service.remove(f.bot.id, binding.id)
+    f.service.remove(f.bot.id, binding.id) // Idempotent retries.
+    expect((await f.service.list(f.bot.id)).items).toEqual([])
+    expect(f.remote.get(binding.id)?.state).toBe("revoked")
+    expect(f.service.history(f.bot.id, binding.id).items.map((entry) => entry.text)).toContain(
+      "保留这段群聊记录"
+    )
+    expect(f.store.getTask(taskId).state).toBe("completed")
+    expect(f.host.snapshot().imConversations).toEqual([
+      expect.objectContaining({ bindingId: binding.id, state: "revoked" })
+    ])
+    const reopened = new BotImGatewayStore(f.db)
+    expect(reopened.visibleBindings("realm", "owner", [revoked])).toEqual([])
+    expect(reopened.visibleBindings("other-realm", "owner", [revoked])).toEqual([revoked])
+    expect(reopened.visibleBindings("realm", "other-owner", [revoked])).toEqual([revoked])
+  })
+  it("only removes terminal records owned by the selected Bot and preserves pagination", async () => {
+    const f = fixture()
+    const pending = await f.service.create(f.bot.id, "group", "pending")
+    expect(() => f.service.remove(f.bot.id, pending.id)).toThrow("只能删除")
+    const expired: BotImBinding = { ...pending, state: "expired" }
+    f.remote.set(expired.id, expired)
+    await f.service.list(f.bot.id)
+    const other = f.store.create({
+      name: "Other",
+      instructions: "",
+      color: "#123456",
+      modelRef: null
+    })
+    expect(() => f.service.remove(other.id, expired.id)).toThrow("不属于")
+    expect(() => f.service.remove(f.bot.id, "missing")).toThrow("不属于")
+    f.service.remove(f.bot.id, expired.id)
+    f.client.botBindingCommand.mockResolvedValueOnce({ items: [expired], before: "123" })
+    expect(await f.service.list(f.bot.id)).toEqual({ items: [], before: "123" })
+    // A late authoritative activation cannot become invisible after an expired snapshot was removed.
+    f.remote.set(expired.id, {
+      ...expired,
+      state: "active",
+      version: 1,
+      conversationKey: "late-active"
+    })
+    expect((await f.service.list(f.bot.id)).items).toEqual([
+      expect.objectContaining({ state: "active" })
+    ])
+  })
+
+  it("allows App attachments and same-group task history while rejecting another group's history", async () => {
+    const works = new Map<string, string>()
+    const query = vi.fn(async (work) => ({
+      work: { id: work.id, title: work.title, goal: work.goal },
+      entries: [],
+      nextCursor: null,
+      scanned: 0,
+      truncated: false,
+      coverage: "exhausted" as const
+    }))
+    const f = fixture(
+      async (task, host) => {
+        if (task.origin.kind === "mock" && task.message === "create") {
+          const created = await host.createWork(
+            {
+              botId: task.botId,
+              operationId: "create",
+              title: "Scoped work",
+              goal: "do this work"
+            },
+            { taskId: task.id, callId: "create", key: "create" }
+          )
+          works.set(task.mockSource!.bindingId, created.work.id)
+        }
+        if (task.message === "read") {
+          const own = works.get(task.mockSource!.bindingId)!
+          const foreign = [...works.values()].find((id) => id !== own)!
+          const history = await host.workHistory(task.id, { workId: own })
+          expect(history.work.execution.phase).toBe("idle")
+          expect(host.workStatusContext(task.id).items.map(item => item.workId)).toEqual([own])
+          expect(host.workTargets(task.id).items.map(item => item.id)).toEqual([own])
+          await expect(host.workHistory(task.id, { workId: foreign })).rejects.toThrow("私有历史")
+        }
+        return { state: "completed", result: "done" }
+      },
+      undefined,
+      undefined,
+      undefined,
+      { query, resolve: vi.fn() },
+      2,
+      () => ({ available: true, threadExists: true, runActive: false, userInput: { count: 0, questions: [] }, approval: false, commands: false, workflow: false, workers: false, pendingResults: false })
+    )
+    const a = await f.binding(),
+      b = await f.binding()
+    await f.service.receive(f.event(a, "a-create", "create"))
+    await eventually(() => works.size === 1)
+    await f.service.receive(f.event(b, "b-create", "create"))
+    await eventually(() => works.size === 2)
+    await eventually(() => [...works.values()].every(id => f.store.getWork(f.bot.id, id).executionState === "completed"))
+    await f.service.receive(f.event(a, "read", "read"))
+    await eventually(
+      () =>
+        query.mock.calls.length === 1 &&
+        f.calls.some((t) => t.message === "read" && f.store.getTask(t.id).state === "completed")
+    )
+    const workId = [...works.values()][0]
+    const attachment = '<user_attachment path="/tmp/report.md">report.md</user_attachment> 分析附件'
+    const local = f.store.enqueue({
+      botId: f.bot.id,
+      workId,
+      requestId: "app-attachment",
+      message: attachment
+    })
+    f.host.resume()
+    await eventually(() => f.store.getTask(local.id).state === "completed")
+    expect(local.mockSource!.bindingId).toBe([...works.keys()][0])
+    expect(f.calls.find((t) => t.id === local.id)?.message).toBe(attachment)
+    expect(f.errors).toEqual([])
+  })
+
+  it("returns asynchronous Bot collaboration to its original IM group without touching private threads", async () => {
+    let peerId = ""
+    const f = fixture(async (task, host) => {
+      if (task.origin.kind === "mock") {
+        host.delegate(task.id, peerId, "Review the assigned work", "peer", [])
+        return { state: "completed", result: "已交办" }
+      }
+      if (task.origin.kind === "bot" && task.origin.expectsReply)
+        return { state: "completed", result: "peer-result" }
+      return { state: "completed", result: "group-final" }
+    })
+    peerId = f.store.create({ name: "Peer", instructions: "", color: "#123456", modelRef: null }).id
+    const binding = await f.binding()
+    await f.service.receive(f.event(binding, "collaboration"))
+    await eventually(() => f.calls.some((t) => t.origin.kind === "bot" && !t.origin.expectsReply))
+    await eventually(() =>
+      f.client.submitReply.mock.calls.some(([reply]) =>
+        reply.message.content.includes("group-final")
+      )
+    )
+    const root = f.calls[0],
+      child = f.calls.find((t) => t.botId === peerId)!,
+      reply = f.calls.at(-1)!
+    expect(child.threadId).not.toBe(f.store.getBot(peerId).threadId)
+    expect(botMemoryContext(child)).toEqual({ groupId: root.mockSource!.bindingId })
+    expect(reply.threadId).toBe(root.threadId)
+    expect(reply.mockSource).toEqual(root.mockSource)
+    expect(f.store.im.execution(child, false)?.source.bindingId).toBe(root.mockSource!.bindingId)
+    expect(
+      f.client.submitReply.mock.calls.every(([r]) => r.conversationKey === binding.conversationKey)
+    ).toBe(true)
+    expect(f.errors).toEqual([])
+  })
+
+  it("keeps nested collaborator integration private until the original IM owner replies", async () => {
+    let b = "", c = ""
+    const f = fixture(async (task, host) => {
+      if (task.origin.kind === "mock") {
+        host.delegate(task.id, b, "Review privately", "to-b")
+        return { state: "completed", result: "A dispatch" }
+      }
+      if (task.botId === b && task.origin.kind === "bot" && task.origin.expectsReply) {
+        host.delegate(task.id, c, "Nested private check", "to-c")
+        return { state: "completed", result: "B private dispatch" }
+      }
+      if (task.botId === c) return { state: "completed", result: "C private result" }
+      if (task.botId === b) return { state: "completed", result: "B private integration" }
+      return { state: "completed", result: "A reviewed final" }
+    })
+    b = f.store.create({ name: "B", instructions: "", color: "#123456", modelRef: null }).id
+    c = f.store.create({ name: "C", instructions: "", color: "#123456", modelRef: null }).id
+    const binding = await f.binding()
+    await f.service.receive(f.event(binding, "nested-collaboration"))
+    await eventually(() => f.client.submitReply.mock.calls.some(([r]) => r.message.content === "A reviewed final"))
+    expect(f.calls).toHaveLength(5)
+    expect(f.calls.every((task) => f.store.getTask(task.id).state === "completed")).toBe(true)
+    expect(f.client.submitReply.mock.calls.map(([r]) => r.message.content)).toEqual(["A dispatch", "A reviewed final"])
+    expect(f.db.exec("SELECT text FROM bot_im_outbox")[0].values.flat()).toEqual(["A dispatch", "A reviewed final"])
+    expect(f.errors).toEqual([])
+  })
+
+  it.each(["completed", "failed"] as const)("returns a peer workflow %s summary privately before the IM owner integrates it", async (outcome) => {
+    let b = ""
+    const run = { threadId: "", workspacePath: "/synthetic", runId: "wf-peer", startedAt: "2026-10-31T01:00:00Z" }
+    const f = fixture(async (task, host) => {
+      if (task.origin.kind === "mock") {
+        host.delegate(task.id, b, "Run workflow privately", "to-b")
+        return { state: "completed", result: "A dispatch" }
+      }
+      if (task.botId === b && task.origin.kind === "bot" && task.origin.expectsReply) {
+        run.threadId = task.threadId
+        host.acceptWorkflow(task.id, run)
+        return { state: "completed", result: "B private launch" }
+      }
+      if (task.botId === b) return { state: outcome, result: "B private summary", error: outcome === "failed" ? "Summary failed" : undefined }
+      return { state: "completed", result: "A integrated final" }
+    })
+    b = f.store.create({ name: "B", instructions: "", color: "#123456", modelRef: null }).id
+    const binding = await f.binding()
+    await f.service.receive(f.event(binding, "workflow-collaboration"))
+    await eventually(() => f.calls.some(t => t.botId === b && f.store.getTask(t.id).state === "completed"))
+    expect(f.calls).toHaveLength(2)
+    f.host.enqueueNotification(b, run.threadId, "workflow", run.runId, "Summary", undefined, run.startedAt)
+    await eventually(() => f.client.submitReply.mock.calls.some(([r]) => r.message.content === "A integrated final"))
+    expect(f.calls).toHaveLength(4)
+    expect(f.db.exec("SELECT text FROM bot_im_outbox")[0].values.flat()).toEqual(["A dispatch", "A integrated final"])
+    expect(f.errors).toEqual([])
+  })
+
+  it.each(["restart", "cancel"])("keeps an A-to-B-to-A internal workflow %s outcome private", async (ending) => {
+    let b = "", available = true
+    const run = { threadId: "", workspacePath: "/synthetic", runId: "wf-loop", startedAt: "2026-10-31T01:00:00Z" }
+    const f = fixture(async (task, host) => {
+      if (task.origin.kind === "mock") {
+        host.delegate(task.id, b, "Delegate verification", "to-b")
+        return { state: "completed", result: "A dispatch" }
+      }
+      if (task.botId === b) {
+        host.delegate(task.id, f.bot.id, "Run nested workflow", "back-to-a")
+        return { state: "completed", result: "B private dispatch" }
+      }
+      run.threadId = task.threadId
+      host.acceptWorkflow(task.id, run)
+      available = false
+      return { state: "completed", result: "A internal launch" }
+      }, undefined, () => available)
+    b = f.store.create({ name: "B", instructions: "", color: "#123456", modelRef: null }).id
+    const binding = await f.binding()
+    await f.service.receive(f.event(binding, "loop-workflow"))
+    await eventually(() => f.calls.length === 3 && f.calls.every(t => f.store.getTask(t.id).state === "completed"))
+    const notice = f.host.enqueueNotification(f.bot.id, run.threadId, "workflow", run.runId, "Summary", undefined, run.startedAt)!
+    f.store.transition(notice.id, "running")
+    if (ending === "restart") f.store.recover()
+    else f.store.settle(notice.id, "cancelled", "Stopped internal check", "Private partial findings")
+    expect(f.db.exec("SELECT text FROM bot_im_outbox")[0].values.flat()).toEqual(["A dispatch"])
+    f.store.flushReplies()
+    const returned = f.store.recentTasks().find(t => t.requestId === `reply-${notice.id}`)!
+    expect(returned.botId).toBe(b)
+    expect(returned.mockSource).toEqual(notice.mockSource)
+    expect(f.errors).toEqual([])
+  })
+
+  it.each(["completed", "failed"] as const)("blocks a revoked IM peer's %s receipt without faulting other Bots or restart", async (outcome) => {
+    let peerId = "", finishPeer: (() => void) | undefined
+    const f = fixture(async (task, host, signal) => {
+      if (task.origin.kind === "mock") {
+        host.delegate(task.id, peerId, "Long review", "delegate")
+        return { state: "completed", result: "delegated" }
+      }
+      if (task.origin.kind !== "bot") return { state: "completed", result: "ordinary reply" }
+      await new Promise<void>((resolve) => {
+        finishPeer = resolve
+        signal.addEventListener("abort", () => resolve(), { once: true })
+      })
+      return outcome === "completed"
+        ? { state: "completed", result: "private peer result" }
+        : { state: "failed", error: "grant expired" }
+    })
+    peerId = f.host.create({ name: "Peer", instructions: "", color: "#123456", modelRef: null }).id
+    const binding = await f.binding()
+    await f.service.receive(f.event(binding, "revoked-peer"))
+    await eventually(() => Boolean(finishPeer))
+    // Isolate a late terminal callback whose external authority has already changed.
+    // The service's active abort path is tested separately above.
+    const source = f.calls.find((task) => task.origin.kind === "bot")!.mockSource!
+    f.store.im.revoke(f.bot.id, source.bindingId, source.grantVersion)
+    finishPeer!()
+    const peer = f.calls.find((task) => task.origin.kind === "bot")!
+    await eventually(() => f.store.getTask(peer.id).state === outcome)
+    f.store.flushReplies()
+    expect(f.db.exec("SELECT blocked FROM bot_reply_outbox")[0].values).toEqual([[1]])
+    const ordinary = f.host.send({ botId: peerId, requestId: "unrelated", message: "Hello" })
+    await eventually(() => f.store.getTask(ordinary.id).state === "completed")
+    expect(f.errors).toEqual([])
+    expect(f.client.submitReply.mock.calls.some(([reply]) => reply.message.content.includes("private peer result"))).toBe(false)
+    await f.host.stop()
+    const restartedStore = new BotStore(f.db)
+    const restarted = new LocalBotHost(restartedStore, { onAvailable: () => () => {}, acquire: () => null })
+    try {
+      restartedStore.flushReplies()
+      expect(() => restarted.send({ botId: peerId, requestId: "restart", message: "Hello again" })).not.toThrow()
+    } finally { await restarted.stop() }
+  })
+
+  it("keeps completed group turns stoppable while their own background commands remain active", async () => {
+    const f = fixture(async (task, host) => {
+      host.commandLifecycle(task.id).accepted({
+        id: `command-${task.id}`,
+        threadId: task.threadId,
+        command: "sleep 30",
+        cwd: "/tmp",
+        startedAt: Date.now()
+      })
+      return { state: "completed", result: "已在后台执行" }
+    })
+    const a = await f.binding()
+    const b = await f.binding()
+    await f.service.receive(f.event(a, "background-a"))
+    await f.service.receive(f.event(b, "background-b"))
+    await eventually(
+      () => f.calls.length === 2 && f.store.recentTasks().every((t) => t.state === "completed")
+    )
+    const snapshot = f.host.snapshot()
+    const own = snapshot.imConversations!.find((item) => item.bindingId === a.id)!
+    const other = snapshot.imConversations!.find((item) => item.bindingId === b.id)!
+    expect(snapshot.backgroundThreads).toEqual(
+      expect.arrayContaining([own.threadId, other.threadId])
+    )
+    f.host.stopImConversation(f.bot.id, own.id)
+    expect(f.cancelBackground.mock.calls).toEqual([[own.threadId]])
+    const row = f.db.prepare("SELECT thread_id,suppressed FROM bot_commands ORDER BY thread_id")
+    try {
+      const suppressed: Record<string, unknown> = {}
+      while (row.step()) {
+        const value = row.getAsObject()
+        suppressed[String(value.thread_id)] = value.suppressed
+      }
+      expect(suppressed).toEqual({ [own.threadId!]: 1, [other.threadId!]: 0 })
+    } finally {
+      row.free()
+    }
+  })
+
+  it.each([false, true])(
+    "stops completed IM peer services without touching other scopes (reply active: %s)",
+    async (replyActive) => {
+      let peerId = ""
+      const f = fixture(async (task, host, signal) => {
+        if (task.origin.kind === "mock") {
+          if (task.message === "group-a")
+            f.store.createWork(
+              {
+                botId: task.botId, operationId: "retained-work",
+                title: "Independent", goal: "Keep service"
+              },
+              { taskId: task.id, callId: "create", key: "create" }
+            )
+          host.delegate(task.id, peerId, "start service", "peer-service", [])
+          return { state: "completed", result: "delegated" }
+        }
+        if (task.origin.kind === "bot" && !task.origin.expectsReply) {
+          if (replyActive)
+            await new Promise<void>((resolve) =>
+              signal.addEventListener("abort", () => resolve(), { once: true })
+            )
+          return { state: "completed", result: "ready" }
+        }
+        host.commandLifecycle(task.id).accepted({
+          id: `service-${task.id}`,
+          threadId: task.threadId,
+          command: "node server.js",
+          cwd: "/tmp",
+          startedAt: Date.now(),
+          notifyOnComplete: false
+        })
+        return { state: "completed", result: "service ready" }
+      }, undefined, () => true, undefined, undefined, 8)
+      peerId = f.store.create({
+        name: "Peer", instructions: "", color: "#123456", modelRef: null
+      }).id
+      const a = await f.binding(), b = await f.binding()
+      await f.service.receive(f.event(a, "stop-service-a", "group-a"))
+      await f.service.receive(f.event(b, "keep-service-b", "group-b"))
+      const local = f.host.send({
+        botId: f.bot.id, requestId: "keep-private", message: "private service"
+      })
+      await eventually(() =>
+        f.calls.filter((t) => t.origin.kind === "bot" && !t.origin.expectsReply).length === 2 &&
+        f.calls.filter((t) => t.workId).length === 1 &&
+        f.calls.every((t) => f.store.getTask(t.id).state === "completed" ||
+          (replyActive && t.origin.kind === "bot" && !t.origin.expectsReply))
+      )
+      const ownId = botImScopeId("realm", "owner", a.id)
+      const child = f.calls.find(
+        (t) => t.botId === peerId && t.mockSource?.bindingId === ownId
+      )!
+      const root = f.calls.find((t) => t.message === "group-a")!
+      const snapshot = f.host.snapshot()
+      const conversation = snapshot.imConversations!.find((item) => item.id === ownId)!
+      expect(snapshot.collaborationThreads).toContain(conversation.threadId)
+      expect(f.store.getTask(child.id).state).toBe("completed")
+      const retained = f.calls.filter((t) => t.id !== child.id &&
+        (t.botId === peerId || t.id === local.id || !!t.workId))
+      expect(retained).toHaveLength(3)
+
+      f.host.stopImConversation(f.bot.id, ownId)
+      await eventually(() => f.cancelBackgroundCommands.mock.calls.length > 0)
+      expect(f.cancelBackgroundCommands.mock.calls.flatMap(([ids]) => ids)).toEqual([
+        `service-${child.id}`
+      ])
+      expect(f.store.getTask(root.id).state).toBe("cancelled")
+      for (const task of retained) {
+        expect(f.store.getTask(task.id).state).toBe("completed")
+        expect(f.cancelBackground.mock.calls.flat()).not.toContain(task.threadId)
+      }
+      // Physical cleanup still owns completion; its late result must not wake the stopped family.
+      const count = f.calls.length
+      f.host.commandLifecycle(child.id).settled({
+        id: `service-${child.id}`, threadId: child.threadId, exitCode: 0,
+        output: "closed", cancelled: true, truncated: false
+      })
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      expect(f.calls).toHaveLength(count)
+      expect(f.store.activeCommandThreads()).not.toContain(child.threadId)
+      expect(f.host.snapshot().collaborationThreads).not.toContain(conversation.threadId)
+      expect(f.errors).toEqual([])
+    }
+  )
+
+  it("keeps workflow and detached command callbacks in the IM group after ingress completion", async () => {
+    const f = fixture(async (task, host) => {
+      if (task.origin.kind === "mock")
+        host.commandLifecycle(task.id).accepted({
+          id: "im-command",
+          threadId: task.threadId,
+          command: "git status",
+          cwd: "/tmp",
+          startedAt: Date.now()
+        })
+      return {
+        state: "completed",
+        result: task.origin.kind === "mock" ? "started" : "callback-result"
+      }
+    })
+    const binding = await f.binding()
+    await f.service.receive(f.event(binding, "background"))
+    await eventually(
+      () => f.calls.length === 1 && f.store.getTask(f.calls[0].id).state === "completed"
+    )
+    const root = f.calls[0]
+    f.host.commandLifecycle(root.id).settled({
+      id: "im-command",
+      threadId: root.threadId,
+      exitCode: 0,
+      output: "clean",
+      cancelled: false,
+      truncated: false
+    })
+    await eventually(() => f.calls.length >= 2)
+    f.host.enqueueNotification(
+      root.botId,
+      root.threadId,
+      "workflow",
+      "wf-im",
+      "workflow done",
+      undefined,
+      new Date().toISOString()
+    )
+    await eventually(() => f.calls.length === 3)
+    await eventually(() => f.store.getTask(f.calls[2].id).state === "completed")
+    expect(
+      f.calls.every(
+        (t) =>
+          t.threadId === root.threadId && t.mockSource?.bindingId === root.mockSource!.bindingId
+      )
+    ).toBe(true)
+    expect(f.errors).toEqual([])
+  })
+
+  it("keeps the group main chat responsive during a recurring worker, returns only to its group and stops on revocation", async () => {
+    const gate = Promise.withResolvers<void>()
+    const f = fixture(async (task, host, signal) => {
+      if (task.origin.kind === "schedule") {
+        await gate.promise
+        return { state: "completed", result: "检查完成：7 条" }
+      }
+      if (task.message === "你好") return { state: "completed", result: "群主对话在线" }
+      const [tool] = createBotScheduleTools(f.bot, task, () => host, signal)
+      const saved = await tool.invoke({ type: "tool_call", name: tool.name, id: "routine", args: {
+        action: "save", name: "群内检查", message: "检查本群数据", frequency: "interval", intervalMinutes: 5
+      } })
+      expect(saved.status, String(saved.content)).toBe("success")
+      return { state: "completed", result: "日程已保存" }
+    }, undefined, undefined, undefined, undefined, 2, undefined, { persist() {}, async announce() {} })
+    const binding = await f.binding()
+    await f.binding()
+    await f.service.receive(f.event(binding, "routine"))
+    await eventually(() => f.store.schedules().length === 1 && f.store.getTask(f.calls[0].id).state === "completed")
+    const [schedule] = f.store.schedules()
+    expect(schedule.audienceKey).toBe(f.calls[0].mockSource!.audienceKey)
+    const work = f.store.getWork(f.bot.id, schedule.workId!)
+    expect(work.parentThreadId).toBe(f.calls[0].threadId)
+    expect(work.threadId).not.toBe(work.parentThreadId)
+    expect(f.calls).toHaveLength(1)
+    f.store.fireSchedule(schedule, new Date(Date.now() + 300000).toISOString())
+    f.host.resume()
+    try {
+      await eventually(() => f.calls.some(t => t.origin.kind === "schedule"))
+      await f.service.receive(f.event(binding, "ping", "你好"))
+      await eventually(() => f.client.submitReply.mock.calls.some(([r]) => r.message.content === "群主对话在线"))
+      expect(f.store.getTask(f.calls[1].id)).toMatchObject({ state: "running", workId: work.id, threadId: work.threadId })
+      f.store.fireSchedule(f.store.schedules()[0], new Date(Date.now() + 600_000).toISOString())
+      expect(f.store.recentTasks().filter(t => t.origin.kind === "schedule")).toHaveLength(1)
+    } finally { gate.resolve() }
+    await eventually(() => f.client.submitReply.mock.calls.some(([r]) => r.message.content === "检查完成：7 条"))
+    expect(f.client.submitReply.mock.calls.filter(([r]) => r.message.content === "检查完成：7 条")).toHaveLength(1)
+    expect(f.client.submitReply.mock.calls.every(([r]) => r.conversationKey === binding.conversationKey)).toBe(true)
+    const local = f.calls[0].mockSource!
+    f.store.im.revoke(f.bot.id, local.bindingId, local.grantVersion)
+    f.store.fireSchedule(f.store.schedules()[0], new Date().toISOString())
+    expect(f.store.schedules()[0].enabled).toBe(false)
+    expect(f.calls.filter(t => t.origin.kind === "schedule")).toHaveLength(1)
+    expect(f.errors).toEqual([])
+  })
+
+  it.each(["dm", "group"] as const)("keeps a named skill and its schedule in the originating IM %s", async kind => {
+    const skill = { name: "daily", path: "/fixture/daily/SKILL.md" }
+    const catalog = vi.spyOn(await import("../agent/standard-thread-turn"), "resolveNamedBotSkill")
+      .mockImplementation(async input => {
+        expect(input).toMatchObject({ name: "daily", request: expect.stringContaining("使用 daily") })
+        return skill
+      })
+    try {
+      const f = fixture(async (task, host, signal) => {
+        if (task.origin.kind === "schedule") {
+          expect(task.origin.explicitSkill).toEqual(skill)
+          return { state: "completed", result: "例行已核对" }
+        }
+        if (task.origin.kind === "work") {
+          expect(host.workInputContext(task.id)?.explicitSkill).toEqual(skill)
+          return { state: "completed", result: "已核对" }
+        }
+        if (task.origin.kind !== "mock") return { state: "completed", result: "核对结果" }
+        const tool = createBotWorkTools(task, () => host, signal).find(t => t.name === "bot_skill_dispatch")!
+        const runLater = task.message.includes("稍后")
+        const response = await tool.invoke({ type: "tool_call", name: tool.name, id: task.requestId, args: {
+          skillName: "daily", title: "核对", ...(runLater ? { schedule: { frequency: "once", afterSeconds: 300, message: "使用 daily 核对" } } : {})
+        } }) as { content: string; status: string }
+        expect(response.status, response.content).not.toBe("error")
+        return { state: "completed", result: "已受理" }
+      }, undefined, undefined, undefined, undefined, 2, undefined, { persist() {}, async announce() {} })
+      const binding = await f.binding(kind)
+      await f.binding("group")
+      await f.service.receive(f.event(binding, "named-now", "使用 daily 核对"))
+      await eventually(() => f.calls.some(t => t.origin.kind === "work" && f.store.getTask(t.id).state === "completed"))
+      await f.service.receive(f.event(binding, "named-later", "稍后使用 daily 再核对"))
+      await eventually(() => f.store.schedules().length === 1)
+      const [saved] = f.store.schedules()
+      expect(saved.explicitSkill).toEqual(skill)
+      expect(saved.audienceKey).toBe(f.calls[0].mockSource!.audienceKey)
+      expect(f.calls.some(t => t.origin.kind === "schedule")).toBe(false)
+      f.store.fireSchedule(saved, null)
+      f.host.resume()
+      await eventually(() => f.calls.some(t => t.origin.kind === "schedule" && f.store.getTask(t.id).state === "completed"))
+      expect(f.calls.filter(t => t.workId).every(t =>
+        f.store.getWork(f.bot.id, t.workId!).parentThreadId === f.calls[0].threadId)).toBe(true)
+      expect(f.client.submitReply.mock.calls.every(([r]) => r.conversationKey === binding.conversationKey)).toBe(true)
+      expect(f.errors).toEqual([])
+    } finally { catalog.mockRestore() }
+  })
+
+  it("delivers recurring fixed reminder text to its original IM group without acquiring a worker", async () => {
+    const publication = { persist: vi.fn(), announce: vi.fn(async () => {}) }
+    const f = fixture(async (task, host, signal) => {
+      const [tool] = createBotScheduleTools(f.bot, task, () => host, signal)
+      const result = await tool.invoke({ type: "tool_call", name: tool.name, id: "remind", args: {
+        action: "save", kind: "fixed_reminder", name: "打卡", message: "记得打卡", frequency: "daily", runAtTime: "09:00"
+      } })
+      expect(result.status, String(result.content)).toBe("success")
+      return { state: "completed", result: "提醒已保存" }
+    }, undefined, undefined, undefined, undefined, 2, undefined, publication)
+    const group = await f.binding()
+    await f.service.receive(f.event(group, "remind-me", "每天九点提醒我打卡"))
+    await eventually(() => f.store.schedules().length === 1 && f.store.getTask(f.calls[0].id).state === "completed")
+    for (let i = 1; i <= 2; i++) {
+      const [current] = f.store.schedules()
+      expect(current.workId).toBeUndefined()
+      f.store.fireSchedule(current, new Date(Date.parse(current.nextRunAt!) + 86_400_000).toISOString())
+      f.host.resume()
+      await eventually(() => f.client.submitReply.mock.calls.filter(([r]) => r.message.content === "记得打卡").length === i)
+    }
+    expect(publication.persist).toHaveBeenCalledTimes(2)
+    expect(f.calls).toHaveLength(1)
+    expect(f.client.submitReply.mock.calls.every(([r]) => r.conversationKey === group.conversationKey)).toBe(true)
+    expect(f.errors).toEqual([])
+  })
+
+  it("pauses only the due legacy routine for a stopped personal IM work", async () => {
+    const nextRunAt = new Date().toISOString()
+    const input = {
+      name: "Follow up", message: "Check progress", frequency: "interval" as const,
+      intervalMinutes: 5, enabled: true
+    }
+    const f = fixture(async (task, host) => {
+      if (task.origin.kind === "mock") {
+        f.store.saveSchedule(task.botId, input, nextRunAt, undefined, task.id)
+        await host.createWork(
+          { botId: task.botId, operationId: "work", title: "Personal work", goal: "Check progress" },
+          { taskId: task.id, callId: "create", key: "create" }
+        )
+      } else if (task.origin.kind === "work") {
+        f.store.saveSchedule(task.botId, input, nextRunAt, undefined, task.id)
+      }
+      return { state: "completed" }
+    })
+    const binding = await f.binding("dm")
+    await f.service.receive(f.event(binding, "legacy-routine"))
+    await eventually(() => f.calls.some(task => task.workId && f.store.getTask(task.id).state === "completed"))
+    const [main, work] = f.store.schedules()
+    expect(work.workId).toBeDefined()
+    expect(work.desktopWork).toBeUndefined()
+    f.host.stopWork(f.bot.id, work.workId!)
+    f.store.fireSchedule(work, new Date(Date.now() + 300_000).toISOString())
+    f.store.fireSchedule(work, new Date(Date.now() + 300_000).toISOString())
+    expect(f.store.schedules()).toEqual([
+      main, { ...work, enabled: false, nextRunAt: null, version: work.version + 1 }
+    ])
+    expect(f.store.recentTasks().some(task => task.origin.kind === "schedule")).toBe(false)
+    expect(f.errors).toEqual([])
+  })
+
+  it("creates a group Git task in the selected directory and retains it for follow-up", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "bot-im-git-"))
+    cleanups.push(() => rm(directory, { recursive: true, force: true }))
+    const git = (...args: string[]) =>
+      execFileSync("git", args, { cwd: directory, encoding: "utf8" }).trim()
+    git("init", "--quiet")
+    await writeFile(join(directory, "README.md"), "local IM test")
+    git("add", "README.md")
+    git(
+      "-c",
+      "user.name=Bot Test",
+      "-c",
+      "user.email=bot-test@example.invalid",
+      "commit",
+      "--quiet",
+      "-m",
+      "IM workspace test"
+    )
+    const head = git("rev-parse", "HEAD")
+    let workId = ""
+    const results: string[] = []
+    const resolve = vi.fn(async () => ({ kind: "directory" as const, path: directory }))
+    const f = fixture(
+      async (task, host) => {
+        if (task.workId) {
+          const work = host.getWork(task.botId, task.workId)
+          results.push(
+            execFileSync("git", ["log", "-1", "--format=%H"], {
+              cwd: work.workspace!.path,
+              encoding: "utf8"
+            }).trim()
+          )
+          return { state: "completed", result: results.at(-1) }
+        }
+        const source = { taskId: task.id, callId: task.id, key: task.id }
+        if (!workId) {
+          const created = await host.createWork(
+            {
+              botId: task.botId,
+              operationId: task.id,
+              title: "Git review",
+              goal: "Read latest commit",
+              workspace: { kind: "directory", path: directory }
+            },
+            source
+          )
+          workId = created.work.id
+        } else host.sendWork(source, workId, "Read latest commit again")
+        return { state: "completed", result: "dispatched" }
+      },
+      undefined,
+      () => true,
+      { resolve, projects: async () => ({ items: [], nextCursor: null }) }
+    )
+    const binding = await f.binding("group")
+    await f.service.receive(f.event(binding, "git-request", "创建任务查看指定目录的最新提交"))
+    await eventually(() => results.length === 1).catch((error) => {
+      throw new Error(
+        JSON.stringify(
+          f.store.recentTasks().map((t) => ({ state: t.state, error: t.error, workId: t.workId }))
+        ) + String(error)
+      )
+    })
+    await f.service.receive(f.event(binding, "git-follow-up", "继续检查这个任务"))
+    await eventually(() => results.length === 2)
+    expect(results).toEqual([head, head])
+    expect(resolve).toHaveBeenCalledTimes(1)
+    expect(f.host.getWork(f.bot.id, workId).workspace?.path).toBe(directory)
+    expect(f.host.listWorks(f.bot.id).items).toEqual([])
+    const group = f.host.snapshot().imConversations![0]
+    expect(f.host.imConversationWorks(f.bot.id, group.id).items.map((w) => w.id)).toEqual([workId])
+    expect(f.host.browserScope(`im-${group.id}--${f.bot.id}`)).toBe(`im-${group.id}--${f.bot.id}`)
+    expect(f.host.browserScope(`work-${workId}--${f.bot.id}`)).toBe(`work-${workId}--${f.bot.id}`)
+    expect(() => f.host.browserScope(`im-unknown--${f.bot.id}`)).toThrow()
+    expect(f.errors).toEqual([])
+  })
+  it.each(
+    ["dm", "group"].flatMap((kind) =>
+      [
+        "/回答 A1B2C3 1",
+        "/文字模式",
+        "/文字模式 开",
+        "/文字模式 关",
+        "/门禁批准 A1B2C3",
+        "/在当前会话继续托管 A1B2C3 继续校验",
+        "/开启新会话继续托管 A1B2C3",
+        "/停止托管运行 A1B2C3"
+      ].map((command) => [kind, command])
+    )
+  )(
+    "routes a %s control %s around a waiting Bot run and deduplicates redelivery",
+    async (kind, command) => {
+      interactionCommand.mockClear()
+      const f = fixture(async (_task, _host, signal) => {
+        await new Promise<void>((resolve) =>
+          signal.addEventListener("abort", () => resolve(), { once: true })
+        )
+        return { state: "failed" }
+      })
+      const binding = await f.binding(kind as "dm" | "group")
+      await f.service.receive(f.event(binding, "question", "帮我安排会议"))
+      await eventually(() => f.calls.length === 1)
+      const answer = f.event(binding, "answer", command)
+      await f.service.receive(answer)
+      await f.service.receive(answer)
+      expect(interactionCommand).toHaveBeenCalledTimes(1)
+      expect(interactionCommand).toHaveBeenCalledWith(
+        answer,
+        "owner",
+        botImScopeId("realm", "owner", "answer")
+      )
+      expect(f.calls).toHaveLength(1)
+      expect(f.client.sendAcknowledgement).toHaveBeenCalledWith(
+        expect.objectContaining({ eventId: "answer", type: "completed" })
+      )
+      expect(f.errors).toEqual([])
+    }
+  )
+  it.each(["dm", "group"] as const)(
+    "sends Markdown for %s without changing segment identity on explicit downgrade",
+    async (kind) => {
+      const f = fixture(),
+        binding = await f.binding(kind)
+      f.client.supportsMarkdownReplies.mockReturnValue(true)
+      const rejection = Object.assign(new Error("old node"), { reasonCode: "INVALID_PAYLOAD" })
+      f.client.submitReply.mockRejectedValueOnce(rejection)
+      await f.service.receive(f.event(binding, "markdown", "**加粗** 与表格"))
+      await eventually(() => f.client.submitReply.mock.calls.length === 2)
+      const [markdown, fallback] = f.client.submitReply.mock.calls.map(([reply]) => reply)
+      expect(markdown.message.type).toBe("markdown")
+      expect(fallback).toEqual({ ...markdown, message: { ...markdown.message, type: "text" } })
+      expect(fallback.conversationKey).toBe(binding.conversationKey)
+      expect(f.calls).toHaveLength(1)
+    }
+  )
+  it("refreshes group names after messages and notifies the UI without moving history or works", async () => {
+    vi.useFakeTimers()
+    const f = fixture(async (task, host) => {
+      if (!task.workId && task.message === "创建群任务")
+        await host.createWork(
+          { botId: task.botId, operationId: task.id, title: "群内任务", goal: "写通知" },
+          { taskId: task.id, callId: task.id, key: task.id }
+        )
+      return { state: "completed", result: "已回复" }
+    })
+    const group = await f.binding(), other = await f.binding(), dm = await f.binding("dm")
+    f.remote.set(group.id, { ...group, peerLabel: "原群名" })
+    f.remote.set(other.id, { ...other, peerLabel: "另一个群" })
+    await f.service.list(f.bot.id)
+    await f.service.receive(f.event(group, "create-before-rename", "创建群任务"))
+    await vi.advanceTimersByTimeAsync(1000)
+    const before = f.host.snapshot().imConversations!.find((g) => g.bindingId === group.id)!
+    const works = f.host.imConversationWorks(f.bot.id, before.id).items
+    expect(works).toHaveLength(1)
+    const notifications = vi.fn(() => f.host.snapshot())
+    const unsubscribe = f.host.subscribe(notifications)
+    f.remote.set(group.id, { ...group, peerLabel: "项目协作群 · 二期" })
+    await f.service.receive(f.event(group, "after-rename", "继续交流"))
+    await vi.advanceTimersByTimeAsync(5000)
+    const after = f.host.snapshot().imConversations!.find((g) => g.bindingId === group.id)!
+    expect(after).toMatchObject({ id: before.id, threadId: before.threadId, title: "项目协作群 · 二期" })
+    expect(f.host.imConversationWorks(f.bot.id, after.id).items.map((w) => w.id)).toEqual(works.map((w) => w.id))
+    expect(f.host.imConversationHistory(f.bot.id, after.id).items.map((m) => m.text)).toContain("创建群任务")
+    expect(f.host.snapshot().imConversations!.find((g) => g.bindingId === other.id)?.title).toBe("另一个群")
+    expect(f.host.getBot(f.bot.id).name).toBe("IM Bot")
+    expect(f.host.imGateway.binding(botImScopeId("realm", "owner", dm.id))!.binding).toEqual(dm)
+    expect(notifications.mock.results.some((r) => r.value.imConversations.some((g: { title: string }) => g.title === after.title))).toBe(true)
+    notifications.mockClear()
+    await f.service.list(f.bot.id)
+    expect(notifications).not.toHaveBeenCalled()
+    unsubscribe()
+    expect(f.errors).toEqual([])
+  })
+
+  it("coalesces group name refreshes, reads every binding page and ignores message replays", async () => {
+    vi.useFakeTimers()
+    const f = fixture(), a = await f.binding(), b = await f.binding()
+    await vi.advanceTimersByTimeAsync(1000)
+    f.client.botBindingCommand.mockClear()
+    f.client.botBindingCommand.mockImplementation(async (command) => {
+      if (command.action !== "list") throw new Error("unexpected command")
+      return command.before
+        ? { items: [{ ...b, peerLabel: "第二页的新群名" }], before: null }
+        : { items: [{ ...a, peerLabel: "第一页的新群名" }], before: "1" }
+    })
+    const event = f.event(b, "rename-burst", "群消息")
+    await f.service.receive(event)
+    for (let i = 0; i < 8; i++) await f.service.receive(f.event(a, `burst-${i}`, "群消息"))
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(f.client.botBindingCommand.mock.calls.map(([command]) => command)).toEqual([
+      { action: "list", botId: f.bot.id }, { action: "list", botId: f.bot.id, before: "1" }
+    ])
+    expect(f.host.snapshot().imConversations!.find((g) => g.bindingId === b.id)?.title).toBe("第二页的新群名")
+    const runs = f.calls.length
+    await f.service.receive({ ...event, event: { ...event.event, redelivered: true } })
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(f.client.botBindingCommand).toHaveBeenCalledTimes(2)
+    expect(f.calls).toHaveLength(runs)
+    expect(f.errors).toEqual([])
+  })
+
+  it("keeps group execution available when a name refresh fails and recovers on the next sync", async () => {
+    vi.useFakeTimers()
+    const f = fixture(), group = await f.binding()
+    await vi.advanceTimersByTimeAsync(1000)
+    f.remote.set(group.id, { ...group, peerLabel: "恢复后的群名" })
+    f.client.botBindingCommand.mockRejectedValueOnce(new Error("temporary list failure"))
+    await f.service.receive(f.event(group, "refresh-fails", "正常交办"))
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(f.calls).toHaveLength(1)
+    expect(f.store.getTask(f.calls[0].id).state).toBe("completed")
+    expect(f.errors).toHaveLength(1)
+    expect(String(f.errors[0])).toContain("temporary list failure")
+    await vi.advanceTimersByTimeAsync(25000)
+    expect(f.host.snapshot().imConversations![0].title).toBe("恢复后的群名")
+  })
+
+  it("aggregates private, group, work and IM activity into the local unread indicator", async () => {
+    const f = fixture(undefined, undefined, () => false)
+    const expectUnread = (unread: boolean) => {
+      const revision = f.store.revision()
+      expect(f.host.hasUnread()).toBe(unread)
+      expect(f.store.revision()).toBe(revision)
+    }
+    expectUnread(false)
+
+    f.host.markUnread("bot", f.bot.id)
+    expectUnread(true)
+    f.host.markRead("bot", f.bot.id, f.store.activities().find(item => item.id === f.bot.id)!.version)
+    expectUnread(false)
+
+    const group = f.store.saveGroup({ name: "Local group", memberIds: [f.bot.id] })
+    f.host.markUnread("group", group.id)
+    expectUnread(true)
+    f.host.markRead("group", group.id, f.store.activities().find(item => item.id === group.id)!.version)
+    expectUnread(false)
+
+    const { task, work } = f.store.createWork({
+      botId: f.bot.id, operationId: "work-unread", title: "Desktop work", goal: "Prepare a draft"
+    })
+    f.store.transition(task.id, "running")
+    f.store.settle(task.id, "completed", null, "Draft ready")
+    expectUnread(true)
+    f.host.markRead("work", work.id, f.store.getWork(f.bot.id, work.id).activity!.version)
+    expectUnread(false)
+
+    const binding = await f.binding()
+    await f.service.receive(f.event(binding, "im-unread", "Check the draft"))
+    const conversation = f.store.imGateway.groupConversations()[0]
+    expect(conversation.activity.unread).toBe(true)
+    expectUnread(true)
+    f.host.markRead("im", conversation.id, conversation.activity.version)
+    expectUnread(false)
+  })
+
+  it("exposes retained groups separately from private previews and keeps read boundaries scoped", async () => {
+    const f = fixture(),
+      a = await f.binding(),
+      b = await f.binding()
+    f.remote.set(a.id, { ...a, peerLabel: "项目协作群" })
+    await f.service.list(f.bot.id)
+    await f.service.receive(f.event(a, "group-a", "A 群的消息"))
+    await f.service.receive(f.event(b, "group-b", "B 群的消息"))
+    await eventually(
+      () =>
+        f.calls.length === 2 &&
+        f.calls.every((task) => f.store.getTask(task.id).state === "completed")
+    )
+    const groups = f.host.snapshot().imConversations!
+    expect(groups).toHaveLength(2)
+    const first = groups.find((item) => item.bindingId === a.id)!
+    const second = groups.find((item) => item.bindingId === b.id)!
+    expect(first.title).toBe("项目协作群")
+    expect(first.activity.preview).toBe("reply:A 群的消息")
+    expect(first.activity.unread).toBe(true)
+    expect(
+      f.store.activities().find((item) => item.kind === "bot" && item.id === f.bot.id)?.preview ??
+        ""
+    ).not.toContain("群的消息")
+    f.host.markRead("im", first.id, first.activity.version)
+    expect(
+      f.host.snapshot().imConversations!.find((item) => item.id === first.id)?.activity.unread
+    ).toBe(false)
+    expect(
+      f.host.snapshot().imConversations!.find((item) => item.id === second.id)?.activity.unread
+    ).toBe(true)
+    await f.service.receive(f.event(a, "later", "新的消息"))
+    await eventually(
+      () => f.calls.length === 3 && f.store.getTask(f.calls[2].id).state === "completed"
+    )
+    f.host.markRead("im", first.id, first.activity.version)
+    expect(
+      f.host.snapshot().imConversations!.find((item) => item.id === first.id)?.activity.unread
+    ).toBe(true)
+    await f.service.revoke(f.bot.id, a.id, a.version)
+    f.service.disconnected()
+    const retained = f.host.snapshot().imConversations!.find((item) => item.id === first.id)!
+    expect(retained.state).toBe("revoked")
+    expect(retained.connected).toBe(false)
+    expect(
+      f.host.imConversationHistory(f.bot.id, first.id).items.map((entry) => entry.text)
+    ).toContain("A 群的消息")
+    expect(
+      f.host
+        .imConversationHistory(f.bot.id, first.id)
+        .items.some((entry) => entry.text.includes("B 群"))
+    ).toBe(false)
+    const other = f.store.create({
+      name: "Other",
+      color: "#123456",
+      instructions: "",
+      modelRef: null
+    })
+    expect(() => f.host.imConversationHistory(other.id, first.id)).toThrow("不存在")
+    expect(() => f.host.imConversationWorks(other.id, first.id)).toThrow("不存在")
+    expect(() => f.host.markRead("im", "unknown", 1)).toThrow("不存在")
+  })
+
+  it("upgrades old group previews without replaying messages or rewriting history", async () => {
+    const f = fixture(),
+      binding = await f.binding()
+    await f.service.receive(f.event(binding, "old", "旧群消息"))
+    await eventually(
+      () => f.calls.length === 1 && f.store.getTask(f.calls[0].id).state === "completed"
+    )
+    const group = f.host.snapshot().imConversations![0]
+    const before = f.host.imConversationHistory(f.bot.id, group.id).items
+    f.db.run("DELETE FROM bot_activity WHERE kind='im'")
+    f.db.run("INSERT OR REPLACE INTO bot_activity VALUES('bot',?,9,9,4,?,'reply:旧群消息')", [
+      f.bot.id,
+      Date.now()
+    ])
+    const restored = new BotStore(f.db)
+    expect(restored.imGateway.groupConversations()[0].activity.preview).toBe("reply:旧群消息")
+    expect(restored.activities().find((item) => item.id === f.bot.id)?.preview).toBe("")
+    expect(restored.imConversationHistory(f.bot.id, group.id).items).toEqual(before)
+    const version = restored.imGateway.groupConversations()[0].activity.version
+    const restarted = new BotStore(f.db)
+    expect(restarted.imGateway.groupConversations()[0].activity.version).toBe(version)
+    expect(f.calls).toHaveLength(1)
+  })
+
+  it("scopes group work lists and unread clocks without changing private or simulated works", async () => {
+    const f = fixture(async (task, host) => {
+      if (!task.workId)
+        await host.createWork(
+          { botId: task.botId, operationId: task.id, title: task.message, goal: "Write notice" },
+          { taskId: task.id, callId: task.id, key: task.id }
+        )
+      return { state: "completed", result: `done:${task.message}` }
+    })
+    const a = await f.binding(),
+      b = await f.binding()
+    await f.service.receive(f.event(a, "a", "A 群任务"))
+    await f.service.receive(f.event(b, "b", "B 群任务"))
+    await eventually(
+      () =>
+        f.calls.length === 4 && f.store.recentTasks().every((task) => task.state === "completed")
+    )
+    const groups = f.host.snapshot().imConversations!
+    const first = groups.find((item) => item.bindingId === a.id)!
+    const second = groups.find((item) => item.bindingId === b.id)!
+    const aWorks = f.host.imConversationWorks(f.bot.id, first.id)
+    expect(aWorks.items.map((work) => work.title)).toEqual(["A 群任务"])
+    expect(f.host.imConversationWorks(f.bot.id, second.id).items.map((work) => work.title)).toEqual(
+      ["B 群任务"]
+    )
+    expect(f.host.imConversationWorks(f.bot.id, first.id, undefined, "B 群").items).toEqual([])
+    expect(aWorks.items[0].activity?.unread).toBe(true)
+    expect(f.store.workActivities()).toEqual([])
+    const clock = f.db.exec("SELECT version FROM bot_activity WHERE kind='work-bot'")[0]
+      .values[0][0] as number
+    f.host.markWorksRead(f.bot.id, clock)
+    expect(f.host.imConversationWorks(f.bot.id, first.id).items[0].activity?.unread).toBe(true)
+    f.host.markRead("work", aWorks.items[0].id, aWorks.items[0].activity!.version)
+    expect(f.host.imConversationWorks(f.bot.id, first.id).items[0].activity?.unread).toBe(false)
+    expect(f.host.imConversationWorks(f.bot.id, second.id).items[0].activity?.unread).toBe(true)
+    expect(f.errors).toEqual([])
+  })
+
+  it.each(["dm", "group"] as const)(
+    "runs a wire-valid opaque sender once in %s and preserves its frozen source",
+    async (kind) => {
+      const f = fixture(undefined, "binding:synthetic"),
+        binding = await f.binding(kind),
+        input = f.event(binding)
+      input.route.senderId = "employee:42"
+      assertBotImBinding(binding)
+      assertBotImEvent(input)
+      await f.service.receive(input)
+      await f.service.receive({ ...input, event: { ...input.event, redelivered: true } })
+      const eventId = botImScopeId("realm", "owner", input.event.eventId)
+      await eventually(() => f.store.imGateway.event(eventId)?.state === "completed")
+      await f.service.receive({ ...input, event: { ...input.event, redelivered: true } })
+      expect(f.calls).toHaveLength(1)
+      const saved = f.store.getTask(f.calls[0].id),
+        senderId = botImScopeId("realm", "owner", "employee:42")
+      expect(saved.mockSource).toMatchObject({ senderId, transport: "im" })
+      expect(f.store.im.execution(saved, false)?.source).toEqual(saved.mockSource)
+      expect(f.store.imGateway.event(eventId)?.payload.route.senderId).toBe("employee:42")
+      expect(f.service.history(f.bot.id, binding.id).items).toEqual(
+        expect.arrayContaining([expect.objectContaining({ kind: "user", senderId })])
+      )
+      expect(saved.threadId === f.bot.threadId).toBe(kind === "dm")
+      expect(f.client.acquireBotPermit).toHaveBeenCalledTimes(1)
+      expect(f.client.sendAcknowledgement.mock.calls.at(-1)?.[0]).toMatchObject({
+        type: "completed"
+      })
+      expect(f.errors).toEqual([])
+    }
+  )
+
+  it("isolates the same external sender across realms and authenticated principals", async () => {
+    const f = fixture(),
+      binding = await f.binding(),
+      input = f.event(binding),
+      services: BotImChannelService[] = []
+    input.route.senderId = "employee:42"
+    try {
+      await f.service.receive(input)
+      for (const [realm, principal] of [
+        ["other-realm", "owner"],
+        ["realm", "other-owner"]
+      ]) {
+        const client = {
+          ...f.client,
+          getStatus: () =>
+            ({ principalId: principal }) as ReturnType<BotImGatewayClient["getStatus"]>
+        }
+        const service = new BotImChannelService(client, realm, () => f.host)
+        services.push(service)
+        await service.list(f.bot.id)
+        await service.receive({ ...input, event: { ...input.event, principalId: principal } })
+      }
+      await eventually(() => f.calls.length === 3)
+      expect(new Set(f.calls.map((task) => task.mockSource?.senderId))).toEqual(
+        new Set([
+          botImScopeId("realm", "owner", input.route.senderId),
+          botImScopeId("other-realm", "owner", input.route.senderId),
+          botImScopeId("realm", "other-owner", input.route.senderId)
+        ])
+      )
+      expect(new Set(f.calls.map((task) => task.mockSource?.bindingId)).size).toBe(3)
+      expect(f.errors).toEqual([])
+    } finally {
+      services.forEach((service) => service.stop())
+    }
+  })
+
+  it("keeps existing unscoped sender sources readable and redelivery idempotent", async () => {
+    const f = fixture(),
+      binding = await f.binding(),
+      input = f.event(binding),
+      ingress = f.store.imGateway.receive("realm", "owner", input)
+    f.store.imGateway.settle(ingress.id, "active", undefined, Date.now() + 90000)
+    // Reproduce the persisted source made by the previous adapter, without rewriting it.
+    const accepted = f.host.acceptImEvent({
+      bindingId: ingress.bindingId,
+      eventId: ingress.id,
+      messageId: botImScopeId("realm", "owner", input.event.platformMessageId),
+      senderId: input.route.senderId,
+      text: input.event.message.text,
+      mentionsBotIds: [f.bot.id]
+    })
+    f.store.imGateway.settle(ingress.id, "active", accepted.taskId!)
+    await f.service.receive({ ...input, event: { ...input.event, redelivered: true } })
+    await eventually(() => f.store.imGateway.event(ingress.id)?.state === "completed")
+    expect(f.calls).toHaveLength(1)
+    const saved = f.store.getTask(accepted.taskId!)
+    expect(saved.mockSource?.senderId).toBe("member-a")
+    expect(f.store.im.execution(saved, false)?.source).toEqual(saved.mockSource)
+    expect(f.errors).toEqual([])
+  })
+
+  it.each(["completed", "failed", "outcome_unknown"] as const)(
+    "preserves the actual %s execution outcome in the gateway acknowledgement without replay",
+    async (state) => {
+      const f = fixture(async () => ({ state, result: "execution result" }))
+      const binding = await f.binding(),
+        input = f.event(binding)
+      await f.service.receive(input)
+      await eventually(() =>
+        f.client.sendAcknowledgement.mock.calls.some(
+          ([ack]) => ack.type === "completed" || ack.type === "failed"
+        )
+      )
+      const ack = f.client.sendAcknowledgement.mock.calls.at(-1)![0]
+      expect(ack).toMatchObject(
+        state === "completed"
+          ? { type: "completed" }
+          : {
+              type: "failed",
+              retryable: false,
+              reasonCode:
+                state === "outcome_unknown" ? "EVENT_OUTCOME_UNKNOWN" : "BOT_EXECUTION_FAILED"
+            }
+      )
+      expect(f.store.imGateway.event(botImScopeId("realm", "owner", "event"))?.state).toBe(
+        state === "outcome_unknown" ? "unknown" : state === "completed" ? "completed" : "failed"
+      )
+      await f.service.receive({ ...input, event: { ...input.event, redelivered: true } })
+      expect(f.calls).toHaveLength(1)
+      expect(f.errors).toEqual([])
+    }
+  )
+  it("shares owner DM with the main thread, isolates groups, and deduplicates received events", async () => {
+    const f = fixture(),
+      dm = await f.binding("dm"),
+      group = await f.binding()
+    // Upgraded bindings may already have an initialized, separate channel history.
+    f.db.run("UPDATE bot_im_conversations SET initialized=1")
+    const input = f.event(group)
+    assertBotImEvent(input)
+    await f.service.receive(input)
+    await f.service.receive({ ...input, event: { ...input.event, redelivered: true } })
+    await f.service.receive(f.event(dm, "dm"))
+    await eventually(() => f.calls.length === 2 && f.client.submitReply.mock.calls.length === 2)
+    expect(new Set(f.calls.map((task) => task.threadId)).size).toBe(2)
+    expect(f.calls.every((task) => task.mockSource?.transport === "im")).toBe(true)
+    expect(f.calls[0].threadId).not.toBe(f.bot.threadId)
+    expect(f.calls[0].mockSource?.personal).toBeUndefined()
+    expect(f.calls[1]).toMatchObject({
+      threadId: f.bot.threadId,
+      mockSource: { personal: true, audienceKey: "desktop" }
+    })
+    expect(f.store.im.execution(f.calls[1], false)?.threadInitialized).toBe(false)
+    expect(() => parseBotMockSource(f.calls[0].mockSource)).toThrow("真实 IM")
+    expect(buildBotPrompt(f.bot, f.calls[0], "/unused")).toContain("authenticated IM")
+    expect(buildBotPrompt(f.bot, f.calls[0], "/unused")).not.toContain("simulated")
+    expect(f.client.submitReply.mock.calls.map(([reply]) => reply.conversationKey).sort()).toEqual(
+      [dm.conversationKey, group.conversationKey].sort()
+    )
+    expect(f.store.mock.bindings(f.bot.id).items).toHaveLength(0)
+    expect(f.errors).toEqual([])
+  })
+
+  it("mirrors only new main-thread replies to the owner's DM, never to groups", async () => {
+    const f = fixture()
+    f.host.send({ botId: f.bot.id, requestId: "before", message: "before binding" })
+    await eventually(() => f.store.recentTasks()[0]?.state === "completed")
+    const dm = await f.binding("dm"),
+      group = await f.binding()
+    f.host.send({ botId: f.bot.id, requestId: "after", message: "from App" })
+    await eventually(() => f.client.submitReply.mock.calls.length === 1)
+    expect(f.calls.map((t) => t.threadId)).toEqual([f.bot.threadId, f.bot.threadId])
+    expect(f.client.submitReply.mock.calls[0][0].conversationKey).toBe(dm.conversationKey)
+    expect(f.service.history(f.bot.id, dm.id).items.map((i) => i.text)).toEqual(["reply:from App"])
+    expect(f.service.history(f.bot.id, group.id).items).toEqual([])
+    expect(f.host.snapshot().personalIm).toEqual([{ botId: f.bot.id, connected: true }])
+    expect(f.errors).toEqual([])
+  })
+
+  it.each((["direct", "nested", "workflow"] as const).flatMap(mode =>
+    (["completed", "restart"] as const).map(ending => ({ mode, ending }))
+  ))("keeps $mode retained internal results out of the executing Bot's personal IM ($ending)", async ({ mode, ending }) => {
+    const { snapshotBotDeliveryFile } = await import("./file-copy")
+    const { realpath } = await import("node:fs/promises")
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "bot-private-im-")))
+    const f = fixture(undefined, undefined, () => false)
+    try {
+      await f.binding("dm")
+      const localBinding = f.store.im.bindings(f.bot.id).items.find(binding => binding.kind === "dm")!
+      f.service.stop()
+      const caller = f.store.create({ name: "Caller", instructions: "", color: "#123456", modelRef: null })
+      const root = f.store.enqueue({ botId: caller.id, requestId: "root", message: "Prepare private review" })
+      f.store.transition(root.id, "running")
+      const parent = f.store.delegate(root.id, f.bot.id, "Review privately", "review")
+      f.store.transition(parent.id, "running")
+      let current = parent
+      if (mode === "nested") {
+        const helper = f.store.create({ name: "Helper", instructions: "", color: "#123456", modelRef: null })
+        const nested = f.store.delegate(parent.id, helper.id, "Check", "nested")
+        f.store.settle(parent.id, "completed", null, "Waiting")
+        f.store.transition(nested.id, "running")
+        f.store.settle(nested.id, "completed", null, "Checked")
+        f.store.flushReplies()
+        current = f.store.recentTasks().find(t => t.requestId === `reply-${nested.id}`)!
+        f.store.transition(current.id, "running")
+      } else if (mode === "workflow") {
+        const run = { threadId: parent.threadId, workspacePath: directory, runId: "private-workflow", startedAt: "2026-11-09T00:00:00Z" }
+        f.store.acceptWorkflow(parent.id, run)
+        f.store.settle(parent.id, "completed", null, "Waiting")
+        current = f.host.enqueueNotification(f.bot.id, run.threadId, "workflow", run.runId, "Summary", undefined, run.startedAt)!
+        f.store.transition(current.id, "running")
+      }
+      const path = join(directory, "private-review.md")
+      await writeFile(path, "Private findings for the caller")
+      const file = { filePath: path, name: "private-review.md", ...(await snapshotBotDeliveryFile(directory, path, new AbortController().signal)) }
+      if (ending === "restart") f.store.recover()
+      else f.store.settle(current.id, "completed", null, "Private review complete", [file])
+      expect(f.store.im.history(f.bot.id, localBinding.id).items).toEqual([])
+      expect(f.db.exec("SELECT source_task_id FROM bot_im_outbox")[0]?.values ?? []).toEqual([])
+      // Normal user-facing replies and their attachments still use the existing mirror.
+      const visible = f.store.enqueue({ botId: f.bot.id, requestId: "visible", message: "Deliver my report" })
+      f.store.transition(visible.id, "running")
+      f.store.settle(visible.id, "completed", null, "Your report", [file])
+      expect(f.db.exec("SELECT source_task_id,text FROM bot_im_outbox")[0].values).toEqual([[visible.id, "Your report"]])
+      expect(f.store.im.history(f.bot.id, localBinding.id).items).toHaveLength(1)
+      expect(f.errors).toEqual([])
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it("uses the prepared owner IM work input in the shared desktop result", async () => {
+    let workId = ""
+    const f = fixture(async (task, host) => {
+      if (task.origin.kind === "work_result") return { state: "completed", result: "Reported" }
+      if (task.workId) {
+        host.recordPreparedInput(task.id, task.id, "Approved owner input")
+        return { state: "completed", result: "Verified result" }
+      }
+      const source = { taskId: task.id, callId: task.id, key: task.id }
+      if (task.message === "create") {
+        workId = (await host.createWork({ botId: task.botId, operationId: task.id,
+          title: "REMOVED OWNER INPUT", goal: "REMOVED OWNER INPUT" }, source)).work.id
+      } else {
+        host.sendWork(source, workId, "REMOVED FOLLOWUP")
+      }
+      return { state: "completed", result: "Accepted" }
+    })
+    const dm = await f.binding("dm")
+    await f.service.receive(f.event(dm, "create", "create"))
+    await eventually(() => f.calls.length === 3 && f.store.recentTasks().every(t => t.state === "completed"))
+    await f.service.receive(f.event(dm, "follow-up", "revise"))
+    await eventually(() => f.calls.length === 6 && f.store.recentTasks().every(t => t.state === "completed"))
+    const receipts = f.calls.filter(t => t.origin.kind === "work_result")
+    expect(receipts).toHaveLength(2)
+    for (const receipt of receipts) {
+      expect(JSON.parse(receipt.message)).toMatchObject({ title: "原任务",
+        requestContext: { messages: [{ text: "Approved owner input", truncated: false }] } })
+      expect(JSON.stringify(receipt)).not.toContain("REMOVED")
+    }
+    expect(f.host.getWork(f.bot.id, workId)).toMatchObject({ title: "REMOVED OWNER INPUT", audienceKey: "desktop" })
+    expect(f.errors).toEqual([])
+  })
+
+  it("shares personal tasks across DM and App, reports results once, and keeps group tasks separate", async () => {
+    let workId = ""
+    const f = fixture(async (task, host) => {
+      if (task.origin.kind === "work_result")
+        return { state: "completed", result: `report:${JSON.parse(task.message).result}` }
+      if (task.workId) return { state: "completed", result: `notice:${task.message}` }
+      const source = { taskId: task.id, callId: task.id, key: task.id }
+      if (task.message === "create") {
+        workId = (
+          await host.createWork(
+            { botId: task.botId, operationId: task.id, title: "通知", goal: "Sunday" },
+            source
+          )
+        ).work.id
+      } else if (task.message === "revise") {
+        expect(host.workTargets(task.id).items.map((w) => w.id)).toContain(workId)
+        host.sendWork(source, workId, task.mockSource ? "from DM" : "from App")
+      } else if (task.message === "group") {
+        expect(host.workTargets(task.id).items.map((w) => w.id)).not.toContain(workId)
+        expect(() => host.sendWork(source, workId, "group edit")).toThrow()
+      } else if (task.message === "complete") {
+        await host.changeWorkFromTool(
+          source,
+          workId,
+          host.getWork(task.botId, workId).version,
+          "complete"
+        )
+      }
+      return { state: "completed", result: `handled:${task.message}` }
+    })
+    const dm = await f.binding("dm"),
+      group = await f.binding()
+    await f.service.receive(f.event(dm, "create", "create"))
+    await eventually(
+      () => f.calls.length === 3 && f.store.recentTasks().every((t) => t.state === "completed")
+    )
+    const work = f.host.getWork(f.bot.id, workId)
+    expect(work).toMatchObject({
+      audienceKey: "desktop",
+      parentThreadId: f.bot.threadId,
+      state: "active"
+    })
+    expect(work.source).toBeUndefined()
+    f.host.send({ botId: f.bot.id, requestId: "desktop-edit", message: "revise" })
+    await eventually(
+      () => f.calls.length === 6 && f.store.recentTasks().every((t) => t.state === "completed")
+    )
+    await f.service.receive(f.event(dm, "dm-edit", "revise"))
+    await eventually(
+      () => f.calls.length === 9 && f.store.recentTasks().every((t) => t.state === "completed")
+    )
+    await f.service.receive(f.event(group, "group", "group"))
+    await f.service.receive(f.event(dm, "complete", "complete"))
+    await eventually(() => f.host.getWork(f.bot.id, workId).state === "completed")
+    const runs = f.calls.filter((t) => t.workId)
+    expect(runs.map((t) => t.workId)).toEqual([workId, workId, workId])
+    expect(runs.map((t) => t.threadId)).toEqual([work.threadId, work.threadId, work.threadId])
+    expect(runs.map((t) => Boolean(t.mockSource?.personal))).toEqual([true, false, true])
+    expect(f.calls.filter((t) => t.origin.kind === "work_result")).toHaveLength(3)
+    const replies = f.service.history(f.bot.id, dm.id).items.filter((i) => i.kind === "bot")
+    expect(replies.filter((i) => i.text.startsWith("notice:"))).toHaveLength(0)
+    expect(replies.filter((i) => i.text.startsWith("report:"))).toHaveLength(3)
+    expect(replies.every((i) => i.text !== "handled:group")).toBe(true)
+    expect(f.errors).toEqual([])
+  })
+
+  it.each([false, true])("observes the owner's IM continuation even with a retired desktop review (%s)", async (retire) => {
+    let workId = "", originalId = "", callbackId = ""
+    const f = fixture(async (task, host) => {
+      if (retire && task.requestId === `work-start-${workId}`) {
+        originalId = task.id
+        host.recordPreparedInput(task.id, task.id, task.message)
+        expect(host.armWorkResultReview(task.id, "incarnation")).toBe(true)
+        host.commandLifecycle(task.id).accepted({
+          id: "old-generator", threadId: task.threadId, command: "generate", cwd: "/reports",
+          startedAt: Date.now(), notifyOnComplete: true
+        })
+        return { state: "completed", result: "Waiting for the old generator" }
+      }
+      if (retire && task.workId && task.mockSource?.personal) {
+        host.recordPreparedInput(task.id, task.id, task.message)
+        expect(host.armWorkResultReview(task.id, "incarnation")).toBe(false)
+      }
+      if (retire && task.origin.kind === "notification" && task.origin.notificationKind === "command") {
+        callbackId = task.id
+        return { state: "failed", error: "Old generator failed" }
+      }
+      if (task.workId || task.origin.kind === "work_result")
+        return { state: "completed", result: task.message }
+      const source = { taskId: task.id, callId: task.id, key: task.id }
+      if (task.message === "create") {
+        if (retire) host.recordPreparedInput(task.id, task.id, task.message)
+        workId = (await host.createWork({
+          botId: task.botId, operationId: task.id, title: "Report", goal: "Initial report"
+        }, source)).work.id
+      } else if (task.message === "observe") {
+        f.store.saveSchedule(f.bot.id, {
+          name: "Watch report", message: "Notify on new results", frequency: "interval", intervalMinutes: 10, enabled: true
+        }, "2030-01-01T00:10:00Z", undefined, undefined, undefined,
+          { input: { workId, mode: "new_result" }, source })
+      } else if (task.message === "revise") {
+        host.sendWork(source, workId, "Revise the report from personal IM")
+      }
+      return { state: "completed", result: "accepted" }
+    })
+    const dm = await f.binding("dm")
+    f.host.send({ botId: f.bot.id, requestId: "desktop-create", message: "create" })
+    await eventually(() => f.calls.length === (retire ? 2 : 3) &&
+      f.store.recentTasks().every(task => task.state === "completed"))
+    f.host.send({ botId: f.bot.id, requestId: "desktop-observe", message: "observe" })
+    await eventually(() => f.calls.length === (retire ? 3 : 4) &&
+      f.store.recentTasks().every(task => task.state === "completed"))
+    const schedule = f.store.schedules()[0]
+    const initial = f.calls.find(task => task.workId === workId)!
+    expect(schedule.workMonitor?.lastSuccessful?.result?.taskId).toBe(retire ? undefined : initial.id)
+
+    await f.service.receive(f.event(dm, "dm-edit", "revise"))
+    await eventually(() => f.calls.length === (retire ? 6 : 7) &&
+      f.store.recentTasks().every(task => task.state === "completed"))
+    const revised = f.calls.find(task => task.workId === workId && task.mockSource?.personal)!
+    expect(revised).toMatchObject({ threadId: initial.threadId, mockSource: { transport: "im", personal: true } })
+    if (retire) {
+      f.host.commandLifecycle(originalId).settled({
+        id: "old-generator", threadId: initial.threadId, exitCode: 1, output: "Old generator failed",
+        cancelled: false, truncated: false
+      })
+      await eventually(() => Boolean(callbackId) && f.store.getTask(callbackId).state === "failed")
+    }
+    f.store.fireSchedule(schedule, "2030-01-01T00:20:00Z")
+    const observation = f.store.nextQueued([], true, true)!
+    expect(f.store.settleScheduledWorkObservation(observation.id))
+      .toMatchObject({ kind: "notify", snapshot: { result: { taskId: revised.id, state: "completed" } } })
+    expect(f.errors).toEqual([])
+  })
+
+  it.each(["late peer", "late command", "unchanged", "attachment", "failed", "group"] as const)(
+    "observes only current results of a personal IM routine (%s)",
+    async (outcome) => {
+      const late = outcome === "late peer" || outcome === "late command"
+      const group = outcome === "group"
+      const failed = late || outcome === "failed"
+      const ready = { kind: "ready" as const, summary: "The updated report has been verified" }
+      const scheduleInput = {
+        name: "Watch report", message: "Check the existing report", frequency: "interval" as const,
+        intervalMinutes: 10, enabled: true
+      }
+      const files = outcome === "attachment"
+        ? [{ name: "report.md", filePath: "/reports/report.md", attachmentPath: "/retained/report.md", size: 8 }]
+        : undefined
+      let workId = "", reviewedId = "", launcher: BotTask | undefined, returned: BotTask | undefined
+      let releasePeer: (() => void) | undefined
+      const f = fixture(async (task, host, signal) => {
+        const { origin } = task
+        const source = { taskId: task.id, callId: task.id, key: task.id }
+        if (origin.kind === "mock" && task.message === "create") {
+          workId = (await host.createWork({
+            botId: task.botId, operationId: "report", title: "Report", goal: "Prepare the report"
+          }, source)).work.id
+        } else if (origin.kind === "work" && task.mockSource) {
+          f.store.saveSchedule(task.botId, scheduleInput, "2030-01-01T00:10:00Z", undefined, task.id)
+        } else if (origin.kind === "schedule") {
+          host.delegate(task.id, peer.id, "Check the report that this routine started with", "check-report")
+          return { state: "completed", result: BOT_ROUTINE_SILENT }
+        } else if (origin.kind === "bot" && origin.expectsReply) {
+          if (late) await new Promise<void>((resolve) => {
+            releasePeer = resolve
+            if (signal.aborted) resolve()
+            else signal.addEventListener("abort", () => resolve(), { once: true })
+          })
+          return { state: "completed", result: "The report needs a checksum check" }
+        } else if (origin.kind === "bot" && task.workId === workId) {
+          if (outcome === "late peer") {
+            returned = task
+            return { state: "failed", error: "The previous report did not pass verification" }
+          }
+          launcher = task
+          host.commandLifecycle(task.id).accepted({
+            id: "verify-checksum", threadId: task.threadId, command: "verify-checksum", cwd: "/reports",
+            startedAt: Date.now(), notifyOnComplete: true
+          })
+        } else if (origin.kind === "notification" && origin.notificationKind === "command") {
+          returned = task
+          return failed
+            ? { state: "failed", error: "Checksum verification failed" }
+            : { state: "completed", result: BOT_ROUTINE_SILENT, files }
+        } else if (origin.kind === "user" && task.message === "revise") {
+          host.recordPreparedInput(task.id, task.id, task.message)
+          host.sendWork(source, workId, "Verify the updated report")
+        } else if (origin.kind === "work" && task.workId === workId) {
+          host.recordPreparedInput(task.id, task.id, task.message)
+          expect(host.armWorkResultReview(task.id, "incarnation")).toBe(true)
+          reviewedId = task.id
+          return { state: "completed", result: ready.summary }
+        } else if (origin.kind === "work_result" && origin.review?.phase === "review") {
+          expect(host.commitWorkResultReview(task.id, { ...ready, evidenceIds: [] }, []).state).toBe("publish")
+        } else if (origin.kind === "work_result" && origin.review?.phase === "publish") {
+          expect(host.acknowledgeWorkResultPublication(task.id)).toBe(true)
+        } else if (origin.kind === "user" && task.message === "observe") {
+          const watch = () => f.store.saveSchedule(task.botId, scheduleInput, "2030-01-01T00:10:00Z", undefined, undefined, undefined,
+            { input: { workId, mode: "new_result" }, source })
+          if (group) expect(watch).toThrow("原任务不属于当前会话")
+          else watch()
+        }
+        return { state: "completed", result: "Handled" }
+      }, undefined, undefined, undefined, undefined, Number.POSITIVE_INFINITY)
+      const peer = f.store.create({ name: "Reviewer", instructions: "", color: "#345678", modelRef: null })
+      const binding = await f.binding(group ? "group" : "dm")
+      await f.service.receive(f.event(binding, "create-report", "create"))
+      await eventually(() => Boolean(workId) && f.store.schedules().some(schedule => schedule.workId === workId))
+      const routine = f.store.schedules().find(schedule => schedule.workId === workId)!
+      const trigger = () => {
+        f.store.fireSchedule(routine, "2030-01-01T00:20:00Z")
+        f.host.resume()
+      }
+      if (late || group) trigger()
+      if (late) await eventually(() => Boolean(releasePeer))
+      if (!group) {
+        f.host.send({ botId: f.bot.id, requestId: "desktop-revise", message: "revise" })
+        await eventually(() => f.store.getWork(f.bot.id, workId).resultConclusion?.kind === "ready")
+      }
+      const observer = f.host.send({ botId: f.bot.id, requestId: "desktop-observe", message: "observe" })
+      await eventually(() => f.store.getTask(observer.id).state === "completed")
+      const monitor = f.store.schedules().find(schedule => schedule.workMonitor)
+      const baseline = { taskId: reviewedId, state: "completed", review: "ready" }
+      if (!group) expect(monitor?.workMonitor?.lastSuccessful?.result).toEqual(baseline)
+      if (late) releasePeer!()
+      else if (!group) trigger()
+      if (outcome !== "late peer") {
+        await eventually(() => Boolean(launcher) && f.store.getTask(launcher!.id).state === "completed")
+        f.host.commandLifecycle(launcher!.id).settled({
+          id: "verify-checksum", threadId: launcher!.threadId, exitCode: failed ? 1 : 0,
+          output: failed ? "Checksum mismatch" : "Checksum OK", cancelled: false, truncated: false
+        })
+      }
+      await eventually(() => Boolean(returned) && f.store.getTask(returned!.id).state === (failed ? "failed" : "completed"))
+      const callback = f.store.getTask(returned!.id)
+      expect(callback).toMatchObject({ workId, threadId: f.store.getWork(f.bot.id, workId).threadId })
+      expect(callback.mockSource?.transport).toBe("im")
+      expect(Boolean(callback.mockSource?.personal)).toBe(!group)
+      if (group) {
+        expect(callback.mockSource?.audienceKey).not.toBe("desktop")
+        expect(monitor).toBeUndefined()
+        expect(callback.origin).not.toHaveProperty("observationRequestOrdinal")
+        expect(callback.origin).not.toHaveProperty("workResultSilent")
+      } else {
+        const quiet = late || outcome === "unchanged"
+        expect.soft(f.store.getWork(f.bot.id, workId).resultConclusion).toEqual(quiet ? ready : undefined)
+        expect.soft(f.store.getWork(f.bot.id, workId).executionState).toBe(!quiet && failed ? "failed" : "completed")
+        expect.soft(f.store.listWorks(f.bot.id).items.find(work => work.id === workId)?.executionState)
+          .toBe(!quiet && failed ? "failed" : "completed")
+        f.store.fireSchedule(monitor!, "2030-01-01T00:20:00Z", true)
+        const savedMonitor = f.store.schedules().find(schedule => schedule.id === monitor!.id)
+        expect.soft(savedMonitor?.workMonitor?.lastSuccessful?.result).toEqual(quiet ? baseline : {
+          taskId: callback.id, state: failed ? "failed" : "completed", ...(failed ? { commandOutcome: "failed" } : {})
+        })
+        expect.soft(f.store.pendingScheduledWorkPublications()).toHaveLength(quiet ? 0 : 1)
+        if (files) expect(f.store.pendingScheduledWorkPublications()[0]?.text).toContain("最近一次执行结果为已完成")
+        if (failed && !late) expect(f.store.pendingScheduledWorkPublications()[0]?.text).toContain("后台命令执行失败")
+      }
+      expect(f.errors).toEqual([])
+    }
+  )
+
+  it.each(["failed", "outcome_unknown", "withdrawn"] as const)(
+    "observes a nested command after an authenticated IM continuation's sibling is %s",
+    async (outcome) => {
+      let workId = ""
+      const f = fixture(async (task, host) => {
+        const accept = (id: string) => host.commandLifecycle(task.id).accepted({
+          id, threadId: task.threadId, command: id, cwd: "/reports",
+          startedAt: Date.now(), notifyOnComplete: true
+        })
+        if (task.workId && task.origin.kind === "work" && task.mockSource?.personal) {
+          host.recordPreparedInput(task.id, task.id, task.message)
+          expect(host.armWorkResultReview(task.id, "incarnation")).toBe(false)
+          if (task.message === "Run the independent report") accept("independent")
+          else {
+            accept("first-check")
+            accept("second-check")
+          }
+        } else if (task.origin.kind === "notification" && task.origin.notificationKind === "command" &&
+            task.origin.key === "first-check") {
+          expect(host.commandUserRequest(task.id)).toBeNull()
+          accept("verify-first-check")
+        } else if (!task.workId && task.origin.kind !== "work_result") {
+          const source = { taskId: task.id, callId: task.id, key: task.id }
+          if (task.message === "observe") {
+            f.store.saveSchedule(f.bot.id, {
+              name: "Watch report", message: "Notify on new results", frequency: "interval", intervalMinutes: 10, enabled: true
+            }, "2030-01-01T00:10:00Z", undefined, undefined, undefined, { input: { workId, mode: "report" }, source })
+          } else {
+            host.sendWork(source, workId, task.message === "independent"
+              ? "Run the independent report" : "Perform two independent checks, then verify the first result")
+          }
+        }
+        return { state: "completed", result: "Reported this turn's outcome" }
+      })
+      const dm = await f.binding("dm")
+      const initial = await f.host.createWork({
+        botId: f.bot.id, operationId: "create", title: "Report", goal: "Create report"
+      })
+      workId = initial.work.id
+      await eventually(() => f.store.getTask(initial.task.id).state === "completed")
+      const observer = f.host.send({ botId: f.bot.id, requestId: "desktop-observe", message: "observe" })
+      await eventually(() => f.store.getTask(observer.id).state === "completed")
+      await f.service.receive(f.event(dm, "dm-revise", "revise"))
+      const workRuns = () => f.calls.filter(task => task.workId === workId && task.origin.kind === "work")
+      await eventually(() => workRuns().length === 1 && f.store.getTask(workRuns()[0].id).state === "completed")
+      const [launcher] = workRuns()
+      const threadId = launcher.threadId
+      const callback = (id: string) => f.calls.find(task =>
+        task.origin.kind === "notification" && task.origin.notificationKind === "command" && task.origin.key === id)
+      const settle = async (id: string, exitCode: number, ownerId = launcher.id) => {
+        f.host.commandLifecycle(ownerId).settled({
+          id, threadId, exitCode, output: "Command result", cancelled: false, truncated: false
+        })
+        await eventually(() => Boolean(callback(id)) && f.store.getTask(callback(id)!.id).state === "completed")
+        return callback(id)!
+      }
+      const first = await settle("first-check", 0)
+      expect(f.db.exec("SELECT source_task_id FROM bot_commands WHERE id='verify-first-check'")[0].values)
+        .toEqual([[first.id]])
+
+      if (outcome === "failed") await settle("second-check", 2)
+      else {
+        f.store.settleCommand({ id: "second-check", threadId, exitCode: null, output: "",
+          cancelled: outcome === "withdrawn", truncated: false }, outcome === "outcome_unknown")
+        f.host.resume()
+        if (outcome === "outcome_unknown")
+          await eventually(() => Boolean(callback("second-check")) &&
+            f.store.getTask(callback("second-check")!.id).state === "completed")
+      }
+
+      // Age the earlier receipts out while the nested command is still live.
+      // Silent commands in another thread exercise normal retention without
+      // adding unrelated notification turns.
+      const other = f.store.create({ name: "Other", instructions: "", color: "#123456", modelRef: null })
+      const filler = f.store.enqueue({ botId: other.id, requestId: "retention", message: "Other activity" })
+      f.store.transition(filler.id, "running")
+      for (let index = 0; index < 201; index++) {
+        const id = `retention-${index}`
+        f.store.acceptCommand(filler.id, { id, threadId: filler.threadId, command: "check", cwd: "/other",
+          startedAt: Date.now(), notifyOnComplete: false })
+        f.store.settleCommand({ id, threadId: filler.threadId, exitCode: 0, output: "", cancelled: false, truncated: false })
+      }
+      f.store.settle(filler.id, "completed", null)
+      expect(f.db.exec("SELECT id FROM bot_commands WHERE id IN ('first-check','second-check')")[0].values)
+        .toEqual([])
+
+      const observeResult = () => {
+        const [schedule] = f.store.schedules()
+        f.store.fireSchedule(schedule, "2030-01-01T00:20:00Z", true)
+        const [notice] = f.store.pendingScheduledWorkPublications()
+        f.store.acknowledgeScheduledWorkPublication(notice.taskId)
+        return { text: notice.text, result: f.store.schedules()[0].workMonitor?.lastSuccessful?.result }
+      }
+      const final = await settle("verify-first-check", 0, first.id)
+      const observed = observeResult()
+      if (outcome === "withdrawn") expect(observed.result).toEqual({ taskId: initial.task.id, state: "completed" })
+      else {
+        expect(observed.result).toEqual({ taskId: final.id, state: "completed", commandOutcome: outcome })
+        expect(observed.text).toContain(outcome === "failed" ? "后台命令执行失败" : "后台命令结果待确认")
+      }
+
+      await f.service.receive(f.event(dm, "dm-independent", "independent"))
+      await eventually(() => workRuns().length === 2 && f.store.getTask(workRuns()[1].id).state === "completed")
+      const independent = await settle("independent", 0, workRuns()[1].id)
+      expect(observeResult().result).toEqual({ taskId: independent.id, state: "completed" })
+      expect(f.errors).toEqual([])
+    }
+  )
+
+  it.each([true, false])("lets an authenticated same-work IM correction reach preparation before a queued desktop repair (accepted=%s)", async accepted => {
+    let available = true
+    let workId = "", repairId = "", correctionId = ""
+    const f = fixture(async (task, host, signal) => {
+      if (task.requestId === `work-start-${workId}`) {
+        host.recordPreparedInput(task.id, task.id, task.message)
+        expect(host.armWorkResultReview(task.id, "incarnation")).toBe(true)
+        return { state: "completed", result: "CSV ready" }
+      }
+      if (task.origin.kind === "work_result" && task.origin.review?.phase === "review") {
+        if (repairId) {
+          host.commitWorkResultReview(task.id, { kind: "ready", summary: "Reviewed", evidenceIds: [] }, [])
+          return { state: "completed" }
+        }
+        const result = host.commitWorkResultReview(task.id, {
+          kind: "repair", gap: "CSV upload pending", instruction: "Upload the CSV", evidenceIds: []
+        }, [])
+        if (result.state !== "repair") throw new Error("Expected a queued repair")
+        repairId = result.task.id
+        available = false
+      } else if (task.mockSource && !task.workId) {
+        const tool = createBotWorkTools(task, () => host, signal).find(tool => tool.name === "bot_work_send")!
+        const response = await tool.invoke({
+          type: "tool_call", name: tool.name, id: "im-revision",
+          args: { workId, requestKey: "im-revision", message: task.message }
+        })
+        expect(response.status).not.toBe("error")
+        correctionId = JSON.parse(response.content).receipt.id
+      } else if (task.workId === workId && task.mockSource) {
+        expect(task.mockSource).toMatchObject({ transport: "im", personal: true })
+        host.beginInputPreparation(task.id, task.id)
+        expect(host.armWorkResultReview(task.id, "incarnation")).toBe(false)
+        if (!accepted) return { state: "failed", error: "Input rejected" }
+        host.recordPreparedInput(task.id, task.id, task.message)
+        expect(host.armWorkResultReview(task.id, "incarnation")).toBe(false)
+        return { state: "completed", result: "CSV kept local" }
+      }
+      return { state: "completed" }
+    }, undefined, () => available)
+    const dm = await f.binding("dm")
+    workId = (await f.host.createWork({
+      botId: f.bot.id, operationId: "desktop-original", title: "CSV", goal: "Generate and upload the CSV"
+    })).work.id
+    await eventually(() => Boolean(repairId))
+    expect(f.store.getTask(repairId).state).toBe("queued")
+    await f.service.receive(f.event(dm, "im-correction", "Do not upload the CSV. Keep it local."))
+    available = true
+    f.host.resume()
+    await eventually(() => Boolean(correctionId) && ["completed", "failed"].includes(f.store.getTask(correctionId).state))
+    expect(f.store.getTask(correctionId)).toMatchObject({ state: accepted ? "completed" : "failed" })
+    await eventually(() => ["cancelled", "completed", "failed"].includes(f.store.getTask(repairId).state))
+    expect(f.store.getTask(repairId)).toMatchObject({ state: accepted ? "cancelled" : "completed" })
+    const correctionIndex = f.calls.findIndex(task => task.id === correctionId)
+    expect(correctionIndex).toBeGreaterThan(-1)
+    if (!accepted) expect(f.calls.findIndex(task => task.id === repairId)).toBeGreaterThan(correctionIndex)
+    expect(f.calls.some(task => task.id === repairId)).toBe(!accepted)
+    if (accepted) {
+      expect(f.store.workResultReviewActiveForExecution(correctionId)).toBe(false)
+      expect(f.calls.filter(task => task.origin.kind === "work_result" && task.origin.review?.phase === "review")).toHaveLength(1)
+    }
+    expect(f.errors).toEqual([])
+  })
+
+  it("queues DM and App turns on the same thread without steering across capability boundaries", async () => {
+    let finish: (() => void) | undefined
+    const f = fixture(async (task) => {
+      if (task.message === "App first")
+        await new Promise<void>((resolve) => {
+          finish = resolve
+        })
+      return { state: "completed", result: "Done" }
+    })
+    const dm = await f.binding("dm")
+    f.host.send({ botId: f.bot.id, requestId: "first", message: "App first" })
+    await eventually(() => f.calls.length === 1)
+    await f.service.receive(f.event(dm, "second", "DM second"))
+    const remote = f.store.recentTasks().find((t) => t.mockSource)!
+    expect(remote).toMatchObject({ state: "queued", threadId: f.bot.threadId })
+    expect(canSteerBotTask(f.calls[0], remote)).toBe(false)
+    expect(canSteerBotTask(remote, { ...f.calls[0], origin: { kind: "user" } })).toBe(false)
+    finish!()
+    await eventually(
+      () => f.calls.length === 2 && f.store.recentTasks().every((t) => t.state === "completed")
+    )
+    expect(f.errors).toEqual([])
+  })
+
+  it("keeps an offline App reply durable and blocks it if the binding is revoked", async () => {
+    const f = fixture(),
+      dm = await f.binding("dm")
+    f.service.disconnected()
+    f.host.send({ botId: f.bot.id, requestId: "offline", message: "offline" })
+    await eventually(() => f.store.recentTasks()[0]?.state === "completed")
+    expect(f.host.snapshot().personalIm).toEqual([{ botId: f.bot.id, connected: false }])
+    expect(f.service.history(f.bot.id, dm.id).items[0]).toMatchObject({
+      text: "reply:offline",
+      state: "pending"
+    })
+    expect(f.store.im.beginDelivery()).toBeNull()
+    await f.service.revoke(f.bot.id, dm.id, dm.version)
+    expect(f.service.history(f.bot.id, dm.id).items[0].state).toBe("blocked")
+    expect(f.host.snapshot().personalIm).toEqual([])
+    expect(f.client.submitReply).not.toHaveBeenCalled()
+    expect(f.errors).toEqual([])
+  })
+
+  it("does not push an in-flight App reply to a newly bound destination", async () => {
+    const f = fixture(),
+      task = f.store.enqueue({ botId: f.bot.id, requestId: "old", message: "old request" })
+    f.db.run("UPDATE bot_tasks SET created_at=1 WHERE id=?", [task.id])
+    f.store.transition(task.id, "running")
+    const dm = await f.binding("dm")
+    f.store.settle(task.id, "completed", null, "old reply")
+    expect(f.service.history(f.bot.id, dm.id).items).toEqual([])
+  })
+
+  it("notifies the owner once when a desktop main turn is interrupted by restart", async () => {
+    const f = fixture(),
+      dm = await f.binding("dm")
+    f.service.disconnected()
+    const task = f.store.enqueue({
+      botId: f.bot.id,
+      requestId: "restart-main",
+      message: "App work"
+    })
+    f.store.transition(task.id, "running")
+    const reopened = new BotStore(f.db)
+    reopened.recover()
+    const replies = reopened.im.history(f.bot.id, botImScopeId("realm", "owner", dm.id)).items
+    expect(replies).toHaveLength(1)
+    expect(replies[0]).toMatchObject({ kind: "bot", state: "pending" })
+    expect(replies[0].text).toContain("应用已重启")
+    reopened.recover()
+    expect(reopened.im.history(f.bot.id, botImScopeId("realm", "owner", dm.id)).items).toHaveLength(
+      1
+    )
+    expect(f.calls).toHaveLength(0)
+  })
+
+  it.each(["dm", "group"] as const)(
+    "settles an admitted queued %s turn after restart without reacquiring its old permit",
+    async (kind) => {
+      const f = fixture(undefined, undefined, () => false)
+      const binding = await f.binding(kind)
+      await f.service.receive(f.event(binding, "busy", "IM first"))
+      const busy = f.store.getTask(
+        f.store.imGateway.event(botImScopeId("realm", "owner", "busy"))!.taskId!
+      )
+      f.store.transition(busy.id, "running")
+      const input = f.event(binding, "restart-queued", "IM second")
+      await f.service.receive(input)
+      const eventId = botImScopeId("realm", "owner", input.event.eventId),
+        taskId = f.store.imGateway.event(eventId)!.taskId!,
+        task = f.store.getTask(taskId)
+      expect(task.state).toBe("queued")
+      expect(task.threadId === f.bot.threadId).toBe(kind === "dm")
+      expect(f.store.nextQueued([])).toBeNull()
+      expect(f.calls).toHaveLength(0)
+      // Rebuild before graceful shutdown: a process crash does not run service.stop(),
+      // which intentionally cancels live permits instead of leaving a restart queue.
+      const reopened = new BotStore(f.db)
+      f.service.stop()
+      await f.host.stop()
+      reopened.recover()
+      reopened.im.setOnline(f.bot.id, task.mockSource!.bindingId, true)
+      while (reopened.im.recoverInterruptedBatch()) {}
+      expect(reopened.imGateway.event(eventId)).toMatchObject({ state: "unknown", expiresAt: 0 })
+      expect(reopened.getTask(taskId)).toMatchObject({ state: "interrupted" })
+      expect(reopened.pendingTasksForThread(task.threadId)).toEqual([])
+      expect(
+        reopened.im
+          .history(f.bot.id, task.mockSource!.bindingId)
+          .items.filter(
+            (item) =>
+              item.kind === "bot" &&
+              item.replyToMessageId === task.mockSource!.messageId &&
+              item.text.includes("不会自动重复执行")
+          )
+      ).toHaveLength(1)
+      const reply = reopened.im.beginDelivery()!
+      expect(reply.sourceTaskId === taskId || reply.sourceTaskId === busy.id).toBe(true)
+      const rows = f.db.exec("SELECT source_task_id FROM bot_im_outbox")[0].values
+      expect(rows.filter(([id]) => id === taskId)).toHaveLength(1)
+      reopened.recover()
+      while (reopened.im.recoverInterruptedBatch()) {}
+      expect(
+        f.db
+          .exec("SELECT source_task_id FROM bot_im_outbox")[0]
+          .values.filter(([id]) => id === taskId)
+      ).toHaveLength(1)
+      expect(reopened.nextQueued([])).toBeNull()
+      const acquire = vi.fn(() => null),
+        host = new LocalBotHost(reopened, { onAvailable: () => () => {}, acquire }),
+        service = new BotImChannelService(f.client, "realm", () => host)
+      try {
+        await service.receive({ ...input, event: { ...input.event, redelivered: true } })
+        expect(f.client.sendAcknowledgement.mock.calls.at(-1)?.[0]).toMatchObject({
+          type: "failed",
+          eventId: input.event.eventId
+        })
+        expect(acquire).not.toHaveBeenCalled()
+      } finally {
+        service.stop()
+        await host.stop()
+      }
+      expect(f.client.acquireBotPermit).toHaveBeenCalledTimes(2)
+      expect(f.calls).toHaveLength(0)
+      expect(f.errors).toEqual([])
+    }
+  )
+
+  it.each(["dm", "group"] as const)(
+    "records a queued %s work interruption once through its existing result channel",
+    async (kind) => {
+      const f = fixture(),
+        binding = await f.binding(kind)
+      // Keep the host idle while constructing the same admitted source and child a turn creates.
+      f.service.stop()
+      await f.host.stop()
+      const input = f.event(binding, "restart-work", "Create work"),
+        event = f.store.imGateway.receive("realm", "owner", input)
+      f.store.im.setOnline(f.bot.id, event.bindingId, true)
+      f.store.imGateway.settle(event.id, "active", undefined, Date.now() + 90000)
+      const receipt = f.store.im.inject({
+        simulation: true,
+        bindingId: event.bindingId,
+        eventId: event.id,
+        messageId: botImScopeId("realm", "owner", input.event.platformMessageId),
+        senderId: botImScopeId("realm", "owner", input.route.senderId),
+        text: input.event.message.text,
+        mentionsBotIds: [f.bot.id]
+      })
+      f.store.imGateway.settle(event.id, "active", receipt.taskId!)
+      f.store.transition(receipt.taskId!, "running")
+      const work = f.store.createWork(
+        { botId: f.bot.id, operationId: "restart-work", title: "Synthetic", goal: "Finish work" },
+        { taskId: receipt.taskId!, callId: "create", key: "create" }
+      )
+      f.store.settle(receipt.taskId!, "completed", null, "Work admitted")
+      expect(work.task.state).toBe("queued")
+      expect(f.store.nextQueued([])?.id).toBe(work.task.id)
+
+      const reopened = new BotStore(f.db)
+      reopened.recover()
+      while (reopened.im.recoverInterruptedBatch()) {}
+      expect(reopened.getTask(work.task.id).state).toBe("interrupted")
+      expect(reopened.pendingTasksForThread(work.work.threadId)).toEqual([])
+      if (kind === "dm") {
+        const outbox = f.db.exec("SELECT task_id,message FROM bot_reply_outbox")[0].values
+        expect(outbox).toHaveLength(1)
+        expect(outbox[0][0]).toBe(work.task.id)
+        expect(JSON.parse(String(outbox[0][1]))).toMatchObject({
+          executionState: "interrupted",
+          pendingExecution: false
+        })
+        reopened.flushReplies()
+        const reports = reopened
+          .recentTasks()
+          .filter(
+            (task) =>
+              task.origin.kind === "work_result" && task.origin.executionTaskId === work.task.id
+          )
+        expect(reports).toHaveLength(1)
+        reopened.recover()
+        while (reopened.im.recoverInterruptedBatch()) {}
+        reopened.flushReplies()
+        expect(
+          reopened
+            .recentTasks()
+            .filter(
+              (task) =>
+                task.origin.kind === "work_result" && task.origin.executionTaskId === work.task.id
+            )
+        ).toHaveLength(1)
+        expect(
+          f.db
+            .exec("SELECT source_task_id FROM bot_im_outbox")[0]
+            .values.filter(([id]) => id === work.task.id)
+        ).toHaveLength(0)
+      } else {
+        expect(
+          f.db
+            .exec("SELECT source_task_id FROM bot_im_outbox")[0]
+            .values.filter(([id]) => id === work.task.id)
+        ).toHaveLength(1)
+        reopened.recover()
+        while (reopened.im.recoverInterruptedBatch()) {}
+        expect(
+          f.db
+            .exec("SELECT source_task_id FROM bot_im_outbox")[0]
+            .values.filter(([id]) => id === work.task.id)
+        ).toHaveLength(1)
+      }
+      expect(f.calls).toHaveLength(0)
+      expect(f.errors).toEqual([])
+    }
+  )
+
+  it("preserves queued App, mock and separately authorized local IM work on restart", async () => {
+    const f = fixture(),
+      binding = await f.binding("group")
+    f.service.stop()
+    await f.host.stop()
+    const input = f.event(binding, "local-work", "Create work"),
+      event = f.store.imGateway.receive("realm", "owner", input)
+    f.store.im.setOnline(f.bot.id, event.bindingId, true)
+    f.store.imGateway.settle(event.id, "active", undefined, Date.now() + 90000)
+    const receipt = f.store.im.inject({
+      simulation: true,
+      bindingId: event.bindingId,
+      eventId: event.id,
+      messageId: input.event.platformMessageId,
+      senderId: input.route.senderId,
+      text: input.event.message.text,
+      mentionsBotIds: [f.bot.id]
+    })
+    f.store.imGateway.settle(event.id, "active", receipt.taskId!)
+    f.store.transition(receipt.taskId!, "running")
+    const work = f.store.createWork(
+      { botId: f.bot.id, operationId: "local-work", title: "Synthetic", goal: "Finish work" },
+      { taskId: receipt.taskId!, callId: "create", key: "create" }
+    )
+    f.store.settle(receipt.taskId!, "completed", null, "Work admitted")
+    f.store.transition(work.task.id, "running")
+    f.store.settle(work.task.id, "completed", null, "First part done")
+    const local = f.store.enqueue({
+      botId: f.bot.id,
+      workId: work.work.id,
+      requestId: "local-followup",
+      message: "Continue here"
+    })
+    f.store.transition(local.id, "running")
+    const localChild = f.store.sendWork(
+      { taskId: local.id, callId: "local-edit", key: "local-edit" },
+      work.work.id,
+      "Continue the local request"
+    )
+    f.store.settle(local.id, "completed", null, "Followup admitted")
+    const localQueued = f.store.enqueue({
+      botId: f.bot.id,
+      workId: work.work.id,
+      requestId: "local-queued",
+      message: "Keep queued"
+    })
+    const app = f.store.enqueue({
+        botId: f.bot.id,
+        requestId: "app-queued",
+        message: "App queued"
+      }),
+      checkpoint = f.store.enqueue(
+        { botId: f.bot.id, requestId: "checkpoint", message: "Original long task checkpoint" },
+        { kind: "schedule", scheduleId: "synthetic-schedule" }
+      )
+    f.store.transition(checkpoint.id, "running")
+    f.store.deferTask(checkpoint.id, "synthetic-checkpoint")
+    const mockBinding = f.store.mock.create({
+        simulation: true,
+        botId: f.bot.id,
+        operationId: "mock",
+        kind: "dm",
+        channelKey: "mock",
+        label: "Synthetic",
+        allowedSenderIds: ["alice"]
+      }),
+      mock = f.store.mock.inject({
+        simulation: true,
+        bindingId: mockBinding.id,
+        eventId: "mock-event",
+        messageId: "mock-message",
+        senderId: "alice",
+        text: "Mock queued",
+        mentionsBotIds: []
+      })
+    const localIds = [localChild.id, localQueued.id]
+    expect(
+      f.db.exec("SELECT task_id FROM bot_im_local_execution")[0].values.map(([id]) => id)
+    ).toEqual(expect.arrayContaining(localIds))
+
+    const reopened = new BotStore(f.db)
+    reopened.recover()
+    reopened.im.setOnline(f.bot.id, event.bindingId, true)
+    while (reopened.im.recoverInterruptedBatch()) {}
+    while (reopened.mock.recoverInterruptedBatch()) {}
+    for (const id of [app.id, mock.taskId!, ...localIds])
+      expect(reopened.getTask(id).state).toBe("queued")
+    for (const id of localIds)
+      expect(reopened.im.execution(reopened.getTask(id))?.source.transport).toBe("im")
+    expect(reopened.getTask(checkpoint.id).state).toBe("interrupted")
+    expect(reopened.imGateway.event(event.id)?.state).toBe("unknown")
+    const executed: string[] = [],
+      host = new LocalBotHost(reopened, {
+        onAvailable: () => () => {},
+        acquire: (_bot, task) => ({
+          release() {},
+          execute: async () => {
+            executed.push(task.id)
+            if (task.mockSource) reopened.external(task.mockSource).execution(task)
+            return { state: "completed", result: "Synthetic completed" }
+          }
+        })
+      })
+    try {
+      for (const id of [app.id, mock.taskId!, ...localIds]) {
+        await eventually(() => reopened.getTask(id).state === "completed")
+        expect(executed.filter((taskId) => taskId === id)).toHaveLength(1)
+      }
+      expect(executed).not.toContain(checkpoint.id)
+      expect(executed).not.toContain(receipt.taskId)
+      expect(executed).not.toContain(work.task.id)
+    } finally {
+      await host.stop()
+    }
+    expect(f.calls).toHaveLength(0)
+    expect(f.client.acquireBotPermit).not.toHaveBeenCalled()
+    expect(f.errors).toEqual([])
+  })
+
+  it("reports a queued personal work cancellation to the App after its IM binding is revoked", async () => {
+    const f = fixture(),
+      dm = await f.binding("dm"),
+      input = f.event(dm, "revoke-queued-work", "create")
+    const event = f.store.imGateway.receive("realm", "owner", input)
+    f.store.imGateway.settle(event.id, "active", undefined, Date.now() + 90000)
+    const parent = f.store.im.inject({
+      simulation: true,
+      bindingId: event.bindingId,
+      eventId: event.id,
+      messageId: input.event.platformMessageId,
+      senderId: input.route.senderId,
+      text: "create",
+      mentionsBotIds: [f.bot.id]
+    })
+    f.store.imGateway.settle(event.id, "active", parent.taskId!)
+    f.store.transition(parent.taskId!, "running")
+    const work = f.store.createWork(
+      { botId: f.bot.id, operationId: "cancel-work", title: "通知", goal: "notice" },
+      { taskId: parent.taskId!, callId: "create", key: "create" }
+    )
+    await f.service.revoke(f.bot.id, dm.id, dm.version)
+    expect(f.store.getTask(work.task.id).state).toBe("cancelled")
+    f.store.flushReplies()
+    const reports = f.store
+      .recentTasks()
+      .filter(
+        (task) => task.origin.kind === "work_result" && task.origin.executionTaskId === work.task.id
+      )
+    expect(reports).toHaveLength(1)
+    expect(JSON.parse(reports[0].message)).toMatchObject({ executionState: "cancelled", title: "原任务",
+      requestContext: { messages: [], messagesOmitted: true } })
+    expect(f.client.submitReply).not.toHaveBeenCalled()
+  })
+
+  it("keeps the same outbox identity on recovery and mirrors one physical reply for steered App inputs", async () => {
+    const f = fixture(),
+      dm = await f.binding("dm")
+    const first = f.store.enqueue({ botId: f.bot.id, requestId: "one", message: "one" })
+    f.store.transition(first.id, "running")
+    const second = f.store.enqueue({ botId: f.bot.id, requestId: "two", message: "two" })
+    f.store.injectIntoRun(second.id, first.id)
+    f.store.settleRun(first.id, [second.id], "completed", null, "combined reply")
+    expect(f.service.history(f.bot.id, dm.id).items).toHaveLength(1)
+    const queued = f.store.im.beginDelivery()!
+    expect(queued.text).toBe("combined reply")
+    const reopened = new BotStore(f.db)
+    reopened.recover()
+    expect(reopened.im.beginDelivery()).toBeNull()
+    reopened.im.setOnline(f.bot.id, queued.bindingId, true)
+    const retry = reopened.im.beginDelivery()!
+    expect(retry.id).toBe(queued.id)
+    reopened.im.delivered(retry.id, "accepted")
+    reopened.settle(first.id, "completed", null, "duplicate settlement")
+    expect(reopened.im.beginDelivery()).toBeNull()
+    expect(f.calls).toHaveLength(0)
+  })
+
+  it("rejects an owner identity/realm switch and personal proofs on group or mock bindings", async () => {
+    const f = fixture(),
+      dm = await f.binding("dm"),
+      group = await f.binding()
+    expect(() =>
+      f.store.imGateway.register("realm", "someone-else", { ...dm, id: "other" })
+    ).toThrow("另一登录身份")
+    expect(() =>
+      f.store.imGateway.register("other-realm", "owner", { ...dm, id: "other" })
+    ).toThrow("另一登录身份")
+    await f.service.receive(f.event(group))
+    await eventually(() => f.calls.length === 1)
+    const inbound = f.calls[0].mockSource!
+    assert.ok(inbound.eventId)
+    const forged = { ...inbound, personal: true as const, audienceKey: "desktop" }
+    expect(() => f.store.im.validateSource(forged, f.bot.id)).toThrow("未经身份验证")
+    expect(() => parseBotMockSource(forged)).toThrow("真实 IM")
+    expect(f.errors).toEqual([])
+  })
+
+  it.each(["member-a", "employee:42"])(
+    "creates, revises and continues work with frozen sender %s",
+    async (sender) => {
+      let workId = ""
+      const f = fixture(async (task, host) => {
+        if (task.workId) return { state: "completed", result: `notice:${task.message}` }
+        const source = { taskId: task.id, callId: task.id, key: task.id }
+        if (task.message === "create") {
+          workId = (
+            await host.createWork(
+              { botId: task.botId, operationId: task.id, title: "周末通知", goal: "Write notice" },
+              source
+            )
+          ).work.id
+        } else if (task.message === "revise") host.sendWork(source, workId, "Change to Sunday")
+        else if (task.message === "complete" || task.message === "continue")
+          await host.changeWorkFromTool(
+            source,
+            workId,
+            host.getWork(task.botId, workId).version,
+            task.message
+          )
+        return { state: "completed", result: `handled:${task.message}` }
+      })
+      const b = await f.binding()
+      const event = (id: string) => {
+        const input = f.event(b, id, id)
+        input.route.senderId = sender
+        return input
+      }
+      await f.service.receive(event("create"))
+      await eventually(
+        () => f.calls.length === 2 && f.store.recentTasks().every((t) => t.state === "completed")
+      )
+      await f.service.receive(event("revise"))
+      await eventually(
+        () => f.calls.length === 4 && f.store.recentTasks().every((t) => t.state === "completed")
+      )
+      await f.service.receive(event("complete"))
+      await eventually(() => f.host.getWork(f.bot.id, workId).state === "completed")
+      await f.service.receive(event("continue"))
+      await eventually(() => f.host.getWork(f.bot.id, workId).state === "active")
+      expect(f.host.listWorks(f.bot.id).items).toHaveLength(0)
+      expect(
+        f.host
+          .imConversationWorks(f.bot.id, f.host.getWork(f.bot.id, workId).source!.bindingId)
+          .items.map((item) => item.id)
+      ).toEqual([workId])
+      expect(f.calls.filter((t) => t.workId).map((t) => t.workId)).toEqual([workId, workId])
+      expect(f.host.getWork(f.bot.id, workId).source?.transport).toBe("im")
+      expect(f.host.getWork(f.bot.id, workId).source?.senderId).toBe(
+        botImScopeId("realm", "owner", sender)
+      )
+      for (const task of f.calls.filter((task) => task.mockSource)) {
+        const saved = f.store.getTask(task.id)
+        expect(saved.mockSource?.senderId).toBe(botImScopeId("realm", "owner", sender))
+        expect(f.store.im.validateSource(saved.mockSource!, f.bot.id, false)).toEqual(
+          saved.mockSource
+        )
+      }
+      expect(f.errors).toEqual([])
+    }
+  )
+
+  it("rejects forged routes and changed duplicate contents before running the model", async () => {
+    const f = fixture(),
+      b = await f.binding(),
+      input = f.event(b)
+    await f.service.receive({ ...input, route: { ...input.route, bindingId: "other" } })
+    expect(f.calls).toHaveLength(0)
+    await f.service.receive(input)
+    await eventually(() => f.calls.length === 1)
+    await f.service.receive({
+      ...input,
+      event: { ...input.event, message: { type: "text", text: "Changed" } }
+    })
+    expect(f.calls).toHaveLength(1)
+    expect(
+      f.client.sendAcknowledgement.mock.calls.filter(([ack]) => ack.type === "failed")
+    ).toHaveLength(2)
+  })
+
+  it("does not create a model turn without a granted execution permit", async () => {
+    const f = fixture(),
+      b = await f.binding()
+    f.client.acquireBotPermit.mockResolvedValueOnce({
+      status: "denied",
+      reasonCode: "LEASE_REVOKED"
+    })
+    const input = f.event(b)
+    await f.service.receive(input)
+    await f.service.receive(input)
+    expect(f.calls).toHaveLength(0)
+    expect(f.store.recentTasks()).toHaveLength(0)
+    expect(f.client.acquireBotPermit).toHaveBeenCalledTimes(1)
+    expect(f.store.imGateway.event(botImScopeId("realm", "owner", "event"))?.state).toBe("unknown")
+  })
+
+  it.each(["list", "periodic sync"] as const)(
+    "wakes an idle Host's authorized local IM work after reconnect by %s",
+    async (reconnect) => {
+      let available = false
+      const f = fixture(undefined, undefined, () => available),
+        binding = await f.binding(),
+        input = f.event(binding, "reconnect-work", "Create work")
+      await f.service.receive(input)
+      const event = f.store.imGateway.event(botImScopeId("realm", "owner", input.event.eventId))!
+      f.store.transition(event.taskId!, "running")
+      const work = f.store.createWork(
+        { botId: f.bot.id, operationId: "reconnect-work", title: "Synthetic", goal: "Text work" },
+        { taskId: event.taskId!, callId: "create", key: "create" }
+      )
+      f.store.settle(event.taskId!, "completed", null, "Work admitted")
+      f.store.transition(work.task.id, "running")
+      f.store.settle(work.task.id, "completed", null, "Initial part done")
+      f.service.disconnected()
+      const continuation = f.host.send({
+        botId: f.bot.id,
+        workId: work.work.id,
+        requestId: "reconnect-local-followup",
+        message: "Continue this work"
+      })
+      available = true
+      // Drain the send wake while offline. Reconnect must wake this already-idle Host itself.
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      expect(f.store.getTask(continuation.id).state).toBe("queued")
+      expect(f.store.im.get(f.bot.id, event.bindingId).online).toBe(false)
+      expect(f.calls).toEqual([])
+      expect(f.db.exec("SELECT task_id FROM bot_im_local_execution")[0].values).toContainEqual([
+        continuation.id
+      ])
+      expect(f.store.imGateway.event(event.id)?.state).toBe("unknown")
+      if (reconnect === "list") await f.service.list(f.bot.id)
+      // The other branch uses the service's existing timer, not an unrelated Host action.
+      await eventually(() => f.store.getTask(continuation.id).state === "completed")
+      expect(f.calls.map((task) => task.id)).toEqual([continuation.id])
+      expect(f.store.im.get(f.bot.id, event.bindingId).online).toBe(true)
+      expect(f.store.imGateway.event(event.id)?.state).toBe("unknown")
+      expect(f.client.acquireBotPermit).toHaveBeenCalledTimes(1)
+      expect(f.errors).toEqual([])
+    }
+  )
+
+  it.each(["unknown", "expired", "revoked"] as const)(
+    "does not replay an external queued event with %s authority on reconnect",
+    async (authority) => {
+      let available = false
+      const f = fixture(undefined, undefined, () => available),
+        binding = await f.binding(),
+        input = f.event(binding, `reconnect-${authority}`)
+      await f.service.receive(input)
+      const event = f.store.imGateway.event(botImScopeId("realm", "owner", input.event.eventId))!
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      expect(f.store.getTask(event.taskId!).state).toBe("queued")
+      if (authority === "unknown") await f.service.leaseRevoked(input.event.eventId)
+      else if (authority === "expired")
+        f.db.run("UPDATE bot_im_ingress SET expires_at=0 WHERE id=?", [event.id])
+      else await f.service.revoke(f.bot.id, binding.id, binding.version)
+      f.store.im.setAllOffline()
+      available = true
+      await f.service.list(f.bot.id)
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      expect(f.calls).toEqual([])
+      expect(f.store.getTask(event.taskId!).state).not.toBe("running")
+      expect(f.client.acquireBotPermit).toHaveBeenCalledTimes(1)
+      expect(
+        f.db.exec("SELECT task_id FROM bot_im_local_execution").flatMap((r) => r.values)
+      ).toEqual([])
+      expect(f.errors).toEqual([])
+    }
+  )
+
+  it("does not notify or repump unchanged active IM registrations", async () => {
+    const available = vi.fn(() => false),
+      f = fixture(undefined, undefined, available),
+      binding = await f.binding()
+    await f.service.receive(f.event(binding, "unchanged-registration"))
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    const attempts = available.mock.calls.length,
+      changed = vi.fn(),
+      unsubscribe = f.host.subscribe(changed)
+    try {
+      await f.service.list(f.bot.id)
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      expect(available).toHaveBeenCalledTimes(attempts)
+      expect(changed).not.toHaveBeenCalled()
+      f.store.im.setAllOffline()
+      await f.service.list(f.bot.id)
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      expect(available.mock.calls.length).toBeGreaterThan(attempts)
+      expect(changed).toHaveBeenCalledTimes(1)
+      await f.service.revoke(f.bot.id, binding.id, binding.version)
+      expect(() =>
+        f.host.setImOnline(f.bot.id, botImScopeId("realm", "owner", binding.id), true)
+      ).toThrow("绑定已撤销")
+      expect(f.calls).toEqual([])
+      expect(f.errors).toEqual([])
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it("keeps ordinary App and mock scheduling independent of IM reconnect", async () => {
+    const f = fixture(),
+      binding = await f.binding()
+    f.service.disconnected()
+    const app = f.host.send({
+      botId: f.bot.id,
+      requestId: "ordinary-app-offline",
+      message: "An ordinary local task"
+    })
+    const mock = f.host.createMockBinding({
+      simulation: true,
+      botId: f.bot.id,
+      operationId: "ordinary-mock-offline",
+      kind: "dm",
+      channelKey: "mock-reconnect-control",
+      label: "Synthetic mock",
+      allowedSenderIds: ["alice"]
+    })
+    const accepted = f.host.injectMockEvent({
+      simulation: true,
+      bindingId: mock.id,
+      eventId: "ordinary-mock-event",
+      messageId: "ordinary-mock-message",
+      senderId: "alice",
+      text: "An ordinary mock task",
+      mentionsBotIds: []
+    })
+    await eventually(() =>
+      [app.id, accepted.taskId!].every((id) => f.store.getTask(id).state === "completed")
+    )
+    const imBindingId = botImScopeId("realm", "owner", binding.id)
+    expect(f.store.im.get(f.bot.id, imBindingId).online).toBe(false)
+    expect(new Set(f.calls.map((task) => task.id))).toEqual(new Set([app.id, accepted.taskId!]))
+    expect(f.client.acquireBotPermit).not.toHaveBeenCalled()
+    expect(f.errors).toEqual([])
+  })
+
+  it("stops running work on disconnect and never resumes it on a duplicate delivery", async () => {
+    const f = fixture(
+        async (_task, _host, signal) =>
+          new Promise((resolve) => {
+            signal.addEventListener("abort", () => resolve({ state: "failed", error: "aborted" }), {
+              once: true
+            })
+          })
+      ),
+      b = await f.binding(),
+      input = f.event(b)
+    await f.service.receive(input)
+    await eventually(() => f.calls.length === 1)
+    f.service.disconnected()
+    await eventually(() => f.store.recentTasks().every((t) => t.state !== "running"))
+    await f.service.list(f.bot.id)
+    await f.service.receive({ ...input, event: { ...input.event, redelivered: true } })
+    expect(f.calls).toHaveLength(1)
+    expect(f.store.imGateway.event(botImScopeId("realm", "owner", "event"))?.state).toBe("unknown")
+  })
+
+  it("checks the live permit again before tools and blocks pending replies after revoke", async () => {
+    const f = fixture(
+        async (_task, _host, signal) =>
+          new Promise((resolve) => {
+            signal.addEventListener("abort", () => resolve({ state: "failed", error: "aborted" }), {
+              once: true
+            })
+          })
+      ),
+      b = await f.binding()
+    await f.service.receive(f.event(b))
+    await eventually(() => f.calls.length === 1)
+    f.db.run("UPDATE bot_im_ingress SET expires_at=0")
+    expect(() => f.host.workToolSource(f.calls[0].id)).toThrow("执行许可")
+    await f.service.revoke(f.bot.id, b.id, 1)
+    await eventually(() => f.store.recentTasks().every((t) => t.state !== "running"))
+    expect(f.store.im.beginDelivery()).toBeNull()
+    const history = f.service.history(f.bot.id, b.id)
+    expect(history.items.filter((i) => i.kind === "bot").every((i) => i.state === "blocked")).toBe(
+      true
+    )
+    expect(f.client.submitReply).not.toHaveBeenCalled()
+  })
+
+  it("does not let a delayed create result downgrade a consumed binding", async () => {
+    const f = fixture(),
+      b = await f.binding()
+    f.store.imGateway.register("realm", "owner", { ...b, state: "pending", conversationKey: null })
+    const id = botImScopeId("realm", "owner", b.id)
+    expect(f.store.imGateway.binding(id)?.binding.state).toBe("active")
+    await f.service.revoke(f.bot.id, b.id, 1)
+    f.store.imGateway.register("realm", "owner", b)
+    expect(f.store.imGateway.binding(id)?.binding.state).toBe("revoked")
+  })
+
+  it("keeps completed events terminal when a late lease revocation arrives", async () => {
+    const f = fixture(),
+      b = await f.binding(),
+      input = f.event(b)
+    await f.service.receive(input)
+    const id = botImScopeId("realm", "owner", "event")
+    await eventually(() => f.store.imGateway.event(id)?.state === "completed")
+    expect(await f.service.leaseRevoked("event")).toBe(true)
+    await f.service.receive({ ...input, event: { ...input.event, redelivered: true } })
+    expect(f.store.imGateway.event(id)?.state).toBe("completed")
+    expect(f.calls).toHaveLength(1)
+    expect(f.client.sendAcknowledgement.mock.calls.at(-1)?.[0].type).toBe("completed")
+  })
+
+  it("retains an uncertain platform result without retrying or claiming delivery", async () => {
+    const f = fixture(),
+      b = await f.binding()
+    f.client.submitReply.mockResolvedValue({ state: "platform_unknown" })
+    await f.service.receive(f.event(b))
+    await eventually(() =>
+      f.service
+        .history(f.bot.id, b.id)
+        .items.some((item) => item.kind === "bot" && item.state === "unknown")
+    )
+    expect(f.store.im.beginDelivery()).toBeNull()
+    expect(f.client.submitReply).toHaveBeenCalledTimes(1)
+  })
+})
+
+it("moves an explicitly bound personal Bot between gateways while retaining history and delivery scope", async () => {
+  const f = fixture()
+  const old = await f.binding("dm")
+  await f.service.receive(f.event(old, "before-switch"))
+  await eventually(() => f.calls.length === 1 && f.store.recentTasks()[0].state === "completed")
+  f.service.stop()
+  f.remote.clear()
+  const production = new BotImChannelService(f.client, "production-realm", () => f.host)
+  try {
+    const pending = await production.create(f.bot.id, "dm", "production-create")
+    const active = { ...pending, state: "active" as const, conversationKey: "production-dm" }
+    f.remote.set(active.id, active)
+    expect((await production.list(f.bot.id)).items[0].localError).toBeUndefined()
+    await production.receive(f.event(active, "after-switch"))
+    await eventually(() => f.calls.length === 2)
+    expect(f.calls[1].threadId).toBe(f.calls[0].threadId)
+    expect(f.calls[1].mockSource?.personal).toBe(true)
+    expect(f.store.imGateway.isPersonalBinding(botImScopeId("realm", "owner", old.id))).toBe(true)
+    expect(f.store.imGateway.personalBinding(f.bot.id, Date.now())?.realm).toBe("production-realm")
+    expect(
+      f.store.im.history(f.bot.id, botImScopeId("realm", "owner", old.id)).items.length
+    ).toBeGreaterThan(0)
+    expect(f.store.recentTasks().some((task) => task.id === f.calls[0].id)).toBe(true)
+    expect(f.errors).toEqual([])
+  } finally {
+    production.stop()
+  }
+})
+
+it("keeps a conflicting remote binding manageable without disconnecting the shared transport", async () => {
+  const f = fixture()
+  await f.binding("dm")
+  f.service.stop()
+  const other = new BotImChannelService(
+    {
+      ...f.client,
+      getStatus: () =>
+        ({ principalId: "someone-else" }) as ReturnType<BotImGatewayClient["getStatus"]>
+    },
+    "realm",
+    () => f.host,
+    (e) => f.errors.push(e)
+  )
+  try {
+    const pending = await other.create(f.bot.id, "dm", "other-create")
+    const active = { ...pending, state: "active" as const, conversationKey: "other-dm" }
+    f.remote.clear()
+    f.remote.set(active.id, active)
+    expect((await other.list(f.bot.id)).items[0].localError).toContain("另一登录身份")
+    // No authorisation from the old owner's private transcript is granted.
+    const input = f.event(active, "other-message")
+    input.event.principalId = "someone-else"
+    await expect(other.receive(input)).resolves.toBeUndefined()
+    expect(f.calls).toHaveLength(0)
+    expect(f.client.sendAcknowledgement.mock.calls.at(-1)?.[0].type).toBe("failed")
+    expect((await other.revoke(f.bot.id, active.id, active.version)).state).toBe("revoked")
+  } finally {
+    other.stop()
+  }
+})
+
+it("replaces only the selected binding using existing create and revoke commands", async () => {
+  const f = fixture()
+  const dm = await f.binding("dm"),
+    group = await f.binding()
+  await f.service.receive(f.event(dm, "old-bot-message"))
+  await eventually(
+    () => f.calls.length === 1 && f.store.getTask(f.calls[0].id).state === "completed"
+  )
+  const next = f.store.create({
+    name: "Next Bot",
+    instructions: "Help",
+    color: "#123456",
+    modelRef: null
+  })
+  expect((await f.service.replacementTargets("dm")).map((item) => item.id)).toEqual([dm.id])
+  expect((await f.service.replacementTargets("group")).map((item) => item.id)).toEqual([group.id])
+  const count = f.client.botBindingCommand.mock.calls.length
+  const result = await f.service.create(next.id, "dm", "replace-dm", {
+    botId: f.bot.id,
+    bindingId: dm.id,
+    version: dm.version
+  })
+  const changes = f.client.botBindingCommand.mock.calls
+    .slice(count)
+    .map(([input]) => input.action)
+    .filter((action) => action !== "list")
+  expect(changes).toEqual(["create", "revoke"])
+  expect(result.state).toBe("pending")
+  expect(f.remote.get(dm.id)?.state).toBe("revoked")
+  expect(f.remote.get(group.id)?.state).toBe("active")
+  await expect(
+    f.service.create(next.id, "dm", "wrong-kind", {
+      botId: f.bot.id,
+      bindingId: group.id,
+      version: group.version
+    })
+  ).rejects.toThrow("原接入已变化")
+  expect(f.remote.get(group.id)?.state).toBe("active")
+  // Simulate consuming the generated code through the unchanged gateway callback.
+  const active = { ...result, state: "active" as const, conversationKey: "next-bot-dm" }
+  delete active.instruction
+  f.remote.set(active.id, active)
+  await f.service.list(next.id)
+  const message = f.event(active, "new-bot-message")
+  message.route.botId = next.id
+  await f.service.receive(message)
+  await eventually(
+    () => f.calls.length === 2 && f.store.getTask(f.calls[1].id).state === "completed"
+  )
+  expect(f.calls[1]).toMatchObject({
+    botId: next.id,
+    threadId: next.threadId,
+    mockSource: { personal: true }
+  })
+  expect(f.service.history(f.bot.id, dm.id).items.some((item) => item.kind === "user")).toBe(true)
+  await f.service.receive(f.event(dm, "late-old-route"))
+  expect(f.calls).toHaveLength(2)
+  expect(f.store.imGateway.personalBinding(f.bot.id, Date.now())).toBeNull()
+  expect(f.store.imGateway.personalBinding(next.id, Date.now())?.binding.id).toBe(active.id)
+  expect(f.errors).toEqual([])
+})
+
+it("does not revoke on failed proof creation and retries a lost revoke response idempotently", async () => {
+  const f = fixture()
+  const dm = await f.binding("dm")
+  const next = f.store.create({
+    name: "Next Bot",
+    instructions: "Help",
+    color: "#123456",
+    modelRef: null
+  })
+  const replace = { botId: f.bot.id, bindingId: dm.id, version: dm.version }
+  const original = f.client.botBindingCommand.getMockImplementation()!
+  let proof: BotImBinding | undefined
+  let failCreate = true,
+    loseRevoke = true
+  f.client.botBindingCommand.mockImplementation(async (command, id) => {
+    if (command.action === "create") {
+      if (failCreate) {
+        failCreate = false
+        throw new Error("create offline")
+      }
+      if (proof) return proof
+      proof = (await original(command, id)) as BotImBinding
+      return proof
+    }
+    const result = await original(command, id)
+    if (command.action === "revoke" && loseRevoke) {
+      loseRevoke = false
+      throw new Error("lost revoke response")
+    }
+    return result
+  })
+  await expect(f.service.create(next.id, "dm", "stable", replace)).rejects.toThrow("create offline")
+  expect(f.remote.get(dm.id)?.state).toBe("active")
+  await expect(f.service.create(next.id, "dm", "stable", replace)).rejects.toThrow(
+    "lost revoke response"
+  )
+  expect(f.remote.get(dm.id)?.state).toBe("revoked")
+  const retry = await f.service.create(next.id, "dm", "stable", replace)
+  expect(retry.id).toBe(proof!.id)
+  expect(retry.instruction).toBeTruthy()
+})
+
+it("stops the replaced IM route without stopping a different group", async () => {
+  const f = fixture(
+    async (_task, _host, signal) => {
+      await new Promise<void>((resolve) =>
+        signal.addEventListener("abort", () => resolve(), { once: true })
+      )
+      return { state: "completed", result: "done" }
+    },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    Infinity
+  )
+  const dm = await f.binding("dm"),
+    group = await f.binding()
+  await f.service.receive(f.event(dm, "replace-running-dm"))
+  await f.service.receive(f.event(group, "keep-running-group"))
+  await eventually(() => f.calls.length === 2)
+  const oldTask = f.calls.find(
+    (task) => task.mockSource?.bindingId === botImScopeId("realm", "owner", dm.id)
+  )!
+  const groupTask = f.calls.find(
+    (task) => task.mockSource?.bindingId === botImScopeId("realm", "owner", group.id)
+  )!
+  const next = f.store.create({
+    name: "Next Bot",
+    instructions: "Help",
+    color: "#123456",
+    modelRef: null
+  })
+  await f.service.create(next.id, "dm", "switch-running", {
+    botId: f.bot.id,
+    bindingId: dm.id,
+    version: dm.version
+  })
+  await eventually(() => f.store.getTask(oldTask.id).state === "cancelled")
+  expect(f.store.getTask(groupTask.id).state).toBe("running")
+  expect(f.store.imGateway.personalBinding(f.bot.id, Date.now())).toBeNull()
+})
+
+it("automatically replaces private bindings after a lost revoke reply and service restart", async () => {
+  const f = fixture(),
+    dm = await f.binding("dm"),
+    group = await f.binding()
+  const next = f.store.create({ name: "Next", instructions: "", color: "#123456", modelRef: null })
+  const original = f.client.botBindingCommand.getMockImplementation()!
+  let lose = true
+  f.client.botBindingCommand.mockImplementation(async (command, operationId) => {
+    const value = await original(command, operationId)
+    if (command.action === "revoke" && lose) {
+      lose = false
+      throw new Error("lost response")
+    }
+    return value
+  })
+  await expect(f.service.create(next.id, "dm", "restart-private")).rejects.toThrow("lost response")
+  const pending = [...f.remote.values()].find((binding) => binding.botId === next.id)!
+  expect(
+    new BotImGatewayStore(f.db).replacement(botImScopeId("realm", "owner", pending.id))
+  ).toEqual({ botId: f.bot.id, bindingId: dm.id, version: dm.version })
+  f.service.stop()
+  const restarted = new BotImChannelService(f.client, "realm", () => f.host)
+  try {
+    const retried = await restarted.create(next.id, "dm", "restart-private")
+    expect(retried).toMatchObject({ id: pending.id, state: "pending", replacedBindingId: dm.id })
+    expect(f.remote.get(dm.id)?.state).toBe("revoked")
+    expect(f.remote.get(group.id)?.state).toBe("active")
+  } finally {
+    restarted.stop()
+  }
+})
+
+it("does not let an old replacement retry revoke a newer private Bot binding", async () => {
+  const f = fixture(),
+    dm = await f.binding("dm")
+  const next = f.store.create({ name: "Next", instructions: "", color: "#123456", modelRef: null })
+  const newest = f.store.create({
+    name: "Newest",
+    instructions: "",
+    color: "#123456",
+    modelRef: null
+  })
+  const pending = await f.service.create(next.id, "dm", "old-attempt")
+  expect(pending.replacedBindingId).toBe(dm.id)
+  const latest = await f.service.create(newest.id, "dm", "new-attempt")
+  f.remote.set(latest.id, { ...latest, state: "active", conversationKey: "newest-private" })
+  await f.service.list(newest.id)
+  await expect(f.service.create(next.id, "dm", "old-attempt")).rejects.toThrow("私聊接入已变化")
+  expect(f.remote.get(latest.id)?.state).toBe("active")
+  expect(f.remote.get(pending.id)?.state).toBe("pending")
+})
+
+
+it.each(["success", "failure", "restart"] as const)("settles a revoked IM command without blocking unrelated Bots (%s)", async (mode) => {
+  let lifecycle: ReturnType<LocalBotHost["commandLifecycle"]> | undefined
+  let threadId = ""
+  const f = fixture(async (task, host) => {
+    if (task.origin.kind === "mock") {
+      threadId = task.threadId
+      lifecycle = host.commandLifecycle(task.id)
+      lifecycle.accepted({ id: "revoked-command", threadId, command: "synthetic background", cwd: "/synthetic", startedAt: Date.now() })
+    }
+    return { state: "completed", result: "Started" }
+  })
+  const binding = await f.binding()
+  await f.service.receive(f.event(binding, "revoked-command-event"))
+  await eventually(() => f.calls.length === 1 && f.store.getTask(f.calls[0].id).state === "completed")
+  await f.service.revoke(f.bot.id, binding.id, binding.version)
+  if (mode === "restart") expect(() => f.store.recover()).not.toThrow()
+  else expect(() => lifecycle!.settled({ id: "revoked-command", threadId, exitCode: mode === "failure" ? 7 : 0, output: "actual result", cancelled: false, truncated: false })).not.toThrow()
+  expect(f.store.activeCommandThreads()).not.toContain(threadId)
+  expect(f.store.recentTasks().filter(t => t.origin.kind === "notification")).toHaveLength(0)
+  const other = f.host.create({ name: "Unaffected", instructions: "", color: "#123456", modelRef: null })
+  const next = f.host.send({ botId: other.id, requestId: "after-revoke", message: "Hello" })
+  await eventually(() => f.store.getTask(next.id).state === "completed")
+  expect(f.errors).toEqual([])
+})
+
+it.each([false, true])("defers an IM completion at full Bot capacity and rechecks revocation before admission (revoke=%s)", async revoke => {
+  let available = true
+  let lifecycle: ReturnType<LocalBotHost["commandLifecycle"]> | undefined
+  let source: BotTask | undefined
+  const f = fixture(async (task, host) => {
+    source = task
+    lifecycle = host.commandLifecycle(task.id)
+    lifecycle.accepted({ id: "capacity-im", threadId: task.threadId, command: "check", cwd: "/synthetic", startedAt: 1 })
+    return { state: "completed", result: "Started" }
+  }, undefined, () => available)
+  const binding = await f.binding()
+  await f.service.receive(f.event(binding, "capacity-source"))
+  await eventually(() => !!source && f.store.getTask(source.id).state === "completed")
+  available = false
+  const queued = Array.from({ length: 500 }, (_, i) => f.store.enqueue({ botId: f.bot.id, requestId: `capacity-${i}`, message: "Unrelated" }))
+  lifecycle!.settled({ id: "capacity-im", threadId: source!.threadId, exitCode: 7, output: "IM_FAILURE", cancelled: false, truncated: false })
+  expect(f.store.recentTasks().filter(t => t.origin.kind === "notification")).toHaveLength(0)
+  if (revoke) await f.service.revoke(f.bot.id, binding.id, binding.version)
+  f.store.transition(queued[0].id, "cancelled")
+  f.store.flushReplies()
+  const notices = f.store.recentTasks().filter(t => t.origin.kind === "notification")
+  expect(notices).toHaveLength(revoke ? 0 : 1)
+  if (!revoke) expect(notices[0]).toMatchObject({
+    threadId: source!.threadId, mockSource: source!.mockSource,
+    origin: { sourceTaskId: source!.id, commandSucceeded: false },
+    message: expect.stringContaining("IM_FAILURE")
+  })
+  expect(f.errors).toEqual([])
+})
+
+it("rechecks saved unrelated results when IM revocation releases queued capacity", async () => {
+  const f = fixture(undefined, undefined, () => false)
+  const binding = await f.binding()
+  await f.service.receive(f.event(binding, "queued-capacity-owner"))
+  const external = f.store.recentTasks().find(t => t.origin.kind === "mock")!
+  const owner = f.store.create({ name: "Independent", instructions: "", color: "#123456", modelRef: null })
+  const task = f.store.enqueue({ botId: owner.id, requestId: "independent-source", message: "Run" })
+  f.store.transition(task.id, "running")
+  f.store.acceptCommand(task.id, { id: "independent-result", threadId: task.threadId, command: "check", cwd: "/synthetic", startedAt: 1 })
+  f.store.settle(task.id, "completed", null, "Started", undefined, true)
+  for (let i = 0; i < 499; i++) f.store.enqueue({ botId: f.bot.id, requestId: `unrelated-${i}`, message: "Later" })
+  f.store.settleCommand({ id: "independent-result", threadId: task.threadId, output: "UNRELATED_FAILURE", exitCode: 7, cancelled: false, truncated: false })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  expect(f.store.hasPendingCommandNotifications()).toBe(true)
+  f.host.revokeImBinding(f.bot.id, external.mockSource!.bindingId, external.mockSource!.grantVersion)
+  await eventually(() => f.store.recentTasks().some(t => t.origin.kind === "notification"))
+  expect(f.store.recentTasks().find(t => t.origin.kind === "notification")).toMatchObject({
+    botId: owner.id, threadId: task.threadId, state: "queued", message: expect.stringContaining("UNRELATED_FAILURE")
+  })
+  expect(f.errors).toEqual([])
+})
+
+it.each(["dm", "group"] as const)("delivers independent-work attachments only to their original %s", async (kind) => {
+  const root = await mkdtemp(join(tmpdir(), "im-work-file-"))
+  cleanups.push(() => rm(root, { recursive: true, force: true }))
+  const filePath = join(root, "任务成果.xlsx")
+  await writeFile(filePath, "verified task bytes")
+  const { snapshotBotDeliveryFile } = await import("./file-copy")
+  const file = { name: "任务成果.xlsx", filePath, ...await snapshotBotDeliveryFile(root, filePath, new AbortController().signal) }
+  const f = fixture(async (task, host) => {
+    if (task.workId) return { state: "completed", result: `任务文件已生成：${file.filePath}`, files: [file] }
+    if (task.origin.kind === "work_result") return { state: "completed", result: `任务已返回结果：${file.filePath}` }
+    await host.createWork({ botId: task.botId, operationId: task.id, title: "文件任务", goal: "生成表格" },
+      { taskId: task.id, callId: "create", key: "create" })
+    return { state: "completed", result: "已创建任务" }
+  })
+  const finished: string[] = [], routes: string[] = []
+  let offset = 0
+  Object.assign(f.client, {
+    supportsBotFiles: () => true,
+    supportsBotFileReceipts: () => true,
+    botFileCommand: async (request: import("../../shared/bots/im-file").BotImFileCommand) => {
+      if (request.action === "begin") { routes.push(request.conversationKey); offset = 0; return { state: "uploading", uploadId: request.deliveryId, offset } }
+      if (request.action === "chunk") { offset += Buffer.from(request.data, "base64").length; return { state: "uploading", uploadId: request.uploadId, offset } }
+      if (request.action === "status") return { state: "receipts", receipts: request.deliveries.map(item => ({ deliveryId: item.deliveryId, state: "sent", version: 1 })) }
+      if (request.action === "finish") finished.push(request.uploadId)
+      return { state: "accepted" }
+    }
+  })
+  const binding = await f.binding(kind)
+  await f.service.receive(f.event(binding, "file-work", "请生成文件"))
+  await eventually(() => finished.length === 1)
+  expect(routes).toEqual([binding.conversationKey])
+  expect(f.errors).toEqual([])
+  expect(f.calls.some(task => task.workId)).toBe(true)
+  // A result-summary round must not resend the original attachment.
+  await new Promise(resolve => setTimeout(resolve, 1100))
+  expect(finished).toHaveLength(1)
+  await (f.service as unknown as {checkFileReceipts():Promise<void>}).checkFileReceipts()
+  const attachmentEvents = f.store.telemetry.due(Number.MAX_SAFE_INTEGER)
+    .filter(row => row.event.eventName === BOT_EVENTS.attachmentSent)
+  expect(attachmentEvents).toHaveLength(1)
+  expect(attachmentEvents[0].event.properties).toMatchObject({
+    botId: f.bot.id,
+    botWorkId: f.calls.find(task => task.workId)!.workId,
+    botChannel: kind === "group" ? "zhaohu_group" : "zhaohu_private"
+  })
+  expect(f.client.submitReply.mock.calls.map(([reply]) => reply.message.content).join("\n")).not.toContain(root)
+  expect(await readFile(file.attachmentPath, "utf8")).toBe("verified task bytes")
+})
+
+it.each(["group", "dm", "mirror"] as const)("hides host paths in %s replies while retaining local attachment records", async (kind) => {
+  const file = { name: "hello.txt", filePath: String.raw`C:\Users\alice\.cmbcoworkagent\bots\workspaces\bot-id\hello.txt`, size: 3,
+    attachmentPath: join(tmpdir(), ".bot-deliveries", "a".repeat(64), "hello.txt") }
+  const text = `已创建：\`${file.filePath}\`，请查看附件。`
+  const f = fixture(async () => ({ state: "completed", result: text, files: [file] }))
+  const binding = await f.binding(kind === "group" ? "group" : "dm")
+  f.client.supportsMarkdownReplies.mockReturnValue(kind !== "dm")
+  const upload = vi.fn(async (_request: import("../../shared/bots/im-file").BotImFileCommand) => ({ state: "accepted" as const }))
+  Object.assign(f.client, { supportsBotFiles: () => true, botFileCommand: upload })
+  // Saved attachment references stay internal; the gateway only gets the name and bytes.
+  if (kind === "mirror") f.host.send({ botId: f.bot.id, requestId: "local-file", message: "create file" })
+  else await f.service.receive(f.event(binding, "file", "create file"))
+  await eventually(() => upload.mock.calls.length === 1)
+  const replies = f.client.submitReply.mock.calls.map(([reply]) => reply)
+  expect(replies.some(reply => reply.message.content === "已创建：`hello.txt`，请查看附件。")).toBe(true)
+  expect(replies.every(reply => !reply.message.content.includes("C:") && !reply.message.content.includes(".cmbcoworkagent"))).toBe(true)
+  expect(replies.every(reply => reply.deliveryId.endsWith(":public-text-v1"))).toBe(true)
+  const stored = f.db.exec("SELECT text,files_json FROM bot_im_outbox WHERE text=?", [text])[0].values[0]
+  expect(stored[0]).toBe(text)
+  expect(stored[1]).toBeNull()
+  const attachment = f.db.exec("SELECT files_json FROM bot_im_outbox WHERE file_delivery_id IS NOT NULL")[0].values[0]
+  expect(JSON.parse(String(attachment[0])).files).toEqual([file])
+  expect(upload.mock.calls[0][0]).toMatchObject({ action: "begin", name: "hello.txt", conversationKey: binding.conversationKey })
+  expect(f.errors).toEqual([])
+})
+
+it("keeps the local file and reports an old gateway's missing attachment capability", async () => {
+  const file = { name: "报告.docx", filePath: "/synthetic/report.docx", size: 3, attachmentPath: "/synthetic/.bot-deliveries/" + "a".repeat(64) + "/报告.docx" }
+  const f = fixture(async () => ({ state: "completed", result: "文件已准备", files: [file] }))
+  const binding = await f.binding("group")
+  await f.service.receive(f.event(binding))
+  await eventually(() => f.client.submitReply.mock.calls.some(([reply]) => reply.message.content.includes("附件未全部发送成功")))
+  expect(f.errors.some(error => String(error).includes("升级网关"))).toBe(true)
+  expect(f.store.im.history(f.bot.id, botImScopeId("realm", "owner", binding.id)).items.some(row => row.state === "failed")).toBe(true)
+})
+
+it("keeps text responsive during a file upload, records final receipts and retries only the failed file", async () => {
+  const file = { name: "report.docx", filePath: "/workspace/report.docx", size: 3,
+    attachmentPath: join(tmpdir(), ".bot-deliveries", "a".repeat(64), "report.docx") }
+  const f = fixture(async (task, host) => {
+    if (task.message === "files") host.publishImFiles(task.id,"batch",[file,{...file,name:"other.docx",filePath:"/workspace/other.docx"}])
+    return {state:"completed",result:`reply:${task.message}`}
+  })
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release=resolve })
+  const begins: string[] = [], retryIds: string[] = []
+  const command = vi.fn(async (request: import("../../shared/bots/im-file").BotImFileCommand): Promise<import("../../shared/bots/im-file").BotImFileResult> => {
+    if (request.action === "begin") {
+      begins.push(request.deliveryId)
+      if (begins.length === 1) await held
+      if (request.retryVersion === 2) retryIds.push(request.deliveryId)
+      return {state:"accepted"}
+    }
+    if (request.action === "status") return {state:"receipts", receipts:request.deliveries.map((item,index)=>({
+      deliveryId:item.deliveryId, state:retryIds.length || index===1 ? "sent" : "failed", reasonCode:index===0 ? "FORBIDDEN" : undefined, version:2
+    }))}
+    throw new Error("unexpected bytes: begin already has a durable receipt")
+  })
+  Object.assign(f.client,{supportsBotFiles:()=>true,supportsBotFileReceipts:()=>true,botFileCommand:command})
+  const group = await f.binding("group"), dm = await f.binding("dm")
+  try {
+    await f.service.receive(f.event(group,"files","files"))
+    await eventually(()=>begins.length===1)
+    await f.service.receive(f.event(dm,"text","hello while uploading"))
+    await eventually(()=>f.client.submitReply.mock.calls.some(([reply])=>reply.message.content.includes("hello while uploading")))
+    expect(begins).toHaveLength(1)
+  } finally { release() }
+  await eventually(()=>begins.length===2)
+  const task = f.calls.find(task=>task.message==="files")!
+  const status = () => f.host.imFileStatuses(f.bot.id,task.threadId,"batch")
+  const attachmentEvents = () => f.store.telemetry.due(Number.MAX_SAFE_INTEGER)
+    .filter(row => row.event.eventName === BOT_EVENTS.attachmentSent)
+  await eventually(()=>status().every(item=>item.state==="accepted"))
+  expect(attachmentEvents()).toHaveLength(0)
+  await (f.service as unknown as {checkFileReceipts():Promise<void>}).checkFileReceipts()
+  expect(status().map(item=>item.state).sort()).toEqual(["failed","sent"])
+  expect(attachmentEvents()).toHaveLength(1)
+  expect(attachmentEvents()[0].event.properties?.botChannel).toBe("zhaohu_group")
+  const failed = status().find(item=>item.state==="failed")!, sent=status().find(item=>item.state==="sent")!
+  expect(()=>f.host.retryImFile(f.bot.id,sent.id)).toThrow("不能重试")
+  const other = f.store.create({name:"Other",instructions:"",color:"#123456",modelRef:null})
+  expect(()=>f.host.retryImFile(other.id,failed.id)).toThrow("不能重试")
+  expect(f.host.imFileStatuses(other.id,task.threadId,"batch")).toEqual([])
+  f.host.retryImFile(f.bot.id,failed.id)
+  await eventually(()=>begins.length===3)
+  expect(retryIds).toEqual([`${failed.id}:file:0`])
+  expect(begins.filter(id=>id===`${sent.id}:file:0`)).toHaveLength(1)
+  f.db.run("UPDATE bot_im_outbox SET receipt_checked_at=0 WHERE state='accepted'")
+  await (f.service as unknown as {checkFileReceipts():Promise<void>}).checkFileReceipts()
+  expect(status().every(item=>item.state==="sent")).toBe(true)
+  expect(attachmentEvents()).toHaveLength(2)
+  await (f.service as unknown as {checkFileReceipts():Promise<void>}).checkFileReceipts()
+  expect(attachmentEvents()).toHaveLength(2)
+  expect(f.errors).toEqual([])
+})
+
+it("retains uncertain file receipts without automatic or manual resend", async () => {
+  const file={name:"x.txt",filePath:"/workspace/x.txt",size:1,attachmentPath:join(tmpdir(),".bot-deliveries","a".repeat(64),"x.txt")}
+  const f=fixture(async(task,host)=>{host.publishImFiles(task.id,"unknown-batch",[file]);return {state:"completed",result:"ready"}})
+  const command=vi.fn(async()=>({state:"unknown" as const}))
+  Object.assign(f.client,{supportsBotFiles:()=>true,botFileCommand:command})
+  const binding=await f.binding("group")
+  await f.service.receive(f.event(binding))
+  await eventually(()=>command.mock.calls.length===1)
+  const task=f.calls[0], status=f.host.imFileStatuses(f.bot.id,task.threadId,"unknown-batch")[0]
+  expect(status.state).toBe("unknown")
+  expect(f.store.telemetry.due(Number.MAX_SAFE_INTEGER)
+    .some(row => row.event.eventName === BOT_EVENTS.attachmentSent)).toBe(false)
+  expect(()=>f.host.retryImFile(f.bot.id,status.id)).toThrow("不能重试")
+  expect(f.host.beginImDelivery("file")).toBeNull()
+})
+
+it("backs off only a transiently failed file while the next file can be delivered", async () => {
+  const files = ["a.txt", "b.txt"].map(name=>({name,filePath:`/workspace/${name}`,size:1,
+    attachmentPath:join(tmpdir(),".bot-deliveries","a".repeat(64),name)}))
+  const f=fixture(async(task,host)=>{
+    host.publishImFiles(task.id,"two-files",files)
+    host.publishImFiles(task.id,"two-files",files) // Same tool receipt cannot duplicate either file.
+    return {state:"completed",result:"ready"}
+  })
+  const command=vi.fn(async(request:import("../../shared/bots/im-file").BotImFileCommand)=>{
+    if (request.action!=="begin") throw Error("unexpected transfer")
+    if (request.name==="a.txt") throw Error("temporary network failure")
+    return {state:"accepted" as const}
+  })
+  Object.assign(f.client,{supportsBotFiles:()=>true,botFileCommand:command})
+  const binding=await f.binding("group")
+  await f.service.receive(f.event(binding))
+  await eventually(()=>command.mock.calls.length===2)
+  const statuses=f.host.imFileStatuses(f.bot.id,f.calls[0].threadId,"two-files")
+  expect(statuses).toHaveLength(2)
+  expect(statuses.find(row=>row.file.name==="a.txt")?.state).toBe("pending")
+  expect(statuses.find(row=>row.file.name==="b.txt")?.state).toBe("accepted")
+  expect(f.host.beginImDelivery("file")).toBeNull()
+  expect(f.errors).toHaveLength(1)
+})
+
+
+it.each(["dm", "group"] as const)("delivers browser takeover notices for %s direct and independent runs to their original audience", async (kind) => {
+  let finish!: () => void
+  let activeTask!: BotTask
+  const f = fixture(async (task, host, signal, waiting) => {
+    if (task.origin.kind === "work_result") return { state: "completed", result: "Result reported" }
+    if (task.message === "create help task" && !task.workId) {
+      await host.createWork({ botId: task.botId, operationId: task.id, title: "PRD task", goal: "Login needed" }, { taskId: task.id, callId: task.id, key: task.id })
+      return { state: "completed", result: "Task created" }
+    }
+    activeTask = task
+    waiting(true)
+    const help = { generation: 7, instruction: "请确认登录，然后继续读取文档。" }
+    host.browserHelpNotice(task.id, help, true)
+    host.browserHelpNotice(task.id, help, true)
+    await new Promise<void>(resolve => { finish = resolve; signal.addEventListener("abort", () => resolve(), { once: true }) })
+    host.browserHelpNotice(task.id, help, false)
+    waiting(false)
+    return { state: "completed", result: "Continued" }
+  })
+  const binding = await f.binding(kind)
+  if (kind === "group") await f.binding("group")
+  for (const text of ["direct browser", "create help task"]) {
+    const before = f.client.submitReply.mock.calls.length
+    await f.service.receive(f.event(binding, text, text))
+    await eventually(() => f.client.submitReply.mock.calls.slice(before).some(([reply]) => reply.message.content.includes("需要你操作浏览器")))
+    const notices = f.client.submitReply.mock.calls.slice(before).map(([reply]) => reply).filter(reply => reply.message.content.includes("需要你操作浏览器"))
+    expect(notices).toHaveLength(1)
+    expect(notices[0].conversationKey).toBe(binding.conversationKey)
+    expect(notices[0].message.content).toContain("运行 CMBDevClaw 的电脑")
+    expect(notices[0].message.content).toContain(text === "direct browser" ? (kind === "group" ? "原招乎群聊会话" : "当前 Bot 会话") : "PRD task")
+    expect(f.store.getTask(activeTask.id).state).toBe("waiting_user")
+    const finishedTaskId = activeTask.id
+    finish()
+    await eventually(() => f.store.getTask(finishedTaskId).state === "completed")
+  }
+  expect(f.errors).toEqual([])
+}, 10000)
+
+it("cancels unsent browser notices on return and blocks revoked audiences", async () => {
+  const f = fixture(async (_task, _host, signal) => {
+    await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }))
+    return { state: "failed" }
+  })
+  const binding = await f.binding()
+  await f.service.receive(f.event(binding))
+  await eventually(() => f.calls.length === 1)
+  const task = f.calls[0]
+  const help = { generation: 10, instruction: "Confirm login" }
+  f.host.browserHelpNotice(task.id, help, true)
+  f.host.browserHelpNotice(task.id, help, false)
+  expect(f.host.beginImDelivery("text")).toBeNull()
+  f.host.browserHelpNotice(task.id, { ...help, generation: 11 }, true)
+  const second = f.host.beginImDelivery("text")!
+  expect(second).not.toBeNull()
+  expect(second.text).toContain("Confirm login")
+  f.host.settleImDelivery(second.id, "pending")
+  const source = task.mockSource!
+  f.host.revokeImBinding(task.botId, source.bindingId, source.grantVersion)
+  expect(f.host.beginImDelivery("text")).toBeNull()
+})
+
+describe("private Bot handoff to a Zhaohu group", () => {
+  it("uses the target Bot's existing group thread, only forwards the brief, and delivers replies to that group", async () => {
+    let groupId = "",
+      receipt: any,
+      repeated: any
+    const f = fixture(async (task, host) => {
+      if (!task.mockSource && task.message === "@小群 private request with unrelated secrets") {
+        const targets = host.groupTargets(task.id)
+        expect(targets.some((item) => item.source === "zhaohu" && item.id === groupId)).toBe(true)
+        receipt = host.publishGroupMessage(
+          task.id,
+          "handoff-call",
+          "请沿用群内讨论，整理评审要点",
+          groupId,
+          "zhaohu"
+        )
+        repeated = host.publishGroupMessage(
+          task.id,
+          "handoff-call",
+          "请沿用群内讨论，整理评审要点",
+          groupId,
+          "zhaohu"
+        )
+        expect(() =>
+          host.publishGroupMessage(task.id, "handoff-call", "different", groupId, "zhaohu")
+        ).toThrow("另一条")
+        return { state: "completed", result: "已交办，请查看目标群" }
+      }
+      host.initializeMockThread(task)
+      return { state: "completed", result: `群内结果:${task.message}` }
+    })
+    const binding = await f.binding()
+    groupId = botImScopeId("realm", "owner", binding.id)
+    await f.service.receive(f.event(binding, "previous-group-context", "群内约定：周五评审"))
+    await eventually(() =>
+      f.calls.some((task) => task.mockSource && f.store.getTask(task.id).state === "completed")
+    )
+    const originalThread = f.calls.find((task) => task.mockSource)!.threadId
+    const sourceBot = f.store.create({
+      name: "私人助手",
+      instructions: "Help",
+      color: "#123456",
+      modelRef: null
+    })
+    // Include the picker's structured selection at admission, before the model
+    // calls its handoff tool. Publishing the tool directly misses queue bugs.
+    const sourceTask = f.host.send({
+      botId: sourceBot.id,
+      requestId: "private-handoff",
+      message: "@小群 private request with unrelated secrets",
+      mentions: [
+        { start: 0, end: 3, kind: "group", groupSource: "zhaohu", groupId, label: "小群" }
+      ]
+    })
+    expect(sourceTask.origin).toMatchObject({
+      kind: "user",
+      mentions: [{ groupSource: "zhaohu", groupId }]
+    })
+    await eventually(() =>
+      Boolean(receipt && f.calls.some((task) => task.id === receipt.targetTaskId))
+    )
+    await eventually(() =>
+      f.client.submitReply.mock.calls.some(([reply]) =>
+        reply.message.content.includes("群内结果:来自")
+      )
+    )
+    expect(repeated).toEqual(receipt)
+    const target = f.calls.find((task) => task.id === receipt.targetTaskId)!
+    expect(target.botId).toBe(f.bot.id)
+    expect(target.threadId).toBe(originalThread)
+    expect(target.threadId).not.toBe(f.bot.threadId)
+    expect(target.message).toBe("来自「私人助手」的交办：\n请沿用群内讨论，整理评审要点")
+    expect(target.mockSource).toMatchObject({
+      transport: "im",
+      bindingId: groupId,
+      audienceKey: `im:${groupId}`,
+      desktopMessageId: receipt.messageId
+    })
+    expect(target.mockSource?.eventId).toBeUndefined()
+    expect(botMemoryContext(target)).toMatchObject({ groupId })
+    const forwarded = f.client.submitReply.mock.calls
+      .map(([reply]) => reply)
+      .filter((reply) => reply.message.content.includes("来自「私人助手」"))
+    expect(forwarded.length).toBe(2) // one handoff + one result, no duplicate for the retry
+    expect(forwarded.every((reply) => reply.conversationKey === binding.conversationKey)).toBe(true)
+    expect(forwarded.every((reply) => !reply.message.content.includes("secrets"))).toBe(true)
+    expect(
+      f.host
+        .imConversationHistory(f.bot.id, groupId)
+        .items.some((item) => item.text.startsWith("来自「私人助手」"))
+    ).toBe(true)
+    expect(f.errors).toEqual([])
+  })
+
+  it("keeps same-Bot handoffs and subsequent independent work in the target group", async () => {
+    let groupId = "",
+      work: any
+    const f = fixture(async (task, host) => {
+      if (!task.mockSource) {
+        host.publishGroupMessage(task.id, "same-bot", "请单独整理清单", groupId, "zhaohu")
+        return { state: "completed", result: "已交办" }
+      }
+      host.initializeMockThread(task)
+      if (!task.workId) {
+        work = await host.createWork(
+          {
+            botId: task.botId,
+            operationId: "handoff-work",
+            title: "评审清单",
+            goal: "整理群内清单"
+          },
+          { taskId: task.id, callId: "work-call", key: "handoff-work" }
+        )
+      }
+      return { state: "completed", result: "整理完成" }
+    })
+    const binding = await f.binding()
+    groupId = botImScopeId("realm", "owner", binding.id)
+    f.host.send({
+      botId: f.bot.id,
+      requestId: "same-bot",
+      message: "交给群处理"
+    })
+    await eventually(() => Boolean(work))
+    expect(work.work.source.bindingId).toBe(groupId)
+    expect(work.work.audienceKey).toBe(`im:${groupId}`)
+    expect(work.work.parentThreadId).not.toBe(f.bot.threadId)
+    await eventually(() => f.calls.some((task) => task.workId === work.work.id))
+    expect(f.calls.find((task) => task.workId === work.work.id)?.mockSource?.bindingId).toBe(
+      groupId
+    )
+    expect(f.errors).toEqual([])
+  })
+
+  it("fences queued handoffs after revocation and rejects copied receipts in another thread", async () => {
+    let groupId = "",
+      targetId = ""
+    const f = fixture(async (task, host) => {
+      if (task.mockSource) throw new Error("A revoked handoff must not execute")
+      const receipt = host.publishGroupMessage(task.id, "race", "queued brief", groupId, "zhaohu")
+      if (!("targetTaskId" in receipt) || typeof receipt.targetTaskId !== "string")
+        throw new Error("Expected a Zhaohu handoff receipt")
+      targetId = receipt.targetTaskId
+      const target = f.store.getTask(targetId)
+      const source = target.mockSource
+      if (!source?.desktopMessageId) throw new Error("Expected a desktop handoff source")
+      expect(() => f.store.im.execution({ ...target, threadId: task.threadId }, false)).toThrow(
+        "回执不一致"
+      )
+      expect(() =>
+        f.store.im.execution({ ...target, mockSource: { ...source, desktopMessageId: "forged" } })
+      ).toThrow("所属群不一致")
+      const route = host.imGateway.binding(groupId)!
+      host.registerImBinding(route.realm, route.principal, {
+        ...route.binding,
+        state: "revoked",
+        version: 2
+      })
+      host.revokeImBinding(target.botId, groupId, source.grantVersion)
+      return { state: "completed", result: "The group was disconnected" }
+    })
+    const binding = await f.binding()
+    groupId = botImScopeId("realm", "owner", binding.id)
+    f.host.send({ botId: f.bot.id, requestId: "handoff-race", message: "交办" })
+    await eventually(() => Boolean(targetId && f.store.getTask(targetId).state === "cancelled"))
+    expect(f.calls.filter((task) => task.mockSource)).toHaveLength(0)
+    expect(f.client.submitReply).not.toHaveBeenCalled()
+    expect(f.errors).toEqual([])
+  })
+
+  it("rejects offline, revoked and cross-context destinations without creating a task or receipt", async () => {
+    let groupId = "",
+      checked = false
+    const f = fixture(async (task, host) => {
+      if (!task.mockSource) {
+        host.setImOnline(f.bot.id, groupId, false)
+        expect(() =>
+          host.publishGroupMessage(task.id, "offline", "brief", groupId, "zhaohu")
+        ).toThrow("离线")
+        host.setImOnline(f.bot.id, groupId, true)
+        const route = host.imGateway.binding(groupId)!
+        host.registerImBinding(route.realm, route.principal, {
+          ...route.binding,
+          state: "revoked",
+          version: 2
+        })
+        expect(() =>
+          host.publishGroupMessage(task.id, "revoked", "brief", groupId, "zhaohu")
+        ).toThrow("解绑")
+        checked = true
+      }
+      return { state: "completed", result: "done" }
+    })
+    const binding = await f.binding()
+    groupId = botImScopeId("realm", "owner", binding.id)
+    f.host.send({
+      botId: f.bot.id,
+      requestId: "blocked-handoff",
+      message: "交办"
+    })
+    await eventually(() => checked)
+    expect(f.calls.filter((task) => task.mockSource)).toHaveLength(0)
+    const query = f.db.prepare("SELECT COUNT(*) AS n FROM bot_im_handoffs")
+    query.step()
+    expect(query.getAsObject().n).toBe(0)
+    query.free()
+    expect(f.errors).toEqual([])
+  })
+})

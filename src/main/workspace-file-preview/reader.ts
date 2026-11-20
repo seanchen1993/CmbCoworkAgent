@@ -1,4 +1,5 @@
 import path from "node:path"
+import { realpath } from "node:fs/promises"
 import { assertOriginalContent } from "../services/market-content"
 import {
   WORKSPACE_FILE_PREVIEW_CANCELLED,
@@ -8,7 +9,12 @@ import {
   type WorkspaceFilePreviewTextResult
 } from "../../shared/workspace-file-preview"
 import type { WorkspaceFilePreviewWorkerSource } from "./protocol"
-import { openStableFileHandle, type StableFileHandle } from "../services/stable-file-handle"
+import {
+  openStableFileHandle,
+  readStableFileHandleBounded,
+  type StableFileHandle
+} from "../services/stable-file-handle"
+import { MAX_ATTACHMENT_FILE_BYTES } from "../../shared/file-attachment"
 
 export interface ResolvedPreviewFile {
   resolvedPath: string
@@ -141,11 +147,24 @@ async function openPreviewFile(
     trustedRootPath = path.resolve(source.trustedRootPath)
   } else {
     if (!workspacePath) throw new Error("No workspace folder linked")
-    const resolved = resolveWorkspacePreviewCandidate(
-      source.filePath,
-      workspacePath,
-      source.workspacePathKind
-    )
+    let resolved: { root: string; candidate: string }
+    try {
+      resolved = resolveWorkspacePreviewCandidate(
+        source.filePath,
+        workspacePath,
+        source.workspacePathKind
+      )
+    } catch (error) {
+      // Historical absolute paths can name an alias of the same directory.
+      // Keep relative conventions unchanged and recheck the canonical boundary.
+      if (source.workspacePathKind !== "absolute" || !path.isAbsolute(source.filePath)) throw error
+      try {
+        const [file, root] = await Promise.all([realpath(source.filePath), realpath(workspacePath)])
+        resolved = resolveWorkspacePreviewCandidate(file, root, "absolute")
+      } catch {
+        throw error
+      }
+    }
     candidate = resolved.candidate
     trustedRootPath = resolved.root
   }
@@ -231,12 +250,48 @@ export async function readPreviewTextPage(
   source: WorkspaceFilePreviewWorkerSource,
   workspacePath: string | undefined,
   offset: number,
-  cancellation: Int32Array
+  cancellation: Int32Array,
+  officePreview?: true
 ): Promise<{ result: WorkspaceFilePreviewTextResult; resolvedPath: string }> {
   const file = await openPreviewFile(source, workspacePath, cancellation)
   try {
     ensurePreviewOffset(offset, file.size)
     throwIfCancelled(cancellation)
+    if (officePreview) {
+      if (offset !== 0 || !/\.(docx|xlsx)$/i.test(file.filePath)) {
+        throw new Error("Office 预览仅支持从文件起始读取 DOCX、XLSX")
+      }
+      // Keep archive/parser dependencies out of ordinary text-preview startup.
+      const [{ assertBoundedOfficeArchive }, { parseOfficePreview }] = await Promise.all([
+        import("../file-parser"),
+        import("./office-preview")
+      ])
+      throwIfCancelled(cancellation)
+      const bytes = await readStableFileHandleBounded(file, MAX_ATTACHMENT_FILE_BYTES)
+      assertBoundedOfficeArchive(bytes)
+      throwIfCancelled(cancellation)
+      const office = await parseOfficePreview(bytes, file.filePath, () =>
+        throwIfCancelled(cancellation)
+      )
+      throwIfCancelled(cancellation)
+      return {
+        resolvedPath: file.filePath,
+        result: {
+          success: true,
+          content: "",
+          contentBytes: 0,
+          size: file.size,
+          modified_at: file.modified_at,
+          offset: 0,
+          nextOffset: null,
+          hasMore: false,
+          hasPrevious: false,
+          truncated: false,
+          lineCount: 0,
+          office
+        }
+      }
+    }
     const remaining = Math.max(0, file.size - offset)
     const readBudget = Math.min(WORKSPACE_FILE_PREVIEW_MAX_TEXT_BYTES, remaining)
     const buffer = Buffer.allocUnsafe(readBudget)

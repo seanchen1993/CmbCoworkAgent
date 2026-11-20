@@ -43,7 +43,7 @@ function createHarness() {
     section("const EXCLUSIVE_TOOL_NAMES =", "type RuntimePromptToolPolicy ="),
     section("function isRecord(", "function createTrustedToolFilePreviewContextMiddleware")
   ].join("\n")
-  const compiled = ts.transpileModule(extracted.replace("export function", "function"), {
+  const compiled = ts.transpileModule(extracted.replaceAll("export function", "function"), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None }
   }).outputText
   const activeWorkflows = new Set<string>()

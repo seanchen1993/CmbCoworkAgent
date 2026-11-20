@@ -14,7 +14,8 @@ const idle = vi.hoisted(() => ({
 }))
 
 const state = vi.hoisted(() => ({
-  metadata: null as string | null
+  metadata: null as string | null,
+  defaultLookup: vi.fn()
 }))
 
 const configs = vi.hoisted(() => [
@@ -64,7 +65,10 @@ vi.mock("../storage", () => ({
 
 vi.mock("../models/registry", () => ({
   getModelConfigs: () => configs,
-  getAvailableModelConfigOrDefault: () => configs.find((config) => Boolean(config.apiKey)) ?? null,
+  getAvailableModelConfigOrDefault: () => {
+    state.defaultLookup()
+    return configs.find((config) => Boolean(config.apiKey)) ?? null
+  },
   getModelByTier: (tier: "premium" | "economy") =>
     configs.find((config) => config.tier === tier) ?? configs[0] ?? null,
   getModelConfigByRef: (value: string) =>
@@ -84,11 +88,54 @@ import { resolveModel } from "./index"
 
 beforeEach(() => {
   state.metadata = null
+  state.defaultLookup.mockClear()
   idle.idleModelEnvironment = undefined
   idle.unavailableReason = "outside service hours"
 })
 
 describe("routing with managed model refs", () => {
+  it("refuses a removed explicit pinned model instead of changing provider", async () => {
+    await expect(
+      resolveModel({
+        taskSource: "chat",
+        routingMode: "pinned",
+        requestedModelId: "builtin:removed"
+      })
+    ).rejects.toMatchObject({ code: "PINNED_MODEL_UNAVAILABLE", reason: "missing_config" })
+    expect(state.defaultLookup).not.toHaveBeenCalled()
+  })
+  it("refuses missing credentials, then uses the same saved ref once credentials are restored", async () => {
+    const config = configs[2],
+      key = config.apiKey
+    try {
+      config.apiKey = ""
+      await expect(
+        resolveModel({ taskSource: "chat", routingMode: "pinned", requestedModelId: config.ref })
+      ).rejects.toMatchObject({ code: "PINNED_MODEL_UNAVAILABLE", reason: "missing_credentials" })
+      expect(state.defaultLookup).not.toHaveBeenCalled()
+      config.apiKey = key
+      expect(
+        (
+          await resolveModel({
+            taskSource: "chat",
+            routingMode: "pinned",
+            requestedModelId: config.ref
+          })
+        ).resolvedModelId
+      ).toBe("custom:shared")
+    } finally {
+      config.apiKey = key
+    }
+  })
+  it("keeps default selection for an unspecified or blank pinned request", async () => {
+    for (const requestedModelId of [undefined, "", "  "])
+      expect(
+        (await resolveModel({ taskSource: "chat", routingMode: "pinned", requestedModelId }))
+          .resolvedModelId
+      ).toBe("builtin:premium")
+    expect(state.defaultLookup).toHaveBeenCalledTimes(3)
+  })
+
   it("keeps a pinned UAT idle model outside production service hours", async () => {
     vi.useFakeTimers({ toFake: ["Date"] })
     vi.setSystemTime(new Date("2026-11-03T12:00:00+08:00"))
@@ -121,18 +168,6 @@ describe("routing with managed model refs", () => {
       vi.useRealTimers()
     }
   })
-
-  it("falls back safely when a pinned model was removed by a catalog refresh", async () => {
-    const result = await resolveModel({
-      taskSource: "chat",
-      routingMode: "pinned",
-      requestedModelId: "builtin:removed"
-    })
-
-    expect(result.resolvedModelId).toBe("builtin:premium")
-    expect(result.routingTrace?.layers[0]?.reason).toBe("fallback-to-first-config")
-  })
-
   it("reroutes a continuation when its previous managed model no longer exists", async () => {
     state.metadata = JSON.stringify({
       routingState: {

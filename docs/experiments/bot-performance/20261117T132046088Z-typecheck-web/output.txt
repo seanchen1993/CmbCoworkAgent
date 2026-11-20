@@ -1,0 +1,4 @@
+src/renderer/src/components/bots/BotFeaturePanel.tsx(276,73): error TS2554: Expected 1 arguments, but got 0.
+src/renderer/src/components/bots/BotFeaturePanel.tsx(281,5): error TS2322: Type 'undefined' is not assignable to type 'string'.
+src/renderer/src/components/bots/BotFeaturePanel.tsx(311,5): error TS2322: Type 'undefined' is not assignable to type 'string'.
+src/renderer/src/components/bots/BotFeaturePanel.tsx(332,9): error TS2322: Type 'undefined' is not assignable to type 'string'.

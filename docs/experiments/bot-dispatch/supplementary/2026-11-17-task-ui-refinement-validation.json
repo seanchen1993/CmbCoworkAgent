@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-11-17T01:47:49.489Z",
+  "kind": "renderer-ui-validation",
+  "hypothesis": "任务空态提供清晰交办入口；将低频任务操作收进更多菜单，减少常驻工具栏并保持私聊和群内任务的可达性。",
+  "branch": "codex/merge-uat-into-bot-beta",
+  "baseCommit": "234c46c19251b5c2bad07e477ca37570b88313e0",
+  "implementationDiffSha256": "ac8b92cc4ea2ca24b7e9c343c8db11544727cc391f8f74bed0d2ab40dab93a03",
+  "changedFiles": [
+    "src/renderer/src/components/bots/BotExecutionDetailsToggle.tsx",
+    "src/renderer/src/components/bots/BotTaskWorkspaceButton.tsx",
+    "src/renderer/src/components/bots/BotWorkPanel.tsx",
+    "src/renderer/src/components/bots/ConversationTaskControls.tsx"
+  ],
+  "environment": {
+    "os": "darwin",
+    "arch": "arm64",
+    "node": "22.23.5",
+    "applicationVersion": "1.5.5"
+  },
+  "modelCalls": false,
+  "checks": [
+    {
+      "id": "renderer-typecheck",
+      "command": "npm run typecheck:web",
+      "result": "passed",
+      "exitCode": 0,
+      "evidence": {
+        "name": "bot-task-ui-types-20261117.log",
+        "sha256": "e22d83a1b3f75416254645f6f14cb9bd297d0ab3d78373750943a48f773cfc54"
+      }
+    },
+    {
+      "id": "work-directory-regression",
+      "command": "node --import tsx tests/bots-work-directory-browser.spec.ts",
+      "result": "passed",
+      "exitCode": 0,
+      "scope": "真实 React 组件运行于隔离 Electron，数据与 API 为模拟；验证分页、刷新、选择失败及批次上限。",
+      "evidence": {
+        "name": "bot-task-ui-directory-20261117.log",
+        "sha256": "325ad0292cf833215205df31c0d2183881faf197096708e6086e29e0a75b4ded"
+      }
+    },
+    {
+      "id": "production-build",
+      "command": "npm run build",
+      "result": "passed",
+      "exitCode": 0,
+      "scope": [
+        "main",
+        "preload",
+        "renderer"
+      ],
+      "evidence": {
+        "name": "bot-task-ui-build-20261117.log",
+        "sha256": "61f55700dfdb08f18108ab993c9a01374d6b224d5953b896d4e03e9f515ea3e6"
+      }
+    },
+    {
+      "id": "native-ui",
+      "result": "passed",
+      "method": "重建并启动当前分支应用，通过原生 UI 操作现有私聊任务、模拟招乎群任务及空任务列表。未发送模型消息。",
+      "observations": [
+        "标题、状态、返回入口与更多菜单保留在单行，原第二行工具栏已移除。",
+        "私聊任务的更多菜单包含明细、工作目录、完成任务和解除关联。",
+        "群内任务同样可打开更多菜单，不显示私聊的解除关联操作。",
+        "默认工作区显示“默认”，指定工作区显示目录名；完整路径只在目录详情显示。",
+        "打开目录详情与复制路径成功，Escape 可逐层关闭详情和菜单。",
+        "执行明细切换后菜单关闭，重新打开显示相反操作；验证后恢复原展示偏好。",
+        "群内任务返回后仍保留原群上下文。",
+        "任务空态采用与例行任务相同的灰色层级及交办引导。"
+      ],
+      "notExercised": [
+        "未修改用户任务的完成状态或解除关联，仅检查相应入口。",
+        "未点击打开文件夹。"
+      ]
+    }
+  ],
+  "limitations": [
+    "本轮为 UI 验证，不计入真实模型主动委派或响应延迟实验。",
+    "未测试 Windows 打包应用或真实招乎连接。",
+    "未运行完整 Bot 集成测试集。",
+    "原始测试日志保留于本机临时目录，仓库仅记录脱敏摘要与哈希；不归档个人路径、真实会话、配置或启动全日志。",
+    "没有运行时调度、后端或 ES 查询改动。"
+  ]
+}

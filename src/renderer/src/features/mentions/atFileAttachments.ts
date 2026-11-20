@@ -33,6 +33,8 @@ export type MentionedWorkspaceFile = AtFileSuggestion & {
 
 interface ResolveAtFileAttachmentsParams {
   rawMessage: string
+  /** Explicit non-file identities must never be interpreted as workspace paths. */
+  protectedRanges?: readonly { start: number; end: number }[]
   attachments: readonly FileAttachment[]
   mentionedFiles: readonly MentionedWorkspaceFile[]
   workspacePath?: string | null
@@ -43,11 +45,13 @@ interface ResolveAtFileAttachmentsParams {
     filePath: string,
     maxChars: number
   ) => Promise<WorkspaceReadFileResult>
+  readWorkspaceAttachment?: (filePath: string, maxChars: number) => Promise<FileAttachment>
   cancelWorkspaceFileReads?: () => void
 }
 
 interface ResolveAtFileAttachmentsResult {
   cleanedMessage: string
+  textEdits: { start: number; end: number; text: string }[]
   attachments: FileAttachment[]
   mentionCountLimitHit: boolean
   mentionAttachmentLimitHit: boolean
@@ -219,20 +223,23 @@ export async function readBoundedWorkspaceMentionFile(params: {
 // 发送前把 @文件语法替换回普通路径文本：
 // 1. 只有真正被转换成附件（或已由现有附件覆盖）的 mention 才会被消费；
 // 2. 失败/不支持/未命中的 @文本 会保留原样，避免功能异常时悄悄吞掉用户输入。
-function stripHandledAtFileMentions(rawMessage: string, handledMentionPaths: ReadonlySet<string>): string {
-  if (handledMentionPaths.size === 0) return rawMessage
-
-  const replaceHandledMention = (match: string, pathValue: string): string => {
-    const normalized = normalizeAtFileMentionPath(pathValue)
-    if (!normalized || !handledMentionPaths.has(normalized)) {
-      return match
-    }
-    return `${/^\s/u.test(match) ? " " : ""}${normalized}`
+function stripHandledAtFileMentions(
+  rawMessage: string, handledMentionPaths: ReadonlySet<string>,
+  protectedRanges: readonly { start: number; end: number }[]
+) {
+  const textEdits: { start: number; end: number; text: string }[] = []
+  for (const match of rawMessage.matchAll(/(?:^|\s)@(?:"([^"]+)"|([^\s"]+))/gu)) {
+    const start = match.index!, end = start + match[0].length
+    const tokenStart = start + (/^\s/u.test(match[0]) ? 1 : 0)
+    if (protectedRanges.some((range) => range.start < end && range.end > tokenStart)) continue
+    const normalized = normalizeAtFileMentionPath(match[1] ?? match[2])
+    if (!normalized || !handledMentionPaths.has(normalized)) continue
+    textEdits.push({ start, end, text: `${tokenStart > start ? " " : ""}${normalized}` })
   }
-
-  return rawMessage
-    .replace(/(?:^|\s)@"([^"]+)"/gu, replaceHandledMention)
-    .replace(/(?:^|\s)@([^\s"]+)/gu, replaceHandledMention)
+  let cleanedMessage = rawMessage
+  for (const edit of [...textEdits].reverse())
+    cleanedMessage = cleanedMessage.slice(0, edit.start) + edit.text + cleanedMessage.slice(edit.end)
+  return { cleanedMessage, textEdits }
 }
 
 // 这里把“用户输入的 @文件”统一折算成最终附件列表：
@@ -243,6 +250,7 @@ export async function resolveAtFileAttachments(
 ): Promise<ResolveAtFileAttachmentsResult> {
   const {
     rawMessage,
+    protectedRanges = [],
     attachments,
     mentionedFiles,
     workspacePath,
@@ -250,6 +258,7 @@ export async function resolveAtFileAttachments(
     maxAttachments,
     maxTotalChars,
     readWorkspaceFile,
+    readWorkspaceAttachment,
     cancelWorkspaceFileReads
   } = params
   const fallbackAttachments = attachments.length > 0 ? [...attachments] : []
@@ -257,7 +266,10 @@ export async function resolveAtFileAttachments(
   try {
     // 以当前附件列表为基线继续累加 @文件带入的内容，这样显式上传的附件
     // 和 @文件解析出的附件会共用同一套数量/字符预算。
-    const mentionPaths = extractAtFileMentions(rawMessage)
+    let fileText = rawMessage
+    for (const range of [...protectedRanges].sort((a, b) => b.start - a.start))
+      fileText = fileText.slice(0, range.start) + " ".repeat(range.end - range.start) + fileText.slice(range.end)
+    const mentionPaths = extractAtFileMentions(fileText)
     const currentAttachments = attachments.length > 0 ? [...attachments] : []
     const existingAttachmentPaths = new Set(currentAttachments.map((item) => item.filePath))
     let currentAttachmentChars = currentAttachments.reduce(
@@ -297,6 +309,7 @@ export async function resolveAtFileAttachments(
     // 先纳入输入框里已经通过 popover 选中过的 @文件，保证它们优先参与去重和带入。
     for (const mentionFile of mentionedFiles) {
       if (!isMentionedWorkspaceFileForWorkspace(mentionFile, workspacePath)) {
+        if (readWorkspaceAttachment) throw new Error("@文件所属工作区已变更，请重新选择。")
         warningMessage = "@文件所属工作区已变更，旧工作区引用未被发送。"
         continue
       }
@@ -336,9 +349,16 @@ export async function resolveAtFileAttachments(
     }
 
     if (mentionCandidates.size > 0) {
+      let pendingRetained = readWorkspaceAttachment
+        ? [...mentionCandidates.keys()].filter(path => !existingAttachmentPaths.has(path)).length
+        : 0
+      if (readWorkspaceAttachment && pendingRetained > maxAttachments - currentAttachments.length)
+        throw new Error(`最多只能发送 ${maxAttachments} 个附件，请调整附件后重试。`)
+      if (pendingRetained > 0 && pendingRetained > maxTotalChars - currentAttachmentChars)
+        throw new Error("附件内容已达上限，请调整附件后重试。")
       for (const { mentionFile, sourcePaths } of mentionCandidates.values()) {
         // 数量上限命中后直接停止，和普通附件的 UX 保持一致。
-        if (currentAttachments.length >= maxAttachments) {
+        if (!readWorkspaceAttachment && currentAttachments.length >= maxAttachments) {
           mentionCountLimitHit = true
           break
         }
@@ -354,6 +374,21 @@ export async function resolveAtFileAttachments(
         if (remaining <= 0) {
           mentionAttachmentLimitHit = true
           break
+        }
+
+        if (readWorkspaceAttachment) {
+          // Share the remaining text budget so every selected file gets an
+          // immutable receipt, even when an earlier file fills its excerpt.
+          const budget = Math.floor(remaining / pendingRetained)
+          const attachment = await readWorkspaceAttachment(mentionFile.workspaceFilePath, budget)
+          if (!attachment.botInputId || attachment.content.length > budget)
+            throw new Error("@文件未能保存为 Bot 输入附件，请重新选择。")
+          pendingRetained -= 1
+          currentAttachments.push(attachment)
+          sourcePaths.forEach(path => handledMentionPaths.add(path))
+          existingAttachmentPaths.add(mentionFile.absolutePath)
+          currentAttachmentChars += attachment.content.length
+          continue
         }
 
         // 真正读取文件内容时才触发异步 IO，前面先把过滤/去重做完，尽量减少无效读取。
@@ -399,15 +434,17 @@ export async function resolveAtFileAttachments(
 
     return {
       // 返回清洗后的文本给调用方继续构造最终消息，避免 ChatContainer 再重复理解 @语法细节。
-      cleanedMessage: stripHandledAtFileMentions(rawMessage, handledMentionPaths),
+      ...stripHandledAtFileMentions(rawMessage, handledMentionPaths, protectedRanges),
       attachments: currentAttachments,
       mentionCountLimitHit,
       mentionAttachmentLimitHit,
       warningMessage
     }
-  } catch {
+  } catch (error) {
+    if (readWorkspaceAttachment) throw error
     return {
       cleanedMessage: rawMessage,
+      textEdits: [],
       attachments: fallbackAttachments,
       mentionCountLimitHit: false,
       mentionAttachmentLimitHit: false,

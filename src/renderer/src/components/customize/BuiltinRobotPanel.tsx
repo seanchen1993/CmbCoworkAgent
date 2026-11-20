@@ -17,7 +17,10 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
-import { isBuiltinRobotThreadRemoteAccessEligible } from "@/lib/builtin-robot-remote-access"
+import {
+  botWorkRemoteAccessBlockedReason,
+  isBuiltinRobotThreadRemoteAccessEligible
+} from "@/lib/builtin-robot-remote-access"
 import { sortBuiltinRobotThreadsByRemoteAccess } from "@/lib/builtin-robot-thread-sort"
 import { cn } from "@/lib/utils"
 import type {
@@ -535,6 +538,7 @@ export function BuiltinRobotPanel(): React.JSX.Element {
                       (candidate) => candidate.threadId === thread.thread_id
                     )
                     const enabled = grant?.state === "active"
+                    const botWorkBlocked = botWorkRemoteAccessBlockedReason(thread)
                     const key = `thread-grant:${thread.thread_id}`
                     return (
                       <div
@@ -548,12 +552,16 @@ export function BuiltinRobotPanel(): React.JSX.Element {
                           <p className="mt-0.5 truncate text-xs text-muted-foreground">
                             {String(thread.metadata?.workspacePath ?? "")}
                           </p>
+                          {botWorkBlocked && (
+                            <p className="mt-0.5 text-xs text-muted-foreground">{botWorkBlocked}</p>
+                          )}
                         </div>
                         <Switch
                           aria-label={`允许招乎访问 ${thread.title ?? thread.thread_id}`}
                           checked={enabled}
                           disabled={
-                            busyAction !== null || (!enabled && !remoteAccess?.routeAvailable)
+                            busyAction !== null ||
+                            (!enabled && (!remoteAccess?.routeAvailable || Boolean(botWorkBlocked)))
                           }
                           onCheckedChange={(checked) =>
                             void performRemoteAccess(

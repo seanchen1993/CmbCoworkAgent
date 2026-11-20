@@ -20,7 +20,8 @@ export function SettingsOverlay({
       }}
     >
       <Dialog.Content
-        className="absolute inset-0 z-[70] flex flex-col overflow-hidden bg-background outline-none"
+        // Native drag regions in the covered Bot headers ignore DOM pointer-events and z-index.
+        className="absolute inset-0 z-[70] flex flex-col overflow-hidden bg-background outline-none [-webkit-app-region:no-drag]"
         aria-describedby={undefined}
         data-cmb-modal-dialog="true"
         onInteractOutside={(event) => event.preventDefault()}

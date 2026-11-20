@@ -1,0 +1,179 @@
+[
+  {
+    "file": "bot-slash-dispatch-build-2.log.txt",
+    "rawSha256": "8afe841e1382865461ad4e6d79654fd1aa82cbb378e21033dc1c98371c12b92f",
+    "bytes": 87676,
+    "summary": [
+      "Isolated Bot test build: <temp>/bot-integration-build-hp3IWA"
+    ]
+  },
+  {
+    "file": "bot-slash-dispatch-build-3.log.txt",
+    "rawSha256": "2878840746f3595960d7c6e46a0571c1a82d07adf0ab93ad236e176f672cf102",
+    "bytes": 87676,
+    "summary": [
+      "Isolated Bot test build: <temp>/bot-integration-build-UM39Ba"
+    ]
+  },
+  {
+    "file": "bot-slash-dispatch-build-4.log.txt",
+    "rawSha256": "c9fc5bde15ec5586b04b39a251fdd613d0fba56645549c8785e13682e83da128",
+    "bytes": 87677,
+    "summary": [
+      "Isolated Bot test build: <temp>/bot-integration-build-XQS0CM"
+    ]
+  },
+  {
+    "file": "bot-slash-dispatch-build.log.txt",
+    "rawSha256": "1e4efa40f9b15bdcf45c0ca795ef6fabc78ab48a2cc76b6a3e29c7bdec44100c",
+    "bytes": 87676,
+    "summary": [
+      "Isolated Bot test build: <temp>/bot-integration-build-dmFdAn"
+    ]
+  },
+  {
+    "file": "bot-slash-dispatch-mode-boundaries.log.txt",
+    "rawSha256": "f748a47bf0841f1bd55bd614078734a00f9669547f7a05eb09ffdcff0293652d",
+    "bytes": 3040,
+    "summary": [
+      " Test Files  4 passed (4)",
+      "      Tests  21 passed (21)"
+    ]
+  },
+  {
+    "file": "bot-slash-dispatch-real-1.log.txt",
+    "rawSha256": "ba28d66221b101cd9bdda57d6ccfc767347a69923a1b268b886c789dde4f352d",
+    "bytes": 1294,
+    "summary": [
+      "case failures; inspect JSON report"
+    ]
+  },
+  {
+    "file": "bot-slash-dispatch-real-2.log.txt",
+    "rawSha256": "d5d187f66b5884df03c88aa1ce92e6ad78c3d7f10fae5ae360f98ca5ae1f129b",
+    "bytes": 1592,
+    "summary": []
+  },
+  {
+    "file": "bot-slash-dispatch-real-3.log.txt",
+    "rawSha256": "d4c6d203044611967fd6fe9df6b73215da7ac1bf7675524f38d67724592e19c8",
+    "bytes": 1582,
+    "summary": []
+  },
+  {
+    "file": "bot-slash-dispatch-real-4.log.txt",
+    "rawSha256": "bd0958209828c0a2e461ac4d4265e98cc9bef0c60c4eba75fb89e1643d15a89c",
+    "bytes": 656,
+    "summary": []
+  },
+  {
+    "file": "bot-slash-dispatch-real-5.log.txt",
+    "rawSha256": "c6bc5fefbf6bf813230d5132fe74a5d01150c9223ff3e9e6bf06c064e980730b",
+    "bytes": 656,
+    "summary": []
+  },
+  {
+    "file": "bot-slash-dispatch-regression-2.log.txt",
+    "rawSha256": "a65210ba0e41ce927b41c4e4fc5253711aca52e2d27076e2c6fd3cb1eb5f1a9b",
+    "bytes": 3395,
+    "summary": [
+      " Test Files  11 passed (11)",
+      "      Tests  158 passed (158)"
+    ]
+  },
+  {
+    "file": "bot-slash-dispatch-regression-final-2.log.txt",
+    "rawSha256": "855075c50a13f76bd1c83c4bd4984ed33615bab1c7748027ca5c00232d854ac6",
+    "bytes": 62225,
+    "summary": [
+      " Test Files  12 passed (12)",
+      "      Tests  496 passed (496)"
+    ]
+  },
+  {
+    "file": "bot-slash-dispatch-regression-final.log.txt",
+    "rawSha256": "da624c2e777f2f90edd539e7f929ca95b173cbc660d0d0304a1bb60cbd24e923",
+    "bytes": 61812,
+    "summary": [
+      "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯",
+      " Test Files  1 failed | 11 passed (12)",
+      "      Tests  1 failed | 495 passed (496)"
+    ]
+  },
+  {
+    "file": "bot-slash-dispatch-regression.log.txt",
+    "rawSha256": "8024a193450820dcef45b5004a0545866790a3e441130893b40862345159285e",
+    "bytes": 6233,
+    "summary": [
+      "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯",
+      " Test Files  1 failed | 8 passed (9)",
+      "      Tests  1 failed | 147 passed (148)"
+    ]
+  },
+  {
+    "file": "bot-slash-dispatch-replay-diagnosis.log.txt",
+    "rawSha256": "420bbaf32da44118461f015060d25e50e8852823fbbe380a69ca5448d6d1499a",
+    "bytes": 3382,
+    "summary": [
+      "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯",
+      " Test Files  1 failed (1)",
+      "      Tests  1 failed | 11 passed (12)"
+    ]
+  },
+  {
+    "file": "bot-slash-dispatch-replay-fixed.log.txt",
+    "rawSha256": "a61666e88d59639ea39330e9ff9668a36b93039611241af7248080362eec1bcc",
+    "bytes": 2141,
+    "summary": [
+      " Test Files  1 passed (1)",
+      "      Tests  12 passed (12)"
+    ]
+  },
+  {
+    "file": "bot-slash-dispatch-tests.log.txt",
+    "rawSha256": "99df0b5c57562fd3b086534847dc5b6212b8a9434b67869c0fa0ed677d71fc9b",
+    "bytes": 57229,
+    "summary": [
+      " Test Files  4 passed (4)",
+      "      Tests  363 passed (363)"
+    ]
+  },
+  {
+    "file": "bot-slash-dispatch-typecheck-2.log.txt",
+    "rawSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0,
+    "summary": []
+  },
+  {
+    "file": "bot-slash-dispatch-typecheck-final-2.log.txt",
+    "rawSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0,
+    "summary": []
+  },
+  {
+    "file": "bot-slash-dispatch-typecheck-final.log.txt",
+    "rawSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0,
+    "summary": []
+  },
+  {
+    "file": "bot-slash-dispatch-typecheck.log.txt",
+    "rawSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0,
+    "summary": []
+  },
+  {
+    "file": "bot-slash-dispatch-web-types.log.txt",
+    "rawSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0,
+    "summary": []
+  },
+  {
+    "file": "bot-slash-dispatch-work-app.log.txt",
+    "rawSha256": "2afa2a178b777ded63ee3368a70a093321991b49607d96dc05c0b229d53cb36b",
+    "bytes": 887,
+    "summary": [
+      "PASS: real beta App, ChatContainer and Runtime: main delegation → right Work → file delivery → edit → complete/continue same thread → separate drafts/main reply {"
+    ]
+  }
+]

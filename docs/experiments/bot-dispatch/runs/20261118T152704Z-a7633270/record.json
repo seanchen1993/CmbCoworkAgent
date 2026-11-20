@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "runId": "20261118T152704Z-a7633270",
+  "kind": "real-model-electron",
+  "startedAt": "2026-11-18T15:27:04.615Z",
+  "displayTimezone": "Asia/Shanghai",
+  "status": "failed",
+  "selectedCases": [
+    "greeting",
+    "short-shell",
+    "browser-lookup",
+    "slash-skill-natural"
+  ],
+  "phase": "setup",
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "node": "v25.5.0"
+  },
+  "report": {
+    "results": []
+  },
+  "updatedAt": "2026-11-18T15:27:04.622Z",
+  "finishedAt": "2026-11-18T15:27:04.622Z",
+  "error": "Selected model is not configured"
+}

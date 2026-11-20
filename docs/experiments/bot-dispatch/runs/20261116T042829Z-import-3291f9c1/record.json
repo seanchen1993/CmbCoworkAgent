@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "runId": "20261116T042829Z-import-3291f9c1",
+  "kind": "historical-real-model-electron",
+  "startedAt": "2026-11-16T04:28:29.010Z",
+  "displayTimezone": "Asia/Shanghai",
+  "archivedOn": "2026-11-17",
+  "status": "no-failure-recorded",
+  "exitCode": null,
+  "selectedCases": null,
+  "provenance": {
+    "sourceArtifact": "bot-integration-build-uNW58F/artifacts/routing-1794803309010.json",
+    "originalReportSha256": "3291f9c1ae31a6cca2b5168429f068f3a0e33d7fc401d409cd1903d7658a9e08",
+    "originalExitCodeUnavailable": true,
+    "originalCaseSelectionUnavailable": true,
+    "note": "历史回收。保留缺失字段；未见 error 不等于证实进程成功。未使用当前源码回填历史版本。"
+  },
+  "build": {
+    "builtAt": "2026-11-16T04:21:01.881Z",
+    "mainSha256": "eb885d085129afaafdbb5ba260864ba0a5464e9c7c3117faaab273b7bc8d8896",
+    "sourceAtBuild": null
+  },
+  "notes": "历史单轮记录，完整输入、处理路线及回复见 report；缺失的指标不推算。",
+  "report": {
+    "model": "deepseek-v4-flash",
+    "fixtureApprovalMode": "yolo (disposable profile only)",
+    "wire": {
+      "main": 10,
+      "guided": 10,
+      "worker": 0,
+      "workerCreate": 0
+    },
+    "results": [
+      {
+        "id": "event-plan",
+        "label": "多材料筹备方案及交付",
+        "preferred": "independent",
+        "files": {
+          "活动约束.md": "虚构读书会：周日下午三点开始，共90分钟，20人，各带一本书。必须有签到、分组讨论和分享。预算1000元。\n",
+          "场地说明.md": "社区阅览室免费，可容纳24人，室内不受天气影响。小公园免费、容量40人，下雨不可用。活动中心收费300元、容量30人，有投影。\n",
+          "费用.csv": "项目,单价,数量\n饮用水,5,20\n材料,120,1\n备用金,100,1\n"
+        },
+        "message": "请帮我做好周日读书会筹备方案。工作目录 <test-workspace>/event-plan。读取活动约束.md、场地说明.md、费用.csv，核算费用，比较三个场地的容量、预算和天气风险，推荐一个；制定90分钟流程、分工清单和两条应急安排。写入 plan.md，检查总时长和预算后交给我。后面我会调整时间。资料均为虚构，不用浏览器，也不联系任何人。",
+        "actual": "inline",
+        "followsPreference": false,
+        "seconds": 39.6,
+        "tools": [
+          "ls",
+          "read_file",
+          "execute",
+          "write_file",
+          "bot_deliver_files"
+        ],
+        "mainTools": [
+          "ls",
+          "read_file",
+          "read_file",
+          "read_file",
+          "execute",
+          "execute",
+          "write_file",
+          "execute",
+          "bot_deliver_files",
+          "execute",
+          "bot_deliver_files"
+        ],
+        "reply": "我先查看工作目录和这三份资料文件。\n\n\n\n\n\n\n\n\n方案已写入 `event-plan/plan.md`（原件在该目录，附件是同一内容的可打开副本）。\n\n**费用核算**（费用.csv：水 5×20=100、材料 120、备用金 100）固定 320 元。阅览室或公园 320 元，活动中心 620 元，三者都不超 1000 元预算。\n\n**场地比较**：三处容量都够 20 人（24/40/30）。差别在天气和钱——小公园免费但“下雨不可用”，活动只有单一时间窗、改期成本高，排除；活动中心有投影但没有放映需求，白花 300 元。**推荐社区阅览室**：室内无天气风险、免费、余 4 个机动位。\n\n**流程**：15:00 签到 → 15:10 破冰 → 15:20 分组 → 15:30 分组讨论(30min) → 16:00 小组分享(25min) → 16:25 收尾，合计 10+10+10+30+25+5=90 分钟，16:30 结束。工时已用脚本验算过。\n\n**分工**：总协调 1、签到 2、物料 2、组长 4、计时记录 1（可兼任）。**应急两条**：①阅览室临时不可用 → 转活动中心（620 元仍在预算内），前一天双重确认；②16:00 未收束或超 24 人 → 分享压到每组 3 分钟强制收尾／入口按签到顺序管控不放临时位。\n\n调整时间时，环节时长不变、整体平移即可；要压缩优先压破冰和分享。",
+        "workIds": [],
+        "workspaces": [],
+        "states": [
+          {
+            "kind": "user",
+            "state": "completed",
+            "error": null
+          }
+        ],
+        "reportCount": 0
+      }
+    ]
+  },
+  "logs": [
+    {
+      "name": "bot-routing-scope-prototype.log",
+      "text": "DIAGNOSTIC ONLY: one routing reminder added after scoping\n{\"case\":\"event-plan\",\"actual\":\"inline\",\"preferred\":\"independent\",\"seconds\":39.6,\"tools\":[\"ls\",\"read_file\",\"read_file\",\"read_file\",\"execute\",\"execute\",\"write_file\",\"execute\",\"bot_deliver_files\",\"execute\",\"bot_deliver_files\"]}\nRouting evaluation report: <temp>/bot-integration-build-uNW58F/artifacts/routing-1794803309010.json\n",
+      "sha256": "4167b4aa40553657512e99df7d5f6590b5d392f5052d682196f497cfa4574c10"
+    }
+  ]
+}
