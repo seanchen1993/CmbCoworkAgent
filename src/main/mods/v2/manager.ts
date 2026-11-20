@@ -11,11 +11,7 @@ import type {
   ModObject
 } from "../../../shared/mods/types"
 import type { FunctionPluginStatus } from "../../../shared/mods/v2/commands"
-import {
-  ModFunctionError,
-  matchesEventPattern,
-  type FunctionGuest
-} from "../../../shared/mods/v2/contracts"
+import { ModFunctionError, type FunctionGuest } from "../../../shared/mods/v2/contracts"
 import { FunctionRuntimeClient } from "./runtime-client"
 import { compileFunctionPlugin, type CompiledFunctionPlugin } from "./loader"
 import { FunctionSession, SESSION_CAPABILITIES, type FunctionSessionHost } from "./session"
@@ -29,8 +25,6 @@ import type {
 } from "../../../shared/mods/v2/ui"
 import { CLIENT_BOOTSTRAP } from "./client-bootstrap"
 import type { FunctionToolInfo, RegisteredFunctionTool } from "../../../shared/mods/v2/tools"
-import type { ToolPermissionResult } from "../../../shared/tool-permission"
-import type { ModOrigin } from "../../../shared/mods/v2/contracts"
 
 interface Snapshot {
   compiled: CompiledFunctionPlugin
@@ -64,8 +58,7 @@ interface FunctionManagerHost {
     input: ModObject,
     origin: "model" | "mod",
     signal: AbortSignal,
-    run: () => Promise<ModObject>,
-    caller?: ModOrigin
+    run: () => Promise<ModObject>
   ): Promise<ModObject>
   callTool?(
     workspace: string,
@@ -81,14 +74,6 @@ interface FunctionManagerHost {
     input: ModObject,
     signal: AbortSignal
   ): Promise<ModObject>
-  checkTool?(
-    workspace: string,
-    threadId: string,
-    grant: ModGrant,
-    input: ModObject,
-    signal: AbortSignal,
-    registered?: RegisteredFunctionTool
-  ): Promise<ToolPermissionResult>
   completeModel?(
     workspace: string,
     threadId: string,
@@ -321,7 +306,7 @@ export class FunctionModsManager {
           listTools: this.host.listTools
             ? (signal) => this.host.listTools!(workspace, threadId, signal)
             : undefined,
-          registeredTool: async (owner, input, origin, signal, run, caller) => {
+          registeredTool: async (owner, input, origin, signal, run) => {
             assertLive(owner)
             if (!this.host.registeredTool)
               throw new ModFunctionError("MODS_REGISTERED_TOOL_UNAVAILABLE")
@@ -332,8 +317,7 @@ export class FunctionModsManager {
               input,
               origin,
               signal,
-              run,
-              caller
+              run
             )
             assertLive(owner)
             return answer
@@ -359,21 +343,6 @@ export class FunctionModsManager {
             if (!this.host.callMcp) throw new ModFunctionError("MODS_MCP_UNAVAILABLE")
             const grant = current.snapshots.get(plugin.name)!.grant
             const result = await this.host.callMcp(workspace, threadId, grant, input, signal)
-            assertLive(plugin)
-            return result
-          },
-          checkTool: async (plugin, input, signal, registered) => {
-            assertLive(plugin)
-            if (!this.host.checkTool) throw new ModFunctionError("MODS_TOOL_CHECK_UNAVAILABLE")
-            const grant = current.snapshots.get(plugin.name)!.grant
-            const result = await this.host.checkTool(
-              workspace,
-              threadId,
-              grant,
-              input,
-              signal,
-              registered
-            )
             assertLive(plugin)
             return result
           },
@@ -526,30 +495,6 @@ export class FunctionModsManager {
       return []
     const entry = await this.session(workspace, threadId)
     return entry.session!.registeredTools()
-  }
-
-  async interceptToolCheck(
-    workspace: string,
-    threadId: string,
-    input: ModObject,
-    signal: AbortSignal | undefined,
-    core: (input: ModObject, signal: AbortSignal) => Promise<ModObject>,
-    origin?: ModOrigin
-  ): Promise<ToolPermissionResult> {
-    // A permission check must not start a session (whose startup hooks may perform work).
-    const session = this.sessions.get(JSON.stringify([workspace, threadId]))?.session
-    if (!session || !this.host.enabled(workspace))
-      return (await core(input, signal ?? new AbortController().signal)) as ToolPermissionResult
-    return session.checkTool(input, signal, core, origin)
-  }
-
-  hasToolCheck(workspace: string, threadId: string): boolean {
-    const session = this.sessions.get(JSON.stringify([workspace, threadId]))?.session
-    return !!session?.plugins.some((plugin) =>
-      plugin.guest.registrations.some((registration) =>
-        matchesEventPattern(registration.pattern, "tool.check")
-      )
-    )
   }
 
   async panes(workspace: string, threadId: string): Promise<FunctionPaneSnapshot[]> {

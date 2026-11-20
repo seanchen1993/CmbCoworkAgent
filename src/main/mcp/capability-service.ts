@@ -22,7 +22,6 @@ import { getModCallContext } from "../mods/context"
 import { authorizeCurrentModInput } from "../mods/manager"
 import { invokeMcpToolWithRetry } from "./invocation-retry"
 import { ModError } from "../mods/errors"
-import { beforeModToolExecution } from "../mods/execution-error"
 
 interface CapabilitySource {
   kind: "connector" | "plugin"
@@ -200,11 +199,6 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
   private initPromise: Promise<void> | null = null
   private readonly schemaCache = new SchemaCache()
 
-  peekTools(): McpCapabilityTool[] | null {
-    if (!this.cache || this.cache.fingerprint !== buildFingerprint(this.readSources())) return null
-    return structuredClone(this.cache.tools)
-  }
-
   async listTools(): Promise<McpCapabilityTool[]> {
     await this.ensureInitialized()
     return [...(this.cache?.tools ?? [])]
@@ -245,17 +239,15 @@ class ManagedMcpCapabilityService implements McpCapabilityService {
 
     return withRawModMcp(tool, args, async (args) => {
       await authorizeCurrentModInput(`mcp:${tool.capabilityId}`, args)
-      await beforeModToolExecution(() => {
-        getModCallContext()?.assertMcpTool?.(tool)
-        // Approval can await UI while settings change. Never send to a replaced connection,
-        // even when the server still advertises the same name and schema.
-        if (
-          getModCallContext()?.assertMcpTool &&
-          (this.cache !== connection ||
-            buildFingerprint(this.readSources()) !== connection?.fingerprint)
-        )
-          throw new ModError("MODS_MCP_CONTEXT_EXPIRED")
-      })
+      getModCallContext()?.assertMcpTool?.(tool)
+      // Approval can await UI while settings change. Never send to a replaced connection,
+      // even when the server still advertises the same name and schema.
+      if (
+        getModCallContext()?.assertMcpTool &&
+        (this.cache !== connection ||
+          buildFingerprint(this.readSources()) !== connection?.fingerprint)
+      )
+        throw new ModError("MODS_MCP_CONTEXT_EXPIRED")
       const callClient = serverClient as {
         callTool(
           request: { name: string; arguments: Record<string, unknown> },

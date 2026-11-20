@@ -63,7 +63,6 @@ export async function startModsModelServer() {
     if (Array.isArray(body.tools) && userPrompt?.includes("[mods-registered")) {
       const removed = userPrompt.includes("[mods-registered-removed]")
       const invalid = userPrompt.includes("[mods-registered-invalid]")
-      const denied = userPrompt.includes("[mods-registered-denied]")
       if (removed || body.messages?.at(-1)?.role === "tool") {
         event([
           {
@@ -74,9 +73,7 @@ export async function startModsModelServer() {
                 ? "REGISTERED_TOOL_REMOVED_OK"
                 : invalid
                   ? "REGISTERED_TOOL_INVALID_OK"
-                  : denied
-                    ? "REGISTERED_PERMISSION_DENIED_OK"
-                    : "REGISTERED_TOOL_OK"
+                  : "REGISTERED_TOOL_OK"
             },
             finish_reason: "stop"
           }
@@ -90,15 +87,11 @@ export async function startModsModelServer() {
               tool_calls: [
                 {
                   index: 0,
-                  id: invalid
-                    ? "registered-invalid"
-                    : denied
-                      ? "registered-denied"
-                      : "registered-model",
+                  id: invalid ? "registered-invalid" : "registered-model",
                   type: "function",
                   function: {
                     name: "mcp__function-commands__project_brief",
-                    arguments: JSON.stringify({ limit: invalid ? "bad" : denied ? 13 : 5 })
+                    arguments: JSON.stringify({ limit: invalid ? "bad" : 5 })
                   }
                 }
               ]

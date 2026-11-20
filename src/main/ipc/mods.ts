@@ -11,7 +11,6 @@ import { readManagedModDeployment } from "../mods/policy"
 import { ModCommandQueue } from "../mods/command-queue"
 import { bindStandaloneModCommand } from "../mods/command-backend"
 import { withFunctionMcpCommand } from "../mods/v2/mcp-command"
-import { withFunctionCommandBinding } from "../mods/v2/command-binding"
 import { functionExecutionScope } from "../mods/v2/execution-context"
 import { functionCallTurn } from "../mods/v2/host-call"
 import { encodeModJson, parseModJson } from "../../shared/mods/validation"
@@ -32,7 +31,6 @@ import { randomUUID } from "node:crypto"
 import { FunctionModels } from "../mods/v2/models"
 import { invokeFunctionModel, resolveFunctionModel } from "../mods/v2/model-provider"
 import { FunctionRegisteredTools } from "../mods/v2/registered-tools"
-import { queryFunctionToolPermission } from "../mods/v2/tool-permission-host"
 
 export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWindow | null): void {
   let manager: ModsManager
@@ -40,7 +38,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     manager = new ModsManager(
       join(getOpenworkDir(), "mods-control.sqlite"),
       getPlugins,
-      async (_threadId, modId, toolId, args, signal, reason) => {
+      async (_threadId, modId, toolId, args, signal) => {
         const owner = window()
         if (!owner || owner.isDestroyed()) return false
         const result = await dialog.showMessageBox(owner, {
@@ -48,7 +46,7 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
           type: "question",
           title: "批准插件操作",
           message: `插件 ${modId} 请求执行 ${toolId}`,
-          detail: [reason, JSON.stringify(args, null, 2)].filter(Boolean).join("\n\n"),
+          detail: JSON.stringify(args, null, 2),
           buttons: ["拒绝", "允许本次操作"],
           defaultId: 0,
           cancelId: 0,
@@ -83,10 +81,9 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
       if (!manager.isEnabled(workspace) || writableThreadScope(threadId) !== workspace)
         throw new ModError("MODS_CALL_SCOPE_CHANGED")
     },
-    admit: async (identity, tool, input, signal, caller) => {
+    admit: async (identity, tool, input, signal) => {
       if (manager.protects(identity.workspace))
         await manager.policy.admit(identity, tool, input, signal)
-      await manager.authorizeRegisteredTool(identity, tool, input, signal, caller)
     },
     publish: async (identity, value, signal) => {
       if (manager.protects(identity.workspace))
@@ -130,21 +127,6 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
         return manager.functionToolCatalog(workspace, threadId, functionExecutionAgent())
       },
       completeModel: (...args) => models.complete(...args),
-      checkTool: (workspace, threadId, grant, input, signal, registered) => {
-        if (writableThreadScope(threadId) !== workspace)
-          throw new ModError("MODS_CALL_SCOPE_CHANGED")
-        manager.store.assertGrant(grant)
-        return queryFunctionToolPermission(
-          manager,
-          assertStandaloneThread,
-          workspace,
-          threadId,
-          grant,
-          input,
-          signal,
-          registered
-        )
-      },
       callMcp: (workspace, threadId, grant, input, signal) =>
         scheduleFunctionTool(
           queue,
@@ -206,11 +188,9 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
             if (writableThreadScope(threadId) !== workspace)
               throw new ModError("MODS_CALL_SCOPE_CHANGED")
             manager.store.assertGrant(grant)
-            const execution = functionExecutionScope(workspace, threadId)
-            if ((execution?.agentId ?? "main") !== "main")
-              throw new ModError("MODS_TOOL_AGENT_UNAVAILABLE")
-            const invoke = () =>
-              manager.invokeFunctionTool(
+            const cleanup = await ensureCommandBinding(workspace, threadId, operationSignal)
+            try {
+              return await manager.invokeFunctionTool(
                 workspace,
                 threadId,
                 grant,
@@ -220,21 +200,9 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
                 readOnly,
                 userInitiated
               )
-            if (execution?.turnId || !manager.needsCommandBinding(threadId)) return invoke()
-            assertStandaloneThread(threadId)
-            const turnId = functionCallTurn(workspace, threadId) ?? `function-tools:${randomUUID()}`
-            return withFunctionCommandBinding(
-              "native",
-              workspace,
-              threadId,
-              operationSignal,
-              () => bindStandaloneModCommand(workspace, threadId, turnId, operationSignal),
-              () =>
-                withFunctionExecution(
-                  { workspace, threadId, turnId, leased: true, immediate: readOnly, userInitiated },
-                  invoke
-                )
-            )
+            } finally {
+              await cleanup?.()
+            }
           }
         )
       },
@@ -249,16 +217,6 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     if (owner && !owner.isDestroyed()) owner.webContents.send("mods:jobs-changed", { threadId })
   })
   manager.attachFunctions({
-    hasToolCheck: (workspace, threadId) => functions.hasToolCheck(workspace, threadId),
-    toolCheck: (binding, input, core, origin) =>
-      functions.interceptToolCheck(
-        binding.workspace,
-        binding.threadId,
-        input,
-        binding.signal,
-        core,
-        origin
-      ),
     registeredTools: (workspace, threadId) => functions.registeredTools(workspace, threadId),
     toolCall: (binding, input, core) =>
       withFunctionExecution(
@@ -336,6 +294,11 @@ export function registerModsHandlers(ipcMain: IpcMain, window: () => BrowserWind
     )
       throw new ModError("MODS_THREAD_READ_ONLY")
     return workspace
+  }
+  async function ensureCommandBinding(workspace: string, threadId: string, signal: AbortSignal) {
+    if (!manager.needsCommandBinding(threadId)) return undefined
+    assertStandaloneThread(threadId)
+    return bindStandaloneModCommand(workspace, threadId, `function-tools:${randomUUID()}`, signal)
   }
   function assertStandaloneThread(threadId: string): void {
     const thread = getThreadCore(threadId)!
