@@ -1,5 +1,3 @@
-import { ModFunctionError } from "../../shared/mods/v2/contracts"
-
 export class ModError extends Error {
   readonly code: string
   constructor(code: string) {
@@ -10,7 +8,5 @@ export class ModError extends Error {
 }
 
 export function modErrorCode(error: unknown): string {
-  return error instanceof ModError || error instanceof ModFunctionError
-    ? error.code
-    : "MODS_EXECUTION_FAILED"
+  return error instanceof ModError ? error.code : "MODS_EXECUTION_FAILED"
 }

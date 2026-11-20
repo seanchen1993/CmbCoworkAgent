@@ -12,7 +12,6 @@ export interface ModJobStore {
   jobs(threadId: string): ModCommandJob[]
 }
 interface Pending {
-  immediate: boolean
   job: ModCommandJob
   controller: AbortController
   run: (signal: AbortSignal) => Promise<ModProjection>
@@ -37,8 +36,7 @@ export class ModCommandQueue {
     workspace: string,
     threadId: string,
     command: string,
-    run: Pending["run"],
-    options: { immediate?: boolean; inlineResult?: boolean } = {}
+    run: Pending["run"]
   ): { job: ModCommandJob; completion: Promise<ModProjection> } {
     if (this.closed) throw new ModError("MODS_QUEUE_CLOSED")
     if (
@@ -47,7 +45,6 @@ export class ModCommandQueue {
     )
       throw new ModError("MODS_QUEUE_LIMIT")
     const job: ModCommandJob = {
-      ...(options.inlineResult ? { presentation: "inline" as const } : {}),
       id: randomUUID(),
       threadId,
       workspace,
@@ -64,7 +61,6 @@ export class ModCommandQueue {
     void completion.catch(() => {})
     this.store.saveJob(job)
     this.pending.set(job.id, {
-      immediate: options.immediate === true,
       job,
       run,
       resolve,
@@ -79,27 +75,19 @@ export class ModCommandQueue {
 
   private pump(threadId: string): void {
     if (this.closed) return
-    for (const entry of [...this.pending.values()])
-      if (entry.immediate && entry.job.threadId === threadId && entry.job.state === "queued")
-        this.start(entry, false)
     const item = [...this.pending.values()].find(
-      (entry) => !entry.immediate && entry.job.threadId === threadId && entry.job.state === "queued"
+      (entry) => entry.job.threadId === threadId && entry.job.state === "queued"
     )
     if (!item) return
     const lease = claimLocalThreadRunLease({ threadId, owner: "mods", runId: item.job.id })
     if (!lease.acquired) return
-    this.start(item, true)
-  }
-
-  private start(item: Pending, leased: boolean): void {
-    const threadId = item.job.threadId
     item.job.state = "running"
     try {
       this.store.saveJob(item.job)
     } catch (error) {
       this.pending.delete(item.job.id)
       item.reject(error)
-      if (leased) releaseLocalThreadRunLease(threadId, "mods", item.job.id)
+      releaseLocalThreadRunLease(threadId, "mods", item.job.id)
       return
     }
     this.notify(threadId)
@@ -129,7 +117,7 @@ export class ModCommandQueue {
       } finally {
         clearTimeout(timer)
         this.pending.delete(item.job.id)
-        if (leased) releaseLocalThreadRunLease(threadId, "mods", item.job.id)
+        releaseLocalThreadRunLease(threadId, "mods", item.job.id)
         this.notify(threadId)
       }
     })()
