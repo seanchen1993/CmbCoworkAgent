@@ -19,7 +19,6 @@ interface Pending {
   resolve: (value: ModProjection) => void
   reject: (error: unknown) => void
   completion: Promise<ModProjection>
-  detachAbort?(): void
 }
 
 /** Commands share the same physical thread lease as desktop, IM and scheduled runs. */
@@ -39,10 +38,9 @@ export class ModCommandQueue {
     threadId: string,
     command: string,
     run: Pending["run"],
-    options: { immediate?: boolean; inlineResult?: boolean; signal?: AbortSignal } = {}
+    options: { immediate?: boolean; inlineResult?: boolean } = {}
   ): { job: ModCommandJob; completion: Promise<ModProjection> } {
     if (this.closed) throw new ModError("MODS_QUEUE_CLOSED")
-    if (options.signal?.aborted) throw new ModError("MODS_CANCELLED")
     if (
       this.pending.size >= 32 ||
       [...this.pending.values()].filter((item) => item.job.threadId === threadId).length >= 8
@@ -74,14 +72,6 @@ export class ModCommandQueue {
       completion,
       controller: new AbortController()
     })
-    if (options.signal) {
-      const signal = options.signal
-      const abort = (): void => {
-        if (this.pending.has(job.id)) this.cancel(threadId, job.id)
-      }
-      signal.addEventListener("abort", abort, { once: true })
-      this.pending.get(job.id)!.detachAbort = () => signal.removeEventListener("abort", abort)
-    }
     this.notify(threadId)
     queueMicrotask(() => this.pump(threadId))
     return { job: { ...job }, completion }
@@ -107,7 +97,6 @@ export class ModCommandQueue {
     try {
       this.store.saveJob(item.job)
     } catch (error) {
-      item.detachAbort?.()
       this.pending.delete(item.job.id)
       item.reject(error)
       if (leased) releaseLocalThreadRunLease(threadId, "mods", item.job.id)
@@ -139,7 +128,6 @@ export class ModCommandQueue {
         item.reject(error)
       } finally {
         clearTimeout(timer)
-        item.detachAbort?.()
         this.pending.delete(item.job.id)
         if (leased) releaseLocalThreadRunLease(threadId, "mods", item.job.id)
         this.notify(threadId)
@@ -152,7 +140,6 @@ export class ModCommandQueue {
     if (!item || item.job.threadId !== threadId) throw new ModError("MODS_JOB_UNAVAILABLE")
     item.controller.abort()
     if (item.job.state === "queued") {
-      item.detachAbort?.()
       item.job.state = "cancelled"
       item.job.finishedAt = Date.now()
       this.store.saveJob(item.job)
@@ -160,11 +147,6 @@ export class ModCommandQueue {
       item.reject(new ModError("MODS_CANCELLED"))
       this.notify(threadId)
     }
-  }
-
-  closeThread(threadId: string): void {
-    for (const item of this.pending.values())
-      if (item.job.threadId === threadId) this.cancel(threadId, item.job.id)
   }
 
   close(): void {

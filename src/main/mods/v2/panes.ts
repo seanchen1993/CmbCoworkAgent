@@ -16,7 +16,6 @@ import {
 import type { FunctionPlugin } from "./dispatcher"
 
 export interface FunctionUiDispatch {
-  signal?: AbortSignal
   generation?: string
   operation?: boolean
   core?(input: ModObject, signal: AbortSignal): Promise<ModJson>
@@ -44,10 +43,6 @@ export class FunctionPanes {
   private readonly panes = new Map<string, Pane>()
   private readonly intents = new Map<string, { input: string; result: Promise<void> }>()
   private serial: Promise<unknown> = Promise.resolve()
-  private actions: Promise<unknown> = Promise.resolve()
-  private readonly active = new Map<AbortController, string>()
-  private readonly retained = new Map<string, number>()
-  private readonly retired = new Set<string>()
   private notification?: ReturnType<typeof setTimeout>
   private closed = false
 
@@ -82,14 +77,11 @@ export class FunctionPanes {
     this.changed()
   }
 
-  async closePane(plugin: string, id: string, cancelActions = true): Promise<void> {
+  async closePane(plugin: string, id: string): Promise<void> {
     this.host.assertLive()
     const pane = this.panes.get(`${plugin}:${id}`)
     if (!pane) return
     this.panes.delete(pane.key)
-    for (const [controller, key] of this.active)
-      if (cancelActions && key === pane.key)
-        controller.abort(new ModFunctionError("MODS_UI_PANE_CLOSED"))
     await this.release(pane.generation)
     this.changed()
   }
@@ -101,11 +93,6 @@ export class FunctionPanes {
   }
 
   private async release(generation: string): Promise<void> {
-    if (this.retained.has(generation)) {
-      this.retired.add(generation)
-      return
-    }
-    this.retired.delete(generation)
     await Promise.allSettled(this.host.plugins.map((plugin) => plugin.guest.releaseUi(generation)))
   }
 
@@ -145,7 +132,6 @@ export class FunctionPanes {
           pane.generation = generation
           pane.tree = tree
         } catch (error) {
-          pane.dirty = true
           await this.release(generation)
           throw error
         }
@@ -203,13 +189,10 @@ export class FunctionPanes {
       return prior.input === input
         ? prior.result
         : Promise.reject(new ModFunctionError("MODS_UI_INTENT_CONFLICT"))
-    if (this.panes.get(action.pane)?.generation !== action.generation)
-      return Promise.reject(new ModFunctionError("MODS_UI_STALE_ACTION"))
     // Keep settled IDs for the life of the session: evicting one could replay its action.
     if (this.intents.size >= 4096)
       return Promise.reject(new ModFunctionError("MODS_UI_INTENT_LIMIT"))
-    const perform = async (): Promise<void> => {
-      this.host.assertLive()
+    const result = this.enqueue(async () => {
       const pane = this.panes.get(action.pane)
       if (!pane || pane.generation !== action.generation)
         throw new ModFunctionError("MODS_UI_STALE_ACTION")
@@ -220,8 +203,6 @@ export class FunctionPanes {
           {
             operation: true,
             core: async () => {
-              if (this.panes.get(pane.key) !== pane)
-                throw new ModFunctionError("MODS_UI_STALE_ACTION")
               await this.closePane(pane.plugin, pane.id)
               return {}
             }
@@ -264,46 +245,27 @@ export class FunctionPanes {
         ...(event !== "ui.press" ? { value: action.value ?? "" } : {}),
         ...(event === "ui.input" ? { kind: action.kind } : {})
       }
-      const controller = new AbortController()
-      this.active.set(controller, pane.key)
-      this.retained.set(action.generation, (this.retained.get(action.generation) ?? 0) + 1)
-      try {
-        await this.host.dispatch(event, e, {
-          signal: controller.signal,
-          core: async (input, signal): Promise<ModJson> => {
-            signal.throwIfAborted()
-            if (
-              node.type === "Select" &&
-              !(node.props.options as ModObject[]).some((option) => option.value === input.value)
-            )
-              throw new ModFunctionError("MODS_UI_ACTION_INVALID")
-            await this.host.callback(
-              plugin,
-              event,
-              input,
-              { handle: action.handle, generation: action.generation, kind },
-              signal
-            )
-            return event === "ui.press"
-              ? { element: input.element }
-              : { element: input.element, value: input.value }
-          }
-        })
-        this.host.assertLive()
-      } finally {
-        this.active.delete(controller)
-        const count = this.retained.get(action.generation)! - 1
-        if (count) this.retained.set(action.generation, count)
-        else {
-          this.retained.delete(action.generation)
-          if (this.retired.has(action.generation)) await this.release(action.generation)
+      await this.host.dispatch(event, e, {
+        core: async (input, signal): Promise<ModJson> => {
+          if (
+            node.type === "Select" &&
+            !(node.props.options as ModObject[]).some((option) => option.value === input.value)
+          )
+            throw new ModFunctionError("MODS_UI_ACTION_INVALID")
+          await this.host.callback(
+            plugin,
+            event,
+            input,
+            { handle: action.handle, generation: pane.generation, kind },
+            signal
+          )
+          return event === "ui.press"
+            ? { element: input.element }
+            : { element: input.element, value: input.value }
         }
-      }
-    }
-    // Rendering and closing remain responsive while a callback waits for a queued command.
-    // Mutating callbacks stay serial so read/modify/write closures do not lose updates.
-    const result = action.kind === "close" ? perform() : this.actions.then(perform)
-    if (action.kind !== "close") this.actions = result.catch(() => {})
+      })
+      this.host.assertLive()
+    })
     this.intents.set(action.intentId, { input, result })
     return result
   }
@@ -311,8 +273,6 @@ export class FunctionPanes {
   close(): void {
     this.closed = true
     clearTimeout(this.notification)
-    for (const controller of this.active.keys()) controller.abort()
-    this.active.clear()
     this.panes.clear()
     this.intents.clear()
   }

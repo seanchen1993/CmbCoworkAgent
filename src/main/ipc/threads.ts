@@ -3745,7 +3745,6 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         // Avoid a worker startup per item in batches of empty/small tasks.
         dbDeleteThread(threadId)
       }
-      getModsManager()?.closeFunctionThread(threadId)
       clearTrustedToolFilePreviewSourcesForThread(threadId, previewScopeKeys)
       forgetLegacySubagentTranscriptMigration(threadId)
       // Detach the deleted task from its shared physical workspace watcher so
@@ -4205,4 +4204,3 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     return generateTitle(message)
   })
 }
-import { getModsManager } from "../mods/manager"

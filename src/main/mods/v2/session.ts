@@ -26,11 +26,6 @@ export interface FunctionSessionHost {
   workspace: string
   assertLive(plugin?: FunctionPlugin): void
   uiChanged?(): void
-  scheduleCommand?(
-    command: FunctionCommand,
-    signal: AbortSignal,
-    run: (signal: AbortSignal) => Promise<ModObject>
-  ): Promise<ModObject>
   publish(value: ModJson, signal: AbortSignal): Promise<ModJson>
   state?(plugin: FunctionPlugin): FunctionStateAccess
   files?(plugin: FunctionPlugin): FunctionFileAccess
@@ -64,11 +59,11 @@ export class FunctionSession {
         this.dispatch(
           event,
           input,
-          presentation.signal,
+          undefined,
           undefined,
           0,
           undefined,
-          undefined,
+          event.startsWith("ui.") ? event : undefined,
           presentation
         ),
       callback: async (plugin, event, input, callback, signal) => {
@@ -86,13 +81,12 @@ export class FunctionSession {
               callSignal,
               { event, registration: "callback" },
               0,
-              undefined
+              event
             )
             return value === undefined ? {} : { value }
           },
           {
             event,
-            timeoutMs: 120000,
             callback,
             signal,
             origin: { plugin: "engine", tier: "core" },
@@ -198,9 +192,6 @@ export class FunctionSession {
       skip,
       signal: scopedSignal,
       operation: isOperation,
-      ...(event === "command.run" || ["ui.press", "ui.input", "ui.select"].includes(event)
-        ? { timeoutMs: 120000 }
-        : {}),
       ...(presentation?.generation ? { uiGeneration: presentation.generation } : {}),
       normalizeInput: (name, value) =>
         FILE_CAPABILITIES.some((method) => method === name) &&
@@ -307,7 +298,7 @@ export class FunctionSession {
           core: async (e) => {
             this.assertLive(plugin)
             if (method === "ui.open") this.panes.open(plugin.name, e)
-            else await this.panes.closePane(plugin.name, e.id as string, false)
+            else await this.panes.closePane(plugin.name, e.id as string)
             return undefined
           }
         },
@@ -359,25 +350,18 @@ export class FunctionSession {
         (command.args !== undefined && typeof command.args !== "string")
       )
         throw new ModFunctionError("MODS_COMMAND_ARGS")
-      const run = async (signal: AbortSignal): Promise<ModObject> => {
-        this.assertLive(plugin)
-        signal.throwIfAborted()
-        return (await this.dispatch(
-          "command.run",
-          {
-            command: command.command,
-            args: command.args ?? "",
-            origin: { kind: "plugin", name: plugin.name },
-            presentation: { isFullscreen: false, columns: 80 }
-          },
-          signal,
-          { plugin: plugin.name, registration: source.registration },
-          depth + 1
-        )) as ModObject
-      }
-      return this.host.scheduleCommand
-        ? this.host.scheduleCommand(this.registry.get(command.command)!, callSignal, run)
-        : run(callSignal)
+      return this.dispatch(
+        "command.run",
+        {
+          command: command.command,
+          args: command.args ?? "",
+          origin: { kind: "plugin", name: plugin.name },
+          presentation: { isFullscreen: false, columns: 80 }
+        },
+        callSignal,
+        { plugin: plugin.name, registration: source.registration },
+        depth + 1
+      )
     }
     if (!this.host.capability) throw new ModFunctionError("MODS_CAPABILITY_UNAVAILABLE")
     const value = await this.host.capability(plugin, method, args, callSignal)
