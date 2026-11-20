@@ -233,6 +233,7 @@ export interface QuestionCardQuestion {
 }
 
 export interface QuestionCardInput {
+  group?: boolean
   targetLabel: string
   questions: ReadonlyArray<QuestionCardQuestion>
   tag: string
@@ -305,7 +306,7 @@ export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
     titleComponent("需要你的选择"),
     statusComponent("待回答", STATUS_STYLE.orange),
     kvComponent([{ title: KV_SOURCE_TITLE, value: input.targetLabel }]),
-    textModeHintComponent()
+    textModeHintComponent(input.group)
   ]
 
   const answered = numbered.filter(({ question }) => question.answered)
@@ -329,12 +330,10 @@ export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
       { type: "content", model: 0, list: [{ type: [1], content: title }] },
       contentComponent([
         question.question,
-        ...(question.allowMultiple
-          ? question.options.map(
-              (option, index) =>
-                `${index + 1}. ${option.label}${option.description ? `（${option.description}）` : ""}`
-            )
-          : [])
+        ...question.options.map(
+          (option, index) =>
+            `${index + 1}. ${option.label}${option.description ? `（${option.description}）` : ""}`
+        )
       ])
     )
     // The gateway contract defines string feedback, but not native multi-selector
@@ -360,7 +359,7 @@ export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
             selectModel: LIST_SELECT_CUSTOM_OPTIONS,
             isMultiple: false,
             optionArray: question.options.map((option, index) => ({
-              text: option.description ? `${option.label}（${option.description}）` : option.label,
+              text: `${index + 1}. ${option.label}`,
               value: String(index)
             }))
           }

@@ -68,25 +68,26 @@ export async function handleBotImInteractionCommand(
             ...(message ? { message } : {})
           })
   } else if (!["", "开", "关"].includes(argument)) {
-    text = "用法：/文字模式 开 或 /文字模式 关。"
+    text = "发送 /文字模式 切换，或用 /文字模式 开、/文字模式 关 指定模式。"
   } else {
     await imConversationStateStore.ensureConversation(context)
     const current = imConversationStateStore.getReplyMode(event.conversationKey)
     const mode =
       argument === "开" ? "text" : argument === "关" ? "card" : current === "text" ? "card" : "text"
-    await imConversationStateStore.setReplyMode(event.conversationKey, mode)
-    const results =
-      mode === "text"
-        ? await Promise.all([
-            imRemoteUserInputService.resendPendingAsText(event.conversationKey),
-            imRemoteApprovalService.resendPendingAsText(event.conversationKey),
-            imHumanGateAdapter.resendPendingAsText(event.conversationKey),
-            imBizRetryAdapter.resendPendingAsText(event.conversationKey)
-          ])
-        : []
-    text = mode === "text" ? "已切到文字模式，可用短码回答待处理的问题。" : "已切回卡片模式。"
-    if (results.some((result) => result.failed > 0))
-      text += " 部分提示未能补发，请再次发送 /文字模式 开。"
+    if (current !== mode) await imConversationStateStore.setReplyMode(event.conversationKey, mode)
+    if (mode === "text") {
+      const results = await Promise.allSettled([
+        imRemoteUserInputService.resendPendingAsText(event.conversationKey),
+        imRemoteApprovalService.resendPendingAsText(event.conversationKey),
+        imHumanGateAdapter.resendPendingAsText(event.conversationKey),
+        imBizRetryAdapter.resendPendingAsText(event.conversationKey)
+      ])
+      text = "已开启文字模式，可用短码作答。发送 /文字模式 关 可切回卡片。"
+      if (results.some((result) => result.status === "rejected" || result.value.failed > 0))
+        text += " 部分提示未能补发，请再次发送 /文字模式 开。"
+    } else {
+      text = "已使用卡片模式。新提问会发送卡片，已发出的短码仍可作答。"
+    }
   }
   // Existing reply drainer delivers this durable control receipt, never the model.
   await imEventStore.enqueueProactiveReplies(

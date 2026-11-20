@@ -90,3 +90,9 @@ it("resends a waiting managed decision when a group switches to text", async () 
   await send("/文字模式 开")
   expect(io.resend).toHaveBeenCalledWith("group")
 })
+
+it("acknowledges text mode and offers a retry when a pending notice cannot be resent", async () => {
+  io.resend.mockRejectedValueOnce(new Error("unavailable"))
+  await send("/文字模式 开")
+  expect(io.enqueue.mock.calls[0][0][0].message.content).toContain("请再次发送 /文字模式 开")
+})

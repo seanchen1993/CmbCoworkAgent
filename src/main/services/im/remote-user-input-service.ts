@@ -665,6 +665,7 @@ export class ImRemoteUserInputService {
       targetLabel: session.route.prefix.replace(/[\u3010\u3011]/gu, "").trim(),
       build: (tag) =>
         buildQuestionCard({
+          group: session.route.kind === "group",
           targetLabel: session.route.prefix.replace(/[\u3010\u3011]/gu, "").trim(),
           questions: this.cardQuestions(session),
           tag

@@ -1641,6 +1641,9 @@ describe("authenticated IM on the existing Bot host", () => {
     ["dm", "group"].flatMap((kind) =>
       [
         "/回答 A1B2C3 1",
+        "/文字模式",
+        "/文字模式 开",
+        "/文字模式 关",
         "/门禁批准 A1B2C3",
         "/在当前会话继续托管 A1B2C3 继续校验",
         "/开启新会话继续托管 A1B2C3",

@@ -305,16 +305,21 @@ async function testPromptAndSingleUseOptionAnswer(): Promise<void> {
     await context.publish(request)
     // The card landed, so it is the only message: no notice follows it at all.
     assert.equal(context.deliveryText(request.requestId), "", "a delivered card sends no notice")
-    // Everything a reader needs is therefore in the card, the short code
-    // included — it is the only way to answer when the buttons do not work.
     assert.equal(context.cardInteractions.list().length, 1)
     assert.equal(context.sendPendingCount(), 0, "nothing was queued to drain")
-    // Everything a reader needs is therefore in the card: the question, the
-    // options, and the submit button. The short code is deliberately not among
-    // them — a delivered card is answered by pressing it.
     const card = context.cardJson()
-    assert(card.includes("导出格式用哪种？"), card)
-    assert(card.includes("CSV"), card)
+    const components: Array<{ type: string; list?: Array<{ content: string }> }> = JSON.parse(card)
+    const formIndex = components.findIndex((component) => component.type === "interactive")
+    assert.ok(formIndex > 0, "the standard robot sends an answer form below the question")
+    const body = components.slice(0, formIndex).find(
+      (component) => component.type === "content" && component.list?.[0]?.content === "导出格式用哪种？"
+    )
+    assert.deepEqual(body?.list, [
+      { content: "导出格式用哪种？" },
+      { content: "1. CSV (Recommended)（兼容性最好。）" },
+      { content: "2. Excel（保留表格格式。）" },
+      { content: "3. JSON（便于程序读取。）" }
+    ])
     assert(!card.includes("A1B2C3"), card)
 
     assert.equal(
