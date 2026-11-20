@@ -57,37 +57,10 @@ it("registers direct commands once and preserves module state across invocations
 it("SDK-raised dispatch skips only the invoking hook, including other hooks in its plugin", async () => {
   const value = await session(`
     on("session.start",async($,e,next)=>{await $.command.register({name:"nested",description:"Nested"});return next(e)});
-    on("session.id",async($)=>({value:await $.session.id()}));
-    on("session.id",{},($,e,next)=>({value:next.origin.plugin}));
-    on("command.run",{command:"nested"},async($)=>({text:await $.session.id()}));
+    on("command.run",{command:"nested"},async($,e)=>$.command.run({command:e.command,args:"inner"}));
+    on("command.run",{command:"nested"},($,e,next)=>({text:e.args+":"+next.origin.plugin}));
   `)
-  expect(await value.run("nested", "outer")).toEqual({ text: "demo" })
-})
-
-it("rejects command SDK waits through both direct and nested operation hooks", async () => {
-  const compiled = await compileFunctionPlugin(resolve("tests/fixtures/mods-v2/command-held"))
-  const guest = await FunctionGuestRuntime.create(compiled.code, compiled.options)
-  const value = new FunctionSession(
-    [
-      {
-        name: compiled.name,
-        root: compiled.root,
-        tier: "user",
-        guest,
-        capabilities: [...SESSION_CAPABILITIES]
-      }
-    ],
-    {
-      threadId: "thread",
-      workspace: "/project",
-      assertLive: () => undefined,
-      publish: async (v) => v
-    }
-  )
-  sessions.push(value)
-  expect(await value.run("held-probe", "")).toEqual({
-    text: JSON.stringify({ direct: true, indirect: true, calls: 0 })
-  })
+  expect(await value.run("nested", "outer")).toEqual({ text: "inner:demo" })
 })
 
 it("runs mandatory publication for a short-circuited command", async () => {

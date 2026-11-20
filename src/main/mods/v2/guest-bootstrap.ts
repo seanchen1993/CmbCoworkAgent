@@ -114,7 +114,6 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
       if (reply.error) {
         const error = Error(reply.error.message);
         define(error, "__downstream", { value: reply.error.downstream === true });
-        define(error, "code", { value: reply.error.code });
         throw error;
       }
       if (meta.operation && method === "next" && reply.value && typeof reply.value === "object" &&
@@ -169,7 +168,6 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
       if (!sdk[noun]) sdk[noun] = Object.create(null);
       sdk[noun][method] = async (...args) => {
         if (capability === "store.set") args = [args[0], parse(pack(args[1]))];
-        if (capability === "fs.list" && args[0] === undefined) args = ["."];
         return call(capability, args);
       };
     }
@@ -196,7 +194,6 @@ export const FUNCTION_GUEST_BOOTSTRAP = String.raw`
       return pack({ value });
     } catch (error) {
       return pack({ error: {
-        code: error && error.code,
         message: String(error && error.message || error).slice(0, 2048),
         downstream: error && error.__downstream === true
       }});
