@@ -328,13 +328,18 @@ export function buildQuestionCard(input: QuestionCardInput): CardComponent[] {
     // Do not hide the only copy in promptText, which is replaced on selection.
     components.push(
       { type: "content", model: 0, list: [{ type: [1], content: title }] },
-      contentComponent([
-        question.question,
-        ...question.options.map(
-          (option, index) =>
-            `${index + 1}. ${option.label}${option.description ? `（${option.description}）` : ""}`
-        )
-      ])
+      {
+        type: "content",
+        model: 0,
+        // The client concatenates these rich-text spans. Start each numbered option on a new line.
+        list: [
+          { content: question.question },
+          ...question.options.flatMap((option, index) => [
+            { type: [1], content: `\n${index + 1}. ` },
+            { content: option.description ? `${option.label}（${option.description}）` : option.label }
+          ])
+        ]
+      }
     )
     // The gateway contract defines string feedback, but not native multi-selector
     // encoding. Use the supported text input with an explicit numbered format.
