@@ -170,7 +170,7 @@ describe("LAILAS gateway errors on ordinary model connections", () => {
       const model = getModelInstance(customConfig, { onFetchError }, 1, "agent")
       const error = await model.invoke("hello").catch((err: unknown) => err)
       expect(error).toMatchObject({ message: expect.stringContaining(expected) })
-      const sdkError = error instanceof Error ? error.cause ?? error : error
+      const sdkError = error instanceof Error ? (error.cause ?? error) : error
       expect(sdkError).toMatchObject({ status: 485, requestID: "original-request" })
       expect(contextWindowFromError(error)).toBe(limit)
       expect(clone).toHaveBeenCalledTimes(1)
