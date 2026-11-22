@@ -22,6 +22,19 @@ import type { SearchCommand, SearchReply } from "../../src/main/thread-search/pr
 import { installThreadSearchSchema } from "../../src/main/thread-search/schema"
 import { sqliteRecoveryFamilyKey } from "../../src/main/db/sqlite-recovery-family"
 
+import {
+  PROBE_FEATURE_SLUG,
+  PROBE_PROJECT_ID,
+  projectProbeCases,
+  projectProbeMarker,
+  projectProbeMetadata,
+  projectProbeTitle,
+  seedProbeProjects
+} from "./project-thread-search-fixture"
+
+type StartCommand = Extract<SearchCommand, { type: "start" }>
+
+const mixedProjects = process.env.CMB_THREAD_SEARCH_PROBE_PROJECTS === "1"
 const SEED = 1729
 const TITLE_QUERY = "latest-title-unique"
 const NEW_QUERY = "recent-message-unique"
@@ -35,7 +48,7 @@ function seedFixture(file: string, threadCount: number): number {
       PRAGMA journal_mode = OFF;
       CREATE TABLE threads (
         thread_id TEXT PRIMARY KEY, created_at INTEGER, updated_at INTEGER,
-        metadata TEXT, title TEXT
+        metadata TEXT, title TEXT, status TEXT
       );
       CREATE INDEX idx_threads_updated_at ON threads(updated_at);
       CREATE TABLE thread_messages (
@@ -67,7 +80,7 @@ function seedFixture(file: string, threadCount: number): number {
     installThreadSearchSchema({ run: (sql) => database.exec(sql) }, (table, column) =>
       database.prepare(`PRAGMA table_info(${table})`).all().some((row) => row.name === column))
     database.exec("BEGIN")
-    const insertThread = database.prepare("INSERT INTO threads VALUES (?, ?, ?, ?, ?)")
+    const insertThread = database.prepare("INSERT INTO threads(thread_id, created_at, updated_at, metadata, title) VALUES (?, ?, ?, ?, ?)")
     const migrated = database.prepare(
       "INSERT INTO legacy_checkpoint_transcript_migrations VALUES (?, 'original', 'complete', NULL, 'complete')"
     )
@@ -92,10 +105,12 @@ function seedFixture(file: string, threadCount: number): number {
     for (let thread = 0; thread < threadCount; thread += 1) {
       const id = String(thread)
       const isNewest = thread === threadCount - 1
-      const title = isNewest ? TITLE_QUERY : `Conversation ${thread}`
+      const title = mixedProjects ? projectProbeTitle(thread)
+        : isNewest ? TITLE_QUERY : `Conversation ${thread}`
       const metadata = JSON.stringify({
         workspacePath: thread % 3 === 0 ? null : "C:/fixture",
-        source: thread % 3 === 1 ? "inbox" : "manual"
+        source: thread % 3 === 1 ? "inbox" : "manual",
+        ...(mixedProjects && projectProbeMetadata(thread, threadCount, true))
       })
       insertThread.run(id, thread, thread, metadata, title)
       migrated.run(id)
@@ -104,6 +119,7 @@ function seedFixture(file: string, threadCount: number): number {
         const role = ordinal % 3 === 0 ? "user" : "assistant"
         const prefix = role === "assistant" ? markdown : ""
         const marker =
+          mixedProjects ? projectProbeMarker(thread, ordinal) :
           thread === 0 && ordinal === 0 ? OLD_QUERY : isNewest && ordinal === 9 ? NEW_QUERY : ""
         const text = prefix + paragraph.repeat(28) + `\nRecord ${state}. ${marker}`
         const fragmented = ordinal === 8 || marker.length > 0
@@ -176,7 +192,7 @@ function seedExtremeHistory(file: string) {
   try {
     db.exec(`
       BEGIN;
-      INSERT INTO threads VALUES ('long-history', 1, 2, '{}', 'Long conversation'),
+      INSERT INTO threads(thread_id, created_at, updated_at, metadata, title) VALUES ('long-history', 1, 2, '{}', 'Long conversation'),
         ('old-checkpoint', 1, 1, '{}', 'Legacy conversation');
       INSERT INTO legacy_checkpoint_transcript_migrations
         VALUES ('long-history', 'original', 'complete', NULL, 'complete');
@@ -223,16 +239,28 @@ interface ProbeReply {
   cancelled: boolean
   ms: number
   reasons: string[]
+  route?: string
 }
 
-function queryWorker(worker: Worker, query: string, cancel = false, allowedReasons: string[] = []) {
+function queryWorker(
+  worker: Worker,
+  query: string,
+  cancel: boolean | "directory" = false,
+  allowedReasons: string[] = [],
+  scope?: StartCommand["request"]["scope"],
+  catalog?: StartCommand["catalog"],
+  started = performance.now()
+) {
   const id = randomUUID()
   const cancellation = new SharedArrayBuffer(4)
   return new Promise<ProbeReply>((resolve, reject) => {
-    const started = performance.now()
     let cancelledAt: number | undefined
     let cancelTimer: ReturnType<typeof setTimeout> | undefined
     let cancelScheduled = false
+    const requestCancellation = () => {
+      cancelledAt = performance.now()
+      Atomics.store(new Int32Array(cancellation), 0, 1)
+    }
     const timer = setTimeout(() => finish(new Error("Search probe timed out")), 120_000)
     function onMessage(message: { id?: string; reply?: SearchReply }) {
       const reply = message.reply
@@ -256,17 +284,14 @@ function queryWorker(worker: Worker, query: string, cancel = false, allowedReaso
           scanned: reply.scannedThreads,
           cancelled: reply.scanStatus === "cancelled",
           ms: performance.now() - (cancelledAt ?? started),
-          reasons: reply.coverage.reasons
+          reasons: reply.coverage.reasons,
+          route: reply.results[0]?.route?.kind
         })
         return
       }
       worker.postMessage({ type: "continue", id, cursor: reply.nextCursor } satisfies SearchCommand)
-      if (cancel && !cancelScheduled) {
+      if (cancel === true && !cancelScheduled) {
         cancelScheduled = true
-        const requestCancellation = () => {
-          cancelledAt = performance.now()
-          Atomics.store(new Int32Array(cancellation), 0, 1)
-        }
         if (process.env.CMB_THREAD_SEARCH_PROBE_THREADS === "12") requestCancellation()
         else cancelTimer = setTimeout(requestCancellation, 3)
       }
@@ -290,9 +315,14 @@ function queryWorker(worker: Worker, query: string, cancel = false, allowedReaso
     worker.postMessage({
       type: "start",
       id,
-      request: { query, limit: 1 },
+      request: { query, limit: 1, scope },
+      catalog,
       cancellation
     } satisfies SearchCommand)
+    if (cancel === "directory") {
+      if (Number(process.env.CMB_THREAD_SEARCH_PROBE_THREADS) < 1000) requestCancellation()
+      else cancelTimer = setTimeout(requestCancellation, 0)
+    }
   })
 }
 
@@ -371,6 +401,19 @@ async function main(file: string) {
     await runExtremeHistory(file, rounds)
     return
   }
+  if (mixedProjects) {
+    assert(threads >= 6)
+    assert.notEqual(process.env.CMB_THREAD_SEARCH_PROBE_WRITES, "1")
+  }
+  const registry = mixedProjects ? seedProbeProjects(dirname(file), dirname(file)) : undefined
+  const catalog: StartCommand["catalog"] = registry && {
+    generation: "project-probe-v1",
+    projects: new Map([...registry.projects].map(([projectId, entry]) => [
+      projectId, projectId === PROBE_PROJECT_ID
+        ? { ...entry, features: new Set([PROBE_FEATURE_SLUG]) }
+        : entry
+    ]))
+  }
   const bytes = seedFixture(file, threads)
   seedCompletedCheckpointFiles(file, threads)
   const concurrentWrites = process.env.CMB_THREAD_SEARCH_PROBE_WRITES === "1"
@@ -379,7 +422,7 @@ async function main(file: string) {
   // This exercises concurrent commits while keeping expected search hits deterministic.
   writer?.exec(`
     PRAGMA synchronous = NORMAL;
-    INSERT INTO threads VALUES (
+    INSERT INTO threads(thread_id, created_at, updated_at, metadata, title) VALUES (
       'probe-writer', 0, 0, '{"harnessProjectSession":{"projectId":"probe","kind":"build"}}', NULL
     );
     INSERT INTO thread_messages(thread_id, message_id, role, content_json, created_at, ordinal) VALUES (
@@ -409,14 +452,18 @@ async function main(file: string) {
   }, 25)
   const startWorker = () => openSearchWorker(file)
 
-  const cases = [
+  const cases = mixedProjects
+    ? projectProbeCases(threads, true).map((test) => ({
+      ...test, expected: test.expectedIndex === null ? null : String(test.expectedIndex)
+    }))
+    : [
     { label: "title", query: TITLE_QUERY, expected: String(threads - 1), hot: 1000, cold: 2000 },
     { label: "recent", query: NEW_QUERY, expected: String(threads - 1), hot: 1000, cold: 2000 },
     { label: "oldest", query: OLD_QUERY, expected: "0", hot: 10_000, cold: 20_000 },
     { label: "noMatch", query: NO_QUERY, expected: null, hot: 10_000, cold: 20_000 },
     { label: "noMatchCommonPhrase", query: "saved build", expected: null, hot: 10_000, cold: 20_000 },
     { label: "noMatchChinese", query: "不存在", expected: null, hot: 10_000, cold: 20_000 }
-  ]
+  ].map((test) => ({ ...test, expectedCandidates: threads, scope: undefined }))
   console.log(
     JSON.stringify({
       threads,
@@ -425,6 +472,9 @@ async function main(file: string) {
       completedCheckpointFiles: threads,
       rounds,
       concurrentWrites,
+      mixedProjects,
+      catalogProjects: catalog?.projects.size,
+      catalogBytes: registry?.bytes,
       seed: SEED,
       cpu: cpus()[0]?.model,
       logicalCpus: availableParallelism(),
@@ -439,23 +489,30 @@ async function main(file: string) {
 
   const warm = startWorker()
   try {
-    const warmup = await queryWorker(warm, TITLE_QUERY)
-    assert.equal(warmup.hit, String(threads - 1))
+    const firstCase = cases[0]
+    const warmup = await queryWorker(warm, firstCase.query, false, [], firstCase.scope, catalog)
+    assert.equal(warmup.hit, firstCase.expected)
     for (const test of cases) {
       const hot: number[] = []
       const cold: number[] = []
       let scanned = 0
       for (let iteration = 0; iteration < rounds; iteration += 1) {
-        const hotReply = await queryWorker(warm, test.query)
+        const hotReply = await queryWorker(warm, test.query, false, [], test.scope, catalog)
         assert.equal(hotReply.hit, test.expected)
+        if (mixedProjects && test.expected === String(threads - 2)) {
+          assert.equal(hotReply.route, "featureSession")
+        }
         hot.push(hotReply.ms)
         scanned = hotReply.scanned
-        if (test.query === OLD_QUERY || test.expected === null) {
-          assert.equal(scanned, threads)
+        if (test.label === "oldest" || test.expected === null) {
+          assert.equal(scanned, test.expectedCandidates)
         }
+        const coldStartedAt = performance.now()
         const fresh = startWorker()
         try {
-          const coldReply = await queryWorker(fresh, test.query)
+          const coldReply = await queryWorker(
+            fresh, test.query, false, [], test.scope, catalog, coldStartedAt
+          )
           assert.equal(coldReply.hit, test.expected)
           assert.equal(coldReply.scanned, scanned)
           cold.push(coldReply.ms)
@@ -469,7 +526,9 @@ async function main(file: string) {
       if (coldP95 > test.cold) performanceFailures.push(`${test.label} cold ${coldP95} ms`)
       console.log(
         JSON.stringify({
+          scope: test.scope ?? { kind: "ordinary" },
           case: test.label,
+          candidates: test.expectedCandidates,
           scanned,
           hotP95,
           coldP95,
@@ -478,15 +537,31 @@ async function main(file: string) {
         })
       )
     }
+    const cancelCase = cases.find(({ scope, label }) =>
+      (!mixedProjects || scope?.kind === "all") && label === "noMatch")!
     const cancelled = []
     for (let iteration = 0; iteration < rounds; iteration += 1) {
-      const reply = await queryWorker(warm, NO_QUERY, true)
+      const reply = await queryWorker(warm, cancelCase.query, true, [], cancelCase.scope, catalog)
       assert(reply.cancelled)
       cancelled.push(reply.ms)
     }
     const cancelP95 = p95(cancelled)
     if (cancelP95 > 200) performanceFailures.push(`cancel ${cancelP95} ms`)
     console.log(JSON.stringify({ case: "cancel", p95: cancelP95 }))
+    if (mixedProjects) {
+      const empty = cases.at(-1)!
+      const directoryInterrupts = []
+      for (let iteration = 0; iteration < rounds; iteration += 1) {
+        const reply = await queryWorker(warm, empty.query, "directory", [], empty.scope, catalog)
+        assert(reply.cancelled)
+        directoryInterrupts.push(reply.ms)
+      }
+      const directoryCancelP95 = p95(directoryInterrupts)
+      if (directoryCancelP95 > 200) {
+        performanceFailures.push("directory cancel " + directoryCancelP95 + " ms")
+      }
+      console.log(JSON.stringify({ case: "directory-cancel", p95: directoryCancelP95 }))
+    }
   } finally {
     if (writeTimer) clearInterval(writeTimer)
     clearInterval(rssTimer)

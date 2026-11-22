@@ -1,5 +1,7 @@
 type CatalogListener = (projectId: string, featureSlugs: ReadonlySet<string>) => void
+type CatalogReadObserver = () => CatalogListener
 const listeners = new Set<CatalogListener>()
+const readObservers = new Set<CatalogReadObserver>()
 const currentReads = new Map<string, symbol>()
 
 export function onHarnessFeatureCatalogChange(listener: CatalogListener): () => void {
@@ -7,6 +9,11 @@ export function onHarnessFeatureCatalogChange(listener: CatalogListener): () => 
   return () => {
     listeners.delete(listener)
   }
+}
+
+export function observeHarnessFeatureCatalogReads(observer: CatalogReadObserver): () => void {
+  readObservers.add(observer)
+  return () => readObservers.delete(observer)
 }
 
 function publish(projectId: string, slugs: ReadonlySet<string>): void {
@@ -28,11 +35,14 @@ export function harnessProjectDeleted(projectId: string): void {
 /** Reads from the board, Bot and background reporter can finish out of order. */
 export function beginHarnessFeatureCatalogRead(projectIds: readonly string[]) {
   const token = Symbol()
+  const observations = [...readObservers].map((observe) => observe())
   for (const id of projectIds) currentReads.set(id, token)
   return {
     observed(projectId: string, runs: { slug: string }[]) {
-      if (currentReads.get(projectId) === token && listeners.size)
-        publish(projectId, new Set(runs.map((run) => run.slug)))
+      if (currentReads.get(projectId) !== token || (!listeners.size && !observations.length)) return
+      const slugs = new Set(runs.map((run) => run.slug))
+      publish(projectId, slugs)
+      for (const observe of observations) observe(projectId, slugs)
     },
     finish() {
       for (const id of projectIds) if (currentReads.get(id) === token) currentReads.delete(id)

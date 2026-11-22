@@ -3,7 +3,7 @@ import { SEARCH_BACKFILL_METADATA_BYTE_LIMIT } from "../checkpointer/runtime-pro
 import { THREAD_SEARCH_GOAL_EVENT_SQL, threadSearchGoalScopeSql } from "./goal-event"
 import { SEARCH_VISIBLE_MESSAGE_ID_SQL } from "./message-visibility-sql"
 import { THREAD_SUMMARY_METADATA_SQL } from "../thread-metadata-hydration/summary-sql"
-import type { DatabaseSync, SQLOutputValue } from "node:sqlite"
+import type { DatabaseSync, SQLOutputValue, StatementSync } from "node:sqlite"
 import { hasThreadMessageFragmentGenerations, publishedThreadMessageFragmentsSql } from "../db/thread-message-fragment-storage"
 import {
   THREAD_INCARNATION_METADATA_KEY,
@@ -18,7 +18,9 @@ import {
 } from "../../shared/goal-events"
 import { THREAD_SEARCH_REASONING_BYTE_LIMIT } from "../../shared/thread-search-projection"
 import { THREAD_SEARCH_TARGET_ID_BYTE_LIMIT } from "../../shared/thread-search-types"
-import { getDisplayThreadTitle } from "../../shared/thread-search-scope"
+import { getDisplayThreadTitle, getProjectThreadSearchRoute, sameThreadSearchRoute } from "../../shared/thread-search-scope"
+import type { ThreadSearchRoute, ThreadSearchScope } from "../../shared/thread-search-types"
+import type { ProjectSearchCatalog } from "./protocol"
 
 const CANDIDATE_LIMIT = 50_000
 const CANDIDATE_BYTES = 32 * 1024 * 1024
@@ -32,6 +34,9 @@ const GOAL_DUPLICATE_HEADERS = 512
 interface Candidate {
   hasGoalEvents: boolean
   threadId: string
+  route: ThreadSearchRoute
+  projectLabel?: string
+  featureLabel?: string
   title: string
   workspacePath: string | null
   remoteInbox?: boolean
@@ -124,7 +129,38 @@ const ordinaryThreadPredicate = `NOT (
     )
   )`
 
-const candidateSql = (goalPresence: string, scope = "") => `
+const projectMetadata = `CASE WHEN COALESCE(octet_length(metadata), 0) <= ${SEARCH_BACKFILL_METADATA_BYTE_LIMIT}
+  THEN ${metadata} ELSE '{}' END`
+const projectFields = [
+  "$.harnessFeature.projectId", "$.harnessFeature.slug",
+  "$.harnessProjectSession.projectId", "$.harnessProjectSession.kind"
+] as const
+const projectField = (path: string) => `json_extract(${projectMetadata}, '${path}')`
+const [featureProjectId, featureSlug, sessionProjectId, sessionKind] =
+  projectFields.map((path) => projectField(path))
+const projectFieldsOversized = projectFields.map((path) =>
+  `COALESCE(octet_length(${projectField(path)}), 0) > 8192`
+).join(" OR ")
+const projectRouteProjection = `
+  CASE WHEN ${ordinaryThreadPredicate} THEN 1 ELSE 0 END AS ordinary_scope,
+  CASE WHEN ${projectFieldsOversized} THEN 1 ELSE 0 END AS oversized_project_route,
+  COALESCE(octet_length(metadata), 0) > ${SEARCH_BACKFILL_METADATA_BYTE_LIMIT} AS oversized_project_metadata,
+  json_type(${projectMetadata}, '$.harnessFeature') AS feature_marker,
+  json_type(${projectMetadata}, '$.harnessProjectSession') AS project_marker,
+  ${boundedText(featureProjectId, 8192)} AS feature_project_id,
+  ${boundedText(featureSlug, 8192)} AS feature_slug,
+  ${boundedText(sessionProjectId, 8192)} AS session_project_id,
+  ${boundedText(sessionKind, 8192)} AS session_kind`
+
+export function threadSearchRouteFromRow(row: Record<string, unknown>): ThreadSearchRoute | null {
+  if (row.oversized_project_route === 1) return null
+  return getProjectThreadSearchRoute({
+    harnessFeature: { projectId: row.feature_project_id, slug: row.feature_slug },
+    harnessProjectSession: { projectId: row.session_project_id, kind: row.session_kind }
+  }) ?? (row.ordinary_scope === 1 ? { kind: "ordinary" } : null)
+}
+
+const candidateSql = (goalPresence: string, scope = "", physical = false) => `
   SELECT ${boundedText("thread_id", 4096)} AS thread_id,
     ${goalPresence} AS has_goal_events, created_at, updated_at, ${boundedText("title", 8192)} AS title,
     title IS NOT NULL AND octet_length(title) > 8192 AS oversized_title,
@@ -135,8 +171,11 @@ const candidateSql = (goalPresence: string, scope = "") => `
     json_extract(${metadata}, '$.targetKind') IS 'inbox'
       AND json_type(${metadata}, '$.imDeliveryContext') IN ('object','array') AS remote_inbox,
     ${tokenProjection} AS token, ${tokenOversized} AS oversized_token
+    ${physical ? `, physical.physical_id, physical.physical_time, ${projectRouteProjection}` : ""}
   FROM threads
-  WHERE ${ordinaryThreadPredicate} ${scope}
+  ${physical
+    ? "JOIN physical ON threads.thread_id = physical.physical_id"
+    : `WHERE ${ordinaryThreadPredicate} ${scope}`}
   ORDER BY updated_at DESC, thread_id DESC`
 
 const compactMetadata = `COALESCE(${THREAD_SUMMARY_METADATA_SQL}, '{}')`
@@ -153,21 +192,25 @@ const essentialMetadata = `(
     WHEN field IN ('imDeliveryContext', 'routingState', 'gitContext') THEN 4096
     ELSE 2048 END
 )`
-export const THREAD_SEARCH_IDENTITY_SQL = `
-  SELECT created_at, updated_at, ${tokenProjection} AS token, ${tokenOversized} AS oversized_token,
-    ${boundedText("title", 8192)} AS title, status,
-    COALESCE(${boundedText(compactMetadata, 22 * 1024)}, ${boundedText(essentialMetadata, 22 * 1024)})
-      AS summary_metadata
-  FROM threads WHERE thread_id = ? AND ${ordinaryThreadPredicate}`
+export function threadSearchIdentitySql(includeSummary: boolean, project: boolean): string {
+  return `SELECT created_at, updated_at, status,
+    ${tokenProjection} AS token, ${tokenOversized} AS oversized_token
+    ${project ? `, ${projectRouteProjection}` : ""}
+    ${includeSummary ? `, ${boundedText("title", 8192)} AS title,
+      COALESCE(${boundedText(compactMetadata, 22 * 1024)}, ${boundedText(essentialMetadata, 22 * 1024)})
+      AS summary_metadata` : ""}
+    FROM threads WHERE thread_id = ? ${project ? "" : `AND ${ordinaryThreadPredicate}`}`
+}
 
-export const THREAD_SEARCH_IDENTITY_CHECK_SQL = `
-  SELECT created_at, updated_at, status, ${tokenProjection} AS token, ${tokenOversized} AS oversized_token
-  FROM threads WHERE thread_id = ? AND ${ordinaryThreadPredicate}`
+export const THREAD_SEARCH_IDENTITY_SQL = threadSearchIdentitySql(true, false)
+export const THREAD_SEARCH_IDENTITY_CHECK_SQL = threadSearchIdentitySql(false, false)
 
 const scheduledTaskId = `json_extract(${metadata}, '$.scheduledTaskId')`
 const oversizedBackfillMetadata = `COALESCE(octet_length(metadata), 0) > ${SEARCH_BACKFILL_METADATA_BYTE_LIMIT}`
-export const THREAD_SEARCH_BACKFILL_SQL = `
+function threadSearchBackfillSql(project: boolean): string {
+  return `
   SELECT threads.created_at, threads.status, ${tokenProjection} AS token, ${tokenOversized} AS oversized_token,
+    ${project ? `${projectRouteProjection},` : ""}
     ${boundedText(scheduledTaskId, 4096)} AS scheduled_task_id,
     octet_length(${scheduledTaskId}) > 4096 AS oversized_scheduled_task,
     COALESCE(occurrence.version, 0) AS occurrence_version,
@@ -180,7 +223,11 @@ export const THREAD_SEARCH_BACKFILL_SQL = `
     ON migration.thread_id = threads.thread_id
   LEFT JOIN thread_search_occurrence_versions AS occurrence ON occurrence.thread_id = threads.thread_id
   WHERE threads.thread_id = ?
-    AND CASE WHEN ${oversizedBackfillMetadata} THEN 0 ELSE ${ordinaryThreadPredicate} END`
+    AND CASE WHEN ${oversizedBackfillMetadata} THEN 0
+             ELSE ${project ? "1" : ordinaryThreadPredicate} END`
+}
+export const THREAD_SEARCH_BACKFILL_SQL = threadSearchBackfillSql(false)
+export const THREAD_SEARCH_PROJECT_BACKFILL_SQL = threadSearchBackfillSql(true)
 
 function isCancelled(flag: Int32Array): boolean {
   return Atomics.load(flag, 0) !== 0
@@ -220,6 +267,18 @@ export function createThreadSearchReader(database: DatabaseSync) {
       `AND (NOT (${workspaceIsText}) OR trim(${workspace}, ${workspaceWhitespace}) = '')`
     )
   )
+  const physicalBatchSize = 64
+  const preparePhysical = (later: boolean) => database.prepare(`
+    WITH physical AS MATERIALIZED (
+      SELECT thread_id AS physical_id, updated_at AS physical_time FROM threads
+      ${later ? "WHERE (updated_at, thread_id) < (?, ?)" : ""}
+      ORDER BY updated_at DESC, thread_id DESC LIMIT ${physicalBatchSize}
+    )
+    ${candidateSql(goalPresence, "", true)}`)
+  let physicalFirst: StatementSync | undefined
+  let physicalLater: StatementSync | undefined
+  let projectIdentity: StatementSync | undefined
+  let ordinaryIdentity: StatementSync | undefined
   const identity = database.prepare(`
     SELECT created_at, ${tokenProjection} AS token, ${tokenOversized} AS oversized_token
     FROM threads WHERE thread_id = ?`)
@@ -491,23 +550,93 @@ export function createThreadSearchReader(database: DatabaseSync) {
         return { rows, next, skippedRows, staleIdentity: false }
       })
     },
-    captureCandidates(workspacePath: string | null | undefined, flag: Int32Array) {
+    matchesSearchRoute(threadId: string, route: ThreadSearchRoute): boolean {
+      if (route.kind === "ordinary") {
+        ordinaryIdentity ??= database.prepare(threadSearchIdentitySql(false, false))
+        return !!ordinaryIdentity.get(threadId)
+      }
+      projectIdentity ??= database.prepare(threadSearchIdentitySql(false, true))
+      const row = projectIdentity.get(threadId)
+      const current = row && threadSearchRouteFromRow(row)
+      return !!current && sameThreadSearchRoute(current, route)
+    },
+
+    captureCandidates(
+      workspacePath: string | null | undefined,
+      flag: Int32Array,
+      scope?: ThreadSearchScope,
+      catalog?: ProjectSearchCatalog
+    ) {
       return readTransaction(database, () => {
         const startedAt = performance.now()
         const candidates: Candidate[] = []
         let bytes = 0
         let limited = false
-        const rows =
-          workspacePath === undefined
-            ? directory.iterate()
-            : workspacePath === null
-              ? noWorkspaceDirectory.iterate()
-              : workspaceDirectory.iterate(workspacePath)
+        const projectScope = scope !== undefined && scope.kind !== "ordinary"
+        const catalogUnavailable = Boolean(projectScope && !catalog)
+        let routeUnavailable = false
+        const ordinaryRows = () => workspacePath === undefined
+          ? directory.iterate()
+          : workspacePath === null
+            ? noWorkspaceDirectory.iterate()
+            : workspaceDirectory.iterate(workspacePath)
+        function* physicalRows() {
+          physicalFirst ??= preparePhysical(false)
+          physicalLater ??= preparePhysical(true)
+          let time: number | bigint | null = null
+          let id: string | null = null
+          while (!isCancelled(flag)) {
+            if (performance.now() - startedAt >= CANDIDATE_MS) {
+              limited = true
+              break
+            }
+            const rows: Record<string, SQLOutputValue>[] = id === null
+              ? physicalFirst.all()
+              : physicalLater.all(time, id)
+            if (isCancelled(flag)) break
+            yield* rows
+            if (rows.length < physicalBatchSize) break
+            const tail = rows.at(-1)!
+            if ((typeof tail.physical_time !== "number" && typeof tail.physical_time !== "bigint") ||
+                typeof tail.physical_id !== "string") {
+              limited = true
+              break
+            }
+            time = tail.physical_time
+            id = tail.physical_id
+          }
+        }
+        const rows = !projectScope ? ordinaryRows()
+          : catalog ? physicalRows()
+          : scope.kind === "all" ? ordinaryRows() : []
         for (const row of rows) {
           if (isCancelled(flag)) break
           if (performance.now() - startedAt >= CANDIDATE_MS) {
             limited = true
             break
+          }
+          let route: ThreadSearchRoute = { kind: "ordinary" }
+          let projectLabel: string | undefined
+          if (projectScope && catalog) {
+            const found = threadSearchRouteFromRow(row)
+            if (!found) {
+              if (row.feature_marker || row.project_marker || row.oversized_project_route || row.oversized_project_metadata)
+                routeUnavailable = true
+              continue
+            }
+            if (found.kind === "ordinary") {
+              if (scope.kind !== "all") continue
+            } else {
+              if (scope.kind === "project" && scope.projectId !== found.projectId) continue
+              const project = catalog.projects.get(found.projectId)
+              if (!project) continue
+              if (found.kind === "featureSession" && !project.features?.has(found.slug)) {
+                if (!project.features) routeUnavailable = true
+                continue
+              }
+              projectLabel = project.label
+              route = found
+            }
           }
           if (
             typeof row.thread_id !== "string" ||
@@ -529,6 +658,9 @@ export function createThreadSearchReader(database: DatabaseSync) {
           const candidate: Candidate = {
             hasGoalEvents: row.has_goal_events === 1,
             threadId: row.thread_id,
+            route,
+            ...(projectLabel !== undefined ? { projectLabel } : {}),
+            ...(route.kind === "featureSession" ? { featureLabel: route.slug.slice(0, 160) } : {}),
             title,
             workspacePath: row.remote_inbox === 1 ? null : workspace?.trim() ? workspace : null,
             ...(row.remote_inbox === 1 ? { remoteInbox: true } : {}),
@@ -545,7 +677,7 @@ export function createThreadSearchReader(database: DatabaseSync) {
           }
           candidates.push(candidate)
         }
-        return { candidates, limited }
+        return { candidates, limited, catalogUnavailable, routeUnavailable }
       })
     },
 

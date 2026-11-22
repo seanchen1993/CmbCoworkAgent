@@ -1,3 +1,4 @@
+import { cancelThreadSearchOnTabChange } from "./thread-search-navigation"
 import { isManagedLocalWorkConversation } from "./thread-classification"
 import { shouldClearCoordinatorNotificationError } from "./coordinator-notification-error"
 import type { ThreadMessagesPage } from "../../../main/types"
@@ -6037,6 +6038,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             })
         },
         openFile: (path: string, name: string) => {
+          cancelThreadSearchOnTabChange(threadId)
           updateThreadState(threadId, (state) => {
             if (state.openFiles.some((f) => f.path === path)) {
               return { activeTab: path }
@@ -6064,6 +6066,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           })
         },
         setActiveTab: (tab: "agent" | string) => {
+          if (tab !== "agent") cancelThreadSearchOnTabChange(threadId)
           updateThreadState(threadId, () => ({ activeTab: tab }))
         },
         setFileContents: (path: string, content: string) => {

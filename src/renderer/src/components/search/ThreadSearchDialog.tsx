@@ -5,16 +5,19 @@ import { adoptThreadSearchSummary, isThreadDeletionPending, useAppStore } from "
 import { useThreadStateSelector } from "@/lib/thread-context"
 import { REMOTE_INBOX_WORKSPACE_NAME } from "../../../../shared/remote-inbox-workspace"
 import {
+  bindThreadSearchTicket,
   cancelThreadSearchNavigation,
   finishThreadSearchNavigation,
   isCurrentThreadSearchNavigation,
   openThreadSearch,
   reserveThreadSearchNavigation,
-  useThreadSearch
+  useThreadSearch,
+  withOwnedThreadSearchTransition
 } from "@/lib/thread-search-navigation"
 import {
   THREAD_SEARCH_QUERY_LIMIT,
   type ThreadSearchPage,
+  type ThreadSearchScope,
   type ThreadSearchResult
 } from "../../../../shared/thread-search-types"
 
@@ -22,13 +25,17 @@ const threadSearchEnabled =
   import.meta.env.VITE_DISABLE_THREAD_SEARCH !== "1" &&
   (typeof window === "undefined" || window.api?.threads?.searchEnabled !== false)
 
+function openForCurrentView() {
+  openThreadSearch(useAppStore.getState().mainView === "harness")
+}
+
 export function ThreadSearchButton() {
   if (!threadSearchEnabled) return null
   return (
     <button
       type="button"
       className="flex h-8 w-full items-center gap-2 rounded px-2 text-sm text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
-      onClick={openThreadSearch}
+      onClick={openForCurrentView}
     >
       <Search className="size-4 shrink-0" aria-hidden="true" />
       搜索会话
@@ -38,6 +45,8 @@ export function ThreadSearchButton() {
 
 function coverageLabel(page: ThreadSearchPage | null) {
   if (!page) return ""
+  if (page.coverage.reasons.some((reason) => reason.startsWith("project-catalog") || reason === "project-route-unavailable"))
+    return "项目搜索覆盖不完整，可在对应项目刷新后重试"
   if (page.scanStatus === "limited") return "已达到本次搜索范围上限，请缩小范围"
   if (page.coverage.reasons.includes("legacy-foreground-required"))
     return "部分旧历史需打开对应会话恢复，恢复后可刷新"
@@ -56,11 +65,11 @@ function coverageLabel(page: ThreadSearchPage | null) {
 }
 
 function compareResults(a: ThreadSearchResult, b: ThreadSearchResult) {
-  return b.frozenUpdatedAt - a.frozenUpdatedAt || (a.threadId < b.threadId ? 1 : -1)
+  return Number(b.matchedBy === "title") - Number(a.matchedBy === "title") || b.frozenUpdatedAt - a.frozenUpdatedAt || (a.threadId === b.threadId ? 0 : a.threadId < b.threadId ? 1 : -1)
 }
 
 export function ThreadSearchDialog({ activateChat }: { activateChat: () => void }) {
-  const { open, openingVersion, failure } = useThreadSearch()
+  const { open, openingVersion, failure, origin } = useThreadSearch()
   const currentThreadId = useAppStore((state) => state.currentThreadId)
   const thread = useAppStore((state) =>
     state.threads.find((item) => item.thread_id === state.currentThreadId)
@@ -71,10 +80,13 @@ export function ThreadSearchDialog({ activateChat }: { activateChat: () => void 
   const workspace = residentWorkspace === undefined ? thread?.metadata?.workspacePath : residentWorkspace
   const currentWorkspace = typeof workspace === "string" && workspace.trim() ? workspace : null
   const [query, setQuery] = useState("")
-  const [scope, setScope] = useState("all")
-  const availableScope = scope === "workspace" && !currentWorkspace ? "all" : scope
+  const [scopeSelection, setScopeSelection] = useState<{ version: number; value: string }>()
+  const defaultScope = origin?.projectMode ? (origin.projectId ? "project" : "projects") : "ordinary"
+  const scope = scopeSelection?.version === openingVersion ? scopeSelection.value : defaultScope
+  const availableScope = scope === "workspace" && !currentWorkspace ? "ordinary" : scope
   const workspacePath =
     availableScope === "none" ? null : availableScope === "workspace" ? currentWorkspace : undefined
+  const projectId = origin?.projectId
   const [retry, setRetry] = useState(0)
   const [results, setResults] = useState<ThreadSearchResult[]>([])
   const [pending, setPending] = useState(false)
@@ -89,7 +101,7 @@ export function ThreadSearchDialog({ activateChat }: { activateChat: () => void 
   const entry = useRef<HTMLElement | null>(null)
   const closedByNavigation = useRef(false)
   const reasons = coverageLabel(page)
-  const searchKey = JSON.stringify([openingVersion, query, availableScope, workspacePath, retry])
+  const searchKey = JSON.stringify([openingVersion, query, availableScope, workspacePath, projectId, retry])
   const [executingKey, setExecutingKey] = useState("")
   const visibleResults = executingKey === searchKey ? results : []
   const selectedResult =
@@ -116,7 +128,7 @@ export function ThreadSearchDialog({ activateChat }: { activateChat: () => void 
       ) {
         event.preventDefault()
         event.stopImmediatePropagation()
-        openThreadSearch()
+        openForCurrentView()
       }
     }
     window.addEventListener("keydown", shortcut, true)
@@ -128,6 +140,21 @@ export function ThreadSearchDialog({ activateChat }: { activateChat: () => void 
     let active = true
     let session: string | undefined
     let expiredOnce = false
+    const invalidatedSessions = new Set<string>()
+    const unsubscribe = window.api.threads.onSearchProjectCatalogChanged?.((sessionId) => {
+      if (!active) return
+      invalidatedSessions.add(sessionId)
+      if (session !== sessionId) return
+      setResults((previous) => previous.filter((result) => result.route.kind === "ordinary"))
+      setPage((previous) => previous?.sessionId === sessionId ? {
+        ...previous,
+        coverage: {
+          ...previous.coverage,
+          completeness: "partial",
+          reasons: [...new Set([...previous.coverage.reasons, "project-catalog-changed" as const])]
+        }
+      } : previous)
+    })
     const run = async (): Promise<void> => {
       useThreadSearch.setState({ failure: "" })
       setExecutingKey(searchKey)
@@ -138,12 +165,28 @@ export function ThreadSearchDialog({ activateChat }: { activateChat: () => void 
       setPending(true)
       setRestarting(expiredOnce)
       try {
-        let next = await window.api.threads.searchStart({ query, workspacePath })
+        const requestScope: ThreadSearchScope =
+          availableScope === "project" && projectId ? { kind: "project", projectId } :
+          availableScope === "projects" || availableScope === "all" ? { kind: availableScope } :
+          { kind: "ordinary", workspacePath }
+        let next = await window.api.threads.searchStart({ query, scope: requestScope })
         if (active) setRestarting(false)
         session = next.sessionId
         while (active) {
-          setPage(next)
-          const additions = next.results
+          if (next.coverage.reasons.includes("project-catalog-changed")) invalidatedSessions.add(next.sessionId)
+          const invalidated = invalidatedSessions.has(next.sessionId)
+          setPage(invalidated ? {
+            ...next,
+            coverage: {
+              ...next.coverage,
+              completeness: "partial",
+              reasons: [...new Set([...next.coverage.reasons, "project-catalog-changed" as const])]
+            }
+          } : next)
+          if (invalidated) setResults((previous) => previous.filter((result) => result.route.kind === "ordinary"))
+          const additions = invalidated
+            ? next.results.filter((result) => result.route.kind === "ordinary")
+            : next.results
           if (additions.length) {
             const first = [...additions].sort(compareResults)[0]
             setSelected((previous) => previous ?? first.threadId)
@@ -172,36 +215,63 @@ export function ThreadSearchDialog({ activateChat }: { activateChat: () => void 
     const timer = window.setTimeout(() => void run(), 200)
     return () => {
       active = false
+      unsubscribe?.()
       window.clearTimeout(timer)
-      void window.api.threads.searchCancel(session).catch(() => {})
+      if (session) void window.api.threads.searchCancel(session).catch(() => {})
     }
-  }, [open, query, workspacePath, searchKey])
+  }, [open, query, workspacePath, availableScope, projectId, searchKey])
 
   async function navigate(result: ThreadSearchResult) {
     if (openingThreadId === result.threadId || isThreadDeletionPending(result.threadId)) return
-    const id = reserveThreadSearchNavigation()
-    const previousThread = useAppStore.getState().currentThreadId
-    const previousView = useAppStore.getState().mainView
+    const id = reserveThreadSearchNavigation(useAppStore.getState().currentThreadId, result.threadId)
     setOpening({ id, threadId: result.threadId })
     try {
       const summary = await window.api.threads.searchSummary(result)
-      if (!isCurrentThreadSearchNavigation(id)) return
-      if (
-        useAppStore.getState().currentThreadId !== previousThread ||
-        useAppStore.getState().mainView !== previousView
-      ) {
-        cancelThreadSearchNavigation()
-        return
-      }
-      if (!summary || !adoptThreadSearchSummary(summary, result.incarnation)) {
+      if (!summary?.navigationTicketId || !bindThreadSearchTicket(id, summary.navigationTicketId) || !summary.searchRoute) {
         finishThreadSearchNavigation(id, "会话已变化或被删除，请重新搜索")
         return
       }
-      await useAppStore.getState().selectThread(result.threadId)
+      const { searchRoute: route, navigationTicketId, ...thread } = summary
+      const project = route.kind === "ordinary" ? undefined : (await window.api.harnessBoard.catalogPage({
+        projectId: route.projectId,
+        projectLimit: 1,
+        includeRegistry: false
+      })).projects.find((item) => item.projectId === route.projectId)
       if (!isCurrentThreadSearchNavigation(id)) return
-      activateChat()
-      closedByNavigation.current = true
-      useThreadSearch.setState({ navigation: { id, result, query }, open: false })
+      if (route.kind !== "ordinary" && !project) {
+        finishThreadSearchNavigation(id, "暂时无法打开所属项目，请刷新后重试")
+        return
+      }
+      const confirmed = route.kind !== "ordinary" || await window.api.threads.searchConfirmRoute({
+        ...result, target: result.target, navigationTicketId
+      })
+      if (!isCurrentThreadSearchNavigation(id)) return
+      if (!confirmed || !adoptThreadSearchSummary(thread, result.incarnation)) {
+        finishThreadSearchNavigation(id, "会话或项目已变化，请重新搜索")
+        return
+      }
+      withOwnedThreadSearchTransition(id, () => {
+        const store = useAppStore.getState()
+        const sourceView = store.mainView
+        const sourceThread = store.currentThreadId
+        const restoreSourceView = sourceView === "harness" ? undefined : () => {
+          const current = useAppStore.getState()
+          if (current.mainView !== "harness") return
+          current.setMainView(sourceView)
+          if (sourceView === "thread" && sourceThread) void current.selectThread(sourceThread)
+        }
+        if (route.kind === "ordinary") void store.selectThread(result.threadId)
+        else if (store.mainView !== "harness") store.setMainView("harness")
+        if (!project) activateChat()
+        closedByNavigation.current = true
+        useThreadSearch.setState({
+          navigation: {
+            id, result, query, route, navigationTicketId, project, stage: project ? "board" : "chat",
+            onProjectReady: project ? activateChat : undefined, restoreSourceView
+          },
+          open: false
+        })
+      })
       window.setTimeout(() => finishThreadSearchNavigation(id, "加载会话超时，请重新搜索"), 30_000)
     } catch {
       finishThreadSearchNavigation(id, "无法打开会话，请重试")
@@ -227,7 +297,7 @@ export function ThreadSearchDialog({ activateChat }: { activateChat: () => void 
           className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-md border bg-background px-4 py-2 text-sm shadow"
         >
           {failure}{" "}
-          <button className="ml-3 underline" onClick={openThreadSearch}>
+          <button className="ml-3 underline" onClick={openForCurrentView}>
             重新搜索
           </button>
         </div>
@@ -235,7 +305,7 @@ export function ThreadSearchDialog({ activateChat }: { activateChat: () => void 
       <Dialog
         open={open}
         onOpenChange={(next) => {
-          if (next) openThreadSearch()
+          if (next) openForCurrentView()
           else {
             closedByNavigation.current = false
             cancelThreadSearchNavigation()
@@ -304,11 +374,14 @@ export function ThreadSearchDialog({ activateChat }: { activateChat: () => void 
               onChange={(event) => {
                 if (opening) cancelThreadSearchNavigation()
                 useThreadSearch.setState({ failure: "" })
-                setScope(event.target.value)
+                setScopeSelection({ version: openingVersion, value: event.target.value })
                 setSelected(null)
               }}
             >
-              <option value="all">所有会话</option>
+              <option value="ordinary">普通会话</option>
+              <option value="project" disabled={!projectId}>当前项目</option>
+              <option value="projects">全部项目</option>
+              <option value="all">全部会话</option>
               <option value="workspace" disabled={!currentWorkspace}>
                 当前工作区
               </option>
@@ -344,7 +417,11 @@ export function ThreadSearchDialog({ activateChat }: { activateChat: () => void 
             className="max-h-[55vh] overflow-auto">
             {visibleResults.map((result) => {
               const range = result.snippetRanges[0]
-              const workspaceLabel = result.remoteInbox ? REMOTE_INBOX_WORKSPACE_NAME : result.workspacePath
+              const workspaceLabel = result.route && result.route.kind !== "ordinary"
+                ? [result.projectLabel ?? result.route.projectId,
+                    result.route.kind === "featureSession" ? result.featureLabel ?? result.route.slug : null
+                  ].filter(Boolean).join(" / ")
+                : result.remoteInbox ? REMOTE_INBOX_WORKSPACE_NAME : result.workspacePath
               return (
                 <button
                   key={result.threadId}

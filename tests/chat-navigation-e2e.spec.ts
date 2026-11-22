@@ -1,15 +1,23 @@
 /** Real Electron / React / preload / SQLite / hydration Worker navigation regression.
- * Only the model producer is replaced at agent:invoke with a controlled continuous stream.
+ * Model output and the offline project rollout gate use controlled fixtures.
  * Run: npm run test:chat-navigation:e2e
  */
 import assert from "node:assert/strict"
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { _electron, type ElectronApplication, type Page } from "playwright"
-import type { ThreadSearchPage, ThreadSearchStartRequest } from "../src/shared/thread-search-types"
+import type {
+  ThreadSearchOpenRequest, ThreadSearchPage, ThreadSearchStartRequest,
+  ThreadSearchSummary, ThreadSearchWindow
+} from "../src/shared/thread-search-types"
+import { PROBE_FEATURE_SLUG, PROBE_OTHER_PROJECT_ID, PROBE_PROJECT_ID, seedProbeProjects } from "./support/project-thread-search-fixture"
+import {
+  installProjectSearchHarnessAdapter,
+  PROJECT_SEARCH_FIXTURE_FEATURE_TITLE
+} from "./support/project-search-harness-adapter"
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const applicationRoot = process.env.CHAT_NAVIGATION_APP_ROOT
@@ -37,6 +45,9 @@ interface FixtureApi {
     searchStart(request: ThreadSearchStartRequest): Promise<ThreadSearchPage>
     searchContinue(cursor: string): Promise<ThreadSearchPage>
     searchCancel(id?: string): Promise<void>
+    delete(threadId: string): Promise<unknown>
+    searchSummary(request: ThreadSearchOpenRequest): Promise<ThreadSearchSummary | null>
+    searchTargetWindow(request: ThreadSearchOpenRequest): Promise<ThreadSearchWindow>
   }
   workspace: { set(threadId: string, path: string): Promise<unknown> }
 }
@@ -162,6 +173,394 @@ async function expectMessageTime(page: Page, messageId: string, expected: string
   assert.equal(opacity, 1, "timestamp must remain visible without hovering its message")
 }
 
+async function armProjectConfirmationDelay(app: ElectronApplication, threadId: string) {
+  await app.evaluate(({ ipcMain }, threadId) => {
+    const channel = "threads:search-confirm-route"
+    const original = (ipcMain as unknown as {
+      _invokeHandlers: Map<string, (event: unknown, request: ThreadSearchOpenRequest) => unknown>
+    })._invokeHandlers.get(channel)!
+    const fixture = globalThis as {
+      releaseProjectConfirmation?: () => void
+      projectConfirmationFinished?: boolean
+    }
+    fixture.releaseProjectConfirmation = undefined
+    fixture.projectConfirmationFinished = false
+    ipcMain.removeHandler(channel)
+    ipcMain.handle(channel, async (event, request: ThreadSearchOpenRequest) => {
+      if (request.threadId !== threadId) return original(event, request)
+      ipcMain.removeHandler(channel)
+      ipcMain.handle(channel, original)
+      await new Promise<void>((resolve) => {
+        fixture.releaseProjectConfirmation = resolve
+      })
+      try {
+        return await original(event, request)
+      } finally {
+        fixture.projectConfirmationFinished = true
+      }
+    })
+  }, threadId)
+
+  return {
+    waitUntilPending: () => until(() => app.evaluate(() =>
+      Boolean((globalThis as { releaseProjectConfirmation?: () => void }).releaseProjectConfirmation)
+    ), "project route confirmation pending after summary"),
+    release: async () => {
+      await app.evaluate(() =>
+        (globalThis as { releaseProjectConfirmation?: () => void }).releaseProjectConfirmation?.()
+      )
+      await until(() => app.evaluate(() =>
+        Boolean((globalThis as { projectConfirmationFinished?: boolean }).projectConfirmationFinished)
+      ), "delayed project route confirmation returned")
+    }
+  }
+}
+
+function prepareProjectSearchFixture(dataRoot: string, workspace: string) {
+  const catalog = seedProbeProjects(dataRoot, workspace, 72)
+  assert.equal(catalog.projects.size, 72)
+  const catalogPath = join(dataRoot, "harness-board-projects.json")
+  const catalogFile = JSON.parse(readFileSync(catalogPath, "utf8")) as {
+    projects: Array<{ projectId: string; projectDir?: string; lifecycle: { status: string } }>
+  }
+  const adapterLog = installProjectSearchHarnessAdapter(dataRoot, PROBE_FEATURE_SLUG)
+  const featureProject = catalogFile.projects.find(({ projectId }) => projectId === PROBE_OTHER_PROJECT_ID)!
+  featureProject.projectDir = "feature-fixture"
+  mkdirSync(join(workspace, featureProject.projectDir))
+  writeFileSync(catalogPath, JSON.stringify(catalogFile))
+  return { catalogPath, catalogFile, adapterLog }
+}
+
+async function runProjectSearchScenarios(
+  app: ElectronApplication,
+  page: Page,
+  dataRoot: string,
+  workspace: string,
+  pass: (description: string) => void,
+  fixture: ReturnType<typeof prepareProjectSearchFixture>
+): Promise<void> {
+  await app.evaluate(({ ipcMain }) => {
+    const channel = "featureGates:isEnabled"
+    const handlers = (ipcMain as unknown as {
+      _invokeHandlers: Map<string, (event: unknown, ...args: unknown[]) => unknown>
+    })._invokeHandlers
+    const original = handlers.get(channel)
+    ipcMain.removeHandler(channel)
+    ipcMain.handle(channel, (event, name, options) =>
+      name === "projectMode" ? { enabled: true, reason: "local e2e fixture" }
+        : original?.(event, name, options))
+  })
+  // Project mode has a separately managed rollout gate. Exercise an entitled
+  // offline window without making any search or project-ownership API a mock.
+  await page.reload({ waitUntil: "domcontentloaded" })
+  await page.evaluate("globalThis.__name = (value) => value")
+  await page.evaluate(async () => {
+    const guide = { guideId: "project-mode-getting-started", revision: 1, maxShowCount: 3 }
+    await window.api.uiGuides.getState(guide)
+    await window.api.uiGuides.acknowledge(guide)
+  })
+  const dialog = page.getByRole("dialog", { name: "搜索会话" })
+  const globalInput = dialog.getByRole("combobox", { name: "搜索会话" })
+  const { catalogPath, catalogFile, adapterLog } = fixture
+  const ids = await page.evaluate(async ({ workspace, projectId, otherProjectId }) => {
+    const api = (window as unknown as { api: FixtureApi }).api
+    const marker = "PROJECT_SCOPE_SHARED_MARKER"
+    const seeds = [
+      { label: "regular", metadata: {} },
+      { label: "project", metadata: { harnessProjectSession: { projectId, kind: "chat" } } },
+      { label: "other", metadata: {
+        harnessProjectSession: { projectId: otherProjectId, kind: "chat" }
+      } },
+      { label: "unknown-feature", metadata: {} },
+      { label: "eligible-feature", metadata: {} }
+    ]
+    const ids: Record<string, string> = {}
+    for (const seed of seeds) {
+      const created = await api.threads.create({
+        title: "Fixture project scope " + seed.label,
+        agentMode: "normal",
+        workspacePath: workspace,
+        ...seed.metadata
+      })
+      const threadId = created.thread_id ?? created.id
+      if (!threadId) throw new Error("Missing fixture thread ID")
+      ids[seed.label] = threadId
+      const messages = Array.from({ length: 180 }, (_, row) => ({
+        id: seed.label + "-search-" + row,
+        role: "assistant",
+        created_at: new Date(1_700_000_000_000 + row),
+        content: row === 5
+          ? seed.label === "eligible-feature" ? "ELIGIBLE_FEATURE_HISTORICAL_MARKER" : marker
+          : "A later message for " + seed.label + " " + row
+      }))
+      const result = await api.threads.appendMessages(threadId, messages)
+      if (result.count !== messages.length) throw new Error("Incomplete project transcript")
+    }
+
+    return ids
+  }, { workspace, projectId: PROBE_PROJECT_ID, otherProjectId: PROBE_OTHER_PROJECT_ID })
+  // This session represents history from a previous installation. The current
+  // create path correctly requires workspace configuration for a new Feature.
+  await app.evaluate((_electron, { databasePath, features }) => {
+    const sqlite = process.getBuiltinModule("node:sqlite") as typeof import("node:sqlite")
+    const db = new sqlite.DatabaseSync(databasePath, { timeout: 4000 })
+    try {
+      const update = db.prepare("UPDATE threads SET metadata = json_set(metadata, '$.harnessFeature', json(?)) WHERE thread_id = ?")
+      for (const { threadId, projectId, slug } of features) {
+        if (update.run(JSON.stringify({ projectId, slug }), threadId).changes !== 1) {
+          throw new Error("Missing historical Feature seed row")
+        }
+      }
+    } finally {
+      db.close()
+    }
+  }, {
+    databasePath: join(dataRoot, "cmbcoworkagent.sqlite"),
+    features: [
+      { threadId: ids["unknown-feature"], projectId: PROBE_PROJECT_ID, slug: "unobserved" },
+      { threadId: ids["eligible-feature"], projectId: PROBE_OTHER_PROJECT_ID, slug: PROBE_FEATURE_SLUG }
+    ]
+  })
+  const results = await page.evaluate(async (projectId) => {
+    const api = (window as unknown as { api: FixtureApi }).api
+    const marker = "PROJECT_SCOPE_SHARED_MARKER"
+    const requests: ThreadSearchStartRequest[] = [
+      { query: marker },
+      { query: marker, scope: { kind: "project", projectId } },
+      { query: marker, scope: { kind: "projects" } },
+      { query: marker, scope: { kind: "all" } },
+      { query: "ELIGIBLE_FEATURE_HISTORICAL_MARKER", scope: { kind: "projects" } }
+    ]
+    const results: Array<{ hits: string[]; coverage: string }> = []
+    for (const request of requests) {
+      let reply = await api.threads.searchStart(request)
+      const sessionId = reply.sessionId
+      const hits: string[] = []
+      try {
+        for (;;) {
+          hits.push(...reply.results.map(({ threadId }) => threadId))
+          if (!reply.nextCursor) break
+          reply = await api.threads.searchContinue(reply.nextCursor)
+        }
+        results.push({ hits: hits.sort(), coverage: reply.coverage.completeness })
+      } finally {
+        await api.threads.searchCancel(sessionId)
+      }
+    }
+    return results
+  }, PROBE_PROJECT_ID)
+  const grouped = { ids, results }
+  assert.deepEqual(grouped.results.map(({ hits }) => hits), [
+    [grouped.ids.regular],
+    [grouped.ids.project],
+    [grouped.ids.project, grouped.ids.other].sort(),
+    [grouped.ids.regular, grouped.ids.project, grouped.ids.other].sort(),
+    []
+  ])
+  assert.equal(grouped.results[1].coverage, "partial", "unknown Feature is a coverage gap")
+  assert.equal(grouped.results[4].coverage, "partial")
+  assert.equal(existsSync(adapterLog), false, "queries on unknown Features never invoke adapters")
+  pass("project search isolates four scopes and excludes an unobserved Feature")
+
+  const searchShortcut = process.platform === "darwin" ? "Meta+Shift+f" : "Control+Shift+f"
+  const searchScope = dialog.getByLabel("搜索范围")
+  const projectHeading = page.getByRole("heading", {
+    name: "Fixture project scope project", exact: true
+  })
+  const otherProjectHeading = page.getByRole("heading", {
+    name: "Fixture project scope other", exact: true
+  })
+  await page.keyboard.press(searchShortcut)
+  assert.equal(await searchScope.inputValue(), "ordinary")
+  await searchScope.selectOption("projects")
+  await globalInput.fill("PROJECT_SCOPE_SHARED_MARKER")
+  await dialog.locator('[data-search-thread="' + grouped.ids.project + '"]').click()
+  await dialog.waitFor({ state: "hidden" })
+  await page.locator('[data-chat-thread-id="' + grouped.ids.project + '"]').waitFor()
+  await projectHeading.waitFor()
+  await expectVisibleMatch(page, "PROJECT_SCOPE_SHARED_MARKER", "project-search-5")
+  pass("global search opens an unloaded project after the first 64 and reveals its old message")
+
+  await page.getByPlaceholder("在当前会话中搜索").press("Escape")
+  await page.keyboard.press(searchShortcut)
+  assert.equal(await searchScope.inputValue(), "project")
+  await globalInput.fill("PROJECT_SCOPE_SHARED_MARKER")
+  await dialog.locator('[data-search-thread="' + grouped.ids.project + '"]').waitFor()
+  assert.equal(await dialog.locator('[data-search-thread="' + grouped.ids.other + '"]').count(), 0)
+  await searchScope.selectOption("projects")
+  await dialog.locator('[data-search-thread="' + grouped.ids.other + '"]').click()
+  await dialog.waitFor({ state: "hidden" })
+  await page.locator('[data-chat-thread-id="' + grouped.ids.other + '"]').waitFor()
+  await expectVisibleMatch(page, "PROJECT_SCOPE_SHARED_MARKER", "other-search-5")
+  pass("search defaults to the mounted project and crosses projects after an explicit scope change")
+
+  // The board still has an active copy of the first project. Update only the
+  // underlying registry, then resolve the project again from a search hit.
+  const archived = catalogFile.projects.find(({ projectId }) => projectId === PROBE_PROJECT_ID)!
+  archived.lifecycle.status = "archived"
+  writeFileSync(catalogPath, JSON.stringify(catalogFile))
+  await page.getByPlaceholder("在当前会话中搜索").press("Escape")
+  await page.keyboard.press(searchShortcut)
+  await searchScope.selectOption("projects")
+  await globalInput.fill("PROJECT_SCOPE_SHARED_MARKER")
+  await dialog.locator('[data-search-thread="' + grouped.ids.project + '"]').click()
+  await dialog.waitFor({ state: "hidden" })
+  const archivedChat = page.locator('[data-chat-thread-id="' + grouped.ids.project + '"]')
+  const archivedComposer = archivedChat.getByPlaceholder("所属项目已归档，当前会话只读。", { exact: true })
+  await archivedComposer.waitFor()
+  assert(await archivedComposer.isDisabled(), "archiving disables the project composer")
+  await expectVisibleMatch(page, "PROJECT_SCOPE_SHARED_MARKER", "project-search-5")
+  pass("a cached active project reopens read-only after registry archive")
+
+  const countAdapterInvocations = () => existsSync(adapterLog)
+    ? readFileSync(adapterLog, "utf8").trim().split("\n").length : 0
+  const adapterInvocationsBeforeRefresh = countAdapterInvocations()
+  // Archiving invalidates prior catalog evidence. Refresh through the production
+  // Board path so the successful full project snapshot authorizes the Feature.
+  const detail = await page.evaluate(
+    (id) => window.api.harnessBoard.getProjectDetail(id),
+    PROBE_OTHER_PROJECT_ID
+  )
+  assert.equal(detail.error, null)
+  assert(detail.runs.some(({ slug }) => slug === PROBE_FEATURE_SLUG))
+  assert(countAdapterInvocations() > adapterInvocationsBeforeRefresh)
+  await page.getByPlaceholder("在当前会话中搜索").press("Escape")
+  await page.keyboard.press(searchShortcut)
+  await searchScope.selectOption("projects")
+  await globalInput.fill("ELIGIBLE_FEATURE_HISTORICAL_MARKER")
+  const featureHit = dialog.locator('[data-search-thread="' + grouped.ids["eligible-feature"] + '"]')
+  await featureHit.click()
+  await dialog.waitFor({ state: "hidden" })
+  await page.locator('[data-chat-thread-id="' + grouped.ids["eligible-feature"] + '"]').waitFor()
+  await page.getByText(PROJECT_SEARCH_FIXTURE_FEATURE_TITLE, { exact: true }).first().waitFor()
+  await expectVisibleMatch(page, "ELIGIBLE_FEATURE_HISTORICAL_MARKER", "eligible-feature-search-5")
+  pass("a real Board adapter observation makes a Feature searchable and opens its historic match")
+
+  await page.getByPlaceholder("在当前会话中搜索").press("Escape")
+  await page.getByRole("navigation").getByRole("button", { name: "项目列表", exact: true }).click()
+  const settings = page.getByRole("tab", { name: "工程与精益配置", exact: true })
+  await settings.waitFor()
+  const interruptedOpening = await armProjectConfirmationDelay(app, grouped.ids.other)
+  await page.keyboard.press(searchShortcut)
+  await searchScope.selectOption("projects")
+  await globalInput.fill("PROJECT_SCOPE_SHARED_MARKER")
+  await dialog.locator('[data-search-thread="' + grouped.ids.other + '"]').click()
+  await dialog.waitFor({ state: "hidden" })
+  await interruptedOpening.waitUntilPending()
+  await settings.click()
+  assert.equal(await settings.getAttribute("aria-selected"), "true")
+  await interruptedOpening.release()
+  await page.evaluate(() => new Promise<void>((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+  ))
+  assert.equal(await settings.getAttribute("aria-selected"), "true")
+  assert.equal(await page.locator('[data-chat-thread-id="' + grouped.ids.other + '"]').count(), 0)
+  pass("a manual switch to project settings cancels a delayed search route")
+  await page.getByRole("tab", { name: "项目列表", exact: true }).click()
+
+  await page.keyboard.press(searchShortcut)
+  await searchScope.selectOption("all")
+  await globalInput.fill("PROJECT_SCOPE_SHARED_MARKER")
+  await dialog.locator('[data-search-thread="' + grouped.ids.regular + '"]').click()
+  await dialog.waitFor({ state: "hidden" })
+  await page.locator('[data-chat-thread-id="' + grouped.ids.regular + '"]').waitFor()
+  await projectHeading.waitFor({ state: "detached" })
+  await expectVisibleMatch(page, "PROJECT_SCOPE_SHARED_MARKER", "regular-search-5")
+  pass("all scopes can navigate from project mode back to ordinary chat")
+
+  const tickets = await page.evaluate(async ({ threadId, projectId }) => {
+    const { threads } = (window as unknown as { api: FixtureApi }).api
+    async function ticketFor(query: string) {
+      let reply = await threads.searchStart({ query, scope: { kind: "project", projectId } })
+      const sessionId = reply.sessionId
+      try {
+        for (;;) {
+          const hit = reply.results.find((result) => result.threadId === threadId)
+          if (hit) {
+            const summary = await threads.searchSummary(hit)
+            if (!summary?.navigationTicketId) throw new Error("Missing project navigation ticket")
+            if (new TextEncoder().encode(JSON.stringify(summary)).byteLength > 32 * 1024) {
+              throw new Error("Oversized project navigation summary")
+            }
+            return { ...hit, navigationTicketId: summary.navigationTicketId }
+          }
+          if (!reply.nextCursor) throw new Error("Missing project query target " + query)
+          reply = await threads.searchContinue(reply.nextCursor)
+        }
+      } finally {
+        await threads.searchCancel(sessionId)
+      }
+    }
+    const old = await ticketFor("PROJECT_SCOPE_SHARED_MARKER")
+    const current = await ticketFor("A later message for project 160")
+    const stale = await threads.searchTargetWindow(old)
+    const resolved = await threads.searchTargetWindow(current)
+    if (new TextEncoder().encode(JSON.stringify(resolved)).byteLength > 4 * 1024 * 1024) {
+      throw new Error("Oversized project target window")
+    }
+    const reused = await threads.searchTargetWindow(current)
+    return {
+      stale: stale.status,
+      resolved: resolved.status,
+      reused: reused.status,
+      target: current.target?.kind === "durableMessage" ? current.target.messageId : null
+    }
+  }, { threadId: grouped.ids.project, projectId: PROBE_PROJECT_ID })
+  assert.deepEqual(tickets, {
+    stale: "staleIdentity", resolved: "resolved", reused: "staleIdentity", target: "project-search-160"
+  })
+  pass("same-thread stale project tickets cannot consume the newer exact result")
+  const removedOpening = await armProjectConfirmationDelay(app, grouped.ids.other)
+  await page.getByPlaceholder("在当前会话中搜索").press("Escape")
+  await page.keyboard.press(searchShortcut)
+  await searchScope.selectOption("projects")
+  await globalInput.fill("PROJECT_SCOPE_SHARED_MARKER")
+  await dialog.locator('[data-search-thread="' + grouped.ids.other + '"]').click()
+  await removedOpening.waitUntilPending()
+  catalogFile.projects = catalogFile.projects.filter(({ projectId }) =>
+    projectId !== PROBE_OTHER_PROJECT_ID)
+  writeFileSync(catalogPath, JSON.stringify(catalogFile))
+  await removedOpening.release()
+  await page.locator('[data-chat-thread-id="' + grouped.ids.regular + '"]').waitFor()
+  assert.equal(await otherProjectHeading.count(), 0)
+  assert.equal(await page.locator('[data-chat-thread-id="' + grouped.ids.other + '"]').count(), 0)
+  pass("project removal between summary and Board confirmation restores the source conversation")
+
+  await page.keyboard.press(searchShortcut)
+  await searchScope.selectOption("all")
+  await globalInput.fill("PROJECT_SCOPE_SHARED_MARKER")
+  const deletedHit = dialog.locator('[data-search-thread="' + grouped.ids.project + '"]')
+  const ordinaryHit = dialog.locator('[data-search-thread="' + grouped.ids.regular + '"]')
+  await deletedHit.waitFor()
+  await ordinaryHit.waitFor()
+  await page.evaluate((id) => (window as unknown as { api: FixtureApi }).api.threads.delete(id), grouped.ids.project)
+  await deletedHit.waitFor({ state: "detached" })
+  assert(await ordinaryHit.isVisible(), "committed project deletion preserves verified ordinary results")
+  await globalInput.press("Escape")
+  await dialog.waitFor({ state: "hidden" })
+  pass("committed project session deletion retracts the published hit")
+  writeFileSync(catalogPath, "{invalid registry")
+  const degraded = await page.evaluate(async () => {
+    const { threads } = (window as unknown as { api: FixtureApi }).api
+    let reply = await threads.searchStart({
+      query: "PROJECT_SCOPE_SHARED_MARKER", scope: { kind: "all" }
+    })
+    const sessionId = reply.sessionId
+    const results: string[] = []
+    try {
+      for (;;) {
+        results.push(...reply.results.map(({ threadId }) => threadId))
+        if (!reply.nextCursor) return { results, coverage: reply.coverage.completeness }
+        reply = await threads.searchContinue(reply.nextCursor)
+      }
+    } finally {
+      await threads.searchCancel(sessionId)
+    }
+  })
+  assert.deepEqual(degraded, { results: [grouped.ids.regular], coverage: "partial" })
+  pass("an unreadable project registry retains only verified ordinary results with partial coverage")
+}
+
 async function main(): Promise<void> {
   const isolated = mkdtempSync(join(tmpdir(), "cmb-chat-navigation-e2e-"))
   mkdirSync(artifacts, { recursive: true })
@@ -200,6 +599,7 @@ async function main(): Promise<void> {
     NODE_USE_ENV_PROXY: "1",
     NO_PROXY: "127.0.0.1,localhost"
   })
+  const projectSearchFixture = prepareProjectSearchFixture(env.CMB_COWORK_AGENT_HOME, workspace)
   let app: ElectronApplication | undefined
   let page: Page | undefined
   const pageErrors: string[] = []
@@ -243,6 +643,11 @@ async function main(): Promise<void> {
     page.on("console", (entry) => {
       if (entry.type() === "error" || entry.type() === "warning") noteDiagnostic(entry.text())
     })
+    if (process.env.CMB_PROJECT_THREAD_SEARCH_E2E_ONLY === "1") {
+      await runProjectSearchScenarios(app, page, env.CMB_COWORK_AGENT_HOME, workspace, pass, projectSearchFixture)
+      assert.deepEqual(pageErrors, [], "no renderer errors")
+      return
+    }
     await app.evaluate(({ ipcMain }) => {
       ipcMain.removeAllListeners("agent:invoke")
       ipcMain.on("agent:invoke", (event, request) => {
@@ -1378,6 +1783,8 @@ async function main(): Promise<void> {
       webContents.fromId(run.senderId)?.send(run.channel, { type: "done" })
     })
     pass("global exact highlight completes while the same transcript keeps growing")
+
+    await runProjectSearchScenarios(app, page, env.CMB_COWORK_AGENT_HOME, workspace, pass, projectSearchFixture)
 
     assert.deepEqual(pageErrors, [], "no renderer errors")
     assert.equal(Object.keys(threadIds).length, 4)

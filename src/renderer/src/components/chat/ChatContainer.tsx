@@ -6,7 +6,7 @@ import type { BotGroupInputControl } from "@/components/bots/BotGroupMentionInpu
 import { parseBotMessageMentions } from "../../../../shared/bots/message-mentions"
 import type { BotDefinition, BotMessageReply } from "../../../../shared/bots/contracts"
 import { parseBotMessageReply } from "../../../../shared/bots/message-reply"
-import { finishThreadSearchNavigation, isCurrentThreadSearchNavigation, useThreadSearch, type DurableSearchNavigation } from "@/lib/thread-search-navigation"
+import { finishThreadSearchNavigation, isCurrentThreadSearchNavigation, isThreadSearchSurface, useThreadSearch, type DurableSearchNavigation } from "@/lib/thread-search-navigation"
 import { projectHumanGate } from "../../../../shared/harness-notifications"
 import { IDLE_MODEL_SAP_REQUIRED_MESSAGE } from "../../../../shared/model-catalog"
 import { useHarnessNotifications } from "@/lib/harness-notifications"
@@ -1868,7 +1868,8 @@ export function ChatContainer({
   const durableMessageWindowGenerationRef = useRef(0)
   const chatViewMountedRef = useRef(false)
   const [searchOpen, setSearchOpen] = useState(false)
-  const navigation = useThreadSearch((state) => state.navigation?.result.threadId === threadId ? state.navigation : null)
+  const navigation = useThreadSearch((state) => state.navigation &&
+    isThreadSearchSurface(state.navigation, threadId, surface, state.projectRoute) ? state.navigation : null)
   const [searchReveal, setSearchReveal] = useState<ChatSearchReveal | null>(null)
   const searchIndexerRef = useRef<ReturnType<typeof createChatSearchIndexer> | null>(null)
   const searchLocalCorpus = useCallback((corpus: ChatSearchCorpus, query: string) => {
@@ -4721,6 +4722,7 @@ export function ChatContainer({
     async (match: Pick<DurableChatSearchMatch, "messageId" | "ordinal" | "externalNavigation">): Promise<void> => {
       const request = match.externalNavigation
       if (request) {
+        if (!isCurrentThreadSearchNavigation(request.id)) throw new Error("Search navigation superseded")
         consumedSearchNavigation.current = request.id
         setConsumedSearchNavigationId(request.id)
       }
@@ -4740,7 +4742,7 @@ export function ChatContainer({
       }
       const loaded = await loadMessageWindowAround(match, request ? async (residentMessageIds) => {
         const resolved = await window.api.threads.searchTargetWindow({
-          ...request.result, target: request.target, residentMessageIds
+          ...request.result, target: request.target, navigationTicketId: request.navigationTicketId, residentMessageIds
         })
         return chatViewMountedRef.current &&
           durableMessageWindowGenerationRef.current === revealGeneration &&

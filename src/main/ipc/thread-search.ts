@@ -4,9 +4,19 @@ import { THREAD_SEARCH_GOAL_EVENT_SQL } from "../thread-search/goal-event"
 import { isVisibleGoalUserEventMessage } from "../../shared/goal-events"
 import type { ThreadGoalHydrationEvent } from "../thread-metadata-hydration/protocol"
 import { randomUUID } from "node:crypto"
+import { isDeepStrictEqual } from "node:util"
+import { sameThreadSearchRoute } from "../../shared/thread-search-scope"
+import { threadSearchIdentitySql, threadSearchRouteFromRow } from "../thread-search/reader"
+import {
+  isProjectSearchRouteCurrent,
+  onProjectSearchCatalogChange,
+  projectSearchCatalogGeneration,
+  readProjectSearchCatalog
+} from "../thread-search/project-catalog"
 import type { Worker } from "node:worker_threads"
 import type { IpcMain } from "electron"
 import { getDb, getThreadRowLifetime } from "../db"
+import { onThreadDirectoryIdentityChanged } from "../db/thread-directory-lifecycle"
 import { readThreadSearchHydrationInWorker } from "../thread-metadata-hydration/client"
 import { getDbPath, getThreadCheckpointDir } from "../storage"
 import { readThreadMessagesPageInWorker } from "../thread-message-hydration/client"
@@ -14,7 +24,10 @@ import {
   THREAD_SEARCH_QUERY_LIMIT,
   THREAD_SEARCH_TARGET_ID_BYTE_LIMIT,
   type ThreadSearchOpenRequest,
-  type ThreadSearchStartRequest
+  type ThreadSearchStartRequest,
+  type ThreadSearchScope,
+  type ThreadSearchRoute,
+  type ThreadSearchResult
 } from "../../shared/thread-search-types"
 import type { SearchBackfillCandidate, SearchCommand, SearchReply } from "../thread-search/protocol"
 import {
@@ -26,14 +39,26 @@ interface SessionHandle {
   active: boolean
   flag: Int32Array
   lastAccess: number
-  results: Map<string, ThreadSearchOpenRequest>
+  results: Map<string, SearchDestination>
+  catalogGeneration?: string
+  catalogChanged?: boolean
+  stopCatalogObservation?: () => void
+  catalogInvalidation?: SharedArrayBuffer
+  notifyCatalogChanged?: () => void
+  verifyOrdinaryRoute?: boolean
   pending?: { resolve: (reply: SearchReply) => void; timer: ReturnType<typeof setTimeout> }
+}
+
+type SearchDestination = ThreadSearchOpenRequest & {
+  route: ThreadSearchRoute
+  catalogGeneration?: string
 }
 
 const handles = new Map<number, SessionHandle>()
 const observedWindows = new Set<number>()
 const navigationTickets = new Map<number, {
-  request: ThreadSearchOpenRequest
+  request: SearchDestination
+  id: string
   expires: number
   consumed: boolean
 }>()
@@ -44,6 +69,8 @@ let worker: Promise<Worker> | undefined
 function release(owner: number, handle: SessionHandle) {
   if (handles.get(owner) !== handle) return
   handles.delete(owner)
+  handle.stopCatalogObservation?.()
+  if (handle.catalogInvalidation) Atomics.store(new Int32Array(handle.catalogInvalidation), 0, 1)
   summaryRequests.delete(owner)
   Atomics.store(handle.flag, 0, 1)
   if (handle.pending) {
@@ -106,17 +133,9 @@ function getWorker() {
             return
           }
           const { id } = message
-          const reply =
-            "error" in message.reply
-              ? message.reply
-              : {
-                  ...message.reply,
-                  results: message.reply.results.filter(
-                    (result) => !isThreadPublicationPending(result.threadId)
-                  )
-                }
           const handle = [...handles.values()].find((current) => current.id === id)
           if (!handle?.pending) return
+          const reply = "error" in message.reply ? message.reply : checkedPage(handle, message.reply)
           clearTimeout(handle.pending.timer)
           if (!("error" in reply)) {
             handle.active = reply.nextCursor !== null
@@ -124,7 +143,10 @@ function getWorker() {
               handle.results.set(result.threadId, {
                 threadId: result.threadId,
                 incarnation: result.incarnation,
-                target: result.target
+                target: result.target,
+                route: result.route ?? { kind: "ordinary" },
+                ...(result.route?.kind !== undefined && result.route.kind !== "ordinary"
+                  ? { catalogGeneration: handle.catalogGeneration } : {})
               })
           }
           handle.pending.resolve(reply)
@@ -194,8 +216,113 @@ function validIdentity(request: ThreadSearchOpenRequest): boolean {
 function sameSearchIdentity(left: ThreadSearchOpenRequest, right: ThreadSearchOpenRequest) {
   return (
     left.threadId === right.threadId &&
-    matchesThreadIncarnationSnapshot(left.incarnation, right.incarnation)
+    matchesThreadIncarnationSnapshot(left.incarnation, right.incarnation) &&
+    isDeepStrictEqual(left.target ?? null, right.target ?? null)
   )
+}
+
+function invalidateProjectResults(handle: SessionHandle) {
+  if (handle.catalogChanged) return
+  handle.catalogChanged = true
+  if (handle.catalogInvalidation) Atomics.store(new Int32Array(handle.catalogInvalidation), 0, 1)
+  for (const [threadId, destination] of handle.results) {
+    if (destination.route.kind !== "ordinary") handle.results.delete(threadId)
+  }
+  handle.notifyCatalogChanged?.()
+}
+
+function checkedPage(handle: SessionHandle, reply: Exclude<SearchReply, { error: string }>) {
+  if (reply.coverage.reasons.includes("project-catalog-changed") ||
+      (handle.catalogGeneration && projectSearchCatalogGeneration() !== handle.catalogGeneration))
+    invalidateProjectResults(handle)
+  const results = reply.results.filter((result: ThreadSearchResult) => {
+    if (isThreadPublicationPending(result.threadId)) return false
+    if (!result.route || result.route.kind === "ordinary") {
+      return !handle.verifyOrdinaryRoute || currentDestination({
+        ...result, route: { kind: "ordinary" }
+      })
+    }
+    if (handle.catalogChanged || !handle.catalogGeneration) return false
+    if (currentDestination({
+      ...result,
+      catalogGeneration: handle.catalogGeneration
+    })) return true
+    invalidateProjectResults(handle)
+    return false
+  })
+  if (!handle.catalogChanged) return { ...reply, results }
+  return {
+    ...reply,
+    results: results.filter((result) => !result.route || result.route.kind === "ordinary"),
+    coverage: {
+      ...reply.coverage,
+      completeness: "partial" as const,
+      reasons: [...new Set([...reply.coverage.reasons, "project-catalog-changed" as const])]
+    }
+  }
+}
+
+function currentDestination(request: SearchDestination): boolean {
+  const project = request.route.kind !== "ordinary"
+  if (request.route.kind !== "ordinary" &&
+      (!request.catalogGeneration || !isProjectSearchRouteCurrent(request.catalogGeneration, request.route))) {
+    return false
+  }
+  try {
+    const stmt = getDb().prepare(threadSearchIdentitySql(false, project))
+    try {
+      stmt.bind([request.threadId])
+      if (!stmt.step()) return false
+      const row = stmt.getAsObject()
+      const route = project ? threadSearchRouteFromRow(row) : { kind: "ordinary" as const }
+      return !!route && sameThreadSearchRoute(request.route, route) && !row.oversized_token &&
+        matchesThreadIncarnationSnapshot({
+          token: typeof row.token === "string" && row.token ? row.token : null,
+          legacyCreatedAt: Number(row.created_at)
+        }, request.incarnation)
+    } finally {
+      stmt.free()
+    }
+  } catch {
+    return false
+  }
+}
+
+function currentProjectDestination(request: SearchDestination): boolean {
+  return request.route.kind === "ordinary" || currentDestination(request)
+}
+
+function validatedScope(request: ThreadSearchStartRequest): ThreadSearchScope {
+  const workspaceValid = (value: unknown) => value == null ||
+    (typeof value === "string" && Buffer.byteLength(value) <= 32768)
+  const scope = request.scope
+  if (!workspaceValid(request.workspacePath)) throw new Error("SEARCH_INVALID")
+  if (scope === undefined) return { kind: "ordinary", workspacePath: request.workspacePath }
+  if (!scope || typeof scope !== "object" || Array.isArray(scope)) throw new Error("SEARCH_INVALID")
+  if (scope.kind === "ordinary") {
+    if (!workspaceValid(scope.workspacePath) ||
+        (scope.workspacePath !== undefined && request.workspacePath !== undefined))
+      throw new Error("SEARCH_INVALID")
+    return {
+      kind: "ordinary",
+      workspacePath: scope.workspacePath !== undefined ? scope.workspacePath : request.workspacePath
+    }
+  }
+  if (request.workspacePath !== undefined || "workspacePath" in scope) throw new Error("SEARCH_INVALID")
+  if (scope.kind === "project" && typeof scope.projectId === "string" &&
+      scope.projectId.trim() && Buffer.byteLength(scope.projectId) <= 8192)
+    return { kind: "project", projectId: scope.projectId.trim() }
+  if (scope.kind === "projects" || scope.kind === "all") return { kind: scope.kind }
+  throw new Error("SEARCH_INVALID")
+}
+
+function admittedTicket(owner: number, candidate: ThreadSearchOpenRequest) {
+  const ticket = navigationTickets.get(owner)
+  if (!ticket || ticket.consumed || ticket.id !== candidate?.navigationTicketId ||
+      ticket.expires <= Date.now() || !validIdentity(candidate) ||
+      !sameSearchIdentity(ticket.request, candidate) || !currentProjectDestination(ticket.request))
+    return undefined
+  return ticket
 }
 
 function readTargetVersion(threadId: string, messageId: string): [number, number] {
@@ -211,14 +338,29 @@ function readTargetVersion(threadId: string, messageId: string): [number, number
 
 function readSearchThread(
   owner: number,
-  request: ThreadSearchOpenRequest,
+  request: SearchDestination,
   includeSummary: boolean
 ) {
   return readThreadSearchHydrationInWorker(request.threadId, owner, {
     incarnation: request.incarnation,
-    includeSummary
+    includeSummary,
+    route: request.route
   })
 }
+
+onThreadDirectoryIdentityChanged((threadId) => {
+  for (const [owner, ticket] of navigationTickets) {
+    if (ticket.request.threadId === threadId && !currentProjectDestination(ticket.request)) {
+      navigationTickets.delete(owner)
+    }
+  }
+  for (const handle of handles.values()) {
+    const result = handle.results.get(threadId)
+    if (result && result.route.kind !== "ordinary" && !currentProjectDestination(result)) {
+      invalidateProjectResults(handle)
+    }
+  }
+})
 
 export function registerThreadSearchHandlers(ipc: IpcMain) {
   ipc.handle("threads:search-start", async ({ sender }, request: ThreadSearchStartRequest) => {
@@ -228,14 +370,12 @@ export function registerThreadSearchHandlers(ipc: IpcMain) {
       typeof request.query !== "string" ||
       !request.query.trim() ||
       request.query.length > THREAD_SEARCH_QUERY_LIMIT ||
-      (request.workspacePath != null &&
-        (typeof request.workspacePath !== "string" ||
-          Buffer.byteLength(request.workspacePath) > 32768)) ||
       (request.limit !== undefined &&
         (!Number.isInteger(request.limit) || request.limit < 1 || request.limit > 50))
     ) {
       throw new Error("SEARCH_INVALID")
     }
+    const scope = validatedScope(request)
     const now = Date.now()
     for (const id of handles.keys()) getSession(id)
     navigationTickets.delete(sender.id)
@@ -261,15 +401,28 @@ export function registerThreadSearchHandlers(ipc: IpcMain) {
       active: true
     }
     handles.set(sender.id, handle)
+    handle.verifyOrdinaryRoute = scope.kind === "all"
+    const catalog = scope.kind === "ordinary" ? null : await readProjectSearchCatalog()
+    if (handles.get(sender.id) !== handle) throw new Error("SEARCH_CURSOR_EXPIRED")
+    if (catalog) {
+      handle.catalogGeneration = catalog.generation
+      handle.catalogInvalidation = new SharedArrayBuffer(4)
+      handle.notifyCatalogChanged = () => {
+        if (!sender.isDestroyed()) sender.send("threads:search-project-catalog-changed", handle.id)
+      }
+      handle.stopCatalogObservation = onProjectSearchCatalogChange(() => invalidateProjectResults(handle))
+      if (projectSearchCatalogGeneration() !== catalog.generation) invalidateProjectResults(handle)
+    }
     return dispatch(sender.id, handle, {
       type: "start",
       id: handle.id,
       request: {
         query: request.query.trim(),
-        workspacePath: request.workspacePath,
+        scope,
         limit: request.limit
       },
-      cancellation: handle.flag.buffer as SharedArrayBuffer
+      cancellation: handle.flag.buffer as SharedArrayBuffer,
+      ...(catalog ? { catalog, catalogInvalidation: handle.catalogInvalidation } : {})
     })
   })
   ipc.handle("threads:search-continue", ({ sender }, cursor: string) => {
@@ -291,7 +444,7 @@ export function registerThreadSearchHandlers(ipc: IpcMain) {
     const request = handle?.results.get(candidate.threadId)
     if (!request || !sameSearchIdentity(request, candidate)) return null
     const lifetime = getThreadRowLifetime(request.threadId)
-    if (lifetime === null) return null
+    if (lifetime === null || !currentProjectDestination(request)) return null
     navigationTickets.delete(owner)
     const token = Symbol()
     summaryRequests.set(owner, token)
@@ -302,31 +455,42 @@ export function registerThreadSearchHandlers(ipc: IpcMain) {
         !summary ||
         getSession(owner) !== handle ||
         getThreadRowLifetime(request.threadId) !== lifetime ||
-        isThreadPublicationPending(candidate.threadId)
+        isThreadPublicationPending(candidate.threadId) ||
+        !currentProjectDestination(request)
       )
         return null
-      if (Buffer.byteLength(JSON.stringify(summary)) > 32 * 1024) return null
-      if (request.target) navigationTickets.set(owner, { request, expires: Date.now() + 30_000, consumed: false })
-      return summary
+      const id = randomUUID()
+      const response = { ...summary, searchRoute: request.route, navigationTicketId: id }
+      if (Buffer.byteLength(JSON.stringify(response)) > 32 * 1024) return null
+      navigationTickets.set(owner, { id, request, expires: Date.now() + 30_000, consumed: false })
+      return response
     } finally {
       if (summaryRequests.get(owner) === token) summaryRequests.delete(owner)
     }
   })
+  ipc.handle("threads:search-cancel-navigation", ({ sender }, id: string) => {
+    if (navigationTickets.get(sender.id)?.id === id) navigationTickets.delete(sender.id)
+  })
+  ipc.handle("threads:search-confirm-route", async ({ sender }, candidate: ThreadSearchOpenRequest) => {
+    const ticket = admittedTicket(sender.id, candidate)
+    if (!ticket || isThreadPublicationPending(candidate.threadId)) return false
+    const lifetime = getThreadRowLifetime(ticket.request.threadId)
+    const identity = lifetime !== null && await readSearchThread(sender.id, ticket.request, false)
+    if (!identity || lifetime !== getThreadRowLifetime(ticket.request.threadId) ||
+        admittedTicket(sender.id, candidate) !== ticket || isThreadPublicationPending(candidate.threadId))
+      return false
+    if (!ticket.request.target) navigationTickets.delete(sender.id)
+    return true
+  })
   ipc.handle(
     "threads:search-target-window",
     async ({ sender }, candidate: ThreadSearchOpenRequest) => {
-      const ticket = navigationTickets.get(sender.id)
-      if (
-        !ticket ||
-        ticket.consumed ||
-        ticket.expires < Date.now() ||
-        !validIdentity(candidate) ||
-        !sameSearchIdentity(ticket.request, candidate)
-      )
-        return { status: "staleIdentity" }
+      const ticket = admittedTicket(sender.id, candidate)
+      if (!ticket) return { status: "staleIdentity" }
       const request = ticket.request
       ticket.consumed = true
-      const current = () => navigationTickets.get(sender.id) === ticket
+      const current = () => navigationTickets.get(sender.id) === ticket &&
+        ticket.expires > Date.now() && currentProjectDestination(request)
       const lifetime = getThreadRowLifetime(request.threadId)
       if (lifetime === null) {
         navigationTickets.delete(sender.id)
@@ -397,7 +561,7 @@ export function registerThreadSearchHandlers(ipc: IpcMain) {
           ? resolved
           : { status: "failed" }
       }).catch(() => ({ status: current() ? "failed" : "staleIdentity" })).finally(() => {
-        if (current()) navigationTickets.delete(sender.id)
+        if (navigationTickets.get(sender.id) === ticket) navigationTickets.delete(sender.id)
       })
     }
   )

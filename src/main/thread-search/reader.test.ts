@@ -67,6 +67,80 @@ function insertThread(threadId: string) {
 }
 
 describe("isolated thread search read path", () => {
+  it("uses a physical boundary through sparse projects without including unverified features", () => {
+    const insert = sqlite.prepare(
+      "INSERT INTO threads(thread_id, created_at, updated_at, metadata, title) VALUES (?, 1, ?, ?, ?)"
+    )
+    const project = (projectId: string) => ({ harnessProjectSession: { projectId, kind: "planning" } })
+    const feature = (projectId: string, slug: string) => ({ harnessFeature: { projectId, slug } })
+    for (let i = 0; i < 150; i++) insert.run("noise-" + i, 1000 + i, JSON.stringify(project("other")), "Noise")
+    insert.run("project", 2, JSON.stringify(project(" target ")), "Project")
+    insert.run("verified", 3, JSON.stringify(feature("target", "known")), "Feature")
+    insert.run("unknown", 4, JSON.stringify(feature("uncertain", "unknown")), "Unconfirmed")
+    insert.run("removed", 5, JSON.stringify(feature("target", "removed")), "Removed")
+    insert.run("ambiguous", 6, JSON.stringify({ ...project("target"), ...feature("target", "known") }), "Ambiguous")
+    insert.run("ordinary", 7, "{}", "Ordinary")
+    const catalog = {
+      generation: "current",
+      projects: new Map([
+        ["target", { label: "Project", features: new Set(["known"]) }],
+        ["uncertain", { label: "Another project" }]
+      ])
+    }
+    const reader = createThreadSearchReader(sqlite)
+    const selected = reader.captureCandidates(undefined, flag, { kind: "project", projectId: "target" }, catalog)
+    expect(selected.limited).toBe(false)
+    expect(selected.candidates).toMatchObject([
+      { threadId: "verified", route: { kind: "featureSession", projectId: "target", slug: "known" } },
+      { threadId: "project", route: { kind: "projectSession", projectId: "target" } }
+    ])
+    const all = reader.captureCandidates(undefined, flag, { kind: "all" }, catalog)
+    expect(all.routeUnavailable).toBe(true)
+    expect(all.candidates.map(({ threadId }) => threadId)).toEqual(["ordinary", "verified", "project"])
+    const unavailable = reader.captureCandidates(undefined, flag, { kind: "all" })
+    expect(unavailable.catalogUnavailable).toBe(true)
+    expect(unavailable.candidates.map(({ threadId }) => threadId)).toEqual(["ordinary"])
+  })
+
+  it("keeps valid project hits beside invalid JSON and reports oversized project metadata", () => {
+    const insert = sqlite.prepare(
+      "INSERT INTO threads(thread_id, created_at, updated_at, metadata) VALUES (?, 1, ?, ?)"
+    )
+    const owned = { harnessProjectSession: { projectId: "project", kind: "chat" } }
+    insert.run("valid", 1, JSON.stringify(owned))
+    insert.run("invalid-json", 2, "{")
+    insert.run("oversized", 3, JSON.stringify({ ...owned, padding: "x".repeat(256 * 1024) }))
+    const reader = createThreadSearchReader(sqlite)
+    const catalog = { generation: "current", projects: new Map([["project", { label: "Project" }]]) }
+    const scoped = reader.captureCandidates(undefined, flag, { kind: "project", projectId: "project" }, catalog)
+    expect(scoped.routeUnavailable).toBe(true)
+    expect(scoped.candidates.map(({ threadId }) => threadId)).toEqual(["valid"])
+    const all = reader.captureCandidates(undefined, flag, { kind: "all" }, catalog)
+    expect(all.routeUnavailable).toBe(true)
+    expect(all.candidates.map(({ threadId }) => threadId)).toEqual(["invalid-json", "valid"])
+  })
+
+  it("does not return a project title whose route changed after directory capture", () => {
+    insertThread("moved")
+    sqlite.prepare("UPDATE threads SET title = ?, metadata = ? WHERE thread_id = ?")
+      .run("unique title", JSON.stringify({ harnessProjectSession: { projectId: "source", kind: "chat" } }), "moved")
+    const reader = createThreadSearchReader(sqlite)
+    const session = new ThreadSearchSession(
+      "test",
+      { query: "unique", scope: { kind: "projects" } },
+      reader,
+      flag.buffer as SharedArrayBuffer,
+      () => "verified",
+      { generation: "current", projects: new Map([["source", { label: "Source" }]]) }
+    )
+    sqlite.prepare("UPDATE threads SET metadata = ? WHERE thread_id = ?").run(
+      JSON.stringify({ harnessProjectSession: { projectId: "destination", kind: "chat" } }), "moved"
+    )
+    expect(session.page(null)).toMatchObject({
+      results: [],
+      coverage: { completeness: "partial", reasons: ["project-catalog-changed"] }
+    })
+  })
   it("rechecks foreground-required coverage after the reply occurrence evidence changes", () => {
     const { incarnation } = insertThread("changed")
     sqlite.exec(`INSERT INTO thread_messages (thread_id, message_id, role, content_json, ordinal, created_at)

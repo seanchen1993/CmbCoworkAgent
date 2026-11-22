@@ -11,7 +11,7 @@ import {
   mergeWorkerToolCallSnapshot,
   restoreSnapshotAliasCallsWithResults
 } from "./snapshot-message-aliases"
-import { cancelThreadSearchNavigation, useThreadSearch } from "./thread-search-navigation"
+import { cancelThreadSearchNavigation, isOwnedThreadSearchTransition, useThreadSearch } from "./thread-search-navigation"
 import { THREAD_LIST_PRIORITY_KEYS } from "../../../shared/thread-directory-metadata"
 import { THREAD_INCARNATION_METADATA_KEY, matchesThreadIncarnationSnapshot, type ThreadIncarnationSnapshot } from "../../../shared/thread-incarnation"
 import { create } from "zustand"
@@ -2727,8 +2727,8 @@ export function adoptThreadSearchSummary(thread: Thread, identity: ThreadIncarna
 }
 
 useAppStore.subscribe((state, previous) => {
-  const command = useThreadSearch.getState().navigation
-  if (command && (state.currentThreadId !== command.result.threadId ||
+  if (isOwnedThreadSearchTransition()) return
+  if (state.currentThreadId !== previous.currentThreadId ||
     (!previous.showCustomizeView && state.showCustomizeView) ||
-    (state.mainView !== previous.mainView && state.mainView !== "thread"))) cancelThreadSearchNavigation()
+    state.mainView !== previous.mainView) cancelThreadSearchNavigation()
 })

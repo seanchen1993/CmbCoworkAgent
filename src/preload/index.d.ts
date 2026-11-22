@@ -26,7 +26,7 @@ import type {
   ManagedRunScheduleIdentity,
   ManagedRunScheduleChange
 } from "../shared/managed-run-schedule"
-import type { ThreadSearchOpenRequest, ThreadSearchPage, ThreadSearchStartRequest, ThreadSearchWindow } from "../shared/thread-search-types"
+import type { ThreadSearchOpenRequest, ThreadSearchPage, ThreadSearchStartRequest, ThreadSearchSummary, ThreadSearchWindow } from "../shared/thread-search-types"
 import type {
   KnowledgeAccumulationData,
   KnowledgeOrgItem,
@@ -1233,7 +1233,10 @@ interface CustomAPI {
     searchStart: (request: ThreadSearchStartRequest) => Promise<ThreadSearchPage>
     searchContinue: (cursor: string) => Promise<ThreadSearchPage>
     searchCancel: (id?: string) => Promise<void>
-    searchSummary: (request: ThreadSearchOpenRequest) => Promise<Thread | null>
+    searchCancelNavigation: (navigationTicketId: string) => Promise<void>
+    searchSummary: (request: ThreadSearchOpenRequest) => Promise<ThreadSearchSummary | null>
+    searchConfirmRoute: (request: ThreadSearchOpenRequest) => Promise<boolean>
+    onSearchProjectCatalogChanged: (callback: (sessionId: string) => void) => () => void
     searchTargetWindow: (request: ThreadSearchOpenRequest) => Promise<ThreadSearchWindow>
     list: () => Promise<Thread[]>
     listPage: (options?: ThreadSummaryPageOptions) => Promise<ThreadSummaryPage>

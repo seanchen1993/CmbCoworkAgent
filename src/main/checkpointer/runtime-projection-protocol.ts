@@ -66,6 +66,9 @@ export interface CheckpointLatestRuntimeTupleReadRequest {
 }
 
 export type LegacySearchBootstrapGuard = {
+  route?: import("../../shared/thread-search-types").ThreadSearchRoute
+  catalogInvalidation?: SharedArrayBuffer
+  catalogSource?: { path: string; signature: string }
   incarnation: ThreadIncarnationSnapshot
   sourceKey?: string
 } & (
